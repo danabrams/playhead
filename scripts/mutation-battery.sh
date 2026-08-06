@@ -1269,8 +1269,30 @@ MUTABLE_FILES=(
   "$FUSION" "$DSPAN" "$EXTENT" "$RSLOT" "$ATOMEV"
   "$DETCLS" "$DETLED" "$SPLIT" "$HOTGATE" "$UGCEN" "$POLICY" "$SEGAGG"
   "$DLMGR" "$FQSCAN" "$BGFEED" "$EPPREP" "$SCHED"
-  "$CLAIM" "$RECON" "$ATOM" "$AJRUN" "$ACOORD" "$ESUMBF" "$MPTRENG"
+  "$CLAIM" "$RECON" "$ATOM" "$AJRUN" "$ACOORD" "$ESUMBF" "$MPTRENG" "$MPTRIDX"
 )
+# playhead-6r4z R1 review: `$MPTRIDX` was MISSING from the list above from the
+# moment playhead-mptr added the K2 series, and it is the target of NINE of the
+# thirteen K2 mutations (K201 K202 K203 K204 K205 K208 K209 K210 K212, batches
+# 200-203 and 205). `restore_sources` only checks out `MUTABLE_FILES` and
+# `restore_and_verify` only hashes `MUTABLE_FILES`, so a batch touching this
+# file did BOTH halves of the failure that helper's own comment says it exists
+# to prevent: the injected defect stayed in the working tree, and the
+# byte-exactness check reported success because it never looked at the file.
+#
+# OBSERVED, not reasoned: `--batch 200` on 10018535 exited 0 printing "All
+# mutations killed" and left K201+K203+K209 applied. Batches 201 and 202 then
+# refused with "the focused suites are RED before any mutation" — which is the
+# only reason this has never been scored WRONG rather than merely aborted, and
+# it is luck: those batches happen to share a focused suite with the leftover
+# defect. A batch whose suites did not overlap would have been evaluated against
+# a codebase already carrying an injected bug, and one whose expectation named a
+# test the leftover defect reddens would have been credited a false KILL.
+#
+# The residue is worse than a wrong verdict. An author who runs one batch and
+# then commits, commits the mutation — and the K2 mutations are one-token
+# comparison flips (`>=` for `>`, `<=` for `<`) in a file whose whole job is a
+# half-open-interval contract.
 
 FOCUSED_SUITES=(
   # playhead-gard: the per-detector trust rails (I series). Seven suites,
@@ -12709,6 +12731,48 @@ while [ $# -gt 0 ]; do
     *) echo "mutation-battery: unknown argument '$1'" >&2; exit 2 ;;
   esac
 done
+
+# playhead-6r4z R1 review: EVERY mutation's file must be restorable, checked on
+# every invocation.
+#
+# `restore_sources` checks out `MUTABLE_FILES` and `restore_and_verify` hashes
+# `MUTABLE_FILES`, so a mutation whose file is absent from that list is applied
+# and never taken back — and the byte-exactness check reports success because it
+# never looked at the file. Both halves fail together, and they fail in the
+# direction that reads as success: "All mutations killed", exit 0, defect still
+# in the tree. `$MPTRIDX` sat in exactly that state from playhead-mptr until
+# this review, nine mutations across five batches.
+#
+# It drifts by construction: `rec_file`'s case table and `MUTABLE_FILES` are
+# edited in different parts of this file, eleven thousand lines apart, and a
+# rename touches the first without touching the second. So the premise is
+# checked rather than remembered — the same move `restore_and_verify` itself
+# makes by re-hashing after every batch instead of trusting one final restore.
+UNRESTORABLE=""
+for rec in "${MUTATIONS[@]}"; do
+  mb_f="$(rec_file "$rec")"
+  mb_n="$(rec_name "$rec")"
+  if [ -z "$mb_f" ]; then
+    UNRESTORABLE="$UNRESTORABLE  $mb_n -> rec_file returned NOTHING (key not in its case table)
+"
+    continue
+  fi
+  mb_found=0
+  for mb_m in "${MUTABLE_FILES[@]}"; do
+    [ "$mb_m" = "$mb_f" ] && mb_found=1 && break
+  done
+  [ "$mb_found" -eq 0 ] && UNRESTORABLE="$UNRESTORABLE  $mb_n -> $mb_f
+"
+done
+if [ -n "$UNRESTORABLE" ]; then
+  echo "mutation-battery: FATAL — mutation target(s) missing from MUTABLE_FILES:" >&2
+  printf '%s' "$UNRESTORABLE" >&2
+  echo "Those files are mutated but never restored, and restore_and_verify" >&2
+  echo "cannot see them — so an injected defect stays in your working tree while" >&2
+  echo "the run still prints that the tree was restored. Add them to" >&2
+  echo "MUTABLE_FILES (and check nothing was committed from an earlier run)." >&2
+  exit 2
+fi
 
 if [ "$LIST_ONLY" -eq 1 ]; then
   printf '%-5s %-6s %s\n' "NAME" "BATCH" "MUTATION"

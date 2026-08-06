@@ -1124,10 +1124,13 @@ actor TranscriptEngineService {
         // very pass minted to read the audio behind it. On the 2026-08-03 pull
         // that is 215 shards / 6,450 s of re-read across seven of twelve assets,
         // and on 48E903D7 the re-read prefix beats the new audio 1,230 s to
-        // 103 s inside a flat 300 s cap. Of those 215 shards ZERO lacked a chunk
-        // of either pass, so this widening moves only audio a real row backs.
-        // The WATERMARK below is deliberately still the fast one — see
-        // `TranscriptCoverageIndex`'s header for why the two halves differ.
+        // 103 s inside a flat 300 s cap. The moved shards are densely backed —
+        // union fill min 0.610 / median 0.906, none under 0.25, against a
+        // minimum of 0.266 among the shards mptr already sorted last — so this
+        // widening moves audio a real row genuinely covers, not audio a sliver
+        // touches. The WATERMARK below is deliberately still the fast one; see
+        // `TranscriptCoverageIndex`'s header for why the two halves differ, and
+        // `playhead-9j94` for what that leaves on the table.
         var coverageIndex = TranscriptCoverageIndex.empty
         var coverageWatermark: Double?
         do {

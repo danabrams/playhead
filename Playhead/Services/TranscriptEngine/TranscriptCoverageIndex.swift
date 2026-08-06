@@ -18,9 +18,24 @@
 // assets — SEVEN of the twelve carry some (the bead's ticket named six; 83592353
 // is the seventh, 5 shards / 150 s). On 48E903D7 that re-read prefix is 1,230 s
 // against 103.1 s of genuinely new audio, a 11.9:1 inversion inside a 300 s stage
-// cap. And the direction is clean: of those 215 shards, ZERO lacked a chunk of
-// either pass, so widening condition 2 to the union moves only audio a real row
-// on disk already backs.
+// cap.
+//
+// IS THE ARTIFACT BEHIND A MOVED SHARD THIN? This is the only way the widening
+// could hurt — `overlaps` is satisfied by ANY overlap, so a one-second final
+// chunk would be enough to sort a 30 s shard last. R1 review replaced the first
+// draft's answer here, which was "of those 215 shards, ZERO lacked a chunk of
+// either pass": true, and empty, because a shard moves precisely when a chunk
+// of some pass overlaps it and the count could not have come out otherwise.
+//
+// The measurement with content is the FILL: what fraction of a moved shard the
+// union of chunks actually spans. On the same pull the moved shards run
+// min 0.610 / p10 0.806 / median 0.906, and NONE is under 0.25 — against the
+// 959 shards mptr already sorted last, whose minimum is 0.266. The audio this
+// deprioritises is better backed than the audio already being deprioritised,
+// which is the comparison that makes the widening safe. (Chunks are
+// utterance-level, ~0.9 s mean, so a fill below 1.0 is silence between
+// utterances, not unread audio — which is why the CONTROL population, not 1.0,
+// is the yardstick.)
 //
 // This is the same fast-only under-report `playhead-9y9e` fixed for the ad-scan
 // bound. The canonical union — `AnalysisStore.fetchTranscribedRegion` — already
@@ -68,10 +83,28 @@
 // first — stronger than the pre-mptr behaviour, not weaker. playhead-6r4z
 // widened condition 2 and left condition 1 exactly where it was, which is the
 // conservative half: the watermark is still `fastTranscriptCoverageEndTime`, so
-// final-pass coverage ABOVE the fast watermark still sorts first. On the pull
-// that is 480 s on D9B513CD and 96 s on 83592353 — real, and a separate
-// question, because raising the watermark changes what "some pass claims to have
-// gone this far" MEANS rather than which artifact backs the claim.
+// final-pass coverage ABOVE the fast watermark still sorts first. That is real
+// and it is a separate question, because raising the watermark changes what
+// "some pass claims to have gone this far" MEANS rather than which artifact
+// backs the claim. Filed as `playhead-9j94`.
+//
+// R1 REVIEW CORRECTED THE SIZE OF IT, and the error was this bead's own defect
+// class. The first draft of this paragraph said "480 s on D9B513CD and 96 s on
+// 83592353", and the bead comment added "which is ALL of the remaining unread
+// audio on both". Those are `episodeDurationSec - watermark` — the SPAN above
+// the watermark — read as though it were the audio a final pass has already
+// covered inside that span. Measured, on the same 2026-08-03 pull:
+//
+//   asset      span above wm   UNION of chunks in it   what is actually re-read
+//   D9B513CD        479.9 s          50.3 s (10.5 %)       ~60 s, 2 shards
+//   83592353         95.9 s          58.0 s (60.5 %)       ~66 s, 3 shards
+//
+// So raising condition 1 would recover tens of seconds, not 576 s, and it is
+// ~10x smaller than quoted on the bigger of the two. The tell is the standing
+// one: `MAX(endTime)` over final chunks is a REACH — D9B513CD's is 3,929.8 s
+// against a 3,929.9 s episode, which reads as 100 % and is 10.5 % of the span.
+// Ask what the value would read if the thing it claims to measure had never
+// happened: an episode with ONE final chunk at the very end reads the same.
 //
 // WHY WIDENING CONDITION 2 LOSES NOTHING, since it is a behaviour change on
 // every run. Re-running ASR over a final-covered region is the LEAST valuable
