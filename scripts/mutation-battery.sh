@@ -2816,6 +2816,11 @@ T_LMRX_NORMALEXIT="the work-deadline return does not strand the job it leaves ru
 T_LMRX_EARLYRETURN="a drain that returned EARLY does not cancel the run loop's job"
 T_LMRX_GRACE="the post-reclaim wait is bounded by the OS grace, not by the teardown reserve"
 T_LMRX_GRACESITE="the expiration wait spends the post-reclaim grace, not the teardown reserve"
+T_LMRX_AIM="the cancel reaches every job it names"
+T_LMRX_PERJOBCAUSE="each cancelled job keeps its own cause, so neither spends an attempt"
+T_LMRX_HEARTBEAT="a job finishing does not cancel a sibling's lease heartbeat"
+T_LMRX_DOOR="dispatch is closed for a teardown, and re-opens by itself"
+T_LMRX_RECOVERYEXIT="recovery's work-deadline return does not strand the job it leaves running"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -5687,6 +5692,39 @@ MUTATIONS=(
   #     reserve is 60 s, against a job that never settles.
   "LX23|562|GRANT|$T_LMRX_GRACE"
   "LX24|563|BGPS|$T_LMRX_GRACESITE"
+
+  # ---- playhead-lmrx review round 3: the cancel is aimed at jobs (LX25-LX29) ----
+  #
+  #   * LX25 restores the single-slot aim: `cancelCurrentJob` cancels ONE task
+  #     and still returns the whole in-flight set as "what it was aimed at".
+  #     With `nowCap == 2` and both dispatch drivers able to be inside
+  #     `processJob`, the second dispatch overwrote the slot — so the returned
+  #     set could name a job nobody asked to stop. Killed by the settle: a
+  #     missed job is parked in a 20 s sleep and cannot leave inside the wait.
+  #   * LX26 restores the DESTRUCTIVE read of the global cancel cause. One
+  #     `.taskExpired` cancel acting on two jobs: the first consumed the cause,
+  #     the second read `nil`, took the attempt-spending arm and superseded
+  #     permanently. Round 2 guarded the two sites that erase the cause without
+  #     reading it; no guard on those can see this one, because this site
+  #     erases it BY reading it. This is also the rail R2 could not add for its
+  #     own `pendingCancelCause` guard — the two-in-flight test it needed is
+  #     the same one LX25 needs, so building it once pinned both.
+  #   * LX27 makes the teardown door a no-op, restoring the window in which
+  #     `runLoop()`'s 5 s poll can dispatch a fresh job AFTER the handler's
+  #     cancel has gone past — aimed at by nothing and live at
+  #     `setTaskCompleted`.
+  #   * LX28 is the vacuity control in the other direction: a door that never
+  #     re-opens. It would pass every "no dispatch during teardown" assertion
+  #     and leave a foregrounded app with a scheduler that never dispatches
+  #     again, since nothing outside a BGTask handler calls the re-openers.
+  #   * LX29 restores the exit this bead's own change opened in the RECOVERY
+  #     handler — the LX21 hole, one handler over: normal return, no cancel, no
+  #     settle, `markComplete(success: true)` over a live job.
+  "LX25|564|SCHED|$T_LMRX_AIM"
+  "LX26|565|SCHED|$T_LMRX_PERJOBCAUSE"
+  "LX27|566|SCHED|$T_LMRX_DOOR"
+  "LX28|567|SCHED|$T_LMRX_DOOR"
+  "LX29|568|BGPS|$T_LMRX_RECOVERYEXIT"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -6061,6 +6099,11 @@ describe_mutation() {
     LX22) echo "lmrx: the normal return cancels unconditionally, killing a live job on an EARLY drain exit" ;;
     LX23) echo "lmrx: the post-reclaim wait reverts to the teardown reserve — 36 s of a grant the OS already took back" ;;
     LX24) echo "lmrx: the expiration CALL SITE asks for the reserve instead of the grace, spending it after the reclaim" ;;
+    LX25) echo "lmrx: the cancel goes back to one unnamed task slot while still claiming it reached every in-flight job" ;;
+    LX26) echo "lmrx: the cancel cause is consumed destructively, so the second of two cancelled jobs supersedes" ;;
+    LX27) echo "lmrx: the teardown door goes, and the run loop dispatches a fresh job into setTaskCompleted" ;;
+    LX28) echo "lmrx: the teardown door never re-opens, leaving a foregrounded app with a dead scheduler" ;;
+    LX29) echo "lmrx: recovery's work-deadline return completes the task over a live job, as backfill's once did" ;;
     TS01) echo "5n8k: THE historical defect restored — install assigns a process-global and restores it in a defer" ;;
     TS02) echo "5n8k: the leak variant — the funnel caches the last binding in a process-global and never restores" ;;
     TS03) echo "5n8k: the funnel drops every diagnostic — the vacuity control on all four positive witnesses" ;;
@@ -12930,10 +12973,12 @@ EOF
   # MK09 — make the in-flight removal a blanket clear, mirroring the
   # `currentJobId = nil` on the line above. Only an overlapping dispatch can
   # see it.
+  # playhead-lmrx R3: re-expressed against the per-job registry, which is now
+  # what `inFlightJobIds` reads. Same mutation, same blanket-clear shape.
   MK09)
     patch "$file" \
-      '            inFlightJobIds.remove(job.jobId)' \
-      '            inFlightJobIds.removeAll()' ;;
+      '            let finished = runningJobs.removeValue(forKey: job.jobId)' \
+      '            let finished = runningJobs.removeValue(forKey: job.jobId); runningJobs.removeAll()' ;;
 
   # MK10 — drop the idempotence clause from `recoverExpiredLease`. Invisible to
   # every rail above: they exercise ONE reclaimer at a time, and this defect
@@ -13083,17 +13128,18 @@ EOF
 
   # LX12 — the exemption survives but spends an attempt, so the terminal arm
   # still catches a long episode on its fifth window.
+  # playhead-lmrx R3: RE-ANCHORED OFF THE COMMENT. The shipped anchor opened on
+  # `jobId: job.jobId,` and spanned the two comment lines that explain the
+  # `incrementAttempt` default — so rewording either of them silently retires
+  # the rail, which is exactly what happened to LX17 earlier in this same bead.
+  # `nextEligibleAt: expiredNextEligible` occurs once in the file and is code.
   LX12)
     snippet OLD <<'EOF'
-                            jobId: job.jobId,
-                            // `incrementAttempt` left at its `false` default,
-                            // which is the entire fix.
                             stateUpdate: .init(
                                 state: "queued",
                                 nextEligibleAt: expiredNextEligible,
 EOF
     snippet NEW <<'EOF'
-                            jobId: job.jobId,
                             incrementAttempt: true,
                             stateUpdate: .init(
                                 state: "queued",
@@ -13265,6 +13311,79 @@ EOF
       '                    let remaining = budget.expirationSettleBudget(since: teardownStart)' \
       '                    let remaining = budget.remainingTeardownReserve(since: teardownStart)' ;;
 
+  # LX25 — the aim goes back to a single unnamed slot, while the return value
+  # keeps claiming the whole in-flight set. Reads like a simplification of a
+  # loop into "cancel the current one"; it is the defect the round-3 review
+  # opened on.
+  LX25)
+    patch "$file" \
+      '        cancelRunningJobs(where: { _ in true }, cause: resolved)' \
+      '        runningJobs.values.first?.runTask?.cancel()' ;;
+
+  # LX26 — the destructive read of the global cancel cause, restored. The
+  # per-job copy is ignored and the global is nil'd unconditionally, so the
+  # first of two cancelled jobs consumes the cause and the second falls back to
+  # `.pipelineError`, spends an attempt, and supersedes at five.
+  LX26)
+    snippet OLD <<'EOF'
+                let cause = runningJobs[job.jobId]?.cancelCause
+                    ?? pendingCancelCause
+                    ?? .pipelineError
+                runningJobs[job.jobId]?.cancelCause = nil
+                if inFlightJobIds.subtracting([job.jobId]).isEmpty {
+                    pendingCancelCause = nil
+                }
+EOF
+    snippet NEW <<'EOF'
+                let cause = pendingCancelCause ?? .pipelineError
+                pendingCancelCause = nil
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LX27 — the teardown door goes. `runLoop()`'s 5 s poll can then dispatch a
+  # fresh job after the handler's cancel has already gone past: named by
+  # nothing, absent from the settle population, live at `setTaskCompleted`.
+  LX27)
+    patch "$file" \
+      '        if isDispatchClosed() { return false }' \
+      '        if false { return false }' ;;
+
+  # LX28 — the vacuity control in the other direction: the door never re-opens.
+  # Every "nothing dispatches during teardown" assertion still passes, and a
+  # foregrounded app is left with a scheduler that never dispatches again,
+  # because nothing outside a BGTask handler calls the re-openers.
+  LX28)
+    snippet OLD <<'EOF'
+        guard let until = dispatchClosedUntil else { return false }
+        if ContinuousClock.now < until { return true }
+        dispatchClosedUntil = nil
+        return false
+EOF
+    snippet NEW <<'EOF'
+        guard dispatchClosedUntil != nil else { return false }
+        return true
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LX29 — the recovery handler's work-deadline return loses its cancel, so it
+  # completes the task over a job the run loop is still running. The LX21 hole,
+  # one handler over, and the one this bead's own budget change opened.
+  LX29)
+    snippet OLD <<'EOF'
+                if ContinuousClock.now >= workDeadline,
+                   let scheduler = self.analysisWorkScheduler {
+                    await scheduler.closeDispatchForTeardown(lasting: budget.teardownReserve)
+                    cancelledJobIds = await scheduler.cancelCurrentJob(cause: .taskExpired)
+                }
+EOF
+    snippet NEW <<'EOF'
+                if false, let scheduler = self.analysisWorkScheduler {
+                    await scheduler.closeDispatchForTeardown(lasting: budget.teardownReserve)
+                    cancelledJobIds = await scheduler.cancelCurrentJob(cause: .taskExpired)
+                }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
   # LX20 — the settle wait loses its identity scoping and goes back to asking
   # "is ANYTHING running", which is the same question whether the cancelled job
   # settled or `runLoop()` (5 s poll) has since picked up a sibling. Reads as a
@@ -13273,7 +13392,7 @@ EOF
   LX20)
     patch "$file" \
       '        while !inFlightJobIds.isDisjoint(with: jobIds) {' \
-      '        while currentRunningTask != nil {' ;;
+      '        while !runningJobs.isEmpty {' ;;
 
   *)
     echo "mutation-battery: unknown mutation '$name'" >&2
