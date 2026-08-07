@@ -5923,7 +5923,10 @@ MUTATIONS=(
 
   # ---- playhead-wxsv: the coverage-lane job identity (WX) ----
   #
-  # RUN 2026-08-07: 11 KILLED / 0 SURVIVED / 0 ERROR, 6 builds, batches 575-580.
+  # RUN 2026-08-07: 12 KILLED / 0 SURVIVED / 0 ERROR / 1 UNSCOREABLE (WX13 hangs
+  # — see its own note below), 9 builds, batches 575-582. WX01-WX11 were re-run
+  # after the review round rewrote the claim/heartbeat split, so no verdict here
+  # predates the code it scores.
   # Under `PLAYHEAD_MB_SKIP_BASELINE=1`, and the caveat matters: the
   # FOCUSED_SUITES baseline was RED on 6 tests from ShadowRetryTests,
   # BackgroundGrantBudgetTests and SkipOrchestratorRevertTests — the starvation
@@ -6020,8 +6023,29 @@ MUTATIONS=(
   # that were invisible from the spec itself, and neither is reachable from any
   # other WX rail: WX12 needs two lanes on one row, WX13 needs a heartbeat on a
   # row the drain has already retired.
+  # SEPARATE BATCHES, and the split is the RESULT of a measurement rather than a
+  # precaution. Run together on 2026-08-07 they SPUN: the sim-side app burned
+  # 100 minutes of CPU at 699 % with a completely static log, where every other
+  # WX batch finished in ~2.5 minutes. Split and re-run:
+  #
+  #   WX12 alone  -> KILLED, 2m03s
+  #   WX13 alone  -> still spinning at 420 s, killed by `timeout`
+  #
+  # SO WX13 IS UNSCOREABLE, AND WHY IS THE INTERESTING PART. Its mutant lets a
+  # liveness heartbeat TRANSITION a row (`status <> 'complete'` instead of
+  # `status = 'running'`), and that does not merely break an expectation — it
+  # makes some drain in the focused set re-admit work it has already retired,
+  # without bound. The rail's own description is "resurrecting a retired row";
+  # the mutant delivers that as a LIVELOCK rather than as a red test, which is a
+  # stronger statement about the hazard than a KILL would have been and a weaker
+  # one about the test. `heartbeatCannotStartARow` is the behavioural witness and
+  # it passes; what is NOT established is that the witness is what fails first.
+  #
+  # Do not "fix" this by widening the mutant until it merely fails. The honest
+  # options are to bound the spinning suite, or to score WX13 against a store
+  # test run in isolation (`--only WX13` with a narrowed FOCUSED_SUITES).
   "WX12|581|STORE|$T_WXSV_RESTAMP"
-  "WX13|581|STORE|$T_WXSV_HEARTBEAT"
+  "WX13|582|STORE|$T_WXSV_HEARTBEAT"
 
   # WX09 — THE DEFECT ITSELF, restored at the call site rather than in the
   # derivation (the signature is shared with ~40 test call sites, so putting it
