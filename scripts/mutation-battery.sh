@@ -5874,6 +5874,24 @@ MUTATIONS=(
   #     handler directly and cannot see it. Source canary, because
   #     `registerBackgroundTasks()` goes through the real `BGTaskScheduler`.
   "LX40|573|BGPS|$T_LMRX_CHARGEDWIRING"
+
+  # ---- playhead-lmrx review round 8: the canary must say WHICH site (LX41) ----
+  #
+  #   * LX41 is LX40's mirror, and the reason round 8 opened on the instrument
+  #     rather than the code. LX40's canary asserted `code.contains(
+  #     "identifier: BackgroundTaskID.backfillProcessingCharged")` over a body
+  #     holding BOTH registrations — its own comment named that hazard and its
+  #     remedy (counting `handleBackfillTask(`) answered a different question,
+  #     HOW MANY dispatches rather than WHICH one is charged. So the PLAIN
+  #     registration could take the charged identifier and budget with every
+  #     assertion still green, which is the worse direction of the same edit:
+  #     the battery-idle class — the 203 expired windows this bead was filed on
+  #     — would spend the ASSUMED 1800 s charger horizon (worse than the 1500 s
+  #     that filed the bead) and record itself under the charged identifier, so
+  #     the ledger loses sight of the plain class as well as the charged one.
+  #     Its own batch: the mutant touches the same `registerBackgroundTasks()`
+  #     body LX40 does, and two edits to one body cannot be attributed apart.
+  "LX41|574|BGPS|$T_LMRX_CHARGEDWIRING"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -6263,6 +6281,7 @@ describe_mutation() {
     LX38) echo "lmrx: recovery's expiry stops CANCELLING — LX35's complement, one line down" ;;
     LX39) echo "lmrx: the baseline IDENTITIES are never published, so every expired row loses jobsCompleted while jobsSeen stays green" ;;
     LX40) echo "lmrx: the charger-class registration drops its identifier and budget, silently spending the plain class's measurement" ;;
+    LX41) echo "lmrx: the PLAIN registration takes the charged identifier and budget, so every measured window spends an assumed 1800 s" ;;
     TS01) echo "5n8k: THE historical defect restored — install assigns a process-global and restores it in a defer" ;;
     TS02) echo "5n8k: the leak variant — the funnel caches the last binding in a process-global and never restores" ;;
     TS03) echo "5n8k: the funnel drops every diagnostic — the vacuity control on all four positive witnesses" ;;
@@ -13745,6 +13764,27 @@ EOF
 EOF
     snippet NEW <<'EOF'
             Task { await self.handleBackfillTask(sendableTask.value) }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LX41 — the mirror of LX40, and the one its canary could not see. The PLAIN
+  # registration takes the charger class's identifier and budget: it compiles
+  # (both are ordinary arguments), and every `contains` in the round-7 canary
+  # stays satisfied because the charged registration still spells them too. The
+  # anchor is the pre-lmrx one-line dispatch, which occurs once — the charged
+  # registration's call is multi-line.
+  LX41)
+    snippet OLD <<'EOF'
+            Task { await self.handleBackfillTask(sendableTask.value) }
+EOF
+    snippet NEW <<'EOF'
+            Task {
+                await self.handleBackfillTask(
+                    sendableTask.value,
+                    identifier: BackgroundTaskID.backfillProcessingCharged,
+                    budget: .backfillProcessingCharged
+                )
+            }
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 

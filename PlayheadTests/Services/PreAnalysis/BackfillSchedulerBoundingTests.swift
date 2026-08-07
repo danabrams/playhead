@@ -347,6 +347,27 @@ struct BackfillSchedulerBoundingTests {
         // COUNTED, not `contains` (the round-6 lesson): `handleBackfillTask` is
         // dispatched from exactly two registrations, and asserting the charged
         // spelling appears somewhere would be satisfied by either of them.
+        //
+        // playhead-lmrx (review round 8): AND ROUND 7 NAMED THAT HAZARD IN THE
+        // LINE ABOVE AND THEN DID NOT CLOSE IT. Counting `handleBackfillTask(`
+        // establishes how MANY dispatches there are; it says nothing about
+        // WHICH of them carries the charged spelling, and the two assertions
+        // below were `contains` over a body holding both. Ask the diagnostic
+        // question of them: what would `contains("identifier:
+        // BackgroundTaskID.backfillProcessingCharged")` read if the CHARGED
+        // registration lost its identifier and the PLAIN one gained it? The
+        // same `true` — the standing defect class, committed in the instrument
+        // that exists to catch it.
+        //
+        // The single-edit regression that slipped through is the worse
+        // direction, and it is only possible because this bead ADDED the two
+        // parameters: give the PLAIN registration the charged values and every
+        // battery-idle window — the 203-expiry population this whole bead is
+        // about — spends the unmeasured 1800 s charger horizon (worse than the
+        // 1500 s that filed the bead) and records itself under the charged
+        // identifier, so the ledger can no longer see the plain class either.
+        // Splitting the body at the charged `register(...)` is what lets each
+        // half be asked its own question.
         let source = try SwiftSourceInspector.loadSource(repoRelativePath: Self.servicePath)
         let anchor = "nonisolated func registerBackgroundTasks() {"
         #expect(source.components(separatedBy: anchor).count == 2,
@@ -379,6 +400,44 @@ struct BackfillSchedulerBoundingTests {
                 the measured plain-class budget, so omitting it spends 132 \
                 plain-identifier observations on a class with none — and caps \
                 an overnight charger grant at 219 s.
+                """)
+
+        // WHICH registration carries them. The two `contains` above are true of
+        // the body; these say the values are on the charger-class side of it.
+        let chargedRegistration = "forTaskWithIdentifier: BackgroundTaskID.backfillProcessingCharged"
+        let halves = code.components(separatedBy: chargedRegistration)
+        #expect(halves.count == 2,
+                """
+                the charger-class registration must appear exactly once — this \
+                canary splits the body on it, so two of them would silently \
+                make the plain half unreadable.
+                """)
+        let plainHalf = try #require(halves.first, "the body did not split")
+        #expect(plainHalf.components(separatedBy: "handleBackfillTask(").count - 1 == 1,
+                """
+                the PLAIN registration must be the one before it, and must \
+                dispatch the handler exactly once — positive control that \
+                `plainHalf` is a registration body and not an empty prefix, so \
+                the two refusals below cannot pass vacuously.
+                """)
+        #expect(!plainHalf.contains("identifier: BackgroundTaskID.backfillProcessingCharged"),
+                """
+                the PLAIN registration must NOT name the charged identifier. \
+                Combined with the assertion above it, this is what makes the \
+                claim 'the charger-class registration passes its own \
+                identifier' rather than 'the string appears somewhere in this \
+                method'. A plain-class window recorded as charged is the same \
+                instrumentation defect that made 'the pull has zero rows for \
+                this class' true by construction, pointed the other way — and \
+                it would blind the ledger to the 203-expiry population too.
+                """)
+        #expect(!plainHalf.contains("budget: .backfillProcessingCharged"),
+                """
+                and it must NOT spend the charger class's budget. The plain \
+                identifier is the ONLY class this repo has measured; handing it \
+                the assumed 1800 s horizon reinstates playhead-lmrx's own bug — \
+                a work deadline 6x the p90 grant — on the 80 % of windows the \
+                bead was filed about.
                 """)
     }
 
