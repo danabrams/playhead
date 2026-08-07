@@ -582,6 +582,39 @@ struct FMCoarseWindowOutput: Sendable, Equatable {
     let transcriptQuality: TranscriptQuality
     let screening: CoarseScreeningSchema
     let latencyMillis: Double
+    /// playhead-rkfp: `latencyMillis`'s twin over the SAME span, on the
+    /// suspending clock — device sleep excluded. `nil` where the producing
+    /// path has not been threaded (shrink-split retries, subdivision,
+    /// passB); never fabricated from a different span, because a row whose
+    /// suspending reading exceeds its continuous one is nonsense and a
+    /// mismatched span is how you get one. See `FMClockPair`.
+    let suspendingLatencyMillis: Double?
+    /// playhead-ezmv: other in-process FM daemon calls in flight when this
+    /// window's attempt began (`FMDaemonCallCensus`). 0 = no self-contention;
+    /// `nil` = not measured on this path.
+    let daemonPeersAtStart: Int?
+
+    init(
+        windowIndex: Int,
+        lineRefs: [Int],
+        startTime: Double,
+        endTime: Double,
+        transcriptQuality: TranscriptQuality,
+        screening: CoarseScreeningSchema,
+        latencyMillis: Double,
+        suspendingLatencyMillis: Double? = nil,
+        daemonPeersAtStart: Int? = nil
+    ) {
+        self.windowIndex = windowIndex
+        self.lineRefs = lineRefs
+        self.startTime = startTime
+        self.endTime = endTime
+        self.transcriptQuality = transcriptQuality
+        self.screening = screening
+        self.latencyMillis = latencyMillis
+        self.suspendingLatencyMillis = suspendingLatencyMillis
+        self.daemonPeersAtStart = daemonPeersAtStart
+    }
 }
 
 /// playhead-qbib: one attempted coarse window that produced NO usable
@@ -631,6 +664,12 @@ struct CoarseWindowFailure: Sendable, Equatable {
     /// abandonment would persist stamped with its pass's total and read
     /// exactly like the unbounded call it replaced.
     let latencyMillis: Double?
+    /// playhead-rkfp: `latencyMillis`'s twin over the SAME span, on the
+    /// suspending clock. See `FMCoarseWindowOutput.suspendingLatencyMillis`.
+    let suspendingLatencyMillis: Double?
+    /// playhead-ezmv: other in-process FM daemon calls in flight when this
+    /// attempt began. See `FMCoarseWindowOutput.daemonPeersAtStart`.
+    let daemonPeersAtStart: Int?
 
     init(
         planWindowIndex: Int,
@@ -639,7 +678,9 @@ struct CoarseWindowFailure: Sendable, Equatable {
         endTime: Double,
         status: SemanticScanStatus,
         coversWholePlan: Bool = true,
-        latencyMillis: Double? = nil
+        latencyMillis: Double? = nil,
+        suspendingLatencyMillis: Double? = nil,
+        daemonPeersAtStart: Int? = nil
     ) {
         self.planWindowIndex = planWindowIndex
         self.lineRefs = lineRefs
@@ -648,6 +689,8 @@ struct CoarseWindowFailure: Sendable, Equatable {
         self.status = status
         self.coversWholePlan = coversWholePlan
         self.latencyMillis = latencyMillis
+        self.suspendingLatencyMillis = suspendingLatencyMillis
+        self.daemonPeersAtStart = daemonPeersAtStart
     }
 
     /// Whole-plan failure: the plan was attempted as planned and produced
@@ -655,7 +698,9 @@ struct CoarseWindowFailure: Sendable, Equatable {
     init(
         plan: CoarsePassWindowPlan,
         status: SemanticScanStatus,
-        latencyMillis: Double? = nil
+        latencyMillis: Double? = nil,
+        suspendingLatencyMillis: Double? = nil,
+        daemonPeersAtStart: Int? = nil
     ) {
         self.init(
             planWindowIndex: plan.windowIndex,
@@ -664,7 +709,9 @@ struct CoarseWindowFailure: Sendable, Equatable {
             endTime: plan.endTime,
             status: status,
             coversWholePlan: true,
-            latencyMillis: latencyMillis
+            latencyMillis: latencyMillis,
+            suspendingLatencyMillis: suspendingLatencyMillis,
+            daemonPeersAtStart: daemonPeersAtStart
         )
     }
 
@@ -2154,10 +2201,19 @@ struct FoundationModelClassifier: Sendable {
                 if let router = sensitiveRouter,
                    let permissive = permissiveClassifier,
                    router.route(window: windowSegments) == .sensitive {
-                    let permissiveStart = clock.now
+                    // playhead-rkfp: both clocks and the census, read at the
+                    // instant the attempt begins. Every latency this arm
+                    // records is derived from THIS pair so the continuous and
+                    // suspending numbers always cover the same span — the
+                    // 1,955.6 s field row was this site's continuous reading
+                    // with a 1,504 s process freeze inside it, and only a
+                    // same-span twin can say so from the next pull.
+                    let permissiveStart = FMClockPair.now()
+                    let permissivePeers = FMDaemonCallCensus.shared.inFlight
                     do {
                         let screening = try await permissive.classify(window: windowSegments)
-                        let permissiveLatency = Self.latencyMillis(since: permissiveStart, clock: clock)
+                        let permissiveReading = permissiveStart.elapsed()
+                        let permissiveLatency = permissiveReading.continuousMs
                         windows.append(
                             FMCoarseWindowOutput(
                                 windowIndex: windows.count,
@@ -2166,7 +2222,9 @@ struct FoundationModelClassifier: Sendable {
                                 endTime: plan.endTime,
                                 transcriptQuality: plan.transcriptQuality,
                                 screening: screening,
-                                latencyMillis: permissiveLatency
+                                latencyMillis: permissiveLatency,
+                                suspendingLatencyMillis: permissiveReading.suspendingMs,
+                                daemonPeersAtStart: permissivePeers
                             )
                         )
                         logger.debug(
@@ -2195,11 +2253,14 @@ struct FoundationModelClassifier: Sendable {
                         // shadow retry observer (Agent C) will pick the
                         // window up next capability transition.
                         let status = Self.permissiveStatus(for: error.reason)
+                        let failureReading = permissiveStart.elapsed()
                         failedWindows.append(
                             CoarseWindowFailure(
                                 plan: plan,
                                 status: status,
-                                latencyMillis: Self.latencyMillis(since: permissiveStart, clock: clock)
+                                latencyMillis: failureReading.continuousMs,
+                                suspendingLatencyMillis: failureReading.suspendingMs,
+                                daemonPeersAtStart: permissivePeers
                             )
                         )
                         permissiveCounts.increment(reason: error.reason)
@@ -2218,11 +2279,14 @@ struct FoundationModelClassifier: Sendable {
                         // mislabelled here. The catch-all below would record
                         // `.permissiveRefusal` — "Apple's safety layer said
                         // no" — for a call the safety layer never saw.
+                        let timeoutReading = permissiveStart.elapsed()
                         failedWindows.append(
                             CoarseWindowFailure(
                                 plan: plan,
                                 status: .inferenceTimeout,
-                                latencyMillis: Self.latencyMillis(since: permissiveStart, clock: clock)
+                                latencyMillis: timeoutReading.continuousMs,
+                                suspendingLatencyMillis: timeoutReading.suspendingMs,
+                                daemonPeersAtStart: permissivePeers
                             )
                         )
                         consecutiveInferenceTimeouts += 1
@@ -2259,11 +2323,14 @@ struct FoundationModelClassifier: Sendable {
                         // come from the same value, preserving Cycle 6's
                         // invariant.
                         let unexpectedReason = Self.permissiveUnexpectedReason(for: error)
+                        let unexpectedReading = permissiveStart.elapsed()
                         failedWindows.append(
                             CoarseWindowFailure(
                                 plan: plan,
                                 status: Self.permissiveStatus(for: unexpectedReason),
-                                latencyMillis: Self.latencyMillis(since: permissiveStart, clock: clock)
+                                latencyMillis: unexpectedReading.continuousMs,
+                                suspendingLatencyMillis: unexpectedReading.suspendingMs,
+                                daemonPeersAtStart: permissivePeers
                             )
                         )
                         permissiveCounts.increment(reason: unexpectedReason)
@@ -2286,12 +2353,22 @@ struct FoundationModelClassifier: Sendable {
             // the in-window retries (`coarseResponses` owns smart-shrink and
             // rate-limit backoff), because those are part of what the window
             // actually cost.
-            let windowAttemptStart = clock.now
+            //
+            // playhead-rkfp: both clocks plus the census, so the persisted row
+            // can separate "elapsed" from "elapsed while the device was awake"
+            // over the SAME span, and say whether our own calls were already
+            // in flight. The pair is also handed to `coarseResponses` so a
+            // success row's twin covers the same span its `latencyMillis`
+            // does.
+            let attemptClocks = FMClockPair.now()
+            let attemptPeers = FMDaemonCallCensus.shared.inFlight
             switch await coarseResponses(
                 for: plan,
                 sessionBox: perWindowBox,
                 lineRefLookup: coarseLineRefLookup,
                 clock: clock,
+                attemptClocks: attemptClocks,
+                attemptPeers: attemptPeers,
                 windowIndex: planIndex + 1,
                 totalWindows: totalWindows
             ) {
@@ -2308,15 +2385,15 @@ struct FoundationModelClassifier: Sendable {
                             endTime: output.endTime,
                             transcriptQuality: output.transcriptQuality,
                             screening: output.screening,
-                            latencyMillis: output.latencyMillis
+                            latencyMillis: output.latencyMillis,
+                            suspendingLatencyMillis: output.suspendingLatencyMillis,
+                            daemonPeersAtStart: output.daemonPeersAtStart
                         )
                     )
                 }
             case let .failure(status):
-                let windowAttemptLatency = Self.latencyMillis(
-                    since: windowAttemptStart,
-                    clock: clock
-                )
+                let windowAttemptReading = attemptClocks.elapsed()
+                let windowAttemptLatency = windowAttemptReading.continuousMs
                 // playhead-8d5r: NO-PROGRESS GUARD.
                 //
                 // `.inferenceTimeout` is `.window`-scoped so one slow window
@@ -2379,7 +2456,9 @@ struct FoundationModelClassifier: Sendable {
                                     endTime: output.endTime,
                                     transcriptQuality: output.transcriptQuality,
                                     screening: output.screening,
-                                    latencyMillis: output.latencyMillis
+                                    latencyMillis: output.latencyMillis,
+                                    suspendingLatencyMillis: output.suspendingLatencyMillis,
+                                    daemonPeersAtStart: output.daemonPeersAtStart
                                 )
                             )
                         }
@@ -2423,7 +2502,9 @@ struct FoundationModelClassifier: Sendable {
                         CoarseWindowFailure(
                             plan: plan,
                             status: status,
-                            latencyMillis: windowAttemptLatency
+                            latencyMillis: windowAttemptLatency,
+                            suspendingLatencyMillis: windowAttemptReading.suspendingMs,
+                            daemonPeersAtStart: attemptPeers
                         )
                     )
                     if consecutiveInferenceTimeouts >= Self.consecutiveInferenceTimeoutAbortThreshold {
@@ -4952,10 +5033,19 @@ struct FoundationModelClassifier: Sendable {
         sessionBox: SessionBox,
         lineRefLookup: [Int: AdTranscriptSegment],
         clock: ContinuousClock,
+        attemptClocks: FMClockPair,
+        attemptPeers: Int,
         windowIndex: Int,
         totalWindows: Int
     ) async -> CoarseResponseOutcome {
-        let windowStart = clock.now
+        // playhead-rkfp: the attempt's clock pair comes from the CALLER (taken
+        // just before the session was minted) so a success row's continuous
+        // and suspending readings cover the same span the caller would stamp
+        // on a failure. Shrink-split retries (`runCoarseRetry`,
+        // `runCoarseSmartShrinkLoop`) measure their own sub-spans on the
+        // continuous clock only and leave the twin nil — a twin from a
+        // DIFFERENT span could read "suspending > continuous", which is
+        // nonsense a reader has no way to detect.
 
         // bd-34e: log a structured submit breadcrumb before each
         // `respond` call so we can correlate guardrail blocks with the
@@ -4974,6 +5064,7 @@ struct FoundationModelClassifier: Sendable {
                 schema: response,
                 validLineRefs: Set(plan.lineRefs)
             )
+            let reading = attemptClocks.elapsed()
             return .success([
                 FMCoarseWindowOutput(
                     windowIndex: 0,
@@ -4982,7 +5073,9 @@ struct FoundationModelClassifier: Sendable {
                     endTime: plan.endTime,
                     transcriptQuality: plan.transcriptQuality,
                     screening: screening,
-                    latencyMillis: Self.latencyMillis(since: windowStart, clock: clock)
+                    latencyMillis: reading.continuousMs,
+                    suspendingLatencyMillis: reading.suspendingMs,
+                    daemonPeersAtStart: attemptPeers
                 )
             ])
         } catch {
@@ -5083,6 +5176,7 @@ struct FoundationModelClassifier: Sendable {
                             schema: response,
                             validLineRefs: Set(plan.lineRefs)
                         )
+                        let retryReading = attemptClocks.elapsed()
                         return .success([
                             FMCoarseWindowOutput(
                                 windowIndex: 0,
@@ -5091,7 +5185,9 @@ struct FoundationModelClassifier: Sendable {
                                 endTime: plan.endTime,
                                 transcriptQuality: plan.transcriptQuality,
                                 screening: screening,
-                                latencyMillis: Self.latencyMillis(since: windowStart, clock: clock)
+                                latencyMillis: retryReading.continuousMs,
+                                suspendingLatencyMillis: retryReading.suspendingMs,
+                                daemonPeersAtStart: attemptPeers
                             )
                         ])
                     } catch {

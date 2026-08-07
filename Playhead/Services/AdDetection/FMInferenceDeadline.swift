@@ -59,8 +59,8 @@
 import Foundation
 import os
 
-/// Thrown by ``FMInferenceDeadline/run(_:operation:)`` when one Foundation
-/// Models inference call outlived its deadline.
+/// Thrown by ``FMInferenceDeadline/run(_:census:operation:)`` when one
+/// Foundation Models inference call outlived its deadline.
 ///
 /// This is deliberately a DISTINCT type from `CancellationError`. The two mean
 /// different things and must not be conflated:
@@ -80,6 +80,85 @@ struct FMInferenceTimeoutError: Error, Sendable, Equatable {
     /// The deadline that elapsed. Carried so a log line or a test can assert
     /// WHICH budget was exceeded rather than just that something was.
     let deadline: Duration
+
+    /// playhead-ezmv: how many OTHER bounded Foundation Models calls from THIS
+    /// process were still in flight when the timed-out call was issued.
+    ///
+    /// Numerator: calls that had entered ``FMDaemonCallCensus`` and not yet
+    /// returned at the instant this call entered. Denominator: none — it is a
+    /// count, not a ratio. If no self-call was in flight it reads 0, which is
+    /// the honest answer for "the daemon was busy with something that was not
+    /// us" (another process, or a frozen wait).
+    ///
+    /// Carried ON the error because the error is what reaches the defer site:
+    /// `BackfillJobRunner` writes the metadata-stall cause from the caught
+    /// error alone, and the census reading at catch time would name the wrong
+    /// instant — by then the peer that caused the stall may have finished.
+    let peersAtStart: Int
+
+    init(deadline: Duration, peersAtStart: Int = 0) {
+        self.deadline = deadline
+        self.peersAtStart = peersAtStart
+    }
+}
+
+/// playhead-ezmv: a process-wide census of in-flight Foundation Models daemon
+/// calls, kept by the one chokepoint they all pass through
+/// (``FMInferenceDeadline/run(_:census:operation:)``).
+///
+/// WHY THIS EXISTS. `tokenCount` and `respond` share one on-device model
+/// daemon, and the 2026-08-06 device pull showed 30 of 141 respond rows
+/// (numerator: `semantic_scan_results.latencyMs > 30000`; denominator: rows
+/// with `latencyMs > 0`) exceeding the 30 s metadata budget — so roughly one
+/// inference in five, if in flight when `planPassA` issues a `tokenCount`, is
+/// enough on its own to blow that budget. Whether a given stall was actually
+/// behind OUR OWN inference was not measurable from the device: the daemon is
+/// Apple's and its queue is invisible. This census records the half of the
+/// question that IS visible — how many of our own calls were outstanding —
+/// so the next pull can confirm or refute the self-contention claim per stall.
+///
+/// A call COUNTS UNTIL APPLE'S CALL RETURNS, not until we stop waiting. The
+/// deadline abandons the wait, but the XPC request it abandoned is still load
+/// on the daemon; `exit()` runs inside the operation task, after the
+/// underlying call completes, precisely so an abandoned-but-running call keeps
+/// counting. What would this read if self-contention never happened? Zero, on
+/// every row — because the drain issues calls sequentially and each one's
+/// census entry exits before the next begins.
+///
+/// NOT COUNTED, deliberately and named: `prewarm` (fire-and-forget, never
+/// awaited) and any Foundation Models use outside the ad-detection chokepoint
+/// (e.g. `ChapterLabelingService`). A census reading is therefore a lower
+/// bound on self-load, never an upper one.
+final class FMDaemonCallCensus: Sendable {
+    /// The production census. One per process, because the daemon is one per
+    /// process — a per-runner census would undercount exactly the concurrent
+    /// case it exists to observe.
+    static let shared = FMDaemonCallCensus()
+
+    private let state = OSAllocatedUnfairLock(initialState: 0)
+
+    init() {}
+
+    /// Record one call entering flight. Returns the number of OTHER calls in
+    /// flight at that instant — the value read BEFORE this call is counted,
+    /// so a lone call always observes 0 peers.
+    func enter() -> Int {
+        state.withLock { count in
+            defer { count += 1 }
+            return count
+        }
+    }
+
+    /// Record one call leaving flight (the underlying call returned or threw
+    /// — NOT the deadline giving up on it).
+    func exit() {
+        state.withLock { $0 -= 1 }
+    }
+
+    /// Calls currently in flight.
+    var inFlight: Int {
+        state.withLock { $0 }
+    }
 }
 
 enum FMInferenceDeadline {
@@ -182,26 +261,61 @@ enum FMInferenceDeadline {
     /// be generous, a bound that costs only the wait does not.
     static let metadata: Duration = .seconds(30)
 
-    /// Run `operation` under a hard wall-clock deadline.
+    /// Run `operation` under a hard per-call deadline, measured on the
+    /// SUSPENDING clock.
     ///
     /// Returns whatever `operation` returns, rethrows whatever it throws, and
     /// throws ``FMInferenceTimeoutError`` if `deadline` elapses first. A
     /// non-positive `deadline` disables the bound entirely and calls
     /// `operation` inline, so a caller can opt out without a second code path.
+    /// The census is entered either way — an unbounded call is still daemon
+    /// load.
+    ///
+    /// WHY THE SUSPENDING CLOCK (playhead-rkfp). The budget's licence is "no
+    /// plausible real inference takes this long" — a property of the model and
+    /// the prompt WHILE THE SYSTEM CAN RUN THEM. The 2026-08-06 device pull
+    /// proved the continuous clock measures a different population: a passA
+    /// permissive call recorded 1,955.6 s of which 1,504 s (76.9%) was the
+    /// process frozen between two background grants (08:20:39 grant end to
+    /// 08:45:43 grant start), during which neither the model nor the timer ran
+    /// a single instruction. On the continuous clock that freeze both bills
+    /// the call's budget and, at thaw, makes the timer race the buffered XPC
+    /// reply — killing a viable answer by timing that has nothing to do with
+    /// the model. On the suspending clock, device sleep spends no budget, so
+    /// the deadline bounds the thing its derivation actually measured.
+    ///
+    /// STATED LIMIT: `SuspendingClock` pauses during DEVICE sleep, not during
+    /// app suspension with the device awake. A frozen-but-awake stretch still
+    /// bills the call. That residue is unavoidable from inside the process —
+    /// nothing observable distinguishes "frozen" from "running slowly" — and
+    /// it errs in the direction 8d5r chose deliberately: when in doubt, the
+    /// bound fires late, never early.
     ///
     /// Cancellation of the CALLING task propagates as `CancellationError`,
     /// never as a timeout — see ``FMInferenceTimeoutError`` for why that
     /// distinction is load-bearing.
     static func run<T: Sendable>(
         _ deadline: Duration,
+        census: FMDaemonCallCensus = .shared,
         operation: @escaping @Sendable () async throws -> T
     ) async throws -> T {
         guard deadline > .zero else {
+            _ = census.enter()
+            defer { census.exit() }
             return try await operation()
         }
 
+        // Read-and-increment happens HERE, before the operation is spawned,
+        // so the reading names the instant the call was issued — the instant
+        // the ezmv stall table asks about.
+        let peersAtStart = census.enter()
         let race = AbandonableRace<T>()
         let work = Task {
+            // The census exit belongs to the OPERATION, not to the waiter:
+            // an abandoned call is still in flight on the daemon until
+            // Apple's call actually returns, and the whole point of the
+            // census is that a later `tokenCount` can see it.
+            defer { census.exit() }
             do {
                 await race.settle(.success(try await operation()))
             } catch {
@@ -210,13 +324,15 @@ enum FMInferenceDeadline {
         }
         let timer = Task {
             do {
-                try await Task.sleep(for: deadline)
+                try await Task.sleep(for: deadline, tolerance: nil, clock: SuspendingClock())
             } catch {
                 // The timer lost the race and was cancelled. Settling here
                 // would be a spurious timeout.
                 return
             }
-            await race.settle(.failure(FMInferenceTimeoutError(deadline: deadline)))
+            await race.settle(
+                .failure(FMInferenceTimeoutError(deadline: deadline, peersAtStart: peersAtStart))
+            )
         }
 
         let outcome = await withTaskCancellationHandler {

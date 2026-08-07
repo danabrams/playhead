@@ -2577,6 +2577,9 @@ actor AnalysisStore {
             // pre-v44 row is deleted, because its id was minted under the old
             // derivation and nothing can address it again.
             try migrateBackfillJobIdentityV44IfNeeded()
+            // playhead-rkfp/ezmv: the wait-vs-infer split — nullable
+            // suspending-clock twin and daemon-census columns, no backfill.
+            try migrateScanLatencySplitV45IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -2930,6 +2933,9 @@ actor AnalysisStore {
         // playhead-wxsv (v44): guarded on `tableExists`, so a seeded fixture
         // without `backfill_jobs` still reaches v44.
         try migrateBackfillJobIdentityV44IfNeeded()
+        // playhead-rkfp/ezmv (v45): guarded on `tableExists`, so a seeded
+        // fixture without `semantic_scan_results` still reaches v45.
+        try migrateScanLatencySplitV45IfNeeded()
     }
     #endif
 
@@ -6638,6 +6644,48 @@ actor AnalysisStore {
         try setSchemaVersion(44)
     }
 
+    /// V45 migration (playhead-rkfp / playhead-ezmv) — the wait-vs-infer
+    /// split. Two nullable columns on `semantic_scan_results`:
+    ///
+    ///   * `suspendingLatencyMs` — `latencyMs`'s twin over the SAME span on
+    ///     the SUSPENDING clock. `latencyMs` is a `ContinuousClock` span and
+    ///     the 2026-08-06 device pull proved it conflates populations: its
+    ///     worst row read 1,955.6 s of which 1,504 s (76.9%) was the process
+    ///     frozen between background grants. The difference of the two
+    ///     columns is the device-asleep share of a row.
+    ///   * `daemonPeersAtStart` — how many other in-process FM daemon calls
+    ///     were in flight when the row's window attempt began
+    ///     (`FMDaemonCallCensus`), the measurable half of the ezmv
+    ///     self-contention claim.
+    ///
+    /// Nullable, no backfill, exactly like V42's attribution columns: NULL
+    /// means "written by a binary that did not measure this", and inventing
+    /// 0 for historical rows would assert "no sleep / no peers" about spans
+    /// nobody measured. Idempotent (`addColumnIfNeeded`) and guarded on
+    /// `tableExists` so a seeded fixture without `semantic_scan_results`
+    /// still reaches v45.
+    private func migrateScanLatencySplitV45IfNeeded() throws {
+        let observed = (try schemaVersion() ?? 1)
+        guard observed < 45 else { return }
+        // DO NOT STEP OVER A ROLLED-BACK V39, exactly as V40–V44 do not — see
+        // `migrateSemanticScanAttributionV42IfNeeded` for why the ladder does
+        // not enforce this structurally.
+        guard observed >= 44 else { return }
+        if try tableExists("semantic_scan_results") {
+            try addColumnIfNeeded(
+                table: "semantic_scan_results",
+                column: "suspendingLatencyMs",
+                definition: "REAL"
+            )
+            try addColumnIfNeeded(
+                table: "semantic_scan_results",
+                column: "daemonPeersAtStart",
+                definition: "INTEGER"
+            )
+        }
+        try setSchemaVersion(45)
+    }
+
     /// Fold ONE settled day-0 kickoff into its episode's row.
     ///
     /// The counters accumulate in SQL rather than in Swift so two writers can
@@ -8818,6 +8866,8 @@ actor AnalysisStore {
                 createdAt REAL,
                 scenePhase TEXT,
                 runCorrelationId TEXT,
+                suspendingLatencyMs REAL,
+                daemonPeersAtStart INTEGER,
                 UNIQUE(reuseKeyHash)
             )
             """)
@@ -17391,7 +17441,8 @@ actor AnalysisStore {
         disposition, spansJSON, status, attemptCount, errorContext,
         inputTokenCount, outputTokenCount, latencyMs, prewarmHit,
         scanCohortJSON, transcriptVersion, reuseKeyHash, runMode, jobPhase,
-        createdAt, scenePhase, runCorrelationId
+        createdAt, scenePhase, runCorrelationId,
+        suspendingLatencyMs, daemonPeersAtStart
         """
 
     /// H-1: canonicalize a `scanCohortJSON` before hashing so two
@@ -17637,8 +17688,9 @@ actor AnalysisStore {
              disposition, spansJSON, status, attemptCount, errorContext,
              inputTokenCount, outputTokenCount, latencyMs, prewarmHit,
              scanCohortJSON, transcriptVersion, reuseKeyHash, runMode, jobPhase,
-             createdAt, scenePhase, runCorrelationId)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             createdAt, scenePhase, runCorrelationId,
+             suspendingLatencyMs, daemonPeersAtStart)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -17673,6 +17725,12 @@ actor AnalysisStore {
         bind(stmt, 23, result.createdAt ?? now)
         bind(stmt, 24, result.scenePhase?.rawValue)
         bind(stmt, 25, result.runCorrelationId)
+        // playhead-rkfp/ezmv (V45). Neither falls back to anything: a NULL
+        // means "the producing path did not measure this", and a store that
+        // substituted 0 would turn "unmeasured" into "no sleep, no peers" —
+        // the exact conflation these columns exist to end.
+        bind(stmt, 26, result.suspendingLatencyMs)
+        bind(stmt, 27, result.daemonPeersAtStart)
         try step(stmt, expecting: SQLITE_DONE)
     }
 
@@ -18187,6 +18245,12 @@ actor AnalysisStore {
             inputTokenCount: optionalInt(stmt, 13),
             outputTokenCount: optionalInt(stmt, 14),
             latencyMs: optionalDouble(stmt, 15),
+            // playhead-rkfp/ezmv (V45): `optionalDouble`/`optionalInt`, never
+            // the bare column reads — a NULL read as 0.0 would claim "zero
+            // sleep in this span" / "zero peers" for every pre-V45 row, the
+            // same 1970-dating defect the createdAt read below documents.
+            suspendingLatencyMs: optionalDouble(stmt, 25),
+            daemonPeersAtStart: optionalInt(stmt, 26),
             prewarmHit: sqlite3_column_int(stmt, 16) != 0,
             scanCohortJSON: try requireText(stmt, 17),
             transcriptVersion: try requireText(stmt, 18),
