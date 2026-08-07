@@ -47,6 +47,95 @@ private struct UncheckedSendableBox<T>: @unchecked Sendable {
     init(_ value: T) { self.value = value }
 }
 
+/// playhead-lmrx: the achievement counters of ONE background grant, written by
+/// the work task and readable by the expiration handler.
+///
+/// WHY A BOX AND NOT A LOCAL. `handleBackfillTask` already computed
+/// `baselinePending` and passed it as `jobsSeen`/`jobsAdmitted` — but only on
+/// the work task's NORMAL-return path, as a local variable the expiration
+/// handler could not see. On the 2026-08-06 device pull that path was taken 51
+/// times out of 254; the other 203 runs (80.0 %) ended `expired`, where
+/// `finishRun` wrote outcome/cause/expiration and nothing else. So
+/// `jobsSeen`, `jobsAdmitted` and `jobsCompleted` are NULL on **every** expired
+/// row and the ledger cannot answer "how much did this window achieve" for four
+/// fifths of the grants it recorded — the 4-of-203 figure in the bead had to be
+/// reconstructed by joining `semantic_scan_results` timestamps against run
+/// windows.
+///
+/// A lock rather than actor state because the two writers are on different
+/// isolation domains and the expiration handler must be able to read the
+/// counters without first winning a hop onto a `BackgroundProcessingService`
+/// that may be parked inside the very drain it is expiring.
+///
+/// `nil` is preserved as distinct from `0` in every field: "the handler never
+/// got far enough to count" and "the handler counted zero" are different
+/// findings, and collapsing them is the same class of error as the one this box
+/// exists to fix. `finishRun` binds through `COALESCE(?, col)`, so a `nil` here
+/// leaves the column untouched rather than overwriting it with a fabricated 0.
+///
+/// **`jobsAdmitted` IS DELIBERATELY NOT HERE.** The pre-lmrx handler wrote
+/// `jobsAdmitted: baselinePending` — the same number it wrote for `jobsSeen` —
+/// and all 12 `admitted_work` rows in the 2026-08-06 pull duly carry
+/// `jobsSeen == jobsAdmitted`. Ask the diagnostic question of it: what would
+/// that column read if NOTHING had been admitted? The same. It is not a
+/// measurement of admission, it is a copy of the denominator, and this handler
+/// has no honest admission count to offer — `drainEligible` awaits each pass to
+/// completion, so a window whose only pass never returns cannot say whether the
+/// pass it started counts as admitted. Leaving the column NULL says "not
+/// measured", which is true. Writing the denominator into it says something
+/// false, and this bead exists because of a ledger that said false things.
+final class BackgroundGrantCounters: Sendable {
+    private struct State {
+        var jobsSeen: Int?
+        var jobsCompleted: Int?
+    }
+
+    private let state = OSAllocatedUnfairLock(initialState: State())
+
+    /// Record the queue depth observed at the start of the grant — the
+    /// DENOMINATOR. Recorded before the drain mutates anything.
+    func noteBaseline(pending: Int) {
+        state.withLock { $0.jobsSeen = pending }
+    }
+
+    /// Record how many of the jobs pending at the start of this grant reached
+    /// terminal SUCCESS.
+    ///
+    /// The NUMERATOR over ``noteBaseline(pending:)``'s denominator, and over the
+    /// same population by construction — the caller passes the size of an
+    /// intersection with the baseline id set, not a difference of two counts.
+    /// See `AnalysisWorkScheduler.pendingJobIdsForLedger()` for why a count
+    /// delta is the wrong instrument here.
+    ///
+    /// Zero is a measurement and is stored as one: "admitted work and finished
+    /// none" is this bead's headline finding, and it must not read as NULL.
+    func noteCompleted(_ completed: Int) {
+        state.withLock { $0.jobsCompleted = completed }
+    }
+
+    /// The counters as they stand, for whichever path reaches `finishRun`
+    /// first — the work task's normal return or the expiration handler.
+    var snapshot: (jobsSeen: Int?, jobsCompleted: Int?) {
+        state.withLock { ($0.jobsSeen, $0.jobsCompleted) }
+    }
+}
+
+/// playhead-lmrx: the identities of the jobs pending when a grant opened.
+///
+/// Shared with the expiration handler for the same reason the counters are: the
+/// completion count has to be taken over the population the baseline named, and
+/// in 80 % of grants the only path that reaches a terminal ledger write is the
+/// expiration handler, which cannot see the work task's locals.
+final class BackgroundGrantBaselineIds: Sendable {
+    private let ids = OSAllocatedUnfairLock<Set<String>?>(initialState: nil)
+
+    func store(_ value: Set<String>) { ids.withLock { $0 = value } }
+
+    /// `nil` when the grant ended before the baseline was ever read — which is
+    /// a different thing from an empty queue, and must stay distinguishable.
+    var value: Set<String>? { ids.withLock { $0 } }
+}
+
 // MARK: - Protocols for Testability
 
 /// Abstracts BGProcessingTask for testability.
@@ -174,7 +263,12 @@ protocol AnalysisCoordinating: Sendable {
     /// Drain any pending analysis backfill work for the duration of a
     /// BGProcessingTask window. Must respect `Task.isCancelled` and return
     /// promptly on expiration.
-    func runPendingBackfill() async
+    ///
+    /// playhead-lmrx: `deadline` is REQUIRED here, with no protocol-level
+    /// default, so a conformance cannot inherit "poll until something else
+    /// stops me". The caller is spending an OS grant and is the only party that
+    /// knows when it opened.
+    func runPendingBackfill(deadline: ContinuousClock.Instant) async
 
     /// playhead-44h1: continue a foreground-assist download + analysis
     /// inside a `BGContinuedProcessingTask` window.
@@ -440,6 +534,35 @@ actor BackgroundProcessingService {
             episodeId: episodeId,
             detail: "continued-processing-expired"
         )
+    }
+
+    /// playhead-lmrx (review round 7): the work `Task` a BGTask handler left
+    /// behind for `task`, so a test can await its COMPLETION.
+    ///
+    /// This exists for one reason, and it is the only reason it should ever be
+    /// used. Both work drivers end their teardown with
+    /// `guard !Task.isCancelled else { return }` — the OS reclaimed us mid-wait,
+    /// so the expiration handler owns the ending. The correct behaviour of that
+    /// guard is a bare `return`: it writes nothing, logs at `.info`, and leaves
+    /// no state behind. The only *observable* difference between having it and
+    /// not having it is WHO reaches `setTaskCompleted`, and asking that
+    /// question directly is a race — the mutant's `markComplete(success: true)`
+    /// and the expiration handler's `markComplete(success: false)` are two
+    /// tasks sprinting at a first-writer-wins flag.
+    ///
+    /// Awaiting this handle is the happens-before edge that removes the race.
+    /// `.value` returns on BOTH paths — the guard's `return` and the
+    /// fall-through — so a test that holds the expiration handler still (at its
+    /// own ledger write, which is upstream of its `markComplete`) can assert
+    /// that the work task completed NOTHING, as a fact about the guard rather
+    /// than about which task the scheduler ran first.
+    ///
+    /// Returns `nil` once the task has been completed: `markComplete` removes
+    /// the entry, so a caller must take the handle before driving the teardown.
+    func workTaskForTesting(
+        _ task: any BackgroundProcessingTaskProtocol
+    ) -> Task<Void, Never>? {
+        activeBackgroundTasks[ObjectIdentifier(task as AnyObject)]
     }
 
     // MARK: - State
@@ -712,6 +835,37 @@ actor BackgroundProcessingService {
         // playhead-i6oi: charger-class backfill sibling routes to the SAME
         // handler. Whichever class iOS grants a window to (battery-idle or
         // charger-maintenance), the identical backfill drain runs.
+        //
+        // playhead-lmrx: but NOT the same budget. Every grant measurement in
+        // this repo comes from the plain identifier, and the charger class
+        // exists precisely because it is expected to behave differently.
+        // Spending the plain identifier's 219 s here would both be unevidenced
+        // and risk surrendering most of an overnight grant, so this class keeps
+        // the horizon the handler assumed before lmrx and says so in
+        // `Provenance.assumed`.
+        //
+        // playhead-lmrx (review round): the IDENTIFIER is threaded too, and it
+        // was not before. Every ledger and telemetry write in this handler
+        // hardcoded `BackgroundTaskID.backfillProcessing`, so a charger-class
+        // window was recorded as a plain one. Two consequences, both of them
+        // the standing defect class — `taskIdentifier` named WHICH HANDLER RAN
+        // and was read as WHICH CLASS THE OS GRANTED:
+        //
+        //  * "the pull contains zero rows for this identifier" was true by
+        //    construction and could never have been otherwise, so it was not
+        //    evidence that the class never ran;
+        //  * and any charger-class window that DID run is inside the 203
+        //    expired rows the plain identifier's measured grant came from.
+        //    (Nothing in that population exceeds 321.4 s, so no long
+        //    charger-class grant is visibly in it — but that is an argument
+        //    from the data, not from the instrumentation.)
+        //
+        // With the identifier threaded, the next pull can actually settle what
+        // this class is granted — for queries that group by `taskIdentifier`.
+        // `entryPoint` stays `.backfill` for both (it names which handler ran,
+        // which is what it has always meant), so `fetchLatestRun(for:
+        // .backfill)` still mixes them; the identifier is the column that now
+        // separates them.
         BGTaskScheduler.shared.register(
             forTaskWithIdentifier: BackgroundTaskID.backfillProcessingCharged,
             using: nil
@@ -721,7 +875,13 @@ actor BackgroundProcessingService {
                 return
             }
             let sendableTask = UncheckedSendableBox(processingTask)
-            Task { await self.handleBackfillTask(sendableTask.value) }
+            Task {
+                await self.handleBackfillTask(
+                    sendableTask.value,
+                    identifier: BackgroundTaskID.backfillProcessingCharged,
+                    budget: .backfillProcessingCharged
+                )
+            }
         }
 
         BGTaskScheduler.shared.register(
@@ -1114,11 +1274,28 @@ actor BackgroundProcessingService {
 
     /// Handle the backfill BGProcessingTask. Runs analysis on episodes that
     /// have incomplete transcription or ad detection.
-    func handleBackfillTask(_ task: any BackgroundProcessingTaskProtocol) async {
+    /// - Parameter budget: the measured grant this handler is spending.
+    ///   Defaults to the plain `com.playhead.app.analysis.backfill` budget; the
+    ///   playhead-i6oi charger-class sibling shares this handler and passes
+    ///   ``BackgroundGrantBudget/backfillProcessingCharged`` instead, because
+    ///   the pull contains ZERO observations of that identifier and spending the
+    ///   plain identifier's measurement on it would be exactly the
+    ///   wrong-population error this type exists to stop (playhead-lmrx).
+    /// - Parameter identifier: the BGTask identifier iOS actually dispatched,
+    ///   recorded on every ledger and telemetry write. Threaded rather than
+    ///   hardcoded (playhead-lmrx review round) because this handler serves two
+    ///   identifiers and used to record both as the plain one — which made
+    ///   "the pull has zero rows for the charged class" an artifact of the
+    ///   instrumentation rather than an observation about the class.
+    func handleBackfillTask(
+        _ task: any BackgroundProcessingTaskProtocol,
+        identifier: String = BackgroundTaskID.backfillProcessing,
+        budget: BackgroundGrantBudget = .backfillProcessing
+    ) async {
         logger.info("Backfill task started")
 
         let taskID = ObjectIdentifier(task as AnyObject)
-        emitStart(identifier: BackgroundTaskID.backfillProcessing, taskRef: task as AnyObject)
+        emitStart(identifier: identifier, taskRef: task as AnyObject)
 
         // playhead-hygc.1.4: open a durable run-outcome row at handler
         // entry so dogfood snapshots taken mid-run are still classifiable
@@ -1146,12 +1323,26 @@ actor BackgroundProcessingService {
         let runId = UUID().uuidString
         let instanceID = bgTaskInstanceID(for: task as AnyObject)
         let runLedgerForStart = self.runLedger
+        // playhead-lmrx: the grant opened NOW. Every deadline this handler hands
+        // out is measured from this instant rather than from whenever the work
+        // task happens to reach the call, so a slow `recordRunStart` or a
+        // contended actor hop spends the grant it delays rather than silently
+        // extending it. Read synchronously, before the first `await`, for the
+        // same playhead-c25o reason the expiration handler is armed here.
+        let grantStart = ContinuousClock.now
+        // playhead-lmrx: shared with the expiration handler so an `expired` row
+        // reports what the window achieved instead of only that it ended. The
+        // baseline IDS live alongside it because `jobsCompleted` must be counted
+        // over the same population `jobsSeen` measured — see
+        // `AnalysisWorkScheduler.pendingJobIdsForLedger()`.
+        let counters = BackgroundGrantCounters()
+        let baselineIdsBox = BackgroundGrantBaselineIds()
         let startRunTask = Task {
             let scenePhase = await BGTaskTelemetryScenePhase.current()
             await runLedgerForStart.recordRunStart(
                 runId: runId,
                 entryPoint: .backfill,
-                taskIdentifier: BackgroundTaskID.backfillProcessing,
+                taskIdentifier: identifier,
                 taskInstanceID: instanceID,
                 scenePhase: scenePhase
             )
@@ -1231,6 +1422,19 @@ actor BackgroundProcessingService {
                 // returning. `pauseAllWork` is the thermal pause path;
                 // `!allowSoonLane && !pauseAllWork` is the capability
                 // (LPM-stacked-on-fair) pause path.
+                // playhead-lmrx (review round): NO CANCEL/SETTLE ON THIS EXIT,
+                // and the asymmetry with the work-deadline return below is
+                // deliberate. This path completes the task ~3 s into the
+                // handler (7 `deferred_capability` rows in the pull, mean
+                // 3.0 s) WITHOUT having started or woken anything: it returns
+                // before `ensureSchedulerLoopStarted`, before the drain, before
+                // the poll loop. Whatever the long-lived `runLoop()` may be
+                // running was not dispatched into this grant and is not this
+                // handler's to cancel — and cancelling it would cost a live
+                // job a 60 s requeue for a window that admitted no work. The
+                // pre-existing lease reaper covers the case where the process
+                // is then suspended, which is what covered it before this bead
+                // too.
                 let outcome: BackgroundTaskRunOutcome =
                     policy.pauseAllWork ? .deferredThermal : .deferredCapability
                 // Wait for the row insert to land before the UPDATE so
@@ -1257,7 +1461,25 @@ actor BackgroundProcessingService {
             // injected (early-launch race), we treat baseline as 0 so
             // the eventual outcome falls into no_eligible_work / no_op
             // semantics rather than misclassifying as admitted work.
-            let baselinePending = await self.analysisWorkScheduler?.pendingJobCountForLedger() ?? 0
+            // playhead-lmrx: capture the pending IDENTITIES, not just the count.
+            // The count answers `jobsSeen`; the identities are what make
+            // `jobsCompleted` a measurement over the same population rather than
+            // a difference of two global counts (which a concurrent failure or a
+            // tier-advance mint would corrupt in opposite directions).
+            let baselineIds = await self.analysisWorkScheduler?.pendingJobIdsForLedger() ?? []
+            let baselinePending = baselineIds.count
+            // Publish the baseline the moment it is known, not at the
+            // normal-return `finishRun` below. In a full-length grant that
+            // return is never reached — the OS reclaims first — which is exactly
+            // why every `expired` row carries NULL counters today.
+            //
+            // The DENOMINATOR is published first and the ids second, so the
+            // only interleaving an expiration can observe is "jobsSeen without
+            // jobsCompleted" (honest: the window ended before completions could
+            // be counted). The other order admits "completed 2 of NULL", which
+            // is a numerator with no denominator.
+            counters.noteBaseline(pending: baselinePending)
+            baselineIdsBox.store(baselineIds)
 
             // Drive the analysis pipeline to drain pending backfill jobs.
             //
@@ -1286,12 +1508,25 @@ actor BackgroundProcessingService {
             // the loop exists, then ACTIVELY drain the eligible queue rather
             // than only nudging a poll. `runPendingBackfill` below still runs
             // to keep the BG task alive and confirm the queue drained.
+            //
+            // playhead-lmrx: both drivers are now bounded by the MEASURED grant
+            // (`BackgroundGrantBudget.backfillProcessing`, 219 s of work inside
+            // a 255 s design grant) instead of the 25 minutes they used to
+            // assume — 5.07x the p90 of the 203 expired backfill grants in the
+            // 2026-08-06 pull. The deadline is computed from `grantStart`, so
+            // the two drivers SHARE one budget rather than each starting a fresh
+            // clock; a drain that spends 200 s leaves the poll loop 19 s, which
+            // is the truth about the window.
+            let workDeadline = budget.workDeadline(from: grantStart)
             await self.analysisWorkScheduler?.ensureSchedulerLoopStarted()
             if let scheduler = self.analysisWorkScheduler {
-                await scheduler.drainEligible(deadline: ContinuousClock.now + .seconds(25 * 60))
+                await scheduler.drainEligible(
+                    deadline: workDeadline,
+                    minimumCheckpointBudget: budget.minimumCheckpointBudget
+                )
             }
             await self.analysisWorkScheduler?.wake()
-            await self.coordinator.runPendingBackfill()
+            await self.coordinator.runPendingBackfill(deadline: workDeadline)
 
             // If the task was cancelled (expiration fired), bail out without
             // marking success. The expiration handler will mark the task
@@ -1314,18 +1549,159 @@ actor BackgroundProcessingService {
             // the queue (the polling loop only returns when pending
             // count hits zero or the task is cancelled), so the
             // outcome is `.admittedWork`.
+            //
+            // playhead-lmrx (review round): NOT FIXED HERE, AND SAY SO. This
+            // expression has the same shape as the `jobsAdmitted: baselinePending`
+            // write the same commit deleted — what would it read if the window
+            // admitted nothing? `.admittedWork`, whenever the queue was
+            // non-empty. The difference is that `jobsAdmitted` was a NUMBER
+            // nobody else consumed, while `outcome` is the enum every existing
+            // ledger query groups by and every prior bead's measurement is
+            // stated in (`12 admitted_work`, `23 no_eligible_work`). Redefining
+            // it mid-bead would silently re-cut every one of those. It is left
+            // exactly as it was, and named here so the next reader is not misled
+            // by the counter argument three lines down.
             let outcome: BackgroundTaskRunOutcome =
                 baselinePending > 0 ? .admittedWork : .noEligibleWork
+            // playhead-lmrx (review round): THE NORMAL RETURN IS NOW A TEARDOWN
+            // PATH TOO, AND IT MUST DO THE SAME THING THE EXPIRY DOES.
+            //
+            // Bounding the drivers at 219 s created an exit the old code did not
+            // have. Pre-lmrx both drivers ran to `now + 25 * 60`, so inside a
+            // ~295 s grant this return was unreachable and the OS expiry always
+            // drove teardown. Now the poll loop returns the moment the work
+            // deadline passes, with `Task.isCancelled` still FALSE — and the
+            // scheduler's long-lived `runLoop()`, which this handler explicitly
+            // started and woke above, keeps dispatching on its own 5 s poll for
+            // the rest of the window. So a job dispatched at t+200 s is still in
+            // flight here, and `markComplete` below calls `setTaskCompleted`,
+            // after which iOS may suspend the process at once. That is exactly
+            // the stranding this bead exists to remove — no checkpoint, no
+            // requeue, a leased `running` row for mk6z's reaper — reintroduced
+            // on the path the fix makes common.
+            //
+            // Completing the task is what makes this urgent: once completed, the
+            // `expirationHandler` will never fire, so the cancel wiring below it
+            // cannot rescue anything.
+            //
+            // ONLY WHEN THE DEADLINE ACTUALLY ELAPSED, which is not the only
+            // way this return is reached. `runBackfillPollingLoop` also returns
+            // EARLY, on two consecutive empty polls — that is the 51 normal
+            // returns in the pull, seconds into a window with the whole grant
+            // still ahead. Cancelling there would reach whatever the run loop
+            // happens to be running, including a `playback`-lane catch-up job
+            // for the episode the user is listening to right now, and cost it
+            // a 60 s requeue for nothing: the grant has not ended, so nothing
+            // is about to be suspended. The gate is the deadline itself.
+            //
+            // Harmless when the queue genuinely drained AND the deadline has
+            // passed: nothing is in flight, `cancelCurrentJob` returns an empty
+            // set, and the settle is a no-op.
+            //
+            // ACCEPTED EDGE, named rather than gated: with background audio
+            // playing, the process is not suspended at `setTaskCompleted`, so a
+            // job cancelled at the deadline pays a 60 s requeue it did not need
+            // to. Bounded, flat, and it buys the far worse case — a suspended
+            // process holding a lease — everywhere else. Gating on playback
+            // would need the scheduler's context threaded here and is not this
+            // bead's.
+            //
+            // `.taskExpired` IS THE HONEST CAUSE HERE, even though the OS has
+            // not reclaimed anything yet. What the cause names is "the
+            // background window this job was dispatched into has ended", and it
+            // has — this handler is about to tell iOS the task is complete, and
+            // iOS may suspend the process on that call. Any other cause would
+            // charge the job an attempt for the grant running out, which is the
+            // accounting playhead-lmrx exists to remove; and inventing an
+            // `InternalMissCause` case would re-cut the journal taxonomy,
+            // `CauseAttributionPolicy`'s precedence ladder and every
+            // SurfaceStatus fixture that reads them, for a distinction no
+            // consumer makes.
+            //
+            // The teardown reserve is spent from HERE, as one budget for the
+            // ledger write AND the wait — the same rule the expiration path
+            // follows, and the reason `remainingTeardownReserve` exists.
+            let teardownStart = ContinuousClock.now
+            let deadlineElapsed = ContinuousClock.now >= workDeadline
+            var cancelledJobIds: Set<String> = []
+            if deadlineElapsed, let scheduler = self.analysisWorkScheduler {
+                // playhead-lmrx (review round 3): SHUT THE DOOR BEFORE FIRING
+                // THE CANCEL, or the cancel is a one-shot edge against a loop
+                // that is still dispatching.
+                //
+                // `runLoop()` polls every 5 s for as long as the process has
+                // CPU, and this handler started and woke it. A job it dispatches
+                // AFTER the line below is aimed at by nothing, is absent from
+                // `cancelledJobIds`, and is live when `markComplete` calls
+                // `setTaskCompleted` — the same stranding the cancel exists to
+                // prevent, through the window the cancel opened. The close comes
+                // first so there is no such window.
+                //
+                // The duration is this teardown's own ceiling, not a new
+                // constant: everything between here and `setTaskCompleted` is
+                // budgeted out of `teardownReserve` (see
+                // `remainingTeardownReserve`), so the door is shut for exactly
+                // the interval during which a dispatch could still be caught by
+                // the completion. It expires by itself — see
+                // `AnalysisWorkScheduler.dispatchClosedUntil` for why nothing
+                // re-opens it explicitly.
+                await scheduler.closeDispatchForTeardown(lasting: budget.teardownReserve)
+                cancelledJobIds = await scheduler.cancelCurrentJob(cause: .taskExpired)
+            }
+            // playhead-lmrx: `jobsCompleted` was never written on this path, so
+            // all 12 `admitted_work` rows in the 2026-08-06 pull read NULL and
+            // "26 jobs admitted, 0 completed" had to be inferred. Measure it —
+            // over the baseline POPULATION, and counting terminal SUCCESS only.
+            await self.recordGrantCompletions(counters: counters, baselineIds: baselineIds)
+            let achieved = counters.snapshot
             // Wait for the row insert to land before the UPDATE.
             await startRunTask.value
             await runLedger.finishRun(
                 runId: runId,
                 update: BackgroundTaskRunOutcomeUpdate(
                     outcome: outcome,
-                    jobsSeen: baselinePending,
-                    jobsAdmitted: baselinePending
+                    jobsSeen: achieved.jobsSeen,
+                    jobsCompleted: achieved.jobsCompleted
                 )
             )
+
+            // And only then wait for the requeue, for the same reason and in
+            // the same order as the expiration path: the durable row first, the
+            // wait between it and `setTaskCompleted`. What is left of the
+            // reserve, not all of it — the write above already spent from it.
+            if !cancelledJobIds.isEmpty, let scheduler = self.analysisWorkScheduler {
+                let remaining = budget.remainingTeardownReserve(since: teardownStart)
+                var settled = false
+                if remaining > .zero {
+                    settled = await scheduler.awaitJobsSettled(
+                        cancelledJobIds,
+                        within: remaining
+                    )
+                }
+                if !settled {
+                    self.logger.warning(
+                        "Backfill work deadline: in-flight job(s) \(cancelledJobIds.sorted().joined(separator: ","), privacy: .public) did not settle within the \(remaining, privacy: .public) left of the \(budget.teardownReserve, privacy: .public) teardown reserve; the requeue may be lost to suspension"
+                    )
+                }
+            }
+
+            // playhead-lmrx (review round): AND IF THE OS EXPIRED US WHILE WE
+            // WAITED, THE EXPIRATION HANDLER OWNS THE ENDING.
+            //
+            // `awaitJobsSettled` returns `false` immediately on cancellation
+            // (that guard is what stops it busy-spinning), so without this the
+            // work task would fall straight through to `markComplete(success:
+            // true)` and RACE the expiration handler to `setTaskCompleted` —
+            // winning it, since the handler still has its own cancel, ledger
+            // write and settle to do. The task would be completed over a live
+            // job with the run recorded `.admittedWork`, which is the stranding
+            // this block exists to prevent, arrived at through the block itself.
+            // Same rule, same reason, as the `guard !Task.isCancelled` after
+            // the poll loop above.
+            guard !Task.isCancelled else {
+                self.logger.info("Backfill work task cancelled during teardown; deferring to the expiration handler")
+                return
+            }
 
             // Let the coordinator run until the task expires or completes.
             self.markComplete(task, success: true)
@@ -1339,8 +1715,61 @@ actor BackgroundProcessingService {
         task.expirationHandler = { [weak self] in
             workTask.cancel()
             Task { [weak self] in
+                // playhead-lmrx: teardown starts HERE, and what it may spend is
+                // one budget for the whole of it — the ledger write and the wait
+                // for the interrupted job's resume point — not an allowance each
+                // step may take in full. On THIS path the ceiling is the
+                // post-reclaim grace rather than the teardown reserve, because
+                // the OS has already taken the grant the reserve was carved from.
+                // See `BackgroundGrantBudget.expirationSettleBudget(since:now:)`.
+                let teardownStart = ContinuousClock.now
+                // playhead-lmrx: tell the SCHEDULER the grant is over, not just
+                // this handler's task.
+                //
+                // THIS IS THE RESUME POINT. `workTask.cancel()` reaches the
+                // drain call and the poll loop, but the analysis job the drain
+                // dispatched runs on `AnalysisWorkScheduler`'s own task tree —
+                // it is not a child of `workTask`, so it never observes the
+                // cancellation. Pre-fix it kept running, unaware, into process
+                // suspension: no checkpoint, no requeue, and a `running` row
+                // with a stale lease left for the reaper (which is
+                // playhead-mk6z's problem, and this is why it had one to solve).
+                // `cancelCurrentJob` cancels the in-flight job so its
+                // cancel-catch arm commits `state = 'queued'` with a flat-floor
+                // `nextEligibleAt` and journals a `preempted` row carrying
+                // `task_expired` — WITHOUT spending an attempt, because an
+                // OS-reclaimed window is evidence about the window and not
+                // about the job. The next granted window therefore CONTINUES
+                // from a durable, correct position instead of restarting from a
+                // lease nobody released.
+                //
+                // The healthy sibling already does exactly this: the
+                // pre-analysis recovery expiration handler has called
+                // `cancelCurrentJob(cause: .taskExpired)` since playhead-1nl6,
+                // and recovery ran 86 of 97 wakes to `recovered_work` at 5.1 s
+                // average while backfill produced nothing durable in 199 of 203.
+                //
+                // FIRST, and before the ledger write, because it is the one
+                // step that costs nothing to issue: `cancelCurrentJob` sets a
+                // flag and calls `cancel()`. Getting the cancellation in flight
+                // early is free; WAITING for it is what costs, and that wait is
+                // deliberately last (see below).
+                var cancelledJobIds: Set<String> = []
+                if let scheduler = await self?.analysisWorkScheduler {
+                    // playhead-lmrx (review round 3): and shut the dispatch door
+                    // FIRST, for the same reason as the work-deadline return —
+                    // see that call site. The exposure is shorter here (this
+                    // teardown is bounded by `expirationSettleBudget`, not the
+                    // whole reserve) but not zero: the run loop's poll is 5 s
+                    // and the ledger write in between is not instantaneous. The
+                    // close is stated in the same units as the other path so
+                    // there is one quantity to reason about, and a close that
+                    // outlives the process's remaining life costs nothing.
+                    await scheduler.closeDispatchForTeardown(lasting: budget.teardownReserve)
+                    cancelledJobIds = await scheduler.cancelCurrentJob(cause: .taskExpired)
+                }
                 await self?.emitExpire(
-                    identifier: BackgroundTaskID.backfillProcessing,
+                    identifier: identifier,
                     taskRef: task as AnyObject,
                     detail: "backfill-task-expired"
                 )
@@ -1373,17 +1802,106 @@ actor BackgroundProcessingService {
                     // the warning channel. A future ledger method that
                     // exposes per-run outcome would let us split these
                     // cases — tracked as a follow-up.
+                    // playhead-lmrx: persist what this window ACHIEVED, not only
+                    // that it ended. Pre-fix this call wrote
+                    // outcome/cause/expiration and nothing else, so
+                    // `jobsSeen`/`jobsAdmitted`/`jobsCompleted` were NULL on all
+                    // 203 expired rows and the ledger could not answer "how much
+                    // did this window achieve" for 80 % of the grants it
+                    // recorded. `nil` fields stay `nil` — `finishRun` binds
+                    // through `COALESCE(?, col)` — so a window that expired
+                    // before the baseline was even read still reports NULL
+                    // rather than a fabricated 0.
+                    //
+                    // The completion count is taken HERE rather than inherited,
+                    // because the whole point is that this path is the only one
+                    // 80 % of grants reach.
+                    //
+                    // It is taken BEFORE the settle wait below, so a job that
+                    // reaches terminal `complete` while that wait runs is not
+                    // counted. That is an UNDERCOUNT and it is the direction
+                    // this bead insists on: the column may say less than the
+                    // window achieved, never more. Writing the durable row
+                    // first is what buys it, and that trade is the whole
+                    // ordering argument below.
+                    if let baselineIds = baselineIdsBox.value {
+                        await self.recordGrantCompletions(
+                            counters: counters,
+                            baselineIds: baselineIds
+                        )
+                    }
+                    let achieved = counters.snapshot
                     let advanced = await self.runLedger.finishRun(
                         runId: runId,
                         update: BackgroundTaskRunOutcomeUpdate(
                             outcome: .expired,
                             cause: InternalMissCause.taskExpired.rawValue,
+                            jobsSeen: achieved.jobsSeen,
+                            jobsCompleted: achieved.jobsCompleted,
                             expiration: true
                         )
                     )
                     if !advanced {
                         self.logger.info(
                             "Backfill expiration: ledger row not advanced for runId=\(runId, privacy: .public) — either recordRunStart's INSERT lost, OR the work task wrote a terminal outcome before expiration fired. Probe the ledger to distinguish."
+                        )
+                    }
+                }
+                // playhead-lmrx: AND ONLY NOW DO WE WAIT. `cancelCurrentJob`
+                // above only set a flag; the writes that make this a resume
+                // point — `state = 'queued'`, `nextEligibleAt`, the `preempted`
+                // journal row — land later on the scheduler's own task. Walking
+                // straight from the cancel to `setTaskCompleted` invites iOS to
+                // suspend the process while they are in flight, which loses the
+                // durability the cancel exists to buy. So the wait sits between
+                // the ledger write and `markComplete` (inside
+                // `handleExpiredProcessingTask`), which is the only ordering
+                // that satisfies BOTH obligations:
+                //
+                //  * the `expired` row is durable before anything that can
+                //    block — playhead-hygc.1.4's rule, and the first draft of
+                //    this bead broke it by putting a wait of up to the whole
+                //    teardown reserve in front of the write. A process killed
+                //    during that wait leaves the row at `running`, which is
+                //    STRICTLY WORSE than the `expired`-with-NULL-counters row
+                //    this bead was filed to improve;
+                //  * and `setTaskCompleted` still does not fire until the
+                //    requeue has committed or the reserve is gone.
+                //
+                // The wait is scoped to the jobs the cancel was actually aimed
+                // at, not to "is anything running" — `runLoop()` polls every 5 s
+                // and will happily start a sibling while this waits, and a
+                // signal that cannot tell that apart would time out on a
+                // requeue that already landed.
+                //
+                // AND IT IS BOUNDED BY THE POST-RECLAIM GRACE, NOT BY THE
+                // TEARDOWN RESERVE (playhead-lmrx review round 2). The reserve
+                // is wall clock carved out of `designGrant`; by the time this
+                // runs the OS has taken the grant back, so there is nothing left
+                // for it to be carved out of. `remainingTeardownReserve` alone
+                // hands back its full 36 s here whether the window ran to its
+                // 295 s limit (57 % of them) or was reclaimed at t+5 s — the
+                // standing defect class, a value that reads the same whether or
+                // not the thing it bounds still exists. iOS terminates an app
+                // that does not complete its task promptly after
+                // `expirationHandler` and penalises its future scheduling, which
+                // is the very resource this bead is trying to spend well, so
+                // overrunning trades a rescue we may not get for windows we
+                // certainly will not. The `expired` row is already durable above;
+                // see `BackgroundGrantBudget.expirationSettleGrace`.
+                if !cancelledJobIds.isEmpty,
+                   let scheduler = await self?.analysisWorkScheduler {
+                    let remaining = budget.expirationSettleBudget(since: teardownStart)
+                    var settled = false
+                    if remaining > .zero {
+                        settled = await scheduler.awaitJobsSettled(
+                            cancelledJobIds,
+                            within: remaining
+                        )
+                    }
+                    if !settled {
+                        self?.logger.warning(
+                            "Backfill expiration: in-flight job(s) \(cancelledJobIds.sorted().joined(separator: ","), privacy: .public) did not settle within the \(remaining, privacy: .public) left of the \(budget.expirationSettleGrace, privacy: .public) post-reclaim grace; the requeue may be lost to suspension"
                         )
                     }
                 }
@@ -1703,11 +2221,39 @@ actor BackgroundProcessingService {
         markComplete(task, success: false)
     }
 
+    /// playhead-lmrx: measure how many of the jobs pending when this grant
+    /// opened have reached terminal SUCCESS, and publish it to `counters`.
+    ///
+    /// One helper rather than two copies because BOTH terminal paths need it and
+    /// they must agree: the work task's normal return (reached by ~20 % of
+    /// grants) and the expiration handler (the other 80 %). A completion count
+    /// computed one way on one path and another way on the other is a ledger
+    /// whose column means two things.
+    ///
+    /// Not "no longer pending" and not a delta of counts — see
+    /// `AnalysisWorkScheduler.completedJobIdsForLedger(among:)` for why both of
+    /// those measure something other than what the column is named.
+    private func recordGrantCompletions(
+        counters: BackgroundGrantCounters,
+        baselineIds: Set<String>
+    ) async {
+        guard let scheduler = analysisWorkScheduler else { return }
+        let completed = await scheduler.completedJobIdsForLedger(among: baselineIds)
+        counters.noteCompleted(completed.count)
+    }
+
     // MARK: - Pre-Analysis Recovery
 
     /// Handle the pre-analysis recovery BGProcessingTask. Runs reconciliation
     /// to find interrupted T0/T1+ jobs and resumes them.
-    func handlePreAnalysisRecovery(_ task: any BackgroundProcessingTaskProtocol) async {
+    /// - Parameter budget: the grant this handler is spending. Defaults to the
+    ///   measured `com.playhead.app.preanalysis.recovery` budget; injectable for
+    ///   the same reason `handleBackfillTask`'s is — the work-deadline teardown
+    ///   is 219 s into a grant and is otherwise unreachable from a test.
+    func handlePreAnalysisRecovery(
+        _ task: any BackgroundProcessingTaskProtocol,
+        budget: BackgroundGrantBudget = .preAnalysisRecovery
+    ) async {
         logger.info("Pre-analysis recovery task started")
 
         let taskID = ObjectIdentifier(task as AnyObject)
@@ -1734,6 +2280,10 @@ actor BackgroundProcessingService {
         let runId = UUID().uuidString
         let instanceID = bgTaskInstanceID(for: task as AnyObject)
         let runLedgerForStart = self.runLedger
+        // playhead-lmrx: see `handleBackfillTask` — the grant opened now, and
+        // every deadline is measured from here rather than from whenever the
+        // work task reaches the call.
+        let recoveryGrantStart = ContinuousClock.now
         let startRunTask = Task {
             let scenePhase = await BGTaskTelemetryScenePhase.current()
             await runLedgerForStart.recordRunStart(
@@ -1809,8 +2359,15 @@ actor BackgroundProcessingService {
                 // then actively drain the queue within the remaining budget.
                 let jobsSeen = await self.analysisWorkScheduler?.pendingJobCountForLedger() ?? 0
                 await self.analysisWorkScheduler?.ensureSchedulerLoopStarted()
+                // 5 minutes was already within 1.2x of the measured grant (not
+                // 5.07x), so this moves little — the point is that both handlers
+                // now spend a budget somebody measured.
+                let workDeadline = budget.workDeadline(from: recoveryGrantStart)
                 if let scheduler = self.analysisWorkScheduler {
-                    await scheduler.drainEligible(deadline: ContinuousClock.now + .seconds(5 * 60))
+                    await scheduler.drainEligible(
+                        deadline: workDeadline,
+                        minimumCheckpointBudget: budget.minimumCheckpointBudget
+                    )
                 }
                 // Re-check cancellation after the drain: a mid-drain
                 // expiration defers the terminal outcome to the expiration
@@ -1827,6 +2384,37 @@ actor BackgroundProcessingService {
                 let recovered = report.recoveredWorkCount
                 let outcome: BackgroundTaskRunOutcome =
                     (recovered > 0 || jobsSeen > 0) ? .recoveredWork : .noOp
+
+                // playhead-lmrx (review round 3): THIS RETURN IS A TEARDOWN PATH
+                // TOO, AND IT WAS NOT ONE — the same hole LX21 closed on
+                // backfill, opened here by this bead's own change.
+                //
+                // Before playhead-lmrx the drain read `now + 300 s` AT THE CALL,
+                // i.e. after `reconcile()`, so inside a ~295 s grant it was
+                // unreachable and the OS expiry always drove teardown. It is now
+                // `recoveryGrantStart + 219 s`, which a normal grant reaches
+                // with `Task.isCancelled` still FALSE — while the scheduler's
+                // long-lived `runLoop()`, which this handler explicitly started
+                // above, keeps dispatching on its own 5 s poll. So a job started
+                // at t+200 s is in flight right here, and `markComplete` below
+                // calls `setTaskCompleted`, after which iOS may suspend the
+                // process at once: no checkpoint, no requeue, a leased `running`
+                // row. The in-file justification for the budget change argued
+                // only the EXPIRY asymmetry and never mentioned the exit the
+                // change created.
+                //
+                // Gated on the deadline for the same reason backfill is: the
+                // drain also returns EARLY when the queue has nothing
+                // dispatchable, seconds into a window with the whole grant
+                // ahead, and cancelling there would cost a live job a 60 s
+                // requeue for nothing.
+                let teardownStart = ContinuousClock.now
+                var cancelledJobIds: Set<String> = []
+                if ContinuousClock.now >= workDeadline,
+                   let scheduler = self.analysisWorkScheduler {
+                    await scheduler.closeDispatchForTeardown(lasting: budget.teardownReserve)
+                    cancelledJobIds = await scheduler.cancelCurrentJob(cause: .taskExpired)
+                }
                 // Wait for the row insert to land before the UPDATE.
                 await startRunTask.value
                 await runLedger.finishRun(
@@ -1837,6 +2425,30 @@ actor BackgroundProcessingService {
                         jobsCompleted: recovered
                     )
                 )
+                // The durable row first, the wait between it and
+                // `setTaskCompleted` — the same order as both backfill paths,
+                // and for the same reason: a process killed during the wait
+                // still leaves a readable outcome.
+                if !cancelledJobIds.isEmpty, let scheduler = self.analysisWorkScheduler {
+                    let remaining = budget.remainingTeardownReserve(since: teardownStart)
+                    var settled = false
+                    if remaining > .zero {
+                        settled = await scheduler.awaitJobsSettled(cancelledJobIds, within: remaining)
+                    }
+                    if !settled {
+                        self.logger.warning(
+                            "Pre-analysis recovery work deadline: in-flight job(s) \(cancelledJobIds.sorted().joined(separator: ","), privacy: .public) did not settle within the \(remaining, privacy: .public) left of the \(budget.teardownReserve, privacy: .public) teardown reserve; the requeue may be lost to suspension"
+                        )
+                    }
+                }
+                // And if the OS expired us while we waited, the expiration
+                // handler owns the ending — `awaitJobsSettled` returns `false`
+                // immediately on cancellation, so without this the work task
+                // would race it to `setTaskCompleted` and win.
+                guard !Task.isCancelled else {
+                    self.logger.info("Pre-analysis recovery cancelled during teardown; deferring to the expiration handler")
+                    return
+                }
             } catch {
                 // playhead-hygc.1.4 (R2 fix): cancellation rolls in
                 // here as `CancellationError` from a throwing
@@ -1894,7 +2506,29 @@ actor BackgroundProcessingService {
                 // `.taskExpired` InternalMissCause so any live slice
                 // emits a WorkJournal row with `cause = task_expired`
                 // instead of a bare cancel.
-                await self?.analysisWorkScheduler?.cancelCurrentJob(cause: .taskExpired)
+                //
+                // playhead-lmrx (review round): NO SETTLE WAIT HERE, AND THAT
+                // ASYMMETRY WITH `handleBackfillTask` IS DELIBERATE — it is a
+                // question of how often there is anything to wait for, not a
+                // difference of opinion about whether waiting is right.
+                // Backfill has a job in flight at expiry in 108 of its 203
+                // expired windows (one `acquired` event and nothing else).
+                // Recovery expired 5 times in 97 recorded runs, its drain
+                // averages 5.1 s, and its `finishRun` already lands BEFORE this
+                // cancel — so the wait would almost always be a no-op and would
+                // buy no durability the ordering does not already provide. If a
+                // future pull shows recovery holding work at expiry, the fix is
+                // `awaitJobsSettled(_:within:)`, exactly as backfill does it.
+                // playhead-lmrx (review round 3): shut the dispatch door first,
+                // as both backfill endings do. The cancel is a one-shot edge;
+                // `runLoop()` keeps polling every 5 s for as long as the process
+                // has CPU, so without this a job dispatched between the cancel
+                // and `setTaskCompleted` is live at suspension and named by
+                // nothing.
+                if let scheduler = await self?.analysisWorkScheduler {
+                    await scheduler.closeDispatchForTeardown(lasting: budget.teardownReserve)
+                    await scheduler.cancelCurrentJob(cause: .taskExpired)
+                }
                 await self?.markComplete(task, success: false)
             }
         }

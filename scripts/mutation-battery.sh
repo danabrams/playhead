@@ -1319,6 +1319,11 @@ BGPS="Playhead/Services/AnalysisCoordinator/BackgroundProcessingService.swift"
 # `transcript_chunks.transcriptVersion` column rather than through a call.
 # Added for CN07.
 ESUMBF="Playhead/Services/EpisodeSummaries/EpisodeSummaryBackfillCoordinator.swift"
+# playhead-lmrx: the measured description of one BGTask grant. Every number in
+# it is derived from `background_task_runs` / `semantic_scan_results` on the
+# 2026-08-06 pull, and every one of them can be quietly restored to a value
+# nobody measured — which is precisely how `25 * 60` survived in the handler.
+GRANT="Playhead/Services/AnalysisCoordinator/BackgroundGrantBudget.swift"
 MUTABLE_FILES=(
   "$ORCH" "$STORE" "$CTRL" "$VIEW" "$TRIG" "$RSVC" "$TRUST" "$NPV" "$NPVM"
   "$BWPOL" "$KICK" "$KCOORD" "$SEAMS" "$ACT" "$ADSVC" "$PODC"
@@ -1328,7 +1333,7 @@ MUTABLE_FILES=(
   "$DETCLS" "$DETLED" "$SPLIT" "$HOTGATE" "$UGCEN" "$POLICY" "$SEGAGG"
   "$DLMGR" "$FQSCAN" "$BGFEED" "$EPPREP" "$SCHED"
   "$CLAIM" "$RECON" "$ATOM" "$AJRUN" "$ACOORD" "$ESUMBF" "$MPTRENG" "$MPTRIDX"
-  "$BGPS"
+  "$BGPS" "$GRANT"
 )
 # playhead-6r4z R1 review: `$MPTRIDX` was MISSING from the list above from the
 # moment playhead-mptr added the K2 series, and it is the target of NINE of the
@@ -1769,6 +1774,40 @@ FOCUSED_SUITES=(
   # the situation `pushEvidenceCatalog` (CN06) was in: private, unseamed, and
   # covered by nothing. Two tests, no build cost beyond compiling them.
   -only-testing:PlayheadTests/TranscriptCanonicalizationRuleCanaryTests
+  # playhead-lmrx: the suites the LX series is scored against. Three are
+  # pure value tests over `BackgroundGrantBudget` / `BackgroundGrantCounters`
+  # (no build cost beyond compiling them); the other three drive a real
+  # `AnalysisWorkScheduler` + `AnalysisStore` through the BGTask handler,
+  # because the defects are in the WIRING — which deadline is handed over, who
+  # is told the grant ended, which columns a terminal write fills — and none of
+  # that is observable from a value test.
+  -only-testing:PlayheadTests/BackgroundGrantBudgetArithmeticTests
+  -only-testing:PlayheadTests/BackgroundGrantBudgetMeasurementTests
+  -only-testing:PlayheadTests/BackgroundGrantCountersTests
+  -only-testing:PlayheadTests/DrainEligibleStartGateTests
+  -only-testing:PlayheadTests/BackfillGrantBoundingTests
+  -only-testing:PlayheadTests/BackfillExpiryDurabilityTests
+  -only-testing:PlayheadTests/GrantCompletionPopulationTests
+  -only-testing:PlayheadTests/ExpiredWindowAttemptAccountingTests
+  # playhead-lmrx review round 3: the two-in-flight suite. The LX25-LX29 rails
+  # are the only ones that can see a cancel aimed at a SLOT rather than at a
+  # job, and none of the suites above ever gets two dispatches overlapping —
+  # they all seed `.soon`-lane jobs, whose cap is 1.
+  -only-testing:PlayheadTests/CancelAimIdentityTests
+  # playhead-lmrx review round: the cancel-catch arm is shared, so the LX11-LX13
+  # exemption rails must be scored against the suites that already own the
+  # poisoned-job escape valve too. Without these a mutation that widened the
+  # exemption to every cause would redden nothing an LX rail names.
+  -only-testing:PlayheadTests/AnalysisWorkSchedulerOutcomeBookkeepingTests
+  -only-testing:PlayheadTests/AnalysisWorkSchedulerJournalEmissionTests
+  # playhead-lmrx review round: the SOURCE CANARIES over the very method this
+  # bead rewrites. `BackfillSchedulerBoundingTests` pins playhead-c25o's rule
+  # that `handleBackfillTask` may not suspend before arming its expiration
+  # handler — and it pins it by matching the method's text, so this bead's own
+  # signature change silently broke the anchor and no round ran the suite that
+  # would have said so. It belongs in the scored set for exactly that reason.
+  -only-testing:PlayheadTests/BackfillSchedulerBoundingTests
+  -only-testing:PlayheadTests/BackgroundProcessingServiceLedgerTests
 )
 
 # Named to match the `/private/tmp/playhead-*` pattern `scripts/disk-cleanup.sh`
@@ -2757,6 +2796,41 @@ T_MK6Z_IDEMPOTENT="the reconciler's reclaim does not re-charge a row the loop's 
 T_Y8F3_REACH="a capped-out asset under 95% transcript becomes dispatchable and transcribes more audio"
 T_Y8F3_DEGRADED="the coverage-insufficient degraded terminal is not this bead's to re-request"
 T_Y8F3_STALE="an older cap-out under a newer clean terminal is not re-requested"
+
+# playhead-lmrx — a ~295 s background grant must be spent on work that can
+# finish or checkpoint inside it, and what it achieved must be readable after.
+T_LMRX_DEADLINE="the poll loop is handed a deadline inside the measured grant, not 25 minutes"
+T_LMRX_RESUME="expiry tells the SCHEDULER the grant is over, so the in-flight job requeues"
+T_LMRX_COUNTERS="an expired run records what the window achieved, not only that it ended"
+T_LMRX_STARTGATE="a pass is NOT started when the remaining grant is below the checkpoint floor"
+T_LMRX_MEASURED="a budget that claims to be measured fits the grant that was measured"
+T_LMRX_CLAMP="workBudget clamps at zero rather than going negative"
+T_LMRX_ZERO="noteCompleted records zero as a measurement, not as absence"
+T_LMRX_UNITFLOOR="the checkpoint floor is large enough to bank one durable window"
+T_LMRX_ATTEMPT="an expired background window leaves the job queued and spends no attempt"
+T_LMRX_NEVERDIE="five expired windows in a row still leave the job alive"
+T_LMRX_POISON="control: a genuine mid-run cancel still spends an attempt and still supersedes"
+T_LMRX_POPULATION="a FAILED job is not credited as completed"
+T_LMRX_SCOPE="an empty baseline completes nothing"
+T_LMRX_CHARGED="the charged sibling is declared an assumption, not a measurement"
+T_LMRX_SETTLE="awaitJobsSettled waits for a running job and times out rather than lying"
+T_LMRX_PROVENANCE="a measured budget names the denominator each of its numbers came from"
+T_LMRX_ROWFIRST="the expired row is durable BEFORE the handler waits for anything"
+T_LMRX_NORMALEXIT="the work-deadline return does not strand the job it leaves running"
+T_LMRX_EARLYRETURN="a drain that returned EARLY does not cancel the run loop's job"
+T_LMRX_GRACE="the post-reclaim wait is bounded by the OS grace, not by the teardown reserve"
+T_LMRX_GRACESITE="the expiration wait spends the post-reclaim grace, not the teardown reserve"
+T_LMRX_AIM="the cancel reaches every job it names"
+T_LMRX_PERJOBCAUSE="each cancelled job keeps its own cause, so neither spends an attempt"
+T_LMRX_HEARTBEAT="a job finishing does not cancel a sibling's lease heartbeat"
+T_LMRX_BUDGETWIRING="both BGTask handlers spend the BUDGET they were handed, not a local constant"
+T_LMRX_DOOR="dispatch is closed for a teardown, and re-opens by itself"
+T_LMRX_RECOVERYEXIT="recovery's work-deadline return does not strand the job it leaves running"
+T_LMRX_NORMALCOUNTERS="the work-deadline return MEASURES its completions too, and writes them"
+T_LMRX_RECOVERYDOOR="recovery's EXPIRY shuts the dispatch door too"
+T_LMRX_TEARDOWNGUARD="a teardown cancelled mid-settle leaves the ending to the expiration handler"
+T_LMRX_RECOVERYGUARD="recovery's teardown cancelled mid-settle leaves the ending to the expiration handler"
+T_LMRX_CHARGEDWIRING="the charger-class REGISTRATION hands its own identifier and budget to the shared handler"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -5498,6 +5572,326 @@ MUTATIONS=(
   # Reads as removing a redundant clause — every caller already selects rows
   # with a non-NULL owner — and it IS redundant except in the race.
   "MK10|539|STORE|$T_MK6Z_IDEMPOTENT"
+
+  # ---- playhead-lmrx: a granted background window must buy something (LX01-LX10) ----
+  #
+  # Measured on the 2026-08-06 pull: 203 of 254 backfill wakes (80.0 %) ended
+  # `expired` at 209.8 s average, only 4 of the 203 wrote a single
+  # `semantic_scan_results` row inside their own window, and 25 of 30
+  # `backfill_jobs` carry no `progressCursor`. Three separable defects produced
+  # that, and each half of each one is a rail here.
+  #
+  # ONE RAIL PER BATCH, deliberately. Several of these mutations redden a
+  # SECOND test in the same suite as a side effect (dropping the `workBudget`
+  # clamp also moves the subtraction fixture, inflating `designGrant` also moves
+  # every derived value), and a batch whose members can redden each other's
+  # expectations is exactly the miscredit the batching rule exists to prevent.
+  #
+  #   * LX01 restores the shipped constant verbatim: `ContinuousClock.now +
+  #     .seconds(25 * 60)` for the handler's work deadline. 1500 s is 5.07x the
+  #     p90 of the 203 measured grants (295.9 s). It reads as generous headroom
+  #     and is the reason the handler could never reach its own terminal write.
+  #   * LX02 deletes the one line that tells `AnalysisWorkScheduler` the grant
+  #     ended. `workTask.cancel()` is right above it and looks sufficient — but
+  #     the dispatched analysis job lives on the scheduler's task tree, not this
+  #     handler's, so without the cancel it runs on unaware into suspension:
+  #     no checkpoint, no requeue, a leased `running` row for the reaper.
+  #   * LX03 returns the expiration `finishRun` to outcome/cause/expiration
+  #     only — the shipped state, in which four fifths of all grants are
+  #     unreadable.
+  #   * LX04 restores the bare `now < deadline` loop condition, which admits a
+  #     whole analysis job with a millisecond of grant left.
+  #   * LX05 removes the EARLY publication of the baseline. Subtle and the most
+  #     likely to be "cleaned up": the counters are still assembled at the
+  #     normal return, so every happy-path test stays green — and every expired
+  #     row goes back to NULL, because in a full-length grant that return is
+  #     never reached.
+  #   * LX06/LX10 inflate the design grant and shrink the unit floor: the two
+  #     directions in which a measured budget decays back into a plausible
+  #     constant.
+  #   * LX07 drops the zero-clamp, so an over-reserved budget yields a NEGATIVE
+  #     duration and a deadline in the past — "already expired" for the wrong
+  #     reason, which masks a mis-specified budget instead of surfacing it.
+  #   * LX08 IS RETIRED (review round 7). It flipped `canReachCheckpoint`'s
+  #     `>=` to `>`, and that method had no production caller at all — the gate
+  #     it described is spelled inline in `drainEligible`. The method is gone;
+  #     see `BackgroundGrantBudget.swift` for why no rail replaces it (the
+  #     equality case is not reachable at the surviving gate, which computes
+  #     `remaining` from `ContinuousClock.now`).
+  #   * LX09 is the standing defect class in miniature: a measured ZERO written
+  #     as NULL, so "admitted work and completed none" — the bead's headline
+  #     finding — becomes indistinguishable from "never started".
+  "LX01|540|BGPS|$T_LMRX_DEADLINE"
+  "LX02|541|BGPS|$T_LMRX_RESUME"
+  "LX03|542|BGPS|$T_LMRX_COUNTERS"
+  "LX04|543|SCHED|$T_LMRX_STARTGATE"
+  "LX05|544|BGPS|$T_LMRX_COUNTERS"
+  "LX06|545|GRANT|$T_LMRX_MEASURED"
+  "LX07|546|GRANT|$T_LMRX_CLAMP"
+  "LX09|548|BGPS|$T_LMRX_ZERO"
+  "LX10|549|GRANT|$T_LMRX_UNITFLOOR"
+
+  # ---- playhead-lmrx review round: the fixes the FIRST fix made necessary ----
+  #
+  #   * LX11 is the most important rail in the series. Wiring the backfill
+  #     expiry to `cancelCurrentJob` (LX02) routes ~80 % of grants through the
+  #     cancel-catch arm, which charges an attempt and SUPERSEDES at five — and
+  #     a superseded row never comes back (`workKey` UNIQUE, `insertJob` is
+  #     `INSERT OR IGNORE`). Removing the `.taskExpired` exemption reads as
+  #     deleting a special case; it abandons every long episode on its fifth
+  #     window, by the OS doing exactly what the OS does.
+  #   * LX12 is LX11's terminal half, seeded one below the cap — the shape that
+  #     already killed two episodes in the 2026-08-06 pull.
+  #   * LX13 is the vacuity control in the other direction: exempting an expiry
+  #     must not disarm the poisoned-job escape valve.
+  #   * LX14 is the standing defect class, caught in this bead's own first
+  #     draft: counting "no longer pending" credits a FAILURE as a completion,
+  #     and failure is the commoner exit (112 `failed` vs 45 `finalized` in the
+  #     pull). LX15 drops the baseline SCOPING, which is what makes the
+  #     numerator and the denominator the same population.
+  #   * LX16 lets the unmeasured charger-class sibling inherit the measured
+  #     identifier's cap — the wrong-population error, one layer up.
+  #   * LX17 makes the settle-wait lie. `cancelCurrentJob` only sets a flag; the
+  #     requeue write lands later on the scheduler's task, so a wait that
+  #     returns success immediately invites iOS to suspend the process
+  #     mid-write and loses exactly the durability the cancel was for.
+  "LX11|550|SCHED|$T_LMRX_ATTEMPT"
+  "LX12|551|SCHED|$T_LMRX_NEVERDIE"
+  "LX13|552|SCHED|$T_LMRX_POISON"
+  "LX14|553|SCHED|$T_LMRX_POPULATION"
+  "LX15|554|SCHED|$T_LMRX_SCOPE"
+  "LX16|555|GRANT|$T_LMRX_CHARGED"
+  "LX17|556|SCHED|$T_LMRX_SETTLE"
+
+  # ---- playhead-lmrx review round 2: three defects the first fix introduced ----
+  #
+  #   * LX18 is the standing defect class one level ABOVE the values it guards.
+  #     The `Provenance` payload was a single `sampleSize: 203` — the number of
+  #     expired backfill rows — while the three quantities it vouches for have
+  #     denominators 132, 30 and 142. A provenance that reads the same whether
+  #     or not its own values were derived is not provenance.
+  #   * LX19 restores the ordering the first draft shipped: the settle wait in
+  #     FRONT of the durable ledger write. playhead-hygc.1.4 put that write
+  #     first on purpose; a kill during a wait of up to the whole teardown
+  #     reserve leaves the row at `running`, which is worse than the
+  #     `expired`-with-NULL-counters row this bead exists to improve.
+  #   * LX20 restores the un-scoped settle signal (`currentRunningTask != nil`,
+  #     "is ANYTHING running"). `runLoop()` polls every 5 s for the whole grant
+  #     and the expiry requeue leaves a queue full of eligible siblings, so the
+  #     wait would routinely time out on a requeue that already committed —
+  #     burning the reserve that stands between it and `setTaskCompleted`.
+  #   * LX21 is the exit the 219 s bound created and the first draft did not
+  #     cover: the work-deadline return completes the task with an analysis job
+  #     still in flight, which strands it exactly as the expiry used to — and
+  #     completing the task means the expirationHandler can never rescue it.
+  "LX18|557|GRANT|$T_LMRX_PROVENANCE"
+  "LX19|558|BGPS|$T_LMRX_ROWFIRST"
+  "LX20|559|SCHED|$T_LMRX_SETTLE"
+  "LX21|560|BGPS|$T_LMRX_NORMALEXIT"
+  "LX22|561|BGPS|$T_LMRX_EARLYRETURN"
+
+  # ---- playhead-lmrx review round 2: the reserve is not the grace (LX23-LX24) ----
+  #
+  #   * LX23 collapses `expirationSettleBudget` back into
+  #     `remainingTeardownReserve`. `teardownReserve` is wall clock carved OUT of
+  #     `designGrant`; once the OS has fired `expirationHandler` there is no
+  #     grant left for it to be carved from, and the expression returns the
+  #     reserve's full length whether the window ran to its 295 s limit or was
+  #     reclaimed at t+5 s — the standing defect class, a bound that survives the
+  #     thing it bounds not existing. Arithmetic rail: no clock, no load.
+  #   * LX24 is the same defect at the CALL SITE, which LX23 cannot see: the
+  #     method stays correct and the expiration handler simply asks the other
+  #     one. Killed behaviourally, with a budget whose grace is zero and whose
+  #     reserve is 60 s, against a job that never settles.
+  "LX23|562|GRANT|$T_LMRX_GRACE"
+  "LX24|563|BGPS|$T_LMRX_GRACESITE"
+
+  # ---- playhead-lmrx review round 3: the cancel is aimed at jobs (LX25-LX29) ----
+  #
+  #   * LX25 restores the single-slot aim: `cancelCurrentJob` cancels ONE task
+  #     and still returns the whole in-flight set as "what it was aimed at".
+  #     With `nowCap == 2` and both dispatch drivers able to be inside
+  #     `processJob`, the second dispatch overwrote the slot — so the returned
+  #     set could name a job nobody asked to stop. Killed by the settle: a
+  #     missed job is parked in a 20 s sleep and cannot leave inside the wait.
+  #   * LX26 restores the DESTRUCTIVE read of the global cancel cause. One
+  #     `.taskExpired` cancel acting on two jobs: the first consumed the cause,
+  #     the second read `nil`, took the attempt-spending arm and superseded
+  #     permanently. Round 2 guarded the two sites that erase the cause without
+  #     reading it; no guard on those can see this one, because this site
+  #     erases it BY reading it. This is also the rail R2 could not add for its
+  #     own `pendingCancelCause` guard — the two-in-flight test it needed is
+  #     the same one LX25 needs, so building it once pinned both.
+  #   * LX27 makes the teardown door a no-op, restoring the window in which
+  #     `runLoop()`'s 5 s poll can dispatch a fresh job AFTER the handler's
+  #     cancel has gone past — aimed at by nothing and live at
+  #     `setTaskCompleted`.
+  #   * LX28 is the vacuity control in the other direction: a door that never
+  #     re-opens. It would pass every "no dispatch during teardown" assertion
+  #     and leave a foregrounded app with a scheduler that never dispatches
+  #     again, since nothing outside a BGTask handler calls the re-openers.
+  #   * LX29 restores the exit this bead's own change opened in the RECOVERY
+  #     handler — the LX21 hole, one handler over: normal return, no cancel, no
+  #     settle, `markComplete(success: true)` over a live job.
+  "LX25|564|SCHED|$T_LMRX_AIM"
+  "LX26|565|SCHED|$T_LMRX_PERJOBCAUSE"
+  "LX27|566|SCHED|$T_LMRX_DOOR"
+  "LX28|567|SCHED|$T_LMRX_DOOR"
+  "LX29|568|BGPS|$T_LMRX_RECOVERYEXIT"
+
+  # ---- playhead-lmrx review round 4: the two round-3 claims with no rail ----
+  #
+  #   * LX30 is $T_LMRX_HEARTBEAT, DEFINED IN ROUND 3 AND NEVER USED. The
+  #     sibling-heartbeat fix — the third consequence of the single slot — had a
+  #     test and no mutation, which is the shape this repo keeps being burned
+  #     by. It restores "the `defer` cancels whatever the slot then held", which
+  #     after a sibling dispatch is the SIBLING: a job finishing NORMALLY kills
+  #     an unrelated live job and stops its lease being renewed.
+  #   * LX31 moves the teardown door BELOW `canAdmit`'s T0 playback bypass
+  #     rather than removing it. LX27 (door gone) and LX28 (door never re-opens)
+  #     between them cannot see this: the door still exists, still expires, and
+  #     every dispatch LX27/LX28 drive is `preAnalysis`. It is the likelier
+  #     regression of the three, because `canAdmit` is a method named for lane
+  #     capacity and moving a non-cap check below the cap bypass reads as tidying
+  #     up. What it restores is the stranding for the one job class where it is
+  #     worst — a T0 job left at `running` with a live lease at suspension.
+  #
+  # One batch on purpose, and the independence is the reason: LX30 touches only
+  # `processJob`'s `defer`, LX31 only the order of two lines in `canAdmit`, and
+  # neither can redden the other's expectation. Cross-credit is the standing
+  # hazard of batching and is checked here rather than assumed.
+  "LX30|569|SCHED|$T_LMRX_HEARTBEAT"
+  "LX31|569|SCHED|$T_LMRX_DOOR"
+
+  # ---- playhead-lmrx review round 5: the door and the floor are WIRED ----
+  #
+  # Both rails mutate a handler's ARGUMENT, and both were invisible to every
+  # rail above because those all mutate the CALLEE. That is the shape of the
+  # gap: LX04 proves `drainEligible` honours a floor it is given and LX27/LX28
+  # prove the door works when it is shut, and neither can see a handler that
+  # stopped giving the floor or stopped shutting the door.
+  #
+  #   * LX32 deletes the work-deadline teardown's `closeDispatchForTeardown`.
+  #     The cancel survives, so the mutant still requeues the job it can see —
+  #     what it restores is the window in which `runLoop()`'s 5 s poll starts a
+  #     FRESH job after the cancel has gone past, absent from the settle
+  #     population and live at `setTaskCompleted`. Before this round the whole
+  #     suite stayed green with all three handler call sites deleted.
+  #   * LX33 hands `drainEligible` a literal `.zero` floor from the backfill
+  #     handler — the pre-lmrx bare `now < deadline`, reached without touching
+  #     `drainEligible` at all. Killed by a SOURCE canary rather than a
+  #     behavioural test because the handler also starts the long-lived
+  #     `runLoop()`, which dispatches on its own poll regardless of the floor,
+  #     so the floor's effect is not separately observable through the handler.
+  "LX32|570|BGPS|$T_LMRX_NORMALEXIT"
+  "LX33|571|BGPS|$T_LMRX_BUDGETWIRING"
+
+  # ---- playhead-lmrx review round 6: the same gap, two sites round 5 missed ----
+  #
+  # Round 5 named the shape exactly right — "a rail proves the mechanism works;
+  # it does not prove anyone uses it" — and then left two call sites standing.
+  # Both are one deleted line, and before this round both left the suite green.
+  #
+  #   * LX34 deletes the WORK-DEADLINE return's `recordGrantCompletions`. The
+  #     expiry's copy survives, so `expiredRunCountsRealCompletions` is
+  #     untouched; what goes is `jobsCompleted` on every `admitted_work` row,
+  #     which is half of this bead's headline claim ("26 admitted / 0
+  #     completed, all 12 rows NULL"). Invisible to every other test in the
+  #     file because they all reach `finishRun` through the EXPIRY, and the two
+  #     normal-return tests construct no ledger at all.
+  #   * LX35 deletes RECOVERY'S EXPIRY door — the fourth call site, where round
+  #     5's own test comment counted three. LX27 mutates the callee and LX32
+  #     the backfill work-deadline caller; neither can see this one.
+  #
+  # One batch, and the independence is the reason: LX34 touches
+  # `handleBackfillTask`'s normal return and LX35 `handlePreAnalysisRecovery`'s
+  # expiration handler, neither test drives the other's handler, and a joint
+  # SURVIVED would name which rail survived.
+  "LX34|572|BGPS|$T_LMRX_NORMALCOUNTERS"
+  "LX35|572|BGPS|$T_LMRX_RECOVERYDOOR"
+
+  # ---- playhead-lmrx review round 7: the teardown guard, and two more uses ----
+  #
+  # Round 6 named LX36/LX37's defect exactly and DECLINED to build the rails,
+  # because the observation looked like a race: the guard's correct behaviour is
+  # a bare `return`, so the only difference it makes is who reaches
+  # `setTaskCompleted`, and both candidates are live tasks. That was the right
+  # call on the evidence available, and it is answered by a seam rather than by
+  # a tolerance — see `GatedRunLedger` and
+  # `BackgroundProcessingService.workTaskForTesting(_:)`. The expiration handler
+  # is PARKED at its own ledger write (upstream of its `markComplete` on both
+  # handlers), so it is not racing anything; and the work task's own `.value` is
+  # the happens-before edge, returning on the guard's `return` and on the
+  # fall-through alike. No sleep, no poll, no tolerance.
+  #
+  #   * LX36 downgrades backfill's teardown guard to a bare log. The work task
+  #     then walks out of a cancelled settle wait into
+  #     `markComplete(success: true)` and BEATS the expiration handler, which
+  #     still has its own cancel, ledger write and settle to do. The run is
+  #     recorded `.admittedWork` over a live job: no checkpoint, no requeue, a
+  #     leased `running` row — and no expirationHandler left to rescue it,
+  #     because the task is complete. It is the stranding the teardown exists to
+  #     prevent, reached through the teardown itself.
+  #   * LX37 is the same edit in `handlePreAnalysisRecovery`, and is if anything
+  #     worse: recovery's expiration handler carries no settle wait, so there is
+  #     nothing behind the lost guard to make the requeue durable.
+  #   * LX38 deletes the CANCEL in recovery's expiry — the exact complement of
+  #     LX35, which deletes the door-close one line above it. Pre-existing since
+  #     playhead-1nl6 and unasserted until round 7: round 6 drove the path but
+  #     stopped at the door, having reached for `state == 'queued'`, which is
+  #     not ordered against `markComplete`. The marks `cancelCurrentJob` sets are
+  #     synchronous and one statement earlier, so a gated unwind makes them a
+  #     fact rather than a wait.
+  #   * LX39 deletes the baseline IDENTITIES publication while leaving the count
+  #     publication (LX05's line) alone. Every `jobsSeen` assertion stays green
+  #     and every expired row loses `jobsCompleted`, because the expiration
+  #     handler cannot count over a population it was never handed. The two
+  #     lines are adjacent and look like one act; they are two, and only one was
+  #     railed.
+  #
+  # ONE BATCH, and the independence was checked rather than assumed — for ALL
+  # FIVE, including LX40, which an earlier draft of this note appended to the
+  # batch without amending the count (adversarial pass; the note covered 4 of
+  # 5). LX36 drives only `handleBackfillTask`; LX37 and LX38 only
+  # `handlePreAnalysisRecovery`, at different call sites with different
+  # expectations; LX39 only the ledger counters; and LX40 edits
+  # `registerBackgroundTasks()`, whose body no other member touches and whose
+  # canary reads only that body. No member can redden another's expected test.
+  "LX36|573|BGPS|$T_LMRX_TEARDOWNGUARD"
+  "LX37|573|BGPS|$T_LMRX_RECOVERYGUARD"
+  "LX38|573|BGPS|$T_LMRX_RECOVERYDOOR"
+  "LX39|573|BGPS|$T_LMRX_COUNTERS"
+  #   * LX40 is the R7 finding, and the same caller-vs-callee shape one layer
+  #     out. `handleBackfillTask`'s two new parameters both DEFAULT to the plain
+  #     backfill values, so the charger-class registration's wiring can be
+  #     deleted and still compile — `await self.handleBackfillTask(
+  #     sendableTask.value)` is the pre-lmrx spelling. The mutant therefore
+  #     spends 132 plain-identifier grant observations on the class with none
+  #     (capping an overnight charger window at 219 s) and records every
+  #     charger-class run under the plain identifier again, which is precisely
+  #     the instrumentation defect that made "the pull has zero rows for this
+  #     class" true by construction. `chargedSiblingUsesItsOwnBudget` calls the
+  #     handler directly and cannot see it. Source canary, because
+  #     `registerBackgroundTasks()` goes through the real `BGTaskScheduler`.
+  "LX40|573|BGPS|$T_LMRX_CHARGEDWIRING"
+
+  # ---- playhead-lmrx review round 8: the canary must say WHICH site (LX41) ----
+  #
+  #   * LX41 is LX40's mirror, and the reason round 8 opened on the instrument
+  #     rather than the code. LX40's canary asserted `code.contains(
+  #     "identifier: BackgroundTaskID.backfillProcessingCharged")` over a body
+  #     holding BOTH registrations — its own comment named that hazard and its
+  #     remedy (counting `handleBackfillTask(`) answered a different question,
+  #     HOW MANY dispatches rather than WHICH one is charged. So the PLAIN
+  #     registration could take the charged identifier and budget with every
+  #     assertion still green, which is the worse direction of the same edit:
+  #     the battery-idle class — the 203 expired windows this bead was filed on
+  #     — would spend the ASSUMED 1800 s charger horizon (worse than the 1500 s
+  #     that filed the bead) and record itself under the charged identifier, so
+  #     the ledger loses sight of the plain class as well as the charged one.
+  #     Its own batch: the mutant touches the same `registerBackgroundTasks()`
+  #     body LX40 does, and two edits to one body cannot be attributed apart.
+  "LX41|574|BGPS|$T_LMRX_CHARGEDWIRING"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -5848,6 +6242,46 @@ describe_mutation() {
     MK08) echo "mk6z: the sweep call site excludes nothing at all" ;;
     MK09) echo "mk6z: a finished dispatch clears the whole in-flight set, unmasking its sibling" ;;
     MK10) echo "mk6z: the reconciler re-charges attemptCount on a row the sweep already reclaimed" ;;
+    LX01) echo "lmrx: the handler's work deadline reverts to 25 minutes — 5.07x the p90 measured grant" ;;
+    LX02) echo "lmrx: a backfill expiry no longer tells the scheduler, so the in-flight job is abandoned unleased" ;;
+    LX03) echo "lmrx: the expiration finishRun drops the counters it holds, and 80% of grants go unreadable again" ;;
+    LX04) echo "lmrx: the drain start-gate goes — a whole analysis job may begin with a millisecond of grant left" ;;
+    LX05) echo "lmrx: the baseline is published only at the normal return, which a full-length grant never reaches" ;;
+    LX06) echo "lmrx: the design grant inflates past anything the OS was measured to give" ;;
+    LX07) echo "lmrx: the workBudget clamp goes, so an over-reserved budget deadlines in the past" ;;
+    LX09) echo "lmrx: a measured ZERO completion is written as NULL — 'completed none' reads as 'never started'" ;;
+    LX10) echo "lmrx: the unit floor shrinks below the cost of one durable FM window" ;;
+    LX11) echo "lmrx: an OS-expired window is charged as an attempt again — 80% of grants now strike the job" ;;
+    LX12) echo "lmrx: the expiry requeue spends an attempt, so a long episode still supersedes on its 5th window" ;;
+    LX13) echo "lmrx: the expiry exemption widens to EVERY cancel, disarming the poisoned-job escape valve" ;;
+    LX14) echo "lmrx: 'completed' becomes 'no longer pending', so a FAILED job is credited to the window" ;;
+    LX15) echo "lmrx: the completion count drops its baseline scoping and stops matching its own denominator" ;;
+    LX16) echo "lmrx: the unmeasured charger-class budget is tidied into the measured one, and relabelled measured" ;;
+    LX17) echo "lmrx: the settle wait returns success without waiting, so a requeue can be lost to suspension" ;;
+    LX18) echo "lmrx: the provenance quotes 203 — the row count — where the design grant's denominator is 132" ;;
+    LX19) echo "lmrx: the settle wait moves back in front of the durable expired row, so a kill leaves no outcome" ;;
+    LX20) echo "lmrx: the settle wait drops its identity scoping and waits out any sibling the run loop picks up" ;;
+    LX21) echo "lmrx: the work-deadline return completes the task with a job still running, stranding it" ;;
+    LX22) echo "lmrx: the normal return cancels unconditionally, killing a live job on an EARLY drain exit" ;;
+    LX23) echo "lmrx: the post-reclaim wait reverts to the teardown reserve — 36 s of a grant the OS already took back" ;;
+    LX24) echo "lmrx: the expiration CALL SITE asks for the reserve instead of the grace, spending it after the reclaim" ;;
+    LX25) echo "lmrx: the cancel goes back to one unnamed task slot while still claiming it reached every in-flight job" ;;
+    LX26) echo "lmrx: the cancel cause is consumed destructively, so the second of two cancelled jobs supersedes" ;;
+    LX27) echo "lmrx: the teardown door goes, and the run loop dispatches a fresh job into setTaskCompleted" ;;
+    LX28) echo "lmrx: the teardown door never re-opens, leaving a foregrounded app with a dead scheduler" ;;
+    LX29) echo "lmrx: recovery's work-deadline return completes the task over a live job, as backfill's once did" ;;
+    LX30) echo "lmrx: a job's exit cancels its SIBLING's runner and lease heartbeat, as the single slot did" ;;
+    LX31) echo "lmrx: the teardown door moves below the T0 playback bypass, so a playback job starts into the suspension" ;;
+    LX32) echo "lmrx: the handler stops SHUTTING the door — the mechanism still works, nothing uses it" ;;
+    LX33) echo "lmrx: the handler hands the drain a zero floor, reverting the start gate without touching it" ;;
+    LX34) echo "lmrx: the work-deadline return stops MEASURING completions, so every admitted_work row goes back to NULL" ;;
+    LX35) echo "lmrx: recovery's expiry stops shutting the door — the fourth call site, where round 5 counted three" ;;
+    LX36) echo "lmrx: backfill's teardown guard becomes a log, so a cancelled work task completes the task anyway" ;;
+    LX37) echo "lmrx: recovery's teardown guard becomes a log — the same fall-through, in the handler with no settle wait behind it" ;;
+    LX38) echo "lmrx: recovery's expiry stops CANCELLING — LX35's complement, one line down" ;;
+    LX39) echo "lmrx: the baseline IDENTITIES are never published, so every expired row loses jobsCompleted while jobsSeen stays green" ;;
+    LX40) echo "lmrx: the charger-class registration drops its identifier and budget, silently spending the plain class's measurement" ;;
+    LX41) echo "lmrx: the PLAIN registration takes the charged identifier and budget, so every measured window spends an assumed 1800 s" ;;
     TS01) echo "5n8k: THE historical defect restored — install assigns a process-global and restores it in a defer" ;;
     TS02) echo "5n8k: the leak variant — the funnel caches the last binding in a process-global and never restores" ;;
     TS03) echo "5n8k: the funnel drops every diagnostic — the vacuity control on all four positive witnesses" ;;
@@ -12717,10 +13151,12 @@ EOF
   # MK09 — make the in-flight removal a blanket clear, mirroring the
   # `currentJobId = nil` on the line above. Only an overlapping dispatch can
   # see it.
+  # playhead-lmrx R3: re-expressed against the per-job registry, which is now
+  # what `inFlightJobIds` reads. Same mutation, same blanket-clear shape.
   MK09)
     patch "$file" \
-      '            inFlightJobIds.remove(job.jobId)' \
-      '            inFlightJobIds.removeAll()' ;;
+      '            let finished = runningJobs.removeValue(forKey: job.jobId)' \
+      '            let finished = runningJobs.removeValue(forKey: job.jobId); runningJobs.removeAll()' ;;
 
   # MK10 — drop the idempotence clause from `recoverExpiredLease`. Invisible to
   # every rail above: they exercise ONE reclaimer at a time, and this defect
@@ -12741,6 +13177,626 @@ EOF
     snippet NEW <<'EOF'
 EOF
     patch "$file" "$OLD" "$NEW" ;;
+
+  # ---- playhead-lmrx ----
+
+  # LX01 — the shipped constant, restored verbatim. Both drivers read
+  # `workDeadline`, so one patch returns the whole handler to 25 minutes.
+  LX01)
+    patch "$file" \
+      '            let workDeadline = budget.workDeadline(from: grantStart)' \
+      '            let workDeadline = ContinuousClock.now + .seconds(25 * 60)' ;;
+
+  # LX02 — the backfill expiry stops telling the scheduler its grant ended.
+  # The anchor carries the preceding `guard` line: the pre-analysis recovery
+  # handler has its own `cancelCurrentJob(cause: .taskExpired)` call, and the
+  # `guard` is what makes this one the backfill site. The replacement keeps the
+  # closure's `Set<String>` return and its `await`, so what the mutant removes
+  # is the cancellation and nothing else.
+  # playhead-lmrx R3: re-anchored — the block gained the teardown door close.
+  # The mutation still removes only the CANCEL, which is the defect LX02 names.
+  LX02)
+    snippet OLD <<'EOF'
+                    await scheduler.closeDispatchForTeardown(lasting: budget.teardownReserve)
+                    cancelledJobIds = await scheduler.cancelCurrentJob(cause: .taskExpired)
+                }
+                await self?.emitExpire(
+                    identifier: identifier,
+EOF
+    snippet NEW <<'EOF'
+                    await scheduler.closeDispatchForTeardown(lasting: budget.teardownReserve)
+                    cancelledJobIds = []
+                }
+                await self?.emitExpire(
+                    identifier: identifier,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LX03 — the expiration `finishRun` returns to outcome/cause/expiration only.
+  # `expiration: true` is what makes the anchor the EXPIRY call site rather than
+  # the normal-return one.
+  LX03)
+    snippet OLD <<'EOF'
+                            jobsSeen: achieved.jobsSeen,
+                            jobsCompleted: achieved.jobsCompleted,
+                            expiration: true
+EOF
+    snippet NEW <<'EOF'
+                            expiration: true
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LX04 — the drain start-gate goes; a pass may begin with any remaining grant.
+  LX04)
+    patch "$file" \
+      '            guard remaining > .zero, remaining >= minimumCheckpointBudget else { break }' \
+      '            guard remaining > .zero else { break }' ;;
+
+  # LX05 — the baseline is no longer published when it is READ, only assembled
+  # at the normal return the OS usually pre-empts.
+  LX05)
+    snippet OLD <<'EOF'
+            counters.noteBaseline(pending: baselinePending)
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LX06 — the design grant decays back into the constant it replaced.
+  LX06)
+    snippet OLD <<'EOF'
+    static let backfillProcessing = BackgroundGrantBudget(
+        designGrant: .seconds(255),
+EOF
+    snippet NEW <<'EOF'
+    static let backfillProcessing = BackgroundGrantBudget(
+        designGrant: .seconds(1500),
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LX07 — the zero-clamp goes, so an over-reserved budget yields a negative
+  # duration and a work deadline in the past.
+  # The anchor carries the enclosing `workBudget` block: the same clamp
+  # expression also ends `remainingTeardownReserve`, and `patch` refuses a
+  # non-unique anchor.
+  LX07)
+    snippet OLD <<'EOF'
+    var workBudget: Duration {
+        let remainder = designGrant - teardownReserve
+        return remainder > .zero ? remainder : .zero
+    }
+EOF
+    snippet NEW <<'EOF'
+    var workBudget: Duration {
+        let remainder = designGrant - teardownReserve
+        return remainder
+    }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LX09 — a measured zero is written as NULL, collapsing "completed none" into
+  # "never started".
+  LX09)
+    patch "$file" \
+      '        state.withLock { $0.jobsCompleted = completed }' \
+      '        state.withLock { $0.jobsCompleted = completed > 0 ? completed : nil }' ;;
+
+  # LX10 — the unit floor shrinks below the cost of one durable FM window.
+  LX10)
+    snippet OLD <<'EOF'
+    static let backfillProcessing = BackgroundGrantBudget(
+        designGrant: .seconds(255),
+        teardownReserve: .seconds(36),
+        minimumCheckpointBudget: .seconds(60),
+EOF
+    snippet NEW <<'EOF'
+    static let backfillProcessing = BackgroundGrantBudget(
+        designGrant: .seconds(255),
+        teardownReserve: .seconds(36),
+        minimumCheckpointBudget: .seconds(1),
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LX11 — the `.taskExpired` exemption goes, and every expired window is
+  # charged an attempt again. Reads as deleting a special case.
+  LX11)
+    patch "$file" \
+      '                if cause == .taskExpired {' \
+      '                if cause == .taskExpired, false {' ;;
+
+  # LX12 — the exemption survives but spends an attempt, so the terminal arm
+  # still catches a long episode on its fifth window.
+  # playhead-lmrx R3: RE-ANCHORED OFF THE COMMENT. The shipped anchor opened on
+  # `jobId: job.jobId,` and spanned the two comment lines that explain the
+  # `incrementAttempt` default — so rewording either of them silently retires
+  # the rail, which is exactly what happened to LX17 earlier in this same bead.
+  # `nextEligibleAt: expiredNextEligible` occurs once in the file and is code.
+  LX12)
+    snippet OLD <<'EOF'
+                            stateUpdate: .init(
+                                state: "queued",
+                                nextEligibleAt: expiredNextEligible,
+EOF
+    snippet NEW <<'EOF'
+                            incrementAttempt: true,
+                            stateUpdate: .init(
+                                state: "queued",
+                                nextEligibleAt: expiredNextEligible,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LX13 — the exemption widens to every cancel cause, disarming the
+  # poisoned-job escape valve. The vacuity control for LX11/LX12.
+  LX13)
+    patch "$file" \
+      '                if cause == .taskExpired {' \
+      '                if true {' ;;
+
+  # LX14 — completion becomes "no longer pending", so a FAILED job is credited
+  # to the window as work completed.
+  LX14)
+    snippet OLD <<'EOF'
+        guard let rows = try? await store.fetchJobsByState("complete") else { return [] }
+        return ids.intersection(rows.map(\.jobId))
+EOF
+    snippet NEW <<'EOF'
+        let stillPending = await pendingJobIdsForLedger()
+        return ids.subtracting(stillPending)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LX15 — the baseline scoping goes, so the count stops being over the
+  # population `jobsSeen` measured.
+  LX15)
+    snippet OLD <<'EOF'
+        guard !ids.isEmpty else { return [] }
+        guard let rows = try? await store.fetchJobsByState("complete") else { return [] }
+        return ids.intersection(rows.map(\.jobId))
+EOF
+    snippet NEW <<'EOF'
+        guard let rows = try? await store.fetchJobsByState("complete") else { return [] }
+        return Set(rows.map(\.jobId))
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LX16 — the unmeasured charger-class sibling is "tidied" into the measured
+  # identifier's constants, and relabelled as measured along with them.
+  LX16)
+    snippet OLD <<'EOF'
+    static let backfillProcessingCharged = BackgroundGrantBudget(
+        designGrant: .seconds(1800),
+        teardownReserve: .seconds(36),
+        minimumCheckpointBudget: .seconds(60),
+        expirationSettleGrace: .seconds(3),
+        provenance: .assumed
+    )
+EOF
+    snippet NEW <<'EOF'
+    static let backfillProcessingCharged = BackgroundGrantBudget(
+        designGrant: .seconds(255),
+        teardownReserve: .seconds(36),
+        minimumCheckpointBudget: .seconds(60),
+        expirationSettleGrace: .seconds(3),
+        provenance: .measured(
+            grantObservations: 132,
+            teardownObservations: 30,
+            checkpointObservations: 142
+        )
+    )
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LX17 — the settle wait reports success without waiting for anything.
+  # Anchored on the two lines that OPEN the wait rather than on the whole loop
+  # body: the body carries comments, and a comment edit must not be able to
+  # silently retire a rail (it did once, in this bead's own review round).
+  LX17)
+    snippet OLD <<'EOF'
+        guard !jobIds.isEmpty else { return true }
+        let deadline = ContinuousClock.now + budget
+EOF
+    snippet NEW <<'EOF'
+        guard !jobIds.isEmpty else { return true }
+        if true { return true }
+        let deadline = ContinuousClock.now + budget
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LX18 — the provenance names the wrong denominator: 203 is how many expired
+  # backfill rows exist, and it is what the first draft carried. The design
+  # grant's own denominator is the 132 of those that reached 200 s. Reads as a
+  # harmless tidy-up toward "the sample size everybody quotes".
+  LX18)
+    snippet OLD <<'EOF'
+        provenance: .measured(
+            grantObservations: 132,
+EOF
+    snippet NEW <<'EOF'
+        provenance: .measured(
+            grantObservations: 203,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LX19 — the settle wait moves back IN FRONT of the durable ledger write,
+  # which is where this bead's first draft put it. Reads as "wait for the job
+  # before recording the outcome", and it puts up to a whole teardown reserve
+  # between the expiration and the only write that records it: a process killed
+  # during the wait leaves the row at `running`, i.e. strictly worse than the
+  # `expired`-with-NULL-counters row the bead was filed to improve.
+  # playhead-lmrx R3: re-anchored — the block gained the teardown door close.
+  LX19)
+    snippet OLD <<'EOF'
+                    await scheduler.closeDispatchForTeardown(lasting: budget.teardownReserve)
+                    cancelledJobIds = await scheduler.cancelCurrentJob(cause: .taskExpired)
+                }
+                await self?.emitExpire(
+                    identifier: identifier,
+EOF
+    snippet NEW <<'EOF'
+                    await scheduler.closeDispatchForTeardown(lasting: budget.teardownReserve)
+                    cancelledJobIds = await scheduler.cancelCurrentJob(cause: .taskExpired)
+                    _ = await scheduler.awaitJobsSettled(
+                        cancelledJobIds,
+                        within: budget.teardownReserve
+                    )
+                }
+                await self?.emitExpire(
+                    identifier: identifier,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LX21 — the WORK-DEADLINE return stops telling the scheduler the grant is
+  # over. Reads as removing a redundant call (the expiration handler does it),
+  # and it is redundant only if the expiration handler still runs — which it
+  # cannot, because this path calls `setTaskCompleted` a few lines later and a
+  # completed task never fires its expirationHandler. This is the exit the 219 s
+  # bound created; before lmrx the 25-minute deadline made it unreachable.
+  # playhead-lmrx R3: re-anchored — the block gained the teardown door close.
+  LX21)
+    snippet OLD <<'EOF'
+                await scheduler.closeDispatchForTeardown(lasting: budget.teardownReserve)
+                cancelledJobIds = await scheduler.cancelCurrentJob(cause: .taskExpired)
+            }
+EOF
+    snippet NEW <<'EOF'
+                await scheduler.closeDispatchForTeardown(lasting: budget.teardownReserve)
+                cancelledJobIds = await scheduler.pendingJobIdsForLedger().subtracting(baselineIds)
+            }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LX22 — the work-deadline gate goes and the normal return cancels
+  # UNCONDITIONALLY. Reads as removing a redundant condition (the cancel is a
+  # no-op when nothing runs), and it is a no-op only when nothing runs: the poll
+  # loop also returns EARLY on two empty polls, seconds into a window, where the
+  # scheduler may be running a playback-lane catch-up for the episode the user
+  # is listening to. That job is then killed and delayed 60 s for a grant that
+  # had not ended.
+  LX22)
+    patch "$file" \
+      '            if deadlineElapsed, let scheduler = self.analysisWorkScheduler {' \
+      '            if true, let scheduler = self.analysisWorkScheduler {' ;;
+
+  # LX23 — `expirationSettleBudget` collapses into the teardown reserve. Reads
+  # as removing a redundant `min`; it restores a bound that returns its full
+  # length at the instant the OS reclaims the window, identically for a grant
+  # run to its 295 s limit and one reclaimed at t+5 s.
+  LX23)
+    patch "$file" \
+      '        min(remainingTeardownReserve(since: teardownStart, now: now), expirationSettleGrace)' \
+      '        remainingTeardownReserve(since: teardownStart, now: now)' ;;
+
+  # LX24 — the method stays correct and the expiration handler asks the other
+  # one. This is the half LX23 cannot see, and it is the likelier regression: a
+  # reader who has just met `remainingTeardownReserve` on the normal-return path
+  # twenty lines up reaches for the same name here.
+  LX24)
+    patch "$file" \
+      '                    let remaining = budget.expirationSettleBudget(since: teardownStart)' \
+      '                    let remaining = budget.remainingTeardownReserve(since: teardownStart)' ;;
+
+  # LX25 — the aim goes back to a single unnamed slot, while the return value
+  # keeps claiming the whole in-flight set. Reads like a simplification of a
+  # loop into "cancel the current one"; it is the defect the round-3 review
+  # opened on.
+  LX25)
+    patch "$file" \
+      '        cancelRunningJobs(where: { _ in true }, cause: resolved)' \
+      '        runningJobs.values.first?.runTask?.cancel()' ;;
+
+  # LX26 — the destructive read of the global cancel cause, restored. The
+  # per-job copy is ignored and the global is nil'd unconditionally, so the
+  # first of two cancelled jobs consumes the cause and the second falls back to
+  # `.pipelineError`, spends an attempt, and supersedes at five.
+  LX26)
+    snippet OLD <<'EOF'
+                let cause = runningJobs[job.jobId]?.cancelCause
+                    ?? pendingCancelCause
+                    ?? .pipelineError
+                runningJobs[job.jobId]?.cancelCause = nil
+                if inFlightJobIds.subtracting([job.jobId]).isEmpty {
+                    pendingCancelCause = nil
+                }
+EOF
+    snippet NEW <<'EOF'
+                let cause = pendingCancelCause ?? .pipelineError
+                pendingCancelCause = nil
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LX27 — the teardown door goes. `runLoop()`'s 5 s poll can then dispatch a
+  # fresh job after the handler's cancel has already gone past: named by
+  # nothing, absent from the settle population, live at `setTaskCompleted`.
+  LX27)
+    patch "$file" \
+      '        if isDispatchClosed() { return false }' \
+      '        if false { return false }' ;;
+
+  # LX28 — the vacuity control in the other direction: the door never re-opens.
+  # Every "nothing dispatches during teardown" assertion still passes, and a
+  # foregrounded app is left with a scheduler that never dispatches again,
+  # because nothing outside a BGTask handler calls the re-openers.
+  LX28)
+    snippet OLD <<'EOF'
+        guard let until = dispatchClosedUntil else { return false }
+        if ContinuousClock.now < until { return true }
+        dispatchClosedUntil = nil
+        return false
+EOF
+    snippet NEW <<'EOF'
+        guard dispatchClosedUntil != nil else { return false }
+        return true
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LX29 — the recovery handler's work-deadline return loses its cancel, so it
+  # completes the task over a job the run loop is still running. The LX21 hole,
+  # one handler over, and the one this bead's own budget change opened.
+  LX29)
+    snippet OLD <<'EOF'
+                if ContinuousClock.now >= workDeadline,
+                   let scheduler = self.analysisWorkScheduler {
+                    await scheduler.closeDispatchForTeardown(lasting: budget.teardownReserve)
+                    cancelledJobIds = await scheduler.cancelCurrentJob(cause: .taskExpired)
+                }
+EOF
+    snippet NEW <<'EOF'
+                if false, let scheduler = self.analysisWorkScheduler {
+                    await scheduler.closeDispatchForTeardown(lasting: budget.teardownReserve)
+                    cancelledJobIds = await scheduler.cancelCurrentJob(cause: .taskExpired)
+                }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LX30 — the `defer` goes back to cancelling "whatever the slot holds", which
+  # after a sibling dispatch is the sibling. The job's own removal still happens,
+  # so `inFlightJobIds` stays honest and only the sibling's LIVENESS changes —
+  # which is exactly why the round-3 test had to be strengthened before this rail
+  # could mean anything: `runTask != nil` is still true of a cancelled task.
+  LX30)
+    snippet OLD <<'EOF'
+            let finished = runningJobs.removeValue(forKey: job.jobId)
+            finished?.leaseRenewalTask?.cancel()
+            finished?.runTask?.cancel()
+EOF
+    snippet NEW <<'EOF'
+            _ = runningJobs.removeValue(forKey: job.jobId)
+            for other in runningJobs.values {
+                other.leaseRenewalTask?.cancel()
+                other.runTask?.cancel()
+            }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LX31 — the door survives, and moves one bypass down. Every `preAnalysis`
+  # dispatch is still refused, so LX27's and LX28's assertions are untouched; a
+  # T0 playback job starts into a process that may be suspended within seconds.
+  LX31)
+    snippet OLD <<'EOF'
+        if isDispatchClosed() { return false }
+        let lane = job.schedulerLane
+        if lane == .now && job.jobType == "playback" {
+            return true
+        }
+EOF
+    snippet NEW <<'EOF'
+        let lane = job.schedulerLane
+        if lane == .now && job.jobType == "playback" {
+            return true
+        }
+        if isDispatchClosed() { return false }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LX32 — the work-deadline teardown stops shutting the door. The cancel and
+  # the settle both survive, so the job the handler can SEE is still requeued;
+  # what comes back is the window in which `runLoop()`'s poll starts a fresh
+  # one behind the cancel. Reads as removing a redundant belt (the cancel is
+  # right there), which is exactly why it needs a rail. The anchor is the
+  # 16-space work-deadline block: the three other call sites are nested one
+  # level deeper, so this span cannot match them.
+  LX32)
+    snippet OLD <<'EOF'
+                await scheduler.closeDispatchForTeardown(lasting: budget.teardownReserve)
+                cancelledJobIds = await scheduler.cancelCurrentJob(cause: .taskExpired)
+            }
+EOF
+    snippet NEW <<'EOF'
+                cancelledJobIds = await scheduler.cancelCurrentJob(cause: .taskExpired)
+            }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LX33 — the backfill handler hands the drain a literal floor of zero, which
+  # is the pre-lmrx `now < deadline` restored without touching `drainEligible`.
+  # Invisible to LX04, which mutates the guard inside the callee.
+  LX33)
+    snippet OLD <<'EOF'
+                await scheduler.drainEligible(
+                    deadline: workDeadline,
+                    minimumCheckpointBudget: budget.minimumCheckpointBudget
+                )
+EOF
+    snippet NEW <<'EOF'
+                await scheduler.drainEligible(
+                    deadline: workDeadline,
+                    minimumCheckpointBudget: .zero
+                )
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LX34 — the work-deadline return stops measuring what it completed. The
+  # expiration handler's copy of the call survives, so every expiry-driven
+  # counter test is untouched; `jobsCompleted` simply goes back to NULL on the
+  # `admitted_work` rows, which is the state the bead measured and half of what
+  # it claims to fix. Anchored on the call plus the line that consumes its
+  # effect, which is what makes the span unique — the expiry's call is
+  # multi-line and nested one level deeper.
+  LX34)
+    snippet OLD <<'EOF'
+            await self.recordGrantCompletions(counters: counters, baselineIds: baselineIds)
+            let achieved = counters.snapshot
+EOF
+    snippet NEW <<'EOF'
+            let achieved = counters.snapshot
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LX35 — recovery's EXPIRATION handler stops shutting the dispatch door. The
+  # cancel on the next line survives, so the job the handler can see is still
+  # cancelled; what comes back is the window in which `runLoop()`'s 5 s poll
+  # starts a fresh one behind the cancel and ahead of `setTaskCompleted`. The
+  # anchor is the whole `if let scheduler` block: backfill's expiry block reads
+  # `cancelledJobIds = await scheduler.cancelCurrentJob(...)` and has comments
+  # between the two calls, so this span cannot match it.
+  LX35)
+    snippet OLD <<'EOF'
+                if let scheduler = await self?.analysisWorkScheduler {
+                    await scheduler.closeDispatchForTeardown(lasting: budget.teardownReserve)
+                    await scheduler.cancelCurrentJob(cause: .taskExpired)
+                }
+EOF
+    snippet NEW <<'EOF'
+                if let scheduler = await self?.analysisWorkScheduler {
+                    await scheduler.cancelCurrentJob(cause: .taskExpired)
+                }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LX36 — backfill's teardown guard stops RETURNING. The log survives, so the
+  # edit reads as "we still record it, we just do not bail" — and the work task
+  # falls through to `markComplete(success: true)` over a job that is still
+  # running, beating the expiration handler to `setTaskCompleted`. Anchored on
+  # four contiguous CODE lines; the log string occurs once in the file.
+  LX36)
+    snippet OLD <<'EOF'
+            guard !Task.isCancelled else {
+                self.logger.info("Backfill work task cancelled during teardown; deferring to the expiration handler")
+                return
+            }
+EOF
+    snippet NEW <<'EOF'
+            if Task.isCancelled {
+                self.logger.info("Backfill work task cancelled during teardown; deferring to the expiration handler")
+            }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LX37 — the same edit in `handlePreAnalysisRecovery`. Distinct anchor: the
+  # indentation and the log string both differ.
+  LX37)
+    snippet OLD <<'EOF'
+                guard !Task.isCancelled else {
+                    self.logger.info("Pre-analysis recovery cancelled during teardown; deferring to the expiration handler")
+                    return
+                }
+EOF
+    snippet NEW <<'EOF'
+                if Task.isCancelled {
+                    self.logger.info("Pre-analysis recovery cancelled during teardown; deferring to the expiration handler")
+                }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LX38 — recovery's expiry keeps the door and loses the CANCEL. The exact
+  # complement of LX35, so the pair covers both lines of that block.
+  LX38)
+    snippet OLD <<'EOF'
+                if let scheduler = await self?.analysisWorkScheduler {
+                    await scheduler.closeDispatchForTeardown(lasting: budget.teardownReserve)
+                    await scheduler.cancelCurrentJob(cause: .taskExpired)
+                }
+EOF
+    snippet NEW <<'EOF'
+                if let scheduler = await self?.analysisWorkScheduler {
+                    await scheduler.closeDispatchForTeardown(lasting: budget.teardownReserve)
+                }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LX39 — the baseline COUNT is still published and the IDENTITIES are not, so
+  # `jobsSeen` survives everywhere and `jobsCompleted` goes NULL on the expiry
+  # path only (the normal return holds `baselineIds` as a local and is
+  # unaffected — that half is LX34's). Reads as deleting a redundant second
+  # publication of one thing.
+  LX39)
+    snippet OLD <<'EOF'
+            counters.noteBaseline(pending: baselinePending)
+            baselineIdsBox.store(baselineIds)
+EOF
+    snippet NEW <<'EOF'
+            counters.noteBaseline(pending: baselinePending)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LX40 — the charger-class registration reverts to the pre-lmrx dispatch. It
+  # COMPILES, because both parameters carry the plain class's values as
+  # defaults, and that is exactly why it needs a rail.
+  LX40)
+    snippet OLD <<'EOF'
+            Task {
+                await self.handleBackfillTask(
+                    sendableTask.value,
+                    identifier: BackgroundTaskID.backfillProcessingCharged,
+                    budget: .backfillProcessingCharged
+                )
+            }
+EOF
+    snippet NEW <<'EOF'
+            Task { await self.handleBackfillTask(sendableTask.value) }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LX41 — the mirror of LX40, and the one its canary could not see. The PLAIN
+  # registration takes the charger class's identifier and budget: it compiles
+  # (both are ordinary arguments), and every `contains` in the round-7 canary
+  # stays satisfied because the charged registration still spells them too. The
+  # anchor is the pre-lmrx one-line dispatch, which occurs once — the charged
+  # registration's call is multi-line.
+  LX41)
+    snippet OLD <<'EOF'
+            Task { await self.handleBackfillTask(sendableTask.value) }
+EOF
+    snippet NEW <<'EOF'
+            Task {
+                await self.handleBackfillTask(
+                    sendableTask.value,
+                    identifier: BackgroundTaskID.backfillProcessingCharged,
+                    budget: .backfillProcessingCharged
+                )
+            }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LX20 — the settle wait loses its identity scoping and goes back to asking
+  # "is ANYTHING running", which is the same question whether the cancelled job
+  # settled or `runLoop()` (5 s poll) has since picked up a sibling. Reads as a
+  # simplification; it makes the handler burn its whole reserve waiting out a
+  # requeue that already committed.
+  LX20)
+    patch "$file" \
+      '        while !inFlightJobIds.isDisjoint(with: jobIds) {' \
+      '        while !runningJobs.isEmpty {' ;;
 
   *)
     echo "mutation-battery: unknown mutation '$name'" >&2
@@ -12809,6 +13865,7 @@ rec_file()   {
     EPPREP) printf '%s' "$EPPREP" ;;
     SCHED) printf '%s' "$SCHED" ;;
     BGPS)  printf '%s' "$BGPS" ;;
+    GRANT) printf '%s' "$GRANT" ;;
     CLAIM) printf '%s' "$CLAIM" ;;
     RECON) printf '%s' "$RECON" ;;
     ATOM)  printf '%s' "$ATOM" ;;

@@ -429,8 +429,14 @@ final class StubAnalysisCoordinator: AnalysisCoordinating, @unchecked Sendable {
         stopCalls.increment()
     }
 
-    func runPendingBackfill() async {
+    /// playhead-lmrx: every deadline the handler hands this method, captured so
+    /// a test can assert the budget it was spending — the pre-fix value was
+    /// `now + 25 minutes` inside a measured 294 s grant.
+    private(set) var runPendingBackfillDeadlines: [ContinuousClock.Instant] = []
+
+    func runPendingBackfill(deadline: ContinuousClock.Instant) async {
         runPendingBackfillCallCount += 1
+        runPendingBackfillDeadlines.append(deadline)
         runPendingBackfillEntries.increment()
         if let duration = runPendingBackfillDuration {
             try? await Task.sleep(for: duration)

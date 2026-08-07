@@ -422,16 +422,28 @@ struct AnalysisWorkSchedulerJournalEmissionTests {
         )
     }
 
-    // MARK: - cancelCatch.requeue → preempted with .taskExpired
+    // MARK: - cancelCatch.taskExpiredRequeue → preempted with .taskExpired
 
     @Test("cancel-mid-decode (attempts < max) emits a `.preempted` journal row tagged with the cancel cause")
     func cancelMidDecodeEmitsPreemptedWithTaskExpired() async throws {
-        // Drives the `cancelCatch.requeue` arm with the BG-task
-        // expiration shape (`cancelCurrentJob(.taskExpired)`). This is
-        // the production path that fires when the OS reclaims a BG
-        // processing window before the decoder finishes. The arm
-        // reverts state to 'queued' with backoff and (post-fix) emits
-        // a `.preempted` row with cause `.taskExpired`.
+        // Drives the BG-task expiration shape (`cancelCurrentJob(.taskExpired)`).
+        // This is the production path that fires when the OS reclaims a BG
+        // processing window before the decoder finishes.
+        //
+        // playhead-lmrx moved which ARM serves it — `.taskExpired` now takes
+        // `cancelCatch.taskExpiredRequeue` (state 'queued', a FLAT requeue
+        // floor, and no attempt spent) rather than `cancelCatch.requeue` (state
+        // 'queued' with exponential backoff and an attempt spent).
+        //
+        // WHAT IT STILL PINS, stated exactly, because the round-2 review caught
+        // the comment claiming more: that the new arm emits a `.preempted` row
+        // — not `.failed`, which orphan recovery reads as unrecoverable —
+        // tagged `task_expired`. It can no longer pin cause THREADING: the new
+        // arm passes the literal `.taskExpired`, so threading and hardcoding
+        // are indistinguishable here. Threading is
+        // `cancelCatch.revertQueued`'s property and is pinned next door by
+        // `cancelMidDecodeEmitsPreemptedWithUserCancelled`. The attempt
+        // accounting is in `ExpiredWindowAttemptAccountingTests`.
         let store = try await makeTestStore()
         let downloads = StubDownloadProvider()
         downloads.cachedURLs["ep-task-expired"] = URL(fileURLWithPath: "/tmp/ep-task-expired.mp3")
@@ -494,6 +506,77 @@ struct AnalysisWorkSchedulerJournalEmissionTests {
                 "All preempted rows must carry cause=.taskExpired (got \(preempted.map { $0.cause?.rawValue ?? "nil" }))")
     }
 
+    // MARK: - cancelCatch.revertQueued → preempted with the cancel's own cause
+
+    @Test("a non-expiry mid-decode cancel emits `.preempted` with ITS cause, not the default")
+    func cancelMidDecodeEmitsPreemptedWithUserCancelled() async throws {
+        // playhead-lmrx review round: COVERAGE THE EXEMPTION WOULD OTHERWISE
+        // HAVE TAKEN. The sibling test above was the only witness that
+        // `cancelCatch.requeue` threads `pendingCancelCause` into
+        // `emitJournalPreempted` rather than falling back on the helper's
+        // `?? .pipelineError`. `.taskExpired` now takes a different arm, so that
+        // test no longer reaches `cancelCatch.revertQueued` at all — and a
+        // regression that hardcoded `.pipelineError` there would have reddened
+        // nothing. `.userCancelled` is the other production cause that reaches
+        // it (the explicit-cancel entry point), and it still does.
+        //
+        // ONE HONEST LIMIT: a mutant that hardcoded `.userCancelled` at that
+        // emission site would survive this test alone. What excludes it is the
+        // PAIR — `runnerFailureUnderMaxAttemptsEmitsPreempted` drives the same
+        // helper with `.pipelineError` — so no single literal satisfies both.
+        let store = try await makeTestStore()
+        let downloads = StubDownloadProvider()
+        downloads.cachedURLs["ep-user-cancelled"] = URL(fileURLWithPath: "/tmp/ep-user-cancelled.mp3")
+
+        let job = makeAnalysisJob(
+            jobId: "user-cancelled",
+            jobType: "preAnalysis",
+            episodeId: "ep-user-cancelled",
+            analysisAssetId: "asset-user-cancelled",
+            workKey: "fp-user-cancelled:1:preAnalysis",
+            sourceFingerprint: "fp-user-cancelled",
+            priority: 10,
+            desiredCoverageSec: 90,
+            state: "queued",
+            attemptCount: 0
+        )
+        try await store.insertJob(job)
+
+        let audioStub = CancellableAudioStub()
+        let scheduler = await makeScheduler(
+            store: store,
+            audioProvider: audioStub,
+            downloads: downloads
+        )
+        let processed = await scheduler.processNextDispatchableJobForTesting(
+            cancelAfterRunnerStart: .userCancelled
+        )
+        #expect(processed, "Scheduler test hook should process user-cancelled")
+
+        let landed = await pollUntil {
+            let rows = (try? await fetchJournalRowsForEpisode(
+                store: store, jobId: "user-cancelled", episodeId: "ep-user-cancelled"
+            )) ?? []
+            return rows.contains { $0.eventType == .preempted && $0.cause == .userCancelled }
+        }
+        #expect(landed, "Expected a `.preempted` row tagged `.userCancelled` from cancelCatch.revertQueued")
+
+        let rows = try await fetchJournalRowsForEpisode(
+            store: store, jobId: "user-cancelled", episodeId: "ep-user-cancelled"
+        )
+        let preemptedRows = rows.filter { $0.eventType == .preempted }
+        #expect(!preemptedRows.isEmpty, "Expected at least one preempted row")
+        #expect(preemptedRows.allSatisfy { $0.cause == .userCancelled },
+                "All preempted rows must carry cause=.userCancelled (got \(preemptedRows.map { $0.cause?.rawValue ?? "nil" }))")
+
+        // And the arm is the attempt-spending one: a user cancel is not an
+        // OS-reclaimed window, so it still charges the retry ladder.
+        let after = try #require(try await store.fetchJob(byId: "user-cancelled"))
+        #expect(after.state == "queued")
+        #expect(after.attemptCount == 1,
+                "a non-expiry cancel still spends an attempt — that is what the exemption is carved OUT of")
+    }
+
     // MARK: - cancelCatch.supersede → failed with .pipelineError
 
     @Test("cancel-mid-decode at maxAttempts emits a `.failed` journal row tagged `.pipelineError`")
@@ -530,8 +613,16 @@ struct AnalysisWorkSchedulerJournalEmissionTests {
             audioProvider: audioStub,
             downloads: downloads
         )
+        // playhead-lmrx: this fixture used to pass `.taskExpired`, which was
+        // incidental — the test is about the POISONED-JOB escape valve, not
+        // about OS expiry. `.taskExpired` no longer reaches this arm: an
+        // OS-reclaimed background window spends no attempt (it is evidence
+        // about the window, not the job), so it would never supersede and
+        // never escalate backoff. `.pipelineError` is the arm's own
+        // documented default and the honest cause for a poisoned decode, so
+        // every assertion below is unchanged in meaning.
         let processed = await scheduler.processNextDispatchableJobForTesting(
-            cancelAfterRunnerStart: .taskExpired
+            cancelAfterRunnerStart: .pipelineError
         )
 
         // Two assertions: the analysis_jobs row must terminate at

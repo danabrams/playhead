@@ -186,12 +186,25 @@ struct BackfillSchedulerBoundingTests {
     @Test("handleBackfillTask has no suspension point before it arms the expiration handler")
     func handleBackfillTaskHasNoAwaitBeforeArming() throws {
         let source = try SwiftSourceInspector.loadSource(repoRelativePath: Self.servicePath)
+        // playhead-lmrx (review round): anchored on the DECLARATION, not on a
+        // whole one-line signature. `firstBody` takes the first `{` after the
+        // anchor, so this survives parameters being added or the signature
+        // being wrapped across lines — and playhead-lmrx did both, which broke
+        // the old anchor. A canary that matches nothing does not fail quietly
+        // here (the `#require` below catches it), but it was also not in any
+        // suite the bead's own rounds ran, so nobody saw it for two commits.
+        // Anchoring on what cannot drift is the fix; broadening the gate's
+        // suite list is the other half.
+        // `firstBody` takes the first `{` after the FIRST occurrence, so a
+        // second occurrence (a doc comment quoting the declaration) would aim
+        // this canary at the wrong site while every assertion below still ran.
+        // Pin the count so that failure is named rather than inferred.
+        let anchor = "func handleBackfillTask("
+        #expect(source.components(separatedBy: anchor).count == 2,
+                "the canary anchor '\(anchor)' must occur exactly once in \(Self.servicePath)")
         let body = try #require(
-            SwiftSourceInspector.firstBody(
-                in: source,
-                after: "func handleBackfillTask(_ task: any BackgroundProcessingTaskProtocol) async {"
-            ),
-            "handleBackfillTask's signature drifted — update this canary"
+            SwiftSourceInspector.firstBody(in: source, after: anchor),
+            "handleBackfillTask's declaration drifted — update this canary"
         )
         // `firstBody` returns "" (not nil) on an unbalanced brace, which
         // would make every check below vacuously true.
@@ -218,6 +231,256 @@ struct BackfillSchedulerBoundingTests {
                 unreportable and kills the process (playhead-c25o). Move the \
                 awaited work into the work task instead. Found: \
                 \(beforeArming.trimmingCharacters(in: .whitespacesAndNewlines))
+                """)
+    }
+
+    @Test("both BGTask handlers spend the BUDGET they were handed, not a local constant")
+    func handlersThreadTheirBudgetIntoTheDrain() throws {
+        // playhead-lmrx (review round 5): THE ARGUMENT, not the callee.
+        //
+        // `DrainEligibleStartGateTests` calls `drainEligible(deadline:
+        // minimumCheckpointBudget:)` by hand with `.seconds(60)`, and rail LX04
+        // mutates the guard INSIDE `drainEligible`. Between them they prove the
+        // start gate works and that its callee honours it. Neither can see the
+        // handler's ARGUMENT: change both call sites to
+        // `minimumCheckpointBudget: .zero` and production reverts to the
+        // pre-lmrx bare `now < deadline` — a whole analysis job may begin with a
+        // millisecond of grant left — while every behavioural test stays green.
+        // Ask the diagnostic question of the suite: what would it read if the
+        // handlers passed a floor of zero? Exactly what it reads now.
+        //
+        // A SOURCE canary because the alternative is a new DEBUG seam recording
+        // an argument, and the floor's effect is not separately observable
+        // through the handler: the handler also starts the long-lived
+        // `runLoop()`, which dispatches on its own poll regardless of the floor.
+        //
+        // THE DOOR CLAUSE COUNTS, AND DID NOT USED TO (review round 6). Round 5
+        // added it to cover the recovery EXPIRY door, on the grounds that the
+        // other three `closeDispatchForTeardown` sites were pinned
+        // behaviourally and that one had no test driving recovery's
+        // `expirationHandler`. But `contains` asks whether the string appears
+        // ANYWHERE in the handler body, and each handler has TWO sites — its
+        // work-deadline return and its expiry — so deleting either one left the
+        // other satisfying the canary and the whole suite green. That is this
+        // bead's own standing defect class read back into its instrument: a
+        // value that reads the same whether or not the thing it claims to
+        // measure happened. All four sites are now pinned behaviourally in
+        // `BackgroundGrantBudgetTests`; this clause is the source-level
+        // backstop, and it counts.
+        let source = try SwiftSourceInspector.loadSource(repoRelativePath: Self.servicePath)
+        for (anchor, grantStart) in [
+            ("func handleBackfillTask(", "grantStart"),
+            ("func handlePreAnalysisRecovery(", "recoveryGrantStart"),
+        ] {
+            #expect(source.components(separatedBy: anchor).count == 2,
+                    "the canary anchor '\(anchor)' must occur exactly once in \(Self.servicePath)")
+            let body = try #require(
+                SwiftSourceInspector.firstBody(in: source, after: anchor),
+                "\(anchor) drifted — update this canary"
+            )
+            try #require(!body.isEmpty, "\(anchor) body did not parse")
+            let code = SwiftSourceInspector.strippingComments(body)
+
+            #expect(code.contains("minimumCheckpointBudget: budget.minimumCheckpointBudget"),
+                    """
+                    \(anchor) must hand `drainEligible` the floor from the \
+                    budget it is spending. A literal (or the `.zero` default) \
+                    is the unmeasured constant `BackgroundGrantBudget` exists \
+                    to delete.
+                    """)
+            let doorSites = code.components(
+                separatedBy: "closeDispatchForTeardown(lasting: budget.teardownReserve)"
+            ).count - 1
+            #expect(doorSites == 2,
+                    """
+                    \(anchor) has TWO endings — its work-deadline return and \
+                    its expiration handler — and BOTH must shut the dispatch \
+                    door out of its own budget's teardown reserve before they \
+                    cancel; otherwise `runLoop()`'s poll can dispatch a fresh \
+                    job after the cancel has gone past, live at \
+                    `setTaskCompleted`. Found \(doorSites). If a third ending \
+                    was added deliberately, raise this number and pin the new \
+                    site behaviourally too — do not relax it back to a \
+                    `contains`, which cannot tell two sites from one.
+                    """)
+            // playhead-lmrx (review round 8): NAMED, not `workDeadline(from:`.
+            // The bare prefix is satisfied by `workDeadline(from:
+            // ContinuousClock.now)`, which is precisely the claim at the
+            // `grantStart` assignment — "a slow `recordRunStart` or a contended
+            // actor hop spends the grant it delays rather than silently
+            // extending it" — deleted. `pollLoopDeadlineIsGrantShaped` cannot
+            // see that either: it is deliberately built to tolerate the handler
+            // reading the clock anywhere between its own before/after bounds.
+            #expect(code.contains("workDeadline(from: \(grantStart))"),
+                    """
+                    \(anchor) must derive its work deadline from the instant \
+                    the GRANT opened (`\(grantStart)`), not from the clock at \
+                    the call — otherwise everything the handler does before the \
+                    drain silently extends the window instead of spending it. \
+                    Also the positive control that this canary is reading a \
+                    handler body and not an empty string.
+                    """)
+            // playhead-lmrx (review round 8): AND NOTHING IN EITHER HANDLER MAY
+            // MINT A DEADLINE FROM A FRESH CLOCK READ.
+            //
+            // The gap this closes: every consumer of the shared local is
+            // written `deadline: workDeadline`, and no rail and no test asserts
+            // the ARGUMENT. LX01 mutates the local, so it changes both
+            // consumers at once and dies through the coordinator's recorded
+            // deadline; LX33 mutates the FLOOR argument. Changing one call site
+            // to `deadline: ContinuousClock.now + .seconds(25 * 60)` restores
+            // this bead's headline defect for the driver that actually
+            // dispatches analysis jobs, and every assertion stays green —
+            // `pollLoopDeadlineIsGrantShaped` reads only the OTHER driver, and
+            // `DrainEligibleStartGateTests` call `drainEligible` directly and so
+            // never see a handler's argument. Recovery is worse: its drain is
+            // its only deadline consumer, so it has no instrument at all.
+            //
+            // Stated as an absence because that is the only form that is
+            // indifferent to which call site, which spelling of the duration,
+            // and how the arguments are wrapped. Measured: neither handler
+            // contains `ContinuousClock.now + ` today, and neither does the
+            // rest of this file.
+            #expect(!code.contains("ContinuousClock.now + "),
+                    """
+                    no deadline handed out of \(anchor) may be minted from a \
+                    FRESH clock read. Every bound this handler spends comes \
+                    from the measured `BackgroundGrantBudget` applied to \
+                    `\(grantStart)`; a `ContinuousClock.now + .seconds(...)` \
+                    here is the 1500 s literal that filed playhead-lmrx, \
+                    reintroduced at one call site where nothing else can see it.
+                    """)
+        }
+    }
+
+    @Test("the charger-class REGISTRATION hands its own identifier and budget to the shared handler")
+    func chargedRegistrationThreadsItsIdentifierAndBudget() throws {
+        // playhead-lmrx (review round 7): THE WIRING, not the handler.
+        //
+        // `handleBackfillTask(_:identifier:budget:)` defaults BOTH new
+        // parameters to the PLAIN backfill values, which is right for the plain
+        // registration and is why the charger-class registration has to pass
+        // them explicitly. The consequence is that the wiring can be deleted
+        // and still compile — `await self.handleBackfillTask(sendableTask.value)`
+        // is the pre-lmrx spelling and reverts the charger class to the plain
+        // one silently, in both of the ways this bead's own review round argued
+        // at length must not happen:
+        //
+        //  * the charger class would spend the MEASURED 219 s work budget,
+        //    which was derived from 132 plain-identifier grants. That is the
+        //    wrong-population error `BackgroundGrantBudget` exists to stop, and
+        //    a live regression: the charger class exists because it is expected
+        //    to grant LONGER windows (playhead-i6oi), so a 219 s cap surrenders
+        //    the rest of an overnight grant;
+        //  * and every ledger and telemetry write for a charger-class window
+        //    would be recorded under the plain identifier again — the exact
+        //    instrumentation defect that made "the pull contains zero rows for
+        //    this identifier" true by construction rather than an observation.
+        //
+        // `chargedSiblingUsesItsOwnBudget` calls the handler DIRECTLY with the
+        // charged budget, so it proves the handler honours what it is handed
+        // and says nothing about whether anything hands it. Asked the
+        // diagnostic way: what would that test read if the registration passed
+        // nothing at all? Exactly what it reads now. This is the same
+        // caller-vs-callee gap rounds 5 and 6 closed at four other sites.
+        //
+        // A SOURCE canary because `registerBackgroundTasks()` goes through the
+        // real `BGTaskScheduler.shared.register`, which no test can drive.
+        //
+        // COUNTED, not `contains` (the round-6 lesson): `handleBackfillTask` is
+        // dispatched from exactly two registrations, and asserting the charged
+        // spelling appears somewhere would be satisfied by either of them.
+        //
+        // playhead-lmrx (review round 8): AND ROUND 7 NAMED THAT HAZARD IN THE
+        // LINE ABOVE AND THEN DID NOT CLOSE IT. Counting `handleBackfillTask(`
+        // establishes how MANY dispatches there are; it says nothing about
+        // WHICH of them carries the charged spelling, and the two assertions
+        // below were `contains` over a body holding both. Ask the diagnostic
+        // question of them: what would `contains("identifier:
+        // BackgroundTaskID.backfillProcessingCharged")` read if the CHARGED
+        // registration lost its identifier and the PLAIN one gained it? The
+        // same `true` — the standing defect class, committed in the instrument
+        // that exists to catch it.
+        //
+        // The single-edit regression that slipped through is the worse
+        // direction, and it is only possible because this bead ADDED the two
+        // parameters: give the PLAIN registration the charged values and every
+        // battery-idle window — the 203-expiry population this whole bead is
+        // about — spends the unmeasured 1800 s charger horizon (worse than the
+        // 1500 s that filed the bead) and records itself under the charged
+        // identifier, so the ledger can no longer see the plain class either.
+        // Splitting the body at the charged `register(...)` is what lets each
+        // half be asked its own question.
+        let source = try SwiftSourceInspector.loadSource(repoRelativePath: Self.servicePath)
+        let anchor = "nonisolated func registerBackgroundTasks() {"
+        #expect(source.components(separatedBy: anchor).count == 2,
+                "the canary anchor '\(anchor)' must occur exactly once in \(Self.servicePath)")
+        let body = try #require(
+            SwiftSourceInspector.firstBody(in: source, after: anchor),
+            "registerBackgroundTasks() moved — update this canary"
+        )
+        try #require(!body.isEmpty, "registerBackgroundTasks() body did not parse")
+        let code = SwiftSourceInspector.strippingComments(body)
+
+        #expect(code.components(separatedBy: "handleBackfillTask(").count - 1 == 2,
+                """
+                registerBackgroundTasks() must dispatch handleBackfillTask from \
+                exactly two registrations — the plain identifier and the \
+                playhead-i6oi charger sibling. A third would need its own \
+                budget decision and its own line here.
+                """)
+        #expect(code.contains("identifier: BackgroundTaskID.backfillProcessingCharged"),
+                """
+                the charger-class registration must name its OWN identifier. \
+                The parameter defaults to the plain one, so omitting it records \
+                every charger-class window as a plain-class window — which is \
+                what made the ledger unable to say whether the class had ever \
+                run.
+                """)
+        #expect(code.contains("budget: .backfillProcessingCharged"),
+                """
+                and it must hand over its OWN budget. The parameter defaults to \
+                the measured plain-class budget, so omitting it spends 132 \
+                plain-identifier observations on a class with none — and caps \
+                an overnight charger grant at 219 s.
+                """)
+
+        // WHICH registration carries them. The two `contains` above are true of
+        // the body; these say the values are on the charger-class side of it.
+        let chargedRegistration = "forTaskWithIdentifier: BackgroundTaskID.backfillProcessingCharged"
+        let halves = code.components(separatedBy: chargedRegistration)
+        #expect(halves.count == 2,
+                """
+                the charger-class registration must appear exactly once — this \
+                canary splits the body on it, so two of them would silently \
+                make the plain half unreadable.
+                """)
+        let plainHalf = try #require(halves.first, "the body did not split")
+        #expect(plainHalf.components(separatedBy: "handleBackfillTask(").count - 1 == 1,
+                """
+                the PLAIN registration must be the one before it, and must \
+                dispatch the handler exactly once — positive control that \
+                `plainHalf` is a registration body and not an empty prefix, so \
+                the two refusals below cannot pass vacuously.
+                """)
+        #expect(!plainHalf.contains("identifier: BackgroundTaskID.backfillProcessingCharged"),
+                """
+                the PLAIN registration must NOT name the charged identifier. \
+                Combined with the assertion above it, this is what makes the \
+                claim 'the charger-class registration passes its own \
+                identifier' rather than 'the string appears somewhere in this \
+                method'. A plain-class window recorded as charged is the same \
+                instrumentation defect that made 'the pull has zero rows for \
+                this class' true by construction, pointed the other way — and \
+                it would blind the ledger to the 203-expiry population too.
+                """)
+        #expect(!plainHalf.contains("budget: .backfillProcessingCharged"),
+                """
+                and it must NOT spend the charger class's budget. The plain \
+                identifier is the ONLY class this repo has measured; handing it \
+                the assumed 1800 s horizon reinstates playhead-lmrx's own bug — \
+                a work deadline 6x the p90 grant — on the 80 % of windows the \
+                bead was filed about.
                 """)
     }
 
