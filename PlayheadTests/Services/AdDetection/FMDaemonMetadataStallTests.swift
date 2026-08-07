@@ -791,7 +791,9 @@ struct FMDaemonMetadataStallRunnerTests {
 
         #expect(reasons.contains(FMDaemonRefusal.throttle.passPrologueCause),
                 "the throttled job did not record kvs8's cause: \(reasons)")
-        #expect(reasons.contains(FMDaemonRefusal.metadataStall.passPrologueCause),
+        // playhead-ezmv: PREFIX, not equality — the stall cause now carries
+        // the census suffix `(peers=N)` after the greppable token.
+        #expect(reasons.contains(where: { $0.hasPrefix(FMDaemonRefusal.metadataStall.passPrologueCause) }),
                 "the stalled job did not record the stall cause: \(reasons)")
 
         let siblings = reasons.filter { $0.contains("batchSibling") }
@@ -1187,7 +1189,21 @@ final class FMDaemonRefusalSourceCanaryTests: XCTestCase {
         // The durable writes, in source order. Every `reason:` label in the
         // runner is scanned and only those naming an `FMDaemonRefusal` cause
         // property are kept, so nothing here is a list of expected spellings.
+        //
+        // playhead-ezmv: the refused job's own write may carry the census
+        // suffix — `refusal.passPrologueCause + peersSuffix` — appended AFTER
+        // the enum token so the greppable prefix is untouched. The suffix is
+        // normalised away here under a NAMING OBLIGATION: it must be spelled
+        // exactly `peersSuffix`, so this canary keeps seeing the enum property
+        // underneath. Any other spelling (a literal, a different variable)
+        // fails the count below, which is the point — the token itself must
+        // still reach the store through the enum.
         let refusalWrites = Self.firstArguments(after: "reason:", in: dense)
+            .map { argument in
+                argument.hasSuffix("+peersSuffix")
+                    ? String(argument.dropLast("+peersSuffix".count))
+                    : argument
+            }
             .filter { $0.hasSuffix("Cause") }
         XCTAssertEqual(
             refusalWrites.count,

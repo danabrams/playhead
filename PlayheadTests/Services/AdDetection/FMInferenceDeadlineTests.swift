@@ -55,13 +55,25 @@ struct FMInferenceDeadlineTests {
     /// Safe in the parallel gate: it asserts only WHICH error is thrown, never
     /// how fast. Starvation delays the timeout; it cannot turn it into success,
     /// because the operation sleeps 600x the budget.
+    ///
+    /// playhead-ezmv: the assertion inspects `deadline` rather than comparing
+    /// whole values — the error now also carries `peersAtStart`, read from the
+    /// SHARED census, and the parallel gate legitimately has other bounded
+    /// calls in flight, so the whole-value form would flake on a reading that
+    /// is correct.
     @Test("a call that outlives the deadline throws FMInferenceTimeoutError")
     func slowCallTimesOut() async {
-        await #expect(throws: FMInferenceTimeoutError(deadline: .milliseconds(50))) {
-            try await FMInferenceDeadline.run(.milliseconds(50)) {
+        do {
+            _ = try await FMInferenceDeadline.run(.milliseconds(50)) {
                 try await Task.sleep(for: .seconds(30))
                 return "never"
             }
+            Issue.record("expected the 50ms deadline to fire")
+        } catch let timeout as FMInferenceTimeoutError {
+            #expect(timeout.deadline == .milliseconds(50))
+            #expect(timeout.peersAtStart >= 0)
+        } catch {
+            Issue.record("expected FMInferenceTimeoutError, got \(error)")
         }
     }
 
