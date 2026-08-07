@@ -55,7 +55,7 @@ struct AdmissionRejectReasonV30MigrationTests {
         // recently 36 → 37 (playhead-0sro fast-transcript watermark
         // reconcile, data-only). The V30 reject-advisory columns probed
         // below are unchanged by any of it.
-        #expect(AnalysisStore.currentSchemaVersion == 43)
+        #expect(AnalysisStore.currentSchemaVersion == 44)
         #expect(try probeColumnExists(in: dir, table: "analysis_jobs", column: "lastRejectReason"))
         #expect(try probeColumnExists(in: dir, table: "analysis_jobs", column: "lastRejectAt"))
     }
