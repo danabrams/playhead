@@ -1789,6 +1789,11 @@ FOCUSED_SUITES=(
   -only-testing:PlayheadTests/BackfillExpiryDurabilityTests
   -only-testing:PlayheadTests/GrantCompletionPopulationTests
   -only-testing:PlayheadTests/ExpiredWindowAttemptAccountingTests
+  # playhead-lmrx review round 3: the two-in-flight suite. The LX25-LX29 rails
+  # are the only ones that can see a cancel aimed at a SLOT rather than at a
+  # job, and none of the suites above ever gets two dispatches overlapping —
+  # they all seed `.soon`-lane jobs, whose cap is 1.
+  -only-testing:PlayheadTests/CancelAimIdentityTests
   # playhead-lmrx review round: the cancel-catch arm is shared, so the LX11-LX13
   # exemption rails must be scored against the suites that already own the
   # poisoned-job escape valve too. Without these a mutation that widened the
@@ -13015,16 +13020,22 @@ EOF
   # `guard` is what makes this one the backfill site. The replacement keeps the
   # closure's `Set<String>` return and its `await`, so what the mutant removes
   # is the cancellation and nothing else.
+  # playhead-lmrx R3: re-anchored — the block gained the teardown door close.
+  # The mutation still removes only the CANCEL, which is the defect LX02 names.
   LX02)
     snippet OLD <<'EOF'
-                if let scheduler = await self?.analysisWorkScheduler {
+                    await scheduler.closeDispatchForTeardown(lasting: budget.teardownReserve)
                     cancelledJobIds = await scheduler.cancelCurrentJob(cause: .taskExpired)
                 }
+                await self?.emitExpire(
+                    identifier: identifier,
 EOF
     snippet NEW <<'EOF'
-                if (await self?.analysisWorkScheduler) != nil {
+                    await scheduler.closeDispatchForTeardown(lasting: budget.teardownReserve)
                     cancelledJobIds = []
                 }
+                await self?.emitExpire(
+                    identifier: identifier,
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -13245,20 +13256,25 @@ EOF
   # between the expiration and the only write that records it: a process killed
   # during the wait leaves the row at `running`, i.e. strictly worse than the
   # `expired`-with-NULL-counters row the bead was filed to improve.
+  # playhead-lmrx R3: re-anchored — the block gained the teardown door close.
   LX19)
     snippet OLD <<'EOF'
-                if let scheduler = await self?.analysisWorkScheduler {
+                    await scheduler.closeDispatchForTeardown(lasting: budget.teardownReserve)
                     cancelledJobIds = await scheduler.cancelCurrentJob(cause: .taskExpired)
                 }
+                await self?.emitExpire(
+                    identifier: identifier,
 EOF
     snippet NEW <<'EOF'
-                if let scheduler = await self?.analysisWorkScheduler {
+                    await scheduler.closeDispatchForTeardown(lasting: budget.teardownReserve)
                     cancelledJobIds = await scheduler.cancelCurrentJob(cause: .taskExpired)
                     _ = await scheduler.awaitJobsSettled(
                         cancelledJobIds,
                         within: budget.teardownReserve
                     )
                 }
+                await self?.emitExpire(
+                    identifier: identifier,
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -13268,14 +13284,15 @@ EOF
   # cannot, because this path calls `setTaskCompleted` a few lines later and a
   # completed task never fires its expirationHandler. This is the exit the 219 s
   # bound created; before lmrx the 25-minute deadline made it unreachable.
+  # playhead-lmrx R3: re-anchored — the block gained the teardown door close.
   LX21)
     snippet OLD <<'EOF'
-            if deadlineElapsed, let scheduler = self.analysisWorkScheduler {
+                await scheduler.closeDispatchForTeardown(lasting: budget.teardownReserve)
                 cancelledJobIds = await scheduler.cancelCurrentJob(cause: .taskExpired)
             }
 EOF
     snippet NEW <<'EOF'
-            if deadlineElapsed, let scheduler = self.analysisWorkScheduler {
+                await scheduler.closeDispatchForTeardown(lasting: budget.teardownReserve)
                 cancelledJobIds = await scheduler.pendingJobIdsForLedger().subtracting(baselineIds)
             }
 EOF
