@@ -240,9 +240,8 @@ struct BackfillCoarseCheckpointTests {
             if let resolvedJobId { return resolvedJobId }
             for phase in BackfillJobPhase.allCases {
                 for offset in 0..<4 {
-                    let candidate = BackfillJobRunner.makeJobIdForTesting(
+                    let candidate = BackfillJobRunner.makeJobId(
                         analysisAssetId: assetId,
-                        transcriptVersion: transcriptVersion,
                         phase: phase,
                         offset: offset
                     )
@@ -469,9 +468,8 @@ struct BackfillCoarseCheckpointTests {
                 guard ordinal == captureAtWindow else { return }
                 for phase in BackfillJobPhase.allCases {
                     for offset in 0..<4 {
-                        let candidate = BackfillJobRunner.makeJobIdForTesting(
+                        let candidate = BackfillJobRunner.makeJobId(
                             analysisAssetId: assetId,
-                            transcriptVersion: inputs.transcriptVersion,
                             phase: phase,
                             offset: offset
                         )
@@ -833,16 +831,15 @@ struct BackfillCoarseCheckpointTests {
         //
         // R5: the loop is `guard let job = … else { continue }`, so if job-id
         // derivation ever drifts — a new phase, a changed offset range, a
-        // renamed `makeJobIdForTesting` — every iteration skips and the headline
+        // renamed `makeJobId` — every iteration skips and the headline
         // claim of this test executes ZERO expectations while still reporting
         // green. Count what was inspected and require at least one, so an empty
         // sweep fails loudly instead of passing silently.
         var jobsInspected = 0
         for phase in BackfillJobPhase.allCases {
             for offset in 0..<4 {
-                let jobId = BackfillJobRunner.makeJobIdForTesting(
+                let jobId = BackfillJobRunner.makeJobId(
                     analysisAssetId: assetId,
-                    transcriptVersion: inputs.transcriptVersion,
                     phase: phase,
                     offset: offset
                 )
@@ -1158,18 +1155,24 @@ struct BackfillCoarseCheckpointTests {
     /// closure it was a rule nothing could see deleted. `touchCoarseLeaseIfLive`
     /// exists so the same claim can be made directly and deterministically.
     ///
-    /// The state that makes it matter is a NON-TERMINAL row.
-    /// `markBackfillJobRunning` accepts `queued`, `deferred` and `running`, and
-    /// `resetStrandedBackfillJobs` only sweeps `running` rows whose `updatedAt`
-    /// is STALE — so a touch from a pass whose own run is over pulls a job a
-    /// later run left `deferred` back into `running` and keeps it fresh there,
-    /// where the reaper will not take it and the drain will not re-admit it.
-    /// That is the stall qk44 exists to prevent, re-entered through qk44's own
-    /// observer.
+    /// **playhead-wxsv narrowed what a touch can do, so this test's positive
+    /// half asserts something different — deliberately, and it is the safer
+    /// contract.** The touch used to go through `markBackfillJobRunning`, which
+    /// accepted `queued`/`deferred`/`running`, so a leaked touch could pull a
+    /// job a later run left `deferred` back into `running` and keep it fresh
+    /// there, where the reaper will not take it and the drain will not re-admit
+    /// it. wxsv's spec-1 widening made that strictly worse (it added `failed`
+    /// under budget — the state the no-progress watchdog leaves), so the
+    /// heartbeat moved to `AnalysisStore.touchBackfillJobLiveness`, which
+    /// refreshes `updatedAt` on a `running` row and is a NO-OP on every other
+    /// status.
     ///
-    /// Both directions, deliberately: a guard that refused everything would
-    /// satisfy the negative half on its own while silently retiring the lease
-    /// heartbeat that is the whole point of qk44.
+    /// So a defused touch is now inert by construction rather than by the box's
+    /// guard — and the box still earns its place, because a leaked touch on a
+    /// genuinely `running` successor keeps a lease warm for a pass nobody is
+    /// running. Both directions are still asserted; the positive one is now
+    /// "the work clock advanced", which is what qk44 actually needed, rather
+    /// than "the status changed", which was a side effect nobody wanted.
     @Test("a defused lease touch cannot resurrect a deferred job — and a live one still leases")
     func aDefusedLeaseTouchDoesNotResurrectTheJob() async throws {
         let assetId = "asset-26od-lease"
@@ -1191,13 +1194,51 @@ struct BackfillCoarseCheckpointTests {
             "an orphaned pass pulled a deferred job back into running: \(afterOrphan.status)"
         )
 
+        // playhead-wxsv: and a `failed` row under the retry budget — the state
+        // `FMNoProgressWatchdog` leaves, and the state all 5 field rows are in —
+        // must be just as untouchable. Spec 1 made this row STARTABLE, so before
+        // the heartbeat was narrowed a leaked touch resurrected exactly the row
+        // the watchdog had retired, into a status excluded from every
+        // resumability read.
+        let retiredJobId = "job-26od-lease-retired"
+        try await seedRunningJob(store, assetId: assetId, jobId: retiredJobId, status: .deferred)
+        try await store.markBackfillJobFailed(
+            jobId: retiredJobId,
+            reason: "FMNoProgressError",
+            retryCount: 1
+        )
+        await runner.touchCoarseLeaseIfLive(box: CoarseCheckpointBox(), jobId: retiredJobId)
+        #expect(
+            try await store.fetchBackfillJob(byId: retiredJobId)?.status == .failed,
+            "a heartbeat resurrected a watchdog-retired row into running"
+        )
+
+        // The positive half: a live pass on a RUNNING row still advances the
+        // work clock. A guard that refused everything would satisfy both
+        // negative halves on its own while silently retiring qk44's heartbeat.
+        //
+        // Asserted through `resetStrandedBackfillJobs` rather than by reading
+        // `updatedAt`, because that reaper IS the consumer qk44 built the clock
+        // for — it sweeps `running` rows whose `updatedAt` is older than the
+        // freshness floor. Backdating the row makes it sweepable; if the touch
+        // landed, the reaper leaves it alone. No new production test surface,
+        // and the assertion is about the behaviour rather than the column.
         let liveJobId = "job-26od-lease-live"
         try await seedRunningJob(store, assetId: assetId, jobId: liveJobId, status: .deferred)
+        try await store.markBackfillJobRunning(jobId: liveJobId, transcriptVersion: "tx-26od")
+        try await store.execForTesting(
+            "UPDATE backfill_jobs SET updatedAt = 1 WHERE jobId = '\(liveJobId)'"
+        )
         await runner.touchCoarseLeaseIfLive(box: CoarseCheckpointBox(), jobId: liveJobId)
         let afterLive = try #require(try await store.fetchBackfillJob(byId: liveJobId))
         #expect(
             afterLive.status == .running,
-            "a live pass stopped leasing — playhead-qk44's work clock is dead"
+            "a live pass must leave a running row running"
+        )
+        _ = try await store.resetStrandedBackfillJobs()
+        #expect(
+            try await store.fetchBackfillJob(byId: liveJobId)?.status == .running,
+            "the reaper swept a leased row — playhead-qk44's work clock is dead"
         )
     }
 
@@ -1575,9 +1616,8 @@ struct BackfillCoarseCheckpointTests {
                 guard ordinal == captureAtWindow else { return }
                 for phase in BackfillJobPhase.allCases {
                     for offset in 0..<4 {
-                        let candidate = BackfillJobRunner.makeJobIdForTesting(
+                        let candidate = BackfillJobRunner.makeJobId(
                             analysisAssetId: assetId,
-                            transcriptVersion: inputs.transcriptVersion,
                             phase: phase,
                             offset: offset
                         )

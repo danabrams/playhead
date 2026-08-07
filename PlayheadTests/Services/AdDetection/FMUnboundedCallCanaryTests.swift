@@ -150,7 +150,7 @@ final class FMUnboundedCallCanaryTests: XCTestCase {
         //
         // playhead-26od RE-POINTED this THROUGH an extraction rather than
         // relaxing it. The refresh used to be two lines inside the closure and
-        // this asserted the literal `markBackfillJobRunning(jobId: leaseJobId)`;
+        // this asserted the literal `markBackfillJobRunning(jobId: leaseJobId, transcriptVersion: "tx-test")`;
         // it now lives behind `touchCoarseLeaseIfLive`, which exists so the
         // job-lifetime guard riding with it is reachable from a test at all.
         // A single literal grep cannot follow that, so BOTH links in the chain
@@ -174,9 +174,20 @@ final class FMUnboundedCallCanaryTests: XCTestCase {
             "\(path): `touchCoarseLeaseIfLive` is gone. It is the only thing the coarse-pass progress observer calls, so the lease is no longer refreshed at all."
         )
         let helperEnd = min(lines.count - 1, helperIndex + Self.lookbackLines)
+        // playhead-wxsv: the method it must reach is `touchBackfillJobLiveness`,
+        // NOT `markBackfillJobRunning`. Spec 1 widened the latter to accept a
+        // `failed` row under the retry budget — the state `FMNoProgressWatchdog`
+        // leaves — so a heartbeat routed through it would resurrect the very row
+        // the watchdog retired, into a status excluded from every resumability
+        // read. Naming the narrow method here is what stops that being
+        // re-introduced by someone reaching for the obvious call.
         XCTAssertTrue(
+            lines[helperIndex...helperEnd].contains { $0.contains("touchBackfillJobLiveness(") },
+            "\(path): `touchCoarseLeaseIfLive` must refresh the `backfill_jobs` lease via `touchBackfillJobLiveness`. A helper that only logged would satisfy every check above while changing nothing — which is the whole reason this assertion exists."
+        )
+        XCTAssertFalse(
             lines[helperIndex...helperEnd].contains { $0.contains("markBackfillJobRunning(") },
-            "\(path): `touchCoarseLeaseIfLive` must refresh the `backfill_jobs` lease via `markBackfillJobRunning`. A helper that only logged would satisfy every check above while changing nothing — which is the whole reason this assertion exists."
+            "\(path): `touchCoarseLeaseIfLive` must NOT go through `markBackfillJobRunning` — since playhead-wxsv that accepts a `failed` row under the retry budget, so a leaked heartbeat would pull a watchdog-retired row into `running`, where nothing counts it as resumable and nothing can re-open it."
         )
     }
 }

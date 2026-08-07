@@ -612,59 +612,43 @@ actor BackfillJobRunner {
         var enqueuedJobs: [BackfillJob] = []
         var resumedJobIds = Set<String>()
         for (offset, phase) in plan.phases.enumerated() {
-            // R4-Fix6: include `inputs.transcriptVersion` in the jobId so a
-            // transcript regeneration produces a fresh row instead of
-            // colliding with the prior `.complete` job under the same id
-            // (which the M-5 idempotency check would skip, defeating the
-            // whole point of reprocessing the new transcript).
-            //
-            // HIGH-R5-1 note: this transcriptVersion embedding is defensive
-            // for a Phase 4 re-trigger path that does not yet exist in
-            // production. `AnalysisCoordinator.finalizeBackfill` calls
-            // `runBackfill` exactly once per session and then transitions
-            // to `.complete`, so at HEAD no caller re-invokes this runner
-            // under a new transcriptVersion. Keep the embedding — it costs
-            // nothing and unblocks the Phase 4 re-analysis trigger when
-            // transcripts regenerate without another round of id surgery.
             // R7-Fix11: jobId is a stable hash over the canonical tuple.
             // String concatenation with `-` separators is ambiguous when
-            // `analysisAssetId` or `transcriptVersion` contains a hyphen
-            // (UUIDs do), which would let two distinct tuples collide on
-            // the same id. SHA-256 truncated to 16 hex chars gives ~64
-            // bits of collision resistance — comfortably more than the
-            // logical-tuple cardinality of one device's backfill history.
-            let jobId = Self.makeJobIdForTesting(
+            // `analysisAssetId` contains a hyphen (UUIDs do), which would let
+            // two distinct tuples collide on the same id. SHA-256 truncated to
+            // 16 hex chars gives ~64 bits of collision resistance —
+            // comfortably more than the logical-tuple cardinality of one
+            // device's backfill history.
+            //
+            // playhead-wxsv: the tuple no longer carries `transcriptVersion`.
+            // See ``makeJobId(analysisAssetId:phase:offset:)`` for why it used
+            // to, why that orphaned a row per transcription session, and where
+            // the requirement it served now lives.
+            let jobId = Self.makeJobId(
                 analysisAssetId: inputs.analysisAssetId,
-                transcriptVersion: inputs.transcriptVersion,
                 phase: phase,
                 offset: offset
             )
 
             // M5: idempotent re-invocation. Job ids are deterministic, so a
             // second call would otherwise throw `duplicateJobId`. Check first:
-            //   - complete: skip entirely (already done)
-            //   - queued / running / deferred / failed: re-drive the existing
-            //     row by enqueueing it against the admission controller; do
-            //     NOT insert a duplicate.
+            //   - complete AT THE CURRENT TRANSCRIPT VERSION: skip entirely.
+            //   - terminal against an OLDER version (complete, or retries
+            //     exhausted): re-open the row — keeping its cursor — and
+            //     re-drive it. This is what makes a growing transcript CARRY ON
+            //     rather than start over.
+            //   - queued / running / deferred / failed under budget: re-drive
+            //     the existing row by enqueueing it; do NOT insert a duplicate.
             //   - missing: insert a fresh row.
             if let existing = try await store.fetchBackfillJob(byId: jobId) {
-                if existing.status == .complete {
-                    continue
+                if let redriven = try await redrivableRow(
+                    existing,
+                    transcriptVersion: inputs.transcriptVersion
+                ) {
+                    await admissionController.enqueue(redriven)
+                    enqueuedJobs.append(redriven)
+                    resumedJobIds.insert(redriven.jobId)
                 }
-                // C-B: enforce retry budget across runBackfill invocations.
-                // The factory creates a fresh AdmissionController per call, so
-                // the controller's in-memory retry budget is reset every
-                // time. The persisted retryCount is the source of truth — if
-                // it already meets or exceeds maxRetries the job must not be
-                // re-enqueued, otherwise a persistently failing job would
-                // loop forever across runs.
-                if existing.retryCount >= AdmissionController.maxRetries {
-                    logger.warning("FM backfill job exhausted retries: \(existing.jobId, privacy: .public) retries=\(existing.retryCount)")
-                    continue
-                }
-                await admissionController.enqueue(existing)
-                enqueuedJobs.append(existing)
-                resumedJobIds.insert(existing.jobId)
                 continue
             }
 
@@ -697,20 +681,23 @@ actor BackfillJobRunner {
         // above exactly; the offset continues past the last plan phase so the
         // deterministic jobId never collides with an FM phase's.
         if specialistScanEnabled, specialistRuntime != nil {
-            let specialistJobId = Self.makeJobIdForTesting(
+            let specialistJobId = Self.makeJobId(
                 analysisAssetId: inputs.analysisAssetId,
-                transcriptVersion: inputs.transcriptVersion,
                 phase: .specialistHostReadScan,
                 offset: plan.phases.count
             )
             if let existing = try await store.fetchBackfillJob(byId: specialistJobId) {
-                // Idempotent re-invocation: complete → skip; retry-exhausted →
-                // skip; otherwise re-drive the existing row (no duplicate insert).
-                if existing.status != .complete,
-                   existing.retryCount < AdmissionController.maxRetries {
-                    await admissionController.enqueue(existing)
-                    enqueuedJobs.append(existing)
-                    resumedJobIds.insert(existing.jobId)
+                // Idempotent re-invocation, through the same helper the FM plan
+                // loop uses so the two branches cannot drift: complete at this
+                // version → skip; terminal against an older version → re-open
+                // keeping the cursor; otherwise re-drive in place.
+                if let redriven = try await redrivableRow(
+                    existing,
+                    transcriptVersion: inputs.transcriptVersion
+                ) {
+                    await admissionController.enqueue(redriven)
+                    enqueuedJobs.append(redriven)
+                    resumedJobIds.insert(redriven.jobId)
                 }
             } else {
                 let specialistJob = BackfillJob(
@@ -874,7 +861,22 @@ actor BackfillJobRunner {
                 // C-2: split lifecycle API. `markBackfillJobRunning` preserves
                 // progressCursor/retryCount/deferReason so an earlier-deferred
                 // row's audit trail is not lost when it resumes.
-                try await store.markBackfillJobRunning(jobId: job.jobId)
+                //
+                // playhead-wxsv: THE attempt-start site, and the only one. This
+                // is where a job goes from "selected" to "about to read audio",
+                // so it is the only place that can honestly say which transcript
+                // the row's next state will have been made against — and the
+                // claim and the stamp are ONE statement, so a row can never be
+                // stamped with a version it was not claimed for. The liveness
+                // heartbeats go through `touchBackfillJobLiveness` instead:
+                // refreshing `updatedAt` on an attempt already under way says
+                // nothing new about the transcript, and a heartbeat that could
+                // also transition a row is how an orphaned pass resurrects the
+                // run it came from.
+                try await store.markBackfillJobRunning(
+                    jobId: job.jobId,
+                    transcriptVersion: inputs.transcriptVersion
+                )
 
                 // playhead-b6jq PR 4: the specialist host-read scan phase owns
                 // its own candidate selection and persistence — it bypasses the
@@ -1729,6 +1731,87 @@ actor BackfillJobRunner {
     /// The demotion buys the INTENT to read the whole episode; whether the pass
     /// survives to do it is playhead-qbib / playhead-i7qe territory, not this
     /// gate's.
+    /// playhead-wxsv: the M-5 idempotency decision for one existing row.
+    /// Returns the row to enqueue, or `nil` when this invocation must leave it
+    /// alone.
+    ///
+    /// **The question this answers is "is the same WORK already done?", and
+    /// before this bead it was unanswerable.** `jobId` encoded the transcript
+    /// version, so "same version?" and "same job?" were the same question, and
+    /// a row from an earlier transcript was not merely skipped — it was
+    /// invisible, because no invocation ever re-derived its id again. The
+    /// version now lives on the row, so both questions can be asked separately:
+    ///
+    /// - `complete` at the CURRENT version → done; skip. This is R4-Fix6's
+    ///   requirement (a regenerated transcript must not be skipped by colliding
+    ///   with a prior `.complete` row) expressed as a query rather than as a
+    ///   hash.
+    /// - terminal against a DIFFERENT version — `complete`, or non-complete with
+    ///   the retry budget spent — → ask the store to re-open it. The row keeps
+    ///   its `progressCursor` and `createdAt`, so a transcript that GREW resumes
+    ///   where the last pass stopped instead of re-reading what it already read.
+    ///   ``AnalysisStore/reopenBackfillJob(jobId:forTranscriptVersion:)`` refuses
+    ///   when the version has not moved, which is what stops a completed row
+    ///   from being resurrected.
+    /// - anything else (`queued`, `deferred`, `running`, `failed` under budget)
+    ///   → re-drive in place, unchanged.
+    ///
+    /// C-B: the retry budget is enforced ACROSS invocations from the persisted
+    /// `retryCount`, not from the admission controller — the factory builds a
+    /// fresh controller per call, so its in-memory budget resets every time.
+    private func redrivableRow(
+        _ existing: BackfillJob,
+        transcriptVersion: String
+    ) async throws -> BackfillJob? {
+        let budgetSpent = existing.retryCount >= AdmissionController.maxRetries
+        guard existing.status == .complete || budgetSpent else {
+            return existing
+        }
+        if existing.status == .complete, existing.attemptTranscriptVersion == transcriptVersion {
+            return nil
+        }
+        guard try await store.reopenBackfillJob(
+            jobId: existing.jobId,
+            forTranscriptVersion: transcriptVersion
+        ), let reopened = try await store.fetchBackfillJob(byId: existing.jobId) else {
+            // Always logged, never silently — the `status != .complete` filter
+            // this replaced left the ONE shape here whose cause is a defect
+            // rather than a policy with no trace at all. A terminal row that
+            // never recorded an attempt can be re-opened at no version
+            // whatsoever, so it is skipped for the life of the asset; an
+            // honestly-retired row is a budget doing its job. Those need
+            // different words, not one word and a silence.
+            if existing.attemptTranscriptVersion == nil {
+                logger.error(
+                    """
+                    fm_backfill_job_unreachable job=\(existing.jobId, privacy: .public) \
+                    status=\(existing.status.rawValue, privacy: .public) \
+                    reason=terminal_without_a_recorded_attempt
+                    """
+                )
+            } else {
+                logger.warning(
+                    """
+                    fm_backfill_job_retained job=\(existing.jobId, privacy: .public) \
+                    status=\(existing.status.rawValue, privacy: .public) \
+                    retries=\(existing.retryCount, privacy: .public) \
+                    at=\(existing.attemptTranscriptVersion ?? "-", privacy: .public)
+                    """
+                )
+            }
+            return nil
+        }
+        logger.info(
+            """
+            fm_backfill_job_reopened job=\(reopened.jobId, privacy: .public) \
+            from=\(existing.status.rawValue, privacy: .public) \
+            retriesCleared=\(existing.retryCount, privacy: .public) \
+            cursorKept=\(reopened.progressCursor?.lastProcessedUpperBoundSec?.rawValue ?? -1, privacy: .public)
+            """
+        )
+        return reopened
+    }
+
     private func fullRescanReadEpisode(assetId: String) async -> Bool {
         // playhead-41mu: reads through the shared measurement so this gate and
         // the coverage-lane terminal ask the store the same question exactly
@@ -2710,26 +2793,33 @@ actor BackfillJobRunner {
     /// job-lifetime token.
     ///
     /// The lease is what tells `resetStrandedBackfillJobs` a `running` row is
-    /// alive, and `markBackfillJobRunning` accepts `queued`, `deferred` AND
-    /// `running` — so a touch arriving from a pass whose job is over does not
-    /// merely refresh a timestamp, it can RESURRECT a non-terminal row into
-    /// `running` and then pin it there, fresh, where the reaper will not sweep
-    /// it and the drain will not re-admit it. A `running` row nobody sweeps is
-    /// exactly the stall qk44 exists to prevent.
+    /// alive, so a touch arriving from a pass whose job is over must not do
+    /// anything except refresh a timestamp. If it could also TRANSITION a row it
+    /// would pin a non-terminal row in `running`, fresh, where the reaper will
+    /// not sweep it and the drain will not re-admit it. A `running` row nobody
+    /// sweeps is exactly the stall qk44 exists to prevent.
     ///
-    /// **Which sequence actually reaches that, stated precisely because the
-    /// obvious one does not.** The only thing that orphans a pass is
-    /// `FMNoProgressWatchdog` abandoning it, and the `FMNoProgressError` that
-    /// produces lands in the drain loop's untyped `catch`, which marks the job
-    /// `.failed`. `markBackfillJobRunning` REFUSES a terminal row
-    /// (`invalidStateTransition`, swallowed by the `try?`), so an orphan cannot
-    /// resurrect the run it came from. What it can outlive is that run: the
-    /// abandoned pass stays parked on an FM call that never returns and keeps
-    /// firing this callback, and by then the SAME `jobId` may have been
-    /// re-driven and left `queued` or `deferred` by a later run. That row is
-    /// non-terminal, so the touch lands — and it lands on work nobody is doing.
-    /// Slower than the sequence this guard was first written for, and reachable
-    /// on a device whose headline failure mode is a pass that never finishes.
+    /// **playhead-wxsv: this used to route through `markBackfillJobRunning`, and
+    /// that stopped being safe.** The original argument was that
+    /// `markBackfillJobRunning` REFUSES a terminal row, so an orphaned pass
+    /// could not resurrect the run it came from — the only thing that orphans a
+    /// pass is `FMNoProgressWatchdog`, whose `FMNoProgressError` lands in the
+    /// drain loop's untyped `catch` and marks the job `.failed`. Spec 1 of wxsv
+    /// widened that guard to accept `failed` UNDER THE RETRY BUDGET, which is
+    /// precisely the state the watchdog leaves (all 5 `failed` rows on the
+    /// 2026-08-07 pull sit at `retryCount = 1` of 3), so the argument inverted:
+    /// a leaked touch would have resurrected the very row the watchdog had just
+    /// retired, into a status that is excluded from
+    /// `countResumableBackfillJobs`, `fetchAssetIdsWithResumableBackfillJobs`
+    /// AND `reopenBackfillJob` — no carrier, no count, no way back until a
+    /// freshness floor the touch itself keeps resetting.
+    ///
+    /// So the heartbeat now has its own store entry point,
+    /// ``AnalysisStore/touchBackfillJobLiveness(jobId:)``, scoped to `running`.
+    /// A touch can no longer change any row's status, which makes the guard
+    /// below about WASTED WORK rather than about correctness: an abandoned pass
+    /// that outlives its run can still keep a genuinely-running successor's
+    /// lease warm, and that is the case the box closes.
     ///
     /// A method rather than two lines inside the closure `runJob` installs, and
     /// for exactly the reason ``checkpointCoarseWindows`` is one: the guard is
@@ -2738,15 +2828,16 @@ actor BackfillJobRunner {
     /// no test could see deleted. Here a test can hand it a defused box
     /// directly. `runJob` remains the only production caller.
     ///
-    /// Narrowed, not closed: `markBackfillJobRunning` is a suspension away, so
-    /// a `defuse()` landing in that gap still lets ONE touch through. What the
-    /// guard removes is the unbounded case — an orphaned pass refreshing the
-    /// lease for the rest of its life.
+    /// Narrowed, not closed: the store call is a suspension away, so a
+    /// `defuse()` landing in that gap still lets ONE touch through. That leaked
+    /// touch is now harmless on any row that is not `running`; what the guard
+    /// removes is the unbounded case — an orphaned pass refreshing the lease for
+    /// the rest of its life.
     func touchCoarseLeaseIfLive(box: CoarseCheckpointBox, jobId: String) async {
         guard !box.isDefused else { return }
         // `try?` matches the other heartbeat sites: a lease touch that loses a
         // race with a terminal transition must not fail the pass.
-        try? await store.markBackfillJobRunning(jobId: jobId)
+        try? await store.touchBackfillJobLiveness(jobId: jobId)
     }
 
     /// playhead-26od: make everything a coarse pass has screened SO FAR durable,
@@ -2813,7 +2904,9 @@ actor BackfillJobRunner {
     /// only production caller.
     ///
     /// This repo's other method-level test seams carry a `ForTesting` suffix
-    /// (`makeJobIdForTesting`, `makeScanResultIdForTesting`). One is not added
+    /// (`makeScanResultIdForTesting`; `makeJobIdForTesting` was renamed to
+    /// ``makeJobId(analysisAssetId:phase:offset:)`` by playhead-wxsv, whose
+    /// suffix had never been true). One is not added
     /// here because a forwarder would name a second entry point to the same
     /// mutation of the same two durable tables, and the danger with this
     /// function is a SECOND caller, not a test-shaped one. Nothing else can
@@ -3257,7 +3350,7 @@ actor BackfillJobRunner {
         // lease's `updatedAt` stale before refinement adds another
         // long FM call.
         if ContinuousClock.now - lastHeartbeatTick >= heartbeatInterval {
-            try? await store.markBackfillJobRunning(jobId: jobIdForHeartbeat)
+            try? await store.touchBackfillJobLiveness(jobId: jobIdForHeartbeat)
             lastHeartbeatTick = ContinuousClock.now
         }
 
@@ -3302,7 +3395,7 @@ actor BackfillJobRunner {
         // new FM work, it just stops discarding the FM work already done.
         for window in coarse.windows {
             if ContinuousClock.now - lastHeartbeatTick >= heartbeatInterval {
-                try? await store.markBackfillJobRunning(jobId: jobIdForHeartbeat)
+                try? await store.touchBackfillJobLiveness(jobId: jobIdForHeartbeat)
                 lastHeartbeatTick = ContinuousClock.now
             }
             let result = makeScanResult(
@@ -3530,7 +3623,7 @@ actor BackfillJobRunner {
                 // build burned >5 min already, this prevents the reaper
                 // from racing the refinement call.
                 if ContinuousClock.now - lastHeartbeatTick >= heartbeatInterval {
-                    try? await store.markBackfillJobRunning(jobId: jobIdForHeartbeat)
+                    try? await store.touchBackfillJobLiveness(jobId: jobIdForHeartbeat)
                     lastHeartbeatTick = ContinuousClock.now
                 }
                 let refinement = try await dispatchedRefinePassB(
@@ -3561,7 +3654,7 @@ actor BackfillJobRunner {
                 for window in refinement.windows {
                     try Task.checkCancellation()
                     if ContinuousClock.now - lastHeartbeatTick >= heartbeatInterval {
-                        try? await store.markBackfillJobRunning(jobId: jobIdForHeartbeat)
+                        try? await store.touchBackfillJobLiveness(jobId: jobIdForHeartbeat)
                         lastHeartbeatTick = ContinuousClock.now
                     }
                     let result = makeRefinementScanResult(
@@ -4651,33 +4744,43 @@ actor BackfillJobRunner {
     /// R7-Fix11: stable id for backfill jobs. Mirrors the scan-result
     /// helper so both id spaces are immune to asset-id hyphen drift.
     ///
-    /// **The `ForTesting` suffix is a lie and the name is kept anyway.** This is
-    /// the PRODUCTION derivation of `backfill_jobs.jobId`, with three
+    /// This is the PRODUCTION derivation of `backfill_jobs.jobId`, with three
     /// non-test callers: `runPendingBackfill`'s plan loop (the FM phases) and
     /// its specialist-phase append, both in this file, and
-    /// ``SemanticScanClaim/jobId(analysisAssetId:transcriptVersion:)``, which
-    /// re-derives the id so a claim row minted OUTSIDE the runner is the same
-    /// row the runner later re-drives. Elsewhere in this file a `ForTesting`
-    /// suffix means "a seam that exists for tests" (see the note on
-    /// ``checkpointCoarseWindows(_:box:inputs:jobId:jobPhase:priorCursor:runMode:)``),
-    /// so anyone applying that reading here would conclude this is dead outside
-    /// the test target — it is not, and removing or `#if DEBUG`-fencing it
-    /// breaks job identity for every asset on disk.
+    /// ``SemanticScanClaim/jobId(analysisAssetId:)``, which re-derives the id so
+    /// a claim row minted OUTSIDE the runner is the same row the runner later
+    /// re-drives. (It was called `makeJobIdForTesting` until playhead-wxsv; the
+    /// suffix was a documented lie, and this bead had to rewrite every call site
+    /// anyway to drop a parameter, so the rename stopped costing anything.)
     ///
-    /// Renaming it is the obvious fix and was deliberately NOT done in
-    /// playhead-fil5's review: the callers are 3 production and ~30 test sites
-    /// across 8 suites owned by other beads, so the rename is pure conflict
-    /// surface against open branches for zero behaviour change. It is a
-    /// standalone cleanup, not a rider. What that rename must NOT do is change
-    /// the canonical string below — the id is persisted, so a different
-    /// preimage orphans every existing row.
-    nonisolated static func makeJobIdForTesting(
+    /// **playhead-wxsv REMOVED `transcriptVersion` from the preimage, and that
+    /// is the bead.** The tuple used to be
+    /// `(assetId, transcriptVersion, phase, offset)`. `transcriptVersion` is a
+    /// content hash, transcription runs across sessions, and `runJob` re-derives
+    /// every input from the CURRENT transcript — so the id named the
+    /// TRANSCRIPT's identity while being read as the JOB's, and every session
+    /// that extended a transcript minted a new id with `progressCursor = nil`
+    /// and orphaned the row before it. Measured on the 2026-08-07 pull: one
+    /// stale row per transcript version, exactly, and `CDD611C4` holding four
+    /// abandoned full-episode scans that between them produced zero results.
+    ///
+    /// The reason the version was embedded (R4-Fix6) was sound and is
+    /// preserved, just not here: a regenerated transcript must not be skipped
+    /// by colliding with a prior `.complete` row. That is now a QUERY — is
+    /// there a `complete` row for this asset+phase at the CURRENT version? —
+    /// answered from `backfill_jobs.attemptTranscriptVersion`. Answering it by
+    /// hashing made "is this the same WORK?" unanswerable, which is what the
+    /// deleted unfinished-row fallback existed to work around.
+    ///
+    /// The id is persisted, so changing this canonical string again orphans
+    /// every existing row. The v44 migration deletes the pre-wxsv rows for
+    /// precisely that reason.
+    nonisolated static func makeJobId(
         analysisAssetId: String,
-        transcriptVersion: String,
         phase: BackfillJobPhase,
         offset: Int
     ) -> String {
-        let canonical = "asset=\(analysisAssetId)|version=\(transcriptVersion)|phase=\(phase.rawValue)|offset=\(offset)"
+        let canonical = "asset=\(analysisAssetId)|phase=\(phase.rawValue)|offset=\(offset)"
         return hashedId(prefix: "fm", canonical: canonical)
     }
 

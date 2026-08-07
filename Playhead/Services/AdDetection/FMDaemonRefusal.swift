@@ -46,14 +46,25 @@
 // job's own merits.
 //
 // R4 CORRECTED THE SCOPE OF THAT COST, and the field pull quoted above is its
-// own counterexample. The budget is spent per JOB ROW, and a row's identity is
-// `hash(asset | transcriptVersion | phase | offset)` (`makeJobIdForTesting`),
-// so an episode whose transcript is still growing gets a FRESH row at
-// `retryCount = 0` rather than being re-driven: 0C2FC22E's failed row
-// `fm-443333542600941c` is followed 7,351 s — 2 h 02 m — later by
-// `fm-673a3b2b167fc4c7`, queued, `retryCount = 0`, same asset, same phase. Both
-// endpoints are `backfill_jobs` columns and the interval is measured from the
-// FAILURE to the next row's creation, not between two creations.
+// own counterexample. The budget is spent per JOB ROW, and a row's identity USED
+// TO BE `hash(asset | transcriptVersion | phase | offset)`, so an episode whose
+// transcript was still growing got a FRESH row at `retryCount = 0` rather than
+// being re-driven: 0C2FC22E's failed row `fm-443333542600941c` is followed
+// 7,351 s — 2 h 02 m — later by `fm-673a3b2b167fc4c7`, queued,
+// `retryCount = 0`, same asset, same phase. Both endpoints are `backfill_jobs`
+// columns and the interval is measured from the FAILURE to the next row's
+// creation, not between two creations.
+//
+// playhead-wxsv REMOVED THAT ESCAPE, deliberately, and replaced it rather than
+// merely deleting it. The fresh row was an accident of the identity — it also
+// discarded the previous row's cursor and orphaned it forever — so the escape
+// came bundled with the defect. The id is now
+// ``BackfillJobRunner/makeJobId(analysisAssetId:phase:offset:)`` and a terminal
+// row whose `attemptTranscriptVersion` is no longer current is RE-OPENED in
+// place by ``AnalysisStore/reopenBackfillJob(jobId:forTranscriptVersion:)``,
+// which clears `retryCount` and keeps the cursor. Same relief from a transient
+// daemon outage, tied to the same real event (the transcript moved), without
+// abandoning the work already done.
 //
 // So "for the life of the install", which this paragraph used to say, is false
 // while the transcript is still moving. It becomes true the moment the

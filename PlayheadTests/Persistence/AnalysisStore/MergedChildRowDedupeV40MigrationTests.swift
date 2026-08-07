@@ -536,7 +536,7 @@ struct MergedChildRowDedupeV40MigrationTests {
         try await store.migrate()
 
         #expect(try await store.schemaVersion() == AnalysisStore.currentSchemaVersion)
-        #expect(AnalysisStore.currentSchemaVersion == 43)
+        #expect(AnalysisStore.currentSchemaVersion == 44)
 
         let db = try openRaw(dir)
         defer { sqlite3_close_v2(db) }

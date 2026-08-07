@@ -321,9 +321,8 @@ struct FMDaemonMetadataStallRunnerTests {
     ) async throws -> [BackfillJob] {
         var rows: [BackfillJob] = []
         for (offset, phase) in Self.batchPhases.enumerated() {
-            let jobId = BackfillJobRunner.makeJobIdForTesting(
+            let jobId = BackfillJobRunner.makeJobId(
                 analysisAssetId: assetId,
-                transcriptVersion: transcriptVersion,
                 phase: phase,
                 offset: offset
             )

@@ -395,6 +395,55 @@ struct ResumableBackfillJobSelectorTests {
         #expect(AnalysisStore.backfillEnqueueBatchWindowSec > 0.0005 * 100)
     }
 
+    /// playhead-wxsv SPEC 3: the re-drive window must not be evicted.
+    ///
+    /// `countResumableBackfillJobs` scopes to a 0.5 s window below an
+    /// UNFILTERED `MAX(createdAt)`, so any write that moves a row's timestamp
+    /// forward pushes that row's own siblings out of the window — and if the
+    /// moved row is itself `complete` or `running` (both excluded from the
+    /// count) the answer becomes ZERO while real pending work sits there, and
+    /// `AnalysisWorkScheduler.shouldMintAdScanRedrive` shuts the gate.
+    ///
+    /// This bead adds a new writer to these rows —
+    /// `reopenBackfillJob` — so the invariant needs a witness rather than a
+    /// convention. The fixture is the exact shape that breaks: one asset, a
+    /// complete row and a still-queued sibling in the same batch. An
+    /// `INSERT OR REPLACE` re-open (the tempting spelling) restamps `createdAt`
+    /// to now and this reads 0.
+    @Test("playhead-wxsv: re-opening a row does not evict its batch from the re-drive window")
+    func reopenDoesNotEvictTheBatch() async throws {
+        let store = try await makeTestStore()
+        try await seedAsset(store, id: "a-window")
+
+        // One enqueue batch: a phase that finished and a phase still waiting.
+        try await store.insertBackfillJob(
+            makeBackfillJob(
+                jobId: "win-done", analysisAssetId: "a-window",
+                phase: .fullEpisodeScan, status: .queued, createdAt: 5_000
+            )
+        )
+        try await store.insertBackfillJob(
+            makeBackfillJob(
+                jobId: "win-pending", analysisAssetId: "a-window",
+                phase: .scanLikelyAdSlots, status: .queued, createdAt: 5_000.0001
+            )
+        )
+        try await store.markBackfillJobRunning(jobId: "win-done", transcriptVersion: "tx-v1")
+        try await store.markBackfillJobComplete(jobId: "win-done", progressCursor: nil)
+        #expect(try await store.countResumableBackfillJobs(assetId: "a-window") == 1,
+                "the pending sibling is the asset's remaining work")
+
+        #expect(try await store.reopenBackfillJob(jobId: "win-done", forTranscriptVersion: "tx-v2"))
+
+        #expect(try await store.countResumableBackfillJobs(assetId: "a-window") == 2,
+                "re-opening adds work; it must never subtract the sibling by moving MAX(createdAt)")
+        #expect(AnalysisWorkScheduler.shouldMintAdScanRedrive(
+                    adScanFraction: 0.1,
+                    resumableCoverageJobCount: try await store.countResumableBackfillJobs(assetId: "a-window")
+                ),
+                "the playhead-onn6 gate must still open")
+    }
+
     @Test("an asset with no coverage-lane rows counts zero")
     func emptyLaneCountsZero() async throws {
         let store = try await makeTestStore()

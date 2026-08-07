@@ -570,9 +570,8 @@ struct AdDetectionServiceShadowModeTests {
             .scanRandomAuditWindows,
         ]
         for (offset, phase) in expectedTargetedPhases.enumerated() {
-            let jobId = BackfillJobRunner.makeJobIdForTesting(
+            let jobId = BackfillJobRunner.makeJobId(
                 analysisAssetId: targetedAssetId,
-                transcriptVersion: version.transcriptVersion,
                 phase: phase,
                 offset: offset
             )
@@ -581,9 +580,8 @@ struct AdDetectionServiceShadowModeTests {
             #expect(job.phase == phase)
         }
 
-        let fullEpisodeJobId = BackfillJobRunner.makeJobIdForTesting(
+        let fullEpisodeJobId = BackfillJobRunner.makeJobId(
             analysisAssetId: targetedAssetId,
-            transcriptVersion: version.transcriptVersion,
             phase: .fullEpisodeScan,
             offset: 0
         )

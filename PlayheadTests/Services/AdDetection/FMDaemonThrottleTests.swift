@@ -517,9 +517,8 @@ struct FMThrottledPrologueRunnerTests {
         ]
         var rows: [BackfillJob] = []
         for (offset, phase) in phases.enumerated() {
-            let jobId = BackfillJobRunner.makeJobIdForTesting(
+            let jobId = BackfillJobRunner.makeJobId(
                 analysisAssetId: assetId,
-                transcriptVersion: transcriptVersion,
                 phase: phase,
                 offset: offset
             )

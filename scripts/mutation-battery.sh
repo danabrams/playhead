@@ -1808,6 +1808,18 @@ FOCUSED_SUITES=(
   # would have said so. It belongs in the scored set for exactly that reason.
   -only-testing:PlayheadTests/BackfillSchedulerBoundingTests
   -only-testing:PlayheadTests/BackgroundProcessingServiceLedgerTests
+  # playhead-wxsv: the coverage-lane job IDENTITY (WX series). Four suites,
+  # because the claim spans four layers and no one of them can see the others:
+  # the store transitions themselves (re-open, the failed-under-budget restart,
+  # the attempt stamp); the RUNNER, which is the only thing able to observe that
+  # a growing transcript resumes rather than restarts; the playhead-onn6
+  # re-drive count, which is what a moved `createdAt` silently zeroes; and the
+  # MIGRATION, because "legacy rows are dropped, not migrated" is a property of
+  # a rung nothing else runs.
+  -only-testing:PlayheadTests/BackfillJobStoreTests
+  -only-testing:PlayheadTests/BackfillJobRunnerTests
+  -only-testing:PlayheadTests/ResumableBackfillJobSelectorTests
+  -only-testing:PlayheadTests/BackfillJobIdentityV44MigrationTests
 )
 
 # Named to match the `/private/tmp/playhead-*` pattern `scripts/disk-cleanup.sh`
@@ -2811,6 +2823,22 @@ T_LMRX_ATTEMPT="an expired background window leaves the job queued and spends no
 T_LMRX_NEVERDIE="five expired windows in a row still leave the job alive"
 T_LMRX_POISON="control: a genuine mid-run cancel still spends an attempt and still supersedes"
 T_LMRX_POPULATION="a FAILED job is not credited as completed"
+
+# ---- playhead-wxsv: the coverage-lane job identity (WX series) ----
+T_WXSV_CURSOR="playhead-wxsv: re-opening a completed row keeps its cursor and its createdAt"
+T_WXSV_WINDOW="playhead-wxsv: re-opening a row does not evict its batch from the re-drive window"
+T_WXSV_SAMEVERSION="playhead-wxsv: re-open refuses a completed row at the same version"
+T_WXSV_UNSTAMPED="playhead-wxsv: re-open refuses a terminal row that was never stamped"
+T_WXSV_BUDGET="playhead-wxsv: re-opening an exhausted row clears the retry budget it spent elsewhere"
+T_WXSV_RESTART="playhead-wxsv: markBackfillJobRunning restarts a failed row under the retry budget"
+T_WXSV_RETIRED="playhead-wxsv: markBackfillJobRunning still refuses a failed row at the retry budget"
+T_WXSV_REDRIVEN="playhead-wxsv: a failed row under the retry budget is re-driven and reaches FM"
+T_WXSV_GROWS="playhead-wxsv: a transcript that grows resumes the scan instead of restarting it"
+T_WXSV_REOPENS="playhead-wxsv: a transcriptVersion bump re-opens the SAME row and re-drives it"
+T_WXSV_DROP="playhead-wxsv: the v43->v44 step deletes every pre-existing backfill row"
+T_WXSV_V39="playhead-wxsv: v44 does not step over a rolled-back v39"
+T_WXSV_HEARTBEAT="playhead-wxsv: a liveness heartbeat cannot start a row, only refresh a running one"
+T_WXSV_RESTAMP="playhead-wxsv: a second claim on a running row does not steal its attempt version"
 T_LMRX_SCOPE="an empty baseline completes nothing"
 T_LMRX_CHARGED="the charged sibling is declared an assumption, not a measurement"
 T_LMRX_SETTLE="awaitJobsSettled waits for a running job and times out rather than lying"
@@ -5892,6 +5920,140 @@ MUTATIONS=(
   #     Its own batch: the mutant touches the same `registerBackgroundTasks()`
   #     body LX40 does, and two edits to one body cannot be attributed apart.
   "LX41|574|BGPS|$T_LMRX_CHARGEDWIRING"
+
+  # ---- playhead-wxsv: the coverage-lane job identity (WX) ----
+  #
+  # RUN 2026-08-07: 12 KILLED / 0 SURVIVED / 0 ERROR / 1 UNSCOREABLE (WX13 hangs
+  # — see its own note below), 9 builds, batches 575-582. WX01-WX11 were re-run
+  # after the review round rewrote the claim/heartbeat split, so no verdict here
+  # predates the code it scores.
+  # Under `PLAYHEAD_MB_SKIP_BASELINE=1`, and the caveat matters: the
+  # FOCUSED_SUITES baseline was RED on 6 tests from ShadowRetryTests,
+  # BackgroundGrantBudgetTests and SkipOrchestratorRevertTests — the starvation
+  # families playhead-ehz2 is filed on, measured red on four separate commits
+  # by four agents. The bypass is honest here for two reasons, both checked
+  # before it was used: the four WX suites were run SCOPED and green first
+  # (184 tests / 13 suites and 119 / 8, both exit 0), and every WX expectation
+  # string begins "playhead-wxsv: ", which appears nowhere in the red set — so
+  # no WX verdict can be a red-baseline artefact. That disjointness check is
+  # the manual form of ehz2's fix direction (b).
+  #
+  # WHAT IS BEING DEFENDED. `backfill_jobs.jobId` used to be
+  # `SHA256(assetId | transcriptVersion | phase | offset)`, so a row's IDENTITY
+  # named a transcript while `runJob` re-derived every input from whatever
+  # transcript was current. `transcriptVersion` is a content hash and
+  # transcription runs across sessions, so every session that extended a
+  # transcript minted a new id with a nil cursor and orphaned the row before it
+  # — measured on the 2026-08-07 pull as one stale row per version, exactly,
+  # with `CDD611C4` holding four abandoned full-episode scans that between them
+  # produced zero results. The version is now a COLUMN
+  # (`attemptTranscriptVersion`), stamped at the one attempt-start site, and a
+  # terminal row whose stamp is stale is re-opened in place — cursor kept.
+  #
+  # WHY THE BATCHES ARE SHAPED THIS WAY: several of these mutants break more
+  # than one WX test, so each is scored against a witness that ONLY it can
+  # redden, and mutants whose collateral overlaps another's expectation are put
+  # in different batches. WX08 and WX09 are alone for that reason: each of them
+  # reddens most of the series.
+
+  # WX01 — the re-open clears the cursor, "start the new transcript fresh". It
+  # is the single most tempting simplification here and it silently gives back
+  # the whole bead: the row survives, so nothing looks orphaned, and the episode
+  # is simply re-read from zero on every re-transcription.
+  "WX01|575|STORE|$T_WXSV_CURSOR"
+
+  # WX06 — `markBackfillJobRunning` goes back to refusing `failed`. This is the
+  # SHIPPED defect: the runner re-drives a failed row under the retry budget,
+  # this guard rejected it, and the retry threw. All 5 failed rows on the pull
+  # sit at retryCount=1 of 3, so the fleet's whole failed population was
+  # unstartable while `countResumableBackfillJobs` counted it as pending work.
+  "WX06|575|STORE|$T_WXSV_RESTART"
+
+  # WX10 — the v44 rung keeps the legacy rows and merely adds the column. Every
+  # one of those rows was minted under a preimage nothing derives again, so they
+  # are unreachable debris that still count as resumable — and the only way to
+  # give them a version is to read the transcript on disk now, which is this
+  # bead's own defect committed inside its fix.
+  "WX10|575|STORE|$T_WXSV_DROP"
+
+  # WX02 — the re-open restamps `createdAt`. This is what an `INSERT OR REPLACE`
+  # spelling does for free, and it is invisible on the row itself:
+  # `countResumableBackfillJobs` scopes to a 0.5 s window below an UNFILTERED
+  # `MAX(createdAt)`, so a moved timestamp pushes the row's own SIBLINGS out of
+  # the window and the playhead-onn6 re-drive gate shuts on an asset that has
+  # real pending work.
+  "WX02|576|STORE|$T_WXSV_WINDOW"
+
+  # WX07 — the restart guard drops the retry budget: any `failed` row starts.
+  # The mirror of WX06 and the reason the budget is enforced in SQL rather than
+  # left to the caller — a caller-side check and a store-side guard disagreeing
+  # is how the original defect arose.
+  "WX07|576|STORE|$T_WXSV_RETIRED"
+
+  # WX11 — the v44 rung loses its "do not step over a rolled-back V39" guard.
+  # For V40-V43 stepping over strands an index; for THIS rung it DELETES the
+  # coverage lane of a device stuck at 38, on every launch.
+  "WX11|576|STORE|$T_WXSV_V39"
+
+  # WX03 — the re-open stops comparing versions and re-opens any terminal row.
+  # That is spec 2 gone: a completed row is resurrected on every pass, and since
+  # `markBackfillJobRunning` refuses `complete` outright this guard is the only
+  # door there is.
+  "WX03|577|STORE|$T_WXSV_SAMEVERSION"
+
+  # WX04 — a NULL stamp counts as "the version differs", the permissive reading.
+  # It looks harmless because production cannot produce a terminal row without a
+  # stamp; what it actually buys is an UNBOUNDED re-open the moment any path
+  # can, since an absence of evidence never stops being absent.
+  "WX04|578|STORE|$T_WXSV_UNSTAMPED"
+
+  # WX05 — the re-open leaves `retryCount` where it was. The row is re-queued
+  # and looks startable, and `markBackfillJobRunning` refuses it forever: a row
+  # nothing can start, blocking, which is spec 1 all over again one layer up.
+  "WX05|578|STORE|$T_WXSV_BUDGET"
+
+  # WX08 — the attempt stamp is never written. Every re-open then refuses (no
+  # positive evidence), so the fix inverts into permanent suppression: no
+  # completed row is ever reprocessed and no exhausted row ever escapes. Alone
+  # in its batch because it reddens most of the series.
+  "WX08|579|STORE|$T_WXSV_REDRIVEN"
+
+  # WX12 / WX13 — the two regressions adversarial review found in the FIRST cut
+  # of this bead, each now a rail. Both are consequences of spec 1's widening
+  # that were invisible from the spec itself, and neither is reachable from any
+  # other WX rail: WX12 needs two lanes on one row, WX13 needs a heartbeat on a
+  # row the drain has already retired.
+  # SEPARATE BATCHES, and the split is the RESULT of a measurement rather than a
+  # precaution. Run together on 2026-08-07 they SPUN: the sim-side app burned
+  # 100 minutes of CPU at 699 % with a completely static log, where every other
+  # WX batch finished in ~2.5 minutes. Split and re-run:
+  #
+  #   WX12 alone  -> KILLED, 2m03s
+  #   WX13 alone  -> still spinning at 420 s, killed by `timeout`
+  #
+  # SO WX13 IS UNSCOREABLE, AND WHY IS THE INTERESTING PART. Its mutant lets a
+  # liveness heartbeat TRANSITION a row (`status <> 'complete'` instead of
+  # `status = 'running'`), and that does not merely break an expectation — it
+  # makes some drain in the focused set re-admit work it has already retired,
+  # without bound. The rail's own description is "resurrecting a retired row";
+  # the mutant delivers that as a LIVELOCK rather than as a red test, which is a
+  # stronger statement about the hazard than a KILL would have been and a weaker
+  # one about the test. `heartbeatCannotStartARow` is the behavioural witness and
+  # it passes; what is NOT established is that the witness is what fails first.
+  #
+  # Do not "fix" this by widening the mutant until it merely fails. The honest
+  # options are to bound the spinning suite, or to score WX13 against a store
+  # test run in isolation (`--only WX13` with a narrowed FOCUSED_SUITES).
+  "WX12|581|STORE|$T_WXSV_RESTAMP"
+  "WX13|582|STORE|$T_WXSV_HEARTBEAT"
+
+  # WX09 — THE DEFECT ITSELF, restored at the call site rather than in the
+  # derivation (the signature is shared with ~40 test call sites, so putting it
+  # back there would break the build instead of the behaviour). The plan loop
+  # folds `transcriptVersion` into the asset key, which is byte-for-byte the
+  # pre-wxsv identity: a new row per transcription session, cursor nil, previous
+  # row orphaned. Alone in its batch for the same reason as WX08.
+  "WX09|580|RUNNER|$T_WXSV_GROWS;$T_WXSV_REOPENS"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -6282,6 +6444,19 @@ describe_mutation() {
     LX39) echo "lmrx: the baseline IDENTITIES are never published, so every expired row loses jobsCompleted while jobsSeen stays green" ;;
     LX40) echo "lmrx: the charger-class registration drops its identifier and budget, silently spending the plain class's measurement" ;;
     LX41) echo "lmrx: the PLAIN registration takes the charged identifier and budget, so every measured window spends an assumed 1800 s" ;;
+    WX01) echo "wxsv: the re-open clears the cursor, so a grown transcript re-reads the episode from zero" ;;
+    WX02) echo "wxsv: the re-open restamps createdAt, evicting the row's own siblings from the re-drive window" ;;
+    WX03) echo "wxsv: the re-open stops comparing versions and resurrects a completed row on every pass" ;;
+    WX04) echo "wxsv: an absent stamp counts as a changed version, making the re-open unbounded" ;;
+    WX05) echo "wxsv: the re-open leaves the spent retry budget, so the row it queues can never start" ;;
+    WX06) echo "wxsv: markBackfillJobRunning refuses a failed row again — the shipped defect, whole fleet unstartable" ;;
+    WX07) echo "wxsv: the restart guard drops the retry budget, so a failing job loops forever" ;;
+    WX08) echo "wxsv: the claim never stamps a version, so no row is ever re-opened again" ;;
+    WX09) echo "wxsv: the plan loop folds the transcript version back into the job id — the defect itself" ;;
+    WX10) echo "wxsv: the v44 rung keeps unreachable legacy rows instead of dropping them" ;;
+    WX11) echo "wxsv: the v44 rung steps over a rolled-back v39 and deletes a v38 device's coverage lane" ;;
+    WX12) echo "wxsv: the attempt stamp is assigned unconditionally, so a second lane restamps a running row" ;;
+    WX13) echo "wxsv: the liveness heartbeat is a start transition again, resurrecting a retired row" ;;
     TS01) echo "5n8k: THE historical defect restored — install assigns a process-global and restores it in a defer" ;;
     TS02) echo "5n8k: the leak variant — the funnel caches the last binding in a process-global and never restores" ;;
     TS03) echo "5n8k: the funnel drops every diagnostic — the vacuity control on all four positive witnesses" ;;
@@ -13773,6 +13948,169 @@ EOF
   # stays satisfied because the charged registration still spells them too. The
   # anchor is the pre-lmrx one-line dispatch, which occurs once — the charged
   # registration's call is multi-line.
+  # ---- playhead-wxsv (WX01-WX11) ----
+
+  # WX01 — the re-open "starts the new transcript fresh". Every field the row
+  # carried about how far it got is discarded; the row itself survives, so
+  # nothing looks orphaned and the cost is invisible except as a re-read.
+  WX01)
+    patch "$file" \
+      "            SET status = 'queued',
+                retryCount = 0,
+                updatedAt = strftime('%s', 'now')
+            WHERE jobId = ?
+              AND status <> 'running'" \
+      "            SET status = 'queued',
+                retryCount = 0,
+                progressCursor = NULL,
+                updatedAt = strftime('%s', 'now')
+            WHERE jobId = ?
+              AND status <> 'running'" ;;
+
+  # WX02 — the re-open restamps `createdAt`, which is what the `INSERT OR
+  # REPLACE` spelling of this method does for free.
+  WX02)
+    patch "$file" \
+      "            SET status = 'queued',
+                retryCount = 0,
+                updatedAt = strftime('%s', 'now')
+            WHERE jobId = ?
+              AND status <> 'running'" \
+      "            SET status = 'queued',
+                retryCount = 0,
+                createdAt = strftime('%s', 'now'),
+                updatedAt = strftime('%s', 'now')
+            WHERE jobId = ?
+              AND status <> 'running'" ;;
+
+  # WX03 — the version comparison goes. The bind stays (SQLite tolerates an
+  # unused parameter), so this compiles and reads as a simplification: "a
+  # terminal row is re-openable".
+  WX03)
+    patch "$file" \
+      "              AND status <> 'running'
+              AND attemptTranscriptVersion IS NOT NULL
+              AND attemptTranscriptVersion <> ?" \
+      "              AND status <> 'running'
+              AND (? IS NOT NULL)" ;;
+
+  # WX04 — an absent stamp counts as "the version differs".
+  WX04)
+    patch "$file" \
+      "              AND attemptTranscriptVersion IS NOT NULL
+              AND attemptTranscriptVersion <> ?" \
+      "              AND (attemptTranscriptVersion IS NULL
+                   OR attemptTranscriptVersion <> ?)" ;;
+
+  # WX05 — the re-open leaves the retry budget where the previous transcript
+  # spent it.
+  WX05)
+    patch "$file" \
+      "            SET status = 'queued',
+                retryCount = 0,
+                updatedAt = strftime('%s', 'now')
+            WHERE jobId = ?
+              AND status <> 'running'" \
+      "            SET status = 'queued',
+                updatedAt = strftime('%s', 'now')
+            WHERE jobId = ?
+              AND status <> 'running'" ;;
+
+  # WX06 — the shipped defect: `failed` is refused outright again.
+  WX06)
+    patch "$file" \
+      "            WHERE jobId = ?
+              AND (status IN ('queued', 'deferred', 'running')
+                   OR (status = 'failed' AND retryCount < ?))" \
+      "            WHERE jobId = ?
+              AND (status IN ('queued', 'deferred', 'running')
+                   OR (status = 'failed' AND ? IS NULL))" ;;
+
+  # WX07 — the budget clause goes: any `failed` row restarts, forever.
+  WX07)
+    patch "$file" \
+      "                   OR (status = 'failed' AND retryCount < ?))" \
+      "                   OR (status = 'failed' AND ? IS NOT NULL))" ;;
+
+  # WX10 — the v44 rung adds the column and keeps the rows.
+  WX10)
+    patch "$file" \
+      "            try exec(\"DELETE FROM backfill_jobs\")
+            try addColumnIfNeeded(
+                table: \"backfill_jobs\",
+                column: \"attemptTranscriptVersion\"," \
+      "            try addColumnIfNeeded(
+                table: \"backfill_jobs\",
+                column: \"attemptTranscriptVersion\"," ;;
+
+  # WX11 — the v44 rung drops the V39 step-over guard.
+  WX11)
+    patch "$file" \
+      "        guard observed < 44 else { return }
+        // DO NOT STEP OVER A ROLLED-BACK V39, exactly as V40/V41/V42/V43 do not
+        // — see \`migrateSemanticScanAttributionV42IfNeeded\` for why the ladder
+        // does not enforce this structurally.
+        guard observed >= 43 else { return }" \
+      "        guard observed < 44 else { return }" ;;
+
+  # WX08 — the attempt stamp is never written, so no re-open ever finds the
+  # positive evidence it requires.
+  WX08)
+    patch "$file" \
+      "                attemptTranscriptVersion = CASE
+                    WHEN status = 'running' THEN attemptTranscriptVersion
+                    ELSE ?
+                END," \
+      "                attemptTranscriptVersion = CASE
+                    WHEN ? IS NULL THEN attemptTranscriptVersion
+                    ELSE attemptTranscriptVersion
+                END," ;;
+
+  # WX12 — the CASE loses its incumbent clause and the stamp is assigned
+  # unconditionally. This is the two-writes bug the review found, expressed in
+  # one statement: a second lane told "already running" restamps a row whose
+  # in-flight attempt is reading a different transcript, and the completion that
+  # follows claims a version nothing scanned.
+  WX12)
+    patch "$file" \
+      "                attemptTranscriptVersion = CASE
+                    WHEN status = 'running' THEN attemptTranscriptVersion
+                    ELSE ?
+                END," \
+      "                attemptTranscriptVersion = ?," ;;
+
+  # WX13 — the liveness heartbeat goes back to being a full start transition.
+  # Post-spec-1 that resurrects the very `failed` row the no-progress watchdog
+  # just retired, into a status excluded from every resumability read.
+  WX13)
+    patch "$file" \
+      "            UPDATE backfill_jobs
+            SET updatedAt = strftime('%s', 'now')
+            WHERE jobId = ? AND status = 'running'" \
+      "            UPDATE backfill_jobs
+            SET status = 'running',
+                updatedAt = strftime('%s', 'now')
+            WHERE jobId = ? AND status <> 'complete'" ;;
+
+  # WX09 — the pre-wxsv identity, restored at the call site: the transcript
+  # version is folded into the asset key, so every version derives a new row.
+  WX09)
+    snippet OLD <<'EOF'
+            let jobId = Self.makeJobId(
+                analysisAssetId: inputs.analysisAssetId,
+                phase: phase,
+                offset: offset
+            )
+EOF
+    snippet NEW <<'EOF'
+            let jobId = Self.makeJobId(
+                analysisAssetId: "\(inputs.analysisAssetId)|\(inputs.transcriptVersion)",
+                phase: phase,
+                offset: offset
+            )
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
   LX41)
     snippet OLD <<'EOF'
             Task { await self.handleBackfillTask(sendableTask.value) }
