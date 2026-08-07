@@ -2051,12 +2051,34 @@ struct CancelAimIdentityTests {
             try #require(spins < 1000, "the two dispatches never overlapped; in flight: \(seen.sorted())")
             try await Task.sleep(for: .milliseconds(20))
         }
-        // Both runners started, so the `runTask` half of the aim is exercised
+        // BOTH runners started, so the `runTask` half of the aim is exercised
         // and not only the `cancelRequested` half.
+        //
+        // playhead-lmrx (review round 8): ASKED BY IDENTITY, AND IT WAS NOT.
+        // This loop spun on `hasCurrentRunningTaskForTesting()`, which reads
+        // `runningJobs.values.contains { $0.runTask != nil }` — satisfied by
+        // EITHER job. `first` is dispatched a whole `processJob` prologue ahead
+        // of `second`, so it is normally already running when `second` has only
+        // just been inserted into the registry, and the loop fell through with
+        // `second` still between its insert and its `runTask` assignment
+        // (several DB suspension points later). Round 7 fixed exactly this
+        // shape at `recoveryExpiryShutsTheDispatchDoor` and did not look at the
+        // helper that drives three tests.
+        //
+        // The consequence is not a weakened assertion, it is a RED on correct
+        // code: a cancel landing in that gap is caught by `cancelRequested`, so
+        // the job takes the CANCEL-RACE arm rather than the cancel-catch arm,
+        // and that arm's `updateJobState(jobId:state: "queued")` binds
+        // `lastErrorCode = NULL`. `siblingsDoNotStealEachOthersCancelCause`
+        // then reads NULL where it requires
+        // `backgroundWindowExpiredErrorCode`, and an intermittently-red rail is
+        // what round 6 refused to accept.
         spins = 0
-        while await scheduler.hasCurrentRunningTaskForTesting() == false {
+        while await scheduler.runnerStartedJobIdsForTesting() != [first, second] {
             spins += 1
-            try #require(spins < 1000, "no runner ever started")
+            let started = await scheduler.runnerStartedJobIdsForTesting()
+            try #require(spins < 1000,
+                         "both runners never started; started: \(started.sorted())")
             try await Task.sleep(for: .milliseconds(20))
         }
         return [a, b]

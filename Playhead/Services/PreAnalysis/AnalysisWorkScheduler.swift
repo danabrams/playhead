@@ -2917,6 +2917,31 @@ actor AnalysisWorkScheduler {
         runningJobs.values.contains { $0.runTask != nil }
     }
 
+    /// playhead-lmrx (review round 8): WHICH in-flight jobs have their runner
+    /// assigned, rather than whether ANY of them does.
+    ///
+    /// ``hasCurrentRunningTaskForTesting()`` is the right observable for one job
+    /// and the wrong one for two: it reads `contains { $0.runTask != nil }`, so
+    /// with two dispatches in flight EITHER satisfies it. That is the single
+    /// slot's own question re-asked of the registry that replaced it — this
+    /// bead's standing defect class, a value that names "a runner is going"
+    /// read as "the runners I mean are going".
+    ///
+    /// It matters because the gap is wide and one-sided. A job's registry entry
+    /// is created at the top of `processJob` and its `runTask` is assigned
+    /// after the fingerprint check, the asset-id resolution and the lease/
+    /// cancel-race checks — several DB suspension points later. The first job
+    /// dispatched is therefore running long before the second is, so a test
+    /// spinning on "any runner" proceeds while the second job is still inside
+    /// that gap. A cancel landing there is caught by ``RunningJob/
+    /// cancelRequested`` and takes the CANCEL-RACE arm, whose
+    /// `updateJobState(jobId:state:)` binds `lastErrorCode = NULL` — a
+    /// different row from the cancel-catch arm's expiry requeue, and an
+    /// assertion about the expiry's error code then goes red on CORRECT code.
+    func runnerStartedJobIdsForTesting() -> Set<String> {
+        Set(runningJobs.filter { $0.value.runTask != nil }.keys)
+    }
+
     /// playhead-lmrx (review round 3): which in-flight jobs `cancelCurrentJob`
     /// actually reached. Distinct from ``inFlightJobIdsForTesting()``, which is
     /// what it CLAIMS to have reached — the two were allowed to disagree before

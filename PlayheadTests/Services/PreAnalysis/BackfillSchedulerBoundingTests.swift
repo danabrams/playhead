@@ -268,7 +268,10 @@ struct BackfillSchedulerBoundingTests {
         // `BackgroundGrantBudgetTests`; this clause is the source-level
         // backstop, and it counts.
         let source = try SwiftSourceInspector.loadSource(repoRelativePath: Self.servicePath)
-        for anchor in ["func handleBackfillTask(", "func handlePreAnalysisRecovery("] {
+        for (anchor, grantStart) in [
+            ("func handleBackfillTask(", "grantStart"),
+            ("func handlePreAnalysisRecovery(", "recoveryGrantStart"),
+        ] {
             #expect(source.components(separatedBy: anchor).count == 2,
                     "the canary anchor '\(anchor)' must occur exactly once in \(Self.servicePath)")
             let body = try #require(
@@ -300,12 +303,52 @@ struct BackfillSchedulerBoundingTests {
                     site behaviourally too — do not relax it back to a \
                     `contains`, which cannot tell two sites from one.
                     """)
-            #expect(code.contains("workDeadline(from:"),
+            // playhead-lmrx (review round 8): NAMED, not `workDeadline(from:`.
+            // The bare prefix is satisfied by `workDeadline(from:
+            // ContinuousClock.now)`, which is precisely the claim at the
+            // `grantStart` assignment — "a slow `recordRunStart` or a contended
+            // actor hop spends the grant it delays rather than silently
+            // extending it" — deleted. `pollLoopDeadlineIsGrantShaped` cannot
+            // see that either: it is deliberately built to tolerate the handler
+            // reading the clock anywhere between its own before/after bounds.
+            #expect(code.contains("workDeadline(from: \(grantStart))"),
                     """
-                    and it must derive its work deadline from the grant's \
-                    start rather than reading the clock at the call — \
-                    positive control that this canary is reading a handler \
-                    body and not an empty string.
+                    \(anchor) must derive its work deadline from the instant \
+                    the GRANT opened (`\(grantStart)`), not from the clock at \
+                    the call — otherwise everything the handler does before the \
+                    drain silently extends the window instead of spending it. \
+                    Also the positive control that this canary is reading a \
+                    handler body and not an empty string.
+                    """)
+            // playhead-lmrx (review round 8): AND NOTHING IN EITHER HANDLER MAY
+            // MINT A DEADLINE FROM A FRESH CLOCK READ.
+            //
+            // The gap this closes: every consumer of the shared local is
+            // written `deadline: workDeadline`, and no rail and no test asserts
+            // the ARGUMENT. LX01 mutates the local, so it changes both
+            // consumers at once and dies through the coordinator's recorded
+            // deadline; LX33 mutates the FLOOR argument. Changing one call site
+            // to `deadline: ContinuousClock.now + .seconds(25 * 60)` restores
+            // this bead's headline defect for the driver that actually
+            // dispatches analysis jobs, and every assertion stays green —
+            // `pollLoopDeadlineIsGrantShaped` reads only the OTHER driver, and
+            // `DrainEligibleStartGateTests` call `drainEligible` directly and so
+            // never see a handler's argument. Recovery is worse: its drain is
+            // its only deadline consumer, so it has no instrument at all.
+            //
+            // Stated as an absence because that is the only form that is
+            // indifferent to which call site, which spelling of the duration,
+            // and how the arguments are wrapped. Measured: neither handler
+            // contains `ContinuousClock.now + ` today, and neither does the
+            // rest of this file.
+            #expect(!code.contains("ContinuousClock.now + "),
+                    """
+                    no deadline handed out of \(anchor) may be minted from a \
+                    FRESH clock read. Every bound this handler spends comes \
+                    from the measured `BackgroundGrantBudget` applied to \
+                    `\(grantStart)`; a `ContinuousClock.now + .seconds(...)` \
+                    here is the 1500 s literal that filed playhead-lmrx, \
+                    reintroduced at one call site where nothing else can see it.
                     """)
         }
     }
