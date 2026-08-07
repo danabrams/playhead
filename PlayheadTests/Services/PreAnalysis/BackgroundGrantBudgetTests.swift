@@ -132,9 +132,16 @@ struct BackgroundGrantBudgetArithmeticTests {
         #expect(subject.expirationSettleBudget(since: start, now: start) == .seconds(3),
                 "the grace is the ceiling even with the whole reserve nominally unspent")
         #expect(subject.expirationSettleBudget(since: start, now: start + .seconds(1))
+            == .seconds(3),
+                """
+                and it stays the ceiling while the reserve has more than the \
+                grace left — a second of teardown does not buy a second back \
+                from a bound that was never about the reserve.
+                """)
+        #expect(subject.expirationSettleBudget(since: start, now: start + .seconds(34))
             == .seconds(2),
-                "and it is still spent DOWN by the teardown that precedes it")
-        #expect(subject.expirationSettleBudget(since: start, now: start + .seconds(3)) == .zero)
+                "the reserve takes over once its remainder falls below the grace")
+        #expect(subject.expirationSettleBudget(since: start, now: start + .seconds(36)) == .zero)
         #expect(subject.expirationSettleBudget(since: start, now: start + .seconds(90)) == .zero,
                 "an overrun clamps at zero rather than going negative")
 
