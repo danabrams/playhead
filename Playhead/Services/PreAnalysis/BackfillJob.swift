@@ -111,9 +111,11 @@ struct BackfillJob: Sendable, Equatable {
     let scanCohortJSON: String?
     let createdAt: Double
     /// playhead-wxsv: the transcript version of this row's most recent
-    /// ATTEMPT — the version the run that last called
-    /// ``AnalysisStore/noteBackfillJobAttempt(jobId:transcriptVersion:)``
-    /// was about to process. `nil` until an attempt has begun.
+    /// ATTEMPT — stamped by
+    /// ``AnalysisStore/markBackfillJobRunning(jobId:transcriptVersion:)`` in
+    /// the SAME statement as the claim, so it names the transcript the attempt
+    /// that owns the row was about to process. `nil` until an attempt has
+    /// begun.
     ///
     /// **It is NOT "the version currently on disk", and the distinction is
     /// the whole of this bead.** `jobId` used to be

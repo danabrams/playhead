@@ -1750,8 +1750,12 @@ actor AnalysisStore {
     /// without checkpointing risks duplicate-FM-call dispatch when the
     /// reaper flips the row back to `queued`. The runners enforce this
     /// via cooperative checkpoints; long-running shards should call
-    /// `markBackfillJobRunning(jobId:)` (which is idempotent and only
-    /// rewrites `updatedAt`) on a schedule shorter than this floor.
+    /// ``touchBackfillJobLiveness(jobId:)`` on a schedule shorter than this
+    /// floor. NOT `markBackfillJobRunning` — since playhead-wxsv that is a
+    /// START transition that accepts a `failed` row under the retry budget,
+    /// so using it as a heartbeat can resurrect a row the no-progress
+    /// watchdog just retired (the exact regression the heartbeat split
+    /// exists to prevent; see `touchBackfillJobLiveness`).
     nonisolated static let strandedJobFreshnessSeconds: Int = 600
 
     /// bd-m8k / Cycle 2 C4: Maximum number of recent full-rescan **recall**
@@ -16190,11 +16194,18 @@ actor AnalysisStore {
     /// would re-open the row, run it, and (if some path ever writes a terminal
     /// state without an attempt) re-open it again forever. So this asks for
     /// POSITIVE evidence: a version was recorded, and it is not this one.
-    /// Production cannot produce a terminal row with a NULL stamp —
-    /// ``noteBackfillJobAttempt(jobId:transcriptVersion:)`` runs before any work
-    /// that could reach a terminal transition — and the pre-v44 rows that
-    /// could, being unstamped by construction, are deleted rather than
-    /// migrated.
+    /// Production cannot ordinarily produce a terminal row with a NULL stamp —
+    /// the stamp is written by ``markBackfillJobRunning(jobId:transcriptVersion:)``
+    /// in the SAME statement as the claim, and the claim is the first store
+    /// write of every attempt — and the pre-v44 rows that could, being
+    /// unstamped by construction, are deleted rather than migrated. The one
+    /// remaining producer is contrived: the drain's typed-error catch marks a
+    /// row `failed` when the claim ITSELF threw a store error (the row was
+    /// never claimed, so never stamped), which is recoverable while under the
+    /// retry budget and reaches a NULL-stamped terminal state only if the
+    /// claim fails that way on `maxRetries` separate invocations while each
+    /// failure write succeeds. `BackfillJobRunner.redrivableRow` logs that
+    /// state as `fm_backfill_job_unreachable` rather than silently skipping.
     ///
     /// `running` is excluded: a live carrier owns that row's state machine.
     /// A row stranded in `running` by a process death is normalised back to
@@ -16202,7 +16213,7 @@ actor AnalysisStore {
     /// after that.
     ///
     /// `deferReason` is deliberately PRESERVED, matching
-    /// ``markBackfillJobRunning(jobId:)``'s audit-trail rule: the reason the
+    /// ``markBackfillJobRunning(jobId:transcriptVersion:)``'s audit-trail rule: the reason the
     /// row last stopped is still the most specific thing anyone reading a
     /// device pull can learn about it.
     @discardableResult
