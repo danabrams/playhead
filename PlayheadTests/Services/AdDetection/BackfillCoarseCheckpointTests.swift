@@ -240,9 +240,8 @@ struct BackfillCoarseCheckpointTests {
             if let resolvedJobId { return resolvedJobId }
             for phase in BackfillJobPhase.allCases {
                 for offset in 0..<4 {
-                    let candidate = BackfillJobRunner.makeJobIdForTesting(
+                    let candidate = BackfillJobRunner.makeJobId(
                         analysisAssetId: assetId,
-                        transcriptVersion: transcriptVersion,
                         phase: phase,
                         offset: offset
                     )
@@ -469,9 +468,8 @@ struct BackfillCoarseCheckpointTests {
                 guard ordinal == captureAtWindow else { return }
                 for phase in BackfillJobPhase.allCases {
                     for offset in 0..<4 {
-                        let candidate = BackfillJobRunner.makeJobIdForTesting(
+                        let candidate = BackfillJobRunner.makeJobId(
                             analysisAssetId: assetId,
-                            transcriptVersion: inputs.transcriptVersion,
                             phase: phase,
                             offset: offset
                         )
@@ -833,16 +831,15 @@ struct BackfillCoarseCheckpointTests {
         //
         // R5: the loop is `guard let job = … else { continue }`, so if job-id
         // derivation ever drifts — a new phase, a changed offset range, a
-        // renamed `makeJobIdForTesting` — every iteration skips and the headline
+        // renamed `makeJobId` — every iteration skips and the headline
         // claim of this test executes ZERO expectations while still reporting
         // green. Count what was inspected and require at least one, so an empty
         // sweep fails loudly instead of passing silently.
         var jobsInspected = 0
         for phase in BackfillJobPhase.allCases {
             for offset in 0..<4 {
-                let jobId = BackfillJobRunner.makeJobIdForTesting(
+                let jobId = BackfillJobRunner.makeJobId(
                     analysisAssetId: assetId,
-                    transcriptVersion: inputs.transcriptVersion,
                     phase: phase,
                     offset: offset
                 )
@@ -1575,9 +1572,8 @@ struct BackfillCoarseCheckpointTests {
                 guard ordinal == captureAtWindow else { return }
                 for phase in BackfillJobPhase.allCases {
                     for offset in 0..<4 {
-                        let candidate = BackfillJobRunner.makeJobIdForTesting(
+                        let candidate = BackfillJobRunner.makeJobId(
                             analysisAssetId: assetId,
-                            transcriptVersion: inputs.transcriptVersion,
                             phase: phase,
                             offset: offset
                         )

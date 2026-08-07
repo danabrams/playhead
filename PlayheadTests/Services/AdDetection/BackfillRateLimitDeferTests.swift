@@ -429,9 +429,8 @@ struct BackfillRateLimitDeferTests {
         // The (deterministic-id) job is DEFERRED with the honest PARTIAL cursor
         // (10) — NOT episode end (30), and NOT nil (which would re-scan the
         // coarse prefix on the next BG window).
-        let jobId = BackfillJobRunner.makeJobIdForTesting(
+        let jobId = BackfillJobRunner.makeJobId(
             analysisAssetId: inputs.analysisAssetId,
-            transcriptVersion: inputs.transcriptVersion,
             phase: .fullEpisodeScan,
             offset: 0
         )
@@ -479,9 +478,8 @@ struct BackfillRateLimitDeferTests {
         await #expect(throws: CancellationError.self) { _ = try await task.value }
         #expect(await fmRuntime.refinementCallCount >= 1)
 
-        let jobId = BackfillJobRunner.makeJobIdForTesting(
+        let jobId = BackfillJobRunner.makeJobId(
             analysisAssetId: inputs.analysisAssetId,
-            transcriptVersion: inputs.transcriptVersion,
             phase: .fullEpisodeScan,
             offset: 0
         )
@@ -543,9 +541,8 @@ struct BackfillRateLimitDeferTests {
         await gate.release()
         await #expect(throws: CancellationError.self) { _ = try await task.value }
 
-        let jobId = BackfillJobRunner.makeJobIdForTesting(
+        let jobId = BackfillJobRunner.makeJobId(
             analysisAssetId: inputs.analysisAssetId,
-            transcriptVersion: inputs.transcriptVersion,
             phase: .fullEpisodeScan,
             offset: 0
         )
@@ -656,9 +653,8 @@ struct BackfillRateLimitDeferTests {
         // That is verbatim the bug playhead-pmp9 fixed for rate limits; the
         // defer predicate keyed on rate-limiting alone and a Bool cannot carry
         // a second cause.
-        let jobId = BackfillJobRunner.makeJobIdForTesting(
+        let jobId = BackfillJobRunner.makeJobId(
             analysisAssetId: inputs.analysisAssetId,
-            transcriptVersion: inputs.transcriptVersion,
             phase: .fullEpisodeScan,
             offset: 0
         )
@@ -850,9 +846,8 @@ struct BackfillRateLimitDeferTests {
         let store = try await makeTestStore()
         try await store.insertAsset(makeAsset())
         let inputs = makeSixWindowInputs()
-        let jobId = BackfillJobRunner.makeJobIdForTesting(
+        let jobId = BackfillJobRunner.makeJobId(
             analysisAssetId: inputs.analysisAssetId,
-            transcriptVersion: inputs.transcriptVersion,
             phase: .fullEpisodeScan,
             offset: 0
         )
@@ -939,9 +934,8 @@ struct BackfillRateLimitDeferTests {
         let store = try await makeTestStore()
         try await store.insertAsset(makeAsset())
         let inputs = makeSixWindowInputs()
-        let jobId = BackfillJobRunner.makeJobIdForTesting(
+        let jobId = BackfillJobRunner.makeJobId(
             analysisAssetId: inputs.analysisAssetId,
-            transcriptVersion: inputs.transcriptVersion,
             phase: .fullEpisodeScan,
             offset: 0
         )
@@ -982,9 +976,8 @@ struct BackfillRateLimitDeferTests {
         let store = try await makeTestStore()
         try await store.insertAsset(makeAsset())
         let inputs = makeThreeWindowInputs()
-        let jobId = BackfillJobRunner.makeJobIdForTesting(
+        let jobId = BackfillJobRunner.makeJobId(
             analysisAssetId: inputs.analysisAssetId,
-            transcriptVersion: inputs.transcriptVersion,
             phase: .fullEpisodeScan,
             offset: 0
         )

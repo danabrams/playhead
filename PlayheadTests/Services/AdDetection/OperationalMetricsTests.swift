@@ -339,9 +339,8 @@ struct OperationalMetricsTests {
         let transcriptVersion = "tx-operational-complete-race"
         try await store.insertAsset(makeTestAsset(id: assetId))
 
-        let jobId = BackfillJobRunner.makeJobIdForTesting(
+        let jobId = BackfillJobRunner.makeJobId(
             analysisAssetId: assetId,
-            transcriptVersion: transcriptVersion,
             phase: .fullEpisodeScan,
             offset: 0
         )

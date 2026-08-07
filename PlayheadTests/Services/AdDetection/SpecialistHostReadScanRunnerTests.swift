@@ -210,9 +210,8 @@ struct SpecialistHostReadScanRunnerTests {
 
         // The specialist job exists and completed.
         let plan = CoveragePlanner().plan(for: inputs.plannerContext)
-        let specialistJobId = BackfillJobRunner.makeJobIdForTesting(
+        let specialistJobId = BackfillJobRunner.makeJobId(
             analysisAssetId: assetId,
-            transcriptVersion: inputs.transcriptVersion,
             phase: .specialistHostReadScan,
             offset: plan.phases.count
         )
@@ -284,9 +283,8 @@ struct SpecialistHostReadScanRunnerTests {
         // Zero specialist rows, no specialist backfill_job.
         #expect(try await offStore.fetchSpecialistScanResults(analysisAssetId: assetId).isEmpty)
         let plan = CoveragePlanner().plan(for: inputs.plannerContext)
-        let specialistJobId = BackfillJobRunner.makeJobIdForTesting(
+        let specialistJobId = BackfillJobRunner.makeJobId(
             analysisAssetId: assetId,
-            transcriptVersion: transcriptVersion,
             phase: .specialistHostReadScan,
             offset: plan.phases.count
         )
@@ -320,9 +318,8 @@ struct SpecialistHostReadScanRunnerTests {
 
         #expect(try await store.fetchSpecialistScanResults(analysisAssetId: assetId).isEmpty)
         let plan = CoveragePlanner().plan(for: inputs.plannerContext)
-        let specialistJobId = BackfillJobRunner.makeJobIdForTesting(
+        let specialistJobId = BackfillJobRunner.makeJobId(
             analysisAssetId: assetId,
-            transcriptVersion: inputs.transcriptVersion,
             phase: .specialistHostReadScan,
             offset: plan.phases.count
         )
@@ -444,9 +441,8 @@ struct SpecialistHostReadScanRunnerTests {
         // Nothing admitted, everything deferred — including the specialist job.
         #expect(result.admittedJobIds.isEmpty)
         let plan = CoveragePlanner().plan(for: inputs.plannerContext)
-        let specialistJobId = BackfillJobRunner.makeJobIdForTesting(
+        let specialistJobId = BackfillJobRunner.makeJobId(
             analysisAssetId: assetId,
-            transcriptVersion: inputs.transcriptVersion,
             phase: .specialistHostReadScan,
             offset: plan.phases.count
         )

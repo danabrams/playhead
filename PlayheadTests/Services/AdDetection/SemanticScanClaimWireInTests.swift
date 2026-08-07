@@ -257,8 +257,7 @@ struct SemanticScanClaimGateWireInTests {
     /// The row the claim would name, whichever wrote it.
     private func claimRow(_ store: AnalysisStore) async throws -> BackfillJob? {
         try await store.fetchBackfillJob(byId: SemanticScanClaim.jobId(
-            analysisAssetId: Self.assetId,
-            transcriptVersion: SemanticScanClaim.transcriptVersion(forPersistedChunks: chunks())
+            analysisAssetId: Self.assetId
         ))
     }
 }
@@ -427,10 +426,7 @@ struct SemanticScanClaimReconcilerTests {
                 "the claim must be actionable in the SAME pass, not the next launch")
 
         let claim = try #require(try await store.fetchBackfillJob(byId: SemanticScanClaim.jobId(
-            analysisAssetId: Self.assetId,
-            transcriptVersion: SemanticScanClaim.transcriptVersion(
-                forPersistedChunks: try await store.fetchTranscriptChunks(assetId: Self.assetId)
-            )
+            analysisAssetId: Self.assetId
         )))
         #expect(claim.deferReason == SemanticScanClaim.Gate.noCoverageLaneRow.deferReason)
         #expect(claim.podcastId == "pod-FCDDB309")

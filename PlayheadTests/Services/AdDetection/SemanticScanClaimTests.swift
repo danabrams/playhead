@@ -326,20 +326,19 @@ struct SemanticScanClaimPredicateTests {
         // Derived exactly the way `runPendingBackfill` derives it: the phase and
         // its index in the plan.
         let planned = plan.phases.enumerated().map { offset, phase in
-            BackfillJobRunner.makeJobIdForTesting(
+            BackfillJobRunner.makeJobId(
                 analysisAssetId: "asset-1",
-                transcriptVersion: "tv-1",
                 phase: phase,
                 offset: offset
             )
         }
         let expected = try #require(planned.first)
-        #expect(SemanticScanClaim.jobId(analysisAssetId: "asset-1", transcriptVersion: "tv-1")
+        #expect(SemanticScanClaim.jobId(analysisAssetId: "asset-1")
                 == expected)
         // …and it is genuinely keyed on both halves.
-        #expect(SemanticScanClaim.jobId(analysisAssetId: "asset-1", transcriptVersion: "tv-2")
+        #expect(SemanticScanClaim.jobId(analysisAssetId: "asset-1")
                 != expected)
-        #expect(SemanticScanClaim.jobId(analysisAssetId: "asset-2", transcriptVersion: "tv-1")
+        #expect(SemanticScanClaim.jobId(analysisAssetId: "asset-2")
                 != expected)
     }
 
@@ -398,7 +397,6 @@ struct SemanticScanClaimPredicateTests {
         let row = SemanticScanClaim.claimRow(
             analysisAssetId: "asset-1",
             podcastId: "pod-1",
-            transcriptVersion: "tv-1",
             gate: .foundationModelsUnavailable,
             createdAt: 1_000
         )
@@ -421,16 +419,13 @@ struct SemanticScanClaimPredicateTests {
     @Test("an empty podcastId persists as nil, not as an empty-string podcast")
     func emptyPodcastIdBecomesNil() {
         #expect(SemanticScanClaim.claimRow(
-            analysisAssetId: "a", podcastId: "", transcriptVersion: "tv",
-            gate: .podcastIdMissing, createdAt: 0
+            analysisAssetId: "a", podcastId: "",gate: .podcastIdMissing, createdAt: 0
         ).podcastId == nil)
         #expect(SemanticScanClaim.claimRow(
-            analysisAssetId: "a", podcastId: nil, transcriptVersion: "tv",
-            gate: .podcastIdMissing, createdAt: 0
+            analysisAssetId: "a", podcastId: nil,gate: .podcastIdMissing, createdAt: 0
         ).podcastId == nil)
         #expect(SemanticScanClaim.claimRow(
-            analysisAssetId: "a", podcastId: "pod", transcriptVersion: "tv",
-            gate: .podcastIdMissing, createdAt: 0
+            analysisAssetId: "a", podcastId: "pod",gate: .podcastIdMissing, createdAt: 0
         ).podcastId == "pod")
     }
 }
@@ -486,14 +481,13 @@ struct SemanticScanClaimPersistenceTests {
             gate: .foundationModelsUnavailable,
             analysisAssetId: "a-mint",
             podcastId: "pod-1",
-            transcriptVersion: "tv-1",
             store: store,
             clock: { 5_000 },
             logger: logger
         )
         #expect(outcome == .minted)
 
-        let jobId = SemanticScanClaim.jobId(analysisAssetId: "a-mint", transcriptVersion: "tv-1")
+        let jobId = SemanticScanClaim.jobId(analysisAssetId: "a-mint")
         let row = try #require(try await store.fetchBackfillJob(byId: jobId))
         #expect(row.status == .deferred)
         #expect(row.deferReason == SemanticScanClaim.Gate.foundationModelsUnavailable.deferReason)
@@ -512,18 +506,16 @@ struct SemanticScanClaimPersistenceTests {
         try await seed(store, assetId: "a-idem")
 
         #expect(await SemanticScanClaim.record(
-            gate: .fmModeOff, analysisAssetId: "a-idem", podcastId: nil,
-            transcriptVersion: "tv-1", store: store, clock: { 1 }, logger: logger
+            gate: .fmModeOff, analysisAssetId: "a-idem", podcastId: nil,store: store, clock: { 1 }, logger: logger
         ) == .minted)
         for _ in 0..<4 {
             #expect(await SemanticScanClaim.record(
-                gate: .foundationModelsUnavailable, analysisAssetId: "a-idem", podcastId: nil,
-                transcriptVersion: "tv-1", store: store, clock: { 2 }, logger: logger
+                gate: .foundationModelsUnavailable, analysisAssetId: "a-idem", podcastId: nil,store: store, clock: { 2 }, logger: logger
             ) == .refreshed)
         }
 
         #expect(try await store.countResumableBackfillJobs(assetId: "a-idem") == 1)
-        let jobId = SemanticScanClaim.jobId(analysisAssetId: "a-idem", transcriptVersion: "tv-1")
+        let jobId = SemanticScanClaim.jobId(analysisAssetId: "a-idem")
         let row = try #require(try await store.fetchBackfillJob(byId: jobId))
         #expect(row.retryCount == 0, "a closed gate is not a failed attempt")
         // The most recent cause is the one visible.
@@ -541,12 +533,10 @@ struct SemanticScanClaimPersistenceTests {
         let store = try await makeTestStore()
         try await seed(store, assetId: "a-empty-pod")
         #expect(await SemanticScanClaim.record(
-            gate: .podcastIdMissing, analysisAssetId: "a-empty-pod", podcastId: "",
-            transcriptVersion: "tv-1", store: store, logger: logger
+            gate: .podcastIdMissing, analysisAssetId: "a-empty-pod", podcastId: "",store: store, logger: logger
         ) == .minted)
         let jobId = SemanticScanClaim.jobId(
-            analysisAssetId: "a-empty-pod", transcriptVersion: "tv-1"
-        )
+            analysisAssetId: "a-empty-pod")
         #expect(try await store.fetchBackfillJob(byId: jobId)?.podcastId == nil)
     }
 
@@ -558,8 +548,7 @@ struct SemanticScanClaimPersistenceTests {
         try await seed(store, assetId: "a-done", scannedSec: 2_113)
 
         #expect(await SemanticScanClaim.record(
-            gate: .foundationModelsUnavailable, analysisAssetId: "a-done", podcastId: nil,
-            transcriptVersion: "tv-1", store: store, logger: logger
+            gate: .foundationModelsUnavailable, analysisAssetId: "a-done", podcastId: nil,store: store, logger: logger
         ) == .notOwed)
         #expect(try await store.countResumableBackfillJobs(assetId: "a-done") == 0)
         #expect(try await store.fetchAssetIdsWithResumableBackfillJobs(limit: 10).isEmpty)
@@ -572,8 +561,7 @@ struct SemanticScanClaimPersistenceTests {
         let store = try await makeTestStore()
         try await seed(store, assetId: "a-short", scannedSec: 1_000)
         #expect(await SemanticScanClaim.record(
-            gate: .runnerFactoryMissing, analysisAssetId: "a-short", podcastId: nil,
-            transcriptVersion: "tv-1", store: store, logger: logger
+            gate: .runnerFactoryMissing, analysisAssetId: "a-short", podcastId: nil,store: store, logger: logger
         ) == .minted)
     }
 
@@ -583,14 +571,13 @@ struct SemanticScanClaimPersistenceTests {
     func completeRowIsSatisfied() async throws {
         let store = try await makeTestStore()
         try await seed(store, assetId: "a-complete")
-        let jobId = SemanticScanClaim.jobId(analysisAssetId: "a-complete", transcriptVersion: "tv-1")
+        let jobId = SemanticScanClaim.jobId(analysisAssetId: "a-complete")
         try await store.insertBackfillJob(makeBackfillJob(
             jobId: jobId, analysisAssetId: "a-complete", status: .complete
         ))
 
         #expect(await SemanticScanClaim.record(
-            gate: .fmModeOff, analysisAssetId: "a-complete", podcastId: nil,
-            transcriptVersion: "tv-1", store: store, logger: logger
+            gate: .fmModeOff, analysisAssetId: "a-complete", podcastId: nil,store: store, logger: logger
         ) == .alreadySatisfied)
         #expect(try await store.fetchBackfillJob(byId: jobId)?.status == .complete)
     }
@@ -605,16 +592,14 @@ struct SemanticScanClaimPersistenceTests {
                                   ("a-failed", .failed)] {
             try await seed(store, assetId: assetId)
             let jobId = SemanticScanClaim.jobId(
-                analysisAssetId: assetId, transcriptVersion: "tv-1"
-            )
+                analysisAssetId: assetId)
             try await store.insertBackfillJob(makeBackfillJob(
                 jobId: jobId, analysisAssetId: assetId,
                 deferReason: "daemon_throttled", status: status
             ))
 
             #expect(await SemanticScanClaim.record(
-                gate: .fmModeOff, analysisAssetId: assetId, podcastId: nil,
-                transcriptVersion: "tv-1", store: store, logger: logger
+                gate: .fmModeOff, analysisAssetId: assetId, podcastId: nil,store: store, logger: logger
             ) == .leftInPlace)
             let row = try #require(try await store.fetchBackfillJob(byId: jobId))
             #expect(row.status == status)
@@ -631,8 +616,7 @@ struct SemanticScanClaimPersistenceTests {
         // No asset row: the FK on `backfill_jobs.analysisAssetId` rejects the
         // insert. The claim reports the failure instead of propagating it.
         #expect(await SemanticScanClaim.record(
-            gate: .fmModeOff, analysisAssetId: "ghost", podcastId: nil,
-            transcriptVersion: "tv-1", store: store, logger: logger
+            gate: .fmModeOff, analysisAssetId: "ghost", podcastId: nil,store: store, logger: logger
         ) == .failed)
     }
 }

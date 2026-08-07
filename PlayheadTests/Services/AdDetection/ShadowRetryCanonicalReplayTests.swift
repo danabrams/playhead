@@ -5,7 +5,7 @@
 // asset 53FC53E3 carried 2,949 transcript chunks: 2,917 `fast` covering
 // [0, 2490] and 32 `final` covering [2490, 2525.82]. Its one `backfill_jobs`
 // row is `fm-041dedcf8293523e`, and re-deriving
-// `BackfillJobRunner.makeJobIdForTesting` over each candidate chunk set says
+// `BackfillJobRunner.makeJobId` over each candidate chunk set says
 // which set minted it:
 //
 //     V(final-only) = 55afd3e8bb41833c004ee7d4b1be7589 -> fm-041dedcf8293523e  <- the row
@@ -400,6 +400,20 @@ struct ShadowRetryCanonicalReplayTests {
     }
 
     /// The identity that decides whether a later pass can find this work at all.
+    ///
+    /// **playhead-wxsv changed what this rail can assert, because it removed the
+    /// defect's precondition.** The drain's private id space existed because the
+    /// job id was hashed over a transcript version, so a caller replaying a
+    /// final-pass-only chunk set derived a DIFFERENT id from the one
+    /// `runBackfill` would derive over the canonical set. The id is now
+    /// `(asset, phase, offset)` and no chunk set reaches it, so there is exactly
+    /// one id space by construction and "the private one is empty" is no longer
+    /// a statement that can be false.
+    ///
+    /// What is still worth pinning, and is pinned here, is the two halves that
+    /// remain contingent: the two chunk sets DO still hash to different
+    /// transcript versions (so the fixture reproduces iu0t's input, not a
+    /// degenerate one), and the drain's row IS findable at the shared id.
     @Test("the drain mints the job id the runBackfill path would mint")
     func drainMintsTheSharedJobId() async throws {
         let chunks = mixedPassChunks()
@@ -408,20 +422,15 @@ struct ShadowRetryCanonicalReplayTests {
         _ = await service(store: store).retryShadowFMPhaseForSession(sessionId: Self.sessionId)
 
         let persisted = try await store.fetchTranscriptChunks(assetId: Self.assetId)
-        let canonicalId = SemanticScanClaim.jobId(
-            analysisAssetId: Self.assetId,
-            transcriptVersion: canonicalVersion(persisted)
-        )
-        let finalOnlyId = SemanticScanClaim.jobId(
-            analysisAssetId: Self.assetId,
-            transcriptVersion: finalOnlyVersion(persisted)
-        )
-        #expect(canonicalId != finalOnlyId)
+        #expect(canonicalVersion(persisted) != finalOnlyVersion(persisted),
+                "the fixture must still be one where the two replays disagree")
 
-        #expect(try await store.fetchBackfillJob(byId: canonicalId) != nil,
+        let sharedId = SemanticScanClaim.jobId(analysisAssetId: Self.assetId)
+        #expect(try await store.fetchBackfillJob(byId: sharedId) != nil,
                 "the coverage-lane row must be the one `runBackfill` would also derive")
-        #expect(try await store.fetchBackfillJob(byId: finalOnlyId) == nil,
-                "no row may exist in the drain-private id space")
+        #expect(try await store.fetchAssetIdsWithResumableBackfillJobs(limit: 10)
+                    .filter { $0 == Self.assetId }.count <= 1,
+                "one asset, one coverage-lane row — no second id space to strand work in")
     }
 
     // MARK: - Rail 3: the fil5 claim rides the same identity
@@ -441,19 +450,20 @@ struct ShadowRetryCanonicalReplayTests {
         #expect(didRun == false, "a mode-off phase does not execute")
 
         let persisted = try await store.fetchTranscriptChunks(assetId: Self.assetId)
-        let canonicalId = SemanticScanClaim.jobId(
-            analysisAssetId: Self.assetId,
-            transcriptVersion: canonicalVersion(persisted)
-        )
-        let finalOnlyId = SemanticScanClaim.jobId(
-            analysisAssetId: Self.assetId,
-            transcriptVersion: finalOnlyVersion(persisted)
-        )
+        #expect(canonicalVersion(persisted) != finalOnlyVersion(persisted),
+                "the fixture must still be one where the two replays disagree")
 
-        let claim = try #require(try await store.fetchBackfillJob(byId: canonicalId),
-                                 "the claim must name the canonical job")
+        // playhead-wxsv: see `drainMintsTheSharedJobId` for why this is one id
+        // rather than two. The claim's own guarantee — that a mode-off bail
+        // leaves a row the runner will later find — is unchanged and is what is
+        // asserted.
+        let claim = try #require(
+            try await store.fetchBackfillJob(byId: SemanticScanClaim.jobId(analysisAssetId: Self.assetId)),
+            "the claim must name the job the runner would derive"
+        )
         #expect(claim.deferReason == SemanticScanClaim.Gate.fmModeOff.deferReason)
-        #expect(try await store.fetchBackfillJob(byId: finalOnlyId) == nil)
+        #expect(claim.attemptTranscriptVersion == nil,
+                "a claim is a request; no attempt has read a transcript yet")
     }
 
     // MARK: - Rail 4: the no-regression pin
@@ -484,11 +494,8 @@ struct ShadowRetryCanonicalReplayTests {
             .retryShadowFMPhaseForSession(sessionId: sessionId)
         #expect(didRun)
 
-        let expectedId = SemanticScanClaim.jobId(
-            analysisAssetId: assetId,
-            transcriptVersion: TranscriptAtomizer.transcriptVersionHash(chunks: preFixReplay)
-        )
-        #expect(try await store.fetchBackfillJob(byId: expectedId) != nil,
+        #expect(try await store.fetchBackfillJob(
+                    byId: SemanticScanClaim.jobId(analysisAssetId: assetId)) != nil,
                 "the all-fast drain must still mint the id it always did")
     }
 }
