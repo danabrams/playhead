@@ -257,23 +257,32 @@ struct BackgroundGrantBudget: Sendable, Equatable {
         min(remainingTeardownReserve(since: teardownStart, now: now), expirationSettleGrace)
     }
 
-    /// Is there enough grant left for a pass that starts now to reach a
-    /// checkpoint?
-    ///
-    /// The comparison is `>=` so a budget exactly equal to the floor still
-    /// admits a pass — the floor is the cost of one durable artifact, and an
-    /// artifact that costs exactly its own cost fits.
-    func canReachCheckpoint(remaining: Duration) -> Bool {
-        remaining >= minimumCheckpointBudget
-    }
-
-    /// Convenience over ``canReachCheckpoint(remaining:)`` for callers holding a
-    /// deadline rather than a remaining duration. A deadline already in the
-    /// past yields a negative remainder, which is correctly below any
-    /// non-negative floor.
-    func canReachCheckpoint(before deadline: ContinuousClock.Instant, now: ContinuousClock.Instant) -> Bool {
-        canReachCheckpoint(remaining: now.duration(to: deadline))
-    }
+    // THE CHECKPOINT PREDICATE USED TO LIVE HERE, AND IT WAS NEVER CALLED
+    // (playhead-lmrx review round 7).
+    //
+    // `canReachCheckpoint(remaining:)` and its `(before:now:)` convenience were
+    // shipped with ZERO production callers — `grep -rn canReachCheckpoint
+    // Playhead/` returned only their own two definitions — while the gate they
+    // describe is spelled out inline in `AnalysisWorkScheduler.drainEligible`
+    // as `remaining >= minimumCheckpointBudget`. Two definitions of one gate,
+    // free to drift, and rail LX08 pinned the one nobody ran. That is the
+    // `playhead-y3ya` shape (`FMBackfillMode.canProposeNewRegions`, likewise
+    // shipped with no consumers), and it is worse than plain dead code because
+    // the rail reads as coverage of a gate it never touches.
+    //
+    // Wiring `drainEligible` to consult a `BackgroundGrantBudget` instead of
+    // the `Duration` it is handed would mean pushing this type across a service
+    // boundary, which is an architectural change and not a review one. So the
+    // dead copy is deleted and the shipped gate keeps its single spelling,
+    // pinned behaviourally by LX04/LX33.
+    //
+    // WHAT WENT WITH IT, named rather than quietly lost: LX08 flipped `>=` to
+    // `>`, and no rail replaces it — because at the real gate that boundary is
+    // not observable. `drainEligible` computes `remaining` from
+    // `ContinuousClock.now` against a caller's deadline, so `remaining` is
+    // never exactly `minimumCheckpointBudget`; a test can straddle the floor
+    // but cannot land on it. LX08 was pinning an equality case that only the
+    // uncalled copy could ever see.
 
     // MARK: - Measured instances
 

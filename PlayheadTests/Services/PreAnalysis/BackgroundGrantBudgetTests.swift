@@ -75,26 +75,11 @@ struct BackgroundGrantBudgetArithmeticTests {
         #expect(grantStart.duration(to: shipped.workDeadline(from: grantStart)) == shipped.workBudget)
     }
 
-    @Test("canReachCheckpoint admits exactly the floor and refuses below it")
-    func canReachCheckpointBoundary() {
-        let subject = budget()
-        #expect(subject.canReachCheckpoint(remaining: .seconds(61)))
-        #expect(subject.canReachCheckpoint(remaining: .seconds(60)),
-                "an artifact that costs exactly its own cost fits")
-        #expect(!subject.canReachCheckpoint(remaining: .seconds(59)))
-        #expect(!subject.canReachCheckpoint(remaining: .zero))
-        #expect(!subject.canReachCheckpoint(remaining: .seconds(-5)),
-                "a deadline already in the past yields a negative remainder")
-    }
-
-    @Test("canReachCheckpoint(before:now:) agrees with the duration form")
-    func canReachCheckpointDeadlineForm() {
-        let subject = budget()
-        let now = ContinuousClock.now
-        #expect(subject.canReachCheckpoint(before: now + .seconds(120), now: now))
-        #expect(!subject.canReachCheckpoint(before: now + .seconds(5), now: now))
-        #expect(!subject.canReachCheckpoint(before: now - .seconds(5), now: now))
-    }
+    // The two `canReachCheckpoint` tests that stood here went with the method
+    // (playhead-lmrx review round 7): it had no production caller, and the gate
+    // it described is spelled inline in `AnalysisWorkScheduler.drainEligible`.
+    // See `BackgroundGrantBudget.swift` for the argument and for why the `>=`
+    // boundary LX08 pinned is not observable at the surviving gate.
 
     @Test("the teardown reserve is spent DOWN by teardown, not re-granted per step")
     func teardownReserveIsOneBudgetForTheWholeTeardown() {
@@ -1010,83 +995,6 @@ struct BackfillExpiryDurabilityTests {
         }
     }
 
-    /// A one-shot gate the TEST opens, so "the cancelled job is still
-    /// unwinding" is a fact the test controls rather than a duration it hopes
-    /// for. Awaiting a continuation somebody else resumes ignores task
-    /// cancellation by construction, which is exactly the state under test.
-    ///
-    /// The safety timer is why this is not simply a sleep in disguise: on the
-    /// correct ordering the gate is opened by the ledger write itself, so the
-    /// test is insensitive to how long the handler takes to get there. It is
-    /// only the WRONG ordering — where the write is behind the wait and the
-    /// wait is behind this gate — that ever reaches the timer, and it then
-    /// observes a settled scheduler and fails, which is the point.
-    private final class UnwindGate: @unchecked Sendable {
-        private let lock = NSLock()
-        private var waiters: [CheckedContinuation<Void, Never>] = []
-        private var isOpen = false
-
-        func wait() async {
-            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-                lock.lock()
-                if isOpen {
-                    lock.unlock()
-                    continuation.resume()
-                    return
-                }
-                waiters.append(continuation)
-                lock.unlock()
-            }
-        }
-
-        /// Idempotent, and non-async so `NSLock` is taken outside an async
-        /// context.
-        func open() {
-            lock.lock()
-            if isOpen {
-                lock.unlock()
-                return
-            }
-            isOpen = true
-            let pending = waiters
-            waiters.removeAll()
-            lock.unlock()
-            for continuation in pending { continuation.resume() }
-        }
-
-        /// Deadlock insurance: opens the gate after `seconds` no matter what,
-        /// so a test that never reaches its own `open()` fails on an assertion
-        /// rather than hanging.
-        ///
-        /// **Arm this as LATE as possible.** An earlier draft armed it at the
-        /// top of the test, so setup and the spin-to-in-flight loop spent the
-        /// same budget the handler's teardown needs — and it went red under the
-        /// mutation battery's suite load twice. The window that has to fit is
-        /// only "expiration fired" → "the ledger row was written"; everything
-        /// before that is unbounded and must not be charged here.
-        func openAfter(seconds: TimeInterval) {
-            DispatchQueue.global().asyncAfter(deadline: .now() + seconds) { [self] in
-                open()
-            }
-        }
-    }
-
-    /// Blocks in `decode` on an ``UnwindGate``, ignoring cancellation until the
-    /// gate opens.
-    private final class GatedUnwindAudioStub: AnalysisAudioProviding, @unchecked Sendable {
-        private let gate: UnwindGate
-        init(gate: UnwindGate) { self.gate = gate }
-        func decode(
-            fileURL: LocalAudioURL,
-            episodeID: String,
-            shardDuration: TimeInterval
-        ) async throws -> [AnalysisShard] {
-            await gate.wait()
-            try Task.checkCancellation()
-            return []
-        }
-    }
-
     /// Snapshots an arbitrary probe at the moment `finishRun` lands, so the
     /// ORDER of the expiration handler's steps is directly assertable rather
     /// than inferred from wall clock. Same shape as
@@ -1561,6 +1469,131 @@ struct BackfillExpiryDurabilityTests {
         _ = await dispatch.value
     }
 
+    @Test("a teardown cancelled mid-settle leaves the ending to the expiration handler",
+          .timeLimit(.minutes(2)))
+    func backfillTeardownCancelledMidSettleDefersToTheExpiry() async throws {
+        // playhead-lmrx (review round 7): THE `guard !Task.isCancelled` AFTER
+        // THE SETTLE WAIT, WHICH NO TEST COULD SEE UNTIL NOW.
+        //
+        // `awaitJobsSettled` returns `false` IMMEDIATELY on cancellation — that
+        // guard is what stops it busy-spinning to its deadline. So an OS reclaim
+        // landing while the work-deadline teardown is waiting drops the work
+        // task straight out of the wait, and without this guard it walks on to
+        // `markComplete(success: true)` and RACES the expiration handler to
+        // `setTaskCompleted` — winning, because the handler still has its own
+        // cancel, ledger write and settle to do. The task is then completed
+        // `.admittedWork` over a live job: no checkpoint, no requeue, a leased
+        // `running` row, and no expirationHandler left to rescue it. That is
+        // precisely the stranding this teardown block exists to prevent,
+        // arrived at THROUGH the block itself.
+        //
+        // WHY THIS IS NOT A RACE DRESSED AS A CLAIM (round 6 declined to build
+        // it for exactly that reason). Two seams make the observation a fact:
+        //
+        //  * the expiration handler is PARKED at its own `finishRun` — which is
+        //    upstream of `handleExpiredProcessingTask` on this path — so from
+        //    that moment the work task is the only party that CAN complete the
+        //    task. Nobody is racing it;
+        //  * and `workTaskForTesting(_:).value` is the happens-before edge. It
+        //    returns on BOTH paths — the guard's `return` and the fall-through
+        //    to `markComplete` — so the assertion below is taken after the work
+        //    task has finished deciding, not after a duration.
+        //
+        // No sleeps, no polling for the negative, nothing that a loaded box can
+        // reorder.
+        let store = try await makeTestStore()
+        let downloads = StubDownloadProvider()
+        downloads.cachedURLs["ep-mid-settle"] = URL(fileURLWithPath: "/tmp/ep-mid-settle.m4a")
+        try await store.insertJob(makeAnalysisJob(
+            jobId: "mid-settle",
+            jobType: "preAnalysis",
+            episodeId: "ep-mid-settle",
+            analysisAssetId: "asset-mid-settle",
+            workKey: "fp-mid-settle:1:preAnalysis",
+            sourceFingerprint: "fp-mid-settle",
+            priority: 10,
+            desiredCoverageSec: 90,
+            state: "queued"
+        ))
+
+        // Gated, not merely slow: the job must still be in flight when the
+        // teardown's settle wait runs, or the wait returns `true` at once and
+        // the cancellation never lands inside it.
+        let unwind = UnwindGate()
+        defer { unwind.open() }
+        let scheduler = makeScheduler(
+            store: store,
+            audio: GatedUnwindAudioStub(gate: unwind),
+            downloads: downloads
+        )
+
+        // Put the job in flight from ANOTHER driver, as
+        // `normalReturnAlsoRequeuesTheInFlightJob` does: its lease then hides it
+        // from the handler's own drain, so nothing here depends on the handler
+        // dispatching anything.
+        let dispatch = Task { await scheduler.processNextDispatchableJobForTesting() }
+        var spins = 0
+        while await !scheduler.hasCurrentRunningTaskForTesting() {
+            spins += 1
+            try #require(spins < 1000, "the seeded job never entered decode")
+            try await Task.sleep(for: .milliseconds(20))
+        }
+
+        let expiryGate = UnwindGate()
+        defer { expiryGate.open() }
+        let ledger = GatedRunLedger(parkOn: .expired, gate: expiryGate)
+        let bps = BackgroundProcessingService(
+            coordinator: StubAnalysisCoordinator(),
+            capabilitiesService: CapabilitiesService(),
+            taskScheduler: StubTaskScheduler(),
+            batteryProvider: StubBatteryProvider(),
+            runLedger: ledger
+        )
+        await bps.setPreAnalysisServices(scheduler: scheduler, reconciler: makeReconciler(store: store))
+
+        let task = StubBackgroundTask()
+        await bps.handleBackfillTask(task, budget: Self.deadlineAlreadyPast)
+        let workTask = try #require(
+            await bps.workTaskForTesting(task),
+            "the handler must leave its work task registered until something completes the BGTask"
+        )
+
+        // The work task's OWN terminal write — the statement immediately before
+        // the settle wait. Waiting on it is what puts the cancellation inside
+        // the wait rather than before it.
+        await ledger.finishes.wait(for: 1)
+        task.simulateExpiration()
+
+        // And now the expiration handler is committed to its ledger write and
+        // parked there. It cannot reach `markComplete` while this holds.
+        await ledger.reachedPark.wait(for: 1)
+
+        await workTask.value
+
+        #expect(task.completedSuccess == nil,
+                """
+                The work task must NOT complete the BGTask after the OS \
+                cancelled it mid-teardown. Finding `true` here means it fell \
+                through the settle wait into `markComplete(success: true)` and \
+                told iOS the window was finished over a job that is still \
+                running — the exact stranding the teardown exists to prevent, \
+                reached through the teardown itself.
+                """)
+        #expect(task.setTaskCompletedCallCount == 0,
+                "and it must not have touched setTaskCompleted at all")
+
+        // The complement: once the expiration handler is released it DOES end
+        // the run, and ends it as an expiry.
+        unwind.open()
+        expiryGate.open()
+        await task.awaitCompletion()
+        #expect(task.completedSuccess == false,
+                "the expiration handler owns the ending, and records it as one")
+        #expect(ledger.recordedOutcomes.contains(.expired),
+                "and the durable row for this window is the expired one")
+        _ = await dispatch.value
+    }
+
     /// A budget whose `workBudget` clamps to zero, so `workDeadline(from:)`
     /// returns the grant's own start instant and every deadline test reads
     /// "already elapsed". The reserve is real so the settle has something to
@@ -1921,12 +1954,13 @@ struct CancelAimIdentityTests {
 
     private func makeScheduler(
         store: AnalysisStore,
-        downloads: StubDownloadProvider
+        downloads: StubDownloadProvider,
+        audio: any AnalysisAudioProviding = CancellableSleepAudioStub()
     ) -> AnalysisWorkScheduler {
         let speechService = SpeechService(recognizer: StubSpeechRecognizer())
         let runner = AnalysisJobRunner(
             store: store,
-            audioProvider: CancellableSleepAudioStub(),
+            audioProvider: audio,
             featureService: FeatureExtractionService(store: store),
             transcriptEngine: TranscriptEngineService(speechService: speechService, store: store),
             adDetection: StubAdDetectionProvider()
@@ -2332,6 +2366,94 @@ struct CancelAimIdentityTests {
         _ = await dispatch.value
     }
 
+    @Test("recovery's teardown cancelled mid-settle leaves the ending to the expiration handler",
+          .timeLimit(.minutes(2)))
+    func recoveryTeardownCancelledMidSettleDefersToTheExpiry() async throws {
+        // playhead-lmrx (review round 7): the backfill twin's guard, one
+        // handler over. Read
+        // `backfillTeardownCancelledMidSettleDefersToTheExpiry` for the full
+        // argument — the defect, the two seams that make it a fact rather than
+        // a race, and why round 6 declined to build it.
+        //
+        // Recovery's version is if anything nastier, because its expiration
+        // handler has NO settle wait: the moment the work task loses that guard
+        // it wins the sprint to `setTaskCompleted` by a wider margin, and the
+        // run is recorded `recovered_work` over a job that is still running.
+        let store = try await makeTestStore()
+        let downloads = StubDownloadProvider()
+        let unwind = UnwindGate()
+        defer { unwind.open() }
+        let scheduler = makeScheduler(
+            store: store,
+            downloads: downloads,
+            audio: GatedUnwindAudioStub(gate: unwind)
+        )
+        try await insertNowLaneJob(store: store, downloads: downloads,
+                                   jobId: "recovery-mid-settle", priority: 21,
+                                   createdAt: Date().timeIntervalSince1970)
+
+        let dispatch = Task { await scheduler.processNextDispatchableJobForTesting() }
+        var spins = 0
+        while await !scheduler.hasCurrentRunningTaskForTesting() {
+            spins += 1
+            try #require(spins < 1000, "the seeded job never entered decode")
+            try await Task.sleep(for: .milliseconds(20))
+        }
+
+        let expiryGate = UnwindGate()
+        defer { expiryGate.open() }
+        let ledger = GatedRunLedger(parkOn: .expired, gate: expiryGate)
+        let bps = BackgroundProcessingService(
+            coordinator: StubAnalysisCoordinator(),
+            capabilitiesService: CapabilitiesService(),
+            taskScheduler: StubTaskScheduler(),
+            batteryProvider: StubBatteryProvider(),
+            runLedger: ledger
+        )
+        let reconciler = AnalysisJobReconciler(
+            store: store,
+            downloadManager: StubDownloadProvider(),
+            capabilitiesService: StubCapabilitiesProvider(
+                snapshot: makeCapabilitySnapshot(thermalState: .nominal, isCharging: true)
+            )
+        )
+        await bps.setPreAnalysisServices(scheduler: scheduler, reconciler: reconciler)
+
+        let task = StubBackgroundTask()
+        await bps.handlePreAnalysisRecovery(task, budget: Self.deadlineAlreadyPast)
+        let workTask = try #require(
+            await bps.workTaskForTesting(task),
+            "the handler must leave its work task registered until something completes the BGTask"
+        )
+
+        await ledger.finishes.wait(for: 1)
+        task.simulateExpiration()
+        await ledger.reachedPark.wait(for: 1)
+
+        await workTask.value
+
+        #expect(task.completedSuccess == nil,
+                """
+                Recovery's work task must NOT complete the BGTask after the OS \
+                cancelled it mid-teardown. `true` here means it fell through \
+                the settle wait into `markComplete(success: true)`, telling iOS \
+                the window finished over a live job — with recovery's expiry \
+                carrying no settle wait of its own, there is nothing behind it \
+                to make the requeue durable.
+                """)
+        #expect(task.setTaskCompletedCallCount == 0,
+                "and it must not have touched setTaskCompleted at all")
+
+        unwind.open()
+        expiryGate.open()
+        await task.awaitCompletion()
+        #expect(task.completedSuccess == false,
+                "the expiration handler owns the ending, and records it as one")
+        #expect(ledger.recordedOutcomes.contains(.expired),
+                "and the durable row for this window is the expired one")
+        _ = await dispatch.value
+    }
+
     @Test("recovery's EXPIRY shuts the dispatch door too", .timeLimit(.minutes(2)))
     func recoveryExpiryShutsTheDispatchDoor() async throws {
         // playhead-lmrx (review round 6): THE FOURTH DOOR CALL SITE.
@@ -2358,7 +2480,15 @@ struct CancelAimIdentityTests {
         // recovery's 97 recorded runs ended in.
         let store = try await makeTestStore()
         let downloads = StubDownloadProvider()
-        let scheduler = makeScheduler(store: store, downloads: downloads)
+        // playhead-lmrx (review round 7): GATED, not merely slow — see the
+        // cancel assertion at the bottom for why the difference is load-bearing.
+        let unwind = UnwindGate()
+        defer { unwind.open() }
+        let scheduler = makeScheduler(
+            store: store,
+            downloads: downloads,
+            audio: GatedUnwindAudioStub(gate: unwind)
+        )
         try await insertNowLaneJob(store: store, downloads: downloads,
                                    jobId: "recovery-expiry-door", priority: 21,
                                    createdAt: Date().timeIntervalSince1970)
@@ -2382,6 +2512,7 @@ struct CancelAimIdentityTests {
         // The handler installs its expiration handler and returns; the work
         // task it left behind is what parks in the drain.
         await bps.handlePreAnalysisRecovery(task)
+        let workTask = await bps.workTaskForTesting(task)
         var spins = 0
         while await !scheduler.inFlightJobIdsForTesting().contains("recovery-expiry-door") {
             spins += 1
@@ -2400,14 +2531,201 @@ struct CancelAimIdentityTests {
                 it starts before `setTaskCompleted` is named by nothing and \
                 live when iOS suspends the process.
                 """)
-        // Deliberately NOT also asserting the requeue here. Recovery's expiry
-        // has no settle wait — that asymmetry with backfill is argued in the
-        // handler and is not this bead's to change — so `state == 'queued'` is
-        // not ordered against `markComplete` and asserting it would be a race
-        // dressed as a claim. The cancel's own effect is pinned by
-        // `ExpiredWindowAttemptAccountingTests`; what is unpinned, and what
-        // this test is for, is the door.
+        // playhead-lmrx (review round 7): AND THE CANCEL ONE LINE BELOW THE
+        // DOOR, which round 6 left unasserted.
+        //
+        // `cancelCurrentJob` at this call site is pre-existing (playhead-1nl6)
+        // and its EFFECT was pinned nowhere: round 6 drove the path for the
+        // first time and deliberately stopped at the door, because the effect
+        // it reached for — `state == 'queued'` — lands several actor hops and
+        // two SQLite writes after the cancel and is not ordered against
+        // `markComplete`. Round 6 was right to decline that assertion. It is
+        // the wrong OBSERVABLE, not an unpinnable claim.
+        //
+        // Cancellation is requested SYNCHRONOUSLY inside `cancelCurrentJob`,
+        // one statement before `markComplete`, so by the time `awaitCompletion`
+        // above has returned the marks are already set. The only thing that
+        // could hide them is the job leaving the registry first — which the
+        // gate makes impossible. Deleting the cancel therefore reddens this
+        // deterministically, with no wait and no race.
+        //
+        // Both halves of the aim are checked because they cover disjoint
+        // stretches of `processJob`: `cancelRequested` reaches a job dispatched
+        // but not yet past its cancel-race check, `runTask.isCancelled` a job
+        // whose runner has started.
+        #expect(await scheduler.cancelRequestedJobIdsForTesting().contains("recovery-expiry-door"),
+                """
+                Recovery's expiration teardown must CANCEL the job it found in \
+                flight, not merely shut the door on new ones. Without it the \
+                live job runs on unaware into `setTaskCompleted` and process \
+                suspension: no checkpoint, no requeue, and a leased `running` \
+                row left for mk6z's reaper.
+                """)
+        #expect(await scheduler.cancelledRunTaskJobIdsForTesting().contains("recovery-expiry-door"),
+                "and the cancel must reach the RUNNER, not only the registry mark")
         #expect(task.completedSuccess == false,
                 "and it must be the EXPIRATION that ended this run, not the work task's normal return")
+        unwind.open()
+        await workTask?.value
     }
+}
+
+// MARK: - Shared teardown harness (file scope, review round 7)
+//
+// `UnwindGate` and `GatedUnwindAudioStub` were nested inside
+// `BackfillExpiryDurabilityTests`. They moved out unchanged because the
+// recovery handler's teardown needs the same two seams, and duplicating them
+// per suite is how two copies of one harness start disagreeing about what
+// "held in flight" means.
+
+/// A one-shot gate the TEST opens, so "the cancelled job is still
+/// unwinding" is a fact the test controls rather than a duration it hopes
+/// for. Awaiting a continuation somebody else resumes ignores task
+/// cancellation by construction, which is exactly the state under test.
+///
+/// The safety timer is why this is not simply a sleep in disguise: on the
+/// correct ordering the gate is opened by the ledger write itself, so the
+/// test is insensitive to how long the handler takes to get there. It is
+/// only the WRONG ordering — where the write is behind the wait and the
+/// wait is behind this gate — that ever reaches the timer, and it then
+/// observes a settled scheduler and fails, which is the point.
+private final class UnwindGate: @unchecked Sendable {
+    private let lock = NSLock()
+    private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var isOpen = false
+
+    func wait() async {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            lock.lock()
+            if isOpen {
+                lock.unlock()
+                continuation.resume()
+                return
+            }
+            waiters.append(continuation)
+            lock.unlock()
+        }
+    }
+
+    /// Idempotent, and non-async so `NSLock` is taken outside an async
+    /// context.
+    func open() {
+        lock.lock()
+        if isOpen {
+            lock.unlock()
+            return
+        }
+        isOpen = true
+        let pending = waiters
+        waiters.removeAll()
+        lock.unlock()
+        for continuation in pending { continuation.resume() }
+    }
+
+    /// Deadlock insurance: opens the gate after `seconds` no matter what,
+    /// so a test that never reaches its own `open()` fails on an assertion
+    /// rather than hanging.
+    ///
+    /// **Arm this as LATE as possible.** An earlier draft armed it at the
+    /// top of the test, so setup and the spin-to-in-flight loop spent the
+    /// same budget the handler's teardown needs — and it went red under the
+    /// mutation battery's suite load twice. The window that has to fit is
+    /// only "expiration fired" → "the ledger row was written"; everything
+    /// before that is unbounded and must not be charged here.
+    func openAfter(seconds: TimeInterval) {
+        DispatchQueue.global().asyncAfter(deadline: .now() + seconds) { [self] in
+            open()
+        }
+    }
+}
+
+/// Blocks in `decode` on an ``UnwindGate``, ignoring cancellation until the
+/// gate opens.
+private final class GatedUnwindAudioStub: AnalysisAudioProviding, @unchecked Sendable {
+    private let gate: UnwindGate
+    init(gate: UnwindGate) { self.gate = gate }
+    func decode(
+        fileURL: LocalAudioURL,
+        episodeID: String,
+        shardDuration: TimeInterval
+    ) async throws -> [AnalysisShard] {
+        await gate.wait()
+        try Task.checkCancellation()
+        return []
+    }
+}
+
+/// playhead-lmrx (review round 7): a run ledger that PARKS its caller inside
+/// `finishRun` for one nominated outcome, and signals every terminal write.
+///
+/// **This is what makes the teardown `guard !Task.isCancelled` pinnable at
+/// all.** That guard's correct behaviour is a bare `return` — no row, no state,
+/// nothing. Its only observable consequence is negative: the work task does not
+/// call `setTaskCompleted`, leaving the ending to the expiration handler. Ask
+/// that question directly and you are timing a sprint between two tasks to a
+/// first-writer-wins flag, which is why review round 6 declined to build the
+/// rail: an intermittently-surviving rail is worse than none.
+///
+/// Parking the EXPIRATION handler at its own `finishRun` — which is upstream of
+/// its `markComplete` on both handlers — removes the other runner from the
+/// race. From that moment the work task is the ONLY party that can complete the
+/// task, so `completedSuccess` is a fact about the guard.
+private final class GatedRunLedger: BackgroundTaskRunLedger, @unchecked Sendable {
+    private let parkOn: BackgroundTaskRunOutcome
+    private let gate: UnwindGate
+    private let lock = NSLock()
+    private var seen: [BackgroundTaskRunOutcome] = []
+    /// Fires when a `finishRun` for ``parkOn`` has ARRIVED — i.e. the parked
+    /// caller is committed and cannot reach anything downstream of the write.
+    let reachedPark = TestEventCounter()
+    /// Fires on every terminal write, parked or not.
+    let finishes = TestEventCounter()
+
+    init(parkOn: BackgroundTaskRunOutcome, gate: UnwindGate) {
+        self.parkOn = parkOn
+        self.gate = gate
+    }
+
+    var recordedOutcomes: [BackgroundTaskRunOutcome] {
+        lock.lock(); defer { lock.unlock() }
+        return seen
+    }
+
+    func startRun(
+        entryPoint: BackgroundTaskRunEntryPoint,
+        taskIdentifier: String,
+        taskInstanceID: String?,
+        scenePhase: String?
+    ) async -> String { UUID().uuidString }
+
+    func recordRunStart(
+        runId: String,
+        entryPoint: BackgroundTaskRunEntryPoint,
+        taskIdentifier: String,
+        taskInstanceID: String?,
+        scenePhase: String?
+    ) async {}
+
+    /// Non-async so `NSLock` is taken outside an async context.
+    private func record(_ outcome: BackgroundTaskRunOutcome) {
+        lock.lock(); defer { lock.unlock() }
+        seen.append(outcome)
+    }
+
+    @discardableResult
+    func finishRun(runId: String, update: BackgroundTaskRunOutcomeUpdate) async -> Bool {
+        record(update.outcome)
+        finishes.increment()
+        if update.outcome == parkOn {
+            reachedPark.increment()
+            await gate.wait()
+        }
+        return true
+    }
+
+    func fetchLatestRun(for entryPoint: BackgroundTaskRunEntryPoint) async -> BackgroundTaskRunRecord? { nil }
+    func fetchRecentRuns(limit: Int) async -> [BackgroundTaskRunRecord] { [] }
+    func fetchLatestRun(forAssetId assetId: String) async -> BackgroundTaskRunRecord? { nil }
+    @discardableResult
+    func reapOrphansAtLaunch(startedBefore: Double) async -> Int { 0 }
 }

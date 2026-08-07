@@ -536,6 +536,35 @@ actor BackgroundProcessingService {
         )
     }
 
+    /// playhead-lmrx (review round 7): the work `Task` a BGTask handler left
+    /// behind for `task`, so a test can await its COMPLETION.
+    ///
+    /// This exists for one reason, and it is the only reason it should ever be
+    /// used. Both work drivers end their teardown with
+    /// `guard !Task.isCancelled else { return }` — the OS reclaimed us mid-wait,
+    /// so the expiration handler owns the ending. The correct behaviour of that
+    /// guard is a bare `return`: it writes nothing, logs at `.info`, and leaves
+    /// no state behind. The only *observable* difference between having it and
+    /// not having it is WHO reaches `setTaskCompleted`, and asking that
+    /// question directly is a race — the mutant's `markComplete(success: true)`
+    /// and the expiration handler's `markComplete(success: false)` are two
+    /// tasks sprinting at a first-writer-wins flag.
+    ///
+    /// Awaiting this handle is the happens-before edge that removes the race.
+    /// `.value` returns on BOTH paths — the guard's `return` and the
+    /// fall-through — so a test that holds the expiration handler still (at its
+    /// own ledger write, which is upstream of its `markComplete`) can assert
+    /// that the work task completed NOTHING, as a fact about the guard rather
+    /// than about which task the scheduler ran first.
+    ///
+    /// Returns `nil` once the task has been completed: `markComplete` removes
+    /// the entry, so a caller must take the handle before driving the teardown.
+    func workTaskForTesting(
+        _ task: any BackgroundProcessingTaskProtocol
+    ) -> Task<Void, Never>? {
+        activeBackgroundTasks[ObjectIdentifier(task as AnyObject)]
+    }
+
     // MARK: - State
 
     /// Whether the hot-path is currently active (audio playing in foreground).
