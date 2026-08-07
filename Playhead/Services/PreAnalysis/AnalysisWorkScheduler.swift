@@ -1479,7 +1479,8 @@ actor AnalysisWorkScheduler {
         // stand here as well, and it was the aim defect pointing the other way.
         // See ``episodeDeleted(episodeId:)`` for the argument; it applies
         // verbatim. `lostOwnership` stays, un-narrowed, because it is a
-        // different quantity with a different fix — see playhead-mk6z.
+        // different quantity with a different fix — see playhead-hrs5, which
+        // also records that this very condition is a single-slot AIM.
         if currentEpisodeId == episodeId {
             lostOwnership = true
         }
@@ -2690,7 +2691,7 @@ actor AnalysisWorkScheduler {
         // removes ("a sibling is not preempted") cannot be pinned from outside
         // this actor: the flag's only clearer is `processJob`'s own cancel-race
         // arm and `defer`, so any external observation of it races the unwind of
-        // the very job whose episode was deleted. Filed as playhead-3n0k.
+        // the very job whose episode was deleted. Filed as playhead-m315.
         //
         // playhead-lmrx (review round 3): as in `retireDownloadAnalysis` — the
         // cancel is aimed at the deleted episode's jobs by identity.
