@@ -276,7 +276,7 @@ struct BackfillJobStoreTests {
         try await store.insertBackfillJob(job)
         try await store.markBackfillJobDeferred(jobId: job.jobId, reason: "thermal")
 
-        try await store.markBackfillJobRunning(jobId: job.jobId)
+        try await store.markBackfillJobRunning(jobId: job.jobId, transcriptVersion: "tx-test")
 
         let fetched = try #require(await store.fetchBackfillJob(byId: job.jobId))
         #expect(fetched.status == .running)
@@ -299,7 +299,7 @@ struct BackfillJobStoreTests {
         )
         try await store.insertBackfillJob(job)
 
-        try await store.markBackfillJobRunning(jobId: job.jobId)
+        try await store.markBackfillJobRunning(jobId: job.jobId, transcriptVersion: "tx-test")
 
         let fetched = try #require(await store.fetchBackfillJob(byId: job.jobId))
         #expect(fetched.status == .running)
@@ -407,7 +407,7 @@ struct BackfillJobStoreTests {
         )
 
         await #expect(throws: AnalysisStoreError.self) {
-            try await store.markBackfillJobRunning(jobId: job.jobId)
+            try await store.markBackfillJobRunning(jobId: job.jobId, transcriptVersion: "tx-test")
         }
 
         let fetched = try #require(await store.fetchBackfillJob(byId: job.jobId))
@@ -443,7 +443,7 @@ struct BackfillJobStoreTests {
             retryCount: 1
         )
 
-        try await store.markBackfillJobRunning(jobId: job.jobId)
+        try await store.markBackfillJobRunning(jobId: job.jobId, transcriptVersion: "tx-test")
 
         let fetched = try #require(await store.fetchBackfillJob(byId: job.jobId))
         #expect(fetched.status == .running, "a failure under budget is a retry, not a retirement")
@@ -468,7 +468,7 @@ struct BackfillJobStoreTests {
         )
 
         await #expect(throws: AnalysisStoreError.self) {
-            try await store.markBackfillJobRunning(jobId: job.jobId)
+            try await store.markBackfillJobRunning(jobId: job.jobId, transcriptVersion: "tx-test")
         }
 
         let fetched = try #require(await store.fetchBackfillJob(byId: job.jobId))
@@ -483,7 +483,7 @@ struct BackfillJobStoreTests {
         try await store.insertBackfillJob(job)
         try await store.markBackfillJobDeferred(jobId: job.jobId, reason: "thermal")
 
-        try await store.markBackfillJobRunning(jobId: job.jobId)
+        try await store.markBackfillJobRunning(jobId: job.jobId, transcriptVersion: "tx-test")
 
         let fetched = try #require(await store.fetchBackfillJob(byId: job.jobId))
         #expect(fetched.status == .running)
@@ -494,7 +494,7 @@ struct BackfillJobStoreTests {
     func markBackfillJobRunning_throwsOnMissingRow() async throws {
         let store = try await makeTestStore()
         await #expect(throws: AnalysisStoreError.self) {
-            try await store.markBackfillJobRunning(jobId: "nope")
+            try await store.markBackfillJobRunning(jobId: "nope", transcriptVersion: "tx-test")
         }
     }
 
@@ -518,10 +518,10 @@ struct BackfillJobStoreTests {
             deferReason: "earlier-defer"
         )
         try await store.insertBackfillJob(job)
-        try await store.markBackfillJobRunning(jobId: job.jobId)
+        try await store.markBackfillJobRunning(jobId: job.jobId, transcriptVersion: "tx-test")
 
         // Second call must not throw and must not clobber audit fields.
-        try await store.markBackfillJobRunning(jobId: job.jobId)
+        try await store.markBackfillJobRunning(jobId: job.jobId, transcriptVersion: "tx-test")
 
         let fetched = try #require(await store.fetchBackfillJob(byId: job.jobId))
         #expect(fetched.status == .running)
@@ -551,10 +551,10 @@ struct BackfillJobStoreTests {
             retryCount: 1
         )
         try await store.insertBackfillJob(job)
-        try await store.markBackfillJobRunning(jobId: job.jobId)
+        try await store.markBackfillJobRunning(jobId: job.jobId, transcriptVersion: "tx-test")
 
         // Second run after "crash" — must not throw.
-        try await store.markBackfillJobRunning(jobId: job.jobId)
+        try await store.markBackfillJobRunning(jobId: job.jobId, transcriptVersion: "tx-test")
 
         let fetched = try #require(await store.fetchBackfillJob(byId: job.jobId))
         #expect(fetched.status == .running)
@@ -808,7 +808,7 @@ struct BackfillJobStoreTests {
         try await store.insertBackfillJob(job)
 
         // Move the row into the `.failed` terminal state, with the budget spent.
-        try await store.markBackfillJobRunning(jobId: job.jobId)
+        try await store.markBackfillJobRunning(jobId: job.jobId, transcriptVersion: "tx-test")
         try await store.markBackfillJobFailed(
             jobId: job.jobId,
             reason: "boom",
@@ -819,7 +819,7 @@ struct BackfillJobStoreTests {
         // with the job id, the prior `.failed` status, and the requested
         // target status.
         do {
-            try await store.markBackfillJobRunning(jobId: job.jobId)
+            try await store.markBackfillJobRunning(jobId: job.jobId, transcriptVersion: "tx-test")
             Issue.record("expected invalidStateTransition, but no error was thrown")
         } catch let error as AnalysisStoreError {
             guard case .invalidStateTransition(let id, let fromStatus, let toStatus) = error else {
@@ -848,9 +848,95 @@ struct BackfillJobStoreTests {
         let fetched = try #require(await store.fetchBackfillJob(byId: job.jobId))
         #expect(fetched.attemptTranscriptVersion == nil)
 
-        try await store.noteBackfillJobAttempt(jobId: job.jobId, transcriptVersion: "tx-a")
+        try await store.markBackfillJobRunning(jobId: job.jobId, transcriptVersion: "tx-a")
         let stamped = try #require(await store.fetchBackfillJob(byId: job.jobId))
         #expect(stamped.attemptTranscriptVersion == "tx-a")
+    }
+
+    /// playhead-wxsv SPEC 1's COST, found by adversarial review after the first
+    /// implementation shipped it: widening the start guard to accept `failed`
+    /// must not turn the liveness HEARTBEAT into a resurrection.
+    ///
+    /// The coarse-pass heartbeats used to call `markBackfillJobRunning` purely
+    /// to prove a job was advancing, and relied on it refusing terminal rows.
+    /// Once `failed`-under-budget became startable — which is exactly the state
+    /// `FMNoProgressWatchdog` leaves, and exactly the state all 5 field rows are
+    /// in — a heartbeat leaked past `defuse()` by an orphaned pass would flip
+    /// that row to `running`. `running` is excluded from
+    /// `countResumableBackfillJobs`, `fetchAssetIdsWithResumableBackfillJobs`
+    /// AND `reopenBackfillJob`, so the asset reads as having no resumable work,
+    /// with no carrier, and the touch resets the reaper's freshness clock on its
+    /// way past. That is spec item 3's failure mode reached without moving a
+    /// single timestamp.
+    ///
+    /// A broken implementation that would still pass every other test here: the
+    /// one this repo had until the review — heartbeats routed through
+    /// `markBackfillJobRunning`.
+    @Test("playhead-wxsv: a liveness heartbeat cannot start a row, only refresh a running one")
+    func heartbeatCannotStartARow() async throws {
+        let store = try await makeTestStore()
+        try await insertParentAsset(store)
+        let job = makeBackfillJob(jobId: "watchdog-victim", createdAt: 3_000)
+        try await store.insertBackfillJob(job)
+        try await store.markBackfillJobRunning(jobId: job.jobId, transcriptVersion: "tx-v1")
+        try await store.markBackfillJobFailed(
+            jobId: job.jobId,
+            reason: "FMNoProgressError",
+            retryCount: 1
+        )
+        #expect(try await store.countResumableBackfillJobs(assetId: "asset-1") == 1,
+                "a failure under budget is still the asset's pending work")
+
+        // The leaked touch from an orphaned pass.
+        try await store.touchBackfillJobLiveness(jobId: job.jobId)
+
+        let row = try #require(await store.fetchBackfillJob(byId: job.jobId))
+        #expect(row.status == .failed, "a heartbeat is not a transition")
+        #expect(try await store.countResumableBackfillJobs(assetId: "asset-1") == 1,
+                "the asset must not lose its only resumable row to a heartbeat")
+
+        // …and it still does its actual job on a row that IS running.
+        try await store.markBackfillJobRunning(jobId: job.jobId, transcriptVersion: "tx-v1")
+        try await store.touchBackfillJobLiveness(jobId: job.jobId)
+        #expect(try await store.fetchBackfillJob(byId: job.jobId)?.status == .running)
+    }
+
+    /// playhead-wxsv, the STANDING DEFECT CLASS, closed at the write rather than
+    /// argued about: a row must never carry a version nothing scanned.
+    ///
+    /// `BGProcessingTaskHandler` runs inside the live app process, so the
+    /// foreground runner and the background lane can both reach
+    /// `markBackfillJobRunning` for one row. The second caller is told "already
+    /// running" (idempotent success) — and for one round of this bead the stamp
+    /// was a SEPARATE write with no status guard, so that second caller
+    /// overwrote the stamp with ITS version. The first runner then completed the
+    /// row, which now read `complete @ V2` while only V1 was ever scanned, and
+    /// the next pass at V2 took the idempotency skip. A permanent coverage hole
+    /// whose value would read the same whether or not the thing it names had
+    /// happened.
+    ///
+    /// The fix is the `CASE` in the UPDATE: a row already `running` keeps the
+    /// stamp of whoever claimed it. A broken implementation that would still
+    /// pass `insertedRowHasNoAttemptVersion`: an unconditional assignment.
+    @Test("playhead-wxsv: a second claim on a running row does not steal its attempt version")
+    func secondClaimDoesNotRestampARunningRow() async throws {
+        let store = try await makeTestStore()
+        try await insertParentAsset(store)
+        let job = makeBackfillJob(jobId: "two-carriers")
+        try await store.insertBackfillJob(job)
+
+        try await store.markBackfillJobRunning(jobId: job.jobId, transcriptVersion: "tx-v1")
+        // A second lane reaches the same row. Idempotent success, by design.
+        try await store.markBackfillJobRunning(jobId: job.jobId, transcriptVersion: "tx-v2")
+
+        #expect(try await store.fetchBackfillJob(byId: job.jobId)?.attemptTranscriptVersion == "tx-v1",
+                "the in-flight attempt owns the stamp; the row must not claim a version nobody read")
+
+        // The consequence that makes it matter: the row completes under the
+        // version actually scanned, so a V2 pass still re-opens it.
+        try await store.markBackfillJobComplete(jobId: job.jobId, progressCursor: nil)
+        #expect(try await store.reopenBackfillJob(jobId: job.jobId, forTranscriptVersion: "tx-v2"),
+                "V2 was never scanned, so a V2 pass must still get its turn")
     }
 
     /// playhead-wxsv SPEC 2 + THE PRIZE, at the store layer.
@@ -870,8 +956,7 @@ struct BackfillJobStoreTests {
         try await insertParentAsset(store)
         let job = makeBackfillJob(jobId: "grew", createdAt: 1_000)
         try await store.insertBackfillJob(job)
-        try await store.noteBackfillJobAttempt(jobId: job.jobId, transcriptVersion: "tx-v1")
-        try await store.markBackfillJobRunning(jobId: job.jobId)
+        try await store.markBackfillJobRunning(jobId: job.jobId, transcriptVersion: "tx-v1")
         try await store.markBackfillJobComplete(
             jobId: job.jobId,
             progressCursor: BackfillProgressCursor(
@@ -902,8 +987,7 @@ struct BackfillJobStoreTests {
         try await insertParentAsset(store)
         let job = makeBackfillJob(jobId: "already-done")
         try await store.insertBackfillJob(job)
-        try await store.noteBackfillJobAttempt(jobId: job.jobId, transcriptVersion: "tx-v1")
-        try await store.markBackfillJobRunning(jobId: job.jobId)
+        try await store.markBackfillJobRunning(jobId: job.jobId, transcriptVersion: "tx-v1")
         try await store.markBackfillJobComplete(jobId: job.jobId, progressCursor: nil)
 
         #expect(try await store.reopenBackfillJob(jobId: job.jobId, forTranscriptVersion: "tx-v1") == false)
@@ -911,7 +995,7 @@ struct BackfillJobStoreTests {
         #expect(row.status == .complete)
 
         await #expect(throws: AnalysisStoreError.self) {
-            try await store.markBackfillJobRunning(jobId: job.jobId)
+            try await store.markBackfillJobRunning(jobId: job.jobId, transcriptVersion: "tx-test")
         }
     }
 
@@ -925,10 +1009,14 @@ struct BackfillJobStoreTests {
     func reopenRefusesAnUnstampedRow() async throws {
         let store = try await makeTestStore()
         try await insertParentAsset(store)
-        let job = makeBackfillJob(jobId: "unstamped", status: .queued)
+        // Inserted terminal, because since playhead-wxsv the claim and the stamp
+        // are ONE statement — there is no longer a way to reach `complete`
+        // through the lifecycle without a version. That is the point: this state
+        // is unreachable in production, and this test pins what happens if some
+        // future path reaches it anyway.
+        let job = makeBackfillJob(jobId: "unstamped", status: .complete)
         try await store.insertBackfillJob(job)
-        try await store.markBackfillJobRunning(jobId: job.jobId)
-        try await store.markBackfillJobComplete(jobId: job.jobId, progressCursor: nil)
+        #expect(try await store.fetchBackfillJob(byId: job.jobId)?.attemptTranscriptVersion == nil)
 
         #expect(try await store.reopenBackfillJob(jobId: job.jobId, forTranscriptVersion: "tx-anything") == false)
         #expect(try await store.fetchBackfillJob(byId: job.jobId)?.status == .complete)
@@ -955,8 +1043,7 @@ struct BackfillJobStoreTests {
         try await insertParentAsset(store)
         let job = makeBackfillJob(jobId: "exhausted-elsewhere", createdAt: 2_000)
         try await store.insertBackfillJob(job)
-        try await store.noteBackfillJobAttempt(jobId: job.jobId, transcriptVersion: "tx-v1")
-        try await store.markBackfillJobRunning(jobId: job.jobId)
+        try await store.markBackfillJobRunning(jobId: job.jobId, transcriptVersion: "tx-v1")
         try await store.markBackfillJobFailed(
             jobId: job.jobId,
             reason: "Request has been rate limited. Please try again later.",
@@ -969,7 +1056,7 @@ struct BackfillJobStoreTests {
         // stays retired, and nothing can start it.
         #expect(try await store.reopenBackfillJob(jobId: job.jobId, forTranscriptVersion: "tx-v1") == false)
         await #expect(throws: AnalysisStoreError.self) {
-            try await store.markBackfillJobRunning(jobId: job.jobId)
+            try await store.markBackfillJobRunning(jobId: job.jobId, transcriptVersion: "tx-test")
         }
 
         // It expires when the thing it was scoped to changes.
@@ -980,7 +1067,7 @@ struct BackfillJobStoreTests {
         #expect(reopened.status == .queued)
         #expect(reopened.createdAt == 2_000, "re-opening must not move createdAt — see spec item 3")
         // …and it is genuinely startable now, not merely relabelled.
-        try await store.markBackfillJobRunning(jobId: job.jobId)
+        try await store.markBackfillJobRunning(jobId: job.jobId, transcriptVersion: "tx-test")
         #expect(try await store.fetchBackfillJob(byId: job.jobId)?.status == .running)
     }
 
@@ -993,8 +1080,7 @@ struct BackfillJobStoreTests {
         try await insertParentAsset(store)
         let job = makeBackfillJob(jobId: "in-flight")
         try await store.insertBackfillJob(job)
-        try await store.noteBackfillJobAttempt(jobId: job.jobId, transcriptVersion: "tx-v1")
-        try await store.markBackfillJobRunning(jobId: job.jobId)
+        try await store.markBackfillJobRunning(jobId: job.jobId, transcriptVersion: "tx-v1")
 
         #expect(try await store.reopenBackfillJob(jobId: job.jobId, forTranscriptVersion: "tx-v2") == false)
         #expect(try await store.fetchBackfillJob(byId: job.jobId)?.status == .running)

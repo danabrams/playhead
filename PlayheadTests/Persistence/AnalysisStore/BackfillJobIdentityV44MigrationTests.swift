@@ -148,7 +148,7 @@ struct BackfillJobIdentityV44MigrationTests {
         try await store.insertBackfillJob(
             makeBackfillJob(jobId: "post-v44", analysisAssetId: "asset-legacy")
         )
-        try await store.noteBackfillJobAttempt(jobId: "post-v44", transcriptVersion: "tx-v1")
+        try await store.markBackfillJobRunning(jobId: "post-v44", transcriptVersion: "tx-v1")
         #expect(try await store.fetchBackfillJob(byId: "post-v44")?.attemptTranscriptVersion == "tx-v1")
     }
 

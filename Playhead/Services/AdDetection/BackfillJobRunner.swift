@@ -861,16 +861,19 @@ actor BackfillJobRunner {
                 // C-2: split lifecycle API. `markBackfillJobRunning` preserves
                 // progressCursor/retryCount/deferReason so an earlier-deferred
                 // row's audit trail is not lost when it resumes.
-                try await store.markBackfillJobRunning(jobId: job.jobId)
-                // playhead-wxsv: THE attempt-start site. This is the only place
-                // in the runner where a job goes from "selected" to "about to
-                // read audio", so it is the only place that can honestly say
-                // which transcript the row's next state will have been made
-                // against. The liveness heartbeats elsewhere call
-                // `markBackfillJobRunning` alone on purpose — refreshing
-                // `updatedAt` on an attempt already under way says nothing new
-                // about the transcript.
-                try await store.noteBackfillJobAttempt(
+                //
+                // playhead-wxsv: THE attempt-start site, and the only one. This
+                // is where a job goes from "selected" to "about to read audio",
+                // so it is the only place that can honestly say which transcript
+                // the row's next state will have been made against — and the
+                // claim and the stamp are ONE statement, so a row can never be
+                // stamped with a version it was not claimed for. The liveness
+                // heartbeats go through `touchBackfillJobLiveness` instead:
+                // refreshing `updatedAt` on an attempt already under way says
+                // nothing new about the transcript, and a heartbeat that could
+                // also transition a row is how an orphaned pass resurrects the
+                // run it came from.
+                try await store.markBackfillJobRunning(
                     jobId: job.jobId,
                     transcriptVersion: inputs.transcriptVersion
                 )
@@ -1771,8 +1774,30 @@ actor BackfillJobRunner {
             jobId: existing.jobId,
             forTranscriptVersion: transcriptVersion
         ), let reopened = try await store.fetchBackfillJob(byId: existing.jobId) else {
-            if existing.status != .complete {
-                logger.warning("FM backfill job exhausted retries: \(existing.jobId, privacy: .public) retries=\(existing.retryCount)")
+            // Always logged, never silently — the `status != .complete` filter
+            // this replaced left the ONE shape here whose cause is a defect
+            // rather than a policy with no trace at all. A terminal row that
+            // never recorded an attempt can be re-opened at no version
+            // whatsoever, so it is skipped for the life of the asset; an
+            // honestly-retired row is a budget doing its job. Those need
+            // different words, not one word and a silence.
+            if existing.attemptTranscriptVersion == nil {
+                logger.error(
+                    """
+                    fm_backfill_job_unreachable job=\(existing.jobId, privacy: .public) \
+                    status=\(existing.status.rawValue, privacy: .public) \
+                    reason=terminal_without_a_recorded_attempt
+                    """
+                )
+            } else {
+                logger.warning(
+                    """
+                    fm_backfill_job_retained job=\(existing.jobId, privacy: .public) \
+                    status=\(existing.status.rawValue, privacy: .public) \
+                    retries=\(existing.retryCount, privacy: .public) \
+                    at=\(existing.attemptTranscriptVersion ?? "-", privacy: .public)
+                    """
+                )
             }
             return nil
         }
@@ -2768,26 +2793,33 @@ actor BackfillJobRunner {
     /// job-lifetime token.
     ///
     /// The lease is what tells `resetStrandedBackfillJobs` a `running` row is
-    /// alive, and `markBackfillJobRunning` accepts `queued`, `deferred` AND
-    /// `running` — so a touch arriving from a pass whose job is over does not
-    /// merely refresh a timestamp, it can RESURRECT a non-terminal row into
-    /// `running` and then pin it there, fresh, where the reaper will not sweep
-    /// it and the drain will not re-admit it. A `running` row nobody sweeps is
-    /// exactly the stall qk44 exists to prevent.
+    /// alive, so a touch arriving from a pass whose job is over must not do
+    /// anything except refresh a timestamp. If it could also TRANSITION a row it
+    /// would pin a non-terminal row in `running`, fresh, where the reaper will
+    /// not sweep it and the drain will not re-admit it. A `running` row nobody
+    /// sweeps is exactly the stall qk44 exists to prevent.
     ///
-    /// **Which sequence actually reaches that, stated precisely because the
-    /// obvious one does not.** The only thing that orphans a pass is
-    /// `FMNoProgressWatchdog` abandoning it, and the `FMNoProgressError` that
-    /// produces lands in the drain loop's untyped `catch`, which marks the job
-    /// `.failed`. `markBackfillJobRunning` REFUSES a terminal row
-    /// (`invalidStateTransition`, swallowed by the `try?`), so an orphan cannot
-    /// resurrect the run it came from. What it can outlive is that run: the
-    /// abandoned pass stays parked on an FM call that never returns and keeps
-    /// firing this callback, and by then the SAME `jobId` may have been
-    /// re-driven and left `queued` or `deferred` by a later run. That row is
-    /// non-terminal, so the touch lands — and it lands on work nobody is doing.
-    /// Slower than the sequence this guard was first written for, and reachable
-    /// on a device whose headline failure mode is a pass that never finishes.
+    /// **playhead-wxsv: this used to route through `markBackfillJobRunning`, and
+    /// that stopped being safe.** The original argument was that
+    /// `markBackfillJobRunning` REFUSES a terminal row, so an orphaned pass
+    /// could not resurrect the run it came from — the only thing that orphans a
+    /// pass is `FMNoProgressWatchdog`, whose `FMNoProgressError` lands in the
+    /// drain loop's untyped `catch` and marks the job `.failed`. Spec 1 of wxsv
+    /// widened that guard to accept `failed` UNDER THE RETRY BUDGET, which is
+    /// precisely the state the watchdog leaves (all 5 `failed` rows on the
+    /// 2026-08-07 pull sit at `retryCount = 1` of 3), so the argument inverted:
+    /// a leaked touch would have resurrected the very row the watchdog had just
+    /// retired, into a status that is excluded from
+    /// `countResumableBackfillJobs`, `fetchAssetIdsWithResumableBackfillJobs`
+    /// AND `reopenBackfillJob` — no carrier, no count, no way back until a
+    /// freshness floor the touch itself keeps resetting.
+    ///
+    /// So the heartbeat now has its own store entry point,
+    /// ``AnalysisStore/touchBackfillJobLiveness(jobId:)``, scoped to `running`.
+    /// A touch can no longer change any row's status, which makes the guard
+    /// below about WASTED WORK rather than about correctness: an abandoned pass
+    /// that outlives its run can still keep a genuinely-running successor's
+    /// lease warm, and that is the case the box closes.
     ///
     /// A method rather than two lines inside the closure `runJob` installs, and
     /// for exactly the reason ``checkpointCoarseWindows`` is one: the guard is
@@ -2796,15 +2828,16 @@ actor BackfillJobRunner {
     /// no test could see deleted. Here a test can hand it a defused box
     /// directly. `runJob` remains the only production caller.
     ///
-    /// Narrowed, not closed: `markBackfillJobRunning` is a suspension away, so
-    /// a `defuse()` landing in that gap still lets ONE touch through. What the
-    /// guard removes is the unbounded case — an orphaned pass refreshing the
-    /// lease for the rest of its life.
+    /// Narrowed, not closed: the store call is a suspension away, so a
+    /// `defuse()` landing in that gap still lets ONE touch through. That leaked
+    /// touch is now harmless on any row that is not `running`; what the guard
+    /// removes is the unbounded case — an orphaned pass refreshing the lease for
+    /// the rest of its life.
     func touchCoarseLeaseIfLive(box: CoarseCheckpointBox, jobId: String) async {
         guard !box.isDefused else { return }
         // `try?` matches the other heartbeat sites: a lease touch that loses a
         // race with a terminal transition must not fail the pass.
-        try? await store.markBackfillJobRunning(jobId: jobId)
+        try? await store.touchBackfillJobLiveness(jobId: jobId)
     }
 
     /// playhead-26od: make everything a coarse pass has screened SO FAR durable,
@@ -3317,7 +3350,7 @@ actor BackfillJobRunner {
         // lease's `updatedAt` stale before refinement adds another
         // long FM call.
         if ContinuousClock.now - lastHeartbeatTick >= heartbeatInterval {
-            try? await store.markBackfillJobRunning(jobId: jobIdForHeartbeat)
+            try? await store.touchBackfillJobLiveness(jobId: jobIdForHeartbeat)
             lastHeartbeatTick = ContinuousClock.now
         }
 
@@ -3362,7 +3395,7 @@ actor BackfillJobRunner {
         // new FM work, it just stops discarding the FM work already done.
         for window in coarse.windows {
             if ContinuousClock.now - lastHeartbeatTick >= heartbeatInterval {
-                try? await store.markBackfillJobRunning(jobId: jobIdForHeartbeat)
+                try? await store.touchBackfillJobLiveness(jobId: jobIdForHeartbeat)
                 lastHeartbeatTick = ContinuousClock.now
             }
             let result = makeScanResult(
@@ -3590,7 +3623,7 @@ actor BackfillJobRunner {
                 // build burned >5 min already, this prevents the reaper
                 // from racing the refinement call.
                 if ContinuousClock.now - lastHeartbeatTick >= heartbeatInterval {
-                    try? await store.markBackfillJobRunning(jobId: jobIdForHeartbeat)
+                    try? await store.touchBackfillJobLiveness(jobId: jobIdForHeartbeat)
                     lastHeartbeatTick = ContinuousClock.now
                 }
                 let refinement = try await dispatchedRefinePassB(
@@ -3621,7 +3654,7 @@ actor BackfillJobRunner {
                 for window in refinement.windows {
                     try Task.checkCancellation()
                     if ContinuousClock.now - lastHeartbeatTick >= heartbeatInterval {
-                        try? await store.markBackfillJobRunning(jobId: jobIdForHeartbeat)
+                        try? await store.touchBackfillJobLiveness(jobId: jobIdForHeartbeat)
                         lastHeartbeatTick = ContinuousClock.now
                     }
                     let result = makeRefinementScanResult(

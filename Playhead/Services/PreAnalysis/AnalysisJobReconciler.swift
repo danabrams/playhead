@@ -1519,12 +1519,14 @@ actor AnalysisJobReconciler {
             // and it stays a candidate. That is affordable because the state is
             // near-unreachable in production rather than merely rare: reaching
             // it needs `semantic_scan_results` rows covering >= 98 % of the
-            // episode with ZERO `backfill_jobs` rows, and nothing in the store
-            // ever deletes a `backfill_jobs` row (there is no `DELETE FROM
-            // backfill_jobs` — the only removal is the asset's own FK CASCADE,
-            // which takes the scan rows with it). If a future migration or a
-            // partial-wipe recovery path ever does strand scan rows without job
-            // rows, this is the line to revisit.
+            // episode with ZERO `backfill_jobs` rows. playhead-wxsv MADE THAT
+            // REACHABLE and this paragraph used to say it could not be: the v44
+            // rung runs `DELETE FROM backfill_jobs` once, to drop rows minted
+            // under an id derivation nothing re-derives. So exactly one launch,
+            // on exactly one upgrade, an asset can hold scan rows and no job
+            // row — and that is the state this sweep exists to recover, which
+            // is why the break is affordable. Every other removal is still the
+            // asset's own FK CASCADE, which takes the scan rows with it.
 
             let chunks = try await store.fetchTranscriptChunks(assetId: assetId)
             guard !chunks.isEmpty else { continue }

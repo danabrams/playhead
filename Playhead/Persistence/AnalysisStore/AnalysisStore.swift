@@ -6598,6 +6598,18 @@ actor AnalysisStore {
     // (their assets get re-scanned, resuming nothing), and 28 rows that were
     // either orphans or blocked. What is gained is that every row minted from
     // here on is addressable for the life of the asset.
+    //
+    // NO CONSTRAINT IS VIOLATED BY THE DELETE, and one thing is left DANGLING —
+    // say so here rather than let a device pull surprise somebody. Nothing
+    // holds a foreign key to `backfill_jobs.jobId`: `final_pass_jobs` is a
+    // sibling with its own id space, and `semantic_scan_results.jobId` /
+    // `.runCorrelationId` are free-text ATTRIBUTIONS, not references. So after
+    // this rung a pull will show scan rows attributed to job ids that no longer
+    // exist. That is correct — those scans really were produced by those jobs —
+    // but a query joining the two will silently return nothing for pre-v44
+    // rows. No in-memory state spans the migration: it runs inside `migrate()`
+    // at store open, before any `AdmissionController` or runner exists, and the
+    // scheduler keys on `analysis_jobs.workKey` rather than on a backfill id.
 
     /// V44 migration — drop the version out of the job identity. Idempotent
     /// (`addColumnIfNeeded`) and guarded on `tableExists` so a seeded fixture
@@ -16039,10 +16051,36 @@ actor AnalysisStore {
     /// The budget is enforced in the SQL rather than left to the caller,
     /// because the caller's check and this guard disagreeing is how the defect
     /// arose in the first place. A row at or over budget is still refused.
-    func markBackfillJobRunning(jobId: String) throws {
+    ///
+    /// **This also STAMPS `attemptTranscriptVersion`, in the same statement, and
+    /// that atomicity is load-bearing.** The claim and the stamp were two
+    /// separate writes for one round of this bead, and two writes admit a state
+    /// neither of them describes. `BGProcessingTaskHandler` runs inside the live
+    /// app process, so the foreground runner and the BG lane can both reach this
+    /// method for one row; the second caller is told "already running"
+    /// (idempotent success, below) and would then have overwritten the stamp
+    /// with ITS transcript version — after which the FIRST runner's completion
+    /// writes `complete`, and the row claims to have been scanned at a version
+    /// nothing ever read. That is the standing defect class exactly: the value
+    /// would read the same whether or not the thing it names had happened.
+    ///
+    /// The `CASE` is what closes it: a row already `running` KEEPS the stamp of
+    /// whoever claimed it, so the version on the row is always the version of
+    /// the attempt that is actually in flight. The residual — a genuinely dead
+    /// carrier's stamp outliving it inside the reaper's freshness window — errs
+    /// toward UNDER-claiming, which costs a re-open and a re-scan rather than a
+    /// silent coverage hole.
+    ///
+    /// A heartbeat must NOT come through here; see
+    /// ``touchBackfillJobLiveness(jobId:)``.
+    func markBackfillJobRunning(jobId: String, transcriptVersion: String) throws {
         let sql = """
             UPDATE backfill_jobs
             SET status = 'running',
+                attemptTranscriptVersion = CASE
+                    WHEN status = 'running' THEN attemptTranscriptVersion
+                    ELSE ?
+                END,
                 updatedAt = strftime('%s', 'now')
             WHERE jobId = ?
               AND (status IN ('queued', 'deferred', 'running')
@@ -16050,8 +16088,9 @@ actor AnalysisStore {
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
-        bind(stmt, 1, jobId)
-        bind(stmt, 2, AdmissionController.maxRetries)
+        bind(stmt, 1, transcriptVersion)
+        bind(stmt, 2, jobId)
+        bind(stmt, 3, AdmissionController.maxRetries)
         try step(stmt, expecting: SQLITE_DONE)
         if sqlite3_changes(db) == 0 {
             // With 'running' included in the IN clause above, a zero-change
@@ -16072,37 +16111,38 @@ actor AnalysisStore {
         }
     }
 
-    /// playhead-wxsv: record that an attempt on `jobId` has BEGUN, against
-    /// `transcriptVersion`.
+    /// playhead-wxsv: refresh the liveness clock of a row whose attempt is
+    /// ALREADY under way. Touches `updatedAt` and nothing else.
     ///
-    /// Called once per admitted job, immediately after
-    /// ``markBackfillJobRunning(jobId:)`` — never from the liveness heartbeats,
-    /// which touch `updatedAt` on a row whose attempt is already under way and
-    /// have nothing new to say about which transcript it is reading.
+    /// **This exists because `markBackfillJobRunning` stopped being safe to use
+    /// as a heartbeat.** The coarse-pass heartbeats
+    /// (`BackfillJobRunner.touchCoarseLeaseIfLive` and the three in-loop ticks)
+    /// called it purely to prove the job was still advancing, and relied on it
+    /// REFUSING a terminal row — an orphaned pass that leaked one touch past its
+    /// `defuse()` could not then resurrect the run it came from. Widening that
+    /// guard to accept `failed` under the retry budget (spec 1) quietly took
+    /// that property away: a leaked touch would flip a `failed` row to
+    /// `running`, and `running` is excluded from
+    /// ``countResumableBackfillJobs(assetId:)``,
+    /// ``fetchAssetIdsWithResumableBackfillJobs(limit:)`` AND
+    /// ``reopenBackfillJob(jobId:forTranscriptVersion:)`` — so the asset would
+    /// read as having no resumable work, with no carrier and no way back until
+    /// the stranded-row reaper's 600 s freshness floor, which the touch itself
+    /// had just reset.
     ///
-    /// **What the column means, and the reading that would make it the defect
-    /// again.** It names the version of the run that most recently STARTED on
-    /// this row. It does NOT name "the transcript currently on disk": the two
-    /// coincide only while a run is in flight, and the whole of this bead is
-    /// that `runJob` re-derives its inputs from the current transcript while
-    /// the row's own state was made against an older one. Written at attempt
-    /// START rather than at insert for the same reason — an inserted row has
-    /// done nothing, and a version stamped on it would read as work performed.
-    ///
-    /// Unconditional by design: it is a fact about the attempt, not a
-    /// transition, so it carries no status guard. The caller has already been
-    /// refused by `markBackfillJobRunning` if the row could not start.
-    func noteBackfillJobAttempt(jobId: String, transcriptVersion: String) throws {
+    /// `status = 'running'` in the WHERE clause is therefore the whole point: a
+    /// heartbeat asserts "the row I am already running is still alive", which is
+    /// a claim only a `running` row can make. A no-op on any other status is the
+    /// correct outcome, which is why callers use `try?`.
+    func touchBackfillJobLiveness(jobId: String) throws {
         let sql = """
             UPDATE backfill_jobs
-            SET attemptTranscriptVersion = ?,
-                updatedAt = strftime('%s', 'now')
-            WHERE jobId = ?
+            SET updatedAt = strftime('%s', 'now')
+            WHERE jobId = ? AND status = 'running'
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
-        bind(stmt, 1, transcriptVersion)
-        bind(stmt, 2, jobId)
+        bind(stmt, 1, jobId)
         try step(stmt, expecting: SQLITE_DONE)
     }
 

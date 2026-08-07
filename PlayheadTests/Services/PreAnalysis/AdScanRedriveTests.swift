@@ -428,8 +428,7 @@ struct ResumableBackfillJobSelectorTests {
                 phase: .scanLikelyAdSlots, status: .queued, createdAt: 5_000.0001
             )
         )
-        try await store.noteBackfillJobAttempt(jobId: "win-done", transcriptVersion: "tx-v1")
-        try await store.markBackfillJobRunning(jobId: "win-done")
+        try await store.markBackfillJobRunning(jobId: "win-done", transcriptVersion: "tx-v1")
         try await store.markBackfillJobComplete(jobId: "win-done", progressCursor: nil)
         #expect(try await store.countResumableBackfillJobs(assetId: "a-window") == 1,
                 "the pending sibling is the asset's remaining work")

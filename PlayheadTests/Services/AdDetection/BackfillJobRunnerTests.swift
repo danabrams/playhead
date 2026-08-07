@@ -1998,10 +1998,15 @@ struct BackfillJobRunnerTests {
     /// exactly, and `CDD611C4` with four abandoned full-episode scans and zero
     /// results between them.
     ///
-    /// The assertion is about the ATOMS the classifier was handed, not about a
-    /// row count, because a row count cannot tell "resumed" from "restarted and
-    /// deduplicated". A broken implementation that would still pass a
-    /// one-row-only check: any of them that clears the cursor on re-open.
+    /// **The assertion is about the LINE REFS the classifier was handed, and
+    /// that is not a stylistic preference — a row count cannot see this at
+    /// all.** Scan-result ids are deterministic, so a session that re-read
+    /// 0-90 s writes rows that `insertSemanticScanResult` dedupes onto the ones
+    /// session 1 already wrote. The persisted set is IDENTICAL whether the
+    /// cursor was honoured or cleared, and so is the row count, the job count,
+    /// `createdAt`, and "the cursor advanced". `TestFMRuntime` records every
+    /// coarse prompt it was given, which is the only place the difference is
+    /// observable.
     @Test("playhead-wxsv: a transcript that grows resumes the scan instead of restarting it")
     func growingTranscriptContinuesTheScan() async throws {
         let store = try await makeTestStore()
@@ -2023,10 +2028,9 @@ struct BackfillJobRunnerTests {
         let afterFirst = try #require(await store.fetchBackfillJob(byId: jobId))
         let firstCursor = try #require(afterFirst.progressCursor?.lastProcessedUpperBoundSec)
         #expect(firstCursor.rawValue > 0, "session 1 must leave a cursor, or the rail is vacuous")
-        let windowsAfterFirst = try await store
-            .fetchSemanticScanResults(analysisAssetId: "asset-runner")
-            .map { ($0.windowStartTime, $0.windowEndTime) }
-        #expect(!windowsAfterFirst.isEmpty)
+        let refsAfterFirst = await fmRuntime.snapshotSubmittedCoarseLineRefs()
+        let firstSubmitted = Set(refsAfterFirst.flatMap { $0 })
+        #expect(!firstSubmitted.isEmpty, "session 1 must submit line refs, or the rail is vacuous")
 
         // Session 2: the SAME audio, transcribed further — one longer version.
         let grownSegments = makeFMSegments(
@@ -2062,19 +2066,21 @@ struct BackfillJobRunnerTests {
         #expect(afterSecond.createdAt == afterFirst.createdAt)
         #expect(afterSecond.attemptTranscriptVersion == "tx-grow-180")
 
-        // And it read only the NEW span. Every window the second session added
-        // starts at or beyond where the first one stopped.
-        let allWindows = try await store
-            .fetchSemanticScanResults(analysisAssetId: "asset-runner")
-            .map { ($0.windowStartTime, $0.windowEndTime) }
-        let added = allWindows.filter { window in
-            !windowsAfterFirst.contains { $0 == window.0 && $1 == window.1 }
-        }
-        #expect(!added.isEmpty, "the grown transcript must produce new scan windows")
-        for window in added {
-            #expect(window.1 > firstCursor.rawValue,
-                    "window \(window) ends at or below the cursor — the scan restarted instead of resuming")
-        }
+        // And it read only the NEW span. The line refs session 2 submitted are
+        // disjoint from session 1's: the first three lines (0-90 s, refs 0-2)
+        // were already scanned and must not be handed to FM again.
+        let refsAfterSecond = await fmRuntime.snapshotSubmittedCoarseLineRefs()
+        let secondSubmitted = Set(refsAfterSecond.flatMap { $0 }).subtracting(firstSubmitted)
+        #expect(!secondSubmitted.isEmpty,
+                "the grown transcript must be scanned — session 2 submitted nothing new")
+        let resubmitted = Set(refsAfterSecond.dropFirst(refsAfterFirst.count).flatMap { $0 })
+            .intersection(firstSubmitted)
+        #expect(resubmitted.isEmpty,
+                """
+                session 2 re-submitted line refs \(resubmitted.sorted()) that session 1 had \
+                already scanned — the cursor was discarded and the episode was re-read. This is \
+                the ONLY assertion in this test that can see that: the persisted rows dedupe.
+                """)
         #expect(try #require(afterSecond.progressCursor?.lastProcessedUpperBoundSec).rawValue
                 > firstCursor.rawValue,
                 "the cursor must advance across the growth, not reset")

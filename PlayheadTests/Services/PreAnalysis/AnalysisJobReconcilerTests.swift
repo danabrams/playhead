@@ -858,7 +858,7 @@ struct AnalysisJobReconcilerTests {
         // `markBackfillJobRunning` as the first DB write of the drain
         // loop. We exercise that exact write here so the test proves
         // end-to-end recovery: status reset → admission → running.
-        try await store.markBackfillJobRunning(jobId: strandedJobId)
+        try await store.markBackfillJobRunning(jobId: strandedJobId, transcriptVersion: "tx-test")
         let nowRunning = try await store.fetchBackfillJob(byId: strandedJobId)
         #expect(nowRunning?.status == .running,
                 "M-5 path re-drives the row by calling markBackfillJobRunning, which must succeed against a queued row")
