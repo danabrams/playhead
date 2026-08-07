@@ -1342,7 +1342,11 @@ struct BackfillExpiryDurabilityTests {
         await bps.setPreAnalysisServices(scheduler: scheduler, reconciler: makeReconciler(store: store))
 
         let task = StubBackgroundTask()
-        await bps.handleBackfillTask(task)
+        // A budget whose work deadline is ALREADY past when the handler runs,
+        // which is the state the 219 s bound puts a real window into at t+219 s.
+        // `workBudget` clamps to zero, so the drain admits nothing and the poll
+        // loop returns at once — no sleeping, no racing.
+        await bps.handleBackfillTask(task, budget: Self.deadlineAlreadyPast)
         await task.awaitCompletion()
 
         let after = try #require(try await store.fetchJob(byId: "late-dispatch"))
@@ -1357,6 +1361,92 @@ struct BackfillExpiryDurabilityTests {
         #expect(after.lastErrorCode == AnalysisWorkScheduler.backgroundWindowExpiredErrorCode)
         #expect(after.attemptCount == 0,
                 "the grant ending is not the job's fault on this path either")
+        _ = await dispatch.value
+    }
+
+    /// A budget whose `workBudget` clamps to zero, so `workDeadline(from:)`
+    /// returns the grant's own start instant and every deadline test reads
+    /// "already elapsed". The reserve is real so the settle has something to
+    /// spend.
+    private static let deadlineAlreadyPast = BackgroundGrantBudget(
+        designGrant: .zero,
+        teardownReserve: .seconds(30),
+        minimumCheckpointBudget: .zero,
+        provenance: .assumed
+    )
+
+    @Test("a drain that returned EARLY does not cancel the run loop's job",
+          .timeLimit(.minutes(2)))
+    func earlyDrainReturnLeavesTheRunLoopsJobAlone() async throws {
+        // THE COMPLEMENT, and the reason the cancel above is gated on the
+        // deadline rather than fired unconditionally.
+        //
+        // `runBackfillPollingLoop` also returns on two consecutive EMPTY polls
+        // — the 51 normal returns in the 2026-08-06 pull — seconds into a
+        // window with the whole grant still ahead. Cancelling there reaches
+        // whatever `runLoop()` happens to be running, which can be a
+        // `playback`-lane catch-up job for the episode the user is listening to
+        // right now, and costs it a 60 s requeue for nothing: the grant has not
+        // ended, so nothing is about to be suspended.
+        //
+        // Identical fixture to the test above; the ONLY difference is the
+        // budget, so what this pair isolates is the gate and not the wiring.
+        let store = try await makeTestStore()
+        let downloads = StubDownloadProvider()
+        let scheduler = makeScheduler(
+            store: store,
+            audio: CancellableDecodeAudioStub(),
+            downloads: downloads
+        )
+
+        downloads.cachedURLs["ep-early-return"] = URL(fileURLWithPath: "/tmp/ep-early-return.m4a")
+        try await store.insertJob(makeAnalysisJob(
+            jobId: "early-return",
+            jobType: "preAnalysis",
+            episodeId: "ep-early-return",
+            analysisAssetId: "asset-early-return",
+            workKey: "fp-early-return:1:preAnalysis",
+            sourceFingerprint: "fp-early-return",
+            priority: 10,
+            desiredCoverageSec: 90,
+            state: "queued"
+        ))
+        let dispatch = Task { await scheduler.processNextDispatchableJobForTesting() }
+        var spins = 0
+        while await !scheduler.hasCurrentRunningTaskForTesting() {
+            spins += 1
+            try #require(spins < 1000, "the seeded job never entered decode")
+            try await Task.sleep(for: .milliseconds(20))
+        }
+
+        let coordinator = StubAnalysisCoordinator()
+        let bps = BackgroundProcessingService(
+            coordinator: coordinator,
+            capabilitiesService: CapabilitiesService(),
+            taskScheduler: StubTaskScheduler(),
+            batteryProvider: StubBatteryProvider()
+        )
+        await bps.setPreAnalysisServices(scheduler: scheduler, reconciler: makeReconciler(store: store))
+
+        let task = StubBackgroundTask()
+        // The SHIPPED budget: 219 s of work, none of it spent, so the handler
+        // reaches its normal return with the deadline far in the future.
+        await bps.handleBackfillTask(task)
+        await task.awaitCompletion()
+
+        let after = try #require(try await store.fetchJob(byId: "early-return"))
+        #expect(after.state == "running",
+                """
+                A drain that finished early has not spent the grant, so it must \
+                leave the run loop's job alone. Finding it `queued` means the \
+                handler cancelled a live job — possibly a playback-lane \
+                catch-up — and bought it a 60 s delay for a window that had not \
+                ended.
+                """)
+        #expect(await scheduler.pendingCancelCauseForTesting() == nil,
+                "and it must not even ARM a cancel cause for the next job to inherit")
+
+        await scheduler.cancelCurrentJob(cause: .userCancelled)
         _ = await dispatch.value
     }
 

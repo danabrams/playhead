@@ -2813,6 +2813,7 @@ T_LMRX_SETTLE="awaitJobsSettled waits for a running job and times out rather tha
 T_LMRX_PROVENANCE="a measured budget names the denominator each of its numbers came from"
 T_LMRX_ROWFIRST="the expired row is durable BEFORE the handler waits for anything"
 T_LMRX_NORMALEXIT="the work-deadline return does not strand the job it leaves running"
+T_LMRX_EARLYRETURN="a drain that returned EARLY does not cancel the run loop's job"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -5667,6 +5668,7 @@ MUTATIONS=(
   "LX19|558|BGPS|$T_LMRX_ROWFIRST"
   "LX20|559|SCHED|$T_LMRX_SETTLE"
   "LX21|560|BGPS|$T_LMRX_NORMALEXIT"
+  "LX22|561|BGPS|$T_LMRX_EARLYRETURN"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -6038,6 +6040,7 @@ describe_mutation() {
     LX19) echo "lmrx: the settle wait moves back in front of the durable expired row, so a kill leaves no outcome" ;;
     LX20) echo "lmrx: the settle wait drops its identity scoping and waits out any sibling the run loop picks up" ;;
     LX21) echo "lmrx: the work-deadline return completes the task with a job still running, stranding it" ;;
+    LX22) echo "lmrx: the normal return cancels unconditionally, killing a live job on an EARLY drain exit" ;;
     TS01) echo "5n8k: THE historical defect restored — install assigns a process-global and restores it in a defer" ;;
     TS02) echo "5n8k: the leak variant — the funnel caches the last binding in a process-global and never restores" ;;
     TS03) echo "5n8k: the funnel drops every diagnostic — the vacuity control on all four positive witnesses" ;;
@@ -13199,16 +13202,28 @@ EOF
   # bound created; before lmrx the 25-minute deadline made it unreachable.
   LX21)
     snippet OLD <<'EOF'
-            if let scheduler = self.analysisWorkScheduler {
+            if deadlineElapsed, let scheduler = self.analysisWorkScheduler {
                 cancelledJobIds = await scheduler.cancelCurrentJob(cause: .taskExpired)
             }
 EOF
     snippet NEW <<'EOF'
-            if let scheduler = self.analysisWorkScheduler {
+            if deadlineElapsed, let scheduler = self.analysisWorkScheduler {
                 cancelledJobIds = await scheduler.pendingJobIdsForLedger().subtracting(baselineIds)
             }
 EOF
     patch "$file" "$OLD" "$NEW" ;;
+
+  # LX22 — the work-deadline gate goes and the normal return cancels
+  # UNCONDITIONALLY. Reads as removing a redundant condition (the cancel is a
+  # no-op when nothing runs), and it is a no-op only when nothing runs: the poll
+  # loop also returns EARLY on two empty polls, seconds into a window, where the
+  # scheduler may be running a playback-lane catch-up for the episode the user
+  # is listening to. That job is then killed and delayed 60 s for a grant that
+  # had not ended.
+  LX22)
+    patch "$file" \
+      '            if deadlineElapsed, let scheduler = self.analysisWorkScheduler {' \
+      '            if true, let scheduler = self.analysisWorkScheduler {' ;;
 
   # LX20 — the settle wait loses its identity scoping and goes back to asking
   # "is ANYTHING running", which is the same question whether the cancelled job
