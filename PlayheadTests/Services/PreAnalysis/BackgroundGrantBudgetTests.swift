@@ -1351,6 +1351,89 @@ struct BackfillExpiryDurabilityTests {
                 """)
     }
 
+    @Test("the work-deadline return MEASURES its completions too, and writes them",
+          .timeLimit(.minutes(1)))
+    func normalReturnCountsRealCompletions() async throws {
+        // playhead-lmrx (review round 6): THE THIRD INSTANCE OF THE ROUND-5
+        // DEFECT — a capability whose CALLEE is pinned and whose CALL SITE is
+        // not.
+        //
+        // `recordGrantCompletions` has two call sites. The expiration one is
+        // driven by the two tests above; the work-deadline one at
+        // `BackgroundProcessingService.swift:1626` was driven by nothing —
+        // every ledger-reading test in this file reaches `finishRun` through
+        // the EXPIRY, and the two normal-return tests
+        // (`normalReturnAlsoRequeuesTheInFlightJob`,
+        // `earlyDrainReturnLeavesTheRunLoopsJobAlone`) construct no `runLedger`
+        // at all, so they hold a `NoOpBackgroundTaskRunLedger` and cannot
+        // observe a ledger write of any kind. Delete that one line and every
+        // `admitted_work` row goes back to `jobsCompleted = NULL` — which is
+        // half of this bead's headline claim, "26 jobs admitted / 0 completed,
+        // and all 12 rows read NULL" — with the whole suite green.
+        //
+        // Asked the diagnostic way: what would the suite read if the normal
+        // return never counted anything? Exactly what it read before this test.
+        //
+        // Same fixture and same argument as `expiredRunCountsRealCompletions`,
+        // one exit further along: TWO baseline jobs so the denominator is
+        // known, ONE of them driven to terminal `complete` inside the window,
+        // so a literal `0` and a count taken over the wrong population both
+        // fail. The difference is only which ending is reached — this one takes
+        // `deadlineAlreadyPast`, the state a real window is in at t+219 s, and
+        // returns normally with `Task.isCancelled` still false.
+        let store = try await makeTestStore()
+        let scheduler = makeScheduler(store: store)
+        try await insertQueuedJob(store, id: "pending-a")
+        try await insertQueuedJob(store, id: "pending-b")
+
+        let ledger = AnalysisStoreBackgroundTaskRunLedger(store: store)
+        let coordinator = StubAnalysisCoordinator()
+        // A gate the TEST opens rather than a duration it hopes for: the poll
+        // loop is held inside `runPendingBackfill` until the completion below
+        // has landed, so "the job completed after the baseline was read and
+        // before the counters were taken" is a fact, not a race.
+        coordinator.runPendingBackfillHoldsUntilReleased = true
+        let bps = BackgroundProcessingService(
+            coordinator: coordinator,
+            capabilitiesService: CapabilitiesService(),
+            taskScheduler: StubTaskScheduler(),
+            batteryProvider: StubBatteryProvider(),
+            runLedger: ledger
+        )
+        await bps.setPreAnalysisServices(scheduler: scheduler, reconciler: makeReconciler(store: store))
+
+        let task = StubBackgroundTask()
+        let workTask = Task { await bps.handleBackfillTask(task, budget: Self.deadlineAlreadyPast) }
+        // Entry into the poll loop proves the baseline of TWO was already read,
+        // so the completion below is scored against the population this window
+        // named rather than against whatever the queue happens to hold later.
+        await coordinator.runPendingBackfillEntries.wait(for: 1)
+        try await store.updateJobState(jobId: "pending-a", state: "complete")
+        coordinator.runPendingBackfillReleases.increment()
+        await workTask.value
+        await task.awaitCompletion()
+
+        let latest = try #require(await ledger.fetchLatestRun(for: .backfill))
+        #expect(latest.outcome == .admittedWork,
+                """
+                This must be the WORK-DEADLINE return, not the expiry — the \
+                expiration handler writes `.expired`, and a test that reached \
+                it would be a third copy of the two above rather than the \
+                missing one.
+                """)
+        #expect(latest.expiration == false, "and nothing about this ending was an OS reclaim")
+        #expect(latest.jobsSeen == 2, "the denominator is the queue depth at grant open")
+        #expect(latest.jobsCompleted == 1,
+                """
+                One of the two jobs this window found pending reached terminal \
+                `complete` inside it. NULL means the normal return never \
+                measured anything — the state all 12 `admitted_work` rows in \
+                the 2026-08-06 pull are in. A hardcoded 0, or a count taken \
+                over the queue as it stands at teardown rather than over the \
+                baseline, also fails here.
+                """)
+    }
+
     @Test("the work-deadline return does not strand the job it leaves running",
           .timeLimit(.minutes(2)))
     func normalReturnAlsoRequeuesTheInFlightJob() async throws {
@@ -2216,5 +2299,84 @@ struct CancelAimIdentityTests {
         #expect(await scheduler.isDispatchClosedForTesting(),
                 "recovery's work-deadline teardown must shut the dispatch door before it cancels")
         _ = await dispatch.value
+    }
+
+    @Test("recovery's EXPIRY shuts the dispatch door too", .timeLimit(.minutes(2)))
+    func recoveryExpiryShutsTheDispatchDoor() async throws {
+        // playhead-lmrx (review round 6): THE FOURTH DOOR CALL SITE.
+        //
+        // `closeDispatchForTeardown` has four call sites in
+        // `BackgroundProcessingService` — backfill's work-deadline return
+        // (:1619), backfill's expiry (:1739), recovery's work-deadline return
+        // (:2386) and recovery's EXPIRY (:2500). Round 5 counted three, pinned
+        // three, and this is the one it did not count: delete :2500 and nothing
+        // in the suite goes red, while `runLoop()`'s 5 s poll is free again to
+        // start a job between the cancel one line below it and
+        // `setTaskCompleted` one line below that — aimed at by nothing, live at
+        // suspension. That is LX27's defect, on the path the round-3 fix added
+        // the door to.
+        //
+        // BEHAVIOURAL, not a source canary: the expiry is reached with the job
+        // genuinely in flight, so the door's state at `markComplete` is a fact
+        // about the handler rather than about the file.
+        //
+        // The drain is what parks this handler. Seeded with a now-lane job and
+        // the SHIPPED budget (219 s of work, 60 s floor), `drainEligible`
+        // dispatches it and awaits the runner, so the expiration below fires
+        // while the work task is genuinely live — which is the state 5 of
+        // recovery's 97 recorded runs ended in.
+        let store = try await makeTestStore()
+        let downloads = StubDownloadProvider()
+        let scheduler = makeScheduler(store: store, downloads: downloads)
+        try await insertNowLaneJob(store: store, downloads: downloads,
+                                   jobId: "recovery-expiry-door", priority: 21,
+                                   createdAt: Date().timeIntervalSince1970)
+
+        let bps = BackgroundProcessingService(
+            coordinator: StubAnalysisCoordinator(),
+            capabilitiesService: CapabilitiesService(),
+            taskScheduler: StubTaskScheduler(),
+            batteryProvider: StubBatteryProvider()
+        )
+        let reconciler = AnalysisJobReconciler(
+            store: store,
+            downloadManager: StubDownloadProvider(),
+            capabilitiesService: StubCapabilitiesProvider(
+                snapshot: makeCapabilitySnapshot(thermalState: .nominal, isCharging: true)
+            )
+        )
+        await bps.setPreAnalysisServices(scheduler: scheduler, reconciler: reconciler)
+
+        let task = StubBackgroundTask()
+        // The handler installs its expiration handler and returns; the work
+        // task it left behind is what parks in the drain.
+        await bps.handlePreAnalysisRecovery(task)
+        var spins = 0
+        while await !scheduler.inFlightJobIdsForTesting().contains("recovery-expiry-door") {
+            spins += 1
+            try #require(spins < 1000, "recovery's own drain never dispatched the seeded job")
+            try await Task.sleep(for: .milliseconds(20))
+        }
+
+        task.simulateExpiration()
+        await task.awaitCompletion()
+
+        #expect(await scheduler.isDispatchClosedForTesting(),
+                """
+                Recovery's expiration teardown must shut the dispatch door \
+                before it cancels. Without it the cancel is a one-shot edge \
+                against a run loop that is still polling every 5 s, and a job \
+                it starts before `setTaskCompleted` is named by nothing and \
+                live when iOS suspends the process.
+                """)
+        // Deliberately NOT also asserting the requeue here. Recovery's expiry
+        // has no settle wait — that asymmetry with backfill is argued in the
+        // handler and is not this bead's to change — so `state == 'queued'` is
+        // not ordered against `markComplete` and asserting it would be a race
+        // dressed as a claim. The cancel's own effect is pinned by
+        // `ExpiredWindowAttemptAccountingTests`; what is unpinned, and what
+        // this test is for, is the door.
+        #expect(task.completedSuccess == false,
+                "and it must be the EXPIRATION that ended this run, not the work task's normal return")
     }
 }

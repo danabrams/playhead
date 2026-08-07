@@ -2827,6 +2827,8 @@ T_LMRX_HEARTBEAT="a job finishing does not cancel a sibling's lease heartbeat"
 T_LMRX_BUDGETWIRING="both BGTask handlers spend the BUDGET they were handed, not a local constant"
 T_LMRX_DOOR="dispatch is closed for a teardown, and re-opens by itself"
 T_LMRX_RECOVERYEXIT="recovery's work-deadline return does not strand the job it leaves running"
+T_LMRX_NORMALCOUNTERS="the work-deadline return MEASURES its completions too, and writes them"
+T_LMRX_RECOVERYDOOR="recovery's EXPIRY shuts the dispatch door too"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -5778,6 +5780,30 @@ MUTATIONS=(
   #     so the floor's effect is not separately observable through the handler.
   "LX32|570|BGPS|$T_LMRX_NORMALEXIT"
   "LX33|571|BGPS|$T_LMRX_BUDGETWIRING"
+
+  # ---- playhead-lmrx review round 6: the same gap, two sites round 5 missed ----
+  #
+  # Round 5 named the shape exactly right — "a rail proves the mechanism works;
+  # it does not prove anyone uses it" — and then left two call sites standing.
+  # Both are one deleted line, and before this round both left the suite green.
+  #
+  #   * LX34 deletes the WORK-DEADLINE return's `recordGrantCompletions`. The
+  #     expiry's copy survives, so `expiredRunCountsRealCompletions` is
+  #     untouched; what goes is `jobsCompleted` on every `admitted_work` row,
+  #     which is half of this bead's headline claim ("26 admitted / 0
+  #     completed, all 12 rows NULL"). Invisible to every other test in the
+  #     file because they all reach `finishRun` through the EXPIRY, and the two
+  #     normal-return tests construct no ledger at all.
+  #   * LX35 deletes RECOVERY'S EXPIRY door — the fourth call site, where round
+  #     5's own test comment counted three. LX27 mutates the callee and LX32
+  #     the backfill work-deadline caller; neither can see this one.
+  #
+  # One batch, and the independence is the reason: LX34 touches
+  # `handleBackfillTask`'s normal return and LX35 `handlePreAnalysisRecovery`'s
+  # expiration handler, neither test drives the other's handler, and a joint
+  # SURVIVED would name which rail survived.
+  "LX34|572|BGPS|$T_LMRX_NORMALCOUNTERS"
+  "LX35|572|BGPS|$T_LMRX_RECOVERYDOOR"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -6161,6 +6187,8 @@ describe_mutation() {
     LX31) echo "lmrx: the teardown door moves below the T0 playback bypass, so a playback job starts into the suspension" ;;
     LX32) echo "lmrx: the handler stops SHUTTING the door — the mechanism still works, nothing uses it" ;;
     LX33) echo "lmrx: the handler hands the drain a zero floor, reverting the start gate without touching it" ;;
+    LX34) echo "lmrx: the work-deadline return stops MEASURING completions, so every admitted_work row goes back to NULL" ;;
+    LX35) echo "lmrx: recovery's expiry stops shutting the door — the fourth call site, where round 5 counted three" ;;
     TS01) echo "5n8k: THE historical defect restored — install assigns a process-global and restores it in a defer" ;;
     TS02) echo "5n8k: the leak variant — the funnel caches the last binding in a process-global and never restores" ;;
     TS03) echo "5n8k: the funnel drops every diagnostic — the vacuity control on all four positive witnesses" ;;
@@ -13527,6 +13555,44 @@ EOF
                     deadline: workDeadline,
                     minimumCheckpointBudget: .zero
                 )
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LX34 — the work-deadline return stops measuring what it completed. The
+  # expiration handler's copy of the call survives, so every expiry-driven
+  # counter test is untouched; `jobsCompleted` simply goes back to NULL on the
+  # `admitted_work` rows, which is the state the bead measured and half of what
+  # it claims to fix. Anchored on the call plus the line that consumes its
+  # effect, which is what makes the span unique — the expiry's call is
+  # multi-line and nested one level deeper.
+  LX34)
+    snippet OLD <<'EOF'
+            await self.recordGrantCompletions(counters: counters, baselineIds: baselineIds)
+            let achieved = counters.snapshot
+EOF
+    snippet NEW <<'EOF'
+            let achieved = counters.snapshot
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LX35 — recovery's EXPIRATION handler stops shutting the dispatch door. The
+  # cancel on the next line survives, so the job the handler can see is still
+  # cancelled; what comes back is the window in which `runLoop()`'s 5 s poll
+  # starts a fresh one behind the cancel and ahead of `setTaskCompleted`. The
+  # anchor is the whole `if let scheduler` block: backfill's expiry block reads
+  # `cancelledJobIds = await scheduler.cancelCurrentJob(...)` and has comments
+  # between the two calls, so this span cannot match it.
+  LX35)
+    snippet OLD <<'EOF'
+                if let scheduler = await self?.analysisWorkScheduler {
+                    await scheduler.closeDispatchForTeardown(lasting: budget.teardownReserve)
+                    await scheduler.cancelCurrentJob(cause: .taskExpired)
+                }
+EOF
+    snippet NEW <<'EOF'
+                if let scheduler = await self?.analysisWorkScheduler {
+                    await scheduler.cancelCurrentJob(cause: .taskExpired)
+                }
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 

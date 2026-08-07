@@ -254,10 +254,19 @@ struct BackfillSchedulerBoundingTests {
         // through the handler: the handler also starts the long-lived
         // `runLoop()`, which dispatches on its own poll regardless of the floor.
         //
-        // The recovery EXPIRY door is here for the same reason and no other —
-        // the other three `closeDispatchForTeardown` call sites are pinned
-        // behaviourally in `BackgroundGrantBudgetTests`, and that path has no
-        // test that drives recovery's `expirationHandler` with a live job.
+        // THE DOOR CLAUSE COUNTS, AND DID NOT USED TO (review round 6). Round 5
+        // added it to cover the recovery EXPIRY door, on the grounds that the
+        // other three `closeDispatchForTeardown` sites were pinned
+        // behaviourally and that one had no test driving recovery's
+        // `expirationHandler`. But `contains` asks whether the string appears
+        // ANYWHERE in the handler body, and each handler has TWO sites — its
+        // work-deadline return and its expiry — so deleting either one left the
+        // other satisfying the canary and the whole suite green. That is this
+        // bead's own standing defect class read back into its instrument: a
+        // value that reads the same whether or not the thing it claims to
+        // measure happened. All four sites are now pinned behaviourally in
+        // `BackgroundGrantBudgetTests`; this clause is the source-level
+        // backstop, and it counts.
         let source = try SwiftSourceInspector.loadSource(repoRelativePath: Self.servicePath)
         for anchor in ["func handleBackfillTask(", "func handlePreAnalysisRecovery("] {
             #expect(source.components(separatedBy: anchor).count == 2,
@@ -276,12 +285,20 @@ struct BackfillSchedulerBoundingTests {
                     is the unmeasured constant `BackgroundGrantBudget` exists \
                     to delete.
                     """)
-            #expect(code.contains("closeDispatchForTeardown(lasting: budget.teardownReserve)"),
+            let doorSites = code.components(
+                separatedBy: "closeDispatchForTeardown(lasting: budget.teardownReserve)"
+            ).count - 1
+            #expect(doorSites == 2,
                     """
-                    \(anchor) must shut the dispatch door out of its own \
-                    budget's teardown reserve before it cancels — otherwise \
-                    `runLoop()`'s poll can dispatch a fresh job after the \
-                    cancel has gone past, live at `setTaskCompleted`.
+                    \(anchor) has TWO endings — its work-deadline return and \
+                    its expiration handler — and BOTH must shut the dispatch \
+                    door out of its own budget's teardown reserve before they \
+                    cancel; otherwise `runLoop()`'s poll can dispatch a fresh \
+                    job after the cancel has gone past, live at \
+                    `setTaskCompleted`. Found \(doorSites). If a third ending \
+                    was added deliberately, raise this number and pin the new \
+                    site behaviourally too — do not relax it back to a \
+                    `contains`, which cannot tell two sites from one.
                     """)
             #expect(code.contains("workDeadline(from:"),
                     """
