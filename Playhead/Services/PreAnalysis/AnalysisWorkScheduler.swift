@@ -672,7 +672,100 @@ actor AnalysisWorkScheduler {
     }
 
     private var schedulerTask: Task<Void, Never>?
-    private var currentRunningTask: Task<Void, Never>?
+    /// playhead-lmrx (review round 3): everything `processJob` owns on behalf of
+    /// ONE job, so a cancel can be aimed at a job rather than at a slot.
+    ///
+    /// The fields here used to be two bare properties, `currentRunningTask` and
+    /// `leaseRenewalTask`, and both were the standing defect class in its
+    /// structural form: a single slot named "current" read as "the job I mean".
+    /// Two dispatch drivers can be inside `processJob` at once (`runLoop()` and
+    /// `drainEligible`; see ``runningJobs``), and the second assignment simply
+    /// overwrote the first — with three consequences, none of them theoretical
+    /// at `nowCap == 2`:
+    ///
+    ///  * `cancelCurrentJob(cause:)` reached ONE task and returned the whole
+    ///    in-flight set as "what the cancel was aimed at". The job it missed
+    ///    could never settle, so the caller's settle wait was a certain timeout,
+    ///    and that job ran live into `setTaskCompleted` — the exact stranding
+    ///    playhead-lmrx exists to remove.
+    ///  * A's `defer` cancelled whatever was in the slot, which after B's
+    ///    dispatch is B — so a job finishing NORMALLY killed an unrelated job
+    ///    mid-run.
+    ///  * The same overwrite on `leaseRenewalTask` left A's renewal running
+    ///    forever while B's was cancelled by A's `defer`, so B's lease stopped
+    ///    being heartbeat-renewed and B lost ownership to the reaper.
+    ///
+    /// Keying by job id makes all three unrepresentable: an overlapping dispatch
+    /// adds rather than replaces, and each `processJob` cancels and removes only
+    /// its own entry.
+    private struct RunningJob {
+        /// The episode this job belongs to, so the episode-scoped cancels
+        /// (`episodeDeleted`, `retireDownloadAnalysis`) can reach exactly the
+        /// jobs they mean instead of whatever the slot last held.
+        let episodeId: String
+        /// Set by ``cancelCurrentJob(cause:)`` for every job it acted on.
+        ///
+        /// Distinct from the global `shouldCancelCurrentJob` on purpose: that
+        /// flag is cleared by whichever `processJob` reaches its entry or its
+        /// `defer` first, so with two jobs in flight a cancel aimed at both can
+        /// be erased for one of them by the other's ordinary progress. This
+        /// per-job copy cannot be, which is what makes the identifiers
+        /// `cancelCurrentJob` returns true rather than hopeful.
+        var cancelRequested = false
+        /// The cause THIS job's cancel carried.
+        ///
+        /// playhead-lmrx (review round 3): the global `pendingCancelCause` is
+        /// consumed destructively — the cancel-catch arm reads it and
+        /// immediately nils it — so with two jobs cancelled by one
+        /// `cancelCurrentJob(.taskExpired)` the first to unwind takes the cause
+        /// and the second reads `nil`, falls back to `.pipelineError`, and
+        /// SPENDS AN ATTEMPT. At `attemptCount == 4` that supersedes the row
+        /// with `nextEligibleAt: nil`, and a superseded row never comes back
+        /// (`workKey` is UNIQUE, `insertJob` is `INSERT OR IGNORE`). So the
+        /// exemption LX11/LX12 exist to guarantee held for exactly one of the
+        /// two jobs an expiring window had in flight. Round 2 guarded the two
+        /// sites that ERASE the cause without reading it; this is the site that
+        /// reads it, and no guard on the others can cover it. A cause is a
+        /// property of a job's cancellation, so it lives with the job.
+        var cancelCause: InternalMissCause?
+        /// The wrapper task around `AnalysisJobRunner.run`. Nil between the
+        /// registry insert at the top of `processJob` and the assignment after
+        /// the lease/cancel-race checks; a cancel landing in that gap is caught
+        /// by ``cancelRequested`` instead.
+        var runTask: Task<Void, Never>?
+        /// The lease heartbeat for this job and no other.
+        var leaseRenewalTask: Task<Void, any Error>?
+    }
+
+    /// Every job this scheduler currently has inside `processJob`, keyed by job
+    /// id. Membership begins before the lease-renewal task is armed and ends in
+    /// `processJob`'s `defer`, so it spans the whole body — including the commit
+    /// arms that write a resume point.
+    private var runningJobs: [String: RunningJob] = [:]
+
+    /// playhead-lmrx (review round 3): the instant after which dispatch may
+    /// start again, or `nil` when the door is open.
+    ///
+    /// **WHY A CANCEL IS NOT ENOUGH.** A BGTask handler that has decided its
+    /// grant is over cancels what is in flight and waits for the requeue. But
+    /// nothing quiesced `runLoop()`, which keeps polling every
+    /// `idlePollSeconds` (5 s) for as long as the process has CPU — so it can
+    /// dispatch a FRESH job into the teardown, after the cancel has already
+    /// gone past. That job is aimed at by nothing, is not in the set the handler
+    /// is waiting on, and is live when `setTaskCompleted` invites iOS to suspend
+    /// the process. It is the same stranding the cancel exists to prevent,
+    /// arrived at through the window the cancel opened.
+    ///
+    /// **WHY IT EXPIRES ON ITS OWN, which is the whole design.** A flag cleared
+    /// by the closer is a starvation bug waiting for an early return: this
+    /// scheduler's only external re-openers are `wake()` and
+    /// `ensureSchedulerLoopStarted()`, and BOTH are called only by the BGTask
+    /// handlers — so a leaked "closed" would leave a foregrounded app with a
+    /// scheduler that never dispatches again, and no test that does not already
+    /// know to look would see it. An instant cannot leak. The caller states how
+    /// long its own teardown may last, the door reopens by itself, and the worst
+    /// case is a bounded pause rather than a dead scheduler.
+    private var dispatchClosedUntil: ContinuousClock.Instant?
     private var currentJobId: String?
     private var currentEpisodeId: String?
     /// Episode id of the currently-loaded playback session, if any.
@@ -781,14 +874,19 @@ actor AnalysisWorkScheduler {
     /// dispatch" read as though it named "what this process is running". The
     /// set is keyed by job id, so an overlapping dispatch adds rather than
     /// replaces, and each `processJob` removes only its own entry.
-    private var inFlightJobIds: Set<String> = []
+    ///
+    /// playhead-lmrx (review round 3): DERIVED from ``runningJobs`` rather than
+    /// maintained beside it. Two containers tracking one population is the same
+    /// hazard one level up — they drift the day an exit path updates one and not
+    /// the other — and there is nothing this set knows that the registry does
+    /// not.
+    private var inFlightJobIds: Set<String> { Set(runningJobs.keys) }
     /// Cause to thread into WorkJournal when the current running job is
     /// cancelled. Set by `cancelCurrentJob(cause:)`; consumed on the
     /// cancellation branch of the run loop. Resets to `nil` after each
     /// job finishes (whether cancelled or not) so a subsequent job
     /// doesn't inherit a stale cause tag.
     private var pendingCancelCause: InternalMissCause?
-    private var leaseRenewalTask: Task<Void, any Error>?
     /// Optional WorkJournal recorder. When non-nil the scheduler emits
     /// a `recordFailed(..., cause:, metadataJSON:)` row on the
     /// cancellation path so causes like `.taskExpired` and
@@ -841,7 +939,7 @@ actor AnalysisWorkScheduler {
 
     /// Per-lane running-job counter. Enforces the Now/Soon/Background
     /// concurrency caps spelled out in playhead-r835. Today the scheduler
-    /// runs at most one job at a time via `currentRunningTask`, so the
+    /// usually runs one job at a time, so the
     /// counter's per-lane caps are not yet the binding constraint on real
     /// execution — they are the contract the admission path uses so that
     /// later beads can fan the scheduler out to honest multi-lane
@@ -1380,9 +1478,11 @@ actor AnalysisWorkScheduler {
         if currentEpisodeId == episodeId {
             shouldCancelCurrentJob = true
             lostOwnership = true
-            leaseRenewalTask?.cancel()
-            currentRunningTask?.cancel()
         }
+        // playhead-lmrx (review round 3): reach the jobs for THIS episode, not
+        // whatever the single task slot happened to hold. With two dispatches in
+        // flight the slot could name the other episode's job entirely.
+        cancelRunningJobs(where: { $0.episodeId == episodeId })
         do {
             let removed = try await store
                 .deleteAnalysisJobsForRemovedDownload(
@@ -1887,9 +1987,12 @@ actor AnalysisWorkScheduler {
     func playbackStarted(episodeId: String) async {
         activePlaybackEpisodeId = episodeId
         playbackContext = .playing
-        if currentRunningTask != nil {
+        // playhead-lmrx (review round 3): "is a runner actually going" — the
+        // exact predicate the single `currentRunningTask` slot used to answer,
+        // now asked of every job rather than of the last one dispatched.
+        if runningJobs.values.contains(where: { $0.runTask != nil }) {
             shouldCancelCurrentJob = true
-            currentRunningTask?.cancel()
+            cancelRunningJobs(where: { _ in true })
             logger.info("Playback preempted pre-analysis while episode \(episodeId) is active")
         }
         wakeSchedulerLoop()
@@ -2559,8 +2662,10 @@ actor AnalysisWorkScheduler {
     func episodeDeleted(episodeId: String) async {
         if currentEpisodeId == episodeId {
             shouldCancelCurrentJob = true
-            currentRunningTask?.cancel()
         }
+        // playhead-lmrx (review round 3): as in `retireDownloadAnalysis` — the
+        // cancel is aimed at the deleted episode's jobs by identity.
+        cancelRunningJobs(where: { $0.episodeId == episodeId })
         do {
             let states = ["queued", "paused", "running", "failed",
                           "blocked:missingFile", "blocked:modelUnavailable"]
@@ -2595,21 +2700,36 @@ actor AnalysisWorkScheduler {
     /// bare "is anything running" signal is the wrong question. Empty means
     /// nothing was in flight, which is a settled state, not an unknown one.
     ///
-    /// It returns ``inFlightJobIds``, which is a SUPERSET of what the cancel
-    /// reached, and that is deliberate. `currentRunningTask?.cancel()` reaches
-    /// one task; `runLoop()` and `drainEligible` can both be inside
-    /// `processJob` at the same instant (that interleaving is what
-    /// `inFlightJobIds` exists for, and why `sweepExpiredLeasesIfDue()`
-    /// DECLINES on `count > 1` rather than asserting), so the set can name a
-    /// second job this cancel did not touch.
+    /// It returns ``inFlightJobIds``, and every id in it has been acted on —
+    /// which was NOT true before the third review round, and the difference is
+    /// the whole of playhead-lmrx's own defect class.
     ///
-    /// Returning the superset errs toward waiting too long, never toward
-    /// walking away from a requeue in flight — and "too long" is bounded by the
-    /// caller's remaining teardown reserve, which is a budget it was already
-    /// going to spend. The alternative, naming the cancelled job exactly, needs
-    /// an owner id recorded with `currentRunningTask` and would MISS the window
-    /// where a cancel lands before that task is assigned. Neither is free; this
-    /// one cannot lose a resume point.
+    /// The shipped version cancelled `currentRunningTask`, a single slot with no
+    /// owner id, and then returned the whole in-flight set as "what this cancel
+    /// was aimed at". `runLoop()` and `drainEligible` can both be inside
+    /// `processJob` at the same instant (that interleaving is what
+    /// `inFlightJobIds` exists for, and why `sweepExpiredLeasesIfDue()` DECLINES
+    /// on `count > 1` rather than asserting) and `nowCap` is 2, so the second
+    /// dispatch simply overwrote the slot. The first job was then named by the
+    /// return value, cancelled by nothing, and could not settle — turning the
+    /// caller's bounded wait into a certain timeout and leaving that job LIVE
+    /// through `setTaskCompleted`. The doc comment that stood here called the
+    /// superset deliberate and claimed it "errs toward waiting too long, never
+    /// toward walking away from a requeue in flight". Ask the diagnostic
+    /// question of it: what would the returned set read if the cancel had
+    /// reached nothing at all? The same ids.
+    ///
+    /// Now the cancel is aimed at jobs, by identity, in two halves that between
+    /// them cover the whole of `processJob`:
+    ///
+    ///  * every job whose `runTask` exists has that task cancelled;
+    ///  * every job in the registry — including one dispatched but not yet past
+    ///    its cancel-race check — is marked ``RunningJob/cancelRequested``,
+    ///    which that check reads.
+    ///
+    /// So the returned set is exactly the population acted on, and
+    /// ``awaitJobsSettled(_:within:pollInterval:)`` is waiting for something
+    /// that was actually asked to stop.
     @discardableResult
     func cancelCurrentJob(cause: InternalMissCause = .pipelineError) -> Set<String> {
         shouldCancelCurrentJob = true
@@ -2637,8 +2757,58 @@ actor AnalysisWorkScheduler {
             resolved = cause
         }
         pendingCancelCause = resolved
-        currentRunningTask?.cancel()
+        cancelRunningJobs(where: { _ in true }, cause: resolved)
         return inFlightJobIds
+    }
+
+    /// Cancel — by identity — every in-flight job the predicate selects.
+    ///
+    /// Marking ``RunningJob/cancelRequested`` and cancelling `runTask` are one
+    /// step because they cover disjoint halves of `processJob`'s body: before
+    /// the runner starts there is no task to cancel, and after it starts the
+    /// cancel-race check is already behind the job. Doing only one of the two
+    /// leaves a gap that depends on where each job happens to be, which is the
+    /// non-determinism this method exists to remove.
+    private func cancelRunningJobs(
+        where predicate: (RunningJob) -> Bool,
+        cause: InternalMissCause? = nil
+    ) {
+        for (jobId, running) in runningJobs where predicate(running) {
+            runningJobs[jobId]?.cancelRequested = true
+            if let cause {
+                runningJobs[jobId]?.cancelCause = cause
+            }
+            running.runTask?.cancel()
+        }
+    }
+
+    /// playhead-lmrx (review round 3): refuse to START any job until `deadline`.
+    ///
+    /// Called by a BGTask handler the moment it decides its grant is over, so
+    /// the long-lived `runLoop()` cannot slip a fresh dispatch past the cancel
+    /// and into `setTaskCompleted`. `duration` is how long the caller's own
+    /// teardown may last — the handler already owns that bound
+    /// (`BackgroundGrantBudget.teardownReserve`), and expressing the closure in
+    /// terms of it is what keeps this from becoming a new unmeasured constant.
+    ///
+    /// Extending an existing closure is a `max`, never a replacement: two
+    /// handlers tearing down at once (backfill expiring while recovery returns)
+    /// must not have the shorter one re-open the door under the longer one.
+    /// See ``dispatchClosedUntil`` for why it expires rather than being cleared.
+    func closeDispatchForTeardown(lasting duration: Duration) {
+        let until = ContinuousClock.now + duration
+        if let existing = dispatchClosedUntil, existing > until { return }
+        dispatchClosedUntil = until
+    }
+
+    /// Whether ``closeDispatchForTeardown(lasting:)`` is still in force. Reading
+    /// it also drops an elapsed closure so the field does not keep an instant
+    /// nobody will consult again.
+    private func isDispatchClosed() -> Bool {
+        guard let until = dispatchClosedUntil else { return false }
+        if ContinuousClock.now < until { return true }
+        dispatchClosedUntil = nil
+        return false
     }
 
     /// playhead-lmrx: suspend until `jobIds` have finished unwinding, or
@@ -2714,7 +2884,26 @@ actor AnalysisWorkScheduler {
     }
 
     func hasCurrentRunningTaskForTesting() -> Bool {
-        currentRunningTask != nil
+        runningJobs.values.contains { $0.runTask != nil }
+    }
+
+    /// playhead-lmrx (review round 3): which in-flight jobs `cancelCurrentJob`
+    /// actually reached. Distinct from ``inFlightJobIdsForTesting()``, which is
+    /// what it CLAIMS to have reached — the two were allowed to disagree before
+    /// this round, and a test that can only see the claim cannot see the defect.
+    func cancelRequestedJobIdsForTesting() -> Set<String> {
+        Set(runningJobs.filter { $0.value.cancelRequested }.keys)
+    }
+
+    /// playhead-lmrx (review round 3): in-flight jobs whose `runTask` exists and
+    /// has been cancelled. The half of the aim that a `Task` can be asked about
+    /// directly, so a test need not infer it from downstream effects.
+    func cancelledRunTaskJobIdsForTesting() -> Set<String> {
+        Set(runningJobs.filter { $0.value.runTask?.isCancelled == true }.keys)
+    }
+
+    func isDispatchClosedForTesting() -> Bool {
+        isDispatchClosed()
     }
 
     /// playhead-lmrx: the population ``awaitJobsSettled(_:within:pollInterval:)``
@@ -3085,10 +3274,12 @@ actor AnalysisWorkScheduler {
     func stop() {
         schedulerTask?.cancel()
         schedulerTask = nil
-        currentRunningTask?.cancel()
-        currentRunningTask = nil
-        leaseRenewalTask?.cancel()
-        leaseRenewalTask = nil
+        // playhead-lmrx (review round 3): every job, not the last one dispatched.
+        // The entries themselves are removed by each `processJob`'s own `defer`.
+        for running in runningJobs.values {
+            running.leaseRenewalTask?.cancel()
+        }
+        cancelRunningJobs(where: { _ in true })
     }
 
     // MARK: - Scheduler Loop
@@ -3685,6 +3876,18 @@ actor AnalysisWorkScheduler {
     /// playback jobs (`jobType == "playback"`) bypass the Now cap
     /// unconditionally — the hot-path must always be able to drain.
     func canAdmit(job: AnalysisJob) -> Bool {
+        // playhead-lmrx (review round 3): a BGTask handler tearing its grant
+        // down admits NOTHING, and this is the one gate every dispatch site
+        // passes through — `runSingleDispatchPass`, the run loop's standard
+        // dispatch, the foreground catch-up escalation and the acoustic
+        // promotion all consult it immediately before `processJob`.
+        //
+        // ABOVE the playback bypass on purpose. That bypass exists so the hot
+        // path is never blocked by a LANE CAP; this is not a cap, it is "the
+        // process may be suspended within seconds", which is true of a playback
+        // job as much as any other — and a T0 job stranded at `running` with a
+        // live lease is the worst version of the outcome, not an exempt one.
+        if isDispatchClosed() { return false }
         let lane = job.schedulerLane
         if lane == .now && job.jobType == "playback" {
             return true
@@ -4269,7 +4472,11 @@ actor AnalysisWorkScheduler {
         // playhead-mk6z (review round): additive, unlike `currentJobId`. See
         // the property's own comment for the interleaving that makes the
         // difference load-bearing for `sweepExpiredLeasesIfDue()`.
-        inFlightJobIds.insert(job.jobId)
+        // playhead-lmrx (review round 3): the registry entry IS the membership —
+        // `inFlightJobIds` reads it — and it is created here, before the lease
+        // heartbeat is armed, so no window exists in which a job is running and
+        // unreachable by identity.
+        runningJobs[job.jobId] = RunningJob(episodeId: job.episodeId)
         currentEpisodeId = job.episodeId
         shouldCancelCurrentJob = false
         lostOwnership = false
@@ -4285,7 +4492,7 @@ actor AnalysisWorkScheduler {
         // write (state revert, progress update, backoff, releaseLease)
         // that would otherwise clobber the new owner's bookkeeping, then
         // cancel the running task so the run loop unwinds promptly.
-        leaseRenewalTask = Task { [clock] in
+        runningJobs[job.jobId]?.leaseRenewalTask = Task { [clock] in
             while !Task.isCancelled {
                 try await Task.sleep(for: .seconds(Self.leaseRenewalIntervalSeconds))
                 let newExpiry = clock().timeIntervalSince1970 + Self.leaseExpirySeconds
@@ -4296,24 +4503,30 @@ actor AnalysisWorkScheduler {
                 )) ?? false
                 if !stillOwned {
                     self.lostOwnership = true
-                    self.currentRunningTask?.cancel()
+                    // playhead-lmrx (review round 3): cancel THIS job's runner.
+                    // The single slot meant a sibling dispatch could redirect
+                    // this heartbeat's cancel onto an unrelated, healthy job.
+                    self.runningJobs[job.jobId]?.runTask?.cancel()
                     break
                 }
             }
         }
 
         defer {
-            leaseRenewalTask?.cancel()
-            leaseRenewalTask = nil
-            currentRunningTask?.cancel()
-            currentRunningTask = nil
+            // playhead-lmrx (review round 3): one removal takes this job's
+            // membership, its heartbeat and its runner together, so no exit path
+            // can drop one and keep another — and neither cancel can reach a
+            // sibling, which is what the two single slots used to do.
+            let finished = runningJobs.removeValue(forKey: job.jobId)
+            finished?.leaseRenewalTask?.cancel()
+            finished?.runTask?.cancel()
+            // playhead-mk6z (review round): the removal above takes only THIS
+            // job. `currentJobId = nil` is a blanket clear and is why a sibling
+            // dispatch's completion used to make a still-running job look
+            // unowned to the sweep. The registry removal runs on every exit path
+            // the `defer` covers, so the set cannot leak an entry and silence
+            // the sweep's exclusion.
             currentJobId = nil
-            // playhead-mk6z (review round): remove only THIS job. `currentJobId
-            // = nil` above is a blanket clear and is why a sibling dispatch's
-            // completion used to make a still-running job look unowned to the
-            // sweep. This runs on every exit path the `defer` covers, so the
-            // set cannot leak an entry and silence the sweep's exclusion.
-            inFlightJobIds.remove(job.jobId)
             currentEpisodeId = nil
             shouldCancelCurrentJob = false
             // playhead-lmrx (review round 2): SAME GUARD, SAME REASON AS THE
@@ -4501,7 +4714,15 @@ actor AnalysisWorkScheduler {
 
         let jobSignpost = PreAnalysisInstrumentation.beginJobDuration(jobId: job.jobId)
         do {
-            guard !shouldCancelCurrentJob else {
+            // playhead-lmrx (review round 3): EITHER the global flag OR this
+            // job's own cancel mark. The global one is cleared by whichever
+            // `processJob` reaches its entry or its `defer` first, so with two
+            // jobs in flight a cancel aimed at both is erased for one of them by
+            // the other's ordinary progress — and that job would then start a
+            // runner the caller has already been told was cancelled, and been
+            // handed its id to wait for.
+            guard !shouldCancelCurrentJob,
+                  runningJobs[job.jobId]?.cancelRequested != true else {
                 PreAnalysisInstrumentation.endJobDuration(jobSignpost)
                 // `acquireLease` set state='running' atomically; if we
                 // skip without reverting, the job is stranded at
@@ -4537,7 +4758,11 @@ actor AnalysisWorkScheduler {
                 // (which already emits via the existing recorder
                 // call). `pendingCancelCause` overrides when the
                 // racing canceller passed a more specific cause.
-                let cancelRaceCause = pendingCancelCause ?? .userCancelled
+                // playhead-lmrx (review round 3): this job's own cause first,
+                // for the reason spelled out at the cancel-catch arm below.
+                let cancelRaceCause = runningJobs[job.jobId]?.cancelCause
+                    ?? pendingCancelCause
+                    ?? .userCancelled
                 let cancelRaceMetadata = await SliceCompletionInstrumentation
                     .recordPaused(
                         cause: cancelRaceCause,
@@ -4562,7 +4787,12 @@ actor AnalysisWorkScheduler {
                 // a stale value would mis-attribute the next job's
                 // cancellation if one arrives.
                 shouldCancelCurrentJob = false
-                pendingCancelCause = nil
+                runningJobs[job.jobId]?.cancelCause = nil
+                // playhead-lmrx (review round 3): and the global only when no
+                // sibling could still be holding an unread copy.
+                if inFlightJobIds.subtracting([job.jobId]).isEmpty {
+                    pendingCancelCause = nil
+                }
                 return
             }
 
@@ -4572,7 +4802,7 @@ actor AnalysisWorkScheduler {
                 try Task.checkCancellation()
                 return result
             }
-            currentRunningTask = Task {
+            runningJobs[job.jobId]?.runTask = Task {
                 await withTaskCancellationHandler {
                     _ = try? await runTask.value
                 } onCancel: {
@@ -4584,7 +4814,8 @@ actor AnalysisWorkScheduler {
             if let testCancelAfterRunnerStart {
                 pendingCancelCause = testCancelAfterRunnerStart
                 shouldCancelCurrentJob = true
-                currentRunningTask?.cancel()
+                runningJobs[job.jobId]?.cancelRequested = true
+                runningJobs[job.jobId]?.runTask?.cancel()
                 runTask.cancel()
             }
             #endif
@@ -4601,7 +4832,12 @@ actor AnalysisWorkScheduler {
                     // its bookkeeping. Drop the cancel cause to avoid
                     // bleeding it into the next job.
                     logger.warning("Skipping cancel cleanup writes for job \(job.jobId): lease reclaimed by orphan recovery")
-                    pendingCancelCause = nil
+                    runningJobs[job.jobId]?.cancelCause = nil
+                    // playhead-lmrx (review round 3): guarded, same rule as the
+                    // `defer` — a sibling may not have read the cause yet.
+                    if inFlightJobIds.subtracting([job.jobId]).isEmpty {
+                        pendingCancelCause = nil
+                    }
                     return
                 }
                 // Bump `attemptCount`: repeated mid-decode cancellation
@@ -4613,8 +4849,31 @@ actor AnalysisWorkScheduler {
                 // Default `.pipelineError` for callers that forgot to
                 // pass one; BG-task expiration passes `.taskExpired`;
                 // explicit user cancel passes `.userCancelled`.
-                let cause = pendingCancelCause ?? .pipelineError
-                pendingCancelCause = nil
+                // playhead-lmrx (review round 3): THIS JOB'S cause first.
+                //
+                // The line below used to be `pendingCancelCause ?? .pipelineError`
+                // followed by an unconditional `pendingCancelCause = nil`, which
+                // is a DESTRUCTIVE read of a single global slot. One
+                // `cancelCurrentJob(.taskExpired)` at a backfill expiry can act
+                // on two jobs (`nowCap` is 2, and both dispatch drivers can be
+                // inside `processJob`); the first to unwind consumed the cause,
+                // and the second read `nil`, fell back to `.pipelineError`, and
+                // took the ATTEMPT-SPENDING arm — superseding permanently on its
+                // fifth window. Round 2 guarded the two sites that ERASE the
+                // cause without reading it, and neither guard could see this
+                // one, because this site erases it precisely by reading it.
+                //
+                // The global stays as the fallback for a cancel that named no
+                // job — `episodeDeleted`, `retireDownloadAnalysis`, playback
+                // preemption — and is cleared only when nobody else could still
+                // be holding an unread copy, the same rule as the `defer`.
+                let cause = runningJobs[job.jobId]?.cancelCause
+                    ?? pendingCancelCause
+                    ?? .pipelineError
+                runningJobs[job.jobId]?.cancelCause = nil
+                if inFlightJobIds.subtracting([job.jobId]).isEmpty {
+                    pendingCancelCause = nil
+                }
                 let episodeId = job.episodeId
 
                 // playhead-lmrx: AN OS-RECLAIMED BACKGROUND WINDOW IS NOT AN
@@ -4823,7 +5082,11 @@ actor AnalysisWorkScheduler {
                 }
                 return
             }
-            currentRunningTask = nil
+            // playhead-lmrx (review round 3): release THIS job's runner handle,
+            // not the slot — which by now may hold a sibling's. The registry
+            // entry itself stays until the `defer`, because `inFlightJobIds`
+            // reads it and the commit arms below still have to run.
+            runningJobs[job.jobId]?.runTask = nil
             // Non-cancel path: clear any stale cause so the next job
             // doesn't inherit it.
             // playhead-lmrx (review round 2): but not one a SIBLING is still
