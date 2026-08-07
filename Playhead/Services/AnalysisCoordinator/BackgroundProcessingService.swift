@@ -2217,7 +2217,14 @@ actor BackgroundProcessingService {
 
     /// Handle the pre-analysis recovery BGProcessingTask. Runs reconciliation
     /// to find interrupted T0/T1+ jobs and resumes them.
-    func handlePreAnalysisRecovery(_ task: any BackgroundProcessingTaskProtocol) async {
+    /// - Parameter budget: the grant this handler is spending. Defaults to the
+    ///   measured `com.playhead.app.preanalysis.recovery` budget; injectable for
+    ///   the same reason `handleBackfillTask`'s is — the work-deadline teardown
+    ///   is 219 s into a grant and is otherwise unreachable from a test.
+    func handlePreAnalysisRecovery(
+        _ task: any BackgroundProcessingTaskProtocol,
+        budget: BackgroundGrantBudget = .preAnalysisRecovery
+    ) async {
         logger.info("Pre-analysis recovery task started")
 
         let taskID = ObjectIdentifier(task as AnyObject)
@@ -2248,11 +2255,6 @@ actor BackgroundProcessingService {
         // every deadline is measured from here rather than from whenever the
         // work task reaches the call.
         let recoveryGrantStart = ContinuousClock.now
-        // playhead-lmrx: derived from the same grant measurement as the backfill
-        // handler rather than from a second unrelated constant. Declared at
-        // handler scope because BOTH endings spend it — the work-deadline return
-        // and the expiration handler.
-        let budget = BackgroundGrantBudget.preAnalysisRecovery
         let startRunTask = Task {
             let scenePhase = await BGTaskTelemetryScenePhase.current()
             await runLedgerForStart.recordRunStart(

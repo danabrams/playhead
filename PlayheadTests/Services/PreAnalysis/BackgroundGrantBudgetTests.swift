@@ -1752,3 +1752,385 @@ struct BackfillExpiryDurabilityTests {
                 "the job must still be unwinding — otherwise there was nothing to wait for")
     }
 }
+
+// MARK: - A cancel is aimed at jobs, not at a slot (review round 3)
+
+@Suite("playhead-lmrx: a cancel is aimed at jobs, not at a slot")
+struct CancelAimIdentityTests {
+
+    /// Sleeps in `decode` and OBSERVES CANCELLATION, which is the whole point:
+    /// a job the cancel reached leaves promptly, a job it missed sits here.
+    /// The finite sleep is teardown insurance, not the mechanism — on the
+    /// failing path the assertion has already fired by the time it elapses.
+    private final class CancellableSleepAudioStub: AnalysisAudioProviding, @unchecked Sendable {
+        func decode(
+            fileURL: LocalAudioURL,
+            episodeID: String,
+            shardDuration: TimeInterval
+        ) async throws -> [AnalysisShard] {
+            try await Task.sleep(for: .seconds(20))
+            return []
+        }
+    }
+
+    private func makeScheduler(
+        store: AnalysisStore,
+        downloads: StubDownloadProvider
+    ) -> AnalysisWorkScheduler {
+        let speechService = SpeechService(recognizer: StubSpeechRecognizer())
+        let runner = AnalysisJobRunner(
+            store: store,
+            audioProvider: CancellableSleepAudioStub(),
+            featureService: FeatureExtractionService(store: store),
+            transcriptEngine: TranscriptEngineService(speechService: speechService, store: store),
+            adDetection: StubAdDetectionProvider()
+        )
+        let battery = StubBatteryProvider()
+        battery.level = 0.9
+        battery.charging = true
+        return AnalysisWorkScheduler(
+            store: store,
+            jobRunner: runner,
+            capabilitiesService: StubCapabilitiesProvider(
+                snapshot: makeCapabilitySnapshot(thermalState: .nominal, isCharging: true)
+            ),
+            downloadManager: downloads,
+            batteryProvider: battery,
+            transportStatusProvider: StubTransportStatusProvider()
+        )
+    }
+
+    /// Now-lane (`priority >= 20`), because `nowCap` is 2 and every other lane
+    /// caps at 1 — a test that seeds `.soon` jobs can never get two in flight
+    /// and would pass against the single-slot code it is meant to kill.
+    @discardableResult
+    private func insertNowLaneJob(
+        store: AnalysisStore,
+        downloads: StubDownloadProvider,
+        jobId: String,
+        priority: Int,
+        createdAt: Double,
+        attemptCount: Int = 0
+    ) async throws -> AnalysisJob {
+        let episodeId = "ep-\(jobId)"
+        downloads.cachedURLs[episodeId] = URL(fileURLWithPath: "/tmp/\(episodeId).m4a")
+        let job = makeAnalysisJob(
+            jobId: jobId,
+            jobType: "preAnalysis",
+            episodeId: episodeId,
+            analysisAssetId: "asset-\(jobId)",
+            workKey: "fp-\(jobId):1:preAnalysis",
+            sourceFingerprint: "fp-\(jobId)",
+            priority: priority,
+            desiredCoverageSec: 90,
+            state: "queued",
+            attemptCount: attemptCount,
+            createdAt: createdAt
+        )
+        try await store.insertJob(job)
+        return job
+    }
+
+    /// Puts exactly two jobs in flight at once and returns the two dispatch
+    /// tasks. `fetchNextEligibleJob` skips leased rows, so the second dispatch
+    /// can only see the second job after the first has committed its lease —
+    /// which is why this is staged rather than fired in parallel.
+    private func driveTwoInFlight(
+        scheduler: AnalysisWorkScheduler,
+        first: String,
+        second: String
+    ) async throws -> [Task<Bool, Never>] {
+        let a = Task { await scheduler.processNextDispatchableJobForTesting() }
+        var spins = 0
+        while await !scheduler.inFlightJobIdsForTesting().contains(first) {
+            spins += 1
+            try #require(spins < 1000, "the first job never entered processJob")
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        let b = Task { await scheduler.processNextDispatchableJobForTesting() }
+        spins = 0
+        while await scheduler.inFlightJobIdsForTesting() != [first, second] {
+            spins += 1
+            let seen = await scheduler.inFlightJobIdsForTesting()
+            try #require(spins < 1000, "the two dispatches never overlapped; in flight: \(seen.sorted())")
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        // Both runners started, so the `runTask` half of the aim is exercised
+        // and not only the `cancelRequested` half.
+        spins = 0
+        while await scheduler.hasCurrentRunningTaskForTesting() == false {
+            spins += 1
+            try #require(spins < 1000, "no runner ever started")
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        return [a, b]
+    }
+
+    @Test("the cancel reaches every job it names", .timeLimit(.minutes(2)))
+    func cancelReachesEveryJobItNames() async throws {
+        // THE DEFECT, stated as the diagnostic question. `cancelCurrentJob`
+        // returned `inFlightJobIds` as "what this cancel was aimed at" while
+        // cancelling only `currentRunningTask` — a single slot with no owner id,
+        // overwritten by the second concurrent `processJob`. What would the
+        // returned set have read if the cancel had reached nothing at all? The
+        // same ids. The caller then waits on a job nobody asked to stop, times
+        // out with certainty, and calls `setTaskCompleted` over it.
+        let store = try await makeTestStore()
+        let downloads = StubDownloadProvider()
+        let scheduler = makeScheduler(store: store, downloads: downloads)
+        let t0 = Date().timeIntervalSince1970
+        try await insertNowLaneJob(store: store, downloads: downloads, jobId: "aim-a", priority: 21, createdAt: t0 - 10)
+        try await insertNowLaneJob(store: store, downloads: downloads, jobId: "aim-b", priority: 20, createdAt: t0)
+
+        let dispatches = try await driveTwoInFlight(scheduler: scheduler, first: "aim-a", second: "aim-b")
+
+        let cancelled = await scheduler.cancelCurrentJob(cause: .taskExpired)
+        #expect(cancelled == ["aim-a", "aim-b"],
+                "the return value is the caller's whole picture of what it must wait for")
+        #expect(await scheduler.cancelRequestedJobIdsForTesting() == cancelled,
+                """
+                What the cancel CLAIMS and what it REACHED must be the same set. \
+                These were allowed to disagree, and the claim was the one the \
+                caller acted on.
+                """)
+
+        // The load-bearing assertion. A job the cancel missed is parked in a
+        // 20 s sleep, so this budget cannot be met by luck.
+        #expect(await scheduler.awaitJobsSettled(cancelled, within: .seconds(10)),
+                """
+                Every named job must actually unwind. A missed one makes the \
+                handler's settle wait a certain timeout and leaves that job \
+                running, unrequeued, into setTaskCompleted — the stranding this \
+                bead exists to remove.
+                """)
+
+        for jobId in ["aim-a", "aim-b"] {
+            let after = try #require(try await store.fetchJob(byId: jobId))
+            #expect(after.state == "queued", "\(jobId) must be resumable, not left leased at `running`")
+        }
+        for dispatch in dispatches { _ = await dispatch.value }
+    }
+
+    @Test("each cancelled job keeps its own cause, so neither spends an attempt",
+          .timeLimit(.minutes(2)))
+    func siblingsDoNotStealEachOthersCancelCause() async throws {
+        // THE SAME DEFECT ONE LAYER IN, and reachable only because the cancel
+        // now genuinely reaches both jobs. The cancel-catch arm read
+        // `pendingCancelCause ?? .pipelineError` and then nil'd it
+        // unconditionally: a DESTRUCTIVE read of a single global slot. The first
+        // job to unwind took `.taskExpired`; the second read `nil`, fell back to
+        // `.pipelineError`, took the ATTEMPT-SPENDING arm, and at
+        // `attemptCount == 4` superseded with `nextEligibleAt: nil` — a row that
+        // never comes back, because `workKey` is UNIQUE and `insertJob` is
+        // `INSERT OR IGNORE`.
+        //
+        // Seeded at 4 on BOTH jobs so either ordering is fatal: whichever loses
+        // the race supersedes, and the test cannot pass by getting lucky.
+        let store = try await makeTestStore()
+        let downloads = StubDownloadProvider()
+        let scheduler = makeScheduler(store: store, downloads: downloads)
+        let t0 = Date().timeIntervalSince1970
+        try await insertNowLaneJob(store: store, downloads: downloads,
+                                   jobId: "cause-a", priority: 21, createdAt: t0 - 10, attemptCount: 4)
+        try await insertNowLaneJob(store: store, downloads: downloads,
+                                   jobId: "cause-b", priority: 20, createdAt: t0, attemptCount: 4)
+
+        let dispatches = try await driveTwoInFlight(scheduler: scheduler, first: "cause-a", second: "cause-b")
+
+        let cancelled = await scheduler.cancelCurrentJob(cause: .taskExpired)
+        #expect(await scheduler.awaitJobsSettled(cancelled, within: .seconds(10)))
+        for dispatch in dispatches { _ = await dispatch.value }
+
+        for jobId in ["cause-a", "cause-b"] {
+            let after = try #require(try await store.fetchJob(byId: jobId))
+            #expect(after.state == "queued",
+                    """
+                    \(jobId) was superseded by an expiry. One cancel, one cause, \
+                    two jobs — and the loser of that race is abandoned forever.
+                    """)
+            #expect(after.attemptCount == 4,
+                    "\(jobId): an OS-reclaimed window is evidence about the window, not about the job")
+            #expect(after.lastErrorCode == AnalysisWorkScheduler.backgroundWindowExpiredErrorCode,
+                    "\(jobId): the requeue must carry the expiry's own error code, not a pipeline error")
+        }
+    }
+
+    @Test("a job finishing does not cancel a sibling's lease heartbeat",
+          .timeLimit(.minutes(2)))
+    func siblingLeaseHeartbeatSurvivesAnotherJobsExit() async throws {
+        // The third consequence of the single slot, and the quietest.
+        // `leaseRenewalTask` was one slot too, so B's dispatch overwrote A's
+        // heartbeat handle and A's `defer` then cancelled B's — leaving a LIVE
+        // job with no lease renewal, to be reclaimed out from under itself by
+        // the reaper, while A's own heartbeat ran on forever.
+        //
+        // Asserted structurally rather than by waiting out a renewal interval:
+        // after one job leaves, the other must still hold a heartbeat and its
+        // lease must still be its own.
+        let store = try await makeTestStore()
+        let downloads = StubDownloadProvider()
+        let scheduler = makeScheduler(store: store, downloads: downloads)
+        let t0 = Date().timeIntervalSince1970
+        try await insertNowLaneJob(store: store, downloads: downloads, jobId: "beat-a", priority: 21, createdAt: t0 - 10)
+        try await insertNowLaneJob(store: store, downloads: downloads, jobId: "beat-b", priority: 20, createdAt: t0)
+
+        let dispatches = try await driveTwoInFlight(scheduler: scheduler, first: "beat-a", second: "beat-b")
+
+        // Retire only A's episode: its job is cancelled by identity and leaves,
+        // running its `defer` while B is still in flight.
+        await scheduler.retireDownloadAnalysis(episodeId: "ep-beat-a", downloadId: "dl-1")
+        var spins = 0
+        while await scheduler.inFlightJobIdsForTesting().contains("beat-a") {
+            spins += 1
+            try #require(spins < 1000, "the retired job never unwound")
+            try await Task.sleep(for: .milliseconds(20))
+        }
+
+        #expect(await scheduler.inFlightJobIdsForTesting() == ["beat-b"],
+                "the surviving job must still be in flight — a sibling leaving is not its business")
+        #expect(await scheduler.hasCurrentRunningTaskForTesting(),
+                """
+                beat-b's runner must still be alive. The single slot meant \
+                beat-a's `defer` cancelled whatever the slot then held, which is \
+                beat-b — a job finishing NORMALLY killing an unrelated one.
+                """)
+        let survivor = try #require(try await store.fetchJob(byId: "beat-b"))
+        #expect(survivor.state == "running" && survivor.leaseOwner != nil,
+                "and it must still own its lease")
+
+        await scheduler.cancelCurrentJob(cause: .taskExpired)
+        for dispatch in dispatches { _ = await dispatch.value }
+    }
+
+    @Test("dispatch is closed for a teardown, and re-opens by itself",
+          .timeLimit(.minutes(2)))
+    func dispatchClosesForTeardownAndReopens() async throws {
+        // F7: nothing quiesced `runLoop()`, whose 5 s poll can dispatch a fresh
+        // job AFTER the handler's cancel has gone past — aimed at by nothing,
+        // absent from the set the handler waits on, live at `setTaskCompleted`.
+        //
+        // The re-open is asserted because the alternative design is a starvation
+        // bug: this scheduler's only external re-openers are called solely by
+        // the BGTask handlers, so a "closed" flag that leaked on any early
+        // return would leave a foregrounded app with a scheduler that never
+        // dispatches again.
+        let store = try await makeTestStore()
+        let downloads = StubDownloadProvider()
+        let scheduler = makeScheduler(store: store, downloads: downloads)
+        try await insertNowLaneJob(store: store, downloads: downloads,
+                                   jobId: "closed-door", priority: 21,
+                                   createdAt: Date().timeIntervalSince1970)
+
+        await scheduler.closeDispatchForTeardown(lasting: .milliseconds(250))
+        // Extending is a `max`: a shorter close must not re-open a longer one.
+        await scheduler.closeDispatchForTeardown(lasting: .milliseconds(1))
+        #expect(await scheduler.isDispatchClosedForTesting())
+        #expect(await scheduler.processNextDispatchableJobForTesting() == false,
+                "no job may START while a handler is tearing its grant down")
+        let untouched = try #require(try await store.fetchJob(byId: "closed-door"))
+        #expect(untouched.state == "queued", "and the refused job must be left exactly where it was")
+
+        // Deliberately far past the 250 ms close, so oversleeping under load can
+        // only help. The claim is that the door opens WITHOUT anyone opening it.
+        try await Task.sleep(for: .seconds(2))
+        #expect(await scheduler.isDispatchClosedForTesting() == false)
+        // Dispatched in a Task and observed by its arrival in flight, rather
+        // than awaited: the pass runs a whole job and this stub's decode sleeps.
+        let reopened = Task { await scheduler.processNextDispatchableJobForTesting() }
+        var spins = 0
+        while await scheduler.inFlightJobIdsForTesting().isEmpty {
+            spins += 1
+            try #require(spins < 500,
+                         """
+                         An expired close must let work through again. A close that \
+                         has to be cleared is one an early return can leak, and \
+                         nothing outside a BGTask handler ever calls the re-openers.
+                         """)
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        await scheduler.cancelCurrentJob(cause: .taskExpired)
+        _ = await reopened.value
+    }
+
+    /// A budget whose `workBudget` clamps to zero, so `workDeadline(from:)`
+    /// returns the grant's own start and every deadline test reads "already
+    /// elapsed" — the state a real window is in at t+219 s, without waiting
+    /// 219 s for it. The reserve is real so the settle has something to spend.
+    private static let deadlineAlreadyPast = BackgroundGrantBudget(
+        designGrant: .zero,
+        teardownReserve: .seconds(30),
+        minimumCheckpointBudget: .zero,
+        expirationSettleGrace: .seconds(30),
+        provenance: .assumed
+    )
+
+    @Test("recovery's work-deadline return does not strand the job it leaves running",
+          .timeLimit(.minutes(2)))
+    func recoveryNormalReturnRequeuesTheInFlightJob() async throws {
+        // F5: THE HOLE THIS BEAD'S OWN CHANGE OPENED, in the handler nobody
+        // re-read after opening it.
+        //
+        // LX21 closed exactly this on backfill. Recovery's drain moved from
+        // `now + 300 s` read AT THE CALL — unreachable inside a ~295 s grant, so
+        // the OS expiry always drove teardown — to `grantStart + 219 s`, which a
+        // normal grant reaches with `Task.isCancelled` still FALSE while the
+        // long-lived `runLoop()` this handler started keeps dispatching on its
+        // own 5 s poll. The handler then wrote `finishRun` and
+        // `markComplete(success: true)` with no cancel and no settle. The
+        // in-file justification for the budget change argued only the EXPIRY
+        // asymmetry and never mentioned the exit it created.
+        //
+        // Driven with no timing dependence, exactly as the backfill twin is: the
+        // job is put in flight by another driver first, and its lease then makes
+        // it invisible to `fetchNextEligibleJob`, so the handler's own drain
+        // dispatches nothing and returns at once — reproducing "the handler
+        // reaches its normal return while a job it did not dispatch is running".
+        let store = try await makeTestStore()
+        let downloads = StubDownloadProvider()
+        let scheduler = makeScheduler(store: store, downloads: downloads)
+        try await insertNowLaneJob(store: store, downloads: downloads,
+                                   jobId: "recovery-strand", priority: 21,
+                                   createdAt: Date().timeIntervalSince1970)
+
+        let dispatch = Task { await scheduler.processNextDispatchableJobForTesting() }
+        var spins = 0
+        while await !scheduler.hasCurrentRunningTaskForTesting() {
+            spins += 1
+            try #require(spins < 1000, "the seeded job never entered decode")
+            try await Task.sleep(for: .milliseconds(20))
+        }
+
+        let bps = BackgroundProcessingService(
+            coordinator: StubAnalysisCoordinator(),
+            capabilitiesService: CapabilitiesService(),
+            taskScheduler: StubTaskScheduler(),
+            batteryProvider: StubBatteryProvider()
+        )
+        let reconciler = AnalysisJobReconciler(
+            store: store,
+            downloadManager: StubDownloadProvider(),
+            capabilitiesService: StubCapabilitiesProvider(
+                snapshot: makeCapabilitySnapshot(thermalState: .nominal, isCharging: true)
+            )
+        )
+        await bps.setPreAnalysisServices(scheduler: scheduler, reconciler: reconciler)
+
+        let task = StubBackgroundTask()
+        await bps.handlePreAnalysisRecovery(task, budget: Self.deadlineAlreadyPast)
+        await task.awaitCompletion()
+
+        let after = try #require(try await store.fetchJob(byId: "recovery-strand"))
+        #expect(after.state == "queued",
+                """
+                Recovery's work-deadline return must cancel and requeue what it \
+                leaves running, exactly as backfill's does. Finding this row \
+                still `running` means the handler called setTaskCompleted over a \
+                live job — no checkpoint, no requeue, a stale lease for the \
+                reaper, and no expirationHandler left to rescue it.
+                """)
+        #expect(after.lastErrorCode == AnalysisWorkScheduler.backgroundWindowExpiredErrorCode)
+        #expect(after.attemptCount == 0,
+                "the grant ending is not the job's fault on this path either")
+        _ = await dispatch.value
+    }
+}
