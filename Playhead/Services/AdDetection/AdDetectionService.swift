@@ -9281,22 +9281,21 @@ actor AdDetectionService {
     /// was requested and refused — and the sessionless callers skipped even the
     /// bd-3bz retry marker, making the drop permanent. See ``SemanticScanClaim``.
     ///
-    /// `chunks` must be the SAME array the phase would have atomized, because
-    /// the claim's job id is derived from its `transcriptVersion`. That is why
-    /// this takes the chunks rather than re-reading them: each claim must name
-    /// the job ITS caller would have minted.
+    /// `chunks` is read for ONE thing: whether there is a transcript at all.
+    /// Empty chunks are a no-op — there is nothing for a semantic scan to read,
+    /// so there is nothing to claim (and `runBackfill` has already returned in
+    /// that case).
     ///
-    /// playhead-iu0t: both callers now pass the CANONICAL set, so "the job its
-    /// caller would have minted" and "the job any other caller would mint" are
-    /// finally the same row. Until iu0t, `retryShadowFMPhaseForSession` passed
-    /// a final-pass-only replay set, and a claim minted on its behalf named a
-    /// job in an id space no other dispatcher derives — a durable rescue row
-    /// for work nothing could pick up. Do not "simplify" this by re-reading the
-    /// store here: the parameter is what keeps the claim and the phase provably
-    /// in agreement rather than agreeing by coincidence.
-    ///
-    /// Empty chunks are a no-op: there is no transcript to scan, so there is
-    /// nothing to claim (and `runBackfill` has already returned in that case).
+    /// **playhead-wxsv narrowed this parameter, and the history is worth
+    /// keeping.** The claim's job id used to be derived from the chunks'
+    /// `transcriptVersion`, so the array had to be the SAME one the phase would
+    /// have atomized or the claim named a row no dispatcher would ever look up.
+    /// playhead-iu0t hit exactly that: `retryShadowFMPhaseForSession` passed a
+    /// final-pass-only replay set and minted a durable rescue row for work
+    /// nothing could pick up. The id is now derived from the ASSET alone, so
+    /// that whole class of disagreement is gone — a claim names the same row
+    /// whichever caller mints it, and whichever transcript was on disk at the
+    /// time.
     private func recordSemanticScanClaim(
         gate: SemanticScanClaim.Gate,
         chunks: [TranscriptChunk],
@@ -9308,7 +9307,6 @@ actor AdDetectionService {
             gate: gate,
             analysisAssetId: analysisAssetId,
             podcastId: podcastId,
-            transcriptVersion: TranscriptAtomizer.transcriptVersionHash(chunks: chunks),
             store: store,
             logger: logger
         )

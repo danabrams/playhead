@@ -51,9 +51,9 @@ import os
 /// invisible to that sweep by construction, which is exactly why the four
 /// zero-row field assets have no recovery path at all.
 ///
-/// **Why the id is the runner's id.** ``jobId(analysisAssetId:transcriptVersion:)``
-/// re-derives `BackfillJobRunner`'s deterministic `(asset, transcriptVersion,
-/// phase, offset)` hash for `.fullEpisodeScan` at offset 0 — the row a
+/// **Why the id is the runner's id.** ``jobId(analysisAssetId:)``
+/// re-derives `BackfillJobRunner`'s deterministic `(asset, phase, offset)`
+/// hash for `.fullEpisodeScan` at offset 0 — the row a
 /// `fullCoverage` plan mints. So when a pass finally runs under an open gate,
 /// the runner's M-5 idempotency branch finds the claim, re-drives it, and
 /// completes it. A claim with a private id would linger `deferred` forever
@@ -370,10 +370,16 @@ enum SemanticScanClaim {
     /// string. A claim whose id merely LOOKS like the runner's would be a row
     /// the runner never finds, i.e. exactly the orphan this type exists to
     /// prevent.
-    static func jobId(analysisAssetId: String, transcriptVersion: String) -> String {
-        BackfillJobRunner.makeJobIdForTesting(
+    ///
+    /// playhead-wxsv: the derivation lost its `transcriptVersion` term, and the
+    /// claim path had to move with it or it would have re-created the very
+    /// duplicate this bead removes — a claim minted while the transcript was
+    /// still growing would have named a row that the next session's runner,
+    /// hashing a longer transcript, never looked up. A claim is now about the
+    /// ASSET, which is what it always meant.
+    static func jobId(analysisAssetId: String) -> String {
+        BackfillJobRunner.makeJobId(
             analysisAssetId: analysisAssetId,
-            transcriptVersion: transcriptVersion,
             phase: .fullEpisodeScan,
             offset: 0
         )
@@ -408,15 +414,22 @@ enum SemanticScanClaim {
     /// `retryCount < AdmissionController.maxRetries`, and a gate closing is not
     /// an attempt that failed — charging it as one would let three closed gates
     /// permanently retire an asset that has never once been scanned.
+    ///
+    /// playhead-wxsv: `attemptTranscriptVersion` is left `nil`, and that is the
+    /// honest value rather than a missing one. A claim is a REQUEST — no run
+    /// has started, so no transcript has been read, so there is no version this
+    /// row's state was made against. Stamping the transcript that happens to be
+    /// on disk when a gate closes is precisely the reading this bead exists to
+    /// remove, and it would additionally make the row answer "complete at this
+    /// version?" with a version nothing ever processed.
     static func claimRow(
         analysisAssetId: String,
         podcastId: String?,
-        transcriptVersion: String,
         gate: Gate,
         createdAt: Double
     ) -> BackfillJob {
         BackfillJob(
-            jobId: jobId(analysisAssetId: analysisAssetId, transcriptVersion: transcriptVersion),
+            jobId: jobId(analysisAssetId: analysisAssetId),
             analysisAssetId: analysisAssetId,
             // An empty id is the ABSENCE of a podcast, not a podcast. Persisting
             // "" would hand the planner-state lookup a key that matches nothing
@@ -440,7 +453,7 @@ enum SemanticScanClaim {
 
     // MARK: - Recording
 
-    /// What ``record(gate:analysisAssetId:podcastId:transcriptVersion:store:clock:logger:)``
+    /// What ``record(gate:analysisAssetId:podcastId:store:clock:logger:)``
     /// did. Returned rather than logged-only so the guarantee is assertable
     /// without scraping `os_log`.
     enum Outcome: Equatable, Sendable {
@@ -449,8 +462,16 @@ enum SemanticScanClaim {
         /// A claim (or any non-terminal coverage-lane row) already existed and
         /// its `deferReason` now names this gate.
         case refreshed
-        /// A `complete` row already exists for this asset+transcriptVersion —
-        /// the scan this claim would request has already run.
+        /// A `complete` row already exists for this asset's coverage lane —
+        /// the scan this claim would request has already run. playhead-wxsv:
+        /// "for this asset", not "for this asset+transcriptVersion", and the
+        /// change is a fix rather than a loosening. While the id carried the
+        /// version, a claim minted mid-transcription named a DIFFERENT row from
+        /// the one the completed scan wrote, so this branch could not see it
+        /// and the claim inserted a duplicate. Whether a scan is still OWED is
+        /// asked one layer up, from measured coverage
+        /// (``isOwed(adScanFraction:)``), which is the question that does not
+        /// depend on an identity at all.
         case alreadySatisfied
         /// A `running` or `failed` row already exists and was left untouched.
         /// `running` means a pass is mid-flight and owns the row's bookkeeping;
@@ -479,12 +500,11 @@ enum SemanticScanClaim {
         gate: Gate,
         analysisAssetId: String,
         podcastId: String?,
-        transcriptVersion: String,
         store: AnalysisStore,
         clock: @Sendable () -> Double = { Date().timeIntervalSince1970 },
         logger: Logger
     ) async -> Outcome {
-        let jobId = jobId(analysisAssetId: analysisAssetId, transcriptVersion: transcriptVersion)
+        let jobId = jobId(analysisAssetId: analysisAssetId)
         do {
             let fraction = try await store
                 .fetchCoverageSummariesByAssetIds([analysisAssetId])[analysisAssetId]?
@@ -522,7 +542,6 @@ enum SemanticScanClaim {
             try await store.insertBackfillJob(claimRow(
                 analysisAssetId: analysisAssetId,
                 podcastId: podcastId,
-                transcriptVersion: transcriptVersion,
                 gate: gate,
                 createdAt: clock()
             ))

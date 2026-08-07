@@ -162,10 +162,15 @@ enum TranscriptAtomizer {
     /// playhead-fil5: the `transcriptVersion` for a chunk set, WITHOUT paying
     /// for atoms.
     ///
-    /// `transcriptVersion` is half of the coverage-lane job identity
-    /// (``BackfillJobRunner/makeJobIdForTesting(analysisAssetId:transcriptVersion:phase:offset:)``),
-    /// so anything that wants to name a job the runner would later derive has
-    /// to compute the same hash. Before this existed the only way to get it was
+    /// `transcriptVersion` used to be half of the coverage-lane job identity;
+    /// playhead-wxsv took it out of
+    /// ``BackfillJobRunner/makeJobId(analysisAssetId:phase:offset:)`` and put it
+    /// on the row as `backfill_jobs.attemptTranscriptVersion`, so naming a job
+    /// no longer requires this hash. It is still what the runner STAMPS on an
+    /// attempt, and it is still the invalidation key for episode summaries and
+    /// evidence events, so every caller that needs "the version of this
+    /// transcript" comes through here. Before this existed the only way to get
+    /// it was
     /// ``atomize(chunks:analysisAssetId:normalizationHash:sourceHash:)``, which
     /// also runs a SHA-256 and a `TranscriptQualityEstimator` pass PER CHUNK to
     /// build atoms the caller then throws away.

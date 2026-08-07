@@ -1728,7 +1728,7 @@ actor AnalysisStore {
     /// assertions automatically follow the production constant — hardcoding
     /// the integer in tests has been a recurring source of stale-assertion
     /// flakes whenever the schema bumps.
-    nonisolated static let currentSchemaVersion = 43
+    nonisolated static let currentSchemaVersion = 44
 
     /// H1: minimum age (in seconds) a `backfill_jobs` / `final_pass_jobs`
     /// row stuck in `status='running'` must reach before the launch-time
@@ -2568,6 +2568,11 @@ actor AnalysisStore {
             // playhead-ug9m: the day-0 RESCUE counter — how many re-attempts an
             // asset that already has marks has spent this generation.
             try migrateRediffDayZeroRescueV43IfNeeded()
+            // playhead-wxsv: `backfill_jobs.jobId` stops encoding the transcript
+            // version and the version becomes a column. DESTRUCTIVE: every
+            // pre-v44 row is deleted, because its id was minted under the old
+            // derivation and nothing can address it again.
+            try migrateBackfillJobIdentityV44IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -2918,6 +2923,9 @@ actor AnalysisStore {
         // playhead-ug9m (v43): guarded on `tableExists`, so a seeded fixture
         // without `rediff_day_zero_attempts` still reaches v43.
         try migrateRediffDayZeroRescueV43IfNeeded()
+        // playhead-wxsv (v44): guarded on `tableExists`, so a seeded fixture
+        // without `backfill_jobs` still reaches v44.
+        try migrateBackfillJobIdentityV44IfNeeded()
     }
     #endif
 
@@ -6559,6 +6567,61 @@ actor AnalysisStore {
         try setSchemaVersion(43)
     }
 
+    // MARK: - V44: the backfill job's identity stops naming a transcript (playhead-wxsv)
+    //
+    // `backfill_jobs.jobId` was `SHA256(assetId | transcriptVersion | phase |
+    // offset)`. `transcriptVersion` is a CONTENT HASH and transcription runs
+    // across sessions, so every session that extended a transcript derived a
+    // NEW id, inserted a fresh row with `progressCursor = nil`, and left the
+    // previous row unreachable — no code anywhere re-derives an id for a
+    // transcript that no longer exists.
+    //
+    // Measured on the 2026-08-07 device pull, and the correlation is exact —
+    // one stale row per transcript version (F4CE7F47 3/3, AD5F3A0A 2/2,
+    // DE0784D8 1/1). `CDD611C4` holds FOUR `queued` rows, every cursor nil,
+    // and zero `semantic_scan_results`: four full-episode scans minted and
+    // abandoned without one of them ever producing a result. N scales with how
+    // many sessions the transcription took, so the longest episodes — the ones
+    // with the most ad time to find — are punished worst, and a NEW install is
+    // hit hardest of all because that is when transcription spans most sessions.
+    //
+    // **The rows are DROPPED, not migrated, and that is the point.** Every
+    // surviving row's id was minted under the old preimage, so no future
+    // invocation can address it; and the only way to give an old row an
+    // `attemptTranscriptVersion` would be to read the transcript that is on
+    // disk NOW and write it onto progress that was made against something else
+    // — which is the exact defect this bead exists to remove, committed inside
+    // its own fix. Dan approved the break: "I am ok with breaking a schema, I
+    // am still the only user."
+    //
+    // What is lost is bounded and re-derivable: 2 `complete` rows on the pull
+    // (their assets get re-scanned, resuming nothing), and 28 rows that were
+    // either orphans or blocked. What is gained is that every row minted from
+    // here on is addressable for the life of the asset.
+
+    /// V44 migration — drop the version out of the job identity. Idempotent
+    /// (`addColumnIfNeeded`) and guarded on `tableExists` so a seeded fixture
+    /// without `backfill_jobs` still reaches v44.
+    private func migrateBackfillJobIdentityV44IfNeeded() throws {
+        let observed = (try schemaVersion() ?? 1)
+        guard observed < 44 else { return }
+        // DO NOT STEP OVER A ROLLED-BACK V39, exactly as V40/V41/V42/V43 do not
+        // — see `migrateSemanticScanAttributionV42IfNeeded` for why the ladder
+        // does not enforce this structurally.
+        guard observed >= 43 else { return }
+        if try tableExists("backfill_jobs") {
+            // Order matters only for readability: the DELETE empties the table,
+            // so the column add is over zero rows either way.
+            try exec("DELETE FROM backfill_jobs")
+            try addColumnIfNeeded(
+                table: "backfill_jobs",
+                column: "attemptTranscriptVersion",
+                definition: "TEXT"
+            )
+        }
+        try setSchemaVersion(44)
+    }
+
     /// Fold ONE settled day-0 kickoff into its episode's row.
     ///
     /// The counters accumulate in SQL rather than in Swift so two writers can
@@ -8629,6 +8692,17 @@ actor AnalysisStore {
             table: "backfill_jobs",
             column: "updatedAt",
             definition: "REAL NOT NULL DEFAULT 0"
+        )
+        // playhead-wxsv (v44): the transcript version of the row's most recent
+        // ATTEMPT. Nullable on purpose — NULL means "no attempt has begun",
+        // which is a different statement from any version string and must stay
+        // distinguishable from one. Declared here as well as in
+        // `migrateBackfillJobIdentityV44IfNeeded` so a fresh DB (built from the
+        // CREATE above, which does not carry it) and an upgraded DB converge.
+        try addColumnIfNeeded(
+            table: "backfill_jobs",
+            column: "attemptTranscriptVersion",
+            definition: "TEXT"
         )
 
         // final_pass_jobs (Bug 9)
@@ -15782,8 +15856,8 @@ actor AnalysisStore {
             INSERT INTO backfill_jobs
             (jobId, analysisAssetId, podcastId, phase, coveragePolicy, priority,
              progressCursor, retryCount, deferReason, status, scanCohortJSON,
-             createdAt, updatedAt)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             createdAt, updatedAt, attemptTranscriptVersion)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -15802,6 +15876,11 @@ actor AnalysisStore {
         // H1: liveness clock seeded to createdAt; subsequent transitions
         // refresh it via `strftime('%s','now')` in the mark* helpers.
         bind(stmt, 13, job.createdAt)
+        // playhead-wxsv: an inserted row has had no attempt, so in production
+        // this is always nil. Bound from the value rather than hardcoded so a
+        // caller reconstructing a row (a test fixture, a future repair path)
+        // cannot silently lose it.
+        bind(stmt, 14, job.attemptTranscriptVersion)
         do {
             try step(stmt, expecting: SQLITE_DONE)
         } catch {
@@ -15822,11 +15901,11 @@ actor AnalysisStore {
     func fetchBackfillJob(byId jobId: String) throws -> BackfillJob? {
         // Column order: jobId, analysisAssetId, podcastId, phase, coveragePolicy,
         // priority, progressCursor, retryCount, deferReason, status,
-        // scanCohortJSON, createdAt.
+        // scanCohortJSON, createdAt, attemptTranscriptVersion.
         let sql = """
             SELECT jobId, analysisAssetId, podcastId, phase, coveragePolicy,
                    priority, progressCursor, retryCount, deferReason, status,
-                   scanCohortJSON, createdAt
+                   scanCohortJSON, createdAt, attemptTranscriptVersion
             FROM backfill_jobs WHERE jobId = ?
             """
         let stmt = try prepare(sql)
@@ -15943,21 +16022,41 @@ actor AnalysisStore {
     /// forever. The `IN (..., 'running')` clause restores symmetry; the
     /// row is left untouched (no field clobbering) because the UPDATE is
     /// a no-op when the row is already `.running`.
+    ///
+    /// playhead-wxsv: `failed` UNDER THE RETRY BUDGET is accepted too, and its
+    /// absence was a live production defect. `BackfillJobRunner`'s M-5 branch
+    /// re-drives a `failed` row whose `retryCount` is still under
+    /// ``AdmissionController/maxRetries`` — that is what a retry budget MEANS —
+    /// but this transition refused it, so the retry threw
+    /// `invalidStateTransition` and no attempt ever ran. Meanwhile
+    /// ``countResumableBackfillJobs(assetId:)`` counts exactly those rows as
+    /// resumable, so the asset read as "work is pending" while nothing on the
+    /// device could start it: a row nothing can START was BLOCKING. On the
+    /// 2026-08-07 pull all 5 `failed` rows sat at `retryCount = 1` against a
+    /// budget of 3, across 3 assets, every one of them a transient FM daemon
+    /// fault (`Request has been rate limited`, `FMInferenceTimeoutError`).
+    ///
+    /// The budget is enforced in the SQL rather than left to the caller,
+    /// because the caller's check and this guard disagreeing is how the defect
+    /// arose in the first place. A row at or over budget is still refused.
     func markBackfillJobRunning(jobId: String) throws {
         let sql = """
             UPDATE backfill_jobs
             SET status = 'running',
                 updatedAt = strftime('%s', 'now')
-            WHERE jobId = ? AND status IN ('queued', 'deferred', 'running')
+            WHERE jobId = ?
+              AND (status IN ('queued', 'deferred', 'running')
+                   OR (status = 'failed' AND retryCount < ?))
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, jobId)
+        bind(stmt, 2, AdmissionController.maxRetries)
         try step(stmt, expecting: SQLITE_DONE)
         if sqlite3_changes(db) == 0 {
             // With 'running' included in the IN clause above, a zero-change
-            // result means the row is either missing or in a terminal state
-            // (`complete`/`failed`). Probe for defensive disambiguation: if
+            // result means the row is either missing, `complete`, or `failed`
+            // at/over the retry budget. Probe for defensive disambiguation: if
             // the row somehow reports `.running` (e.g. a future schema
             // change widens the set) treat it as idempotent success;
             // anything else is a real invalid transition.
@@ -15971,6 +16070,105 @@ actor AnalysisStore {
                 toStatus: "running"
             )
         }
+    }
+
+    /// playhead-wxsv: record that an attempt on `jobId` has BEGUN, against
+    /// `transcriptVersion`.
+    ///
+    /// Called once per admitted job, immediately after
+    /// ``markBackfillJobRunning(jobId:)`` — never from the liveness heartbeats,
+    /// which touch `updatedAt` on a row whose attempt is already under way and
+    /// have nothing new to say about which transcript it is reading.
+    ///
+    /// **What the column means, and the reading that would make it the defect
+    /// again.** It names the version of the run that most recently STARTED on
+    /// this row. It does NOT name "the transcript currently on disk": the two
+    /// coincide only while a run is in flight, and the whole of this bead is
+    /// that `runJob` re-derives its inputs from the current transcript while
+    /// the row's own state was made against an older one. Written at attempt
+    /// START rather than at insert for the same reason — an inserted row has
+    /// done nothing, and a version stamped on it would read as work performed.
+    ///
+    /// Unconditional by design: it is a fact about the attempt, not a
+    /// transition, so it carries no status guard. The caller has already been
+    /// refused by `markBackfillJobRunning` if the row could not start.
+    func noteBackfillJobAttempt(jobId: String, transcriptVersion: String) throws {
+        let sql = """
+            UPDATE backfill_jobs
+            SET attemptTranscriptVersion = ?,
+                updatedAt = strftime('%s', 'now')
+            WHERE jobId = ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, transcriptVersion)
+        bind(stmt, 2, jobId)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// playhead-wxsv: re-open a row whose terminal state was reached against a
+    /// transcript that is no longer the current one. Returns `true` when the
+    /// row was re-opened.
+    ///
+    /// **This is the only path out of `complete`, and it is the whole prize of
+    /// the bead.** The row keeps its `progressCursor` and its `createdAt`; only
+    /// `status` and `retryCount` move. A longer transcript is more text over
+    /// the same audio, so the scan should CARRY ON: a row that completed at
+    /// 900 s because that was where the transcript ended resumes at 900 s when
+    /// the transcript reaches 1800 s, instead of re-reading the first 900 s
+    /// (what the pre-wxsv code did, by minting a whole new row) or orphaning
+    /// itself (what the abandoned `playhead-7x1s` branch did).
+    ///
+    /// Three properties, each load-bearing and each pinned by a test:
+    ///
+    /// - **It refuses when the version has NOT moved.** That is what keeps a
+    ///   `complete` row from being resurrected: at the current version the only
+    ///   honest answer is "already done", and `markBackfillJobRunning` refuses
+    ///   `complete` outright, so there is no other door.
+    /// - **`createdAt` is not touched.** ``countResumableBackfillJobs(assetId:)``
+    ///   scopes to a 0.5 s window below an unfiltered `MAX(createdAt)`, so a row
+    ///   whose timestamp moved forward would push its own siblings out of that
+    ///   window — and if the moved row is itself `complete` or `running` (both
+    ///   excluded from the count) the count reads ZERO and
+    ///   `AnalysisWorkScheduler.shouldMintAdScanRedrive` shuts the
+    ///   `playhead-onn6` re-drive gate on an asset that has real pending work.
+    ///   An `INSERT OR REPLACE` spelling of this method would do exactly that,
+    ///   and would drop the cursor as well.
+    /// - **`retryCount` is reset.** The budget counts attempts spent on a unit
+    ///   of work; a different transcript is different work. Before this bead
+    ///   the reset happened by accident — a new version minted a new id, so a
+    ///   retry-exhausted row was escaped rather than retried — and removing
+    ///   that accident without replacing it would have turned a transient FM
+    ///   daemon outage into permanent retirement for the episode. The reset is
+    ///   strictly narrower than what it replaces: the row keeps its cursor and
+    ///   its history instead of being abandoned for a blank one.
+    ///
+    /// `running` is excluded: a live carrier owns that row's state machine.
+    /// A row stranded in `running` by a process death is normalised back to
+    /// `queued` by ``resetStrandedBackfillJobs()`` and re-opens on the pass
+    /// after that.
+    ///
+    /// `deferReason` is deliberately PRESERVED, matching
+    /// ``markBackfillJobRunning(jobId:)``'s audit-trail rule: the reason the
+    /// row last stopped is still the most specific thing anyone reading a
+    /// device pull can learn about it.
+    @discardableResult
+    func reopenBackfillJob(jobId: String, forTranscriptVersion transcriptVersion: String) throws -> Bool {
+        let sql = """
+            UPDATE backfill_jobs
+            SET status = 'queued',
+                retryCount = 0,
+                updatedAt = strftime('%s', 'now')
+            WHERE jobId = ?
+              AND status <> 'running'
+              AND (attemptTranscriptVersion IS NULL OR attemptTranscriptVersion <> ?)
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, jobId)
+        bind(stmt, 2, transcriptVersion)
+        try step(stmt, expecting: SQLITE_DONE)
+        return sqlite3_changes(db) > 0
     }
 
     /// C-2: terminal success transition. Writes the final `progressCursor`
@@ -16091,17 +16289,22 @@ actor AnalysisStore {
     /// load-bearing.** The obvious predicate — "any row that is not `complete` and
     /// is under ``AdmissionController/maxRetries``" — reads like an exact mirror of
     /// the runner's M-5 resume branch, and is not one. The runner does not iterate
-    /// rows; it RE-DERIVES jobIds from
-    /// `(analysisAssetId, transcriptVersion, phase, offset)` and looks each one up
-    /// (`BackfillJobRunner.runPendingBackfill`). A row whose tuple the current
-    /// invocation does not regenerate is never fetched, never enqueued, and its
-    /// `retryCount` never moves — so it stays "resumable" forever while being
-    /// permanently invisible to the runner. Three real producers of such orphans:
-    /// `transcriptVersion` is a content hash and changes on any re-transcription;
-    /// `CoveragePlanner` flips between the one-phase `fullCoverage` plan and the
-    /// three-phase `targetedWithAudit` plan, and offsets are positional; and the
-    /// specialist phase is flag-gated. On the 2026-07-29 device pull, 4 of the 16
-    /// assets with non-complete rows had orphans of exactly this shape.
+    /// rows; it RE-DERIVES jobIds from `(analysisAssetId, phase, offset)` and
+    /// looks each one up (`BackfillJobRunner.runPendingBackfill`). A row whose
+    /// tuple the current invocation does not regenerate is never fetched, never
+    /// enqueued, and its `retryCount` never moves — so it stays "resumable"
+    /// forever while being permanently invisible to the runner.
+    ///
+    /// playhead-wxsv REMOVED THE LARGEST PRODUCER of such orphans: the tuple used
+    /// to carry `transcriptVersion`, a content hash that changes on every session
+    /// that extends a transcript, so a growing transcript orphaned the previous
+    /// row every time. On the 2026-08-07 pull that was one stale row per
+    /// transcript version, exactly. Two producers remain, and they are why this
+    /// scoping stays: `CoveragePlanner` flips between the one-phase
+    /// `fullCoverage` plan and the three-phase `targetedWithAudit` plan and
+    /// offsets are positional, and the specialist phase is flag-gated. On the
+    /// 2026-07-29 device pull, 4 of the 16 assets with non-complete rows had
+    /// orphans of exactly this shape.
     ///
     /// Counting only the newest batch fixes it without a schema change. Every row
     /// a single `runPendingBackfill` invocation inserts shares one `now` snapshot
@@ -17988,7 +18191,8 @@ actor AnalysisStore {
             deferReason: optionalText(stmt, 8),
             status: status,
             scanCohortJSON: optionalText(stmt, 10),
-            createdAt: sqlite3_column_double(stmt, 11)
+            createdAt: sqlite3_column_double(stmt, 11),
+            attemptTranscriptVersion: optionalText(stmt, 12)
         )
     }
 

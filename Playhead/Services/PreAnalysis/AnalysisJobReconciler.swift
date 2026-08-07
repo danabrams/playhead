@@ -1342,16 +1342,18 @@ actor AnalysisJobReconciler {
     /// under that sweep's existing budget
     /// (``AnalysisWorkScheduler/maxAdScanRedrives``).
     ///
-    /// **One claim per asset, EVER — not per transcript version.** The two
-    /// bounds are different and it matters which one this sweep has.
-    /// ``SemanticScanClaim/record(gate:analysisAssetId:podcastId:transcriptVersion:store:clock:logger:)``
-    /// is keyed per `(asset, transcriptVersion)`, but this sweep's candidate
-    /// query excludes an asset that owns a row of ANY kind, so once the first
-    /// claim lands the asset never returns here regardless of what its
-    /// transcript does afterwards. That is deliberate: a re-transcription is
-    /// not a new strand, and an asset whose transcript version moves is by
-    /// definition being worked on by a lane that will reach the gates — and
-    /// the gates record for themselves.
+    /// **One claim per asset, EVER — not per transcript version.** Two bounds
+    /// now agree on this where they used to differ.
+    /// ``SemanticScanClaim/record(gate:analysisAssetId:podcastId:store:clock:logger:)``
+    /// is keyed per ASSET since playhead-wxsv (it was per
+    /// `(asset, transcriptVersion)`, which is how a growing transcript minted a
+    /// second claim for work the first one already named), and this sweep's
+    /// candidate query independently excludes an asset that owns a row of ANY
+    /// kind. So once the first claim lands the asset never returns here
+    /// regardless of what its transcript does afterwards. That is deliberate: a
+    /// re-transcription is not a new strand, and an asset whose transcript
+    /// version moves is by definition being worked on by a lane that will reach
+    /// the gates — and the gates record for themselves.
     ///
     /// **Best-effort by contract**, exactly like ``mintAdScanRedrives``: `async`,
     /// not `async throws`, every store error logged and swallowed. A failure to
@@ -1501,7 +1503,7 @@ actor AnalysisJobReconciler {
                 episodeDurationSec: asset.episodeDurationSec.map { EpisodeSeconds($0) }
             ) else { continue }
             // Whether a scan is OWED is deliberately not re-asked here.
-            // ``SemanticScanClaim/record(gate:analysisAssetId:podcastId:transcriptVersion:store:clock:logger:)``
+            // ``SemanticScanClaim/record(gate:analysisAssetId:podcastId:store:clock:logger:)``
             // reads the same coverage summary and refuses with `.notOwed`, and a
             // copy of that floor in this file would be a second policy that
             // drifts — and, being behaviourally identical while it agreed, one
@@ -1511,8 +1513,8 @@ actor AnalysisJobReconciler {
             //
             // The cost of that choice, stated so nobody has to re-derive it:
             // a candidate that clears the transcript floor but turns out not to
-            // be owed a scan pays a whole-transcript read, a SHA-256 over it and
-            // two more store round-trips before `record` says `.notOwed`, and it
+            // be owed a scan pays a whole-transcript read and two more store
+            // round-trips before `record` says `.notOwed`, and it
             // pays them again on every `reconcile()` because no row is written
             // and it stays a candidate. That is affordable because the state is
             // near-unreachable in production rather than merely rare: reaching
@@ -1535,7 +1537,7 @@ actor AnalysisJobReconciler {
             // assets this sweep reaches is `nil` — not `""`.
             //
             // Handed on verbatim anyway, because the value is a pass-through and
-            // ``SemanticScanClaim/claimRow(analysisAssetId:podcastId:transcriptVersion:gate:createdAt:)``
+            // ``SemanticScanClaim/claimRow(analysisAssetId:podcastId:gate:createdAt:)``
             // is the ONE place that decides an empty id is an ABSENCE.
             // Normalizing here as well is the shape that let the SC09 mutant
             // survive in R2 — a duplicate policy that no test can kill while it
@@ -1550,7 +1552,6 @@ actor AnalysisJobReconciler {
                 gate: .noCoverageLaneRow,
                 analysisAssetId: assetId,
                 podcastId: podcastId,
-                transcriptVersion: SemanticScanClaim.transcriptVersion(forPersistedChunks: chunks),
                 store: store,
                 clock: { [clock] in clock().timeIntervalSince1970 },
                 logger: logger

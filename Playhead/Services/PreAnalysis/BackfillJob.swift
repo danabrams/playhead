@@ -110,6 +110,64 @@ struct BackfillJob: Sendable, Equatable {
     let status: BackfillJobStatus
     let scanCohortJSON: String?
     let createdAt: Double
+    /// playhead-wxsv: the transcript version of this row's most recent
+    /// ATTEMPT — the version the run that last called
+    /// ``AnalysisStore/noteBackfillJobAttempt(jobId:transcriptVersion:)``
+    /// was about to process. `nil` until an attempt has begun.
+    ///
+    /// **It is NOT "the version currently on disk", and the distinction is
+    /// the whole of this bead.** `jobId` used to be
+    /// `SHA256(assetId | transcriptVersion | phase | offset)`, so the row's
+    /// IDENTITY named a transcript while `runJob` re-derived every input from
+    /// whatever transcript was current. `transcriptVersion` is a content hash
+    /// and transcription runs across sessions, so every session that extended
+    /// a transcript minted a fresh id with `progressCursor = nil` and orphaned
+    /// the previous row. Measured on the 2026-08-07 pull: one stale row per
+    /// transcript version, exactly — and `CDD611C4` held four `queued` rows
+    /// with nil cursors and ZERO scan rows, four full-episode scans minted and
+    /// abandoned.
+    ///
+    /// So the version moved off the identity and onto the row, where it
+    /// records a FACT about a past attempt rather than a premise about the
+    /// present. Two readers, both in `BackfillJobRunner.runPendingBackfill`:
+    ///   - `status == .complete && attemptTranscriptVersion == current` is the
+    ///     idempotency skip. It is exact because nothing can start an attempt
+    ///     on a `complete` row, so the stamp belongs to the attempt that
+    ///     completed it.
+    ///   - a terminal row whose stamp is NOT the current version is re-opened
+    ///     by ``AnalysisStore/reopenBackfillJob(jobId:forTranscriptVersion:)``,
+    ///     which keeps the cursor and the `createdAt`.
+    let attemptTranscriptVersion: String?
+
+    init(
+        jobId: String,
+        analysisAssetId: String,
+        podcastId: String?,
+        phase: BackfillJobPhase,
+        coveragePolicy: CoveragePolicy,
+        priority: Int,
+        progressCursor: BackfillProgressCursor?,
+        retryCount: Int,
+        deferReason: String?,
+        status: BackfillJobStatus,
+        scanCohortJSON: String?,
+        createdAt: Double,
+        attemptTranscriptVersion: String? = nil
+    ) {
+        self.jobId = jobId
+        self.analysisAssetId = analysisAssetId
+        self.podcastId = podcastId
+        self.phase = phase
+        self.coveragePolicy = coveragePolicy
+        self.priority = priority
+        self.progressCursor = progressCursor
+        self.retryCount = retryCount
+        self.deferReason = deferReason
+        self.status = status
+        self.scanCohortJSON = scanCohortJSON
+        self.createdAt = createdAt
+        self.attemptTranscriptVersion = attemptTranscriptVersion
+    }
 
     func remainingUnitRange(totalUnits: Int) -> Range<Int> {
         let boundedTotal = max(0, totalUnits)
