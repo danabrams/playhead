@@ -2555,8 +2555,14 @@ struct CancelAimIdentityTests {
         // holds the job is parked in the gated `decode` and cannot leave the
         // registry. Both new tests in this file already spin this way; this one
         // did not, and that was the defect.
-        while await !(scheduler.hasCurrentRunningTaskForTesting()
-            && scheduler.inFlightJobIdsForTesting().contains("recovery-expiry-door")) {
+        // Two separate `await`s rather than one over `&&`: the operator takes
+        // its right operand as an autoclosure, which is a synchronous
+        // nonisolated context, so a single leading `await` does not cover it.
+        while true {
+            let runnerStarted = await scheduler.hasCurrentRunningTaskForTesting()
+            let isOurs = await scheduler.inFlightJobIdsForTesting()
+                .contains("recovery-expiry-door")
+            if runnerStarted && isOurs { break }
             spins += 1
             try #require(spins < 1000, "recovery's own drain never got the seeded job into decode")
             try await Task.sleep(for: .milliseconds(20))
