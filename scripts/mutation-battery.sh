@@ -2830,6 +2830,7 @@ T_LMRX_NORMALCOUNTERS="the work-deadline return MEASURES its completions too, an
 T_LMRX_RECOVERYDOOR="recovery's EXPIRY shuts the dispatch door too"
 T_LMRX_TEARDOWNGUARD="a teardown cancelled mid-settle leaves the ending to the expiration handler"
 T_LMRX_RECOVERYGUARD="recovery's teardown cancelled mid-settle leaves the ending to the expiration handler"
+T_LMRX_CHARGEDWIRING="the charger-class REGISTRATION hands its own identifier and budget to the shared handler"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -5856,6 +5857,19 @@ MUTATIONS=(
   "LX37|573|BGPS|$T_LMRX_RECOVERYGUARD"
   "LX38|573|BGPS|$T_LMRX_RECOVERYDOOR"
   "LX39|573|BGPS|$T_LMRX_COUNTERS"
+  #   * LX40 is the R7 finding, and the same caller-vs-callee shape one layer
+  #     out. `handleBackfillTask`'s two new parameters both DEFAULT to the plain
+  #     backfill values, so the charger-class registration's wiring can be
+  #     deleted and still compile — `await self.handleBackfillTask(
+  #     sendableTask.value)` is the pre-lmrx spelling. The mutant therefore
+  #     spends 132 plain-identifier grant observations on the class with none
+  #     (capping an overnight charger window at 219 s) and records every
+  #     charger-class run under the plain identifier again, which is precisely
+  #     the instrumentation defect that made "the pull has zero rows for this
+  #     class" true by construction. `chargedSiblingUsesItsOwnBudget` calls the
+  #     handler directly and cannot see it. Source canary, because
+  #     `registerBackgroundTasks()` goes through the real `BGTaskScheduler`.
+  "LX40|573|BGPS|$T_LMRX_CHARGEDWIRING"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -6244,6 +6258,7 @@ describe_mutation() {
     LX37) echo "lmrx: recovery's teardown guard becomes a log — the same fall-through, in the handler with no settle wait behind it" ;;
     LX38) echo "lmrx: recovery's expiry stops CANCELLING — LX35's complement, one line down" ;;
     LX39) echo "lmrx: the baseline IDENTITIES are never published, so every expired row loses jobsCompleted while jobsSeen stays green" ;;
+    LX40) echo "lmrx: the charger-class registration drops its identifier and budget, silently spending the plain class's measurement" ;;
     TS01) echo "5n8k: THE historical defect restored — install assigns a process-global and restores it in a defer" ;;
     TS02) echo "5n8k: the leak variant — the funnel caches the last binding in a process-global and never restores" ;;
     TS03) echo "5n8k: the funnel drops every diagnostic — the vacuity control on all four positive witnesses" ;;
@@ -13708,6 +13723,24 @@ EOF
 EOF
     snippet NEW <<'EOF'
             counters.noteBaseline(pending: baselinePending)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LX40 — the charger-class registration reverts to the pre-lmrx dispatch. It
+  # COMPILES, because both parameters carry the plain class's values as
+  # defaults, and that is exactly why it needs a rail.
+  LX40)
+    snippet OLD <<'EOF'
+            Task {
+                await self.handleBackfillTask(
+                    sendableTask.value,
+                    identifier: BackgroundTaskID.backfillProcessingCharged,
+                    budget: .backfillProcessingCharged
+                )
+            }
+EOF
+    snippet NEW <<'EOF'
+            Task { await self.handleBackfillTask(sendableTask.value) }
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 

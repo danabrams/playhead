@@ -310,6 +310,78 @@ struct BackfillSchedulerBoundingTests {
         }
     }
 
+    @Test("the charger-class REGISTRATION hands its own identifier and budget to the shared handler")
+    func chargedRegistrationThreadsItsIdentifierAndBudget() throws {
+        // playhead-lmrx (review round 7): THE WIRING, not the handler.
+        //
+        // `handleBackfillTask(_:identifier:budget:)` defaults BOTH new
+        // parameters to the PLAIN backfill values, which is right for the plain
+        // registration and is why the charger-class registration has to pass
+        // them explicitly. The consequence is that the wiring can be deleted
+        // and still compile — `await self.handleBackfillTask(sendableTask.value)`
+        // is the pre-lmrx spelling and reverts the charger class to the plain
+        // one silently, in both of the ways this bead's own review round argued
+        // at length must not happen:
+        //
+        //  * the charger class would spend the MEASURED 219 s work budget,
+        //    which was derived from 132 plain-identifier grants. That is the
+        //    wrong-population error `BackgroundGrantBudget` exists to stop, and
+        //    a live regression: the charger class exists because it is expected
+        //    to grant LONGER windows (playhead-i6oi), so a 219 s cap surrenders
+        //    the rest of an overnight grant;
+        //  * and every ledger and telemetry write for a charger-class window
+        //    would be recorded under the plain identifier again — the exact
+        //    instrumentation defect that made "the pull contains zero rows for
+        //    this identifier" true by construction rather than an observation.
+        //
+        // `chargedSiblingUsesItsOwnBudget` calls the handler DIRECTLY with the
+        // charged budget, so it proves the handler honours what it is handed
+        // and says nothing about whether anything hands it. Asked the
+        // diagnostic way: what would that test read if the registration passed
+        // nothing at all? Exactly what it reads now. This is the same
+        // caller-vs-callee gap rounds 5 and 6 closed at four other sites.
+        //
+        // A SOURCE canary because `registerBackgroundTasks()` goes through the
+        // real `BGTaskScheduler.shared.register`, which no test can drive.
+        //
+        // COUNTED, not `contains` (the round-6 lesson): `handleBackfillTask` is
+        // dispatched from exactly two registrations, and asserting the charged
+        // spelling appears somewhere would be satisfied by either of them.
+        let source = try SwiftSourceInspector.loadSource(repoRelativePath: Self.servicePath)
+        let anchor = "nonisolated func registerBackgroundTasks() {"
+        #expect(source.components(separatedBy: anchor).count == 2,
+                "the canary anchor '\(anchor)' must occur exactly once in \(Self.servicePath)")
+        let body = try #require(
+            SwiftSourceInspector.firstBody(in: source, after: anchor),
+            "registerBackgroundTasks() moved — update this canary"
+        )
+        try #require(!body.isEmpty, "registerBackgroundTasks() body did not parse")
+        let code = SwiftSourceInspector.strippingComments(body)
+
+        #expect(code.components(separatedBy: "handleBackfillTask(").count - 1 == 2,
+                """
+                registerBackgroundTasks() must dispatch handleBackfillTask from \
+                exactly two registrations — the plain identifier and the \
+                playhead-i6oi charger sibling. A third would need its own \
+                budget decision and its own line here.
+                """)
+        #expect(code.contains("identifier: BackgroundTaskID.backfillProcessingCharged"),
+                """
+                the charger-class registration must name its OWN identifier. \
+                The parameter defaults to the plain one, so omitting it records \
+                every charger-class window as a plain-class window — which is \
+                what made the ledger unable to say whether the class had ever \
+                run.
+                """)
+        #expect(code.contains("budget: .backfillProcessingCharged"),
+                """
+                and it must hand over its OWN budget. The parameter defaults to \
+                the measured plain-class budget, so omitting it spends 132 \
+                plain-identifier observations on a class with none — and caps \
+                an overnight charger grant at 219 s.
+                """)
+    }
+
     @Test("The production pending-requests bridge is bounded, not a bare continuation")
     func productionBridgeIsBounded() throws {
         let source = try SwiftSourceInspector.loadSource(repoRelativePath: Self.servicePath)
