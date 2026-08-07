@@ -2824,6 +2824,7 @@ T_LMRX_GRACESITE="the expiration wait spends the post-reclaim grace, not the tea
 T_LMRX_AIM="the cancel reaches every job it names"
 T_LMRX_PERJOBCAUSE="each cancelled job keeps its own cause, so neither spends an attempt"
 T_LMRX_HEARTBEAT="a job finishing does not cancel a sibling's lease heartbeat"
+T_LMRX_BUDGETWIRING="both BGTask handlers spend the BUDGET they were handed, not a local constant"
 T_LMRX_DOOR="dispatch is closed for a teardown, and re-opens by itself"
 T_LMRX_RECOVERYEXIT="recovery's work-deadline return does not strand the job it leaves running"
 
@@ -5754,6 +5755,29 @@ MUTATIONS=(
   # hazard of batching and is checked here rather than assumed.
   "LX30|569|SCHED|$T_LMRX_HEARTBEAT"
   "LX31|569|SCHED|$T_LMRX_DOOR"
+
+  # ---- playhead-lmrx review round 5: the door and the floor are WIRED ----
+  #
+  # Both rails mutate a handler's ARGUMENT, and both were invisible to every
+  # rail above because those all mutate the CALLEE. That is the shape of the
+  # gap: LX04 proves `drainEligible` honours a floor it is given and LX27/LX28
+  # prove the door works when it is shut, and neither can see a handler that
+  # stopped giving the floor or stopped shutting the door.
+  #
+  #   * LX32 deletes the work-deadline teardown's `closeDispatchForTeardown`.
+  #     The cancel survives, so the mutant still requeues the job it can see —
+  #     what it restores is the window in which `runLoop()`'s 5 s poll starts a
+  #     FRESH job after the cancel has gone past, absent from the settle
+  #     population and live at `setTaskCompleted`. Before this round the whole
+  #     suite stayed green with all three handler call sites deleted.
+  #   * LX33 hands `drainEligible` a literal `.zero` floor from the backfill
+  #     handler — the pre-lmrx bare `now < deadline`, reached without touching
+  #     `drainEligible` at all. Killed by a SOURCE canary rather than a
+  #     behavioural test because the handler also starts the long-lived
+  #     `runLoop()`, which dispatches on its own poll regardless of the floor,
+  #     so the floor's effect is not separately observable through the handler.
+  "LX32|570|BGPS|$T_LMRX_NORMALEXIT"
+  "LX33|571|BGPS|$T_LMRX_BUDGETWIRING"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -6135,6 +6159,8 @@ describe_mutation() {
     LX29) echo "lmrx: recovery's work-deadline return completes the task over a live job, as backfill's once did" ;;
     LX30) echo "lmrx: a job's exit cancels its SIBLING's runner and lease heartbeat, as the single slot did" ;;
     LX31) echo "lmrx: the teardown door moves below the T0 playback bypass, so a playback job starts into the suspension" ;;
+    LX32) echo "lmrx: the handler stops SHUTTING the door — the mechanism still works, nothing uses it" ;;
+    LX33) echo "lmrx: the handler hands the drain a zero floor, reverting the start gate without touching it" ;;
     TS01) echo "5n8k: THE historical defect restored — install assigns a process-global and restores it in a defer" ;;
     TS02) echo "5n8k: the leak variant — the funnel caches the last binding in a process-global and never restores" ;;
     TS03) echo "5n8k: the funnel drops every diagnostic — the vacuity control on all four positive witnesses" ;;
@@ -13464,6 +13490,43 @@ EOF
             return true
         }
         if isDispatchClosed() { return false }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LX32 — the work-deadline teardown stops shutting the door. The cancel and
+  # the settle both survive, so the job the handler can SEE is still requeued;
+  # what comes back is the window in which `runLoop()`'s poll starts a fresh
+  # one behind the cancel. Reads as removing a redundant belt (the cancel is
+  # right there), which is exactly why it needs a rail. The anchor is the
+  # 16-space work-deadline block: the three other call sites are nested one
+  # level deeper, so this span cannot match them.
+  LX32)
+    snippet OLD <<'EOF'
+                await scheduler.closeDispatchForTeardown(lasting: budget.teardownReserve)
+                cancelledJobIds = await scheduler.cancelCurrentJob(cause: .taskExpired)
+            }
+EOF
+    snippet NEW <<'EOF'
+                cancelledJobIds = await scheduler.cancelCurrentJob(cause: .taskExpired)
+            }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LX33 — the backfill handler hands the drain a literal floor of zero, which
+  # is the pre-lmrx `now < deadline` restored without touching `drainEligible`.
+  # Invisible to LX04, which mutates the guard inside the callee.
+  LX33)
+    snippet OLD <<'EOF'
+                await scheduler.drainEligible(
+                    deadline: workDeadline,
+                    minimumCheckpointBudget: budget.minimumCheckpointBudget
+                )
+EOF
+    snippet NEW <<'EOF'
+                await scheduler.drainEligible(
+                    deadline: workDeadline,
+                    minimumCheckpointBudget: .zero
+                )
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 

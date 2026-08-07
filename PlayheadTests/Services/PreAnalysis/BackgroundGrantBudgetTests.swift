@@ -1294,6 +1294,13 @@ struct BackfillExpiryDurabilityTests {
                 """)
         #expect(latest.jobsCompleted == 0,
                 "nothing completed in this window, and 0 is a finding — not NULL, not absent")
+        // playhead-lmrx (review round 5): the EXPIRY path's door wiring. Same
+        // argument as the work-deadline twin — the door's mechanism is pinned
+        // by `dispatchClosesForTeardownAndReopens`, its USE by nothing until
+        // here. The closure lasts the shipped 36 s reserve, so this read is
+        // well inside the test's own lifetime.
+        #expect(await scheduler.isDispatchClosedForTesting(),
+                "the expiration teardown must shut the dispatch door before it cancels")
     }
 
     @Test("an expired run's completion count is measured, not a literal zero",
@@ -1422,6 +1429,21 @@ struct BackfillExpiryDurabilityTests {
         #expect(after.lastErrorCode == AnalysisWorkScheduler.backgroundWindowExpiredErrorCode)
         #expect(after.attemptCount == 0,
                 "the grant ending is not the job's fault on this path either")
+        // playhead-lmrx (review round 5): THE DOOR'S WIRING, not just its
+        // mechanism. `dispatchClosesForTeardownAndReopens` drives
+        // `closeDispatchForTeardown` directly, so it proves the door WORKS and
+        // says nothing about whether any handler uses it — delete the three
+        // `await scheduler.closeDispatchForTeardown(...)` lines from the
+        // handlers and every other assertion in this file stays green, while
+        // `runLoop()`'s 5 s poll is free again to dispatch a job into
+        // `setTaskCompleted`. Asked the diagnostic way: what would this suite
+        // read if no handler ever shut the door? Exactly what it reads now.
+        #expect(await scheduler.isDispatchClosedForTesting(),
+                """
+                the work-deadline teardown must SHUT THE DOOR before it \
+                cancels, or the cancel is a one-shot edge against a loop that \
+                is still dispatching
+                """)
         _ = await dispatch.value
     }
 
@@ -1528,6 +1550,16 @@ struct BackfillExpiryDurabilityTests {
                 """)
         #expect(await scheduler.pendingCancelCauseForTesting() == nil,
                 "and it must not even ARM a cancel cause for the next job to inherit")
+        // playhead-lmrx (review round 5): and it must not shut the DOOR either.
+        // The close sits inside the same `deadlineElapsed` gate as the cancel,
+        // so this is the complement of the assertion in the twin above — and it
+        // is the half that would bite a listening user: the door is checked
+        // ABOVE the T0 playback bypass, so a close fired on an EARLY drain
+        // return refuses the playback-lane catch-up for the episode being
+        // played, for the whole teardown reserve, inside a grant that has not
+        // ended.
+        #expect(!(await scheduler.isDispatchClosedForTesting()),
+                "a drain that finished early has not spent the grant and must leave dispatch open")
 
         await scheduler.cancelCurrentJob(cause: .userCancelled)
         _ = await dispatch.value
@@ -2178,6 +2210,11 @@ struct CancelAimIdentityTests {
         #expect(after.lastErrorCode == AnalysisWorkScheduler.backgroundWindowExpiredErrorCode)
         #expect(after.attemptCount == 0,
                 "the grant ending is not the job's fault on this path either")
+        // playhead-lmrx (review round 5): recovery's door wiring, for the same
+        // reason as backfill's — three handler call sites, none of them
+        // observed by any test until this round.
+        #expect(await scheduler.isDispatchClosedForTesting(),
+                "recovery's work-deadline teardown must shut the dispatch door before it cancels")
         _ = await dispatch.value
     }
 }

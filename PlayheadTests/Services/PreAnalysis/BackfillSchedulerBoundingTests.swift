@@ -234,6 +234,65 @@ struct BackfillSchedulerBoundingTests {
                 """)
     }
 
+    @Test("both BGTask handlers spend the BUDGET they were handed, not a local constant")
+    func handlersThreadTheirBudgetIntoTheDrain() throws {
+        // playhead-lmrx (review round 5): THE ARGUMENT, not the callee.
+        //
+        // `DrainEligibleStartGateTests` calls `drainEligible(deadline:
+        // minimumCheckpointBudget:)` by hand with `.seconds(60)`, and rail LX04
+        // mutates the guard INSIDE `drainEligible`. Between them they prove the
+        // start gate works and that its callee honours it. Neither can see the
+        // handler's ARGUMENT: change both call sites to
+        // `minimumCheckpointBudget: .zero` and production reverts to the
+        // pre-lmrx bare `now < deadline` — a whole analysis job may begin with a
+        // millisecond of grant left — while every behavioural test stays green.
+        // Ask the diagnostic question of the suite: what would it read if the
+        // handlers passed a floor of zero? Exactly what it reads now.
+        //
+        // A SOURCE canary because the alternative is a new DEBUG seam recording
+        // an argument, and the floor's effect is not separately observable
+        // through the handler: the handler also starts the long-lived
+        // `runLoop()`, which dispatches on its own poll regardless of the floor.
+        //
+        // The recovery EXPIRY door is here for the same reason and no other —
+        // the other three `closeDispatchForTeardown` call sites are pinned
+        // behaviourally in `BackgroundGrantBudgetTests`, and that path has no
+        // test that drives recovery's `expirationHandler` with a live job.
+        let source = try SwiftSourceInspector.loadSource(repoRelativePath: Self.servicePath)
+        for anchor in ["func handleBackfillTask(", "func handlePreAnalysisRecovery("] {
+            #expect(source.components(separatedBy: anchor).count == 2,
+                    "the canary anchor '\(anchor)' must occur exactly once in \(Self.servicePath)")
+            let body = try #require(
+                SwiftSourceInspector.firstBody(in: source, after: anchor),
+                "\(anchor) drifted — update this canary"
+            )
+            try #require(!body.isEmpty, "\(anchor) body did not parse")
+            let code = SwiftSourceInspector.strippingComments(body)
+
+            #expect(code.contains("minimumCheckpointBudget: budget.minimumCheckpointBudget"),
+                    """
+                    \(anchor) must hand `drainEligible` the floor from the \
+                    budget it is spending. A literal (or the `.zero` default) \
+                    is the unmeasured constant `BackgroundGrantBudget` exists \
+                    to delete.
+                    """)
+            #expect(code.contains("closeDispatchForTeardown(lasting: budget.teardownReserve)"),
+                    """
+                    \(anchor) must shut the dispatch door out of its own \
+                    budget's teardown reserve before it cancels — otherwise \
+                    `runLoop()`'s poll can dispatch a fresh job after the \
+                    cancel has gone past, live at `setTaskCompleted`.
+                    """)
+            #expect(code.contains("workDeadline(from:"),
+                    """
+                    and it must derive its work deadline from the grant's \
+                    start rather than reading the clock at the call — \
+                    positive control that this canary is reading a handler \
+                    body and not an empty string.
+                    """)
+        }
+    }
+
     @Test("The production pending-requests bridge is bounded, not a bare continuation")
     func productionBridgeIsBounded() throws {
         let source = try SwiftSourceInspector.loadSource(repoRelativePath: Self.servicePath)
