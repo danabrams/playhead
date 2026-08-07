@@ -5921,6 +5921,18 @@ MUTATIONS=(
 
   # ---- playhead-wxsv: the coverage-lane job identity (WX) ----
   #
+  # RUN 2026-08-07: 11 KILLED / 0 SURVIVED / 0 ERROR, 6 builds, batches 575-580.
+  # Under `PLAYHEAD_MB_SKIP_BASELINE=1`, and the caveat matters: the
+  # FOCUSED_SUITES baseline was RED on 6 tests from ShadowRetryTests,
+  # BackgroundGrantBudgetTests and SkipOrchestratorRevertTests — the starvation
+  # families playhead-ehz2 is filed on, measured red on four separate commits
+  # by four agents. The bypass is honest here for two reasons, both checked
+  # before it was used: the four WX suites were run SCOPED and green first
+  # (184 tests / 13 suites and 119 / 8, both exit 0), and every WX expectation
+  # string begins "playhead-wxsv: ", which appears nowhere in the red set — so
+  # no WX verdict can be a red-baseline artefact. That disjointness check is
+  # the manual form of ehz2's fix direction (b).
+  #
   # WHAT IS BEING DEFENDED. `backfill_jobs.jobId` used to be
   # `SHA256(assetId | transcriptVersion | phase | offset)`, so a row's IDENTITY
   # named a transcript while `runJob` re-derived every input from whatever
