@@ -285,6 +285,7 @@
 		3426E54C6555D3353647373E /* MusicOffsetLexicalGate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 8801B280AAE6E2BA59DD4D7A /* MusicOffsetLexicalGate.swift */; };
 		34AB6F7F2EBC6F20E0F999FE /* FeedDiscoveryTestSupport.swift in Sources */ = {isa = PBXBuildFile; fileRef = 91F088D11BE1E1A6F3838517 /* FeedDiscoveryTestSupport.swift */; };
 		352CA80168DE9AE3A60A3A58 /* InstrumentationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7D08053BA32F9F2DCBB3AE58 /* InstrumentationTests.swift */; };
+		353F515063401E17A773ACC6 /* FMClockPair.swift in Sources */ = {isa = PBXBuildFile; fileRef = ED08EFF9B5C8AA291AB3D156 /* FMClockPair.swift */; };
 		35454E8DF2FFE14055F28C0C /* BackfillJobStoreTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EAC3C9C1978C5634AA850DA1 /* BackfillJobStoreTests.swift */; };
 		354714663A2D35112D4AD53B /* MusicBedClassifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = 5C96548F57B9AC14A52B040A /* MusicBedClassifier.swift */; };
 		354B0624BC482A886CE307CC /* BracketAwareBoundaryRefiner.swift in Sources */ = {isa = PBXBuildFile; fileRef = 976B329261A44BE1FC47A96D /* BracketAwareBoundaryRefiner.swift */; };
@@ -2573,6 +2574,7 @@
 		EC64CF958B92F0DB39273628 /* PermissiveAdClassifierTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PermissiveAdClassifierTests.swift; sourceTree = "<group>"; };
 		EC71BC8B8D4F0C527BB799F4 /* OperationalMetrics.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OperationalMetrics.swift; sourceTree = "<group>"; };
 		ECA829B3645ADCF4CFB7712F /* SharedSponsorLexicon.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SharedSponsorLexicon.swift; sourceTree = "<group>"; };
+		ED08EFF9B5C8AA291AB3D156 /* FMClockPair.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FMClockPair.swift; sourceTree = "<group>"; };
 		ED256712FC85D30A011EA6BF /* TranscriptEngineCoverageOrderingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TranscriptEngineCoverageOrderingTests.swift; sourceTree = "<group>"; };
 		ED4E2DA89CA712CC334C564F /* Phase4ShadowBenchmarkTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Phase4ShadowBenchmarkTests.swift; sourceTree = "<group>"; };
 		ED88574B2065F9F2E939744C /* SpanHypothesisConfigTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpanHypothesisConfigTests.swift; sourceTree = "<group>"; };
@@ -3594,6 +3596,7 @@
 				BC08DC8B4A22D0FC54D8159D /* FineBoundaryRefiner.swift */,
 				1ED0C092F615C536018D5062 /* FineFeatureBandCache.swift */,
 				4AEAC08A1DD2872D180B0ED3 /* FMBackfillMode.swift */,
+				ED08EFF9B5C8AA291AB3D156 /* FMClockPair.swift */,
 				FA6E567BA832EE3AC6C5453B /* FMDaemonRefusal.swift */,
 				6257C9B2D7BDB63432BAA037 /* FMDaemonThrottle.swift */,
 				6BB4E33B1F82EE0BA37712D6 /* FMInferenceDeadline.swift */,
@@ -5427,6 +5430,7 @@
 				5F03D466667DDD84AE302E47 /* EvidenceLedgerEntry.swift in Sources */,
 				9EBE7BA74B14C8CC6E03C716 /* ExecutionConditionClassifier.swift in Sources */,
 				CB0020FC1A5013E44F30FD48 /* FMBackfillMode.swift in Sources */,
+				353F515063401E17A773ACC6 /* FMClockPair.swift in Sources */,
 				1050605FEE7C34087DCCD561 /* FMDaemonRefusal.swift in Sources */,
 				E13A284352FC7575502BB575 /* FMDaemonThrottle.swift in Sources */,
 				8981BE48CB66F22E60391AC7 /* FMInferenceDeadline.swift in Sources */,
