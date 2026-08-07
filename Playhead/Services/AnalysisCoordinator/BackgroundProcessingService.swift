@@ -1542,6 +1542,18 @@ actor BackgroundProcessingService {
             // Harmless when the queue genuinely drained: nothing is in flight,
             // `cancelCurrentJob` returns an empty set, and the settle is a
             // no-op.
+            //
+            // `.taskExpired` IS THE HONEST CAUSE HERE, even though the OS has
+            // not reclaimed anything yet. What the cause names is "the
+            // background window this job was dispatched into has ended", and it
+            // has — this handler is about to tell iOS the task is complete, and
+            // iOS may suspend the process on that call. Any other cause would
+            // charge the job an attempt for the grant running out, which is the
+            // accounting playhead-lmrx exists to remove; and inventing an
+            // `InternalMissCause` case would re-cut the journal taxonomy,
+            // `CauseAttributionPolicy`'s precedence ladder and every
+            // SurfaceStatus fixture that reads them, for a distinction no
+            // consumer makes.
             var cancelledJobIds: Set<String> = []
             if let scheduler = self.analysisWorkScheduler {
                 cancelledJobIds = await scheduler.cancelCurrentJob(cause: .taskExpired)
@@ -2286,6 +2298,19 @@ actor BackgroundProcessingService {
                 // `.taskExpired` InternalMissCause so any live slice
                 // emits a WorkJournal row with `cause = task_expired`
                 // instead of a bare cancel.
+                //
+                // playhead-lmrx (review round): NO SETTLE WAIT HERE, AND THAT
+                // ASYMMETRY WITH `handleBackfillTask` IS DELIBERATE — it is a
+                // question of how often there is anything to wait for, not a
+                // difference of opinion about whether waiting is right.
+                // Backfill has a job in flight at expiry in 108 of its 203
+                // expired windows (one `acquired` event and nothing else).
+                // Recovery expired 5 times in 97 recorded runs, its drain
+                // averages 5.1 s, and its `finishRun` already lands BEFORE this
+                // cancel — so the wait would almost always be a no-op and would
+                // buy no durability the ordering does not already provide. If a
+                // future pull shows recovery holding work at expiry, the fix is
+                // `awaitJobsSettled(_:within:)`, exactly as backfill does it.
                 await self?.analysisWorkScheduler?.cancelCurrentJob(cause: .taskExpired)
                 await self?.markComplete(task, success: false)
             }

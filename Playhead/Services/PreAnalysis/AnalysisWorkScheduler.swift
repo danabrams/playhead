@@ -2594,6 +2594,17 @@ actor AnalysisWorkScheduler {
     /// population. See ``awaitJobsSettled(_:within:pollInterval:)`` for why a
     /// bare "is anything running" signal is the wrong question. Empty means
     /// nothing was in flight, which is a settled state, not an unknown one.
+    ///
+    /// It returns ``inFlightJobIds``, which is the set this cancel acted on
+    /// under the invariant `sweepExpiredLeasesIfDue()` documents and enforces:
+    /// at most one job is in flight at an instant, because the run loop is
+    /// demonstrably not inside `processJob` when it sweeps and `drainEligible`
+    /// awaits its passes serially. If a THIRD dispatch driver is ever added the
+    /// set can hold two while `currentRunningTask?.cancel()` still reaches only
+    /// one — and the wait would then spend reserve on a job nobody cancelled.
+    /// That direction is the safe one (a longer wait, never a lost requeue),
+    /// but it is a reason to revisit this alongside that sweep's own guard
+    /// rather than independently.
     @discardableResult
     func cancelCurrentJob(cause: InternalMissCause = .pipelineError) -> Set<String> {
         shouldCancelCurrentJob = true
@@ -2801,6 +2812,12 @@ actor AnalysisWorkScheduler {
     /// Returns the empty set on read failure rather than throwing, for the same
     /// reason the count does: the caller is spending an OS grant and a transient
     /// SQLite hiccup must not become a thrown error on the teardown path.
+    ///
+    /// The three reads are not one transaction, so a job that moves between
+    /// them can be missed — the same looseness the count it replaced always
+    /// had. It is a diagnostics denominator, not a lease decision, and it errs
+    /// by under-counting, which is the direction that cannot fabricate an
+    /// achievement.
     func pendingJobIdsForLedger() async -> Set<String> {
         let states = ["queued", "running", "paused"]
         var ids: Set<String> = []
@@ -2839,6 +2856,17 @@ actor AnalysisWorkScheduler {
     /// off the queue for good, without having failed" — and
     /// ``GrantCompletionPopulationTests`` pins both halves of that, the credited
     /// give-up as well as the excluded failure.
+    ///
+    /// **Cost, named because this runs on a teardown path with seconds to
+    /// spare.** `fetchJobsByState` hydrates every `complete` row and keeps only
+    /// the ids, and `complete` is the terminal that accumulates for the life of
+    /// the library. It is index-backed (`idx_jobs_state_priority`) and bounded
+    /// by the episode count rather than by anything unbounded, so it is
+    /// accepted here; the alternative — one `fetchJob(byId:)` per baseline id —
+    /// trades one read for N actor round-trips on the same path and is not
+    /// obviously better at these sizes. If the library grows to where it is,
+    /// the fix is a `WHERE state='complete' AND jobId IN (…)` projection, not a
+    /// loop.
     func completedJobIdsForLedger(among ids: Set<String>) async -> Set<String> {
         guard !ids.isEmpty else { return [] }
         guard let rows = try? await store.fetchJobsByState("complete") else { return [] }
