@@ -16143,6 +16143,19 @@ actor AnalysisStore {
     ///   strictly narrower than what it replaces: the row keeps its cursor and
     ///   its history instead of being abandoned for a blank one.
     ///
+    /// **A NULL `attemptTranscriptVersion` does NOT re-open, and the `IS NOT
+    /// NULL` clause is the whole of that.** NULL means no attempt was ever
+    /// recorded, which is an ABSENCE of evidence, not evidence the work is
+    /// stale — and re-opening on an absence is unbounded: every invocation
+    /// would re-open the row, run it, and (if some path ever writes a terminal
+    /// state without an attempt) re-open it again forever. So this asks for
+    /// POSITIVE evidence: a version was recorded, and it is not this one.
+    /// Production cannot produce a terminal row with a NULL stamp —
+    /// ``noteBackfillJobAttempt(jobId:transcriptVersion:)`` runs before any work
+    /// that could reach a terminal transition — and the pre-v44 rows that
+    /// could, being unstamped by construction, are deleted rather than
+    /// migrated.
+    ///
     /// `running` is excluded: a live carrier owns that row's state machine.
     /// A row stranded in `running` by a process death is normalised back to
     /// `queued` by ``resetStrandedBackfillJobs()`` and re-opens on the pass
@@ -16161,7 +16174,8 @@ actor AnalysisStore {
                 updatedAt = strftime('%s', 'now')
             WHERE jobId = ?
               AND status <> 'running'
-              AND (attemptTranscriptVersion IS NULL OR attemptTranscriptVersion <> ?)
+              AND attemptTranscriptVersion IS NOT NULL
+              AND attemptTranscriptVersion <> ?
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }

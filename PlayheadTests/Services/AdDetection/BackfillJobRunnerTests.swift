@@ -766,12 +766,25 @@ struct BackfillJobRunnerTests {
     /// Every cycle re-transcribes (a fresh `transcriptVersion`), which is the
     /// real producer of repeat coverage-lane batches — measured on the
     /// 2026-07-29 device pull, six assets carried 2–3 distinct transcript
-    /// versions each. So every cycle here mints a genuinely new job batch, runs
-    /// it, and records a real observation; none of them gains coverage.
+    /// versions each. So every cycle here re-drives the asset's coverage-lane
+    /// work under a new transcript and records a real observation; none of them
+    /// gains coverage.
     ///
     /// What a broken implementation would do: promote on some later cycle, let
     /// per-cycle job or scan-row counts grow super-linearly, or let the recall
     /// ring fill from runs that read nothing.
+    ///
+    /// **playhead-wxsv tightened the growth bound from linear to flat, and that
+    /// is the bead's prize measured.** Before it, each new version derived a new
+    /// jobId, so every cycle minted a fresh row with a nil cursor and re-read
+    /// the whole episode: 2 scan rows and a full FM pass per cycle, 30 of each.
+    /// Now the ONE row is re-opened with its cursor intact, `narrowedForResume`
+    /// drops everything at or below it, and cycles 2–30 find nothing left to
+    /// read — one cheap no-anchors sentinel row apiece and ZERO further FM
+    /// calls. The two assertions below are written as upper bounds against the
+    /// pre-wxsv numbers so a regression that clears the cursor on re-open (the
+    /// tempting `INSERT OR REPLACE` spelling of the same fix) lands here as
+    /// `first * cycle` rows and a 30-fold FM bill.
     @Test("playhead-hvk0: 30 no-progress runner cycles never promote and never run away")
     func noProgressRunnerCyclesStayBounded() async throws {
         let store = try await makeTestStore()
@@ -795,6 +808,7 @@ struct BackfillJobRunnerTests {
 
         let cycles = 30
         var scanRowsAfterFirst: Int?
+        var coarseCallsAfterFirst: Int?
         for cycle in 1...cycles {
             let state = try await store.fetchPodcastPlannerState(podcastId: podcastId)
             // Asserted on the phases, not the policy name: `fullCoverage` and
@@ -816,21 +830,28 @@ struct BackfillJobRunnerTests {
             #expect(after.stableRecallFlag == false, "cycle \(cycle) must not promote")
             #expect(after.recallSamples.isEmpty, "cycle \(cycle) must not enter the ring")
 
-            // Runaway check: FM work per cycle must stay CONSTANT. One batch per
-            // transcript version and no more — growth linear in re-transcriptions
-            // is pre-existing M-5 behaviour, and the gate adds nothing to it. A
-            // gate that re-drove, re-widened or re-planned would show up here as
-            // super-linear growth long before the 30th cycle.
+            // Runaway check: FM work per cycle must not GROW.
             let scans = try await store.fetchSemanticScanResults(analysisAssetId: assetId)
             if cycle == 1 {
-                // Guard the rail against going vacuous: `n == 0 * cycle` holds
+                // Guard the rail against going vacuous: an `n <= …` bound holds
                 // for every cycle if the fixture ever stops producing rows.
                 #expect(scans.count > 0, "cycle 1 wrote no scan rows — the rail would be vacuous")
                 scanRowsAfterFirst = scans.count
-            } else if let first = scanRowsAfterFirst {
+                coarseCallsAfterFirst = await runtime.coarseCallCount
+                #expect(coarseCallsAfterFirst ?? 0 > 0, "cycle 1 called no FM — the rail would be vacuous")
+            } else if let first = scanRowsAfterFirst, let firstCalls = coarseCallsAfterFirst {
+                let cap = first + (cycle - 1)
                 #expect(
-                    scans.count == first * cycle,
-                    "cycle \(cycle) wrote \(scans.count) scan rows, expected \(first * cycle)"
+                    scans.count <= cap,
+                    """
+                    cycle \(cycle) wrote \(scans.count) scan rows; a re-driven cycle may add at \
+                    most one sentinel, so the cap is \(cap). Pre-wxsv this was \(first * cycle) \
+                    — a cleared cursor re-reads the episode.
+                    """
+                )
+                #expect(
+                    await runtime.coarseCallCount == firstCalls,
+                    "cycle \(cycle) called FM again: a transcript that grew past nothing must read no audio"
                 )
             }
         }
@@ -1694,20 +1715,26 @@ struct BackfillJobRunnerTests {
         #expect(row.retryCount == AdmissionController.maxRetries)
     }
 
-    @Test("C3-1: invalidStateTransition on a pre-failed row is logged and skipped, not re-failed")
-    func preFailedRowTriggersInvalidStateTransition_runnerSkips() async throws {
-        // Setup: pre-insert a `.failed` row with the deterministic jobId the
-        // runner will synthesize, and retryCount=0 so the M-5 idempotency
-        // path re-enqueues it (retryCount < maxRetries). Once the drain
-        // calls `markBackfillJobRunning`, the C-2 guard rejects
-        // `.failed -> .running` and throws `invalidStateTransition`.
-        //
-        // The C3-1 catch arm recognises the typed store error, logs, and
-        // continues the drain. It must NOT route the error through the
-        // generic `catch` branch that calls `markBackfillJobFailed` — the
-        // row is already terminal and the secondary write is wasted work
-        // (and, pre-fix-1, would double-bump retryCount). This test pins
-        // the no-op: the row must stay at exactly the state we seeded.
+    /// playhead-wxsv SPEC 1, at the RUNNER level: a `failed` row under the
+    /// retry budget is RE-DRIVEN, and the retry actually reaches the
+    /// classifier.
+    ///
+    /// **This test asserted the opposite until playhead-wxsv.** It pinned the
+    /// C3-1 catch arm swallowing an `invalidStateTransition` on exactly this
+    /// row, and that swallow was the defect: the M-5 branch re-enqueued a
+    /// failed-under-budget row, `markBackfillJobRunning` refused it, the arm
+    /// logged and continued, and the retry budget bought nothing. The store
+    /// guard now accepts the row (see
+    /// `BackfillJobStoreTests.markBackfillJobRunning_restartsFailedRowUnderBudget`),
+    /// so the observable claim is the one that matters to the user: the asset
+    /// gets its scan.
+    ///
+    /// A broken implementation that would still pass the OLD test: the shipped
+    /// one. A broken implementation that would still pass THIS test: one that
+    /// also restarts a row at the budget — which
+    /// `exhaustedRetryBudgetIsNotReAdmitted` refuses.
+    @Test("playhead-wxsv: a failed row under the retry budget is re-driven and reaches FM")
+    func preFailedRowUnderBudgetIsRedriven() async throws {
         let store = try await makeTestStore()
         try await store.insertAsset(makeAsset())
 
@@ -1734,20 +1761,17 @@ struct BackfillJobRunnerTests {
         let fmRuntime = TestFMRuntime()
         let runner = makeRunner(store: store, runtime: fmRuntime.runtime)
 
-        // Must not throw: the C3-1 path handles the invalidStateTransition.
         let result = try await runner.runPendingBackfill(for: makeInputs())
 
-        // FM must not have been called — the transition failed before
-        // reaching the classifier.
-        #expect(await fmRuntime.coarseCallCount == 0, "FM must not run for a terminal row")
-        #expect(result.scanResultIds.isEmpty)
-        #expect(result.evidenceEventIds.isEmpty)
+        #expect(await fmRuntime.coarseCallCount > 0,
+                "the retry must reach the classifier — a budget nothing can spend is not a budget")
+        #expect(result.admittedJobIds.contains(failedJob.jobId))
 
         let row = try #require(await store.fetchBackfillJob(byId: failedJob.jobId))
-        #expect(row.status == .failed, "row must remain .failed")
-        #expect(row.retryCount == 0, "retryCount must not be bumped by the C3-1 skip path")
-        #expect(row.deferReason == "seeded failure",
-                "the seeded failure reason must be preserved, not overwritten by the invalidStateTransition cascade")
+        #expect(row.status != .failed,
+                "the row must have left .failed; it stayed there for the whole pre-wxsv life of the fleet")
+        #expect(row.attemptTranscriptVersion == makeInputs().transcriptVersion,
+                "the attempt must record the transcript it actually read")
     }
 
     @Test("H-1: thermal defer marks ALL planned jobs, not just the first")
@@ -1897,13 +1921,24 @@ struct BackfillJobRunnerTests {
         }
     }
 
-    // R4-Fix6: jobId did not include `inputs.transcriptVersion`. After a
-    // transcript regeneration the M-5 idempotency check found the prior
-    // `.complete` job under the same id and skipped FM entirely against
-    // the new transcript. Add transcriptVersion to the jobId tuple so a
-    // version bump produces a fresh row and re-invokes the classifier.
-    @Test("R4-Fix6: a transcriptVersion bump produces a new jobId and reprocesses the asset")
-    func transcriptVersionBumpReprocessesAsset() async throws {
+    /// R4-Fix6's requirement, under playhead-wxsv's mechanism: a version bump
+    /// must still REPROCESS — the completed row must not silently absorb the
+    /// new transcript by colliding with it.
+    ///
+    /// **What changed and why.** R4-Fix6 met that requirement by hashing the
+    /// version into the jobId, so a bump minted a whole new row. That is the
+    /// defect this bead removes: the old row was orphaned with its cursor, one
+    /// per transcription session, measured on the 2026-08-07 pull as one stale
+    /// row per version and four abandoned full-episode scans on `CDD611C4`. The
+    /// requirement is now met by re-opening the SAME row, so the assertion
+    /// moves from "a second row exists" to "the one row was re-opened and
+    /// re-driven, keeping what it had".
+    ///
+    /// A broken implementation that would still pass this: one that re-opens
+    /// unconditionally, including at an unchanged version. `rerunProducesNoDuplicateScanRows`
+    /// and `completedRowAtTheSameVersionIsNotResurrected` refuse that.
+    @Test("playhead-wxsv: a transcriptVersion bump re-opens the SAME row and re-drives it")
+    func transcriptVersionBumpReopensTheSameRow() async throws {
         let store = try await makeTestStore()
         try await store.insertAsset(makeAsset())
         let fmRuntime = TestFMRuntime(
@@ -1913,35 +1948,174 @@ struct BackfillJobRunnerTests {
             ]
         )
         let runner = makeRunner(store: store, runtime: fmRuntime.runtime)
+        let jobId = BackfillJobRunner.makeJobId(
+            analysisAssetId: "asset-runner",
+            phase: .fullEpisodeScan,
+            offset: 0
+        )
 
-        // First run: v1 transcript. Expect FM invoked, job marked complete.
         _ = try await runner.runPendingBackfill(
             for: makeInputs(transcriptVersion: "tx-runner-v1")
         )
-        let coarseAfterV1 = await fmRuntime.coarseCallCount
-        #expect(coarseAfterV1 >= 1, "v1 must invoke the classifier")
+        let afterV1 = try #require(await store.fetchBackfillJob(byId: jobId))
+        #expect(afterV1.status == .complete)
+        #expect(afterV1.attemptTranscriptVersion == "tx-runner-v1",
+                "the row must record the version its attempt actually read")
+        #expect(await fmRuntime.coarseCallCount >= 1, "v1 must invoke the classifier")
 
-        // Second run: v2 transcript. Without R4-Fix6 the M-5 idempotency
-        // probe finds the prior v1 .complete row at the same jobId and
-        // skips FM entirely. With the fix, the v2 jobId is distinct, so a
-        // new row is inserted and FM runs again.
-        _ = try await runner.runPendingBackfill(
+        let result = try await runner.runPendingBackfill(
             for: makeInputs(transcriptVersion: "tx-runner-v2")
         )
-        let coarseAfterV2 = await fmRuntime.coarseCallCount
-        #expect(coarseAfterV2 > coarseAfterV1,
-                "v2 must invoke the classifier again; v1=\(coarseAfterV1) v2=\(coarseAfterV2)")
 
-        // The store must contain a job whose id encodes "tx-runner-v2".
-        let v2Job = try await store.fetchBackfillJob(
-            byId: BackfillJobRunner.makeJobId(
-                analysisAssetId: "asset-runner",
-                phase: .fullEpisodeScan,
-                offset: 0
-            )
+        // Re-driven, not skipped: the row was admitted again under v2.
+        #expect(result.admittedJobIds.contains(jobId),
+                "a version bump must not be absorbed by the completed row")
+        let afterV2 = try #require(await store.fetchBackfillJob(byId: jobId))
+        #expect(afterV2.attemptTranscriptVersion == "tx-runner-v2",
+                "the second attempt must re-stamp the row")
+        #expect(afterV2.createdAt == afterV1.createdAt,
+                "re-opening must not move createdAt — see spec item 3")
+
+        // And exactly ONE row exists for this asset+phase, where the pre-wxsv
+        // runner would have left two: the live one and an orphan.
+        #expect(try await store.countResumableBackfillJobs(assetId: "asset-runner") <= 1)
+    }
+
+    /// **playhead-wxsv, THE PRIZE, end to end: a growing transcript CONTINUES
+    /// the scan.**
+    ///
+    /// Session 1 transcribes 0–90 s and the coverage lane scans it. Session 2
+    /// transcribes on to 180 s, which is a new `transcriptVersion` because the
+    /// version is a content hash. What must happen is that the SAME row resumes
+    /// and reads only 90–180 s.
+    ///
+    /// Neither prior implementation could express that. Main derives a new
+    /// jobId from the new version, so it inserts a second row with a nil cursor
+    /// and re-reads 0–180 — and the first row is orphaned forever, because no
+    /// invocation will ever re-derive its id again. The abandoned
+    /// `playhead-7x1s` branch orphaned it too and adopted it later. Measured on
+    /// the 2026-08-07 pull, that is one stale row per transcript version,
+    /// exactly, and `CDD611C4` with four abandoned full-episode scans and zero
+    /// results between them.
+    ///
+    /// The assertion is about the ATOMS the classifier was handed, not about a
+    /// row count, because a row count cannot tell "resumed" from "restarted and
+    /// deduplicated". A broken implementation that would still pass a
+    /// one-row-only check: any of them that clears the cursor on re-open.
+    @Test("playhead-wxsv: a transcript that grows resumes the scan instead of restarting it")
+    func growingTranscriptContinuesTheScan() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        let fmRuntime = TestFMRuntime(
+            coarseResponses: (0..<20).map { _ in
+                CoarseScreeningSchema(disposition: .noAds, support: nil)
+            }
         )
-        #expect(v2Job != nil, "expected a v2-tagged backfill job row")
-        #expect(v2Job?.status == .complete)
+        let runner = makeRunner(store: store, runtime: fmRuntime.runtime)
+        let jobId = BackfillJobRunner.makeJobId(
+            analysisAssetId: "asset-runner",
+            phase: .fullEpisodeScan,
+            offset: 0
+        )
+
+        // Session 1: the transcript reaches 90 s.
+        _ = try await runner.runPendingBackfill(for: makeInputs(transcriptVersion: "tx-grow-90"))
+        let afterFirst = try #require(await store.fetchBackfillJob(byId: jobId))
+        let firstCursor = try #require(afterFirst.progressCursor?.lastProcessedUpperBoundSec)
+        #expect(firstCursor.rawValue > 0, "session 1 must leave a cursor, or the rail is vacuous")
+        let windowsAfterFirst = try await store
+            .fetchSemanticScanResults(analysisAssetId: "asset-runner")
+            .map { ($0.windowStartTime, $0.windowEndTime) }
+        #expect(!windowsAfterFirst.isEmpty)
+
+        // Session 2: the SAME audio, transcribed further — one longer version.
+        let grownSegments = makeFMSegments(
+            analysisAssetId: "asset-runner",
+            transcriptVersion: "tx-grow-180",
+            lines: [
+                (0, 30, "Welcome to the show. Today we're discussing podcasts."),
+                (30, 60, "Use code SHOW for 20 percent off at example dot com."),
+                (60, 90, "Now back to the interview with our guest."),
+                (90, 120, "Our guest explains how the field changed after 2015."),
+                (120, 150, "This segment is supported by ExampleCo, visit example dot com."),
+                (150, 180, "And that wraps the second half of the conversation.")
+            ]
+        )
+        let grown = BackfillJobRunner.AssetInputs(
+            analysisAssetId: "asset-runner",
+            podcastId: "podcast-runner",
+            segments: grownSegments,
+            evidenceCatalog: EvidenceCatalogBuilder.build(
+                atoms: grownSegments.flatMap(\.atoms),
+                analysisAssetId: "asset-runner",
+                transcriptVersion: "tx-grow-180"
+            ),
+            transcriptVersion: "tx-grow-180",
+            plannerContext: makeInputs().plannerContext
+        )
+        let result = try await runner.runPendingBackfill(for: grown)
+
+        // ONE row, re-driven — not a second row, and not an orphan.
+        #expect(result.admittedJobIds == [jobId])
+        #expect(try await store.countResumableBackfillJobs(assetId: "asset-runner") <= 1)
+        let afterSecond = try #require(await store.fetchBackfillJob(byId: jobId))
+        #expect(afterSecond.createdAt == afterFirst.createdAt)
+        #expect(afterSecond.attemptTranscriptVersion == "tx-grow-180")
+
+        // And it read only the NEW span. Every window the second session added
+        // starts at or beyond where the first one stopped.
+        let allWindows = try await store
+            .fetchSemanticScanResults(analysisAssetId: "asset-runner")
+            .map { ($0.windowStartTime, $0.windowEndTime) }
+        let added = allWindows.filter { window in
+            !windowsAfterFirst.contains { $0 == window.0 && $1 == window.1 }
+        }
+        #expect(!added.isEmpty, "the grown transcript must produce new scan windows")
+        for window in added {
+            #expect(window.1 > firstCursor.rawValue,
+                    "window \(window) ends at or below the cursor — the scan restarted instead of resuming")
+        }
+        #expect(try #require(afterSecond.progressCursor?.lastProcessedUpperBoundSec).rawValue
+                > firstCursor.rawValue,
+                "the cursor must advance across the growth, not reset")
+    }
+
+    /// playhead-wxsv SPEC 2: a completed row is not resurrected at the version
+    /// it completed against.
+    ///
+    /// The store-level guard is `reopenBackfillJob` refusing an unchanged
+    /// version; this is the runner-level consequence, and it is the half that
+    /// keeps "re-open on a version change" from degenerating into "re-open
+    /// every launch". A broken implementation that would still pass
+    /// `transcriptVersionBumpReopensTheSameRow`: one that re-opens
+    /// unconditionally.
+    @Test("playhead-wxsv: a completed row at the SAME version is not resurrected")
+    func completedRowAtTheSameVersionIsNotResurrected() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        let fmRuntime = TestFMRuntime(
+            coarseResponses: [
+                CoarseScreeningSchema(disposition: .noAds, support: nil),
+                CoarseScreeningSchema(disposition: .noAds, support: nil)
+            ]
+        )
+        let runner = makeRunner(store: store, runtime: fmRuntime.runtime)
+        let jobId = BackfillJobRunner.makeJobId(
+            analysisAssetId: "asset-runner",
+            phase: .fullEpisodeScan,
+            offset: 0
+        )
+
+        _ = try await runner.runPendingBackfill(for: makeInputs(transcriptVersion: "tx-same"))
+        let callsAfterFirst = await fmRuntime.coarseCallCount
+        #expect(callsAfterFirst >= 1)
+
+        let result = try await runner.runPendingBackfill(for: makeInputs(transcriptVersion: "tx-same"))
+
+        #expect(result.admittedJobIds.isEmpty, "the same version has nothing new to process")
+        #expect(await fmRuntime.coarseCallCount == callsAfterFirst, "FM must not be called again")
+        let row = try #require(await store.fetchBackfillJob(byId: jobId))
+        #expect(row.status == .complete, "the row must still be complete, not re-queued")
     }
 
     @Test("H-3: re-run with deterministic inputs produces no duplicate scan rows")

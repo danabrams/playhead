@@ -333,13 +333,14 @@ struct SemanticScanClaimPredicateTests {
             )
         }
         let expected = try #require(planned.first)
-        #expect(SemanticScanClaim.jobId(analysisAssetId: "asset-1")
-                == expected)
-        // …and it is genuinely keyed on both halves.
-        #expect(SemanticScanClaim.jobId(analysisAssetId: "asset-1")
-                != expected)
-        #expect(SemanticScanClaim.jobId(analysisAssetId: "asset-2")
-                != expected)
+        #expect(SemanticScanClaim.jobId(analysisAssetId: "asset-1") == expected)
+        // …and it is genuinely keyed on the asset. playhead-wxsv: this used to
+        // check BOTH halves, because the id was keyed on
+        // `(asset, transcriptVersion)`. The version is now a column rather than
+        // part of the identity, so the asset is the only half left and it is
+        // the only one that can be asserted. A claim that varied with the
+        // transcript is precisely what this bead removed.
+        #expect(SemanticScanClaim.jobId(analysisAssetId: "asset-2") != expected)
     }
 
     /// **The version must be the CANONICALIZED one.** `runBackfill` atomizes

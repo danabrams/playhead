@@ -131,7 +131,8 @@ func makeBackfillJob(
     deferReason: String? = nil,
     status: BackfillJobStatus = .queued,
     scanCohortJSON: String? = nil,
-    createdAt: Double = Date().timeIntervalSince1970
+    createdAt: Double = Date().timeIntervalSince1970,
+    attemptTranscriptVersion: String? = nil
 ) -> BackfillJob {
     BackfillJob(
         jobId: jobId,
@@ -145,6 +146,7 @@ func makeBackfillJob(
         deferReason: deferReason,
         status: status,
         scanCohortJSON: scanCohortJSON,
-        createdAt: createdAt
+        createdAt: createdAt,
+        attemptTranscriptVersion: attemptTranscriptVersion
     )
 }
