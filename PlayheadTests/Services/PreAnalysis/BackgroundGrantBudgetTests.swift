@@ -1381,10 +1381,41 @@ struct BackfillExpiryDurabilityTests {
         // fail. The difference is only which ending is reached — this one takes
         // `deadlineAlreadyPast`, the state a real window is in at t+219 s, and
         // returns normally with `Task.isCancelled` still false.
+        //
+        // THE BASELINE ROWS CARRY A FUTURE `nextEligibleAt`, and that is load
+        // insurance rather than decoration. The handler starts and wakes the
+        // long-lived `runLoop()`, which selects a queued row, finds no cached
+        // audio and writes `state = 'blocked'` — and with this budget
+        // `drainEligible` breaks immediately, so unlike the expiry twin that
+        // blocking is NOT done and finished before the window's own gate. It
+        // raced the `complete` write and overwrote it, and the counter read 0:
+        // observed on the first mutation-battery baseline of this round, green
+        // in a scoped run, red under the full focused set. A future
+        // `nextEligibleAt` keeps the rows out of `fetchNextEligibleJob`
+        // entirely (they are still `queued`, so they are still the baseline
+        // population `pendingJobIdsForLedger` reads) so the only writer of
+        // these two rows is the test.
         let store = try await makeTestStore()
         let scheduler = makeScheduler(store: store)
-        try await insertQueuedJob(store, id: "pending-a")
-        try await insertQueuedJob(store, id: "pending-b")
+        let ineligibleUntil = Date().timeIntervalSince1970 + 3600
+        for id in ["pending-a", "pending-b"] {
+            try await store.insertJob(makeAnalysisJob(
+                jobId: id,
+                jobType: "preAnalysis",
+                episodeId: "ep-\(id)",
+                analysisAssetId: nil,
+                workKey: AnalysisJob.computeWorkKey(
+                    fingerprint: "fp-\(id)",
+                    analysisVersion: PreAnalysisConfig.analysisVersion,
+                    jobType: "preAnalysis"
+                ),
+                sourceFingerprint: "fp-\(id)",
+                priority: 10,
+                desiredCoverageSec: 90,
+                state: "queued",
+                nextEligibleAt: ineligibleUntil
+            ))
+        }
 
         let ledger = AnalysisStoreBackgroundTaskRunLedger(store: store)
         let coordinator = StubAnalysisCoordinator()
