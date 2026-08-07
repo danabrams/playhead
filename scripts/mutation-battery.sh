@@ -5849,10 +5849,14 @@ MUTATIONS=(
   #     lines are adjacent and look like one act; they are two, and only one was
   #     railed.
   #
-  # ONE BATCH, and the independence was checked rather than assumed: LX36 drives
-  # only `handleBackfillTask`, LX37 and LX38 only `handlePreAnalysisRecovery`
-  # (different call sites, different expectations), and LX39 only the ledger
-  # counters. No member can redden another's expected test.
+  # ONE BATCH, and the independence was checked rather than assumed — for ALL
+  # FIVE, including LX40, which an earlier draft of this note appended to the
+  # batch without amending the count (adversarial pass; the note covered 4 of
+  # 5). LX36 drives only `handleBackfillTask`; LX37 and LX38 only
+  # `handlePreAnalysisRecovery`, at different call sites with different
+  # expectations; LX39 only the ledger counters; and LX40 edits
+  # `registerBackgroundTasks()`, whose body no other member touches and whose
+  # canary reads only that body. No member can redden another's expected test.
   "LX36|573|BGPS|$T_LMRX_TEARDOWNGUARD"
   "LX37|573|BGPS|$T_LMRX_RECOVERYGUARD"
   "LX38|573|BGPS|$T_LMRX_RECOVERYDOOR"

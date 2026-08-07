@@ -1499,8 +1499,18 @@ struct BackfillExpiryDurabilityTests {
         //    to `markComplete` — so the assertion below is taken after the work
         //    task has finished deciding, not after a duration.
         //
-        // No sleeps, no polling for the negative, nothing that a loaded box can
-        // reorder.
+        // WHAT PINS THE CANCEL'S PLACEMENT, stated precisely because an earlier
+        // draft of this comment claimed more than it had (adversarial pass).
+        // `ledger.finishes` fires INSIDE `finishRun`, so `simulateExpiration()`
+        // below is not ordered against the work task's next few statements. It
+        // does not need to be: the job is held by `unwind`, so `inFlightJobIds`
+        // never becomes disjoint and `awaitJobsSettled` CANNOT return `true`.
+        // The work task is therefore parked until it is cancelled, whichever
+        // side of the settle the cancel arrives on — and it reaches the guard
+        // with `Task.isCancelled` true either way. The only thing the 30 s
+        // reserve buys is a ceiling on that wait; it is not what orders the
+        // test. (The wait exists at all because `cancelCurrentJob` returned a
+        // non-empty set, which the spin loop above guarantees.)
         let store = try await makeTestStore()
         let downloads = StubDownloadProvider()
         downloads.cachedURLs["ep-mid-settle"] = URL(fileURLWithPath: "/tmp/ep-mid-settle.m4a")
@@ -1589,8 +1599,14 @@ struct BackfillExpiryDurabilityTests {
         await task.awaitCompletion()
         #expect(task.completedSuccess == false,
                 "the expiration handler owns the ending, and records it as one")
-        #expect(ledger.recordedOutcomes.contains(.expired),
-                "and the durable row for this window is the expired one")
+        // NOT `recordedOutcomes.contains(.expired)` — that is implied by
+        // `reachedPark.wait(for: 1)` above, since `GatedRunLedger` records the
+        // outcome before incrementing the park counter, so it could not fail
+        // (adversarial pass). What is NOT implied is the ORDER: the work task's
+        // own terminal write lands first and the expiry's second, which is what
+        // makes the expiry the row that survives.
+        #expect(ledger.recordedOutcomes.last == .expired,
+                "the expiry must be the LAST terminal write, so it is the outcome that stands")
         _ = await dispatch.value
     }
 
@@ -2449,8 +2465,14 @@ struct CancelAimIdentityTests {
         await task.awaitCompletion()
         #expect(task.completedSuccess == false,
                 "the expiration handler owns the ending, and records it as one")
-        #expect(ledger.recordedOutcomes.contains(.expired),
-                "and the durable row for this window is the expired one")
+        // NOT `recordedOutcomes.contains(.expired)` — that is implied by
+        // `reachedPark.wait(for: 1)` above, since `GatedRunLedger` records the
+        // outcome before incrementing the park counter, so it could not fail
+        // (adversarial pass). What is NOT implied is the ORDER: the work task's
+        // own terminal write lands first and the expiry's second, which is what
+        // makes the expiry the row that survives.
+        #expect(ledger.recordedOutcomes.last == .expired,
+                "the expiry must be the LAST terminal write, so it is the outcome that stands")
         _ = await dispatch.value
     }
 
@@ -2514,9 +2536,29 @@ struct CancelAimIdentityTests {
         await bps.handlePreAnalysisRecovery(task)
         let workTask = await bps.workTaskForTesting(task)
         var spins = 0
-        while await !scheduler.inFlightJobIdsForTesting().contains("recovery-expiry-door") {
+        // playhead-lmrx (review round 7, adversarial pass): SPIN TO THE RUNNER,
+        // NOT TO REGISTRY MEMBERSHIP — the two are not the same instant, and
+        // the gap is exactly where this test's cancel assertions would go red
+        // against CORRECT code.
+        //
+        // `runningJobs[job.jobId]` is created at the top of `processJob`, but
+        // `runTask` is not assigned until after `cachedCanonicalFingerprintStatus`
+        // and `resolveAnalysisAssetId` — two DB suspension points later. A
+        // cancel landing in that window marks `cancelRequested` with no runner
+        // to cancel, `processJob` then fails its cancel-race guard and RETURNS,
+        // and the `defer` removes the entry. Both assertions at the bottom
+        // would then read an empty set on unmutated code. The `UnwindGate` does
+        // not cover this: it only bites inside `decode`, which is downstream of
+        // the `runTask` assignment.
+        //
+        // `hasCurrentRunningTaskForTesting()` is `runTask != nil`, so once it
+        // holds the job is parked in the gated `decode` and cannot leave the
+        // registry. Both new tests in this file already spin this way; this one
+        // did not, and that was the defect.
+        while await !(scheduler.hasCurrentRunningTaskForTesting()
+            && scheduler.inFlightJobIdsForTesting().contains("recovery-expiry-door")) {
             spins += 1
-            try #require(spins < 1000, "recovery's own drain never dispatched the seeded job")
+            try #require(spins < 1000, "recovery's own drain never got the seeded job into decode")
             try await Task.sleep(for: .milliseconds(20))
         }
 
