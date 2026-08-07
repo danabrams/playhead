@@ -433,11 +433,17 @@ struct AnalysisWorkSchedulerJournalEmissionTests {
         // playhead-lmrx moved which ARM serves it — `.taskExpired` now takes
         // `cancelCatch.taskExpiredRequeue` (state 'queued', a FLAT requeue
         // floor, and no attempt spent) rather than `cancelCatch.requeue` (state
-        // 'queued' with exponential backoff and an attempt spent). What this
-        // test pins is unchanged and is what it was written for: the cause on
-        // the emitted `.preempted` row is the cancel's own, never the helper's
-        // `.pipelineError` default. The attempt accounting is covered next
-        // door, in `ExpiredWindowAttemptAccountingTests`.
+        // 'queued' with exponential backoff and an attempt spent).
+        //
+        // WHAT IT STILL PINS, stated exactly, because the round-2 review caught
+        // the comment claiming more: that the new arm emits a `.preempted` row
+        // — not `.failed`, which orphan recovery reads as unrecoverable —
+        // tagged `task_expired`. It can no longer pin cause THREADING: the new
+        // arm passes the literal `.taskExpired`, so threading and hardcoding
+        // are indistinguishable here. Threading is
+        // `cancelCatch.revertQueued`'s property and is pinned next door by
+        // `cancelMidDecodeEmitsPreemptedWithUserCancelled`. The attempt
+        // accounting is in `ExpiredWindowAttemptAccountingTests`.
         let store = try await makeTestStore()
         let downloads = StubDownloadProvider()
         downloads.cachedURLs["ep-task-expired"] = URL(fileURLWithPath: "/tmp/ep-task-expired.mp3")
@@ -513,6 +519,11 @@ struct AnalysisWorkSchedulerJournalEmissionTests {
         // regression that hardcoded `.pipelineError` there would have reddened
         // nothing. `.userCancelled` is the other production cause that reaches
         // it (the explicit-cancel entry point), and it still does.
+        //
+        // ONE HONEST LIMIT: a mutant that hardcoded `.userCancelled` at that
+        // emission site would survive this test alone. What excludes it is the
+        // PAIR — `runnerFailureUnderMaxAttemptsEmitsPreempted` drives the same
+        // helper with `.pipelineError` — so no single literal satisfies both.
         let store = try await makeTestStore()
         let downloads = StubDownloadProvider()
         downloads.cachedURLs["ep-user-cancelled"] = URL(fileURLWithPath: "/tmp/ep-user-cancelled.mp3")

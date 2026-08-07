@@ -399,7 +399,18 @@ struct GrantCompletionPopulationTests {
         try await insertJob(store, id: "gave-up")
 
         let baseline = await scheduler.pendingJobIdsForLedger()
-        try await store.updateJobState(jobId: "gave-up", state: "complete")
+        // Stamped with the arm's OWN constant, not a hand-written string, so
+        // this reads the writer rather than a copy of it: if
+        // `coverageInsufficient.noProgress` ever stops terminating `complete`,
+        // that constant moves and this test moves with it.
+        try await store.updateJobState(
+            jobId: "gave-up",
+            state: "complete",
+            lastErrorCode: AnalysisWorkScheduler.noProgressTerminalErrorCode
+        )
+        let stamped = try #require(try await store.fetchJob(byId: "gave-up"))
+        #expect(stamped.lastErrorCode == AnalysisWorkScheduler.noProgressTerminalErrorCode,
+                "precondition: the row carries the give-up arm's own terminal code")
 
         #expect(await scheduler.completedJobIdsForLedger(among: baseline) == ["gave-up"],
                 """
@@ -762,11 +773,12 @@ struct ExpiredWindowAttemptAccountingTests {
         let scheduler = makeScheduler(store: store, downloads: downloads)
 
         // Nothing running: the cancel names nothing, and an empty population is
-        // settled by definition rather than a thing to wait for.
-        let idleStart = ContinuousClock.now
+        // settled by definition rather than a thing to wait for. No elapsed
+        // assertion here — the `guard !jobIds.isEmpty` returns without reading a
+        // clock, so one could not fail. The non-vacuous version of that question
+        // lives on the `unrelated` block below, where the method genuinely has
+        // to look at something before it can return.
         #expect(await scheduler.awaitJobsSettled([], within: .seconds(5)))
-        #expect(idleStart.duration(to: ContinuousClock.now) < .seconds(2),
-                "an empty population must settle at once, not wait out the budget")
 
         // A job parked in `decode` is NOT settled, and the wait must say so by
         // timing out rather than returning true.
@@ -798,11 +810,14 @@ struct ExpiredWindowAttemptAccountingTests {
         // (which polls every 5 s for the whole grant). With that signal this
         // assertion is false and the handler burns its entire reserve waiting
         // for a requeue that already committed.
+        let unrelatedStart = ContinuousClock.now
         let unrelated = await scheduler.awaitJobsSettled(
             ["a-job-nobody-cancelled"],
-            within: .milliseconds(300),
+            within: .seconds(5),
             pollInterval: .milliseconds(20)
         )
+        #expect(unrelatedStart.duration(to: ContinuousClock.now) < .seconds(2),
+                "and it must return AT ONCE. A 5 s budget with a job in flight is the shape the unscoped signal burned the whole reserve on.")
         #expect(unrelated,
                 """
                 The wait must be over the population the cancel named. A job \
@@ -1365,9 +1380,12 @@ struct BackfillExpiryDurabilityTests {
         // by a gate the ledger write itself opens — so "still unwinding when
         // the row was written" is a fact this test controls, not a duration it
         // races. An earlier draft used a fixed 2 s hold and went red under the
-        // mutation battery's own suite load, which is exactly the kind of
-        // timing assertion this repo gates behind `PerfGate`; this one has no
-        // timing assertion left to gate.
+        // mutation battery's own suite load. What is left is not zero timing:
+        // the 30 s deadlock timer armed just before `simulateExpiration()` is a
+        // budget for the teardown PREFIX — a cancel, a telemetry emit, a
+        // MainActor hop and two SQLite statements. It is 15x the window that
+        // failed, and on the correct ordering the gate is opened by the ledger
+        // write itself, so the timer is never reached at all.
         let store = try await makeTestStore()
         let downloads = StubDownloadProvider()
         downloads.cachedURLs["ep-slow-unwind"] = URL(fileURLWithPath: "/tmp/ep-slow-unwind.m4a")
@@ -1392,7 +1410,11 @@ struct BackfillExpiryDurabilityTests {
             downloads: downloads
         )
         let ledger = OrderProbeRunLedger {
-            let stillUnwinding = await scheduler.hasCurrentRunningTaskForTesting()
+            // `inFlightJobIds`, not `currentRunningTask` — the probe must
+            // measure the same population `awaitJobsSettled` waits on, or it is
+            // asserting about a quantity production does not use.
+            let stillUnwinding = await scheduler.inFlightJobIdsForTesting()
+                .contains("slow-unwind")
             // The write has landed; let the cancelled job finish unwinding so
             // the settle below has something to observe.
             gate.open()

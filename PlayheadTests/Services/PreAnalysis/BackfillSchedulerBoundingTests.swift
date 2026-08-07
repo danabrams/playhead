@@ -195,11 +195,15 @@ struct BackfillSchedulerBoundingTests {
         // suite the bead's own rounds ran, so nobody saw it for two commits.
         // Anchoring on what cannot drift is the fix; broadening the gate's
         // suite list is the other half.
+        // `firstBody` takes the first `{` after the FIRST occurrence, so a
+        // second occurrence (a doc comment quoting the declaration) would aim
+        // this canary at the wrong site while every assertion below still ran.
+        // Pin the count so that failure is named rather than inferred.
+        let anchor = "func handleBackfillTask("
+        #expect(source.components(separatedBy: anchor).count == 2,
+                "the canary anchor '\(anchor)' must occur exactly once in \(Self.servicePath)")
         let body = try #require(
-            SwiftSourceInspector.firstBody(
-                in: source,
-                after: "func handleBackfillTask("
-            ),
+            SwiftSourceInspector.firstBody(in: source, after: anchor),
             "handleBackfillTask's declaration drifted — update this canary"
         )
         // `firstBody` returns "" (not nil) on an unbalanced brace, which

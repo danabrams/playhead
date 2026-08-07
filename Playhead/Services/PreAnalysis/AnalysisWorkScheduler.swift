@@ -2595,16 +2595,21 @@ actor AnalysisWorkScheduler {
     /// bare "is anything running" signal is the wrong question. Empty means
     /// nothing was in flight, which is a settled state, not an unknown one.
     ///
-    /// It returns ``inFlightJobIds``, which is the set this cancel acted on
-    /// under the invariant `sweepExpiredLeasesIfDue()` documents and enforces:
-    /// at most one job is in flight at an instant, because the run loop is
-    /// demonstrably not inside `processJob` when it sweeps and `drainEligible`
-    /// awaits its passes serially. If a THIRD dispatch driver is ever added the
-    /// set can hold two while `currentRunningTask?.cancel()` still reaches only
-    /// one — and the wait would then spend reserve on a job nobody cancelled.
-    /// That direction is the safe one (a longer wait, never a lost requeue),
-    /// but it is a reason to revisit this alongside that sweep's own guard
-    /// rather than independently.
+    /// It returns ``inFlightJobIds``, which is a SUPERSET of what the cancel
+    /// reached, and that is deliberate. `currentRunningTask?.cancel()` reaches
+    /// one task; `runLoop()` and `drainEligible` can both be inside
+    /// `processJob` at the same instant (that interleaving is what
+    /// `inFlightJobIds` exists for, and why `sweepExpiredLeasesIfDue()`
+    /// DECLINES on `count > 1` rather than asserting), so the set can name a
+    /// second job this cancel did not touch.
+    ///
+    /// Returning the superset errs toward waiting too long, never toward
+    /// walking away from a requeue in flight — and "too long" is bounded by the
+    /// caller's remaining teardown reserve, which is a budget it was already
+    /// going to spend. The alternative, naming the cancelled job exactly, needs
+    /// an owner id recorded with `currentRunningTask` and would MISS the window
+    /// where a cancel lands before that task is assigned. Neither is free; this
+    /// one cannot lose a resume point.
     @discardableResult
     func cancelCurrentJob(cause: InternalMissCause = .pipelineError) -> Set<String> {
         shouldCancelCurrentJob = true
@@ -2708,6 +2713,15 @@ actor AnalysisWorkScheduler {
 
     func hasCurrentRunningTaskForTesting() -> Bool {
         currentRunningTask != nil
+    }
+
+    /// playhead-lmrx: the population ``awaitJobsSettled(_:within:pollInterval:)``
+    /// actually waits on. Distinct from ``hasCurrentRunningTaskForTesting()``
+    /// on purpose — `currentRunningTask` is assigned partway through
+    /// `processJob` while membership here spans the whole body, so a test that
+    /// probes the wrong one is measuring a different quantity from production.
+    func inFlightJobIdsForTesting() -> Set<String> {
+        inFlightJobIds
     }
 
     /// skeptical-review-cycle-5 #48 test-only entry point. The
@@ -4216,6 +4230,33 @@ actor AnalysisWorkScheduler {
             return
         }
 
+        // playhead-lmrx (review round): the CAUSE is reset here, alongside the
+        // flag it accompanies — but ONLY when nothing else is in flight.
+        //
+        // `cancelCurrentJob` sets both unconditionally, even when nothing is
+        // running, which is the common case at a background expiry now that
+        // `drainEligible` stops at the work deadline well before the OS
+        // reclaims. `shouldCancelCurrentJob` was already cleared below (a
+        // cancel aimed at a job that had finished must not strike the next
+        // one); the cause was not, so it survived into the next dispatched job
+        // — possibly a foreground one, launches later.
+        //
+        // That was cosmetic before this bead: a mislabelled journal cause. It
+        // is not cosmetic now. `.taskExpired` selects the arm that spends NO
+        // attempt, so a stale one would exempt an unrelated job from the retry
+        // ladder — silently disarming the poisoned-job escape valve for a job
+        // the OS never interrupted, the exact converse of the fix.
+        //
+        // THE GUARD IS THE POINT, and a bare clear here was wrong. `runLoop()`
+        // and `drainEligible` can both be inside `processJob` (see
+        // `inFlightJobIds`), so a sibling dispatch arriving here would clear a
+        // cause the ALREADY-CANCELLED job has not read yet — it reads it after
+        // resuming from `runTask.value` — sending a genuine expiry down the
+        // attempt-spending arm. Clearing only when nothing is in flight cannot
+        // race a consumer, because there is none.
+        if inFlightJobIds.isEmpty {
+            pendingCancelCause = nil
+        }
         currentJobId = job.jobId
         // playhead-mk6z (review round): additive, unlike `currentJobId`. See
         // the property's own comment for the interleaving that makes the
@@ -4223,21 +4264,6 @@ actor AnalysisWorkScheduler {
         inFlightJobIds.insert(job.jobId)
         currentEpisodeId = job.episodeId
         shouldCancelCurrentJob = false
-        // playhead-lmrx (review round): the CAUSE is reset here too, alongside
-        // the flag it accompanies. `cancelCurrentJob` sets both unconditionally
-        // — even when nothing is running, which is the COMMON case at a
-        // background expiry now that `drainEligible` stops at the work deadline
-        // well before the OS reclaims. `shouldCancelCurrentJob` was already
-        // cleared here (a cancel aimed at a job that had finished must not
-        // strike the next one); the cause was not, so it survived into the next
-        // dispatched job — possibly a foreground one, launches later.
-        //
-        // That was cosmetic before this bead: a mislabelled journal cause. It is
-        // not cosmetic now. `.taskExpired` selects the arm that spends NO
-        // attempt, so a stale one would exempt an unrelated job from the retry
-        // ladder — silently disarming the poisoned-job escape valve for a job
-        // the OS never interrupted, which is the exact converse of the fix.
-        pendingCancelCause = nil
         lostOwnership = false
 
         // End queue-wait signpost interval.

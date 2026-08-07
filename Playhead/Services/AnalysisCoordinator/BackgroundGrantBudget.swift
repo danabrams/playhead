@@ -225,6 +225,22 @@ struct BackgroundGrantBudget: Sendable, Equatable {
     ///   a percentile: a handler that cannot reach its terminal write produces
     ///   precisely the unreadable `expired` row this bead exists to fix, so the
     ///   reserve is sized to the worst teardown actually seen.
+    ///
+    ///   **WHAT THOSE 30 ROWS ACTUALLY MEASURE, said plainly because the number
+    ///   is load-bearing twice over (lmrx review round).** They are
+    ///   `finishedAt - startedAt` for the WHOLE handler — entry,
+    ///   `scheduleBackfillIfNeeded`'s out-of-process pending query,
+    ///   `updateBatteryState`, the capabilities snapshot, the pending-count
+    ///   read, `finishRun`, `setTaskCompleted`. Ask the diagnostic question: if
+    ///   teardown itself cost nothing, 36.0 s would read the same. So it is an
+    ///   UPPER BOUND on a superset, not a measurement of teardown — the
+    ///   conservative direction for subtracting from the grant, and a BORROWED
+    ///   bound where the handlers spend it as a settle timeout. That population
+    ///   contains zero observations of a settle wait BY CONSTRUCTION: no work
+    ///   was admitted, so nothing was ever in flight to unwind.
+    ///   `teardownObservations: 30` names those 30 rows and claims nothing
+    ///   more. A terminal-segment measurement would settle it, and this bead's
+    ///   own counters are what make one possible.
     /// - `minimumCheckpointBudget` = **60 s**. Denominator: the 142 `latencyMs`
     ///   values in `semantic_scan_results`, one per FM coarse window — the
     ///   smallest artifact playhead-26od makes durable. p50 6.0 s, p75 20.3 s,
