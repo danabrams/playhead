@@ -1988,12 +1988,35 @@ struct CancelAimIdentityTests {
 
         #expect(await scheduler.inFlightJobIdsForTesting() == ["beat-b"],
                 "the surviving job must still be in flight — a sibling leaving is not its business")
-        #expect(await scheduler.hasCurrentRunningTaskForTesting(),
+        // playhead-lmrx (review round 4): THE ASSERTION THAT ACTUALLY SEES THE
+        // DEFECT, and the reason the two below cannot.
+        //
+        // `hasCurrentRunningTaskForTesting()` is `runTask != nil`. Ask the
+        // diagnostic question of it: what would it read if beat-a's `defer` HAD
+        // killed beat-b's runner? `Task.cancel()` does not clear the handle, so
+        // it reads exactly the same `true`. It names "a runner handle exists"
+        // and was being read as "the runner is alive" — the standing defect
+        // class, in the observable rather than in the code.
+        //
+        // The store read below is no better on its own: beat-b reverts to
+        // `queued` only after its cancel arm has run several actor hops and two
+        // SQLite writes, so against the single-slot defect this test's outcome
+        // was a coin flip on whether that finished inside the 20 ms poll gap —
+        // a rail on a coin flip is worse than no rail.
+        //
+        // Cancellation is observable the instant it is requested, and the pair
+        // of assertions is total: either beat-b is still in the registry, in
+        // which case its cancelled runner is visible here, or it has already
+        // unwound, in which case the in-flight assertion above has fired.
+        #expect(await scheduler.cancelledRunTaskJobIdsForTesting().isEmpty,
                 """
-                beat-b's runner must still be alive. The single slot meant \
-                beat-a's `defer` cancelled whatever the slot then held, which is \
-                beat-b — a job finishing NORMALLY killing an unrelated one.
+                beat-b's runner must not have been CANCELLED. The single slot \
+                meant beat-a's `defer` cancelled whatever the slot then held, \
+                which is beat-b — a job finishing NORMALLY killing an unrelated \
+                one.
                 """)
+        #expect(await scheduler.hasCurrentRunningTaskForTesting(),
+                "and beat-b's runner handle must still be there at all")
         let survivor = try #require(try await store.fetchJob(byId: "beat-b"))
         #expect(survivor.state == "running" && survivor.leaseOwner != nil,
                 "and it must still own its lease")
@@ -2027,6 +2050,30 @@ struct CancelAimIdentityTests {
         #expect(await scheduler.isDispatchClosedForTesting())
         #expect(await scheduler.processNextDispatchableJobForTesting() == false,
                 "no job may START while a handler is tearing its grant down")
+        // playhead-lmrx (review round 4): the door's PLACEMENT, not just its
+        // existence. It sits above `canAdmit`'s T0 playback bypass, and nothing
+        // pinned that — every dispatch this test drives is `preAnalysis`, so a
+        // later reader moving the check below the bypass (it is, after all, in a
+        // method named for lane capacity) keeps this test green while restoring
+        // the stranding for the one job class where it is worst: a T0 job left
+        // at `running` with a live lease when the process suspends. "The
+        // process may be suspended within seconds" is not a lane cap, and it is
+        // as true of a playback job as of any other.
+        let playbackJob = makeAnalysisJob(
+            jobId: "closed-door-playback",
+            jobType: "playback",
+            episodeId: "ep-closed-door-playback",
+            analysisAssetId: "asset-closed-door-playback",
+            workKey: "fp-closed-door-playback:1:playback",
+            sourceFingerprint: "fp-closed-door-playback",
+            priority: 21,
+            desiredCoverageSec: 90,
+            state: "queued",
+            attemptCount: 0,
+            createdAt: Date().timeIntervalSince1970
+        )
+        #expect(await scheduler.canAdmit(job: playbackJob) == false,
+                "the T0 playback bypass skips the LANE CAP, not the teardown door")
         let untouched = try #require(try await store.fetchJob(byId: "closed-door"))
         #expect(untouched.state == "queued", "and the refused job must be left exactly where it was")
 

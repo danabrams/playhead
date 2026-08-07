@@ -1475,8 +1475,12 @@ actor AnalysisWorkScheduler {
             default: 0
         ] &+= 1
         clearPendingDownloadState(episodeId: episodeId)
+        // playhead-lmrx (review round 4): `shouldCancelCurrentJob = true` used to
+        // stand here as well, and it was the aim defect pointing the other way.
+        // See ``episodeDeleted(episodeId:)`` for the argument; it applies
+        // verbatim. `lostOwnership` stays, un-narrowed, because it is a
+        // different quantity with a different fix — see playhead-mk6z.
         if currentEpisodeId == episodeId {
-            shouldCancelCurrentJob = true
             lostOwnership = true
         }
         // playhead-lmrx (review round 3): reach the jobs for THIS episode, not
@@ -2660,9 +2664,34 @@ actor AnalysisWorkScheduler {
 
     /// Mark jobs for a deleted episode as superseded.
     func episodeDeleted(episodeId: String) async {
-        if currentEpisodeId == episodeId {
-            shouldCancelCurrentJob = true
-        }
+        // playhead-lmrx (review round 4): AN EPISODE-SCOPED CANCEL MUST NOT SET
+        // A GLOBAL FLAG, and the round-3 fix left one standing here.
+        //
+        // `shouldCancelCurrentJob = true` used to guard this call under
+        // `currentEpisodeId == episodeId`. It bought nothing and cost a sibling.
+        //
+        //  * It bought nothing. `currentEpisodeId` is assigned immediately after
+        //    the registry insert and nil'd in the same `defer` that removes the
+        //    entry, so `currentEpisodeId == episodeId` implies that job is in
+        //    `runningJobs` — and the `cancelRunningJobs` call below already
+        //    reaches every registry entry for the episode, by identity.
+        //  * It cost a sibling. `nowCap` is 2 and both dispatch drivers can be
+        //    inside `processJob`, so the OTHER in-flight job may still be
+        //    upstream of its cancel-race check — that check reads the global
+        //    with an `||`. A job on an episode nobody deleted would then take
+        //    the cancel-race arm: reverted to `queued`, lease released, and a
+        //    `preempted` journal row emitted for a preemption that never
+        //    happened. Ask the diagnostic question of the flag: what would it
+        //    read if the cancel had been aimed at this job? The same `true`.
+        //
+        // NOT PINNED BY A MUTATION RAIL, and said out loud rather than left to
+        // be discovered. The deletion is redundant BY CONSTRUCTION — the two
+        // bullets above are a proof, not a measurement — but the claim it
+        // removes ("a sibling is not preempted") cannot be pinned from outside
+        // this actor: the flag's only clearer is `processJob`'s own cancel-race
+        // arm and `defer`, so any external observation of it races the unwind of
+        // the very job whose episode was deleted. Filed as playhead-3n0k.
+        //
         // playhead-lmrx (review round 3): as in `retireDownloadAnalysis` — the
         // cancel is aimed at the deleted episode's jobs by identity.
         cancelRunningJobs(where: { $0.episodeId == episodeId })

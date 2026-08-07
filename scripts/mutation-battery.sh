@@ -5730,6 +5730,30 @@ MUTATIONS=(
   "LX27|566|SCHED|$T_LMRX_DOOR"
   "LX28|567|SCHED|$T_LMRX_DOOR"
   "LX29|568|BGPS|$T_LMRX_RECOVERYEXIT"
+
+  # ---- playhead-lmrx review round 4: the two round-3 claims with no rail ----
+  #
+  #   * LX30 is $T_LMRX_HEARTBEAT, DEFINED IN ROUND 3 AND NEVER USED. The
+  #     sibling-heartbeat fix — the third consequence of the single slot — had a
+  #     test and no mutation, which is the shape this repo keeps being burned
+  #     by. It restores "the `defer` cancels whatever the slot then held", which
+  #     after a sibling dispatch is the SIBLING: a job finishing NORMALLY kills
+  #     an unrelated live job and stops its lease being renewed.
+  #   * LX31 moves the teardown door BELOW `canAdmit`'s T0 playback bypass
+  #     rather than removing it. LX27 (door gone) and LX28 (door never re-opens)
+  #     between them cannot see this: the door still exists, still expires, and
+  #     every dispatch LX27/LX28 drive is `preAnalysis`. It is the likelier
+  #     regression of the three, because `canAdmit` is a method named for lane
+  #     capacity and moving a non-cap check below the cap bypass reads as tidying
+  #     up. What it restores is the stranding for the one job class where it is
+  #     worst — a T0 job left at `running` with a live lease at suspension.
+  #
+  # One batch on purpose, and the independence is the reason: LX30 touches only
+  # `processJob`'s `defer`, LX31 only the order of two lines in `canAdmit`, and
+  # neither can redden the other's expectation. Cross-credit is the standing
+  # hazard of batching and is checked here rather than assumed.
+  "LX30|569|SCHED|$T_LMRX_HEARTBEAT"
+  "LX31|569|SCHED|$T_LMRX_DOOR"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -6109,6 +6133,8 @@ describe_mutation() {
     LX27) echo "lmrx: the teardown door goes, and the run loop dispatches a fresh job into setTaskCompleted" ;;
     LX28) echo "lmrx: the teardown door never re-opens, leaving a foregrounded app with a dead scheduler" ;;
     LX29) echo "lmrx: recovery's work-deadline return completes the task over a live job, as backfill's once did" ;;
+    LX30) echo "lmrx: a job's exit cancels its SIBLING's runner and lease heartbeat, as the single slot did" ;;
+    LX31) echo "lmrx: the teardown door moves below the T0 playback bypass, so a playback job starts into the suspension" ;;
     TS01) echo "5n8k: THE historical defect restored — install assigns a process-global and restores it in a defer" ;;
     TS02) echo "5n8k: the leak variant — the funnel caches the last binding in a process-global and never restores" ;;
     TS03) echo "5n8k: the funnel drops every diagnostic — the vacuity control on all four positive witnesses" ;;
@@ -13398,6 +13424,46 @@ EOF
                     await scheduler.closeDispatchForTeardown(lasting: budget.teardownReserve)
                     cancelledJobIds = await scheduler.cancelCurrentJob(cause: .taskExpired)
                 }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LX30 — the `defer` goes back to cancelling "whatever the slot holds", which
+  # after a sibling dispatch is the sibling. The job's own removal still happens,
+  # so `inFlightJobIds` stays honest and only the sibling's LIVENESS changes —
+  # which is exactly why the round-3 test had to be strengthened before this rail
+  # could mean anything: `runTask != nil` is still true of a cancelled task.
+  LX30)
+    snippet OLD <<'EOF'
+            let finished = runningJobs.removeValue(forKey: job.jobId)
+            finished?.leaseRenewalTask?.cancel()
+            finished?.runTask?.cancel()
+EOF
+    snippet NEW <<'EOF'
+            _ = runningJobs.removeValue(forKey: job.jobId)
+            for other in runningJobs.values {
+                other.leaseRenewalTask?.cancel()
+                other.runTask?.cancel()
+            }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LX31 — the door survives, and moves one bypass down. Every `preAnalysis`
+  # dispatch is still refused, so LX27's and LX28's assertions are untouched; a
+  # T0 playback job starts into a process that may be suspended within seconds.
+  LX31)
+    snippet OLD <<'EOF'
+        if isDispatchClosed() { return false }
+        let lane = job.schedulerLane
+        if lane == .now && job.jobType == "playback" {
+            return true
+        }
+EOF
+    snippet NEW <<'EOF'
+        let lane = job.schedulerLane
+        if lane == .now && job.jobType == "playback" {
+            return true
+        }
+        if isDispatchClosed() { return false }
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
