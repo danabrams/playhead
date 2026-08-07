@@ -36,12 +36,14 @@ struct BackgroundGrantBudgetArithmeticTests {
     private func budget(
         grant: Duration = .seconds(255),
         reserve: Duration = .seconds(36),
-        floor: Duration = .seconds(60)
+        floor: Duration = .seconds(60),
+        grace: Duration = .seconds(3)
     ) -> BackgroundGrantBudget {
         BackgroundGrantBudget(
             designGrant: grant,
             teardownReserve: reserve,
             minimumCheckpointBudget: floor,
+            expirationSettleGrace: grace,
             provenance: .measured(
                 grantObservations: 132,
                 teardownObservations: 30,
@@ -111,6 +113,58 @@ struct BackgroundGrantBudgetArithmeticTests {
         #expect(subject.remainingTeardownReserve(since: start, now: start + .seconds(90))
             == .zero,
                 "an overrun clamps at zero rather than going negative")
+    }
+
+    @Test("the post-reclaim wait is bounded by the OS grace, not by the teardown reserve")
+    func expirationSettleBudgetIsBoundedByTheGrace() {
+        // playhead-lmrx review round 2. `teardownReserve` is wall clock carved
+        // OUT of `designGrant`. Once the OS has fired `expirationHandler` there
+        // is no grant left for it to be carved from, so spending it there asks
+        // the diagnostic question backwards: what would
+        // `remainingTeardownReserve` read if the window had already run to its
+        // full 295 s limit before being reclaimed? The same 36 s it reads for a
+        // window reclaimed at t+5 s. A bound that survives the thing it bounds
+        // not existing is not a bound — and the consequence is concrete, since
+        // iOS terminates an app that does not complete its task promptly after
+        // expiration and penalises its future scheduling.
+        let subject = budget(reserve: .seconds(36), grace: .seconds(3))
+        let start = ContinuousClock.now
+        #expect(subject.expirationSettleBudget(since: start, now: start) == .seconds(3),
+                "the grace is the ceiling even with the whole reserve nominally unspent")
+        #expect(subject.expirationSettleBudget(since: start, now: start + .seconds(1))
+            == .seconds(2),
+                "and it is still spent DOWN by the teardown that precedes it")
+        #expect(subject.expirationSettleBudget(since: start, now: start + .seconds(3)) == .zero)
+        #expect(subject.expirationSettleBudget(since: start, now: start + .seconds(90)) == .zero,
+                "an overrun clamps at zero rather than going negative")
+
+        // The other operand still binds when it is the smaller one: a teardown
+        // that has already spent most of a SHORT reserve gets what is left of
+        // it, not the full grace.
+        let tight = budget(reserve: .seconds(2), grace: .seconds(3))
+        #expect(tight.expirationSettleBudget(since: start, now: start) == .seconds(2),
+                "the min is a min in both directions, or one of the two operands is decoration")
+    }
+
+    @Test("the shipped grace is far under the reserve, and under the OS grace it is bounded by")
+    func shippedGraceIsSmall() {
+        // The number itself, pinned so a "tidy-up" that unifies it with the
+        // teardown reserve has to argue with a test. 3 s sits inside the ~5 s
+        // this repo already records as iOS's tightest suspension grace
+        // (`BGTaskScheduler.pendingTaskRequestsTimeout`'s own justification),
+        // with room left to emit telemetry and call `setTaskCompleted`.
+        for shipped in [
+            BackgroundGrantBudget.backfillProcessing,
+            BackgroundGrantBudget.backfillProcessingCharged,
+            BackgroundGrantBudget.preAnalysisRecovery,
+        ] {
+            #expect(shipped.expirationSettleGrace <= .seconds(5),
+                    "a post-reclaim wait longer than iOS's grace risks the process, not just the job")
+            #expect(shipped.expirationSettleGrace < shipped.teardownReserve,
+                    "the grace is not the reserve; collapsing them is the defect this pins")
+            #expect(shipped.expirationSettleGrace > .zero,
+                    "and it is not zero either — a wait of nothing cannot bank a requeue")
+        }
     }
 }
 
@@ -1372,6 +1426,28 @@ struct BackfillExpiryDurabilityTests {
         designGrant: .zero,
         teardownReserve: .seconds(30),
         minimumCheckpointBudget: .zero,
+        expirationSettleGrace: .seconds(30),
+        provenance: .assumed
+    )
+
+    /// The shipped backfill budget with a deliberately generous post-reclaim
+    /// grace.
+    ///
+    /// `expiredRowLandsBeforeTheSettleWait` below pins an ORDER — the durable
+    /// `expired` row before anything that can block — and asserts, as its
+    /// complement, that the wait then actually observes the requeue. The
+    /// shipped grace is 3 s, which is the right ceiling in production (see
+    /// `BackgroundGrantBudget.expirationSettleGrace`) and the wrong thing for
+    /// this test to depend on: it would make an ordering assertion fail
+    /// intermittently under the mutation battery's own suite load, which is the
+    /// flake this file already fought once. The grace's own value is pinned
+    /// arithmetically, and without a clock, in
+    /// `BackgroundGrantBudgetArithmeticTests`.
+    private static let generousSettleGrace = BackgroundGrantBudget(
+        designGrant: BackgroundGrantBudget.backfillProcessing.designGrant,
+        teardownReserve: BackgroundGrantBudget.backfillProcessing.teardownReserve,
+        minimumCheckpointBudget: BackgroundGrantBudget.backfillProcessing.minimumCheckpointBudget,
+        expirationSettleGrace: .seconds(30),
         provenance: .assumed
     )
 
@@ -1522,7 +1598,11 @@ struct BackfillExpiryDurabilityTests {
         await bps.setPreAnalysisServices(scheduler: scheduler, reconciler: makeReconciler(store: store))
 
         let task = StubBackgroundTask()
-        let workTask = Task { await bps.handleBackfillTask(task) }
+        // The shipped budget with a wider post-reclaim grace — see
+        // `generousSettleGrace`. This test is about the ORDER of the durable
+        // write against the wait; the grace's length is pinned without a clock
+        // in `BackgroundGrantBudgetArithmeticTests`.
+        let workTask = Task { await bps.handleBackfillTask(task, budget: Self.generousSettleGrace) }
         await task.awaitExpirationHandlerInstalled()
 
         // Wait until the drain has the job genuinely in flight, so the
@@ -1563,5 +1643,105 @@ struct BackfillExpiryDurabilityTests {
         let after = try #require(try await store.fetchJob(byId: "slow-unwind"))
         #expect(after.state == "queued",
                 "the handler must not complete the task until the requeue has committed")
+    }
+
+    /// The shipped backfill budget with NO post-reclaim grace and a large
+    /// teardown reserve. The two numbers disagree on purpose: only an
+    /// implementation that spends the grace stops at once.
+    private static let noGraceLargeReserve = BackgroundGrantBudget(
+        designGrant: BackgroundGrantBudget.backfillProcessing.designGrant,
+        teardownReserve: .seconds(60),
+        minimumCheckpointBudget: BackgroundGrantBudget.backfillProcessing.minimumCheckpointBudget,
+        expirationSettleGrace: .zero,
+        provenance: .assumed
+    )
+
+    @Test("the expiration wait spends the post-reclaim grace, not the teardown reserve",
+          .timeLimit(.minutes(2)))
+    func expirationWaitIsBoundedByTheGraceNotTheReserve() async throws {
+        // playhead-lmrx review round 2. `teardownReserve` is wall clock carved
+        // OUT of `designGrant`; by the time this handler runs the OS has taken
+        // the grant back, so there is none left to carve from.
+        // `remainingTeardownReserve` cannot see that — it returns the reserve's
+        // full length at the instant of reclaim, identically for a window that
+        // ran to its 295 s limit (57 % of them, measured) and one reclaimed at
+        // t+5 s. iOS terminates an app that does not complete its task promptly
+        // after `expirationHandler` and penalises its future scheduling, which
+        // is exactly the resource this bead exists to spend well, so the
+        // overrun costs windows to buy a rescue it may not get.
+        //
+        // The budget below sets the grace to zero and the reserve to 60 s, and
+        // the job it cancels NEVER settles (its decode is parked on a gate this
+        // test does not open). Correct code skips the wait entirely and
+        // completes the task at once; an implementation that reached for the
+        // reserve would poll for a minute first. The threshold is 20 s — 3x
+        // over the noise on the correct path and 3x under the wrong one — so
+        // this is a bound, not a measurement.
+        let store = try await makeTestStore()
+        let downloads = StubDownloadProvider()
+        downloads.cachedURLs["ep-never-settles"] = URL(fileURLWithPath: "/tmp/ep-never-settles.m4a")
+        let job = makeAnalysisJob(
+            jobId: "never-settles",
+            jobType: "preAnalysis",
+            episodeId: "ep-never-settles",
+            analysisAssetId: "asset-never-settles",
+            workKey: "fp-never-settles:1:preAnalysis",
+            sourceFingerprint: "fp-never-settles",
+            priority: 10,
+            desiredCoverageSec: 90,
+            state: "queued"
+        )
+        try await store.insertJob(job)
+
+        let gate = UnwindGate()
+        defer { gate.open() }
+        let scheduler = makeScheduler(
+            store: store,
+            audio: GatedUnwindAudioStub(gate: gate),
+            downloads: downloads
+        )
+        let coordinator = StubAnalysisCoordinator()
+        coordinator.runPendingBackfillDuration = .seconds(30)
+        let bps = BackgroundProcessingService(
+            coordinator: coordinator,
+            capabilitiesService: CapabilitiesService(),
+            taskScheduler: StubTaskScheduler(),
+            batteryProvider: StubBatteryProvider()
+        )
+        await bps.setPreAnalysisServices(scheduler: scheduler, reconciler: makeReconciler(store: store))
+
+        let task = StubBackgroundTask()
+        let workTask = Task {
+            await bps.handleBackfillTask(task, budget: Self.noGraceLargeReserve)
+        }
+        defer { workTask.cancel() }
+        await task.awaitExpirationHandlerInstalled()
+
+        // The job must be genuinely in flight, or the cancel names nothing and
+        // there is no wait to bound — the test would pass vacuously.
+        var spins = 0
+        while await !scheduler.hasCurrentRunningTaskForTesting() {
+            spins += 1
+            try #require(spins < 1000, "the seeded job never entered decode")
+            try await Task.sleep(for: .milliseconds(20))
+        }
+
+        let expiredAt = ContinuousClock.now
+        task.simulateExpiration()
+        await task.awaitCompletion()
+        let elapsed = expiredAt.duration(to: ContinuousClock.now)
+
+        #expect(elapsed < .seconds(20),
+                """
+                With a zero post-reclaim grace the handler must complete the \
+                task at once. Taking \(elapsed) means it spent the 60 s \
+                teardown reserve instead — a budget carved out of a grant the \
+                OS has already reclaimed, waiting for a job that never settles, \
+                while iOS waits to terminate the process for not completing.
+                """)
+        // And the cancel really was aimed at something, so the wait it skipped
+        // was a real one.
+        #expect(await scheduler.inFlightJobIdsForTesting().contains("never-settles"),
+                "the job must still be unwinding — otherwise there was nothing to wait for")
     }
 }

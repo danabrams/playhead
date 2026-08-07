@@ -2691,9 +2691,11 @@ actor AnalysisWorkScheduler {
             guard ContinuousClock.now < deadline else { return false }
             // `try?` swallows the cancellation `Task.sleep` throws, so without
             // this the loop would spin at full speed to the deadline once the
-            // caller's task is cancelled. No production caller is cancellable
-            // today; the guard is what keeps that from becoming a busy-wait the
-            // day one is.
+            // caller's task is cancelled. That is not hypothetical: the
+            // work-deadline caller in `handleBackfillTask` runs inside the very
+            // `workTask` the expiration handler cancels, so an OS reclaim
+            // arriving mid-wait lands here — which is also why that caller
+            // re-checks `Task.isCancelled` before completing the task.
             guard !Task.isCancelled else { return false }
             try? await Task.sleep(for: pollInterval)
         }
@@ -4254,6 +4256,12 @@ actor AnalysisWorkScheduler {
         // resuming from `runTask.value` — sending a genuine expiry down the
         // attempt-spending arm. Clearing only when nothing is in flight cannot
         // race a consumer, because there is none.
+        //
+        // playhead-lmrx (review round 2): THE ENTRY IS ONLY HALF OF IT. A
+        // sibling ARRIVING was guarded here; a sibling LEAVING was not, and
+        // leaving is the commoner event. The same guard now sits on the `defer`
+        // and on the non-cancel completion path below, where the erasure
+        // actually happened.
         if inFlightJobIds.isEmpty {
             pendingCancelCause = nil
         }
@@ -4308,7 +4316,31 @@ actor AnalysisWorkScheduler {
             inFlightJobIds.remove(job.jobId)
             currentEpisodeId = nil
             shouldCancelCurrentJob = false
-            pendingCancelCause = nil
+            // playhead-lmrx (review round 2): SAME GUARD, SAME REASON AS THE
+            // ENTRY CLEAR — and this site is the one that actually bites.
+            //
+            // The entry guard stops a sibling ARRIVING from erasing a cause its
+            // owner has not read yet; nothing stopped a sibling LEAVING from
+            // doing it, and leaving is the commoner event. Concretely, with a
+            // job A cancelled `.taskExpired` and parked in `runTask.value`,
+            // `runLoop()`'s 5 s poll dispatches B; B finishes first and this
+            // `defer` cleared the cause; A then reads
+            // `pendingCancelCause ?? .pipelineError`, takes the ATTEMPT-SPENDING
+            // arm, and supersedes permanently on its fifth window — the exact
+            // outcome the `.taskExpired` exemption exists to remove, restored by
+            // an unrelated job completing.
+            //
+            // `remove` has already run, so an empty set means nobody else can be
+            // holding an unread cause and clearing cannot race a consumer.
+            //
+            // RESIDUAL, named rather than hidden: the cause is still a single
+            // global slot, so a cancel aimed at A while B is in flight has no
+            // way to say which one it meant. The complete fix is a cause keyed
+            // by job id; this closes the interleaving that erases one, not the
+            // one that misattributes it.
+            if inFlightJobIds.isEmpty {
+                pendingCancelCause = nil
+            }
         }
 
         if case .changed(let currentFingerprint) = await cachedCanonicalFingerprintStatus(
@@ -4794,7 +4826,13 @@ actor AnalysisWorkScheduler {
             currentRunningTask = nil
             // Non-cancel path: clear any stale cause so the next job
             // doesn't inherit it.
-            pendingCancelCause = nil
+            // playhead-lmrx (review round 2): but not one a SIBLING is still
+            // waiting to read — see the `defer` above. `job.jobId` is still a
+            // member here (the `defer` has not run), so the question is whether
+            // anyone ELSE is in flight.
+            if inFlightJobIds.subtracting([job.jobId]).isEmpty {
+                pendingCancelCause = nil
+            }
 
             PreAnalysisInstrumentation.endJobDuration(jobSignpost)
 

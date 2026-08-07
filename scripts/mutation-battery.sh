@@ -2814,6 +2814,8 @@ T_LMRX_PROVENANCE="a measured budget names the denominator each of its numbers c
 T_LMRX_ROWFIRST="the expired row is durable BEFORE the handler waits for anything"
 T_LMRX_NORMALEXIT="the work-deadline return does not strand the job it leaves running"
 T_LMRX_EARLYRETURN="a drain that returned EARLY does not cancel the run loop's job"
+T_LMRX_GRACE="the post-reclaim wait is bounded by the OS grace, not by the teardown reserve"
+T_LMRX_GRACESITE="the expiration wait spends the post-reclaim grace, not the teardown reserve"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -5669,6 +5671,22 @@ MUTATIONS=(
   "LX20|559|SCHED|$T_LMRX_SETTLE"
   "LX21|560|BGPS|$T_LMRX_NORMALEXIT"
   "LX22|561|BGPS|$T_LMRX_EARLYRETURN"
+
+  # ---- playhead-lmrx review round 2: the reserve is not the grace (LX23-LX24) ----
+  #
+  #   * LX23 collapses `expirationSettleBudget` back into
+  #     `remainingTeardownReserve`. `teardownReserve` is wall clock carved OUT of
+  #     `designGrant`; once the OS has fired `expirationHandler` there is no
+  #     grant left for it to be carved from, and the expression returns the
+  #     reserve's full length whether the window ran to its 295 s limit or was
+  #     reclaimed at t+5 s — the standing defect class, a bound that survives the
+  #     thing it bounds not existing. Arithmetic rail: no clock, no load.
+  #   * LX24 is the same defect at the CALL SITE, which LX23 cannot see: the
+  #     method stays correct and the expiration handler simply asks the other
+  #     one. Killed behaviourally, with a budget whose grace is zero and whose
+  #     reserve is 60 s, against a job that never settles.
+  "LX23|562|GRANT|$T_LMRX_GRACE"
+  "LX24|563|BGPS|$T_LMRX_GRACESITE"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -6041,6 +6059,8 @@ describe_mutation() {
     LX20) echo "lmrx: the settle wait drops its identity scoping and waits out any sibling the run loop picks up" ;;
     LX21) echo "lmrx: the work-deadline return completes the task with a job still running, stranding it" ;;
     LX22) echo "lmrx: the normal return cancels unconditionally, killing a live job on an EARLY drain exit" ;;
+    LX23) echo "lmrx: the post-reclaim wait reverts to the teardown reserve — 36 s of a grant the OS already took back" ;;
+    LX24) echo "lmrx: the expiration CALL SITE asks for the reserve instead of the grace, spending it after the reclaim" ;;
     TS01) echo "5n8k: THE historical defect restored — install assigns a process-global and restores it in a defer" ;;
     TS02) echo "5n8k: the leak variant — the funnel caches the last binding in a process-global and never restores" ;;
     TS03) echo "5n8k: the funnel drops every diagnostic — the vacuity control on all four positive witnesses" ;;
@@ -13123,6 +13143,7 @@ EOF
         designGrant: .seconds(1800),
         teardownReserve: .seconds(36),
         minimumCheckpointBudget: .seconds(60),
+        expirationSettleGrace: .seconds(3),
         provenance: .assumed
     )
 EOF
@@ -13131,6 +13152,7 @@ EOF
         designGrant: .seconds(255),
         teardownReserve: .seconds(36),
         minimumCheckpointBudget: .seconds(60),
+        expirationSettleGrace: .seconds(3),
         provenance: .measured(
             grantObservations: 132,
             teardownObservations: 30,
@@ -13224,6 +13246,24 @@ EOF
     patch "$file" \
       '            if deadlineElapsed, let scheduler = self.analysisWorkScheduler {' \
       '            if true, let scheduler = self.analysisWorkScheduler {' ;;
+
+  # LX23 — `expirationSettleBudget` collapses into the teardown reserve. Reads
+  # as removing a redundant `min`; it restores a bound that returns its full
+  # length at the instant the OS reclaims the window, identically for a grant
+  # run to its 295 s limit and one reclaimed at t+5 s.
+  LX23)
+    patch "$file" \
+      '        min(remainingTeardownReserve(since: teardownStart, now: now), expirationSettleGrace)' \
+      '        remainingTeardownReserve(since: teardownStart, now: now)' ;;
+
+  # LX24 — the method stays correct and the expiration handler asks the other
+  # one. This is the half LX23 cannot see, and it is the likelier regression: a
+  # reader who has just met `remainingTeardownReserve` on the normal-return path
+  # twenty lines up reaches for the same name here.
+  LX24)
+    patch "$file" \
+      '                    let remaining = budget.expirationSettleBudget(since: teardownStart)' \
+      '                    let remaining = budget.remainingTeardownReserve(since: teardownStart)' ;;
 
   # LX20 — the settle wait loses its identity scoping and goes back to asking
   # "is ANYTHING running", which is the same question whether the cancelled job

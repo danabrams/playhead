@@ -1665,11 +1665,13 @@ actor BackgroundProcessingService {
         task.expirationHandler = { [weak self] in
             workTask.cancel()
             Task { [weak self] in
-                // playhead-lmrx: the teardown reserve is spent from HERE. It is
-                // one budget for the whole teardown — the ledger write and the
-                // wait for the interrupted job's resume point — not an
-                // allowance each step may take in full. See
-                // `BackgroundGrantBudget.remainingTeardownReserve(since:now:)`.
+                // playhead-lmrx: teardown starts HERE, and what it may spend is
+                // one budget for the whole of it — the ledger write and the wait
+                // for the interrupted job's resume point — not an allowance each
+                // step may take in full. On THIS path the ceiling is the
+                // post-reclaim grace rather than the teardown reserve, because
+                // the OS has already taken the grant the reserve was carved from.
+                // See `BackgroundGrantBudget.expirationSettleBudget(since:now:)`.
                 let teardownStart = ContinuousClock.now
                 // playhead-lmrx: tell the SCHEDULER the grant is over, not just
                 // this handler's task.
@@ -1811,9 +1813,25 @@ actor BackgroundProcessingService {
                 // and will happily start a sibling while this waits, and a
                 // signal that cannot tell that apart would time out on a
                 // requeue that already landed.
+                //
+                // AND IT IS BOUNDED BY THE POST-RECLAIM GRACE, NOT BY THE
+                // TEARDOWN RESERVE (playhead-lmrx review round 2). The reserve
+                // is wall clock carved out of `designGrant`; by the time this
+                // runs the OS has taken the grant back, so there is nothing left
+                // for it to be carved out of. `remainingTeardownReserve` alone
+                // hands back its full 36 s here whether the window ran to its
+                // 295 s limit (57 % of them) or was reclaimed at t+5 s — the
+                // standing defect class, a value that reads the same whether or
+                // not the thing it bounds still exists. iOS terminates an app
+                // that does not complete its task promptly after
+                // `expirationHandler` and penalises its future scheduling, which
+                // is the very resource this bead is trying to spend well, so
+                // overrunning trades a rescue we may not get for windows we
+                // certainly will not. The `expired` row is already durable above;
+                // see `BackgroundGrantBudget.expirationSettleGrace`.
                 if !cancelledJobIds.isEmpty,
                    let scheduler = await self?.analysisWorkScheduler {
-                    let remaining = budget.remainingTeardownReserve(since: teardownStart)
+                    let remaining = budget.expirationSettleBudget(since: teardownStart)
                     var settled = false
                     if remaining > .zero {
                         settled = await scheduler.awaitJobsSettled(
@@ -1823,7 +1841,7 @@ actor BackgroundProcessingService {
                     }
                     if !settled {
                         self?.logger.warning(
-                            "Backfill expiration: in-flight job(s) \(cancelledJobIds.sorted().joined(separator: ","), privacy: .public) did not settle within the \(budget.teardownReserve, privacy: .public) teardown reserve (\(remaining, privacy: .public) left after the ledger write); the requeue may be lost to suspension"
+                            "Backfill expiration: in-flight job(s) \(cancelledJobIds.sorted().joined(separator: ","), privacy: .public) did not settle within the \(remaining, privacy: .public) left of the \(budget.expirationSettleGrace, privacy: .public) post-reclaim grace; the requeue may be lost to suspension"
                         )
                     }
                 }

@@ -44,6 +44,15 @@
 // spent DURING teardown, as a live timeout on how long the handler may wait for
 // that requeue to commit before it must call `setTaskCompleted` anyway. See
 // `remainingTeardownReserve(since:now:)`.
+//
+// AND IT IS ONLY THE RIGHT BOUND WHILE THE GRANT IS STILL OPEN. `teardownReserve`
+// is wall clock carved OUT of `designGrant`; once the OS has fired
+// `expirationHandler` there is no grant left for it to be carved out of, so
+// spending it there is asking the diagnostic question the wrong way round —
+// `teardownReserve - (now - teardownStart)` reads the same 36 s whether the
+// window ended at t+50 s or ran to its full t+295 s limit. What governs after a
+// reclaim is `expirationSettleGrace`, which is a property of iOS rather than of
+// a task class. See `expirationSettleBudget(since:now:)`.
 
 import Foundation
 
@@ -69,6 +78,11 @@ struct BackgroundGrantBudget: Sendable, Equatable {
         /// Derived from device observations — one denominator PER FIELD,
         /// because the three fields were not measured over the same rows and a
         /// single `sampleSize` could only be right about one of them.
+        ///
+        /// THREE fields, not four. ``expirationSettleGrace`` is outside this
+        /// claim by construction and always will be: it bounds what may happen
+        /// AFTER the OS reclaims a window, and this ledger's clock stops at the
+        /// reclaim. Naming a denominator for it would be inventing one.
         ///
         /// The first draft of this type carried exactly that single number, and
         /// it read `203` — the count of expired backfill runs. Ask the
@@ -112,6 +126,41 @@ struct BackgroundGrantBudget: Sendable, Equatable {
     /// handler spends it.
     let teardownReserve: Duration
 
+    /// How long the EXPIRATION handler may wait for the interrupted job to
+    /// commit its resume point, once the OS has already reclaimed the window.
+    ///
+    /// **NOT A SLICE OF ``designGrant``, AND NOT MEASURED — it cannot be, from
+    /// anything in this repo's ledger.** ``teardownReserve`` is wall clock held
+    /// back FROM the grant, so it is the right bound on the handler's own
+    /// work-deadline return, which happens while the grant is still open. It is
+    /// the wrong bound after `expirationHandler` fires: the grant is over, and
+    /// `teardownReserve - (now - teardownStart)` would hand back the full
+    /// reserve no matter how much of the window had already been consumed.
+    /// Asked the diagnostic way: what would that expression read if the OS had
+    /// run this task to its own 295 s limit before reclaiming it? The same 36 s
+    /// it reads for a task reclaimed at t+5 s. A quantity that survives the
+    /// thing it claims to bound not existing is not a bound.
+    ///
+    /// **WHY IT IS SMALL.** iOS terminates an app that does not call
+    /// `setTaskCompleted` promptly after its expiration handler runs, and
+    /// penalises its future scheduling — which is this bead's own currency. The
+    /// repo already writes that grace down once, in
+    /// `BGTaskScheduler.pendingTaskRequestsTimeout`: "a timeout longer than the
+    /// caller's own budget protects nothing", bounded at 2 s against the ~5 s
+    /// iOS allows on the `.background` scenePhase transition. This follows the
+    /// same shape — comfortably inside that grace, with room left to emit
+    /// telemetry and complete the task.
+    ///
+    /// **WHAT IT GIVES UP, SAID PLAINLY.** A job that will not reach a
+    /// checkpoint inside this window is not rescued. That is the honest
+    /// division: the cancelled job's unwind is one SQLite transaction once it
+    /// observes cancellation, so this grace covers the jobs the wait can
+    /// actually win, and the ones it cannot are not winnable at 36 s either —
+    /// ``minimumCheckpointBudget`` records that one FM coarse window alone has a
+    /// p95 of 57.5 s. The `expired` ledger row is durable BEFORE this wait
+    /// begins, so overrunning buys nothing and risks the whole process.
+    let expirationSettleGrace: Duration
+
     /// The smallest remaining grant worth starting a dispatch pass with.
     ///
     /// **This is the cost of the smallest DURABLE ARTIFACT the pipeline writes,
@@ -141,11 +190,13 @@ struct BackgroundGrantBudget: Sendable, Equatable {
         designGrant: Duration,
         teardownReserve: Duration,
         minimumCheckpointBudget: Duration,
+        expirationSettleGrace: Duration,
         provenance: Provenance
     ) {
         self.designGrant = designGrant
         self.teardownReserve = teardownReserve
         self.minimumCheckpointBudget = minimumCheckpointBudget
+        self.expirationSettleGrace = expirationSettleGrace
         self.provenance = provenance
     }
 
@@ -185,6 +236,25 @@ struct BackgroundGrantBudget: Sendable, Equatable {
     ) -> Duration {
         let remainder = teardownReserve - teardownStart.duration(to: now)
         return remainder > .zero ? remainder : .zero
+    }
+
+    /// How long an EXPIRATION handler may still wait, given when its teardown
+    /// began.
+    ///
+    /// The `min` is the whole point, and the two operands answer different
+    /// questions. ``remainingTeardownReserve(since:now:)`` asks "how much of the
+    /// reserve has this teardown already spent?", which stays meaningful for
+    /// ordering the steps within a teardown. ``expirationSettleGrace`` asks "how
+    /// long may anything at all run after the OS has reclaimed the window?",
+    /// which is the question that actually binds here — and only the second one
+    /// knows the grant is gone. Taking the reserve alone was the defect: it
+    /// hands back its full length at the moment the OS reclaims, however much
+    /// of the window was consumed first.
+    func expirationSettleBudget(
+        since teardownStart: ContinuousClock.Instant,
+        now: ContinuousClock.Instant = .now
+    ) -> Duration {
+        min(remainingTeardownReserve(since: teardownStart, now: now), expirationSettleGrace)
     }
 
     /// Is there enough grant left for a pass that starts now to reach a
@@ -256,10 +326,17 @@ struct BackgroundGrantBudget: Sendable, Equatable {
     /// of much longer grants. They are all `lastErrorCode = 'orphan_at_launch'`
     /// — rows reaped by a LATER launch, so their `finishedAt` is the reaping,
     /// not the end of a grant. They are excluded from every percentile above.
+    /// - `expirationSettleGrace` = **3 s**, and it is NOT part of the measured
+    ///   claim below — see the field's own doc comment. It bounds the post-
+    ///   reclaim wait, where no grant remains to be carved from; 3 s sits inside
+    ///   the ~5 s the repo already records as iOS's tightest suspension grace
+    ///   (`BGTaskScheduler.pendingTaskRequestsTimeout`) with room left to
+    ///   complete the task.
     static let backfillProcessing = BackgroundGrantBudget(
         designGrant: .seconds(255),
         teardownReserve: .seconds(36),
         minimumCheckpointBudget: .seconds(60),
+        expirationSettleGrace: .seconds(3),
         provenance: .measured(
             grantObservations: 132,
             teardownObservations: 30,
@@ -298,10 +375,15 @@ struct BackgroundGrantBudget: Sendable, Equatable {
     /// playhead-lmrx — no behaviour change for the class nobody has measured —
     /// and says out loud that it is an assumption. The handler now threads its
     /// real identifier, so the NEXT pull genuinely can settle this.
+    ///
+    /// `expirationSettleGrace` is the ONE field this sibling does not differ on,
+    /// and deliberately: it is a property of iOS's reclaim behaviour, not of how
+    /// long a class's window is, so a longer grant does not buy a longer grace.
     static let backfillProcessingCharged = BackgroundGrantBudget(
         designGrant: .seconds(1800),
         teardownReserve: .seconds(36),
         minimumCheckpointBudget: .seconds(60),
+        expirationSettleGrace: .seconds(3),
         provenance: .assumed
     )
 
@@ -336,6 +418,7 @@ struct BackgroundGrantBudget: Sendable, Equatable {
         designGrant: .seconds(255),
         teardownReserve: .seconds(36),
         minimumCheckpointBudget: .seconds(60),
+        expirationSettleGrace: .seconds(3),
         provenance: .assumed
     )
 }
