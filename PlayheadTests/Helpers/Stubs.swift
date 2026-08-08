@@ -436,6 +436,7 @@ final class StubAnalysisCoordinator: AnalysisCoordinating, @unchecked Sendable {
 
     func runPendingBackfill(deadline: ContinuousClock.Instant) async {
         runPendingBackfillCallCount += 1
+        grantDriverCallOrder.append("poll")
         runPendingBackfillDeadlines.append(deadline)
         runPendingBackfillEntries.increment()
         if let duration = runPendingBackfillDuration {
@@ -447,6 +448,11 @@ final class StubAnalysisCoordinator: AnalysisCoordinating, @unchecked Sendable {
     }
 
     // MARK: playhead-13kf hooks
+
+    /// Shared call-order journal across the two grant-spending coordinator
+    /// drivers ("coarse", "poll"), because the reorder's contract is an ORDER
+    /// and two independent counters cannot express one.
+    private(set) var grantDriverCallOrder: [String] = []
 
     /// Every `(deadline, minimumWindowBudget)` pair the handler handed the
     /// FM-first coarse phase, so tests can assert the phase spends the SAME
@@ -473,6 +479,7 @@ final class StubAnalysisCoordinator: AnalysisCoordinating, @unchecked Sendable {
         minimumWindowBudget: Duration
     ) async -> Int {
         runPendingCoarseScansCallCount += 1
+        grantDriverCallOrder.append("coarse")
         runPendingCoarseScansCalls.append(
             (deadline: deadline, minimumWindowBudget: minimumWindowBudget)
         )
