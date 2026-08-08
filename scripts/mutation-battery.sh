@@ -1835,6 +1835,13 @@ FOCUSED_SUITES=(
   -only-testing:PlayheadTests/BackfillJobRunnerTests
   -only-testing:PlayheadTests/ResumableBackfillJobSelectorTests
   -only-testing:PlayheadTests/BackfillJobIdentityV44MigrationTests
+  # playhead-13kf: the FM-first reorder rails (RO series). Three suites: the
+  # BPS-level order/deadline/floor pins (real store + scheduler, a few
+  # seconds), the pure coarse-loop gates (instant), and the budget-constant
+  # derivation pins (instant).
+  -only-testing:PlayheadTests/BackfillCoarseFirstOrderTests
+  -only-testing:PlayheadTests/CoarseScanLoopTests
+  -only-testing:PlayheadTests/DrainFloorDerivationTests
 )
 
 # Named to match the `/private/tmp/playhead-*` pattern `scripts/disk-cleanup.sh`
@@ -2883,6 +2890,15 @@ T_LMRX_RECOVERYDOOR="recovery's EXPIRY shuts the dispatch door too"
 T_LMRX_TEARDOWNGUARD="a teardown cancelled mid-settle leaves the ending to the expiration handler"
 T_LMRX_RECOVERYGUARD="recovery's teardown cancelled mid-settle leaves the ending to the expiration handler"
 T_LMRX_CHARGEDWIRING="the charger-class REGISTRATION hands its own identifier and budget to the shared handler"
+
+# ---- playhead-13kf: the FM/coarse phase runs FIRST in a granted window (RO series) ----
+T_13KF_ORDER="the coarse phase observes the queue BEFORE the drain has dispatched anything"
+T_13KF_DEADLINE="both phases and the poll spend ONE deadline, anchored at the grant's start"
+T_13KF_DRAINFLOOR="the drain's floor is the RELAXED drain constant, not the coarse-window price"
+T_13KF_LOOPGATE="the window floor is a START gate between assets, not a kill switch"
+T_13KF_FIL5="candidates keep BOTH populations, resumable first, deduplicated"
+T_13KF_FLOORZERO="the reordered handler's drain floor is zero, and zero is a derivation"
+T_13KF_RECOVERYFLOOR="recovery keeps the coarse-window price on its drain — it was NOT reordered"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -6111,6 +6127,50 @@ MUTATIONS=(
   # pre-wxsv identity: a new row per transcription session, cursor nil, previous
   # row orphaned. Alone in its batch for the same reason as WX08.
   "WX09|580|RUNNER|$T_WXSV_GROWS;$T_WXSV_REOPENS"
+
+  # ---- playhead-13kf: a granted window runs the FM scan FIRST (RO01-RO08) ----
+  #
+  # ONE RAIL PER BATCH, the lmrx rule: several of these redden a second test in
+  # the same suites as a side effect (deleting the coarse call also breaks the
+  # shared-deadline pin; un-relaxing the drain floor also breaks the
+  # behavioural floor pin), and a batch whose members redden each other's
+  # expectations is the miscredit the batching rule exists to prevent.
+  #
+  #   * RO01 deletes the coarse-phase call — the pre-13kf handler restored as
+  #     "dead code cleanup". The window goes back to funding transcription
+  #     only, which is the 108-of-203 shape the bead removes.
+  #   * RO02 restores the pre-13kf ORDER (drain first, coarse after) without
+  #     deleting anything — two sites, the shape a merge conflict resolution
+  #     would produce. Kills the ordering pin ONLY: the coarse phase still
+  #     runs, still gets the right deadline, but observes a queue the drain
+  #     already emptied.
+  #   * RO03 hands the drain the coarse-window price again — the one-token
+  #     revert of the F6 decision ("the two floors look like a typo").
+  #   * RO04 re-anchors the poll deadline at ContinuousClock.now — each phase
+  #     opening a fresh clock, which quietly extends the grant by however long
+  #     the earlier phases ran. The lmrx deadline test CANNOT see this (both
+  #     its bounds still hold); only the shared-instant equality can.
+  #   * RO05 weakens the coarse loop's start gate to a bare deadline check,
+  #     which starts an asset whose one durable window cannot fit — the same
+  #     defect LX04 pins on the drain, one phase earlier.
+  #   * RO06 drops the fil5 population from the candidate merge — "the
+  #     resumable query already finds everything" — which silently recreates
+  #     the blind spot fil5 was filed about (an asset with ZERO coverage-lane
+  #     rows is invisible to the resumable query BY CONSTRUCTION).
+  #   * RO07 "tidies" the backfill drain floor back to 60 s in the budget
+  #     constant itself — same defect as RO03, one layer down, where it also
+  #     reads as making the struct more uniform.
+  #   * RO08 relaxes RECOVERY's drain floor too — spending this bead's
+  #     derivation on a handler the reorder never touched. Recovery's drain is
+  #     still the only road to Stage-4 FM work in its window.
+  "RO01|602|BGPS|$T_13KF_ORDER"
+  "RO02|603|BGPS|$T_13KF_ORDER"
+  "RO03|604|BGPS|$T_13KF_DRAINFLOOR"
+  "RO04|605|BGPS|$T_13KF_DEADLINE"
+  "RO05|606|ACOORD|$T_13KF_LOOPGATE"
+  "RO06|607|ACOORD|$T_13KF_FIL5"
+  "RO07|608|GRANT|$T_13KF_FLOORZERO"
+  "RO08|609|GRANT|$T_13KF_RECOVERYFLOOR"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -14366,6 +14426,142 @@ EOF
     patch "$file" \
       '        while !inFlightJobIds.isDisjoint(with: jobIds) {' \
       '        while !runningJobs.isEmpty {' ;;
+
+  # ---- playhead-13kf: the FM-first reorder (RO series) ----
+
+  # RO01 — delete the coarse-phase call. Reads as dead-code cleanup ("the
+  # coordinator already drains backfill below"); restores the window that
+  # funds transcription only.
+  RO01)
+    snippet OLD <<'EOF'
+            let coarseAssetsDriven = await self.coordinator.runPendingCoarseScans(
+                deadline: workDeadline,
+                minimumWindowBudget: budget.minimumCheckpointBudget
+            )
+EOF
+    snippet NEW <<'EOF'
+            let coarseAssetsDriven = 0
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # RO02 — restore the pre-13kf ORDER: the coarse phase still runs, with the
+  # right deadline and floor, but AFTER the drain and the wake. Two sites (see
+  # the two-site rule above patch()); the coarse call keeps its position
+  # before the poll so the stub-level call-order journal stays ["coarse",
+  # "poll"] and only the behavioural queue-snapshot pin can see the swap.
+  RO02)
+    snippet OLD <<'EOF'
+            let coarseAssetsDriven = await self.coordinator.runPendingCoarseScans(
+                deadline: workDeadline,
+                minimumWindowBudget: budget.minimumCheckpointBudget
+            )
+EOF
+    snippet NEW <<'EOF'
+            var coarseAssetsDriven = 0
+EOF
+    patch "$file" "$OLD" "$NEW" || return $?
+    snippet OLD <<'EOF'
+            await self.coordinator.runPendingBackfill(deadline: workDeadline)
+EOF
+    snippet NEW <<'EOF'
+            coarseAssetsDriven = await self.coordinator.runPendingCoarseScans(
+                deadline: workDeadline,
+                minimumWindowBudget: budget.minimumCheckpointBudget
+            )
+            _ = coarseAssetsDriven
+            await self.coordinator.runPendingBackfill(deadline: workDeadline)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # RO03 — hand the drain the coarse-window price again. One token, and it
+  # reads like fixing a typo between two near-identical field names.
+  RO03)
+    snippet OLD <<'EOF'
+                await scheduler.drainEligible(
+                    deadline: workDeadline,
+                    minimumCheckpointBudget: budget.minimumDrainCheckpointBudget
+                )
+            }
+            await self.analysisWorkScheduler?.wake()
+EOF
+    snippet NEW <<'EOF'
+                await scheduler.drainEligible(
+                    deadline: workDeadline,
+                    minimumCheckpointBudget: budget.minimumCheckpointBudget
+                )
+            }
+            await self.analysisWorkScheduler?.wake()
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # RO04 — each phase opens a fresh clock. The lmrx bounds test cannot see
+  # this (both its inequalities still hold); only the shared-instant equality
+  # can, and it exists because "derived from what is actually left" is a
+  # property of the instant being shared.
+  RO04)
+    snippet OLD <<'EOF'
+            await self.coordinator.runPendingBackfill(deadline: workDeadline)
+EOF
+    snippet NEW <<'EOF'
+            await self.coordinator.runPendingBackfill(deadline: ContinuousClock.now + budget.workBudget)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # RO05 — the coarse loop's floor gate weakens to a bare deadline check,
+  # admitting an asset whose one durable window cannot fit before the close.
+  # LX04's defect, one phase earlier.
+  RO05)
+    snippet OLD <<'EOF'
+            guard remaining > .zero, remaining >= minimumWindowBudget else {
+EOF
+    snippet NEW <<'EOF'
+            guard remaining > .zero else {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # RO06 — the fil5 population falls out of the candidate merge. An asset
+  # with zero coverage-lane rows is invisible to the resumable query BY
+  # CONSTRUCTION, so this silently recreates the fil5 blind spot while every
+  # resumable-population test stays green.
+  RO06)
+    snippet OLD <<'EOF'
+        var seen = Set<String>()
+        return (resumable + missingRows).filter { seen.insert($0).inserted }
+EOF
+    snippet NEW <<'EOF'
+        var seen = Set<String>()
+        _ = missingRows
+        return resumable.filter { seen.insert($0).inserted }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # RO07 — the F6 revert one layer down, in the constant itself, where it
+  # reads as making the struct uniform.
+  RO07)
+    snippet OLD <<'EOF'
+        designGrant: .seconds(255),
+        teardownReserve: .seconds(36),
+        minimumCheckpointBudget: .seconds(60),
+        minimumDrainCheckpointBudget: .zero,
+EOF
+    snippet NEW <<'EOF'
+        designGrant: .seconds(255),
+        teardownReserve: .seconds(36),
+        minimumCheckpointBudget: .seconds(60),
+        minimumDrainCheckpointBudget: .seconds(60),
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # RO08 — recovery's drain floor relaxes too: this bead's derivation spent
+  # on the handler the reorder never touched.
+  RO08)
+    snippet OLD <<'EOF'
+        minimumDrainCheckpointBudget: .seconds(60),
+EOF
+    snippet NEW <<'EOF'
+        minimumDrainCheckpointBudget: .zero,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
 
   *)
     echo "mutation-battery: unknown mutation '$name'" >&2
