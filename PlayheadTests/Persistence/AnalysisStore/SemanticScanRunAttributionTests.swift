@@ -159,7 +159,10 @@ struct SemanticScanRunAttributionTests {
         let (store, dir) = try await makeTestStoreWithDirectory()
 
         #expect(try await store.schemaVersion() == AnalysisStore.currentSchemaVersion)
-        #expect(AnalysisStore.currentSchemaVersion == 45)
+        // Drift guard, pinned to the LITERAL head (45 → 46, playhead-3oyz's
+        // additive day-0 retry-claim columns). Never `== currentSchemaVersion`:
+        // that passes for every value and stops policing anything.
+        #expect(AnalysisStore.currentSchemaVersion == 46)
         for column in ["createdAt", "scenePhase", "runCorrelationId"] {
             #expect(
                 try probeColumnExists(in: dir, table: "semantic_scan_results", column: column),

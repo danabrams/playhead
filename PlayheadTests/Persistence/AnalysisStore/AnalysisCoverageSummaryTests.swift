@@ -1643,7 +1643,10 @@ struct FastTranscriptCoverageV37MigrationTests {
     func freshDbReachesV37() async throws {
         let (store, _) = try await makeTestStoreWithDirectory()
         #expect(try await store.schemaVersion() == AnalysisStore.currentSchemaVersion)
-        #expect(AnalysisStore.currentSchemaVersion == 45)
+        // Drift guard, pinned to the LITERAL head (45 → 46, playhead-3oyz's
+        // additive day-0 retry-claim columns). Never `== currentSchemaVersion`:
+        // that passes for every value and stops policing anything.
+        #expect(AnalysisStore.currentSchemaVersion == 46)
     }
 
     /// THE MIGRATION EVIDENCE. An asset already on disk — written by a

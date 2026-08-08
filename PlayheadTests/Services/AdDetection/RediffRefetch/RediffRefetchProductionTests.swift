@@ -93,10 +93,11 @@ struct RediffRefetchStateV28MigrationTests {
         let (store, _) = try await makeTestStoreWithDirectory()
         #expect(try await store.schemaVersion() == AnalysisStore.currentSchemaVersion)
         // Drift guard: head has moved on repeatedly since V28 — most
-        // recently 36 → 37 (playhead-0sro fast-transcript watermark
-        // reconcile, data-only). The V28 rediff_refetch_state tables probed
-        // below are unchanged by any of it.
-        #expect(AnalysisStore.currentSchemaVersion == 45)
+        // recently 45 → 46 (playhead-3oyz day-0 retry-claim columns,
+        // additive). The V28 rediff_refetch_state tables probed below are
+        // unchanged by any of it. Pinned to the LITERAL: comparing against
+        // `currentSchemaVersion` would pass for every value.
+        #expect(AnalysisStore.currentSchemaVersion == 46)
         // Probe by using the API — both tables must be queryable.
         #expect(try await store.fetchRediffRefetchStates().isEmpty)
         #expect(try await store.fetchRediffBandwidthTotals() == RediffBandwidthTotals())
