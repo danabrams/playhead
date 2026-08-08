@@ -55,13 +55,25 @@ struct FMInferenceDeadlineTests {
     /// Safe in the parallel gate: it asserts only WHICH error is thrown, never
     /// how fast. Starvation delays the timeout; it cannot turn it into success,
     /// because the operation sleeps 600x the budget.
+    ///
+    /// playhead-ezmv: the assertion inspects `deadline` rather than comparing
+    /// whole values — the error now also carries `peersAtStart`, read from the
+    /// SHARED census, and the parallel gate legitimately has other bounded
+    /// calls in flight, so the whole-value form would flake on a reading that
+    /// is correct.
     @Test("a call that outlives the deadline throws FMInferenceTimeoutError")
     func slowCallTimesOut() async {
-        await #expect(throws: FMInferenceTimeoutError(deadline: .milliseconds(50))) {
-            try await FMInferenceDeadline.run(.milliseconds(50)) {
+        do {
+            _ = try await FMInferenceDeadline.run(.milliseconds(50)) {
                 try await Task.sleep(for: .seconds(30))
                 return "never"
             }
+            Issue.record("expected the 50ms deadline to fire")
+        } catch let timeout as FMInferenceTimeoutError {
+            #expect(timeout.deadline == .milliseconds(50))
+            #expect(timeout.peersAtStart >= 0)
+        } catch {
+            Issue.record("expected FMInferenceTimeoutError, got \(error)")
         }
     }
 
@@ -572,6 +584,110 @@ struct FMInferenceDeadlineTimingTests {
             abandoned call — see the file header on FMInferenceDeadline.
             """
         )
+    }
+}
+
+// MARK: - playhead-ezmv: the daemon-call census
+
+@Suite("playhead-ezmv: FMDaemonCallCensus at the deadline chokepoint")
+struct FMDaemonCallCensusTests {
+
+    /// The census must count a call for the LIFETIME OF APPLE'S CALL, not for
+    /// the lifetime of our wait. The deadline abandons the wait; the XPC it
+    /// abandoned is still load on the daemon, and the whole point of the
+    /// census is that a later `tokenCount` can see it.
+    @Test("an abandoned call keeps counting until the operation actually returns")
+    func abandonedCallKeepsCounting() async throws {
+        let census = FMDaemonCallCensus()
+        let operationStarted = AsyncSignal()
+        let release = AsyncSignal()
+        let operationFinished = AsyncSignal()
+
+        await #expect(throws: FMInferenceTimeoutError.self) {
+            try await FMInferenceDeadline.run(.milliseconds(20), census: census) {
+                await operationStarted.signal()
+                await release.wait()
+                await operationFinished.signal()
+                return "late"
+            }
+        }
+
+        // The deadline has fired and the caller has moved on — but the
+        // operation is still parked on `release`, so it is still in flight
+        // on the daemon and must still be counted.
+        await operationStarted.wait()
+        #expect(census.inFlight == 1,
+                "an abandoned-but-running call left the census at \(census.inFlight); it is still daemon load")
+
+        // Only the operation's own completion exits the census.
+        await release.signal()
+        await operationFinished.wait()
+        // The exit runs in the operation task after `operationFinished` is
+        // signalled; yield until it lands rather than sleeping and hoping.
+        for _ in 0..<10_000 where census.inFlight != 0 {
+            await Task.yield()
+        }
+        #expect(census.inFlight == 0)
+    }
+
+    @Test("a completed call exits the census, and a lone call observes zero peers")
+    func loneCallObservesZeroPeers() async throws {
+        let census = FMDaemonCallCensus()
+        #expect(census.enter() == 0, "the first call in flight has no peers — enter() must read BEFORE counting itself")
+        census.exit()
+        #expect(census.inFlight == 0)
+
+        let value = try await FMInferenceDeadline.run(.seconds(30), census: census) { "answered" }
+        #expect(value == "answered")
+        #expect(census.inFlight == 0, "a completed bounded call must not leak a census entry")
+    }
+
+    @Test("the census is entered even when the bound is disabled — an unbounded call is still daemon load")
+    func disabledBoundStillCounts() async throws {
+        let census = FMDaemonCallCensus()
+        let observedDuringCall = try await FMInferenceDeadline.run(.zero, census: census) {
+            census.inFlight
+        }
+        #expect(observedDuringCall == 1)
+        #expect(census.inFlight == 0)
+    }
+
+    /// The reading the ezmv stall table needs: WHEN the timed-out call was
+    /// issued, how many of our own calls were already outstanding. Carried on
+    /// the error because the error is what reaches the defer site.
+    @Test("a timeout error carries the census reading from the instant the call was issued")
+    func timeoutErrorCarriesPeersAtStart() async throws {
+        let census = FMDaemonCallCensus()
+        let peerStarted = AsyncSignal()
+        let releasePeer = AsyncSignal()
+
+        // A peer call that is in flight for the duration of the test.
+        let peer = Task {
+            try await FMInferenceDeadline.run(.seconds(30), census: census) {
+                await peerStarted.signal()
+                await releasePeer.wait()
+                return "peer"
+            }
+        }
+        await peerStarted.wait()
+
+        do {
+            _ = try await FMInferenceDeadline.run(.milliseconds(20), census: census) {
+                try await Task.sleep(for: .seconds(30))
+                return "never"
+            }
+            Issue.record("expected the 20ms deadline to fire")
+        } catch let timeout as FMInferenceTimeoutError {
+            #expect(timeout.peersAtStart == 1,
+                    "one peer was in flight at issue time; the error carried \(timeout.peersAtStart)")
+        }
+
+        await releasePeer.signal()
+        _ = try await peer.value
+        for _ in 0..<10_000 where census.inFlight != 0 {
+            await Task.yield()
+        }
+        #expect(census.inFlight == 0)
     }
 }
 

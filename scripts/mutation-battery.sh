@@ -1151,6 +1151,10 @@ FMREF="Playhead/Services/AdDetection/FMDaemonRefusal.swift"
 RUNNER="Playhead/Services/AdDetection/BackfillJobRunner.swift"
 FMCLS="Playhead/Services/AdDetection/FoundationModelClassifier.swift"
 PROBE="Playhead/Services/Capabilities/FoundationModelsUsabilityProbe.swift"
+# playhead-rkfp/ezmv: the deadline chokepoint (census + suspending-clock
+# timer) and the two-clock reading behind semantic_scan_results V45.
+FMDL="Playhead/Services/AdDetection/FMInferenceDeadline.swift"
+FMCP="Playhead/Services/AdDetection/FMClockPair.swift"
 # playhead-e75l R4: the THIRD injected inference budget. R2's enumeration
 # derived the call sites and hand-picked one default to pin; this file carries
 # one of the two it did not.
@@ -1328,6 +1332,7 @@ MUTABLE_FILES=(
   "$ORCH" "$STORE" "$CTRL" "$VIEW" "$TRIG" "$RSVC" "$TRUST" "$NPV" "$NPVM"
   "$BWPOL" "$KICK" "$KCOORD" "$SEAMS" "$ACT" "$ADSVC" "$PODC"
   "$THROT" "$FMREF" "$RUNNER" "$FMCLS" "$PROBE" "$PERMC" "$RT" "$MODEL" "$INGO" "$INVF"
+  "$FMDL" "$FMCP"
   "$SWEEP" "$SCANORD" "$SCRATCH" "$SCRATCHH" "$FMSUP" "$GATE"
   "$FUSION" "$DSPAN" "$EXTENT" "$RSLOT" "$ATOMEV"
   "$DETCLS" "$DETLED" "$SPLIT" "$HOTGATE" "$UGCEN" "$POLICY" "$SEGAGG"
@@ -1394,6 +1399,16 @@ FOCUSED_SUITES=(
   # shipped kvs8's literal for a condition that is not a throttle.
   -only-testing:PlayheadTests/FMDaemonRefusalDefinitionTests
   -only-testing:PlayheadTests/FMDaemonMetadataStallRunnerTests
+  # playhead-rkfp/ezmv: the wait-vs-infer split (FZ series). Four suites:
+  # the census at the deadline chokepoint (pure, instant); the two-clock pair
+  # with synthetic instants (pure, instant); the classifier wiring that stamps
+  # the split on success and failure rows; and the store round-trip that is
+  # the only thing able to see a crossed wire or a NULL-to-0 default at the
+  # persistence seam.
+  -only-testing:PlayheadTests/FMDaemonCallCensusTests
+  -only-testing:PlayheadTests/FMClockPairTests
+  -only-testing:PlayheadTests/CoarseLatencySplitTests
+  -only-testing:PlayheadTests/SemanticScanPersistenceTests
   -only-testing:PlayheadTests/FMDaemonRefusalSourceCanaryTests
   # playhead-cgka: the scratch-reaper rails (Z series). 13 tests, ~0.06s — it
   # costs nothing to carry in every batch and the alternative is a second
@@ -2731,6 +2746,15 @@ T_IU0T_SPLITLINE="TranscriptCanonicalizationRuleCanaryTests/testTheSiteFinderSee
 T_IU0T_LAUNDER="TranscriptCanonicalizationRuleCanaryTests/testCanonicalizingAndThenCollapsingIsNotCanonicalized"
 
 # --- playhead-e75l: the daemon-refusal rails (DR series) -------------------
+# playhead-rkfp/ezmv (FZ series): the wait-vs-infer split.
+T_FZ_TIMERCLOCK="FMUnboundedCallCanaryTests/testInferenceDeadlineTimerSleepsOnTheSuspendingClock"
+T_FZ_CENSUSEXIT="a completed call exits the census, and a lone call observes zero peers"
+T_FZ_PEERS="a timeout error carries the census reading from the instant the call was issued"
+T_FZ_CLOCKPAIR="each reading derives from its own clock — a 10s continuous / 3s suspending span reports both"
+T_FZ_SUFFIX="playhead-ezmv: the defer cause carries the ERROR's census reading, not a reading taken at catch time"
+T_FZ_ROUNDTRIP="playhead-rkfp/ezmv (V45): the wait-vs-infer split round-trips, and NULL stays NULL"
+T_FZ_FAILSPLIT="a failed window's row carries the split too — failures are where the 1,955.6s row lived"
+T_FZ_OKSPLIT="a successful window's row carries a same-span suspending twin and a census reading"
 T_DR_DEFERS="a metadata-deadline timeout in the PROLOGUE defers the job — it must not mark it failed"
 T_DR_COST="THE COST, DIRECTLY: three metadata stalls must not disqualify an episode forever"
 T_DR_CAUSE="a metadata stall records a NAMED cause, not the error's Swift description"
@@ -5408,6 +5432,39 @@ MUTATIONS=(
   # what the SWEPT rows carry names a cause no swept row holds.
   "DR20|516|RUNNER|$T_DR_CAUSEFIELDS"
 
+  # ---- playhead-rkfp / playhead-ezmv: the wait-vs-infer split (FZ series) ----
+  #
+  # Batch 600. Seven mutations, one build, and no two can redden the same
+  # expectation:
+  #   FZ01 swaps the deadline timer back to the continuous clock — only the
+  #        source canary can see it (an always-awake simulator cannot).
+  #   FZ02 stops the census exit — a completed call stays counted forever.
+  #        NOT batched with FZ03: FZ02 also reddens the peers test's final
+  #        inFlight==0 check, which is FZ03's expectation.
+  #   FZ04 wires the suspending reading to the continuous clock — the exact
+  #        crossed wire the synthetic-instant test exists to see.
+  #   FZ05 drops the census suffix from the metadata-stall defer cause.
+  #   FZ06 binds the suspendingLatencyMs COLUMN from latencyMs — the write-side
+  #        crossed wire; on every awake fixture the two agree, so only the
+  #        field-row fixture (1,955,575.3 vs 451,600) can see it.
+  #   FZ08/FZ09 stop stamping the split on the failure/success arm — distinct
+  #        tests, distinct anchors, independent arms.
+  "FZ01|600|FMDL|$T_FZ_TIMERCLOCK"
+  "FZ02|600|FMDL|$T_FZ_CENSUSEXIT"
+  "FZ04|600|FMCP|$T_FZ_CLOCKPAIR"
+  "FZ05|600|RUNNER|$T_FZ_SUFFIX"
+  "FZ06|600|STORE|$T_FZ_ROUNDTRIP"
+  "FZ08|600|FMCLS|$T_FZ_FAILSPLIT"
+  "FZ09|600|FMCLS|$T_FZ_OKSPLIT"
+
+  # Batch 601. FZ03 reads the census AFTER entering (self-included, +1 on every
+  # reading) — separated from FZ02, which reddens the same test's teardown
+  # check. FZ07 defaults a NULL split column to 0 on the READ — "unmeasured"
+  # becomes "no sleep, no peers" for every pre-V45 row; separated from FZ06
+  # because both redden the same round-trip test.
+  "FZ03|601|FMDL|$T_FZ_PEERS"
+  "FZ07|601|STORE|$T_FZ_ROUNDTRIP"
+
   # DR21 — `sweptSiblingCount` incremented ABOVE the `do` rather than after the
   # defer returns. The declaration, increment and read all survive, so R5's
   # "exactly three occurrences" rule is not what catches it; the ORDER is. The
@@ -6564,6 +6621,15 @@ describe_mutation() {
     DR19) echo "e75l R6: the per-job refusal line's cause= field takes the SIBLING token — a job refused on its own run reports the cause reserved for jobs never asked" ;;
     DR20) echo "e75l R6: the drain-stop line's siblingCause= field takes the refused job's token — the field naming what the swept rows carry names a cause no swept row holds" ;;
     DR21) echo "e75l R6: sweptSiblingCount is incremented ABOVE the defer — a sibling rejected by the terminal-row guard is counted as swept and deferredSiblings= over-reports" ;;
+    FZ01) echo "rkfp: the deadline timer sleeps on ContinuousClock — device sleep bills the budget and races the thawed reply" ;;
+    FZ02) echo "ezmv: census.exit() leaves the operation task — a completed call is counted forever" ;;
+    FZ03) echo "ezmv: peersAtStart read AFTER enter — every reading includes the call itself (+1)" ;;
+    FZ04) echo "rkfp: FMClockPair.elapsed wires suspendingMs to the continuous clock — the split reads zero sleep forever" ;;
+    FZ05) echo "ezmv: the metadataStall defer cause drops its (peers=N) census suffix" ;;
+    FZ06) echo "rkfp: insertSemanticScanResult binds suspendingLatencyMs from latencyMs — the write-side crossed wire" ;;
+    FZ07) echo "rkfp: the READ defaults a NULL split column to 0 — unmeasured becomes a measurement" ;;
+    FZ08) echo "rkfp: the coarse failure arm stops stamping the split" ;;
+    FZ09) echo "rkfp: the coarse success arm stops stamping the split" ;;
     DR22) echo "e75l R7: the drain-stop EVENT is bound to a fixed kind, so a drain stopped by metadata stalls emits kvs8's throttle event — R1's defect with no literal for the hard-coding rail to see" ;;
     DR23) echo "e75l R7: the drain-stop line's consecutive= reports the drain-wide deferred.count instead of the run of back-to-back refusals" ;;
     DR24) echo "e75l R7: the per-job line's consecutive= reports job.retryCount — the quantity this bead PRESERVES, so the field can never move" ;;
@@ -13124,6 +13190,171 @@ EOF
 
   # DR21 — R6 review. Probe R6-PB3 made a record: the sweep's counter
   # incremented before the write it is counting. SURVIVED on first plant.
+  # ---- playhead-rkfp / playhead-ezmv: wait-vs-infer split (FZ series) ----
+
+  # FZ01 — the deadline timer back on the continuous clock. Behaviour-identical
+  # on an always-awake simulator, so only the source canary can see it; on a
+  # device it bills device sleep to the call's budget and races the buffered
+  # reply at thaw — the exact mechanism behind the 1,955.6 s field row.
+  FZ01)
+    snippet OLD <<'EOF'
+                try await Task.sleep(for: deadline, tolerance: nil, clock: SuspendingClock())
+EOF
+    snippet NEW <<'EOF'
+                try await Task.sleep(for: deadline, tolerance: nil, clock: ContinuousClock())
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # FZ02 — the census exit leaves the operation task. A completed call then
+  # stays counted forever, so every reading inflates monotonically and
+  # "peers=0" becomes unwritable — the census reports contention that is not
+  # happening, which is the opposite lie to the one it exists to end.
+  FZ02)
+    snippet OLD <<'EOF'
+            defer { census.exit() }
+            do {
+                await race.settle(.success(try await operation()))
+EOF
+    snippet NEW <<'EOF'
+            do {
+                await race.settle(.success(try await operation()))
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # FZ03 — peers read AFTER the call is counted. Every reading is +1: a lone
+  # call reports one peer, and the ezmv confirm/refute query counts
+  # self-contention on every stall including the frozen-wait ones.
+  FZ03)
+    snippet OLD <<'EOF'
+        let peersAtStart = census.enter()
+EOF
+    snippet NEW <<'EOF'
+        _ = census.enter()
+        let peersAtStart = census.inFlight
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # FZ04 — the suspending reading computed from the continuous clock. On every
+  # awake fixture the two agree, so only the synthetic-instant test can see it;
+  # in the field the split reads "no sleep anywhere, ever" and the 1,955.6 s
+  # class of row becomes unexplainable again.
+  FZ04)
+    snippet OLD <<'EOF'
+        FMClockPairReading(
+            continuousMs: Self.milliseconds(of: continuousNow - continuousStart),
+            suspendingMs: Self.milliseconds(of: suspendingNow - suspendingStart)
+        )
+EOF
+    snippet NEW <<'EOF'
+        FMClockPairReading(
+            continuousMs: Self.milliseconds(of: continuousNow - continuousStart),
+            suspendingMs: Self.milliseconds(of: continuousNow - continuousStart)
+        )
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # FZ05 — the defer cause loses its census reading. The row still defers, the
+  # token still greps, and the next device pull can no longer say whose
+  # inference the stalled tokenizer was waiting behind — the ezmv claim goes
+  # back to unfalsifiable.
+  FZ05)
+    snippet OLD <<'EOF'
+                    let peersSuffix = (error as? FMInferenceTimeoutError)
+                        .map { "(peers=\($0.peersAtStart))" } ?? ""
+EOF
+    snippet NEW <<'EOF'
+                    let peersSuffix = ""
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # FZ06 — the write-side crossed wire: the suspending COLUMN bound from
+  # latencyMs. Plausible-looking (both are "the row's latency"), agrees on
+  # every awake fixture, and makes latencyMs − suspendingLatencyMs read 0 for
+  # every row — "no freeze ever happened".
+  FZ06)
+    snippet OLD <<'EOF'
+        bind(stmt, 26, result.suspendingLatencyMs)
+EOF
+    snippet NEW <<'EOF'
+        bind(stmt, 26, result.latencyMs)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # FZ07 — the READ defaults NULL to 0, T03/T06's defect on the new columns:
+  # every pre-V45 row claims "zero awake time, zero peers" — measurements
+  # nobody made, asserted retroactively about exactly the rows this bead was
+  # filed to explain.
+  FZ07)
+    snippet OLD <<'EOF'
+            suspendingLatencyMs: optionalDouble(stmt, 25),
+            daemonPeersAtStart: optionalInt(stmt, 26),
+EOF
+    snippet NEW <<'EOF'
+            suspendingLatencyMs: optionalDouble(stmt, 25) ?? 0,
+            daemonPeersAtStart: optionalInt(stmt, 26) ?? 0,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # FZ08 — the failure arm stops stamping the split. Failure rows are where the
+  # 1,955.6 s row lived; a NULL there reads "not measured" and the next pull is
+  # back to one conflated number for precisely the rows under investigation.
+  FZ08)
+    snippet OLD <<'EOF'
+                        CoarseWindowFailure(
+                            plan: plan,
+                            status: status,
+                            latencyMillis: windowAttemptLatency,
+                            suspendingLatencyMillis: windowAttemptReading.suspendingMs,
+                            daemonPeersAtStart: attemptPeers
+                        )
+EOF
+    snippet NEW <<'EOF'
+                        CoarseWindowFailure(
+                            plan: plan,
+                            status: status,
+                            latencyMillis: windowAttemptLatency
+                        )
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # FZ09 — the success arm stops stamping the split. 28 of the 30 over-30s
+  # rows in the pull are successes; without the twin their slow tail cannot be
+  # split into "model time" and "frozen time" on the next pull.
+  FZ09)
+    snippet OLD <<'EOF'
+            let reading = attemptClocks.elapsed()
+            return .success([
+                FMCoarseWindowOutput(
+                    windowIndex: 0,
+                    lineRefs: plan.lineRefs,
+                    startTime: plan.startTime,
+                    endTime: plan.endTime,
+                    transcriptQuality: plan.transcriptQuality,
+                    screening: screening,
+                    latencyMillis: reading.continuousMs,
+                    suspendingLatencyMillis: reading.suspendingMs,
+                    daemonPeersAtStart: attemptPeers
+                )
+            ])
+        } catch {
+EOF
+    snippet NEW <<'EOF'
+            let reading = attemptClocks.elapsed()
+            return .success([
+                FMCoarseWindowOutput(
+                    windowIndex: 0,
+                    lineRefs: plan.lineRefs,
+                    startTime: plan.startTime,
+                    endTime: plan.endTime,
+                    transcriptQuality: plan.transcriptQuality,
+                    screening: screening,
+                    latencyMillis: reading.continuousMs
+                )
+            ])
+        } catch {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
   DR21)
     snippet OLD <<'EOF'
                 do {
@@ -14175,6 +14406,8 @@ rec_file()   {
     RUNNER) printf '%s' "$RUNNER" ;;
     FMCLS) printf '%s' "$FMCLS" ;;
     PROBE) printf '%s' "$PROBE" ;;
+    FMDL)  printf '%s' "$FMDL" ;;
+    FMCP)  printf '%s' "$FMCP" ;;
     PERMC) printf '%s' "$PERMC" ;;
     RT)    printf '%s' "$RT" ;;
     MODEL) printf '%s' "$MODEL" ;;

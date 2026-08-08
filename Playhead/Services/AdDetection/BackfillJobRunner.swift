@@ -1365,10 +1365,21 @@ actor BackfillJobRunner {
                 if let refusal = FMDaemonRefusal.classify(error) {
                     daemonRefusalThisJob = refusal
                     consecutiveDaemonRefusals += 1
+                    // playhead-ezmv: when the refusal is a timed-out call, the
+                    // error carries the census reading from the instant the
+                    // call was ISSUED — how many of our own daemon calls were
+                    // already in flight. Appended in parentheses so the
+                    // greppable token is untouched (`grep -c
+                    // 'metadataStall-refused'` still counts these rows) while
+                    // the pull can finally answer WHOSE inference the stalled
+                    // tokenizer was waiting behind: `peers=0` refutes
+                    // self-contention for that stall, `peers>=1` confirms it.
+                    let peersSuffix = (error as? FMInferenceTimeoutError)
+                        .map { "(peers=\($0.peersAtStart))" } ?? ""
                     do {
                         try await store.markBackfillJobDeferred(
                             jobId: job.jobId,
-                            reason: refusal.passPrologueCause
+                            reason: refusal.passPrologueCause + peersSuffix
                         )
                         deferred.append(job.jobId)
                     } catch {
@@ -5324,6 +5335,8 @@ actor BackfillJobRunner {
             inputTokenCount: nil,
             outputTokenCount: nil,
             latencyMs: windowOutput.latencyMillis,
+            suspendingLatencyMs: windowOutput.suspendingLatencyMillis,
+            daemonPeersAtStart: windowOutput.daemonPeersAtStart,
             prewarmHit: false,
             scanCohortJSON: scanCohortJSON,
             transcriptVersion: inputs.transcriptVersion,
@@ -5456,6 +5469,8 @@ actor BackfillJobRunner {
         jobPhase: BackfillJobPhase,
         status: SemanticScanStatus,
         latencyMs: Double,
+        suspendingLatencyMs: Double? = nil,
+        daemonPeersAtStart: Int? = nil,
         runMode: SemanticScanPhase,
         windowKey: String? = nil
     ) -> SemanticScanResult? {
@@ -5493,6 +5508,8 @@ actor BackfillJobRunner {
             inputTokenCount: nil,
             outputTokenCount: nil,
             latencyMs: latencyMs,
+            suspendingLatencyMs: suspendingLatencyMs,
+            daemonPeersAtStart: daemonPeersAtStart,
             prewarmHit: false,
             scanCohortJSON: scanCohortJSON,
             transcriptVersion: inputs.transcriptVersion,
@@ -5567,6 +5584,11 @@ actor BackfillJobRunner {
             jobPhase: jobPhase,
             status: failure.status,
             latencyMs: latencyMs,
+            // playhead-rkfp: the twins come off the FAILURE, never off the
+            // pass — a failure that did not measure itself gets NULL, not a
+            // number from a different span.
+            suspendingLatencyMs: failure.suspendingLatencyMillis,
+            daemonPeersAtStart: failure.daemonPeersAtStart,
             runMode: runMode
         )
     }

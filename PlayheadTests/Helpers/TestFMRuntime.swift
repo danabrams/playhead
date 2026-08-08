@@ -284,6 +284,14 @@ enum TestFMRuntimeFailure: Sendable {
     /// does no generation at all" — evidence about the daemon, not the model.
     case metadataTimeout
 
+    /// playhead-ezmv: `.metadataTimeout` whose error carries a non-zero
+    /// `FMDaemonCallCensus` reading — the fixture for "the stalled tokenizer
+    /// was waiting behind N of our own in-flight calls". A separate case for
+    /// the same reason `.metadataTimeout` is: a call site that passes the
+    /// number is a call site that can pass the wrong one, and the zero-peers
+    /// path must stay the un-parameterised default.
+    case metadataTimeoutWithPeers(Int)
+
     var error: Error {
         // playhead-8d5r: not a FoundationModels error — the deadline is ours.
         //
@@ -303,6 +311,12 @@ enum TestFMRuntimeFailure: Sendable {
         if case .metadataTimeout = self {
             return FMInferenceTimeoutError(deadline: FMInferenceDeadline.metadata)
         }
+        if case let .metadataTimeoutWithPeers(peers) = self {
+            return FMInferenceTimeoutError(
+                deadline: FMInferenceDeadline.metadata,
+                peersAtStart: peers
+            )
+        }
         #if canImport(FoundationModels)
         if #available(iOS 26.0, *) {
             let context = LanguageModelSession.GenerationError.Context(debugDescription: "test-fm-runtime")
@@ -316,7 +330,7 @@ enum TestFMRuntimeFailure: Sendable {
                 return LanguageModelSession.GenerationError.guardrailViolation(context)
             case .rateLimited:
                 return LanguageModelSession.GenerationError.rateLimited(context)
-            case .inferenceTimeout, .metadataTimeout:
+            case .inferenceTimeout, .metadataTimeout, .metadataTimeoutWithPeers:
                 // Unreachable — handled by the early returns above. Kept so the
                 // switch stays exhaustive.
                 break

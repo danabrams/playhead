@@ -105,6 +105,78 @@ struct SemanticScanPersistenceTests {
         #expect(byAsset == [result])
     }
 
+    @Test("playhead-rkfp/ezmv (V45): the wait-vs-infer split round-trips, and NULL stays NULL")
+    func latencySplitColumnsRoundTrip() async throws {
+        // Non-nil values chosen so a dropped bind or a crossed read CANNOT
+        // pass: the whole-struct equality above is satisfied by nil == nil,
+        // which is exactly what a write path that ignores the new columns
+        // produces. 1,955,575.3 / 451,600 are the field row's numbers — the
+        // continuous span and its awake share — so the fixture also documents
+        // the population each column names.
+        let store = try await makeTestStore()
+        try await store.insertAsset(makePersistenceTestAsset())
+
+        let measured = SemanticScanResult(
+            id: "scan-split-1",
+            analysisAssetId: "asset-1",
+            windowFirstAtomOrdinal: 20,
+            windowLastAtomOrdinal: 28,
+            windowStartTime: 450.84,
+            windowEndTime: 502.38,
+            scanPass: "passA",
+            transcriptQuality: .good,
+            disposition: .abstain,
+            spansJSON: "[]",
+            status: .permissiveDecodingFailure,
+            attemptCount: 2,
+            errorContext: nil,
+            inputTokenCount: nil,
+            outputTokenCount: nil,
+            latencyMs: 1_955_575.3,
+            suspendingLatencyMs: 451_600,
+            daemonPeersAtStart: 1,
+            prewarmHit: false,
+            scanCohortJSON: try makeScanCohortJSON(),
+            transcriptVersion: "tx-v1",
+            createdAt: 1700000002.0
+        )
+        try await store.insertSemanticScanResult(measured)
+        let fetchedMeasured = try await store.fetchSemanticScanResult(id: measured.id)
+        #expect(fetchedMeasured?.suspendingLatencyMs == 451_600)
+        #expect(fetchedMeasured?.daemonPeersAtStart == 1)
+        #expect(fetchedMeasured == measured)
+
+        // And the absence side: a row written WITHOUT the measurement must
+        // come back NULL, never 0 — "unmeasured" and "no sleep, no peers" are
+        // different claims and the store must not convert one into the other.
+        let unmeasured = SemanticScanResult(
+            id: "scan-split-2",
+            analysisAssetId: "asset-1",
+            windowFirstAtomOrdinal: 30,
+            windowLastAtomOrdinal: 38,
+            windowStartTime: 600,
+            windowEndTime: 660,
+            scanPass: "passB",
+            transcriptQuality: .good,
+            disposition: .containsAd,
+            spansJSON: "[]",
+            status: .success,
+            attemptCount: 1,
+            errorContext: nil,
+            inputTokenCount: nil,
+            outputTokenCount: nil,
+            latencyMs: 5_000,
+            prewarmHit: false,
+            scanCohortJSON: try makeScanCohortJSON(),
+            transcriptVersion: "tx-v1",
+            createdAt: 1700000003.0
+        )
+        try await store.insertSemanticScanResult(unmeasured)
+        let fetchedUnmeasured = try await store.fetchSemanticScanResult(id: unmeasured.id)
+        #expect(fetchedUnmeasured?.suspendingLatencyMs == nil)
+        #expect(fetchedUnmeasured?.daemonPeersAtStart == nil)
+    }
+
     @Test("bind helper preserves UTF-8 edge cases (emoji, RTL, combining marks)")
     func bindHelperPreservesUTF8EdgeCases() async throws {
         let store = try await makeTestStore()

@@ -434,8 +434,16 @@ struct FMDaemonMetadataStallRunnerTests {
         let jobId = try #require(result.admittedJobIds.first)
         let row = try #require(await store.fetchBackfillJob(byId: jobId))
 
-        #expect(row.deferReason == Self.expectedCause,
-                "expected the metadata-stall cause; got \(row.deferReason ?? "nil")")
+        // playhead-ezmv: the cause now carries the census reading from the
+        // instant the stalled call was issued, in parentheses AFTER the token
+        // so `grep -c 'metadataStall-refused'` still counts these rows. The
+        // fixture's error carries the default reading (no peers), so the
+        // suffix is deterministic here; the peers>0 path has its own test
+        // below.
+        #expect(row.deferReason == Self.expectedCause + "(peers=0)",
+                "expected the metadata-stall cause with its census suffix; got \(row.deferReason ?? "nil")")
+        #expect(row.deferReason?.hasPrefix(Self.expectedCause) == true,
+                "the greppable token must stay a PREFIX of the recorded cause")
 
         // Never the Swift description, which is what the field row carried and
         // which no operator can group or count.
@@ -450,6 +458,34 @@ struct FMDaemonMetadataStallRunnerTests {
         // R2-Fix1: nor playhead-8d5r's family, which counts a model that is
         // not answering — the opposite claim to the one this row makes.
         #expect(!reason.hasPrefix("inferenceTimeout-"))
+    }
+
+    @available(iOS 26.0, *)
+    @Test("playhead-ezmv: the defer cause carries the ERROR's census reading, not a reading taken at catch time")
+    func metadataStallCauseCarriesThePeersReadingFromTheError() async throws {
+        // The value must come off the caught `FMInferenceTimeoutError` —
+        // the census AT THE INSTANT THE CALL WAS ISSUED — because by catch
+        // time the peer that caused the stall may have finished. A runner
+        // that re-read the live census here would write `peers=0` for
+        // exactly the stalls the column exists to explain.
+        let store = try await makeTestStore()
+        let assetId = "asset-ezmv-peers"
+        try await store.insertAsset(makeAsset(id: assetId))
+        let runtime = TestFMRuntime(
+            contextSize: Self.contextSize,
+            coarseSchemaTokenCount: Self.coarseSchemaTokenCount,
+            coarseSchemaTokenCountFailure: .metadataTimeoutWithPeers(2),
+            tokenCountRule: windowingTokenRule()
+        )
+        let runner = makeRunner(store: store, runtime: runtime.runtime)
+
+        let result = try await runner.runPendingBackfill(for: makeInputs(assetId: assetId))
+        let jobId = try #require(result.admittedJobIds.first)
+        let row = try #require(await store.fetchBackfillJob(byId: jobId))
+
+        #expect(row.status == .deferred)
+        #expect(row.deferReason == Self.expectedCause + "(peers=2)",
+                "expected the error's census reading in the cause; got \(row.deferReason ?? "nil")")
     }
 
     @available(iOS 26.0, *)
@@ -755,7 +791,9 @@ struct FMDaemonMetadataStallRunnerTests {
 
         #expect(reasons.contains(FMDaemonRefusal.throttle.passPrologueCause),
                 "the throttled job did not record kvs8's cause: \(reasons)")
-        #expect(reasons.contains(FMDaemonRefusal.metadataStall.passPrologueCause),
+        // playhead-ezmv: PREFIX, not equality — the stall cause now carries
+        // the census suffix `(peers=N)` after the greppable token.
+        #expect(reasons.contains(where: { $0.hasPrefix(FMDaemonRefusal.metadataStall.passPrologueCause) }),
                 "the stalled job did not record the stall cause: \(reasons)")
 
         let siblings = reasons.filter { $0.contains("batchSibling") }
@@ -1151,7 +1189,21 @@ final class FMDaemonRefusalSourceCanaryTests: XCTestCase {
         // The durable writes, in source order. Every `reason:` label in the
         // runner is scanned and only those naming an `FMDaemonRefusal` cause
         // property are kept, so nothing here is a list of expected spellings.
+        //
+        // playhead-ezmv: the refused job's own write may carry the census
+        // suffix — `refusal.passPrologueCause + peersSuffix` — appended AFTER
+        // the enum token so the greppable prefix is untouched. The suffix is
+        // normalised away here under a NAMING OBLIGATION: it must be spelled
+        // exactly `peersSuffix`, so this canary keeps seeing the enum property
+        // underneath. Any other spelling (a literal, a different variable)
+        // fails the count below, which is the point — the token itself must
+        // still reach the store through the enum.
         let refusalWrites = Self.firstArguments(after: "reason:", in: dense)
+            .map { argument in
+                argument.hasSuffix("+peersSuffix")
+                    ? String(argument.dropLast("+peersSuffix".count))
+                    : argument
+            }
             .filter { $0.hasSuffix("Cause") }
         XCTAssertEqual(
             refusalWrites.count,

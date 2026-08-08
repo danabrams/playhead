@@ -70,6 +70,26 @@ struct SemanticScanResult: Sendable, Equatable {
     let inputTokenCount: Int?
     let outputTokenCount: Int?
     let latencyMs: Double?
+    /// playhead-rkfp (schema V45): `latencyMs`'s twin over the SAME span,
+    /// measured on the SUSPENDING clock — device sleep excluded.
+    ///
+    /// `latencyMs` is a `ContinuousClock` span and includes every second the
+    /// process spent frozen between background grants: the 2026-08-06 device
+    /// pull's worst row read 1,955.6 s of which 1,504 s was a process freeze,
+    /// and one number cannot say so. `latencyMs − suspendingLatencyMs` is the
+    /// device-asleep share of the row; it reads 0 when the row never crossed
+    /// a sleep, and `nil` means "not measured" (pre-V45 rows, and paths not
+    /// yet threaded: shrink-split retries, subdivision, passB).
+    let suspendingLatencyMs: Double?
+    /// playhead-ezmv (schema V45): how many OTHER in-process Foundation Models
+    /// daemon calls were in flight when this row's window attempt began
+    /// (`FMDaemonCallCensus`, which counts abandoned-but-unreturned calls too).
+    ///
+    /// 0 means "no self-contention at this instant" — the honest reading for a
+    /// stall that was really a frozen wait or another process's load. `nil`
+    /// means "not measured". A lower bound: `prewarm` and non-ad-detection FM
+    /// use are not censused.
+    let daemonPeersAtStart: Int?
     let prewarmHit: Bool
     let scanCohortJSON: String
     let transcriptVersion: String
@@ -145,6 +165,8 @@ struct SemanticScanResult: Sendable, Equatable {
         inputTokenCount: Int?,
         outputTokenCount: Int?,
         latencyMs: Double?,
+        suspendingLatencyMs: Double? = nil,
+        daemonPeersAtStart: Int? = nil,
         prewarmHit: Bool,
         scanCohortJSON: String,
         transcriptVersion: String,
@@ -174,6 +196,8 @@ struct SemanticScanResult: Sendable, Equatable {
         self.inputTokenCount = inputTokenCount
         self.outputTokenCount = outputTokenCount
         self.latencyMs = latencyMs
+        self.suspendingLatencyMs = suspendingLatencyMs
+        self.daemonPeersAtStart = daemonPeersAtStart
         self.prewarmHit = prewarmHit
         self.scanCohortJSON = scanCohortJSON
         self.transcriptVersion = transcriptVersion
@@ -226,6 +250,8 @@ struct SemanticScanResult: Sendable, Equatable {
             inputTokenCount: inputTokenCount,
             outputTokenCount: outputTokenCount,
             latencyMs: latencyMs,
+            suspendingLatencyMs: suspendingLatencyMs,
+            daemonPeersAtStart: daemonPeersAtStart,
             prewarmHit: prewarmHit,
             scanCohortJSON: scanCohortJSON,
             transcriptVersion: transcriptVersion,

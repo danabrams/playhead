@@ -190,4 +190,34 @@ final class FMUnboundedCallCanaryTests: XCTestCase {
             "\(path): `touchCoarseLeaseIfLive` must NOT go through `markBackfillJobRunning` — since playhead-wxsv that accepts a `failed` row under the retry budget, so a leaked heartbeat would pull a watchdog-retired row into `running`, where nothing counts it as resumable and nothing can re-open it."
         )
     }
+
+    // MARK: - Claim 4 (playhead-rkfp): the deadline timer runs on the
+    // SUSPENDING clock
+
+    /// No runtime test can observe this: on an always-awake simulator the two
+    /// clocks are indistinguishable, and device sleep cannot be simulated from
+    /// inside the process. Yet the choice is load-bearing — the 2026-08-06
+    /// device pull's 1,955.6 s row spanned a 1,504 s process freeze, and a
+    /// timer on the CONTINUOUS clock both bills that freeze to the call's
+    /// budget and, at thaw, races the buffered XPC reply to kill an answer the
+    /// model already produced. The budget's derivation ("no plausible real
+    /// inference takes this long") is a claim about awake model time, so the
+    /// timer must measure awake time.
+    func testInferenceDeadlineTimerSleepsOnTheSuspendingClock() throws {
+        let path = "Services/AdDetection/FMInferenceDeadline.swift"
+        let lines = try codeLines(path)
+
+        let timerSleeps = lines.filter {
+            $0.contains("Task.sleep(for: deadline")
+        }
+        XCTAssertEqual(
+            timerSleeps.count,
+            1,
+            "\(path): expected exactly one deadline-timer sleep; found \(timerSleeps.count). If the timer moved, move this canary with it — do not delete it."
+        )
+        XCTAssertTrue(
+            timerSleeps.allSatisfy { $0.contains("clock: SuspendingClock()") },
+            "\(path): the deadline timer must sleep on `SuspendingClock`. On the continuous clock a device-sleep span bills the call's budget and the timer races the buffered reply at thaw — the exact mechanism behind the 1,955.6 s field row (playhead-rkfp)."
+        )
+    }
 }
