@@ -1,0 +1,76 @@
+{
+  "artifact_kind": "human_first_pass_attestation",
+  "audio_bindings": [
+    {
+      "annotation_decision": {
+        "ad_windows": [
+          {
+            "ad_type": "dynamic_insertion",
+            "advertiser": null,
+            "confidence_notes": "Pre-roll. Day-0 rediff byte-exact window ran 0.0-60.133; the owner's 2026-08-01 veto (exactTimeSpan 60.060-62.100) fixes the true ad end at 60.06. playhead-j4wi.",
+            "end_seconds": 60.06,
+            "product": null,
+            "start_seconds": 0.0,
+            "transition_type": null
+          },
+          {
+            "ad_type": "host_read",
+            "advertiser": "WhisperFlow",
+            "confidence_notes": "Mid-roll pod creative 1 of 2, owner falseNegative mark 2026-08-01 15:25:22. 'I've got 60 seconds ... because of our sponsor called Whisper Flow' ... 'head to whisperflow.ai slash Stephen'. Undetected by the pipeline. playhead-j4wi.",
+            "end_seconds": 2897.94,
+            "product": "Speech-to-text app",
+            "start_seconds": 2838.18,
+            "transition_type": "explicit"
+          },
+          {
+            "ad_type": "host_read",
+            "advertiser": "Ketone-IQ",
+            "confidence_notes": "Mid-roll pod creative 2 of 2, owner falseNegative mark 2026-08-01 15:26:04. 'Just like John Jones ...' ... 'go to ketone.com slash Stephen'. Undetected by the pipeline. playhead-j4wi.",
+            "end_seconds": 2953.68,
+            "product": "Ketone drink",
+            "start_seconds": 2898.66,
+            "transition_type": "blended"
+          },
+          {
+            "ad_type": "dynamic_insertion",
+            "advertiser": null,
+            "confidence_notes": "Post-roll. Day-0 rediff byte-exact window; device end 5522.6775510123671 exceeds the asset's episodeDurationSec 5522.6514375 by 0.026 s and is clamped to the episode duration for the partition invariant. Never corrected by the owner. playhead-j4wi.",
+            "end_seconds": 5522.6514375,
+            "product": null,
+            "start_seconds": 5462.570296660244,
+            "transition_type": null
+          }
+        ],
+        "audio_fingerprint": "sha256:16d072117c9404ad53d48271c37aefb21d72330c65afa0f6c5570851462348c8",
+        "content_windows": [
+          {
+            "end_seconds": 2838.18,
+            "notes": "Show content. Includes two owner-vetoed false positives: the 2.04 s pre-roll skip overshoot (60.06-62.10) and the 8.04 s lexical span persisted as 'acousticRefined' at 2828.40-2836.44 ('work in partnership with the artificial intelligence' - show content that false-fired the disclosure regex). playhead-j4wi.",
+            "start_seconds": 60.06
+          },
+          {
+            "end_seconds": 2898.66,
+            "notes": "0.72 s between the owner's two separate mid-roll marks - the creative seam. Not asserted skippable; present only so ad and content windows partition the timeline.",
+            "start_seconds": 2897.94
+          },
+          {
+            "end_seconds": 5462.570296660244,
+            "notes": "Show content between the mid-roll pod and the post-roll.",
+            "start_seconds": 2953.68
+          }
+        ],
+        "duration_seconds": 5522.6514375,
+        "episode_id": "doac-2026-07-31-ray-dalio-de0784d8",
+        "show_name": "Diary of a CEO",
+        "variant_of": null
+      },
+      "audio_fingerprint": "sha256:16d072117c9404ad53d48271c37aefb21d72330c65afa0f6c5570851462348c8",
+      "episode_id": "doac-2026-07-31-ray-dalio-de0784d8"
+    }
+  ],
+  "reviewed_at": "2026-08-01T15:26:04Z",
+  "reviewer": "Dan Abrams",
+  "schema_version": 1,
+  "source": "Device pull analysis.sqlite 2026-08-02: un-retracted correction_events for asset DE0784D8-BE2F-4BEB-8BA1-3D9EF51AD659 (playhead-j4wi). The three 2026-07-31 banner-confirm/veto churn pairs at 210-240, 2670-2700 and 4800-4950 are excluded.",
+  "source_decision_count": 10
+}
