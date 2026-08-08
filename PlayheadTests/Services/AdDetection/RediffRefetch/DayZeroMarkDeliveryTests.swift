@@ -592,7 +592,9 @@ struct DayZeroTriggerMarkDeliveryTests {
             suppressionRecorder: { _, _, _ in },
             mintedMarkDelivery: { delivery.record($0) },
             budgetWindowProvider: { .empty },
-            budgetSpendRecorder: { _, _ in }
+            budgetSpendRecorder: { _, _ in },
+            // playhead-3oyz: the retry lane is owned by DayZeroSameSessionRetryTests — opt out.
+            retryClaimRecorder: { _ in }
         )
     }
 
@@ -760,7 +762,9 @@ struct DayZeroFirstListenInSessionSkipTests {
             suppressionRecorder: { _, _, _ in },
             mintedMarkDelivery: delivery,
             budgetWindowProvider: { .empty },
-            budgetSpendRecorder: { _, _ in }
+            budgetSpendRecorder: { _, _ in },
+            // playhead-3oyz: the retry lane is owned by DayZeroSameSessionRetryTests — opt out.
+            retryClaimRecorder: { _ in }
         )
     }
 

@@ -866,7 +866,9 @@ struct DayZeroRescueTriggerTests {
             },
             mintedMarkDelivery: { _ in },
             budgetWindowProvider: { .empty },
-            budgetSpendRecorder: { _, _ in }
+            budgetSpendRecorder: { _, _ in },
+            // playhead-3oyz: the retry lane is owned by DayZeroSameSessionRetryTests — opt out.
+            retryClaimRecorder: { _ in }
         )
     }
 
@@ -981,7 +983,9 @@ struct DayZeroRescueTriggerTests {
             },
             mintedMarkDelivery: { _ in },
             budgetWindowProvider: { .empty },
-            budgetSpendRecorder: { _, _ in }
+            budgetSpendRecorder: { _, _ in },
+            // playhead-3oyz: the retry lane is owned by DayZeroSameSessionRetryTests — opt out.
+            retryClaimRecorder: { _ in }
         )
         await fire(trigger)
         #expect(!fetcher.calls.isEmpty,
@@ -1038,7 +1042,9 @@ struct DayZeroRescueTriggerTests {
             },
             mintedMarkDelivery: { _ in },
             budgetWindowProvider: { .empty },
-            budgetSpendRecorder: { _, _ in }
+            budgetSpendRecorder: { _, _ in },
+            // playhead-3oyz: the retry lane is owned by DayZeroSameSessionRetryTests — opt out.
+            retryClaimRecorder: { _ in }
         ))
         #expect(anchoredFetcher.calls.isEmpty,
                 "one anchored row on disk must stop the same rescue")

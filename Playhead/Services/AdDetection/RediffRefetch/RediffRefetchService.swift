@@ -281,6 +281,13 @@ actor RediffRefetchService {
         /// "trusting a number without asking what it measures" defect.
         /// Always `0` for the lagged sweep, which mints nothing.
         var dayZeroMarkCount = 0
+        /// playhead-3oyz: the terminal exit of THIS day-0 run, when the run
+        /// got far enough to have one — what the same-session retry decision
+        /// reads, alongside `fullFetchBytes`, so "retry?" is answered by the
+        /// named exit plus the MEASURED bytes rather than re-derived from
+        /// counters that mean something else. Always `nil` for the lagged
+        /// sweep, whose outcomes speak the `rediff_refetch_state` vocabulary.
+        var dayZeroExit: RediffDayZeroExit?
         var totalBytes: Int { precheckBytes + fullFetchBytes }
     }
 
@@ -329,6 +336,9 @@ actor RediffRefetchService {
         /// construction below stays literally unchanged and reports 0 — the
         /// lagged path has no minter and persists no windows.
         var dayZeroMarkCount: Int = 0
+        /// playhead-3oyz: the day-0 exit this candidate's run ended on.
+        /// Defaulted `nil` so the lagged-sweep constructions stay untouched.
+        var dayZeroExit: RediffDayZeroExit?
     }
 
     /// Pre-check one candidate; full-fetch + fingerprint/consume + DELETE only
@@ -548,6 +558,7 @@ actor RediffRefetchService {
             // a silent return is what made the 299.6 MB invisible.
             await recorder.recordOutcome(.dayZeroUnmarked(
                 assetId: candidate.assetId, cost: .zero, mint: .blocked(.minterUnavailable)))
+            summary.dayZeroExit = .minterUnavailable
             return summary
         }
         // playhead-p70f change 2 (in-process half): `kickOffDayZeroRediff` fires
@@ -559,6 +570,7 @@ actor RediffRefetchService {
             logger.info("rediff DAY-0 already in flight asset=\(candidate.assetId, privacy: .public) — declining the duplicate kickoff")
             await recorder.recordOutcome(.dayZeroUnmarked(
                 assetId: candidate.assetId, cost: .zero, mint: .blocked(.alreadyInFlight)))
+            summary.dayZeroExit = .alreadyInFlight
             return summary
         }
         defer { dayZeroInFlight.remove(candidate.assetId) }
@@ -578,6 +590,7 @@ actor RediffRefetchService {
         // the in-session delivery is about. `rotatedCount` above is a different
         // fact (the shared attempt state resolved) that happens to move with it.
         summary.dayZeroMarkCount += result.dayZeroMarkCount
+        summary.dayZeroExit = result.dayZeroExit
         logger.info(
             "rediff DAY-0 refetch asset=\(candidate.assetId, privacy: .public) marks=\(summary.dayZeroMarkCount, privacy: .public) resolved=\(summary.rotatedCount, privacy: .public) failed=\(summary.failedCount, privacy: .public) bytes=\(summary.totalBytes, privacy: .public)"
         )
@@ -614,7 +627,9 @@ actor RediffRefetchService {
             logger.info("rediff DAY-0 blocked BEFORE fetch asset=\(candidate.assetId, privacy: .public) exit=\(blocker.rawValue, privacy: .public) — 0 bytes spent")
             await recorder.recordOutcome(.dayZeroUnmarked(
                 assetId: candidate.assetId, cost: .zero, mint: .blocked(blocker)))
-            return CandidateResult(cost: .zero, rotated: false, failed: false)
+            return CandidateResult(
+                cost: .zero, rotated: false, failed: false, dayZeroExit: blocker
+            )
         }
         var fullFetchBytes = 0
         do {
@@ -655,7 +670,8 @@ actor RediffRefetchService {
                     assetId: candidate.assetId, cost: cost, mint: mint, newState: newState))
                 return CandidateResult(
                     cost: cost, rotated: true, failed: false,
-                    dayZeroMarkCount: mint.markCount
+                    dayZeroMarkCount: mint.markCount,
+                    dayZeroExit: mint.exit
                 )
             } else {
                 // POISONING FIX: no marks ⇒ bandwidth accounted, NO
@@ -665,7 +681,9 @@ actor RediffRefetchService {
                 // different table and is read by no lagged query.
                 await recorder.recordOutcome(.dayZeroUnmarked(
                     assetId: candidate.assetId, cost: cost, mint: mint))
-                return CandidateResult(cost: cost, rotated: false, failed: false)
+                return CandidateResult(
+                    cost: cost, rotated: false, failed: false, dayZeroExit: mint.exit
+                )
             }
         } catch {
             // POISONING FIX: a day-0 fetch error also advances NO lagged state —
@@ -681,7 +699,12 @@ actor RediffRefetchService {
                 assetId: candidate.assetId,
                 cost: cost,
                 mint: .blocked(.fetchFailed, detail: String(describing: error))))
-            return CandidateResult(cost: cost, rotated: false, failed: true)
+            // playhead-3oyz: `cost.fullFetchBytes` rides up beside the exit —
+            // the trigger's same-session retry is granted on the MEASURED
+            // landed bytes being zero, never on the error code alone.
+            return CandidateResult(
+                cost: cost, rotated: false, failed: true, dayZeroExit: .fetchFailed
+            )
         }
     }
 

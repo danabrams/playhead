@@ -526,7 +526,9 @@ struct RediffActivationWiringTests {
             // in-session delivery is asserted by DayZeroMarkDeliveryTests.
             mintedMarkDelivery: { _ in },
             budgetWindowProvider: { .empty },
-            budgetSpendRecorder: { _, _ in }
+            budgetSpendRecorder: { _, _ in },
+            // playhead-3oyz: the retry lane is owned by DayZeroSameSessionRetryTests — opt out.
+            retryClaimRecorder: { _ in }
         )
         let summary = await trigger.triggerIfEligible(
             analysisAssetId: assetId,

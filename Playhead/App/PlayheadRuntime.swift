@@ -1709,6 +1709,19 @@ final class PlayheadRuntime {
                     try? await dayZeroAttemptStore.recordRediffDayZeroBudgetSpend(
                         bytes: bytes, at: at
                     )
+                },
+                // playhead-3oyz: the same-session retry's durable claim,
+                // written BEFORE the retry's delay. Stamped with the LIVE
+                // clock, not the trigger's nominal `now` — the failed attempt
+                // it follows was stamped live by the recorder (possibly
+                // minutes after the trigger fired, a -1001 takes its time),
+                // and the claim must sort after it for
+                // `lastRetryClaimAt > lastAttemptAt` to be the queryable
+                // "claimed but never ran" signature.
+                retryClaimRecorder: { assetId in
+                    try? await dayZeroAttemptStore.noteRediffDayZeroRetryClaim(
+                        assetId: assetId, at: Date().timeIntervalSince1970
+                    )
                 }
             )
         } else {
