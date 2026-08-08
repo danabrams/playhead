@@ -2894,7 +2894,7 @@ T_LMRX_CHARGEDWIRING="the charger-class REGISTRATION hands its own identifier an
 # ---- playhead-13kf: the FM/coarse phase runs FIRST in a granted window (RO series) ----
 T_13KF_ORDER="the coarse phase observes the queue BEFORE the drain has dispatched anything"
 T_13KF_DEADLINE="both phases and the poll spend ONE deadline, anchored at the grant's start"
-T_13KF_DRAINFLOOR="the drain's floor is the RELAXED drain constant, not the coarse-window price"
+T_13KF_DRAINFLOOR="both drain call sites pass the DRAIN floor field, and the coarse phase the coarse-window price — counted"
 T_13KF_LOOPGATE="the window floor is a START gate between assets, not a kill switch"
 T_13KF_FIL5="candidates keep BOTH populations, resumable first, deduplicated"
 T_13KF_FLOORZERO="the reordered handler's drain floor is zero, and zero is a derivation"
@@ -6145,7 +6145,11 @@ MUTATIONS=(
   #     runs, still gets the right deadline, but observes a queue the drain
   #     already emptied.
   #   * RO03 hands the drain the coarse-window price again — the one-token
-  #     revert of the F6 decision ("the two floors look like a typo").
+  #     revert of the F6 decision ("the two floors look like a typo"). Killed
+  #     by the counted call-site canary, NOT by a behavioural pin: the first
+  #     behavioural attempt SURVIVED this rail, because the handler's own
+  #     run loop is a second dispatcher with no floor and identical gates —
+  #     see the canary's own comment for the three-link chain.
   #   * RO04 re-anchors the poll deadline at ContinuousClock.now — each phase
   #     opening a fresh clock, which quietly extends the grant by however long
   #     the earlier phases ran. The lmrx deadline test CANNOT see this (both

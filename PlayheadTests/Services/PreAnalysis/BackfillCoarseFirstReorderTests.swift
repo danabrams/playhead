@@ -244,65 +244,63 @@ struct BackfillCoarseFirstOrderTests {
                 "the coarse phase precedes the poll keep-alive")
     }
 
-    @Test("the drain's floor is the RELAXED drain constant, not the coarse-window price",
-          .timeLimit(.minutes(1)))
-    func drainAdmitsAPassTheOldFloorWouldHaveRefused() async throws {
-        // The F6 decision, pinned behaviourally. The injected budget leaves the
-        // drain ~60 s minus handler overhead — a remainder the OLD floor
-        // (minimumCheckpointBudget, 60 s) refuses by construction, because some
-        // overhead always elapses before the drain's clock read. With the
-        // derived drain floor of zero the pass is admitted and the seeded job
-        // reaches a terminal state.
+    @Test("both drain call sites pass the DRAIN floor field, and the coarse phase the coarse-window price — counted")
+    func floorThreadingIsCountedInSource() throws {
+        // WHY A SOURCE CANARY AND NOT A BEHAVIOURAL PIN — recorded because the
+        // behavioural version was tried first and its own rail (RO03) SURVIVED
+        // it. That version seeded a job, gave the handler a budget whose
+        // remainder was under the old 60 s floor, and asserted the job was
+        // still dispatched. But `handleBackfillTask` starts the long-lived
+        // `runLoop()` before the drain, and the run loop dispatches the same
+        // job with NO floor at all — a second dispatcher with identical gates
+        // masks the first, so "the job left queued" cannot distinguish the
+        // drain refusing at 60 s from the drain admitting at 0.
         //
-        // What broken implementation still passes? One that hands the drain
-        // `.zero` INLINE rather than the budget field — the arithmetic suite
-        // below pins the field values themselves, and the recovery handler's
-        // 60 s coupling is pinned there too, so the pair only passes together
-        // when both call sites read the fields.
-        let store = try await makeTestStore()
-        let downloads = StubDownloadProvider()
-        try await insertComputeOnlyJob(
-            store: store, downloads: downloads,
-            jobId: "floor-probe", episodeId: "ep-floor-probe"
-        )
-        let scheduler = makeScheduler(store: store, downloads: downloads)
-        let coordinator = StubAnalysisCoordinator()
-        let bps = BackgroundProcessingService(
-            coordinator: coordinator,
-            capabilitiesService: CapabilitiesService(),
-            taskScheduler: StubTaskScheduler(),
-            batteryProvider: StubBatteryProvider()
-        )
-        await bps.setPreAnalysisServices(scheduler: scheduler, reconciler: makeReconciler(store: store))
+        // The chain that replaces it, each link killable on its own:
+        //   * the VALUE (backfill drain floor = 0, recovery = 60) is pinned
+        //     arithmetically in `DrainFloorDerivationTests` (rails RO07/RO08);
+        //   * the MECHANISM (drainEligible honours whatever floor it is
+        //     handed) is pinned behaviourally in `DrainEligibleStartGateTests`
+        //     (rail LX04);
+        //   * the CALL SITE — which budget field each caller passes — is THIS
+        //     test, counted per the repo's canary rule
+        //     (`FMUnboundedCallCanaryTests`) so a third drain call site cannot
+        //     appear unexamined (rail RO03).
+        let lines = try Self.backgroundProcessingServiceCodeLines()
+        let drainField = lines.filter {
+            $0.contains("minimumCheckpointBudget: budget.minimumDrainCheckpointBudget")
+        }.count
+        let coarsePriceAtDrain = lines.filter {
+            $0.contains("minimumCheckpointBudget: budget.minimumCheckpointBudget")
+        }.count
+        let coarseGate = lines.filter {
+            $0.contains("minimumWindowBudget: budget.minimumCheckpointBudget")
+        }.count
+        #expect(drainField == 2,
+                "backfill AND recovery drains must both read the drain-floor field; found \(drainField)")
+        #expect(coarsePriceAtDrain == 0,
+                "no drain may be handed the coarse-window price — that is the F6 revert (playhead-13kf); found \(coarsePriceAtDrain)")
+        #expect(coarseGate == 1,
+                "the FM-first phase is gated by the coarse-window price, exactly once; found \(coarseGate)")
+    }
 
-        // workBudget = 96 − 36 = 60 s. The drain reads its clock after handler
-        // overhead, so remaining < 60 s there — under the old floor (60 s, the
-        // minimumCheckpointBudget below) it would refuse; under the derived
-        // drain floor (zero) it must dispatch.
-        let budget = BackgroundGrantBudget(
-            designGrant: .seconds(96),
-            teardownReserve: .seconds(36),
-            minimumCheckpointBudget: .seconds(60),
-            minimumDrainCheckpointBudget: .zero,
-            expirationSettleGrace: .seconds(3),
-            provenance: .assumed
-        )
-        let task = StubBackgroundTask()
-        await bps.handleBackfillTask(task, budget: budget)
-        await task.awaitCompletion()
-
-        let stillQueued = try await store.fetchJobsByState("queued")
-        #expect(
-            !stillQueued.contains { $0.jobId == "floor-probe" },
-            """
-            With the FM phase served first, a sub-floor drain remainder must \
-            still be SPENT on transcription: the 60 s coarse-window price no \
-            longer names the drain's artifact, and refusing to start only \
-            converts drain tail into idle (playhead-13kf resolving \
-            playhead-lmrx F6).
-            """
-        )
-        await scheduler.stop()
+    /// `BackgroundProcessingService.swift` as code lines, whole-line comments
+    /// stripped — the canary is about what the code does, and prose that
+    /// legitimately names the fields must not satisfy it (the
+    /// `FMUnboundedCallCanaryTests` rule).
+    private static func backgroundProcessingServiceCodeLines() throws -> [String] {
+        var root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        for _ in 0..<3 {
+            root.deleteLastPathComponent()
+        }
+        let path = root
+            .appendingPathComponent("Playhead", isDirectory: true)
+            .appendingPathComponent("Services/AnalysisCoordinator/BackgroundProcessingService.swift")
+        let text = try String(contentsOf: path, encoding: .utf8)
+        return text
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map(String.init)
+            .map { $0.trimmingCharacters(in: .whitespaces).hasPrefix("//") ? "" : $0 }
     }
 }
 
