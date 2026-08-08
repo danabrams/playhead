@@ -680,12 +680,29 @@ actor AnalysisCoordinator {
         // then a harmless second write.
         stopRequested = false
 
-        let resumable = (try? await store.fetchAssetIdsWithResumableBackfillJobs(
-            limit: Self.coarseScanSweepLimit
-        )) ?? []
-        let missingRows = (try? await store.fetchAssetIdsMissingCoverageLaneJobs(
-            limit: Self.coarseScanSweepLimit, offset: 0
-        )) ?? []
+        // A failed candidate query is treated as EMPTY FOR THIS GRANT (the
+        // phase cannot proceed on candidates it cannot read, and the drain
+        // behind it must still get the window) — but it is logged as the
+        // failure it is, never as a measured absence. "no coverage-lane
+        // candidates" answering a store error is the standing defect class:
+        // the barren-window ledger reads these lines, and an unreadable
+        // population must not be indistinguishable from an empty one.
+        var resumable: [String] = []
+        do {
+            resumable = try await store.fetchAssetIdsWithResumableBackfillJobs(
+                limit: Self.coarseScanSweepLimit
+            )
+        } catch {
+            logger.warning("runPendingCoarseScans: resumable-candidate query FAILED (empty for this grant, not a measured absence): \(String(describing: error))")
+        }
+        var missingRows: [String] = []
+        do {
+            missingRows = try await store.fetchAssetIdsMissingCoverageLaneJobs(
+                limit: Self.coarseScanSweepLimit, offset: 0
+            )
+        } catch {
+            logger.warning("runPendingCoarseScans: zero-row-candidate query FAILED (empty for this grant, not a measured absence): \(String(describing: error))")
+        }
         let candidates = Self.coarseScanCandidates(
             resumable: resumable,
             missingRows: missingRows
