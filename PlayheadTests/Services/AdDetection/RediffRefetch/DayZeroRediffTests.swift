@@ -84,7 +84,9 @@ struct DayZeroRediffTriggerTests {
             // delivery of a minted mark is asserted by DayZeroMarkDeliveryTests.
             mintedMarkDelivery: { _ in },
             budgetWindowProvider: { .empty },
-            budgetSpendRecorder: { _, _ in }
+            budgetSpendRecorder: { _, _ in },
+            // playhead-3oyz: the retry lane is owned by DayZeroSameSessionRetryTests — opt out.
+            retryClaimRecorder: { _ in }
         )
     }
 
@@ -259,7 +261,9 @@ struct DayZeroRediffTriggerTests {
             // in-session delivery is asserted by DayZeroMarkDeliveryTests.
             mintedMarkDelivery: { _ in },
             budgetWindowProvider: { .empty },
-            budgetSpendRecorder: { _, _ in }
+            budgetSpendRecorder: { _, _ in },
+            // playhead-3oyz: the retry lane is owned by DayZeroSameSessionRetryTests — opt out.
+            retryClaimRecorder: { _ in }
         )
         let summary = await fire(trigger)
 
@@ -347,7 +351,9 @@ struct DayZeroRediffTriggerTests {
             // in-session delivery is asserted by DayZeroMarkDeliveryTests.
             mintedMarkDelivery: { _ in },
             budgetWindowProvider: { .empty },
-            budgetSpendRecorder: { _, _ in }
+            budgetSpendRecorder: { _, _ in },
+            // playhead-3oyz: the retry lane is owned by DayZeroSameSessionRetryTests — opt out.
+            retryClaimRecorder: { _ in }
         )
         await fire(trigger)
         #expect(!FileManager.default.fileExists(atPath: bCopy.path),

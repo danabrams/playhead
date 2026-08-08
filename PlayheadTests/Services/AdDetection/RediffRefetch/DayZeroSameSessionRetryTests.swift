@@ -53,6 +53,12 @@ final class ScriptedKWayFetcher: FullEpisodeFetching, @unchecked Sendable {
     }
 
     func download(url: URL, persona: RediffFetchPersona?) async throws -> (fileURL: URL, byteCount: Int) {
+        // A synchronous hop, because `NSLock.lock` is (correctly) unavailable
+        // from async contexts — the critical section never suspends.
+        try scriptedStep(url: url, persona: persona)
+    }
+
+    private func scriptedStep(url: URL, persona: RediffFetchPersona?) throws -> (fileURL: URL, byteCount: Int) {
         lock.lock(); defer { lock.unlock() }
         let index = invocationCount
         invocationCount += 1
