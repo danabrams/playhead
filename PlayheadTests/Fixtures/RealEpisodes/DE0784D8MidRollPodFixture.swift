@@ -15,8 +15,9 @@
 //     and no candidate existed here).
 //
 // What the fixture pins (the CURRENT, broken behaviour):
-//   • a 116 s two-creative host-read pod at 2838.18-2953.68 that detection
-//     produced NOTHING for (Dan marked both creatives by hand), and
+//   • a two-creative host-read pod at 2838.18-2953.68 (115.5 s outer width,
+//     114.78 s of marked ad) that detection produced NOTHING for (Dan marked
+//     both creatives by hand), and
 //   • the 8.04 s false positive at 2828.40-2836.44 immediately before it —
 //     persisted with boundaryState "acousticRefined" but actually LEXICAL: the
 //     disclosure regex `\bin partnership with\b` matched show content ("work

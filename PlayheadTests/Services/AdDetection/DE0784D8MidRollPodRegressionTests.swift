@@ -49,10 +49,11 @@ struct DE0784D8MidRollPodRegressionTests {
             coveredSeconds == 0.0,
             """
             KNOWN HOLE (playhead-j4wi): the mid-roll pod at \
-            \(Fixture.creative1.lowerBound)-\(Fixture.creative2.upperBound) is expected to be \
-            entirely undetected in the frozen device pull. Detection now covers \
-            \(coveredSeconds)s of \(podWidth)s — if that is a real fix, update this fixture \
-            and comment on playhead-j4wi; if not, a detection window is leaking into the pod.
+            \(Fixture.creative1.lowerBound)-\(Fixture.creative2.upperBound) was entirely \
+            undetected in the frozen device pull. This is a CAPTURE pin — frozen data cannot \
+            observe a production fix — so a failure here means the fixture table itself was \
+            edited. The live fix-detectors are livePipelineReproducesSeamFPAndPodHole and \
+            ketoneURLAnchorIsDroppedByMinimumDuration.
             """
         )
     }
@@ -91,7 +92,7 @@ struct DE0784D8MidRollPodRegressionTests {
         // because the applied skip ran past the window end, but the WINDOW
         // error is sub-0.1 s.
         let preRollTruthEnd = Fixture.preRollOvershootVeto.lowerBound
-        #expect(preRoll.overlap(with: 0.0 ... preRollTruthEnd) == preRollTruthEnd)
+        #expect(abs(preRoll.overlap(with: 0.0 ... preRollTruthEnd) - preRollTruthEnd) < 0.001)
         #expect(abs(preRoll.endTime - preRollTruthEnd) < 0.1)
 
         // Post-roll: runs to end-of-file; the window end exceeds the asset's
@@ -157,7 +158,7 @@ struct DE0784D8MidRollPodRegressionTests {
     }
 
     @Test("The pod's only true lexical anchor (ketone.com) fires in the catalog but dies at the 5s micro-fragment floor")
-    func ketoneURLAnchorIsDroppedByMinimumDuration() async throws {
+    func ketoneURLAnchorIsDroppedByMinimumDuration() throws {
         let atoms = Fixture.atoms()
         let catalog = EvidenceCatalogBuilder.build(
             atoms: atoms,
@@ -185,8 +186,12 @@ struct DE0784D8MidRollPodRegressionTests {
         // is a .ai domain (the URL patterns cover .com/.co/.org/.io only),
         // the CTA is "head to" (only "head over to" is a pattern), and the
         // disclosure is "because of our sponsor called ..." (not in the
-        // disclosure list). Anchoring categories are url / promoCode /
-        // disclosurePhrase / ctaPhrase; brandSpan never anchors.
+        // disclosure list). This set mirrors the PRIVATE
+        // `AtomEvidenceProjector.anchoringCategories` (url / promoCode /
+        // disclosurePhrase / ctaPhrase; brandSpan never anchors) — if a new
+        // anchoring category is added there, update this copy. A fix arriving
+        // through a stale copy still trips `spans.count == 1` in the live
+        // decode test, so there is no silent-green path.
         let anchoringCategories: Set<EvidenceCategory> = [
             .url, .promoCode, .disclosurePhrase, .ctaPhrase,
         ]
@@ -210,15 +215,21 @@ struct DE0784D8MidRollPodRegressionTests {
 
     @Test("The canonical L2F annotation exists, is silver, and matches the device-pull ground truth")
     func corpusAnnotationMatchesDevicePull() throws {
-        let loader = CorpusAnnotationLoader()
-        let annotations: [CorpusAnnotation]
-        do {
-            annotations = try loader.loadAll(verifyAudioFingerprints: false)
-        } catch CorpusAnnotationLoaderError.directoryNotFound {
-            // Lightweight checkouts may omit TestFixtures; the composition
-            // test in CorpusAnnotationTests governs presence there.
-            return
-        }
+        // repoRoot is passed EXPLICITLY: CorpusAnnotationLoader's `filePath:
+        // String = #filePath` default expands at the CALL SITE, and its fixed
+        // five-component walk-up assumes a caller exactly four directories
+        // deep (every prior caller is). This file is three deep, so the
+        // default resolves one level ABOVE the repo root (playhead-7iqi).
+        let repoRoot = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()  // AdDetection/
+            .deletingLastPathComponent()  // Services/
+            .deletingLastPathComponent()  // PlayheadTests/
+            .deletingLastPathComponent()  // <repo root>
+        let loader = CorpusAnnotationLoader(repoRoot: repoRoot)
+        // No lightweight-checkout escape hatch: the annotations are committed,
+        // and a checkout without them should fail here as loudly as
+        // `canonicalManifestAndTiers` does.
+        let annotations = try loader.loadAll(verifyAudioFingerprints: false)
         let annotation = try #require(
             annotations.first { $0.episodeId == Fixture.corpusEpisodeId }
         )
