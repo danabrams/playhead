@@ -37,12 +37,14 @@ struct BackgroundGrantBudgetArithmeticTests {
         grant: Duration = .seconds(255),
         reserve: Duration = .seconds(36),
         floor: Duration = .seconds(60),
+        drainFloor: Duration = .zero,
         grace: Duration = .seconds(3)
     ) -> BackgroundGrantBudget {
         BackgroundGrantBudget(
             designGrant: grant,
             teardownReserve: reserve,
             minimumCheckpointBudget: floor,
+            minimumDrainCheckpointBudget: drainFloor,
             expirationSettleGrace: grace,
             provenance: .measured(
                 grantObservations: 132,
@@ -1618,6 +1620,7 @@ struct BackfillExpiryDurabilityTests {
         designGrant: .zero,
         teardownReserve: .seconds(30),
         minimumCheckpointBudget: .zero,
+        minimumDrainCheckpointBudget: .zero,
         expirationSettleGrace: .seconds(30),
         provenance: .assumed
     )
@@ -1639,6 +1642,7 @@ struct BackfillExpiryDurabilityTests {
         designGrant: BackgroundGrantBudget.backfillProcessing.designGrant,
         teardownReserve: BackgroundGrantBudget.backfillProcessing.teardownReserve,
         minimumCheckpointBudget: BackgroundGrantBudget.backfillProcessing.minimumCheckpointBudget,
+        minimumDrainCheckpointBudget: BackgroundGrantBudget.backfillProcessing.minimumDrainCheckpointBudget,
         expirationSettleGrace: .seconds(30),
         provenance: .assumed
     )
@@ -1854,6 +1858,7 @@ struct BackfillExpiryDurabilityTests {
         designGrant: BackgroundGrantBudget.backfillProcessing.designGrant,
         teardownReserve: .seconds(60),
         minimumCheckpointBudget: BackgroundGrantBudget.backfillProcessing.minimumCheckpointBudget,
+        minimumDrainCheckpointBudget: BackgroundGrantBudget.backfillProcessing.minimumDrainCheckpointBudget,
         expirationSettleGrace: .zero,
         provenance: .assumed
     )
@@ -2325,6 +2330,7 @@ struct CancelAimIdentityTests {
         designGrant: .zero,
         teardownReserve: .seconds(30),
         minimumCheckpointBudget: .zero,
+        minimumDrainCheckpointBudget: .zero,
         expirationSettleGrace: .seconds(30),
         provenance: .assumed
     )

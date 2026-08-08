@@ -611,6 +611,214 @@ actor AnalysisCoordinator {
         }
     }
 
+    // MARK: - FM-first coarse ad-scan phase (playhead-13kf)
+
+    /// How many assets each of the two candidate queries may return per
+    /// granted window.
+    ///
+    /// The DEADLINE is the gate on how much work actually runs — this cap only
+    /// bounds the two enumeration queries, exactly as
+    /// `AnalysisJobReconciler.maxAdScanRedrivesPerReconcile` (same value, same
+    /// reasoning) bounds the re-drive sweep those queries were built for. Two
+    /// queries × 8 assets is far more than a 219 s work budget can start at the
+    /// measured p50 of 6.2 s per coarse window (n=113 passA
+    /// `semantic_scan_results.latencyMs` rows, 2026-08-06 pull), so raising it
+    /// would change nothing observable before the deadline binds.
+    static let coarseScanSweepLimit = 8
+
+    /// Run the FM / coarse ad-scan phase DIRECTLY, before anything else spends
+    /// the granted background window (playhead-13kf).
+    ///
+    /// **Why this exists.** The coverage lane (`backfill_jobs`) has exactly one
+    /// production dispatcher: `BackfillJobRunner.runPendingBackfill`, reached
+    /// through `AdDetectionService.runBackfill` at Stage 4 of a full analysis
+    /// pass. In a granted background window that pass sits BEHIND the
+    /// transcription stages, and on the measured ledger the transcription drain
+    /// consumes the whole grant — 108 of 203 expired backfill windows contain
+    /// exactly one `acquired` event and nothing else, and only 4 of 203 wrote a
+    /// single `semantic_scan_results` row inside their own window. This method
+    /// is the same Stage-4 entry invoked at the FRONT of the grant instead:
+    /// per-asset, deadline-gated, banking durable coarse windows (playhead-26od
+    /// persists each one the moment it lands) at a measured p50 of 6.2 s each,
+    /// before the transcription drain gets what remains.
+    ///
+    /// **What it deliberately does NOT do.** No new scan machinery and no new
+    /// persistence: everything below the per-asset call is the shipped FM
+    /// phase — wxsv's cross-version resume, fil5's durable claims when a gate
+    /// closes, e75l's stall defers, rkfp's per-call deadline. And no
+    /// completeness predicate: an asset is a candidate because the coverage
+    /// lane says it holds resumable work (playhead-onn6's query) or because it
+    /// is transcribed and owns no coverage-lane row at all (playhead-fil5's
+    /// query) — never because a watermark says its transcript "is complete",
+    /// which is the playhead-346z/6r4z defect this bead's contract names.
+    ///
+    /// - Parameters:
+    ///   - deadline: the instant this phase must stop STARTING assets by.
+    ///     The caller spends an OS grant and passes the same
+    ///     `BackgroundGrantBudget.workDeadline(from:)` it hands the drain, so
+    ///     the two phases share one budget rather than each opening a fresh
+    ///     clock. No default, for the playhead-lmrx reason: only the handler
+    ///     knows when the grant opened.
+    ///   - minimumWindowBudget: the smallest remaining grant worth starting
+    ///     ANOTHER asset's scan with — callers pass
+    ///     `BackgroundGrantBudget.minimumCheckpointBudget`, the measured cost
+    ///     of the one durable artifact this phase banks (one FM coarse window,
+    ///     p95 57.5 s over 142 scan rows). Same start-gate shape as
+    ///     `AnalysisWorkScheduler.drainEligible`.
+    /// - Returns: how many assets the phase DROVE to a non-throwing Stage-4
+    ///   return. Not windows banked — those are counted where they are
+    ///   durable, in `semantic_scan_results` (each row carries `createdAt` and
+    ///   a run correlation id).
+    func runPendingCoarseScans(
+        deadline: ContinuousClock.Instant,
+        minimumWindowBudget: Duration
+    ) async -> Int {
+        // Clear any prior stop request, for the same reason `runPendingBackfill`
+        // does: a thermal stop() from a PREVIOUS window must not disable this
+        // phase for the life of the process. This phase runs first in the
+        // handler, so the reset lives here too; the poll loop's own reset is
+        // then a harmless second write.
+        stopRequested = false
+
+        let resumable = (try? await store.fetchAssetIdsWithResumableBackfillJobs(
+            limit: Self.coarseScanSweepLimit
+        )) ?? []
+        let missingRows = (try? await store.fetchAssetIdsMissingCoverageLaneJobs(
+            limit: Self.coarseScanSweepLimit, offset: 0
+        )) ?? []
+        let candidates = Self.coarseScanCandidates(
+            resumable: resumable,
+            missingRows: missingRows
+        )
+        guard !candidates.isEmpty else {
+            logger.info("runPendingCoarseScans: no coverage-lane candidates")
+            return 0
+        }
+        logger.info("runPendingCoarseScans: \(candidates.count) candidate asset(s) (\(resumable.count) resumable, \(missingRows.count) without coverage-lane rows)")
+        return await Self.runCoarseScanLoop(
+            deadline: deadline,
+            minimumWindowBudget: minimumWindowBudget,
+            candidates: candidates,
+            isStopRequested: { [weak self] in
+                guard let self else { return true }
+                return await self.stopRequested
+            },
+            scanAsset: { [weak self] assetId in
+                guard let self else { throw CancellationError() }
+                try await self.coarseScanOneAsset(assetId)
+            },
+            logger: logger
+        )
+    }
+
+    /// Candidate order for the FM-first phase: assets with RESUMABLE
+    /// coverage-lane rows first (in-flight work, oldest-stranded first as the
+    /// store query orders them), then transcribed assets that own NO
+    /// coverage-lane row at all (playhead-fil5's population — invisible to the
+    /// resumable query by construction), deduplicated preserving order.
+    ///
+    /// Static and pure so the membership rule is testable without a
+    /// coordinator — the fil5 population going missing here would silently
+    /// recreate exactly the blind spot fil5 was filed about.
+    static func coarseScanCandidates(
+        resumable: [String],
+        missingRows: [String]
+    ) -> [String] {
+        var seen = Set<String>()
+        return (resumable + missingRows).filter { seen.insert($0).inserted }
+    }
+
+    /// The deadline-gated loop used by `runPendingCoarseScans`. Exposed as a
+    /// static helper for the same reason `runBackfillPollingLoop` is: driving
+    /// it with injected closures is the only way to test the gate without
+    /// standing up a full `AnalysisCoordinator` (which transitively requires
+    /// AudioService / FeatureService / TranscriptEngine / AdDetection / etc.).
+    ///
+    /// Behaviour notes covered by regression tests:
+    ///   - ONE clock read per iteration (the deadline test and the floor test
+    ///     must agree about what "now" is — same rule as
+    ///     `AnalysisWorkScheduler.drainEligible`).
+    ///   - The floor is a START gate, not a kill switch: it stops the NEXT
+    ///     asset, never the one in flight. Within an asset the bound is the
+    ///     shipped FM machinery (rkfp's per-call deadline, e75l's defers) plus
+    ///     caller cancellation.
+    ///   - A thrown `CancellationError` ends the phase (the grant was
+    ///     reclaimed); any other per-asset error is logged and the loop moves
+    ///     on, because one asset's store hiccup must not starve the rest of
+    ///     the window.
+    static func runCoarseScanLoop(
+        deadline: ContinuousClock.Instant,
+        minimumWindowBudget: Duration,
+        candidates: [String],
+        isStopRequested: @Sendable () async -> Bool,
+        scanAsset: @Sendable (String) async throws -> Void,
+        isTaskCancelled: @Sendable () -> Bool = { Task.isCancelled },
+        now: @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now },
+        logger: Logger
+    ) async -> Int {
+        var scanned = 0
+        for assetId in candidates {
+            guard !isTaskCancelled() else {
+                logger.info("runPendingCoarseScans: cancelled after \(scanned) asset(s)")
+                return scanned
+            }
+            if await isStopRequested() {
+                logger.info("runPendingCoarseScans: coordinator stop requested, exiting after \(scanned) asset(s)")
+                return scanned
+            }
+            let remaining = now().duration(to: deadline)
+            guard remaining > .zero, remaining >= minimumWindowBudget else {
+                logger.info("runPendingCoarseScans: \(remaining) left is under the \(minimumWindowBudget) window floor; handing the remainder to the drain after \(scanned) asset(s)")
+                return scanned
+            }
+            do {
+                try await scanAsset(assetId)
+                scanned += 1
+            } catch is CancellationError {
+                logger.info("runPendingCoarseScans: cancelled mid-asset \(assetId, privacy: .public)")
+                return scanned
+            } catch {
+                logger.warning("runPendingCoarseScans: asset \(assetId, privacy: .public) failed (continuing): \(String(describing: error))")
+            }
+        }
+        logger.info("runPendingCoarseScans: drove \(scanned) of \(candidates.count) candidate asset(s)")
+        return scanned
+    }
+
+    /// Drive the shipped Stage-4 backfill entry for one asset.
+    ///
+    /// Everything here is resolution of the arguments `runBackfill` already
+    /// takes, from persisted rows only — this path runs in a background window
+    /// with no live pipeline state:
+    ///   - chunks: raw persisted rows; `runBackfill` canonicalizes for itself
+    ///     (playhead-hc7e/iu0t — canonicalization lives at the callee).
+    ///   - podcastId: from the episode's latest `analysis_jobs` row, the same
+    ///     carrier the re-drive mint reads. A missing id is handed through as
+    ///     `""` — `runBackfill`'s own playhead-fil5 gate records the durable
+    ///     `podcastIdMissing` claim, which is the designed disposition, not an
+    ///     error to pre-empt here.
+    ///   - episodeDuration: the persisted `episodeDurationSec` (or 0 when the
+    ///     row predates playhead-gtt9.1.1). The pipeline's `max(live, persisted)`
+    ///     resolution needs `activeShards`, which only exist mid-decode; the
+    ///     persisted value is what every resume-from-disk path already uses.
+    private func coarseScanOneAsset(_ assetId: String) async throws {
+        let chunks = try await store.fetchTranscriptChunks(assetId: assetId)
+        let asset = try await store.fetchAsset(id: assetId)
+        var podcastId = ""
+        if let episodeId = asset?.episodeId,
+           let job = try? await store.fetchLatestJobForEpisode(episodeId),
+           let jobPodcastId = job.podcastId {
+            podcastId = jobPodcastId
+        }
+        try await adDetectionService.runBackfill(
+            chunks: chunks,
+            analysisAssetId: assetId,
+            podcastId: podcastId,
+            episodeDuration: asset?.episodeDurationSec ?? 0,
+            sessionId: nil
+        )
+    }
+
     // MARK: - Foreground-Assist Hand-off (playhead-44h1)
 
     /// In-memory record of an active foreground-assist hand-off

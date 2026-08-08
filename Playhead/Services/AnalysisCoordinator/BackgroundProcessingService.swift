@@ -270,6 +270,18 @@ protocol AnalysisCoordinating: Sendable {
     /// knows when it opened.
     func runPendingBackfill(deadline: ContinuousClock.Instant) async
 
+    /// playhead-13kf: run the FM / coarse ad-scan phase for assets with
+    /// pending coverage-lane work, BEFORE anything else spends the granted
+    /// window. Must stop starting assets at `deadline`, must not start one
+    /// with less than `minimumWindowBudget` remaining (the measured cost of
+    /// one durable coarse window), and must respect `Task.isCancelled`.
+    /// Returns how many assets the phase drove. Both parameters are required
+    /// for the playhead-lmrx reason `runPendingBackfill`'s deadline is.
+    func runPendingCoarseScans(
+        deadline: ContinuousClock.Instant,
+        minimumWindowBudget: Duration
+    ) async -> Int
+
     /// playhead-44h1: continue a foreground-assist download + analysis
     /// inside a `BGContinuedProcessingTask` window.
     ///
@@ -1509,20 +1521,59 @@ actor BackgroundProcessingService {
             // than only nudging a poll. `runPendingBackfill` below still runs
             // to keep the BG task alive and confirm the queue drained.
             //
-            // playhead-lmrx: both drivers are now bounded by the MEASURED grant
+            // playhead-lmrx: all drivers are bounded by the MEASURED grant
             // (`BackgroundGrantBudget.backfillProcessing`, 219 s of work inside
             // a 255 s design grant) instead of the 25 minutes they used to
             // assume — 5.07x the p90 of the 203 expired backfill grants in the
             // 2026-08-06 pull. The deadline is computed from `grantStart`, so
-            // the two drivers SHARE one budget rather than each starting a fresh
-            // clock; a drain that spends 200 s leaves the poll loop 19 s, which
-            // is the truth about the window.
+            // every phase SHARES one budget rather than each starting a fresh
+            // clock; a coarse phase that spends 200 s leaves the drain 19 s,
+            // which is the truth about the window.
             let workDeadline = budget.workDeadline(from: grantStart)
+
+            // playhead-13kf: THE FM / COARSE AD-SCAN PHASE RUNS FIRST, and it
+            // runs DIRECTLY — not through the analysis-job queue.
+            //
+            // The coverage lane's only dispatcher used to be Stage 4 of a full
+            // analysis pass, which sits behind transcription; `drainEligible`
+            // awaits an entire such pass, and on the measured ledger that pass
+            // consumed the whole grant (108 of 203 expired windows hold exactly
+            // one `acquired` event and nothing else — the ad-scan the app
+            // exists for never ran). Running the Stage-4 entry first banks
+            // durable coarse windows at a measured p50 of 6.2 s each
+            // (playhead-26od persists each one the moment it lands) before the
+            // transcription drain gets the REMAINDER of the same deadline.
+            //
+            // Ordering is load-bearing in both directions: the scheduler loop
+            // is started (and woken) only AFTER this phase returns, so the
+            // handler does not set the run loop dispatching a grant-long
+            // transcription pass in parallel with the scan it exists to fund —
+            // on a sceneless background launch the loop does not exist until
+            // this handler creates it. The per-asset start gate is
+            // `minimumCheckpointBudget`, the measured cost of the one durable
+            // artifact this phase banks; the drain below gets the RELAXED
+            // floor — see `BackgroundGrantBudget.minimumDrainCheckpointBudget`
+            // for the post-reorder derivation of both.
+            let coarseAssetsDriven = await self.coordinator.runPendingCoarseScans(
+                deadline: workDeadline,
+                minimumWindowBudget: budget.minimumCheckpointBudget
+            )
+            self.logger.info("Backfill coarse phase drove \(coarseAssetsDriven, privacy: .public) asset(s); handing the remaining budget to the transcription drain")
+
+            // playhead-13kf: if the OS reclaimed the window during the coarse
+            // phase, the expiration handler owns the ending — do not start the
+            // scheduler loop or the drain during teardown. Same rule, same
+            // no-ledger-write reason, as the post-drain guard below.
+            guard !Task.isCancelled else {
+                self.logger.info("Backfill work task cancelled during the coarse phase")
+                return
+            }
+
             await self.analysisWorkScheduler?.ensureSchedulerLoopStarted()
             if let scheduler = self.analysisWorkScheduler {
                 await scheduler.drainEligible(
                     deadline: workDeadline,
-                    minimumCheckpointBudget: budget.minimumCheckpointBudget
+                    minimumCheckpointBudget: budget.minimumDrainCheckpointBudget
                 )
             }
             await self.analysisWorkScheduler?.wake()
@@ -2363,10 +2414,16 @@ actor BackgroundProcessingService {
                 // 5.07x), so this moves little — the point is that both handlers
                 // now spend a budget somebody measured.
                 let workDeadline = budget.workDeadline(from: recoveryGrantStart)
+                // playhead-13kf: the DRAIN field, which for recovery is the
+                // same 60 s — this handler was not reordered, so its drain is
+                // still the road to Stage-4 FM work and the coarse-window
+                // price still names its artifact. One field is the authority
+                // on drain floors so the two handlers cannot drift apart
+                // silently; see `BackgroundGrantBudget.preAnalysisRecovery`.
                 if let scheduler = self.analysisWorkScheduler {
                     await scheduler.drainEligible(
                         deadline: workDeadline,
-                        minimumCheckpointBudget: budget.minimumCheckpointBudget
+                        minimumCheckpointBudget: budget.minimumDrainCheckpointBudget
                     )
                 }
                 // Re-check cancellation after the drain: a mid-drain
