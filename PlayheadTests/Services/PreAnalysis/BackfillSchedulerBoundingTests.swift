@@ -281,12 +281,17 @@ struct BackfillSchedulerBoundingTests {
             try #require(!body.isEmpty, "\(anchor) body did not parse")
             let code = SwiftSourceInspector.strippingComments(body)
 
-            #expect(code.contains("minimumCheckpointBudget: budget.minimumCheckpointBudget"),
+            #expect(code.contains("minimumCheckpointBudget: budget.minimumDrainCheckpointBudget"),
                     """
                     \(anchor) must hand `drainEligible` the floor from the \
-                    budget it is spending. A literal (or the `.zero` default) \
-                    is the unmeasured constant `BackgroundGrantBudget` exists \
-                    to delete.
+                    budget it is spending. Since playhead-13kf that field is \
+                    `minimumDrainCheckpointBudget` — a documented `.zero` \
+                    sentinel on the budget, because the coarse-first phase \
+                    ahead of the drain owns the measured floor. A call-site \
+                    literal (including an inline `.zero`) is still the \
+                    unmeasured constant `BackgroundGrantBudget` exists to \
+                    delete: the value must come from the budget object, where \
+                    its meaning is documented and per-budget.
                     """)
             let doorSites = code.components(
                 separatedBy: "closeDispatchForTeardown(lasting: budget.teardownReserve)"
