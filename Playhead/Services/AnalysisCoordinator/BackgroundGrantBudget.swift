@@ -79,10 +79,14 @@ struct BackgroundGrantBudget: Sendable, Equatable {
         /// because the three fields were not measured over the same rows and a
         /// single `sampleSize` could only be right about one of them.
         ///
-        /// THREE fields, not four. ``expirationSettleGrace`` is outside this
-        /// claim by construction and always will be: it bounds what may happen
-        /// AFTER the OS reclaims a window, and this ledger's clock stops at the
-        /// reclaim. Naming a denominator for it would be inventing one.
+        /// THREE fields, not all of them. ``expirationSettleGrace`` is outside
+        /// this claim by construction and always will be: it bounds what may
+        /// happen AFTER the OS reclaims a window, and this ledger's clock stops
+        /// at the reclaim. Naming a denominator for it would be inventing one.
+        /// ``minimumDrainCheckpointBudget`` (playhead-13kf) is outside it for
+        /// the sibling reason: its backfill value is derived from the ABSENCE
+        /// of a measurable artifact cost, and an absence has no denominator
+        /// either.
         ///
         /// The first draft of this type carried exactly that single number, and
         /// it read `203` — the count of expired backfill runs. Ask the
@@ -181,7 +185,61 @@ struct BackgroundGrantBudget: Sendable, Equatable {
     /// gate is asked about those. It is a genuine bound on wasted tail-of-grant
     /// dispatch; it is NOT the fix for the 199-of-203 barren windows, and
     /// nothing here should be read as claiming otherwise.
+    ///
+    /// **Who consumes it changed in playhead-13kf, and the meaning is why.**
+    /// The value prices ONE FM COARSE WINDOW, so it gates the phase that banks
+    /// coarse windows: `AnalysisCoordinator.runPendingCoarseScans`, the
+    /// FM-first phase that now runs at the front of every backfill grant. The
+    /// transcription drain behind it takes ``minimumDrainCheckpointBudget``
+    /// instead — see that field for why the 60 s does not transfer.
+    /// `handlePreAnalysisRecovery` is NOT reordered, and its drain remains the
+    /// only road to Stage-4 FM work in its window; its instance therefore sets
+    /// the drain field to the same 60 s (see ``preAnalysisRecovery``).
     let minimumCheckpointBudget: Duration
+
+    /// The smallest remaining grant worth starting a TRANSCRIPTION-DRAIN pass
+    /// with, after playhead-13kf put the FM phase in front of the drain.
+    ///
+    /// **This is the playhead-lmrx F6 question, resolved here by the bead that
+    /// inherited it.** Under the old order the drain was the only road to the
+    /// FM phase, so its floor was honestly ``minimumCheckpointBudget`` — the
+    /// measured cost of one coarse window — and the compound bound it created
+    /// (no pass may start after grantStart + 159 s of a 294 s median grant,
+    /// ~46 % of the median grant closed to starting work) was the price of
+    /// never converting a grant tail into a pass that could bank nothing.
+    ///
+    /// **After the reorder that derivation no longer names the drain's
+    /// artifact.** The coarse windows are banked FIRST, directly; what the
+    /// drain starts is transcription-headed, and its smallest durable artifact
+    /// is a persisted transcript-chunk batch. The ledger cannot price that
+    /// artifact: `transcript_chunks` carries no timestamps, and of the 115
+    /// measured transcription attempts in the 2026-08-06 pull
+    /// (`work_journal.metadata.stage = 'analysisJobRunner.run.transcriptionTimeout'`),
+    /// 96 persisted ZERO chunks at ANY length (playhead-i2am) — a population
+    /// in which no floor value separates "banked something" from "banked
+    /// nothing". By this file's own rule a value nobody measured must not pass
+    /// as one that was, so the only non-arbitrary drain floor is ZERO:
+    /// admission unrestricted, exactly the pre-lmrx condition for non-grant
+    /// callers.
+    ///
+    /// **What zero admits, and why that is now safe (the lmrx R3 argument,
+    /// recorded when the question was deferred to this bead).** A pass started
+    /// with seconds left is cancelled at the work deadline and pays: the
+    /// teardown door closes dispatch for the reserve, the cancel is aimed by
+    /// identity, the requeue commits a flat-floor `nextEligibleAt` WITHOUT
+    /// spending an attempt, and whatever chunks it wrote are already durable.
+    /// The tail-of-grant stranding the 60 s floor guarded against is closed by
+    /// that machinery, not by refusing to start; refusing to start only
+    /// converts drain tail into idle. What zero gives up, said plainly: a
+    /// start that cannot reach its first chunk burns its setup for nothing —
+    /// bounded, flat, and unpriceable from this ledger, which is the point.
+    ///
+    /// **NOT part of the `.measured` provenance claim**, for the same
+    /// structural reason ``expirationSettleGrace`` is not: its backfill value
+    /// is derived from the ABSENCE of a measurable artifact cost, and a
+    /// denominator for an absence would be an invention. The recovery
+    /// instance's 60 s is different in kind — see ``preAnalysisRecovery``.
+    let minimumDrainCheckpointBudget: Duration
 
     /// Whether the three durations above are measurements or assumptions.
     let provenance: Provenance
@@ -190,12 +248,14 @@ struct BackgroundGrantBudget: Sendable, Equatable {
         designGrant: Duration,
         teardownReserve: Duration,
         minimumCheckpointBudget: Duration,
+        minimumDrainCheckpointBudget: Duration,
         expirationSettleGrace: Duration,
         provenance: Provenance
     ) {
         self.designGrant = designGrant
         self.teardownReserve = teardownReserve
         self.minimumCheckpointBudget = minimumCheckpointBudget
+        self.minimumDrainCheckpointBudget = minimumDrainCheckpointBudget
         self.expirationSettleGrace = expirationSettleGrace
         self.provenance = provenance
     }
@@ -341,10 +401,20 @@ struct BackgroundGrantBudget: Sendable, Equatable {
     ///   the ~5 s the repo already records as iOS's tightest suspension grace
     ///   (`BGTaskScheduler.pendingTaskRequestsTimeout`) with room left to
     ///   complete the task.
+    /// - `minimumDrainCheckpointBudget` = **0** (playhead-13kf). The 60 s
+    ///   floor priced one FM coarse window, and the FM phase now runs FIRST
+    ///   and directly — the drain behind it is transcription-headed, and this
+    ///   ledger cannot price a transcription pass's smallest durable artifact
+    ///   (no chunk timestamps; 96 of 115 measured attempts persisted zero
+    ///   chunks at any length, playhead-i2am). Zero is the only value that is
+    ///   not an invention; the tail-dispatch churn it admits is the case the
+    ///   teardown door, identity cancel and no-attempt requeue were built for.
+    ///   See the field's own doc comment for the full derivation.
     static let backfillProcessing = BackgroundGrantBudget(
         designGrant: .seconds(255),
         teardownReserve: .seconds(36),
         minimumCheckpointBudget: .seconds(60),
+        minimumDrainCheckpointBudget: .zero,
         expirationSettleGrace: .seconds(3),
         provenance: .measured(
             grantObservations: 132,
@@ -388,10 +458,16 @@ struct BackgroundGrantBudget: Sendable, Equatable {
     /// `expirationSettleGrace` is the ONE field this sibling does not differ on,
     /// and deliberately: it is a property of iOS's reclaim behaviour, not of how
     /// long a class's window is, so a longer grant does not buy a longer grace.
+    ///
+    /// `minimumDrainCheckpointBudget` is 0 here for the same playhead-13kf
+    /// reason as ``backfillProcessing``: the charged sibling shares
+    /// `handleBackfillTask`, so its drain also runs behind the FM-first phase
+    /// and the 60 s coarse-window price does not name its artifact either.
     static let backfillProcessingCharged = BackgroundGrantBudget(
         designGrant: .seconds(1800),
         teardownReserve: .seconds(36),
         minimumCheckpointBudget: .seconds(60),
+        minimumDrainCheckpointBudget: .zero,
         expirationSettleGrace: .seconds(3),
         provenance: .assumed
     )
@@ -423,10 +499,20 @@ struct BackgroundGrantBudget: Sendable, Equatable {
     /// the reserve plus the floor. That binds on 5 of the 97 recorded runs, and
     /// all five of those ended in expiry, which is the outcome the reserve
     /// exists to convert into a recorded one.
+    ///
+    /// `minimumDrainCheckpointBudget` **keeps the full 60 s here, and the
+    /// asymmetry with ``backfillProcessing`` is the playhead-13kf decision
+    /// working as designed**: recovery was NOT reordered, so its drain remains
+    /// the only road to Stage-4 FM work inside its window — the pass it admits
+    /// may still head straight into a coarse scan, and the artifact the floor
+    /// prices (one FM coarse window, p95 57.5 s over 142 rows) is still the
+    /// artifact at stake. Relaxing it here would be spending playhead-13kf's
+    /// derivation on a handler the reorder never touched.
     static let preAnalysisRecovery = BackgroundGrantBudget(
         designGrant: .seconds(255),
         teardownReserve: .seconds(36),
         minimumCheckpointBudget: .seconds(60),
+        minimumDrainCheckpointBudget: .seconds(60),
         expirationSettleGrace: .seconds(3),
         provenance: .assumed
     )

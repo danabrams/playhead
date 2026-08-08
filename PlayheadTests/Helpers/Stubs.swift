@@ -436,6 +436,7 @@ final class StubAnalysisCoordinator: AnalysisCoordinating, @unchecked Sendable {
 
     func runPendingBackfill(deadline: ContinuousClock.Instant) async {
         runPendingBackfillCallCount += 1
+        grantDriverCallOrder.append("poll")
         runPendingBackfillDeadlines.append(deadline)
         runPendingBackfillEntries.increment()
         if let duration = runPendingBackfillDuration {
@@ -444,6 +445,51 @@ final class StubAnalysisCoordinator: AnalysisCoordinating, @unchecked Sendable {
         if runPendingBackfillHoldsUntilReleased {
             await runPendingBackfillReleases.wait(for: 1)
         }
+    }
+
+    // MARK: playhead-13kf hooks
+
+    /// Shared call-order journal across the two grant-spending coordinator
+    /// drivers ("coarse", "poll"), because the reorder's contract is an ORDER
+    /// and two independent counters cannot express one.
+    private(set) var grantDriverCallOrder: [String] = []
+
+    /// Every `(deadline, minimumWindowBudget)` pair the handler handed the
+    /// FM-first coarse phase, so tests can assert the phase spends the SAME
+    /// grant instant as the drivers behind it and is gated by the measured
+    /// coarse-window floor.
+    private(set) var runPendingCoarseScansCalls:
+        [(deadline: ContinuousClock.Instant, minimumWindowBudget: Duration)] = []
+    var runPendingCoarseScansCallCount = 0
+    /// If set, `runPendingCoarseScans` sleeps this long — cancellation-
+    /// responsive, like `runPendingBackfillDuration` — so tests can burn a
+    /// slice of the grant inside the coarse phase and observe what the
+    /// later phases were handed.
+    var runPendingCoarseScansDuration: Duration?
+    /// If set, invoked ON ENTRY of `runPendingCoarseScans`, BEFORE any sleep.
+    /// The ordering pin uses this to snapshot scheduler-visible state at the
+    /// exact moment the coarse phase runs — the only observation point that
+    /// can tell "before the drain" from "after the drain".
+    var onRunPendingCoarseScans: (@Sendable () async -> Void)?
+    /// The value `runPendingCoarseScans` reports as assets driven.
+    var runPendingCoarseScansResult = 0
+
+    func runPendingCoarseScans(
+        deadline: ContinuousClock.Instant,
+        minimumWindowBudget: Duration
+    ) async -> Int {
+        runPendingCoarseScansCallCount += 1
+        grantDriverCallOrder.append("coarse")
+        runPendingCoarseScansCalls.append(
+            (deadline: deadline, minimumWindowBudget: minimumWindowBudget)
+        )
+        if let hook = onRunPendingCoarseScans {
+            await hook()
+        }
+        if let duration = runPendingCoarseScansDuration {
+            try? await Task.sleep(for: duration)
+        }
+        return runPendingCoarseScansResult
     }
 
     func continueForegroundAssist(episodeId: String, deadline: Date) async throws {
