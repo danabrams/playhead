@@ -10,9 +10,14 @@
 //     each vetoed ~20 min later — mark-then-retract churn pairs — and are
 //     deliberately NOT ground truth here),
 //   • pipeline output -> `ad_windows` (all 12 rows, frozen below),
-//   • transcript      -> `transcript_chunks` (fast pass; the final pass never
-//     covered this region because final re-transcription is candidate-local
-//     and no candidate existed here).
+//   • transcript      -> `transcript_chunks` (fast pass; zero `pass='final'`
+//     rows intersect 2820-2962. Final re-transcription is candidate-local and
+//     its single enqueue batch (2026-07-31 23:58:59 UTC, 7 windows, none in
+//     this region) PREDATES both the seam FP (00:42 UTC) and Dan's marks
+//     (15:25/15:26 UTC); the runner's watermark resume guard — already at
+//     EOF — plus its 0.5 floor over `ad_windows.confidence` (which stores
+//     skipConfidence for fusion rows, playhead-ar60) then exclude the late
+//     arrivals permanently — filed as playhead-jzj0).
 //
 // What the fixture pins (the CURRENT, broken behaviour):
 //   • a two-creative host-read pod at 2838.18-2953.68 (115.5 s outer width,

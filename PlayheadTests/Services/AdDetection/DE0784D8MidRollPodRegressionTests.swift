@@ -30,10 +30,10 @@ struct DE0784D8MidRollPodRegressionTests {
     @Test("KNOWN HOLE: the frozen device pull has zero detection-produced seconds inside the 114.78s pod")
     func devicePullPodCoverageIsZero() throws {
         let detectionWindows = Fixture.devicePullAdWindows.filter(\.isDetectionProduced)
-        // Every row in the frozen pull is accounted for: 12 total, 3 of them
-        // replayed user corrections (2 marks + 3 confirmed banners = 5 rows
-        // are user-sourced; 2 marks carry detectorVersion "userCorrection",
-        // 3 banner confirms carry boundaryState "userConfirmedSuggested").
+        // Every row in the frozen pull is accounted for: 12 total, 5 of them
+        // user-sourced (the 2 pod marks carry detectorVersion
+        // "userCorrection"; the 3 banner confirms carry boundaryState
+        // "userConfirmedSuggested"), leaving 7 detection-produced windows.
         #expect(Fixture.devicePullAdWindows.count == 12)
         #expect(detectionWindows.count == 7)
 
