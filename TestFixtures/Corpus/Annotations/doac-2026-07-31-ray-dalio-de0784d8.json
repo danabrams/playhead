@@ -1,0 +1,85 @@
+{
+  "episode_id": "doac-2026-07-31-ray-dalio-de0784d8",
+  "show_name": "Diary of a CEO",
+  "duration_seconds": 5522.6514375,
+  "ad_windows": [
+    {
+      "start_seconds": 0.0,
+      "end_seconds": 60.06,
+      "advertiser": null,
+      "product": null,
+      "ad_type": "dynamic_insertion",
+      "transition_type": null,
+      "confidence_notes": "Pre-roll. Day-0 rediff byte-exact window ran 0.0-60.133; the owner's 2026-08-01 veto (exactTimeSpan 60.060-62.100) fixes the true ad end at 60.06. playhead-j4wi.",
+      "provenance": [
+        "human_first_pass"
+      ]
+    },
+    {
+      "start_seconds": 2838.18,
+      "end_seconds": 2897.94,
+      "advertiser": "WhisperFlow",
+      "product": "Speech-to-text app",
+      "ad_type": "host_read",
+      "transition_type": "explicit",
+      "confidence_notes": "Mid-roll pod creative 1 of 2, owner falseNegative mark 2026-08-01 15:25:22. 'I've got 60 seconds ... because of our sponsor called Whisper Flow' ... 'head to whisperflow.ai slash Stephen'. Undetected by the pipeline. playhead-j4wi.",
+      "provenance": [
+        "human_first_pass"
+      ]
+    },
+    {
+      "start_seconds": 2898.66,
+      "end_seconds": 2953.68,
+      "advertiser": "Ketone-IQ",
+      "product": "Ketone drink",
+      "ad_type": "host_read",
+      "transition_type": "blended",
+      "confidence_notes": "Mid-roll pod creative 2 of 2, owner falseNegative mark 2026-08-01 15:26:04. 'Just like John Jones ...' ... 'go to ketone.com slash Stephen'. Undetected by the pipeline. playhead-j4wi.",
+      "provenance": [
+        "human_first_pass"
+      ]
+    },
+    {
+      "start_seconds": 5462.570296660244,
+      "end_seconds": 5522.6514375,
+      "advertiser": null,
+      "product": null,
+      "ad_type": "dynamic_insertion",
+      "transition_type": null,
+      "confidence_notes": "Post-roll. Day-0 rediff byte-exact window; device end 5522.6775510123671 exceeds the asset's episodeDurationSec 5522.6514375 by 0.026 s and is clamped to the episode duration for the partition invariant. Never corrected by the owner. playhead-j4wi.",
+      "provenance": [
+        "human_first_pass"
+      ]
+    }
+  ],
+  "content_windows": [
+    {
+      "start_seconds": 60.06,
+      "end_seconds": 2838.18,
+      "notes": "Show content. Includes two owner-vetoed false positives: the 2.04 s pre-roll skip overshoot (60.06-62.10) and the 8.04 s lexical span persisted as 'acousticRefined' at 2828.40-2836.44 ('work in partnership with the artificial intelligence' - show content that false-fired the disclosure regex). playhead-j4wi."
+    },
+    {
+      "start_seconds": 2897.94,
+      "end_seconds": 2898.66,
+      "notes": "0.72 s between the owner's two separate mid-roll marks - the creative seam. Not asserted skippable; present only so ad and content windows partition the timeline."
+    },
+    {
+      "start_seconds": 2953.68,
+      "end_seconds": 5462.570296660244,
+      "notes": "Show content between the mid-roll pod and the post-roll."
+    }
+  ],
+  "variant_of": null,
+  "audio_fingerprint": "sha256:16d072117c9404ad53d48271c37aefb21d72330c65afa0f6c5570851462348c8",
+  "provenance": [
+    "human_first_pass"
+  ],
+  "review_attestations": [
+    {
+      "reviewer": "Dan Abrams",
+      "reviewed_at": "2026-08-01T15:26:04Z",
+      "audio_fingerprint": "sha256:16d072117c9404ad53d48271c37aefb21d72330c65afa0f6c5570851462348c8",
+      "review_artifact_id": "sha256:a4a5300f1c6f2556e5b27ed815bf476e18411ab7ad56041d14d53c2783319311"
+    }
+  ]
+}

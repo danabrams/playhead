@@ -1163,7 +1163,7 @@ struct CorpusAnnotationLoaderDiskTests {
     func canonicalManifestAndTiers() throws {
         let loader = CorpusAnnotationLoader()
         let urls = try loader.annotationFileURLs()
-        #expect(urls.count == 12)
+        #expect(urls.count == 13)
 
         let annotations = try loader.loadAll(verifyAudioFingerprints: false)
         #expect(annotations.filter(\.isEligibleForGoldEvaluation).isEmpty)
@@ -1171,7 +1171,9 @@ struct CorpusAnnotationLoaderDiskTests {
             annotation.adWindows.map { annotation.labelTier(for: $0) }
         }
         #expect(tiers.filter { $0 == .gold }.isEmpty)
-        #expect(tiers.filter { $0 == .silver }.count == 24)
+        // 24 windows across the 2026-05 first-pass batch + 4 on the
+        // playhead-j4wi device-pull episode (doac-2026-07-31-ray-dalio-de0784d8).
+        #expect(tiers.filter { $0 == .silver }.count == 28)
         #expect(tiers.filter { $0 == .boundaryProposal }.isEmpty)
         #expect(annotations.allSatisfy { $0.provenance == ["human_first_pass"] })
         #expect(annotations.allSatisfy { $0.reviewAttestations?.count == 1 })
