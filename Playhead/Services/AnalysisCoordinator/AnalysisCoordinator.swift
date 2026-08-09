@@ -309,6 +309,25 @@ actor AnalysisCoordinator {
     /// isolation pass the provider at init.
     private var schedulerStateSnapshotProvider: (any SchedulerStateSnapshotProviding)?
 
+    /// playhead-vtjx: episodeId → the show that episode belongs to, answered by
+    /// the EPISODE store (SwiftData) rather than the analysis lane.
+    ///
+    /// The coarse-first phase runs from persisted rows in a background window,
+    /// and `analysis_jobs.podcastId` — the only show identity it used to read —
+    /// is SQL NULL for every episode whose first job predates playhead-kkzu,
+    /// inherited forever by the re-mint paths. This is how it asks the store
+    /// that does know. Consulted only when the analysis lane has no usable
+    /// identity; see ``resolveShowIdentity(forEpisode:)``.
+    ///
+    /// `var` (not `let`) and nullable for the same reason
+    /// ``schedulerStateSnapshotProvider`` is: `PlayheadRuntime` constructs the
+    /// coordinator before the SwiftData `ModelContainer` exists, and tests that
+    /// stand a coordinator up in isolation must keep working without one. A nil
+    /// resolver is not a silent degradation — it leaves the fil5
+    /// `podcastIdMissing` claim exactly as it was, and
+    /// ``resolveShowIdentity(forEpisode:)`` logs which of the two it was.
+    private var showIdentityResolver: (@Sendable (String) async -> String?)?
+
     // MARK: - Active Session State
 
     /// The currently active session, if any.
@@ -420,6 +439,15 @@ actor AnalysisCoordinator {
     /// return meaningful snapshots.
     func setSchedulerStateSnapshotProvider(_ provider: (any SchedulerStateSnapshotProviding)?) {
         self.schedulerStateSnapshotProvider = provider
+    }
+
+    /// playhead-vtjx: install (or replace) the episode-store show-identity
+    /// resolver. `PlayheadRuntime` calls this once at construction with a
+    /// closure that reads its `episodePodcastIdResolverBox` AT CALL TIME —
+    /// `PlayheadApp` fills that box later, from the scene bootstrap, and
+    /// reading it lazily is what makes the wiring race-free without a poll.
+    func setShowIdentityResolver(_ resolver: (@Sendable (String) async -> String?)?) {
+        self.showIdentityResolver = resolver
     }
 
     // MARK: - Lifecycle
@@ -802,6 +830,83 @@ actor AnalysisCoordinator {
         return scanned
     }
 
+    /// playhead-vtjx: where a coarse scan's show identity came from, and
+    /// whether the analysis lane still owes a repair for it.
+    ///
+    /// Three cases rather than a `String?` because the caller must distinguish
+    /// *found* from *recovered*: the two run the scan identically, and only the
+    /// second is evidence that `analysis_jobs.podcastId` is still NULL for this
+    /// episode and can be filled in. Collapsing them would either re-write the
+    /// row on every scan or never write it at all.
+    enum CoarseScanShowIdentity: Equatable, Sendable {
+        /// The analysis lane's own row already names the show.
+        case fromAnalysisLane(String)
+        /// The analysis lane holds no usable identity and the EPISODE store
+        /// does. The scan runs under it and the lane rows should be repaired.
+        case recoveredFromEpisodeStore(String)
+        /// Neither store names a show for this episode. `runBackfill` is handed
+        /// `""` and its playhead-fil5 gate records the `podcastIdMissing`
+        /// claim — which, having asked both stores, is now a true statement
+        /// rather than a report about one of them.
+        case unknown
+
+        /// The value handed to `runBackfill`. `""` for ``unknown``, which is
+        /// the ABSENCE the fil5 gate is written to catch — not a podcast.
+        var podcastIdArgument: String {
+            switch self {
+            case .fromAnalysisLane(let id), .recoveredFromEpisodeStore(let id):
+                return id
+            case .unknown:
+                return ""
+            }
+        }
+    }
+
+    /// playhead-vtjx: decide which show a coarse scan runs under, from the two
+    /// stores that can answer.
+    ///
+    /// **The defect this closes.** The coarse-first phase asked exactly one
+    /// store — `analysis_jobs.podcastId` — and rendered its absence as `""`.
+    /// On the 2026-08-08 pull that column is NULL for 12 of 19 assets,
+    /// including all four the bead names, because it was optional before
+    /// playhead-kkzu and because every re-mint path copies it verbatim, so the
+    /// NULL is inherited indefinitely. The identity was never missing from the
+    /// device: it lives in the SwiftData episode row, reachable through the
+    /// resolver seam `PlayheadRuntime` already installs for the final-pass
+    /// sweep. This function is what asks the second store, and the reason the
+    /// answer is a case rather than a string is so the caller can repair the
+    /// first one.
+    ///
+    /// **Both inputs go through the SAME admission gate, and it is the gate the
+    /// rest of the show-scoped lane uses**:
+    /// `RecurrenceMaterialIdentity.canonicalIdentifier`, which admits a value
+    /// only in its exact canonical spelling — the same one
+    /// `DownloadContext.init`, `Episode.resolvedShowIdentity` and
+    /// `SkipOrchestrator.beginEpisode` apply. `""`, `"   "` and a NUL-bearing
+    /// string are therefore ``unknown`` from EITHER source, not a podcast whose
+    /// id happens to be blank. Ask the standing question: what would this read
+    /// if the podcast were unknown? `.unknown` — never a key that joins to
+    /// `podcast_profiles` and reads as a real show.
+    ///
+    /// **`episodeStoreIdentity: nil` may mean "not asked".** The caller only
+    /// consults the resolver when the analysis lane failed to answer, because
+    /// that resolution is a MainActor SwiftData fetch. That is safe here and
+    /// not a conflation: when the lane answers, the first branch wins and this
+    /// parameter is never read, so "not asked" and "asked and unknown" can
+    /// never produce different results.
+    static func resolveCoarseScanShowIdentity(
+        jobPodcastId: String?,
+        episodeStoreIdentity: String?
+    ) -> CoarseScanShowIdentity {
+        if let fromLane = RecurrenceMaterialIdentity.canonicalIdentifier(jobPodcastId) {
+            return .fromAnalysisLane(fromLane)
+        }
+        if let recovered = RecurrenceMaterialIdentity.canonicalIdentifier(episodeStoreIdentity) {
+            return .recoveredFromEpisodeStore(recovered)
+        }
+        return .unknown
+    }
+
     /// Drive the shipped Stage-4 backfill entry for one asset.
     ///
     /// Everything here is resolution of the arguments `runBackfill` already
@@ -809,11 +914,17 @@ actor AnalysisCoordinator {
     /// with no live pipeline state:
     ///   - chunks: raw persisted rows; `runBackfill` canonicalizes for itself
     ///     (playhead-hc7e/iu0t — canonicalization lives at the callee).
-    ///   - podcastId: from the episode's latest `analysis_jobs` row, the same
-    ///     carrier the re-drive mint reads. A missing id is handed through as
-    ///     `""` — `runBackfill`'s own playhead-fil5 gate records the durable
-    ///     `podcastIdMissing` claim, which is the designed disposition, not an
-    ///     error to pre-empt here.
+    ///   - podcastId: the newest ATTRIBUTED `analysis_jobs` row for the episode
+    ///     first, and — playhead-vtjx — the EPISODE store when no such row
+    ///     exists. An identity found only in the
+    ///     second store is written back to the first, so the next reader of
+    ///     `analysis_jobs.podcastId` (the reconciler's claim mint, the
+    ///     scheduler's `job.podcastId ?? ""`, rediff's latest-job read, and
+    ///     every re-mint that inherits the column) sees it too. Only when
+    ///     BOTH stores are silent is `""` handed through, and `runBackfill`'s
+    ///     playhead-fil5 gate records the durable `podcastIdMissing` claim —
+    ///     the designed disposition, and now a claim about the device rather
+    ///     than about one table.
     ///   - episodeDuration: the persisted `episodeDurationSec` (or 0 when the
     ///     row predates playhead-gtt9.1.1). The pipeline's `max(live, persisted)`
     ///     resolution needs `activeShards`, which only exist mid-decode; the
@@ -821,19 +932,93 @@ actor AnalysisCoordinator {
     private func coarseScanOneAsset(_ assetId: String) async throws {
         let chunks = try await store.fetchTranscriptChunks(assetId: assetId)
         let asset = try await store.fetchAsset(id: assetId)
-        var podcastId = ""
-        if let episodeId = asset?.episodeId,
-           let job = try? await store.fetchLatestJobForEpisode(episodeId),
-           let jobPodcastId = job.podcastId {
-            podcastId = jobPodcastId
-        }
+        let identity = await resolveShowIdentity(forEpisode: asset?.episodeId)
         try await adDetectionService.runBackfill(
             chunks: chunks,
             analysisAssetId: assetId,
-            podcastId: podcastId,
+            podcastId: identity.podcastIdArgument,
             episodeDuration: asset?.episodeDurationSec ?? 0,
             sessionId: nil
         )
+    }
+
+    /// playhead-vtjx: ask both stores which show this episode belongs to, and
+    /// repair the analysis lane when only the episode store knew.
+    ///
+    /// The episode store is consulted ONLY when the analysis lane has no usable
+    /// identity — the resolver hops to the MainActor for a SwiftData fetch, and
+    /// the healthy majority of assets must not pay for it. See
+    /// ``resolveCoarseScanShowIdentity(jobPodcastId:episodeStoreIdentity:)``
+    /// for why that laziness cannot change the answer.
+    ///
+    /// The repair is best-effort and deliberately non-fatal: this runs inside a
+    /// granted background window whose product is a banked coarse scan, and a
+    /// failed bookkeeping write must not cost the window the scan it came for.
+    /// The write itself is idempotent and fills only NULLs — see
+    /// ``AnalysisStore/backfillJobPodcastId(episodeId:podcastId:)``.
+    ///
+    /// A `nil` `episodeId` is an asset row with no episode, which no resolver
+    /// can be asked about; it short-circuits to ``CoarseScanShowIdentity/unknown``.
+    ///
+    /// **The analysis-lane read is ``AnalysisStore/fetchRecordedPodcastId(forEpisodeId:)``,
+    /// not `fetchLatestJobForEpisode(_:)?.podcastId`, and the difference is a
+    /// live defect rather than a preference.** `fetchLatestJobForEpisode` orders
+    /// by `updatedAt DESC` with NO `podcastId IS NOT NULL` filter, so a single
+    /// NULL-bearing row shadows every attributed row for the same episode the
+    /// moment it is touched more recently — and NULL-bearing rows are still
+    /// being minted daily by `AnalysisJobReconciler.discoverUnEnqueuedDownloads`,
+    /// which holds no show identity at all and hardcodes `nil` (five such rows
+    /// on 2026-08-06 alone, in two same-second batches). Repairing the column
+    /// while reading it through a query that a later NULL can shadow would have
+    /// produced a fix that worked once and then stopped.
+    private func resolveShowIdentity(
+        forEpisode episodeId: String?
+    ) async -> CoarseScanShowIdentity {
+        guard let episodeId else { return .unknown }
+        let jobPodcastId = try? await store.fetchRecordedPodcastId(forEpisodeId: episodeId)
+        var episodeStoreIdentity: String?
+        if RecurrenceMaterialIdentity.canonicalIdentifier(jobPodcastId) == nil,
+           let resolve = showIdentityResolver {
+            episodeStoreIdentity = await resolve(episodeId)
+        }
+        let identity = Self.resolveCoarseScanShowIdentity(
+            jobPodcastId: jobPodcastId,
+            episodeStoreIdentity: episodeStoreIdentity
+        )
+        switch identity {
+        case .fromAnalysisLane:
+            break
+        case .recoveredFromEpisodeStore(let podcastId):
+            do {
+                let repaired = try await store.backfillJobPodcastId(
+                    episodeId: episodeId,
+                    podcastId: podcastId
+                )
+                if repaired > 0 {
+                    logger.info(
+                        """
+                        coarse_scan_show_identity_repaired episode=\(episodeId, privacy: .public) \
+                        rows=\(repaired)
+                        """
+                    )
+                }
+            } catch {
+                logger.warning(
+                    """
+                    coarse_scan_show_identity_repair_failed episode=\(episodeId, privacy: .public) \
+                    error=\(String(describing: error), privacy: .public)
+                    """
+                )
+            }
+        case .unknown:
+            logger.info(
+                """
+                coarse_scan_show_identity_unknown episode=\(episodeId, privacy: .public) \
+                resolverInstalled=\(self.showIdentityResolver != nil)
+                """
+            )
+        }
+        return identity
     }
 
     // MARK: - Foreground-Assist Hand-off (playhead-44h1)
