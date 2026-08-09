@@ -724,8 +724,15 @@ struct CoarseScanShowIdentityRuntimeWiringTests {
             // instead of assuming it has already run. `.unknown` is what a
             // MISSING wiring returns on every iteration, so a deleted call site
             // spends the whole budget and then fails the assertion below.
+            //
+            // 3s, not the 1s that was enough to prove the mutation RED on a
+            // quiet box: this suite runs inside the full plan, where a freshly
+            // created `Task` waits behind ~8,300 tests' worth of runnable work
+            // on the global executor. The budget is the FLAKE margin, and it
+            // costs nothing in the green direction — the loop exits on the
+            // first iteration that sees the resolver.
             var identity = AnalysisCoordinator.CoarseScanShowIdentity.unknown
-            for _ in 0..<100 {
+            for _ in 0..<300 {
                 identity = await runtime.analysisCoordinator
                     .resolveShowIdentity(forEpisode: episodeId)
                 if identity != .unknown { break }
