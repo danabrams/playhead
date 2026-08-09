@@ -339,7 +339,33 @@ struct AdWindow: Sendable {
     let analysisAssetId: String
     let startTime: Double
     let endTime: Double
+    /// playhead-ar60: the DETECTION confidence — "how strongly does the
+    /// evidence say this span is an ad". Every producer writes this quantity:
+    /// the hot-path classifier writes `adProbability`, the segment aggregator
+    /// its `segmentScore`, the mark composers their capped mark confidence,
+    /// byte-exact rediff and user marks write `1.0`, and (since ar60) the
+    /// fusion path writes `DecisionResult.proposalConfidence`.
+    ///
+    /// It is NOT the number an actuator may gate on. Until ar60 the fusion
+    /// path wrote `DecisionResult.skipConfidence` — the post-correction
+    /// ACTUATION number — into this same column, so the two quantities shared
+    /// one field and every reader saw whichever the producer happened to mean:
+    /// on the 2026-08-02 device pull that was 40 of 104 rows, and 5 of them
+    /// were admitted to the cross-launch preload only because an unrelated
+    /// user correction on the same asset had inflated the value past the 0.7
+    /// DETECTOR floor. Actuation now lives in `skipConfidence`; read it
+    /// through ``actuationConfidence`` so a producer that records no separate
+    /// actuation number still resolves to something.
     let confidence: Double
+    /// playhead-ar60: the ACTUATION confidence — "how much permission does the
+    /// system have to act on this span", i.e. detection after calibration and
+    /// after the user-correction factor. Written by the fusion path only.
+    ///
+    /// `nil` means the producer has exactly one number and it is in
+    /// `confidence`: the hot path, the mark composers, rediff mints, user
+    /// marks, and every row written before the V47 split. Do not read this
+    /// field directly for a gate — use ``actuationConfidence``.
+    let skipConfidence: Double?
     let boundaryState: String
     let decisionState: String
     let detectorVersion: String
@@ -389,6 +415,17 @@ struct AdWindow: Sendable {
     /// persistence layer stays decoupled from the orchestrator's enum for I/O.
     let startEdgeAnchor: String
     let endEdgeAnchor: String
+
+    /// playhead-ar60: the confidence an ACTUATOR must gate on — the persisted
+    /// `skipConfidence` when the producer recorded one, otherwise
+    /// `confidence`.
+    ///
+    /// The fallback is what makes the V47 split behaviour-preserving: a
+    /// producer with a single number (hot path, mark composers, rediff, user
+    /// marks) and every pre-V47 row resolve to exactly the value the actuation
+    /// readers saw before the split. Only the fusion path, which genuinely has
+    /// two numbers, now hands them a different one from `confidence`.
+    var actuationConfidence: Double { skipConfidence ?? confidence }
 
     /// A non-zero score or any match-provenance field claims that catalog
     /// evidence participated in this decision. Invalid non-finite values also
@@ -445,6 +482,12 @@ struct AdWindow: Sendable {
         startTime: Double,
         endTime: Double,
         confidence: Double,
+        // playhead-ar60: defaulted so the single-number producers (hot path,
+        // mark composers, rediff mints, user marks, copy-with helpers) keep
+        // their call sites AND their semantics — `nil` means "this producer
+        // has one number and it is `confidence`", which is exactly true of
+        // every one of them.
+        skipConfidence: Double? = nil,
         boundaryState: String,
         decisionState: String,
         detectorVersion: String,
@@ -474,6 +517,7 @@ struct AdWindow: Sendable {
         self.startTime = startTime
         self.endTime = endTime
         self.confidence = confidence
+        self.skipConfidence = skipConfidence
         self.boundaryState = boundaryState
         self.decisionState = decisionState
         self.detectorVersion = detectorVersion
@@ -1728,7 +1772,7 @@ actor AnalysisStore {
     /// assertions automatically follow the production constant — hardcoding
     /// the integer in tests has been a recurring source of stale-assertion
     /// flakes whenever the schema bumps.
-    nonisolated static let currentSchemaVersion = 46
+    nonisolated static let currentSchemaVersion = 47
 
     /// H1: minimum age (in seconds) a `backfill_jobs` / `final_pass_jobs`
     /// row stuck in `status='running'` must reach before the launch-time
@@ -2583,6 +2627,11 @@ actor AnalysisStore {
             // playhead-3oyz: the day-0 same-session retry claim — a dropped
             // retry must not read as "never happened" (the fil5 precedent).
             try migrateRediffDayZeroRetryClaimV46IfNeeded()
+            // playhead-ar60: `ad_windows.confidence` stops being two
+            // quantities. Adds `skipConfidence` and MOVES the fusion path's
+            // actuation number into it, restoring each row's detection number
+            // from the `decision_events` row that produced it.
+            try migrateAdWindowSkipConfidenceSplitV47IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -2942,6 +2991,12 @@ actor AnalysisStore {
         // playhead-3oyz (v46): guarded on `tableExists`, so a seeded fixture
         // without `rediff_day_zero_attempts` still reaches v46.
         try migrateRediffDayZeroRetryClaimV46IfNeeded()
+        // playhead-ar60 (v47): guarded on `tableExists` for BOTH `ad_windows`
+        // and `decision_events`, so a seeded fixture missing either still
+        // reaches v47 — without the events table the column is added and no
+        // row is repaired, which is the correct answer when the witness that
+        // would justify a repair is absent.
+        try migrateAdWindowSkipConfidenceSplitV47IfNeeded()
     }
     #endif
 
@@ -6733,6 +6788,91 @@ actor AnalysisStore {
         try setSchemaVersion(46)
     }
 
+    // MARK: - V47: split actuation out of `ad_windows.confidence` (playhead-ar60)
+    //
+    // One nullable column, `skipConfidence`, plus a data repair that is a pure
+    // MOVE — no value is invented, because every number it writes was already
+    // on disk.
+    //
+    // WHY. `confidence` means DETECTION for six of the seven producers. The
+    // fusion path wrote `DecisionResult.skipConfidence` — the ACTUATION number,
+    // detection times the user-correction factor — into the same column, and
+    // put `proposalConfidence` into `metadataConfidence`, where the metadata
+    // extractor then overwrote it (40 of 40 fusion rows on the 2026-08-02
+    // device pull: 28 at the 0.1 fallback, 12 at 0.3). So the detection number
+    // was not merely mislabelled, it was DESTROYED on every persisted fusion
+    // row, and every reader of `confidence` — the 0.7 cross-launch preload
+    // DETECTOR floor, the cue-window gates, catalog/repeated-ad learning, the
+    // transcript "AD n%" label, the corpus export — read actuation instead.
+    //
+    // THE REPAIR, and why it invents nothing. `decision_events` records
+    // `(windowId, proposalConfidence, skipConfidence)` for every fusion
+    // decision. A row whose `confidence` is bit-identical to a recorded
+    // `skipConfidence` for its own window id was written by the fusion writer
+    // in that run, and that run's `proposalConfidence` is the detection number
+    // this row lost. So:
+    //
+    //     skipConfidence := confidence          (a MOVE — same value, right column)
+    //     confidence     := that run's proposalConfidence
+    //
+    // Measured on the two device pulls: 40/40 and 48/48 fusion rows matched
+    // exactly, and NO non-fusion row matched — hot-path/rediff/user-mark ids
+    // never appear in `decision_events` at all, so the join is its own
+    // discriminator and no `LIKE 'fusion-%'` guess is needed. A row that
+    // matches nothing is left completely alone: `skipConfidence` stays NULL,
+    // `actuationConfidence` falls back to `confidence`, and it behaves exactly
+    // as it did before this migration.
+    //
+    // WHAT IT DELIBERATELY DOES NOT DO. It does not clamp, does not touch
+    // `metadataConfidence` (the extractor owns that column and its historical
+    // values are the extractor's, not fusion's), and does not rewrite
+    // `decisionState`. A row whose detection number cannot be recovered keeps
+    // the value it shipped with — wrong, but unchanged, and the next backfill
+    // rewrites it from the live decision.
+
+    /// V47 migration — the detection/actuation split on `ad_windows`.
+    /// Idempotent: `addColumnIfNeeded` guards the ALTER, and the repair is
+    /// scoped to `skipConfidence IS NULL` so a re-run cannot move a value
+    /// twice. `tableExists` guards the ladder-only seam where a seeded fixture
+    /// omits `ad_windows` (and the seam where it omits `decision_events`).
+    private func migrateAdWindowSkipConfidenceSplitV47IfNeeded() throws {
+        let observed = (try schemaVersion() ?? 1)
+        guard observed < 47 else { return }
+        // DO NOT STEP OVER A ROLLED-BACK V39 — same rationale as V40–V46.
+        guard observed >= 46 else { return }
+        if try tableExists("ad_windows") {
+            try addColumnIfNeeded(
+                table: "ad_windows",
+                column: "skipConfidence",
+                definition: "REAL"
+            )
+            if try tableExists("decision_events") {
+                // ONE statement, so the move and the restore cannot half-apply:
+                // `skipConfidence` is assigned from the OLD `confidence` and
+                // `confidence` from the matching event, and SQLite evaluates
+                // every SET expression against the pre-UPDATE row.
+                try exec("""
+                    UPDATE ad_windows
+                       SET skipConfidence = confidence,
+                           confidence = (
+                               SELECT d.proposalConfidence FROM decision_events d
+                                WHERE d.windowId = ad_windows.id
+                                  AND d.skipConfidence = ad_windows.confidence
+                                ORDER BY d.createdAt DESC LIMIT 1
+                           )
+                     WHERE skipConfidence IS NULL
+                       AND EXISTS (
+                               SELECT 1 FROM decision_events d
+                                WHERE d.windowId = ad_windows.id
+                                  AND d.skipConfidence = ad_windows.confidence
+                                  AND d.proposalConfidence IS NOT NULL
+                           )
+                    """)
+            }
+        }
+        try setSchemaVersion(47)
+    }
+
     /// Fold ONE settled day-0 kickoff into its episode's row.
     ///
     /// The counters accumulate in SQL rather than in Swift so two writers can
@@ -8743,7 +8883,8 @@ actor AnalysisStore {
                 catalogMatchedLearningSource TEXT,
                 catalogMatchedLearningLifecycle TEXT,
                 startEdgeAnchor     TEXT NOT NULL DEFAULT 'unanchored',
-                endEdgeAnchor       TEXT NOT NULL DEFAULT 'unanchored'
+                endEdgeAnchor       TEXT NOT NULL DEFAULT 'unanchored',
+                skipConfidence      REAL
             )
             """)
         try exec("CREATE INDEX IF NOT EXISTS idx_ad_asset ON ad_windows(analysisAssetId)")
@@ -11526,6 +11667,7 @@ actor AnalysisStore {
         // catalogFingerprintVersion=24 catalogMatchedEntryId=25
         // catalogMatchedShowId=26 catalogMatchedLearningSource=27
         // catalogMatchedLearningLifecycle=28 (playhead-o4qr)
+        // skipConfidence=29 (playhead-ar60)
         // Keep bind() call indices and this comment in sync when adding columns.
         let conflictClause = orReplace ? "OR REPLACE " : ""
         let sql = """
@@ -11537,8 +11679,9 @@ actor AnalysisStore {
              evidenceSources, eligibilityGate, catalogStoreMatchSimilarity,
              startEdgeAnchor, endEdgeAnchor, catalogFingerprintVersion,
              catalogMatchedEntryId, catalogMatchedShowId,
-             catalogMatchedLearningSource, catalogMatchedLearningLifecycle)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             catalogMatchedLearningSource, catalogMatchedLearningLifecycle,
+             skipConfidence)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -11570,6 +11713,7 @@ actor AnalysisStore {
         bind(stmt, 26, ad.catalogMatchedShowId)
         bind(stmt, 27, ad.catalogMatchedLearningSource)
         bind(stmt, 28, ad.catalogMatchedLearningLifecycle)
+        bind(stmt, 29, ad.skipConfidence)
         try step(stmt, expecting: SQLITE_DONE)
     }
 
@@ -11594,6 +11738,13 @@ actor AnalysisStore {
             startTime: sqlite3_column_double(stmt, 2),
             endTime: sqlite3_column_double(stmt, 3),
             confidence: sqlite3_column_double(stmt, 4),
+            // playhead-ar60: ALTER-appended in V47, so resolved by NAME like
+            // every other post-baseline column. Absent column or NULL cell →
+            // nil, which `actuationConfidence` reads as "this producer has one
+            // number and it is `confidence`" — exactly true of every pre-V47
+            // row and every non-fusion producer.
+            skipConfidence: columnIndex(stmt, name: "skipConfidence")
+                .flatMap { optionalDouble(stmt, $0) },
             boundaryState: text(stmt, 5),
             decisionState: text(stmt, 6),
             detectorVersion: text(stmt, 7),
@@ -11664,6 +11815,8 @@ actor AnalysisStore {
         )
         let startAnchorIdx = columnIndex(stmt, name: "startEdgeAnchor")
         let endAnchorIdx = columnIndex(stmt, name: "endEdgeAnchor")
+        // playhead-ar60: V47's actuation column, same by-name resolution.
+        let skipConfidenceIdx = columnIndex(stmt, name: "skipConfidence")
         var results: [AdWindow] = []
         while true {
             let result = sqlite3_step(stmt)
@@ -11679,6 +11832,9 @@ actor AnalysisStore {
                 startTime: sqlite3_column_double(stmt, 2),
                 endTime: sqlite3_column_double(stmt, 3),
                 confidence: sqlite3_column_double(stmt, 4),
+                skipConfidence: skipConfidenceIdx.flatMap {
+                    optionalDouble(stmt, $0)
+                },
                 boundaryState: text(stmt, 5),
                 decisionState: text(stmt, 6),
                 detectorVersion: text(stmt, 7),
@@ -12908,7 +13064,7 @@ actor AnalysisStore {
                 catalogMatchedEntryId = ?, catalogMatchedShowId = ?,
                 catalogMatchedLearningSource = ?,
                 catalogMatchedLearningLifecycle = ?, startEdgeAnchor = ?,
-                endEdgeAnchor = ?
+                endEdgeAnchor = ?, skipConfidence = ?
             WHERE id = ? AND analysisAssetId = ?
             """
         let stmt = try prepare(sql)
@@ -12935,8 +13091,15 @@ actor AnalysisStore {
         bind(stmt, 20, ad.catalogMatchedLearningLifecycle)
         bind(stmt, 21, ad.startEdgeAnchor)
         bind(stmt, 22, ad.endEdgeAnchor)
-        bind(stmt, 23, ad.id)
-        bind(stmt, 24, ad.analysisAssetId)
+        // playhead-ar60: `confidence` and `skipConfidence` are ONE
+        // observation and are always written together. An UPDATE that
+        // rewrote only `confidence` would leave the actuation column
+        // describing a decision that no longer exists — the same
+        // two-quantities-one-column failure this bead removed, arrived at by
+        // a stale write instead of a mislabelled one.
+        bind(stmt, 23, ad.skipConfidence)
+        bind(stmt, 24, ad.id)
+        bind(stmt, 25, ad.analysisAssetId)
         try step(stmt, expecting: SQLITE_DONE)
         guard sqlite3_changes(db) == 1 else {
             throw AnalysisStoreError.staleAdWindowRevision(id: ad.id)

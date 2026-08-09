@@ -8746,15 +8746,41 @@ actor AdDetectionService {
     ) -> AdWindow {
         // Map fusion policy action + gate to AdDecisionState for persistence.
         // autoSkipEligible: confirmed when gate passes, candidate otherwise.
-        // detectOnly/logOnly: always confirmed (no applied-skip banner; data preserved for Phase 7).
+        // detectOnly/logOnly: confirmed (no applied-skip banner; data preserved
+        //   for Phase 7) — EXCEPT when the user vetoed this span.
         // suppress: always suppressed (never shown to user).
+        //
+        // playhead-ar60 (mechanism 3): `detectOnly` used to persist
+        // `.confirmed` UNCONDITIONALLY, and `rawPolicyAction` is
+        // `SkipPolicyMatrix.action(for: .unknown, ownership: .unknown)` —
+        // `.detectOnly` for every fusion span that is not promoted. So a span
+        // whose gate was `.blockedByUserCorrection` (the user's own "not an
+        // ad") came back as a CONFIRMED row, and on episode DE0784D8 Dan was
+        // shown a confirmed banner for a span he had vetoed 7 seconds earlier.
+        // `.blockedByUserCorrection` is the one gate that encodes an explicit
+        // human judgement about THIS span, and re-presenting it is the system
+        // arguing with the user. `.suppressed` is the existing "never shown"
+        // terminal state: it is reconcilable (so a later run that no longer
+        // sees a veto can flip it back), it is excluded from
+        // `SkipOrchestrator`'s cross-launch preload, and it is what the
+        // `.suppress` policy action already produces.
+        //
+        // Deliberately narrow. Every OTHER blocked gate
+        // (`.blockedByEvidenceQuorum`, `.blockedByFMConsensus`, `.markOnly`,
+        // …) still persists `.confirmed`: those are the system's own
+        // uncertainty, and a banner Dan can answer is exactly what that
+        // population is for (feedback_banner_is_a_skip_affordance). A general
+        // low-confidence EMISSION FLOOR is a recall decision and is NOT taken
+        // here — see the bead comment; filed separately.
         let decisionState: AdDecisionState
         switch policyAction {
         case .autoSkipEligible:
             decisionState = decision.eligibilityGate == .eligible ? .confirmed : .candidate
         case .detectOnly, .logOnly:
             // logOnly and detectOnly: persist but don't auto-skip.
-            decisionState = .confirmed
+            decisionState = decision.eligibilityGate == .blockedByUserCorrection
+                ? .suppressed
+                : .confirmed
         case .suppress:
             decisionState = .suppressed
         }
@@ -8776,7 +8802,23 @@ actor AdDetectionService {
             analysisAssetId: analysisAssetId,
             startTime: span.startTime,
             endTime: span.endTime,
-            confidence: decision.skipConfidence,
+            // playhead-ar60 (mechanism 2): the two quantities stop sharing a
+            // column. `confidence` is the DETECTION number — what the evidence
+            // says — matching every other producer of this column; the
+            // ACTUATION number, detection after calibration and after the
+            // user-correction factor, goes to `skipConfidence`.
+            //
+            // Before this bead these were reversed and lossy: `skipConfidence`
+            // went into `confidence`, `proposalConfidence` went into
+            // `metadataConfidence`, and the metadata extractor then OVERWROTE
+            // that with its own unrelated number (40 of 40 fusion rows on the
+            // 2026-08-02 pull). So the detection confidence of a persisted
+            // fusion row was not recoverable at all, while the 0.7 preload
+            // DETECTOR floor, the cue gates, catalog/repeated-ad learning and
+            // the "AD n%" transcript label all read the actuation number in
+            // its place.
+            confidence: decision.proposalConfidence,
+            skipConfidence: decision.skipConfidence,
             boundaryState: AdBoundaryState.acousticRefined.rawValue,
             decisionState: decisionState.rawValue,
             detectorVersion: config.detectorVersion,
@@ -8786,7 +8828,17 @@ actor AdDetectionService {
             evidenceText: nil,
             evidenceStartTime: span.startTime,
             metadataSource: "fusion-v1",
-            metadataConfidence: decision.proposalConfidence,
+            // playhead-ar60: `nil`, not `proposalConfidence`. This column is
+            // the METADATA EXTRACTOR's confidence in the advertiser/product it
+            // named, and `AdBannerView.bannerCopy` gates the advertiser name on
+            // it at 0.60 — so parking a detection score here asked a banner
+            // whether to name a sponsor using a number about something else,
+            // for a row whose `advertiser` is `nil` two lines above. Every
+            // other mark composer writes `nil` here for exactly this reason,
+            // and the extractor overwrote it anyway on every row that reached
+            // it. `nil` = "no metadata claim", which is the truth at fusion
+            // time; the detection score now has its own column.
+            metadataConfidence: nil,
             metadataPromptVersion: nil,
             wasSkipped: false,
             userDismissedBanner: false,
