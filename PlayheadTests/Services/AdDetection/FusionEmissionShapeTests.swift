@@ -106,7 +106,7 @@ struct FusionEmissionShapeTests {
                     endTime: veto.upperBound,
                     assetId: assetId,
                     podcastId: nil,
-                    source: CorrectionSource(kind: .falsePositive)
+                    source: CorrectionSource.manualVeto
                 )
             }
             await service.setUserCorrectionStore(corrections)

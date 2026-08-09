@@ -165,7 +165,7 @@ struct CorrectionFactorScopingTests {
                 endTime: veto.upperBound,
                 assetId: assetId,
                 podcastId: nil,
-                source: CorrectionSource(kind: .falsePositive)
+                source: CorrectionSource.manualVeto
             )
         }
         for mark in Pull.falseNegativeMarkSpans {
@@ -174,7 +174,7 @@ struct CorrectionFactorScopingTests {
                 endTime: mark.upperBound,
                 assetId: assetId,
                 podcastId: nil,
-                source: CorrectionSource(kind: .falseNegative)
+                source: CorrectionSource.falseNegative
             )
         }
 
