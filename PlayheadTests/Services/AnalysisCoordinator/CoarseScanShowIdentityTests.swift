@@ -702,8 +702,17 @@ struct CoarseScanShowIdentityWireInTests {
 @Suite("playhead-vtjx: PlayheadRuntime wires its coordinator to the episode store")
 struct CoarseScanShowIdentityRuntimeWiringTests {
 
+    /// **Budget sized against the precedent, not against a quiet box (review
+    /// R3).** Three minutes is what `RuntimeShutdownLifecycleTests`
+    /// (playhead-7h2) — the other FastTests suite that constructs a real
+    /// `PlayheadRuntime` and touches its on-disk analysis store — declares, and
+    /// that family is one CLAUDE.md names as load-sensitive. A one-minute limit
+    /// on a strictly heavier-scheduled test than the established precedent is
+    /// the shape a gate flake takes. Nothing here asserts on elapsed time, so a
+    /// larger limit cannot mask a defect: the only assertion is on the identity
+    /// VALUE, and the poll below exits on the first iteration that sees it.
     @Test("the runtime's coordinator recovers a show through the runtime's own resolver",
-          .timeLimit(.minutes(1)))
+          .timeLimit(.minutes(3)))
     func theRuntimeInstallsTheResolverOnItsCoordinator() async throws {
         // Unique per run so no row in the runtime's real analysis store can
         // answer for it — the lane must be silent, which is what forces the
@@ -725,17 +734,27 @@ struct CoarseScanShowIdentityRuntimeWiringTests {
             // MISSING wiring returns on every iteration, so a deleted call site
             // spends the whole budget and then fails the assertion below.
             //
-            // 3s, not the 1s that was enough to prove the mutation RED on a
-            // quiet box: this suite runs inside the full plan, where a freshly
-            // created `Task` waits behind ~8,300 tests' worth of runnable work
-            // on the global executor. The budget is the FLAKE margin, and it
-            // costs nothing in the green direction — the loop exits on the
-            // first iteration that sees the resolver.
+            // **A WALL-CLOCK deadline, not an iteration count (review R3).** The
+            // budget must be denominated in the thing that varies. An iteration
+            // count only bounds wall time if each iteration is cheap, and each
+            // iteration here is a hop onto a contended `MainActor` plus an
+            // indexed SQLite read against the runtime's real store — precisely
+            // the costs that inflate under the full plan, which is the load this
+            // margin exists for. 300 × 10 ms reads as "3 s" on a quiet box and
+            // is unbounded above on a saturated one, so the RED case could blow
+            // the time limit before reaching its own assertion and report as a
+            // timeout rather than as the wiring failure it is.
+            //
+            // 30 s of that budget, against a 3-minute limit. It costs nothing in
+            // the green direction — the loop exits on the first iteration that
+            // sees the resolver, which on a quiet box is the first or second.
+            let deadline = ContinuousClock.now.advanced(by: .seconds(30))
             var identity = AnalysisCoordinator.CoarseScanShowIdentity.unknown
-            for _ in 0..<300 {
+            while true {
                 identity = await runtime.analysisCoordinator
                     .resolveShowIdentity(forEpisode: episodeId)
                 if identity != .unknown { break }
+                if ContinuousClock.now >= deadline { break }
                 try await Task.sleep(for: .milliseconds(10))
             }
 
