@@ -916,8 +916,8 @@ actor AnalysisCoordinator {
     ///     (playhead-hc7e/iu0t — canonicalization lives at the callee).
     ///   - podcastId: the newest ATTRIBUTED `analysis_jobs` row for the episode
     ///     first, and — playhead-vtjx — the EPISODE store when no such row
-    ///     exists. An identity found only in the
-    ///     second store is written back to the first, so the next reader of
+    ///     exists. An identity found only in the second store is written back
+    ///     to the first, so the next reader of
     ///     `analysis_jobs.podcastId` (the reconciler's claim mint, the
     ///     scheduler's `job.podcastId ?? ""`, rediff's latest-job read, and
     ///     every re-mint that inherits the column) sees it too. Only when
@@ -976,15 +976,23 @@ actor AnalysisCoordinator {
     ) async -> CoarseScanShowIdentity {
         guard let episodeId else { return .unknown }
         let jobPodcastId = try? await store.fetchRecordedPodcastId(forEpisodeId: episodeId)
-        var episodeStoreIdentity: String?
-        if RecurrenceMaterialIdentity.canonicalIdentifier(jobPodcastId) == nil,
-           let resolve = showIdentityResolver {
-            episodeStoreIdentity = await resolve(episodeId)
-        }
-        let identity = Self.resolveCoarseScanShowIdentity(
+        // "Does the analysis lane answer?" is asked by running THE RULE against
+        // the lane alone, not by re-testing the lane value here. Both questions
+        // are the same predicate, and a second copy of it is the shape
+        // playhead-fil5 R2 recorded when the SC09 mutant survived: two policies
+        // that agree, so no mutant can kill either. Tightening the rule without
+        // this would silently stop the recovery being attempted in exactly the
+        // cases the tightening created.
+        var identity = Self.resolveCoarseScanShowIdentity(
             jobPodcastId: jobPodcastId,
-            episodeStoreIdentity: episodeStoreIdentity
+            episodeStoreIdentity: nil
         )
+        if identity == .unknown, let resolve = showIdentityResolver {
+            identity = Self.resolveCoarseScanShowIdentity(
+                jobPodcastId: jobPodcastId,
+                episodeStoreIdentity: await resolve(episodeId)
+            )
+        }
         switch identity {
         case .fromAnalysisLane:
             break
