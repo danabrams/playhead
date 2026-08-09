@@ -62,7 +62,7 @@ struct BackfillJobIdentityV44MigrationTests {
         // Drift guard, pinned to the LITERAL head (45 → 46, playhead-3oyz's
         // additive day-0 retry-claim columns). Never `== currentSchemaVersion`:
         // that passes for every value and stops policing anything.
-        #expect(AnalysisStore.currentSchemaVersion == 46)
+        #expect(AnalysisStore.currentSchemaVersion == 47)
 
         try await store.insertAsset(makeAsset(id: "asset-fresh"))
         try await store.insertBackfillJob(
@@ -139,7 +139,7 @@ struct BackfillJobIdentityV44MigrationTests {
         // A v43-seeded DB must climb the WHOLE remaining ladder, not just the
         // V44 rung under test — pinned to the literal head for the same reason
         // as the drift guard above.
-        #expect(try await store.schemaVersion() == 46)
+        #expect(try await store.schemaVersion() == 47)
         #expect(try await store.fetchBackfillJob(byId: "fm-legacy-complete") == nil,
                 "a completed row minted under the old preimage cannot be addressed again")
         #expect(try await store.fetchBackfillJob(byId: "fm-legacy-queued") == nil,

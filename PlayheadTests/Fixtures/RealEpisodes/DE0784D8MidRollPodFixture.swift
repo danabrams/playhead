@@ -170,6 +170,98 @@ enum DE0784D8MidRollPodFixture {
         devicePullAdWindows.first { $0.id == "fusion-f8d4c169288e9a37" }
     }
 
+    // MARK: - The decision behind each frozen fusion row (playhead-ar60)
+
+    /// One `decision_events` row per frozen fusion window: the run whose
+    /// `skipConfidence` is BIT-IDENTICAL to the `ad_windows` row's persisted
+    /// `confidence`, and therefore the run that wrote it.
+    ///
+    /// This is the witness that `ad_windows.confidence` held the ACTUATION
+    /// number on this device and that the DETECTION number was recoverable
+    /// from a table that was already on disk — which is exactly what the V47
+    /// migration does. Re-derived from the 2026-08-02 pull; every value is a
+    /// verbatim `Double` from SQLite, not a rounding.
+    struct FrozenFusionDecision: Sendable {
+        /// `ad_windows.id` == `decision_events.windowId`.
+        let windowId: String
+        /// What the row PERSISTED in `confidence` before V47.
+        let persistedConfidence: Double
+        /// What that value actually was: `DecisionResult.skipConfidence`.
+        let skipConfidence: Double
+        /// The detection number the row lost — `metadataConfidence` was
+        /// overwritten by the metadata extractor on every one of these rows.
+        let proposalConfidence: Double
+    }
+
+    /// All five fusion windows on this asset. Note the ratio
+    /// `proposalConfidence / skipConfidence` is IDENTICAL within a run
+    /// (396.56x for the two 2026-08-01 00:42:34 rows, 141.302x for the two
+    /// 2026-08-02 06:43:22 rows) — a per-span quantity cannot have a
+    /// per-asset ratio, and that is the asset-wide correction blanket showing
+    /// through the data.
+    static let frozenFusionDecisions: [FrozenFusionDecision] = [
+        FrozenFusionDecision(
+            windowId: "fusion-fdb0b42c16139351",
+            persistedConfidence: 0.0015781934036755733,
+            skipConfidence: 0.0015781934036755733,
+            proposalConfidence: 0.6258487465276336
+        ),
+        FrozenFusionDecision(
+            windowId: "fusion-7892299324c9e90f",
+            persistedConfidence: 0.0034568565990255808,
+            skipConfidence: 0.0034568565990255808,
+            proposalConfidence: 0.4884603495736534
+        ),
+        FrozenFusionDecision(
+            windowId: "fusion-f8d4c169288e9a37",
+            persistedConfidence: 0.001150758771374174,
+            skipConfidence: 0.001150758771374174,
+            proposalConfidence: 0.45634516843301726
+        ),
+        FrozenFusionDecision(
+            windowId: "fusion-d4e332f1a5d9221c",
+            persistedConfidence: 0.003915335846121139,
+            skipConfidence: 0.003915335846121139,
+            proposalConfidence: 0.5532443308853713
+        ),
+        FrozenFusionDecision(
+            windowId: "fusion-05f4ddfceef0e09d",
+            persistedConfidence: 6.7274513060489565e-06,
+            skipConfidence: 6.7274513060489565e-06,
+            proposalConfidence: 0.37888321687686927
+        ),
+    ]
+
+    /// The decision behind the 8.04 s seam false positive.
+    static var frozenFalsePositiveDecision: FrozenFusionDecision? {
+        frozenFusionDecisions.first { $0.windowId == "fusion-f8d4c169288e9a37" }
+    }
+
+    /// Dan's un-retracted `.falsePositive` veto spans on this asset, from
+    /// `correction_events` (`exactTimeSpan` scopes). Five of them, and the
+    /// point of playhead-ar60 is that NONE overlaps the fusion window at
+    /// 4329.96-4342.20 — which the asset-wide blanket suppressed anyway.
+    static let falsePositiveVetoSpans: [ClosedRange<Double>] = [
+        60.060...62.100,
+        210.120...239.820,
+        2670.300...2699.820,
+        2828.400...2836.440,
+        4800.480...4949.820,
+    ]
+
+    /// Dan's `.falseNegative` mark spans on this asset, same source.
+    static let falseNegativeMarkSpans: [ClosedRange<Double>] = [
+        210.000...240.000,
+        2670.000...2700.000,
+        2838.180...2897.940,
+        2898.660...2953.680,
+        4800.000...4950.000,
+    ]
+
+    /// The fusion window with INDEPENDENT evidence that no correction on this
+    /// asset touches — the acceptance case for per-span scoping.
+    static let uncorrectedFusionSpan: ClosedRange<Double> = 4329.96...4342.2
+
     // MARK: - Frozen transcript (fast pass, 2820.24-2961.18)
 
     struct Chunk: Sendable {

@@ -82,7 +82,7 @@ struct EpisodeFingerprintsV27MigrationTests {
         // PIN THE LITERAL. Writing this as `== AnalysisStore.currentSchemaVersion`
         // would make it pass for every possible value and destroy the canary;
         // its whole job is to fail when head moves so the ladder gets read.
-        #expect(AnalysisStore.currentSchemaVersion == 46)
+        #expect(AnalysisStore.currentSchemaVersion == 47)
         #expect(try probeTableExists(in: dir, table: "episode_fingerprints"))
     }
 

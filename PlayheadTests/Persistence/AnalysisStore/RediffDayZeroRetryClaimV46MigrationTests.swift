@@ -104,7 +104,7 @@ struct RediffDayZeroRetryClaimV46MigrationTests {
         // next has to come here and read this rung. Written as
         // `== AnalysisStore.currentSchemaVersion` it would pass for every
         // possible value and police nothing.
-        #expect(AnalysisStore.currentSchemaVersion == 46)
+        #expect(AnalysisStore.currentSchemaVersion == 47)
         #expect(try columnsPresent(in: dir))
     }
 

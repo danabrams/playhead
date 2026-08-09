@@ -4585,18 +4585,32 @@ actor AdDetectionService {
         // side-effect emission loop below.
         var pendingDecisions: [PendingBackfillDecision] = []
 
-        // Phase 7.2: pre-compute correction factor for this asset (actor-context query).
+        // Phase 7.2 / playhead-ar60: snapshot this asset's corrections ONCE per
+        // backfill (actor-context query), then evaluate the multiplier PER SPAN.
         // Combines passthrough (false-positive suppression, [0.0, 1.0]) and boost
         // (false-negative amplification, [1.0, 2.0]) into a single multiplier.
         // Result: 1.0 = no correction effect; < 1.0 = FP suppression; > 1.0 = FN boost.
-        // Queried once per backfill run (not per span) for performance.
-        let assetCorrectionFactor: Double
+        //
+        // The query is still once per run — that is what the old "not per span,
+        // for performance" note was protecting, and it is unchanged. What moved
+        // is the EVALUATION: `CorrectionFactorSnapshot.factor(overlapping:_:)`
+        // is pure and runs inside the emission loop, so a span is affected by
+        // the corrections that actually reach it. Before ar60 one scalar was
+        // computed here and handed to every `DecisionMapper` in the episode, so
+        // a veto at 210 s rewrote the confidence of a span 2,600 s away with
+        // wholly independent evidence — witnessed on DE0784D8 as an identical
+        // `skipConfidence / proposalConfidence` ratio across all five windows
+        // of every run, moving 4 orders of magnitude between runs while each
+        // window's own `proposalConfidence` stayed bit-identical.
+        //
+        // Show-wide scopes (a vetoed SPONSOR, a vetoed PHRASE) still apply to
+        // every span — see `CorrectionFactorSnapshot`.
+        let correctionSnapshot: CorrectionFactorSnapshot
         if let correctionStore {
-            let passthrough = await correctionStore.correctionPassthroughFactor(for: analysisAssetId)
-            let boost = await correctionStore.correctionBoostFactor(for: analysisAssetId)
-            assetCorrectionFactor = passthrough * boost
+            correctionSnapshot = await correctionStore
+                .correctionFactorSnapshot(for: analysisAssetId)
         } else {
-            assetCorrectionFactor = 1.0
+            correctionSnapshot = .identity
         }
 
         // playhead-gtt9.17: reset per-backfill state for catalog egress so a
@@ -5291,7 +5305,11 @@ actor AdDetectionService {
                 ledger: effectiveLedger,
                 config: fusionConfig,
                 transcriptQuality: transcriptQuality,
-                correctionFactor: assetCorrectionFactor,
+                // playhead-ar60: THIS span's corrections, not the episode's.
+                correctionFactor: correctionSnapshot.factor(
+                    overlapping: refinedSpan.startTime,
+                    refinedSpan.endTime
+                ),
                 // playhead-084j: Consume the typical-ad-duration prior as a soft
                 // monotonic multiplier, derived from the per-episode resolved
                 // priors (global + trait + show-local). Resolution happened
@@ -8740,6 +8758,29 @@ actor AdDetectionService {
     /// into `buildFusionAdWindow` below. (A `static` tuple-returning wrapper used
     /// to live here; it was removed once the emission loop stopped calling it,
     /// rather than left as a second spelling of the same rule.)
+    /// The persisted `AdDecisionState` for one fusion span.
+    ///
+    /// `internal` and `static` so the mapping has ONE spelling and can be
+    /// exercised exhaustively over (policy action x gate) without reaching
+    /// into `buildFusionAdWindow`'s twelve parameters — see
+    /// `FusionEmissionShapeTests.decisionStateMappingIsExhaustive`.
+    static func fusionDecisionState(
+        policyAction: SkipPolicyAction,
+        eligibilityGate: SkipEligibilityGate
+    ) -> AdDecisionState {
+        switch policyAction {
+        case .autoSkipEligible:
+            return eligibilityGate == .eligible ? .confirmed : .candidate
+        case .detectOnly, .logOnly:
+            // logOnly and detectOnly: persist but don't auto-skip.
+            return eligibilityGate == .blockedByUserCorrection
+                ? .suppressed
+                : .confirmed
+        case .suppress:
+            return .suppressed
+        }
+    }
+
     private func buildFusionAdWindow(
         span: DecodedSpan,
         decision: DecisionResult,
@@ -8779,18 +8820,10 @@ actor AdDetectionService {
         // population is for (feedback_banner_is_a_skip_affordance). A general
         // low-confidence EMISSION FLOOR is a recall decision and is NOT taken
         // here — see the bead comment; filed separately.
-        let decisionState: AdDecisionState
-        switch policyAction {
-        case .autoSkipEligible:
-            decisionState = decision.eligibilityGate == .eligible ? .confirmed : .candidate
-        case .detectOnly, .logOnly:
-            // logOnly and detectOnly: persist but don't auto-skip.
-            decisionState = decision.eligibilityGate == .blockedByUserCorrection
-                ? .suppressed
-                : .confirmed
-        case .suppress:
-            decisionState = .suppressed
-        }
+        let decisionState = Self.fusionDecisionState(
+            policyAction: policyAction,
+            eligibilityGate: decision.eligibilityGate
+        )
 
         return AdWindow(
             // playhead-ud4n: content-addressed id (Design B) instead of a fresh

@@ -537,6 +537,124 @@ protocol UserCorrectionStore: Sendable {
     /// false-positive vetoes by convention and are therefore excluded here. The
     /// default implementation returns `[]`.
     func activeFalseNegativeScopes(for analysisAssetId: String) async -> [CorrectionScope]
+
+    /// playhead-ar60: one asset's corrections, in a form a PER-SPAN decision
+    /// can evaluate. Replaces the pair of asset-wide scalars
+    /// `AdDetectionService.runBackfill` used to collapse into a single blanket
+    /// multiplier for every span in the episode.
+    ///
+    /// Called ONCE per backfill, exactly like the two factors it supersedes;
+    /// the per-span work is `CorrectionFactorSnapshot.factor(overlapping:_:)`,
+    /// which is pure. The default implementation preserves the old blanket
+    /// behaviour for stores that cannot report scope, so a store that does not
+    /// override this is not silently made less protective — it is exactly as
+    /// protective as it was.
+    func correctionFactorSnapshot(
+        for analysisAssetId: String
+    ) async -> CorrectionFactorSnapshot
+}
+
+// MARK: - CorrectionFactorSnapshot (playhead-ar60)
+
+/// One asset's decay-weighted corrections, in a form a per-span decision can
+/// evaluate without touching SQLite.
+///
+/// WHY THIS EXISTS. `AdDetectionService.runBackfill` used to resolve ONE
+/// `passthrough * boost` scalar per run — `correctionFactor` was documented
+/// "Queried once per backfill run (not per span) for performance" — and hand
+/// the same number to every span's `DecisionMapper`. That made a correction
+/// ASSET-SCOPED in effect regardless of how precisely the user had scoped it.
+/// On episode DE0784D8 the consequence was measured: five vetoes, none of them
+/// touching the span at 4329.96-4342.20, drove that span's actuation
+/// confidence to 0.0039 and its gate to `blockedByUserCorrection`; and in the
+/// other direction two false-negative marks nearly DOUBLED the confidence of
+/// seven spans they did not overlap, five of which crossed the 0.7 preload
+/// floor on inflation alone (true detection 0.37-0.66). The tell is that
+/// `skipConfidence / proposalConfidence` was bit-identical across all five
+/// windows of a run — a per-span quantity cannot have a per-asset ratio.
+///
+/// WHAT IT CHANGES, AND WHAT IT DOES NOT. The snapshot is still built with ONE
+/// store query per backfill, so the performance property the old comment was
+/// protecting is unchanged; only the EVALUATION moved per-span, and it is pure.
+/// Span-scoped corrections (`.exactSpan`, `.exactTimeSpan`) count for a span
+/// they overlap and for no other. Show-wide scopes (`.sponsorOnShow`,
+/// `.phraseOnShow`, `.campaignOnShow`, `.domainOwnershipOnShow`,
+/// `.jingleOnShow`) still apply to every span, because that is what they
+/// actually assert — the same split `correctionBoostFactor(for:overlapping:)`
+/// already draws.
+///
+/// The arithmetic is unchanged from the two asset-wide factors it replaces:
+/// `max(0, 1 - maxSuppressorWeight) * min(2, 1 + maxBoosterWeight)`. Only the
+/// population each `max` runs over is narrower.
+struct CorrectionFactorSnapshot: Sendable, Equatable {
+
+    /// One decay-weighted correction. `range == nil` means a SHOW-WIDE scope,
+    /// which applies to every span; a non-nil range applies only where it
+    /// overlaps.
+    struct Entry: Sendable, Equatable {
+        let weight: Double
+        let range: ClosedRange<Double>?
+
+        init(weight: Double, range: ClosedRange<Double>?) {
+            self.weight = weight
+            self.range = range
+        }
+    }
+
+    /// `.falsePositive` (and legacy nil-source) corrections — the suppress
+    /// direction.
+    let suppressors: [Entry]
+    /// `.falseNegative` corrections — the boost direction.
+    let boosters: [Entry]
+
+    /// No corrections: every span sees a factor of exactly 1.0.
+    static let identity = CorrectionFactorSnapshot(
+        suppressors: [],
+        boosters: []
+    )
+
+    init(suppressors: [Entry], boosters: [Entry]) {
+        self.suppressors = suppressors
+        self.boosters = boosters
+    }
+
+    /// Compatibility shim for stores that can only report the two ASSET-WIDE
+    /// scalars (the protocol default, and every test double that predates this
+    /// type). Both are recorded as show-wide entries, so `factor(overlapping:)`
+    /// returns the same number for every span — byte-identical to the
+    /// pre-ar60 blanket, which is the correct behaviour for a store that
+    /// cannot say where its corrections were.
+    init(assetWidePassthrough passthrough: Double, boost: Double) {
+        let clampedPassthrough = min(max(passthrough, 0), 1)
+        let clampedBoost = min(max(boost, 1), 2)
+        suppressors = clampedPassthrough < 1
+            ? [Entry(weight: 1 - clampedPassthrough, range: nil)]
+            : []
+        boosters = clampedBoost > 1
+            ? [Entry(weight: clampedBoost - 1, range: nil)]
+            : []
+    }
+
+    /// The combined correction multiplier for one span.
+    ///
+    /// A non-finite or inverted range asks about nothing, so only show-wide
+    /// entries can apply — never guess which span the caller meant.
+    func factor(overlapping startTime: Double, _ endTime: Double) -> Double {
+        let spanIsUsable =
+            startTime.isFinite && endTime.isFinite && endTime > startTime
+        func applies(_ entry: Entry) -> Bool {
+            guard let range = entry.range else { return true }
+            guard spanIsUsable else { return false }
+            return range.lowerBound < endTime && startTime < range.upperBound
+        }
+        let suppressWeight = suppressors.filter(applies)
+            .map(\.weight).max() ?? 0
+        let boostWeight = boosters.filter(applies)
+            .map(\.weight).max() ?? 0
+        let passthrough = max(0.0, 1.0 - suppressWeight)
+        let boost = min(2.0, 1.0 + boostWeight)
+        return passthrough * boost
+    }
 }
 
 // MARK: - UserCorrectionStore default
@@ -557,6 +675,22 @@ extension UserCorrectionStore {
     /// Default: no corrections. Overridden by `PersistentUserCorrectionStore`.
     func activeFalseNegativeScopes(for analysisAssetId: String) async -> [CorrectionScope] {
         []
+    }
+
+    /// playhead-ar60 default: derive the snapshot from the two ASSET-WIDE
+    /// factors this store already reports. Every entry is recorded show-wide,
+    /// so `factor(overlapping:_:)` answers the same value for every span —
+    /// i.e. identical to the pre-ar60 blanket. `PersistentUserCorrectionStore`
+    /// overrides it with the real, scope-aware snapshot.
+    func correctionFactorSnapshot(
+        for analysisAssetId: String
+    ) async -> CorrectionFactorSnapshot {
+        let passthrough = await correctionPassthroughFactor(for: analysisAssetId)
+        let boost = await correctionBoostFactor(for: analysisAssetId)
+        return CorrectionFactorSnapshot(
+            assetWidePassthrough: passthrough,
+            boost: boost
+        )
     }
 }
 
@@ -946,6 +1080,102 @@ actor PersistentUserCorrectionStore: UserCorrectionStore {
         }
         guard maxOverlapWeight > 0 else { return 1.0 }
         return min(2.0, 1.0 + maxOverlapWeight)
+    }
+
+    // MARK: - Protocol: correctionFactorSnapshot (playhead-ar60)
+
+    /// The scope-aware snapshot. ONE `weightedCorrections` round trip — the
+    /// same cost as the two asset-wide factors it replaces, which each made
+    /// their own — plus at most one synthetic-ordinal map load, on the same
+    /// predicate `correctionBoostFactor(for:overlapping:)` already uses.
+    ///
+    /// Filters mirror the asset-wide factors EXACTLY so nothing changes but
+    /// scope: legacy nil-source rows are false-positive vetoes, and a
+    /// `.falseNegative` never suppresses. A scope string that fails to decode
+    /// is dropped rather than promoted to show-wide — a correction nobody can
+    /// place must not become a correction that applies everywhere.
+    func correctionFactorSnapshot(
+        for analysisAssetId: String
+    ) async -> CorrectionFactorSnapshot {
+        let weighted: [(CorrectionEvent, Double)]
+        do {
+            weighted = try await weightedCorrections(for: analysisAssetId)
+        } catch {
+            logger.warning(
+                "correctionFactorSnapshot: failed to load corrections for \(analysisAssetId, privacy: .public): \(error.localizedDescription, privacy: .public)"
+            )
+            return .identity
+        }
+        guard !weighted.isEmpty else { return .identity }
+
+        // Loaded at most once, and only when some correction actually needs
+        // it — a synthetic (negative-ordinal) `.exactSpan`. The common path is
+        // `.exactTimeSpan`, which the UI writes and which needs no lookup.
+        // Resolved BEFORE the classification loop, on the same predicate
+        // `correctionBoostFactor(for:overlapping:)` uses, so the loop itself
+        // stays synchronous.
+        let needsSyntheticMap = weighted.contains { event, _ in
+            guard case .exactSpan(_, let ordinalRange)? =
+                    CorrectionScope.deserialize(event.scope) else {
+                return false
+            }
+            return ordinalRange.lowerBound < 0
+        }
+        let synthSpansByOrdinal: [Int: (startTime: Double, endTime: Double)] =
+            needsSyntheticMap
+                ? await loadSyntheticOrdinalTimeMap(assetId: analysisAssetId)
+                : [:]
+
+        var suppressors: [CorrectionFactorSnapshot.Entry] = []
+        var boosters: [CorrectionFactorSnapshot.Entry] = []
+        for (event, weight) in weighted {
+            let isSuppressor =
+                event.source?.kind == .falsePositive || event.source == nil
+            let isBooster = event.source?.kind == .falseNegative
+            guard isSuppressor || isBooster else { continue }
+            guard let scope = CorrectionScope.deserialize(event.scope) else {
+                continue
+            }
+            let range: ClosedRange<Double>?
+            switch scope {
+            case .exactTimeSpan(_, let start, let end):
+                guard start.isFinite, end.isFinite, end >= start else {
+                    continue
+                }
+                range = start...end
+            case .exactSpan(_, let ordinalRange):
+                // A REAL transcript ordinal has no time mapping at this layer,
+                // exactly as in `correctionBoostFactor(for:overlapping:)`. It
+                // is dropped rather than treated as show-wide: an unplaceable
+                // span correction is the asset blanket this bead removed.
+                guard ordinalRange.lowerBound < 0,
+                      let times = synthSpansByOrdinal[ordinalRange.lowerBound],
+                      times.startTime.isFinite,
+                      times.endTime.isFinite,
+                      times.endTime >= times.startTime else {
+                    continue
+                }
+                range = times.startTime...times.endTime
+            case .sponsorOnShow, .phraseOnShow, .campaignOnShow,
+                 .domainOwnershipOnShow, .jingleOnShow:
+                // Genuinely asset-wide: the user vetoed a SPONSOR or a PHRASE,
+                // not a position. `nil` range = applies to every span.
+                range = nil
+            }
+            let entry = CorrectionFactorSnapshot.Entry(
+                weight: weight,
+                range: range
+            )
+            if isSuppressor {
+                suppressors.append(entry)
+            } else {
+                boosters.append(entry)
+            }
+        }
+        return CorrectionFactorSnapshot(
+            suppressors: suppressors,
+            boosters: boosters
+        )
     }
 
     /// Build a map from synthetic atom ordinal (always negative) to the
