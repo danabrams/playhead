@@ -427,6 +427,17 @@ struct AdWindow: Sendable {
     /// two numbers, now hands them a different one from `confidence`.
     var actuationConfidence: Double { skipConfidence ?? confidence }
 
+    /// playhead-ar60: the ACTUATION number is a usable probability.
+    ///
+    /// The runtime already fails closed on a malformed `confidence`
+    /// (`SkipOrchestrator.hasValidRuntimeWindowMaterial`); V47 added a second
+    /// number that a skip gate reads, so it needs the same door. Vacuously
+    /// true whenever `skipConfidence` is nil, because then
+    /// `actuationConfidence` IS `confidence` and the existing check covers it.
+    var carriesUsableActuationConfidence: Bool {
+        actuationConfidence.isFinite && (0...1).contains(actuationConfidence)
+    }
+
     /// A non-zero score or any match-provenance field claims that catalog
     /// evidence participated in this decision. Invalid non-finite values also
     /// count as a claim so corrupted rows fail closed instead of slipping

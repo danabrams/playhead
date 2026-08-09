@@ -6242,7 +6242,14 @@ actor AdDetectionService {
                 analysisAssetId: result.analysisAssetId,
                 startTime: window.startTime,
                 endTime: window.endTime,
-                skipConfidence: window.confidence,
+                // playhead-ar60: an ACTUATION reader. This rebind exists so
+                // the exported decision describes the same final material as
+                // the `ad_windows` row, and the orchestrator's envelope check
+                // compares it against `producerRevision.actuationConfidence`
+                // — reading `window.confidence` here would hand over the
+                // DETECTION number and fail that comparison on every fusion
+                // span.
+                skipConfidence: window.actuationConfidence,
                 eligibilityGate: finalEligibilityGate,
                 recomputationRevision: result.recomputationRevision,
                 // Metadata and reconciliation can still revise durable
@@ -10357,6 +10364,11 @@ actor AdDetectionService {
                 startTime: adWindow.startTime,
                 endTime: adWindow.endTime,
                 confidence: adWindow.confidence,
+                // playhead-ar60: both confidences come from THIS run, like
+                // `confidence` immediately above — they are one observation and
+                // taking them from different runs is how a row would come to
+                // report a detection score the actuation number never saw.
+                skipConfidence: adWindow.skipConfidence,
                 boundaryState: adWindow.boundaryState,
                 decisionState: existing.decisionState,
                 detectorVersion: adWindow.detectorVersion,

@@ -134,7 +134,14 @@ struct AdDecisionResult: Sendable {
             analysisAssetId: analysisAssetId,
             startTime: revision.startTime,
             endTime: revision.endTime,
-            skipConfidence: revision.confidence,
+            // playhead-ar60: an ACTUATION reader. `AdDecisionResult
+            // .skipConfidence` is the number the skip policy gates on, so it
+            // must come from the row's actuation column, not from
+            // `confidence` (which is the DETECTION number since V47).
+            // `actuationConfidence` falls back to `confidence` for producers
+            // with a single number, so every pre-V47 row and every non-fusion
+            // row projects exactly the value it did before.
+            skipConfidence: revision.actuationConfidence,
             eligibilityGate: handedOffGate,
             recomputationRevision: recomputationRevision,
             producerRevision: revision
@@ -2727,13 +2734,19 @@ actor SkipOrchestrator {
                 )
                 continue
             }
+            // playhead-ar60: BOTH persisted confidences must be usable. The
+            // existing call validates `confidence` (DETECTION); V47 added a
+            // second number that `evaluateWindow` gates the skip on, so the
+            // fail-closed door has to cover it too — otherwise a row could be
+            // refused for a malformed detection score and admitted with a
+            // malformed actuation one.
             guard Self.hasValidRuntimeWindowMaterial(
                 id: adWindow.id,
                 analysisAssetId: adWindow.analysisAssetId,
                 startTime: adWindow.startTime,
                 endTime: adWindow.endTime,
                 confidence: adWindow.confidence
-            ) else {
+            ), adWindow.carriesUsableActuationConfidence else {
                 retireAllNonRevertedWindowStateIfPresent(
                     windowId: adWindow.id
                 )
@@ -3249,7 +3262,13 @@ actor SkipOrchestrator {
                       revision.analysisAssetId == result.analysisAssetId,
                       revision.startTime == result.startTime,
                       revision.endTime == result.endTime,
-                      revision.confidence == result.skipConfidence else {
+                      // playhead-ar60: the envelope binds the durable row to
+                      // the live decision by the ACTUATION number — that is
+                      // what `AdDecisionResult.skipConfidence` holds. Reading
+                      // `revision.confidence` here would compare a detection
+                      // number against an actuation number and refuse every
+                      // genuine fusion envelope.
+                      revision.actuationConfidence == result.skipConfidence else {
                     return nil
                 }
                 return revision
@@ -3427,7 +3446,10 @@ actor SkipOrchestrator {
                   producerRevision.analysisAssetId == result.analysisAssetId,
                   producerRevision.startTime == result.startTime,
                   producerRevision.endTime == result.endTime,
-                  producerRevision.confidence == result.skipConfidence,
+                  // playhead-ar60: same binding, same reason as the envelope
+                  // check in `receiveAdDecisionResults` — the live decision
+                  // carries the ACTUATION number.
+                  producerRevision.actuationConfidence == result.skipConfidence,
                   SkipDecisionState(
                       rawValue: producerRevision.decisionState
                   ).map({
@@ -5680,6 +5702,14 @@ actor SkipOrchestrator {
             // playhead-ynmk: NEVER 1.0. A tap does not measure anything — a
             // pure-show span confirmed by mistake would read 1.00 too.
             confidence: suggested.confidence,
+            // playhead-ar60: carried through for the SAME reason as
+            // `confidence` above — a tap is not a measurement, so the
+            // promoted row keeps the actuation number the detector
+            // produced rather than acquiring a fresh one. `nil` here would
+            // silently PROMOTE a user-suppressed span, because
+            // `actuationConfidence` would then fall back to the (higher)
+            // detection score.
+            skipConfidence: suggested.skipConfidence,
             boundaryState: UserSpanAssertion.userConfirmedSuggested.rawValue,
             decisionState: extentIsSkippable
                 ? AdDecisionState.applied.rawValue
@@ -6651,7 +6681,18 @@ actor SkipOrchestrator {
 
     /// Evaluate a single window against skip policy. Returns the decision.
     private func evaluateWindow(_ managed: inout ManagedWindow) -> SkipDecisionState {
-        let confidence = managed.adWindow.confidence
+        // playhead-ar60: the auto-skip policy is the actuation decision, so it
+        // reads the ACTUATION number. Every threshold below — `enterThreshold`,
+        // `stayThreshold`, `shortSpanOverrideConfidence` — was calibrated
+        // against `DecisionResult.skipConfidence`, which the fusion path used
+        // to smuggle in through `confidence`. Since V47 that column carries
+        // DETECTION, and comparing a detection score against these thresholds
+        // would make every span the user vetoed (or that calibration
+        // discounted) more skip-eager than the decision that produced it.
+        // `actuationConfidence` is `confidence` for producers with a single
+        // number, so hot-path, rediff, user-mark and pre-V47 rows evaluate
+        // exactly as before.
+        let confidence = managed.adWindow.actuationConfidence
         let span = managed.snappedEnd - managed.snappedStart
         // playhead-gard: resolved once, read twice (candidate promotion and the
         // trust gate). Two reads of a per-window policy value is how the two

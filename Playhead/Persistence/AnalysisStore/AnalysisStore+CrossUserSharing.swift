@@ -144,6 +144,15 @@ struct CrossUserAnalysisSnapshot: Codable, Equatable, Sendable {
         let startTime: Double
         let endTime: Double
         let confidence: Double
+        /// playhead-ar60: the ACTUATION number, split out of `confidence` in
+        /// schema V47. Optional, and DELIBERATELY not a wire-format version
+        /// bump: a snapshot written before the split decodes it as `nil`,
+        /// which is exactly what those rows carried — one number, in
+        /// `confidence`. Without it a shared fusion row would import with the
+        /// exporter's DETECTION score standing in for its actuation number,
+        /// i.e. more skip-eager on the importing device than on the one that
+        /// produced it.
+        let skipConfidence: Double?
         let boundaryState: String
         let decisionState: String
         let isAd: Bool
@@ -168,6 +177,7 @@ struct CrossUserAnalysisSnapshot: Codable, Equatable, Sendable {
             startTime: Double,
             endTime: Double,
             confidence: Double,
+            skipConfidence: Double? = nil,
             boundaryState: String,
             decisionState: String,
             isAd: Bool = true,
@@ -191,6 +201,7 @@ struct CrossUserAnalysisSnapshot: Codable, Equatable, Sendable {
             self.startTime = startTime
             self.endTime = endTime
             self.confidence = confidence
+            self.skipConfidence = skipConfidence
             self.boundaryState = boundaryState
             self.decisionState = decisionState
             self.isAd = isAd
@@ -218,6 +229,7 @@ struct CrossUserAnalysisSnapshot: Codable, Equatable, Sendable {
                 startTime: adWindow.startTime,
                 endTime: adWindow.endTime,
                 confidence: adWindow.confidence,
+                skipConfidence: adWindow.skipConfidence,
                 boundaryState: adWindow.boundaryState,
                 decisionState: adWindow.decisionState,
                 isAd: Self.isAdDecision(adWindow.decisionState),
@@ -267,6 +279,7 @@ struct CrossUserAnalysisSnapshot: Codable, Equatable, Sendable {
                 startTime: adWindow.startTime,
                 endTime: adWindow.endTime,
                 confidence: adWindow.confidence,
+                skipConfidence: adWindow.skipConfidence,
                 boundaryState: boundaryState,
                 decisionState: decisionState,
                 isAd: isAdDecision(decisionState),
@@ -866,6 +879,10 @@ extension AnalysisStore {
             startTime: window.startTime,
             endTime: window.endTime,
             confidence: min(max(window.confidence, 0), 1),
+            // playhead-ar60: clamped like `confidence` above — this is the
+            // one write path that clamps, and an untrusted peer's actuation
+            // number gets exactly the same treatment as its detection score.
+            skipConfidence: window.skipConfidence.map { min(max($0, 0), 1) },
             boundaryState: window.boundaryState,
             decisionState: decisionState,
             detectorVersion: window.detectorVersion,
@@ -952,6 +969,7 @@ extension AnalysisStore {
             && window.endTime > window.startTime
             && (0...1).contains(window.confidence)
             && AdBoundaryState(rawValue: window.boundaryState) != nil
+            && window.skipConfidence.map { $0.isFinite && (0...1).contains($0) } ?? true
             && window.metadataConfidence.map { $0.isFinite && (0...1).contains($0) } ?? true
             && window.catalogStoreMatchSimilarity.map { $0.isFinite && (0...1).contains($0) } ?? true
             && window.catalogFingerprintVersion.map {

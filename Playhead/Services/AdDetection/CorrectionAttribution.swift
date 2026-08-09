@@ -207,6 +207,11 @@ struct ExplicitFeedbackDetectionProjection:
     let startTime: Double
     let endTime: Double
     let confidence: Double
+    /// playhead-ar60: the ACTUATION number, split out of `confidence` in
+    /// V47. Optional and un-versioned on purpose — a baseline captured
+    /// before the split decodes it as `nil`, which is exactly what its rows
+    /// carried, so the round-trip equality check still holds for them.
+    let skipConfidence: Double?
     let boundaryState: String
     let decisionState: String
     let detectorVersion: String
@@ -237,6 +242,7 @@ struct ExplicitFeedbackDetectionProjection:
         startTime = window.startTime
         endTime = window.endTime
         confidence = window.confidence
+        skipConfidence = window.skipConfidence
         boundaryState = window.boundaryState
         decisionState = window.decisionState
         detectorVersion = window.detectorVersion
@@ -271,6 +277,7 @@ struct ExplicitFeedbackDetectionProjection:
             startTime: startTime,
             endTime: endTime,
             confidence: confidence,
+            skipConfidence: skipConfidence,
             boundaryState: boundaryState,
             decisionState: decisionState,
             detectorVersion: detectorVersion,
@@ -656,6 +663,7 @@ enum ExplicitBannerFeedbackPrivacy {
             startTime: window.startTime,
             endTime: window.endTime,
             confidence: window.confidence,
+            skipConfidence: window.skipConfidence,
             boundaryState: window.boundaryState,
             decisionState: decisionState,
             detectorVersion: window.detectorVersion,
@@ -727,6 +735,12 @@ enum AdWindowMaterialIdentity {
             encoded(window.startTime),
             encoded(window.endTime),
             encoded(window.confidence),
+            // playhead-ar60: V47 split the actuation number out of
+            // `confidence`, so the revision token has to carry it or two rows
+            // that differ ONLY in what the skip gate reads would share an
+            // identity — and a CAS fence that cannot see the difference is
+            // not a fence.
+            encoded(window.skipConfidence),
             encoded(window.boundaryState),
             encoded(window.detectorVersion),
             encoded(window.advertiser),

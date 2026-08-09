@@ -210,6 +210,11 @@ enum DebugEpisodeExportService {
                 out += "Ad #\(i + 1):\n"
                 out += "  Time:       \(formatTime(w.startTime)) - \(formatTime(w.endTime)) (\(formatDuration(w.endTime - w.startTime)))\n"
                 out += "  Confidence: \(String(format: "%.2f", w.confidence))\n"
+                // playhead-ar60: name both numbers. This surface is exactly
+                // where "conf 0.00" on a confirmed row was read as detection.
+                if let skip = w.skipConfidence {
+                    out += "  Skip conf:  \(String(format: "%.4f", skip))\n"
+                }
                 out += "  Decision:   \(w.decisionState)\n"
                 out += "  Boundary:   \(w.boundaryState)\n"
                 if let advertiser = w.advertiser {
@@ -374,7 +379,8 @@ enum DebugEpisodeExportService {
             for (i, w) in ads.enumerated() {
                 let advertiser = w.advertiser ?? "?"
                 out += "    Ad #\(i + 1): \(formatTime(w.startTime))-\(formatTime(w.endTime)) "
-                out += "conf=\(fmt(w.confidence)) \(w.decisionState) \(advertiser)\n"
+                let skipConf = w.skipConfidence.map { " skip=\(fmt($0))" } ?? ""
+                out += "conf=\(fmt(w.confidence))\(skipConf) \(w.decisionState) \(advertiser)\n"
                 if let evidence = w.evidenceText, !evidence.isEmpty {
                     out += "        evidence: \"\(evidence.prefix(80))\"\n"
                 }
