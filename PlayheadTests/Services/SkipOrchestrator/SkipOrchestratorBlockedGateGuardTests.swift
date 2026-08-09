@@ -93,14 +93,13 @@ struct SkipOrchestratorActuationReadTests {
         )
     }
 
-    @Test("a span with detection 0.95 but actuation 0.01 must not auto-skip")
-    func lowActuationDoesNotSkipDespiteHighDetection() async throws {
+    /// Drive one window through `beginEpisode` under maximum auto-skip
+    /// pressure and return the decision record `evaluateWindow` wrote for it.
+    private func decisionRecord(
+        for window: AdWindow
+    ) async throws -> SkipDecisionRecord {
         let store = try await makeTestStore()
         try await store.insertAsset(makeSkipTestAnalysisAsset())
-        // Maximum auto-skip pressure: auto mode, high trust. Under
-        // `SkipPolicyConfig`'s defaults (enterThreshold 0.65) a confirmed,
-        // eligible window at 0.95 sails through — which is exactly what
-        // `evaluateWindow` would see if it read `confidence`.
         let trustService = try await makeSkipTestTrustService(
             mode: "auto",
             trustScore: 0.95,
@@ -112,56 +111,71 @@ struct SkipOrchestratorActuationReadTests {
             episodeId: "asset-1",
             podcastId: "podcast-1"
         )
-
-        let windowId = "ar60-low-actuation"
-        await orchestrator.receiveAdWindows([
-            splitWindow(id: windowId, confidence: 0.95, skipConfidence: 0.01)
-        ])
+        await orchestrator.receiveAdWindows([window])
         try await Task.sleep(for: .milliseconds(100))
-
-        let emitted = await orchestrator.emittedAutoSkipBannersSnapshot()
-        #expect(
-            !emitted.contains(windowId),
-            """
-            The skip gate must read the ACTUATION number (0.01), not the             detection number (0.95). An auto-skip banner here means             `evaluateWindow` is comparing the wrong quantity against             `enterThreshold`.
-            """
+        let log = await orchestrator.getDecisionLog()
+        return try #require(
+            log.last { $0.adWindowId == window.id },
+            "the window must reach evaluateWindow at all — got \(log.map(\.adWindowId))"
         )
-        let applied = await orchestrator.confirmedWindows()
-            .first { $0.id == windowId }
-        #expect(applied?.decisionState != .applied)
     }
 
-    @Test("the SAME span with only its detection number present DOES auto-skip — the control")
-    func highSingleNumberStillSkips() async throws {
-        let store = try await makeTestStore()
-        try await store.insertAsset(makeSkipTestAnalysisAsset())
-        let trustService = try await makeSkipTestTrustService(
-            mode: "auto",
-            trustScore: 0.95,
-            observations: 50
+    @Test("a span with detection 0.95 but actuation 0.01 is judged on 0.01")
+    func lowActuationDoesNotSkipDespiteHighDetection() async throws {
+        // Under `SkipPolicyConfig`'s defaults (enterThreshold 0.65) a
+        // confirmed, eligible window at 0.95 clears every gate. 0.01 clears
+        // none. The record is the direct witness of WHICH number the
+        // comparison used.
+        let record = try await decisionRecord(
+            for: splitWindow(
+                id: "ar60-low-actuation",
+                confidence: 0.95,
+                skipConfidence: 0.01
+            )
         )
-        let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
-        await orchestrator.beginEpisode(
-            analysisAssetId: "asset-1",
-            episodeId: "asset-1",
-            podcastId: "podcast-1"
-        )
-
-        // `skipConfidence: nil` — a one-number producer. `actuationConfidence`
-        // falls back to `confidence`, so this MUST still skip. Without this
-        // control the test above would also pass if the orchestrator had
-        // simply stopped skipping anything.
-        let windowId = "ar60-single-number"
-        await orchestrator.receiveAdWindows([
-            splitWindow(id: windowId, confidence: 0.95, skipConfidence: nil)
-        ])
-        try await Task.sleep(for: .milliseconds(100))
-
-        let emitted = await orchestrator.emittedAutoSkipBannersSnapshot()
         #expect(
-            emitted.contains(windowId),
-            "the fallback must leave a one-number producer skipping exactly as before"
+            record.confidence == 0.01,
+            """
+            `evaluateWindow` must judge on the ACTUATION number. The decision             record says \(record.confidence); the row's detection number is             0.95 and its actuation number is 0.01.
+            """
         )
+        #expect(record.decision != .applied,
+                "reason: \(record.reason)")
+
+        // …and the number CHANGED THE OUTCOME. Pinned as a difference rather
+        // than as a literal reason string: which arm a 0.95 window takes
+        // depends on edge-padding and trust policy that this bead does not
+        // own, but "0.01 and 0.95 are judged the same way" would mean the
+        // comparison is not reading the field at all.
+        let control = try await decisionRecord(
+            for: splitWindow(
+                id: "ar60-low-actuation-control",
+                confidence: 0.95,
+                skipConfidence: nil
+            )
+        )
+        #expect(record.reason != control.reason,
+                "0.01 and 0.95 must not reach the same verdict — both said \(record.reason)")
+    }
+
+    @Test("the SAME span with only its detection number present is judged on 0.95 — the control")
+    func highSingleNumberStillSkips() async throws {
+        // `skipConfidence: nil` — a one-number producer. `actuationConfidence`
+        // falls back to `confidence`, so this row must be judged on 0.95 and
+        // must NOT take the sub-threshold arm. Without this control the test
+        // above would also pass if the orchestrator had simply stopped
+        // evaluating anything.
+        let record = try await decisionRecord(
+            for: splitWindow(
+                id: "ar60-single-number",
+                confidence: 0.95,
+                skipConfidence: nil
+            )
+        )
+        #expect(record.confidence == 0.95,
+                "the fallback must judge a one-number producer exactly as before")
+        #expect(record.decision != .suppressed,
+                "0.95 clears every default threshold — got \(record.reason)")
     }
 
     @Test("a non-finite actuation number is refused at the ingest door")
