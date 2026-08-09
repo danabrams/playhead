@@ -326,6 +326,33 @@ actor AnalysisCoordinator {
     /// resolver is not a silent degradation — it leaves the fil5
     /// `podcastIdMissing` claim exactly as it was, and
     /// ``resolveShowIdentity(forEpisode:)`` logs which of the two it was.
+    ///
+    /// **KNOWN LIMITATION, stated rather than papered over (playhead-1shd).**
+    /// The only writer of the box this reads is `PlayheadApp`'s WindowGroup
+    /// `.task`, so on a **sceneless background launch** — which
+    /// `BackgroundProcessingService` explicitly supports, and which is one of
+    /// the ways the grant that drives this phase arrives — the resolver is
+    /// absent and an unattributed episode is refused exactly as before. Three
+    /// things bound that, and they are why this is a delay rather than a hole:
+    ///
+    ///  * the shipped final-pass launch sweep has the SAME dependency (it polls
+    ///    the same box through `awaitEpisodePodcastIdResolver` and proceeds with
+    ///    `nil` on timeout), so this is the established behaviour of that seam
+    ///    rather than a new weakness introduced here;
+    ///  * the recovery is needed AT MOST ONCE PER EPISODE. The identity is
+    ///    written back into `analysis_jobs.podcastId`, so the first grant that
+    ///    does have a scene repairs the lane permanently and every later
+    ///    launch — sceneless or not — reads it from
+    ///    ``AnalysisStore/fetchRecordedPodcastId(forEpisodeId:)`` with no
+    ///    resolver involved;
+    ///  * the refusal that remains is the TRUE one and says so:
+    ///    ``resolveShowIdentity(forEpisode:)`` logs `resolverInstalled=false`,
+    ///    which is what distinguishes "nobody knows this show" from "nobody was
+    ///    able to ask" on a device pull.
+    ///
+    /// Making the install scene-independent means moving it out of a
+    /// `WindowGroup` `.task`, which is an app-bootstrap change and Dan's call —
+    /// filed as playhead-1shd rather than taken unilaterally here.
     private var showIdentityResolver: (@Sendable (String) async -> String?)?
 
     // MARK: - Active Session State
@@ -951,6 +978,15 @@ actor AnalysisCoordinator {
     /// ``resolveCoarseScanShowIdentity(jobPodcastId:episodeStoreIdentity:)``
     /// for why that laziness cannot change the answer.
     ///
+    /// **That hop is one bound `runCoarseScanLoop`'s doc does not enumerate.**
+    /// It lists rkfp's per-call deadline, e75l's defers and caller cancellation
+    /// as what bounds an in-flight asset; a `MainActor` SwiftData fetch is under
+    /// none of them and is not itself cancellation-aware. It is one indexed
+    /// fetch on a key with a uniqueness constraint, taken at most once per
+    /// episode ever (the repair below is what makes it once), against a
+    /// deadline gate that is a START gate anyway — so it is a real gap in that
+    /// enumeration rather than a real risk to the grant.
+    ///
     /// The repair is best-effort and deliberately non-fatal: this runs inside a
     /// granted background window whose product is a banked coarse scan, and a
     /// failed bookkeeping write must not cost the window the scan it came for.
@@ -975,7 +1011,24 @@ actor AnalysisCoordinator {
         forEpisode episodeId: String?
     ) async -> CoarseScanShowIdentity {
         guard let episodeId else { return .unknown }
-        let jobPodcastId = try? await store.fetchRecordedPodcastId(forEpisodeId: episodeId)
+        // A FAILED read is logged as the failure it is, never treated as a
+        // measured absence — the same rule `runPendingCoarseScans` applies to
+        // its two candidate queries thirty lines up. A `try?` here would report
+        // an unreadable lane as an unattributed one, and the repair below would
+        // then log `…_repaired` for an episode whose lane may be attributed.
+        // (The `podcastId IS NULL` clause still makes the write itself safe;
+        // what is at stake is the honesty of the reading.)
+        var jobPodcastId: String?
+        do {
+            jobPodcastId = try await store.fetchRecordedPodcastId(forEpisodeId: episodeId)
+        } catch {
+            logger.warning(
+                """
+                coarse_scan_show_identity_lane_read_failed episode=\(episodeId, privacy: .public) \
+                error=\(String(describing: error), privacy: .public)
+                """
+            )
+        }
         // "Does the analysis lane answer?" is asked by running THE RULE against
         // the lane alone, not by re-testing the lane value here. Both questions
         // are the same predicate, and a second copy of it is the shape

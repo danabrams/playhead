@@ -1,0 +1,1615 @@
+fast-gate: disk preflight OK — 33.54 GiB free, needs 13.50 GiB
+lint: clean
+fast-gate: plan=PlayheadFastTests dest=platform=iOS Simulator,name=iPhone 17 derived=.derivedData jobs=4 (single-host; no clone parallelism)
+Command line invocation:
+    /Applications/Xcode-beta.app/Contents/Developer/usr/bin/xcodebuild test -scheme Playhead -testPlan PlayheadFastTests -destination "platform=iOS Simulator,name=iPhone 17" -derivedDataPath .derivedData -jobs 4 "-only-testing:PlayheadTests/SemanticScanClaimPredicateTests" "-only-testing:PlayheadTests/SemanticScanClaimPersistenceTests"
+
+Resolve Package Graph
+
+
+Resolved source packages:
+  swift-huggingface: https://github.com/huggingface/swift-huggingface.git @ 0.9.0
+  swift-transformers: https://github.com/huggingface/swift-transformers @ 1.2.0
+  swift-atomics: https://github.com/apple/swift-atomics.git @ 1.3.1
+  coreai-models: /Users/dabrams/playhead/.worktrees/vtjx/Vendor/coreai-models
+  swift-collections: https://github.com/apple/swift-collections.git @ 1.6.0
+  swift-nio: https://github.com/apple/swift-nio.git @ 2.101.3
+  swift-crypto: https://github.com/apple/swift-crypto.git @ 4.5.1
+  EventSource: https://github.com/mattt/EventSource.git @ 1.4.1
+  Jinja: https://github.com/huggingface/swift-jinja.git @ 2.4.2
+  swift-system: https://github.com/apple/swift-system.git @ 1.7.5
+  swift-asn1: https://github.com/apple/swift-asn1.git @ 1.7.1
+  xgrammar: https://github.com/mlc-ai/xgrammar @ 4d145cc
+  yyjson: https://github.com/ibireme/yyjson.git @ 0.12.0
+
+Build Preparation
+Build task concurrency set to 4 via user default IDEBuildOperationMaxNumberOfConcurrentCompileTasks
+
+ComputePackagePrebuildTargetDependencyGraph
+
+Prepare packages
+
+CreateBuildRequest
+
+SendProjectDescription
+
+CreateBuildOperation
+
+ComputeTargetDependencyGraph
+note: Building targets in dependency order
+note: Target dependency graph (46 targets)
+    Target 'PlayheadTests' in project 'Playhead'
+        ➜ Explicit dependency on target 'Playhead' in project 'Playhead'
+    Target 'Playhead' in project 'Playhead'
+        ➜ Explicit dependency on target 'CoreAILM-product' in project 'coreai-models'
+    Target 'CoreAILM-product' in project 'coreai-models'
+        ➜ Explicit dependency on target 'CoreAILanguageModels' in project 'coreai-models'
+        ➜ Explicit dependency on target 'CoreAIShared' in project 'coreai-models'
+        ➜ Explicit dependency on target 'CXGrammar' in project 'coreai-models'
+        ➜ Explicit dependency on target 'XGrammar-product' in project 'xgrammar'
+        ➜ Explicit dependency on target 'Transformers-product' in project 'swift-transformers'
+    Target 'CoreAILanguageModels' in project 'coreai-models'
+        ➜ Explicit dependency on target 'CoreAIShared' in project 'coreai-models'
+        ➜ Explicit dependency on target 'CXGrammar' in project 'coreai-models'
+        ➜ Explicit dependency on target 'XGrammar-product' in project 'xgrammar'
+        ➜ Explicit dependency on target 'Transformers-product' in project 'swift-transformers'
+    Target 'Transformers-product' in project 'swift-transformers'
+        ➜ Explicit dependency on target 'Tokenizers' in project 'swift-transformers'
+        ➜ Explicit dependency on target 'Generation' in project 'swift-transformers'
+        ➜ Explicit dependency on target 'Models' in project 'swift-transformers'
+        ➜ Explicit dependency on target 'Hub' in project 'swift-transformers'
+        ➜ Explicit dependency on target 'Jinja-product' in project 'Jinja'
+        ➜ Explicit dependency on target 'HuggingFace-product' in project 'swift-huggingface'
+        ➜ Explicit dependency on target 'OrderedCollections-product' in project 'swift-collections'
+        ➜ Explicit dependency on target 'Crypto-product' in project 'swift-crypto'
+        ➜ Explicit dependency on target 'yyjson-product' in project 'yyjson'
+    Target 'Models' in project 'swift-transformers'
+        ➜ Explicit dependency on target 'Hub' in project 'swift-transformers'
+        ➜ Explicit dependency on target 'Tokenizers' in project 'swift-transformers'
+        ➜ Explicit dependency on target 'Generation' in project 'swift-transformers'
+        ➜ Explicit dependency on target 'Jinja-product' in project 'Jinja'
+        ➜ Explicit dependency on target 'HuggingFace-product' in project 'swift-huggingface'
+        ➜ Explicit dependency on target 'OrderedCollections-product' in project 'swift-collections'
+        ➜ Explicit dependency on target 'Crypto-product' in project 'swift-crypto'
+        ➜ Explicit dependency on target 'yyjson-product' in project 'yyjson'
+    Target 'Generation' in project 'swift-transformers'
+        ➜ Explicit dependency on target 'Hub' in project 'swift-transformers'
+        ➜ Explicit dependency on target 'Tokenizers' in project 'swift-transformers'
+        ➜ Explicit dependency on target 'Jinja-product' in project 'Jinja'
+        ➜ Explicit dependency on target 'HuggingFace-product' in project 'swift-huggingface'
+        ➜ Explicit dependency on target 'OrderedCollections-product' in project 'swift-collections'
+        ➜ Explicit dependency on target 'Crypto-product' in project 'swift-crypto'
+        ➜ Explicit dependency on target 'yyjson-product' in project 'yyjson'
+    Target 'Tokenizers' in project 'swift-transformers'
+        ➜ Explicit dependency on target 'Hub' in project 'swift-transformers'
+        ➜ Explicit dependency on target 'Jinja-product' in project 'Jinja'
+        ➜ Explicit dependency on target 'HuggingFace-product' in project 'swift-huggingface'
+        ➜ Explicit dependency on target 'OrderedCollections-product' in project 'swift-collections'
+        ➜ Explicit dependency on target 'Crypto-product' in project 'swift-crypto'
+        ➜ Explicit dependency on target 'yyjson-product' in project 'yyjson'
+    Target 'Hub' in project 'swift-transformers'
+        ➜ Explicit dependency on target 'swift-transformers_Hub' in project 'swift-transformers'
+        ➜ Explicit dependency on target 'Jinja-product' in project 'Jinja'
+        ➜ Explicit dependency on target 'HuggingFace-product' in project 'swift-huggingface'
+        ➜ Explicit dependency on target 'OrderedCollections-product' in project 'swift-collections'
+        ➜ Explicit dependency on target 'Crypto-product' in project 'swift-crypto'
+        ➜ Explicit dependency on target 'yyjson-product' in project 'yyjson'
+    Target 'yyjson-product' in project 'yyjson'
+        ➜ Explicit dependency on target 'yyjson' in project 'yyjson'
+    Target 'yyjson' in project 'yyjson' (no dependencies)
+    Target 'HuggingFace-product' in project 'swift-huggingface'
+        ➜ Explicit dependency on target 'HuggingFace' in project 'swift-huggingface'
+        ➜ Explicit dependency on target 'EventSource-product' in project 'EventSource'
+        ➜ Explicit dependency on target 'Crypto-product' in project 'swift-crypto'
+    Target 'HuggingFace' in project 'swift-huggingface'
+        ➜ Explicit dependency on target 'EventSource-product' in project 'EventSource'
+        ➜ Explicit dependency on target 'Crypto-product' in project 'swift-crypto'
+    Target 'Crypto-product' in project 'swift-crypto'
+        ➜ Explicit dependency on target 'Crypto' in project 'swift-crypto'
+        ➜ Explicit dependency on target 'swift-crypto_Crypto' in project 'swift-crypto'
+    Target 'Crypto' in project 'swift-crypto'
+        ➜ Explicit dependency on target 'swift-crypto_Crypto' in project 'swift-crypto'
+    Target 'swift-crypto_Crypto' in project 'swift-crypto' (no dependencies)
+    Target 'EventSource-product' in project 'EventSource'
+        ➜ Explicit dependency on target 'EventSource' in project 'EventSource'
+        ➜ Explicit dependency on target 'NIOCore-product' in project 'swift-nio'
+    Target 'EventSource' in project 'EventSource'
+        ➜ Explicit dependency on target 'NIOCore-product' in project 'swift-nio'
+    Target 'NIOCore-product' in project 'swift-nio'
+        ➜ Explicit dependency on target 'NIOCore' in project 'swift-nio'
+        ➜ Explicit dependency on target 'CNIOAtomics' in project 'swift-nio'
+        ➜ Explicit dependency on target 'NIOConcurrencyHelpers' in project 'swift-nio'
+        ➜ Explicit dependency on target '_NIOBase64' in project 'swift-nio'
+        ➜ Explicit dependency on target 'CNIOOpenBSD' in project 'swift-nio'
+        ➜ Explicit dependency on target 'CNIOFreeBSD' in project 'swift-nio'
+        ➜ Explicit dependency on target 'CNIODarwin' in project 'swift-nio'
+        ➜ Explicit dependency on target 'CNIOLinux' in project 'swift-nio'
+        ➜ Explicit dependency on target 'CNIOWindows' in project 'swift-nio'
+        ➜ Explicit dependency on target 'CNIOWASI' in project 'swift-nio'
+        ➜ Explicit dependency on target '_NIODataStructures' in project 'swift-nio'
+        ➜ Explicit dependency on target 'DequeModule-product' in project 'swift-collections'
+        ➜ Explicit dependency on target 'Atomics-product' in project 'swift-atomics'
+    Target 'NIOCore' in project 'swift-nio'
+        ➜ Explicit dependency on target 'CNIOAtomics' in project 'swift-nio'
+        ➜ Explicit dependency on target 'NIOConcurrencyHelpers' in project 'swift-nio'
+        ➜ Explicit dependency on target '_NIOBase64' in project 'swift-nio'
+        ➜ Explicit dependency on target 'CNIOOpenBSD' in project 'swift-nio'
+        ➜ Explicit dependency on target 'CNIOFreeBSD' in project 'swift-nio'
+        ➜ Explicit dependency on target 'CNIODarwin' in project 'swift-nio'
+        ➜ Explicit dependency on target 'CNIOLinux' in project 'swift-nio'
+        ➜ Explicit dependency on target 'CNIOWindows' in project 'swift-nio'
+        ➜ Explicit dependency on target 'CNIOWASI' in project 'swift-nio'
+        ➜ Explicit dependency on target '_NIODataStructures' in project 'swift-nio'
+        ➜ Explicit dependency on target 'DequeModule-product' in project 'swift-collections'
+        ➜ Explicit dependency on target 'Atomics-product' in project 'swift-atomics'
+    Target 'Atomics-product' in project 'swift-atomics'
+        ➜ Explicit dependency on target 'Atomics' in project 'swift-atomics'
+        ➜ Explicit dependency on target '_AtomicsShims' in project 'swift-atomics'
+    Target 'Atomics' in project 'swift-atomics'
+        ➜ Explicit dependency on target '_AtomicsShims' in project 'swift-atomics'
+    Target '_AtomicsShims' in project 'swift-atomics' (no dependencies)
+    Target 'DequeModule-product' in project 'swift-collections'
+        ➜ Explicit dependency on target 'DequeModule' in project 'swift-collections'
+        ➜ Explicit dependency on target 'InternalCollectionsUtilities' in project 'swift-collections'
+        ➜ Explicit dependency on target 'ContainersPreview' in project 'swift-collections'
+    Target 'DequeModule' in project 'swift-collections'
+        ➜ Explicit dependency on target 'InternalCollectionsUtilities' in project 'swift-collections'
+        ➜ Explicit dependency on target 'ContainersPreview' in project 'swift-collections'
+    Target 'ContainersPreview' in project 'swift-collections'
+        ➜ Explicit dependency on target 'InternalCollectionsUtilities' in project 'swift-collections'
+    Target '_NIODataStructures' in project 'swift-nio' (no dependencies)
+    Target 'CNIOWASI' in project 'swift-nio' (no dependencies)
+    Target 'CNIOWindows' in project 'swift-nio' (no dependencies)
+    Target 'CNIOLinux' in project 'swift-nio' (no dependencies)
+    Target 'CNIODarwin' in project 'swift-nio' (no dependencies)
+    Target 'CNIOFreeBSD' in project 'swift-nio' (no dependencies)
+    Target 'CNIOOpenBSD' in project 'swift-nio' (no dependencies)
+    Target '_NIOBase64' in project 'swift-nio' (no dependencies)
+    Target 'NIOConcurrencyHelpers' in project 'swift-nio'
+        ➜ Explicit dependency on target 'CNIOAtomics' in project 'swift-nio'
+    Target 'CNIOAtomics' in project 'swift-nio' (no dependencies)
+    Target 'Jinja-product' in project 'Jinja'
+        ➜ Explicit dependency on target 'Jinja' in project 'Jinja'
+        ➜ Explicit dependency on target 'OrderedCollections-product' in project 'swift-collections'
+    Target 'Jinja' in project 'Jinja'
+        ➜ Explicit dependency on target 'OrderedCollections-product' in project 'swift-collections'
+    Target 'OrderedCollections-product' in project 'swift-collections'
+        ➜ Explicit dependency on target 'OrderedCollections' in project 'swift-collections'
+        ➜ Explicit dependency on target 'InternalCollectionsUtilities' in project 'swift-collections'
+    Target 'OrderedCollections' in project 'swift-collections'
+        ➜ Explicit dependency on target 'InternalCollectionsUtilities' in project 'swift-collections'
+    Target 'InternalCollectionsUtilities' in project 'swift-collections' (no dependencies)
+    Target 'swift-transformers_Hub' in project 'swift-transformers' (no dependencies)
+    Target 'CXGrammar' in project 'coreai-models'
+        ➜ Explicit dependency on target 'XGrammar-product' in project 'xgrammar'
+    Target 'XGrammar-product' in project 'xgrammar'
+        ➜ Explicit dependency on target 'XGrammar' in project 'xgrammar'
+    Target 'XGrammar' in project 'xgrammar' (no dependencies)
+    Target 'CoreAIShared' in project 'coreai-models' (no dependencies)
+
+GatherProvisioningInputs
+
+CreateBuildDescription
+
+ExecuteExternalTool /Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang -v -E -dM -arch arm64 -isysroot /Applications/Xcode-beta.app/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/SDKs/iPhoneSimulator27.0.sdk -x c++ -c /dev/null
+
+ExecuteExternalTool /Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/swiftc --version
+
+ExecuteExternalTool /Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang -v -E -dM -arch arm64 -isysroot /Applications/Xcode-beta.app/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/SDKs/iPhoneSimulator27.0.sdk -x c -c /dev/null
+
+ExecuteExternalTool /Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang -v -E -dM -isysroot /Applications/Xcode-beta.app/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/SDKs/iPhoneSimulator27.0.sdk -x c -c /dev/null
+
+ExecuteExternalTool /Applications/Xcode-beta.app/Contents/Developer/usr/bin/ibtool --version --output-format xml1
+
+ExecuteExternalTool /Applications/Xcode-beta.app/Contents/Developer/usr/bin/actool --print-asset-tag-combinations --output-format xml1 /Users/dabrams/playhead/.worktrees/vtjx/Playhead/Resources/Assets.xcassets
+
+ExecuteExternalTool /Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/ld -version_details
+
+ReadFileContents /Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/share/docc/features.json
+
+ExecuteExternalTool /Applications/Xcode-beta.app/Contents/Developer/usr/bin/actool --version --output-format xml1
+
+Build description signature: 0b45a1bc3cbd98110bb2be1d5c21bba0
+Build description path: /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/XCBuildData/0b45a1bc3cbd98110bb2be1d5c21bba0.xcbuilddata
+ClangStatCache /Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang-stat-cache /Applications/Xcode-beta.app/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/SDKs/iPhoneSimulator27.0.sdk /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/SDKStatCaches.noindex/iphonesimulator27.0-24A5370g-3243818bda632a4370e1cc7a9fd181c5.sdkstatcache
+    cd /Users/dabrams/playhead/.worktrees/vtjx/Playhead.xcodeproj
+    /Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/clang-stat-cache /Applications/Xcode-beta.app/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/SDKs/iPhoneSimulator27.0.sdk -o /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/SDKStatCaches.noindex/iphonesimulator27.0-24A5370g-3243818bda632a4370e1cc7a9fd181c5.sdkstatcache
+
+ProcessInfoPlistFile /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/swift-transformers_Hub.bundle/Info.plist /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/swift-transformers.build/Debug-iphonesimulator/swift-transformers_Hub-b.build/empty-swift-transformers_Hub.plist (in target 'swift-transformers_Hub' from project 'swift-transformers')
+    cd /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/SourcePackages/checkouts/swift-transformers
+    builtin-infoPlistUtility /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/swift-transformers.build/Debug-iphonesimulator/swift-transformers_Hub-b.build/empty-swift-transformers_Hub.plist -producttype com.apple.product-type.bundle -expandbuildsettings -format binary -platform iphonesimulator -o /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/swift-transformers_Hub.bundle/Info.plist
+
+ProcessInfoPlistFile /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/swift-crypto_Crypto.bundle/Info.plist /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/swift-crypto.build/Debug-iphonesimulator/swift-crypto_Crypto-b.build/empty-swift-crypto_Crypto.plist (in target 'swift-crypto_Crypto' from project 'swift-crypto')
+    cd /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/SourcePackages/checkouts/swift-crypto
+    builtin-infoPlistUtility /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/swift-crypto.build/Debug-iphonesimulator/swift-crypto_Crypto-b.build/empty-swift-crypto_Crypto.plist -producttype com.apple.product-type.bundle -expandbuildsettings -format binary -platform iphonesimulator -o /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/swift-crypto_Crypto.bundle/Info.plist
+
+note: Run script build phase 'Verify specialist model staged' will be run during every build because the option to run the script phase "Based on dependency analysis" is unchecked. (in target 'Playhead' from project 'Playhead')
+warning: Run script build phase 'Stamp build commit SHA' will be run during every build because it does not specify any outputs. To address this issue, either add output dependencies to the script phase, or configure it to run in every build by unchecking "Based on dependency analysis" in the script phase. (in target 'Playhead' from project 'Playhead')
+PhaseScriptExecution Verify\ specialist\ model\ staged /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build/Script-4A042A8AF14BFE7308031A36.sh (in target 'Playhead' from project 'Playhead')
+    cd /Users/dabrams/playhead/.worktrees/vtjx
+    export ACTION\=build
+    export AD_HOC_CODE_SIGNING_ALLOWED\=YES
+    export AGGREGATE_TRACKED_DOMAINS\=YES
+    export ALLOW_BUILD_REQUEST_OVERRIDES\=NO
+    export ALLOW_TARGET_PLATFORM_SPECIALIZATION\=NO
+    export ALTERNATE_GROUP\=staff
+    export ALTERNATE_MODE\=u+w,go-w,a+rX
+    export ALTERNATE_OWNER\=dabrams
+    export ALTERNATIVE_DISTRIBUTION_WEB\=NO
+    export ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES\=NO
+    export ALWAYS_SEARCH_USER_PATHS\=NO
+    export ALWAYS_USE_SEPARATE_HEADERMAPS\=NO
+    export APPLICATION_EXTENSION_API_ONLY\=NO
+    export APPLY_RULES_IN_COPY_FILES\=NO
+    export APPLY_RULES_IN_COPY_HEADERS\=NO
+    export APP_SHORTCUTS_ENABLE_FLEXIBLE_MATCHING\=YES
+    export ARCHS\=arm64
+    export ARCHS_BASE\=arm64
+    export ARCHS_STANDARD\=arm64\ x86_64
+    export ARCHS_STANDARD_32_64_BIT\=arm64\ x86_64
+    export ARCHS_STANDARD_64_BIT\=arm64\ x86_64
+    export ARCHS_STANDARD_INCLUDING_64_BIT\=arm64\ x86_64
+    export ARCHS_UNIVERSAL_IPHONE_OS\=arm64\ x86_64
+    export ASSETCATALOG_COMPILER_APPICON_NAME\=AppIcon
+    export ASSETCATALOG_FILTER_FOR_DEVICE_MODEL\=iPhone18,3
+    export ASSETCATALOG_FILTER_FOR_DEVICE_OS_VERSION\=27.0
+    export ASSETCATALOG_FILTER_FOR_THINNING_DEVICE_CONFIGURATION\=iPhone18,3
+    export AUTOMATICALLY_MERGE_DEPENDENCIES\=NO
+    export AUTOMATION_APPLE_EVENTS\=NO
+    export AVAILABLE_PLATFORMS\=android\ appletvos\ appletvsimulator\ driverkit\ freebsd\ iphoneos\ iphonesimulator\ linux\ macosx\ none\ openbsd\ qnx\ watchos\ watchsimulator\ webassembly\ xros\ xrsimulator
+    export AppIdentifierPrefix\=36Z6VYTT9X.
+    export BUILD_ACTIVE_RESOURCES_ONLY\=YES
+    export BUILD_COMPONENTS\=headers\ build
+    export BUILD_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products
+    export BUILD_LIBRARY_FOR_DISTRIBUTION\=NO
+    export BUILD_ONLY_KNOWN_LOCALIZATIONS\=NO
+    export BUILD_ROOT\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products
+    export BUILD_STYLE\=
+    export BUILD_VARIANTS\=normal
+    export BUILT_PRODUCTS_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator
+    export BUNDLE_CONTENTS_FOLDER_PATH_deep\=Contents/
+    export BUNDLE_EXECUTABLE_FOLDER_NAME_deep\=MacOS
+    export BUNDLE_EXTENSIONS_FOLDER_PATH\=Extensions
+    export BUNDLE_FORMAT\=shallow
+    export BUNDLE_FRAMEWORKS_FOLDER_PATH\=Frameworks
+    export BUNDLE_PLUGINS_FOLDER_PATH\=PlugIns
+    export BUNDLE_PRIVATE_HEADERS_FOLDER_PATH\=PrivateHeaders
+    export BUNDLE_PUBLIC_HEADERS_FOLDER_PATH\=Headers
+    export CACHE_ROOT\=/var/folders/qd/qyx62km142b7lpv0868gpwgw0000gn/C/com.apple.DeveloperTools/27.0-27A5209h/Xcode
+    export CCHROOT\=/var/folders/qd/qyx62km142b7lpv0868gpwgw0000gn/C/com.apple.DeveloperTools/27.0-27A5209h/Xcode
+    export CHMOD\=/bin/chmod
+    export CHOWN\=chown
+    export CLANG_ANALYZER_NONNULL\=YES
+    export CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION\=YES_AGGRESSIVE
+    export CLANG_CACHE_FINE_GRAINED_OUTPUTS\=YES
+    export CLANG_COVERAGE_MAPPING\=YES
+    export CLANG_CXX_LANGUAGE_STANDARD\=gnu++14
+    export CLANG_CXX_LIBRARY\=libc++
+    export CLANG_ENABLE_EXPLICIT_MODULES\=YES
+    export CLANG_ENABLE_MODULES\=YES
+    export CLANG_ENABLE_OBJC_ARC\=YES
+    export CLANG_ENABLE_OBJC_WEAK\=YES
+    export CLANG_MODULES_BUILD_SESSION_FILE\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/ModuleCache.noindex/Session.modulevalidation
+    export CLANG_PROFILE_DATA_DIRECTORY\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/ProfileData
+    export CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING\=YES
+    export CLANG_WARN_BOOL_CONVERSION\=YES
+    export CLANG_WARN_COMMA\=YES
+    export CLANG_WARN_CONSTANT_CONVERSION\=YES
+    export CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS\=YES
+    export CLANG_WARN_DIRECT_OBJC_ISA_USAGE\=YES_ERROR
+    export CLANG_WARN_DOCUMENTATION_COMMENTS\=YES
+    export CLANG_WARN_EMPTY_BODY\=YES
+    export CLANG_WARN_ENUM_CONVERSION\=YES
+    export CLANG_WARN_INFINITE_RECURSION\=YES
+    export CLANG_WARN_INT_CONVERSION\=YES
+    export CLANG_WARN_NON_LITERAL_NULL_CONVERSION\=YES
+    export CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF\=YES
+    export CLANG_WARN_OBJC_LITERAL_CONVERSION\=YES
+    export CLANG_WARN_OBJC_ROOT_CLASS\=YES_ERROR
+    export CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER\=YES
+    export CLANG_WARN_RANGE_LOOP_ANALYSIS\=YES
+    export CLANG_WARN_STRICT_PROTOTYPES\=YES
+    export CLANG_WARN_SUSPICIOUS_MOVE\=YES
+    export CLANG_WARN_UNGUARDED_AVAILABILITY\=YES_AGGRESSIVE
+    export CLANG_WARN_UNREACHABLE_CODE\=YES
+    export CLANG_WARN__DUPLICATE_METHOD_MATCH\=YES
+    export CLASS_FILE_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build/JavaClasses
+    export CLEAN_PRECOMPS\=YES
+    export CLONE_HEADERS\=NO
+    export CODESIGNING_FOLDER_PATH\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/Playhead.app
+    export CODE_SIGNING_ALLOWED\=YES
+    export CODE_SIGNING_REQUIRED\=YES
+    export CODE_SIGN_CONTEXT_CLASS\=XCiPhoneSimulatorCodeSignContext
+    export CODE_SIGN_ENTITLEMENTS\=Playhead/Support/Playhead.entitlements
+    export CODE_SIGN_IDENTITY\=iPhone\ Developer
+    export CODE_SIGN_INJECT_BASE_ENTITLEMENTS\=YES
+    export COLOR_DIAGNOSTICS\=NO
+    export COMBINE_HIDPI_IMAGES\=NO
+    export COMPILATION_CACHE_CAS_PATH\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/CompilationCache.noindex
+    export COMPILATION_CACHE_KEEP_CAS_DIRECTORY\=YES
+    export COMPILER_INDEX_STORE_ENABLE\=Default
+    export COMPOSITE_SDK_DIRS\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/CompositeSDKs
+    export COMPRESS_PNG_FILES\=YES
+    export CONFIGURATION\=Debug
+    export CONFIGURATION_BUILD_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator
+    export CONFIGURATION_TEMP_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator
+    export CONTENTS_FOLDER_PATH\=Playhead.app
+    export CONTENTS_FOLDER_PATH_SHALLOW_BUNDLE_NO\=Playhead.app/Contents
+    export CONTENTS_FOLDER_PATH_SHALLOW_BUNDLE_YES\=Playhead.app
+    export COPYING_PRESERVES_HFS_DATA\=NO
+    export COPY_HEADERS_RUN_UNIFDEF\=NO
+    export COPY_PHASE_STRIP\=NO
+    export CORRESPONDING_DEVICE_PLATFORM_DIR\=/Applications/Xcode-beta.app/Contents/Developer/Platforms/iPhoneOS.platform
+    export CORRESPONDING_DEVICE_PLATFORM_NAME\=iphoneos
+    export CORRESPONDING_DEVICE_SDK_DIR\=/Applications/Xcode-beta.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS27.0.sdk
+    export CORRESPONDING_DEVICE_SDK_NAME\=iphoneos27.0
+    export CP\=/bin/cp
+    export CREATE_INFOPLIST_SECTION_IN_BINARY\=NO
+    export CURRENT_ARCH\=undefined_arch
+    export CURRENT_PROJECT_VERSION\=1
+    export CURRENT_VARIANT\=normal
+    export DEAD_CODE_STRIPPING\=YES
+    export DEBUGGING_SYMBOLS\=YES
+    export DEBUG_INFORMATION_FORMAT\=dwarf
+    export DEBUG_INFORMATION_VERSION\=compiler-default
+    export DEFAULT_COMPILER\=com.apple.compilers.llvm.clang.1_0
+    export DEFAULT_DEXT_INSTALL_PATH\=/System/Library/DriverExtensions
+    export DEFAULT_KEXT_INSTALL_PATH\=/System/Library/Extensions
+    export DEFINES_MODULE\=NO
+    export DEPLOYMENT_LOCATION\=NO
+    export DEPLOYMENT_POSTPROCESSING\=NO
+    export DEPLOYMENT_TARGET_SETTING_NAME\=IPHONEOS_DEPLOYMENT_TARGET
+    export DEPLOYMENT_TARGET_SUGGESTED_VALUES\=15.0\ 15.1\ 15.2\ 15.3\ 15.4\ 15.5\ 15.6\ 16.0\ 16.1\ 16.2\ 16.3\ 16.4\ 16.5\ 16.6\ 17.0\ 17.1\ 17.2\ 17.3\ 17.4\ 17.5\ 17.6\ 18.0\ 18.1\ 18.2\ 18.3\ 18.4\ 18.5\ 18.6\ 26.0\ 26.2\ 26.3\ 26.4\ 26.5\ 26.6\ 27.0
+    export DERIVED_FILES_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build/DerivedSources
+    export DERIVED_FILE_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build/DerivedSources
+    export DERIVED_SOURCES_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build/DerivedSources
+    export DEVELOPER_APPLICATIONS_DIR\=/Applications/Xcode-beta.app/Contents/Developer/Applications
+    export DEVELOPER_BIN_DIR\=/Applications/Xcode-beta.app/Contents/Developer/usr/bin
+    export DEVELOPER_DIR\=/Applications/Xcode-beta.app/Contents/Developer
+    export DEVELOPER_FRAMEWORKS_DIR\=/Applications/Xcode-beta.app/Contents/Developer/Library/Frameworks
+    export DEVELOPER_FRAMEWORKS_DIR_QUOTED\=/Applications/Xcode-beta.app/Contents/Developer/Library/Frameworks
+    export DEVELOPER_LIBRARY_DIR\=/Applications/Xcode-beta.app/Contents/Developer/Library
+    export DEVELOPER_SDK_DIR\=/Applications/Xcode-beta.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs
+    export DEVELOPER_TOOLS_DIR\=/Applications/Xcode-beta.app/Contents/Developer/Tools
+    export DEVELOPER_USR_DIR\=/Applications/Xcode-beta.app/Contents/Developer/usr
+    export DEVELOPMENT_LANGUAGE\=en
+    export DEVELOPMENT_TEAM\=36Z6VYTT9X
+    export DIAGNOSE_MISSING_TARGET_DEPENDENCIES\=YES
+    export DIFF\=/usr/bin/diff
+    export DOCUMENTATION_FOLDER_PATH\=Playhead.app/en.lproj/Documentation
+    export DONT_GENERATE_INFOPLIST_FILE\=NO
+    export DSTROOT\=/tmp/Playhead.dst
+    export DT_TOOLCHAIN_DIR\=/Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain
+    export DWARF_DSYM_FILE_NAME\=Playhead.app.dSYM
+    export DWARF_DSYM_FILE_SHOULD_ACCOMPANY_PRODUCT\=NO
+    export DWARF_DSYM_FOLDER_PATH\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator
+    export DYNAMIC_LIBRARY_EXTENSION\=dylib
+    export EAGER_COMPILATION_ALLOW_SCRIPTS\=NO
+    export EAGER_LINKING\=NO
+    export EFFECTIVE_PLATFORM_NAME\=-iphonesimulator
+    export EFFECTIVE_SWIFT_VERSION\=6
+    export EMBEDDED_CONTENT_CONTAINS_SWIFT\=NO
+    export EMBED_ASSET_PACKS_IN_PRODUCT_BUNDLE\=NO
+    export EMBED_PACKAGE_RESOURCE_BUNDLE_NAMES\=\ swift-transformers_Hub\ swift-crypto_Crypto
+    export ENABLE_APP_SANDBOX\=NO
+    export ENABLE_CODE_COVERAGE\=YES
+    export ENABLE_COHORT_ARCHS\=YES
+    export ENABLE_CPLUSPLUS_BOUNDS_SAFE_BUFFERS\=NO
+    export ENABLE_C_BOUNDS_SAFETY\=NO
+    export ENABLE_DEBUG_DYLIB\=YES
+    export ENABLE_DEFAULT_HEADER_SEARCH_PATHS\=YES
+    export ENABLE_DEFAULT_SEARCH_PATHS\=YES
+    export ENABLE_ENHANCED_SECURITY\=NO
+    export ENABLE_HARDENED_RUNTIME\=NO
+    export ENABLE_HEADER_DEPENDENCIES\=YES
+    export ENABLE_INCOMING_NETWORK_CONNECTIONS\=NO
+    export ENABLE_ON_DEMAND_RESOURCES\=YES
+    export ENABLE_OUTGOING_NETWORK_CONNECTIONS\=NO
+    export ENABLE_POINTER_AUTHENTICATION\=NO
+    export ENABLE_PREVIEWS\=NO
+    export ENABLE_RESOURCE_ACCESS_AUDIO_INPUT\=NO
+    export ENABLE_RESOURCE_ACCESS_BLUETOOTH\=NO
+    export ENABLE_RESOURCE_ACCESS_CALENDARS\=NO
+    export ENABLE_RESOURCE_ACCESS_CAMERA\=NO
+    export ENABLE_RESOURCE_ACCESS_CONTACTS\=NO
+    export ENABLE_RESOURCE_ACCESS_LOCATION\=NO
+    export ENABLE_RESOURCE_ACCESS_PHOTO_LIBRARY\=NO
+    export ENABLE_RESOURCE_ACCESS_PRINTING\=NO
+    export ENABLE_RESOURCE_ACCESS_USB\=NO
+    export ENABLE_SDK_IMPORTS\=NO
+    export ENABLE_SECURITY_COMPILER_WARNINGS\=NO
+    export ENABLE_STRICT_OBJC_MSGSEND\=YES
+    export ENABLE_TESTABILITY\=YES
+    export ENABLE_TESTING_SEARCH_PATHS\=NO
+    export ENABLE_USER_SCRIPT_SANDBOXING\=NO
+    export ENABLE_XOJIT_PREVIEWS\=YES
+    export ENFORCE_VALID_ARCHS\=YES
+    export ENTITLEMENTS_ALLOWED\=NO
+    export ENTITLEMENTS_DESTINATION\=__entitlements
+    export ENTITLEMENTS_REQUIRED\=NO
+    export EXCLUDED_INSTALLSRC_SUBDIRECTORY_PATTERNS\=.DS_Store\ .svn\ .git\ .hg\ CVS
+    export EXCLUDED_RECURSIVE_SEARCH_PATH_SUBDIRECTORIES\=\*.nib\ \*.lproj\ \*.framework\ \*.gch\ \*.xcode\*\ \*.xcassets\ \*.icon\ \(\*\)\ .DS_Store\ CVS\ .svn\ .git\ .hg\ \*.pbproj\ \*.pbxproj
+    export EXECUTABLES_FOLDER_PATH\=Playhead.app/Executables
+    export EXECUTABLE_BLANK_INJECTION_DYLIB_PATH\=Playhead.app/__preview.dylib
+    export EXECUTABLE_DEBUG_DYLIB_INSTALL_NAME\=@rpath/Playhead.debug.dylib
+    export EXECUTABLE_DEBUG_DYLIB_PATH\=Playhead.app/Playhead.debug.dylib
+    export EXECUTABLE_FOLDER_PATH\=Playhead.app
+    export EXECUTABLE_FOLDER_PATH_SHALLOW_BUNDLE_NO\=Playhead.app/MacOS
+    export EXECUTABLE_FOLDER_PATH_SHALLOW_BUNDLE_YES\=Playhead.app
+    export EXECUTABLE_NAME\=Playhead
+    export EXECUTABLE_PATH\=Playhead.app/Playhead
+    export EXPANDED_CODE_SIGN_IDENTITY\=-
+    export EXPANDED_CODE_SIGN_IDENTITY_NAME\=Sign\ to\ Run\ Locally
+    export EXTENSIONS_FOLDER_PATH\=Playhead.app/Extensions
+    export FILE_LIST\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build/Objects/LinkFileList
+    export FIXED_FILES_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build/FixedFiles
+    export FRAMEWORKS_FOLDER_PATH\=Playhead.app/Frameworks
+    export FRAMEWORK_FLAG_PREFIX\=-framework
+    export FRAMEWORK_SEARCH_PATHS\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator\ 
+    export FRAMEWORK_VERSION\=A
+    export FULL_PRODUCT_NAME\=Playhead.app
+    export FUSE_BUILD_PHASES\=YES
+    export FUSE_BUILD_SCRIPT_PHASES\=NO
+    export GCC3_VERSION\=3.3
+    export GCC_C_LANGUAGE_STANDARD\=gnu11
+    export GCC_DYNAMIC_NO_PIC\=NO
+    export GCC_INLINES_ARE_PRIVATE_EXTERN\=YES
+    export GCC_NO_COMMON_BLOCKS\=YES
+    export GCC_OBJC_LEGACY_DISPATCH\=YES
+    export GCC_OPTIMIZATION_LEVEL\=0
+    export GCC_PFE_FILE_C_DIALECTS\=c\ objective-c\ c++\ objective-c++
+    export GCC_PREPROCESSOR_DEFINITIONS\=\ DEBUG\=1
+    export GCC_SYMBOLS_PRIVATE_EXTERN\=NO
+    export GCC_TREAT_WARNINGS_AS_ERRORS\=NO
+    export GCC_VERSION\=com.apple.compilers.llvm.clang.1_0
+    export GCC_VERSION_IDENTIFIER\=com_apple_compilers_llvm_clang_1_0
+    export GCC_WARN_64_TO_32_BIT_CONVERSION\=YES
+    export GCC_WARN_ABOUT_RETURN_TYPE\=YES_ERROR
+    export GCC_WARN_UNDECLARED_SELECTOR\=YES
+    export GCC_WARN_UNINITIALIZED_AUTOS\=YES_AGGRESSIVE
+    export GCC_WARN_UNUSED_FUNCTION\=YES
+    export GCC_WARN_UNUSED_VARIABLE\=YES
+    export GENERATED_MODULEMAP_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator
+    export GENERATE_INFOPLIST_FILE\=NO
+    export GENERATE_INTERMEDIATE_TEXT_BASED_STUBS\=YES
+    export GENERATE_PKGINFO_FILE\=YES
+    export GENERATE_PRELINK_OBJECT_FILE\=NO
+    export GENERATE_PROFILING_CODE\=NO
+    export GENERATE_TEXT_BASED_STUBS\=NO
+    export GID\=20
+    export GROUP\=staff
+    export HEADERMAP_INCLUDES_FLAT_ENTRIES_FOR_TARGET_BEING_BUILT\=YES
+    export HEADERMAP_INCLUDES_FRAMEWORK_ENTRIES_FOR_ALL_PRODUCT_TYPES\=YES
+    export HEADERMAP_INCLUDES_FRAMEWORK_ENTRIES_FOR_TARGETS_NOT_BEING_BUILT\=YES
+    export HEADERMAP_INCLUDES_NONPUBLIC_NONPRIVATE_HEADERS\=YES
+    export HEADERMAP_INCLUDES_PROJECT_HEADERS\=YES
+    export HEADERMAP_USES_FRAMEWORK_PREFIX_ENTRIES\=YES
+    export HEADERMAP_USES_VFS\=NO
+    export HEADER_SEARCH_PATHS\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/SourcePackages/checkouts/xgrammar/include\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/SourcePackages/checkouts/swift-atomics/Sources/_AtomicsShims/include\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/SourcePackages/checkouts/swift-nio/Sources/CNIOWASI/include\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/SourcePackages/checkouts/swift-nio/Sources/CNIOWindows/include\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/SourcePackages/checkouts/swift-nio/Sources/CNIOLinux/include\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/SourcePackages/checkouts/swift-nio/Sources/CNIODarwin/include\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/SourcePackages/checkouts/swift-nio/Sources/CNIOFreeBSD/include\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/SourcePackages/checkouts/swift-nio/Sources/CNIOOpenBSD/include\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/SourcePackages/checkouts/swift-nio/Sources/CNIOAtomics/include\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/SourcePackages/checkouts/yyjson/src\ /Users/dabrams/playhead/.worktrees/vtjx/Vendor/coreai-models/swift/Sources/lib/CXGrammar/include\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/include\ 
+    export HOME\=/Users/dabrams
+    export HOST_ARCH\=arm64
+    export HOST_PLATFORM\=macosx
+    export ICONV\=/usr/bin/iconv
+    export IMPLICIT_DEPENDENCY_DOMAIN\=default
+    export INDEX_ENABLE_OPTIMIZATION_LEVEL_OVERRIDE\=YES
+    export INDEX_STORE_COMPRESS\=NO
+    export INDEX_STORE_ONLY_PROJECT_FILES\=NO
+    export INFOPLIST_ENABLE_CFBUNDLEICONS_MERGE\=YES
+    export INFOPLIST_EXPAND_BUILD_SETTINGS\=YES
+    export INFOPLIST_FILE\=Playhead/Support/Info.plist
+    export INFOPLIST_OUTPUT_FORMAT\=binary
+    export INFOPLIST_PATH\=Playhead.app/Info.plist
+    export INFOPLIST_PREPROCESS\=NO
+    export INFOSTRINGS_PATH\=Playhead.app/en.lproj/InfoPlist.strings
+    export INLINE_PRIVATE_FRAMEWORKS\=NO
+    export INSTALLAPI_IGNORE_SKIP_INSTALL\=YES
+    export INSTALLHDRS_COPY_PHASE\=NO
+    export INSTALLHDRS_SCRIPT_PHASE\=NO
+    export INSTALL_DIR\=/tmp/Playhead.dst/Applications
+    export INSTALL_GROUP\=staff
+    export INSTALL_MODE_FLAG\=u+w,go-w,a+rX
+    export INSTALL_OWNER\=dabrams
+    export INSTALL_PATH\=/Applications
+    export INSTALL_ROOT\=/tmp/Playhead.dst
+    export IPHONEOS_DEPLOYMENT_TARGET\=27.0
+    export IS_UNOPTIMIZED_BUILD\=YES
+    export JAVAC_DEFAULT_FLAGS\=-J-Xms64m\ -J-XX:NewSize\=4M\ -J-Dfile.encoding\=UTF8
+    export JAVA_APP_STUB\=/System/Library/Frameworks/JavaVM.framework/Resources/MacOS/JavaApplicationStub
+    export JAVA_ARCHIVE_CLASSES\=YES
+    export JAVA_ARCHIVE_TYPE\=JAR
+    export JAVA_COMPILER\=/usr/bin/javac
+    export JAVA_FOLDER_PATH\=Playhead.app/Java
+    export JAVA_FRAMEWORK_RESOURCES_DIRS\=Resources
+    export JAVA_JAR_FLAGS\=cv
+    export JAVA_SOURCE_SUBDIR\=.
+    export JAVA_USE_DEPENDENCIES\=YES
+    export JAVA_ZIP_FLAGS\=-urg
+    export JIKES_DEFAULT_FLAGS\=+E\ +OLDCSO
+    export KEEP_PRIVATE_EXTERNS\=NO
+    export LD_DEPENDENCY_INFO_FILE\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build/Objects-normal/undefined_arch/Playhead_dependency_info.dat
+    export LD_ENTITLEMENTS_SECTION\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build/Playhead.app-Simulated.xcent
+    export LD_ENTITLEMENTS_SECTION_DER\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build/Playhead.app-Simulated.xcent.der
+    export LD_EXPORT_GLOBAL_SYMBOLS\=YES
+    export LD_EXPORT_SYMBOLS\=YES
+    export LD_GENERATE_MAP_FILE\=NO
+    export LD_MAP_FILE_PATH\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build/Playhead-LinkMap-normal-undefined_arch.txt
+    export LD_NO_PIE\=NO
+    export LD_QUOTE_LINKER_ARGUMENTS_FOR_COMPILER_DRIVER\=YES
+    export LD_RUNPATH_SEARCH_PATHS\=@loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ @loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ @loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ @loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ @loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ @loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ @loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ @loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ @loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ @loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ @loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ @loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ @loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ @loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ @loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ @loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ @loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ @loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ @loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ @loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ @loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ @loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ @loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ @loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ @loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ @loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ @loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ @loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ @loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ @loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ \ @executable_path/Frameworks
+    export LD_RUNPATH_SEARCH_PATHS_YES\=@loader_path/../Frameworks
+    export LD_SHARED_CACHE_ELIGIBLE\=Automatic
+    export LD_WARN_DUPLICATE_LIBRARIES\=NO
+    export LD_WARN_UNUSED_DYLIBS\=NO
+    export LEGACY_DEVELOPER_DIR\=/Applications/Xcode-beta.app/Contents/PlugIns/Xcode3Core.ideplugin/Contents/SharedSupport/Developer
+    export LEX\=lex
+    export LIBRARY_DEXT_INSTALL_PATH\=/Library/DriverExtensions
+    export LIBRARY_FLAG_NOSPACE\=YES
+    export LIBRARY_FLAG_PREFIX\=-l
+    export LIBRARY_KEXT_INSTALL_PATH\=/Library/Extensions
+    export LIBRARY_SEARCH_PATHS\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator\ 
+    export LINKER_DISPLAYS_MANGLED_NAMES\=NO
+    export LINK_FILE_LIST_normal_arm64\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build/Objects-normal/arm64/Playhead.LinkFileList
+    export LINK_OBJC_RUNTIME\=YES
+    export LINK_WITH_STANDARD_LIBRARIES\=YES
+    export LLVM_TARGET_TRIPLE_OS_VERSION\=ios27.0
+    export LLVM_TARGET_TRIPLE_SUFFIX\=-simulator
+    export LLVM_TARGET_TRIPLE_VENDOR\=apple
+    export LM_AUX_CONST_METADATA_LIST_PATH_normal_arm64\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build/Objects-normal/arm64/Playhead.SwiftConstValuesFileList
+    export LOCALIZATION_EXPORT_SUPPORTED\=YES
+    export LOCALIZATION_PREFERS_STRING_CATALOGS\=NO
+    export LOCALIZED_RESOURCES_FOLDER_PATH\=Playhead.app/en.lproj
+    export LOCALIZED_STRING_CODE_COMMENTS\=NO
+    export LOCALIZED_STRING_MACRO_NAMES\=NSLocalizedString\ CFCopyLocalizedString
+    export LOCALIZED_STRING_SWIFTUI_SUPPORT\=YES
+    export LOCAL_ADMIN_APPS_DIR\=/Applications/Utilities
+    export LOCAL_APPS_DIR\=/Applications
+    export LOCAL_DEVELOPER_DIR\=/Library/Developer
+    export LOCAL_LIBRARY_DIR\=/Library
+    export LOCROOT\=/Users/dabrams/playhead/.worktrees/vtjx
+    export LOCSYMROOT\=/Users/dabrams/playhead/.worktrees/vtjx
+    export MACH_O_TYPE\=mh_execute
+    export MAC_OS_X_PRODUCT_BUILD_VERSION\=26A5378n
+    export MAC_OS_X_VERSION_ACTUAL\=270000
+    export MAC_OS_X_VERSION_MAJOR\=270000
+    export MAC_OS_X_VERSION_MINOR\=270000
+    export MAKE_MERGEABLE\=NO
+    export MARKETING_VERSION\=1.0.0
+    export MERGEABLE_LIBRARY\=NO
+    export MERGED_BINARY_TYPE\=none
+    export MERGE_LINKED_LIBRARIES\=NO
+    export METAL_LIBRARY_FILE_BASE\=default
+    export METAL_LIBRARY_OUTPUT_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/Playhead.app
+    export MODULES_FOLDER_PATH\=Playhead.app/Modules
+    export MODULE_CACHE_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/ModuleCache.noindex
+    export MTL_ENABLE_DEBUG_INFO\=INCLUDE_SOURCE
+    export MTL_FAST_MATH\=YES
+    export NATIVE_ARCH\=arm64
+    export NATIVE_ARCH_32_BIT\=arm
+    export NATIVE_ARCH_64_BIT\=arm64
+    export NATIVE_ARCH_ACTUAL\=arm64
+    export NO_COMMON\=YES
+    export OBJC_ABI_VERSION\=2
+    export OBJECT_FILE_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build/Objects
+    export OBJECT_FILE_DIR_normal\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build/Objects-normal
+    export OBJROOT\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex
+    export ONLY_ACTIVE_ARCH\=YES
+    export ONLY_ARCH\=arm64
+    export OS\=MACOS
+    export OSAC\=/usr/bin/osacompile
+    export OTHER_CFLAGS\=-fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/SourcePackages/checkouts/xgrammar/include/module.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/Jinja.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/ContainersPreview.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/DequeModule.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/SourcePackages/checkouts/swift-atomics/Sources/_AtomicsShims/include/module.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/Atomics.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/_NIODataStructures.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/CNIOWASI.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/SourcePackages/checkouts/swift-nio/Sources/CNIOWindows/include/module.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/CNIOLinux.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/CNIODarwin.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/CNIOFreeBSD.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/CNIOOpenBSD.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/_NIOBase64.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/NIOConcurrencyHelpers.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/CNIOAtomics.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/NIOCore.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/EventSource.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/HuggingFace.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/InternalCollectionsUtilities.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/OrderedCollections.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/Crypto.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/yyjson.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/Hub.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/Models.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/Generation.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/Tokenizers.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/Vendor/coreai-models/swift/Sources/lib/CXGrammar/include/module.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/CoreAIShared.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/CoreAILanguageModels.modulemap\ 
+    export OTHER_CPLUSPLUSFLAGS\=-fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/SourcePackages/checkouts/xgrammar/include/module.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/Jinja.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/ContainersPreview.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/DequeModule.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/SourcePackages/checkouts/swift-atomics/Sources/_AtomicsShims/include/module.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/Atomics.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/_NIODataStructures.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/CNIOWASI.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/SourcePackages/checkouts/swift-nio/Sources/CNIOWindows/include/module.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/CNIOLinux.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/CNIODarwin.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/CNIOFreeBSD.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/CNIOOpenBSD.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/_NIOBase64.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/NIOConcurrencyHelpers.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/CNIOAtomics.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/NIOCore.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/EventSource.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/HuggingFace.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/InternalCollectionsUtilities.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/OrderedCollections.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/Crypto.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/yyjson.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/Hub.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/Models.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/Generation.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/Tokenizers.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/Vendor/coreai-models/swift/Sources/lib/CXGrammar/include/module.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/CoreAIShared.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/CoreAILanguageModels.modulemap\ 
+    export OTHER_LDFLAGS\=-lc++\ -lc++\ \ -lc++
+    export OTHER_SWIFT_FLAGS\=-Xcc\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/SourcePackages/checkouts/xgrammar/include/module.modulemap\ -Xcc\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/SourcePackages/checkouts/swift-atomics/Sources/_AtomicsShims/include/module.modulemap\ -Xcc\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/CNIOWASI.modulemap\ -Xcc\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/SourcePackages/checkouts/swift-nio/Sources/CNIOWindows/include/module.modulemap\ -Xcc\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/CNIOLinux.modulemap\ -Xcc\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/CNIODarwin.modulemap\ -Xcc\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/CNIOFreeBSD.modulemap\ -Xcc\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/CNIOOpenBSD.modulemap\ -Xcc\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/CNIOAtomics.modulemap\ -Xcc\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/yyjson.modulemap\ -Xcc\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/Vendor/coreai-models/swift/Sources/lib/CXGrammar/include/module.modulemap\ 
+    export PACKAGE_TYPE\=com.apple.package-type.wrapper.application
+    export PASCAL_STRINGS\=YES
+    export PATH\=/Applications/Xcode-beta.app/Contents/SharedFrameworks/SwiftBuild.framework/Versions/A/PlugIns/SWBBuildService.bundle/Contents/PlugIns/SWBUniversalPlatformPlugin.bundle/Contents/Frameworks/SWBUniversalPlatform.framework/Resources:/Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin:/Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/local/bin:/Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/libexec:/Applications/Xcode-beta.app/Contents/Developer/Platforms/iPhoneSimulator.platform/usr/bin:/Applications/Xcode-beta.app/Contents/Developer/Platforms/iPhoneSimulator.platform/usr/local/bin:/Applications/Xcode-beta.app/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/usr/bin:/Applications/Xcode-beta.app/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/usr/local/bin:/Applications/Xcode-beta.app/Contents/Developer/usr/bin:/Applications/Xcode-beta.app/Contents/Developer/usr/local/bin:/Users/dabrams/.local/share/mise/installs/go/1.26.0/bin:/Users/dabrams/.local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/System/Cryptexes/App/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/local/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/appleinternal/bin:/pkg/env/global/bin:/Library/Apple/usr/bin:/Users/dabrams/.cargo/bin:/Users/dabrams/go/bin:/Users/dabrams/.claude/plugins/cache/superpowers-marketplace/claude-session-driver/1.0.1/bin:/Users/dabrams/.claude/plugins/cache/superpowers-marketplace/double-shot-latte/1.2.0/bin:/Users/dabrams/.claude/plugins/cache/superpowers-marketplace/elements-of-style/1.0.0/bin:/Users/dabrams/.claude/plugins/cache/superpowers-marketplace/superpowers/4.3.1/bin:/Users/dabrams/.claude/plugins/cache/superpowers-marketplace/superpowers-developing-for-claude-code/0.3.1/bin:/Users/dabrams/.claude/plugins/cache/superpowers-marketplace/superpowers-lab/0.3.0/bin:/Users/dabrams/.claude/plugins/cache/claude-plugins-official/swift-lsp/1.0.0/bin
+    export PATH_PREFIXES_EXCLUDED_FROM_HEADER_DEPENDENCIES\=/usr/include\ /usr/local/include\ /System/Library/Frameworks\ /System/Library/PrivateFrameworks\ /Applications/Xcode-beta.app/Contents/Developer/Headers\ /Applications/Xcode-beta.app/Contents/Developer/SDKs\ /Applications/Xcode-beta.app/Contents/Developer/Platforms
+    export PBDEVELOPMENTPLIST_PATH\=Playhead.app/pbdevelopment.plist
+    export PER_ARCH_MODULE_FILE_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build/Objects-normal/undefined_arch
+    export PER_ARCH_OBJECT_FILE_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build/Objects-normal/undefined_arch
+    export PER_VARIANT_OBJECT_FILE_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build/Objects-normal
+    export PKGINFO_FILE_PATH\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build/PkgInfo
+    export PKGINFO_PATH\=Playhead.app/PkgInfo
+    export PLATFORM_DEVELOPER_APPLICATIONS_DIR\=/Applications/Xcode-beta.app/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/Applications
+    export PLATFORM_DEVELOPER_BIN_DIR\=/Applications/Xcode-beta.app/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/usr/bin
+    export PLATFORM_DEVELOPER_LIBRARY_DIR\=/Applications/Xcode-beta.app/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/Library
+    export PLATFORM_DEVELOPER_SDK_DIR\=/Applications/Xcode-beta.app/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/SDKs
+    export PLATFORM_DEVELOPER_TOOLS_DIR\=/Applications/Xcode-beta.app/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/Tools
+    export PLATFORM_DEVELOPER_USR_DIR\=/Applications/Xcode-beta.app/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/usr
+    export PLATFORM_DIR\=/Applications/Xcode-beta.app/Contents/Developer/Platforms/iPhoneSimulator.platform
+    export PLATFORM_DISPLAY_NAME\=iOS\ Simulator
+    export PLATFORM_FAMILY_NAME\=iOS
+    export PLATFORM_NAME\=iphonesimulator
+    export PLATFORM_PREFERRED_ARCH\=x86_64
+    export PLATFORM_PRODUCT_BUILD_VERSION\=24A5370g
+    export PLATFORM_REQUIRES_SWIFT_AUTOLINK_EXTRACT\=NO
+    export PLATFORM_REQUIRES_SWIFT_MODULEWRAP\=NO
+    export PLATFORM_USES_DSYMS\=YES
+    export PLIST_FILE_OUTPUT_FORMAT\=binary
+    export PLUGINS_FOLDER_PATH\=Playhead.app/PlugIns
+    export PRECOMPS_INCLUDE_HEADERS_FROM_BUILT_PRODUCTS_DIR\=YES
+    export PRECOMP_DESTINATION_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build/PrefixHeaders
+    export PRELINK_DEPENDENCY_INFO_FILE\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build/Objects-normal/undefined_arch/Playhead_prelink_dependency_info.dat
+    export PRIVATE_HEADERS_FOLDER_PATH\=Playhead.app/PrivateHeaders
+    export PROCESSED_INFOPLIST_PATH\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build/Objects-normal/undefined_arch/Processed-Info.plist
+    export PRODUCT_BUNDLE_IDENTIFIER\=com.playhead.app
+    export PRODUCT_BUNDLE_PACKAGE_TYPE\=APPL
+    export PRODUCT_MODULE_NAME\=Playhead
+    export PRODUCT_NAME\=Playhead
+    export PRODUCT_SETTINGS_PATH\=/Users/dabrams/playhead/.worktrees/vtjx/Playhead/Support/Info.plist
+    export PRODUCT_TYPE\=com.apple.product-type.application
+    export PROFILING_CODE\=NO
+    export PROJECT\=Playhead
+    export PROJECT_DERIVED_FILE_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/DerivedSources
+    export PROJECT_DIR\=/Users/dabrams/playhead/.worktrees/vtjx
+    export PROJECT_FILE_PATH\=/Users/dabrams/playhead/.worktrees/vtjx/Playhead.xcodeproj
+    export PROJECT_GUID\=dcda67f77159778791d457df9be20ebb
+    export PROJECT_NAME\=Playhead
+    export PROJECT_TEMP_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build
+    export PROJECT_TEMP_ROOT\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex
+    export PROVISIONING_PROFILE_REQUIRED\=NO
+    export PROVISIONING_PROFILE_REQUIRED_YES_YES\=YES
+    export PROVISIONING_PROFILE_SUPPORTED\=YES
+    export PUBLIC_HEADERS_FOLDER_PATH\=Playhead.app/Headers
+    export RECOMMENDED_IPHONEOS_DEPLOYMENT_TARGET\=17.0
+    export RECURSIVE_SEARCH_PATHS_FOLLOW_SYMLINKS\=YES
+    export REMOVE_CVS_FROM_RESOURCES\=YES
+    export REMOVE_GIT_FROM_RESOURCES\=YES
+    export REMOVE_HEADERS_FROM_EMBEDDED_BUNDLES\=YES
+    export REMOVE_HG_FROM_RESOURCES\=YES
+    export REMOVE_STATIC_EXECUTABLES_FROM_EMBEDDED_BUNDLES\=YES
+    export REMOVE_SVN_FROM_RESOURCES\=YES
+    export RESCHEDULE_INDEPENDENT_HEADERS_PHASES\=YES
+    export REZ_COLLECTOR_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build/ResourceManagerResources
+    export REZ_OBJECTS_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build/ResourceManagerResources/Objects
+    export REZ_SEARCH_PATHS\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator\ 
+    export RPATH_ORIGIN\=@loader_path
+    export RUNTIME_EXCEPTION_ALLOW_DYLD_ENVIRONMENT_VARIABLES\=NO
+    export RUNTIME_EXCEPTION_ALLOW_JIT\=NO
+    export RUNTIME_EXCEPTION_ALLOW_UNSIGNED_EXECUTABLE_MEMORY\=NO
+    export RUNTIME_EXCEPTION_DEBUGGING_TOOL\=NO
+    export RUNTIME_EXCEPTION_DISABLE_EXECUTABLE_PAGE_PROTECTION\=NO
+    export RUNTIME_EXCEPTION_DISABLE_LIBRARY_VALIDATION\=NO
+    export SCANNING_PCM_KEEP_CACHE_DIRECTORY\=YES
+    export SCAN_ALL_SOURCE_FILES_FOR_INCLUDES\=NO
+    export SCRIPTS_FOLDER_PATH\=Playhead.app/Scripts
+    export SCRIPT_INPUT_FILE_COUNT\=0
+    export SCRIPT_INPUT_FILE_LIST_COUNT\=0
+    export SCRIPT_OUTPUT_FILE_COUNT\=0
+    export SCRIPT_OUTPUT_FILE_LIST_COUNT\=0
+    export SDKROOT\=/Applications/Xcode-beta.app/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/SDKs/iPhoneSimulator27.0.sdk
+    export SDK_DIR\=/Applications/Xcode-beta.app/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/SDKs/iPhoneSimulator27.0.sdk
+    export SDK_DIR_iphonesimulator\=/Applications/Xcode-beta.app/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/SDKs/iPhoneSimulator27.0.sdk
+    export SDK_DIR_iphonesimulator27_0\=/Applications/Xcode-beta.app/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/SDKs/iPhoneSimulator27.0.sdk
+    export SDK_NAME\=iphonesimulator27.0
+    export SDK_NAMES\=iphonesimulator27.0
+    export SDK_PRODUCT_BUILD_VERSION\=24A5370g
+    export SDK_STAT_CACHE_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData
+    export SDK_STAT_CACHE_ENABLE\=YES
+    export SDK_STAT_CACHE_PATH\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/SDKStatCaches.noindex/iphonesimulator27.0-24A5370g-3243818bda632a4370e1cc7a9fd181c5.sdkstatcache
+    export SDK_VERSION\=27.0
+    export SDK_VERSION_ACTUAL\=270000
+    export SDK_VERSION_MAJOR\=270000
+    export SDK_VERSION_MINOR\=270000
+    export SED\=/usr/bin/sed
+    export SEPARATE_STRIP\=NO
+    export SEPARATE_SYMBOL_EDIT\=NO
+    export SET_DIR_MODE_OWNER_GROUP\=YES
+    export SET_FILE_MODE_OWNER_GROUP\=NO
+    export SHALLOW_BUNDLE\=YES
+    export SHALLOW_BUNDLE_TRIPLE\=ios-simulator
+    export SHALLOW_BUNDLE_ios_macabi\=NO
+    export SHALLOW_BUNDLE_macos\=NO
+    export SHARED_DERIVED_FILE_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/DerivedSources
+    export SHARED_FRAMEWORKS_FOLDER_PATH\=Playhead.app/SharedFrameworks
+    export SHARED_PRECOMPS_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/PrecompiledHeaders
+    export SHARED_SUPPORT_FOLDER_PATH\=Playhead.app/SharedSupport
+    export SKIP_COPYING_TEST_FRAMEWORKS\=YES
+    export SKIP_INSTALL\=NO
+    export SKIP_MERGEABLE_LIBRARY_BUNDLE_HOOK\=NO
+    export SOURCE_ROOT\=/Users/dabrams/playhead/.worktrees/vtjx
+    export SRCROOT\=/Users/dabrams/playhead/.worktrees/vtjx
+    export STRINGSDATA_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build/Objects-normal/undefined_arch
+    export STRINGSDATA_ROOT\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build
+    export STRINGS_FILE_INFOPLIST_RENAME\=YES
+    export STRINGS_FILE_OUTPUT_ENCODING\=binary
+    export STRING_CATALOG_GENERATE_SYMBOLS\=NO
+    export STRIP_BITCODE_FROM_COPIED_FILES\=NO
+    export STRIP_INSTALLED_PRODUCT\=NO
+    export STRIP_STYLE\=all
+    export STRIP_SWIFT_SYMBOLS\=YES
+    export SUPPORTED_DEVICE_FAMILIES\=1,2
+    export SUPPORTED_PLATFORMS\=iphoneos\ iphonesimulator
+    export SUPPORTS_MACCATALYST\=YES
+    export SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD\=NO
+    export SUPPORTS_ON_DEMAND_RESOURCES\=YES
+    export SUPPORTS_TEXT_BASED_API\=NO
+    export SUPPRESS_WARNINGS\=NO
+    export SWIFTC_PASS_SDKROOT\=YES
+    export SWIFTC_PASS_SYSROOT\=NO
+    export SWIFT_ACTIVE_COMPILATION_CONDITIONS\=DEBUG
+    export SWIFT_COLOR_DIAGNOSTICS\=NO
+    export SWIFT_EMIT_CONST_VALUE_PROTOCOLS\=AnyResolverProviding\ AppEntity\ AppEnum\ AppExtension\ AppIntent\ AppIntentsPackage\ AppShortcutProviding\ AppShortcutsProvider\ AppUnionValue\ AppUnionValueCasesProviding\ DynamicOptionsProvider\ EntityQuery\ ExtensionPointDefining\ IntentValueQuery\ Resolver\ TransientEntity\ _AssistantIntentsProvider\ _GenerativeFunctionExtractable\ _IntentValueRepresentable
+    export SWIFT_EMIT_LOC_STRINGS\=YES
+    export SWIFT_ENABLE_EXPLICIT_MODULES\=YES
+    export SWIFT_ENABLE_TESTABILITY\=YES
+    export SWIFT_OPTIMIZATION_LEVEL\=-Onone
+    export SWIFT_PLATFORM_TARGET_PREFIX\=ios
+    export SWIFT_RESPONSE_FILE_PATH_normal_arm64\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build/Objects-normal/arm64/Playhead.SwiftFileList
+    export SWIFT_VERSION\=6.0
+    export SYMROOT\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products
+    export SYSROOT\=/Applications/Xcode-beta.app/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/SDKs/iPhoneSimulator27.0.sdk
+    export SYSTEM_ADMIN_APPS_DIR\=/Applications/Utilities
+    export SYSTEM_APPS_DIR\=/Applications
+    export SYSTEM_CORE_SERVICES_DIR\=/System/Library/CoreServices
+    export SYSTEM_DEMOS_DIR\=/Applications/Extras
+    export SYSTEM_DEVELOPER_APPS_DIR\=/Applications/Xcode-beta.app/Contents/Developer/Applications
+    export SYSTEM_DEVELOPER_BIN_DIR\=/Applications/Xcode-beta.app/Contents/Developer/usr/bin
+    export SYSTEM_DEVELOPER_DEMOS_DIR\=/Applications/Xcode-beta.app/Contents/Developer/Applications/Utilities/Built\ Examples
+    export SYSTEM_DEVELOPER_DIR\=/Applications/Xcode-beta.app/Contents/Developer
+    export SYSTEM_DEVELOPER_DOC_DIR\=/Applications/Xcode-beta.app/Contents/Developer/ADC\ Reference\ Library
+    export SYSTEM_DEVELOPER_GRAPHICS_TOOLS_DIR\=/Applications/Xcode-beta.app/Contents/Developer/Applications/Graphics\ Tools
+    export SYSTEM_DEVELOPER_JAVA_TOOLS_DIR\=/Applications/Xcode-beta.app/Contents/Developer/Applications/Java\ Tools
+    export SYSTEM_DEVELOPER_PERFORMANCE_TOOLS_DIR\=/Applications/Xcode-beta.app/Contents/Developer/Applications/Performance\ Tools
+    export SYSTEM_DEVELOPER_RELEASENOTES_DIR\=/Applications/Xcode-beta.app/Contents/Developer/ADC\ Reference\ Library/releasenotes
+    export SYSTEM_DEVELOPER_TOOLS\=/Applications/Xcode-beta.app/Contents/Developer/Tools
+    export SYSTEM_DEVELOPER_TOOLS_DOC_DIR\=/Applications/Xcode-beta.app/Contents/Developer/ADC\ Reference\ Library/documentation/DeveloperTools
+    export SYSTEM_DEVELOPER_TOOLS_RELEASENOTES_DIR\=/Applications/Xcode-beta.app/Contents/Developer/ADC\ Reference\ Library/releasenotes/DeveloperTools
+    export SYSTEM_DEVELOPER_USR_DIR\=/Applications/Xcode-beta.app/Contents/Developer/usr
+    export SYSTEM_DEVELOPER_UTILITIES_DIR\=/Applications/Xcode-beta.app/Contents/Developer/Applications/Utilities
+    export SYSTEM_DEXT_INSTALL_PATH\=/System/Library/DriverExtensions
+    export SYSTEM_DOCUMENTATION_DIR\=/Library/Documentation
+    export SYSTEM_EXTENSIONS_FOLDER_PATH\=Playhead.app/SystemExtensions
+    export SYSTEM_EXTENSIONS_FOLDER_PATH_SHALLOW_BUNDLE_NO\=Playhead.app/Library/SystemExtensions
+    export SYSTEM_EXTENSIONS_FOLDER_PATH_SHALLOW_BUNDLE_YES\=Playhead.app/SystemExtensions
+    export SYSTEM_KEXT_INSTALL_PATH\=/System/Library/Extensions
+    export SYSTEM_LIBRARY_DIR\=/System/Library
+    export TAPI_DEMANGLE\=YES
+    export TAPI_ENABLE_PROJECT_HEADERS\=NO
+    export TAPI_LANGUAGE\=objective-c
+    export TAPI_LANGUAGE_STANDARD\=compiler-default
+    export TAPI_USE_SRCROOT\=YES
+    export TAPI_VERIFY_MODE\=Pedantic
+    export TARGETED_DEVICE_FAMILY\=1,2
+    export TARGETNAME\=Playhead
+    export TARGET_BUILD_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator
+    export TARGET_DEVICE_IDENTIFIER\=19B59D40-3826-4A31-AE37-70F59BA7C96E
+    export TARGET_DEVICE_MODEL\=iPhone18,3
+    export TARGET_DEVICE_OS_VERSION\=27.0
+    export TARGET_DEVICE_PLATFORM_NAME\=iphonesimulator
+    export TARGET_NAME\=Playhead
+    export TARGET_TEMP_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build
+    export TEMP_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build
+    export TEMP_FILES_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build
+    export TEMP_FILE_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build
+    export TEMP_ROOT\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex
+    export TEMP_SANDBOX_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/TemporaryTaskSandboxes
+    export TEST_FRAMEWORK_SEARCH_PATHS\=\ /Applications/Xcode-beta.app/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/Library/Frameworks\ /Applications/Xcode-beta.app/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/SDKs/iPhoneSimulator27.0.sdk/Developer/Library/Frameworks
+    export TEST_LIBRARY_SEARCH_PATHS\=\ /Applications/Xcode-beta.app/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/usr/lib
+    export TOOLCHAINS\=com.apple.dt.toolchain.XcodeDefault
+    export TOOLCHAIN_DIR\=/Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain
+    export TREAT_MISSING_BASELINES_AS_TEST_FAILURES\=NO
+    export TREAT_MISSING_SCRIPT_PHASE_OUTPUTS_AS_ERRORS\=NO
+    export TeamIdentifierPrefix\=36Z6VYTT9X.
+    export UID\=501
+    export UNINSTALLED_PRODUCTS_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/UninstalledProducts
+    export UNLOCALIZED_RESOURCES_FOLDER_PATH\=Playhead.app
+    export UNLOCALIZED_RESOURCES_FOLDER_PATH_SHALLOW_BUNDLE_NO\=Playhead.app/Resources
+    export UNLOCALIZED_RESOURCES_FOLDER_PATH_SHALLOW_BUNDLE_YES\=Playhead.app
+    export UNSTRIPPED_PRODUCT\=NO
+    export USER\=dabrams
+    export USER_APPS_DIR\=/Users/dabrams/Applications
+    export USER_LIBRARY_DIR\=/Users/dabrams/Library
+    export USE_DYNAMIC_NO_PIC\=YES
+    export USE_HEADERMAP\=YES
+    export USE_HEADER_SYMLINKS\=NO
+    export VALIDATE_DEVELOPMENT_ASSET_PATHS\=YES_ERROR
+    export VALIDATE_PRODUCT\=NO
+    export VALID_ARCHS\=arm64\ x86_64
+    export VERBOSE_PBXCP\=NO
+    export VERSIONPLIST_PATH\=Playhead.app/version.plist
+    export VERSION_INFO_BUILDER\=dabrams
+    export VERSION_INFO_FILE\=Playhead_vers.c
+    export VERSION_INFO_STRING\=\"@\(\#\)PROGRAM:Playhead\ \ PROJECT:Playhead-1\"
+    export WORKSPACE_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/Playhead.xcodeproj
+    export WRAPPER_EXTENSION\=app
+    export WRAPPER_NAME\=Playhead.app
+    export WRAPPER_SUFFIX\=.app
+    export WRAP_ASSET_PACKS_IN_SEPARATE_DIRECTORIES\=NO
+    export XCODE_APP_SUPPORT_DIR\=/Applications/Xcode-beta.app/Contents/Developer/Library/Xcode
+    export XCODE_PRODUCT_BUILD_VERSION\=27A5209h
+    export XCODE_VERSION_ACTUAL\=2700
+    export XCODE_VERSION_MAJOR\=2700
+    export XCODE_VERSION_MINOR\=2700
+    export XPCSERVICES_FOLDER_PATH\=Playhead.app/XPCServices
+    export YACC\=yacc
+    export _DISCOVER_COMMAND_LINE_LINKER_INPUTS\=YES
+    export _DISCOVER_COMMAND_LINE_LINKER_INPUTS_INCLUDE_WL\=YES
+    export _LD_MULTIARCH\=YES
+    export _SWIFT_EXPLICIT_MODULES_ALLOW_CXX_INTEROP\=YES
+    export _WRAPPER_CONTENTS_DIR_SHALLOW_BUNDLE_NO\=/Contents
+    export _WRAPPER_PARENT_PATH_SHALLOW_BUNDLE_NO\=/..
+    export _WRAPPER_RESOURCES_DIR_SHALLOW_BUNDLE_NO\=/Resources
+    export __ARCHS__\=arm64\ x86_64
+    export __DIAGNOSE_DEPRECATED_ARCHS\=YES
+    export __DIAGNOSE_INVALID_DEPLOYMENT_TARGET_AS_ERROR\=YES
+    export __IS_NOT_MACOS\=YES
+    export __IS_NOT_MACOS_macosx\=NO
+    export __IS_NOT_SIMULATOR\=NO
+    export __IS_NOT_SIMULATOR_simulator\=NO
+    export __ORIGINAL_SDK_DEFINED_LLVM_TARGET_TRIPLE_SYS\=ios
+    export arch\=undefined_arch
+    export variant\=normal
+    /bin/sh -c /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build/Script-4A042A8AF14BFE7308031A36.sh
+specialist model present: /Users/dabrams/playhead/.worktrees/vtjx/Playhead/Resources/Models/qwen3_0_6b_4bit_dynamic_ft_v2/qwen3_0_6b_4bit_dynamic_ft_v2.aimodel/main.mlirb
+
+PhaseScriptExecution Stamp\ build\ commit\ SHA /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build/Script-69E832A17746D20516B73647.sh (in target 'Playhead' from project 'Playhead')
+    cd /Users/dabrams/playhead/.worktrees/vtjx
+    export ACTION\=build
+    export AD_HOC_CODE_SIGNING_ALLOWED\=YES
+    export AGGREGATE_TRACKED_DOMAINS\=YES
+    export ALLOW_BUILD_REQUEST_OVERRIDES\=NO
+    export ALLOW_TARGET_PLATFORM_SPECIALIZATION\=NO
+    export ALTERNATE_GROUP\=staff
+    export ALTERNATE_MODE\=u+w,go-w,a+rX
+    export ALTERNATE_OWNER\=dabrams
+    export ALTERNATIVE_DISTRIBUTION_WEB\=NO
+    export ALWAYS_EMBED_SWIFT_STANDARD_LIBRARIES\=NO
+    export ALWAYS_SEARCH_USER_PATHS\=NO
+    export ALWAYS_USE_SEPARATE_HEADERMAPS\=NO
+    export APPLICATION_EXTENSION_API_ONLY\=NO
+    export APPLY_RULES_IN_COPY_FILES\=NO
+    export APPLY_RULES_IN_COPY_HEADERS\=NO
+    export APP_SHORTCUTS_ENABLE_FLEXIBLE_MATCHING\=YES
+    export ARCHS\=arm64
+    export ARCHS_BASE\=arm64
+    export ARCHS_STANDARD\=arm64\ x86_64
+    export ARCHS_STANDARD_32_64_BIT\=arm64\ x86_64
+    export ARCHS_STANDARD_64_BIT\=arm64\ x86_64
+    export ARCHS_STANDARD_INCLUDING_64_BIT\=arm64\ x86_64
+    export ARCHS_UNIVERSAL_IPHONE_OS\=arm64\ x86_64
+    export ASSETCATALOG_COMPILER_APPICON_NAME\=AppIcon
+    export ASSETCATALOG_FILTER_FOR_DEVICE_MODEL\=iPhone18,3
+    export ASSETCATALOG_FILTER_FOR_DEVICE_OS_VERSION\=27.0
+    export ASSETCATALOG_FILTER_FOR_THINNING_DEVICE_CONFIGURATION\=iPhone18,3
+    export AUTOMATICALLY_MERGE_DEPENDENCIES\=NO
+    export AUTOMATION_APPLE_EVENTS\=NO
+    export AVAILABLE_PLATFORMS\=android\ appletvos\ appletvsimulator\ driverkit\ freebsd\ iphoneos\ iphonesimulator\ linux\ macosx\ none\ openbsd\ qnx\ watchos\ watchsimulator\ webassembly\ xros\ xrsimulator
+    export AppIdentifierPrefix\=36Z6VYTT9X.
+    export BUILD_ACTIVE_RESOURCES_ONLY\=YES
+    export BUILD_COMPONENTS\=headers\ build
+    export BUILD_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products
+    export BUILD_LIBRARY_FOR_DISTRIBUTION\=NO
+    export BUILD_ONLY_KNOWN_LOCALIZATIONS\=NO
+    export BUILD_ROOT\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products
+    export BUILD_STYLE\=
+    export BUILD_VARIANTS\=normal
+    export BUILT_PRODUCTS_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator
+    export BUNDLE_CONTENTS_FOLDER_PATH_deep\=Contents/
+    export BUNDLE_EXECUTABLE_FOLDER_NAME_deep\=MacOS
+    export BUNDLE_EXTENSIONS_FOLDER_PATH\=Extensions
+    export BUNDLE_FORMAT\=shallow
+    export BUNDLE_FRAMEWORKS_FOLDER_PATH\=Frameworks
+    export BUNDLE_PLUGINS_FOLDER_PATH\=PlugIns
+    export BUNDLE_PRIVATE_HEADERS_FOLDER_PATH\=PrivateHeaders
+    export BUNDLE_PUBLIC_HEADERS_FOLDER_PATH\=Headers
+    export CACHE_ROOT\=/var/folders/qd/qyx62km142b7lpv0868gpwgw0000gn/C/com.apple.DeveloperTools/27.0-27A5209h/Xcode
+    export CCHROOT\=/var/folders/qd/qyx62km142b7lpv0868gpwgw0000gn/C/com.apple.DeveloperTools/27.0-27A5209h/Xcode
+    export CHMOD\=/bin/chmod
+    export CHOWN\=chown
+    export CLANG_ANALYZER_NONNULL\=YES
+    export CLANG_ANALYZER_NUMBER_OBJECT_CONVERSION\=YES_AGGRESSIVE
+    export CLANG_CACHE_FINE_GRAINED_OUTPUTS\=YES
+    export CLANG_COVERAGE_MAPPING\=YES
+    export CLANG_CXX_LANGUAGE_STANDARD\=gnu++14
+    export CLANG_CXX_LIBRARY\=libc++
+    export CLANG_ENABLE_EXPLICIT_MODULES\=YES
+    export CLANG_ENABLE_MODULES\=YES
+    export CLANG_ENABLE_OBJC_ARC\=YES
+    export CLANG_ENABLE_OBJC_WEAK\=YES
+    export CLANG_MODULES_BUILD_SESSION_FILE\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/ModuleCache.noindex/Session.modulevalidation
+    export CLANG_PROFILE_DATA_DIRECTORY\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/ProfileData
+    export CLANG_WARN_BLOCK_CAPTURE_AUTORELEASING\=YES
+    export CLANG_WARN_BOOL_CONVERSION\=YES
+    export CLANG_WARN_COMMA\=YES
+    export CLANG_WARN_CONSTANT_CONVERSION\=YES
+    export CLANG_WARN_DEPRECATED_OBJC_IMPLEMENTATIONS\=YES
+    export CLANG_WARN_DIRECT_OBJC_ISA_USAGE\=YES_ERROR
+    export CLANG_WARN_DOCUMENTATION_COMMENTS\=YES
+    export CLANG_WARN_EMPTY_BODY\=YES
+    export CLANG_WARN_ENUM_CONVERSION\=YES
+    export CLANG_WARN_INFINITE_RECURSION\=YES
+    export CLANG_WARN_INT_CONVERSION\=YES
+    export CLANG_WARN_NON_LITERAL_NULL_CONVERSION\=YES
+    export CLANG_WARN_OBJC_IMPLICIT_RETAIN_SELF\=YES
+    export CLANG_WARN_OBJC_LITERAL_CONVERSION\=YES
+    export CLANG_WARN_OBJC_ROOT_CLASS\=YES_ERROR
+    export CLANG_WARN_QUOTED_INCLUDE_IN_FRAMEWORK_HEADER\=YES
+    export CLANG_WARN_RANGE_LOOP_ANALYSIS\=YES
+    export CLANG_WARN_STRICT_PROTOTYPES\=YES
+    export CLANG_WARN_SUSPICIOUS_MOVE\=YES
+    export CLANG_WARN_UNGUARDED_AVAILABILITY\=YES_AGGRESSIVE
+    export CLANG_WARN_UNREACHABLE_CODE\=YES
+    export CLANG_WARN__DUPLICATE_METHOD_MATCH\=YES
+    export CLASS_FILE_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build/JavaClasses
+    export CLEAN_PRECOMPS\=YES
+    export CLONE_HEADERS\=NO
+    export CODESIGNING_FOLDER_PATH\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/Playhead.app
+    export CODE_SIGNING_ALLOWED\=YES
+    export CODE_SIGNING_REQUIRED\=YES
+    export CODE_SIGN_CONTEXT_CLASS\=XCiPhoneSimulatorCodeSignContext
+    export CODE_SIGN_ENTITLEMENTS\=Playhead/Support/Playhead.entitlements
+    export CODE_SIGN_IDENTITY\=iPhone\ Developer
+    export CODE_SIGN_INJECT_BASE_ENTITLEMENTS\=YES
+    export COLOR_DIAGNOSTICS\=NO
+    export COMBINE_HIDPI_IMAGES\=NO
+    export COMPILATION_CACHE_CAS_PATH\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/CompilationCache.noindex
+    export COMPILATION_CACHE_KEEP_CAS_DIRECTORY\=YES
+    export COMPILER_INDEX_STORE_ENABLE\=Default
+    export COMPOSITE_SDK_DIRS\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/CompositeSDKs
+    export COMPRESS_PNG_FILES\=YES
+    export CONFIGURATION\=Debug
+    export CONFIGURATION_BUILD_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator
+    export CONFIGURATION_TEMP_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator
+    export CONTENTS_FOLDER_PATH\=Playhead.app
+    export CONTENTS_FOLDER_PATH_SHALLOW_BUNDLE_NO\=Playhead.app/Contents
+    export CONTENTS_FOLDER_PATH_SHALLOW_BUNDLE_YES\=Playhead.app
+    export COPYING_PRESERVES_HFS_DATA\=NO
+    export COPY_HEADERS_RUN_UNIFDEF\=NO
+    export COPY_PHASE_STRIP\=NO
+    export CORRESPONDING_DEVICE_PLATFORM_DIR\=/Applications/Xcode-beta.app/Contents/Developer/Platforms/iPhoneOS.platform
+    export CORRESPONDING_DEVICE_PLATFORM_NAME\=iphoneos
+    export CORRESPONDING_DEVICE_SDK_DIR\=/Applications/Xcode-beta.app/Contents/Developer/Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS27.0.sdk
+    export CORRESPONDING_DEVICE_SDK_NAME\=iphoneos27.0
+    export CP\=/bin/cp
+    export CREATE_INFOPLIST_SECTION_IN_BINARY\=NO
+    export CURRENT_ARCH\=undefined_arch
+    export CURRENT_PROJECT_VERSION\=1
+    export CURRENT_VARIANT\=normal
+    export DEAD_CODE_STRIPPING\=YES
+    export DEBUGGING_SYMBOLS\=YES
+    export DEBUG_INFORMATION_FORMAT\=dwarf
+    export DEBUG_INFORMATION_VERSION\=compiler-default
+    export DEFAULT_COMPILER\=com.apple.compilers.llvm.clang.1_0
+    export DEFAULT_DEXT_INSTALL_PATH\=/System/Library/DriverExtensions
+    export DEFAULT_KEXT_INSTALL_PATH\=/System/Library/Extensions
+    export DEFINES_MODULE\=NO
+    export DEPLOYMENT_LOCATION\=NO
+    export DEPLOYMENT_POSTPROCESSING\=NO
+    export DEPLOYMENT_TARGET_SETTING_NAME\=IPHONEOS_DEPLOYMENT_TARGET
+    export DEPLOYMENT_TARGET_SUGGESTED_VALUES\=15.0\ 15.1\ 15.2\ 15.3\ 15.4\ 15.5\ 15.6\ 16.0\ 16.1\ 16.2\ 16.3\ 16.4\ 16.5\ 16.6\ 17.0\ 17.1\ 17.2\ 17.3\ 17.4\ 17.5\ 17.6\ 18.0\ 18.1\ 18.2\ 18.3\ 18.4\ 18.5\ 18.6\ 26.0\ 26.2\ 26.3\ 26.4\ 26.5\ 26.6\ 27.0
+    export DERIVED_FILES_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build/DerivedSources
+    export DERIVED_FILE_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build/DerivedSources
+    export DERIVED_SOURCES_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build/DerivedSources
+    export DEVELOPER_APPLICATIONS_DIR\=/Applications/Xcode-beta.app/Contents/Developer/Applications
+    export DEVELOPER_BIN_DIR\=/Applications/Xcode-beta.app/Contents/Developer/usr/bin
+    export DEVELOPER_DIR\=/Applications/Xcode-beta.app/Contents/Developer
+    export DEVELOPER_FRAMEWORKS_DIR\=/Applications/Xcode-beta.app/Contents/Developer/Library/Frameworks
+    export DEVELOPER_FRAMEWORKS_DIR_QUOTED\=/Applications/Xcode-beta.app/Contents/Developer/Library/Frameworks
+    export DEVELOPER_LIBRARY_DIR\=/Applications/Xcode-beta.app/Contents/Developer/Library
+    export DEVELOPER_SDK_DIR\=/Applications/Xcode-beta.app/Contents/Developer/Platforms/MacOSX.platform/Developer/SDKs
+    export DEVELOPER_TOOLS_DIR\=/Applications/Xcode-beta.app/Contents/Developer/Tools
+    export DEVELOPER_USR_DIR\=/Applications/Xcode-beta.app/Contents/Developer/usr
+    export DEVELOPMENT_LANGUAGE\=en
+    export DEVELOPMENT_TEAM\=36Z6VYTT9X
+    export DIAGNOSE_MISSING_TARGET_DEPENDENCIES\=YES
+    export DIFF\=/usr/bin/diff
+    export DOCUMENTATION_FOLDER_PATH\=Playhead.app/en.lproj/Documentation
+    export DONT_GENERATE_INFOPLIST_FILE\=NO
+    export DSTROOT\=/tmp/Playhead.dst
+    export DT_TOOLCHAIN_DIR\=/Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain
+    export DWARF_DSYM_FILE_NAME\=Playhead.app.dSYM
+    export DWARF_DSYM_FILE_SHOULD_ACCOMPANY_PRODUCT\=NO
+    export DWARF_DSYM_FOLDER_PATH\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator
+    export DYNAMIC_LIBRARY_EXTENSION\=dylib
+    export EAGER_COMPILATION_ALLOW_SCRIPTS\=NO
+    export EAGER_LINKING\=NO
+    export EFFECTIVE_PLATFORM_NAME\=-iphonesimulator
+    export EFFECTIVE_SWIFT_VERSION\=6
+    export EMBEDDED_CONTENT_CONTAINS_SWIFT\=NO
+    export EMBED_ASSET_PACKS_IN_PRODUCT_BUNDLE\=NO
+    export EMBED_PACKAGE_RESOURCE_BUNDLE_NAMES\=\ swift-transformers_Hub\ swift-crypto_Crypto
+    export ENABLE_APP_SANDBOX\=NO
+    export ENABLE_CODE_COVERAGE\=YES
+    export ENABLE_COHORT_ARCHS\=YES
+    export ENABLE_CPLUSPLUS_BOUNDS_SAFE_BUFFERS\=NO
+    export ENABLE_C_BOUNDS_SAFETY\=NO
+    export ENABLE_DEBUG_DYLIB\=YES
+    export ENABLE_DEFAULT_HEADER_SEARCH_PATHS\=YES
+    export ENABLE_DEFAULT_SEARCH_PATHS\=YES
+    export ENABLE_ENHANCED_SECURITY\=NO
+    export ENABLE_HARDENED_RUNTIME\=NO
+    export ENABLE_HEADER_DEPENDENCIES\=YES
+    export ENABLE_INCOMING_NETWORK_CONNECTIONS\=NO
+    export ENABLE_ON_DEMAND_RESOURCES\=YES
+    export ENABLE_OUTGOING_NETWORK_CONNECTIONS\=NO
+    export ENABLE_POINTER_AUTHENTICATION\=NO
+    export ENABLE_PREVIEWS\=NO
+    export ENABLE_RESOURCE_ACCESS_AUDIO_INPUT\=NO
+    export ENABLE_RESOURCE_ACCESS_BLUETOOTH\=NO
+    export ENABLE_RESOURCE_ACCESS_CALENDARS\=NO
+    export ENABLE_RESOURCE_ACCESS_CAMERA\=NO
+    export ENABLE_RESOURCE_ACCESS_CONTACTS\=NO
+    export ENABLE_RESOURCE_ACCESS_LOCATION\=NO
+    export ENABLE_RESOURCE_ACCESS_PHOTO_LIBRARY\=NO
+    export ENABLE_RESOURCE_ACCESS_PRINTING\=NO
+    export ENABLE_RESOURCE_ACCESS_USB\=NO
+    export ENABLE_SDK_IMPORTS\=NO
+    export ENABLE_SECURITY_COMPILER_WARNINGS\=NO
+    export ENABLE_STRICT_OBJC_MSGSEND\=YES
+    export ENABLE_TESTABILITY\=YES
+    export ENABLE_TESTING_SEARCH_PATHS\=NO
+    export ENABLE_USER_SCRIPT_SANDBOXING\=NO
+    export ENABLE_XOJIT_PREVIEWS\=YES
+    export ENFORCE_VALID_ARCHS\=YES
+    export ENTITLEMENTS_ALLOWED\=NO
+    export ENTITLEMENTS_DESTINATION\=__entitlements
+    export ENTITLEMENTS_REQUIRED\=NO
+    export EXCLUDED_INSTALLSRC_SUBDIRECTORY_PATTERNS\=.DS_Store\ .svn\ .git\ .hg\ CVS
+    export EXCLUDED_RECURSIVE_SEARCH_PATH_SUBDIRECTORIES\=\*.nib\ \*.lproj\ \*.framework\ \*.gch\ \*.xcode\*\ \*.xcassets\ \*.icon\ \(\*\)\ .DS_Store\ CVS\ .svn\ .git\ .hg\ \*.pbproj\ \*.pbxproj
+    export EXECUTABLES_FOLDER_PATH\=Playhead.app/Executables
+    export EXECUTABLE_BLANK_INJECTION_DYLIB_PATH\=Playhead.app/__preview.dylib
+    export EXECUTABLE_DEBUG_DYLIB_INSTALL_NAME\=@rpath/Playhead.debug.dylib
+    export EXECUTABLE_DEBUG_DYLIB_PATH\=Playhead.app/Playhead.debug.dylib
+    export EXECUTABLE_FOLDER_PATH\=Playhead.app
+    export EXECUTABLE_FOLDER_PATH_SHALLOW_BUNDLE_NO\=Playhead.app/MacOS
+    export EXECUTABLE_FOLDER_PATH_SHALLOW_BUNDLE_YES\=Playhead.app
+    export EXECUTABLE_NAME\=Playhead
+    export EXECUTABLE_PATH\=Playhead.app/Playhead
+    export EXPANDED_CODE_SIGN_IDENTITY\=-
+    export EXPANDED_CODE_SIGN_IDENTITY_NAME\=Sign\ to\ Run\ Locally
+    export EXTENSIONS_FOLDER_PATH\=Playhead.app/Extensions
+    export FILE_LIST\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build/Objects/LinkFileList
+    export FIXED_FILES_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build/FixedFiles
+    export FRAMEWORKS_FOLDER_PATH\=Playhead.app/Frameworks
+    export FRAMEWORK_FLAG_PREFIX\=-framework
+    export FRAMEWORK_SEARCH_PATHS\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator\ 
+    export FRAMEWORK_VERSION\=A
+    export FULL_PRODUCT_NAME\=Playhead.app
+    export FUSE_BUILD_PHASES\=YES
+    export FUSE_BUILD_SCRIPT_PHASES\=NO
+    export GCC3_VERSION\=3.3
+    export GCC_C_LANGUAGE_STANDARD\=gnu11
+    export GCC_DYNAMIC_NO_PIC\=NO
+    export GCC_INLINES_ARE_PRIVATE_EXTERN\=YES
+    export GCC_NO_COMMON_BLOCKS\=YES
+    export GCC_OBJC_LEGACY_DISPATCH\=YES
+    export GCC_OPTIMIZATION_LEVEL\=0
+    export GCC_PFE_FILE_C_DIALECTS\=c\ objective-c\ c++\ objective-c++
+    export GCC_PREPROCESSOR_DEFINITIONS\=\ DEBUG\=1
+    export GCC_SYMBOLS_PRIVATE_EXTERN\=NO
+    export GCC_TREAT_WARNINGS_AS_ERRORS\=NO
+    export GCC_VERSION\=com.apple.compilers.llvm.clang.1_0
+    export GCC_VERSION_IDENTIFIER\=com_apple_compilers_llvm_clang_1_0
+    export GCC_WARN_64_TO_32_BIT_CONVERSION\=YES
+    export GCC_WARN_ABOUT_RETURN_TYPE\=YES_ERROR
+    export GCC_WARN_UNDECLARED_SELECTOR\=YES
+    export GCC_WARN_UNINITIALIZED_AUTOS\=YES_AGGRESSIVE
+    export GCC_WARN_UNUSED_FUNCTION\=YES
+    export GCC_WARN_UNUSED_VARIABLE\=YES
+    export GENERATED_MODULEMAP_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator
+    export GENERATE_INFOPLIST_FILE\=NO
+    export GENERATE_INTERMEDIATE_TEXT_BASED_STUBS\=YES
+    export GENERATE_PKGINFO_FILE\=YES
+    export GENERATE_PRELINK_OBJECT_FILE\=NO
+    export GENERATE_PROFILING_CODE\=NO
+    export GENERATE_TEXT_BASED_STUBS\=NO
+    export GID\=20
+    export GROUP\=staff
+    export HEADERMAP_INCLUDES_FLAT_ENTRIES_FOR_TARGET_BEING_BUILT\=YES
+    export HEADERMAP_INCLUDES_FRAMEWORK_ENTRIES_FOR_ALL_PRODUCT_TYPES\=YES
+    export HEADERMAP_INCLUDES_FRAMEWORK_ENTRIES_FOR_TARGETS_NOT_BEING_BUILT\=YES
+    export HEADERMAP_INCLUDES_NONPUBLIC_NONPRIVATE_HEADERS\=YES
+    export HEADERMAP_INCLUDES_PROJECT_HEADERS\=YES
+    export HEADERMAP_USES_FRAMEWORK_PREFIX_ENTRIES\=YES
+    export HEADERMAP_USES_VFS\=NO
+    export HEADER_SEARCH_PATHS\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/SourcePackages/checkouts/xgrammar/include\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/SourcePackages/checkouts/swift-atomics/Sources/_AtomicsShims/include\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/SourcePackages/checkouts/swift-nio/Sources/CNIOWASI/include\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/SourcePackages/checkouts/swift-nio/Sources/CNIOWindows/include\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/SourcePackages/checkouts/swift-nio/Sources/CNIOLinux/include\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/SourcePackages/checkouts/swift-nio/Sources/CNIODarwin/include\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/SourcePackages/checkouts/swift-nio/Sources/CNIOFreeBSD/include\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/SourcePackages/checkouts/swift-nio/Sources/CNIOOpenBSD/include\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/SourcePackages/checkouts/swift-nio/Sources/CNIOAtomics/include\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/SourcePackages/checkouts/yyjson/src\ /Users/dabrams/playhead/.worktrees/vtjx/Vendor/coreai-models/swift/Sources/lib/CXGrammar/include\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/include\ 
+    export HOME\=/Users/dabrams
+    export HOST_ARCH\=arm64
+    export HOST_PLATFORM\=macosx
+    export ICONV\=/usr/bin/iconv
+    export IMPLICIT_DEPENDENCY_DOMAIN\=default
+    export INDEX_ENABLE_OPTIMIZATION_LEVEL_OVERRIDE\=YES
+    export INDEX_STORE_COMPRESS\=NO
+    export INDEX_STORE_ONLY_PROJECT_FILES\=NO
+    export INFOPLIST_ENABLE_CFBUNDLEICONS_MERGE\=YES
+    export INFOPLIST_EXPAND_BUILD_SETTINGS\=YES
+    export INFOPLIST_FILE\=Playhead/Support/Info.plist
+    export INFOPLIST_OUTPUT_FORMAT\=binary
+    export INFOPLIST_PATH\=Playhead.app/Info.plist
+    export INFOPLIST_PREPROCESS\=NO
+    export INFOSTRINGS_PATH\=Playhead.app/en.lproj/InfoPlist.strings
+    export INLINE_PRIVATE_FRAMEWORKS\=NO
+    export INSTALLAPI_IGNORE_SKIP_INSTALL\=YES
+    export INSTALLHDRS_COPY_PHASE\=NO
+    export INSTALLHDRS_SCRIPT_PHASE\=NO
+    export INSTALL_DIR\=/tmp/Playhead.dst/Applications
+    export INSTALL_GROUP\=staff
+    export INSTALL_MODE_FLAG\=u+w,go-w,a+rX
+    export INSTALL_OWNER\=dabrams
+    export INSTALL_PATH\=/Applications
+    export INSTALL_ROOT\=/tmp/Playhead.dst
+    export IPHONEOS_DEPLOYMENT_TARGET\=27.0
+    export IS_UNOPTIMIZED_BUILD\=YES
+    export JAVAC_DEFAULT_FLAGS\=-J-Xms64m\ -J-XX:NewSize\=4M\ -J-Dfile.encoding\=UTF8
+    export JAVA_APP_STUB\=/System/Library/Frameworks/JavaVM.framework/Resources/MacOS/JavaApplicationStub
+    export JAVA_ARCHIVE_CLASSES\=YES
+    export JAVA_ARCHIVE_TYPE\=JAR
+    export JAVA_COMPILER\=/usr/bin/javac
+    export JAVA_FOLDER_PATH\=Playhead.app/Java
+    export JAVA_FRAMEWORK_RESOURCES_DIRS\=Resources
+    export JAVA_JAR_FLAGS\=cv
+    export JAVA_SOURCE_SUBDIR\=.
+    export JAVA_USE_DEPENDENCIES\=YES
+    export JAVA_ZIP_FLAGS\=-urg
+    export JIKES_DEFAULT_FLAGS\=+E\ +OLDCSO
+    export KEEP_PRIVATE_EXTERNS\=NO
+    export LD_DEPENDENCY_INFO_FILE\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build/Objects-normal/undefined_arch/Playhead_dependency_info.dat
+    export LD_ENTITLEMENTS_SECTION\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build/Playhead.app-Simulated.xcent
+    export LD_ENTITLEMENTS_SECTION_DER\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build/Playhead.app-Simulated.xcent.der
+    export LD_EXPORT_GLOBAL_SYMBOLS\=YES
+    export LD_EXPORT_SYMBOLS\=YES
+    export LD_GENERATE_MAP_FILE\=NO
+    export LD_MAP_FILE_PATH\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build/Playhead-LinkMap-normal-undefined_arch.txt
+    export LD_NO_PIE\=NO
+    export LD_QUOTE_LINKER_ARGUMENTS_FOR_COMPILER_DRIVER\=YES
+    export LD_RUNPATH_SEARCH_PATHS\=@loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ @loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ @loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ @loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ @loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ @loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ @loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ @loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ @loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ @loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ @loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ @loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ @loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ @loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ @loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ @loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ @loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ @loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ @loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ @loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ @loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ @loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ @loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ @loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ @loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ @loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ @loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ @loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ @loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ @loader_path\ /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/PackageFrameworks\ \ @executable_path/Frameworks
+    export LD_RUNPATH_SEARCH_PATHS_YES\=@loader_path/../Frameworks
+    export LD_SHARED_CACHE_ELIGIBLE\=Automatic
+    export LD_WARN_DUPLICATE_LIBRARIES\=NO
+    export LD_WARN_UNUSED_DYLIBS\=NO
+    export LEGACY_DEVELOPER_DIR\=/Applications/Xcode-beta.app/Contents/PlugIns/Xcode3Core.ideplugin/Contents/SharedSupport/Developer
+    export LEX\=lex
+    export LIBRARY_DEXT_INSTALL_PATH\=/Library/DriverExtensions
+    export LIBRARY_FLAG_NOSPACE\=YES
+    export LIBRARY_FLAG_PREFIX\=-l
+    export LIBRARY_KEXT_INSTALL_PATH\=/Library/Extensions
+    export LIBRARY_SEARCH_PATHS\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator\ 
+    export LINKER_DISPLAYS_MANGLED_NAMES\=NO
+    export LINK_FILE_LIST_normal_arm64\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build/Objects-normal/arm64/Playhead.LinkFileList
+    export LINK_OBJC_RUNTIME\=YES
+    export LINK_WITH_STANDARD_LIBRARIES\=YES
+    export LLVM_TARGET_TRIPLE_OS_VERSION\=ios27.0
+    export LLVM_TARGET_TRIPLE_SUFFIX\=-simulator
+    export LLVM_TARGET_TRIPLE_VENDOR\=apple
+    export LM_AUX_CONST_METADATA_LIST_PATH_normal_arm64\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build/Objects-normal/arm64/Playhead.SwiftConstValuesFileList
+    export LOCALIZATION_EXPORT_SUPPORTED\=YES
+    export LOCALIZATION_PREFERS_STRING_CATALOGS\=NO
+    export LOCALIZED_RESOURCES_FOLDER_PATH\=Playhead.app/en.lproj
+    export LOCALIZED_STRING_CODE_COMMENTS\=NO
+    export LOCALIZED_STRING_MACRO_NAMES\=NSLocalizedString\ CFCopyLocalizedString
+    export LOCALIZED_STRING_SWIFTUI_SUPPORT\=YES
+    export LOCAL_ADMIN_APPS_DIR\=/Applications/Utilities
+    export LOCAL_APPS_DIR\=/Applications
+    export LOCAL_DEVELOPER_DIR\=/Library/Developer
+    export LOCAL_LIBRARY_DIR\=/Library
+    export LOCROOT\=/Users/dabrams/playhead/.worktrees/vtjx
+    export LOCSYMROOT\=/Users/dabrams/playhead/.worktrees/vtjx
+    export MACH_O_TYPE\=mh_execute
+    export MAC_OS_X_PRODUCT_BUILD_VERSION\=26A5378n
+    export MAC_OS_X_VERSION_ACTUAL\=270000
+    export MAC_OS_X_VERSION_MAJOR\=270000
+    export MAC_OS_X_VERSION_MINOR\=270000
+    export MAKE_MERGEABLE\=NO
+    export MARKETING_VERSION\=1.0.0
+    export MERGEABLE_LIBRARY\=NO
+    export MERGED_BINARY_TYPE\=none
+    export MERGE_LINKED_LIBRARIES\=NO
+    export METAL_LIBRARY_FILE_BASE\=default
+    export METAL_LIBRARY_OUTPUT_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/Playhead.app
+    export MODULES_FOLDER_PATH\=Playhead.app/Modules
+    export MODULE_CACHE_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/ModuleCache.noindex
+    export MTL_ENABLE_DEBUG_INFO\=INCLUDE_SOURCE
+    export MTL_FAST_MATH\=YES
+    export NATIVE_ARCH\=arm64
+    export NATIVE_ARCH_32_BIT\=arm
+    export NATIVE_ARCH_64_BIT\=arm64
+    export NATIVE_ARCH_ACTUAL\=arm64
+    export NO_COMMON\=YES
+    export OBJC_ABI_VERSION\=2
+    export OBJECT_FILE_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build/Objects
+    export OBJECT_FILE_DIR_normal\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build/Objects-normal
+    export OBJROOT\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex
+    export ONLY_ACTIVE_ARCH\=YES
+    export ONLY_ARCH\=arm64
+    export OS\=MACOS
+    export OSAC\=/usr/bin/osacompile
+    export OTHER_CFLAGS\=-fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/SourcePackages/checkouts/xgrammar/include/module.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/Jinja.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/ContainersPreview.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/DequeModule.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/SourcePackages/checkouts/swift-atomics/Sources/_AtomicsShims/include/module.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/Atomics.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/_NIODataStructures.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/CNIOWASI.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/SourcePackages/checkouts/swift-nio/Sources/CNIOWindows/include/module.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/CNIOLinux.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/CNIODarwin.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/CNIOFreeBSD.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/CNIOOpenBSD.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/_NIOBase64.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/NIOConcurrencyHelpers.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/CNIOAtomics.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/NIOCore.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/EventSource.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/HuggingFace.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/InternalCollectionsUtilities.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/OrderedCollections.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/Crypto.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/yyjson.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/Hub.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/Models.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/Generation.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/Tokenizers.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/Vendor/coreai-models/swift/Sources/lib/CXGrammar/include/module.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/CoreAIShared.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/CoreAILanguageModels.modulemap\ 
+    export OTHER_CPLUSPLUSFLAGS\=-fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/SourcePackages/checkouts/xgrammar/include/module.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/Jinja.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/ContainersPreview.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/DequeModule.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/SourcePackages/checkouts/swift-atomics/Sources/_AtomicsShims/include/module.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/Atomics.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/_NIODataStructures.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/CNIOWASI.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/SourcePackages/checkouts/swift-nio/Sources/CNIOWindows/include/module.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/CNIOLinux.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/CNIODarwin.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/CNIOFreeBSD.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/CNIOOpenBSD.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/_NIOBase64.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/NIOConcurrencyHelpers.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/CNIOAtomics.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/NIOCore.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/EventSource.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/HuggingFace.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/InternalCollectionsUtilities.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/OrderedCollections.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/Crypto.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/yyjson.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/Hub.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/Models.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/Generation.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/Tokenizers.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/Vendor/coreai-models/swift/Sources/lib/CXGrammar/include/module.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/CoreAIShared.modulemap\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/CoreAILanguageModels.modulemap\ 
+    export OTHER_LDFLAGS\=-lc++\ -lc++\ \ -lc++
+    export OTHER_SWIFT_FLAGS\=-Xcc\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/SourcePackages/checkouts/xgrammar/include/module.modulemap\ -Xcc\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/SourcePackages/checkouts/swift-atomics/Sources/_AtomicsShims/include/module.modulemap\ -Xcc\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/CNIOWASI.modulemap\ -Xcc\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/SourcePackages/checkouts/swift-nio/Sources/CNIOWindows/include/module.modulemap\ -Xcc\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/CNIOLinux.modulemap\ -Xcc\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/CNIODarwin.modulemap\ -Xcc\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/CNIOFreeBSD.modulemap\ -Xcc\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/CNIOOpenBSD.modulemap\ -Xcc\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/CNIOAtomics.modulemap\ -Xcc\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/GeneratedModuleMaps-iphonesimulator/yyjson.modulemap\ -Xcc\ -fmodule-map-file\=/Users/dabrams/playhead/.worktrees/vtjx/Vendor/coreai-models/swift/Sources/lib/CXGrammar/include/module.modulemap\ 
+    export PACKAGE_TYPE\=com.apple.package-type.wrapper.application
+    export PASCAL_STRINGS\=YES
+    export PATH\=/Applications/Xcode-beta.app/Contents/SharedFrameworks/SwiftBuild.framework/Versions/A/PlugIns/SWBBuildService.bundle/Contents/PlugIns/SWBUniversalPlatformPlugin.bundle/Contents/Frameworks/SWBUniversalPlatform.framework/Resources:/Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin:/Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/local/bin:/Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/libexec:/Applications/Xcode-beta.app/Contents/Developer/Platforms/iPhoneSimulator.platform/usr/bin:/Applications/Xcode-beta.app/Contents/Developer/Platforms/iPhoneSimulator.platform/usr/local/bin:/Applications/Xcode-beta.app/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/usr/bin:/Applications/Xcode-beta.app/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/usr/local/bin:/Applications/Xcode-beta.app/Contents/Developer/usr/bin:/Applications/Xcode-beta.app/Contents/Developer/usr/local/bin:/Users/dabrams/.local/share/mise/installs/go/1.26.0/bin:/Users/dabrams/.local/bin:/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/System/Cryptexes/App/usr/bin:/usr/bin:/bin:/usr/sbin:/sbin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/local/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/bin:/var/run/com.apple.security.cryptexd/codex.system/bootstrap/usr/appleinternal/bin:/pkg/env/global/bin:/Library/Apple/usr/bin:/Users/dabrams/.cargo/bin:/Users/dabrams/go/bin:/Users/dabrams/.claude/plugins/cache/superpowers-marketplace/claude-session-driver/1.0.1/bin:/Users/dabrams/.claude/plugins/cache/superpowers-marketplace/double-shot-latte/1.2.0/bin:/Users/dabrams/.claude/plugins/cache/superpowers-marketplace/elements-of-style/1.0.0/bin:/Users/dabrams/.claude/plugins/cache/superpowers-marketplace/superpowers/4.3.1/bin:/Users/dabrams/.claude/plugins/cache/superpowers-marketplace/superpowers-developing-for-claude-code/0.3.1/bin:/Users/dabrams/.claude/plugins/cache/superpowers-marketplace/superpowers-lab/0.3.0/bin:/Users/dabrams/.claude/plugins/cache/claude-plugins-official/swift-lsp/1.0.0/bin
+    export PATH_PREFIXES_EXCLUDED_FROM_HEADER_DEPENDENCIES\=/usr/include\ /usr/local/include\ /System/Library/Frameworks\ /System/Library/PrivateFrameworks\ /Applications/Xcode-beta.app/Contents/Developer/Headers\ /Applications/Xcode-beta.app/Contents/Developer/SDKs\ /Applications/Xcode-beta.app/Contents/Developer/Platforms
+    export PBDEVELOPMENTPLIST_PATH\=Playhead.app/pbdevelopment.plist
+    export PER_ARCH_MODULE_FILE_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build/Objects-normal/undefined_arch
+    export PER_ARCH_OBJECT_FILE_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build/Objects-normal/undefined_arch
+    export PER_VARIANT_OBJECT_FILE_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build/Objects-normal
+    export PKGINFO_FILE_PATH\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build/PkgInfo
+    export PKGINFO_PATH\=Playhead.app/PkgInfo
+    export PLATFORM_DEVELOPER_APPLICATIONS_DIR\=/Applications/Xcode-beta.app/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/Applications
+    export PLATFORM_DEVELOPER_BIN_DIR\=/Applications/Xcode-beta.app/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/usr/bin
+    export PLATFORM_DEVELOPER_LIBRARY_DIR\=/Applications/Xcode-beta.app/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/Library
+    export PLATFORM_DEVELOPER_SDK_DIR\=/Applications/Xcode-beta.app/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/SDKs
+    export PLATFORM_DEVELOPER_TOOLS_DIR\=/Applications/Xcode-beta.app/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/Tools
+    export PLATFORM_DEVELOPER_USR_DIR\=/Applications/Xcode-beta.app/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/usr
+    export PLATFORM_DIR\=/Applications/Xcode-beta.app/Contents/Developer/Platforms/iPhoneSimulator.platform
+    export PLATFORM_DISPLAY_NAME\=iOS\ Simulator
+    export PLATFORM_FAMILY_NAME\=iOS
+    export PLATFORM_NAME\=iphonesimulator
+    export PLATFORM_PREFERRED_ARCH\=x86_64
+    export PLATFORM_PRODUCT_BUILD_VERSION\=24A5370g
+    export PLATFORM_REQUIRES_SWIFT_AUTOLINK_EXTRACT\=NO
+    export PLATFORM_REQUIRES_SWIFT_MODULEWRAP\=NO
+    export PLATFORM_USES_DSYMS\=YES
+    export PLIST_FILE_OUTPUT_FORMAT\=binary
+    export PLUGINS_FOLDER_PATH\=Playhead.app/PlugIns
+    export PRECOMPS_INCLUDE_HEADERS_FROM_BUILT_PRODUCTS_DIR\=YES
+    export PRECOMP_DESTINATION_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build/PrefixHeaders
+    export PRELINK_DEPENDENCY_INFO_FILE\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build/Objects-normal/undefined_arch/Playhead_prelink_dependency_info.dat
+    export PRIVATE_HEADERS_FOLDER_PATH\=Playhead.app/PrivateHeaders
+    export PROCESSED_INFOPLIST_PATH\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build/Objects-normal/undefined_arch/Processed-Info.plist
+    export PRODUCT_BUNDLE_IDENTIFIER\=com.playhead.app
+    export PRODUCT_BUNDLE_PACKAGE_TYPE\=APPL
+    export PRODUCT_MODULE_NAME\=Playhead
+    export PRODUCT_NAME\=Playhead
+    export PRODUCT_SETTINGS_PATH\=/Users/dabrams/playhead/.worktrees/vtjx/Playhead/Support/Info.plist
+    export PRODUCT_TYPE\=com.apple.product-type.application
+    export PROFILING_CODE\=NO
+    export PROJECT\=Playhead
+    export PROJECT_DERIVED_FILE_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/DerivedSources
+    export PROJECT_DIR\=/Users/dabrams/playhead/.worktrees/vtjx
+    export PROJECT_FILE_PATH\=/Users/dabrams/playhead/.worktrees/vtjx/Playhead.xcodeproj
+    export PROJECT_GUID\=dcda67f77159778791d457df9be20ebb
+    export PROJECT_NAME\=Playhead
+    export PROJECT_TEMP_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build
+    export PROJECT_TEMP_ROOT\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex
+    export PROVISIONING_PROFILE_REQUIRED\=NO
+    export PROVISIONING_PROFILE_REQUIRED_YES_YES\=YES
+    export PROVISIONING_PROFILE_SUPPORTED\=YES
+    export PUBLIC_HEADERS_FOLDER_PATH\=Playhead.app/Headers
+    export RECOMMENDED_IPHONEOS_DEPLOYMENT_TARGET\=17.0
+    export RECURSIVE_SEARCH_PATHS_FOLLOW_SYMLINKS\=YES
+    export REMOVE_CVS_FROM_RESOURCES\=YES
+    export REMOVE_GIT_FROM_RESOURCES\=YES
+    export REMOVE_HEADERS_FROM_EMBEDDED_BUNDLES\=YES
+    export REMOVE_HG_FROM_RESOURCES\=YES
+    export REMOVE_STATIC_EXECUTABLES_FROM_EMBEDDED_BUNDLES\=YES
+    export REMOVE_SVN_FROM_RESOURCES\=YES
+    export RESCHEDULE_INDEPENDENT_HEADERS_PHASES\=YES
+    export REZ_COLLECTOR_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build/ResourceManagerResources
+    export REZ_OBJECTS_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build/ResourceManagerResources/Objects
+    export REZ_SEARCH_PATHS\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator\ 
+    export RPATH_ORIGIN\=@loader_path
+    export RUNTIME_EXCEPTION_ALLOW_DYLD_ENVIRONMENT_VARIABLES\=NO
+    export RUNTIME_EXCEPTION_ALLOW_JIT\=NO
+    export RUNTIME_EXCEPTION_ALLOW_UNSIGNED_EXECUTABLE_MEMORY\=NO
+    export RUNTIME_EXCEPTION_DEBUGGING_TOOL\=NO
+    export RUNTIME_EXCEPTION_DISABLE_EXECUTABLE_PAGE_PROTECTION\=NO
+    export RUNTIME_EXCEPTION_DISABLE_LIBRARY_VALIDATION\=NO
+    export SCANNING_PCM_KEEP_CACHE_DIRECTORY\=YES
+    export SCAN_ALL_SOURCE_FILES_FOR_INCLUDES\=NO
+    export SCRIPTS_FOLDER_PATH\=Playhead.app/Scripts
+    export SCRIPT_INPUT_FILE_COUNT\=0
+    export SCRIPT_INPUT_FILE_LIST_COUNT\=0
+    export SCRIPT_OUTPUT_FILE_COUNT\=0
+    export SCRIPT_OUTPUT_FILE_LIST_COUNT\=0
+    export SDKROOT\=/Applications/Xcode-beta.app/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/SDKs/iPhoneSimulator27.0.sdk
+    export SDK_DIR\=/Applications/Xcode-beta.app/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/SDKs/iPhoneSimulator27.0.sdk
+    export SDK_DIR_iphonesimulator\=/Applications/Xcode-beta.app/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/SDKs/iPhoneSimulator27.0.sdk
+    export SDK_DIR_iphonesimulator27_0\=/Applications/Xcode-beta.app/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/SDKs/iPhoneSimulator27.0.sdk
+    export SDK_NAME\=iphonesimulator27.0
+    export SDK_NAMES\=iphonesimulator27.0
+    export SDK_PRODUCT_BUILD_VERSION\=24A5370g
+    export SDK_STAT_CACHE_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData
+    export SDK_STAT_CACHE_ENABLE\=YES
+    export SDK_STAT_CACHE_PATH\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/SDKStatCaches.noindex/iphonesimulator27.0-24A5370g-3243818bda632a4370e1cc7a9fd181c5.sdkstatcache
+    export SDK_VERSION\=27.0
+    export SDK_VERSION_ACTUAL\=270000
+    export SDK_VERSION_MAJOR\=270000
+    export SDK_VERSION_MINOR\=270000
+    export SED\=/usr/bin/sed
+    export SEPARATE_STRIP\=NO
+    export SEPARATE_SYMBOL_EDIT\=NO
+    export SET_DIR_MODE_OWNER_GROUP\=YES
+    export SET_FILE_MODE_OWNER_GROUP\=NO
+    export SHALLOW_BUNDLE\=YES
+    export SHALLOW_BUNDLE_TRIPLE\=ios-simulator
+    export SHALLOW_BUNDLE_ios_macabi\=NO
+    export SHALLOW_BUNDLE_macos\=NO
+    export SHARED_DERIVED_FILE_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/DerivedSources
+    export SHARED_FRAMEWORKS_FOLDER_PATH\=Playhead.app/SharedFrameworks
+    export SHARED_PRECOMPS_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/PrecompiledHeaders
+    export SHARED_SUPPORT_FOLDER_PATH\=Playhead.app/SharedSupport
+    export SKIP_COPYING_TEST_FRAMEWORKS\=YES
+    export SKIP_INSTALL\=NO
+    export SKIP_MERGEABLE_LIBRARY_BUNDLE_HOOK\=NO
+    export SOURCE_ROOT\=/Users/dabrams/playhead/.worktrees/vtjx
+    export SRCROOT\=/Users/dabrams/playhead/.worktrees/vtjx
+    export STRINGSDATA_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build/Objects-normal/undefined_arch
+    export STRINGSDATA_ROOT\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build
+    export STRINGS_FILE_INFOPLIST_RENAME\=YES
+    export STRINGS_FILE_OUTPUT_ENCODING\=binary
+    export STRING_CATALOG_GENERATE_SYMBOLS\=NO
+    export STRIP_BITCODE_FROM_COPIED_FILES\=NO
+    export STRIP_INSTALLED_PRODUCT\=NO
+    export STRIP_STYLE\=all
+    export STRIP_SWIFT_SYMBOLS\=YES
+    export SUPPORTED_DEVICE_FAMILIES\=1,2
+    export SUPPORTED_PLATFORMS\=iphoneos\ iphonesimulator
+    export SUPPORTS_MACCATALYST\=YES
+    export SUPPORTS_MAC_DESIGNED_FOR_IPHONE_IPAD\=NO
+    export SUPPORTS_ON_DEMAND_RESOURCES\=YES
+    export SUPPORTS_TEXT_BASED_API\=NO
+    export SUPPRESS_WARNINGS\=NO
+    export SWIFTC_PASS_SDKROOT\=YES
+    export SWIFTC_PASS_SYSROOT\=NO
+    export SWIFT_ACTIVE_COMPILATION_CONDITIONS\=DEBUG
+    export SWIFT_COLOR_DIAGNOSTICS\=NO
+    export SWIFT_EMIT_CONST_VALUE_PROTOCOLS\=AnyResolverProviding\ AppEntity\ AppEnum\ AppExtension\ AppIntent\ AppIntentsPackage\ AppShortcutProviding\ AppShortcutsProvider\ AppUnionValue\ AppUnionValueCasesProviding\ DynamicOptionsProvider\ EntityQuery\ ExtensionPointDefining\ IntentValueQuery\ Resolver\ TransientEntity\ _AssistantIntentsProvider\ _GenerativeFunctionExtractable\ _IntentValueRepresentable
+    export SWIFT_EMIT_LOC_STRINGS\=YES
+    export SWIFT_ENABLE_EXPLICIT_MODULES\=YES
+    export SWIFT_ENABLE_TESTABILITY\=YES
+    export SWIFT_OPTIMIZATION_LEVEL\=-Onone
+    export SWIFT_PLATFORM_TARGET_PREFIX\=ios
+    export SWIFT_RESPONSE_FILE_PATH_normal_arm64\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build/Objects-normal/arm64/Playhead.SwiftFileList
+    export SWIFT_VERSION\=6.0
+    export SYMROOT\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products
+    export SYSROOT\=/Applications/Xcode-beta.app/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/SDKs/iPhoneSimulator27.0.sdk
+    export SYSTEM_ADMIN_APPS_DIR\=/Applications/Utilities
+    export SYSTEM_APPS_DIR\=/Applications
+    export SYSTEM_CORE_SERVICES_DIR\=/System/Library/CoreServices
+    export SYSTEM_DEMOS_DIR\=/Applications/Extras
+    export SYSTEM_DEVELOPER_APPS_DIR\=/Applications/Xcode-beta.app/Contents/Developer/Applications
+    export SYSTEM_DEVELOPER_BIN_DIR\=/Applications/Xcode-beta.app/Contents/Developer/usr/bin
+    export SYSTEM_DEVELOPER_DEMOS_DIR\=/Applications/Xcode-beta.app/Contents/Developer/Applications/Utilities/Built\ Examples
+    export SYSTEM_DEVELOPER_DIR\=/Applications/Xcode-beta.app/Contents/Developer
+    export SYSTEM_DEVELOPER_DOC_DIR\=/Applications/Xcode-beta.app/Contents/Developer/ADC\ Reference\ Library
+    export SYSTEM_DEVELOPER_GRAPHICS_TOOLS_DIR\=/Applications/Xcode-beta.app/Contents/Developer/Applications/Graphics\ Tools
+    export SYSTEM_DEVELOPER_JAVA_TOOLS_DIR\=/Applications/Xcode-beta.app/Contents/Developer/Applications/Java\ Tools
+    export SYSTEM_DEVELOPER_PERFORMANCE_TOOLS_DIR\=/Applications/Xcode-beta.app/Contents/Developer/Applications/Performance\ Tools
+    export SYSTEM_DEVELOPER_RELEASENOTES_DIR\=/Applications/Xcode-beta.app/Contents/Developer/ADC\ Reference\ Library/releasenotes
+    export SYSTEM_DEVELOPER_TOOLS\=/Applications/Xcode-beta.app/Contents/Developer/Tools
+    export SYSTEM_DEVELOPER_TOOLS_DOC_DIR\=/Applications/Xcode-beta.app/Contents/Developer/ADC\ Reference\ Library/documentation/DeveloperTools
+    export SYSTEM_DEVELOPER_TOOLS_RELEASENOTES_DIR\=/Applications/Xcode-beta.app/Contents/Developer/ADC\ Reference\ Library/releasenotes/DeveloperTools
+    export SYSTEM_DEVELOPER_USR_DIR\=/Applications/Xcode-beta.app/Contents/Developer/usr
+    export SYSTEM_DEVELOPER_UTILITIES_DIR\=/Applications/Xcode-beta.app/Contents/Developer/Applications/Utilities
+    export SYSTEM_DEXT_INSTALL_PATH\=/System/Library/DriverExtensions
+    export SYSTEM_DOCUMENTATION_DIR\=/Library/Documentation
+    export SYSTEM_EXTENSIONS_FOLDER_PATH\=Playhead.app/SystemExtensions
+    export SYSTEM_EXTENSIONS_FOLDER_PATH_SHALLOW_BUNDLE_NO\=Playhead.app/Library/SystemExtensions
+    export SYSTEM_EXTENSIONS_FOLDER_PATH_SHALLOW_BUNDLE_YES\=Playhead.app/SystemExtensions
+    export SYSTEM_KEXT_INSTALL_PATH\=/System/Library/Extensions
+    export SYSTEM_LIBRARY_DIR\=/System/Library
+    export TAPI_DEMANGLE\=YES
+    export TAPI_ENABLE_PROJECT_HEADERS\=NO
+    export TAPI_LANGUAGE\=objective-c
+    export TAPI_LANGUAGE_STANDARD\=compiler-default
+    export TAPI_USE_SRCROOT\=YES
+    export TAPI_VERIFY_MODE\=Pedantic
+    export TARGETED_DEVICE_FAMILY\=1,2
+    export TARGETNAME\=Playhead
+    export TARGET_BUILD_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator
+    export TARGET_DEVICE_IDENTIFIER\=19B59D40-3826-4A31-AE37-70F59BA7C96E
+    export TARGET_DEVICE_MODEL\=iPhone18,3
+    export TARGET_DEVICE_OS_VERSION\=27.0
+    export TARGET_DEVICE_PLATFORM_NAME\=iphonesimulator
+    export TARGET_NAME\=Playhead
+    export TARGET_TEMP_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build
+    export TEMP_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build
+    export TEMP_FILES_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build
+    export TEMP_FILE_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build
+    export TEMP_ROOT\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex
+    export TEMP_SANDBOX_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/TemporaryTaskSandboxes
+    export TEST_FRAMEWORK_SEARCH_PATHS\=\ /Applications/Xcode-beta.app/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/Library/Frameworks\ /Applications/Xcode-beta.app/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/SDKs/iPhoneSimulator27.0.sdk/Developer/Library/Frameworks
+    export TEST_LIBRARY_SEARCH_PATHS\=\ /Applications/Xcode-beta.app/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/usr/lib
+    export TOOLCHAINS\=com.apple.dt.toolchain.XcodeDefault
+    export TOOLCHAIN_DIR\=/Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain
+    export TREAT_MISSING_BASELINES_AS_TEST_FAILURES\=NO
+    export TREAT_MISSING_SCRIPT_PHASE_OUTPUTS_AS_ERRORS\=NO
+    export TeamIdentifierPrefix\=36Z6VYTT9X.
+    export UID\=501
+    export UNINSTALLED_PRODUCTS_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/UninstalledProducts
+    export UNLOCALIZED_RESOURCES_FOLDER_PATH\=Playhead.app
+    export UNLOCALIZED_RESOURCES_FOLDER_PATH_SHALLOW_BUNDLE_NO\=Playhead.app/Resources
+    export UNLOCALIZED_RESOURCES_FOLDER_PATH_SHALLOW_BUNDLE_YES\=Playhead.app
+    export UNSTRIPPED_PRODUCT\=NO
+    export USER\=dabrams
+    export USER_APPS_DIR\=/Users/dabrams/Applications
+    export USER_LIBRARY_DIR\=/Users/dabrams/Library
+    export USE_DYNAMIC_NO_PIC\=YES
+    export USE_HEADERMAP\=YES
+    export USE_HEADER_SYMLINKS\=NO
+    export VALIDATE_DEVELOPMENT_ASSET_PATHS\=YES_ERROR
+    export VALIDATE_PRODUCT\=NO
+    export VALID_ARCHS\=arm64\ x86_64
+    export VERBOSE_PBXCP\=NO
+    export VERSIONPLIST_PATH\=Playhead.app/version.plist
+    export VERSION_INFO_BUILDER\=dabrams
+    export VERSION_INFO_FILE\=Playhead_vers.c
+    export VERSION_INFO_STRING\=\"@\(\#\)PROGRAM:Playhead\ \ PROJECT:Playhead-1\"
+    export WORKSPACE_DIR\=/Users/dabrams/playhead/.worktrees/vtjx/Playhead.xcodeproj
+    export WRAPPER_EXTENSION\=app
+    export WRAPPER_NAME\=Playhead.app
+    export WRAPPER_SUFFIX\=.app
+    export WRAP_ASSET_PACKS_IN_SEPARATE_DIRECTORIES\=NO
+    export XCODE_APP_SUPPORT_DIR\=/Applications/Xcode-beta.app/Contents/Developer/Library/Xcode
+    export XCODE_PRODUCT_BUILD_VERSION\=27A5209h
+    export XCODE_VERSION_ACTUAL\=2700
+    export XCODE_VERSION_MAJOR\=2700
+    export XCODE_VERSION_MINOR\=2700
+    export XPCSERVICES_FOLDER_PATH\=Playhead.app/XPCServices
+    export YACC\=yacc
+    export _DISCOVER_COMMAND_LINE_LINKER_INPUTS\=YES
+    export _DISCOVER_COMMAND_LINE_LINKER_INPUTS_INCLUDE_WL\=YES
+    export _LD_MULTIARCH\=YES
+    export _SWIFT_EXPLICIT_MODULES_ALLOW_CXX_INTEROP\=YES
+    export _WRAPPER_CONTENTS_DIR_SHALLOW_BUNDLE_NO\=/Contents
+    export _WRAPPER_PARENT_PATH_SHALLOW_BUNDLE_NO\=/..
+    export _WRAPPER_RESOURCES_DIR_SHALLOW_BUNDLE_NO\=/Resources
+    export __ARCHS__\=arm64\ x86_64
+    export __DIAGNOSE_DEPRECATED_ARCHS\=YES
+    export __DIAGNOSE_INVALID_DEPLOYMENT_TARGET_AS_ERROR\=YES
+    export __IS_NOT_MACOS\=YES
+    export __IS_NOT_MACOS_macosx\=NO
+    export __IS_NOT_SIMULATOR\=NO
+    export __IS_NOT_SIMULATOR_simulator\=NO
+    export __ORIGINAL_SDK_DEFINED_LLVM_TARGET_TRIPLE_SYS\=ios
+    export arch\=undefined_arch
+    export variant\=normal
+    /bin/sh -c /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build/Script-69E832A17746D20516B73647.sh
+BuildCommitSHA unchanged (31f5fa08); skipping rewrite
+
+ProcessInfoPlistFile /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/Playhead.app/Info.plist /Users/dabrams/playhead/.worktrees/vtjx/Playhead/Support/Info.plist (in target 'Playhead' from project 'Playhead')
+    cd /Users/dabrams/playhead/.worktrees/vtjx
+    builtin-infoPlistUtility /Users/dabrams/playhead/.worktrees/vtjx/Playhead/Support/Info.plist -producttype com.apple.product-type.application -genpkginfo /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/Playhead.app/PkgInfo -expandbuildsettings -format binary -platform iphonesimulator -additionalcontentfile /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build/LaunchScreen-SBPartialInfo.plist -additionalcontentfile /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build/assetcatalog_generated_info.plist -scanforprivacyfile /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/Playhead.app/swift-crypto_Crypto.bundle -scanforprivacyfile /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/Playhead.app/swift-transformers_Hub.bundle -o /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/Playhead.app/Info.plist
+
+CopySwiftLibs /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/Playhead.app (in target 'Playhead' from project 'Playhead')
+    cd /Users/dabrams/playhead/.worktrees/vtjx
+    builtin-swiftStdLibTool --copy --verbose --sign - --scan-executable /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/Playhead.app/Playhead.debug.dylib --scan-folder /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/Playhead.app/Frameworks --scan-folder /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/Playhead.app/PlugIns --scan-folder /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/Playhead.app/SystemExtensions --scan-folder /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/Playhead.app/Extensions --platform iphonesimulator --toolchain /Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain --destination /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/Playhead.app/Frameworks --strip-bitcode --strip-bitcode-tool /Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/bitcode_strip --emit-dependency-info /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/Playhead.build/SwiftStdLibToolInputDependencies.dep --filter-for-swift-os
+
+ProcessInfoPlistFile /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/Playhead.app/PlugIns/PlayheadTests.xctest/Info.plist /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/PlayheadTests.build/empty-PlayheadTests.plist (in target 'PlayheadTests' from project 'Playhead')
+    cd /Users/dabrams/playhead/.worktrees/vtjx
+    builtin-infoPlistUtility /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/PlayheadTests.build/empty-PlayheadTests.plist -producttype com.apple.product-type.bundle.unit-test -expandbuildsettings -format binary -platform iphonesimulator -scanforprivacyfile /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/Playhead.app/PlugIns/PlayheadTests.xctest/swift-crypto_Crypto.bundle -scanforprivacyfile /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/Playhead.app/PlugIns/PlayheadTests.xctest/swift-transformers_Hub.bundle -o /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/Playhead.app/PlugIns/PlayheadTests.xctest/Info.plist
+
+CopySwiftLibs /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/Playhead.app/PlugIns/PlayheadTests.xctest (in target 'PlayheadTests' from project 'Playhead')
+    cd /Users/dabrams/playhead/.worktrees/vtjx
+    builtin-swiftStdLibTool --copy --verbose --sign - --scan-executable /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/Playhead.app/PlugIns/PlayheadTests.xctest/PlayheadTests --scan-folder /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/Playhead.app/PlugIns/PlayheadTests.xctest/Frameworks --scan-folder /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/Playhead.app/PlugIns/PlayheadTests.xctest/PlugIns --scan-folder /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/Playhead.app/PlugIns/PlayheadTests.xctest/SystemExtensions --scan-folder /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/Playhead.app/PlugIns/PlayheadTests.xctest/Extensions --platform iphonesimulator --toolchain /Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain --destination /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Products/Debug-iphonesimulator/Playhead.app/PlugIns/PlayheadTests.xctest/Frameworks --strip-bitcode --scan-executable /Applications/Xcode-beta.app/Contents/Developer/Platforms/iPhoneSimulator.platform/Developer/usr/lib/libXCTestSwiftSupport.dylib --strip-bitcode-tool /Applications/Xcode-beta.app/Contents/Developer/Toolchains/XcodeDefault.xctoolchain/usr/bin/bitcode_strip --emit-dependency-info /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/Playhead.build/Debug-iphonesimulator/PlayheadTests.build/SwiftStdLibToolInputDependencies.dep --filter-for-swift-os
+
+PruneExplicitPrecompiledModules /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/ExplicitPrecompiledModules
+
+PruneExplicitPrecompiledModules /Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Build/Intermediates.noindex/SwiftExplicitPrecompiledModules
+
+objc[63989]: Class LACUIPasscodeServiceOptionsViewConfiguration is implemented in both /Library/Developer/CoreSimulator/Volumes/iOS_24A5370g/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS 27.0.simruntime/Contents/Resources/RuntimeRoot/System/Library/PrivateFrameworks/LocalAuthenticationCoreUI.framework/LocalAuthenticationCoreUI (0x15f644508) and /Library/Developer/CoreSimulator/Volumes/iOS_24A5370g/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS 27.0.simruntime/Contents/Resources/RuntimeRoot/System/Library/Frameworks/LocalAuthenticationEmbeddedUI.framework/LocalAuthenticationEmbeddedUI (0x1472254f0). This may cause spurious casting failures and mysterious crashes. One of the duplicates must be removed or renamed.
+objc[63989]: Class AKDisplayNameFormatter is implemented in both /Library/Developer/CoreSimulator/Volumes/iOS_24A5370g/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS 27.0.simruntime/Contents/Resources/RuntimeRoot/System/Library/PrivateFrameworks/AuthKitUI.framework/AuthKitUI (0x14a798770) and /Library/Developer/CoreSimulator/Volumes/iOS_24A5370g/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS 27.0.simruntime/Contents/Resources/RuntimeRoot/System/Library/PrivateFrameworks/AuthKit.framework/AuthKit (0x13df165b8). This may cause spurious casting failures and mysterious crashes. One of the duplicates must be removed or renamed.
+objc[63989]: Class AKAlertImageURLProvider is implemented in both /Library/Developer/CoreSimulator/Volumes/iOS_24A5370g/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS 27.0.simruntime/Contents/Resources/RuntimeRoot/System/Library/PrivateFrameworks/AuthKitUI.framework/AuthKitUI (0x14a7987c0) and /Library/Developer/CoreSimulator/Volumes/iOS_24A5370g/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS 27.0.simruntime/Contents/Resources/RuntimeRoot/System/Library/PrivateFrameworks/AuthKit.framework/AuthKit (0x13df17f08). This may cause spurious casting failures and mysterious crashes. One of the duplicates must be removed or renamed.
+objc[63989]: Class AKBiometricRatchetUtility is implemented in both /Library/Developer/CoreSimulator/Volumes/iOS_24A5370g/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS 27.0.simruntime/Contents/Resources/RuntimeRoot/System/Library/PrivateFrameworks/AuthKitUI.framework/AuthKitUI (0x14a798838) and /Library/Developer/CoreSimulator/Volumes/iOS_24A5370g/Library/Developer/CoreSimulator/Profiles/Runtimes/iOS 27.0.simruntime/Contents/Resources/RuntimeRoot/System/Library/PrivateFrameworks/AuthKit.framework/AuthKit (0x13df18700). This may cause spurious casting failures and mysterious crashes. One of the duplicates must be removed or renamed.
+2026-08-09 17:32:08.531449-0400 Playhead[63989:47544182] [AppDelegate] scanForSuspendedTransfers skipped — no DownloadManager registered
+2026-08-09 17:32:08.823032-0400 Playhead[63989:47545334] [plugin] AddInstanceForFactory: No factory registered for id <CFUUID 0x704c848ae0> F8BB1C28-BAE8-11D6-9C31-00039315CD46
+2026-08-09 17:32:10.808145-0400 Playhead[63989:47544182] [Capabilities] fm.capability.context_window contextSize=0
+2026-08-09 17:32:10.872772-0400 Playhead[63989:47544182] [CoreMLSequenceClassifier] Layer 2 sequence model not bundled — using RuleBasedClassifier fallback for all classifications.
+2026-08-09 17:32:11.333078-0400 Playhead[63989:47545326] [General] Failed to send CA Event for app launch measurements for ca_event_type: 0 event_name: com.apple.app_launch_measurement.FirstFramePresentationMetric
+2026-08-09 17:32:11.360501-0400 Playhead[63989:47545326] [Downloads] DownloadManager bootstrapped at /Users/dabrams/Library/Developer/CoreSimulator/Devices/19B59D40-3826-4A31-AE37-70F59BA7C96E/data/Containers/Data/Application/B20A8841-9FEB-4091-AD77-9CF366E731AD/Library/Caches/Playhead/AudioCache
+2026-08-09 17:32:11.361848-0400 Playhead[63989:47545326] [SpeechEngine] Preparing fast-path Speech model…
+2026-08-09 17:32:11.363174-0400 Playhead[63989:47545326] [SpeechEngine] Fast-path Speech model ready (2.791e-06 seconds)
+2026-08-09 17:32:11.364186-0400 Playhead[63989:47545326] [SpeechEngine] Fast-path Speech model loaded on attempt 1
+2026-08-09 17:32:11.366403-0400 Playhead[63989:47545347] [RediffRefetch] Failed to schedule rediff re-fetch: Error Domain=BGTaskSchedulerErrorDomain Code=1 "BGTaskScheduler is not available on this platform." UserInfo={NSLocalizedDescription=BGTaskScheduler is not available on this platform.}
+2026-08-09 17:32:11.369490-0400 Playhead[63989:47545347] [BackgroundProcessing] Pre-analysis services injected
+2026-08-09 17:32:11.370367-0400 Playhead[63989:47545326] [AnalysisCoordinator] AnalysisCoordinator started
+2026-08-09 17:32:11.370741-0400 Playhead[63989:47545326] [BackgroundProcessing] BackgroundProcessingService started
+2026-08-09 17:32:11.370919-0400 Playhead[63989:47544182] [App] Scene phase: active
+2026-08-09 17:32:11.375822-0400 Playhead[63989:47545346] [BackgroundProcessing] BGTask submit failed for com.playhead.app.preanalysis.recovery: Error Domain=BGTaskSchedulerErrorDomain Code=1 "BGTaskScheduler is not available on this platform." UserInfo={NSLocalizedDescription=BGTaskScheduler is not available on this platform.}
+2026-08-09 17:32:11.376113-0400 Playhead[63989:47545330] [BackgroundProcessing] BGTask submit failed for com.playhead.app.analysis.backfill: Error Domain=BGTaskSchedulerErrorDomain Code=1 "BGTaskScheduler is not available on this platform." UserInfo={NSLocalizedDescription=BGTaskScheduler is not available on this platform.}
+2026-08-09 17:32:11.376241-0400 Playhead[63989:47545330] [BackgroundProcessing] BGTask submit failed for com.playhead.app.analysis.backfill.charged: Error Domain=BGTaskSchedulerErrorDomain Code=1 "BGTaskScheduler is not available on this platform." UserInfo={NSLocalizedDescription=BGTaskScheduler is not available on this platform.}
+2026-08-09 17:32:11.389385-0400 Playhead[63989:47545331] [FeedRefresh] Failed to schedule feed refresh: Error Domain=BGTaskSchedulerErrorDomain Code=1 "BGTaskScheduler is not available on this platform." UserInfo={NSLocalizedDescription=BGTaskScheduler is not available on this platform.}
+2026-08-09 17:32:11.515596-0400 Playhead[63989:47545333] [Entitlements] EntitlementManager started, isPremium=false
+2026-08-09 17:32:11.521485-0400 Playhead[63989:47545346] [General] Failed to send CA Event for app launch measurements for ca_event_type: 1 event_name: com.apple.app_launch_measurement.ExtendedLaunchMetrics
+2026-08-09 17:32:11.523220-0400 Playhead[63989:47545333] [iCloudSync] Account status: restricted
+2026-08-09 17:32:11.523310-0400 Playhead[63989:47545333] [iCloudSync] iCloud unavailable at start (status=restricted); sync paused.
+2026-08-09 17:32:12.073254-0400 Playhead[63989:47545333] [IPC] Passing along Operation canceled in response to ExecuteRequest
+2026-08-09 17:32:12.074543-0400 Playhead[63989:47545333] [TokenGenerator] Received ModelManagerError that couldn't be converted to a TokenGenerationError: Operation canceled
+2026-08-09 17:32:12.078876-0400 Playhead[63989:47545333] [TokenGenerator] Failed to fetch model metadata. Operation canceled
+2026-08-09 17:32:12.825655-0400 Playhead[63989:47545329] [Capabilities] fm.capability.context_window contextSize=0
+2026-08-09 17:32:12.826798-0400 Playhead[63989:47545329] [Capabilities] Capability snapshot captured: foundationModels=true, foundationModelsUsable=false, appleIntelligence=true, localeSupported=true, contextSize=0, thermal=nominal, lowPower=false, charging=false, bgProcessing=true, diskSpace=33245MB
+2026-08-09 17:32:14.710183-0400 Playhead[63989:47545334] [IPC] Passing along Operation canceled in response to ExecuteRequest
+2026-08-09 17:32:14.710359-0400 Playhead[63989:47545334] [TokenGenerator] Received ModelManagerError that couldn't be converted to a TokenGenerationError: Operation canceled
+2026-08-09 17:32:14.710429-0400 Playhead[63989:47545334] [TokenGenerator] Failed to fetch model metadata. Operation canceled
+2026-08-09 17:32:14.830320-0400 Playhead[63989:47545330] [Capabilities] fm.capability.context_window contextSize=0
+2026-08-09 17:32:14.831220-0400 Playhead[63989:47545330] [Capabilities] Capability snapshot captured: foundationModels=true, foundationModelsUsable=false, appleIntelligence=true, localeSupported=true, contextSize=0, thermal=nominal, lowPower=false, charging=false, bgProcessing=true, diskSpace=33245MB
+2026-08-09 17:32:14.836016-0400 Playhead[63989:47545347] [JobReconciler] Reconciliation complete: expiredLeases=0, strandedSessionJobs=0, missingFilesUnblocked=0, missingFilesStillBlocked=0, modelsUnblocked=0, staleVersions=0, staleReenqueued=0, gc=0, backoff=0, newJobs=0, strandedBackfillJobs=0, strandedFinalPassJobs=0, queuedEpochsRestamped=0, scarcityReprioritized=0, adScanRedrivesMinted=0, capOutRetriesMinted=0, reEnqueuesSwallowed=0, semanticScanClaimsMinted=0
+2026-08-09 17:32:15.968701-0400 Playhead[63989:47545332] [IPC] Passing along InferenceError::operationNotAllowed::Simulator is not supported in response to ExecuteRequest
+2026-08-09 17:32:15.968818-0400 Playhead[63989:47545333] [IPC] Passing along InferenceError::operationNotAllowed::Simulator is not supported in response to ExecuteRequest
+2026-08-09 17:32:15.969828-0400 Playhead[63989:47545333] [TokenGenerator] Received ModelManagerError that couldn't be converted to a TokenGenerationError: InferenceError::operationNotAllowed::Simulator is not supported
+2026-08-09 17:32:15.969851-0400 Playhead[63989:47545332] [TokenGenerator] Received ModelManagerError that couldn't be converted to a TokenGenerationError: InferenceError::operationNotAllowed::Simulator is not supported
+2026-08-09 17:32:15.969898-0400 Playhead[63989:47545333] [TokenGenerator] Failed to fetch model metadata. InferenceError::operationNotAllowed::Simulator is not supported
+2026-08-09 17:32:15.969899-0400 Playhead[63989:47545332] [TokenGenerator] Failed to fetch model metadata. InferenceError::operationNotAllowed::Simulator is not supported
+2026-08-09 17:32:15.974216-0400 Playhead[63989:47545526] [Capabilities] fm.capability.context_window contextSize=0
+2026-08-09 17:32:15.975603-0400 Playhead[63989:47545526] [Capabilities] Capability snapshot captured: foundationModels=true, foundationModelsUsable=false, appleIntelligence=true, localeSupported=true, contextSize=0, thermal=nominal, lowPower=false, charging=false, bgProcessing=true, diskSpace=32221MB
+2026-08-09 17:32:15.975785-0400 Playhead[63989:47545526] [Capabilities] [CapabilitiesService Self-Test] Foundation Models: unavailable | Thermal: 0 | Low Power: false | Disk: 32221MB | Throttle: false | Reduce Hot Path: false
+2026-08-09 17:32:15.977213-0400 Playhead[63989:47545526] [Capabilities] [CapabilitiesService Self-Test] JSON round-trip OK (332 bytes)
+Test Suite 'Selected tests' started at 2026-08-09 17:32:20.266.
+Test Suite 'PlayheadTests.xctest' started at 2026-08-09 17:32:20.268.
+Test Suite 'PlayheadTests.xctest' passed at 2026-08-09 17:32:20.269.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.000) seconds
+Test Suite 'Selected tests' passed at 2026-08-09 17:32:20.269.
+	 Executed 0 tests, with 0 failures (0 unexpected) in 0.000 (0.002) seconds
+◇ Test run started.
+↳ Testing Library Version: 2070
+↳ Target Platform: arm64-apple-ios17.0-simulator
+◇ Suite "Semantic scan claim — the predicates (playhead-fil5)" started.
+◇ Suite "Semantic scan claim — persistence (playhead-fil5)" started.
+◇ Test "running and failed rows keep their own state and reason" started.
+◇ Test "the claim floor is exactly the runner's skip floor" started.
+◇ Test "a bail mints one durable, resumable, named row" started.
+◇ Test "no claim when the measured ad scan already clears the floor" started.
+◇ Test "an empty podcastId persists as nil, not as an empty-string podcast" started.
+◇ Test "an unmeasured ad scan is owed a scan" started.
+◇ Test "an empty podcastId reaches the database as NULL" started.
+◇ Test "a store refusal is reported, not thrown" started.
+◇ Test "the device's unscanned assets are all owed a scan" started.
+◇ Test "the standalone version hash equals atomize's" started.
+◇ Test "the claim row is resumable, unbudgeted, and names its gate" started.
+◇ Test "a complete row is left alone" started.
+◇ Test "bridging closes breaths, not blocks" started.
+◇ Test "the claim's id is the runner's fullCoverage job id" started.
+◇ Test "a short measured ad scan still mints" started.
+◇ Test "repeated bails refresh one row and never charge a retry" started.
+◇ Test "no admission defer reason collides with the claim prefix" started.
+◇ Test "the persisted-chunk version matches what runBackfill atomizes" started.
+◇ Test "a complete transcript reads under the floor RAW and over it bridged" started.
+◇ Test "every gate carries the query prefix and a distinct reason" started.
+◇ Test "an unmeasurable transcript never clears the floor" started.
+◇ Test case passing 1 argument fraction → 0.0 to "the device's unscanned assets are all owed a scan" started.
+◇ Test "the transcript gate uses the finalize floor, which admits 95%" started.
+◇ Test case passing 1 argument fraction → 0.207 to "the device's unscanned assets are all owed a scan" started.
+◇ Test case passing 1 argument fraction → 0.38 to "the device's unscanned assets are all owed a scan" started.
+◇ Test case passing 1 argument fraction → 0.9 to "the device's unscanned assets are all owed a scan" started.
+​​​◇ Test case passing 1 argument fraction → 0.979 to "the device's unscanned assets are all owed a scan" started.
+​​✔ Test "the device's unscanned assets are all owed a scan" with 5 test cases passed after 0.093 seconds.
+✔ Test "the claim floor is exactly the runner's skip floor" passed after 0.097 seconds.
+✔ Test "an unmeasured ad scan is owed a scan" passed after 0.097 seconds.
+✔ Test "the claim row is resumable, unbudgeted, and names its gate" passed after 0.097 seconds.
+✔ Test "an empty podcastId persists as nil, not as an empty-string podcast" passed after 0.097 seconds.
+✔ Test "the claim's id is the runner's fullCoverage job id" passed after 0.058 seconds.
+✔ Test "the standalone version hash equals atomize's" passed after 0.097 seconds.
+✔ Test "the persisted-chunk version matches what runBackfill atomizes" passed after 0.058 seconds.
+✔ Test "every gate carries the query prefix and a distinct reason" passed after 0.058 seconds.
+✔ Test "no admission defer reason collides with the claim prefix" passed after 0.058 seconds.
+2026-08-09 17:32:20.573933-0400 Playhead[63989:47546189] [fil5] scan_claim_minted asset=a-mint gate=fm_unavailable job=fm-62991f6e5176a0fc
+✔ Test "bridging closes breaths, not blocks" passed after 0.070 seconds.
+✔ Test "a complete transcript reads under the floor RAW and over it bridged" passed after 0.093 seconds.
+✔ Test "the transcript gate uses the finalize floor, which admits 95%" passed after 0.049 seconds.
+✔ Test "an unmeasurable transcript never clears the floor" passed after 0.093 seconds.
+✔ Suite "Semantic scan claim — the predicates (playhead-fil5)" passed after 0.136 seconds.
+✔ Test "a bail mints one durable, resumable, named row" passed after 0.137 seconds.
+2026-08-09 17:32:20.600603-0400 Playhead[63989:47545334] [fil5] scan_claim_minted asset=a-empty-pod gate=podcast_id_missing job=fm-bcb007b08bf43c1e
+✔ Test "an empty podcastId reaches the database as NULL" passed after 0.162 seconds.
+✔ Test "a complete row is left alone" passed after 0.148 seconds.
+2026-08-09 17:32:20.651244-0400 Playhead[63989:47545527] [fil5] scan_claim_write_failed asset=ghost gate=fm_mode_off error=Insert failed: FOREIGN KEY constraint failed
+✔ Test "a store refusal is reported, not thrown" passed after 0.213 seconds.
+✔ Test "no claim when the measured ad scan already clears the floor" passed after 0.229 seconds.
+✔ Test "running and failed rows keep their own state and reason" passed after 0.249 seconds.
+2026-08-09 17:32:20.706252-0400 Playhead[63989:47545329] [fil5] scan_claim_minted asset=a-idem gate=fm_mode_off job=fm-136cb24bd3f76e8c
+2026-08-09 17:32:20.706463-0400 Playhead[63989:47545329] [fil5] scan_claim_refreshed asset=a-idem gate=fm_unavailable job=fm-136cb24bd3f76e8c
+2026-08-09 17:32:20.706599-0400 Playhead[63989:47545329] [fil5] scan_claim_refreshed asset=a-idem gate=fm_unavailable job=fm-136cb24bd3f76e8c
+2026-08-09 17:32:20.706717-0400 Playhead[63989:47545329] [fil5] scan_claim_refreshed asset=a-idem gate=fm_unavailable job=fm-136cb24bd3f76e8c
+2026-08-09 17:32:20.706827-0400 Playhead[63989:47545329] [fil5] scan_claim_refreshed asset=a-idem gate=fm_unavailable job=fm-136cb24bd3f76e8c
+✔ Test "repeated bails refresh one row and never charge a retry" passed after 0.228 seconds.
+2026-08-09 17:32:20.726416-0400 Playhead[63989:47545526] [fil5] scan_claim_minted asset=a-short gate=runner_factory_missing job=fm-6ac7fa0a770332c7
+✔ Test "a short measured ad scan still mints" passed after 0.248 seconds.
+✔ Suite "Semantic scan claim — persistence (playhead-fil5)" passed after 0.290 seconds.
+✔ Test run with 22 tests in 2 suites passed after 0.290 seconds.
+2026-08-09 17:32:21.159 xcodebuild[63567:47541765] [MT] IDETestOperationsObserverDebug: 74.647 elapsed -- Testing started completed.
+2026-08-09 17:32:21.159 xcodebuild[63567:47541765] [MT] IDETestOperationsObserverDebug: 0.000 sec, +0.000 sec -- start
+2026-08-09 17:32:21.159 xcodebuild[63567:47541765] [MT] IDETestOperationsObserverDebug: 74.647 sec, +74.647 sec -- end
+
+Test session results, code coverage, and logs:
+	/Users/dabrams/playhead/.worktrees/vtjx/.derivedData/Logs/Test/Test-Playhead-2026.08.09_17-31-03--0400.xcresult
+
+** TEST SUCCEEDED **
+
+Testing started
+fast-gate: baseline check SKIPPED — selective run, a different population
+fast-gate: from the recorded plan. Raw xcodebuild exit 0 stands.
+GATE_EXIT=0

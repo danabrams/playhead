@@ -14415,14 +14415,21 @@ actor AnalysisStore {
     /// **Why a repair exists at all.** `analysis_jobs.podcastId` was optional
     /// before playhead-kkzu made a download's show a compulsory, spelled-out
     /// field of `DownloadContext`, and on the 2026-08-08 pull it is NULL on 53
-    /// of 72 rows — every row created before 2026-08-03 17:48:58, and none
-    /// after. kkzu closed the door for new downloads and could not reach rows
-    /// already written; worse, every re-mint path copies `job.podcastId`
-    /// verbatim (`AnalysisWorkScheduler`'s tier successor, ad-scan re-drive and
-    /// canonical-audio replacement), so a NULL is INHERITED indefinitely. The
-    /// witness is 53FC53E3, whose `…:adScanRedrive:1` row minted on
-    /// 2026-08-08 carries NULL purely because its pre-kkzu parent did, next to
-    /// F2F2FC4C's identical re-drive the same day carrying a real feed URL.
+    /// of 72 rows. Every ATTRIBUTED row was created at or after kkzu
+    /// (2026-08-03 17:48:58); the converse does NOT hold, and stating it that
+    /// way round is load-bearing — 14 NULL rows postdate that instant, so this
+    /// is not a closed population that one backfill drains. Two mechanisms
+    /// produce them: `AnalysisJobReconciler.discoverUnEnqueuedDownloads` holds
+    /// no show identity at all and mints `nil` on every reconcile pass
+    /// (playhead-7ba4), and every re-mint path copies `job.podcastId` verbatim
+    /// (`AnalysisWorkScheduler`'s tier successor, ad-scan re-drive and
+    /// canonical-audio replacement), so a NULL is also INHERITED indefinitely.
+    /// The witness for the second is 53FC53E3, whose `…:adScanRedrive:1` row
+    /// minted 2026-08-08 07:55:05 carries NULL purely because its pre-kkzu
+    /// parent did — four hours before F2F2FC4C's identical re-drive carried a
+    /// real feed URL. That both mechanisms are still live is exactly why the
+    /// reader is ``fetchRecordedPodcastId(forEpisodeId:)`` and not a
+    /// latest-row-wins query: see `AnalysisCoordinator.resolveShowIdentity`.
     ///
     /// **Idempotent and non-destructive by construction.** The `podcastId IS
     /// NULL` clause is what makes both true: a second call changes nothing, and

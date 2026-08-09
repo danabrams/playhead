@@ -277,8 +277,16 @@ struct CoarseScanShowIdentityWireInTests {
         }
     }
 
-    /// The 53FC53E3 shape: transcribed, zero `backfill_jobs` rows, and an
-    /// `analysis_jobs` row carrying SQL NULL where the show should be.
+    /// The 53FC53E3 shape as it stood BEFORE its fil5 claim was minted:
+    /// transcribed, no `backfill_jobs` row, and an `analysis_jobs` row carrying
+    /// SQL NULL where the show should be.
+    ///
+    /// On the pull each of the four assets now owns exactly one backfill row —
+    /// its own `deferred` claim — so in the field they are reached by
+    /// `fetchAssetIdsWithResumableBackfillJobs` rather than by the zero-row
+    /// query. Both candidate queries funnel into the same `coarseScanOneAsset`,
+    /// so the fixture exercises the identical path; it models the earlier state
+    /// only because a store with no claim row is the smaller fixture.
     private func seededStore() async throws -> AnalysisStore {
         let store = try await makeTestStore()
         try await store.insertAsset(
@@ -489,6 +497,92 @@ struct CoarseScanShowIdentityWireInTests {
         #expect(try await store.fetchJob(byId: "job-vtjx")?.podcastId == Self.show)
         let row = try #require(try await claim(store))
         #expect(row.deferReason == SemanticScanClaim.Gate.runnerFactoryMissing.deferReason)
+    }
+
+    /// **The rail on WHICH lane query is read**, and without it the choice is
+    /// free: every other fixture here gives an episode one `analysis_jobs` row,
+    /// and against a single row `fetchRecordedPodcastId` and
+    /// `fetchLatestJobForEpisode(_:)?.podcastId` are indistinguishable — so
+    /// reverting that one line passes the whole rest of this file.
+    ///
+    /// The distinguishing shape is the one the device is actually in: an
+    /// ATTRIBUTED row plus a NEWER unattributed one. `analysis_jobs` collects
+    /// several rows per episode (3–6 for the four field assets), and NULL rows
+    /// keep arriving — `AnalysisJobReconciler.discoverUnEnqueuedDownloads`
+    /// mints them on every reconcile pass (playhead-7ba4), 14 of them after the
+    /// first attributed row on the 2026-08-08 pull. `fetchLatestJobForEpisode`
+    /// orders by `updatedAt DESC` with no `podcastId IS NOT NULL` filter, so
+    /// one such row shadows the show and the episode is refused a scan again —
+    /// a fix that worked once and then stopped.
+    @Test("a newer unattributed row must not shadow the show the lane recorded",
+          .timeLimit(.minutes(1)))
+    func aNewerNullRowDoesNotShadowTheRecordedIdentity() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(
+            AnalysisAsset(
+                id: Self.assetId,
+                episodeId: Self.episodeId,
+                assetFingerprint: "fp-\(Self.assetId)",
+                weakFingerprint: nil,
+                sourceURL: "file:///tmp/\(Self.assetId).m4a",
+                featureCoverageEndTime: Self.episodeDuration,
+                fastTranscriptCoverageEndTime: Self.episodeDuration,
+                confirmedAdCoverageEndTime: nil,
+                analysisState: "new",
+                analysisVersion: 1,
+                capabilitySnapshot: nil,
+                episodeDurationSec: Self.episodeDuration
+            )
+        )
+        try await store.insertTranscriptChunks(chunks())
+        // The attributed row: OLDER on both clocks.
+        try await store.insertJob(makeAnalysisJob(
+            jobId: "job-attributed",
+            jobType: "preAnalysis",
+            episodeId: Self.episodeId,
+            podcastId: Self.show,
+            analysisAssetId: Self.assetId,
+            workKey: "wk-attributed",
+            sourceFingerprint: "fp-\(Self.assetId)",
+            state: "complete",
+            createdAt: 1_000,
+            updatedAt: 1_000
+        ))
+        // The reconciler's later, identity-less mint — newer `updatedAt`.
+        try await store.insertJob(makeAnalysisJob(
+            jobId: "job-sweep",
+            jobType: "preAnalysis",
+            episodeId: Self.episodeId,
+            podcastId: nil,
+            analysisAssetId: Self.assetId,
+            workKey: "wk-sweep",
+            sourceFingerprint: "fp-\(Self.assetId)",
+            createdAt: 2_000,
+            updatedAt: 2_000
+        ))
+
+        let asked = AskedBox()
+        let coordinator = makeCoordinator(store: store)
+        await coordinator.setShowIdentityResolver { _ in
+            asked.markAsked()
+            return nil
+        }
+
+        _ = await runCoarsePhase(coordinator)
+
+        let row = try #require(try await claim(store))
+        #expect(
+            row.deferReason == SemanticScanClaim.Gate.runnerFactoryMissing.deferReason,
+            """
+            The recorded show must still be found with a newer unattributed row \
+            present. A `podcast_id_missing` verdict here means the lane read \
+            takes the LATEST row rather than the latest ATTRIBUTED one.
+            """
+        )
+        #expect(
+            asked.wasAsked == false,
+            "the lane answered, so nothing should have crossed the store boundary"
+        )
     }
 
     /// Lock-protected flag recording whether the injected resolver ran.
