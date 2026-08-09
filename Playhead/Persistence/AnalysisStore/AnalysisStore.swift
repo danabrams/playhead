@@ -14417,7 +14417,9 @@ actor AnalysisStore {
     /// field of `DownloadContext`, and on the 2026-08-08 pull it is NULL on 53
     /// of 72 rows. Every ATTRIBUTED row was created at or after kkzu
     /// (2026-08-03 17:48:58); the converse does NOT hold, and stating it that
-    /// way round is load-bearing — 14 NULL rows postdate that instant, so this
+    /// way round is load-bearing — 15 NULL rows postdate that instant on the
+    /// db-evening and db-overnight pulls (the figure is 14 on db-earlypull,
+    /// taken hours earlier the same day; re-derived at review R1), so this
     /// is not a closed population that one backfill drains. Two mechanisms
     /// produce them: `AnalysisJobReconciler.discoverUnEnqueuedDownloads` holds
     /// no show identity at all and mints `nil` on every reconcile pass

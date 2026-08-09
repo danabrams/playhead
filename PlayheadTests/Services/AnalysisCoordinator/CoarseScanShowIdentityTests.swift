@@ -509,7 +509,7 @@ struct CoarseScanShowIdentityWireInTests {
     /// ATTRIBUTED row plus a NEWER unattributed one. `analysis_jobs` collects
     /// several rows per episode (3–6 for the four field assets), and NULL rows
     /// keep arriving — `AnalysisJobReconciler.discoverUnEnqueuedDownloads`
-    /// mints them on every reconcile pass (playhead-7ba4), 14 of them after the
+    /// mints them on every reconcile pass (playhead-7ba4), 15 of them after the
     /// first attributed row on the 2026-08-08 pull. `fetchLatestJobForEpisode`
     /// orders by `updatedAt DESC` with no `podcastId IS NOT NULL` filter, so
     /// one such row shadows the show and the episode is refused a scan again —
@@ -582,6 +582,80 @@ struct CoarseScanShowIdentityWireInTests {
         #expect(
             asked.wasAsked == false,
             "the lane answered, so nothing should have crossed the store boundary"
+        )
+        // playhead-vtjx REVIEW: and the shadowing row itself is repaired, so
+        // the readers that DO take the latest row stop being shadowed. See
+        // `aRepairedEpisodeStaysRepairedWhenANewNullRowArrives` for why this is
+        // the steady state rather than a one-off.
+        #expect(
+            try await store.fetchJob(byId: "job-sweep")?.podcastId == Self.show,
+            "the newer unattributed row must be filled in, not merely stepped over"
+        )
+    }
+
+    /// **THE CONVERGENCE RAIL (review round R1).** The first implementation
+    /// repaired the lane only on the cross-store recovery branch, so a repaired
+    /// episode drifted straight back to a shadowed state and nothing in the
+    /// suite noticed — every other fixture here reaches the repair through
+    /// `.recoveredFromEpisodeStore`.
+    ///
+    /// The shape is the one the device enters IMMEDIATELY AFTER a successful
+    /// repair: `AnalysisJobReconciler.discoverUnEnqueuedDownloads` holds no show
+    /// identity and mints a fresh NULL row on every reconcile pass
+    /// (playhead-7ba4), which makes the episode MIXED. `fetchRecordedPodcastId`
+    /// still answers, so the coarse lane is fine — but
+    /// `fetchLatestJobForEpisode` (the reconciler's `noCoverageLaneRow` claim
+    /// mint) and `job.podcastId ?? ""` (the full-pass Stage-4 dispatch) read the
+    /// NULL row and reproduce this bead's own `podcast_id_missing` refusal in
+    /// the sibling lane.
+    @Test("a later unattributed row is repaired too, so the lane stays repaired",
+          .timeLimit(.minutes(1)))
+    func aRepairedEpisodeStaysRepairedWhenANewNullRowArrives() async throws {
+        let store = try await seededStore()
+        let coordinator = makeCoordinator(store: store)
+        await coordinator.setShowIdentityResolver { _ in Self.show }
+
+        // Pass 1: the cross-store recovery repairs the only row there is.
+        _ = await runCoarsePhase(coordinator)
+        #expect(try await store.fetchJob(byId: "job-vtjx")?.podcastId == Self.show)
+
+        // The reconciler's next identity-less mint — NEWER on both clocks.
+        // Derived from the seeded row rather than a literal: `makeAnalysisJob`
+        // defaults both stamps to `Date()`, so a small constant here would be
+        // OLDER than the row it is supposed to shadow and the precondition
+        // below would pass for the wrong reason.
+        let seeded = try #require(try await store.fetchJob(byId: "job-vtjx"))
+        try await store.insertJob(makeAnalysisJob(
+            jobId: "job-reconciled",
+            jobType: "preAnalysis",
+            episodeId: Self.episodeId,
+            podcastId: nil,
+            analysisAssetId: Self.assetId,
+            workKey: "wk-reconciled",
+            sourceFingerprint: "fp-\(Self.assetId)",
+            createdAt: seeded.createdAt + 60,
+            updatedAt: seeded.updatedAt + 60
+        ))
+        #expect(
+            try await store.fetchLatestJobForEpisode(Self.episodeId)?.podcastId == nil,
+            "precondition: the new row shadows the show for every latest-row reader"
+        )
+
+        // Pass 2: the lane answers on its own now, and must STILL repair.
+        _ = await runCoarsePhase(coordinator)
+
+        #expect(
+            try await store.fetchJob(byId: "job-reconciled")?.podcastId == Self.show,
+            """
+            A repair that fires only when the episode store rescues the lane \
+            converges for exactly one reconcile pass. Every reader that takes \
+            the LATEST row — AnalysisJobReconciler's claim mint, the full-pass \
+            Stage-4 `job.podcastId ?? ""` — is shadowed again the moment this \
+            row lands, which is this bead's symptom in the other lane.
+            """
+        )
+        #expect(
+            try await store.fetchLatestJobForEpisode(Self.episodeId)?.podcastId == Self.show
         )
     }
 

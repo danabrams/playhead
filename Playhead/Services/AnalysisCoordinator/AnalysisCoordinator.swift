@@ -861,10 +861,18 @@ actor AnalysisCoordinator {
     /// whether the analysis lane still owes a repair for it.
     ///
     /// Three cases rather than a `String?` because the caller must distinguish
-    /// *found* from *recovered*: the two run the scan identically, and only the
-    /// second is evidence that `analysis_jobs.podcastId` is still NULL for this
-    /// episode and can be filled in. Collapsing them would either re-write the
-    /// row on every scan or never write it at all.
+    /// *found* from *recovered* from *absent*: the first two run the scan
+    /// identically and both repair the lane, but only the third is an absence,
+    /// and it is the one the playhead-fil5 gate must still see as `""`.
+    ///
+    /// **REVIEW NOTE — what the two value cases no longer decide.** They used
+    /// to gate the repair (`.recoveredFromEpisodeStore` wrote, `.fromAnalysisLane`
+    /// did not), on the reading that a lane which answers has nothing left to
+    /// fill. That is false the moment an episode is MIXED, which
+    /// `AnalysisJobReconciler.discoverUnEnqueuedDownloads` makes it on the next
+    /// reconcile pass after any repair — see ``resolveShowIdentity(forEpisode:)``.
+    /// The distinction they still carry is diagnostic (``sourceLabel``, and
+    /// whether the episode store had to be asked at all), not authorisation.
     enum CoarseScanShowIdentity: Equatable, Sendable {
         /// The analysis lane's own row already names the show.
         case fromAnalysisLane(String)
@@ -885,6 +893,16 @@ actor AnalysisCoordinator {
                 return id
             case .unknown:
                 return ""
+            }
+        }
+
+        /// Which store the identity came from, for the repair log. Diagnostic
+        /// only — nothing branches on it.
+        var sourceLabel: String {
+            switch self {
+            case .fromAnalysisLane: return "lane"
+            case .recoveredFromEpisodeStore: return "episode_store"
+            case .unknown: return "none"
             }
         }
     }
@@ -943,8 +961,8 @@ actor AnalysisCoordinator {
     ///     (playhead-hc7e/iu0t — canonicalization lives at the callee).
     ///   - podcastId: the newest ATTRIBUTED `analysis_jobs` row for the episode
     ///     first, and — playhead-vtjx — the EPISODE store when no such row
-    ///     exists. An identity found only in the second store is written back
-    ///     to the first, so the next reader of
+    ///     exists. Whichever store answered, the identity is written to every
+    ///     unattributed `analysis_jobs` row of the episode, so the next reader of
     ///     `analysis_jobs.podcastId` (the reconciler's claim mint, the
     ///     scheduler's `job.podcastId ?? ""`, rediff's latest-job read, and
     ///     every re-mint that inherits the column) sees it too. Only when
@@ -1047,9 +1065,40 @@ actor AnalysisCoordinator {
             )
         }
         switch identity {
-        case .fromAnalysisLane:
-            break
-        case .recoveredFromEpisodeStore(let podcastId):
+        case .fromAnalysisLane(let podcastId), .recoveredFromEpisodeStore(let podcastId):
+            // playhead-vtjx REVIEW: the repair runs for BOTH value cases, not
+            // only the cross-store recovery, and the reason is that the lane
+            // does not stay repaired.
+            //
+            // `analysis_jobs` collects several rows per episode, and
+            // `AnalysisJobReconciler.discoverUnEnqueuedDownloads` holds no show
+            // identity at all and mints a fresh NULL one on every reconcile
+            // pass (playhead-7ba4; 15 such rows on the 2026-08-08 pull). The
+            // instant one lands, the episode is MIXED — some rows attributed,
+            // the newest not — and the two OTHER readers this bead's fix shape
+            // names read exactly the row that is NULL: the reconciler's
+            // `noCoverageLaneRow` claim mint (`AnalysisJobReconciler` :1551)
+            // and the full-pass Stage-4 dispatch (`AnalysisWorkScheduler`
+            // :4759, `job.podcastId ?? ""`), both of which go through
+            // `fetchLatestJobForEpisode` / the job row itself and so are
+            // shadowed by it. That second lane then reproduces this bead's own
+            // symptom — a `podcast_id_missing` refusal — for an episode whose
+            // show the lane already records.
+            //
+            // Repairing only on `.recoveredFromEpisodeStore` made the fix
+            // converge for exactly one pass and then diverge again, and it did
+            // so INVISIBLY, because the coarse lane itself reads
+            // `fetchRecordedPodcastId` and is immune to the shadowing it left
+            // behind. Zero episodes on the pull are mixed today (0 of 21) —
+            // the state is reachable only once the repair below has succeeded,
+            // which is why it is this change that creates the obligation.
+            //
+            // It is not a re-point and cannot become one: the write is
+            // `WHERE podcastId IS NULL`, and the value is the lane's OWN
+            // newest attributed record, so in the `.fromAnalysisLane` case the
+            // lane is being made self-consistent rather than told anything new.
+            // In the steady state it is one indexed `UPDATE` matching no rows,
+            // at most `coarseScanSweepLimit` (8) times per granted window.
             do {
                 let repaired = try await store.backfillJobPodcastId(
                     episodeId: episodeId,
@@ -1059,7 +1108,7 @@ actor AnalysisCoordinator {
                     logger.info(
                         """
                         coarse_scan_show_identity_repaired episode=\(episodeId, privacy: .public) \
-                        rows=\(repaired)
+                        rows=\(repaired) source=\(identity.sourceLabel, privacy: .public)
                         """
                     )
                 }
