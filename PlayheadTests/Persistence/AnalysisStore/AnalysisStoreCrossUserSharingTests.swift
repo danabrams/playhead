@@ -147,7 +147,9 @@ struct AnalysisStoreCrossUserSharingTests {
             fileSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             analysisVersion: 1
         ))
-        #expect(snapshot?.schemaVersion == 4)
+        // playhead-ar60: 4 -> 5. The bump is what makes `Window
+        // .skipConfidence == nil` readable — see the type's own doc.
+        #expect(snapshot?.schemaVersion == 5)
         #expect(snapshot?.measurements.fmMinutesSaved == nil)
         #expect(snapshot?.analysisCoverageEndSec == 40)
         #expect(snapshot?.measurements.queueToReadyLatencySec == 3.25)

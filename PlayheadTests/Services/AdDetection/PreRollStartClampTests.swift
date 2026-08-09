@@ -87,6 +87,10 @@ struct PreRollStartClampTests {
         #expect(actual.startTime.bitPattern == expected.startTime.bitPattern)
         #expect(actual.endTime.bitPattern == expected.endTime.bitPattern)
         #expect(actual.confidence.bitPattern == expected.confidence.bitPattern)
+        // playhead-ar60: the clamp rewrites GEOMETRY; the actuation
+        // number carries through like every other field here.
+        #expect(actual.skipConfidence?.bitPattern == expected.skipConfidence?.bitPattern)
+        #expect(actual.actuationConfidence.bitPattern == expected.actuationConfidence.bitPattern)
         #expect(actual.boundaryState == expected.boundaryState)
         #expect(actual.decisionState == expected.decisionState)
         #expect(actual.detectorVersion == expected.detectorVersion)

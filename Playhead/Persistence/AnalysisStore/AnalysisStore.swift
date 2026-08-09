@@ -6862,6 +6862,12 @@ actor AnalysisStore {
                 // `skipConfidence` is assigned from the OLD `confidence` and
                 // `confidence` from the matching event, and SQLite evaluates
                 // every SET expression against the pre-UPDATE row.
+                // The two halves carry the SAME predicate — a picker that can
+                // select a row the existence test excluded is how a repair
+                // comes to write a value nobody vouched for. `rowid` is the
+                // final tiebreaker for the same reason `loadDecisionEvents`
+                // adds it: equal `createdAt` is not ordered by contract, and
+                // this movement happens exactly once and cannot be redone.
                 try exec("""
                     UPDATE ad_windows
                        SET skipConfidence = confidence,
@@ -6869,7 +6875,8 @@ actor AnalysisStore {
                                SELECT d.proposalConfidence FROM decision_events d
                                 WHERE d.windowId = ad_windows.id
                                   AND d.skipConfidence = ad_windows.confidence
-                                ORDER BY d.createdAt DESC LIMIT 1
+                                  AND d.proposalConfidence IS NOT NULL
+                                ORDER BY d.createdAt DESC, d.rowid DESC LIMIT 1
                            )
                      WHERE skipConfidence IS NULL
                        AND EXISTS (

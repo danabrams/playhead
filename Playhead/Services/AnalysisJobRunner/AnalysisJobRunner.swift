@@ -1273,6 +1273,12 @@ actor AnalysisJobRunner {
     }
 
     private static func isCueWindow(_ window: AdWindow) -> Bool {
+        // playhead-ar60: DETECTION, deliberately. "Does this asset have
+        // actionable cues?" is a question about how much ad the pipeline
+        // FOUND, and it feeds progress/coverage accounting — not a skip. Before
+        // V47 this floor saw the fusion path's actuation number, so an asset
+        // could report no cues purely because the user had corrected something
+        // else on it. `eligibilityGate` below is what withholds actuation.
         window.confidence >= cueConfidenceThreshold
             && window.endTime > window.startTime
             && isActionableCueEligibilityGate(window.eligibilityGate)

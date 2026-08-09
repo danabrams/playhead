@@ -1133,33 +1133,79 @@ actor PersistentUserCorrectionStore: UserCorrectionStore {
                 event.source?.kind == .falsePositive || event.source == nil
             let isBooster = event.source?.kind == .falseNegative
             guard isSuppressor || isBooster else { continue }
-            guard let scope = CorrectionScope.deserialize(event.scope) else {
-                continue
+
+            // `range == nil` means "applies to every span". `placement ==
+            // .unplaceable` means "this correction is real but we cannot say
+            // WHERE" — a different thing, resolved below in the SAFE direction
+            // for each side.
+            enum Placement {
+                case everywhere
+                case span(ClosedRange<Double>)
+                case unplaceable
             }
-            let range: ClosedRange<Double>?
-            switch scope {
+            let placement: Placement
+            switch CorrectionScope.deserialize(event.scope) {
             case .exactTimeSpan(_, let start, let end):
-                guard start.isFinite, end.isFinite, end >= start else {
-                    continue
-                }
-                range = start...end
+                placement = start.isFinite && end.isFinite && end >= start
+                    ? .span(start...end)
+                    : .unplaceable
             case .exactSpan(_, let ordinalRange):
-                // A REAL transcript ordinal has no time mapping at this layer,
-                // exactly as in `correctionBoostFactor(for:overlapping:)`. It
-                // is dropped rather than treated as show-wide: an unplaceable
-                // span correction is the asset blanket this bead removed.
-                guard ordinalRange.lowerBound < 0,
-                      let times = synthSpansByOrdinal[ordinalRange.lowerBound],
-                      times.startTime.isFinite,
-                      times.endTime.isFinite,
-                      times.endTime >= times.startTime else {
-                    continue
+                // A synthetic (negative) ordinal resolves through the span
+                // map. A REAL transcript ordinal has no time mapping at this
+                // layer — the same limitation
+                // `correctionBoostFactor(for:overlapping:)` documents.
+                if ordinalRange.lowerBound < 0,
+                   let times = synthSpansByOrdinal[ordinalRange.lowerBound],
+                   times.startTime.isFinite,
+                   times.endTime.isFinite,
+                   times.endTime >= times.startTime {
+                    placement = .span(times.startTime...times.endTime)
+                } else {
+                    placement = .unplaceable
                 }
-                range = times.startTime...times.endTime
             case .sponsorOnShow, .phraseOnShow, .campaignOnShow,
                  .domainOwnershipOnShow, .jingleOnShow:
                 // Genuinely asset-wide: the user vetoed a SPONSOR or a PHRASE,
-                // not a position. `nil` range = applies to every span.
+                // not a position.
+                placement = .everywhere
+            case .none:
+                // A scope string this build cannot decode — corrupt, or
+                // written by a wider vocabulary.
+                placement = .unplaceable
+            }
+
+            // WHAT AN UNPLACEABLE CORRECTION DOES, and why the two sides
+            // differ. `correctionPassthroughFactor` / `correctionBoostFactor`
+            // — the asset-wide functions this snapshot replaces — never
+            // decoded the scope at all: EVERY correction counted, everywhere.
+            // So dropping an unplaceable one is a change, and the direction of
+            // that change is not symmetric:
+            //
+            //   * A SUPPRESSOR is the user saying "not an ad". Dropping it
+            //     fails OPEN on the one path that must never fail open, and it
+            //     would silently retire two real populations: the legacy
+            //     `.exactSpan(0...Int.max)` whole-episode vetoes documented on
+            //     `CorrectionScope.exactTimeSpan`, and every
+            //     `recordVeto(span:)` write, which uses REAL ordinals. It is
+            //     applied EVERYWHERE — exactly its pre-ar60 reach.
+            //   * A BOOSTER is the user saying "there IS an ad here". Applying
+            //     an unplaceable one everywhere is what inflated seven
+            //     unrelated spans on the device pull and pushed five of them
+            //     past the 0.7 preload floor. It is applied NOWHERE.
+            //
+            // One rule, stated once: an unplaceable correction acts in the
+            // direction that cannot cost the user a skip they did not ask for.
+            let range: ClosedRange<Double>?
+            switch placement {
+            case .everywhere:
+                range = nil
+            case .span(let resolved):
+                range = resolved
+            case .unplaceable:
+                guard isSuppressor else { continue }
+                logger.debug(
+                    "correctionFactorSnapshot: unplaceable suppressor scope for \(analysisAssetId, privacy: .public) applied asset-wide (pre-ar60 reach)"
+                )
                 range = nil
             }
             let entry = CorrectionFactorSnapshot.Entry(

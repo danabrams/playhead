@@ -8819,7 +8819,19 @@ actor AdDetectionService {
         // uncertainty, and a banner Dan can answer is exactly what that
         // population is for (feedback_banner_is_a_skip_affordance). A general
         // low-confidence EMISSION FLOOR is a recall decision and is NOT taken
-        // here — see the bead comment; filed separately.
+        // here — see the bead comment; filed as playhead-4obf.
+        //
+        // ONE KNOWN TRADEOFF, recorded rather than hidden. A SHOW-WIDE veto
+        // (`sponsorOnShow`, `phraseOnShow`, ...) legitimately applies to every
+        // span, so a strong one can drive a whole episode under the 0.40
+        // correction gate and, through this arm, suppress every fusion banner
+        // in it — where pre-ar60 those spans still surfaced. The "the user
+        // judged THIS span" justification above is weaker for a sponsor-scoped
+        // veto than for a time-span one. It is not reachable today (zero
+        // show-wide scopes exist in either 2026-08-02 device pull; the UI only
+        // writes `exactTimeSpan`), and suppressing banners for a sponsor the
+        // user has explicitly vetoed is defensible on its own terms — but if a
+        // show-wide veto path ever ships, revisit this arm before it does.
         let decisionState = Self.fusionDecisionState(
             policyAction: policyAction,
             eligibilityGate: decision.eligibilityGate

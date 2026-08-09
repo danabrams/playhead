@@ -347,19 +347,30 @@ struct AdWindowSkipConfidenceSplitV47MigrationTests {
         AnalysisStore.resetMigratedPathsForTesting()
         let first = try AnalysisStore(directory: dir)
         try await first.migrate()
-        // Re-run the ladder on an already-migrated DB. If the repair were
-        // scoped only by "has a witness" rather than by `skipConfidence IS
-        // NULL`, this second pass would move `confidence` (now the PROPOSAL)
-        // into `skipConfidence` and leave the row asserting an actuation
-        // permission of 0.456 for a span the user vetoed.
+        let once = try #require(try await first.fetchAdWindow(id: witness.windowId))
+        #expect(once.confidence == witness.proposalConfidence)
+        #expect(once.skipConfidence == witness.skipConfidence)
+
+        // Re-run the REPAIR, not just the ladder. Simply calling `migrate()`
+        // again proves nothing: `guard observed < 47` returns before the
+        // UPDATE, so a version-guard test would stay green with the
+        // `WHERE skipConfidence IS NULL` clause DELETED. Rewinding only the
+        // recorded version — leaving the column and its now-repaired data in
+        // place — is the state that actually exercises the clause. Without it
+        // the second pass moves `confidence` (now the PROPOSAL) into
+        // `skipConfidence`, leaving the row asserting an actuation permission
+        // of 0.456 for a span the user vetoed.
+        try await first.setMetaValue(forKey: "schema_version", value: "46")
         AnalysisStore.resetMigratedPathsForTesting()
         let second = try AnalysisStore(directory: dir)
         try await second.migrate()
-        try await second.migrateOnlyForTesting()
 
         let row = try #require(try await second.fetchAdWindow(id: witness.windowId))
-        #expect(row.confidence == witness.proposalConfidence)
-        #expect(row.skipConfidence == witness.skipConfidence)
+        #expect(try await second.schemaVersion() == AnalysisStore.currentSchemaVersion)
+        #expect(row.confidence == witness.proposalConfidence,
+                "the detection number must not be moved a second time")
+        #expect(row.skipConfidence == witness.skipConfidence,
+                "the actuation column must still hold the actuation number")
     }
 
     // MARK: - CRUD round-trip

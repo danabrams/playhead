@@ -53,6 +53,8 @@ struct MigrationLadderTests {
         #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "catalogMatchedShowId"))
         #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "catalogMatchedLearningSource"))
         #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "catalogMatchedLearningLifecycle"))
+        // playhead-ar60 (V47): the ACTUATION column.
+        #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "skipConfidence"))
         for column in [
             "learningSource",
             "learningLifecycle",
@@ -147,6 +149,8 @@ struct MigrationLadderTests {
         #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "catalogMatchedShowId"))
         #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "catalogMatchedLearningSource"))
         #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "catalogMatchedLearningLifecycle"))
+        // playhead-ar60 (V47): the ACTUATION column.
+        #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "skipConfidence"))
 
         // Migration is committed and the store is usable.
         try await store.insertAsset(

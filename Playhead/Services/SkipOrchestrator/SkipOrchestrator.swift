@@ -7080,7 +7080,12 @@ actor SkipOrchestrator {
             originalEnd: managed.adWindow.endTime,
             snappedStart: managed.snappedStart,
             snappedEnd: managed.snappedEnd,
-            confidence: managed.adWindow.confidence,
+            // playhead-ar60: the ACTUATION number — the one `evaluateWindow`
+            // compared against the hysteresis thresholds. Recording
+            // `confidence` here would make the log say the decision was taken
+            // on a number it was not, which for a fusion row differs by ~400x.
+            // That is this bead's own defect class pointed at a diagnostic.
+            confidence: managed.adWindow.actuationConfidence,
             timestamp: Date().timeIntervalSince1970
         )
         decisionLog.append(record)

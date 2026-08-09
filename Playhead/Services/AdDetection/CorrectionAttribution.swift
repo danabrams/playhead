@@ -630,6 +630,10 @@ enum ExplicitBannerFeedbackPrivacy {
             && window.confidence.isFinite
             && (window.evidenceStartTime.map { $0.isFinite } ?? true)
             && (window.metadataConfidence.map { $0.isFinite } ?? true)
+            // playhead-ar60: the actuation number gets the same clause
+            // as its sibling. This validator gates what enters a FROZEN
+            // egress baseline, and SQLite stores an infinity happily.
+            && (window.skipConfidence.map { $0.isFinite } ?? true)
             && (window.catalogStoreMatchSimilarity.map { $0.isFinite }
                 ?? true)
     }
