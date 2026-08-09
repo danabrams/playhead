@@ -673,3 +673,75 @@ struct CoarseScanShowIdentityWireInTests {
         }
     }
 }
+
+// MARK: - The wiring
+
+/// **THE WIRING RAIL (review round R2).** Every suite above injects the
+/// resolver by hand, so all of them prove that the recovery MECHANISM works —
+/// and none of them proves that anything in the app ever installs one.
+/// Deleting the `setShowIdentityResolver` block from `PlayheadRuntime.init`
+/// leaves this file's other 15 tests green while the shipped app reverts
+/// exactly to the pre-bead behaviour: `showIdentityResolver` stays nil, the
+/// episode store is never asked, and the four backlog assets keep deferring on
+/// `podcast_id_missing`. That is the "a rail proves the mechanism, not that
+/// anyone uses it" failure this repo has shipped before.
+///
+/// **What this pins, and what it deliberately does not.** It drives the REAL
+/// `PlayheadRuntime`'s own coordinator through the REAL box that
+/// `setEpisodePodcastIdResolver` writes, so it covers the runtime half of the
+/// seam end to end — including the late-read requirement, since the box is
+/// empty while `PlayheadRuntime.init` runs and is filled only afterwards here,
+/// exactly as `PlayheadApp` fills it from its `WindowGroup` `.task`. The
+/// remaining edge — that the `.task` itself calls
+/// `setEpisodePodcastIdResolver` — is a SwiftUI scene body and is not
+/// reachable without a scene; it is also PRE-EXISTING shared machinery (the
+/// final-pass launch sweep depends on the same install), not something this
+/// bead introduced. playhead-1shd is where making that install
+/// scene-independent lives.
+@MainActor
+@Suite("playhead-vtjx: PlayheadRuntime wires its coordinator to the episode store")
+struct CoarseScanShowIdentityRuntimeWiringTests {
+
+    @Test("the runtime's coordinator recovers a show through the runtime's own resolver",
+          .timeLimit(.minutes(1)))
+    func theRuntimeInstallsTheResolverOnItsCoordinator() async throws {
+        // Unique per run so no row in the runtime's real analysis store can
+        // answer for it — the lane must be silent, which is what forces the
+        // question through to the episode-store resolver.
+        let episodeId = "https://example.com/vtjx-\(UUID().uuidString).xml::\(UUID().uuidString)"
+        let show = "https://example.com/vtjx-wiring-feed.xml"
+
+        try await withTestRuntime(isPreviewRuntime: true) { runtime in
+            // Installed AFTER construction, which is the ordering that matters:
+            // the box is empty while `PlayheadRuntime.init` runs, so a wiring
+            // that captured the box's CONTENTS instead of the box itself would
+            // answer nil here forever.
+            runtime.setEpisodePodcastIdResolver { requested in
+                requested == episodeId ? show : nil
+            }
+
+            // The install is an unstructured `Task` in `init`, so wait for it
+            // instead of assuming it has already run. `.unknown` is what a
+            // MISSING wiring returns on every iteration, so a deleted call site
+            // spends the whole budget and then fails the assertion below.
+            var identity = AnalysisCoordinator.CoarseScanShowIdentity.unknown
+            for _ in 0..<100 {
+                identity = await runtime.analysisCoordinator
+                    .resolveShowIdentity(forEpisode: episodeId)
+                if identity != .unknown { break }
+                try await Task.sleep(for: .milliseconds(10))
+            }
+
+            #expect(
+                identity == .recoveredFromEpisodeStore(show),
+                """
+                `PlayheadRuntime.init` must install the episode-store resolver \
+                on its own `analysisCoordinator`. Without it the coordinator's \
+                recovery path is dead code in the shipped app and the four \
+                backlog assets (DE0784D8, AD5F3A0A, 53FC53E3, 83592353) keep \
+                deferring on `podcast_id_missing`.
+                """
+            )
+        }
+    }
+}

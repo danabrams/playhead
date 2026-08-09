@@ -1025,7 +1025,15 @@ actor AnalysisCoordinator {
     /// on 2026-08-06 alone, in two same-second batches). Repairing the column
     /// while reading it through a query that a later NULL can shadow would have
     /// produced a fix that worked once and then stopped.
-    private func resolveShowIdentity(
+    /// **`internal`, not `private` (playhead-vtjx review R2).** It is the only
+    /// point at which the installed ``showIdentityResolver`` is observable, and
+    /// without an observation the `PlayheadRuntime` → coordinator wiring is
+    /// unpinned: deleting that install left every rail in
+    /// `CoarseScanShowIdentityTests` green, because each of them injects a
+    /// resolver directly. See
+    /// `CoarseScanShowIdentityRuntimeWiringTests`, which drives this from a
+    /// real runtime. Nothing in production calls it from outside this type.
+    func resolveShowIdentity(
         forEpisode episodeId: String?
     ) async -> CoarseScanShowIdentity {
         guard let episodeId else { return .unknown }
