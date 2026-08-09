@@ -1728,7 +1728,7 @@ actor AnalysisStore {
     /// assertions automatically follow the production constant — hardcoding
     /// the integer in tests has been a recurring source of stale-assertion
     /// flakes whenever the schema bumps.
-    nonisolated static let currentSchemaVersion = 45
+    nonisolated static let currentSchemaVersion = 46
 
     /// H1: minimum age (in seconds) a `backfill_jobs` / `final_pass_jobs`
     /// row stuck in `status='running'` must reach before the launch-time
@@ -2580,6 +2580,9 @@ actor AnalysisStore {
             // playhead-rkfp/ezmv: the wait-vs-infer split — nullable
             // suspending-clock twin and daemon-census columns, no backfill.
             try migrateScanLatencySplitV45IfNeeded()
+            // playhead-3oyz: the day-0 same-session retry claim — a dropped
+            // retry must not read as "never happened" (the fil5 precedent).
+            try migrateRediffDayZeroRetryClaimV46IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -2936,6 +2939,9 @@ actor AnalysisStore {
         // playhead-rkfp/ezmv (v45): guarded on `tableExists`, so a seeded
         // fixture without `semantic_scan_results` still reaches v45.
         try migrateScanLatencySplitV45IfNeeded()
+        // playhead-3oyz (v46): guarded on `tableExists`, so a seeded fixture
+        // without `rediff_day_zero_attempts` still reaches v46.
+        try migrateRediffDayZeroRetryClaimV46IfNeeded()
     }
     #endif
 
@@ -6686,6 +6692,47 @@ actor AnalysisStore {
         try setSchemaVersion(45)
     }
 
+    // MARK: - V46: day-0 same-session retry claim (playhead-3oyz)
+    //
+    // Two columns on `rediff_day_zero_attempts`. `retryClaimCount` — how many
+    // same-session retries the trigger has CLAIMED for the asset;
+    // `lastRetryClaimAt` — when the most recent claim was written. The claim
+    // lands BEFORE the retry's delay, so a process that dies parked on the
+    // sleep (or mid-retry) leaves `lastRetryClaimAt > lastAttemptAt` — the
+    // queryable signature of "a retry was owed and never completed"
+    // (playhead-fil5: a dropped request must not read as "never happened").
+    //
+    // `lastRetryClaimAt` is nullable with no backfill, exactly like V45's
+    // columns: NULL means "written by a binary that did not claim retries",
+    // and inventing a timestamp for historical rows would assert a claim
+    // nobody made. `retryClaimCount DEFAULT 0` is correct for every existing
+    // row: no build before this one could have claimed one.
+
+    /// V46 migration — the day-0 retry-claim columns. Idempotent
+    /// (`addColumnIfNeeded`) and guarded on `tableExists` so a seeded fixture
+    /// without the day-0 table still reaches v46.
+    private func migrateRediffDayZeroRetryClaimV46IfNeeded() throws {
+        let observed = (try schemaVersion() ?? 1)
+        guard observed < 46 else { return }
+        // DO NOT STEP OVER A ROLLED-BACK V39, exactly as V40–V45 do not — see
+        // `migrateSemanticScanAttributionV42IfNeeded` for why the ladder does
+        // not enforce this structurally.
+        guard observed >= 45 else { return }
+        if try tableExists("rediff_day_zero_attempts") {
+            try addColumnIfNeeded(
+                table: "rediff_day_zero_attempts",
+                column: "retryClaimCount",
+                definition: "INTEGER NOT NULL DEFAULT 0"
+            )
+            try addColumnIfNeeded(
+                table: "rediff_day_zero_attempts",
+                column: "lastRetryClaimAt",
+                definition: "REAL"
+            )
+        }
+        try setSchemaVersion(46)
+    }
+
     /// Fold ONE settled day-0 kickoff into its episode's row.
     ///
     /// The counters accumulate in SQL rather than in Swift so two writers can
@@ -7295,7 +7342,9 @@ actor AnalysisStore {
     /// here would be a read-modify-write over a counter another writer is
     /// incrementing, and the interleaving is not hypothetical: an
     /// `.alreadyInFlight` suppression is recorded PRECISELY while the attempt
-    /// it collided with is between its own read and its own write.
+    /// it collided with is between its own read and its own write. The two
+    /// RETRY-CLAIM columns (playhead-3oyz) get the identical treatment for the
+    /// identical reason — `noteRediffDayZeroRetryClaim` owns them.
     func upsertRediffDayZeroAttempt(_ record: RediffDayZeroAttemptRecord) throws {
         let sql = """
             INSERT INTO rediff_day_zero_attempts
@@ -7303,8 +7352,8 @@ actor AnalysisStore {
              lastBSideCount, lastBSidesAccepted, lastBSidesGateRejected,
              lastBSidesUnreadable, lastDivergentSlotCount, lastFullFetchBytes,
              totalFullFetchBytes, suppressedCount, lastSuppressedAt, lastDetail,
-             policyGeneration, rescueAttemptCount)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             policyGeneration, rescueAttemptCount, retryClaimCount, lastRetryClaimAt)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(analysisAssetId) DO UPDATE SET
                 attemptCount = excluded.attemptCount,
                 lastAttemptAt = excluded.lastAttemptAt,
@@ -7350,6 +7399,12 @@ actor AnalysisStore {
         }
         bind(stmt, 16, record.policyGeneration)
         bind(stmt, 17, record.rescueAttemptCount)
+        bind(stmt, 18, record.retryClaimCount)
+        if let retryClaimAt = record.lastRetryClaimAt {
+            bind(stmt, 19, retryClaimAt)
+        } else {
+            sqlite3_bind_null(stmt, 19)
+        }
         try step(stmt, expecting: SQLITE_DONE)
     }
 
@@ -7383,6 +7438,37 @@ actor AnalysisStore {
         bind(stmt, 1, assetId)
         bind(stmt, 2, now)
         bind(stmt, 3, reason.rawValue)
+        bind(stmt, 4, now)
+        bind(stmt, 5, DayZeroRediffAttemptPolicy.currentGeneration)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// playhead-3oyz: durably CLAIM a same-session retry BEFORE its delay —
+    /// the fil5 discipline. Increments ONLY `retryClaimCount` /
+    /// `lastRetryClaimAt` on conflict, exactly as `noteRediffDayZeroSuppression`
+    /// owns its pair: a claim is not an attempt, so it must neither consume the
+    /// attempt budget nor overwrite the exit the failed attempt recorded.
+    ///
+    /// The INSERT arm is defensive only: a claim always follows a recorded
+    /// `.fetchFailed` attempt for the same asset (the retry is granted off that
+    /// attempt's summary), so the row exists. If a record write failed and the
+    /// insert does run, it seeds `attemptCount = 0` (immediately eligible) with
+    /// the one exit a claim can follow.
+    func noteRediffDayZeroRetryClaim(assetId: String, at now: Double) throws {
+        let sql = """
+            INSERT INTO rediff_day_zero_attempts
+            (analysisAssetId, attemptCount, lastAttemptAt, lastExit,
+             retryClaimCount, lastRetryClaimAt, policyGeneration)
+            VALUES (?, 0, ?, ?, 1, ?, ?)
+            ON CONFLICT(analysisAssetId) DO UPDATE SET
+                retryClaimCount = retryClaimCount + 1,
+                lastRetryClaimAt = excluded.lastRetryClaimAt
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, assetId)
+        bind(stmt, 2, now)
+        bind(stmt, 3, RediffDayZeroExit.fetchFailed.rawValue)
         bind(stmt, 4, now)
         bind(stmt, 5, DayZeroRediffAttemptPolicy.currentGeneration)
         try step(stmt, expecting: SQLITE_DONE)
@@ -7481,7 +7567,7 @@ actor AnalysisStore {
                lastBSideCount, lastBSidesAccepted, lastBSidesGateRejected,
                lastBSidesUnreadable, lastDivergentSlotCount, lastFullFetchBytes,
                totalFullFetchBytes, lastDetail, suppressedCount, lastSuppressedAt,
-               policyGeneration, rescueAttemptCount
+               policyGeneration, rescueAttemptCount, retryClaimCount, lastRetryClaimAt
         FROM rediff_day_zero_attempts
         """
 
@@ -7514,7 +7600,11 @@ actor AnalysisStore {
             policyGeneration: Int(sqlite3_column_int64(stmt, 15)),
             // playhead-ug9m: same discipline. A row written before v43 reads 0
             // — no rescue spent — which is the truth for every one of them.
-            rescueAttemptCount: Int(sqlite3_column_int64(stmt, 16))
+            rescueAttemptCount: Int(sqlite3_column_int64(stmt, 16)),
+            // playhead-3oyz: a row written before v46 reads 0 / NULL — no
+            // retry ever claimed — which is the truth for every one of them.
+            retryClaimCount: Int(sqlite3_column_int64(stmt, 17)),
+            lastRetryClaimAt: sqlite3_column_type(stmt, 18) == SQLITE_NULL ? nil : sqlite3_column_double(stmt, 18)
         )
     }
 

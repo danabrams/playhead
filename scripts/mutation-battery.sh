@@ -1842,6 +1842,16 @@ FOCUSED_SUITES=(
   -only-testing:PlayheadTests/BackfillCoarseFirstOrderTests
   -only-testing:PlayheadTests/CoarseScanLoopTests
   -only-testing:PlayheadTests/DrainFloorDerivationTests
+  # playhead-3oyz: the day-0 same-session retry (SS series). Three suites,
+  # because the claim spans three layers and no one of them can see the
+  # others: the pure grant (zero MEASURED bytes + .fetchFailed + the bound);
+  # the trigger loop that the grant drives (claim BEFORE delay, gates re-read
+  # across it, byte-spending failures take zero trips); and the real-store
+  # durability half, which is the only thing able to see the fil5 signature
+  # (`lastRetryClaimAt > lastAttemptAt`) a dropped retry must leave behind.
+  -only-testing:PlayheadTests/DayZeroSameSessionRetryPolicyTests
+  -only-testing:PlayheadTests/DayZeroSameSessionRetryTriggerTests
+  -only-testing:PlayheadTests/DayZeroSameSessionRetryStoreTests
 )
 
 # Named to match the `/private/tmp/playhead-*` pattern `scripts/disk-cleanup.sh`
@@ -2899,6 +2909,17 @@ T_13KF_LOOPGATE="the window floor is a START gate between assets, not a kill swi
 T_13KF_FIL5="candidates keep BOTH populations, resumable first, deduplicated"
 T_13KF_FLOORZERO="the reordered handler's drain floor is zero, and zero is a derivation"
 T_13KF_RECOVERYFLOOR="recovery keeps the coarse-window price on its drain — it was NOT reordered"
+
+# ---- playhead-3oyz: the day-0 same-session retry (SS series) ----
+T_3OYZ_POLICY_BYTES="A FAILURE THAT LANDED A B-COPY IS NOT RETRIED — the p70f replay bleed stays closed"
+T_3OYZ_TRIGGER_BYTES="A MID-BATCH FAILURE THAT LANDED A COPY IS NOT RETRIED — measured bytes, not the error code, decide"
+T_3OYZ_POLICY_SCOPE="the grant is scoped to .fetchFailed — every other zero-cost exit declines"
+T_3OYZ_TRIGGER_PREFETCH="a zero-cost PREFETCH BLOCK does not retry — zero bytes alone is not the grant"
+T_3OYZ_POLICY_BOUND="the bound: one retry per trigger invocation, then stop"
+T_3OYZ_TRIGGER_BOUND="THE BOUND: a retry that times out again is NOT retried a second time"
+T_3OYZ_WITNESS="THE WITNESS, FIXED: a -1001 that landed nothing is retried once and the pre-roll lane lights up"
+T_3OYZ_CANCEL="CANCELLATION MID-DELAY drops the retry — after the claim, never before it"
+T_3OYZ_DROPPED="A DROPPED RETRY IS QUERYABLE: lastRetryClaimAt > lastAttemptAt with no attempt after it (fil5)"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -6175,6 +6196,22 @@ MUTATIONS=(
   "RO06|607|ACOORD|$T_13KF_FIL5"
   "RO07|608|GRANT|$T_13KF_FLOORZERO"
   "RO08|609|GRANT|$T_13KF_RECOVERYFLOOR"
+
+  # playhead-3oyz: the day-0 same-session retry (SS series, batches 700-703).
+  #
+  # Batching notes, both load-bearing:
+  #   * SS03 (the bound) must NOT share a batch with SS01/SS02: combined they
+  #     make an always-blocked asset retry-eligible forever, and the trigger
+  #     loop would spin unbounded inside the prefetch-block test — a hang, not
+  #     a verdict.
+  #   * SS04 and SS05 rewrite the SAME claim/delay pair, so whichever lands
+  #     first destroys the other's anchor (the M08/M13 precedent).
+  "SS01|700|POLICY|$T_3OYZ_POLICY_BYTES;$T_3OYZ_TRIGGER_BYTES"
+  "SS02|700|POLICY|$T_3OYZ_POLICY_SCOPE;$T_3OYZ_TRIGGER_PREFETCH"
+  "SS03|701|POLICY|$T_3OYZ_POLICY_BOUND;$T_3OYZ_TRIGGER_BOUND"
+  "SS04|702|TRIG|$T_3OYZ_WITNESS;$T_3OYZ_CANCEL"
+  "SS06|702|RSVC|$T_3OYZ_TRIGGER_BYTES"
+  "SS05|703|TRIG|$T_3OYZ_WITNESS;$T_3OYZ_CANCEL;$T_3OYZ_DROPPED"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -14564,6 +14601,88 @@ EOF
 EOF
     snippet NEW <<'EOF'
         minimumDrainCheckpointBudget: .zero,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # ---- playhead-3oyz: the day-0 same-session retry (SS series) ----
+
+  # SS01 — ignore the MEASURED bytes: any fetch failure retries. This is the
+  # p70f replay bleed reopened one notch — a mid-batch failure that landed a
+  # ~54 MB copy re-spends the k-way fetch in the same session.
+  SS01)
+    snippet OLD <<'EOF'
+        return measuredFullFetchBytes == 0
+EOF
+    snippet NEW <<'EOF'
+        return true
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # SS02 — widen the grant from `.fetchFailed` to ANY named exit: the exact
+  # defect class the bead names (an exit code read as if it carried the byte
+  # fact), pointed the other way — a local-state block becomes a network
+  # retry.
+  SS02)
+    snippet OLD <<'EOF'
+        guard exit == .fetchFailed else { return false }
+EOF
+    snippet NEW <<'EOF'
+        guard exit != nil else { return false }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # SS03 — unbound the retry: "a small fixed number" quietly becomes "until it
+  # works". The trigger loop's only brake is this comparison.
+  SS03)
+    snippet OLD <<'EOF'
+        guard retriesUsed < maxSameSessionRetries else { return false }
+EOF
+    snippet NEW <<'EOF'
+        guard retriesUsed < 99 else { return false }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # SS04 — sleep FIRST, claim after: reads as a harmless reorder, and a
+  # process killed during the delay once again leaves no trace that a retry
+  # was owed (the fil5 hole, reopened by swapping two awaits).
+  SS04)
+    snippet OLD <<'EOF'
+            await retryClaimRecorder(analysisAssetId)
+            await retryDelay(DayZeroRediffAttemptPolicy.sameSessionRetryDelaySeconds)
+EOF
+    snippet NEW <<'EOF'
+            await retryDelay(DayZeroRediffAttemptPolicy.sameSessionRetryDelaySeconds)
+            await retryClaimRecorder(analysisAssetId)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # SS05 — drop the durable claim outright: the retry still runs, every
+  # behavioral test still sees it run, and only the fil5 signature — the row a
+  # DROPPED retry leaves — is gone.
+  SS05)
+    snippet OLD <<'EOF'
+            await retryClaimRecorder(analysisAssetId)
+            await retryDelay(DayZeroRediffAttemptPolicy.sameSessionRetryDelaySeconds)
+EOF
+    snippet NEW <<'EOF'
+            await retryDelay(DayZeroRediffAttemptPolicy.sameSessionRetryDelaySeconds)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # SS06 — the service stops carrying the measured bytes up: the summary the
+  # trigger judges reads 0 for a fetch that landed a copy, so the byte gate is
+  # intact and useless — the plumbing lie the acceptance criteria's "never
+  # inferred from the error code alone" exists to forbid.
+  SS06)
+    snippet OLD <<'EOF'
+            return CandidateResult(
+                cost: cost, rotated: false, failed: true, dayZeroExit: .fetchFailed
+            )
+EOF
+    snippet NEW <<'EOF'
+            return CandidateResult(
+                cost: .zero, rotated: false, failed: true, dayZeroExit: .fetchFailed
+            )
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 

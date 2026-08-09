@@ -368,7 +368,9 @@ struct DayZeroTriggerTransportBudgetTests {
             },
             mintedMarkDelivery: { _ in },
             budgetWindowProvider: { budgetWindow },
-            budgetSpendRecorder: { bytes, at in spends.record(bytes, at) }
+            budgetSpendRecorder: { bytes, at in spends.record(bytes, at) },
+            // playhead-3oyz: the retry lane is owned by DayZeroSameSessionRetryTests — opt out.
+            retryClaimRecorder: { _ in }
         )
     }
 
@@ -513,7 +515,9 @@ struct DayZeroTriggerTransportBudgetTests {
                 await reads.increment()
                 return .empty
             },
-            budgetSpendRecorder: { _, _ in }
+            budgetSpendRecorder: { _, _ in },
+            // playhead-3oyz: the retry lane is owned by DayZeroSameSessionRetryTests — opt out.
+            retryClaimRecorder: { _ in }
         )
         _ = await trigger.triggerIfEligible(
             analysisAssetId: "asset-x", enclosureURL: Self.enclosure,

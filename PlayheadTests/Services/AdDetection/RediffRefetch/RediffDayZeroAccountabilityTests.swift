@@ -684,7 +684,9 @@ struct RediffDayZeroTriggerIdempotencyTests {
             // asserted by DayZeroMarkDeliveryTests, so opt OUT explicitly.
             mintedMarkDelivery: { _ in },
             budgetWindowProvider: { .empty },
-            budgetSpendRecorder: { _, _ in }
+            budgetSpendRecorder: { _, _ in },
+            // playhead-3oyz: the retry lane is owned by DayZeroSameSessionRetryTests — opt out.
+            retryClaimRecorder: { _ in }
         )
     }
 
@@ -789,7 +791,9 @@ struct RediffDayZeroTriggerIdempotencyTests {
             suppressionRecorder: { assetId, reason, at in spy.recorded.append((assetId, reason, at)) },
             mintedMarkDelivery: { _ in },
             budgetWindowProvider: { .empty },
-            budgetSpendRecorder: { _, _ in }
+            budgetSpendRecorder: { _, _ in },
+            // playhead-3oyz: the retry lane is owned by DayZeroSameSessionRetryTests — opt out.
+            retryClaimRecorder: { _ in }
         )
 
         _ = await fire(trigger, at: 1)
@@ -848,7 +852,10 @@ struct RediffDayZeroAttemptStoreTests {
             lastDivergentSlotCount: 8, lastFullFetchBytes: 108_000_000,
             totalFullFetchBytes: 216_000_000, suppressedCount: 9,
             lastSuppressedAt: 4_321.5, lastDetail: "boom",
-            policyGeneration: 42
+            policyGeneration: 42,
+            // playhead-3oyz: distinct and non-default, per the R3 note above —
+            // a reader hardcoding either new column must fail this equality.
+            rescueAttemptCount: 11, retryClaimCount: 12, lastRetryClaimAt: 5_678.5
         )
         try await store.upsertRediffDayZeroAttempt(record)
 

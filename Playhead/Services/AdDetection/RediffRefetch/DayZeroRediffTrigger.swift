@@ -102,6 +102,20 @@ struct DayZeroRediffTrigger: Sendable {
     /// the pre-flight estimate — the estimate bounds admission, the ledger
     /// records truth.
     let budgetSpendRecorder: @Sendable (Int, Double) async -> Void
+    /// playhead-3oyz: durably CLAIM a same-session retry BEFORE its delay, so
+    /// a retry the process never lives to run still leaves a row saying one
+    /// was owed (the playhead-fil5 precedent). Production writes
+    /// `AnalysisStore.noteRediffDayZeroRetryClaim`, stamping its own live
+    /// clock — the claim must sort AFTER the failed attempt's
+    /// `lastAttemptAt`, which the recorder also stamps live, so the trigger's
+    /// nominal `now` (captured before a fetch that can take minutes) is
+    /// deliberately not threaded through.
+    let retryClaimRecorder: @Sendable (String) async -> Void
+    /// playhead-3oyz: the retry delay. Production sleeps for real; tests
+    /// inject an instant recorder so no suite ever parks on a 30 s wall-clock
+    /// wait. Cooperative: a real sleep ends early on task cancellation, and
+    /// the loop re-checks `Task.isCancelled` right after it.
+    let retryDelay: @Sendable (TimeInterval) async -> Void
 
     init(
         service: RediffRefetchService,
@@ -136,7 +150,22 @@ struct DayZeroRediffTrigger: Sendable {
         // would restore an UNBOUNDED day-0 byte spend with the whole suite
         // green. A required parameter makes it a compile error.
         budgetWindowProvider: @escaping @Sendable () async -> RediffDayZeroBudgetWindow,
-        budgetSpendRecorder: @escaping @Sendable (Int, Double) async -> Void
+        budgetSpendRecorder: @escaping @Sendable (Int, Double) async -> Void,
+        // DELIBERATELY NOT DEFAULTED, fourth instance of the same discipline
+        // (playhead-3oyz). A `{ _ in }` default reproduces the playhead-fil5
+        // defect verbatim for the retry lane — a retry dropped mid-delay
+        // (teardown, jetsam) would read as "never happened" — and nothing in
+        // the suite builds a real `PlayheadRuntime`, so dropping the wiring
+        // there would be invisible. A required parameter makes it a compile
+        // error. Callers with no store pass the opt-out explicitly and say why.
+        retryClaimRecorder: @escaping @Sendable (String) async -> Void,
+        // Defaulted, unlike the recorders above: a real sleep IS the correct
+        // production behavior, not a silent opt-out — there is no store this
+        // default could fail to reach. Tests that drive the retry path inject
+        // an instant sleeper (the cooperative-time-bound rule).
+        retryDelay: @escaping @Sendable (TimeInterval) async -> Void = { seconds in
+            try? await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000))
+        }
     ) {
         self.service = service
         self.enabled = enabled
@@ -149,6 +178,8 @@ struct DayZeroRediffTrigger: Sendable {
         self.mintedMarkDelivery = mintedMarkDelivery
         self.budgetWindowProvider = budgetWindowProvider
         self.budgetSpendRecorder = budgetSpendRecorder
+        self.retryClaimRecorder = retryClaimRecorder
+        self.retryDelay = retryDelay
     }
 
     /// Fire an immediate day-0 rediff for this episode IF the flag is on AND
@@ -261,6 +292,79 @@ struct DayZeroRediffTrigger: Sendable {
             localAudioURL: playedFileURL,
             attemptState: .initial
         )
+        var summary = await runAccountAndDeliver(
+            candidate: candidate, assetId: analysisAssetId, at: now
+        )
+
+        // playhead-3oyz — THE SAME-SESSION RETRY (Dan's shape (i), 2026-08-08).
+        // One -1001 timeout at download time used to darken the deterministic
+        // pre-roll lane for the entire first-day listen: `.fetchFailed` pays
+        // the same 24 h backoff as a full failed diff, though a timed-out
+        // fetch landed ZERO B-copies (F4CE7F47: lastFullFetchBytes=0,
+        // suppressedCount=2 mid-listen). The grant is decided by the pure
+        // policy over the run's NAMED exit and its MEASURED landed bytes —
+        // never the error code alone — and is bounded to
+        // `maxSameSessionRetries` with a `sameSessionRetryDelaySeconds` pause.
+        // A failure that landed real bytes takes zero trips through this loop
+        // and keeps the p70f backoff untouched.
+        var retriesUsed = 0
+        while DayZeroRediffAttemptPolicy.grantsSameSessionRetry(
+            exit: summary.dayZeroExit,
+            measuredFullFetchBytes: summary.fullFetchBytes,
+            retriesUsed: retriesUsed
+        ) {
+            retriesUsed += 1
+            // The CLAIM precedes the delay (playhead-fil5): a process that
+            // dies parked on the sleep — or mid-retry — leaves
+            // `lastRetryClaimAt > lastAttemptAt`, the queryable signature of
+            // "a retry was owed and never completed". Without this, a dropped
+            // retry is byte-identical in the database to the pre-fix build.
+            await retryClaimRecorder(analysisAssetId)
+            await retryDelay(DayZeroRediffAttemptPolicy.sameSessionRetryDelaySeconds)
+            if Task.isCancelled { break }
+            // The two gates that admit a SPEND are re-read across the delay —
+            // 30 s is plenty of time for the user to flip Low Data Mode on
+            // (the OS-level instruction an in-app mechanism must never
+            // override) or for a concurrent kickoff on another episode to
+            // drain the daily window. The per-asset backoff is deliberately
+            // NOT re-consulted: the record now names the failure this loop
+            // exists to retry, and re-reading it would suppress every retry.
+            let retryTransport = await transportProvider()
+            let retryCharging = await chargeStateProvider()
+            let retryDecision = DayZeroTransportPolicy.decide(
+                enabled: enabled,
+                transport: retryTransport,
+                isCharging: retryCharging,
+                deepScanOptIn: deepScanOptIn
+            )
+            guard retryDecision.isAllowed else {
+                if let exit = retryDecision.deniedExit {
+                    await suppressionRecorder(analysisAssetId, exit, now)
+                }
+                break
+            }
+            let retryWindow = await budgetWindowProvider()
+            guard RediffDayZeroDailyBudget.allows(
+                retryWindow, estimatedCost: estimate, now: now
+            ) else {
+                await suppressionRecorder(analysisAssetId, .deniedDailyBudget, now)
+                break
+            }
+            summary = await runAccountAndDeliver(
+                candidate: candidate, assetId: analysisAssetId, at: now
+            )
+        }
+        return summary
+    }
+
+    /// One day-0 run plus its two accounting hops — shared verbatim by the
+    /// first attempt and the playhead-3oyz same-session retry, so a retry can
+    /// never spend unaccounted bytes or mint undelivered marks.
+    private func runAccountAndDeliver(
+        candidate: RediffRefetchCandidate,
+        assetId: String,
+        at now: Double
+    ) async -> SweepSummary {
         let summary = await service.runDayZeroRefetch(
             for: candidate, kWayFetchCount: kWayFetchCount
         )
@@ -285,7 +389,7 @@ struct DayZeroRediffTrigger: Sendable {
         // `allSlotsAlreadyCovered`, a thrown fetch — persisted nothing, so
         // re-reading would forward only rows the session already holds.
         if summary.dayZeroMarkCount > 0 {
-            await mintedMarkDelivery(analysisAssetId)
+            await mintedMarkDelivery(assetId)
         }
         return summary
     }

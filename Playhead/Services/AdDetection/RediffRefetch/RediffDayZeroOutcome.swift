@@ -369,6 +369,17 @@ struct RediffDayZeroAttemptRecord: Sendable, Equatable {
     /// ordinary three-attempt budget and spend another ~216 MB re-deriving
     /// nothing. Capped at `DayZeroRediffAttemptPolicy.maxRescueAttempts`.
     let rescueAttemptCount: Int
+    /// playhead-3oyz: how many same-session retries have been CLAIMED for this
+    /// asset — a claim is written BEFORE the retry's delay, so a retry the
+    /// process never lived to run still leaves a row that says one was owed
+    /// (the playhead-fil5 precedent: a dropped request must not read as "never
+    /// happened"). `lastRetryClaimAt > lastAttemptAt` is the queryable
+    /// signature of a claimed-but-dropped retry; an executed retry follows its
+    /// claim with an ordinary attempt (own exit, own `lastAttemptAt`).
+    let retryClaimCount: Int
+    /// Unix seconds of the most recent retry claim, `nil` when none was ever
+    /// made.
+    let lastRetryClaimAt: Double?
 
     init(
         analysisAssetId: String,
@@ -387,7 +398,9 @@ struct RediffDayZeroAttemptRecord: Sendable, Equatable {
         lastSuppressedAt: Double? = nil,
         lastDetail: String? = nil,
         policyGeneration: Int = DayZeroRediffAttemptPolicy.currentGeneration,
-        rescueAttemptCount: Int = 0
+        rescueAttemptCount: Int = 0,
+        retryClaimCount: Int = 0,
+        lastRetryClaimAt: Double? = nil
     ) {
         self.analysisAssetId = analysisAssetId
         self.attemptCount = attemptCount
@@ -406,6 +419,8 @@ struct RediffDayZeroAttemptRecord: Sendable, Equatable {
         self.lastDetail = lastDetail
         self.policyGeneration = policyGeneration
         self.rescueAttemptCount = rescueAttemptCount
+        self.retryClaimCount = retryClaimCount
+        self.lastRetryClaimAt = lastRetryClaimAt
     }
 }
 
@@ -476,6 +491,34 @@ enum DayZeroRediffAttemptPolicy {
     /// that exhausted their budget under generation 1 were measuring a build
     /// whose day-0 could not stamp an anchor at all.
     static let currentGeneration = 2
+
+    /// playhead-3oyz — the SAME-SESSION retry bound: how many immediate
+    /// re-attempts one trigger invocation may make after a fetch failure that
+    /// spent ~zero bytes.
+    ///
+    /// **1, derived from the attempt budget, not from optimism.** A retry is
+    /// durably recorded as an attempt (its own exit, its own row advance), so
+    /// every retry consumes the `maxAttempts = 3` generation budget. First
+    /// attempt + 1 retry leaves exactly one budgeted attempt for a later
+    /// (≥ 24 h) session — the existing cross-session ladder stays a real
+    /// backstop. Two retries would let a single session-long outage burn the
+    /// whole generation, converting "one bad session" into "day-0 dead until
+    /// the generation moves", which is strictly worse than the defect this
+    /// fixes.
+    static let maxSameSessionRetries = 1
+
+    /// playhead-3oyz — the delay before the same-session retry.
+    ///
+    /// 30 s, sized from the F4CE7F47 witness timeline. The download-time
+    /// kickoff routinely waits minutes for its preconditions (the witness
+    /// waited 120.4 s; the device pull shows 20.7–507 s), so the session
+    /// demonstrably survives a 30 s pause — and the worst case this adds
+    /// (30 s + one more timeout window, ~2.5 min) still finishes hours before
+    /// any realistic first listen. Shorter would retry INTO the transient
+    /// congestion a just-completed ~50 MB episode download leaves behind,
+    /// which is the most plausible cause of a -1001 seconds after a
+    /// successful download.
+    static let sameSessionRetryDelaySeconds: TimeInterval = 30
 
     /// playhead-ug9m — the RESCUE bound. How many re-attempts, per generation,
     /// an asset that ALREADY has day-0 marks may spend.
@@ -597,6 +640,41 @@ enum DayZeroRediffAttemptPolicy {
         return .attempt(attemptNumber: record.attemptCount + 1)
     }
 
+    /// playhead-3oyz — may THIS trigger invocation retry the attempt it just
+    /// watched fail, right now, in this session?
+    ///
+    /// The distinction is MEASURED, never inferred from the exit code alone
+    /// (the standing defect class: an exit that names "failure" read as if it
+    /// named "bandwidth spent"). `measuredFullFetchBytes` is the sum of
+    /// `byteCount` over the B-copies that actually LANDED (completed
+    /// downloads) in the attempt — there is no denominator; it is compared to
+    /// zero, and the question it answers is "did ANY B-copy land?". If the
+    /// fetch never started it reads 0, which is retry-eligible — correct,
+    /// because a fetch that never started spent nothing. Any non-zero value
+    /// proves a whole ~54 MB copy landed (the population the p70f 24 h
+    /// backoff exists for), so the comparison is `== 0`, not a threshold:
+    /// the quantity is quantized at whole copies, and partial-transfer wire
+    /// bytes are unmeasured by construction (the "~zero" in the bead).
+    ///
+    /// Scoped to `.fetchFailed` ONLY. Every other zero-cost exit — the
+    /// pre-fetch blockers, the gate denials — is a statement about LOCAL
+    /// state or user policy that a 30 s delay cannot change; re-running those
+    /// would be a spin, not a retry.
+    ///
+    /// Cross-session behavior is deliberately untouched: this is consulted by
+    /// the trigger against the summary it is already holding, never by
+    /// `decide`, so the 24 h backoff ladder reads exactly as before
+    /// (shape ii/iii were explicitly not approved).
+    static func grantsSameSessionRetry(
+        exit: RediffDayZeroExit?,
+        measuredFullFetchBytes: Int,
+        retriesUsed: Int
+    ) -> Bool {
+        guard retriesUsed < maxSameSessionRetries else { return false }
+        guard exit == .fetchFailed else { return false }
+        return measuredFullFetchBytes == 0
+    }
+
     /// Fold one attempt's outcome into the durable record. Additive over the
     /// prior row: `attemptCount` and `totalFullFetchBytes` accumulate so the
     /// per-asset bleed is visible without joining anything.
@@ -657,7 +735,12 @@ enum DayZeroRediffAttemptPolicy {
             policyGeneration: currentGeneration,
             // Generation-scoped like `attemptCount`: a bump grants one fresh
             // rescue, and within a generation the counter only ever rises.
-            rescueAttemptCount: (budgeted?.rescueAttemptCount ?? 0) + (isRescue ? 1 : 0)
+            rescueAttemptCount: (budgeted?.rescueAttemptCount ?? 0) + (isRescue ? 1 : 0),
+            // playhead-3oyz: retry-claim history is carried like suppression
+            // history — a historical fact `noteRediffDayZeroRetryClaim` owns
+            // and increments in place; an attempt never resets it.
+            retryClaimCount: record?.retryClaimCount ?? 0,
+            lastRetryClaimAt: record?.lastRetryClaimAt
         )
     }
 

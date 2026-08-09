@@ -75,10 +75,14 @@ struct EpisodeFingerprintsV27MigrationTests {
         try await store.migrate()
 
         #expect(try await store.schemaVersion() == AnalysisStore.currentSchemaVersion)
-        // Head has moved on repeatedly since V27 — most recently 36 → 37
-        // (playhead-0sro fast-transcript watermark reconcile, data-only).
-        // The V27 table pins below are unchanged by any of it.
-        #expect(AnalysisStore.currentSchemaVersion == 45)
+        // Head has moved on repeatedly since V27 — most recently 45 → 46
+        // (playhead-3oyz day-0 retry-claim columns, additive). The V27 table
+        // pins below are unchanged by any of it.
+        //
+        // PIN THE LITERAL. Writing this as `== AnalysisStore.currentSchemaVersion`
+        // would make it pass for every possible value and destroy the canary;
+        // its whole job is to fail when head moves so the ladder gets read.
+        #expect(AnalysisStore.currentSchemaVersion == 46)
         #expect(try probeTableExists(in: dir, table: "episode_fingerprints"))
     }
 
