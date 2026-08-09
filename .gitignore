@@ -127,3 +127,7 @@ TestFixtures/Corpus/Snapshots/*
 # scripts/l2f-syndication-prototype.py. Reproducible from the audio
 # files; never committed.
 TestFixtures/Corpus/Snapshots/fingerprints/
+
+# Scoped-gate transcripts written into a bead worktree (playhead-vtjx).
+# Multi-MB xcodebuild logs are session artifacts, not repo artifacts.
+gate-*.log

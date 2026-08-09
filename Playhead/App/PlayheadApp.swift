@@ -194,6 +194,24 @@ struct PlayheadApp: App {
                     // sweep hard-coded `nil`, breaking per-podcast trust
                     // telemetry and SponsorKnowledge keying for every
                     // asset re-driven at cold launch.
+                    // playhead-vtjx: `resolvedShowIdentity`, NOT
+                    // `podcast?.feedURL.absoluteString`. Two differences, both
+                    // load-bearing now that this resolver's answer is also
+                    // PERSISTED into `analysis_jobs.podcastId` by the
+                    // coarse-scan path:
+                    //   * it admits the identity only in its exact canonical
+                    //     spelling (`RecurrenceMaterialIdentity`), the same gate
+                    //     `DownloadContext.init` and `SkipOrchestrator`
+                    //     .beginEpisode apply — a non-canonical spelling written
+                    //     as a key would join to nothing in `podcast_profiles`
+                    //     while looking exactly like a real show;
+                    //   * it falls back to the identity carried by the episode's
+                    //     OWN `canonicalEpisodeKey` (playhead-usn1's
+                    //     suffix-stripping inverse, which needs the row's
+                    //     `feedItemGUID` and therefore cannot be done anywhere
+                    //     but here), so one unmaterialised SwiftData
+                    //     relationship no longer erases a show the row still
+                    //     names.
                     runtime.setEpisodePodcastIdResolver { @Sendable episodeId in
                         await MainActor.run {
                             let context = modelContainer.mainContext
@@ -201,7 +219,7 @@ struct PlayheadApp: App {
                                 predicate: #Predicate { $0.canonicalEpisodeKey == episodeId }
                             )
                             return (try? context.fetch(descriptor).first)?
-                                .podcast?.feedURL.absoluteString
+                                .resolvedShowIdentity
                         }
                     }
                     // skeptical-review-cycle-3 M-B: batch shape — single
@@ -229,7 +247,11 @@ struct PlayheadApp: App {
                             var result: [String: String] = [:]
                             result.reserveCapacity(episodes.count)
                             for episode in episodes {
-                                if let feed = episode.podcast?.feedURL.absoluteString {
+                                // playhead-vtjx: same identity rule as the
+                                // single resolver above — the two must not
+                                // disagree about what a show is merely because
+                                // one caller asked for many.
+                                if let feed = episode.resolvedShowIdentity {
                                     result[episode.canonicalEpisodeKey] = feed
                                 }
                             }

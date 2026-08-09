@@ -1869,6 +1869,29 @@ final class PlayheadRuntime {
             let coordinator = analysisCoordinator
             Task { await coordinator.setSchedulerStateSnapshotProvider(adapter) }
         }
+        // playhead-vtjx: give the coarse-first ad-scan phase a way to ask the
+        // EPISODE store which show an episode belongs to. `analysis_jobs`
+        // .podcastId — the only identity that phase used to read — is SQL NULL
+        // for every episode whose first job predates playhead-kkzu (53 of 72
+        // rows on the 2026-08-08 pull), and each re-mint inherits the NULL, so
+        // four fully transcribed backlog assets were being refused a semantic
+        // scan claim for a show the device knew perfectly well.
+        //
+        // The closure reads `episodePodcastIdResolverBox` AT CALL TIME rather
+        // than capturing its current contents: `PlayheadApp` installs the
+        // resolver from the scene bootstrap, long after this initializer runs,
+        // and reading late is what makes that ordering a non-issue instead of a
+        // race that needs the `awaitEpisodePodcastIdResolver` poll.
+        do {
+            let coordinator = analysisCoordinator
+            let resolverBox = episodePodcastIdResolverBox
+            Task {
+                await coordinator.setShowIdentityResolver { episodeId in
+                    guard let resolve = resolverBox.withLock({ $0 }) else { return nil }
+                    return await resolve(episodeId)
+                }
+            }
+        }
         // playhead-3xtw: construct the on-demand preparation coordinator
         // now that the download manager + scheduler exist. Preview runtimes
         // use the deterministic Wi‑Fi transport stub (no NWPathMonitor).

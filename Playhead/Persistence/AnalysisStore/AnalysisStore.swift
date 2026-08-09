@@ -14408,6 +14408,69 @@ actor AnalysisStore {
         try step(stmt, expecting: SQLITE_DONE)
     }
 
+    /// playhead-vtjx: fill in the show identity on this episode's
+    /// `analysis_jobs` rows that carry SQL NULL, and report how many rows that
+    /// repaired.
+    ///
+    /// **Why a repair exists at all.** `analysis_jobs.podcastId` was optional
+    /// before playhead-kkzu made a download's show a compulsory, spelled-out
+    /// field of `DownloadContext`, and on the 2026-08-08 pull it is NULL on 53
+    /// of 72 rows. Every ATTRIBUTED row was created at or after kkzu
+    /// (2026-08-03 17:48:58); the converse does NOT hold, and stating it that
+    /// way round is load-bearing — 15 NULL rows postdate that instant on the
+    /// db-evening and db-overnight pulls (the figure is 14 on db-earlypull,
+    /// taken hours earlier the same day; re-derived at review R1), so this
+    /// is not a closed population that one backfill drains. Two mechanisms
+    /// produce them: `AnalysisJobReconciler.discoverUnEnqueuedDownloads` holds
+    /// no show identity at all and mints `nil` on every reconcile pass
+    /// (playhead-7ba4), and every re-mint path copies `job.podcastId` verbatim
+    /// (`AnalysisWorkScheduler`'s tier successor, ad-scan re-drive and
+    /// canonical-audio replacement), so a NULL is also INHERITED indefinitely.
+    /// The witness for the second is 53FC53E3, whose `…:adScanRedrive:1` row
+    /// minted 2026-08-08 07:55:05 carries NULL purely because its pre-kkzu
+    /// parent did — four hours before F2F2FC4C's identical re-drive carried a
+    /// real feed URL. That both mechanisms are still live is exactly why the
+    /// reader is ``fetchRecordedPodcastId(forEpisodeId:)`` and not a
+    /// latest-row-wins query: see `AnalysisCoordinator.resolveShowIdentity`.
+    ///
+    /// **Idempotent and non-destructive by construction.** The `podcastId IS
+    /// NULL` clause is what makes both true: a second call changes nothing, and
+    /// a row that already names a show is never re-pointed at another one. The
+    /// caller supplies an identity recovered from the episode store, which is a
+    /// SECOND observation of the same fact — it may not overrule the analysis
+    /// lane's own record.
+    ///
+    /// **`updatedAt` is deliberately NOT touched.** This is not a lifecycle
+    /// transition; it records something that was always true of the row. The
+    /// column is the clock `fetchLatestJobForEpisode` orders by and the
+    /// stranded-lease reaper keys on, and bumping every row of an episode to
+    /// one instant would re-order "latest" and disturb both — for a write that
+    /// changes no state.
+    ///
+    /// Whether `podcastId` is a real identity is decided ABOVE this call, at
+    /// the one site that turns a resolver's answer into a key it will persist
+    /// (``AnalysisCoordinator/resolveCoarseScanShowIdentity(jobPodcastId:episodeStoreIdentity:)``).
+    /// Restating that policy here would be a second copy that no mutant can
+    /// kill while the two agree — the shape playhead-fil5 R2 recorded when the
+    /// SC09 mutant survived against exactly it.
+    ///
+    /// - Returns: the number of rows repaired. `0` is the steady state, and is
+    ///   also what a race with a concurrent writer yields — benign either way.
+    @discardableResult
+    func backfillJobPodcastId(episodeId: String, podcastId: String) throws -> Int {
+        let sql = """
+            UPDATE analysis_jobs
+            SET podcastId = ?
+            WHERE episodeId = ? AND podcastId IS NULL
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, podcastId)
+        bind(stmt, 2, episodeId)
+        try step(stmt, expecting: SQLITE_DONE)
+        return Int(sqlite3_changes(db))
+    }
+
     /// playhead-kanf: the outcome of a user-intent lane promotion attempt.
     ///
     /// Four cases rather than a `Bool` because the caller has to distinguish
