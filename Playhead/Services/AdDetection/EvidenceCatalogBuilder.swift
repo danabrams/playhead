@@ -773,18 +773,33 @@ enum EvidenceCatalogBuilder {
 
             // playhead-absa: TLDs beyond .com/.org/.io. Every one of these
             // requires a literal dot with NO space in front of the TLD (or the
-            // spoken "dot X" form), which is what keeps them off ordinary
-            // speech — ASR emits "word. Next" with a space after a sentence
-            // period, so `\w+\.ai` cannot be produced by a sentence boundary.
-            // Measured over 94,692 device transcript chunks (31 assets,
-            // fast + final): `.ai` fired 44 times, EVERY one a real sponsor
-            // URL (netsuite.ai ×40, whisperflow.ai, flow.ai, jerry.ai) and
-            // zero on show content; spoken "dot ai" once ("J-E-R-R-Y dot AI",
-            // a spelled-out ad URL); `.co` 12 times, every one
-            // marketreach.co.uk in a sponsor read. `.fm`/`.tv` fired ZERO
-            // times — no measured benefit and no measured cost; they are here
-            // for family symmetry with the same no-space structure, not on
-            // evidence.
+            // spoken "dot X" form). Measured over 94,692 device transcript
+            // chunks (31 assets, fast + final): `.ai` fired 44 times, EVERY
+            // one a real sponsor URL and zero on show content — 41 of the 44
+            // are ONE advertiser under two ASR spellings (netsuite.ai ×28 +
+            // netsweet.ai ×13), the rest whisperflow.ai, flow.ai, jerry.ai;
+            // spoken "dot ai" once ("J-E-R-R-Y dot AI", a spelled-out ad URL);
+            // `.co` 12 times, every one marketreach.co(.uk) in a sponsor read.
+            // Decoded-span attribution, same corpus, one term at a time:
+            // `.ai` +11 spans, `.co` +2, `.fm`/`.tv` +0.
+            //
+            // WHY A BARE TWO-LETTER TLD IS SAFE — and it is NOT that "ASR
+            // always puts a space after a period", which is an absolute nobody
+            // measured. What was measured is the whole risk surface: 259
+            // `<word>.<word>` no-space periods exist in those 94,692 chunks,
+            // and of the ones whose right-hand token is EXACTLY two characters
+            // there are 60 — 56 sponsor URLs (`.ai` 44, `.co` 12) and 4
+            // decimal numbers ("5.30", "99.99", "2.00"). Not one English word.
+            // Numerals can never collide with a letter TLD, so the observed
+            // false-positive surface for this pattern family is empty.
+            //
+            // That bound, not "family symmetry", is why `.fm`/`.tv` ship
+            // having fired ZERO times: they are unmeasured MEMBERS of a
+            // measured FAMILY. Anyone adding a further TLD (`.net`, `.app`,
+            // `.gg`) owes the same two-letter census on a corpus that contains
+            // the population — this one has no `.fm`/`.tv` text at all, ad or
+            // content, so it bounds the family and says nothing about them
+            // individually.
             #"\b\w+\.ai\/\w+"#,                       // .ai URLs with a path
             #"\b\w+\.ai\b"#,                          // bare domain: whisperflow.ai
             #"\b\w+ dot ai\b"#,                       // spoken: "whisperflow dot ai"
@@ -833,6 +848,13 @@ enum EvidenceCatalogBuilder {
             // functionhealth.com, pro.5.com), and the .ai patterns above open
             // two more — both the WhisperFlow "all you have to do is head to"
             // — for 10/10 in-ad after this change.
+            //
+            // Re-checked against the WIDENED anchor set, which is the gate
+            // that actually ships: the `.ai`/`.co`/"our sponsor called"
+            // anchors move two hits from out-of-context to in-context (the two
+            // WhisperFlow reads), and leave BOTH non-ad hits still out. The
+            // term's decoded-span attribution is ZERO — it anchors atoms and
+            // widens ATTENTION, and adds no claim anywhere in the corpus.
             #"\bhead to\b"#,
             #"\bgo check out\b"#,
             #"\btry it free\b"#,
