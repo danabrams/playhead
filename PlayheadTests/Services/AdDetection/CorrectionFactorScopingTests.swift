@@ -145,6 +145,41 @@ struct CorrectionFactorScopingTests {
         #expect(snapshot.factor(overlapping: .infinity, .infinity) == 0.5)
     }
 
+    // MARK: - hasSpanScopedSuppressor (ar60 R1 review)
+
+    @Test("only a span-scoped suppressor that reaches the span counts as a judgement about it")
+    func spanScopedSuppressorPredicate() {
+        let snapshot = CorrectionFactorSnapshot(
+            suppressors: [
+                .init(weight: 0.9, range: 100...200),
+                // Show-wide, and how an UNPLACEABLE suppressor is recorded.
+                .init(weight: 0.95, range: nil),
+                // Fully decayed: moves the factor by nothing, so it cannot be
+                // what blocked the span.
+                .init(weight: 0.0, range: 300...400),
+            ],
+            boosters: [.init(weight: 0.5, range: 100...200)]
+        )
+        #expect(snapshot.hasSpanScopedSuppressor(overlapping: 150, 160))
+        #expect(snapshot.hasSpanScopedSuppressor(overlapping: 190, 260))
+        #expect(!snapshot.hasSpanScopedSuppressor(overlapping: 210, 260))
+        #expect(!snapshot.hasSpanScopedSuppressor(overlapping: 320, 380),
+                "a zero-weight entry is not a live veto")
+        #expect(!snapshot.hasSpanScopedSuppressor(overlapping: .nan, 160))
+        #expect(!snapshot.hasSpanScopedSuppressor(overlapping: 160, 150))
+        // A booster is not a veto, however precisely it is scoped.
+        #expect(!CorrectionFactorSnapshot(
+            suppressors: [],
+            boosters: [.init(weight: 0.9, range: 100...200)]
+        ).hasSpanScopedSuppressor(overlapping: 150, 160))
+        // The pre-ar60 blanket shim reports show-wide, so it never authorises
+        // withholding a banner.
+        #expect(!CorrectionFactorSnapshot(assetWidePassthrough: 0.001, boost: 1)
+            .hasSpanScopedSuppressor(overlapping: 150, 160))
+        #expect(!CorrectionFactorSnapshot.identity
+            .hasSpanScopedSuppressor(overlapping: 150, 160))
+    }
+
     // MARK: - End to end, through the real store, on Dan's real corrections
 
     @Test("DE0784D8: five vetoes and five marks, and the span at 4329.96 sees a factor of exactly 1.0")

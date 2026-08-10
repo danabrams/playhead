@@ -91,14 +91,15 @@ struct FusionEmissionShapeTests {
     /// the fusion windows it persisted.
     private func runBackfill(
         assetId: String,
-        vetoes: [ClosedRange<Double>]
+        vetoes: [ClosedRange<Double>],
+        showWideVetoedSponsors: [String] = []
     ) async throws -> (windows: [AdWindow], events: [DecisionEvent]) {
         let store = try AnalysisStore(path: ":memory:")
         try await store.migrate()
         try await store.insertAsset(makeAsset(id: assetId))
 
         let service = makeService(store: store)
-        if !vetoes.isEmpty {
+        if !vetoes.isEmpty || !showWideVetoedSponsors.isEmpty {
             let corrections = PersistentUserCorrectionStore(store: store)
             for veto in vetoes {
                 await corrections.recordVeto(
@@ -107,6 +108,25 @@ struct FusionEmissionShapeTests {
                     assetId: assetId,
                     podcastId: nil,
                     source: CorrectionSource.manualVeto
+                )
+            }
+            // The "Always skip this sponsor" gesture
+            // (`AdBannerView.alwaysSkipSponsorAction` →
+            // `NowPlayingView.onAlwaysSkipSponsorAsync`) writes exactly this:
+            // a SHOW-WIDE `sponsorOnShow` scope with
+            // `correctionType: .falsePositive`, on the current asset.
+            for sponsor in showWideVetoedSponsors {
+                try await corrections.record(
+                    CorrectionEvent(
+                        analysisAssetId: assetId,
+                        scope: CorrectionScope.sponsorOnShow(
+                            podcastId: "podcast-ar60",
+                            sponsor: sponsor
+                        ).serialized,
+                        source: .manualVeto,
+                        podcastId: "podcast-ar60",
+                        correctionType: .falsePositive
+                    )
                 )
             }
             await service.setUserCorrectionStore(corrections)
@@ -237,42 +257,90 @@ struct FusionEmissionShapeTests {
         )
     }
 
+    /// ar60 R1 review. The `.suppressed` arm has to be about THIS span, and a
+    /// show-wide sponsor veto is not — it is one tap on the shipped "Always
+    /// skip this sponsor" button, and applying it here would take EVERY fusion
+    /// banner in the episode away.
+    @Test("a show-wide sponsor veto gates the span but still persists a bannerable row")
+    func showWideVetoDoesNotSuppressTheBanner() async throws {
+        let clean = try await runBackfill(assetId: "ar60-showwide-clean", vetoes: [])
+        let cleanWindow = try #require(clean.windows.first)
+        #expect(cleanWindow.decisionState != AdDecisionState.suppressed.rawValue)
+
+        let showWide = try await runBackfill(
+            assetId: "ar60-showwide",
+            vetoes: [],
+            showWideVetoedSponsors: ["squarespace"]
+        )
+        let gated = try #require(showWide.windows.first)
+        // Precondition: the show-wide veto really does reach this span — it is
+        // asset-wide by construction, so the actuation number must have moved.
+        #expect(
+            gated.actuationConfidence < cleanWindow.actuationConfidence,
+            "a show-wide veto still suppresses ACTUATION on every span"
+        )
+        #expect(
+            gated.decisionState != AdDecisionState.suppressed.rawValue,
+            """
+            A sponsor-scoped veto says nothing about WHERE the ads are, so it \
+            must not withhold the banner. Persisted state: \(gated.decisionState).
+            """
+        )
+    }
+
     // MARK: - The mapping itself, exhaustively
 
-    @Test("the fusion decision-state mapping is exhaustive over policy action x gate")
+    @Test("the fusion decision-state mapping is exhaustive over policy action x gate x scope")
     func decisionStateMappingIsExhaustive() {
         for action in SkipPolicyAction.allCases {
             for gate in SkipEligibilityGate.allCases {
-                let state = AdDetectionService.fusionDecisionState(
-                    policyAction: action,
-                    eligibilityGate: gate
-                )
-                switch action {
-                case .autoSkipEligible:
-                    #expect(state == (gate == .eligible ? .confirmed : .candidate))
-                case .detectOnly, .logOnly:
-                    // ONLY the user's own veto demotes. Every other blocked
-                    // gate is the system's uncertainty, and a banner Dan can
-                    // answer is what that population is for.
-                    #expect(state == (gate == .blockedByUserCorrection
-                        ? .suppressed
-                        : .confirmed))
-                case .suppress:
-                    #expect(state == .suppressed)
+                for spanScoped in [true, false] {
+                    let state = AdDetectionService.fusionDecisionState(
+                        policyAction: action,
+                        eligibilityGate: gate,
+                        userCorrectionIsSpanScoped: spanScoped
+                    )
+                    switch action {
+                    case .autoSkipEligible:
+                        #expect(state == (gate == .eligible ? .confirmed : .candidate))
+                    case .detectOnly, .logOnly:
+                        // ONLY the user's own veto OF THIS SPAN demotes. Every
+                        // other blocked gate is the system's uncertainty, and a
+                        // banner Dan can answer is what that population is for
+                        // — as is a veto that was about a sponsor rather than
+                        // about a position.
+                        #expect(state == (
+                            gate == .blockedByUserCorrection && spanScoped
+                                ? .suppressed
+                                : .confirmed
+                        ))
+                    case .suppress:
+                        #expect(state == .suppressed)
+                    }
                 }
             }
         }
-        // The specific regression, named.
+        // The specific regressions, named.
         #expect(
             AdDetectionService.fusionDecisionState(
                 policyAction: .detectOnly,
-                eligibilityGate: .blockedByUserCorrection
+                eligibilityGate: .blockedByUserCorrection,
+                userCorrectionIsSpanScoped: true
             ) == .suppressed
         )
         #expect(
             AdDetectionService.fusionDecisionState(
                 policyAction: .detectOnly,
-                eligibilityGate: .markOnly
+                eligibilityGate: .blockedByUserCorrection,
+                userCorrectionIsSpanScoped: false
+            ) == .confirmed,
+            "a show-wide or unplaceable veto must not withhold the banner"
+        )
+        #expect(
+            AdDetectionService.fusionDecisionState(
+                policyAction: .detectOnly,
+                eligibilityGate: .markOnly,
+                userCorrectionIsSpanScoped: true
             ) == .confirmed
         )
     }

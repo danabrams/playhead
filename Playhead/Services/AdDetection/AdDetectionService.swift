@@ -6040,7 +6040,17 @@ actor AdDetectionService {
                 startEdgeAnchor: edgeAnchors.start,
                 endEdgeAnchor: edgeAnchors.end,
                 fusionSplitDiscriminator:
-                    pending.fusionSplitDiscriminator
+                    pending.fusionSplitDiscriminator,
+                // playhead-ar60 (R1 review): whether the veto that can gate
+                // this span was a judgement about THIS span. Same snapshot and
+                // same span bounds as the `correctionFactor` above, so the
+                // question the emission asks and the question the gate answered
+                // are one observation.
+                userCorrectionIsSpanScoped:
+                    correctionSnapshot.hasSpanScopedSuppressor(
+                        overlapping: refinedSpan.startTime,
+                        refinedSpan.endTime
+                    )
             )
             fusionWindows.append(window)
 
@@ -8761,12 +8771,19 @@ actor AdDetectionService {
     /// The persisted `AdDecisionState` for one fusion span.
     ///
     /// `internal` and `static` so the mapping has ONE spelling and can be
-    /// exercised exhaustively over (policy action x gate) without reaching
-    /// into `buildFusionAdWindow`'s twelve parameters — see
+    /// exercised exhaustively over (policy action x gate x scope) without
+    /// reaching into `buildFusionAdWindow`'s parameters — see
     /// `FusionEmissionShapeTests.decisionStateMappingIsExhaustive`.
+    ///
+    /// - Parameter userCorrectionIsSpanScoped: whether a span-scoped suppressor
+    ///   actually reaches this span
+    ///   (`CorrectionFactorSnapshot.hasSpanScopedSuppressor(overlapping:_:)`).
+    ///   Deliberately NOT defaulted: there is one call site, and a default
+    ///   would let a future one withhold a banner by omission.
     static func fusionDecisionState(
         policyAction: SkipPolicyAction,
-        eligibilityGate: SkipEligibilityGate
+        eligibilityGate: SkipEligibilityGate,
+        userCorrectionIsSpanScoped: Bool
     ) -> AdDecisionState {
         switch policyAction {
         case .autoSkipEligible:
@@ -8774,6 +8791,7 @@ actor AdDetectionService {
         case .detectOnly, .logOnly:
             // logOnly and detectOnly: persist but don't auto-skip.
             return eligibilityGate == .blockedByUserCorrection
+                && userCorrectionIsSpanScoped
                 ? .suppressed
                 : .confirmed
         case .suppress:
@@ -8790,7 +8808,8 @@ actor AdDetectionService {
         catalogMatch: CatalogMatch? = nil,
         startEdgeAnchor: AutoSkipEdgeAnchor = .unanchored,
         endEdgeAnchor: AutoSkipEdgeAnchor = .unanchored,
-        fusionSplitDiscriminator: String? = nil
+        fusionSplitDiscriminator: String? = nil,
+        userCorrectionIsSpanScoped: Bool
     ) -> AdWindow {
         // Map fusion policy action + gate to AdDecisionState for persistence.
         // autoSkipEligible: confirmed when gate passes, candidate otherwise.
@@ -8821,20 +8840,42 @@ actor AdDetectionService {
         // low-confidence EMISSION FLOOR is a recall decision and is NOT taken
         // here — see the bead comment; filed as playhead-4obf.
         //
-        // ONE KNOWN TRADEOFF, recorded rather than hidden. A SHOW-WIDE veto
-        // (`sponsorOnShow`, `phraseOnShow`, ...) legitimately applies to every
-        // span, so a strong one can drive a whole episode under the 0.40
-        // correction gate and, through this arm, suppress every fusion banner
-        // in it — where pre-ar60 those spans still surfaced. The "the user
-        // judged THIS span" justification above is weaker for a sponsor-scoped
-        // veto than for a time-span one. It is not reachable today (zero
-        // show-wide scopes exist in either 2026-08-02 device pull; the UI only
-        // writes `exactTimeSpan`), and suppressing banners for a sponsor the
-        // user has explicitly vetoed is defensible on its own terms — but if a
-        // show-wide veto path ever ships, revisit this arm before it does.
+        // AND ONLY WHEN THE VETO WAS ABOUT THIS SPAN — `userCorrectionIsSpanScoped`.
+        //
+        // ar60 R1 review: the first cut of this arm keyed on the gate alone and
+        // justified itself as "the user judged THIS span", with a note saying a
+        // show-wide veto could mute a whole episode's banners but was
+        // unreachable because "the UI only writes `exactTimeSpan`". That
+        // premise was false in the shipped tree, twice over:
+        //
+        //   * `AdBannerView.alwaysSkipSponsorAction` — the "Always skip this
+        //     sponsor" button on the auto-skipped banner (playhead-3bv.4) —
+        //     writes `CorrectionScope.sponsorOnShow` with
+        //     `correctionType: .falsePositive` through
+        //     `NowPlayingView.onAlwaysSkipSponsorAsync`. One tap.
+        //   * `PersistentUserCorrectionStore.recordVeto(span:ledgerEntries:)`
+        //     writes a second `sponsorOnShow` event for every `brandSpan`
+        //     evidence entry on a vetoed span.
+        //
+        // A fresh suppressor carries a decay weight near 1, so passthrough is
+        // near 0 and EVERY span in the asset lands under the 0.40 correction
+        // gate — one tap would have taken every fusion banner in the episode
+        // away, on a gesture that says something about a SPONSOR and nothing
+        // about where the ads are. The device pull showing zero show-wide
+        // scopes only says Dan has not pressed that button yet.
+        //
+        // So the arm now asks the question its own justification asks: did a
+        // SPAN-SCOPED suppressor actually reach this span? A show-wide scope,
+        // and an unplaceable correction (which the snapshot deliberately
+        // records show-wide), answer no and keep the banner — the pre-ar60
+        // behaviour, which is the safe direction when the banner is a skip
+        // affordance. The witnessed DE0784D8 case is unaffected: those five
+        // vetoes were `.exactTimeSpan`, so a span they overlap still suppresses
+        // and a span 2,600 s away is not gated at all.
         let decisionState = Self.fusionDecisionState(
             policyAction: policyAction,
-            eligibilityGate: decision.eligibilityGate
+            eligibilityGate: decision.eligibilityGate,
+            userCorrectionIsSpanScoped: userCorrectionIsSpanScoped
         )
 
         return AdWindow(

@@ -164,13 +164,16 @@ struct CrossUserAnalysisSnapshot: Codable, Equatable, Sendable {
         let endTime: Double
         let confidence: Double
         /// playhead-ar60: the ACTUATION number, split out of `confidence` in
-        /// schema V47. Optional, and DELIBERATELY not a wire-format version
-        /// bump: a snapshot written before the split decodes it as `nil`,
-        /// which is exactly what those rows carried — one number, in
-        /// `confidence`. Without it a shared fusion row would import with the
-        /// exporter's DETECTION score standing in for its actuation number,
-        /// i.e. more skip-eager on the importing device than on the one that
-        /// produced it.
+        /// schema V47. Optional, so a snapshot written before the split
+        /// decodes it as `nil` — which is exactly what those rows carried: one
+        /// number, in `confidence`. Without it a shared fusion row would import
+        /// with the exporter's DETECTION score standing in for its actuation
+        /// number, i.e. more skip-eager on the importing device than on the one
+        /// that produced it.
+        ///
+        /// Adding it DOES bump the wire version (4 → 5) even though the field
+        /// is optional, because the version is the only thing that makes `nil`
+        /// readable — see `CrossUserAnalysisSnapshot.currentSchemaVersion`.
         let skipConfidence: Double?
         let boundaryState: String
         let decisionState: String

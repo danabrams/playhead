@@ -655,6 +655,36 @@ struct CorrectionFactorSnapshot: Sendable, Equatable {
         let boost = min(2.0, 1.0 + boostWeight)
         return passthrough * boost
     }
+
+    /// Whether a SPAN-SCOPED suppressor actually reaches this span — i.e.
+    /// whether the user's "not an ad" was a judgement about THIS span rather
+    /// than about a sponsor, a phrase, or an episode.
+    ///
+    /// Used by `AdDetectionService.fusionDecisionState` and nothing else. The
+    /// distinction matters because that site converts
+    /// `.blockedByUserCorrection` into a `.suppressed` row, which shows NO
+    /// BANNER — and a banner is a skip affordance, so withholding one has to be
+    /// justified by the user having judged this span.
+    ///
+    /// A show-wide entry (`range == nil`) answers `false`. So does an
+    /// UNPLACEABLE suppressor, which `correctionFactorSnapshot` records
+    /// show-wide precisely because it could not be placed: a correction nobody
+    /// can locate is not evidence that the user vetoed THIS span, and reading
+    /// it as one would mute banners on a whole episode. `weight > 0` because a
+    /// fully decayed entry moves the factor by nothing and so cannot be what
+    /// blocked the span.
+    func hasSpanScopedSuppressor(
+        overlapping startTime: Double,
+        _ endTime: Double
+    ) -> Bool {
+        guard startTime.isFinite, endTime.isFinite, endTime > startTime else {
+            return false
+        }
+        return suppressors.contains { entry in
+            guard entry.weight > 0, let range = entry.range else { return false }
+            return range.lowerBound < endTime && startTime < range.upperBound
+        }
+    }
 }
 
 // MARK: - UserCorrectionStore default
