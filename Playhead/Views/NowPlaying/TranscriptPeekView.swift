@@ -474,11 +474,15 @@ private extension TranscriptPeekView {
 
         // Unified highlight: decoded spans OR user-marked AdWindows
         let isHighlighted = peekViewModel.isAdHighlighted(chunkIndex: index)
-        // The popover tap target. playhead-d666 R3: the CLAIMING span when the
-        // row has one, because that is the span the bar, the badge and the
-        // spoken label are all about — reading the full overlap set here made
-        // the tap describe (and the veto retract) the silenced music hint next
-        // to it. See `TranscriptPeekViewModel.popoverSpan(chunkIndex:)`.
+        // The popover tap target: the span this row CLAIMS is an ad, or nil.
+        // playhead-d666 R3 — reading the full overlap set here made the tap
+        // describe (and the veto retract) the silenced music hint next to the
+        // real span. R6 removed the fallback that then opened the hint on a row
+        // carrying no claim at all: `AdRegionPopover` is headed "AD SEGMENT",
+        // so a row this view deliberately draws nothing about must not open
+        // one, and the "Not ad" header mode is the veto route that works on any
+        // row over a range the user chose. See
+        // `TranscriptPeekViewModel.popoverSpan(chunkIndex:)`.
         let primarySpan = peekViewModel.popoverSpan(chunkIndex: index)
 
         return HStack(alignment: .top, spacing: 0) {

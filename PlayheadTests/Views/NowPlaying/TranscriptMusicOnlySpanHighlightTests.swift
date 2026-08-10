@@ -177,28 +177,27 @@ struct TranscriptMusicOnlySpanHighlightTests {
         #expect(peek.isAdHighlighted(chunkIndex: 2) == false)
     }
 
-    @Test("The span is still REACHABLE — only the paint is withheld")
+    @Test("The span is still REACHABLE — only what the row ASSERTS is withheld")
     @MainActor
-    func musicOnlySpanIsStillReturnedForThePopoverAndTheVeto() async throws {
+    func musicOnlySpanIsStillReturnedByTheOverlapReads() async throws {
         let peek = await ClipOutro.loaded(
             snapshot: ClipOutro.snapshot(
                 spans: [ClipOutro.span(anchors: [ClipOutro.musicAnchor])]
             )
         )
 
-        // `TranscriptPeekView` builds its popover tap target and its
-        // "sustained music" explanation from THIS, and
-        // `revertByTimeRange`'s window-less branch requires an overlapping
-        // decoded span to exist before it will record a veto at all. Silencing
-        // the highlight must not silence either.
+        // This bead narrows what a row CLAIMS, not what is persisted or
+        // projected. `SkipOrchestrator.revertByTimeRange`'s window-less branch
+        // requires an overlapping `decoded_spans` row to exist before it will
+        // record a veto at all, so the row surviving these reads is what keeps
+        // the "Not ad" selection route able to retract anything here.
         #expect(peek.decodedSpansOverlapping(chunkIndex: 0).count == 1)
         #expect(
-            peek.decodedSpansOverlapping(startTime: 2044.5, endTime: 2048.82)
-                .count == 1,
+            peek.decodedSpans.count == 1,
             """
             Withholding the highlight must not remove the span from the \
-            overlap reads — a listener who taps still gets the explanation, \
-            and the veto path still has something to retract.
+            projection — every non-display consumer, and the veto path, still \
+            see exactly what was persisted.
             """
         )
     }
@@ -631,7 +630,22 @@ struct TranscriptRowSpokenClaimCompositionTests {
 ///
 /// Measured on `db-corrected2`: 112 transcript rows overlap both a music-only
 /// span and a claiming span, and the music-only span sorts first on all 112.
-@Suite("A tap opens the span that CLAIMS, falling back to the hint (playhead-d666)")
+///
+/// playhead-d666 R6 — AND THERE IS NO LONGER A FALLBACK. R3 kept one ("claiming
+/// span, else the first overlapping span") so an unpainted row retained a tap.
+/// R4 found a defect inside it and added a guard, R5 found a defect inside R4's
+/// guard and added a second. The predicate is now the single question the
+/// popover is entitled to answer: `popoverSpan` is the row's first CLAIMING
+/// span, or nil. `AdRegionPopover` is headed "AD SEGMENT", so a row the app
+/// draws nothing about must not open one; un-marking and vetoing stay reachable
+/// through `TranscriptPeekView`'s unconditional "Not ad" header mode, over a
+/// range the listener selects rather than the music proposer's.
+///
+/// The R4 and R5 fixtures below are KEPT VERBATIM — same geometry, same
+/// expected nil — because they are the measured evidence, and a structural
+/// answer that happens to agree with two ad-hoc guards is worth pinning as
+/// such.
+@Suite("A tap opens the span that CLAIMS, or nothing (playhead-d666)")
 struct TranscriptRowPopoverTargetTests {
 
     private static func realPostRoll() -> DecodedSpan {
@@ -669,17 +683,35 @@ struct TranscriptRowPopoverTargetTests {
         )
     }
 
-    @Test("A row with only a silenced span still opens it — the veto affordance is untouched")
+    @Test("THE R6 DELETION: a row with only a silenced span opens NOTHING")
     @MainActor
-    func musicOnlyRowStillOpensTheHint() async throws {
+    func musicOnlyRowOpensNothing() async throws {
         let peek = await ClipOutro.loaded(
             snapshot: ClipOutro.snapshot(
                 spans: [ClipOutro.span(anchors: [ClipOutro.musicAnchor])]
             )
         )
 
+        // No mark anywhere in the fixture, so neither R4's row guard nor R5's
+        // range guard would have fired — this is the fallback's own best case,
+        // and it is the one being removed.
         #expect(peek.isAdHighlighted(chunkIndex: 0) == false)
-        #expect(peek.popoverSpan(chunkIndex: 0)?.id == ClipOutro.span(anchors: []).id)
+        #expect(peek.showsAdBadge(chunkIndex: 0) == false)
+        for index in 0..<3 {
+            #expect(
+                peek.popoverSpan(chunkIndex: index) == nil,
+                """
+                Row \(index) is drawn with no bar, no tint, no badge and a \
+                spoken label carrying no ad claim. Opening "AD SEGMENT / \
+                DETECTED FROM: sustained music" from it re-asserts on tap the \
+                exact claim every other surface was changed to withhold — and \
+                its "This isn't an ad" reverts by the HINT's range, which the \
+                music proposer chose and the listener never saw.
+                """
+            )
+        }
+        // The span itself is untouched: only what the row may SAY changed.
+        #expect(peek.decodedSpansOverlapping(chunkIndex: 0).count == 1)
     }
 
     @Test("A row with no spans at all opens nothing, in range or out")
@@ -712,21 +744,22 @@ struct TranscriptRowPopoverTargetTests {
         #expect(
             peek.popoverSpan(chunkIndex: 2) == nil,
             """
-            The fallback exists for an UNPAINTED row. This row is lit by the \
-            listener's own mark, so opening the hint headlines "AD SEGMENT / \
-            DETECTED FROM: sustained music" over their own verdict — and its \
-            "This isn't an ad" reverts by the HINT's range (2044.5–2056.98), \
-            which overlaps and therefore retracts the mark itself, and records \
-            a manualVeto correction over a range they never chose.
+            This row is lit by the listener's own mark, so opening the hint \
+            headlines "AD SEGMENT / DETECTED FROM: sustained music" over their \
+            own verdict — and its "This isn't an ad" reverts by the HINT's \
+            range (2044.5–2056.98), which overlaps and therefore retracts the \
+            mark itself, and records a manualVeto correction over a range they \
+            never chose.
             """
         )
 
-        // Row 0 is unpainted, so R4's own guard waves it through — and R4
-        // pinned it here as "the fallback is untouched". It is not safe: the
-        // hint it opens is 2044.5–2056.98, whose tail reaches into the same
-        // mark. See `unpaintedRowWhoseHintReachesAMarkOpensNothing` below,
-        // which is where that row's behaviour is now asserted.
+        // Row 0 is unpainted, so R4's own guard waved it through — and R4
+        // pinned it here as "the fallback is untouched". It was not safe: the
+        // hint it opened is 2044.5–2056.98, whose tail reaches into the same
+        // mark (that is R5). Under R6 neither row opens anything, because
+        // neither carries a claim.
         #expect(peek.isAdHighlighted(chunkIndex: 0) == false)
+        #expect(peek.popoverSpan(chunkIndex: 0) == nil)
     }
 
     @Test("THE R5 DEFECT: an UNPAINTED row whose hint reaches into a mark opens nothing")
@@ -768,12 +801,13 @@ struct TranscriptRowPopoverTargetTests {
         )
     }
 
-    @Test("The fallback survives when the hint reaches NO mark")
+    @Test("A mark elsewhere in the episode changes nothing — the answer is CLAIM, not harm")
     @MainActor
-    func unpaintedRowWhoseHintReachesNoMarkStillOpensTheHint() async throws {
-        // Same unpainted row, same hint — but the listener's mark is elsewhere
-        // in the episode, so the veto cannot touch it. The R3 affordance is
-        // narrowed by the harm, not by the mere existence of a mark.
+    func unpaintedRowOpensNothingEvenWhenNoMarkIsAtRisk() async throws {
+        // The cell R5's truth table left open: same unpainted row, same hint,
+        // but the listener's mark is far away, so neither guard would fire.
+        // Under R6 the answer no longer depends on whether this particular tap
+        // would destroy something — an unpainted row has no claim to explain.
         let peek = await ClipOutro.loaded(
             snapshot: ClipOutro.snapshot(
                 spans: [ClipOutro.span(anchors: [ClipOutro.musicAnchor])],
@@ -782,20 +816,21 @@ struct TranscriptRowPopoverTargetTests {
         )
 
         #expect(peek.isAdHighlighted(chunkIndex: 0) == false)
-        #expect(peek.popoverSpan(chunkIndex: 0)?.id == ClipOutro.span(anchors: []).id)
+        #expect(peek.popoverSpan(chunkIndex: 0) == nil)
         // …and rows 1 and 2, equally unpainted and under the same hint.
-        #expect(peek.popoverSpan(chunkIndex: 1)?.id == ClipOutro.span(anchors: []).id)
-        #expect(peek.popoverSpan(chunkIndex: 2)?.id == ClipOutro.span(anchors: []).id)
+        #expect(peek.popoverSpan(chunkIndex: 1) == nil)
+        #expect(peek.popoverSpan(chunkIndex: 2) == nil)
     }
 
-    @Test("A REVERTED mark is not a mark — it cannot suppress the fallback")
+    @Test("A REVERTED mark leaves the row unpainted, and unpainted still opens nothing")
     @MainActor
-    func revertedMarkDoesNotSuppressTheFallback() async throws {
+    func revertedMarkLeavesTheRowUnpaintedAndSilent() async throws {
         // `rebuildSpansByChunkIndex` treats `decisionState == reverted` as the
-        // mark no longer standing (playhead-u45d), and it is also outside
-        // `revertByTimeRange`'s target set. Both guards must read that same
-        // population or the popover disappears over a correction that is
-        // already spent.
+        // mark no longer standing (playhead-u45d), so the row is not painted.
+        // Under R3–R5 that made this the fallback's easiest case; under R6 the
+        // row has no claim either way and opens nothing. Pinned because a
+        // regression that restored the fallback would show up HERE first — this
+        // is the cell no guard ever suppressed.
         let spent = ClipOutro.userMarkedWindow(
             start: 2052.9,
             end: 2112.9,
@@ -809,19 +844,19 @@ struct TranscriptRowPopoverTargetTests {
         )
 
         #expect(peek.isAdHighlighted(chunkIndex: 2) == false)
-        #expect(peek.popoverSpan(chunkIndex: 0)?.id == ClipOutro.span(anchors: []).id)
-        #expect(peek.popoverSpan(chunkIndex: 2)?.id == ClipOutro.span(anchors: []).id)
+        #expect(peek.popoverSpan(chunkIndex: 0) == nil)
+        #expect(peek.popoverSpan(chunkIndex: 2) == nil)
     }
 
-    @Test("A claiming row is untouched by the range guard")
+    @Test("A claiming row opens its claim even where a mark overlaps")
     @MainActor
-    func claimingRowIsUnaffectedByTheRangeGuard() async throws {
-        // The guard is on the FALLBACK only. A row carrying a real claim still
-        // opens that claim even though the claim's own range overlaps the
-        // mark — the popover header discloses the range it is about, and
-        // withholding the explanation of an ad the app IS drawing would be a
-        // worse trade. (The wider question — that `revertByTimeRange` has no
-        // `boundaryState` filter at all — is filed, not fixed here.)
+    func claimingRowStillOpensItsClaimBesideAMark() async throws {
+        // A row carrying a real claim still opens that claim even though the
+        // claim's own range overlaps the mark — the popover header discloses
+        // the range it is about, and withholding the explanation of an ad the
+        // app IS drawing would be a worse trade. (The wider question — that
+        // `revertByTimeRange` has no `boundaryState` filter at all — is filed
+        // as playhead-95cf, not fixed here.)
         let peek = await ClipOutro.loaded(
             snapshot: ClipOutro.snapshot(
                 spans: [
@@ -851,8 +886,96 @@ struct TranscriptRowPopoverTargetTests {
         #expect(peek.isAdHighlighted(chunkIndex: 2))
         #expect(
             peek.popoverSpan(chunkIndex: 2)?.id == "real-postroll",
-            "the user-mark guard must not suppress a claim the row genuinely carries"
+            "a user mark must not suppress a claim the row genuinely carries"
         )
+    }
+
+    // MARK: The whole table
+
+    /// playhead-d666 R6 — EVERY CELL OF R5's TABLE IN ONE PLACE.
+    ///
+    /// R5 reasoned over four axes — does the row carry a CLAIM, is the row
+    /// MARKED, is a span PRESENT at all, and does that span's range REACH a
+    /// live mark — and answered them with three stacked conditions. Under R6
+    /// three of the four axes are irrelevant: the popover opens the row's first
+    /// claiming span or nothing. That is the property worth pinning, because a
+    /// future round re-deriving a fallback would have to make one of the other
+    /// axes matter again, and every cell here would notice.
+    ///
+    /// "No painted row is left without a correction affordance" is the other
+    /// half. A painted row is painted by a claim (which opens) or by the
+    /// listener's own mark (which has nothing for `AdRegionPopover` to show —
+    /// it takes a `DecodedSpan` and a mark has none). The route for the latter,
+    /// and for every unpainted row, is `TranscriptPeekView`'s "Not ad" header
+    /// mode: rendered unconditionally in `body`, selectable on any row painted
+    /// or not, and `submitNotAdChunks` vetoes over the range the listener drew.
+    @Test("The full truth table: claim × mark × span × reach")
+    @MainActor
+    func popoverSpanTruthTable() async throws {
+        let claim = Self.realPostRoll()                                  // 2052.9–2112.9, row 2
+        let hint = ClipOutro.span(anchors: [ClipOutro.musicAnchor])      // 2044.5–2056.98, rows 0-2
+        // Same persisted row id whatever its anchors — the last table case
+        // reuses the geometry with CLAIMING provenance.
+        let clipOutroSpanId = hint.id
+        // A music-only span short enough to clear a mark that starts at 2054.
+        let shortHint = DecodedSpan(
+            id: "short-hint",
+            assetId: ClipOutro.assetId,
+            firstAtomOrdinal: 2061, lastAtomOrdinal: 2065,
+            startTime: 2044.5, endTime: 2053.5,
+            anchorProvenance: [ClipOutro.musicAnchor]
+        )
+        let markOnRow2 = ClipOutro.userMarkedWindow(start: 2054, end: 2112.9)
+        let farMark = ClipOutro.userMarkedWindow(start: 60, end: 120)
+
+        // (label, spans, adWindows, row, expected popoverSpan id)
+        let table: [(String, [DecodedSpan], [AdWindow], Int, String?)] = [
+            ("no span, unmarked", [], [], 0, nil),
+            ("no span, MARKED (painted by the listener's verdict)",
+             [], [markOnRow2], 2, nil),
+            ("music-only, unmarked, reaches no mark", [hint], [farMark], 0, nil),
+            ("music-only, unmarked, REACHES a mark (R5)",
+             [hint], [ClipOutro.userMarkedWindow(start: 2052.9, end: 2112.9)], 0, nil),
+            ("music-only, MARKED, span clears the mark",
+             [shortHint], [markOnRow2], 2, nil),
+            ("music-only, MARKED, span reaches the mark (R4)",
+             [hint], [ClipOutro.userMarkedWindow(start: 2052.9, end: 2112.9)], 2, nil),
+            ("claiming, unmarked", [claim], [], 2, "real-postroll"),
+            ("claiming, MARKED", [claim], [markOnRow2], 2, "real-postroll"),
+            ("claiming + music-only, music sorts first (R3)",
+             [hint, claim], [], 2, "real-postroll"),
+            ("claiming at row 0 — the badge's index-0 boundary",
+             [ClipOutro.span(anchors: [.classifierSeed(regionId: "r", score: 0.9)])],
+             [], 0, clipOutroSpanId),
+        ]
+
+        for (label, spans, windows, row, expected) in table {
+            let peek = await ClipOutro.loaded(
+                snapshot: ClipOutro.snapshot(spans: spans, adWindows: windows)
+            )
+            #expect(
+                peek.popoverSpan(chunkIndex: row)?.id == expected,
+                "\(label): row \(row) expected \(expected ?? "nil")"
+            )
+            // A painted row always has SOME correction route. When it carries a
+            // claim that route is the popover; when it is the listener's own
+            // mark it is "Not ad" mode, which needs no span.
+            if peek.isAdHighlighted(chunkIndex: row) {
+                #expect(
+                    peek.popoverSpan(chunkIndex: row) != nil
+                        || peek.adClaimingSpansOverlapping(chunkIndex: row).isEmpty,
+                    "\(label): a painted row carrying a claim must open it"
+                )
+            }
+        }
+
+        // Out of range, both directions, on the richest fixture.
+        let peek = await ClipOutro.loaded(
+            snapshot: ClipOutro.snapshot(spans: [hint, claim], adWindows: [markOnRow2])
+        )
+        #expect(peek.popoverSpan(chunkIndex: -1) == nil)
+        #expect(peek.popoverSpan(chunkIndex: 3) == nil)
+        #expect(peek.popoverSpan(chunkIndex: Int.max) == nil)
     }
 }
 
