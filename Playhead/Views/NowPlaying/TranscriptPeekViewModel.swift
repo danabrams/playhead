@@ -352,10 +352,26 @@ final class TranscriptPeekViewModel {
     ///     range the USER drew before calling the same `onRevertAdWindows`. The
     ///     fallback's range was the music proposer's: measured on
     ///     `db-corrected2`, over the 347 rows where it still fired the hint
-    ///     overhangs the tapped row by a median 11.5 s (max 32.5 s), and on 34
+    ///     overhangs the tapped row by a median 14.9 s (max 32.8 s), and on 34
     ///     of them it reaches an `ad_window` in candidate/confirmed/applied
-    ///     that does not touch the tapped row at all — six of those
-    ///     `dayZeroRediffByteExact`, the highest-certainty auto-skip class.
+    ///     that does not touch the tapped row at all. All 34 of those windows
+    ///     are `eligibilityGate == markOnly`.
+    ///
+    ///     R6 REVIEW CORRECTED THIS BULLET'S TWO FIGURES; the numbers above are
+    ///     the re-derived ones. R6 wrote "median 11.5 s (max 32.5 s)" and "six
+    ///     of those `dayZeroRediffByteExact`, the highest-certainty auto-skip
+    ///     class". Neither reproduces. Overhang under every natural definition
+    ///     (hint duration minus row duration, two-sided, leading-only,
+    ///     trailing-only), over the 347 rows or the 252 distinct ones, and
+    ///     under both suppression models, gives a median of 6.3–14.9 s and
+    ///     never 11.5; only the LEADING-overhang max (32.46 s) is near R6's
+    ///     32.5. And `dayZeroRediffByteExact` appears in neither `ad_windows`
+    ///     nor `ad_decision_results` on this database — every reached window
+    ///     is `markOnly`, which is by definition NOT auto-skip, so the clause
+    ///     contradicted itself. Nothing else in this argument rests on either
+    ///     figure: the case for deleting the fallback is the three bullets
+    ///     above plus the fact that a wider veto range is worse than the
+    ///     user's own, which the 34 reached windows still demonstrate.
     ///
     /// WHAT WAS GIVEN UP, stated plainly so it can be restored in one line: an
     /// unpainted row whose only overlapping span is a bare sustained-music hint
