@@ -110,9 +110,12 @@
 //      so every sweep mark cleared it. A derived value clears it only at the
 //      ceiling. Measured over all 22 sweep rows of the 2026-08-10 pull, graded
 //      from the presence rows under each one: 6 stay at 0.70 and 16 fall below
-//      (13 of 22 at or above 0.525, 20 of 22 at or above 0.40, minimum 0.093),
-//      so those 16 would no longer hydrate on the next launch. Both marks Dan
-//      vetoed grade at 0.467, with 16 of 22 grading ABOVE them. That is a REACH
+//      (13 of 22 at or above 0.525, 20 of 22 at or above 0.40, minimum 0.047,
+//      12 distinct values), so those 16 would no longer hydrate on the next
+//      launch. Both marks Dan vetoed grade at 0.467, and 16 of 22 grade ABOVE
+//      them — which is the honest reading of an N of 2, not a claim that the
+//      grade separates good marks from bad ones. What it does claim is that
+//      there is now something in the number TO separate on. That is a REACH
 //      change and it is NOT decided here: `preloadConfidenceThreshold` is
 //      playhead-atr3's settled territory and is untouched.
 //
