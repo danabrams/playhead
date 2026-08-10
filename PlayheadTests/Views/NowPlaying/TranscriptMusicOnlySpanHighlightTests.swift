@@ -123,7 +123,11 @@ private enum ClipOutro {
 
     /// A user-marked window, the shape `rebuildSpansByChunkIndex` reads for
     /// `userMarkedChunkIndices`.
-    static func userMarkedWindow(start: Double, end: Double) -> AdWindow {
+    static func userMarkedWindow(
+        start: Double,
+        end: Double,
+        decisionState: String = AdDecisionState.confirmed.rawValue
+    ) -> AdWindow {
         AdWindow(
             id: "user-marked",
             analysisAssetId: assetId,
@@ -131,7 +135,7 @@ private enum ClipOutro {
             endTime: end,
             confidence: 1.0,
             boundaryState: "userMarked",
-            decisionState: AdDecisionState.confirmed.rawValue,
+            decisionState: decisionState,
             detectorVersion: "userCorrection",
             advertiser: nil, product: nil, adDescription: nil,
             evidenceText: nil, evidenceStartTime: start,
@@ -717,10 +721,118 @@ struct TranscriptRowPopoverTargetTests {
             """
         )
 
-        // The documented fallback is untouched where its own justification
-        // holds: row 0 is unpainted and still reaches the hint.
+        // Row 0 is unpainted, so R4's own guard waves it through — and R4
+        // pinned it here as "the fallback is untouched". It is not safe: the
+        // hint it opens is 2044.5–2056.98, whose tail reaches into the same
+        // mark. See `unpaintedRowWhoseHintReachesAMarkOpensNothing` below,
+        // which is where that row's behaviour is now asserted.
+        #expect(peek.isAdHighlighted(chunkIndex: 0) == false)
+    }
+
+    @Test("THE R5 DEFECT: an UNPAINTED row whose hint reaches into a mark opens nothing")
+    @MainActor
+    func unpaintedRowWhoseHintReachesAMarkOpensNothing() async throws {
+        // The identical fixture to the R4 test above — and the identical harm,
+        // one row earlier. Row 0 (2044.5–2047.2, "to that full episode, I've
+        // linked it down below.") is NOT inside Dan's mark, so R4's per-row
+        // guard passes it. But the only span it can open is 2044.5–2056.98,
+        // and `revertByTimeRange(start: 2044.5, end: 2056.98)` folds in every
+        // overlapping window in candidate/confirmed/applied with no
+        // `boundaryState` filter — including `C0CC71D0` (2052.9–2112.9), the
+        // post-roll Dan marked himself because the app missed it.
+        //
+        // Measured on `db-corrected2`: 32 of 94,099 `transcript_chunks` rows
+        // (16 canonical, doubled fast/final) across 3 of the 5 assets with a
+        // live `userMarked` window are in exactly this state.
+        let peek = await ClipOutro.loaded(
+            snapshot: ClipOutro.snapshot(
+                spans: [ClipOutro.span(anchors: [ClipOutro.musicAnchor])],
+                adWindows: [ClipOutro.userMarkedWindow(start: 2052.9, end: 2112.9)]
+            )
+        )
+
+        // Nothing about the ROW is marked or claimed — the fallback's own
+        // precondition holds. The range is what makes the tap destructive.
+        #expect(peek.isAdHighlighted(chunkIndex: 0) == false)
+        #expect(peek.adClaimingSpansOverlapping(chunkIndex: 0).isEmpty)
+        #expect(peek.decodedSpansOverlapping(chunkIndex: 0).count == 1)
+
+        #expect(
+            peek.popoverSpan(chunkIndex: 0) == nil,
+            """
+            The veto runs over the SPAN's range, not the row's. This hint \
+            reaches 2056.98, inside a mark the listener made — so one tap on a \
+            row the app is not even flagging retracts their own correction and \
+            writes a manualVeto over a range they never chose.
+            """
+        )
+    }
+
+    @Test("The fallback survives when the hint reaches NO mark")
+    @MainActor
+    func unpaintedRowWhoseHintReachesNoMarkStillOpensTheHint() async throws {
+        // Same unpainted row, same hint — but the listener's mark is elsewhere
+        // in the episode, so the veto cannot touch it. The R3 affordance is
+        // narrowed by the harm, not by the mere existence of a mark.
+        let peek = await ClipOutro.loaded(
+            snapshot: ClipOutro.snapshot(
+                spans: [ClipOutro.span(anchors: [ClipOutro.musicAnchor])],
+                adWindows: [ClipOutro.userMarkedWindow(start: 60, end: 120)]
+            )
+        )
+
         #expect(peek.isAdHighlighted(chunkIndex: 0) == false)
         #expect(peek.popoverSpan(chunkIndex: 0)?.id == ClipOutro.span(anchors: []).id)
+        // …and rows 1 and 2, equally unpainted and under the same hint.
+        #expect(peek.popoverSpan(chunkIndex: 1)?.id == ClipOutro.span(anchors: []).id)
+        #expect(peek.popoverSpan(chunkIndex: 2)?.id == ClipOutro.span(anchors: []).id)
+    }
+
+    @Test("A REVERTED mark is not a mark — it cannot suppress the fallback")
+    @MainActor
+    func revertedMarkDoesNotSuppressTheFallback() async throws {
+        // `rebuildSpansByChunkIndex` treats `decisionState == reverted` as the
+        // mark no longer standing (playhead-u45d), and it is also outside
+        // `revertByTimeRange`'s target set. Both guards must read that same
+        // population or the popover disappears over a correction that is
+        // already spent.
+        let spent = ClipOutro.userMarkedWindow(
+            start: 2052.9,
+            end: 2112.9,
+            decisionState: AdDecisionState.reverted.rawValue
+        )
+        let peek = await ClipOutro.loaded(
+            snapshot: ClipOutro.snapshot(
+                spans: [ClipOutro.span(anchors: [ClipOutro.musicAnchor])],
+                adWindows: [spent]
+            )
+        )
+
+        #expect(peek.isAdHighlighted(chunkIndex: 2) == false)
+        #expect(peek.popoverSpan(chunkIndex: 0)?.id == ClipOutro.span(anchors: []).id)
+        #expect(peek.popoverSpan(chunkIndex: 2)?.id == ClipOutro.span(anchors: []).id)
+    }
+
+    @Test("A claiming row is untouched by the range guard")
+    @MainActor
+    func claimingRowIsUnaffectedByTheRangeGuard() async throws {
+        // The guard is on the FALLBACK only. A row carrying a real claim still
+        // opens that claim even though the claim's own range overlaps the
+        // mark — the popover header discloses the range it is about, and
+        // withholding the explanation of an ad the app IS drawing would be a
+        // worse trade. (The wider question — that `revertByTimeRange` has no
+        // `boundaryState` filter at all — is filed, not fixed here.)
+        let peek = await ClipOutro.loaded(
+            snapshot: ClipOutro.snapshot(
+                spans: [
+                    ClipOutro.span(anchors: [ClipOutro.musicAnchor]),
+                    Self.realPostRoll(),
+                ],
+                adWindows: [ClipOutro.userMarkedWindow(start: 2052.9, end: 2112.9)]
+            )
+        )
+
+        #expect(peek.popoverSpan(chunkIndex: 2)?.id == "real-postroll")
     }
 
     @Test("A user-marked row that ALSO carries a claim still opens the claim")
