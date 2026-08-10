@@ -454,6 +454,66 @@ struct TranscriptMusicOnlySpanBadgeTests {
     }
 }
 
+// MARK: - What VoiceOver says
+
+@Suite("VoiceOver may not claim an ad the transcript stopped drawing (playhead-d666)")
+struct TranscriptRowAccessibilityClaimTests {
+
+    private static var outroRow: TranscriptChunk { ClipOutro.chunks()[0] }
+
+    @Test("THE PIN: a silenced row is spoken as plain transcript, with no ad claim")
+    func silencedRowMakesNoSpokenClaim() {
+        let label = TranscriptRowAccessibility.label(
+            chunk: Self.outroRow,
+            isAd: false,
+            overlappingSpans: [ClipOutro.span(anchors: [ClipOutro.musicAnchor])],
+            makesAdClaim: false
+        )
+
+        #expect(
+            label.contains("Ad segment") == false,
+            """
+            The span is still in `overlappingSpans` — the popover and the veto \
+            path need it there. `makesAdClaim` is the ONLY thing standing \
+            between it and a spoken "Ad segment, 12 seconds, detected from \
+            sustained music" on a row a sighted listener sees unpainted.
+            """
+        )
+        #expect(label == "34:04: \(Self.outroRow.text)")
+    }
+
+    @Test("A claiming row is still announced, with its provenance")
+    func claimingRowIsAnnounced() {
+        let real = DecodedSpan(
+            id: "real", assetId: ClipOutro.assetId,
+            firstAtomOrdinal: 2061, lastAtomOrdinal: 2068,
+            startTime: 2044.5, endTime: 2056.98,
+            anchorProvenance: [.classifierSeed(regionId: "r", score: 0.9)]
+        )
+        let label = TranscriptRowAccessibility.label(
+            chunk: Self.outroRow,
+            isAd: false,
+            overlappingSpans: [real],
+            makesAdClaim: true
+        )
+
+        #expect(label.hasPrefix("Ad segment, 12 seconds, detected from classifier."))
+    }
+
+    @Test("The legacy ad-window label is untouched by the claim gate")
+    func legacyWindowLabelIsUnchanged() {
+        // No decoded spans at all: the `isAd` branch is the pre-Phase-5 path
+        // and this change must not have moved it.
+        let label = TranscriptRowAccessibility.label(
+            chunk: Self.outroRow,
+            isAd: true,
+            overlappingSpans: [],
+            makesAdClaim: true
+        )
+        #expect(label == "Ad segment at 34:04: \(Self.outroRow.text)")
+    }
+}
+
 // MARK: - The shared predicate
 
 @Suite("carriesOnlyMusicPresenceHint is one definition, two consumers (playhead-d666)")

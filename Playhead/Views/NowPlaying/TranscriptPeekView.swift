@@ -603,7 +603,7 @@ private extension TranscriptPeekView {
         )
         .animation(Motion.quick, value: isActive)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(accessibilityLabel(
+        .accessibilityLabel(TranscriptRowAccessibility.label(
             chunk: chunk,
             isAd: isAd,
             overlappingSpans: overlappingSpans,
@@ -631,37 +631,9 @@ private extension TranscriptPeekView {
         return ts + String(format: " AD %.0f%%", score * 100)
     }
 
-    /// Phase 5 (u4d): Accessibility label that includes decoded span info when present.
-    /// `makesAdClaim` is `TranscriptPeekViewModel.isAdHighlighted` for this row
-    /// — the one place that decides whether the app is asserting "this is an
-    /// ad". It gates the decoded-span branch so the spoken label and the drawn
-    /// one can never disagree (playhead-d666).
-    ///
-    /// DELIBERATELY NOT DEFAULTED. A default would have to be `true` to keep
-    /// the old shape compiling, and `true` is the wrong answer — it is the bug
-    /// this parameter exists to close. A new call site must say which it holds.
-    func accessibilityLabel(
-        chunk: TranscriptChunk,
-        isAd: Bool,
-        overlappingSpans: [DecodedSpan],
-        makesAdClaim: Bool
-    ) -> String {
-        let ts = TimeFormatter.formatTime(chunk.startTime)
-
-        // Phase 5 decoded span takes precedence for the accessibility label.
-        if makesAdClaim, let span = overlappingSpans.first {
-            let secs = Int(span.duration.rounded())
-            let provenanceSummary = provenanceSummary(span.anchorProvenance)
-            return "Ad segment, \(secs) seconds, detected from \(provenanceSummary). \(ts): \(chunk.text)"
-        }
-
-        // Legacy ad window label.
-        if isAd {
-            return "Ad segment at \(ts): \(chunk.text)"
-        }
-
-        return "\(ts): \(chunk.text)"
-    }
+    // Phase 5 (u4d): the row's spoken label is
+    // `TranscriptRowAccessibility.label` — see there for why it is not a method
+    // on this view (playhead-d666 R1).
 
     /// Submit the marked chunks as a false negative correction.
     ///
@@ -802,7 +774,55 @@ private extension TranscriptPeekView {
         }
     }
 
-    private func provenanceSummary(_ refs: [AnchorRef]) -> String {
+}
+
+// MARK: - TranscriptRowAccessibility
+
+/// What VoiceOver says about one transcript row.
+///
+/// playhead-d666 R1 — WHY THIS IS NOT A METHOD ON THE VIEW, WHERE IT LIVED.
+/// `TranscriptPeekView` has `@State private` storage, so its memberwise
+/// initializer is private and the test target cannot construct one; every test
+/// in this area drives `TranscriptPeekViewModel` instead. That made the spoken
+/// label the one display surface no test could reach — and it is the surface
+/// where a suppressed claim is easiest to leave behind, because nothing about
+/// it is visible on screen. Moving the two pure functions out costs nothing at
+/// the call site and makes the `makesAdClaim` gate below assertable rather than
+/// merely believed.
+enum TranscriptRowAccessibility {
+
+    /// `makesAdClaim` is `TranscriptPeekViewModel.isAdHighlighted` for this row
+    /// — the one place that decides whether the app is asserting "this is an
+    /// ad". It gates the decoded-span branch so the spoken label and the drawn
+    /// one can never disagree (playhead-d666).
+    ///
+    /// DELIBERATELY NOT DEFAULTED. A default would have to be `true` to keep
+    /// the old shape compiling, and `true` is the wrong answer — it is the bug
+    /// this parameter exists to close. A new call site must say which it holds.
+    static func label(
+        chunk: TranscriptChunk,
+        isAd: Bool,
+        overlappingSpans: [DecodedSpan],
+        makesAdClaim: Bool
+    ) -> String {
+        let ts = TimeFormatter.formatTime(chunk.startTime)
+
+        // Phase 5 decoded span takes precedence for the accessibility label.
+        if makesAdClaim, let span = overlappingSpans.first {
+            let secs = Int(span.duration.rounded())
+            let summary = provenanceSummary(span.anchorProvenance)
+            return "Ad segment, \(secs) seconds, detected from \(summary). \(ts): \(chunk.text)"
+        }
+
+        // Legacy ad window label.
+        if isAd {
+            return "Ad segment at \(ts): \(chunk.text)"
+        }
+
+        return "\(ts): \(chunk.text)"
+    }
+
+    static func provenanceSummary(_ refs: [AnchorRef]) -> String {
         if refs.isEmpty { return "unknown signals" }
         let descriptions = refs.prefix(3).map { ref -> String in
             switch ref {
