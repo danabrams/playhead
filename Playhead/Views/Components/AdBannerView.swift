@@ -874,7 +874,7 @@ struct AdBannerView: View {
     /// suggest-tier (the action only applies to confirmed auto-skips —
     /// "always skip" presupposes we just successfully skipped it).
     var onAlwaysSkipSponsor: ((AdSkipBannerItem) -> Void)?
-    /// Production persistence contract for "Always skip this sponsor." The
+    /// Production persistence contract for the always-skip-sponsor action. The
     /// inline success receipt is shown only after the correction store accepts
     /// the write; a rejected write leaves the current card retryable.
     var onAlwaysSkipSponsorAsync: ((AdSkipBannerItem) async -> Bool)?
@@ -1074,12 +1074,31 @@ struct AdBannerView: View {
     }
 
     /// The inline receipt shown for `alwaysSkipConfirmationSeconds` after the
-    /// correction store accepts the write. Deliberately the CTA's own words in
-    /// the present continuous — the listener should be able to match receipt to
-    /// tap without re-reading, and "always skipping … on this show" states the
-    /// standing behaviour rather than promising a future they cannot verify.
+    /// correction store accepts the write. The HINT's own words in the present
+    /// continuous — not the button's.
+    ///
+    /// playhead-q6y3 R1: it read "Always skipping <sponsor> on this show",
+    /// which asserts a standing behaviour the tap does not yet produce, and it
+    /// contradicted the hint one control away that had already been softened to
+    /// "Remembers …" for exactly that reason. Traced end to end, one press
+    /// records a durable confirmation against the sponsor
+    /// (`LearningArtifactIngestor.applySponsorSideEffect` →
+    /// `SponsorKnowledgeStore.recordCandidate`) and changes no skip anywhere;
+    /// the entry needs presses on two DISTINCT episodes to reach `.active`, and
+    /// even then the only production reader of an active sponsor entry is
+    /// `ASRVocabularyProvider` (see the bead's R1 note). A receipt in the
+    /// present continuous of "skipping" is therefore a claim about behaviour
+    /// that is not happening; "remembering" is a claim about the preference,
+    /// which is exactly what did happen.
+    ///
+    /// The label stays imperative ("Always skip …") because that is the
+    /// instruction the listener gave — Dan's ruling. The receipt reports what
+    /// the app did with it.
     static func alwaysSkipSponsorReceipt(for advertiser: String) -> String {
-        "Always skipping \(alwaysSkipSponsorDisplayName(advertiser)) on this show"
+        """
+        Remembering \(alwaysSkipSponsorDisplayName(advertiser)) as one to skip \
+        on this show
+        """
     }
 
     struct FeedbackChoiceContent: Equatable {

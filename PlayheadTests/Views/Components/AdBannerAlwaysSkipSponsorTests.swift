@@ -333,15 +333,45 @@ final class AdBannerAlwaysSkipSponsorTests: XCTestCase {
         XCTAssertFalse(hint.hasPrefix("Skips "))
     }
 
-    /// The receipt is the CTA's own words in the present continuous, so
-    /// the listener can match receipt to tap without re-reading, and it
-    /// states the standing behaviour rather than promising a future
-    /// nobody can verify.
-    func testReceiptMirrorsTheCta() {
+    /// playhead-q6y3 R1: the receipt reports what the app DID, and what it
+    /// did is remember a preference.
+    ///
+    /// It read "Always skipping Squarespace on this show" — the present
+    /// continuous of the button's own imperative, which asserts a standing
+    /// skip. Traced end to end, one press records a durable confirmation
+    /// against the sponsor and changes no skip anywhere; the sponsor entry
+    /// needs presses on two DISTINCT episodes even to reach `.active`. So
+    /// the receipt was a second over-promise sitting one control away from
+    /// a hint that had already been softened to "Remembers …" for exactly
+    /// that reason.
+    func testReceiptReportsTheMemoryNotAStandingSkip() {
+        let receipt = AdBannerView.alwaysSkipSponsorReceipt(for: "Squarespace")
         XCTAssertEqual(
-            AdBannerView.alwaysSkipSponsorReceipt(for: "Squarespace"),
-            "Always skipping Squarespace on this show"
+            receipt,
+            "Remembering Squarespace as one to skip on this show"
         )
+        // It is the HINT in the present continuous, not the BUTTON. Pin that
+        // relationship so a future edit cannot drift the two apart again.
+        XCTAssertTrue(receipt.hasPrefix("Remembering "))
+        XCTAssertFalse(
+            receipt.hasPrefix("Always skipping"),
+            """
+            the app is not skipping this sponsor anywhere yet — one press \
+            records a preference, and promising the behaviour is the defect \
+            playhead-q6y3 R1 removed
+            """
+        )
+        // ANTI-VACUITY: the advertiser is interpolated, not decoration on a
+        // constant string, and the population is still named.
+        XCTAssertNotEqual(
+            receipt,
+            AdBannerView.alwaysSkipSponsorReceipt(for: "BetterHelp")
+        )
+        XCTAssertTrue(
+            AdBannerView.alwaysSkipSponsorReceipt(for: "BetterHelp")
+                .contains("BetterHelp")
+        )
+        XCTAssertTrue(receipt.contains("on this show"))
     }
 
     /// External-copy rules: no "ad detection", no "AI", no metrics. And
@@ -411,8 +441,8 @@ final class AdBannerAlwaysSkipSponsorTests: XCTestCase {
     // MARK: - Confirmation dwell
 
     /// The View uses `alwaysSkipConfirmationSeconds` to drive the
-    /// auto-dismiss after the inline "Will always skip this sponsor"
-    /// receipt. Pin the value so future tweaks are deliberate (the UI
+    /// auto-dismiss after the inline `alwaysSkipSponsorReceipt`
+    /// line. Pin the value so future tweaks are deliberate (the UI
     /// design wants the receipt to read as a calm receipt, not a
     /// modal).
     func testConfirmationDwellIsShortEnoughToReadAsReceipt() {
