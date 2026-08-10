@@ -251,7 +251,10 @@ enum CorrectionSource: String, Sendable, Codable, CaseIterable {
     case listenRevert
     /// User explicitly vetoed a span via "This isn't an ad".
     case manualVeto
-    /// User reported a missed ad (false negative) — "Hearing an ad" button or transcript tap-to-mark.
+    /// User reported a missed ad (false negative) — "Hearing an ad" button,
+    /// transcript tap-to-mark, or (playhead-q6y3) "Always skip <sponsor> on
+    /// this show", which asserts the same direction over a `.sponsorOnShow`
+    /// scope instead of a span.
     case falseNegative
     /// Durable, private receipt for Yes on an already auto-skipped banner.
     case bannerAutoSkipConfirmed

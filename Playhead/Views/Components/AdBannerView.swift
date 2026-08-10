@@ -534,7 +534,7 @@ final class AdBannerQueue {
 
     /// Atomically claims the single durable/replay action slot for a visible
     /// presentation without recording a Yes/No aggregate. Existing actions
-    /// such as Listen and "Always skip this sponsor" use this so a rapid
+    /// such as Listen and the always-skip-sponsor action use this so a rapid
     /// conflicting tap cannot persist two incompatible corrections.
     func claimPresentationAction(
         for item: AdSkipBannerItem,
@@ -598,7 +598,7 @@ final class AdBannerQueue {
 
     /// Dismisses an inline confirmation only when transient timers are active.
     ///
-    /// The "Always skip this sponsor" receipt uses a separate two-second
+    /// The always-skip-sponsor receipt uses a separate two-second
     /// delayed task rather than the queue's normal dwell. Route that task
     /// through the same assistive-control pause state so VoiceOver and Switch
     /// Control users do not lose the receipt while navigating it.
@@ -862,10 +862,13 @@ struct AdBannerView: View {
     /// dismiss/fade still uses the queue's fire-and-forget cleanup callback.
     var onSuggestDeclineAsync: ((AdSkipBannerItem) async -> Bool)?
 
-    /// playhead-3bv.4: Called when the user taps "Always skip this sponsor"
-    /// on an auto-skipped banner. The host records a `sponsorOnShow`
-    /// scope correction in `UserCorrectionStore` so future episodes of
-    /// the same show veto this advertiser proactively. The button is
+    /// playhead-3bv.4 / playhead-q6y3: Called when the user taps
+    /// "Always skip <sponsor> on this show" on an auto-skipped banner. The host
+    /// records a `sponsorOnShow` scope correction in `UserCorrectionStore` in
+    /// the REINFORCEMENT direction — "yes, this is an ad" — so future episodes
+    /// of the same show carry the advertiser forward. It is emphatically NOT a
+    /// veto: this seam shipped writing `.falsePositive`, which taught the
+    /// pipeline the opposite of the button's own label. The button is
     /// hidden when this callback is nil, when the banner has no
     /// advertiser name to scope against, or when the banner is
     /// suggest-tier (the action only applies to confirmed auto-skips —
@@ -915,8 +918,8 @@ struct AdBannerView: View {
     @State private var expandedBannerId: String?
 
     /// playhead-3bv.4: Tracks the banner id that just received an
-    /// "Always skip this sponsor" tap. Drives the inline confirmation
-    /// replacement of the action row ("Will always skip this sponsor")
+    /// always-skip-sponsor tap. Drives the inline confirmation
+    /// replacement of the action row (the always-skip-sponsor receipt)
     /// without dismissing the entire banner — the confirmation is the
     /// receipt the user needs. A short delayed dismiss closes the
     /// banner after the user has had time to read the line.
@@ -931,7 +934,7 @@ struct AdBannerView: View {
     private var dynamicTypeSize
 
     /// Duration before the banner auto-dismisses after the inline
-    /// "Will always skip this sponsor" confirmation appears. Short
+    /// the always-skip-sponsor receipt appears. Short
     /// enough that it never feels like a modal; long enough to read.
     static let alwaysSkipConfirmationSeconds: TimeInterval = 2.0
 
@@ -1010,6 +1013,56 @@ struct AdBannerView: View {
         return normalized
             .trimmingCharacters(in: .whitespacesAndNewlines)
             .isEmpty ? "" : normalized
+    }
+
+    /// The sponsor name as the listener should READ it — original casing,
+    /// outer whitespace and newlines removed. Distinct from
+    /// `normalizedAlwaysSkipSponsor`, which is a storage KEY and is
+    /// deliberately lowercased to match `SponsorKnowledgeStore.normalizedValue`
+    /// byte-for-byte. Falls back to "this sponsor" so no copy path can render
+    /// an empty name; the button's own visibility predicate already makes that
+    /// fallback unreachable from the banner.
+    static func alwaysSkipSponsorDisplayName(_ advertiser: String) -> String {
+        let display = advertiser
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return display.isEmpty ? "this sponsor" : display
+    }
+
+    /// playhead-q6y3: the call to action names the SPONSOR and the POPULATION.
+    ///
+    /// The shipped label was "Always skip this sponsor", which said neither.
+    /// "this sponsor" reads as a pointer at the card in front of you — the same
+    /// span the banner is already about — when the tap is in fact a standing
+    /// instruction about an advertiser across every episode of the show. Dan
+    /// asked for a clearer CTA; naming the advertiser and saying "on this show"
+    /// is what makes the population legible in the four words a listener
+    /// actually reads mid-episode.
+    ///
+    /// "on this show" rather than "in every episode of this show" for the
+    /// button: the accessibility hint carries the full sentence, and a control
+    /// on the banner's quiet utility row has to stay short enough not to
+    /// compete with Listen. The hint is where the durability is spelled out.
+    static func alwaysSkipSponsorLabel(for advertiser: String) -> String {
+        "Always skip \(alwaysSkipSponsorDisplayName(advertiser)) on this show"
+    }
+
+    /// The full sentence, for VoiceOver and for anyone who wants the promise
+    /// stated rather than implied. Present tense and no numbers: this is what
+    /// the app will do from now on, not a count of anything it has done.
+    static func alwaysSkipSponsorHint(for advertiser: String) -> String {
+        """
+        Skips \(alwaysSkipSponsorDisplayName(advertiser)) in every episode of \
+        this show from now on
+        """
+    }
+
+    /// The inline receipt shown for `alwaysSkipConfirmationSeconds` after the
+    /// correction store accepts the write. Deliberately the CTA's own words in
+    /// the present continuous — the listener should be able to match receipt to
+    /// tap without re-reading, and "always skipping … on this show" states the
+    /// standing behaviour rather than promising a future they cannot verify.
+    static func alwaysSkipSponsorReceipt(for advertiser: String) -> String {
+        "Always skipping \(alwaysSkipSponsorDisplayName(advertiser)) on this show"
     }
 
     struct FeedbackChoiceContent: Equatable {
@@ -1498,7 +1551,7 @@ struct AdBannerView: View {
             // ergonomics (compact, low-attention margin note) survive
             // queued skips.
             expandedBannerId = nil
-            // playhead-3bv.4: drop any stale "Always skip this sponsor"
+            // playhead-3bv.4: drop any stale always-skip-sponsor
             // confirmation state when the queue advances. Without this,
             // the delayed auto-dismiss task scheduled for the previous
             // banner would see `confirmedAlwaysSkipBannerId == item.id`
@@ -1970,7 +2023,7 @@ struct AdBannerView: View {
         }
     }
 
-    /// playhead-3bv.4: "Always skip this sponsor" sits on the quiet utility
+    /// playhead-3bv.4: the always-skip-sponsor action sits on the quiet utility
     /// row, separate from the explicit Yes/No learning choice.
     @ViewBuilder
     private func alwaysSkipSponsorAction(
@@ -1998,7 +2051,7 @@ struct AdBannerView: View {
                     }
                 }
             } label: {
-                Text("Always skip this sponsor")
+                Text(Self.alwaysSkipSponsorLabel(for: advertiser))
                     .font(AppTypography.caption)
                     .foregroundStyle(boneText.opacity(0.5))
                     .lineLimit(2)
@@ -2007,10 +2060,8 @@ struct AdBannerView: View {
                     .contentShape(Rectangle())
             }
             .buttonStyle(BannerButtonStyle())
-            .accessibilityLabel("Always skip this sponsor")
-            .accessibilityHint(
-                "Tells Playhead to skip \(advertiser) on this show without asking again"
-            )
+            .accessibilityLabel(Self.alwaysSkipSponsorLabel(for: advertiser))
+            .accessibilityHint(Self.alwaysSkipSponsorHint(for: advertiser))
         }
     }
 
@@ -2091,27 +2142,32 @@ struct AdBannerView: View {
     }
 
     /// playhead-3bv.4: inline confirmation surfaced after the user taps
-    /// "Always skip this sponsor". Replaces the entire action row for
+    /// the always-skip-sponsor action. Replaces the entire action row for
     /// a short dwell so the user sees an unambiguous receipt without a
     /// modal dialog interrupting playback.
     @ViewBuilder
     private func alwaysSkipConfirmation(item: AdSkipBannerItem) -> some View {
+        let receipt = Self.alwaysSkipSponsorReceipt(
+            for: item.advertiser ?? ""
+        )
         HStack(spacing: Spacing.xs) {
             Image(systemName: "checkmark")
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(AppColors.accent)
                 .accessibilityHidden(true)
-            Text("Will always skip this sponsor")
+            Text(receipt)
                 .font(
                     AppTypography.font(
                         for: Self.confirmationTypographyRole
                     )
                 )
                 .foregroundStyle(boneText.opacity(0.75))
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)
         }
         .accessibilityElement(children: .combine)
-        .accessibilityLabel("Will always skip this sponsor")
+        .accessibilityLabel(receipt)
         .transition(.opacity)
     }
 

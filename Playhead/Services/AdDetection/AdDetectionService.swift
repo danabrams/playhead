@@ -4604,7 +4604,9 @@ actor AdDetectionService {
         // window's own `proposalConfidence` stayed bit-identical.
         //
         // Show-wide scopes (a vetoed SPONSOR, a vetoed PHRASE) still apply to
-        // every span — see `CorrectionFactorSnapshot`.
+        // every span in the SUPPRESS direction — and to no span in the BOOST
+        // direction (playhead-q6y3), because a scope that names a sponsor
+        // cannot say where the ads are. See `CorrectionFactorSnapshot`.
         let correctionSnapshot: CorrectionFactorSnapshot
         if let correctionStore {
             correctionSnapshot = await correctionStore

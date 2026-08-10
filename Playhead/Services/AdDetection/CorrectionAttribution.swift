@@ -24,6 +24,15 @@ enum CorrectionType: String, Sendable, Codable, CaseIterable, Equatable {
     /// System flagged content as an ad, but it is not.
     case falsePositive
     /// System missed an ad that the user identified.
+    ///
+    /// The BOOST direction. What it asserts depends on the `CorrectionScope` it
+    /// is stored with, and the scope is the only thing that says over what
+    /// population: on a span scope (`.exactSpan` / `.exactTimeSpan`) it is
+    /// "there is an ad HERE"; on a show-wide scope (`.sponsorOnShow` and
+    /// friends) it is "this advertiser IS an ad on this show" — reinforcement
+    /// of a detection rather than a report of a miss. Both are the same claim
+    /// about direction, which is why one case covers both and why
+    /// `playhead-q6y3` did not add a third `CorrectionType`.
     case falseNegative
     /// The detected ad span starts before the actual ad begins.
     case startTooEarly
