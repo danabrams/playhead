@@ -110,11 +110,17 @@ struct FusionEmissionShapeTests {
                     source: CorrectionSource.manualVeto
                 )
             }
-            // The "Always skip this sponsor" gesture
-            // (`AdBannerView.alwaysSkipSponsorAction` →
-            // `NowPlayingView.onAlwaysSkipSponsorAsync`) writes exactly this:
-            // a SHOW-WIDE `sponsorOnShow` scope with
-            // `correctionType: .falsePositive`, on the current asset.
+            // A SHOW-WIDE `sponsorOnShow` scope in the SUPPRESS direction, on
+            // the current asset — a genuine sponsor veto, which is what
+            // `PersistentUserCorrectionStore.recordVeto(span:ledgerEntries:)`
+            // writes for every `brandSpan` on a vetoed span.
+            //
+            // playhead-q6y3: this used to name the always-skip-sponsor button
+            // as the writer. It no longer is — that gesture means "yes, this
+            // IS an ad" and now writes the REINFORCEMENT direction. The
+            // behaviour these tests pin (a show-wide veto suppresses the whole
+            // asset yet must not withhold the banner) is unchanged and is
+            // still reachable; only the attribution was wrong.
             for sponsor in showWideVetoedSponsors {
                 try await corrections.record(
                     CorrectionEvent(

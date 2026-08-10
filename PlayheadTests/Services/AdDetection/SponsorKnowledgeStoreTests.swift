@@ -506,6 +506,75 @@ struct SponsorKnowledgeStoreNegativeMemoryTests {
         #expect(filtered[0].normalizedValue == "goodsponsor")
     }
 
+    /// playhead-q6y3. "Negative memory" has to mean the SUPPRESS direction, or
+    /// pressing "Always skip <sponsor> on this show" — which writes a
+    /// `sponsorOnShow` correction in the REINFORCEMENT direction — would delete
+    /// the sponsor from the very lexicon the tap was asking us to keep. The
+    /// pass used to ask only whether ANY correction event named the scope.
+    ///
+    /// The vetoed sponsor in the same fixture is the anti-vacuity control: it
+    /// runs through the same store, the same query and the same filter, so a
+    /// change that simply stopped negating anything fails here rather than
+    /// passing as a green reinforcement test.
+    @Test("A reinforcing sponsorOnShow does NOT negate, while a veto still does")
+    func reinforcementDoesNotNegate() async throws {
+        let analysisStore = try await makeTestStore()
+        let knowledgeStore = SponsorKnowledgeStore(store: analysisStore)
+        let correctionStore = PersistentUserCorrectionStore(store: analysisStore)
+
+        try await analysisStore.insertAsset(makeTestAsset(id: "asset-dir"))
+
+        for sponsor in ["KeepSponsor", "VetoedSponsor"] {
+            for i in 1...2 {
+                try await knowledgeStore.recordCandidate(
+                    podcastId: "pod-dir",
+                    entityType: .sponsor,
+                    entityValue: sponsor,
+                    analysisAssetId: "asset-\(sponsor)-\(i)",
+                    sourceAtomOrdinals: [i],
+                    transcriptVersion: "tv-\(i)",
+                    confidence: 0.9
+                )
+            }
+        }
+
+        // The button: "yes, this IS an ad, always skip it."
+        try await correctionStore.record(
+            CorrectionEvent(
+                analysisAssetId: "asset-dir",
+                scope: CorrectionScope.sponsorOnShow(
+                    podcastId: "pod-dir",
+                    sponsor: "keepsponsor"
+                ).serialized,
+                source: .falseNegative,
+                podcastId: "pod-dir",
+                correctionType: .falseNegative
+            )
+        )
+        // The control: a genuine veto, same scope shape, opposite direction.
+        try await correctionStore.record(
+            CorrectionEvent(
+                analysisAssetId: "asset-dir",
+                scope: CorrectionScope.sponsorOnShow(
+                    podcastId: "pod-dir",
+                    sponsor: "vetoedsponsor"
+                ).serialized,
+                source: .manualVeto,
+                podcastId: "pod-dir",
+                correctionType: .falsePositive
+            )
+        )
+
+        let filtered = try await knowledgeStore.activeEntriesWithNegativeMemory(
+            forPodcast: "pod-dir"
+        )
+        let surviving = Set(filtered.map(\.normalizedValue))
+        #expect(surviving.contains("keepsponsor"),
+                "a reinforcement must not remove the sponsor it reinforces")
+        #expect(!surviving.contains("vetoedsponsor"),
+                "anti-vacuity: a real veto in the same fixture must still negate")
+    }
+
     @Test("Non-sponsor entity types are not affected by sponsorOnShow corrections")
     func nonSponsorNotFiltered() async throws {
         let analysisStore = try await makeTestStore()

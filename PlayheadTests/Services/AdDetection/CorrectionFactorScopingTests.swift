@@ -88,7 +88,7 @@ struct CorrectionFactorScopingTests {
                 "a mark at 2838 must not inflate a span at 1396 past a detector floor")
     }
 
-    @Test("show-wide scopes still apply everywhere — they assert a sponsor, not a position")
+    @Test("show-wide SUPPRESSORS still apply everywhere — they assert a sponsor, not a position")
     func showWideScopesRemainAssetWide() {
         let snapshot = CorrectionFactorSnapshot(
             suppressors: [.init(weight: 0.5, range: nil)],
@@ -263,6 +263,165 @@ struct CorrectionFactorScopingTests {
             ) > 1.0,
             "a mark must still boost the span it names"
         )
+    }
+
+    // MARK: - playhead-q6y3: the show-wide scope, in the BOOST direction
+
+    /// The exact event `NowPlayingView.onAlwaysSkipSponsorAsync` writes for
+    /// "Always skip <sponsor> on this show".
+    private func alwaysSkipSponsorEvent(
+        assetId: String,
+        podcastId: String = "pod-q6y3",
+        sponsor: String = "squarespace"
+    ) -> CorrectionEvent {
+        CorrectionEvent(
+            analysisAssetId: assetId,
+            scope: CorrectionScope.sponsorOnShow(
+                podcastId: podcastId,
+                sponsor: sponsor
+            ).serialized,
+            source: .falseNegative,
+            podcastId: podcastId,
+            correctionType: .falseNegative,
+            targetRefs: CorrectionTargetRefs(sponsorEntity: sponsor)
+        )
+    }
+
+    /// `SkipOrchestrator.preloadAdmissibleWindows` compares this against
+    /// `actuationConfidence` (playhead-atr3). It is `private static` there, so
+    /// the value is restated rather than read; the rail that pins the
+    /// orchestrator's own use of it is
+    /// `SkipOrchestratorPreloadActuationFloorTests`.
+    private static let preloadFloor = 0.7
+
+    @Test("a show-wide REINFORCEMENT lifts no span, and cannot carry one over the 0.7 preload floor")
+    func showWideBoosterIsAppliedNowhere() async throws {
+        let dir = try makeTempDir(prefix: "Q6y3ShowWideBoost")
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let assetId = "q6y3-show-wide-boost"
+        AnalysisStore.resetMigratedPathsForTesting()
+        let store = try AnalysisStore(directory: dir)
+        try await store.migrate()
+        try await store.insertAsset(makeAsset(id: assetId))
+
+        let corrections = PersistentUserCorrectionStore(store: store)
+        try await corrections.record(alwaysSkipSponsorEvent(assetId: assetId))
+
+        // ANTI-VACUITY. The row is really there, and the store really does read
+        // it as a BOOSTER — the asset-wide reader, which does not decode scope,
+        // reports a boost well above 1.0 from this single event. So everything
+        // below is the snapshot declining to PLACE a booster it can see, not
+        // the test quietly asserting over an empty table or a row the store
+        // classified as something else.
+        let assetWideBoost = await corrections.correctionBoostFactor(for: assetId)
+        #expect(assetWideBoost > 1.5,
+                """
+                precondition: a fresh sponsorOnShow false-negative must read as a \
+                strong asset-wide boost (got \(assetWideBoost)) — otherwise this \
+                test proves nothing about scoping
+                """)
+
+        let snapshot = await corrections.correctionFactorSnapshot(for: assetId)
+        #expect(snapshot.boosters.isEmpty,
+                """
+                a scope that names a SPONSOR cannot say where the ads are, so it \
+                must not be recorded as a booster over every span — got \
+                \(snapshot.boosters.count)
+                """)
+        #expect(snapshot.factor(overlapping: 10, 20) == 1.0)
+        #expect(snapshot.factor(overlapping: 2828.4, 2836.44) == 1.0)
+        #expect(snapshot.factor(overlapping: 4329.96, 4342.2) == 1.0)
+
+        // THE ACCEPTANCE CRITERION, stated as arithmetic. A span whose detector
+        // number sits below the cross-launch preload floor must still sit below
+        // it after the button has been pressed. Pre-fix the show-wide booster
+        // was recorded with `range: nil`, so `factor` returned the full
+        // `min(2, 1 + weight)` for EVERY span: 0.5 x ~1.99 = ~0.99, over the
+        // floor, on one tap and on evidence about no span at all.
+        let detection = 0.5
+        let actuation = detection * snapshot.factor(overlapping: 4329.96, 4342.2)
+        #expect(actuation < Self.preloadFloor,
+                """
+                pressing "always skip <sponsor>" must not admit an unrelated \
+                0.5-confidence span to the cross-launch preload — got \(actuation)
+                """)
+        #expect(detection * assetWideBoost >= Self.preloadFloor,
+                """
+                anti-vacuity for the line above: the blanket this replaces DID \
+                cross the floor, so the assertion is about scoping and not about \
+                a boost too small to matter
+                """)
+    }
+
+    @Test("a show-wide VETO still suppresses every span — the split is direction, not scope")
+    func showWideSuppressorIsUnchanged() async throws {
+        let dir = try makeTempDir(prefix: "Q6y3ShowWideVeto")
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let assetId = "q6y3-show-wide-veto"
+        AnalysisStore.resetMigratedPathsForTesting()
+        let store = try AnalysisStore(directory: dir)
+        try await store.migrate()
+        try await store.insertAsset(makeAsset(id: assetId))
+
+        // What `PersistentUserCorrectionStore.recordVeto(span:ledgerEntries:)`
+        // writes for a brandSpan on a vetoed span: a GENUINE sponsor veto,
+        // deliberately left in the suppress direction by playhead-q6y3.
+        let corrections = PersistentUserCorrectionStore(store: store)
+        try await corrections.record(
+            CorrectionEvent(
+                analysisAssetId: assetId,
+                scope: CorrectionScope.sponsorOnShow(
+                    podcastId: "pod-q6y3",
+                    sponsor: "squarespace"
+                ).serialized,
+                source: .manualVeto,
+                podcastId: "pod-q6y3",
+                correctionType: .falsePositive
+            )
+        )
+
+        let snapshot = await corrections.correctionFactorSnapshot(for: assetId)
+        #expect(snapshot.suppressors.count == 1)
+        #expect(snapshot.suppressors.first?.range == nil,
+                "a vetoed sponsor is asserted over the whole asset — that has not changed")
+        #expect(snapshot.factor(overlapping: 10, 20) < 1.0)
+        #expect(snapshot.factor(overlapping: 4329.96, 4342.2) < 1.0)
+    }
+
+    @Test("a PLACEABLE reinforcement on the same asset still boosts the span it names")
+    func placedBoosterSurvivesAlongsideAShowWideOne() async throws {
+        let dir = try makeTempDir(prefix: "Q6y3MixedBoost")
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let assetId = "q6y3-mixed-boost"
+        AnalysisStore.resetMigratedPathsForTesting()
+        let store = try AnalysisStore(directory: dir)
+        try await store.migrate()
+        try await store.insertAsset(makeAsset(id: assetId))
+
+        let corrections = PersistentUserCorrectionStore(store: store)
+        try await corrections.record(alwaysSkipSponsorEvent(assetId: assetId))
+        // A transcript mark — the boost direction, scoped to a span.
+        await corrections.recordVeto(
+            startTime: 2838.18,
+            endTime: 2897.94,
+            assetId: assetId,
+            podcastId: "pod-q6y3",
+            source: CorrectionSource.falseNegative
+        )
+
+        let snapshot = await corrections.correctionFactorSnapshot(for: assetId)
+        // ANTI-VACUITY. Exactly ONE booster survives — the placed one. If the
+        // change had simply broken the boost direction, this would be zero and
+        // the assertion below would pass for the wrong reason.
+        #expect(snapshot.boosters.count == 1)
+        #expect(snapshot.boosters.first?.range != nil)
+        #expect(snapshot.factor(overlapping: 2838.18, 2897.94) > 1.0,
+                "a mark must still boost the span it names")
+        #expect(snapshot.factor(overlapping: 4329.96, 4342.2) == 1.0,
+                "and must reach nothing else, show-wide reinforcement included")
     }
 
     @Test("a store that reports only the asset-wide scalars keeps the old blanket behaviour")
