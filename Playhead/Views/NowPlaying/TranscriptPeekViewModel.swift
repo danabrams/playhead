@@ -360,9 +360,10 @@ final class TranscriptPeekViewModel {
     /// WHAT WAS GIVEN UP, stated plainly so it can be restored in one line: an
     /// unpainted row whose only overlapping span is a bare sustained-music hint
     /// no longer opens the tap-to-explain popover. 347 of 94,099
-    /// `transcript_chunks` rows on `db-corrected2` (≈174 canonical, the rest
-    /// fast/final duplicates) were in that state; every painted row keeps its
-    /// popover, and every row keeps "Not ad" mode.
+    /// `transcript_chunks` rows on `db-corrected2` were in that state — 252
+    /// distinct by (start, end, text), the remaining 95 being fast/final
+    /// duplicates. Every painted row keeps its popover, and every row keeps
+    /// "Not ad" mode.
     ///
     /// Deleting it removes both of R4's and R5's guards and the
     /// `liveUserMarkedWindows` mirror they read, and makes the R4/R5/R6 defect
