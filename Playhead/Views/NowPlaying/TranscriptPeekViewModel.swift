@@ -286,6 +286,36 @@ final class TranscriptPeekViewModel {
         return !isAdHighlighted(chunkIndex: chunkIndex - 1)
     }
 
+    /// The span the tap-to-explain popover opens for on this row.
+    ///
+    /// playhead-d666 R3 — THE FOURTH CONSUMER, and the same shape as the other
+    /// three. The view read `decodedSpansOverlapping(chunkIndex:).first`, and
+    /// `fetchDecodedSpans` orders by `startTime`, so on this bead's geometry
+    /// ("an ad begins right AFTER this music") the earliest-starting overlap is
+    /// the SILENCED span. A row lit and badged by a corroborated span therefore
+    /// opened a popover headed "AD SEGMENT / DETECTED FROM: sustained music"
+    /// carrying the hint's duration and time range — the same misattribution R2
+    /// fixed for VoiceOver, one surface over. Worse than a wrong caption: the
+    /// popover's "This isn't an ad" reverts THAT span, so the listener's veto
+    /// landed on the hint while the row stayed lit by the claim they were
+    /// actually looking at, and the correction — the highest-fidelity signal the
+    /// app has — was recorded against the wrong range.
+    ///
+    /// Measured on `db-corrected2`: 112 transcript rows sit under both a
+    /// music-only span and a claiming span, and the music-only span sorts first
+    /// on all 112.
+    ///
+    /// The FALLBACK is deliberate and is what keeps this a fix rather than a
+    /// design change. When nothing on the row claims, the row is drawn
+    /// unpainted and the only remaining way to reach the hint — to see what the
+    /// app thought and veto it — is this tap. Whether that affordance should
+    /// exist at all is a design call left open by this bead; preferring the
+    /// claiming span does not touch it.
+    func popoverSpan(chunkIndex: Int) -> DecodedSpan? {
+        adClaimingSpansOverlapping(chunkIndex: chunkIndex).first
+            ?? decodedSpansOverlapping(chunkIndex: chunkIndex).first
+    }
+
     /// What VoiceOver speaks for the row at `chunkIndex`.
     ///
     /// playhead-d666 R2 — WHY THIS COMPOSES HERE RATHER THAN IN THE VIEW.

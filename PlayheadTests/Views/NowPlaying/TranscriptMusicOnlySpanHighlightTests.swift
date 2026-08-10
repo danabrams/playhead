@@ -613,6 +613,81 @@ struct TranscriptRowSpokenClaimCompositionTests {
     }
 }
 
+// MARK: - What a tap opens, and therefore what a veto retracts
+
+/// playhead-d666 R3. The bar, the badge and the spoken label all read the
+/// CLAIMING set. The tap target did not — it took
+/// `decodedSpansOverlapping(chunkIndex:).first`, and `fetchDecodedSpans` orders
+/// by `startTime`, so on this bead's geometry that is the silenced span.
+///
+/// This is not only a caption defect. `AdRegionPopover`'s "This isn't an ad"
+/// calls `onRevertAdWindows(span)` with whatever span it was opened for, so a
+/// listener vetoing the ad they can see retracted the music hint beside it and
+/// the row stayed lit.
+///
+/// Measured on `db-corrected2`: 112 transcript rows overlap both a music-only
+/// span and a claiming span, and the music-only span sorts first on all 112.
+@Suite("A tap opens the span that CLAIMS, falling back to the hint (playhead-d666)")
+struct TranscriptRowPopoverTargetTests {
+
+    private static func realPostRoll() -> DecodedSpan {
+        DecodedSpan(
+            id: "real-postroll",
+            assetId: ClipOutro.assetId,
+            firstAtomOrdinal: 2068, lastAtomOrdinal: 2090,
+            startTime: 2052.9, endTime: 2112.9,
+            anchorProvenance: [.classifierSeed(regionId: "r2", score: 0.9)]
+        )
+    }
+
+    @Test("THE R3 DEFECT: a row under both spans opens the CLAIMING one")
+    @MainActor
+    func bothOverlapOpensTheClaimingSpan() async throws {
+        let peek = await ClipOutro.loaded(
+            snapshot: ClipOutro.snapshot(
+                spans: [ClipOutro.span(anchors: [ClipOutro.musicAnchor]), Self.realPostRoll()]
+            )
+        )
+
+        // Row 2 is under BOTH, and the silenced span sorts first.
+        #expect(peek.decodedSpansOverlapping(chunkIndex: 2).count == 2)
+        #expect(peek.decodedSpansOverlapping(chunkIndex: 2).first?.id == ClipOutro.span(anchors: []).id)
+        #expect(peek.isAdHighlighted(chunkIndex: 2))
+
+        #expect(
+            peek.popoverSpan(chunkIndex: 2)?.id == "real-postroll",
+            """
+            The row is drawn, badged and spoken for the 60-second post-roll. \
+            Opening the music hint's popover there headlines "AD SEGMENT / \
+            DETECTED FROM: sustained music" with the hint's 12-second duration, \
+            and its "This isn't an ad" retracts the hint instead of the claim.
+            """
+        )
+    }
+
+    @Test("A row with only a silenced span still opens it — the veto affordance is untouched")
+    @MainActor
+    func musicOnlyRowStillOpensTheHint() async throws {
+        let peek = await ClipOutro.loaded(
+            snapshot: ClipOutro.snapshot(
+                spans: [ClipOutro.span(anchors: [ClipOutro.musicAnchor])]
+            )
+        )
+
+        #expect(peek.isAdHighlighted(chunkIndex: 0) == false)
+        #expect(peek.popoverSpan(chunkIndex: 0)?.id == ClipOutro.span(anchors: []).id)
+    }
+
+    @Test("A row with no spans at all opens nothing, in range or out")
+    @MainActor
+    func noSpansOpensNothing() async throws {
+        let peek = await ClipOutro.loaded(snapshot: ClipOutro.snapshot(spans: []))
+        #expect(peek.popoverSpan(chunkIndex: 0) == nil)
+        #expect(peek.popoverSpan(chunkIndex: 3) == nil)
+        #expect(peek.popoverSpan(chunkIndex: -1) == nil)
+    }
+}
+
 // MARK: - The shared predicate
 
 @Suite("carriesOnlyMusicPresenceHint is one definition, two consumers (playhead-d666)")

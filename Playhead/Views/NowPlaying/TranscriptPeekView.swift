@@ -472,12 +472,14 @@ private extension TranscriptPeekView {
             endTime: chunk.endTime
         )
 
-        // Phase 5 decoded spans overlapping this chunk
-        let overlappingSpans = peekViewModel.decodedSpansOverlapping(chunkIndex: index)
         // Unified highlight: decoded spans OR user-marked AdWindows
         let isHighlighted = peekViewModel.isAdHighlighted(chunkIndex: index)
-        // Use the first overlapping span for the popover tap target
-        let primarySpan = overlappingSpans.first
+        // The popover tap target. playhead-d666 R3: the CLAIMING span when the
+        // row has one, because that is the span the bar, the badge and the
+        // spoken label are all about — reading the full overlap set here made
+        // the tap describe (and the veto retract) the silenced music hint next
+        // to it. See `TranscriptPeekViewModel.popoverSpan(chunkIndex:)`.
+        let primarySpan = peekViewModel.popoverSpan(chunkIndex: index)
 
         return HStack(alignment: .top, spacing: 0) {
             // Left-edge accent bar for ad regions (decoded spans or user-marked)
