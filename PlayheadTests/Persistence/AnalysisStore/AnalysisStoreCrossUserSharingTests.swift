@@ -36,6 +36,7 @@ private func makeSharingWindow(
     start: Double = 10,
     end: Double = 40,
     confidence: Double = 0.92,
+    skipConfidence: Double? = nil,
     evidenceText: String? = "raw transcript evidence should not be shared",
     boundaryState: String = AdBoundaryState.acousticRefined.rawValue,
     decisionState: String = AdDecisionState.confirmed.rawValue,
@@ -50,6 +51,7 @@ private func makeSharingWindow(
         startTime: start,
         endTime: end,
         confidence: confidence,
+        skipConfidence: skipConfidence,
         boundaryState: boundaryState,
         decisionState: decisionState,
         detectorVersion: "fm-test-v1",
@@ -460,6 +462,88 @@ struct AnalysisStoreCrossUserSharingTests {
         )
 
         #expect(snapshot == nil)
+    }
+
+    /// playhead-ar60 R1 review: the named residual gap. A peer's ACTUATION
+    /// number has to survive the wire, because on the importing device
+    /// `actuationConfidence` is what the skip policy gates on — falling back to
+    /// the exporter's (higher) DETECTION score would make an imported fusion
+    /// row more skip-eager here than it was there.
+    @Test("skipConfidence round-trips across the sharing boundary")
+    func skipConfidenceSurvivesExportAndImport() async throws {
+        let store = try await makeTestStore()
+        try await seedSharingAsset(
+            store: store,
+            id: "asset-a",
+            episodeId: "episode-1",
+            fileSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            episodeDurationSec: 180
+        )
+        try await store.insertAdWindow(
+            makeSharingWindow(
+                id: "source-window",
+                assetId: "asset-a",
+                confidence: 0.92,
+                skipConfidence: 0.0039
+            )
+        )
+
+        let snapshot = try #require(
+            try await store.exportCrossUserAnalysisSnapshot(
+                assetId: "asset-a",
+                podcastId: "podcast-1",
+                measurements: CrossUserAnalysisMeasurements(
+                    fmMinutesSaved: nil,
+                    queueToReadyLatencySec: 1,
+                    batteryDeltaPercent: nil
+                )
+            )
+        )
+        let exported = try #require(snapshot.windows.first)
+        #expect(exported.confidence == 0.92)
+        #expect(exported.skipConfidence == 0.0039,
+                "the exporter must not collapse the two quantities again")
+
+        let target = try await makeTestStore()
+        try await seedSharingAsset(
+            store: target,
+            id: "asset-b",
+            episodeId: "episode-2",
+            fileSHA: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            episodeDurationSec: 180
+        )
+        _ = try await target.importCrossUserAnalysisSnapshot(
+            snapshot,
+            targetAssetId: "asset-b",
+            podcastId: "podcast-1"
+        )
+        let imported = try #require(
+            try await target.fetchAdWindows(assetId: "asset-b").first
+        )
+        #expect(imported.confidence == 0.92)
+        #expect(imported.skipConfidence == 0.0039)
+        #expect(imported.actuationConfidence == 0.0039,
+                "the importing device must gate on the peer's actuation number")
+
+        // A pre-split peer sends no such key at all, so it decodes as `nil` and
+        // `actuationConfidence` hands the one number it DID send to the skip
+        // gate — which is exactly what that snapshot meant. That direction is a
+        // property of the optional decode rather than of a code path, and the
+        // V3/V4 import suites above already exercise the versions.
+        let preSplit = CrossUserAnalysisSnapshot.Window(
+            adWindow: makeSharingWindow(
+                id: "legacy-window",
+                assetId: "asset-a",
+                confidence: 0.61,
+                skipConfidence: nil
+            )
+        )
+        #expect(preSplit.skipConfidence == nil)
+        let reDecoded = try JSONDecoder().decode(
+            CrossUserAnalysisSnapshot.Window.self,
+            from: try JSONEncoder().encode(preSplit)
+        )
+        #expect(reDecoded.skipConfidence == nil)
     }
 
     @Test("import rejects local assets whose fingerprint is not a full-file SHA")

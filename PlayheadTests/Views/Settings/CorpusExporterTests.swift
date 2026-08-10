@@ -158,6 +158,10 @@ struct CorpusExporterTests {
             !encodedLine.contains(try #require(window.catalogMatchedEntryId)),
             "a private catalog-row UUID must not cross the corpus boundary"
         )
+        // playhead-ar60 R1 review: the named residual gap. A one-number
+        // producer emits `null`, which is what says "there is no separate
+        // actuation number" rather than "it happened to equal `confidence`".
+        #expect(json["skipConfidence"] is NSNull)
         #expect(
             json["catalogMatchedShowId"] as? String
                 == window.catalogMatchedShowId
@@ -182,6 +186,38 @@ struct CorpusExporterTests {
         ] {
             #expect(!json.keys.contains(forbiddenKey))
         }
+    }
+
+    @Test("ad_window export carries the ACTUATION number in its own key (playhead-ar60)")
+    func adWindowExportCarriesSkipConfidence() throws {
+        let fusion = AdWindow(
+            id: "ar60-export-window",
+            analysisAssetId: "ar60-export-asset",
+            startTime: 2828.4,
+            endTime: 2836.44,
+            confidence: 0.456,
+            skipConfidence: 0.00115,
+            boundaryState: AdBoundaryState.acousticRefined.rawValue,
+            decisionState: AdDecisionState.confirmed.rawValue,
+            detectorVersion: "test",
+            advertiser: nil,
+            product: nil,
+            adDescription: nil,
+            evidenceText: nil,
+            evidenceStartTime: nil,
+            metadataSource: "fusion-v1",
+            metadataConfidence: nil,
+            metadataPromptVersion: nil,
+            wasSkipped: false,
+            userDismissedBanner: false
+        )
+        let json = try decodeJSONObject(
+            from: CorpusExporter.adWindowLine(fusion)
+        )
+        // Both, and distinguishable — the whole point of the V47 split is that
+        // a corpus reader can no longer mistake one for the other.
+        #expect(json["confidence"] as? Double == 0.456)
+        #expect(json["skipConfidence"] as? Double == 0.00115)
     }
 
     @Test("feedback-targeted ad-window export redacts only response-derived state")
