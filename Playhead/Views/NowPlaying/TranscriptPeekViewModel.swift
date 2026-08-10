@@ -50,6 +50,14 @@ final class TranscriptPeekViewModel {
     /// These get visual ad highlighting even without a corresponding DecodedSpan.
     private var userMarkedChunkIndices: Set<Int> = []
 
+    /// playhead-d666: chunk indices whose overlapping decoded spans are ALL
+    /// music-only — i.e. every one of them is anchored solely by a
+    /// `.sustainedMusicOffset` hint. Kept separate from `spansByChunkIndex`
+    /// (which still returns them, so the popover, the veto gesture and every
+    /// overlap read are unchanged) because the ONLY thing that must differ is
+    /// whether the row is PAINTED as an ad.
+    private var musicOnlyChunkIndices: Set<Int> = []
+
     /// Index of the chunk containing the current playback position, or nil.
     private(set) var activeChunkIndex: Int?
 
@@ -209,10 +217,29 @@ final class TranscriptPeekViewModel {
         spansByChunkIndex[chunkIndex] ?? []
     }
 
-    /// Whether this chunk should receive ad highlighting (copper bar, background tint).
-    /// True if the chunk overlaps any DecodedSpan OR any user-marked AdWindow.
+    /// Whether this chunk should receive ad highlighting (copper bar, AD badge,
+    /// background tint). True if the chunk overlaps any DecodedSpan that makes
+    /// an ad CLAIM, or any user-marked AdWindow.
+    ///
+    /// playhead-d666: a span whose only presence anchor is
+    /// `.sustainedMusicOffset` does NOT make that claim. `AnchorRef` and
+    /// `BackfillEvidenceFusion` both spell it out — the sustained-music
+    /// proposer is a TARGETING signal ("an ad likely begins right AFTER this
+    /// music"), never a verdict about the audio it covers, which is why
+    /// `DecisionMapper` demotes such a span to `.markOnly` and never lets it
+    /// auto-skip. This surface honoured none of that: it painted "AD" over the
+    /// show's own words on nothing but a music bed. On asset 48E903D7 that was
+    /// the clip outro — "to that full episode, I've linked it down below. Check
+    /// the description. Thank you." — drawn as an ad because an outro music bed
+    /// started 1.5 s into it, and vetoed by the listener as a false positive.
+    ///
+    /// A user-marked window still wins: that IS a verdict, and the listener's
+    /// own. So is any span carrying corroborating presence evidence, music or
+    /// not — only the bare hint is silenced.
     func isAdHighlighted(chunkIndex: Int) -> Bool {
-        (spansByChunkIndex[chunkIndex] != nil) || userMarkedChunkIndices.contains(chunkIndex)
+        if userMarkedChunkIndices.contains(chunkIndex) { return true }
+        guard spansByChunkIndex[chunkIndex] != nil else { return false }
+        return !musicOnlyChunkIndices.contains(chunkIndex)
     }
 
     /// Returns all Phase 5 decoded spans overlapping the given time range.
@@ -429,6 +456,7 @@ final class TranscriptPeekViewModel {
     private func rebuildSpansByChunkIndex() {
         var mapping: [Int: [DecodedSpan]] = [:]
         var userMarked = Set<Int>()
+        var musicOnly = Set<Int>()
 
         // playhead-u45d: the same defect one field over. This set used to
         // filter on `boundaryState` alone, so vetoing an ad the listener had
@@ -448,6 +476,14 @@ final class TranscriptPeekViewModel {
             }
             if !overlapping.isEmpty {
                 mapping[idx] = overlapping
+                // playhead-d666: ALL, not ANY. One corroborated span overlapping
+                // this row is an ad claim about this row, and a bare music hint
+                // sitting on top of it cannot retract that.
+                if overlapping.allSatisfy({
+                    $0.anchorProvenance.carriesOnlyMusicPresenceHint
+                }) {
+                    musicOnly.insert(idx)
+                }
             }
 
             if userMarkedWindows.contains(where: { ad in
@@ -458,6 +494,7 @@ final class TranscriptPeekViewModel {
         }
         spansByChunkIndex = mapping
         userMarkedChunkIndices = userMarked
+        musicOnlyChunkIndices = musicOnly
     }
 
     /// Pull a fresh snapshot and apply it to observable state. Internal (not
