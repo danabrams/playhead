@@ -510,6 +510,13 @@ enum EvidenceCatalogBuilder {
             ".org/",
             ".io/",
             ".co/",
+            // playhead-absa: keep this list in step with the URL patterns.
+            // Without a separator entry a `.ai` match yields NO brand stem, so
+            // "whisperflow.ai" would anchor but never seed the brandSpan
+            // corroboration that "betterhelp.com" does.
+            ".ai/",
+            ".fm/",
+            ".tv/",
             " dot com slash ",
             " dot org slash ",
             " dot io slash ",
@@ -522,10 +529,16 @@ enum EvidenceCatalogBuilder {
             ".org",
             ".io",
             ".co",
+            ".ai",
+            ".fm",
+            ".tv",
             " dot com",
             " dot org",
             " dot io",
             " dot co",
+            " dot ai",
+            " dot fm",
+            " dot tv",
         ]
 
         for separator in separators {
@@ -757,6 +770,32 @@ enum EvidenceCatalogBuilder {
             #"\b\w+\.co\/\w+"#,                       // short domains: something.co/offer
             #"\b\w+\.org\/\w+"#,                      // .org URLs
             #"\b\w+\.io\/\w+"#,                       // .io URLs
+
+            // playhead-absa: TLDs beyond .com/.org/.io. Every one of these
+            // requires a literal dot with NO space in front of the TLD (or the
+            // spoken "dot X" form), which is what keeps them off ordinary
+            // speech — ASR emits "word. Next" with a space after a sentence
+            // period, so `\w+\.ai` cannot be produced by a sentence boundary.
+            // Measured over 94,692 device transcript chunks (31 assets,
+            // fast + final): `.ai` fired 44 times, EVERY one a real sponsor
+            // URL (netsuite.ai ×40, whisperflow.ai, flow.ai, jerry.ai) and
+            // zero on show content; spoken "dot ai" once ("J-E-R-R-Y dot AI",
+            // a spelled-out ad URL); `.co` 12 times, every one
+            // marketreach.co.uk in a sponsor read. `.fm`/`.tv` fired ZERO
+            // times — no measured benefit and no measured cost; they are here
+            // for family symmetry with the same no-space structure, not on
+            // evidence.
+            #"\b\w+\.ai\/\w+"#,                       // .ai URLs with a path
+            #"\b\w+\.ai\b"#,                          // bare domain: whisperflow.ai
+            #"\b\w+ dot ai\b"#,                       // spoken: "whisperflow dot ai"
+            #"\b\w+\.co\b"#,                          // bare short domain: marketreach.co(.uk)
+            #"\b\w+ dot co\b"#,                       // spoken bare .co
+            #"\b\w+\.fm\/\w+"#,                       // .fm URLs with a path
+            #"\b\w+\.fm\b"#,                          // bare domain: something.fm
+            #"\b\w+ dot fm\b"#,                       // spoken bare .fm
+            #"\b\w+\.tv\/\w+"#,                       // .tv URLs with a path
+            #"\b\w+\.tv\b"#,                          // bare domain: something.tv
+            #"\b\w+ dot tv\b"#,                       // spoken bare .tv
         ])
 
         // Promo codes — require qualifying prefix to avoid false positives
@@ -782,6 +821,19 @@ enum EvidenceCatalogBuilder {
             #"\btap the link\b"#,
             #"\bcheck it out\b"#,
             #"\bhead over to\b"#,
+            // playhead-absa. "head to" is far more common in ordinary speech
+            // than "head over to", so it earns its place only because
+            // ctaPhrase is a CONTEXT category: it is extracted solely from
+            // atoms within ±2 of a url/promoCode/disclosure anchor
+            // (`contextCategories` / `commercialContextOrdinals`). Measured
+            // over the same 94,692 chunks: 12 raw occurrences, of which the
+            // two non-ad ones ("head to the gym", "get stretched head to toe")
+            // are BOTH outside commercial context and never extracted. The
+            // 8 that survive the gate are all sponsor reads (pipedrive.com,
+            // functionhealth.com, pro.5.com), and the .ai patterns above open
+            // two more — both the WhisperFlow "all you have to do is head to"
+            // — for 10/10 in-ad after this change.
+            #"\bhead to\b"#,
             #"\bgo check out\b"#,
             #"\btry it free\b"#,
             #"\btry it today\b"#,
@@ -808,6 +860,13 @@ enum EvidenceCatalogBuilder {
             #"\bsupported by\b"#,
             #"\btoday s sponsor\b"#,
             #"\btoday's sponsor\b"#,
+            // playhead-absa: "because of our sponsor called Whisper Flow" —
+            // the DE0784D8 pod's disclosure, which no existing pattern saw.
+            // 2 occurrences in 94,692 chunks, both the same sponsor read on
+            // two assets, zero on content. The broader `\bsponsor called\b`
+            // was measured too and produced an IDENTICAL hit set, so nothing
+            // in the evidence argues for the wider form — the narrow one ships.
+            #"\bour sponsor called\b"#,
         ])
 
         return groups

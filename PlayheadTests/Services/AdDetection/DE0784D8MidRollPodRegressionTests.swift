@@ -11,6 +11,17 @@
 // here MUST fail, and whoever fixes it updates this suite and the bead —
 // that is the fixture doing its job.
 //
+// playhead-absa did exactly that for the LEXICON half. `.ai` URLs, the spoken
+// "dot ai" form, `.co/.fm/.tv`, the CTA "head to" and the disclosure "our
+// sponsor called" all landed, so creative 1 went from ZERO anchoring evidence
+// to three anchors and `ketoneURLAnchorIsDroppedByMinimumDuration` was
+// rewritten around them. What did NOT change is the DECODED OUTPUT: the pod
+// still yields no span, because every one of those anchors is a micro-fragment
+// under `DecoderConstants.minDurationSeconds`. That is the bead's whole point
+// — lexical evidence is ATTENTION, never the determination — so
+// `livePipelineReproducesSeamFPAndPodHole` still asserts one span and nothing
+// in the pod, and it is now a STRONGER statement than it was.
+//
 // Ground truth and inputs: `DE0784D8MidRollPodFixture` (re-derived from the
 // 2026-08-02 device pull) and the canonical L2F annotation
 // `doac-2026-07-31-ray-dalio-de0784d8.json`.
@@ -219,6 +230,11 @@ struct DE0784D8MidRollPodRegressionTests {
         })
 
         // KNOWN HOLE (playhead-j4wi): no decoded span touches either creative.
+        // Still true after playhead-absa widened the lexicon — deliberately.
+        // Creative 1 now carries three anchors and creative 2 one, and all
+        // four are sub-5 s runs, so the DROP step removes every one. If this
+        // ever fires it means the CLAIM widened, which absa was explicitly
+        // not allowed to do; the consumption side is j4wi item 3 / playhead-hp70.
         for span in spans {
             let inPod = max(0, min(span.endTime, Fixture.creative2.upperBound)
                 - max(span.startTime, Fixture.creative1.lowerBound))
@@ -234,7 +250,7 @@ struct DE0784D8MidRollPodRegressionTests {
         }
     }
 
-    @Test("The pod's only true lexical anchor (ketone.com) fires in the catalog but dies at the 5s micro-fragment floor")
+    @Test("Every pod anchor — ketone.com, and the three playhead-absa added for creative 1 — still dies at the 5s micro-fragment floor")
     func ketoneURLAnchorIsDroppedByMinimumDuration() throws {
         let atoms = Fixture.atoms()
         let catalog = EvidenceCatalogBuilder.build(
@@ -259,16 +275,22 @@ struct DE0784D8MidRollPodRegressionTests {
         #expect(abs(ketoneAtomWidth - 3.6) < 0.001)
         #expect(ketoneAtomWidth < DecoderConstants.minDurationSeconds)
 
-        // Creative 1 has NO anchoring catalog entry at all: "whisperflow.ai"
-        // is a .ai domain (the URL patterns cover .com/.co/.org/.io only),
-        // the CTA is "head to" (only "head over to" is a pattern), and the
-        // disclosure is "because of our sponsor called ..." (not in the
-        // disclosure list). This set mirrors the PRIVATE
-        // `AtomEvidenceProjector.anchoringCategories` (url / promoCode /
-        // disclosurePhrase / ctaPhrase; brandSpan never anchors) — if a new
-        // anchoring category is added there, update this copy. A fix arriving
-        // through a stale copy still trips `spans.count == 1` in the live
-        // decode test, so there is no silent-green path.
+        // playhead-absa UPDATE — deliberate, and the reason this assertion
+        // INVERTED. It used to read `#expect(creative1Anchors.isEmpty)` under
+        // a comment saying creative 1 produced no anchoring evidence at all:
+        // "whisperflow.ai" is a .ai domain (URL patterns covered
+        // .com/.co/.org/.io only), the CTA is "head to" (only "head over to"
+        // was a pattern), and the disclosure is "because of our sponsor
+        // called ..." (absent from the list). absa added all three, so
+        // creative 1 now produces exactly three anchors and the old
+        // expectation is FALSE. It was a known-hole pin doing its job.
+        //
+        // This set mirrors the PRIVATE `AtomEvidenceProjector.anchoringCategories`
+        // (url / promoCode / disclosurePhrase / ctaPhrase; brandSpan never
+        // anchors) — if a new anchoring category is added there, update this
+        // copy. A fix arriving through a stale copy still trips
+        // `spans.count == 1` in the live decode test, so there is no
+        // silent-green path.
         let anchoringCategories: Set<EvidenceCategory> = [
             .url, .promoCode, .disclosurePhrase, .ctaPhrase,
         ]
@@ -277,15 +299,41 @@ struct DE0784D8MidRollPodRegressionTests {
                 && entry.startTime >= Fixture.creative1.lowerBound
                 && entry.endTime <= Fixture.creative1.upperBound
         }
-        #expect(
-            creative1Anchors.isEmpty,
-            """
-            KNOWN HOLE (playhead-j4wi): creative 1 (WhisperFlow, 2838.18-2897.94) is \
-            expected to produce zero anchoring lexical evidence today. It now produces \
-            \(creative1Anchors.map(\.normalizedText)) — if the lexicon grew, update this \
-            fixture and comment on playhead-j4wi.
-            """
-        )
+        // Named individually, not counted: a count assertion would keep
+        // passing if one term were swapped for an unrelated one.
+        let creative1Texts = Set(creative1Anchors.map(\.normalizedText))
+        #expect(creative1Texts.contains("our sponsor called"))
+        #expect(creative1Texts.contains("head to"))
+        #expect(creative1Texts.contains("whisperflow.ai"))
+        #expect(creative1Anchors.count == 3, "unexpected extras: \(creative1Texts)")
+
+        // …and the point of the bead: MORE ATTENTION, NOT MORE CLAIM. Every
+        // one of creative 1's anchored atoms is still a micro-fragment. The
+        // disclosure sits alone at 2841.66-2843.88 (2.22 s); "head to" and
+        // "whisperflow.ai" are ORDINAL-CONTIGUOUS so they form one run
+        // 2891.94-2896.08 (4.14 s) — and 4.14 < 5, so it dies in the same
+        // DROP step ketone.com does. The 48 s between them is far past
+        // mergeGapSeconds (3 s), so no merge rescues either.
+        let anchoredOrdinals = Set(creative1Anchors.map(\.atomOrdinal))
+        let anchoredAtoms = atoms
+            .filter { anchoredOrdinals.contains($0.atomKey.atomOrdinal) }
+            .sorted { $0.startTime < $1.startTime }
+        #expect(anchoredAtoms.count == 3)
+        // Run 1: the lone disclosure atom.
+        let disclosureAtom = try #require(anchoredAtoms.first)
+        #expect(disclosureAtom.startTime == 2841.66)
+        #expect(disclosureAtom.endTime - disclosureAtom.startTime < DecoderConstants.minDurationSeconds)
+        // Run 2: the two contiguous CTA + URL atoms, taken TOGETHER.
+        let ctaAtom = anchoredAtoms[1]
+        let urlAtom = anchoredAtoms[2]
+        #expect(ctaAtom.atomKey.atomOrdinal + 1 == urlAtom.atomKey.atomOrdinal,
+                "these two must be contiguous or the run below is not the real one")
+        #expect(ctaAtom.startTime == 2891.94)
+        #expect(urlAtom.endTime == 2896.08)
+        #expect(urlAtom.endTime - ctaAtom.startTime < DecoderConstants.minDurationSeconds)
+        // And the gap between the two runs is not mergeable.
+        #expect(ctaAtom.startTime - disclosureAtom.endTime
+                > MinimalContiguousSpanDecoder.Configuration.default.mergeGapSeconds)
     }
 
     // MARK: - Canonical L2F annotation agreement
