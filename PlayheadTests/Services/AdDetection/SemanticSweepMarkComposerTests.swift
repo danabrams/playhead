@@ -55,6 +55,31 @@ private enum SweepFixture {
     static let firstVerdict = (start: 508.0, end: 599.0)
     static let secondVerdict = (start: 1_604.0, end: 1_731.0)
 
+    /// The support payload a `passA` `containsAd` row actually carries, verbatim
+    /// from the field DB's DE0784D8 508–599 s row. `spansJSON: "[]"` — what the
+    /// fixture used before playhead-92im — is the shape
+    /// `BackfillJobRunner.encodeSupport` writes only when the model returned NO
+    /// support at all, and it appears on 0 of the 55 `containsAd` rows in the
+    /// 2026-08-10 pull. Defaulting to it made every fixture row look
+    /// unevidenced.
+    static func coarseSupport(
+        _ certainty: CertaintyBand,
+        lineRefs: [Int] = [17, 18, 20]
+    ) -> String {
+        let refs = lineRefs.map(String.init).joined(separator: ",")
+        return #"{"supportLineRefs":[\#(refs)],"certainty":"\#(certainty.rawValue)"}"#
+    }
+
+    /// A `passB` row's payload: an ARRAY of refined spans, each with its own
+    /// band. Verbatim shape from the pull's F4CE7F47 590–667 s row.
+    static func refinedSupport(_ certainties: [CertaintyBand]) -> String {
+        let spans = certainties.map {
+            #"{"anchors":[],"certainty":"\#($0.rawValue)","commercialIntent":"paid","#
+                + #""firstLineRef":2,"lastLineRef":2,"ownership":"thirdParty"}"#
+        }
+        return "[\(spans.joined(separator: ","))]"
+    }
+
     static func row(
         id: String,
         start: Double,
@@ -62,7 +87,9 @@ private enum SweepFixture {
         disposition: CoarseDisposition = .containsAd,
         status: SemanticScanStatus = .success,
         scanPass: String = "passA",
-        errorContext: String? = nil
+        errorContext: String? = nil,
+        transcriptQuality: TranscriptQuality = .good,
+        spansJSON: String? = nil
     ) -> SemanticScanResult {
         SemanticScanResult(
             id: id,
@@ -72,9 +99,12 @@ private enum SweepFixture {
             windowStartTime: start,
             windowEndTime: end,
             scanPass: scanPass,
-            transcriptQuality: .good,
+            transcriptQuality: transcriptQuality,
             disposition: disposition,
-            spansJSON: "[]",
+            // Only a `containsAd` row carries support; every other disposition
+            // persists "[]", which is what the field rows show.
+            spansJSON: spansJSON
+                ?? (disposition == .containsAd ? coarseSupport(.strong) : "[]"),
             status: status,
             attemptCount: 1,
             errorContext: errorContext,
@@ -202,11 +232,23 @@ struct SemanticSweepFieldCaseTests {
     /// A mark must clear `SkipOrchestrator.preloadAdmissibleWindows`' 0.70
     /// confidence floor or it is invisible on the next launch — the cross-launch
     /// half of "user-visible".
-    @Test("a mark clears the cross-launch preload confidence floor")
+    ///
+    /// playhead-92im NARROWED THIS CLAIM and the narrowing is the bead. It used
+    /// to hold for every sweep mark ever composed, because the confidence was a
+    /// constant sitting exactly on the floor. It now holds only at the CEILING,
+    /// which the field rows reach: `strong` certainty, `good` transcript, no
+    /// dissenting replicate. A weaker verdict does not clear it — see
+    /// `SemanticSweepConfidenceTests`, which pins that as the intended
+    /// behaviour rather than as an accident.
+    @Test("a mark composed from the field's own strong verdicts clears the preload floor")
     func aMarkClearsThePreloadFloor() {
         let marks = Fx.compose(rows: Fx.fieldRows)
 
+        #expect(marks.count == 2, "control: the composer ran and emitted both verdicts")
         #expect(marks.allSatisfy { $0.confidence >= 0.70 })
+        #expect(marks.allSatisfy {
+            $0.confidence == SemanticSweepMarkComposer.maximumMarkConfidence
+        }, "and they clear it AT the ceiling, with no headroom above it")
     }
 
     /// Never confirmed, never applied. A verdict is a proposal.
@@ -611,7 +653,7 @@ struct SemanticSweepAdditiveOnlyTests {
             !junk.contains { $0.id == mark.id }
         }, "no junk row is re-emitted under a sweep id")
         #expect(marks.allSatisfy { $0.confidence >= 0.70 },
-                "and no sub-threshold confidence rides in on a sweep mark")
+                "and no junk row's confidence rides in on a sweep mark")
     }
 
     /// VACUITY CONTROL. Two of the three tests above assert an absence. This one
@@ -677,5 +719,291 @@ struct SemanticSweepAdditiveOnlyTests {
         let second = Fx.compose(rows: Fx.fieldRows, existing: first)
 
         #expect(second.map(\.id).sorted() == first.map(\.id).sorted())
+    }
+}
+
+// MARK: - 6. The confidence is derived, not minted (playhead-92im)
+
+/// A CONSTANT IS NOT A CONFIDENCE.
+///
+/// Before this suite the composer stamped `0.70` on every mark it ever
+/// produced. The device pull of 2026-08-10 shows the result exactly: 22 sweep
+/// rows, min 0.70, max 0.70 — one value — against `detection-v1`'s 74 rows
+/// spanning 6.7e-06 to 1.0. Apply the standing diagnostic (what would this
+/// number read if the evidence it summarises had never existed?) and the answer
+/// was 0.70, always. There was no signal in it to threshold on, which is why
+/// the two marks Dan vetoed — F4CE7F47 590–679 s and 48E903D7 596–677 s,
+/// ~170 s of show between them, zero confirmed hits — were numerically
+/// indistinguishable from every mark that was never questioned.
+///
+/// EVERY TEST BELOW FAILS AGAINST THE CONSTANT, because under it any two marks
+/// compare equal. Each carries its own in-call vacuity control: an assertion
+/// that the composer actually emitted the marks being compared, so "the two
+/// values differ" can never be satisfied by a composer that emitted nothing.
+@Suite("A sweep mark's confidence is derived from its evidence (playhead-92im)",
+       .timeLimit(.minutes(1)))
+struct SemanticSweepConfidenceTests {
+
+    private typealias Fx = SweepFixture
+
+    private static func confidence(of marks: [AdWindow], startingAt start: Double) -> Double? {
+        marks.first { $0.startTime == start }?.confidence
+    }
+
+    /// THE HEADLINE. Compose a mixed population in ONE call and assert the
+    /// output is not a constant. Against the pre-fix composer every value is
+    /// 0.70 and `Set` collapses to one element.
+    @Test("a mixed population does not collapse to a single value")
+    func aMixedPopulationIsNotAConstant() {
+        let marks = Fx.compose(rows: [
+            Fx.row(id: "strong-good", start: 100, end: 190),
+            Fx.row(id: "moderate-good", start: 300, end: 390,
+                   spansJSON: Fx.coarseSupport(.moderate)),
+            Fx.row(id: "strong-degraded", start: 500, end: 590,
+                   transcriptQuality: .degraded),
+            Fx.row(id: "unevidenced", start: 700, end: 790, spansJSON: "[]"),
+        ])
+
+        #expect(marks.count == 4, "control: all four verdicts marked")
+        let values = Set(marks.map(\.confidence))
+        #expect(values.count == 4,
+                "four distinct evidence profiles, four distinct confidences: \(values.sorted())")
+        #expect(marks.allSatisfy { $0.confidence > 0 })
+    }
+
+    /// The model's OWN `CertaintyBand`, which the composer never read. Two rows
+    /// identical but for `certainty`; only the band may explain the gap.
+    @Test("a moderate verdict is worth less than a strong one")
+    func aModerateVerdictRanksBelowAStrongOne() {
+        let marks = Fx.compose(rows: [
+            Fx.row(id: "strong", start: 100, end: 190),
+            Fx.row(id: "moderate", start: 300, end: 390,
+                   spansJSON: Fx.coarseSupport(.moderate)),
+        ])
+
+        #expect(marks.count == 2, "control: both verdicts marked in the same call")
+        let strong = Self.confidence(of: marks, startingAt: 100)
+        let moderate = Self.confidence(of: marks, startingAt: 300)
+        #expect(strong == SemanticSweepMarkComposer.maximumMarkConfidence)
+        #expect(moderate != nil && strong != nil)
+        #expect((moderate ?? 1) < (strong ?? 0))
+    }
+
+    /// THE playhead-3gzp CLAIM, pinned. Both marks Dan vetoed rest on
+    /// `degraded` rows; a real confidence has to reflect the transcript the
+    /// verdict was formed on. Two rows identical but for `transcriptQuality`.
+    @Test("a degraded transcript discounts an otherwise identical verdict")
+    func aDegradedTranscriptDiscountsTheVerdict() {
+        let marks = Fx.compose(rows: [
+            Fx.row(id: "good", start: 100, end: 190),
+            Fx.row(id: "degraded", start: 300, end: 390, transcriptQuality: .degraded),
+        ])
+
+        #expect(marks.count == 2, "control: both verdicts marked in the same call")
+        let good = Self.confidence(of: marks, startingAt: 100)
+        let degraded = Self.confidence(of: marks, startingAt: 300)
+        #expect(good == SemanticSweepMarkComposer.maximumMarkConfidence)
+        #expect(degraded != nil)
+        #expect((degraded ?? 1) < (good ?? 0))
+    }
+
+    /// THE FIELD RANKING, built from the pull's own payloads. The F4CE7F47
+    /// 590–679 s mark Dan vetoed is `strong` on a `degraded` transcript; the
+    /// DE0784D8 508–599 s mark nobody has questioned is `strong` on a `good`
+    /// one. A useful confidence must separate them, in that direction.
+    @Test("the vetoed field mark ranks below the unquestioned one")
+    func theVetoedFieldMarkRanksLower() {
+        let marks = Fx.compose(rows: [
+            // DE0784D8 508.0–599.8, transcriptQuality good, certainty strong.
+            Fx.row(id: "de0784d8", start: 508, end: 599.8),
+            // F4CE7F47 590.0–679.4, transcriptQuality degraded, certainty
+            // strong — re-based to 1500 s so the two do not merge.
+            Fx.row(id: "f4ce7f47", start: 1_590, end: 1_679.4, transcriptQuality: .degraded),
+        ])
+
+        #expect(marks.count == 2, "control: both field verdicts marked in the same call")
+        let clean = Self.confidence(of: marks, startingAt: 508)
+        let vetoed = Self.confidence(of: marks, startingAt: 1_590)
+        #expect(clean != nil && vetoed != nil)
+        #expect((vetoed ?? 1) < (clean ?? 0),
+                "vetoed=\(vetoed as Any) clean=\(clean as Any)")
+    }
+
+    /// A REPLICATE THAT DISAGREES IS EVIDENCE. The sweep really does re-screen:
+    /// 36 of 125 coarse windows on the pull carry more than one `passA` row,
+    /// each a separate FM call in a separate run, and on four of them
+    /// `containsAd` is the MINORITY verdict. The composer filtered those rows
+    /// out and never counted them.
+    @Test("a contradicted verdict is worth less than an uncontradicted one")
+    func aContradictedVerdictRanksLower() {
+        let marks = Fx.compose(rows: [
+            Fx.row(id: "clean", start: 100, end: 190),
+            Fx.row(id: "disputed", start: 300, end: 390),
+            // A second, independent screening of the SAME window that examined
+            // it and did not affirm an ad.
+            Fx.row(id: "dissent", start: 300, end: 390, disposition: .noAds),
+        ])
+
+        #expect(marks.count == 2, "control: the disputed verdict is still MARKED, not dropped")
+        let clean = Self.confidence(of: marks, startingAt: 100)
+        let disputed = Self.confidence(of: marks, startingAt: 300)
+        #expect(clean != nil && disputed != nil)
+        #expect((disputed ?? 1) < (clean ?? 0))
+    }
+
+    /// THE ANTI-INFLATION HALF of the same factor, and the reason it is
+    /// Laplace-smoothed rather than a plain agreement fraction: repeats that
+    /// AGREE must add nothing, so an absence of dissent can never read as
+    /// corroboration. Four unanimous screenings and one lone screening are the
+    /// same claim.
+    @Test("agreeing repeats add nothing while one dissent still deducts")
+    func unanimityDoesNotInflateButDissentDeflates() {
+        let marks = Fx.compose(rows: [
+            Fx.row(id: "once", start: 100, end: 190),
+            Fx.row(id: "four-a", start: 300, end: 390),
+            Fx.row(id: "four-b", start: 300, end: 390),
+            Fx.row(id: "four-c", start: 300, end: 390),
+            Fx.row(id: "four-d", start: 300, end: 390),
+            Fx.row(id: "split-yes", start: 500, end: 590),
+            Fx.row(id: "split-no", start: 500, end: 590, disposition: .noAds),
+        ])
+
+        #expect(marks.count == 3, "control: three windows, three marks")
+        let once = Self.confidence(of: marks, startingAt: 100)
+        let four = Self.confidence(of: marks, startingAt: 300)
+        let split = Self.confidence(of: marks, startingAt: 500)
+        #expect(once == four, "unanimity is not a bonus")
+        #expect((split ?? 1) < (once ?? 0), "but a dissenting replicate is a deduction")
+    }
+
+    /// THE STANDING DIAGNOSTIC, asserted directly. A `containsAd` row whose
+    /// support payload is `"[]"` — what `BackfillJobRunner.encodeSupport` writes
+    /// when the model returned no support at all — must NOT read like a mark the
+    /// model graded `strong`. Under the constant it read identically.
+    @Test("a verdict that graded itself nothing reads the floor, not the ceiling")
+    func anUnevidencedVerdictReadsTheFloor() {
+        let marks = Fx.compose(rows: [
+            Fx.row(id: "graded", start: 100, end: 190),
+            Fx.row(id: "ungraded", start: 300, end: 390, spansJSON: "[]"),
+        ])
+
+        #expect(marks.count == 2, "control: an ungraded verdict is still MARKED")
+        let graded = Self.confidence(of: marks, startingAt: 100)
+        let ungraded = Self.confidence(of: marks, startingAt: 300)
+        #expect(graded == SemanticSweepMarkComposer.maximumMarkConfidence)
+        #expect(ungraded == SemanticSweepMarkComposer.unevidencedMarkConfidence)
+        #expect((ungraded ?? 1) < (graded ?? 0))
+    }
+
+    /// A `passB` row carries its own bands in an ARRAY. The weakest span
+    /// governs, because the mark covers all of them.
+    @Test("a refinement is graded by its weakest span")
+    func aRefinementIsGradedByItsWeakestSpan() {
+        let marks = Fx.compose(rows: [
+            Fx.row(id: "coarse-a", start: 100, end: 190),
+            Fx.row(id: "refine-a", start: 120, end: 170, scanPass: "passB",
+                   spansJSON: Fx.refinedSupport([.strong, .strong])),
+            Fx.row(id: "coarse-b", start: 300, end: 390),
+            Fx.row(id: "refine-b", start: 320, end: 370, scanPass: "passB",
+                   spansJSON: Fx.refinedSupport([.strong, .moderate])),
+        ])
+
+        #expect(marks.count == 2, "control: both coarse windows refined and marked")
+        let allStrong = Self.confidence(of: marks, startingAt: 120)
+        let mixed = Self.confidence(of: marks, startingAt: 320)
+        #expect(allStrong != nil && mixed != nil)
+        #expect((mixed ?? 1) < (allStrong ?? 0))
+    }
+
+    /// THE ORPHAN REFINEMENT, which is F4CE7F47 322–402 s in the field: three
+    /// independent `passA` screenings said `uncertain`, one `passB` row said
+    /// `containsAd`, and it shipped at the same 0.70 as a mark two clean
+    /// screenings agreed on.
+    ///
+    /// ADMISSION IS DELIBERATELY UNCHANGED — the mark is still emitted, which is
+    /// this test's control. Only the number it carries changes.
+    @Test("a refinement its own screenings declined is marked, at a far lower grade")
+    func anOrphanRefinementIsMarkedButHeavilyDiscounted() {
+        let marks = Fx.compose(rows: [
+            Fx.row(id: "affirmed", start: 100, end: 190),
+            Fx.row(id: "screen-1", start: 300, end: 390, disposition: .uncertain),
+            Fx.row(id: "screen-2", start: 300, end: 390, disposition: .uncertain),
+            Fx.row(id: "screen-3", start: 300, end: 390, disposition: .uncertain),
+            Fx.row(id: "orphan", start: 320, end: 370, scanPass: "passB",
+                   spansJSON: Fx.refinedSupport([.strong])),
+        ])
+
+        #expect(marks.count == 2, "control: the orphan refinement is STILL emitted")
+        let affirmed = Self.confidence(of: marks, startingAt: 100)
+        let orphan = Self.confidence(of: marks, startingAt: 320)
+        #expect(orphan != nil)
+        #expect((orphan ?? 1) < (affirmed ?? 0) / 2,
+                "three screenings declined it: orphan=\(orphan as Any)")
+    }
+
+    /// A merged mark speaks for its WHOLE extent, so its grade is the
+    /// duration-weighted mean of the windows under it — never the best one.
+    @Test("a merged mark is graded by its whole extent, not by its best window")
+    func aMergedMarkIsGradedByItsWholeExtent() {
+        let marks = Fx.compose(rows: [
+            Fx.row(id: "w1", start: 100, end: 190),
+            Fx.row(id: "w2", start: 190, end: 280, spansJSON: Fx.coarseSupport(.moderate)),
+        ])
+
+        #expect(marks.count == 1, "control: the two touching windows merged into one mark")
+        let merged = marks.first?.confidence
+        #expect(merged != nil)
+        #expect((merged ?? 0) < SemanticSweepMarkComposer.maximumMarkConfidence,
+                "the moderate half pulls the whole mark down")
+        #expect((merged ?? 0) > SemanticSweepMarkComposer.maximumMarkConfidence * 0.75,
+                "and the strong half holds it above a purely moderate mark")
+    }
+
+    /// Stage 4 refines GEOMETRY. An anchor proves where a boundary is; it says
+    /// nothing about whether the model was right that an ad is there, so it must
+    /// leave the grade alone.
+    @Test("clipping to a proven edge moves the geometry and not the grade")
+    func clippingDoesNotChangeTheGrade() {
+        let rows = [Fx.row(id: "a", start: 508, end: 599,
+                           spansJSON: Fx.coarseSupport(.moderate))]
+        let clipped = Fx.compose(rows: rows, anchors: [512])
+        let unclipped = Fx.compose(rows: rows, anchors: [])
+
+        #expect(clipped.count == 1 && unclipped.count == 1, "control: both composed a mark")
+        #expect(clipped.first?.startTime == 512, "control: the anchor really clipped")
+        #expect(unclipped.first?.startTime == 508)
+        #expect(clipped.first?.confidence == unclipped.first?.confidence)
+        #expect(clipped.first?.confidence != SemanticSweepMarkComposer.maximumMarkConfidence,
+                "and the preserved grade is a derived one, not the old constant")
+    }
+
+    /// NOTHING IS EVER PROMOTED. The ceiling is the constant this bead replaced,
+    /// so a detector that is 2-for-2 wrong on the judged episodes cannot come
+    /// out of this change stronger than it went in.
+    @Test("no evidence combination mints more than the constant it replaced")
+    func noMarkIsEverPromoted() {
+        let bands: [CertaintyBand?] = [.strong, .moderate, .weak, nil]
+        let qualities: [TranscriptQuality] = [.good, .degraded, .unusable]
+        var seen: Set<Double> = []
+        for band in bands {
+            for quality in qualities {
+                for affirming in 0...4 {
+                    for dissenting in 0...4 {
+                        let value = SemanticSweepMarkComposer.markConfidence(
+                            band: band,
+                            transcriptQuality: quality,
+                            affirming: affirming,
+                            dissenting: dissenting
+                        )
+                        #expect(value <= SemanticSweepMarkComposer.maximumMarkConfidence)
+                        #expect(value > 0)
+                        seen.insert(value)
+                    }
+                }
+            }
+        }
+        #expect(seen.count > 1, "control: the ladder actually varies over its inputs")
+        #expect(seen.contains(SemanticSweepMarkComposer.maximumMarkConfidence),
+                "control: the ceiling is reachable, so the bound is tight")
     }
 }

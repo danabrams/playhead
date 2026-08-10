@@ -1607,7 +1607,19 @@ struct BackfillCoarseCheckpointTests {
                 + Array(
                     repeating: CoarseScreeningSchema(
                         disposition: .containsAd,
-                        support: nil
+                        // playhead-92im: a `containsAd` verdict carries the
+                        // model's own `CertaintyBand`, and `SemanticSweepMark-
+                        // Composer` now grades the mark on it. `support: nil`
+                        // is the "the model returned nothing" shape — 0 of the
+                        // 55 `containsAd` rows in the 2026-08-10 device pull —
+                        // and would grade every mark below the suggest tier's
+                        // 0.70 admission floor, making the surfacing claims
+                        // below vacuously false for a reason that has nothing
+                        // to do with checkpoint durability.
+                        support: CoarseSupportSchema(
+                            supportLineRefs: [17, 18, 20],
+                            certainty: .strong
+                        )
                     ),
                     count: 64
                 ),
@@ -1722,7 +1734,12 @@ struct BackfillCoarseCheckpointTests {
             scanPass: "passB",
             transcriptQuality: .good,
             disposition: .containsAd,
-            spansJSON: "[]",
+            // playhead-92im: a `passB` row persists an ARRAY of refined spans,
+            // each carrying its own band; see `encodeRefinedSpans`.
+            spansJSON: #"""
+            [{"anchors":[],"certainty":"strong","commercialIntent":"paid",\#
+            "firstLineRef":2,"lastLineRef":2,"ownership":"thirdParty"}]
+            """#,
             status: .success,
             attemptCount: 1,
             errorContext: nil,

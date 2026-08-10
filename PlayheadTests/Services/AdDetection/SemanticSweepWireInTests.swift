@@ -99,7 +99,11 @@ struct SemanticSweepWireInTests {
             scanPass: "passA",
             transcriptQuality: .good,
             disposition: .containsAd,
-            spansJSON: "[]",
+            // playhead-92im: the real field support payload. `"[]"` means the
+            // model returned no support at all and now grades the mark at the
+            // floor; production writes that on 0 of the pull's 55 `containsAd`
+            // rows.
+            spansJSON: #"{"supportLineRefs":[17,18,20],"certainty":"strong"}"#,
             status: .success,
             attemptCount: 1,
             errorContext: nil,
@@ -378,7 +382,11 @@ struct SemanticSweepRunnerTailTests {
             scanPass: "passA",
             transcriptQuality: .good,
             disposition: .containsAd,
-            spansJSON: "[]",
+            // playhead-92im: the real field support payload. `"[]"` means the
+            // model returned no support at all and now grades the mark at the
+            // floor; production writes that on 0 of the pull's 55 `containsAd`
+            // rows.
+            spansJSON: #"{"supportLineRefs":[17,18,20],"certainty":"strong"}"#,
             status: .success,
             attemptCount: 1,
             errorContext: nil,
