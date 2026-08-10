@@ -48,6 +48,30 @@ final class RediffEnclosureResolverBox: Sendable {
     }
 }
 
+/// playhead-cnql: the same late-binding shape, for the two SwiftData-only facts
+/// the download-time day-0 kickoff wants — the CURRENT enclosure URL and the
+/// publish date the coordinator's drain orders by.
+///
+/// SEPARATE FROM `RediffEnclosureResolverBox` because the two are read at
+/// different times by different callers and one of them must survive the
+/// resolver being absent. The kickoff observer now runs in EVERY process,
+/// including a background URLSession relaunch and a BGTask-only wake, where
+/// `PlayheadApp.task` never runs and therefore no resolver is ever installed;
+/// the observer falls back to the download's own recorded source URL rather
+/// than dropping the kickoff, which is precisely the drop playhead-cnql exists
+/// to close. A nil resolver is the NORMAL state on those launches, not a fault.
+final class DayZeroKickoffEpisodeFactsBox: Sendable {
+    private let storage =
+        OSAllocatedUnfairLock<(@Sendable (String) async -> DayZeroKickoffEpisodeFacts?)?>(
+            initialState: nil
+        )
+
+    var resolver: (@Sendable (String) async -> DayZeroKickoffEpisodeFacts?)? {
+        get { storage.withLock { $0 } }
+        set { storage.withLock { $0 = newValue } }
+    }
+}
+
 // MARK: - Enumerator
 
 /// Store-backed candidate enumeration. Candidacy = "has a CURRENT-version
