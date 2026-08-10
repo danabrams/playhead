@@ -131,9 +131,12 @@ struct DayZeroBackgroundKickoffHandoffTests {
         )
         #expect(
             await manager.cachedFileURL(for: episodeId) != nil,
-            "ANTI-VACUITY: the fixture must actually land a servable artifact — " +
-            "an early return before `notifyBackgroundDownloadCompleted` would " +
-            "make this test pass for the wrong reason"
+            """
+            ANTI-VACUITY: the fixture must actually land a servable artifact. \
+            `handleBackgroundDownloadComplete` has seven early returns before \
+            `notifyBackgroundDownloadCompleted`, and taking any of them would make \
+            this test pass for the wrong reason.
+            """
         )
 
         // ANTI-VACUITY: the completion must be HELD, not merely un-delivered.
