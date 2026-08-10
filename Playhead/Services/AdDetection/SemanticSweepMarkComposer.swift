@@ -123,12 +123,36 @@
 //      budget landing where the evidence is — but it is a change, so it is
 //      named rather than absorbed.
 //
+//      THREE MORE READERS, found by the review round rather than by the first
+//      grep. All move in the conservative direction, none is a safety
+//      regression, and all are named here because absorbing them silently is
+//      the thing this section exists to refuse:
+//        * `TranscriptPeekViewModel.adConfidence` → the transcript overlay's
+//          `AD %.0f%%` label. USER-VISIBLE: it read a constant "AD 70%" on
+//          every sweep mark and now reads the mark's actual grade, as low as
+//          "AD 9%" on the pull.
+//        * `CorrectionAttribution`'s `producerRevisionToken` hashes
+//          `window.confidence`, so a sweep mark's suggest-card identity can now
+//          CHANGE when a later scan re-grades it. Under the constant it never
+//          could. See the id note below.
+//        * A sweep mark the user CONFIRMS is re-minted at `suggested.confidence`
+//          and then evaluated against the enter/stay thresholds. A confirmed
+//          sweep mark used to clear both by construction and no longer does.
+//
 //      TWO 0.70 GATES THAT LOOK LIVE AND ARE NOT, checked rather than assumed:
 //      `AnalysisJobRunner.isCueWindow` and the cross-user shareable-cue
 //      predicate both ALSO require `SkipEligibilityGate.eligible`, and every
 //      sweep mark is `.markOnly` by hard-coded literal — so neither has ever
 //      seen a sweep mark at any confidence. A sweep mark is additionally
 //      local-only (`isLocalOnlyBoundaryState`), so it is never exported.
+//
+//      THE ID STILL ADDRESSES GEOMETRY ONLY, and that is deliberate. A mark's
+//      grade depends on the WHOLE row set — the corroboration term counts every
+//      overlapping presence-pass replicate — so a later scan can re-grade a
+//      mark whose id is unchanged, and the store updates it in place. Hashing
+//      the confidence into the id instead would mint a fresh row on every
+//      re-screen and orphan the one the user is looking at, which is worse.
+//      What is no longer true is that id-equal implies row-equal.
 //
 // # Why the downside is bounded
 //
@@ -183,12 +207,17 @@ enum SemanticSweepMarkComposer {
     /// vetoed) were indistinguishable from the rest of the population.
     ///
     /// The old comment's premise — "the coarse lane produces a categorical
-    /// verdict, not a score" — was simply not true of the persisted rows.
-    /// EVERY `containsAd` row carries the model's OWN ``CertaintyBand`` in
-    /// `spansJSON` (`CoarseSupportSchema.certainty` for `passA`, the refined
-    /// spans' own bands for `passB`): 55 of 55 coarse and 11 of 11 refined rows
-    /// on that pull, split 40 `strong` / 15 `moderate`. The composer simply
-    /// never read it.
+    /// verdict, not a score" — was simply not true of the persisted rows. Every
+    /// `containsAd` row carries a ``CertaintyBand`` in `spansJSON`
+    /// (`CoarseSupportSchema.certainty` for `passA`, the refined spans' own
+    /// bands for `passB`): 55 of 55 coarse and 11 of 11 refined rows on that
+    /// pull, split 40 `strong` / 15 `moderate`. The composer simply never read
+    /// it.
+    ///
+    /// NOT ALL OF THOSE BANDS ARE THE MODEL'S, and the difference matters more
+    /// than the count: 9 of the 11 refined rows are permissive-bypass spans
+    /// whose `strong` the RUNNER hardcoded. See ``certaintyFactor(of:)``, which
+    /// reads them as ungraded.
     ///
     /// # It is an EVIDENCE GRADE, not a probability
     ///
@@ -336,47 +365,103 @@ enum SemanticSweepMarkComposer {
         affirming: Int,
         dissenting: Int
     ) -> Double {
+        markConfidence(
+            certaintyFactor: certaintyFactor(band),
+            transcriptQuality: quality,
+            affirming: affirming,
+            dissenting: dissenting
+        )
+    }
+
+    /// The same product, taking the certainty term already resolved — which is
+    /// how a ROW reaches it, since a row's term can come from several spans and
+    /// is not one band.
+    static func markConfidence(
+        certaintyFactor certainty: Double,
+        transcriptQuality quality: TranscriptQuality,
+        affirming: Int,
+        dissenting: Int
+    ) -> Double {
         maximumMarkConfidence
-            * certaintyFactor(band)
+            * certainty
             * transcriptQualityFactor(quality)
             * corroborationFactor(affirming: affirming, dissenting: dissenting)
     }
 
-    /// Minimal decode of the `certainty` key out of a persisted support
-    /// payload. Deliberately reads ONLY that key so the two payload shapes and
+    /// Minimal decode of the two keys that say WHETHER THE MODEL GRADED THIS
+    /// and how. Deliberately reads only those, so the two payload shapes and
     /// every future field they gain decode without this composer knowing about
     /// them — the same narrow-decode pattern `AdDetectionService`'s
     /// `SpanTrustDecode` uses over the same column.
     private struct PersistedCertainty: Decodable {
         let certainty: CertaintyBand?
+        /// `BackfillJobRunner.EncodedRefinedSpan`'s flag, absent on the coarse
+        /// payload and on legacy rows. See ``certaintyFactor(of:)`` for why a
+        /// consumer of `certainty` must read it.
+        let ownershipInferenceWasSuppressed: Bool?
+
+        /// The band this span may CONTRIBUTE — `nil` when the model did not
+        /// grade it, and `nil` when the runner did the grading.
+        var attributableBand: CertaintyBand? {
+            ownershipInferenceWasSuppressed == true ? nil : certainty
+        }
     }
 
-    /// The model's OWN certainty for this row's presence claim, or `nil` when
-    /// it expressed none.
+    /// How much the MODEL'S OWN certainty for this row's presence claim
+    /// discounts the ceiling. The floor when it expressed none.
     ///
     /// Two persisted shapes, because two writers:
     ///   • `passA` — ONE `CoarseSupportSchema` OBJECT
     ///     (`BackfillJobRunner.encodeSupport`), e.g.
     ///     `{"supportLineRefs":[17,18,20],"certainty":"strong"}`.
-    ///   • `passB` — an ARRAY of refined spans
-    ///     (`encodeRefinedSpans`), each carrying its own band.
+    ///   • `passB` — an ARRAY of refined spans (`encodeRefinedSpans`), each
+    ///     carrying its own band.
     ///
-    /// For an array the WEAKEST band governs, because the extent this row backs
-    /// covers all of its spans and a mark is only as good as its weakest
-    /// second. `"[]"` — what `encodeSupport` writes for a nil support — decodes
-    /// to an empty array and correctly yields `nil`.
-    static func certaintyBand(of row: SemanticScanResult) -> CertaintyBand? {
-        guard let data = row.spansJSON.data(using: .utf8) else { return nil }
+    /// For an array the WEAKEST span governs, because the extent this row backs
+    /// covers all of them and a mark is only as good as its weakest second. A
+    /// span the model did not grade counts as the weakest rather than being
+    /// skipped — dropping it would let one graded span speak for the ungraded
+    /// ones. `"[]"` — what `encodeSupport` writes for a nil support — decodes
+    /// to an empty array and correctly yields the floor.
+    ///
+    /// # A FABRICATED BAND IS NOT A BAND (playhead-92im review)
+    ///
+    /// `PermissiveAdClassifier` HARDCODES `certainty: .strong` on the
+    /// permissive-bypass path — `makeAnchorlessSpan` for refinement,
+    /// `parse(...)` for coarse — and says so: *"the FM never inferred these
+    /// classification dimensions, the runner is hardcoding them."* Reading that
+    /// as the model's own grade would rebuild this bead's bug on the population
+    /// where it bites hardest: **9 of the 11 refined `containsAd` spans in the
+    /// 2026-08-10 pull are permissive, every one of them `strong`.**
+    ///
+    /// `ownershipInferenceWasSuppressed` is the discriminator, and gating on it
+    /// is not a new idea — `BackfillJobRunner.EncodedRefinedSpan`'s own header
+    /// already requires it of the Phase-8 sponsor-memory writers, *"because
+    /// their classification dimensions are not real signals."* This is the
+    /// second consumer to owe that debt.
+    ///
+    /// THE COARSE HALF OF THE SAME FABRICATION IS NOT DETECTABLE AT REST, and
+    /// pretending otherwise would be worse than saying so: `PermissiveAd-
+    /// Classifier.parse` writes the identical hardcoded `.strong` into a
+    /// `passA` payload, and `usedPermissiveFallback` exists on
+    /// `SemanticScanResult` but has **no column** in `semantic_scan_results` —
+    /// so a permissive coarse row is byte-identical to a genuine one. Filed as
+    /// its own bead; it needs a schema change, not a read.
+    static func certaintyFactor(of row: SemanticScanResult) -> Double {
+        guard let data = row.spansJSON.data(using: .utf8) else {
+            return certaintyFactor(nil)
+        }
         let decoder = JSONDecoder()
         if let support = try? decoder.decode(PersistedCertainty.self, from: data) {
-            return support.certainty
+            return certaintyFactor(support.attributableBand)
         }
-        guard let spans = try? decoder.decode([PersistedCertainty].self, from: data) else {
-            return nil
+        guard let spans = try? decoder.decode([PersistedCertainty].self, from: data),
+              !spans.isEmpty else {
+            return certaintyFactor(nil)
         }
         return spans
-            .compactMap(\.certainty)
-            .min { certaintyFactor($0) < certaintyFactor($1) }
+            .map { certaintyFactor($0.attributableBand) }
+            .min() ?? certaintyFactor(nil)
     }
 
     /// Count the PRESENCE-pass rows that examined this extent and say whether
@@ -560,7 +645,7 @@ enum SemanticSweepMarkComposer {
         extent.confidence = backing
             .map {
                 markConfidence(
-                    band: certaintyBand(of: $0),
+                    certaintyFactor: certaintyFactor(of: $0),
                     transcriptQuality: $0.transcriptQuality,
                     affirming: counts.affirming,
                     dissenting: counts.dissenting
@@ -620,19 +705,34 @@ enum SemanticSweepMarkComposer {
             if var last = result.last,
                extent.start <= last.end + mergeGapSeconds,
                max(last.end, extent.end) - last.start <= maximumMarkDurationSeconds {
-                let held = last.duration
+                let held = max(0, last.duration)
                 let added = max(0, extent.end - last.end)
-                if held + added > 0 {
+                if added <= 0 {
+                    // NESTED, so it adds no seconds and the weighted mean
+                    // cannot see it — but it is still a verdict about audio
+                    // this mark covers, and silently discarding it would let a
+                    // re-screen that graded the SAME window lower vanish. Take
+                    // the weaker, which is the rule the rest of this file
+                    // already applies to two claims over one extent.
+                    last.confidence = min(last.confidence, extent.confidence)
+                } else if held + added > 0 {
                     // INTERPOLATE, do not average as a sum of products.
                     // `(a*h + b*w)/(h+w)` is algebraically the same and
                     // numerically is NOT: for a == b it lands a few ULP off,
                     // and a run of `strong`/`good` windows would then merge to
-                    // 0.6999999999999999 and fall out of a `>= 0.70` gate for
+                    // 0.6999999999999998 and fall out of a `>= 0.70` gate for
                     // no reason a reader could ever see. Measured: 2 of the 6
                     // ceiling-grade marks in the 2026-08-10 pull did exactly
                     // that. This form returns `last.confidence` EXACTLY when
-                    // the two agree, and stays inside `[min, max]` of the two
-                    // when they do not.
+                    // the two agree.
+                    //
+                    // `held` is floored at 0 and `added` is positive here, so
+                    // the weight is in `(0, 1]` and the result cannot leave
+                    // `[min, max]` of the two — an unclamped ratio would
+                    // EXTRAPOLATE (to a negative confidence, even) on an
+                    // inverted extent, and this function is `internal`, so the
+                    // invariant should not rest on `compose` being its only
+                    // caller.
                     last.confidence += (extent.confidence - last.confidence)
                         * (added / (held + added))
                 }

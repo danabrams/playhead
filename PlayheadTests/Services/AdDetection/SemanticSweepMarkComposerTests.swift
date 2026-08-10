@@ -72,10 +72,15 @@ private enum SweepFixture {
 
     /// A `passB` row's payload: an ARRAY of refined spans, each with its own
     /// band. Verbatim shape from the pull's F4CE7F47 590–667 s row.
-    static func refinedSupport(_ certainties: [CertaintyBand]) -> String {
+    static func refinedSupport(
+        _ certainties: [CertaintyBand],
+        ownershipInferenceWasSuppressed: Bool = false
+    ) -> String {
+        let suppressed = ownershipInferenceWasSuppressed ? "true" : "false"
         let spans = certainties.map {
             #"{"anchors":[],"certainty":"\#($0.rawValue)","commercialIntent":"paid","#
-                + #""firstLineRef":2,"lastLineRef":2,"ownership":"thirdParty"}"#
+                + #""firstLineRef":2,"lastLineRef":2,"ownership":"thirdParty","#
+                + #""ownershipInferenceWasSuppressed":\#(suppressed)}"#
         }
         return "[\(spans.joined(separator: ","))]"
     }
@@ -1004,6 +1009,78 @@ struct SemanticSweepConfidenceTests {
                 "merged=\(String(describing: marks.first?.confidence))")
         #expect((marks.first?.confidence ?? 0) >= 0.70,
                 "and it still clears the preload floor's exact comparison")
+    }
+
+    /// A FABRICATED BAND IS NOT A BAND, and this is the population it governs:
+    /// 9 of the 11 refined `containsAd` spans in the 2026-08-10 pull are
+    /// permissive-bypass spans whose `strong` `PermissiveAdClassifier`
+    /// HARDCODED — "the FM never inferred these classification dimensions, the
+    /// runner is hardcoding them". Reading it as the model's own grade rebuilds
+    /// this bead's bug exactly: a value that reads `strong` when nothing
+    /// graded anything.
+    ///
+    /// The two rows are byte-identical but for `ownershipInferenceWasSuppressed`,
+    /// so nothing else can explain the gap.
+    @Test("a band the runner hardcoded on the permissive path is not the model's")
+    func aFabricatedBandDoesNotCountAsCertainty() {
+        let marks = Fx.compose(rows: [
+            Fx.row(id: "coarse-real", start: 100, end: 190),
+            Fx.row(id: "real", start: 120, end: 170, scanPass: "passB",
+                   spansJSON: Fx.refinedSupport([.strong])),
+            Fx.row(id: "coarse-fab", start: 300, end: 390),
+            Fx.row(id: "fabricated", start: 320, end: 370, scanPass: "passB",
+                   spansJSON: Fx.refinedSupport(
+                       [.strong], ownershipInferenceWasSuppressed: true)),
+        ])
+
+        #expect(marks.count == 2, "control: BOTH refinements are still MARKED")
+        let real = Self.confidence(of: marks, startingAt: 120)
+        let fabricated = Self.confidence(of: marks, startingAt: 320)
+        #expect(real == SemanticSweepMarkComposer.maximumMarkConfidence,
+                "control: the genuine strong band still reaches the ceiling")
+        #expect(fabricated != nil)
+        #expect((fabricated ?? 1) < (real ?? 0))
+        #expect(fabricated == SemanticSweepMarkComposer.unevidencedMarkConfidence,
+                "and it reads exactly what an ungraded verdict reads")
+    }
+
+    /// The WEAKEST span governs, and a span nobody graded is the weakest. A
+    /// `compactMap` that skipped it would let the one graded span speak for the
+    /// ungraded one — the same absence-reads-as-evidence shape one layer down.
+    @Test("an ungraded span in a refinement drags the whole row to the floor")
+    func anUngradedSpanGovernsTheRefinement() {
+        let marks = Fx.compose(rows: [
+            Fx.row(id: "coarse-a", start: 100, end: 190),
+            Fx.row(id: "all-graded", start: 120, end: 170, scanPass: "passB",
+                   spansJSON: Fx.refinedSupport([.strong, .strong])),
+            Fx.row(id: "coarse-b", start: 300, end: 390),
+            Fx.row(id: "one-ungraded", start: 320, end: 370, scanPass: "passB",
+                   spansJSON: #"[{"certainty":"strong"},{"firstLineRef":9}]"#),
+        ])
+
+        #expect(marks.count == 2, "control: both refinements marked")
+        let graded = Self.confidence(of: marks, startingAt: 120)
+        let mixed = Self.confidence(of: marks, startingAt: 320)
+        #expect(graded == SemanticSweepMarkComposer.maximumMarkConfidence)
+        #expect((mixed ?? 1) < (graded ?? 0))
+    }
+
+    /// A SECOND SCREENING OF THE SAME WINDOW adds no seconds, so the
+    /// duration-weighted merge cannot see it. It is still a verdict about audio
+    /// this mark covers, and the weaker of the two governs — the rule the rest
+    /// of the composer already applies to two claims over one extent.
+    @Test("a re-screen of the same window at a lower grade is not discarded")
+    func aNestedRescreenTakesTheWeakerGrade() {
+        let marks = Fx.compose(rows: [
+            Fx.row(id: "first", start: 100, end: 190),
+            Fx.row(id: "rescreen", start: 100, end: 190,
+                   transcriptQuality: .degraded),
+        ])
+
+        #expect(marks.count == 1, "control: one window, one mark")
+        #expect((marks.first?.confidence ?? 1)
+                < SemanticSweepMarkComposer.maximumMarkConfidence,
+                "the degraded re-screen is not silently dropped")
     }
 
     /// NOTHING IS EVER PROMOTED. The ceiling is the constant this bead replaced,

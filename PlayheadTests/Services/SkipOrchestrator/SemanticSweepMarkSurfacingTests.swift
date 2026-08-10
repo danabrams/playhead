@@ -306,6 +306,12 @@ struct SemanticSweepArmsSuggestTests {
         let store = try await makeTestStore()
         let orchestrator = try await Fx.makeOrchestrator(store: store)
         let marks = Fx.composedFieldMarks()
+        // playhead-92im: this arms with ZERO margin — the field verdicts grade
+        // at exactly `maximumMarkConfidence` against a `>=` floor. Name the
+        // precondition so a future factor change surfaces HERE as what it is,
+        // rather than as an unexplained arming regression.
+        #expect(marks.allSatisfy { $0.confidence >= 0.70 },
+                "fixture precondition: grades \(marks.map(\.confidence))")
         try await store.upsertHotPathAdWindows(marks, existingIDs: [], retiredIDs: [])
 
         await orchestrator.beginEpisode(
