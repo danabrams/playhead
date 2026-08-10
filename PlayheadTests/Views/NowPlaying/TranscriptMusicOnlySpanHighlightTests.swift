@@ -337,11 +337,23 @@ struct MusicOnlyPresenceHintPredicateTests {
 
     @Test("Every presence anchor corroborates; every width marker does not")
     func corroborationSetIsExact() {
+        // EVERY case of `AnchorRef` appears here or in the width loop below.
+        // A mutation that moves any one of them between the two groups fails
+        // this test, which is what stops the corroboration set drifting.
         let corroborating: [AnchorRef] = [
             .fmConsensus(regionId: "r", consensusStrength: 0.8),
             .fmAcousticCorroborated(regionId: "r", breakStrength: 0.8),
             .classifierSeed(regionId: "r", score: 0.9),
             .userCorrection(correctionId: "c", reportedTime: 2044.5),
+            .evidenceCatalog(entry: EvidenceEntry(
+                evidenceRef: 0,
+                category: .ctaPhrase,
+                matchedText: "link in the description",
+                normalizedText: "link in the description",
+                atomOrdinal: 2061,
+                startTime: 2044.5,
+                endTime: 2047.2
+            )),
         ]
         for anchor in corroborating {
             #expect(

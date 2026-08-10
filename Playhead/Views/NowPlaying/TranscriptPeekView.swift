@@ -614,7 +614,13 @@ private extension TranscriptPeekView {
         .accessibilityLabel(accessibilityLabel(
             chunk: chunk,
             isAd: isAd,
-            overlappingSpans: overlappingSpans
+            overlappingSpans: overlappingSpans,
+            // playhead-d666: the SAME predicate that decides the copper bar and
+            // the AD badge. Without this the accessibility label announced "Ad
+            // segment, detected from sustained music" on a row the fix had just
+            // stopped painting — leaving a VoiceOver listener with the ad claim
+            // a sighted listener no longer gets.
+            makesAdClaim: isHighlighted
         ))
     }
 
@@ -634,15 +640,24 @@ private extension TranscriptPeekView {
     }
 
     /// Phase 5 (u4d): Accessibility label that includes decoded span info when present.
+    /// `makesAdClaim` is `TranscriptPeekViewModel.isAdHighlighted` for this row
+    /// — the one place that decides whether the app is asserting "this is an
+    /// ad". It gates the decoded-span branch so the spoken label and the drawn
+    /// one can never disagree (playhead-d666).
+    ///
+    /// DELIBERATELY NOT DEFAULTED. A default would have to be `true` to keep
+    /// the old shape compiling, and `true` is the wrong answer — it is the bug
+    /// this parameter exists to close. A new call site must say which it holds.
     func accessibilityLabel(
         chunk: TranscriptChunk,
         isAd: Bool,
-        overlappingSpans: [DecodedSpan]
+        overlappingSpans: [DecodedSpan],
+        makesAdClaim: Bool
     ) -> String {
         let ts = TimeFormatter.formatTime(chunk.startTime)
 
         // Phase 5 decoded span takes precedence for the accessibility label.
-        if let span = overlappingSpans.first {
+        if makesAdClaim, let span = overlappingSpans.first {
             let secs = Int(span.duration.rounded())
             let provenanceSummary = provenanceSummary(span.anchorProvenance)
             return "Ad segment, \(secs) seconds, detected from \(provenanceSummary). \(ts): \(chunk.text)"
