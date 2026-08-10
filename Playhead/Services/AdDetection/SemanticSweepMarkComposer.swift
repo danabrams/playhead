@@ -149,7 +149,7 @@
 //        * `TranscriptPeekViewModel.adConfidence` → the transcript overlay's
 //          `AD %.0f%%` label. USER-VISIBLE: it read a constant "AD 70%" on
 //          every sweep mark and now reads the mark's actual grade, as low as
-//          "AD 9%" on the pull.
+//          "AD 5%" on the pull (min 0.046667).
 //        * `CorrectionAttribution`'s `producerRevisionToken` hashes
 //          `window.confidence`, so a sweep mark's suggest-card identity can now
 //          CHANGE when a later scan re-grades it. Under the constant it never
@@ -748,10 +748,17 @@ enum SemanticSweepMarkComposer {
                     // numerically is NOT: for a == b it lands a few ULP off,
                     // and a run of `strong`/`good` windows would then merge to
                     // 0.6999999999999998 and fall out of a `>= 0.70` gate for
-                    // no reason a reader could ever see. Measured: 2 of the 6
-                    // ceiling-grade marks in the 2026-08-10 pull did exactly
-                    // that. This form returns `last.confidence` EXACTLY when
-                    // the two agree.
+                    // no reason a reader could ever see. This form returns
+                    // `last.confidence` EXACTLY when the two agree.
+                    //
+                    // NOT measured on the 2026-08-10 pull: enumerating all 38
+                    // merge events there, the ceiling count is 7 under every
+                    // spelling of the average, so no mark actually fell out.
+                    // (3 of the 18 interpolating events DO differ by 1 ULP
+                    // between forms, at 0.487/0.252/0.187 — just never at a
+                    // gate.) The guarantee below is structural, not empirical;
+                    // an earlier draft of this comment claimed a measurement
+                    // that does not reproduce.
                     //
                     // `held` is floored at 0 and `added` is positive here, so
                     // the weight is in `(0, 1]` and the result cannot leave
