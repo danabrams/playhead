@@ -20173,6 +20173,21 @@ actor AnalysisStore {
     /// list is DERIVED from `CorrectionSource.kind` rather than spelled out, so
     /// a future boost-direction source joins it without anybody remembering to
     /// edit this query.
+    ///
+    /// WHICH SWIFT PREDICATE IT MIRRORS, deliberately. There are two in the
+    /// tree and they disagree on exactly one row shape. This query follows
+    /// `activeFalsePositiveScopes` / `correctionPassthroughFactor` /
+    /// `correctionFactorSnapshot` — the veto-mask family, which reads `source`
+    /// alone and treats `source == nil` as a suppressor. It does NOT follow
+    /// `LearningArtifactIngestor.applySponsorSideEffect`, which falls back to
+    /// `effectiveCorrectionType` when `source` is nil and would therefore call
+    /// a (source: nil, correctionType: .falseNegative) row a BOOSTER. That row
+    /// shape has no writer: every production site that sets `correctionType`
+    /// sets `source` in the same initializer, and the legacy rows the fallback
+    /// exists for carry neither column. Following the majority keeps this
+    /// query consistent with the three readers that actually gate detection;
+    /// if a writer for that shape ever appears, the ingestor is the one to
+    /// reconcile, not this.
     func suppressingCorrectionScopesPresent(
         from scopes: [String]
     ) throws -> Set<String> {

@@ -40,17 +40,29 @@ enum CorrectionScope: Sendable, Equatable {
     /// Serialized times use fixed 3-decimal precision to avoid floating-point
     /// representation drift across round-trips.
     case exactTimeSpan(assetId: String, startTime: Double, endTime: Double)
-    /// Sponsor veto across all episodes of a podcast.
+    // THE SHOW-WIDE SCOPES BELOW NAME A POPULATION, NOT A DIRECTION
+    // (playhead-q6y3). Each used to be documented as a "veto", and that is
+    // literally the line the author of `NowPlayingView.onAlwaysSkipSponsorAsync`
+    // read before writing `source: .manualVeto` on a gesture that means the
+    // opposite — one tap taught the pipeline that an advertiser was NOT an ad
+    // across a whole show. A scope says WHO (or WHAT) and over WHICH episodes;
+    // whether the user is suppressing or reinforcing is carried by the event's
+    // `source` (via `CorrectionSource.kind`), and by nothing else.
+
+    /// A SPONSOR, across all episodes of a podcast. Direction comes from the
+    /// event's `source`: `.manualVeto` suppresses, `.falseNegative` reinforces.
     case sponsorOnShow(podcastId: String, sponsor: String)
-    /// Phrase veto across all episodes of a podcast.
+    /// A PHRASE, across all episodes of a podcast. Direction comes from `source`.
     case phraseOnShow(podcastId: String, phrase: String)
-    /// Campaign veto across all episodes of a podcast.
+    /// A CAMPAIGN, across all episodes of a podcast. Direction comes from `source`.
     case campaignOnShow(podcastId: String, campaign: String)
-    /// Domain ownership veto: the podcast owns this domain (e.g. "nytimes.com"),
-    /// so mentions of it are not third-party ads. Layer B scope.
+    /// A DOMAIN the podcast owns (e.g. "nytimes.com"), across all episodes.
+    /// Written in the suppress direction it says mentions of it are not
+    /// third-party ads. Layer B scope; direction comes from `source`.
     case domainOwnershipOnShow(podcastId: String, domain: String)
-    /// Jingle fingerprint veto: a recurring audio jingle on this show is not an
-    /// ad indicator. Layer B scope.
+    /// A recurring audio JINGLE on this show. Written in the suppress direction
+    /// it says the jingle is not an ad indicator. Layer B scope; direction comes
+    /// from `source`.
     case jingleOnShow(podcastId: String, jingleId: String)
 
     // MARK: Serialization

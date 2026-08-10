@@ -303,15 +303,34 @@ final class AdBannerAlwaysSkipSponsorTests: XCTestCase {
         )
     }
 
-    /// The hint carries the full promise the four-word button cannot:
-    /// durable, and over every episode. Present tense, no counters —
-    /// this is what the app will do, not a tally of what it has done.
-    func testHintSpellsOutDurabilityAndPopulation() {
+    /// The hint carries what the four-word button cannot: durable, and
+    /// over every episode. Present tense, no counters.
+    ///
+    /// It must say REMEMBERS, not "will skip". After playhead-q6y3's
+    /// bound the tap's whole effect is a durable confirmation against
+    /// the sponsor, which reaches future episodes through the show's
+    /// sponsor lexicon and its own promotion lifecycle — it does not
+    /// multiply any span's confidence, and deliberately so. Copy that
+    /// promised the OUTCOME would be asserting something no single tap
+    /// can guarantee; copy that states the PREFERENCE is exactly true.
+    func testHintStatesThePreferenceRatherThanPromisingTheOutcome() {
         let hint = AdBannerView.alwaysSkipSponsorHint(for: "Squarespace")
         XCTAssertEqual(
             hint,
-            "Skips Squarespace in every episode of this show from now on"
+            "Remembers Squarespace as one to skip on this show — every episode, from now on"
         )
+        // The two things the button label cannot carry.
+        XCTAssertTrue(hint.contains("every episode"))
+        XCTAssertTrue(hint.contains("from now on"))
+        // ANTI-VACUITY: assert the DIRECTION of the claim, not just its
+        // words. A hint that promised the outcome would satisfy both
+        // `contains` checks above just as well.
+        XCTAssertTrue(
+            hint.hasPrefix("Remembers "),
+            "the hint states what is remembered, not an outcome it cannot guarantee"
+        )
+        XCTAssertFalse(hint.lowercased().contains("will skip"))
+        XCTAssertFalse(hint.hasPrefix("Skips "))
     }
 
     /// The receipt is the CTA's own words in the present continuous, so
@@ -337,7 +356,7 @@ final class AdBannerAlwaysSkipSponsorTests: XCTestCase {
             AdBannerView.alwaysSkipSponsorReceipt(for: "Squarespace"),
         ]
         let banned = [
-            "ad detection", "detection", "detect", "AI", "algorithm",
+            "ad detection", "detection", "detect", "algorithm",
             "confidence", "accuracy", "this ad", "this segment",
             "this one", "%",
         ]
@@ -349,6 +368,15 @@ final class AdBannerAlwaysSkipSponsorTests: XCTestCase {
                     "\"\(string)\" must not contain \"\(word)\""
                 )
             }
+            // "AI" is checked case-SENSITIVELY and on the untouched
+            // string. Lowercasing it to "ai" would false-trip on any
+            // ordinary word containing those letters ("remains",
+            // "available", an advertiser called Airbnb) — a banned-word
+            // rail that fires on innocent copy is one people delete.
+            XCTAssertFalse(
+                string.contains("AI"),
+                "\"\(string)\" must not contain \"AI\""
+            )
             // ANTI-VACUITY for the loop above: an empty or whitespace
             // string would satisfy every "does not contain" assertion.
             XCTAssertTrue(

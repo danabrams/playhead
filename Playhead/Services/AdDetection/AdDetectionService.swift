@@ -9261,6 +9261,17 @@ actor AdDetectionService {
     /// ⇒ byte-identical to pre-527u (guardrail: no change to non-corrected
     /// episodes' analysis). Flag-off + only a veto ⇒ veto excluded, confirm empty
     /// ⇒ `NoCorrectionMaskProvider` (preserves the xsdz.34 flag-off identity).
+    ///
+    /// playhead-q6y3 — one case the sentence above no longer characterises, and
+    /// why it is left alone. `activeFalseNegativeScopes` does not filter by
+    /// scope SHAPE, so an asset whose only correction is an always-skip-sponsor
+    /// tap now returns a non-empty `confirmedScopes` and selects
+    /// `StoreBackedCorrectionMaskProvider` where it would previously have
+    /// selected `NoCorrectionMaskProvider`. The MASKS are identical either way
+    /// — `AtomEvidence.splitScopes` drops every show-wide scope, so both
+    /// providers answer `[:]` — so this is a provider-identity difference, not
+    /// a behavioural one. Filtering here instead would duplicate `splitScopes`'
+    /// shape knowledge in a second place, which is how the two drift.
     static func makeCorrectionMaskProvider(
         enabled: Bool,
         store: (any UserCorrectionStore)?,

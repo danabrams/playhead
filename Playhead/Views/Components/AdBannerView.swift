@@ -934,8 +934,8 @@ struct AdBannerView: View {
     private var dynamicTypeSize
 
     /// Duration before the banner auto-dismisses after the inline
-    /// the always-skip-sponsor receipt appears. Short
-    /// enough that it never feels like a modal; long enough to read.
+    /// always-skip-sponsor receipt appears. Short enough that it never feels
+    /// like a modal; long enough to read.
     static let alwaysSkipConfirmationSeconds: TimeInterval = 2.0
 
     /// Shared, deliberately plain copy for both banner tiers. Keeping the
@@ -1023,8 +1023,14 @@ struct AdBannerView: View {
     /// an empty name; the button's own visibility predicate already makes that
     /// fallback unreachable from the banner.
     static func alwaysSkipSponsorDisplayName(_ advertiser: String) -> String {
+        // Collapse INTERNAL whitespace too, not just the ends. Advertiser
+        // strings come from the metadata extractor rather than a curated list,
+        // so an embedded newline is possible — and it would render a hard line
+        // break inside the button label and, worse, inside an accessibility
+        // string that has no `lineLimit` to bound it.
         let display = advertiser
-            .trimmingCharacters(in: .whitespacesAndNewlines)
+            .split(whereSeparator: \.isWhitespace)
+            .joined(separator: " ")
         return display.isEmpty ? "this sponsor" : display
     }
 
@@ -1046,13 +1052,24 @@ struct AdBannerView: View {
         "Always skip \(alwaysSkipSponsorDisplayName(advertiser)) on this show"
     }
 
-    /// The full sentence, for VoiceOver and for anyone who wants the promise
-    /// stated rather than implied. Present tense and no numbers: this is what
-    /// the app will do from now on, not a count of anything it has done.
+    /// The full sentence, for VoiceOver and for anyone who wants the standing
+    /// instruction stated rather than implied. Present tense and no numbers.
+    ///
+    /// It says REMEMBERS, not "will skip", and that word is doing real work.
+    /// After playhead-q6y3's bound the tap's whole effect is a durable
+    /// confirmation against the sponsor (`LearningArtifactIngestor` →
+    /// `SponsorKnowledgeStore.recordCandidate`), which reaches future episodes
+    /// through the show's sponsor lexicon and its own promotion lifecycle. It
+    /// deliberately does NOT multiply any span's confidence, so promising the
+    /// outcome — "skips X in every episode from now on" — would be asserting
+    /// something no single tap can guarantee. "Remembers … as one to skip"
+    /// states the preference the listener just set, which is exactly true, and
+    /// still carries the two things the four-word button cannot: EVERY episode,
+    /// and FROM NOW ON.
     static func alwaysSkipSponsorHint(for advertiser: String) -> String {
         """
-        Skips \(alwaysSkipSponsorDisplayName(advertiser)) in every episode of \
-        this show from now on
+        Remembers \(alwaysSkipSponsorDisplayName(advertiser)) as one to skip on \
+        this show — every episode, from now on
         """
     }
 
