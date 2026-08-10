@@ -472,13 +472,18 @@ private extension TranscriptPeekView {
             endTime: chunk.endTime
         )
 
-        // Phase 5 decoded spans overlapping this chunk
-        let overlappingSpans = peekViewModel.decodedSpansOverlapping(chunkIndex: index)
-        let isDecodedAd = !overlappingSpans.isEmpty
         // Unified highlight: decoded spans OR user-marked AdWindows
         let isHighlighted = peekViewModel.isAdHighlighted(chunkIndex: index)
-        // Use the first overlapping span for the popover tap target
-        let primarySpan = overlappingSpans.first
+        // The popover tap target: the span this row CLAIMS is an ad, or nil.
+        // playhead-d666 R3 — reading the full overlap set here made the tap
+        // describe (and the veto retract) the silenced music hint next to the
+        // real span. R6 removed the fallback that then opened the hint on a row
+        // carrying no claim at all: `AdRegionPopover` is headed "AD SEGMENT",
+        // so a row this view deliberately draws nothing about must not open
+        // one, and the "Not ad" header mode is the veto route that works on any
+        // row over a range the user chose. See
+        // `TranscriptPeekViewModel.popoverSpan(chunkIndex:)`.
+        let primarySpan = peekViewModel.popoverSpan(chunkIndex: index)
 
         return HStack(alignment: .top, spacing: 0) {
             // Left-edge accent bar for ad regions (decoded spans or user-marked)
@@ -501,21 +506,14 @@ private extension TranscriptPeekView {
                 VStack(alignment: .leading, spacing: Spacing.xxs) {
                     // AD badge on the first chunk of a decoded span, or on the
                     // first chunk of a user-marked ad region.
-                    let isFirstChunkOfSpan: Bool = {
-                        guard isHighlighted else { return false }
-                        guard index > 0 else { return true }
-                        // For decoded spans: check if previous chunk shares span IDs
-                        if isDecodedAd {
-                            let prevSpanIds = Set(peekViewModel.decodedSpansOverlapping(
-                                chunkIndex: index - 1
-                            ).map(\.id))
-                            let currentSpanIds = Set(overlappingSpans.map(\.id))
-                            return currentSpanIds.isDisjoint(with: prevSpanIds)
-                        }
-                        // For user-marked: show badge if previous chunk is not highlighted
-                        return !peekViewModel.isAdHighlighted(chunkIndex: index - 1)
-                    }()
-                    if isFirstChunkOfSpan {
+                    //
+                    // playhead-d666 R1: the decision moved to the view model
+                    // VERBATIM except that it now groups by CLAIMING spans. Kept
+                    // inline it read the full overlap set, so a silenced
+                    // music-only span straddling the row where a real span
+                    // begins made that span look like a continuation and the
+                    // whole ad region rendered with no badge at all.
+                    if peekViewModel.showsAdBadge(chunkIndex: index) {
                         HStack(spacing: Spacing.xxs) {
                             Text("AD")
                                 .font(AppTypography.sans(size: 10, weight: .semibold))
@@ -611,11 +609,12 @@ private extension TranscriptPeekView {
         )
         .animation(Motion.quick, value: isActive)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(accessibilityLabel(
-            chunk: chunk,
-            isAd: isAd,
-            overlappingSpans: overlappingSpans
-        ))
+        // playhead-d666: the spoken label is composed by the view model, off
+        // the SAME claiming set that decides the copper bar and the AD badge,
+        // so a VoiceOver listener can never be told about a claim a sighted one
+        // is not shown — nor be told the wrong span is the reason for it. See
+        // `TranscriptPeekViewModel.accessibilityLabel(chunkIndex:)`.
+        .accessibilityLabel(peekViewModel.accessibilityLabel(chunkIndex: index))
     }
 
     // MARK: Helpers
@@ -633,28 +632,9 @@ private extension TranscriptPeekView {
         return ts + String(format: " AD %.0f%%", score * 100)
     }
 
-    /// Phase 5 (u4d): Accessibility label that includes decoded span info when present.
-    func accessibilityLabel(
-        chunk: TranscriptChunk,
-        isAd: Bool,
-        overlappingSpans: [DecodedSpan]
-    ) -> String {
-        let ts = TimeFormatter.formatTime(chunk.startTime)
-
-        // Phase 5 decoded span takes precedence for the accessibility label.
-        if let span = overlappingSpans.first {
-            let secs = Int(span.duration.rounded())
-            let provenanceSummary = provenanceSummary(span.anchorProvenance)
-            return "Ad segment, \(secs) seconds, detected from \(provenanceSummary). \(ts): \(chunk.text)"
-        }
-
-        // Legacy ad window label.
-        if isAd {
-            return "Ad segment at \(ts): \(chunk.text)"
-        }
-
-        return "\(ts): \(chunk.text)"
-    }
+    // Phase 5 (u4d): the row's spoken label is
+    // `TranscriptRowAccessibility.label` — see there for why it is not a method
+    // on this view (playhead-d666 R1).
 
     /// Submit the marked chunks as a false negative correction.
     ///
@@ -795,7 +775,66 @@ private extension TranscriptPeekView {
         }
     }
 
-    private func provenanceSummary(_ refs: [AnchorRef]) -> String {
+}
+
+// MARK: - TranscriptRowAccessibility
+
+/// What VoiceOver says about one transcript row.
+///
+/// playhead-d666 R1 — WHY THIS IS NOT A METHOD ON THE VIEW, WHERE IT LIVED.
+/// `TranscriptPeekView` has `@State private` storage, so its memberwise
+/// initializer is private and the test target cannot construct one; every test
+/// in this area drives `TranscriptPeekViewModel` instead. That made the spoken
+/// label the one display surface no test could reach — and it is the surface
+/// where a suppressed claim is easiest to leave behind, because nothing about
+/// it is visible on screen. Moving the two pure functions out costs nothing at
+/// the call site and makes the claim gate below assertable rather than merely
+/// believed.
+enum TranscriptRowAccessibility {
+
+    /// `claimingSpans` is `TranscriptPeekViewModel.adClaimingSpansOverlapping`
+    /// for this row — the spans entitled to assert "this is an ad", which is
+    /// every overlapping span except the ones anchored solely by a
+    /// sustained-music hint (playhead-d666).
+    ///
+    /// IT IS NOT THE FULL OVERLAP SET, and the difference is the whole point.
+    /// R1 shipped this as `overlappingSpans` plus a per-ROW `makesAdClaim`
+    /// boolean, which stopped a silenced row speaking at all but still let a
+    /// CLAIMING row be described by whichever span happened to sort first —
+    /// and `fetchDecodedSpans` orders by `startTime`, so on the geometry this
+    /// bead is about ("an ad begins right AFTER this music") that is the
+    /// silenced one. The row then announced the hint's duration and the hint's
+    /// provenance as the reason for an ad it was drawn for on other evidence.
+    /// Taking the claiming set makes the gate structural: an empty set cannot
+    /// describe anything, so no separate boolean can drift away from it.
+    ///
+    /// The single production caller is
+    /// `TranscriptPeekViewModel.accessibilityLabel(chunkIndex:)`, which is
+    /// reachable from a test; this stays a pure function so the formatting is
+    /// assertable on its own.
+    static func label(
+        chunk: TranscriptChunk,
+        isAd: Bool,
+        claimingSpans: [DecodedSpan]
+    ) -> String {
+        let ts = TimeFormatter.formatTime(chunk.startTime)
+
+        // Phase 5 decoded span takes precedence for the accessibility label.
+        if let span = claimingSpans.first {
+            let secs = Int(span.duration.rounded())
+            let summary = provenanceSummary(span.anchorProvenance)
+            return "Ad segment, \(secs) seconds, detected from \(summary). \(ts): \(chunk.text)"
+        }
+
+        // Legacy ad window label.
+        if isAd {
+            return "Ad segment at \(ts): \(chunk.text)"
+        }
+
+        return "\(ts): \(chunk.text)"
+    }
+
+    static func provenanceSummary(_ refs: [AnchorRef]) -> String {
         if refs.isEmpty { return "unknown signals" }
         let descriptions = refs.prefix(3).map { ref -> String in
             switch ref {

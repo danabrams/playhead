@@ -1260,21 +1260,14 @@ struct DecisionMapper: Sendable {
     /// chroma arm joins that list unchanged — the byte/chroma split is a
     /// certainty distinction WITHIN width ownership and has no bearing on a
     /// question about presence.
+    ///
+    /// playhead-d666: the body moved to `[AnchorRef]
+    /// .carriesOnlyMusicPresenceHint` — unchanged, but now the ONE definition,
+    /// shared with the transcript's ad highlight. It was this clause alone that
+    /// honoured the "targeting signal, never a verdict" policy; the display
+    /// seam drew the same span as an ad and had no way to ask the question.
     private var isMusicOnlyProvenance: Bool {
-        var hasMusic = false
-        var hasCorroboratingPresence = false
-        for ref in span.anchorProvenance {
-            switch ref {
-            case .sustainedMusicOffset:
-                hasMusic = true
-            case .fmConsensus, .fmAcousticCorroborated, .evidenceCatalog,
-                 .classifierSeed, .userCorrection:
-                hasCorroboratingPresence = true
-            case .spliceSlot, .rediffSlot, .rediffSlotChroma:
-                break
-            }
-        }
-        return hasMusic && !hasCorroboratingPresence
+        span.anchorProvenance.carriesOnlyMusicPresenceHint
     }
 
     /// Determine the eligibility gate by reading `anchorProvenance` directly.

@@ -50,6 +50,24 @@ final class TranscriptPeekViewModel {
     /// These get visual ad highlighting even without a corresponding DecodedSpan.
     private var userMarkedChunkIndices: Set<Int> = []
 
+    /// playhead-d666: the overlapping decoded spans that make an ad CLAIM about
+    /// this row — every span in `spansByChunkIndex` except the ones anchored
+    /// solely by a `.sustainedMusicOffset` hint. Absent (rather than empty) when
+    /// nothing on the row claims.
+    ///
+    /// Kept SEPARATE from `spansByChunkIndex` (which still holds the music-only
+    /// spans, so persistence and every non-display read are unchanged) because
+    /// the only thing that must differ is what the row ASSERTS. Stored as the
+    /// span list rather than a boolean because the AD badge needs the span
+    /// IDENTITIES: it decides "is this the first row of this span" by comparing
+    /// this row's ids against the previous row's, and a music-only id leaking
+    /// into either set silently swallows the badge of the real span next to it
+    /// (playhead-d666 R1).
+    ///
+    /// playhead-d666 R6: this is now the ONLY per-row span population any
+    /// display surface reads — bar, tint, badge, spoken label and popover.
+    private var adClaimingSpansByChunkIndex: [Int: [DecodedSpan]] = [:]
+
     /// Index of the chunk containing the current playback position, or nil.
     private(set) var activeChunkIndex: Int?
 
@@ -205,23 +223,214 @@ final class TranscriptPeekViewModel {
 
     /// Returns all Phase 5 decoded spans overlapping the chunk at `chunkIndex`.
     /// Uses the pre-computed mapping built during refresh() for O(1) lookup.
+    ///
+    /// playhead-d666 R6 — NOT A DISPLAY POPULATION, and as of this round it has
+    /// no production caller at all; it survives as the control the tests use to
+    /// show this bead narrowed what a row ASSERTS and nothing else. Every one of
+    /// the six defects on this bead was a display surface taking `.first` of
+    /// this set: the highlight, the badge's span identities, the spoken label,
+    /// the popover tap target, and twice more inside the popover's fallback. A
+    /// new per-row display consumer belongs on
+    /// ``adClaimingSpansOverlapping(chunkIndex:)``.
     func decodedSpansOverlapping(chunkIndex: Int) -> [DecodedSpan] {
         spansByChunkIndex[chunkIndex] ?? []
     }
 
-    /// Whether this chunk should receive ad highlighting (copper bar, background tint).
-    /// True if the chunk overlaps any DecodedSpan OR any user-marked AdWindow.
+    /// Whether this chunk should receive ad highlighting (copper bar, AD badge,
+    /// background tint). True if the chunk overlaps any DecodedSpan that makes
+    /// an ad CLAIM, or any user-marked AdWindow.
+    ///
+    /// playhead-d666: a span whose only presence anchor is
+    /// `.sustainedMusicOffset` does NOT make that claim. `AnchorRef` and
+    /// `BackfillEvidenceFusion` both spell it out — the sustained-music
+    /// proposer is a TARGETING signal ("an ad likely begins right AFTER this
+    /// music"), never a verdict about the audio it covers, which is why
+    /// `DecisionMapper` demotes such a span to `.markOnly` and never lets it
+    /// auto-skip. This surface honoured none of that: it painted "AD" over the
+    /// show's own words on nothing but a music bed. On asset 48E903D7 that was
+    /// the clip outro — "to that full episode, I've linked it down below. Check
+    /// the description. Thank you." — drawn as an ad because an outro music bed
+    /// started 1.5 s into it, and vetoed by the listener as a false positive.
+    ///
+    /// A user-marked window still wins: that IS a verdict, and the listener's
+    /// own. So is any span carrying corroborating presence evidence, music or
+    /// not — only the bare hint is silenced.
     func isAdHighlighted(chunkIndex: Int) -> Bool {
-        (spansByChunkIndex[chunkIndex] != nil) || userMarkedChunkIndices.contains(chunkIndex)
+        userMarkedChunkIndices.contains(chunkIndex)
+            || adClaimingSpansByChunkIndex[chunkIndex] != nil
     }
 
-    /// Returns all Phase 5 decoded spans overlapping the given time range.
-    /// Retained for callers that don't have a chunk index handy.
-    func decodedSpansOverlapping(startTime: Double, endTime: Double) -> [DecodedSpan] {
-        decodedSpans.filter { span in
-            span.startTime < endTime && span.endTime > startTime
-        }
+    /// The decoded spans overlapping this chunk that make an ad CLAIM — i.e.
+    /// `decodedSpansOverlapping(chunkIndex:)` minus every span whose only
+    /// presence anchor is a sustained-music hint (playhead-d666).
+    ///
+    /// This is what the AD badge must group by, NOT the full overlap set. The
+    /// badge asks "does this row start a span the previous row was not already
+    /// under" by comparing span ids; feeding it a music-only id makes a silenced
+    /// span join two rows together, so the real span beginning on the second row
+    /// looks like a continuation and never gets its badge. The copper bar still
+    /// drew, so the symptom is an unlabelled ad region — the one case where
+    /// suppressing the hint costs a claim the app is entitled to make.
+    func adClaimingSpansOverlapping(chunkIndex: Int) -> [DecodedSpan] {
+        adClaimingSpansByChunkIndex[chunkIndex] ?? []
     }
+
+    /// Whether this row carries the "AD" badge: the first row of a decoded ad
+    /// span, or the first row of a user-marked ad region.
+    ///
+    /// playhead-d666 R1: this decision lived inline in `TranscriptPeekView`,
+    /// where nothing could test it and where it read the FULL overlap set. Both
+    /// halves are fixed together — it now groups by CLAIMING spans, and it is
+    /// reachable from a test.
+    func showsAdBadge(chunkIndex: Int) -> Bool {
+        guard isAdHighlighted(chunkIndex: chunkIndex) else { return false }
+        guard chunkIndex > 0 else { return true }
+        let claiming = adClaimingSpansOverlapping(chunkIndex: chunkIndex)
+        // A decoded claim groups by span identity, so two adjacent but distinct
+        // spans each get their own badge.
+        if !claiming.isEmpty {
+            let previousIds = Set(
+                adClaimingSpansOverlapping(chunkIndex: chunkIndex - 1).map(\.id)
+            )
+            return Set(claiming.map(\.id)).isDisjoint(with: previousIds)
+        }
+        // User-marked regions carry no span id — badge the first lit row.
+        return !isAdHighlighted(chunkIndex: chunkIndex - 1)
+    }
+
+    /// The span the tap-to-explain popover opens for on this row.
+    ///
+    /// playhead-d666 R3 — THE FOURTH CONSUMER, and the same shape as the other
+    /// three. The view read `decodedSpansOverlapping(chunkIndex:).first`, and
+    /// `fetchDecodedSpans` orders by `startTime`, so on this bead's geometry
+    /// ("an ad begins right AFTER this music") the earliest-starting overlap is
+    /// the SILENCED span. A row lit and badged by a corroborated span therefore
+    /// opened a popover headed "AD SEGMENT / DETECTED FROM: sustained music"
+    /// carrying the hint's duration and time range — the same misattribution R2
+    /// fixed for VoiceOver, one surface over. Worse than a wrong caption: the
+    /// popover's "This isn't an ad" reverts THAT span, so the listener's veto
+    /// landed on the hint while the row stayed lit by the claim they were
+    /// actually looking at, and the correction — the highest-fidelity signal the
+    /// app has — was recorded against the wrong range.
+    ///
+    /// Measured on `db-corrected2`: 112 transcript rows sit under both a
+    /// music-only span and a claiming span, and the music-only span sorts first
+    /// on all 112.
+    ///
+    /// playhead-d666 R6 — AND THERE IS NO FALLBACK. R3 shipped this as
+    /// "claiming span, else the first overlapping span", so that a row the app
+    /// draws nothing about kept a tap that opened the hint. R4 found a defect
+    /// inside that fallback and added a guard; R5 found a defect inside R4's
+    /// guard and added a second, and recorded that neither subsumes the other.
+    /// Three consecutive rounds, three defects, all in the same two lines, each
+    /// one a fresh ad-hoc condition on a predicate with no closure argument.
+    ///
+    /// The fallback is deleted rather than guarded a third time, for four
+    /// reasons that are about what it IS, not about which cells had bitten:
+    ///
+    ///   • IT MAKES THE CLAIM THIS BEAD EXISTS TO STOP. `AdRegionPopover` hard-
+    ///     codes the header "AD SEGMENT" and lists "Sustained music leading
+    ///     into this segment" under "DETECTED FROM". Bar, tint, badge and
+    ///     spoken label were all moved onto the claiming set precisely so this
+    ///     row asserts nothing. Guarding WHEN the popover may assert never
+    ///     changed WHAT it asserts.
+    ///   • NOBODY CAN FIND IT. On such a row `isAdHighlighted` is false (no
+    ///     copper bar, no background tint), `showsAdBadge` is false, and
+    ///     `accessibilityLabel` is the bare "\(ts): \(text)" — nothing on
+    ///     screen or in VoiceOver says a tap does anything. It is not an
+    ///     affordance, it is an undocumented tap target on unmarked text, and
+    ///     a VoiceOver listener could never reach it at all.
+    ///   • R4 ALREADY WROTE THE ARGUMENT AND APPLIED IT TO HALF THE
+    ///     POPULATION: "Returning nil is the honest answer, not a lost
+    ///     affordance: the app has no ad claim about that row to explain, and
+    ///     un-marking is what the sheet's 'not an ad' marking mode is for."
+    ///     That premise is true of the WHOLE fallback, not only of the cell
+    ///     that had been measured to hurt someone.
+    ///   • THE VETO SURVIVES BY A BETTER ROUTE. `TranscriptPeekView`'s "Not ad"
+    ///     header toggle is rendered unconditionally, selects any row painted
+    ///     or not, and `submitNotAdChunks` builds a synthetic span over the
+    ///     range the USER drew before calling the same `onRevertAdWindows`. The
+    ///     fallback's range was the music proposer's: measured on
+    ///     `db-corrected2`, over the 347 rows where it still fired the hint
+    ///     overhangs the tapped row by a median 14.9 s (max 32.8 s), and on 34
+    ///     of them it reaches an `ad_window` in candidate/confirmed/applied
+    ///     that does not touch the tapped row at all. All 34 of those windows
+    ///     are `eligibilityGate == markOnly`.
+    ///
+    ///     R6 REVIEW CORRECTED THIS BULLET'S TWO FIGURES; the numbers above are
+    ///     the re-derived ones. R6 wrote "median 11.5 s (max 32.5 s)" and "six
+    ///     of those `dayZeroRediffByteExact`, the highest-certainty auto-skip
+    ///     class". Neither reproduces. Overhang under every natural definition
+    ///     (hint duration minus row duration, two-sided, leading-only,
+    ///     trailing-only), over the 347 rows or the 252 distinct ones, and
+    ///     under both suppression models, gives a median of 6.3–14.9 s and
+    ///     never 11.5; only the LEADING-overhang max (32.46 s) is near R6's
+    ///     32.5. And `dayZeroRediffByteExact` appears in neither `ad_windows`
+    ///     nor `ad_decision_results` on this database — every reached window
+    ///     is `markOnly`, which is by definition NOT auto-skip, so the clause
+    ///     contradicted itself. Nothing else in this argument rests on either
+    ///     figure: the case for deleting the fallback is the three bullets
+    ///     above plus the fact that a wider veto range is worse than the
+    ///     user's own, which the 34 reached windows still demonstrate.
+    ///
+    /// WHAT WAS GIVEN UP, stated plainly so it can be restored in one line: an
+    /// unpainted row whose only overlapping span is a bare sustained-music hint
+    /// no longer opens the tap-to-explain popover. 347 of 94,099
+    /// `transcript_chunks` rows on `db-corrected2` were in that state — 252
+    /// distinct by (start, end, text), the remaining 95 being fast/final
+    /// duplicates. Every painted row keeps its popover, and every row keeps
+    /// "Not ad" mode.
+    ///
+    /// Deleting it removes both of R4's and R5's guards and the
+    /// `liveUserMarkedWindows` mirror they read, and makes the R4/R5/R6 defect
+    /// class structurally unreachable rather than individually excluded.
+    func popoverSpan(chunkIndex: Int) -> DecodedSpan? {
+        adClaimingSpansOverlapping(chunkIndex: chunkIndex).first
+    }
+
+    /// What VoiceOver speaks for the row at `chunkIndex`.
+    ///
+    /// playhead-d666 R2 — WHY THIS COMPOSES HERE RATHER THAN IN THE VIEW.
+    /// The spoken label names a SPAN: its duration and the evidence it was
+    /// detected from. R1 gated the whole decoded branch on a per-ROW boolean
+    /// (`makesAdClaim`) but left the view choosing that span out of the FULL
+    /// overlap set, and `fetchDecodedSpans` orders by `startTime`, so `.first`
+    /// is the EARLIEST-starting overlapping span. The sustained-music proposer
+    /// produces exactly the geometry where that is the silenced one — a music
+    /// run, then the ad it is pointing at — so a row under both was announced
+    /// as "Ad segment, 12 seconds, detected from sustained music" while the
+    /// claim it is actually drawn for was a 60-second corroborated post-roll.
+    /// The row's ad-ness was right; its length and its whole reason were the
+    /// hint's, which is the one thing this bead established may never speak for
+    /// an ad.
+    ///
+    /// Composing it here — not in the view — is what makes that assertable:
+    /// `TranscriptPeekView`'s `@State private` storage makes its memberwise
+    /// initializer private, so a test cannot construct one and "does the view
+    /// hand the label the right population?" was unaskable. It is the same move
+    /// R1 made for `showsAdBadge`, for the same reason.
+    ///
+    /// Out of range returns the empty string: a row that does not exist has
+    /// nothing to say, and a trap here would crash the reader over a stale
+    /// index rather than a real defect.
+    func accessibilityLabel(chunkIndex: Int) -> String {
+        guard chunks.indices.contains(chunkIndex) else { return "" }
+        let chunk = chunks[chunkIndex]
+        return TranscriptRowAccessibility.label(
+            chunk: chunk,
+            isAd: isAdSegment(startTime: chunk.startTime, endTime: chunk.endTime),
+            claimingSpans: adClaimingSpansOverlapping(chunkIndex: chunkIndex)
+        )
+    }
+
+    // playhead-d666 R6: `decodedSpansOverlapping(startTime:endTime:)` is
+    // deleted. It was documented as "retained for callers that don't have a
+    // chunk index handy" and had none — zero production callers, one test — and
+    // it vended the UNFILTERED span set with no claim filter, which is the
+    // exact shape of the six defects this bead has now produced (a display-side
+    // consumer taking `.first` of a population it is not entitled to make an ad
+    // claim over). `decodedSpans` is still `private(set)` and readable for the
+    // structural/persistence reads that genuinely want every row.
 
     /// Resolve currently visible audio envelopes captured from displayed rows
     /// to the combined range used by the mark-ad and not-ad submission paths.
@@ -429,6 +638,7 @@ final class TranscriptPeekViewModel {
     private func rebuildSpansByChunkIndex() {
         var mapping: [Int: [DecodedSpan]] = [:]
         var userMarked = Set<Int>()
+        var claiming: [Int: [DecodedSpan]] = [:]
 
         // playhead-u45d: the same defect one field over. This set used to
         // filter on `boundaryState` alone, so vetoing an ad the listener had
@@ -448,6 +658,17 @@ final class TranscriptPeekViewModel {
             }
             if !overlapping.isEmpty {
                 mapping[idx] = overlapping
+                // playhead-d666: filtered PER SPAN, not collapsed to a per-row
+                // verdict. One corroborated span overlapping this row is an ad
+                // claim about this row, and a bare music hint sitting on top of
+                // it cannot retract that — so the survivors, not merely their
+                // count, are what the row is entitled to assert.
+                let claims = overlapping.filter {
+                    !$0.anchorProvenance.carriesOnlyMusicPresenceHint
+                }
+                if !claims.isEmpty {
+                    claiming[idx] = claims
+                }
             }
 
             if userMarkedWindows.contains(where: { ad in
@@ -458,6 +679,7 @@ final class TranscriptPeekViewModel {
         }
         spansByChunkIndex = mapping
         userMarkedChunkIndices = userMarked
+        adClaimingSpansByChunkIndex = claiming
     }
 
     /// Pull a fresh snapshot and apply it to observable state. Internal (not

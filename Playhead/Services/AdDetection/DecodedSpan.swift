@@ -126,6 +126,41 @@ extension [AnchorRef] {
 
     /// The ~1 s CHROMA differ owns this width. See `AnchorRef.rediffSlotChroma`.
     var carriesRediffChromaWidth: Bool { contains(.rediffSlotChroma) }
+
+    /// playhead-d666: `true` IFF the ONLY presence anchor here is
+    /// `.sustainedMusicOffset` — a sustained music-bed run and nothing else.
+    ///
+    /// THE ONE DEFINITION of "music-only", on the provenance ARRAY, for the
+    /// same reason the rediff predicates above live here: the two consumers do
+    /// not hold the same type. `BackfillEvidenceFusion.DecisionMapper` has a
+    /// bare span-under-adjudication; `TranscriptPeekViewModel` has a persisted
+    /// `DecodedSpan`. Before this they were one predicate and one absence — the
+    /// mapper demoted a music-only span to `.markOnly` while the transcript
+    /// drew it as an ad regardless, so the ratified policy held on exactly one
+    /// of the two surfaces it names.
+    ///
+    /// What the anchor MEANS is the whole argument (see `AnchorRef
+    /// .sustainedMusicOffset`): it is a TARGETING signal — "an ad likely begins
+    /// right AFTER this music" — never a verdict about the audio it covers. The
+    /// bare width markers (`.spliceSlot` / `.rediffSlot` / `.rediffSlotChroma`)
+    /// are deliberately NOT corroboration: they set WIDTH, not PRESENCE, so a
+    /// music+slot span still has no presence evidence beyond the music hint.
+    var carriesOnlyMusicPresenceHint: Bool {
+        var hasMusic = false
+        var hasCorroboratingPresence = false
+        for ref in self {
+            switch ref {
+            case .sustainedMusicOffset:
+                hasMusic = true
+            case .fmConsensus, .fmAcousticCorroborated, .evidenceCatalog,
+                 .classifierSeed, .userCorrection:
+                hasCorroboratingPresence = true
+            case .spliceSlot, .rediffSlot, .rediffSlotChroma:
+                break
+            }
+        }
+        return hasMusic && !hasCorroboratingPresence
+    }
 }
 
 // MARK: - DecoderConstants
