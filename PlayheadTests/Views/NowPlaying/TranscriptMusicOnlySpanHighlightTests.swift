@@ -309,6 +309,151 @@ struct TranscriptMusicOnlySpanHighlightTests {
     }
 }
 
+// MARK: - The AD badge
+
+@Suite("Silencing a music hint must not swallow a real span's AD badge (playhead-d666)")
+struct TranscriptMusicOnlySpanBadgeTests {
+
+    /// The real post-roll, starting inside the music-only span's extent — the
+    /// geometry the sustained-music proposer exists to produce ("an ad likely
+    /// begins right AFTER this music"), so row 2 is under BOTH.
+    private static func realPostRoll(
+        id: String = "real-postroll",
+        start: Double = 2052.9
+    ) -> DecodedSpan {
+        DecodedSpan(
+            id: id,
+            assetId: ClipOutro.assetId,
+            firstAtomOrdinal: 2068,
+            lastAtomOrdinal: 2090,
+            startTime: start,
+            endTime: 2112.9,
+            anchorProvenance: [.classifierSeed(regionId: "r2", score: 0.9)]
+        )
+    }
+
+    @Test("The claim set drops the music-only span and keeps the real one")
+    @MainActor
+    func claimingSpansExcludeTheMusicOnlySpan() async throws {
+        let peek = await ClipOutro.loaded(
+            snapshot: ClipOutro.snapshot(
+                spans: [ClipOutro.span(anchors: [ClipOutro.musicAnchor]), Self.realPostRoll()]
+            )
+        )
+
+        // Row 0 is covered by the music-only span alone: nothing claims.
+        #expect(peek.adClaimingSpansOverlapping(chunkIndex: 0).isEmpty)
+        #expect(peek.decodedSpansOverlapping(chunkIndex: 0).count == 1)
+
+        // Row 2 is covered by both. The FULL overlap read still returns both —
+        // the popover and the veto path depend on it — while the claim read
+        // returns only the span entitled to assert an ad.
+        #expect(peek.decodedSpansOverlapping(chunkIndex: 2).count == 2)
+        #expect(
+            peek.adClaimingSpansOverlapping(chunkIndex: 2).map(\.id) == ["real-postroll"],
+            """
+            The claim set is what the AD badge groups by. A music-only id \
+            leaking into it joins row 2 to row 1, and the real span then looks \
+            like a continuation of something that was never drawn.
+            """
+        )
+    }
+
+    @Test("THE R1 DEFECT: the real post-roll still gets its badge")
+    @MainActor
+    func realSpanKeepsItsBadgeUnderAStraddlingMusicOnlySpan() async throws {
+        let peek = await ClipOutro.loaded(
+            snapshot: ClipOutro.snapshot(
+                spans: [ClipOutro.span(anchors: [ClipOutro.musicAnchor]), Self.realPostRoll()]
+            )
+        )
+
+        #expect(peek.showsAdBadge(chunkIndex: 0) == false)
+        #expect(peek.showsAdBadge(chunkIndex: 1) == false)
+        #expect(
+            peek.showsAdBadge(chunkIndex: 2),
+            """
+            Row 2 is the first row of the classifier-seeded post-roll and is \
+            highlighted, so it must carry the badge. Grouping by the FULL \
+            overlap set instead makes the silenced music span — which covers \
+            rows 0-2 — shared with row 1, so row 2 reads as a continuation and \
+            the entire ad region renders with a copper bar and no label.
+            """
+        )
+    }
+
+    @Test("The badge marks the FIRST row of a span, not every row")
+    @MainActor
+    func badgeIsNotRepeatedOnContinuationRows() async throws {
+        // A post-roll that opens on row 1 and continues through row 2.
+        let peek = await ClipOutro.loaded(
+            snapshot: ClipOutro.snapshot(
+                spans: [
+                    ClipOutro.span(anchors: [ClipOutro.musicAnchor]),
+                    Self.realPostRoll(start: 2047.3),
+                ]
+            )
+        )
+
+        #expect(peek.showsAdBadge(chunkIndex: 0) == false)
+        #expect(peek.showsAdBadge(chunkIndex: 1))
+        #expect(
+            peek.showsAdBadge(chunkIndex: 2) == false,
+            "row 2 is the same span continuing — one badge per span, not per row"
+        )
+    }
+
+    @Test("A user-marked region under a music-only span still gets its badge")
+    @MainActor
+    func userMarkedRegionKeepsItsBadge() async throws {
+        // The user-marked route carries no span id, so the badge falls back to
+        // the highlight run. Grouping by the full overlap set sent this row
+        // down the decoded branch instead — where the music-only span it shares
+        // with row 0 suppressed the badge on a region the LISTENER marked.
+        let peek = await ClipOutro.loaded(
+            snapshot: ClipOutro.snapshot(
+                spans: [ClipOutro.span(anchors: [ClipOutro.musicAnchor])],
+                adWindows: [ClipOutro.userMarkedWindow(start: 2047.26, end: 2055.96)]
+            )
+        )
+
+        #expect(peek.showsAdBadge(chunkIndex: 0) == false)
+        #expect(peek.showsAdBadge(chunkIndex: 1))
+        #expect(peek.showsAdBadge(chunkIndex: 2) == false)
+    }
+
+    @Test("A silenced row never carries the badge, including row 0")
+    @MainActor
+    func aMusicOnlyRowNeverBadges() async throws {
+        let peek = await ClipOutro.loaded(
+            snapshot: ClipOutro.snapshot(
+                spans: [ClipOutro.span(anchors: [ClipOutro.musicAnchor])]
+            )
+        )
+
+        // Row 0 is the index-0 special case — highlighted rows badge
+        // unconditionally there, so the silencing has to hold BEFORE it.
+        #expect(peek.showsAdBadge(chunkIndex: 0) == false)
+        #expect(peek.showsAdBadge(chunkIndex: 1) == false)
+        #expect(peek.showsAdBadge(chunkIndex: 2) == false)
+    }
+
+    @Test("A corroborated span on row 0 still badges")
+    @MainActor
+    func corroboratedSpanOnTheFirstRowBadges() async throws {
+        let peek = await ClipOutro.loaded(
+            snapshot: ClipOutro.snapshot(
+                spans: [ClipOutro.span(anchors: [
+                    ClipOutro.musicAnchor,
+                    .fmConsensus(regionId: "r1", consensusStrength: 0.8),
+                ])]
+            )
+        )
+        #expect(peek.showsAdBadge(chunkIndex: 0))
+        #expect(peek.showsAdBadge(chunkIndex: 1) == false)
+    }
+}
+
 // MARK: - The shared predicate
 
 @Suite("carriesOnlyMusicPresenceHint is one definition, two consumers (playhead-d666)")

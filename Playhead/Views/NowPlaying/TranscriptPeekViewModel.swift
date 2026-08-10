@@ -50,13 +50,20 @@ final class TranscriptPeekViewModel {
     /// These get visual ad highlighting even without a corresponding DecodedSpan.
     private var userMarkedChunkIndices: Set<Int> = []
 
-    /// playhead-d666: chunk indices whose overlapping decoded spans are ALL
-    /// music-only — i.e. every one of them is anchored solely by a
-    /// `.sustainedMusicOffset` hint. Kept separate from `spansByChunkIndex`
-    /// (which still returns them, so the popover, the veto gesture and every
-    /// overlap read are unchanged) because the ONLY thing that must differ is
-    /// whether the row is PAINTED as an ad.
-    private var musicOnlyChunkIndices: Set<Int> = []
+    /// playhead-d666: the overlapping decoded spans that make an ad CLAIM about
+    /// this row — every span in `spansByChunkIndex` except the ones anchored
+    /// solely by a `.sustainedMusicOffset` hint. Absent (rather than empty) when
+    /// nothing on the row claims.
+    ///
+    /// Kept SEPARATE from `spansByChunkIndex` (which still returns the music-only
+    /// spans, so the popover, the veto gesture and every overlap read are
+    /// unchanged) because the only thing that must differ is what the row
+    /// ASSERTS. Stored as the span list rather than a boolean because the AD
+    /// badge needs the span IDENTITIES: it decides "is this the first row of this
+    /// span" by comparing this row's ids against the previous row's, and a
+    /// music-only id leaking into either set silently swallows the badge of the
+    /// real span next to it (playhead-d666 R1).
+    private var adClaimingSpansByChunkIndex: [Int: [DecodedSpan]] = [:]
 
     /// Index of the chunk containing the current playback position, or nil.
     private(set) var activeChunkIndex: Int?
@@ -237,9 +244,46 @@ final class TranscriptPeekViewModel {
     /// own. So is any span carrying corroborating presence evidence, music or
     /// not — only the bare hint is silenced.
     func isAdHighlighted(chunkIndex: Int) -> Bool {
-        if userMarkedChunkIndices.contains(chunkIndex) { return true }
-        guard spansByChunkIndex[chunkIndex] != nil else { return false }
-        return !musicOnlyChunkIndices.contains(chunkIndex)
+        userMarkedChunkIndices.contains(chunkIndex)
+            || adClaimingSpansByChunkIndex[chunkIndex] != nil
+    }
+
+    /// The decoded spans overlapping this chunk that make an ad CLAIM — i.e.
+    /// `decodedSpansOverlapping(chunkIndex:)` minus every span whose only
+    /// presence anchor is a sustained-music hint (playhead-d666).
+    ///
+    /// This is what the AD badge must group by, NOT the full overlap set. The
+    /// badge asks "does this row start a span the previous row was not already
+    /// under" by comparing span ids; feeding it a music-only id makes a silenced
+    /// span join two rows together, so the real span beginning on the second row
+    /// looks like a continuation and never gets its badge. The copper bar still
+    /// drew, so the symptom is an unlabelled ad region — the one case where
+    /// suppressing the hint costs a claim the app is entitled to make.
+    func adClaimingSpansOverlapping(chunkIndex: Int) -> [DecodedSpan] {
+        adClaimingSpansByChunkIndex[chunkIndex] ?? []
+    }
+
+    /// Whether this row carries the "AD" badge: the first row of a decoded ad
+    /// span, or the first row of a user-marked ad region.
+    ///
+    /// playhead-d666 R1: this decision lived inline in `TranscriptPeekView`,
+    /// where nothing could test it and where it read the FULL overlap set. Both
+    /// halves are fixed together — it now groups by CLAIMING spans, and it is
+    /// reachable from a test.
+    func showsAdBadge(chunkIndex: Int) -> Bool {
+        guard isAdHighlighted(chunkIndex: chunkIndex) else { return false }
+        guard chunkIndex > 0 else { return true }
+        let claiming = adClaimingSpansOverlapping(chunkIndex: chunkIndex)
+        // A decoded claim groups by span identity, so two adjacent but distinct
+        // spans each get their own badge.
+        if !claiming.isEmpty {
+            let previousIds = Set(
+                adClaimingSpansOverlapping(chunkIndex: chunkIndex - 1).map(\.id)
+            )
+            return Set(claiming.map(\.id)).isDisjoint(with: previousIds)
+        }
+        // User-marked regions carry no span id — badge the first lit row.
+        return !isAdHighlighted(chunkIndex: chunkIndex - 1)
     }
 
     /// Returns all Phase 5 decoded spans overlapping the given time range.
@@ -456,7 +500,7 @@ final class TranscriptPeekViewModel {
     private func rebuildSpansByChunkIndex() {
         var mapping: [Int: [DecodedSpan]] = [:]
         var userMarked = Set<Int>()
-        var musicOnly = Set<Int>()
+        var claiming: [Int: [DecodedSpan]] = [:]
 
         // playhead-u45d: the same defect one field over. This set used to
         // filter on `boundaryState` alone, so vetoing an ad the listener had
@@ -476,13 +520,16 @@ final class TranscriptPeekViewModel {
             }
             if !overlapping.isEmpty {
                 mapping[idx] = overlapping
-                // playhead-d666: ALL, not ANY. One corroborated span overlapping
-                // this row is an ad claim about this row, and a bare music hint
-                // sitting on top of it cannot retract that.
-                if overlapping.allSatisfy({
-                    $0.anchorProvenance.carriesOnlyMusicPresenceHint
-                }) {
-                    musicOnly.insert(idx)
+                // playhead-d666: filtered PER SPAN, not collapsed to a per-row
+                // verdict. One corroborated span overlapping this row is an ad
+                // claim about this row, and a bare music hint sitting on top of
+                // it cannot retract that — so the survivors, not merely their
+                // count, are what the row is entitled to assert.
+                let claims = overlapping.filter {
+                    !$0.anchorProvenance.carriesOnlyMusicPresenceHint
+                }
+                if !claims.isEmpty {
+                    claiming[idx] = claims
                 }
             }
 
@@ -494,7 +541,7 @@ final class TranscriptPeekViewModel {
         }
         spansByChunkIndex = mapping
         userMarkedChunkIndices = userMarked
-        musicOnlyChunkIndices = musicOnly
+        adClaimingSpansByChunkIndex = claiming
     }
 
     /// Pull a fresh snapshot and apply it to observable state. Internal (not

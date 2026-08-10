@@ -474,7 +474,6 @@ private extension TranscriptPeekView {
 
         // Phase 5 decoded spans overlapping this chunk
         let overlappingSpans = peekViewModel.decodedSpansOverlapping(chunkIndex: index)
-        let isDecodedAd = !overlappingSpans.isEmpty
         // Unified highlight: decoded spans OR user-marked AdWindows
         let isHighlighted = peekViewModel.isAdHighlighted(chunkIndex: index)
         // Use the first overlapping span for the popover tap target
@@ -501,21 +500,14 @@ private extension TranscriptPeekView {
                 VStack(alignment: .leading, spacing: Spacing.xxs) {
                     // AD badge on the first chunk of a decoded span, or on the
                     // first chunk of a user-marked ad region.
-                    let isFirstChunkOfSpan: Bool = {
-                        guard isHighlighted else { return false }
-                        guard index > 0 else { return true }
-                        // For decoded spans: check if previous chunk shares span IDs
-                        if isDecodedAd {
-                            let prevSpanIds = Set(peekViewModel.decodedSpansOverlapping(
-                                chunkIndex: index - 1
-                            ).map(\.id))
-                            let currentSpanIds = Set(overlappingSpans.map(\.id))
-                            return currentSpanIds.isDisjoint(with: prevSpanIds)
-                        }
-                        // For user-marked: show badge if previous chunk is not highlighted
-                        return !peekViewModel.isAdHighlighted(chunkIndex: index - 1)
-                    }()
-                    if isFirstChunkOfSpan {
+                    //
+                    // playhead-d666 R1: the decision moved to the view model
+                    // VERBATIM except that it now groups by CLAIMING spans. Kept
+                    // inline it read the full overlap set, so a silenced
+                    // music-only span straddling the row where a real span
+                    // begins made that span look like a continuation and the
+                    // whole ad region rendered with no badge at all.
+                    if peekViewModel.showsAdBadge(chunkIndex: index) {
                         HStack(spacing: Spacing.xxs) {
                             Text("AD")
                                 .font(AppTypography.sans(size: 10, weight: .semibold))
