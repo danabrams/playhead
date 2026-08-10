@@ -286,6 +286,41 @@ final class TranscriptPeekViewModel {
         return !isAdHighlighted(chunkIndex: chunkIndex - 1)
     }
 
+    /// What VoiceOver speaks for the row at `chunkIndex`.
+    ///
+    /// playhead-d666 R2 — WHY THIS COMPOSES HERE RATHER THAN IN THE VIEW.
+    /// The spoken label names a SPAN: its duration and the evidence it was
+    /// detected from. R1 gated the whole decoded branch on a per-ROW boolean
+    /// (`makesAdClaim`) but left the view choosing that span out of the FULL
+    /// overlap set, and `fetchDecodedSpans` orders by `startTime`, so `.first`
+    /// is the EARLIEST-starting overlapping span. The sustained-music proposer
+    /// produces exactly the geometry where that is the silenced one — a music
+    /// run, then the ad it is pointing at — so a row under both was announced
+    /// as "Ad segment, 12 seconds, detected from sustained music" while the
+    /// claim it is actually drawn for was a 60-second corroborated post-roll.
+    /// The row's ad-ness was right; its length and its whole reason were the
+    /// hint's, which is the one thing this bead established may never speak for
+    /// an ad.
+    ///
+    /// Composing it here — not in the view — is what makes that assertable:
+    /// `TranscriptPeekView`'s `@State private` storage makes its memberwise
+    /// initializer private, so a test cannot construct one and "does the view
+    /// hand the label the right population?" was unaskable. It is the same move
+    /// R1 made for `showsAdBadge`, for the same reason.
+    ///
+    /// Out of range returns the empty string: a row that does not exist has
+    /// nothing to say, and a trap here would crash the reader over a stale
+    /// index rather than a real defect.
+    func accessibilityLabel(chunkIndex: Int) -> String {
+        guard chunks.indices.contains(chunkIndex) else { return "" }
+        let chunk = chunks[chunkIndex]
+        return TranscriptRowAccessibility.label(
+            chunk: chunk,
+            isAd: isAdSegment(startTime: chunk.startTime, endTime: chunk.endTime),
+            claimingSpans: adClaimingSpansOverlapping(chunkIndex: chunkIndex)
+        )
+    }
+
     /// Returns all Phase 5 decoded spans overlapping the given time range.
     /// Retained for callers that don't have a chunk index handy.
     func decodedSpansOverlapping(startTime: Double, endTime: Double) -> [DecodedSpan] {

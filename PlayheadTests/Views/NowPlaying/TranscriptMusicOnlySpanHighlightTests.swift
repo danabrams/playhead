@@ -466,17 +466,17 @@ struct TranscriptRowAccessibilityClaimTests {
         let label = TranscriptRowAccessibility.label(
             chunk: Self.outroRow,
             isAd: false,
-            overlappingSpans: [ClipOutro.span(anchors: [ClipOutro.musicAnchor])],
-            makesAdClaim: false
+            claimingSpans: []
         )
 
         #expect(
             label.contains("Ad segment") == false,
             """
-            The span is still in `overlappingSpans` — the popover and the veto \
-            path need it there. `makesAdClaim` is the ONLY thing standing \
-            between it and a spoken "Ad segment, 12 seconds, detected from \
-            sustained music" on a row a sighted listener sees unpainted.
+            The music-only span is still in the row's OVERLAP set — the popover \
+            and the veto path need it there — and is absent only from the CLAIM \
+            set. That absence is the only thing standing between it and a spoken \
+            "Ad segment, 12 seconds, detected from sustained music" on a row a \
+            sighted listener sees unpainted.
             """
         )
         #expect(label == "34:04: \(Self.outroRow.text)")
@@ -493,8 +493,7 @@ struct TranscriptRowAccessibilityClaimTests {
         let label = TranscriptRowAccessibility.label(
             chunk: Self.outroRow,
             isAd: false,
-            overlappingSpans: [real],
-            makesAdClaim: true
+            claimingSpans: [real]
         )
 
         #expect(label.hasPrefix("Ad segment, 12 seconds, detected from classifier."))
@@ -507,10 +506,110 @@ struct TranscriptRowAccessibilityClaimTests {
         let label = TranscriptRowAccessibility.label(
             chunk: Self.outroRow,
             isAd: true,
-            overlappingSpans: [],
-            makesAdClaim: true
+            claimingSpans: []
         )
         #expect(label == "Ad segment at 34:04: \(Self.outroRow.text)")
+    }
+}
+
+// MARK: - What VoiceOver says, composed the way the app composes it
+
+/// playhead-d666 R2. The suite above asserts the FORMATTER. These assert the
+/// COMPOSITION — which population the app hands it — because that is where the
+/// residual defect was: R1's per-row boolean stopped a silenced row speaking,
+/// and left a claiming row free to be described by the silenced span sitting on
+/// top of it.
+@Suite("VoiceOver names the span that CLAIMS, not the one that merely overlaps (playhead-d666)")
+struct TranscriptRowSpokenClaimCompositionTests {
+
+    /// The corroborated post-roll the music hint is pointing AT: it opens on
+    /// row 2, runs a full minute, and is the only thing on that row entitled to
+    /// assert an ad. The music-only span starts EARLIER (2044.5), and
+    /// `fetchDecodedSpans` orders by `startTime`, so the full overlap set puts
+    /// the silenced span first — which is what the view used to read.
+    private static func realPostRoll() -> DecodedSpan {
+        DecodedSpan(
+            id: "real-postroll",
+            assetId: ClipOutro.assetId,
+            firstAtomOrdinal: 2068, lastAtomOrdinal: 2090,
+            startTime: 2052.9, endTime: 2112.9,
+            anchorProvenance: [.classifierSeed(regionId: "r2", score: 0.9)]
+        )
+    }
+
+    @Test("THE R2 DEFECT: a claiming row is announced with the CLAIMING span's length and reason")
+    @MainActor
+    func claimingRowIsNotDescribedByTheSilencedSpan() async throws {
+        let peek = await ClipOutro.loaded(
+            snapshot: ClipOutro.snapshot(
+                spans: [ClipOutro.span(anchors: [ClipOutro.musicAnchor]), Self.realPostRoll()]
+            )
+        )
+
+        // Row 2 is under BOTH spans, and is drawn as an ad because of the
+        // post-roll alone.
+        #expect(peek.decodedSpansOverlapping(chunkIndex: 2).count == 2)
+        #expect(peek.isAdHighlighted(chunkIndex: 2))
+
+        let label = peek.accessibilityLabel(chunkIndex: 2)
+        #expect(
+            label.contains("sustained music") == false,
+            """
+            The row's ad-ness comes from a 60-second classifier-seeded post-roll. \
+            Reading the FULL overlap set picks the earliest-starting span — the \
+            silenced music hint — so VoiceOver was told "Ad segment, 12 seconds, \
+            detected from sustained music": the wrong length, and a reason this \
+            bead established may never speak for an ad at all.
+            """
+        )
+        #expect(label.hasPrefix("Ad segment, 60 seconds, detected from classifier."))
+    }
+
+    @Test("A silenced row speaks no claim through the view model either")
+    @MainActor
+    func silencedRowSpeaksNoClaimThroughTheViewModel() async throws {
+        let peek = await ClipOutro.loaded(
+            snapshot: ClipOutro.snapshot(
+                spans: [ClipOutro.span(anchors: [ClipOutro.musicAnchor])]
+            )
+        )
+
+        for index in 0..<3 {
+            #expect(
+                peek.accessibilityLabel(chunkIndex: index).contains("Ad segment") == false,
+                "row \(index) is drawn unpainted, so it must be spoken unpainted"
+            )
+        }
+        #expect(peek.accessibilityLabel(chunkIndex: 0) == "34:04: \(ClipOutro.rows[0].text)")
+    }
+
+    @Test("A listener's own mark is still announced as an ad, not as sustained music")
+    @MainActor
+    func userMarkedRowIsAnnouncedWithoutBorrowingTheHintsProvenance() async throws {
+        // The listener marked rows 1-2 themselves, under a music-only span that
+        // covers all three rows. The mark is a verdict; the hint is not.
+        let peek = await ClipOutro.loaded(
+            snapshot: ClipOutro.snapshot(
+                spans: [ClipOutro.span(anchors: [ClipOutro.musicAnchor])],
+                adWindows: [ClipOutro.userMarkedWindow(start: 2047.26, end: 2055.96)]
+            )
+        )
+
+        #expect(peek.isAdHighlighted(chunkIndex: 1))
+        let label = peek.accessibilityLabel(chunkIndex: 1)
+        #expect(
+            label.contains("sustained music") == false,
+            "the listener's mark is the reason, and a music bed may not be cited as one"
+        )
+        #expect(label == "Ad segment at 34:07: \(ClipOutro.rows[1].text)")
+    }
+
+    @Test("An index off the end of the transcript has nothing to say")
+    @MainActor
+    func outOfRangeRowIsEmpty() async throws {
+        let peek = await ClipOutro.loaded(snapshot: ClipOutro.snapshot(spans: []))
+        #expect(peek.accessibilityLabel(chunkIndex: 3).isEmpty)
+        #expect(peek.accessibilityLabel(chunkIndex: -1).isEmpty)
     }
 }
 

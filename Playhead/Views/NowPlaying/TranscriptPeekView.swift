@@ -603,17 +603,12 @@ private extension TranscriptPeekView {
         )
         .animation(Motion.quick, value: isActive)
         .accessibilityElement(children: .combine)
-        .accessibilityLabel(TranscriptRowAccessibility.label(
-            chunk: chunk,
-            isAd: isAd,
-            overlappingSpans: overlappingSpans,
-            // playhead-d666: the SAME predicate that decides the copper bar and
-            // the AD badge. Without this the accessibility label announced "Ad
-            // segment, detected from sustained music" on a row the fix had just
-            // stopped painting — leaving a VoiceOver listener with the ad claim
-            // a sighted listener no longer gets.
-            makesAdClaim: isHighlighted
-        ))
+        // playhead-d666: the spoken label is composed by the view model, off
+        // the SAME claiming set that decides the copper bar and the AD badge,
+        // so a VoiceOver listener can never be told about a claim a sighted one
+        // is not shown — nor be told the wrong span is the reason for it. See
+        // `TranscriptPeekViewModel.accessibilityLabel(chunkIndex:)`.
+        .accessibilityLabel(peekViewModel.accessibilityLabel(chunkIndex: index))
     }
 
     // MARK: Helpers
@@ -787,28 +782,39 @@ private extension TranscriptPeekView {
 /// label the one display surface no test could reach — and it is the surface
 /// where a suppressed claim is easiest to leave behind, because nothing about
 /// it is visible on screen. Moving the two pure functions out costs nothing at
-/// the call site and makes the `makesAdClaim` gate below assertable rather than
-/// merely believed.
+/// the call site and makes the claim gate below assertable rather than merely
+/// believed.
 enum TranscriptRowAccessibility {
 
-    /// `makesAdClaim` is `TranscriptPeekViewModel.isAdHighlighted` for this row
-    /// — the one place that decides whether the app is asserting "this is an
-    /// ad". It gates the decoded-span branch so the spoken label and the drawn
-    /// one can never disagree (playhead-d666).
+    /// `claimingSpans` is `TranscriptPeekViewModel.adClaimingSpansOverlapping`
+    /// for this row — the spans entitled to assert "this is an ad", which is
+    /// every overlapping span except the ones anchored solely by a
+    /// sustained-music hint (playhead-d666).
     ///
-    /// DELIBERATELY NOT DEFAULTED. A default would have to be `true` to keep
-    /// the old shape compiling, and `true` is the wrong answer — it is the bug
-    /// this parameter exists to close. A new call site must say which it holds.
+    /// IT IS NOT THE FULL OVERLAP SET, and the difference is the whole point.
+    /// R1 shipped this as `overlappingSpans` plus a per-ROW `makesAdClaim`
+    /// boolean, which stopped a silenced row speaking at all but still let a
+    /// CLAIMING row be described by whichever span happened to sort first —
+    /// and `fetchDecodedSpans` orders by `startTime`, so on the geometry this
+    /// bead is about ("an ad begins right AFTER this music") that is the
+    /// silenced one. The row then announced the hint's duration and the hint's
+    /// provenance as the reason for an ad it was drawn for on other evidence.
+    /// Taking the claiming set makes the gate structural: an empty set cannot
+    /// describe anything, so no separate boolean can drift away from it.
+    ///
+    /// The single production caller is
+    /// `TranscriptPeekViewModel.accessibilityLabel(chunkIndex:)`, which is
+    /// reachable from a test; this stays a pure function so the formatting is
+    /// assertable on its own.
     static func label(
         chunk: TranscriptChunk,
         isAd: Bool,
-        overlappingSpans: [DecodedSpan],
-        makesAdClaim: Bool
+        claimingSpans: [DecodedSpan]
     ) -> String {
         let ts = TimeFormatter.formatTime(chunk.startTime)
 
         // Phase 5 decoded span takes precedence for the accessibility label.
-        if makesAdClaim, let span = overlappingSpans.first {
+        if let span = claimingSpans.first {
             let secs = Int(span.duration.rounded())
             let summary = provenanceSummary(span.anchorProvenance)
             return "Ad segment, \(secs) seconds, detected from \(summary). \(ts): \(chunk.text)"
