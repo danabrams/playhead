@@ -444,4 +444,81 @@ final class DayZeroBackgroundKickoffWiringCanaryTests: XCTestCase {
             """
         )
     }
+
+    /// playhead-cnql R1 review: the observer being installed at launch buys
+    /// nothing unless the COMPLETION can reach it, and in a headless relaunch it
+    /// could not.
+    ///
+    /// `PlayheadAppDelegate` is the only production code that re-instantiates a
+    /// background `URLSession` in a relaunched process
+    /// (`handleEventsForBackgroundURLSession` → `DownloadManager.shared` →
+    /// `resumeSession(identifier:)`), and sessions are created lazily — so with
+    /// `shared` unset the delegate never fires,
+    /// `handleBackgroundDownloadComplete` never runs, and the launch-installed
+    /// observer waits for an event that will never arrive. Both slots were
+    /// published only from `PlayheadApp.task`, the same scene modifier this bead
+    /// moved the observer off.
+    func testDownloadManagerSharedSlotsArePublishedOnTheLaunchPath() throws {
+        let runtimeSource = try SwiftSourceInspector.loadSource(
+            repoRelativePath: "Playhead/App/PlayheadRuntime.swift"
+        )
+        guard let previewGuard = runtimeSource.range(
+            of: "guard !isPreviewRuntime else { return }"
+        ) else {
+            XCTFail(
+                "Could not locate the `isPreviewRuntime` guard — re-anchor this canary."
+            )
+            return
+        }
+        guard let bootstrap = runtimeSource.range(
+            of: "try await downloadManager.bootstrap()"
+        ) else {
+            XCTFail(
+                "Could not locate `try await downloadManager.bootstrap()` — re-anchor this canary."
+            )
+            return
+        }
+        XCTAssertLessThan(
+            previewGuard.upperBound, bootstrap.lowerBound,
+            "canary anchors are out of order; re-anchor before trusting the assertion below"
+        )
+        XCTAssertNotNil(
+            runtimeSource.range(
+                of: "DownloadManager.registerShared(downloadManager)",
+                range: previewGuard.upperBound..<bootstrap.lowerBound
+            ),
+            """
+            `PlayheadRuntime.init` no longer publishes the live DownloadManager on the \
+            launch path. Its only other call site is `PlayheadApp.task` — a SwiftUI scene \
+            modifier — so a headless background-URLSession relaunch would leave \
+            `DownloadManager.shared` nil, `resumeSession(identifier:)` uncalled, the \
+            background session never re-instantiated, and the day-0 completion this bead \
+            exists to deliver never produced at all.
+            """
+        )
+
+        let delegateSource = try SwiftSourceInspector.loadSource(
+            repoRelativePath: "Playhead/App/PlayheadAppDelegate.swift"
+        )
+        guard let didFinishLaunching = delegateSource.range(
+            of: "didFinishLaunchingWithOptions launchOptions:"
+        ) else {
+            XCTFail(
+                "Could not locate `didFinishLaunchingWithOptions` — re-anchor this canary."
+            )
+            return
+        }
+        XCTAssertNotNil(
+            delegateSource.range(
+                of: "DownloadManager.registerAppDelegate(self)",
+                range: didFinishLaunching.upperBound..<delegateSource.endIndex
+            ),
+            """
+            `PlayheadAppDelegate` no longer self-registers at launch. Without it \
+            `urlSessionDidFinishEvents(forBackgroundURLSession:)` cannot reach the stored \
+            OS completion handler in a headless relaunch, and an app that never invokes \
+            that handler is one iOS stops granting background time.
+            """
+        )
+    }
 }

@@ -3004,6 +3004,34 @@ final class PlayheadRuntime {
 
         guard !isPreviewRuntime else { return }
 
+        // playhead-cnql (R1 review): publish the live DownloadManager on the
+        // LAUNCH path, not from `PlayheadApp.task`.
+        //
+        // This is the same defect shape this bead exists to close, one layer
+        // BELOW the observer it moved. `PlayheadAppDelegate` reaches the
+        // download manager through this slot for two things, and both of them
+        // only ever happen in a process iOS launched WITHOUT a scene:
+        //
+        //   * `handleEventsForBackgroundURLSession` → `resumeSession(identifier:)`,
+        //     which is the ONLY production caller that re-instantiates the
+        //     background `URLSession` in a relaunched process. Sessions are
+        //     created lazily (`backgroundSession(for:)`), so without this the
+        //     session object never exists, the delegate never fires,
+        //     `handleBackgroundDownloadComplete` never runs, and the day-0
+        //     observer installed below has nothing to receive — the kickoff is
+        //     lost one step EARLIER than the `guard let observer` this bead
+        //     fixed. The OS completion handler is also never invoked, which is
+        //     how an app loses its background scheduling budget.
+        //   * `didFinishLaunchingWithOptions` → `scanForSuspendedTransfers`,
+        //     the playhead-hyht force-quit resume scan, which logged
+        //     "skipped — no DownloadManager registered" on exactly those launches.
+        //
+        // `PlayheadApp.task` still calls `registerShared` (idempotent, same
+        // instance) so the scene path is unchanged. `init` runs exactly once per
+        // app process — the BGTask registrations directly below would trap on a
+        // second construction — so this cannot install a discarded runtime.
+        DownloadManager.registerShared(downloadManager)
+
         backgroundProcessingService.registerBackgroundTasks()
         // playhead-shpy: wire the process-wide telemetry holder BEFORE
         // registering the early-fire BGTask handler so the fallback's
