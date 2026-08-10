@@ -108,10 +108,12 @@
 //      CONSEQUENCE, STATED RATHER THAN ABSORBED (playhead-92im, Dan's call):
 //      the old constant sat EXACTLY on `SkipOrchestrator`'s 0.70 preload floor,
 //      so every sweep mark cleared it. A derived value clears it only at the
-//      ceiling — measured over the 19 of 22 device-pull marks this composer
-//      still reproduces from the persisted rows, 5 stay at 0.70 and 14 fall
-//      below, so those 14 would no longer be hydrated on the next launch. That
-//      is a REACH change and it is not decided here: the floor itself is
+//      ceiling. Measured over all 22 sweep rows of the 2026-08-10 pull, graded
+//      from the presence rows under each one: 6 stay at 0.70 and 16 fall below
+//      (13 of 22 at or above 0.525, 20 of 22 at or above 0.40, minimum 0.093),
+//      so those 16 would no longer hydrate on the next launch. Both marks Dan
+//      vetoed grade at 0.467, with 16 of 22 grading ABOVE them. That is a REACH
+//      change and it is NOT decided here: `preloadConfidenceThreshold` is
 //      playhead-atr3's settled territory and is untouched.
 //
 // # Why the downside is bounded
