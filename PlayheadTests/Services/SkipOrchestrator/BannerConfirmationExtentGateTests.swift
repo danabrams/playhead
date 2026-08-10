@@ -70,12 +70,18 @@ struct BannerConfirmationExtentGateTests {
     /// playhead-hcpa: the two-number (post-V47) shape — a span the DETECTOR
     /// likes and the user has SUPPRESSED.
     ///
-    /// The pair is chosen so the two numbers land on opposite sides of every
-    /// actuation gate in the orchestrator: 0.90 clears both the 0.65
-    /// `enterThreshold` and the 0.7 `preloadConfidenceThreshold`, 0.12 clears
-    /// neither. That is what makes the fallback a FAIL-OPEN rather than a
-    /// cosmetic difference — drop the forward and `actuationConfidence`
-    /// resolves to 0.90, i.e. to "skip it".
+    /// The pair straddles the gate that actually decides this row's fate:
+    /// `evaluateWindow` reads `actuationConfidence` and compares it against the
+    /// 0.65 `enterThreshold`, which 0.90 clears and 0.12 does not. That is what
+    /// makes the fallback a FAIL-OPEN rather than a cosmetic difference — drop
+    /// the forward and `actuationConfidence` resolves to 0.90, i.e. to
+    /// "skip it".
+    ///
+    /// NOT the 0.7 `preloadConfidenceThreshold`, deliberately: this row's
+    /// `boundaryState` is `userConfirmedSuggested`, so `userAssertion != nil`
+    /// and `preloadAdmissibleWindows` admits it whatever the number says — the
+    /// ynmk bypass ("the floor is a claim about DETECTOR quality and a user
+    /// assertion is not a detector claim"). One gate, not two.
     private static let suppressedDetectionConfidence = 0.90
     private static let suppressedActuationConfidence = 0.12
 
@@ -308,10 +314,12 @@ struct BannerConfirmationExtentGateTests {
     /// Why it is the dangerous half. `actuationConfidence` is
     /// `skipConfidence ?? confidence`, so a dropped forward does not read as
     /// "missing" — it reads as the DETECTION score, which for a span the user
-    /// suppressed is the HIGHER of the two. The row would come back through
-    /// `preloadAdmissibleWindows` and `evaluateWindow` carrying permission it
-    /// was never granted: Playhead skipping audio the listener said not to
-    /// skip. A fail-open, not a fail-closed.
+    /// suppressed is the HIGHER of the two. `evaluateWindow` would then compare
+    /// that score against the enter threshold and grant the row permission it
+    /// was never given: Playhead skipping audio the listener said not to skip.
+    /// A fail-open, not a fail-closed. (Cross-launch, `preloadAdmissibleWindows`
+    /// re-admits this row on `userAssertion` regardless of either number, so
+    /// the fall-back's reach is `evaluateWindow`, not the preload floor.)
     ///
     /// The first two expectations are the anti-vacuity control and they are
     /// load-bearing, not decoration. Because of the `?? confidence` fallback,
@@ -378,7 +386,7 @@ struct BannerConfirmationExtentGateTests {
             unchanged. Got \(promoted.actuationConfidence); the detection \
             score is \(Self.suppressedDetectionConfidence), and reading that \
             here would re-grant a span the user suppressed enough permission \
-            to clear the 0.65 enter threshold and the 0.7 preload floor.
+            to clear `evaluateWindow`'s 0.65 enter threshold.
             """
         )
         #expect(
