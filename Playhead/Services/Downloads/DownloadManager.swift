@@ -4024,8 +4024,9 @@ actor DownloadManager {
     /// A CALLBACK RATHER THAN A STREAM, deliberately. `progressUpdates()` is an
     /// `AsyncStream` because it has many subscribers and drops are harmless;
     /// this has exactly one consumer and a drop is a lost day-0 attempt, so it
-    /// is a direct hand-off with no buffer to overflow. Same `set…` shape as
-    /// `setAnalysisWorkScheduler` / `setDAIStitchRecorder`.
+    /// is a direct hand-off, backed by a small bounded buffer for completions
+    /// that land before the observer is installed (oldest evicted, and logged).
+    /// Same `set…` shape as `setAnalysisWorkScheduler` / `setDAIStitchRecorder`.
     /// playhead-cnql: installing an observer also DRAINS whatever completed
     /// before it arrived. Without this the buffer would only ever grow.
     func setBackgroundDownloadCompletionObserver(
