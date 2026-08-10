@@ -1584,6 +1584,17 @@ private actor GatedUserCorrectionStore: UserCorrectionStore {
             endTime: endTime
         )
     }
+
+    /// playhead-ar60: a DECORATOR that does not forward this silently
+    /// downgrades the wrapped store to the protocol default — which rebuilds
+    /// the snapshot from the two ASSET-WIDE scalars and reinstates the very
+    /// blanket ar60 removed. Forwarding keeps the wrapped store's real,
+    /// scope-aware answer.
+    func correctionFactorSnapshot(
+        for analysisAssetId: String
+    ) async -> CorrectionFactorSnapshot {
+        await wrapped.correctionFactorSnapshot(for: analysisAssetId)
+    }
 }
 
 @Suite("SkipOrchestrator Revert - Time Range and Banner Paths")

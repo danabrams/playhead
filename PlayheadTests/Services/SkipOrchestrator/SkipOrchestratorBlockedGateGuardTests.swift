@@ -45,6 +45,164 @@ import Foundation
 import Testing
 @testable import Playhead
 
+/// playhead-ar60: the SkipOrchestrator half of the detection/actuation split.
+///
+/// V47 gave `AdWindow` two confidences. Every gate in this actor that decides
+/// whether a skip may FIRE must read `actuationConfidence`; the detection
+/// number is deliberately higher for any span calibration or a user correction
+/// discounted. Reverting any of those reads to `.confidence` must be visible,
+/// and before this suite it was not: no test anywhere built an `AdWindow`
+/// whose two confidences DIFFER and then drove the orchestrator with it.
+///
+/// The fixture is the shape the fusion path now produces for a discounted
+/// span: detection 0.95 (well over every threshold in `SkipPolicyConfig`),
+/// actuation 0.01 (under all of them).
+@Suite("SkipOrchestrator reads ACTUATION, not detection (playhead-ar60)")
+struct SkipOrchestratorActuationReadTests {
+
+    private func splitWindow(
+        id: String,
+        confidence: Double,
+        skipConfidence: Double?,
+        gate: SkipEligibilityGate = .eligible,
+        startTime: Double = 60,
+        endTime: Double = 120
+    ) -> AdWindow {
+        AdWindow(
+            id: id,
+            analysisAssetId: "asset-1",
+            startTime: startTime,
+            endTime: endTime,
+            confidence: confidence,
+            skipConfidence: skipConfidence,
+            boundaryState: "acousticRefined",
+            decisionState: AdDecisionState.confirmed.rawValue,
+            detectorVersion: "fusion-v1",
+            advertiser: nil,
+            product: nil,
+            adDescription: nil,
+            evidenceText: "brought to you by",
+            evidenceStartTime: startTime,
+            metadataSource: "fusion-v1",
+            metadataConfidence: nil,
+            metadataPromptVersion: nil,
+            wasSkipped: false,
+            userDismissedBanner: false,
+            evidenceSources: nil,
+            eligibilityGate: gate.rawValue
+        )
+    }
+
+    /// Drive one window through `beginEpisode` under maximum auto-skip
+    /// pressure and return the decision record `evaluateWindow` wrote for it.
+    private func decisionRecord(
+        for window: AdWindow
+    ) async throws -> SkipDecisionRecord {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let trustService = try await makeSkipTestTrustService(
+            mode: "auto",
+            trustScore: 0.95,
+            observations: 50
+        )
+        let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: "asset-1",
+            podcastId: "podcast-1"
+        )
+        await orchestrator.receiveAdWindows([window])
+        try await Task.sleep(for: .milliseconds(100))
+        let log = await orchestrator.getDecisionLog()
+        return try #require(
+            log.last { $0.adWindowId == window.id },
+            "the window must reach evaluateWindow at all — got \(log.map(\.adWindowId))"
+        )
+    }
+
+    @Test("a span with detection 0.95 but actuation 0.01 is judged on 0.01")
+    func lowActuationDoesNotSkipDespiteHighDetection() async throws {
+        // Under `SkipPolicyConfig`'s defaults (enterThreshold 0.65) a
+        // confirmed, eligible window at 0.95 clears every gate. 0.01 clears
+        // none. The record is the direct witness of WHICH number the
+        // comparison used.
+        let record = try await decisionRecord(
+            for: splitWindow(
+                id: "ar60-low-actuation",
+                confidence: 0.95,
+                skipConfidence: 0.01
+            )
+        )
+        #expect(
+            record.confidence == 0.01,
+            """
+            `evaluateWindow` must judge on the ACTUATION number. The decision             record says \(record.confidence); the row's detection number is             0.95 and its actuation number is 0.01.
+            """
+        )
+        #expect(record.decision != .applied,
+                "reason: \(record.reason)")
+
+        // …and the number CHANGED THE OUTCOME. Pinned as a difference rather
+        // than as a literal reason string: which arm a 0.95 window takes
+        // depends on edge-padding and trust policy that this bead does not
+        // own, but "0.01 and 0.95 are judged the same way" would mean the
+        // comparison is not reading the field at all.
+        let control = try await decisionRecord(
+            for: splitWindow(
+                id: "ar60-low-actuation-control",
+                confidence: 0.95,
+                skipConfidence: nil
+            )
+        )
+        #expect(record.reason != control.reason,
+                "0.01 and 0.95 must not reach the same verdict — both said \(record.reason)")
+    }
+
+    @Test("the SAME span with only its detection number present is judged on 0.95 — the control")
+    func highSingleNumberStillSkips() async throws {
+        // `skipConfidence: nil` — a one-number producer. `actuationConfidence`
+        // falls back to `confidence`, so this row must be judged on 0.95 and
+        // must NOT take the sub-threshold arm. Without this control the test
+        // above would also pass if the orchestrator had simply stopped
+        // evaluating anything.
+        let record = try await decisionRecord(
+            for: splitWindow(
+                id: "ar60-single-number",
+                confidence: 0.95,
+                skipConfidence: nil
+            )
+        )
+        #expect(record.confidence == 0.95,
+                "the fallback must judge a one-number producer exactly as before")
+        #expect(record.decision != .suppressed,
+                "0.95 clears every default threshold — got \(record.reason)")
+    }
+
+    @Test("a non-finite actuation number is refused at the ingest door")
+    func malformedActuationIsRefused() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let orchestrator = SkipOrchestrator(store: store)
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: "asset-1",
+            podcastId: "podcast-1"
+        )
+
+        // `confidence` is perfectly valid; only the actuation number is not.
+        // Before ar60 added the second clause, `hasValidRuntimeWindowMaterial`
+        // checked `confidence` alone and this row was admitted.
+        for (id, bad) in [("ar60-nan", Double.nan), ("ar60-over", 1.5)] {
+            await orchestrator.receiveAdWindows([
+                splitWindow(id: id, confidence: 0.9, skipConfidence: bad)
+            ])
+            let active = await orchestrator.activeWindowIDs()
+            #expect(!active.contains(id),
+                    "a row whose actuation number is \(bad) must be refused")
+        }
+    }
+}
+
 @Suite("SkipOrchestrator Blocked-Gate Guard (playhead-bq70)")
 struct SkipOrchestratorBlockedGateGuardTests {
 

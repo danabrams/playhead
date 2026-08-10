@@ -101,7 +101,7 @@ struct SpecialistScanResultsV31MigrationTests {
         // Drift guard, pinned to the LITERAL head (45 → 46, playhead-3oyz's
         // additive day-0 retry-claim columns). Never `== currentSchemaVersion`:
         // that passes for every value and stops policing anything.
-        #expect(AnalysisStore.currentSchemaVersion == 46)
+        #expect(AnalysisStore.currentSchemaVersion == 47)
         #expect(try probeTableExists(in: dir, table: "specialist_scan_results"))
     }
 

@@ -113,8 +113,27 @@ struct CrossUserAnalysisSnapshot: Codable, Equatable, Sendable {
     /// device-local and are never exported as transferable authority; all
     /// catalog-assisted gates are demoted and stripped again on import. V3
     /// remains importable because the added fields are optional.
-    static let currentSchemaVersion = 4
-    static let supportedImportSchemaVersions: ClosedRange<Int> = 3...4
+    ///
+    /// V5 (playhead-ar60) adds `Window.skipConfidence`, splitting the
+    /// ACTUATION number out of `Window.confidence`. Unlike V4 this bump is NOT
+    /// merely bookkeeping for an optional field — it is what makes `nil`
+    /// READABLE. In a V5 snapshot `skipConfidence == nil` means "the producer
+    /// had one number and it is in `confidence`". In a V3/V4 snapshot the key
+    /// is absent for BOTH that case and for a fusion row whose actuation
+    /// number the exporter had put in `confidence`, and nothing on the wire
+    /// distinguishes them. So the version is the only way an importer can tell
+    /// whether `confidence` is unambiguous, and shipping the field without the
+    /// bump would have reproduced, across the sharing boundary, exactly the
+    /// two-quantities-one-column ambiguity this bead removed.
+    ///
+    /// V3/V4 stay importable and are treated conservatively: see
+    /// `importedAdWindow`.
+    static let currentSchemaVersion = 5
+    static let supportedImportSchemaVersions: ClosedRange<Int> = 3...5
+
+    /// The first wire version in which `Window.confidence` is unambiguously
+    /// the DETECTION number and `Window.skipConfidence` carries actuation.
+    static let firstSchemaVersionWithSplitConfidence = 5
 
     let schemaVersion: Int
     let key: CrossUserAnalysisShareKey
@@ -144,6 +163,18 @@ struct CrossUserAnalysisSnapshot: Codable, Equatable, Sendable {
         let startTime: Double
         let endTime: Double
         let confidence: Double
+        /// playhead-ar60: the ACTUATION number, split out of `confidence` in
+        /// schema V47. Optional, so a snapshot written before the split
+        /// decodes it as `nil` — which is exactly what those rows carried: one
+        /// number, in `confidence`. Without it a shared fusion row would import
+        /// with the exporter's DETECTION score standing in for its actuation
+        /// number, i.e. more skip-eager on the importing device than on the one
+        /// that produced it.
+        ///
+        /// Adding it DOES bump the wire version (4 → 5) even though the field
+        /// is optional, because the version is the only thing that makes `nil`
+        /// readable — see `CrossUserAnalysisSnapshot.currentSchemaVersion`.
+        let skipConfidence: Double?
         let boundaryState: String
         let decisionState: String
         let isAd: Bool
@@ -168,6 +199,7 @@ struct CrossUserAnalysisSnapshot: Codable, Equatable, Sendable {
             startTime: Double,
             endTime: Double,
             confidence: Double,
+            skipConfidence: Double? = nil,
             boundaryState: String,
             decisionState: String,
             isAd: Bool = true,
@@ -191,6 +223,7 @@ struct CrossUserAnalysisSnapshot: Codable, Equatable, Sendable {
             self.startTime = startTime
             self.endTime = endTime
             self.confidence = confidence
+            self.skipConfidence = skipConfidence
             self.boundaryState = boundaryState
             self.decisionState = decisionState
             self.isAd = isAd
@@ -218,6 +251,7 @@ struct CrossUserAnalysisSnapshot: Codable, Equatable, Sendable {
                 startTime: adWindow.startTime,
                 endTime: adWindow.endTime,
                 confidence: adWindow.confidence,
+                skipConfidence: adWindow.skipConfidence,
                 boundaryState: adWindow.boundaryState,
                 decisionState: adWindow.decisionState,
                 isAd: Self.isAdDecision(adWindow.decisionState),
@@ -267,6 +301,7 @@ struct CrossUserAnalysisSnapshot: Codable, Equatable, Sendable {
                 startTime: adWindow.startTime,
                 endTime: adWindow.endTime,
                 confidence: adWindow.confidence,
+                skipConfidence: adWindow.skipConfidence,
                 boundaryState: boundaryState,
                 decisionState: decisionState,
                 isAd: isAdDecision(decisionState),
@@ -866,6 +901,21 @@ extension AnalysisStore {
             startTime: window.startTime,
             endTime: window.endTime,
             confidence: min(max(window.confidence, 0), 1),
+            // playhead-ar60: clamped like `confidence` above — this is the
+            // one write path that clamps, and an untrusted peer's actuation
+            // number gets exactly the same treatment as its detection score.
+            //
+            // A V3/V4 snapshot has no such key, so this is `nil` and
+            // `actuationConfidence` falls back to `confidence`. That is the
+            // CONSERVATIVE reading in both directions and needs no version
+            // plumbing: if the exporter was pre-ar60 and the row was a fusion
+            // row, `confidence` held its ACTUATION number — so the imported
+            // row's actuation is exactly what the exporter meant, and its
+            // detection reading is that same (lower) number, which can only
+            // make the 0.7 cue floors stricter, never looser. The version bump
+            // to 5 is what lets a FUTURE reader tell the two apart at all; see
+            // `CrossUserAnalysisSnapshot.firstSchemaVersionWithSplitConfidence`.
+            skipConfidence: window.skipConfidence.map { min(max($0, 0), 1) },
             boundaryState: window.boundaryState,
             decisionState: decisionState,
             detectorVersion: window.detectorVersion,
@@ -952,6 +1002,7 @@ extension AnalysisStore {
             && window.endTime > window.startTime
             && (0...1).contains(window.confidence)
             && AdBoundaryState(rawValue: window.boundaryState) != nil
+            && window.skipConfidence.map { $0.isFinite && (0...1).contains($0) } ?? true
             && window.metadataConfidence.map { $0.isFinite && (0...1).contains($0) } ?? true
             && window.catalogStoreMatchSimilarity.map { $0.isFinite && (0...1).contains($0) } ?? true
             && window.catalogFingerprintVersion.map {
@@ -1062,6 +1113,8 @@ extension AnalysisStore {
         _ window: CrossUserAnalysisSnapshot.Window,
         normalizedDecisionState: String
     ) -> Bool {
+        // playhead-ar60: DETECTION — a shareable-cue COUNT, not a skip. Same
+        // reading as `AnalysisJobRunner.isCueWindow`.
         window.confidence >= CrossUserAnalysisSharingConstants.cueConfidenceThreshold
             && window.endTime > window.startTime
             && isShareableCueEligibilityGate(window.eligibilityGate, isAd: window.isAd)
@@ -1073,6 +1126,8 @@ extension AnalysisStore {
     }
 
     private static func isCueWindow(_ window: AdWindow) -> Bool {
+        // playhead-ar60: DETECTION — a shareable-cue COUNT, not a skip. Same
+        // reading as `AnalysisJobRunner.isCueWindow`.
         window.confidence >= CrossUserAnalysisSharingConstants.cueConfidenceThreshold
             && window.endTime > window.startTime
             && isShareableCueEligibilityGate(window.eligibilityGate, isAd: true)

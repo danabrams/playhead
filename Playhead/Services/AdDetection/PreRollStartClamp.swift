@@ -271,6 +271,9 @@ private extension AdWindow {
             startTime: 0.0,
             endTime: endTime,
             confidence: confidence,
+            // playhead-ar60: the clamp rewrites GEOMETRY. Both confidences
+            // carry through verbatim, same reason the gate does.
+            skipConfidence: skipConfidence,
             boundaryState: boundaryState,
             decisionState: decisionState,
             detectorVersion: detectorVersion,

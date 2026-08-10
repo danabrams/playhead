@@ -65,17 +65,94 @@ struct DE0784D8MidRollPodRegressionTests {
         #expect(fp.startTime == Fixture.acousticFalsePositive.lowerBound)
         #expect(fp.endTime == Fixture.acousticFalsePositive.upperBound)
         #expect(abs((Fixture.creative1.lowerBound - fp.endTime) - 1.74) < 0.001)
-        // `ad_windows.confidence` for fusion windows stores DecisionResult
-        // .skipConfidence — the actuation number after the ASSET-WIDE user
-        // correction suppression factor — not the detection (proposal)
-        // confidence, which was 0.456 for this span (decision_events witness).
-        // The UI rendered this as "conf 0.00" while the row itself persisted.
-        #expect(fp.confidence < 0.002)
+
+        // playhead-ar60 UPDATE. This is a FROZEN-DATA capture of a PRE-V47
+        // device row, so no production change can move it — what changed is
+        // what the number is allowed to be CALLED. The pin below used to read
+        // `#expect(fp.confidence < 0.002)` under a comment explaining that
+        // `ad_windows.confidence` "for fusion windows stores skipConfidence".
+        // That is no longer a property of the schema; it is a property of THIS
+        // ROW, written before the split, and it is now pinned EXACTLY rather
+        // than by a loose bound — the loose bound would keep passing if the
+        // fixture were edited to any other small number.
+        let decision = try #require(Fixture.frozenFalsePositiveDecision)
+        #expect(fp.confidence == decision.skipConfidence)
+        #expect(fp.confidence == 0.001150758771374174)
+
+        // The quantity the column was standing in for, and the quantity it
+        // destroyed. `metadataConfidence` carried `proposalConfidence` at
+        // write time and the metadata extractor overwrote it with 0.1, so the
+        // detection number was recoverable ONLY from `decision_events` — which
+        // is where V47's migration goes to get it.
+        #expect(decision.proposalConfidence == 0.45634516843301726)
+        #expect(decision.proposalConfidence / decision.skipConfidence > 390,
+                "the column was hiding a ~397x difference between the two quantities")
+
+        // What the SAME row reads as after V47: the detection number in
+        // `confidence`, the actuation number in `skipConfidence`, and
+        // `actuationConfidence` — the value every skip gate reads — UNCHANGED.
+        // That last one is the whole reason the migration is safe.
+        let migrated = AdWindow(
+            id: fp.id,
+            analysisAssetId: Fixture.analysisAssetId,
+            startTime: fp.startTime,
+            endTime: fp.endTime,
+            confidence: decision.proposalConfidence,
+            skipConfidence: decision.skipConfidence,
+            boundaryState: fp.boundaryState,
+            decisionState: fp.decisionState,
+            detectorVersion: fp.detectorVersion,
+            advertiser: nil,
+            product: nil,
+            adDescription: nil,
+            evidenceText: nil,
+            evidenceStartTime: fp.startTime,
+            metadataSource: "fusion-v1",
+            metadataConfidence: nil,
+            metadataPromptVersion: nil,
+            wasSkipped: false,
+            userDismissedBanner: false,
+            eligibilityGate: fp.eligibilityGate
+        )
+        #expect(migrated.actuationConfidence == fp.confidence,
+                "the split must not change what any actuation reader sees")
+        #expect(migrated.confidence != fp.confidence,
+                "…while the DETECTION reader stops seeing the actuation number")
+
         // The boundary label says "acousticRefined" but the trigger was
         // lexical (causalSource "lexical", atom 2551): buildFusionAdWindow
-        // hardcodes this boundaryState for every fusion window.
+        // hardcodes this boundaryState for every fusion window. Still true —
+        // ar60 did not touch it (that is playhead-j4wi's finding 0, unfixed).
         #expect(fp.boundaryState == "acousticRefined")
         #expect(fp.eligibilityGate == "blockedByUserCorrection")
+    }
+
+    @Test("KNOWN-SHAPE, superseded: two fusion rows shipped decisionState=confirmed while gated blockedByUserCorrection")
+    func frozenConfirmedDespiteUserCorrection() throws {
+        // playhead-ar60 mechanism 3, as the device shipped it. `detectOnly`
+        // persisted `.confirmed` UNCONDITIONALLY and `rawPolicyAction` is
+        // `.detectOnly` for every unpromoted fusion span, so a span whose gate
+        // records the user's own "not an ad" came back as a CONFIRMED,
+        // banner-bearing row. Two of the five fusion rows on this asset are in
+        // exactly that state (the other three reached `.reverted` only because
+        // Dan vetoed them a SECOND time).
+        let confirmedDespiteVeto = Fixture.devicePullAdWindows.filter {
+            $0.id.hasPrefix("fusion-")
+                && $0.decisionState == "confirmed"
+                && $0.eligibilityGate == "blockedByUserCorrection"
+        }
+        #expect(confirmedDespiteVeto.count == 2)
+        #expect(Set(confirmedDespiteVeto.map(\.id)) == [
+            "fusion-7892299324c9e90f",
+            "fusion-d4e332f1a5d9221c",
+        ])
+        // This is a CAPTURE pin — frozen data cannot observe a production fix.
+        // The live pin for the fix is
+        // `FusionEmissionShapeTests.blockedByUserCorrectionPersistsSuppressed`.
+        #expect(
+            confirmedDespiteVeto.allSatisfy { $0.confidence < 0.005 },
+            "…and every one of them displayed as conf 0.00"
+        )
     }
 
     @Test("Outer rediff slots are excellent: they cover the annotated pre/post rolls with sub-0.1s edge error")

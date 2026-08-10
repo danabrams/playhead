@@ -14,6 +14,17 @@
 //      decision.
 //   3. UNRELATED SPAN UNAFFECTED: a span whose tokens do NOT match any negative
 //      keeps the flag-off confidence even when the flag is ON.
+//
+// WHICH CONFIDENCE (playhead-ar60). xsdz.9's suppression is defined on
+// `DecisionResult.skipConfidence` and rebinds `proposalConfidence` UNCHANGED
+// (`AdDetectionService`, the `crossEpisodeMemoryEvaluator.suppress` block), so
+// the quantity these three tests are about is ACTUATION. That used to be
+// spelled `AdWindow.confidence` because the fusion path wrote its actuation
+// number into that column; since V47 the column carries DETECTION and actuation
+// lives in `skipConfidence`, read through `actuationConfidence`. Reading
+// `confidence` here would compare a number the suppression never touches — so
+// test 2 would fail outright, and tests 1 and 3 (which assert EQUALITY) would
+// still pass while proving nothing, which is the worse half.
 
 #if DEBUG
 
@@ -49,10 +60,14 @@ struct CrossEpisodeMemoryWiringTests {
         func key(_ w: AdWindow) -> String {
             String(format: "%.3f-%.3f", w.startTime, w.endTime)
         }
-        let baseMap = Dictionary(baseline.map { (key($0), $0.confidence) }, uniquingKeysWith: { a, _ in a })
+        let baseMap = Dictionary(
+            baseline.map { (key($0), $0.actuationConfidence) },
+            uniquingKeysWith: { a, _ in a }
+        )
         for w in withBankOff {
             let b = try #require(baseMap[key(w)], "span \(key(w)) missing in baseline")
-            #expect(w.confidence == b, "flag-off must be byte-identical to no-bank baseline")
+            #expect(w.actuationConfidence == b,
+                    "flag-off must be byte-identical to no-bank baseline")
         }
     }
 
@@ -67,9 +82,16 @@ struct CrossEpisodeMemoryWiringTests {
         let offWindow = try #require(flagOff.first { $0.startTime < 90 && $0.endTime > 60 })
         let onWindow = try #require(flagOn.first { $0.startTime < 90 && $0.endTime > 60 })
 
-        // The negative bank holds the same copy → on-flag confidence is lower.
-        #expect(onWindow.confidence < offWindow.confidence,
+        // The negative bank holds the same copy → on-flag ACTUATION is lower.
+        #expect(onWindow.actuationConfidence < offWindow.actuationConfidence,
                 "negative-bank match must suppress the matching span when the flag is on")
+
+        // playhead-ar60: and the DETECTION number is the control. The
+        // suppression rebinds `skipConfidence` only, so `confidence` must be
+        // untouched — which is also what makes the assertion above a statement
+        // about xsdz.9 rather than about the split.
+        #expect(onWindow.confidence == offWindow.confidence,
+                "the suppression moves ACTUATION only; detection is not evidence about it")
     }
 
     // MARK: - 3. Unrelated span unaffected
@@ -90,7 +112,7 @@ struct CrossEpisodeMemoryWiringTests {
 
         let offWindow = try #require(flagOff.first { $0.startTime < 90 && $0.endTime > 60 })
         let onWindow = try #require(flagOnUnrelatedSeed.first { $0.startTime < 90 && $0.endTime > 60 })
-        #expect(onWindow.confidence == offWindow.confidence,
+        #expect(onWindow.actuationConfidence == offWindow.actuationConfidence,
                 "an unrelated negative must not suppress this span")
     }
 

@@ -56,7 +56,7 @@ struct AdmissionRejectReasonV30MigrationTests {
         // additive). The V30 reject-advisory columns probed below are
         // unchanged by any of it. Pinned to the LITERAL: comparing against
         // `currentSchemaVersion` would pass for every value.
-        #expect(AnalysisStore.currentSchemaVersion == 46)
+        #expect(AnalysisStore.currentSchemaVersion == 47)
         #expect(try probeColumnExists(in: dir, table: "analysis_jobs", column: "lastRejectReason"))
         #expect(try probeColumnExists(in: dir, table: "analysis_jobs", column: "lastRejectAt"))
     }

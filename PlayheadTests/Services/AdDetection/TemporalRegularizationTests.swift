@@ -414,15 +414,27 @@ struct TemporalRegularizationServiceWiringTests {
     /// per-run asset id) are DELIBERATELY excluded — they are non-deterministic
     /// across runs by design and were never a behaviour the restructure could
     /// have changed; including them would make any cross-run comparison vacuous.
+    ///
+    /// playhead-ar60: `skipConfidence` joined the persisted row in schema V47 and
+    /// is the column xsdz.10 actually writes — every penalty in this pass lands
+    /// on `DecisionResult.skipConfidence` and rebinds `proposalConfidence`
+    /// verbatim. A fingerprint that stopped at `confidence` would let the
+    /// flag-off determinism claim ("byte-stable across ALL window side effects")
+    /// stand while the one column this bead's subject moves went unread.
     private struct WindowFingerprint: Equatable {
         let startTime: Double
         let endTime: Double
         let confidence: Double
+        let skipConfidence: Double?
         let decisionState: String
         let boundaryState: String
         let eligibilityGate: String?
         let detectorVersion: String
         let catalogStoreMatchSimilarity: Double?
+
+        /// The number an actuator gates on — `skipConfidence` when the producer
+        /// recorded one, otherwise `confidence`. Mirrors `AdWindow`.
+        var actuationConfidence: Double { skipConfidence ?? confidence }
     }
 
     private func runAndReadWindows(temporalEnabled: Bool) async throws -> [WindowFingerprint] {
@@ -452,6 +464,7 @@ struct TemporalRegularizationServiceWiringTests {
                     startTime: w.startTime,
                     endTime: w.endTime,
                     confidence: w.confidence,
+                    skipConfidence: w.skipConfidence,
                     decisionState: w.decisionState,
                     boundaryState: w.boundaryState,
                     eligibilityGate: w.eligibilityGate,
@@ -468,10 +481,10 @@ struct TemporalRegularizationServiceWiringTests {
         #expect(!first.isEmpty,
                 "the fixture must persist at least one ad window or this test proves nothing")
         #expect(first == second,
-                "with the flag off the collect-then-emit restructure must be deterministic / byte-stable across the full AdWindow build (bounds, decisionState, boundaryState, gate, confidence), not just confidence")
+                "with the flag off the collect-then-emit restructure must be deterministic / byte-stable across the full AdWindow build (bounds, decisionState, boundaryState, gate, and BOTH the detection and actuation confidences), not just confidence")
     }
 
-    @Test("Flag ON is one-sided end-to-end: every persisted confidence is <= its flag-OFF counterpart, and identical for a degenerate (<= 1 window) corpus")
+    @Test("Flag ON is one-sided end-to-end: every persisted ACTUATION confidence is <= its flag-OFF counterpart, detection is untouched, and both are identical for a degenerate (<= 1 window) corpus")
     func flagOnIsOneSidedRelativeToOff() async throws {
         let off = try await runAndReadWindows(temporalEnabled: false)
         let on = try await runAndReadWindows(temporalEnabled: true)
@@ -482,11 +495,36 @@ struct TemporalRegularizationServiceWiringTests {
         // confidence, with bounds/state identical.
         #expect(on.count == off.count,
                 "the temporal pass must not add or drop windows — only adjust confidence (off=\(off.count) on=\(on.count))")
+
+        // playhead-ar60 ANTI-VACUITY CONTROL, and it has to come first. Both
+        // assertions below are stated about `actuationConfidence`, which falls
+        // back to `confidence` when the producer recorded no separate actuation
+        // number. If these rows were NOT two-number fusion rows the one-sided
+        // assertion would silently be the old `confidence` assertion again —
+        // reading a column xsdz.10 never writes — and would pass for the wrong
+        // reason. This pins that the fixture really does exercise the split.
+        #expect(on.allSatisfy { $0.skipConfidence != nil },
+                "the fixture must persist FUSION rows (skipConfidence non-nil) or the assertions below read the detection column through the fallback and prove nothing about xsdz.10")
+
         for (onWin, offWin) in zip(on, off) {
             #expect(onWin.startTime == offWin.startTime && onWin.endTime == offWin.endTime,
                     "the pass must not move a window's bounds")
-            #expect(onWin.confidence <= offWin.confidence,
-                    "flag ON is one-sided: confidence must never exceed its flag-OFF value (off=\(offWin.confidence) on=\(onWin.confidence))")
+            // THE PROPERTY. Every xsdz.10 penalty is applied to
+            // `DecisionResult.skipConfidence` (see the regularize block in
+            // `AdDetectionService.runBackfill`), so ACTUATION is the quantity
+            // this pass is one-sided in. Before V47 that number lived in
+            // `AdWindow.confidence`; it now lives in `skipConfidence`, and
+            // asserting `<=` on `confidence` would be satisfied by mere
+            // equality forever — a rail that cannot observe its own subject.
+            #expect(onWin.actuationConfidence <= offWin.actuationConfidence,
+                    "flag ON is one-sided: actuation confidence must never exceed its flag-OFF value (off=\(offWin.actuationConfidence) on=\(onWin.actuationConfidence))")
+            // THE CONTROL, in the other direction. The pass rebinds
+            // `proposalConfidence` verbatim, so the DETECTION column must be
+            // bit-identical. A regression that moved the penalty onto detection
+            // — which is what the pre-V47 spelling of this test would have
+            // silently accepted — fails here.
+            #expect(onWin.confidence == offWin.confidence,
+                    "the temporal pass adjusts ACTUATION only; the detection score must be bit-identical (off=\(offWin.confidence) on=\(onWin.confidence))")
         }
         // For a degenerate corpus (0 or 1 detection) the regularizer's `count > 1`
         // guard makes the pass a strict no-op, so ON must EQUAL OFF exactly.

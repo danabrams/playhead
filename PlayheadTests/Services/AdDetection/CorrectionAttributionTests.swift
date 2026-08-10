@@ -33,6 +33,48 @@ final class CorrectionAttributionTests: XCTestCase {
         )
     }
 
+    /// playhead-ar60 R1 review: the named residual gap. `producerRevisionToken`
+    /// is a CAS fence — `persistRevertedAdWindowsIfCurrent` and the hot-path
+    /// reconcile refuse to mutate a row whose revision moved. V47 added a
+    /// second number the skip gate reads, so a fence that cannot see it would
+    /// let a write land against a revision that differs in exactly the field
+    /// that decides whether the span is skipped.
+    func testProducerRevisionDiscriminatesActuationConfidence() {
+        let suppressed = makePrivacyWindow(
+            id: "actuation-fence-window",
+            skipConfidence: 0.0039
+        )
+        let notSuppressed = makePrivacyWindow(
+            id: "actuation-fence-window",
+            skipConfidence: nil
+        )
+        let other = makePrivacyWindow(
+            id: "actuation-fence-window",
+            skipConfidence: 0.71
+        )
+
+        XCTAssertEqual(suppressed.confidence, notSuppressed.confidence)
+        XCTAssertFalse(
+            AdWindowMaterialIdentity.sameProducerRevision(
+                suppressed,
+                notSuppressed
+            ),
+            "nil and a persisted actuation number are different revisions"
+        )
+        XCTAssertFalse(
+            AdWindowMaterialIdentity.sameProducerRevision(suppressed, other)
+        )
+        XCTAssertTrue(
+            AdWindowMaterialIdentity.sameProducerRevision(
+                suppressed,
+                makePrivacyWindow(
+                    id: "actuation-fence-window",
+                    skipConfidence: 0.0039
+                )
+            )
+        )
+    }
+
     func testExplicitReceiptRejectsEmbeddedNULWindowIdentity() {
         XCTAssertNil(
             CorrectionTargetRefs(
@@ -1759,6 +1801,7 @@ final class CorrectionAttributionTests: XCTestCase {
         id: String,
         analysisAssetId: String = "privacy-asset",
         startTime: Double = 30,
+        skipConfidence: Double? = nil,
         boundaryState: String = "privacy-boundary",
         decisionState: String = AdDecisionState.candidate.rawValue,
         wasSkipped: Bool = false,
@@ -1770,6 +1813,7 @@ final class CorrectionAttributionTests: XCTestCase {
             startTime: startTime,
             endTime: startTime + 45,
             confidence: 0.876,
+            skipConfidence: skipConfidence,
             boundaryState: boundaryState,
             decisionState: decisionState,
             detectorVersion: "privacy-detector",

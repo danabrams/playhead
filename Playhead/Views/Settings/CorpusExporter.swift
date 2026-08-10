@@ -415,7 +415,11 @@ enum CorpusExporter {
             "analysisAssetId": window.analysisAssetId,
             "startTime": window.startTime,
             "endTime": window.endTime,
+            // playhead-ar60: DETECTION. The ACTUATION number rides in its
+            // own key so a corpus reader can tell them apart; `null` means
+            // the producer had exactly one number and it is `confidence`.
             "confidence": window.confidence,
+            "skipConfidence": window.skipConfidence as Any? ?? NSNull(),
             "boundaryState": redactingExplicitBannerFeedback
                 ? NSNull() : window.boundaryState,
             "decisionState": redactingExplicitBannerFeedback

@@ -162,7 +162,7 @@ struct SemanticScanRunAttributionTests {
         // Drift guard, pinned to the LITERAL head (45 → 46, playhead-3oyz's
         // additive day-0 retry-claim columns). Never `== currentSchemaVersion`:
         // that passes for every value and stops policing anything.
-        #expect(AnalysisStore.currentSchemaVersion == 46)
+        #expect(AnalysisStore.currentSchemaVersion == 47)
         for column in ["createdAt", "scenePhase", "runCorrelationId"] {
             #expect(
                 try probeColumnExists(in: dir, table: "semantic_scan_results", column: column),

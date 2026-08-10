@@ -4585,18 +4585,32 @@ actor AdDetectionService {
         // side-effect emission loop below.
         var pendingDecisions: [PendingBackfillDecision] = []
 
-        // Phase 7.2: pre-compute correction factor for this asset (actor-context query).
+        // Phase 7.2 / playhead-ar60: snapshot this asset's corrections ONCE per
+        // backfill (actor-context query), then evaluate the multiplier PER SPAN.
         // Combines passthrough (false-positive suppression, [0.0, 1.0]) and boost
         // (false-negative amplification, [1.0, 2.0]) into a single multiplier.
         // Result: 1.0 = no correction effect; < 1.0 = FP suppression; > 1.0 = FN boost.
-        // Queried once per backfill run (not per span) for performance.
-        let assetCorrectionFactor: Double
+        //
+        // The query is still once per run — that is what the old "not per span,
+        // for performance" note was protecting, and it is unchanged. What moved
+        // is the EVALUATION: `CorrectionFactorSnapshot.factor(overlapping:_:)`
+        // is pure and runs inside the emission loop, so a span is affected by
+        // the corrections that actually reach it. Before ar60 one scalar was
+        // computed here and handed to every `DecisionMapper` in the episode, so
+        // a veto at 210 s rewrote the confidence of a span 2,600 s away with
+        // wholly independent evidence — witnessed on DE0784D8 as an identical
+        // `skipConfidence / proposalConfidence` ratio across all five windows
+        // of every run, moving 4 orders of magnitude between runs while each
+        // window's own `proposalConfidence` stayed bit-identical.
+        //
+        // Show-wide scopes (a vetoed SPONSOR, a vetoed PHRASE) still apply to
+        // every span — see `CorrectionFactorSnapshot`.
+        let correctionSnapshot: CorrectionFactorSnapshot
         if let correctionStore {
-            let passthrough = await correctionStore.correctionPassthroughFactor(for: analysisAssetId)
-            let boost = await correctionStore.correctionBoostFactor(for: analysisAssetId)
-            assetCorrectionFactor = passthrough * boost
+            correctionSnapshot = await correctionStore
+                .correctionFactorSnapshot(for: analysisAssetId)
         } else {
-            assetCorrectionFactor = 1.0
+            correctionSnapshot = .identity
         }
 
         // playhead-gtt9.17: reset per-backfill state for catalog egress so a
@@ -5291,7 +5305,11 @@ actor AdDetectionService {
                 ledger: effectiveLedger,
                 config: fusionConfig,
                 transcriptQuality: transcriptQuality,
-                correctionFactor: assetCorrectionFactor,
+                // playhead-ar60: THIS span's corrections, not the episode's.
+                correctionFactor: correctionSnapshot.factor(
+                    overlapping: refinedSpan.startTime,
+                    refinedSpan.endTime
+                ),
                 // playhead-084j: Consume the typical-ad-duration prior as a soft
                 // monotonic multiplier, derived from the per-episode resolved
                 // priors (global + trait + show-local). Resolution happened
@@ -6022,7 +6040,17 @@ actor AdDetectionService {
                 startEdgeAnchor: edgeAnchors.start,
                 endEdgeAnchor: edgeAnchors.end,
                 fusionSplitDiscriminator:
-                    pending.fusionSplitDiscriminator
+                    pending.fusionSplitDiscriminator,
+                // playhead-ar60 (R1 review): whether the veto that can gate
+                // this span was a judgement about THIS span. Same snapshot and
+                // same span bounds as the `correctionFactor` above, so the
+                // question the emission asks and the question the gate answered
+                // are one observation.
+                userCorrectionIsSpanScoped:
+                    correctionSnapshot.hasSpanScopedSuppressor(
+                        overlapping: refinedSpan.startTime,
+                        refinedSpan.endTime
+                    )
             )
             fusionWindows.append(window)
 
@@ -6242,7 +6270,14 @@ actor AdDetectionService {
                 analysisAssetId: result.analysisAssetId,
                 startTime: window.startTime,
                 endTime: window.endTime,
-                skipConfidence: window.confidence,
+                // playhead-ar60: an ACTUATION reader. This rebind exists so
+                // the exported decision describes the same final material as
+                // the `ad_windows` row, and the orchestrator's envelope check
+                // compares it against `producerRevision.actuationConfidence`
+                // — reading `window.confidence` here would hand over the
+                // DETECTION number and fail that comparison on every fusion
+                // span.
+                skipConfidence: window.actuationConfidence,
                 eligibilityGate: finalEligibilityGate,
                 recomputationRevision: result.recomputationRevision,
                 // Metadata and reconciliation can still revise durable
@@ -8733,6 +8768,37 @@ actor AdDetectionService {
     /// into `buildFusionAdWindow` below. (A `static` tuple-returning wrapper used
     /// to live here; it was removed once the emission loop stopped calling it,
     /// rather than left as a second spelling of the same rule.)
+    /// The persisted `AdDecisionState` for one fusion span.
+    ///
+    /// `internal` and `static` so the mapping has ONE spelling and can be
+    /// exercised exhaustively over (policy action x gate x scope) without
+    /// reaching into `buildFusionAdWindow`'s parameters — see
+    /// `FusionEmissionShapeTests.decisionStateMappingIsExhaustive`.
+    ///
+    /// - Parameter userCorrectionIsSpanScoped: whether a span-scoped suppressor
+    ///   actually reaches this span
+    ///   (`CorrectionFactorSnapshot.hasSpanScopedSuppressor(overlapping:_:)`).
+    ///   Deliberately NOT defaulted: there is one call site, and a default
+    ///   would let a future one withhold a banner by omission.
+    static func fusionDecisionState(
+        policyAction: SkipPolicyAction,
+        eligibilityGate: SkipEligibilityGate,
+        userCorrectionIsSpanScoped: Bool
+    ) -> AdDecisionState {
+        switch policyAction {
+        case .autoSkipEligible:
+            return eligibilityGate == .eligible ? .confirmed : .candidate
+        case .detectOnly, .logOnly:
+            // logOnly and detectOnly: persist but don't auto-skip.
+            return eligibilityGate == .blockedByUserCorrection
+                && userCorrectionIsSpanScoped
+                ? .suppressed
+                : .confirmed
+        case .suppress:
+            return .suppressed
+        }
+    }
+
     private func buildFusionAdWindow(
         span: DecodedSpan,
         decision: DecisionResult,
@@ -8742,22 +8808,75 @@ actor AdDetectionService {
         catalogMatch: CatalogMatch? = nil,
         startEdgeAnchor: AutoSkipEdgeAnchor = .unanchored,
         endEdgeAnchor: AutoSkipEdgeAnchor = .unanchored,
-        fusionSplitDiscriminator: String? = nil
+        fusionSplitDiscriminator: String? = nil,
+        userCorrectionIsSpanScoped: Bool
     ) -> AdWindow {
         // Map fusion policy action + gate to AdDecisionState for persistence.
         // autoSkipEligible: confirmed when gate passes, candidate otherwise.
-        // detectOnly/logOnly: always confirmed (no applied-skip banner; data preserved for Phase 7).
+        // detectOnly/logOnly: confirmed (no applied-skip banner; data preserved
+        //   for Phase 7) — EXCEPT when the user vetoed this span.
         // suppress: always suppressed (never shown to user).
-        let decisionState: AdDecisionState
-        switch policyAction {
-        case .autoSkipEligible:
-            decisionState = decision.eligibilityGate == .eligible ? .confirmed : .candidate
-        case .detectOnly, .logOnly:
-            // logOnly and detectOnly: persist but don't auto-skip.
-            decisionState = .confirmed
-        case .suppress:
-            decisionState = .suppressed
-        }
+        //
+        // playhead-ar60 (mechanism 3): `detectOnly` used to persist
+        // `.confirmed` UNCONDITIONALLY, and `rawPolicyAction` is
+        // `SkipPolicyMatrix.action(for: .unknown, ownership: .unknown)` —
+        // `.detectOnly` for every fusion span that is not promoted. So a span
+        // whose gate was `.blockedByUserCorrection` (the user's own "not an
+        // ad") came back as a CONFIRMED row, and on episode DE0784D8 Dan was
+        // shown a confirmed banner for a span he had vetoed 7 seconds earlier.
+        // `.blockedByUserCorrection` is the one gate that encodes an explicit
+        // human judgement about THIS span, and re-presenting it is the system
+        // arguing with the user. `.suppressed` is the existing "never shown"
+        // terminal state: it is reconcilable (so a later run that no longer
+        // sees a veto can flip it back), it is excluded from
+        // `SkipOrchestrator`'s cross-launch preload, and it is what the
+        // `.suppress` policy action already produces.
+        //
+        // Deliberately narrow. Every OTHER blocked gate
+        // (`.blockedByEvidenceQuorum`, `.blockedByFMConsensus`, `.markOnly`,
+        // …) still persists `.confirmed`: those are the system's own
+        // uncertainty, and a banner Dan can answer is exactly what that
+        // population is for (feedback_banner_is_a_skip_affordance). A general
+        // low-confidence EMISSION FLOOR is a recall decision and is NOT taken
+        // here — see the bead comment; filed as playhead-4obf.
+        //
+        // AND ONLY WHEN THE VETO WAS ABOUT THIS SPAN — `userCorrectionIsSpanScoped`.
+        //
+        // ar60 R1 review: the first cut of this arm keyed on the gate alone and
+        // justified itself as "the user judged THIS span", with a note saying a
+        // show-wide veto could mute a whole episode's banners but was
+        // unreachable because "the UI only writes `exactTimeSpan`". That
+        // premise was false in the shipped tree, twice over:
+        //
+        //   * `AdBannerView.alwaysSkipSponsorAction` — the "Always skip this
+        //     sponsor" button on the auto-skipped banner (playhead-3bv.4) —
+        //     writes `CorrectionScope.sponsorOnShow` with
+        //     `correctionType: .falsePositive` through
+        //     `NowPlayingView.onAlwaysSkipSponsorAsync`. One tap.
+        //   * `PersistentUserCorrectionStore.recordVeto(span:ledgerEntries:)`
+        //     writes a second `sponsorOnShow` event for every `brandSpan`
+        //     evidence entry on a vetoed span.
+        //
+        // A fresh suppressor carries a decay weight near 1, so passthrough is
+        // near 0 and EVERY span in the asset lands under the 0.40 correction
+        // gate — one tap would have taken every fusion banner in the episode
+        // away, on a gesture that says something about a SPONSOR and nothing
+        // about where the ads are. The device pull showing zero show-wide
+        // scopes only says Dan has not pressed that button yet.
+        //
+        // So the arm now asks the question its own justification asks: did a
+        // SPAN-SCOPED suppressor actually reach this span? A show-wide scope,
+        // and an unplaceable correction (which the snapshot deliberately
+        // records show-wide), answer no and keep the banner — the pre-ar60
+        // behaviour, which is the safe direction when the banner is a skip
+        // affordance. The witnessed DE0784D8 case is unaffected: those five
+        // vetoes were `.exactTimeSpan`, so a span they overlap still suppresses
+        // and a span 2,600 s away is not gated at all.
+        let decisionState = Self.fusionDecisionState(
+            policyAction: policyAction,
+            eligibilityGate: decision.eligibilityGate,
+            userCorrectionIsSpanScoped: userCorrectionIsSpanScoped
+        )
 
         return AdWindow(
             // playhead-ud4n: content-addressed id (Design B) instead of a fresh
@@ -8776,7 +8895,23 @@ actor AdDetectionService {
             analysisAssetId: analysisAssetId,
             startTime: span.startTime,
             endTime: span.endTime,
-            confidence: decision.skipConfidence,
+            // playhead-ar60 (mechanism 2): the two quantities stop sharing a
+            // column. `confidence` is the DETECTION number — what the evidence
+            // says — matching every other producer of this column; the
+            // ACTUATION number, detection after calibration and after the
+            // user-correction factor, goes to `skipConfidence`.
+            //
+            // Before this bead these were reversed and lossy: `skipConfidence`
+            // went into `confidence`, `proposalConfidence` went into
+            // `metadataConfidence`, and the metadata extractor then OVERWROTE
+            // that with its own unrelated number (40 of 40 fusion rows on the
+            // 2026-08-02 pull). So the detection confidence of a persisted
+            // fusion row was not recoverable at all, while the 0.7 preload
+            // DETECTOR floor, the cue gates, catalog/repeated-ad learning and
+            // the "AD n%" transcript label all read the actuation number in
+            // its place.
+            confidence: decision.proposalConfidence,
+            skipConfidence: decision.skipConfidence,
             boundaryState: AdBoundaryState.acousticRefined.rawValue,
             decisionState: decisionState.rawValue,
             detectorVersion: config.detectorVersion,
@@ -8786,7 +8921,17 @@ actor AdDetectionService {
             evidenceText: nil,
             evidenceStartTime: span.startTime,
             metadataSource: "fusion-v1",
-            metadataConfidence: decision.proposalConfidence,
+            // playhead-ar60: `nil`, not `proposalConfidence`. This column is
+            // the METADATA EXTRACTOR's confidence in the advertiser/product it
+            // named, and `AdBannerView.bannerCopy` gates the advertiser name on
+            // it at 0.60 — so parking a detection score here asked a banner
+            // whether to name a sponsor using a number about something else,
+            // for a row whose `advertiser` is `nil` two lines above. Every
+            // other mark composer writes `nil` here for exactly this reason,
+            // and the extractor overwrote it anyway on every row that reached
+            // it. `nil` = "no metadata claim", which is the truth at fusion
+            // time; the detection score now has its own column.
+            metadataConfidence: nil,
             metadataPromptVersion: nil,
             wasSkipped: false,
             userDismissedBanner: false,
@@ -10305,6 +10450,11 @@ actor AdDetectionService {
                 startTime: adWindow.startTime,
                 endTime: adWindow.endTime,
                 confidence: adWindow.confidence,
+                // playhead-ar60: both confidences come from THIS run, like
+                // `confidence` immediately above — they are one observation and
+                // taking them from different runs is how a row would come to
+                // report a detection score the actuation number never saw.
+                skipConfidence: adWindow.skipConfidence,
                 boundaryState: adWindow.boundaryState,
                 decisionState: existing.decisionState,
                 detectorVersion: adWindow.detectorVersion,
