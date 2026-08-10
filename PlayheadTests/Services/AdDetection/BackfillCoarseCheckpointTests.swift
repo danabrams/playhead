@@ -1607,7 +1607,30 @@ struct BackfillCoarseCheckpointTests {
                 + Array(
                     repeating: CoarseScreeningSchema(
                         disposition: .containsAd,
-                        support: nil
+                        // playhead-92im: a `containsAd` verdict carries the
+                        // model's own `CertaintyBand`, and `SemanticSweepMark-
+                        // Composer` now grades the mark on it. `support: nil`
+                        // is the "the model returned nothing" shape — 0 of the
+                        // 55 `containsAd` rows in the 2026-08-10 device pull —
+                        // and would grade every mark below the suggest tier's
+                        // 0.70 admission floor, making the surfacing claims
+                        // below fail for a reason that has nothing to do with
+                        // checkpoint durability.
+                        //
+                        // THE REFS MUST SPAN EVERY WINDOW. `FoundationModel-
+                        // Classifier.sanitize(schema:validLineRefs:)` PRE-
+                        // FILTERS `supportLineRefs` to the refs the window
+                        // actually contains and nulls the whole support when
+                        // nothing survives — correctly, since a citation
+                        // outside the window is not evidence about it. One
+                        // repeated response is reused for every window here,
+                        // so it has to cite the whole transcript to leave a
+                        // non-empty intersection in each; the cap of 32 bites
+                        // the post-filter list, which is one window wide.
+                        support: CoarseSupportSchema(
+                            supportLineRefs: inputs.segments.map(\.segmentIndex),
+                            certainty: .strong
+                        )
                     ),
                     count: 64
                 ),
@@ -1722,7 +1745,12 @@ struct BackfillCoarseCheckpointTests {
             scanPass: "passB",
             transcriptQuality: .good,
             disposition: .containsAd,
-            spansJSON: "[]",
+            // playhead-92im: a `passB` row persists an ARRAY of refined spans,
+            // each carrying its own band; see `encodeRefinedSpans`.
+            spansJSON: #"""
+            [{"anchors":[],"certainty":"strong","commercialIntent":"paid",\#
+            "firstLineRef":2,"lastLineRef":2,"ownership":"thirdParty"}]
+            """#,
             status: .success,
             attemptCount: 1,
             errorContext: nil,
@@ -1794,6 +1822,13 @@ struct BackfillCoarseCheckpointTests {
             analysisAssetId: assetId
         )
         #expect(!marks.isEmpty, "the composer emitted nothing — nothing to observe")
+        // playhead-92im: the suggest tier admits on `confidence >= 0.70`, and a
+        // sweep mark's confidence is now GRADED from the model's own certainty
+        // band and the quality of the transcript it read. Naming the grades
+        // here means a surfacing failure below reads as what it is, instead of
+        // looking like a checkpoint-durability regression.
+        #expect(marks.allSatisfy { $0.confidence >= 0.70 },
+                "fixture precondition: grades \(marks.map(\.confidence)) quality \(Set(death.rows.map(\.transcriptQuality))) payloads \(Set(coarsePresence.map(\.spansJSON)))")
 
         let orchestrator = try await deliverToSuggestTier(
             marks + [headArtifact(assetId: assetId)],
@@ -1872,6 +1907,9 @@ struct BackfillCoarseCheckpointTests {
         )
         #expect(refinedMark.startTime == refinedStart)
         #expect(refinedMark.endTime == refinedEnd)
+        // playhead-92im: same precondition, same reason — see the sibling test.
+        #expect(refinedMark.confidence >= 0.70,
+                "fixture precondition: refined grade \(refinedMark.confidence) from quality \(Set(death.rows.map(\.transcriptQuality)))")
 
         let orchestrator = try await deliverToSuggestTier(
             marks + [headArtifact(assetId: assetId)],

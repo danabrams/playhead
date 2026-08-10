@@ -52,7 +52,16 @@ private enum SweepSurfaceFixture {
             scanPass: "passA",
             transcriptQuality: .good,
             disposition: disposition,
-            spansJSON: "[]",
+            // playhead-92im: the support payload the field's own DE0784D8
+            // 508–599 s row carries. A `containsAd` row with `spansJSON: "[]"`
+            // means the model returned NO support, which now grades the mark at
+            // the floor — 0 of the 55 `containsAd` rows in the 2026-08-10 pull
+            // are in that state, so using it here modelled a row production
+            // does not write and would have made the preload arming below test
+            // the unevidenced case by accident.
+            spansJSON: disposition == .containsAd
+                ? #"{"supportLineRefs":[17,18,20],"certainty":"strong"}"#
+                : "[]",
             status: .success,
             attemptCount: 1,
             errorContext: nil,
@@ -297,6 +306,12 @@ struct SemanticSweepArmsSuggestTests {
         let store = try await makeTestStore()
         let orchestrator = try await Fx.makeOrchestrator(store: store)
         let marks = Fx.composedFieldMarks()
+        // playhead-92im: this arms with ZERO margin — the field verdicts grade
+        // at exactly `maximumMarkConfidence` against a `>=` floor. Name the
+        // precondition so a future factor change surfaces HERE as what it is,
+        // rather than as an unexplained arming regression.
+        #expect(marks.allSatisfy { $0.confidence >= 0.70 },
+                "fixture precondition: grades \(marks.map(\.confidence))")
         try await store.upsertHotPathAdWindows(marks, existingIDs: [], retiredIDs: [])
 
         await orchestrator.beginEpisode(

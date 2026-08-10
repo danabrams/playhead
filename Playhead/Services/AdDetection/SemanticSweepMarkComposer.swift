@@ -97,6 +97,82 @@
 //      generic and no advertiser is hallucinated. Content-addressed id, so a
 //      recompose over unchanged inputs is a true no-op.
 //
+//      `confidence` is DERIVED from the evidence under the extent — the model's
+//      own `CertaintyBand`, the quality of the transcript it read, and whether
+//      the presence-pass replicates that examined the same audio agreed. See
+//      `maximumMarkConfidence` for what the constant it replaced could not say,
+//      and `markConfidence(band:transcriptQuality:affirming:dissenting:)` for
+//      the ladder. It is an ordinal EVIDENCE GRADE, not a probability, and it
+//      is capped at the old constant so no mark is ever promoted by this.
+//
+//      CONSEQUENCE, STATED RATHER THAN ABSORBED (playhead-92im, Dan's call):
+//      the old constant sat EXACTLY on `SkipOrchestrator`'s 0.70 preload floor,
+//      so every sweep mark cleared it. A derived value clears it only at the
+//      ceiling. Measured over all 22 sweep rows of the 2026-08-10 pull, graded
+//      from the presence rows under each one — 19 of the 22 the composer
+//      reproduces by geometry, the other 3 being stale marks whose backing rows
+//      changed after they were written and which are graded on their persisted
+//      extent: 6 stay at 0.70 and 16 fall below (12 of 22 at or above 0.525,
+//      15 at or above 0.50, 16 at or above 0.40, minimum 0.047, 14 distinct
+//      values), so those 16 would no longer hydrate on the next launch. That is
+//      a REACH change and it is NOT decided here: `preloadConfidenceThreshold`
+//      is playhead-atr3's settled territory and is untouched.
+//
+//      RE-MEASURED AFTER THE PERMISSIVE-BAND FIX, and the difference is why
+//      the whole block is restated rather than patched: gating on
+//      `ownershipInferenceWasSuppressed` (see ``certaintyFactor(of:)``) moves
+//      every mark whose refinement was a permissive-bypass span, and 9 of the
+//      pull's 11 refined spans are. The figures this comment carried before —
+//      12 distinct values, 13 at or above 0.525, 20 at or above 0.40, both
+//      vetoed marks at 0.467 — are the PRE-fix distribution and no longer
+//      describe what the shipped code computes.
+//
+//      THE JUDGED MARKS, post-fix: 48E903D7 596.3–676.6 s grades 0.467 with 15
+//      of 22 ABOVE it; F4CE7F47 590.0–679.4 s grades 0.233 with 17 above it —
+//      they no longer share a grade, because only the second rests on a
+//      permissive refinement. Both still sit in the lower half, which at an N
+//      of 2 is the honest reading and NOT a claim that the grade separates good
+//      marks from bad ones. What it does claim is that there is now something
+//      in the number TO separate on.
+//
+//      THE OTHER LIVE READER, from the same grep:
+//      `FinalPassRetranscriptionRunner.defaultConfidenceFloor` (0.50) on the
+//      raw `confidence`. 7 of the 22 fall below it and would no longer earn a
+//      final-pass re-transcription of their audio. Also Dan's, and arguably the
+//      budget landing where the evidence is — but it is a change, so it is
+//      named rather than absorbed.
+//
+//      THREE MORE READERS, found by the review round rather than by the first
+//      grep. All move in the conservative direction, none is a safety
+//      regression, and all are named here because absorbing them silently is
+//      the thing this section exists to refuse:
+//        * `TranscriptPeekViewModel.adConfidence` → the transcript overlay's
+//          `AD %.0f%%` label. USER-VISIBLE: it read a constant "AD 70%" on
+//          every sweep mark and now reads the mark's actual grade, as low as
+//          "AD 5%" on the pull (min 0.046667).
+//        * `CorrectionAttribution`'s `producerRevisionToken` hashes
+//          `window.confidence`, so a sweep mark's suggest-card identity can now
+//          CHANGE when a later scan re-grades it. Under the constant it never
+//          could. See the id note below.
+//        * A sweep mark the user CONFIRMS is re-minted at `suggested.confidence`
+//          and then evaluated against the enter/stay thresholds. A confirmed
+//          sweep mark used to clear both by construction and no longer does.
+//
+//      TWO 0.70 GATES THAT LOOK LIVE AND ARE NOT, checked rather than assumed:
+//      `AnalysisJobRunner.isCueWindow` and the cross-user shareable-cue
+//      predicate both ALSO require `SkipEligibilityGate.eligible`, and every
+//      sweep mark is `.markOnly` by hard-coded literal — so neither has ever
+//      seen a sweep mark at any confidence. A sweep mark is additionally
+//      local-only (`isLocalOnlyBoundaryState`), so it is never exported.
+//
+//      THE ID STILL ADDRESSES GEOMETRY ONLY, and that is deliberate. A mark's
+//      grade depends on the WHOLE row set — the corroboration term counts every
+//      overlapping presence-pass replicate — so a later scan can re-grade a
+//      mark whose id is unchanged, and the store updates it in place. Hashing
+//      the confidence into the id instead would mint a fresh row on every
+//      re-screen and orphan the one the user is looking at, which is worse.
+//      What is no longer true is that id-equal implies row-equal.
+//
 // # Why the downside is bounded
 //
 // Every mark is unanchored, so playhead-2350's unanchored-edge gate holds by
@@ -133,14 +209,53 @@ enum SemanticSweepMarkComposer {
 
     // MARK: - Tunables
 
-    /// The `confidence` stamped on every mark. It is NOT a calibrated
-    /// probability — the coarse lane produces a categorical verdict, not a
-    /// score, and inventing a probability here is exactly the presence-shaped
-    /// reasoning `SpanExtentSupport` refuses to manufacture for extent. It is
-    /// pinned at `SkipOrchestrator.preloadConfidenceThreshold` because that is
-    /// the ONE thing the number has to do: clear the cross-launch preload floor
-    /// so the mark is still visible on the next launch.
-    static let markConfidence = 0.70
+    /// The MOST a sweep mark can be worth (playhead-92im). Still exactly
+    /// `SkipOrchestrator.preloadConfidenceThreshold`, and still for the reason
+    /// the constant it replaces was pinned there — a mark at the ceiling clears
+    /// the cross-launch preload floor. What changed is that it is now a CEILING
+    /// rather than the value every mark receives.
+    ///
+    /// # Why the constant had to go
+    ///
+    /// It was minted for EVERY mark: 22 of 22 rows on the 2026-08-10 device pull
+    /// read exactly 0.70, min and max. Apply the standing diagnostic — what
+    /// would this number read if the evidence it claims to summarise had never
+    /// existed? 0.70, always. A number with one value cannot separate a good
+    /// mark from a bad one, so there was nothing to threshold on, and the two
+    /// marks Dan has judged (F4CE7F47 590–679 s, 48E903D7 596–677 s, both
+    /// vetoed) were indistinguishable from the rest of the population.
+    ///
+    /// The old comment's premise — "the coarse lane produces a categorical
+    /// verdict, not a score" — was simply not true of the persisted rows. Every
+    /// `containsAd` row carries a ``CertaintyBand`` in `spansJSON`
+    /// (`CoarseSupportSchema.certainty` for `passA`, the refined spans' own
+    /// bands for `passB`): 55 of 55 coarse and 11 of 11 refined rows on that
+    /// pull, split 40 `strong` / 15 `moderate`. The composer simply never read
+    /// it.
+    ///
+    /// NOT ALL OF THOSE BANDS ARE THE MODEL'S, and the difference matters more
+    /// than the count: 9 of the 11 refined rows are permissive-bypass spans
+    /// whose `strong` the RUNNER hardcoded. See ``certaintyFactor(of:)``, which
+    /// reads them as ungraded.
+    ///
+    /// # It is an EVIDENCE GRADE, not a probability
+    ///
+    /// Nothing here is calibrated against ground truth and nothing pretends to
+    /// be. It is an ordinal grade in `(0, 0.70]` that is MONOTONE in the
+    /// evidence and can never exceed what the constant already claimed — see
+    /// ``markConfidence(band:transcriptQuality:affirming:dissenting:)``.
+    static let maximumMarkConfidence = 0.70
+
+    /// What a mark reads when the model expressed NO certainty at all — an
+    /// absent or undecodable support payload (`spansJSON == "[]"`, which
+    /// `BackfillJobRunner.encodeSupport` writes for a nil `support`).
+    ///
+    /// It is the FLOOR of the band ladder, deliberately: an absence of evidence
+    /// must never read like the presence of strong evidence. This is also the
+    /// default carried by ``Extent``, so a future stage that forgets to attach
+    /// evidence under-claims instead of silently minting the ceiling.
+    static let unevidencedMarkConfidence =
+        maximumMarkConfidence * certaintyFactor(nil)
 
     /// Coarse windows whose gap is at most this are one ad break, not two.
     /// The sweep tiles contiguous windows, so touching windows (gap 0) are the
@@ -182,13 +297,241 @@ enum SemanticSweepMarkComposer {
     /// owns the `passA` counterpart.
     static let refinementScanPass = "passB"
 
+    // MARK: - Confidence (playhead-92im)
+    //
+    // THREE FACTORS, each of which reads its own NEUTRAL value when the thing
+    // it measures is absent, so no factor can manufacture confidence out of
+    // silence. Two of them can only deduct; none can ever raise a mark above
+    // `maximumMarkConfidence`. The change this file makes is therefore MONOTONE
+    // NON-INCREASING against the constant it replaces: no sweep mark is ever
+    // promoted, and a detector that is 2-for-2 wrong on the judged episodes
+    // cannot come out of this stronger than it went in.
+
+    /// The model's own ``CertaintyBand``, as a fraction of the ceiling.
+    ///
+    /// THE LADDER IS BORROWED, NOT INVENTED. `AdDetectionService`'s
+    /// `buildFMLedgerEntries` already maps this exact enum onto
+    /// `fmCap * { 1.0, 0.75, 0.5 }` for `{ strong, moderate, weak }`. Same
+    /// vocabulary, same ratios, anchored at this composer's own ceiling instead
+    /// of `fmCap`, which makes the two lanes' readings of one FM verdict
+    /// commensurable rather than two independent guesses.
+    ///
+    /// `nil` — the model returned no support object, or one that will not
+    /// decode — reads the FLOOR, alongside `.weak`. A verdict that declined to
+    /// grade itself is not a strong verdict.
+    static func certaintyFactor(_ band: CertaintyBand?) -> Double {
+        switch band {
+        case .strong: 1.0
+        case .moderate: 0.75
+        case .weak, nil: 0.5
+        }
+    }
+
+    /// How much the transcript the verdict was formed ON discounts it.
+    ///
+    /// ALSO BORROWED from `buildFMLedgerEntries`, which proxies a missing band
+    /// out of quality alone — `good → .moderate` (0.75), `degraded → .weak`
+    /// (0.5). Read as a ratio against `good`, that is `2/3` for `degraded`;
+    /// `unusable` extends the SAME ladder one step further down (0.25 / 0.75).
+    ///
+    /// This is the factor the playhead-3gzp establish round predicted would
+    /// matter, and the pull bears it out: both marks Dan vetoed rest on rows
+    /// whose `transcriptQuality` is `degraded` — F4CE7F47 590–679 s on four
+    /// `passA` replicates plus its `passB` refinement, all `degraded`, and
+    /// 48E903D7 596–677 s likewise. The constant could not say so.
+    ///
+    /// There is no neutral-on-absence case to state: `transcriptQuality` is
+    /// non-optional on the row and the switch is total.
+    static func transcriptQualityFactor(_ quality: TranscriptQuality) -> Double {
+        switch quality {
+        case .good: 1.0
+        case .degraded: 2.0 / 3.0
+        case .unusable: 1.0 / 3.0
+        }
+    }
+
+    /// Laplace-smoothed agreement among the PRESENCE-pass replicates that
+    /// examined this extent: `(1 + affirming) / (1 + affirming + dissenting)`.
+    ///
+    /// The sweep genuinely re-screens: on the device pull 36 of 125 coarse
+    /// windows carry more than one `passA` row, each a separate FM call in a
+    /// separate backfill run (distinct `runCorrelationId`, distinct latency),
+    /// and on four of them `containsAd` is at most HALF of the rows written for
+    /// the window.
+    ///
+    /// SAY WHICH ROWS THIS FACTOR CAN SEE, because those four are not it. A row
+    /// that did not EXAMINE its window is not a verdict and is skipped below, so
+    /// on the same pull only ONE of the 55 coarse `containsAd` rows has an
+    /// examined dissenter over it, and only 3 of the 22 persisted sweep marks
+    /// are deducted at all. The factor is right; its reach today is small, and
+    /// quoting the wider count as if this read it would overstate it.
+    ///
+    /// IT CAN ONLY DEDUCT, AND THAT IS THE POINT. The smoothing means
+    /// unanimity returns exactly 1.0 whether the window was screened once or
+    /// four times, so a repeat that agrees adds nothing — one scan is the
+    /// baseline, and only CONTRADICTION moves the number. A plain
+    /// `affirming / (affirming + dissenting)` would have read 1.0 for a single
+    /// uncontradicted scan too, but by way of "unanimous", which is the
+    /// absence-reads-as-corroboration shape this bead exists to remove.
+    ///
+    /// LIMIT, stated rather than papered over: a `noAds` denial and an
+    /// `uncertain` declination are counted alike, because that is exactly how
+    /// stage 1 already treats them at ADMISSION. Splitting them is a
+    /// measurement, not a guess, and is not made here.
+    static func corroborationFactor(affirming: Int, dissenting: Int) -> Double {
+        let supporting = Double(max(0, affirming))
+        let opposing = Double(max(0, dissenting))
+        return (1 + supporting) / (1 + supporting + opposing)
+    }
+
+    /// THE derived confidence. One product, three named factors, and a hard
+    /// ceiling that no input combination can beat.
+    static func markConfidence(
+        band: CertaintyBand?,
+        transcriptQuality quality: TranscriptQuality,
+        affirming: Int,
+        dissenting: Int
+    ) -> Double {
+        markConfidence(
+            certaintyFactor: certaintyFactor(band),
+            transcriptQuality: quality,
+            affirming: affirming,
+            dissenting: dissenting
+        )
+    }
+
+    /// The same product, taking the certainty term already resolved — which is
+    /// how a ROW reaches it, since a row's term can come from several spans and
+    /// is not one band.
+    static func markConfidence(
+        certaintyFactor certainty: Double,
+        transcriptQuality quality: TranscriptQuality,
+        affirming: Int,
+        dissenting: Int
+    ) -> Double {
+        maximumMarkConfidence
+            * certainty
+            * transcriptQualityFactor(quality)
+            * corroborationFactor(affirming: affirming, dissenting: dissenting)
+    }
+
+    /// Minimal decode of the two keys that say WHETHER THE MODEL GRADED THIS
+    /// and how. Deliberately reads only those, so the two payload shapes and
+    /// every future field they gain decode without this composer knowing about
+    /// them — the same narrow-decode pattern `AdDetectionService`'s
+    /// `SpanTrustDecode` uses over the same column.
+    private struct PersistedCertainty: Decodable {
+        let certainty: CertaintyBand?
+        /// `BackfillJobRunner.EncodedRefinedSpan`'s flag, absent on the coarse
+        /// payload and on legacy rows. See ``certaintyFactor(of:)`` for why a
+        /// consumer of `certainty` must read it.
+        let ownershipInferenceWasSuppressed: Bool?
+
+        /// The band this span may CONTRIBUTE — `nil` when the model did not
+        /// grade it, and `nil` when the runner did the grading.
+        var attributableBand: CertaintyBand? {
+            ownershipInferenceWasSuppressed == true ? nil : certainty
+        }
+    }
+
+    /// How much the MODEL'S OWN certainty for this row's presence claim
+    /// discounts the ceiling. The floor when it expressed none.
+    ///
+    /// Two persisted shapes, because two writers:
+    ///   • `passA` — ONE `CoarseSupportSchema` OBJECT
+    ///     (`BackfillJobRunner.encodeSupport`), e.g.
+    ///     `{"supportLineRefs":[17,18,20],"certainty":"strong"}`.
+    ///   • `passB` — an ARRAY of refined spans (`encodeRefinedSpans`), each
+    ///     carrying its own band.
+    ///
+    /// For an array the WEAKEST span governs, because the extent this row backs
+    /// covers all of them and a mark is only as good as its weakest second. A
+    /// span the model did not grade counts as the weakest rather than being
+    /// skipped — dropping it would let one graded span speak for the ungraded
+    /// ones. `"[]"` — what `encodeSupport` writes for a nil support — decodes
+    /// to an empty array and correctly yields the floor.
+    ///
+    /// # A FABRICATED BAND IS NOT A BAND (playhead-92im review)
+    ///
+    /// `PermissiveAdClassifier` HARDCODES `certainty: .strong` on the
+    /// permissive-bypass path — `makeAnchorlessSpan` for refinement,
+    /// `parse(...)` for coarse — and says so: *"the FM never inferred these
+    /// classification dimensions, the runner is hardcoding them."* Reading that
+    /// as the model's own grade would rebuild this bead's bug on the population
+    /// where it bites hardest: **9 of the 11 refined `containsAd` spans in the
+    /// 2026-08-10 pull are permissive, every one of them `strong`.**
+    ///
+    /// `ownershipInferenceWasSuppressed` is the discriminator, and gating on it
+    /// is not a new idea — `BackfillJobRunner.EncodedRefinedSpan`'s own header
+    /// already requires it of the Phase-8 sponsor-memory writers, *"because
+    /// their classification dimensions are not real signals."* This is the
+    /// second consumer to owe that debt.
+    ///
+    /// THE COARSE HALF OF THE SAME FABRICATION IS NOT DETECTABLE AT REST, and
+    /// pretending otherwise would be worse than saying so: `PermissiveAd-
+    /// Classifier.parse` writes the identical hardcoded `.strong` into a
+    /// `passA` payload, and `usedPermissiveFallback` exists on
+    /// `SemanticScanResult` but has **no column** in `semantic_scan_results` —
+    /// so a permissive coarse row is byte-identical to a genuine one. Filed as
+    /// its own bead; it needs a schema change, not a read.
+    static func certaintyFactor(of row: SemanticScanResult) -> Double {
+        guard let data = row.spansJSON.data(using: .utf8) else {
+            return certaintyFactor(nil)
+        }
+        let decoder = JSONDecoder()
+        if let support = try? decoder.decode(PersistedCertainty.self, from: data) {
+            return certaintyFactor(support.attributableBand)
+        }
+        guard let spans = try? decoder.decode([PersistedCertainty].self, from: data),
+              !spans.isEmpty else {
+            return certaintyFactor(nil)
+        }
+        return spans
+            .map { certaintyFactor($0.attributableBand) }
+            .min() ?? certaintyFactor(nil)
+    }
+
+    /// Count the PRESENCE-pass rows that examined this extent and say whether
+    /// each one affirmed an ad in it.
+    ///
+    /// Scoped to the presence pass on purpose: `SemanticScanResult`'s own
+    /// documentation is that `passB`'s `.noAds` means "found no edges", never
+    /// "there is no ad", so a refinement that failed to localize must not be
+    /// counted as a replicate voting against presence.
+    static func corroboration(
+        for extent: Extent,
+        in rows: [SemanticScanResult]
+    ) -> (affirming: Int, dissenting: Int) {
+        var affirming = 0
+        var dissenting = 0
+        for row in rows where row.scanPass != refinementScanPass {
+            guard row.didExamineWindow,
+                  row.windowStartTime.isFinite, row.windowEndTime.isFinite,
+                  row.windowEndTime > row.windowStartTime,
+                  extent.overlaps(start: row.windowStartTime, end: row.windowEndTime)
+            else { continue }
+            if row.disposition == .containsAd {
+                affirming += 1
+            } else {
+                dissenting += 1
+            }
+        }
+        return (affirming, dissenting)
+    }
+
     // MARK: - Extent
 
-    /// A candidate extent in seconds. Carries no score and no provenance —
-    /// this composer never claims either.
+    /// A candidate extent in seconds, with the graded strength of the evidence
+    /// under it.
+    ///
+    /// `confidence` DEFAULTS to ``unevidencedMarkConfidence`` — the floor —
+    /// rather than to the ceiling, so an extent nobody attached evidence to
+    /// under-claims. That is the same rule the factors follow, applied to the
+    /// type itself.
     struct Extent: Equatable, Sendable {
         var start: Double
         var end: Double
+        var confidence: Double = SemanticSweepMarkComposer.unevidencedMarkConfidence
 
         var duration: Double { end - start }
 
@@ -257,37 +600,86 @@ enum SemanticSweepMarkComposer {
     /// pass B leaves the coarse verdict standing.
     static func presenceExtents(_ rows: [SemanticScanResult]) -> [Extent] {
         let admissible = rows.filter(isPresenceVerdict)
-        let refinements = admissible
-            .filter { $0.scanPass == refinementScanPass }
-            .map { Extent(start: $0.windowStartTime, end: $0.windowEndTime) }
-        let coarse = admissible
-            .filter { $0.scanPass != refinementScanPass }
-            .map { Extent(start: $0.windowStartTime, end: $0.windowEndTime) }
+        let refinements = admissible.filter { $0.scanPass == refinementScanPass }
+        let coarse = admissible.filter { $0.scanPass != refinementScanPass }
 
         var result: [Extent] = []
         var claimedRefinements = Set<Int>()
         for window in coarse {
             var narrowed: [Extent] = []
             for (index, refinement) in refinements.enumerated()
-            where refinement.overlaps(start: window.start, end: window.end) {
+            where refinement.windowStartTime < window.windowEndTime
+                && refinement.windowEndTime > window.windowStartTime {
                 claimedRefinements.insert(index)
                 narrowed.append(
-                    Extent(
-                        start: max(window.start, refinement.start),
-                        end: min(window.end, refinement.end)
+                    // playhead-92im: a narrowed extent rests on BOTH rows, so
+                    // the WEAKER of the two claims governs it. Reading only the
+                    // refinement would let a `strong` narrowing launder a
+                    // `moderate` screening verdict, and vice versa.
+                    scored(
+                        start: max(window.windowStartTime, refinement.windowStartTime),
+                        end: min(window.windowEndTime, refinement.windowEndTime),
+                        restingOn: [window, refinement],
+                        in: rows
                     )
                 )
             }
-            result.append(contentsOf: narrowed.isEmpty ? [window] : narrowed)
+            result.append(contentsOf: narrowed.isEmpty
+                ? [scored(
+                    start: window.windowStartTime,
+                    end: window.windowEndTime,
+                    restingOn: [window],
+                    in: rows
+                )]
+                : narrowed)
         }
         // A refinement inside no coarse containsAd window is itself a verdict
         // and stands alone. Dropping it would rebuild, one layer down, the
         // "presence needs a host to attach to" rule this bead removes.
+        //
+        // playhead-92im: it stands alone at its OWN strength, which is where
+        // the corroboration factor does its most visible work — the coarse
+        // replicates over such an extent all examined it and did NOT affirm an
+        // ad, so an orphan refinement is a CONTRADICTED claim rather than an
+        // uncorroborated one. On the pull, F4CE7F47 322–402 s is exactly this:
+        // three independent `passA` screenings said `uncertain`, one `passB`
+        // row said `containsAd`, and it shipped at the same 0.70 as a mark two
+        // clean screenings agreed on.
         for (index, refinement) in refinements.enumerated()
         where !claimedRefinements.contains(index) {
-            result.append(refinement)
+            result.append(
+                scored(
+                    start: refinement.windowStartTime,
+                    end: refinement.windowEndTime,
+                    restingOn: [refinement],
+                    in: rows
+                )
+            )
         }
         return result.filter { $0.duration >= minimumMarkDurationSeconds }
+    }
+
+    /// Build an extent and grade it from the rows it rests on plus every
+    /// presence-pass replicate that examined the same audio.
+    private static func scored(
+        start: Double,
+        end: Double,
+        restingOn backing: [SemanticScanResult],
+        in rows: [SemanticScanResult]
+    ) -> Extent {
+        var extent = Extent(start: start, end: end)
+        let counts = corroboration(for: extent, in: rows)
+        extent.confidence = backing
+            .map {
+                markConfidence(
+                    certaintyFactor: certaintyFactor(of: $0),
+                    transcriptQuality: $0.transcriptQuality,
+                    affirming: counts.affirming,
+                    dissenting: counts.dissenting
+                )
+            }
+            .min() ?? unevidencedMarkConfidence
+        return extent
     }
 
     /// Does this row assert that an ad is PRESENT in its window?
@@ -319,6 +711,18 @@ enum SemanticSweepMarkComposer {
     /// one over-wide extent that the width filter then drops WHOLE, losing every
     /// verdict in the run. Stopping the merge instead keeps them, as several
     /// marks that each stay inside the bound.
+    /// playhead-92im: the merged extent's confidence is the DURATION-WEIGHTED
+    /// MEAN of the extents that formed it, weighted by the seconds each one
+    /// contributed. It answers "how well supported is the average second of
+    /// this mark", which is the claim a banner over the whole extent actually
+    /// makes.
+    ///
+    /// Deliberately not `max`: a 290 s mark carried by one `strong` window and
+    /// two `moderate` ones would then read as strong across audio the strong
+    /// verdict never saw — presence laundered into extent, the same inversion
+    /// stage 4's clip exists to avoid. A nested extent contributes 0 new
+    /// seconds and so changes nothing, which is what keeps a recompose over
+    /// unchanged inputs byte-identical.
     static func mergeExtents(_ extents: [Extent]) -> [Extent] {
         let sorted = extents.sorted {
             $0.start != $1.start ? $0.start < $1.start : $0.end < $1.end
@@ -328,6 +732,44 @@ enum SemanticSweepMarkComposer {
             if var last = result.last,
                extent.start <= last.end + mergeGapSeconds,
                max(last.end, extent.end) - last.start <= maximumMarkDurationSeconds {
+                let held = max(0, last.duration)
+                let added = max(0, extent.end - last.end)
+                if added <= 0 {
+                    // NESTED, so it adds no seconds and the weighted mean
+                    // cannot see it — but it is still a verdict about audio
+                    // this mark covers, and silently discarding it would let a
+                    // re-screen that graded the SAME window lower vanish. Take
+                    // the weaker, which is the rule the rest of this file
+                    // already applies to two claims over one extent.
+                    last.confidence = min(last.confidence, extent.confidence)
+                } else if held + added > 0 {
+                    // INTERPOLATE, do not average as a sum of products.
+                    // `(a*h + b*w)/(h+w)` is algebraically the same and
+                    // numerically is NOT: for a == b it lands a few ULP off,
+                    // and a run of `strong`/`good` windows would then merge to
+                    // 0.6999999999999998 and fall out of a `>= 0.70` gate for
+                    // no reason a reader could ever see. This form returns
+                    // `last.confidence` EXACTLY when the two agree.
+                    //
+                    // NOT measured on the 2026-08-10 pull: enumerating all 38
+                    // merge events there, the ceiling count is 7 under every
+                    // spelling of the average, so no mark actually fell out.
+                    // (3 of the 18 interpolating events DO differ by 1 ULP
+                    // between forms, at 0.487/0.252/0.187 — just never at a
+                    // gate.) The guarantee below is structural, not empirical;
+                    // an earlier draft of this comment claimed a measurement
+                    // that does not reproduce.
+                    //
+                    // `held` is floored at 0 and `added` is positive here, so
+                    // the weight is in `(0, 1]` and the result cannot leave
+                    // `[min, max]` of the two — an unclamped ratio would
+                    // EXTRAPOLATE (to a negative confidence, even) on an
+                    // inverted extent, and this function is `internal`, so the
+                    // invariant should not rest on `compose` being its only
+                    // caller.
+                    last.confidence += (extent.confidence - last.confidence)
+                        * (added / (held + added))
+                }
                 last.end = max(last.end, extent.end)
                 result[result.count - 1] = last
             } else {
@@ -357,9 +799,13 @@ enum SemanticSweepMarkComposer {
         let endCandidates = anchors.filter {
             $0 < extent.end && $0 > extent.start && extent.end - $0 <= anchorClipRadiusSeconds
         }
+        // playhead-92im: the clip refines GEOMETRY. It carries the extent's
+        // confidence through untouched — an anchor proves where a boundary is,
+        // it says nothing about whether the model was right that an ad is here.
         let clipped = Extent(
             start: startCandidates.min() ?? extent.start,
-            end: endCandidates.max() ?? extent.end
+            end: endCandidates.max() ?? extent.end,
+            confidence: extent.confidence
         )
         guard clipped.duration >= minimumMarkDurationSeconds else { return extent }
         return clipped
@@ -401,7 +847,8 @@ enum SemanticSweepMarkComposer {
             analysisAssetId: analysisAssetId,
             startTime: extent.start,
             endTime: extent.end,
-            confidence: markConfidence,
+            // playhead-92im: the extent's own graded evidence, never a constant.
+            confidence: extent.confidence,
             boundaryState: boundaryState,
             // NEVER confirmed/applied. A verdict is a proposal.
             decisionState: AdDecisionState.candidate.rawValue,
