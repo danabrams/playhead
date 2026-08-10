@@ -139,6 +139,14 @@ final class PlayheadRuntime {
     /// `PlayheadApp.task` once SwiftData is available; nil resolver ⇒ the
     /// sweep sees zero candidates (benign no-op).
     let rediffEnclosureResolverBox = RediffEnclosureResolverBox()
+    /// playhead-cnql: late-binding episodeId → (CURRENT enclosure URL, publish
+    /// date) resolver for the download-time day-0 kickoff. Installed by
+    /// `attachRediffEnclosureResolver(modelContainer:)` alongside the sweep's
+    /// resolver — but, unlike the sweep, the kickoff OBSERVER is installed at
+    /// launch and must work without this. A nil resolver is the normal state in
+    /// a background-relaunch process and the observer falls back to the URL the
+    /// download itself recorded.
+    let dayZeroKickoffEpisodeFactsBox = DayZeroKickoffEpisodeFactsBox()
     let downloadManager: DownloadManager
     let analysisJobRunner: AnalysisJobRunner
     let analysisWorkScheduler: AnalysisWorkScheduler
@@ -2996,6 +3004,34 @@ final class PlayheadRuntime {
 
         guard !isPreviewRuntime else { return }
 
+        // playhead-cnql (R1 review): publish the live DownloadManager on the
+        // LAUNCH path, not from `PlayheadApp.task`.
+        //
+        // This is the same defect shape this bead exists to close, one layer
+        // BELOW the observer it moved. `PlayheadAppDelegate` reaches the
+        // download manager through this slot for two things, and both of them
+        // only ever happen in a process iOS launched WITHOUT a scene:
+        //
+        //   * `handleEventsForBackgroundURLSession` → `resumeSession(identifier:)`,
+        //     which is the ONLY production caller that re-instantiates the
+        //     background `URLSession` in a relaunched process. Sessions are
+        //     created lazily (`backgroundSession(for:)`), so without this the
+        //     session object never exists, the delegate never fires,
+        //     `handleBackgroundDownloadComplete` never runs, and the day-0
+        //     observer installed below has nothing to receive — the kickoff is
+        //     lost one step EARLIER than the `guard let observer` this bead
+        //     fixed. The OS completion handler is also never invoked, which is
+        //     how an app loses its background scheduling budget.
+        //   * `didFinishLaunchingWithOptions` → `scanForSuspendedTransfers`,
+        //     the playhead-hyht force-quit resume scan, which logged
+        //     "skipped — no DownloadManager registered" on exactly those launches.
+        //
+        // `PlayheadApp.task` still calls `registerShared` (idempotent, same
+        // instance) so the scene path is unchanged. `init` runs exactly once per
+        // app process — the BGTask registrations directly below would trap on a
+        // second construction — so this cannot install a discarded runtime.
+        DownloadManager.registerShared(downloadManager)
+
         backgroundProcessingService.registerBackgroundTasks()
         // playhead-shpy: wire the process-wide telemetry holder BEFORE
         // registering the early-fire BGTask handler so the fallback's
@@ -3023,6 +3059,46 @@ final class PlayheadRuntime {
         if let rediffRefetchService {
             rediffRefetchService.registerBackgroundTaskHandler()
             Task { await rediffRefetchService.scheduleNextRefetch() }
+        }
+
+        // playhead-cnql: install the background-download day-0 kickoff observer
+        // HERE, at launch, in EVERY process — not from `PlayheadApp.task`, where
+        // playhead-4dqe put it.
+        //
+        // WHY THE MOVE IS THE FIX. `.task` is a SwiftUI scene modifier: it runs
+        // when the window's view tree first appears. iOS relaunches this app
+        // WITHOUT a scene to deliver `handleEventsForBackgroundURLSession`
+        // (`DownloadManager.attributionDirectory` documents that the analysis
+        // enqueue "routinely runs in a DIFFERENT PROCESS from the
+        // `backgroundDownload` that started the transfer"), and wakes it the
+        // same way for a BGTask. In those processes `.task` never runs, so no
+        // observer was ever installed, so `notifyBackgroundDownloadCompleted`
+        // took its `guard let observer else { return }` and the kickoff was
+        // gone — no attempt, no give-up, no row in `rediff_day_zero_kickoffs`,
+        // indistinguishable from a download that never happened. That is the
+        // population Dan's "yes rediff on background" was about: on the control
+        // pull, 16 of the 27 assets created since 4dqe shipped have no kickoff
+        // row of any kind.
+        //
+        // This block runs from `init`, below the `isPreviewRuntime` guard, on
+        // the same launch path that already registers the BGTask handlers — the
+        // `BackgroundFeedRefreshService.registerTaskHandler()` precedent
+        // directly above, for the identical reason.
+        //
+        // Captures only Sendable values (never `self`), so it neither retains
+        // the runtime nor hops to the MainActor: the SwiftData facts arrive
+        // later through `dayZeroKickoffEpisodeFactsBox`, and their absence is a
+        // fallback rather than a drop.
+        if let dayZeroKickoffCoordinator {
+            let kickoffDownloads = downloadManager
+            let kickoffFacts = dayZeroKickoffEpisodeFactsBox
+            Task {
+                await Self.installDayZeroBackgroundDownloadKickoff(
+                    downloads: kickoffDownloads,
+                    coordinator: dayZeroKickoffCoordinator,
+                    factsBox: kickoffFacts
+                )
+            }
         }
 
         Task { [downloadManager, speechService, backgroundProcessingService, entitlementManager, iCloudSyncCoordinator, capabilitiesService] in
@@ -5384,51 +5460,67 @@ final class PlayheadRuntime {
                 return episode.audioURL
             }
         }
-        attachDayZeroBackgroundDownloadKickoff(modelContainer: modelContainer)
+        // playhead-cnql: the day-0 kickoff's SwiftData half — an UPGRADE, not
+        // the wiring. The observer itself is installed at launch (see
+        // `installDayZeroBackgroundDownloadKickoff`), because a scene-scoped
+        // install is exactly what left background-relaunch downloads with no
+        // kickoff at all. Once this lands, a kickoff gets the feed's CURRENT
+        // enclosure URL and the publish date the drain orders by; before it,
+        // the download's own URL and an unknown date, which is a worse kickoff
+        // than this one and a far better one than none.
+        guard dayZeroKickoffCoordinator != nil else { return }
+        dayZeroKickoffEpisodeFactsBox.resolver = { @Sendable episodeId in
+            await MainActor.run {
+                let context = modelContainer.mainContext
+                let descriptor = FetchDescriptor<Episode>(
+                    predicate: #Predicate { $0.canonicalEpisodeKey == episodeId }
+                )
+                guard let episode = try? context.fetch(descriptor).first else {
+                    return nil
+                }
+                return DayZeroKickoffEpisodeFacts(
+                    enclosureURL: episode.audioURL,
+                    publishedAt: episode.publishedAt?.timeIntervalSince1970
+                )
+            }
+        }
     }
 
-    /// playhead-4dqe: make every PLAIN / AUTO background download reach day-0.
+    /// playhead-4dqe / playhead-cnql: make every PLAIN / AUTO background
+    /// download reach day-0 — from EVERY process, not only from one that
+    /// rendered a window.
     ///
-    /// Dan, 2026-08-01: "yes rediff on background". Until this, download-time
-    /// day-0 existed only for the explicit "Download & Analyze" tap, so an
-    /// auto-downloaded episode's only chances at marks were the 19-second
-    /// in-play race and the lagged ≥24 h sweep — i.e. exactly not "the marks are
-    /// there before he presses play".
+    /// Dan, 2026-08-01: "yes rediff on background". 4dqe built the seam
+    /// (`DownloadManager.setBackgroundDownloadCompletionObserver`) and installed
+    /// it from `PlayheadApp.task`. That install cannot run when iOS relaunches
+    /// the app headless to drain background URLSession events or to run a
+    /// BGTask — which is precisely when an auto-download completes — so the
+    /// completion met a nil observer and the kickoff evaporated unrecorded.
+    /// cnql moves the install to launch; `DownloadManager` buffers anything
+    /// that still beats it, so the hand-off no longer depends on ordering.
     ///
-    /// Installed on the SAME late-attach hook as the enclosure resolver, and for
-    /// the same reason: the identity this needs (the CURRENT enclosure URL and
-    /// the publish date that drives newest-first ordering) lives in SwiftData,
-    /// which is not available when the runtime is constructed.
-    ///
-    /// The observer is deliberately cheap and non-blocking — it hands a request
-    /// to the coordinator and returns, so a URLSession completion callback is
-    /// never held up by a day-0 wait.
-    private func attachDayZeroBackgroundDownloadKickoff(modelContainer: ModelContainer) {
-        guard dayZeroKickoffCoordinator != nil else { return }
-        let downloads = downloadManager
-        Task { [weak self] in
-            await downloads.setBackgroundDownloadCompletionObserver {
-                @Sendable episodeId, fallbackURL in
-                Task { @MainActor in
-                    guard let self else { return }
-                    let context = modelContainer.mainContext
-                    let descriptor = FetchDescriptor<Episode>(
-                        predicate: #Predicate { $0.canonicalEpisodeKey == episodeId }
-                    )
-                    let episode = try? context.fetch(descriptor).first
-                    // Prefer the feed's CURRENT enclosure URL over the URL the
-                    // download happened to follow: day-0 re-fetches the live
-                    // enclosure K ways, exactly as the play path does. The
-                    // download's own URL is the fallback for an episode that has
-                    // since left the library.
-                    guard let enclosureURL = episode?.audioURL ?? fallbackURL else { return }
-                    self.requestDayZeroKickoff(
-                        episodeId: episodeId,
-                        enclosureURL: enclosureURL,
-                        publishedAt: episode?.publishedAt?.timeIntervalSince1970,
-                        source: .backgroundDownload
-                    )
-                }
+    /// `static` and Sendable-only by construction: this must not capture the
+    /// `@MainActor` runtime, both to keep a URLSession completion callback off
+    /// the main thread and so `init` can call it without capturing `self`.
+    nonisolated static func installDayZeroBackgroundDownloadKickoff(
+        downloads: DownloadManager,
+        coordinator: RediffDayZeroKickoffCoordinator,
+        factsBox: DayZeroKickoffEpisodeFactsBox
+    ) async {
+        await downloads.setBackgroundDownloadCompletionObserver {
+            @Sendable episodeId, fallbackURL in
+            Task {
+                // `?? nil` flattens the double optional: "no resolver yet" and
+                // "resolver found no row" are the SAME instruction to the
+                // request builder — use the download's own URL.
+                let facts = await factsBox.resolver?(episodeId) ?? nil
+                guard let request = DayZeroBackgroundKickoff.request(
+                    episodeId: episodeId,
+                    facts: facts,
+                    fallbackURL: fallbackURL,
+                    enqueuedAt: Date().timeIntervalSince1970
+                ) else { return }
+                await coordinator.requestKickoff(request)
             }
         }
     }

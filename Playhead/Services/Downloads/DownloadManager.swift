@@ -515,6 +515,28 @@ actor DownloadManager {
     /// `setBackgroundDownloadCompletionObserver`.
     private var backgroundDownloadCompletionObserver: (@Sendable (String, URL?) -> Void)?
 
+    /// playhead-cnql: completions that landed BEFORE any observer was installed.
+    ///
+    /// `notifyBackgroundDownloadCompleted` used to be `guard let observer else
+    /// { return }` — the same bare, unrecorded return playhead-4dqe was created
+    /// to kill, one layer above the coordinator it fixed. The observer is
+    /// installed asynchronously (an actor hop) and the delegate can deliver a
+    /// completion at any instant after launch, so a race that drops a day-0
+    /// kickoff forever was always reachable and left nothing behind — no row in
+    /// `rediff_day_zero_kickoffs`, no counter, nothing a device pull could see.
+    /// Buffering makes the hand-off ORDER-INDEPENDENT rather than lucky.
+    ///
+    /// Keyed by episode: a re-delivered completion replaces its predecessor
+    /// rather than queueing a duplicate the coordinator would only dedup later.
+    private var pendingBackgroundDownloadCompletions: [(episodeId: String, sourceURL: URL?)] = []
+
+    /// Cap on the buffer above. A process that never installs an observer (a
+    /// preview runtime, a test host, a build with day-0 off) must not grow this
+    /// without bound — day-0 is speculative preparation and a lost kickoff there
+    /// costs one re-fetch, while an unbounded array costs the process. The
+    /// oldest entry is evicted and LOGGED, so the loss is still not silent.
+    static let maxPendingBackgroundDownloadCompletions = 64
+
     /// playhead-xsdz.71 (Signal 1, ADDITIVE/observational): optional recorder
     /// that receives the enclosure download's redirect-chain hop hosts so the
     /// DAI-stitch classifier can persist a show-level DAI-EXPECTED prior. `nil`
@@ -4002,18 +4024,71 @@ actor DownloadManager {
     /// A CALLBACK RATHER THAN A STREAM, deliberately. `progressUpdates()` is an
     /// `AsyncStream` because it has many subscribers and drops are harmless;
     /// this has exactly one consumer and a drop is a lost day-0 attempt, so it
-    /// is a direct hand-off with no buffer to overflow. Same `set…` shape as
-    /// `setAnalysisWorkScheduler` / `setDAIStitchRecorder`.
+    /// is a direct hand-off, backed by a small bounded buffer for completions
+    /// that land before the observer is installed (oldest evicted, and logged).
+    /// Same `set…` shape as `setAnalysisWorkScheduler` / `setDAIStitchRecorder`.
+    /// playhead-cnql: installing an observer also DRAINS whatever completed
+    /// before it arrived. Without this the buffer would only ever grow.
     func setBackgroundDownloadCompletionObserver(
         _ observer: @escaping @Sendable (String, URL?) -> Void
     ) {
         self.backgroundDownloadCompletionObserver = observer
+        let backlog = pendingBackgroundDownloadCompletions
+        pendingBackgroundDownloadCompletions.removeAll()
+        for completed in backlog {
+            observer(completed.episodeId, completed.sourceURL)
+        }
     }
 
     private func notifyBackgroundDownloadCompleted(episodeId: String, sourceURL: URL?) {
-        guard let observer = backgroundDownloadCompletionObserver else { return }
+        guard let observer = backgroundDownloadCompletionObserver else {
+            bufferBackgroundDownloadCompletion(
+                episodeId: episodeId,
+                sourceURL: sourceURL
+            )
+            return
+        }
         observer(episodeId, sourceURL)
     }
+
+    private func bufferBackgroundDownloadCompletion(
+        episodeId: String,
+        sourceURL: URL?
+    ) {
+        pendingBackgroundDownloadCompletions.removeAll { $0.episodeId == episodeId }
+        pendingBackgroundDownloadCompletions.append(
+            (episodeId: episodeId, sourceURL: sourceURL)
+        )
+        while pendingBackgroundDownloadCompletions.count
+            > Self.maxPendingBackgroundDownloadCompletions {
+            let evicted = pendingBackgroundDownloadCompletions.removeFirst()
+            logger.error(
+                "Day-0 kickoff hand-off buffer full; dropped completion for \(evicted.episodeId, privacy: .public)"
+            )
+        }
+    }
+
+    #if DEBUG
+    /// playhead-cnql test seam: how many completions are waiting for an
+    /// observer. The eviction cap is otherwise unobservable, and an untested cap
+    /// is how a bound becomes decorative.
+    func _pendingBackgroundDownloadCompletionCountForTesting() -> Int {
+        pendingBackgroundDownloadCompletions.count
+    }
+
+    /// playhead-cnql test seam: the buffer's own entry point. Driving the cap
+    /// through 70 real completions would mean 70 file placements and 70 SHA-256
+    /// passes to exercise one `while` loop.
+    func _bufferBackgroundDownloadCompletionForTesting(
+        episodeId: String,
+        sourceURL: URL?
+    ) {
+        bufferBackgroundDownloadCompletion(
+            episodeId: episodeId,
+            sourceURL: sourceURL
+        )
+    }
+    #endif
 
     /// Rebuilds the LRU access log from file modification dates.
     private func rebuildAccessLog() throws {

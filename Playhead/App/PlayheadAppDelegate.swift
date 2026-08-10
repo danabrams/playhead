@@ -70,6 +70,16 @@ final class PlayheadAppDelegate: NSObject, UIApplicationDelegate {
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
     ) -> Bool {
+        // playhead-cnql (R1 review): self-register on the LAUNCH path. The only
+        // other call site is `PlayheadApp.task` — a SCENE modifier — and the
+        // one consumer of this slot, `urlSessionDidFinishEvents(forBackgroundURLSession:)`,
+        // fires precisely in the sceneless relaunch where that never runs. Left
+        // unregistered there, the OS completion handler stored by
+        // `handleEventsForBackgroundURLSession` is never invoked, which is how
+        // iOS stops granting an app background time. Idempotent — the scene
+        // path re-registers the same instance.
+        DownloadManager.registerAppDelegate(self)
+
         // playhead-1nl6: populate the CauseEmissionRegistry so the
         // slice-completion instrumentation knows which production sites
         // emit which InternalMissCauses. Idempotent — safe if tests also

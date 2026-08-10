@@ -359,6 +359,65 @@ struct RediffDayZeroKickoffRequest: Sendable, Equatable {
     }
 }
 
+// MARK: - Background-download kickoff facts (playhead-cnql)
+
+/// The two things only SwiftData can answer about an episode whose background
+/// download just completed: the CURRENT enclosure URL from the feed (which may
+/// have moved since the download followed its own), and the publish date the
+/// coordinator's drain orders by.
+///
+/// Optional as a whole, and optional in each field, because the process that
+/// most needs to ask is the one least able to: a background URLSession relaunch
+/// or a BGTask-only wake never runs `PlayheadApp.task`, so no SwiftData-backed
+/// resolver is ever installed there. See `DayZeroBackgroundKickoff.request`.
+struct DayZeroKickoffEpisodeFacts: Sendable, Equatable {
+    let enclosureURL: URL?
+    let publishedAt: Double?
+
+    init(enclosureURL: URL?, publishedAt: Double?) {
+        self.enclosureURL = enclosureURL
+        self.publishedAt = publishedAt
+    }
+}
+
+/// playhead-cnql: the pure "what kickoff does this completed background
+/// download deserve?" decision.
+///
+/// WHY THIS IS A FUNCTION AND NOT THREE LINES IN A CLOSURE. Before this bead the
+/// equivalent lines lived inside the observer that `PlayheadApp.task` installed,
+/// and they could only run in a process where SwiftData had been attached — so
+/// the fallback arm below (no facts at all) was unreachable and untested, and
+/// every download that completed in a background-relaunch or BGTask-only
+/// process was dropped by `guard let observer else { return }` one layer up. The
+/// decision is lifted out so the SwiftData-less arm is the FIRST thing a test
+/// can reach, not the last thing anyone thinks of.
+enum DayZeroBackgroundKickoff {
+
+    /// The kickoff request for a completed background download, or `nil` when
+    /// no URL is knowable from either source — the one case where there is
+    /// genuinely nothing to re-fetch.
+    ///
+    /// The feed's CURRENT enclosure URL wins when it is known (day-0 re-fetches
+    /// the live enclosure K ways, exactly as the play path does); the URL the
+    /// download itself followed is the fallback, and on a background relaunch it
+    /// is the ONLY thing available.
+    static func request(
+        episodeId: String,
+        facts: DayZeroKickoffEpisodeFacts?,
+        fallbackURL: URL?,
+        enqueuedAt: Double
+    ) -> RediffDayZeroKickoffRequest? {
+        guard let enclosureURL = facts?.enclosureURL ?? fallbackURL else { return nil }
+        return RediffDayZeroKickoffRequest(
+            episodeId: episodeId,
+            enclosureURL: enclosureURL,
+            publishedAt: facts?.publishedAt,
+            source: .backgroundDownload,
+            enqueuedAt: enqueuedAt
+        )
+    }
+}
+
 /// The pure "which pending kickoff runs next" decision — newest episode first.
 ///
 /// Pure and total so the ordering is unit-tested without a queue, a clock, or a
