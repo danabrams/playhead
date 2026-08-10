@@ -264,11 +264,19 @@ actor SkipOrchestrator {
 
     private let logger = Logger(subsystem: "com.playhead", category: "SkipOrchestrator")
 
-    /// Bug 5 (skip-cues-deletion): minimum confidence required for an
-    /// `AdWindow` to be eligible for the `beginEpisode` preload that
-    /// previously read from `skip_cues`. Mirrors the 0.7 threshold the
-    /// (now-deleted) `SkipCueMaterializer` used. Kept private to this
-    /// actor — the only consumer is `beginEpisode`.
+    /// Minimum ACTUATION confidence required for an `AdWindow` to be eligible
+    /// for the cross-launch preload — i.e. `AdWindow.actuationConfidence`, the
+    /// post-calibration, post-user-correction number, NOT raw `confidence`.
+    /// See `preloadAdmissibleWindows` for which quantity this is compared
+    /// against and why (playhead-atr3). Kept private to this actor — the only
+    /// consumers are `beginEpisode`'s preload and the playhead-96ot mid-session
+    /// ingest, both through `preloadAdmissibleWindows`.
+    ///
+    /// Bug 5 (skip-cues-deletion): the VALUE 0.7 is inherited from the
+    /// (now-deleted) `SkipCueMaterializer`, which is where this preload's rows
+    /// used to come from. Only the number is inherited — the materializer had
+    /// one confidence column to read, so it cannot be authority for which of
+    /// V47's two quantities this floor applies to.
     private static let preloadConfidenceThreshold: Double = 0.7
 
     /// Cycle-21 H-1: returns whether a decision state is allowed to
@@ -2207,18 +2215,49 @@ actor SkipOrchestrator {
     /// The rows `beginEpisode`'s cross-launch preload and the playhead-96ot
     /// mid-session ingest both admit.
     ///
-    /// playhead-ynmk: the 0.7 floor is a DETECTOR-confidence filter, and a
-    /// user-asserted row is not a detector claim. Before that bead both user
-    /// gestures wrote `confidence = 1.0`, so the floor never excluded them; now
-    /// that a banner confirmation carries the MEASURED value (0.40 in the field
-    /// case), a row the user answered Yes to would silently drop out of
-    /// cross-launch continuity because the detector was unsure — losing exactly
-    /// the anchored population qs0d wants to keep skipping. Admitting the row is
-    /// not admitting the skip: `paddedCueSpan` re-derives the extent on every
-    /// push, so an unanchored asserted row still cues nothing.
+    /// playhead-atr3: the floor reads `actuationConfidence` — detection AFTER
+    /// calibration and after the user-correction factor — not raw `confidence`.
+    /// Dan's principle: *the highest quality signal we have is a user
+    /// correction*, so a gate that reads the raw number where a corrected one
+    /// exists is discarding the best evidence it has.
+    ///
+    /// This is a RESTORATION, not a widening in principle. Before ar60's V47
+    /// column split the fusion path wrote its actuation number INTO
+    /// `confidence`, so this floor already compared 0.7 against actuation; the
+    /// split silently switched it to detection, which for a corrected or
+    /// calibration-discounted span is the higher of the two. Reading actuation
+    /// is what the code did before, now made explicit and deliberate.
+    ///
+    /// WHAT MAKES IT SAFE — the scope, not a second threshold. ar60's own
+    /// measurement was that five spans crossed this 0.7 floor on inflation from
+    /// marks that did NOT overlap them, because the correction factor was one
+    /// asset-wide scalar handed to every span. That was one good signal smeared
+    /// onto the wrong spans, not a noisy correction. `CorrectionFactorSnapshot`
+    /// now evaluates per span, so a reinforcement can only lift a span it
+    /// actually overlaps. Fix the scope, then trust the number — deliberately
+    /// NO second numeric bound on the boost (Dan considered and declined one).
+    /// The rail that holds the scoping honest is
+    /// `SkipOrchestratorPreloadActuationFloorTests`.
+    ///
+    /// playhead-ynmk: a user-asserted row bypasses the floor entirely, because
+    /// the floor is a claim about DETECTOR quality and a user assertion is not
+    /// a detector claim. Before that bead both user gestures wrote
+    /// `confidence = 1.0`, so the floor never excluded them; now that a banner
+    /// confirmation carries the MEASURED value (0.40 in the field case), a row
+    /// the user answered Yes to would silently drop out of cross-launch
+    /// continuity because the detector was unsure — losing exactly the anchored
+    /// population qs0d wants to keep skipping. That bypass survives atr3
+    /// unchanged: it is the same principle one layer up (the user's own
+    /// gesture outranks any number the detector produced), and switching the
+    /// numeric read must not quietly re-gate the asserted population.
+    ///
+    /// Admitting the row is not admitting the skip: `paddedCueSpan` re-derives
+    /// the extent on every push, so an unanchored asserted row still cues
+    /// nothing, and `evaluateWindow` applies the enter threshold to the same
+    /// actuation quantity afterwards.
     private static func preloadAdmissibleWindows(_ rows: [AdWindow]) -> [AdWindow] {
         rows.filter {
-            ($0.confidence >= preloadConfidenceThreshold
+            ($0.actuationConfidence >= preloadConfidenceThreshold
                 || $0.userAssertion != nil)
                 && $0.endTime > $0.startTime
                 && preloadEligibleDecisionStates.contains($0.decisionState)
@@ -2237,9 +2276,12 @@ actor SkipOrchestrator {
     ///
     /// Bug 5 (skip-cues-deletion): the rows are read directly from `ad_windows`,
     /// which replaced the now-deleted `skip_cues` table. The 0.7 threshold in
-    /// `preloadAdmissibleWindows` mirrors the cue materializer's threshold so
-    /// the preload set is byte-identical to what the cue table used to contain
-    /// at the same point in time. The persisted `AdWindow` rows go to
+    /// `preloadAdmissibleWindows` takes its VALUE from the cue materializer's
+    /// threshold, but it is applied to `actuationConfidence` (playhead-atr3),
+    /// so the preload set is no longer claimed to be byte-identical to what the
+    /// cue table held: a span the user has corrected is admitted or excluded on
+    /// the corrected number, which is the whole point. The persisted
+    /// `AdWindow` rows go to
     /// `receiveAdWindows` UNMODIFIED so the existing event-stream path applies
     /// its standard logic — eligibilityGate, banner state, decision-log dedup —
     /// and so any auto-skip / markOnly precision gate stamped at write time
