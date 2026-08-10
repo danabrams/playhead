@@ -151,7 +151,7 @@ struct BannerFeedbackProductionActions {
 struct NowPlayingView: View {
 
     /// playhead-3bv.4: shared logger for non-fatal correction-persistence
-    /// failures (e.g. the "Always skip this sponsor" sink). Defined at
+    /// failures (e.g. the always-skip-sponsor action sink). Defined at
     /// view scope so the wiring closures inside `body` can reach it via
     /// `Self.logger` without capturing a per-instance `let`.
     fileprivate static let logger = Logger(
@@ -415,13 +415,64 @@ struct NowPlayingView: View {
                 onSuggestSkipAsync: bannerFeedbackActions.onSuggestSkip,
                 onSuggestDeclineAsync:
                     bannerFeedbackActions.onSuggestDecline,
-                // playhead-3bv.4: "Always skip this sponsor" on an
-                // auto-skipped banner. Records a `sponsorOnShow` scope
-                // correction so the SponsorKnowledgeStore's negative-
-                // memory pass filters this advertiser out of future
-                // episodes of the same show. Mirrors the normalization
-                // SponsorKnowledgeStore uses on its
-                // `normalizedValue` field — `entityValue.lowercased()
+                // playhead-3bv.4 / playhead-q6y3: "Always skip <sponsor>
+                // on this show" on an auto-skipped banner. Records a
+                // `sponsorOnShow` scope correction so future episodes of
+                // the same show carry the sponsor forward.
+                //
+                // THE DIRECTION IS REINFORCEMENT, and it did not used to
+                // be (playhead-q6y3, Dan's ruling 2026-08-09). This site
+                // shipped `source: .manualVeto` /
+                // `correctionType: .falsePositive`, which in this codebase
+                // means "the detector said ad and it was NOT" — the
+                // SUPPRESS direction. One tap therefore taught the system
+                // that this advertiser is not an ad across every episode
+                // of the show, and suppressing the detection removes the
+                // skip: press "always skip" and get "never skip". After
+                // playhead-atr3 made SkipOrchestrator's 0.7 cross-launch
+                // preload floor read `actuationConfidence`, that inversion
+                // could also push a span under the floor entirely, so on
+                // relaunch it was neither skipped NOR bannered.
+                //
+                // The gesture means "yes, this IS an ad — keep skipping
+                // it", so the event is written in the BOOST direction.
+                // `CorrectionSource.fidelityRank` already names
+                // `.falseNegative` as `.manualVeto`'s "opposite-signed
+                // twin" at the same rank 3, and
+                // `LearningArtifactIngestor.applySponsorSideEffect`
+                // already defines FN-on-a-sponsor-scope as
+                // "every episode of this show really did sponsor X,
+                // please remember that" → `recordCandidate`. So no new
+                // `CorrectionType` case is needed: the SCOPE carries the
+                // population, the SOURCE carries the direction.
+                //
+                // BOTH fields move together and that is not belt-and-
+                // braces. Every live read-side consumer keys on
+                // `event.source?.kind` — `correctionPassthroughFactor`,
+                // `correctionBoostFactor`, `correctionFactorSnapshot`,
+                // `activeFalse{Positive,Negative}Scopes`, the
+                // training-example materializer, and
+                // `LearningArtifactIngestor` — and reads `correctionType`
+                // only as the legacy fallback for `source == nil` rows.
+                // Flipping `correctionType` alone would have changed
+                // nothing that runs.
+                //
+                // The materializer is named in PROSE rather than spelled as
+                // a symbol on purpose, and this note deliberately does not
+                // spell it either. A privacy rail over in the materializer's
+                // own test file walks every production .swift file, collects
+                // the ones whose raw TEXT mentions that type or its table,
+                // and requires the set to stay inside an allowlist of files
+                // that may legitimately hold training examples. It cannot
+                // tell a reference from a mention, so naming the type in a
+                // view that touches none of them reports this file as an
+                // unreviewed egress consumer and fails the gate. Keep it
+                // unspelled — and do NOT "fix" that rail by adding this file
+                // to its allowlist, which would trade a real privacy guard
+                // for a comment's spelling.
+                //
+                // Mirrors the normalization SponsorKnowledgeStore uses on
+                // its `normalizedValue` field — `entityValue.lowercased()
                 // .trimmingCharacters(in: .whitespaces)` — so the scope
                 // serializer produces an identity that the downstream
                 // lookup actually matches. Using `.whitespaces` (not
@@ -449,9 +500,9 @@ struct NowPlayingView: View {
                     let event = CorrectionEvent(
                         analysisAssetId: assetId,
                         scope: scope.serialized,
-                        source: .manualVeto,
+                        source: .falseNegative,
                         podcastId: podcastId,
-                        correctionType: .falsePositive,
+                        correctionType: .falseNegative,
                         targetRefs: CorrectionTargetRefs(
                             sponsorEntity: normalized
                         )

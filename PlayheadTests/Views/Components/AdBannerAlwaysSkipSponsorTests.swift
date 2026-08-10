@@ -164,17 +164,30 @@ final class AdBannerAlwaysSkipSponsorTests: XCTestCase {
     /// The event the NowPlayingView wiring builds carries:
     ///   * `analysisAssetId` matching the currently-playing episode
     ///   * the `sponsorOnShow` scope as serialized
-    ///   * `source = .manualVeto` (this is a user-driven sponsor veto)
-    ///   * `correctionType = .falsePositive` — the user says "we
-    ///      should NOT have played this in the first place; do not
-    ///      play future instances either"
+    ///   * `source = .falseNegative` and
+    ///     `correctionType = .falseNegative` — the REINFORCEMENT
+    ///     direction. playhead-q6y3, Dan's ruling 2026-08-09: the tap
+    ///     means "yes, this IS an ad, always skip it". This site
+    ///     shipped `.manualVeto` / `.falsePositive`, which in this
+    ///     codebase is the SUPPRESS direction, so one tap taught the
+    ///     pipeline that the advertiser is not an ad across the whole
+    ///     show — and suppressing the detection removes the skip.
     ///   * `targetRefs.sponsorEntity` set to the normalized sponsor
     ///      so the LearningArtifactIngestor's sponsor side-effects
-    ///      (knowledge-store demotion) fire correctly
+    ///      (knowledge-store CONFIRMATION, in this direction) fire
+    ///      correctly
     ///
-    /// This test reconstructs the event the same way the wiring does
-    /// and pins the shape — drift in any of these fields silently
-    /// breaks the user-facing promise.
+    /// The `source` is the load-bearing half: every live read-side
+    /// consumer keys on `event.source?.kind` and reads
+    /// `correctionType` only as the legacy fallback for `source == nil`
+    /// rows. `CorrectionKind` is asserted here rather than inferred so
+    /// that a future rename of the source cannot quietly re-invert the
+    /// direction while the field names still read correctly.
+    ///
+    /// This test reconstructs the event the same way the wiring does.
+    /// `testWiringPersistsTheReinforcementDirection` below is what
+    /// pins the WIRING to this shape — reconstruction alone would be
+    /// vacuous.
     func testCorrectionEventCarriesSponsorTargetRef() {
         let normalized = "squarespace"
         let event = CorrectionEvent(
@@ -183,15 +196,25 @@ final class AdBannerAlwaysSkipSponsorTests: XCTestCase {
                 podcastId: "podcast-xyz",
                 sponsor: normalized
             ).serialized,
-            source: .manualVeto,
+            source: .falseNegative,
             podcastId: "podcast-xyz",
-            correctionType: .falsePositive,
+            correctionType: .falseNegative,
             targetRefs: CorrectionTargetRefs(sponsorEntity: normalized)
         )
         XCTAssertEqual(event.analysisAssetId, "asset-abc")
         XCTAssertEqual(event.podcastId, "podcast-xyz")
-        XCTAssertEqual(event.source, .manualVeto)
-        XCTAssertEqual(event.correctionType, .falsePositive)
+        XCTAssertEqual(event.source, .falseNegative)
+        XCTAssertEqual(event.correctionType, .falseNegative)
+        XCTAssertEqual(
+            event.source?.kind,
+            .falseNegative,
+            "the direction the read side actually resolves must be BOOST"
+        )
+        XCTAssertEqual(
+            event.effectiveCorrectionType,
+            .falseNegative,
+            "and the persisted-identity view of it must agree"
+        )
         XCTAssertEqual(event.targetRefs?.sponsorEntity, normalized)
         XCTAssertEqual(
             event.scope,
@@ -199,11 +222,227 @@ final class AdBannerAlwaysSkipSponsorTests: XCTestCase {
         )
     }
 
+    /// playhead-q6y3: the WIRING, not a reconstruction of it.
+    ///
+    /// `NowPlayingView.onAlwaysSkipSponsorAsync` builds its own
+    /// `CorrectionEvent` rather than routing through the orchestrator,
+    /// so nothing behavioural short of driving SwiftUI observes which
+    /// direction it writes. The neighbouring
+    /// `CorrectionAttributionCaptureTests` pins the same closure's
+    /// capture discipline the same way and explains why a source canary
+    /// is the right instrument for a claim about code shape.
+    ///
+    /// The anti-vacuity control is the `XCTAssertTrue` pair: a canary
+    /// built only from "does not contain" passes just as happily when
+    /// the inspector returns an empty body because the anchor drifted.
+    /// Asserting that the tokens which SHOULD be there ARE there is
+    /// what proves the body was really read.
+    func testWiringPersistsTheReinforcementDirection() throws {
+        let source = try SwiftSourceInspector.loadSource(
+            repoRelativePath: "Playhead/Views/NowPlaying/NowPlayingView.swift"
+        )
+        let body = try XCTUnwrap(
+            SwiftSourceInspector.firstBody(
+                in: source,
+                after: "onAlwaysSkipSponsorAsync:"
+            ),
+            "Could not locate the onAlwaysSkipSponsorAsync closure"
+        )
+        let stripped = SwiftSourceInspector.strippingComments(body)
+
+        XCTAssertTrue(
+            stripped.contains("CorrectionScope.sponsorOnShow"),
+            "anti-vacuity: the closure body must really have been read"
+        )
+        XCTAssertTrue(
+            stripped.contains("source: .falseNegative"),
+            """
+            The tap means "yes, this IS an ad". `source` is the field every \
+            live read-side consumer resolves the direction from, so it is the \
+            one that has to say BOOST.
+            """
+        )
+        XCTAssertTrue(
+            stripped.contains("correctionType: .falseNegative"),
+            "and the persisted type must agree, or a nil-source reader disagrees"
+        )
+        XCTAssertFalse(
+            stripped.contains(".falsePositive"),
+            """
+            playhead-q6y3: a false positive means "the detector was wrong, this \
+            was not an ad" — it SUPPRESSES this sponsor across every episode of \
+            the show, which removes the very skip the button promises.
+            """
+        )
+        XCTAssertFalse(
+            stripped.contains(".manualVeto"),
+            "and `.manualVeto` resolves to the same suppress direction via CorrectionSource.kind"
+        )
+    }
+
+    // MARK: - CTA copy (playhead-q6y3)
+
+    /// Dan asked for a clearer CTA. "Always skip this sponsor" named
+    /// neither the sponsor nor the population: "this sponsor" reads as
+    /// a pointer at the card in front of you — the same span the banner
+    /// is already about — when the tap is a standing instruction about
+    /// an advertiser across every episode of the show.
+    func testCtaNamesTheSponsorAndThePopulation() {
+        let label = AdBannerView.alwaysSkipSponsorLabel(for: "Squarespace")
+        XCTAssertEqual(label, "Always skip Squarespace on this show")
+
+        // ANTI-VACUITY: the advertiser is interpolated, not decoration on
+        // a constant string. Two advertisers must produce two labels.
+        XCTAssertNotEqual(
+            label,
+            AdBannerView.alwaysSkipSponsorLabel(for: "BetterHelp")
+        )
+        XCTAssertTrue(
+            AdBannerView.alwaysSkipSponsorLabel(for: "BetterHelp")
+                .contains("BetterHelp")
+        )
+    }
+
+    /// The hint carries what the four-word button cannot: durable, and
+    /// over every episode. Present tense, no counters.
+    ///
+    /// It must say REMEMBERS, not "will skip". After playhead-q6y3's
+    /// bound the tap's whole effect is a durable confirmation against
+    /// the sponsor, which reaches future episodes through the show's
+    /// sponsor lexicon and its own promotion lifecycle — it does not
+    /// multiply any span's confidence, and deliberately so. Copy that
+    /// promised the OUTCOME would be asserting something no single tap
+    /// can guarantee; copy that states the PREFERENCE is exactly true.
+    func testHintStatesThePreferenceRatherThanPromisingTheOutcome() {
+        let hint = AdBannerView.alwaysSkipSponsorHint(for: "Squarespace")
+        XCTAssertEqual(
+            hint,
+            "Remembers Squarespace as one to skip on this show — every episode, from now on"
+        )
+        // The two things the button label cannot carry.
+        XCTAssertTrue(hint.contains("every episode"))
+        XCTAssertTrue(hint.contains("from now on"))
+        // ANTI-VACUITY: assert the DIRECTION of the claim, not just its
+        // words. A hint that promised the outcome would satisfy both
+        // `contains` checks above just as well.
+        XCTAssertTrue(
+            hint.hasPrefix("Remembers "),
+            "the hint states what is remembered, not an outcome it cannot guarantee"
+        )
+        XCTAssertFalse(hint.lowercased().contains("will skip"))
+        XCTAssertFalse(hint.hasPrefix("Skips "))
+    }
+
+    /// playhead-q6y3 R1: the receipt reports what the app DID, and what it
+    /// did is remember a preference.
+    ///
+    /// It read "Always skipping Squarespace on this show" — the present
+    /// continuous of the button's own imperative, which asserts a standing
+    /// skip. Traced end to end, one press records a durable confirmation
+    /// against the sponsor and changes no skip anywhere; the sponsor entry
+    /// needs presses on two DISTINCT episodes even to reach `.active`. So
+    /// the receipt was a second over-promise sitting one control away from
+    /// a hint that had already been softened to "Remembers …" for exactly
+    /// that reason.
+    func testReceiptReportsTheMemoryNotAStandingSkip() {
+        let receipt = AdBannerView.alwaysSkipSponsorReceipt(for: "Squarespace")
+        XCTAssertEqual(
+            receipt,
+            "Remembering Squarespace as one to skip on this show"
+        )
+        // It is the HINT in the present continuous, not the BUTTON. Pin that
+        // relationship so a future edit cannot drift the two apart again.
+        XCTAssertTrue(receipt.hasPrefix("Remembering "))
+        XCTAssertFalse(
+            receipt.hasPrefix("Always skipping"),
+            """
+            the app is not skipping this sponsor anywhere yet — one press \
+            records a preference, and promising the behaviour is the defect \
+            playhead-q6y3 R1 removed
+            """
+        )
+        // ANTI-VACUITY: the advertiser is interpolated, not decoration on a
+        // constant string, and the population is still named.
+        XCTAssertNotEqual(
+            receipt,
+            AdBannerView.alwaysSkipSponsorReceipt(for: "BetterHelp")
+        )
+        XCTAssertTrue(
+            AdBannerView.alwaysSkipSponsorReceipt(for: "BetterHelp")
+                .contains("BetterHelp")
+        )
+        XCTAssertTrue(receipt.contains("on this show"))
+    }
+
+    /// External-copy rules: no "ad detection", no "AI", no metrics. And
+    /// nothing that reads as acting on the CURRENT span only — the
+    /// banner is a skip affordance that fires on playhead ENTRY, so
+    /// copy implying a retroactive edit of this one segment would be a
+    /// lie about what the tap does.
+    func testCopyObeysTheExternalCopyRules() {
+        let strings = [
+            AdBannerView.alwaysSkipSponsorLabel(for: "Squarespace"),
+            AdBannerView.alwaysSkipSponsorHint(for: "Squarespace"),
+            AdBannerView.alwaysSkipSponsorReceipt(for: "Squarespace"),
+        ]
+        let banned = [
+            "ad detection", "detection", "detect", "algorithm",
+            "confidence", "accuracy", "this ad", "this segment",
+            "this one", "%",
+        ]
+        for string in strings {
+            let lowered = string.lowercased()
+            for word in banned {
+                XCTAssertFalse(
+                    lowered.contains(word.lowercased()),
+                    "\"\(string)\" must not contain \"\(word)\""
+                )
+            }
+            // "AI" is checked case-SENSITIVELY and on the untouched
+            // string. Lowercasing it to "ai" would false-trip on any
+            // ordinary word containing those letters ("remains",
+            // "available", an advertiser called Airbnb) — a banned-word
+            // rail that fires on innocent copy is one people delete.
+            XCTAssertFalse(
+                string.contains("AI"),
+                "\"\(string)\" must not contain \"AI\""
+            )
+            // ANTI-VACUITY for the loop above: an empty or whitespace
+            // string would satisfy every "does not contain" assertion.
+            XCTAssertTrue(
+                lowered.contains("this show"),
+                "\"\(string)\" must name the population it acts over"
+            )
+            XCTAssertTrue(lowered.contains("squarespace"))
+        }
+    }
+
+    /// A whitespace/newline-only advertiser never reaches the copy in
+    /// production — `normalizedAlwaysSkipSponsor` hides the button — but
+    /// the helpers are `static` and reachable, so they must not render a
+    /// sentence with a hole in it.
+    func testDisplayNameFallsBackRatherThanRenderingAHole() {
+        XCTAssertEqual(
+            AdBannerView.alwaysSkipSponsorLabel(for: "  \n "),
+            "Always skip this sponsor on this show"
+        )
+        XCTAssertEqual(
+            AdBannerView.alwaysSkipSponsorDisplayName("  Squarespace \n"),
+            "Squarespace",
+            "outer whitespace is trimmed but the listener's casing is kept"
+        )
+        XCTAssertNotEqual(
+            AdBannerView.alwaysSkipSponsorDisplayName("Squarespace"),
+            AdBannerView.normalizedAlwaysSkipSponsor("Squarespace"),
+            "the display name and the storage key are deliberately different things"
+        )
+    }
+
     // MARK: - Confirmation dwell
 
     /// The View uses `alwaysSkipConfirmationSeconds` to drive the
-    /// auto-dismiss after the inline "Will always skip this sponsor"
-    /// receipt. Pin the value so future tweaks are deliberate (the UI
+    /// auto-dismiss after the inline `alwaysSkipSponsorReceipt`
+    /// line. Pin the value so future tweaks are deliberate (the UI
     /// design wants the receipt to read as a calm receipt, not a
     /// modal).
     func testConfirmationDwellIsShortEnoughToReadAsReceipt() {

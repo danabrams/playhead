@@ -124,9 +124,13 @@ final class ViewLayerCorrectionAttributionCaptureCanaryTests: XCTestCase {
         )
     }
 
-    /// The "Always skip this sponsor" seam writes its own CorrectionEvent
-    /// rather than routing through the orchestrator, so it owns its own
-    /// capture discipline.
+    /// The "Always skip <sponsor> on this show" seam writes its own
+    /// CorrectionEvent rather than routing through the orchestrator, so it owns
+    /// its own capture discipline. (playhead-q6y3: that event is a
+    /// REINFORCEMENT — "yes, this IS an ad" — not a veto. This test is about
+    /// WHICH SHOW it is filed against, which is the same question either way;
+    /// the direction itself is pinned by
+    /// `AdBannerAlwaysSkipSponsorTests.testWiringPersistsTheReinforcementDirection`.)
     func testAlwaysSkipSponsorAttributesToTheBannerItemNotTheLiveRuntime() throws {
         let source = try SwiftSourceInspector.loadSource(
             repoRelativePath: Self.nowPlayingViewPath
@@ -150,7 +154,7 @@ final class ViewLayerCorrectionAttributionCaptureCanaryTests: XCTestCase {
         )
         XCTAssertFalse(
             stripped.contains("runtime.currentPodcastId"),
-            "A live show read here would file the sponsor veto against the wrong podcast."
+            "A live show read here would file the sponsor correction against the wrong podcast."
         )
         let episodeGuard = try XCTUnwrap(
             stripped.range(of: "guard runtime.currentEpisodeId == item.episodeId")

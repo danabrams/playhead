@@ -20151,16 +20151,73 @@ actor AnalysisStore {
         return sqlite3_column_int(stmt, 0) != 0
     }
 
-    /// Batch check: returns the set of scopes (from the input) that have at
-    /// least one correction event. Single round-trip instead of N queries.
-    func correctionScopesPresent(from scopes: [String]) throws -> Set<String> {
+    /// Batch check: returns the set of scopes (from the input) that carry at
+    /// least one SUPPRESS-direction correction event. Single round-trip instead
+    /// of N queries.
+    ///
+    /// playhead-q6y3: this used to ask "does ANY correction event name this
+    /// scope?", which made its one caller —
+    /// `SponsorKnowledgeStore.activeEntriesWithNegativeMemory` — blind to what
+    /// the correction actually said. That was harmless only while every writer
+    /// of a `sponsorOnShow` scope wrote a veto. Now that "Always skip
+    /// <sponsor> on this show" writes the REINFORCEMENT direction, a
+    /// direction-blind query would read "yes, this is an ad" as grounds to
+    /// remove the sponsor from the show's active lexicon — the same inversion
+    /// the button itself had, one layer down.
+    ///
+    /// The predicate mirrors the read side's Swift one
+    /// (`event.source?.kind == .falsePositive || event.source == nil`) exactly,
+    /// including its treatment of unknown values: a `source` string this build
+    /// cannot decode is `nil` in Swift and so counts as a suppressor, and
+    /// `NOT IN (<boost sources>)` says the same thing in SQL. The boost-source
+    /// list is DERIVED from `CorrectionSource.kind` rather than spelled out, so
+    /// a future boost-direction source joins it without anybody remembering to
+    /// edit this query.
+    ///
+    /// WHICH SWIFT PREDICATE IT MIRRORS, deliberately. There are two in the
+    /// tree and they disagree on exactly one row shape. This query follows
+    /// `activeFalsePositiveScopes` / `correctionPassthroughFactor` /
+    /// `correctionFactorSnapshot` — the veto-mask family, which reads `source`
+    /// alone and treats `source == nil` as a suppressor. It does NOT follow
+    /// `LearningArtifactIngestor.applySponsorSideEffect`, which falls back to
+    /// `effectiveCorrectionType` when `source` is nil and would therefore call
+    /// a (source: nil, correctionType: .falseNegative) row a BOOSTER. That row
+    /// shape has no writer: every production site that sets `correctionType`
+    /// sets `source` in the same initializer, and the legacy rows the fallback
+    /// exists for carry neither column. Following the majority keeps this
+    /// query consistent with the three readers that actually gate detection;
+    /// if a writer for that shape ever appears, the ingestor is the one to
+    /// reconcile, not this.
+    func suppressingCorrectionScopesPresent(
+        from scopes: [String]
+    ) throws -> Set<String> {
         guard !scopes.isEmpty else { return [] }
-        let placeholders = scopes.map { _ in "?" }.joined(separator: ", ")
-        let sql = "SELECT DISTINCT scope FROM correction_events WHERE scope IN (\(placeholders))"
+        let boostSources = CorrectionSource.allCases
+            .filter { $0.kind == .falseNegative }
+            .map(\.rawValue)
+        let scopePlaceholders = scopes.map { _ in "?" }.joined(separator: ", ")
+        // `NOT IN ()` is a syntax error, so an empty boost set — impossible
+        // today, reachable only if every source became suppress-direction —
+        // degenerates to the unfiltered query rather than to an unparseable one.
+        let directionClause = boostSources.isEmpty
+            ? ""
+            : """
+              AND (source IS NULL OR source NOT IN (\(
+                  boostSources.map { _ in "?" }.joined(separator: ", ")
+              )))
+              """
+        let sql = """
+            SELECT DISTINCT scope FROM correction_events
+            WHERE scope IN (\(scopePlaceholders))
+            \(directionClause)
+            """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         for (i, scope) in scopes.enumerated() {
             bind(stmt, Int32(i + 1), scope)
+        }
+        for (i, source) in boostSources.enumerated() {
+            bind(stmt, Int32(scopes.count + i + 1), source)
         }
         var result = Set<String>()
         while sqlite3_step(stmt) == SQLITE_ROW {

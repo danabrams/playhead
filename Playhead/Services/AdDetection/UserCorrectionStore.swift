@@ -40,17 +40,29 @@ enum CorrectionScope: Sendable, Equatable {
     /// Serialized times use fixed 3-decimal precision to avoid floating-point
     /// representation drift across round-trips.
     case exactTimeSpan(assetId: String, startTime: Double, endTime: Double)
-    /// Sponsor veto across all episodes of a podcast.
+    // THE SHOW-WIDE SCOPES BELOW NAME A POPULATION, NOT A DIRECTION
+    // (playhead-q6y3). Each used to be documented as a "veto", and that is
+    // literally the line the author of `NowPlayingView.onAlwaysSkipSponsorAsync`
+    // read before writing `source: .manualVeto` on a gesture that means the
+    // opposite — one tap taught the pipeline that an advertiser was NOT an ad
+    // across a whole show. A scope says WHO (or WHAT) and over WHICH episodes;
+    // whether the user is suppressing or reinforcing is carried by the event's
+    // `source` (via `CorrectionSource.kind`), and by nothing else.
+
+    /// A SPONSOR, across all episodes of a podcast. Direction comes from the
+    /// event's `source`: `.manualVeto` suppresses, `.falseNegative` reinforces.
     case sponsorOnShow(podcastId: String, sponsor: String)
-    /// Phrase veto across all episodes of a podcast.
+    /// A PHRASE, across all episodes of a podcast. Direction comes from `source`.
     case phraseOnShow(podcastId: String, phrase: String)
-    /// Campaign veto across all episodes of a podcast.
+    /// A CAMPAIGN, across all episodes of a podcast. Direction comes from `source`.
     case campaignOnShow(podcastId: String, campaign: String)
-    /// Domain ownership veto: the podcast owns this domain (e.g. "nytimes.com"),
-    /// so mentions of it are not third-party ads. Layer B scope.
+    /// A DOMAIN the podcast owns (e.g. "nytimes.com"), across all episodes.
+    /// Written in the suppress direction it says mentions of it are not
+    /// third-party ads. Layer B scope; direction comes from `source`.
     case domainOwnershipOnShow(podcastId: String, domain: String)
-    /// Jingle fingerprint veto: a recurring audio jingle on this show is not an
-    /// ad indicator. Layer B scope.
+    /// A recurring audio JINGLE on this show. Written in the suppress direction
+    /// it says the jingle is not an ad indicator. Layer B scope; direction comes
+    /// from `source`.
     case jingleOnShow(podcastId: String, jingleId: String)
 
     // MARK: Serialization
@@ -579,9 +591,14 @@ protocol UserCorrectionStore: Sendable {
 /// Span-scoped corrections (`.exactSpan`, `.exactTimeSpan`) count for a span
 /// they overlap and for no other. Show-wide scopes (`.sponsorOnShow`,
 /// `.phraseOnShow`, `.campaignOnShow`, `.domainOwnershipOnShow`,
-/// `.jingleOnShow`) still apply to every span, because that is what they
-/// actually assert — the same split `correctionBoostFactor(for:overlapping:)`
-/// already draws.
+/// `.jingleOnShow`) apply to every span in the SUPPRESS direction, because that
+/// is what a vetoed sponsor asserts — and to NO span in the BOOST direction
+/// (playhead-q6y3), which is the same split
+/// `correctionBoostFactor(for:overlapping:)` already draws and the same
+/// asymmetry `PersistentUserCorrectionStore.correctionFactorSnapshot` applies to
+/// an unplaceable correction. A show-wide scope names what is an ad, never
+/// where the ads are; as a booster it would multiply every span in the episode
+/// on evidence about none of them.
 ///
 /// The arithmetic is unchanged from the two asset-wide factors it replaces:
 /// `max(0, 1 - maxSuppressorWeight) * min(2, 1 + maxBoosterWeight)`. Only the
@@ -1195,8 +1212,9 @@ actor PersistentUserCorrectionStore: UserCorrectionStore {
                 }
             case .sponsorOnShow, .phraseOnShow, .campaignOnShow,
                  .domainOwnershipOnShow, .jingleOnShow:
-                // Genuinely asset-wide: the user vetoed a SPONSOR or a PHRASE,
-                // not a position.
+                // Names a SPONSOR or a PHRASE, not a position. Asset-wide in
+                // the suppress direction; see the direction split below for why
+                // that does not make it asset-wide in the boost direction.
                 placement = .everywhere
             case .none:
                 // A scope string this build cannot decode — corrupt, or
@@ -1204,12 +1222,12 @@ actor PersistentUserCorrectionStore: UserCorrectionStore {
                 placement = .unplaceable
             }
 
-            // WHAT AN UNPLACEABLE CORRECTION DOES, and why the two sides
-            // differ. `correctionPassthroughFactor` / `correctionBoostFactor`
-            // — the asset-wide functions this snapshot replaces — never
-            // decoded the scope at all: EVERY correction counted, everywhere.
-            // So dropping an unplaceable one is a change, and the direction of
-            // that change is not symmetric:
+            // WHAT A CORRECTION THAT NAMES NO POSITION DOES, and why the two
+            // sides differ. `correctionPassthroughFactor` /
+            // `correctionBoostFactor` — the asset-wide functions this snapshot
+            // replaces — never decoded the scope at all: EVERY correction
+            // counted, everywhere. So dropping one is a change, and the
+            // direction of that change is not symmetric:
             //
             //   * A SUPPRESSOR is the user saying "not an ad". Dropping it
             //     fails OPEN on the one path that must never fail open, and it
@@ -1219,15 +1237,50 @@ actor PersistentUserCorrectionStore: UserCorrectionStore {
             //     `recordVeto(span:)` write, which uses REAL ordinals. It is
             //     applied EVERYWHERE — exactly its pre-ar60 reach.
             //   * A BOOSTER is the user saying "there IS an ad here". Applying
-            //     an unplaceable one everywhere is what inflated seven
+            //     one that names no position everywhere is what inflated seven
             //     unrelated spans on the device pull and pushed five of them
             //     past the 0.7 preload floor. It is applied NOWHERE.
             //
-            // One rule, stated once: an unplaceable correction acts in the
-            // direction that cannot cost the user a skip they did not ask for.
+            // One rule, stated once: a correction that cannot say WHERE acts in
+            // the direction that cannot cost the user a skip they did not ask
+            // for.
+            //
+            // playhead-q6y3 extends that same rule from `.unplaceable` to
+            // `.everywhere`, because the two are the same fact about a BOOSTER.
+            // A show-wide scope names a SPONSOR or a PHRASE — it asserts what
+            // is an ad, never where the ads are — so as a booster it has
+            // exactly the property that made an unplaceable booster dangerous:
+            // it multiplies every span in the episode, up to 2.0×, on evidence
+            // about none of them. Until q6y3 no writer produced one, so this
+            // arm was unreachable; the always-skip-sponsor button now
+            // writes a show-wide FALSE-NEGATIVE, and without this it would have
+            // become the unbounded inflator the bead exists to prevent.
+            //
+            // It is also the invariant the consumer already claims. The doc on
+            // `SkipOrchestrator.preloadAdmissibleWindows` justifies reading
+            // `actuationConfidence` at the 0.7 floor with "CorrectionFactorSnapshot
+            // now evaluates per span, so a reinforcement can only lift a span it
+            // actually overlaps" — true for span scopes, false for show-wide
+            // ones. This makes it true for both, WITHOUT the second numeric
+            // bound on the boost that Dan considered and declined in atr3: the
+            // fix is scope, not magnitude.
+            //
+            // A show-wide SUPPRESSOR is untouched and still applies to every
+            // span — that is what a vetoed sponsor asserts, and it is the safe
+            // direction. And the reinforcement is not discarded: it reaches
+            // detection through `LearningArtifactIngestor.applySponsorSideEffect`
+            // → `SponsorKnowledgeStore.recordCandidate`, which lifts the sponsor
+            // where the sponsor is actually named rather than lifting the
+            // episode.
             let range: ClosedRange<Double>?
             switch placement {
             case .everywhere:
+                guard isSuppressor else {
+                    logger.debug(
+                        "correctionFactorSnapshot: show-wide booster scope for \(analysisAssetId, privacy: .public) applied to no span (it names a sponsor, not a position)"
+                    )
+                    continue
+                }
                 range = nil
             case .span(let resolved):
                 range = resolved

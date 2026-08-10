@@ -400,6 +400,14 @@ actor SponsorKnowledgeStore {
     /// Sponsor-type entries are checked against sponsorOnShow correction scopes.
     /// Note: corrections are queried from the same AnalysisStore that backs
     /// this knowledge store, since both tables share a single SQLite database.
+    ///
+    /// NEGATED means the SUPPRESS direction only (playhead-q6y3). This pass
+    /// used to ask whether any correction event named the scope at all, which
+    /// was indistinguishable from "the user vetoed this sponsor" for as long as
+    /// vetoes were the only thing written at `sponsorOnShow`. "Always skip
+    /// <sponsor> on this show" now writes the REINFORCEMENT direction, and a
+    /// reinforcement read as a negation would delete the sponsor from the very
+    /// lexicon the tap was asking us to keep.
     func activeEntriesWithNegativeMemory(
         forPodcast podcastId: String
     ) async throws -> [SponsorKnowledgeEntry] {
@@ -414,7 +422,8 @@ actor SponsorKnowledgeStore {
                 sponsor: entry.normalizedValue
             ).serialized
         }
-        let blockedScopes = try await store.correctionScopesPresent(from: scopeStrings)
+        let blockedScopes = try await store
+            .suppressingCorrectionScopesPresent(from: scopeStrings)
 
         return entries.filter { entry in
             guard entry.entityType == .sponsor else { return true }
