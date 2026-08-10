@@ -284,6 +284,11 @@ struct SelfPromoSuppressionWireInTests {
             #expect(a.startTime == b.startTime, "startTime mismatch under flag OFF")
             #expect(a.endTime == b.endTime, "endTime mismatch under flag OFF")
             #expect(a.confidence == b.confidence, "confidence mismatch under flag OFF")
+            // playhead-ar60: schema V47 added a SECOND persisted confidence.
+            // This sweep's whole claim is "every stored field except `id`", so
+            // a new column that no arm compares is the claim quietly going
+            // false — and it is the column an actuator gates on.
+            #expect(a.skipConfidence == b.skipConfidence, "skipConfidence mismatch under flag OFF")
             #expect(a.boundaryState == b.boundaryState, "boundaryState mismatch under flag OFF")
             #expect(a.decisionState == b.decisionState, "decisionState mismatch under flag OFF")
             #expect(a.detectorVersion == b.detectorVersion, "detectorVersion mismatch under flag OFF")
@@ -356,10 +361,29 @@ struct SelfPromoSuppressionWireInTests {
         // persisted confidences must be byte-identical to the undemoted OFF
         // baseline — a regression that clamped a score on the suppression path
         // (instead of forwarding it verbatim) would move these.
+        //
+        // playhead-ar60: WHICH confidences, and where they now live. The
+        // fl4j demotion forwards `DecisionResult`'s two numbers verbatim, so
+        // this rail is about BOTH of them. Before schema V47 they were spelled
+        // `AdWindow.confidence` (which then held the ACTUATION number) and
+        // `AdWindow.metadataConfidence` (which then held `proposalConfidence`)
+        // — which is exactly what the two messages below used to say. Since
+        // V47 `confidence` is DETECTION, actuation is `skipConfidence` read
+        // through `actuationConfidence`, and the fusion path writes `nil` to
+        // `metadataConfidence`. So the second assertion had become `nil ==
+        // nil`: it claimed to pin `proposalConfidence` through the demotion
+        // and pinned nothing at all.
+        //
+        // ANTI-VACUITY CONTROL first: `actuationConfidence` falls back to
+        // `confidence` when the producer recorded no separate actuation
+        // number, so without this the actuation assertion could quietly be the
+        // detection assertion twice over.
+        #expect(on.skipConfidence != nil && off.skipConfidence != nil,
+                "both arms must persist FUSION rows (skipConfidence non-nil), or `actuationConfidence` below falls back to the detection column and proves nothing")
+        #expect(on.actuationConfidence == off.actuationConfidence,
+                "the ACTUATION confidence must be preserved through the demotion (eligibility-only change)")
         #expect(on.confidence == off.confidence,
-                "skipConfidence must be preserved through the demotion (eligibility-only change)")
-        #expect(on.metadataConfidence == off.metadataConfidence,
-                "proposalConfidence must be preserved through the demotion (eligibility-only change)")
+                "the DETECTION confidence must be preserved through the demotion (eligibility-only change)")
 
         // Routing: the persisted markOnly window lands in the SkipOrchestrator
         // suggest tier (play-by-default banner), NOT the auto-skip path.

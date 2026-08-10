@@ -132,7 +132,23 @@ struct RediffByteExactDemotionExemptionTests {
         // Eligibility-only contract: geometry and scores are untouched vs baseline.
         #expect(exempt.window.startTime == baseline.window.startTime, "width must be preserved")
         #expect(exempt.window.endTime == baseline.window.endTime, "width must be preserved")
-        #expect(exempt.window.confidence == baseline.window.confidence, "score must be preserved")
+        // playhead-ar60: "scores" is TWO numbers since schema V47. The
+        // exemption blocks an ELIGIBILITY demotion, so both the detection score
+        // and the number an actuator gates on must be bit-identical to the
+        // baseline arm. Asserting only `confidence` would have left the
+        // actuation half — the half a demotion path could plausibly clamp —
+        // unread. The `skipConfidence != nil` control is what stops
+        // `actuationConfidence` from silently resolving to `confidence` through
+        // its fallback and restating the line above.
+        #expect(exempt.window.confidence == baseline.window.confidence, "detection score must be preserved")
+        #expect(
+            exempt.window.skipConfidence != nil && baseline.window.skipConfidence != nil,
+            "both arms must persist FUSION rows (skipConfidence non-nil) or the actuation assertion below reads the detection column"
+        )
+        #expect(
+            exempt.window.actuationConfidence == baseline.window.actuationConfidence,
+            "actuation score must be preserved"
+        )
     }
 
     /// Exemption-does-not-leak: the SAME self-promo fixture with NO rediff
