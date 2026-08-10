@@ -450,12 +450,26 @@ struct NowPlayingView: View {
                 // braces. Every live read-side consumer keys on
                 // `event.source?.kind` — `correctionPassthroughFactor`,
                 // `correctionBoostFactor`, `correctionFactorSnapshot`,
-                // `activeFalse{Positive,Negative}Scopes`,
-                // `TrainingExampleMaterializer`,
+                // `activeFalse{Positive,Negative}Scopes`, the
+                // training-example materializer, and
                 // `LearningArtifactIngestor` — and reads `correctionType`
                 // only as the legacy fallback for `source == nil` rows.
                 // Flipping `correctionType` alone would have changed
                 // nothing that runs.
+                //
+                // The materializer is named in PROSE rather than spelled as
+                // a symbol on purpose, and this note deliberately does not
+                // spell it either. A privacy rail over in the materializer's
+                // own test file walks every production .swift file, collects
+                // the ones whose raw TEXT mentions that type or its table,
+                // and requires the set to stay inside an allowlist of files
+                // that may legitimately hold training examples. It cannot
+                // tell a reference from a mention, so naming the type in a
+                // view that touches none of them reports this file as an
+                // unreviewed egress consumer and fails the gate. Keep it
+                // unspelled — and do NOT "fix" that rail by adding this file
+                // to its allowlist, which would trade a real privacy guard
+                // for a comment's spelling.
                 //
                 // Mirrors the normalization SponsorKnowledgeStore uses on
                 // its `normalizedValue` field — `entityValue.lowercased()
