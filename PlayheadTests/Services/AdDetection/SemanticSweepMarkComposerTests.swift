@@ -977,6 +977,28 @@ struct SemanticSweepConfidenceTests {
                 "and the preserved grade is a derived one, not the old constant")
     }
 
+    /// FLOAT DRIFT IS A GATE FAILURE, not a rounding curiosity. A run of
+    /// windows that ALL grade at the ceiling must merge to the ceiling
+    /// EXACTLY — `>=` against `SkipOrchestrator`'s 0.70 preload floor is an
+    /// exact comparison, and a mean computed as `(a*h + b*w)/(h+w)` lands a
+    /// few ULP low even when `a == b`. Two of the six ceiling-grade marks in
+    /// the 2026-08-10 pull did exactly that under the sum-of-products form.
+    @Test("a run of ceiling-grade windows merges to the ceiling exactly")
+    func aRunOfCeilingWindowsMergesToTheCeilingExactly() {
+        let marks = Fx.compose(rows: [
+            Fx.row(id: "w1", start: 0.24, end: 98.7),
+            Fx.row(id: "w2", start: 98.7, end: 197.13),
+            Fx.row(id: "w3", start: 197.13, end: 291.42),
+            Fx.row(id: "w4", start: 291.42, end: 300.0),
+        ])
+
+        #expect(marks.count == 1, "control: the four touching windows merged")
+        #expect(marks.first?.confidence == SemanticSweepMarkComposer.maximumMarkConfidence,
+                "merged=\(String(describing: marks.first?.confidence))")
+        #expect((marks.first?.confidence ?? 0) >= 0.70,
+                "and it still clears the preload floor's exact comparison")
+    }
+
     /// NOTHING IS EVER PROMOTED. The ceiling is the constant this bead replaced,
     /// so a detector that is 2-for-2 wrong on the judged episodes cannot come
     /// out of this change stronger than it went in.

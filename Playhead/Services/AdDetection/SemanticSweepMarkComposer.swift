@@ -607,8 +607,18 @@ enum SemanticSweepMarkComposer {
                 let held = last.duration
                 let added = max(0, extent.end - last.end)
                 if held + added > 0 {
-                    last.confidence =
-                        (last.confidence * held + extent.confidence * added) / (held + added)
+                    // INTERPOLATE, do not average as a sum of products.
+                    // `(a*h + b*w)/(h+w)` is algebraically the same and
+                    // numerically is NOT: for a == b it lands a few ULP off,
+                    // and a run of `strong`/`good` windows would then merge to
+                    // 0.6999999999999999 and fall out of a `>= 0.70` gate for
+                    // no reason a reader could ever see. Measured: 2 of the 6
+                    // ceiling-grade marks in the 2026-08-10 pull did exactly
+                    // that. This form returns `last.confidence` EXACTLY when
+                    // the two agree, and stays inside `[min, max]` of the two
+                    // when they do not.
+                    last.confidence += (extent.confidence - last.confidence)
+                        * (added / (held + added))
                 }
                 last.end = max(last.end, extent.end)
                 result[result.count - 1] = last
