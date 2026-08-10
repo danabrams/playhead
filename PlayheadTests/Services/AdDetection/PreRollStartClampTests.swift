@@ -29,6 +29,28 @@ struct PreRollStartClampTests {
         start: Double,
         end: Double,
         confidence: Double = 0.85,
+        // playhead-hcpa: NON-NIL and DIFFERENT from `confidence`, deliberately.
+        //
+        // The clamp's only production caller is `AdDetectionService`'s fusion
+        // emission, and a fusion row is exactly the population that carries two
+        // numbers. A `nil` here made every actuation assertion in this suite
+        // unfalsifiable: the optional compare is `nil == nil`, and
+        // `actuationConfidence` falls back to `confidence` on BOTH sides, so it
+        // restates whatever the detection assertion beside it already said.
+        //
+        // What this value buys is the rail in
+        // `widenedEligibleMaterialKeepsItsGate` — the ONLY test here that
+        // reaches `withStartTimeClampedToZero()`. It does NOT rescue
+        // `expectUnchanged`: that helper is unfalsifiable for a separate and
+        // unfixable-by-fixture reason (both its call sites pass inputs the
+        // clamp REFUSES, so it compares the returned value against itself —
+        // `x == x` for every field, at any `skipConfidence`). See the note on
+        // the helper itself.
+        //
+        // 0.31 is the SUPPRESSED shape — below `confidence`, and below the 0.65
+        // enter threshold that 0.85 clears — so the fallback a dropped forward
+        // would take is a fail-open, and the rail now sees it.
+        skipConfidence: Double? = 0.31,
         decisionState: AdDecisionState = .confirmed,
         eligibilityGate: SkipEligibilityGate? = .eligible,
         evidenceStart: Double? = nil,
@@ -46,6 +68,7 @@ struct PreRollStartClampTests {
             startTime: start,
             endTime: end,
             confidence: confidence,
+            skipConfidence: skipConfidence,
             boundaryState: boundaryState,
             decisionState: decisionState.rawValue,
             detectorVersion: "detection-v1",
@@ -87,8 +110,14 @@ struct PreRollStartClampTests {
         #expect(actual.startTime.bitPattern == expected.startTime.bitPattern)
         #expect(actual.endTime.bitPattern == expected.endTime.bitPattern)
         #expect(actual.confidence.bitPattern == expected.confidence.bitPattern)
-        // playhead-ar60: the clamp rewrites GEOMETRY; the actuation
-        // number carries through like every other field here.
+        // playhead-ar60: the actuation number is checked like every other
+        // field here. playhead-hcpa: this helper proves NOTHING about the copy
+        // helper, and no fixture value can change that. Both call sites pass
+        // inputs the clamp REFUSES (a non-finite threshold, or degenerate
+        // geometry), so it returns the input array untouched and `actual` IS
+        // `expected` — every comparison below is `x == x`, including this one.
+        // The rail on `withStartTimeClampedToZero()` lives in
+        // `widenedEligibleMaterialKeepsItsGate`, the only test that widens.
         #expect(actual.skipConfidence?.bitPattern == expected.skipConfidence?.bitPattern)
         #expect(actual.actuationConfidence.bitPattern == expected.actuationConfidence.bitPattern)
         #expect(actual.boundaryState == expected.boundaryState)
@@ -327,6 +356,38 @@ struct PreRollStartClampTests {
         )
         #expect(clamped.decisionState == original.decisionState)
         #expect(clamped.confidence == original.confidence)
+        // playhead-hcpa: the ACTUATION half of the same copy. Its sibling
+        // `confidence` assertion one line up is the DETECTION half, and until
+        // this bead that was the only one — deleting `skipConfidence:` from
+        // `withStartTimeClampedToZero()` left the suite green.
+        //
+        // `expectUnchanged` does carry a pair of actuation assertions, but it
+        // is only ever called on inputs the clamp REFUSES, so it never reaches
+        // the copy helper at all. This test is the one that widens.
+        #expect(
+            clamped.skipConfidence != nil,
+            """
+            Anti-vacuity: the clamped row must carry a SEPARATE actuation \
+            number. `nil` makes `actuationConfidence` collapse onto \
+            `confidence`, and the expectation below becomes a restatement of \
+            the detection assertion above it.
+            """
+        )
+        #expect(
+            original.skipConfidence != original.confidence,
+            "fixture integrity: equal numbers make the direction test vacuous"
+        )
+        #expect(
+            clamped.actuationConfidence == original.actuationConfidence,
+            """
+            Widening the free OUTER edge must not raise how much permission \
+            the row has to act. A dropped forward reads as the (higher) \
+            detection score, so a fusion span the correction factor \
+            discounted would come out of the clamp more skip-eager than it \
+            went in. Got \(clamped.actuationConfidence), expected \
+            \(original.actuationConfidence).
+            """
+        )
         #expect(clamped.evidenceStartTime == original.evidenceStartTime)  // evidence not widened
         #expect(clamped.startEdgeAnchor == original.startEdgeAnchor)
         #expect(clamped.endEdgeAnchor == original.endEdgeAnchor)
