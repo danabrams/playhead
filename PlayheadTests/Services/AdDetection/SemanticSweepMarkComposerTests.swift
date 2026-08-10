@@ -981,18 +981,25 @@ struct SemanticSweepConfidenceTests {
     /// windows that ALL grade at the ceiling must merge to the ceiling
     /// EXACTLY — `>=` against `SkipOrchestrator`'s 0.70 preload floor is an
     /// exact comparison, and a mean computed as `(a*h + b*w)/(h+w)` lands a
-    /// few ULP low even when `a == b`. Two of the six ceiling-grade marks in
-    /// the 2026-08-10 pull did exactly that under the sum-of-products form.
+    /// few ULP off even when `a == b`.
+    ///
+    /// THE GEOMETRY IS THE FIELD'S, NOT A CONSTRUCTED ONE. These are the three
+    /// coarse windows behind the pull's 8518A3FB 292.0–579.7 s mark, verbatim.
+    /// Under the sum-of-products form they merge to 0.6999999999999998 and the
+    /// mark silently falls out of cross-launch preload; under the
+    /// interpolation form they merge to 0.70. Two of the six ceiling-grade
+    /// marks in the 2026-08-10 pull were in that state. A synthetic run of
+    /// round-numbered windows does NOT reproduce it — the first draft of this
+    /// rail used one and survived the mutant.
     @Test("a run of ceiling-grade windows merges to the ceiling exactly")
     func aRunOfCeilingWindowsMergesToTheCeilingExactly() {
         let marks = Fx.compose(rows: [
-            Fx.row(id: "w1", start: 0.24, end: 98.7),
-            Fx.row(id: "w2", start: 98.7, end: 197.13),
-            Fx.row(id: "w3", start: 197.13, end: 291.42),
-            Fx.row(id: "w4", start: 291.42, end: 300.0),
+            Fx.row(id: "w1", start: 292.02, end: 380.4),
+            Fx.row(id: "w2", start: 380.4, end: 468.78),
+            Fx.row(id: "w3", start: 468.78, end: 579.66),
         ])
 
-        #expect(marks.count == 1, "control: the four touching windows merged")
+        #expect(marks.count == 1, "control: the three touching windows merged")
         #expect(marks.first?.confidence == SemanticSweepMarkComposer.maximumMarkConfidence,
                 "merged=\(String(describing: marks.first?.confidence))")
         #expect((marks.first?.confidence ?? 0) >= 0.70,

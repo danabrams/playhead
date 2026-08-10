@@ -116,6 +116,20 @@
 //      change and it is NOT decided here: `preloadConfidenceThreshold` is
 //      playhead-atr3's settled territory and is untouched.
 //
+//      THE OTHER LIVE READER, from the same grep:
+//      `FinalPassRetranscriptionRunner.defaultConfidenceFloor` (0.50) on the
+//      raw `confidence`. 6 of the 22 fall below it and would no longer earn a
+//      final-pass re-transcription of their audio. Also Dan's, and arguably the
+//      budget landing where the evidence is — but it is a change, so it is
+//      named rather than absorbed.
+//
+//      TWO 0.70 GATES THAT LOOK LIVE AND ARE NOT, checked rather than assumed:
+//      `AnalysisJobRunner.isCueWindow` and the cross-user shareable-cue
+//      predicate both ALSO require `SkipEligibilityGate.eligible`, and every
+//      sweep mark is `.markOnly` by hard-coded literal — so neither has ever
+//      seen a sweep mark at any confidence. A sweep mark is additionally
+//      local-only (`isLocalOnlyBoundaryState`), so it is never exported.
+//
 // # Why the downside is bounded
 //
 // Every mark is unanchored, so playhead-2350's unanchored-edge gate holds by
