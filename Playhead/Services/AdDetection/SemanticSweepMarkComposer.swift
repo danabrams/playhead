@@ -109,19 +109,35 @@
 //      the old constant sat EXACTLY on `SkipOrchestrator`'s 0.70 preload floor,
 //      so every sweep mark cleared it. A derived value clears it only at the
 //      ceiling. Measured over all 22 sweep rows of the 2026-08-10 pull, graded
-//      from the presence rows under each one: 6 stay at 0.70 and 16 fall below
-//      (13 of 22 at or above 0.525, 20 of 22 at or above 0.40, minimum 0.047,
-//      12 distinct values), so those 16 would no longer hydrate on the next
-//      launch. Both marks Dan vetoed grade at 0.467, and 16 of 22 grade ABOVE
-//      them — which is the honest reading of an N of 2, not a claim that the
-//      grade separates good marks from bad ones. What it does claim is that
-//      there is now something in the number TO separate on. That is a REACH
-//      change and it is NOT decided here: `preloadConfidenceThreshold` is
-//      playhead-atr3's settled territory and is untouched.
+//      from the presence rows under each one — 19 of the 22 the composer
+//      reproduces by geometry, the other 3 being stale marks whose backing rows
+//      changed after they were written and which are graded on their persisted
+//      extent: 6 stay at 0.70 and 16 fall below (12 of 22 at or above 0.525,
+//      15 at or above 0.50, 16 at or above 0.40, minimum 0.047, 14 distinct
+//      values), so those 16 would no longer hydrate on the next launch. That is
+//      a REACH change and it is NOT decided here: `preloadConfidenceThreshold`
+//      is playhead-atr3's settled territory and is untouched.
+//
+//      RE-MEASURED AFTER THE PERMISSIVE-BAND FIX, and the difference is why
+//      the whole block is restated rather than patched: gating on
+//      `ownershipInferenceWasSuppressed` (see ``certaintyFactor(of:)``) moves
+//      every mark whose refinement was a permissive-bypass span, and 9 of the
+//      pull's 11 refined spans are. The figures this comment carried before —
+//      12 distinct values, 13 at or above 0.525, 20 at or above 0.40, both
+//      vetoed marks at 0.467 — are the PRE-fix distribution and no longer
+//      describe what the shipped code computes.
+//
+//      THE JUDGED MARKS, post-fix: 48E903D7 596.3–676.6 s grades 0.467 with 15
+//      of 22 ABOVE it; F4CE7F47 590.0–679.4 s grades 0.233 with 17 above it —
+//      they no longer share a grade, because only the second rests on a
+//      permissive refinement. Both still sit in the lower half, which at an N
+//      of 2 is the honest reading and NOT a claim that the grade separates good
+//      marks from bad ones. What it does claim is that there is now something
+//      in the number TO separate on.
 //
 //      THE OTHER LIVE READER, from the same grep:
 //      `FinalPassRetranscriptionRunner.defaultConfidenceFloor` (0.50) on the
-//      raw `confidence`. 6 of the 22 fall below it and would no longer earn a
+//      raw `confidence`. 7 of the 22 fall below it and would no longer earn a
 //      final-pass re-transcription of their audio. Also Dan's, and arguably the
 //      budget landing where the evidence is — but it is a change, so it is
 //      named rather than absorbed.
@@ -340,7 +356,15 @@ enum SemanticSweepMarkComposer {
     /// The sweep genuinely re-screens: on the device pull 36 of 125 coarse
     /// windows carry more than one `passA` row, each a separate FM call in a
     /// separate backfill run (distinct `runCorrelationId`, distinct latency),
-    /// and four windows are ones where `containsAd` is the MINORITY verdict.
+    /// and on four of them `containsAd` is at most HALF of the rows written for
+    /// the window.
+    ///
+    /// SAY WHICH ROWS THIS FACTOR CAN SEE, because those four are not it. A row
+    /// that did not EXAMINE its window is not a verdict and is skipped below, so
+    /// on the same pull only ONE of the 55 coarse `containsAd` rows has an
+    /// examined dissenter over it, and only 3 of the 22 persisted sweep marks
+    /// are deducted at all. The factor is right; its reach today is small, and
+    /// quoting the wider count as if this read it would overstate it.
     ///
     /// IT CAN ONLY DEDUCT, AND THAT IS THE POINT. The smoothing means
     /// unanimity returns exactly 1.0 whether the window was screened once or
