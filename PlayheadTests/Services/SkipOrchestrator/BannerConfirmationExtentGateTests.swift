@@ -67,6 +67,18 @@ struct BannerConfirmationExtentGateTests {
     private static let fieldEnd = 4950.0
     private static let fieldConfidence = 0.40
 
+    /// playhead-hcpa: the two-number (post-V47) shape — a span the DETECTOR
+    /// likes and the user has SUPPRESSED.
+    ///
+    /// The pair is chosen so the two numbers land on opposite sides of every
+    /// actuation gate in the orchestrator: 0.90 clears both the 0.65
+    /// `enterThreshold` and the 0.7 `preloadConfidenceThreshold`, 0.12 clears
+    /// neither. That is what makes the fallback a FAIL-OPEN rather than a
+    /// cosmetic difference — drop the forward and `actuationConfidence`
+    /// resolves to 0.90, i.e. to "skip it".
+    private static let suppressedDetectionConfidence = 0.90
+    private static let suppressedActuationConfidence = 0.12
+
     private static func cueStart(_ cue: CMTimeRange) -> Double {
         CMTimeGetSeconds(cue.start)
     }
@@ -86,11 +98,17 @@ struct BannerConfirmationExtentGateTests {
 
     /// A suggest-tier (`markOnly`) window with explicit per-edge anchors and an
     /// explicit measured confidence — the two inputs this bead is about.
+    ///
+    /// playhead-hcpa: `skipConfidence` defaults to `nil` — the one-number shape
+    /// every other test here relies on (`actuationConfidence == confidence`).
+    /// Only `confirmationPreservesSuppressedActuation` passes it, because it is
+    /// the only test that needs a TWO-number row.
     private static func makeSuggestion(
         id: String,
         start: Double = fieldStart,
         end: Double = fieldEnd,
         confidence: Double = fieldConfidence,
+        skipConfidence: Double? = nil,
         startAnchor: AutoSkipEdgeAnchor = .unanchored,
         endAnchor: AutoSkipEdgeAnchor = .unanchored
     ) -> AdWindow {
@@ -100,6 +118,7 @@ struct BannerConfirmationExtentGateTests {
             startTime: start,
             endTime: end,
             confidence: confidence,
+            skipConfidence: skipConfidence,
             boundaryState: AdBoundaryState.segmentAggregated.rawValue,
             decisionState: AdDecisionState.candidate.rawValue,
             detectorVersion: "detection-v1",
@@ -276,6 +295,99 @@ struct BannerConfirmationExtentGateTests {
             promoted.decisionState == AdDecisionState.confirmed.rawValue
                 && promoted.wasSkipped == false,
             "a refused confirmation must be durably distinguishable from one that never arrived"
+        )
+    }
+
+    /// playhead-hcpa: the ACTUATION half of the same promotion.
+    ///
+    /// `unanchoredConfirmationRowIsHonest` above pins `confidence` — the
+    /// DETECTION number. ar60's V47 split gave the row a second number,
+    /// `skipConfidence`, and the promotion forwards it; nothing asserted that
+    /// forward, so deleting the argument left the whole suite green.
+    ///
+    /// Why it is the dangerous half. `actuationConfidence` is
+    /// `skipConfidence ?? confidence`, so a dropped forward does not read as
+    /// "missing" — it reads as the DETECTION score, which for a span the user
+    /// suppressed is the HIGHER of the two. The row would come back through
+    /// `preloadAdmissibleWindows` and `evaluateWindow` carrying permission it
+    /// was never granted: Playhead skipping audio the listener said not to
+    /// skip. A fail-open, not a fail-closed.
+    ///
+    /// The first two expectations are the anti-vacuity control and they are
+    /// load-bearing, not decoration. Because of the `?? confidence` fallback,
+    /// an assertion "moved" onto the actuation number can silently be the
+    /// detection assertion wearing a new name — and would pass on a fixture
+    /// whose `skipConfidence` is nil, or whose two numbers are equal. So the
+    /// test first proves the row really has TWO numbers and that they DIFFER;
+    /// only then is the third expectation capable of failing.
+    @Test("hcpa: a confirmation preserves the SUPPRESSED actuation number, not just the detection one")
+    func confirmationPreservesSuppressedActuation() async throws {
+        let (orchestrator, store) = try await Self.makeHarness()
+        await orchestrator.setSkipCueHandler { _ in }
+        await orchestrator.beginEpisode(
+            analysisAssetId: Self.assetId,
+            episodeId: Self.episodeId,
+            podcastId: Self.podcastId
+        )
+        await Self.assertAutoMode(orchestrator)
+
+        let suggested = Self.makeSuggestion(
+            id: "hcpa-suppressed-actuation",
+            confidence: Self.suppressedDetectionConfidence,
+            skipConfidence: Self.suppressedActuationConfidence
+        )
+        try await store.insertAdWindow(suggested)
+        await orchestrator.receiveAdWindows([suggested])
+        await orchestrator.acceptSuggestedSkip(
+            windowId: "hcpa-suppressed-actuation"
+        )
+
+        let promoted = try #require(
+            await Self.promotedRow(
+                in: store,
+                originalId: "hcpa-suppressed-actuation"
+            ),
+            "the confirmation must still create its durable promoted row"
+        )
+
+        // Control 1: the fixture is a TWO-number row. Without this, every
+        // assertion below reads `confidence` through the fallback and the
+        // test is the detection rail renamed.
+        #expect(
+            promoted.skipConfidence != nil,
+            """
+            Anti-vacuity: the promoted row must carry a SEPARATE actuation \
+            number. `nil` means `actuationConfidence` collapsed onto \
+            `confidence` and every actuation assertion here became a \
+            restatement of the detection one.
+            """
+        )
+        // Control 2: the two numbers DIFFER, so an assertion on one cannot be
+        // satisfied by the other.
+        #expect(
+            Self.suppressedActuationConfidence
+                != Self.suppressedDetectionConfidence,
+            "fixture integrity: equal numbers make the direction test vacuous"
+        )
+
+        #expect(
+            promoted.actuationConfidence
+                == Self.suppressedActuationConfidence,
+            """
+            The promotion must carry the SUPPRESSED actuation number through \
+            unchanged. Got \(promoted.actuationConfidence); the detection \
+            score is \(Self.suppressedDetectionConfidence), and reading that \
+            here would re-grant a span the user suppressed enough permission \
+            to clear the 0.65 enter threshold and the 0.7 preload floor.
+            """
+        )
+        #expect(
+            promoted.confidence == Self.suppressedDetectionConfidence,
+            """
+            Direction: the DETECTION half must be untouched by this bead. If \
+            this reddens alongside the actuation expectation, the two \
+            quantities have been collapsed again rather than both preserved.
+            """
         )
     }
 
