@@ -311,9 +311,44 @@ final class TranscriptPeekViewModel {
     /// app thought and veto it — is this tap. Whether that affordance should
     /// exist at all is a design call left open by this bead; preferring the
     /// claiming span does not touch it.
+    ///
+    /// playhead-d666 R4 — AND THE FALLBACK IS ONLY FOR AN UNPAINTED ROW, which
+    /// is the one thing its own justification above assumes and did not check.
+    /// A row can be lit with no claiming span at all: `isAdHighlighted` also
+    /// reads `userMarkedChunkIndices`, so a row inside the listener's OWN
+    /// marked region falls through to the hint. That row is painted, and
+    /// painted by a verdict this popover cannot represent — `AdRegionPopover`
+    /// takes a `DecodedSpan`, and a user mark has none. The consequences are
+    /// not cosmetic:
+    ///
+    ///   • the popover headlines "AD SEGMENT / DETECTED FROM: sustained music"
+    ///     over a region the LISTENER marked, citing the one signal this bead
+    ///     established may never speak for an ad; and
+    ///   • "This isn't an ad" reverts by the HINT's time range
+    ///     (`revertByTimeRange(start: span.startTime, end: span.endTime)`),
+    ///     which reverts every overlapping `ad_window` in candidate/confirmed/
+    ///     applied — the listener's own `userMarked` rows included — and writes
+    ///     a `manualVeto` `CorrectionEvent` over a range they never chose.
+    ///     `AnalysisStore.userVetoedTimeRanges` then suppresses every decoded
+    ///     span overlapping it, so one tap can also un-draw a real claim.
+    ///
+    /// Measured on `db-corrected2` (94,099 `transcript_chunks` rows, 66 decoded
+    /// spans, 115 ad windows): 114 rows — 57 canonical, doubled across the
+    /// fast/final passes — on 2 of the 5 assets carrying a live `userMarked`
+    /// window are lit by that mark, carry no claiming span, and overlap a
+    /// music-only span. Two of them are on 48E903D7 at 2052.9–2057.0, inside
+    /// the post-roll Dan marked himself (`C0CC71D0`, 2052.9–2112.9) BECAUSE the
+    /// app missed it — so one tap there retracted the correction it most needed.
+    ///
+    /// Returning nil is the honest answer, not a lost affordance: the app has
+    /// no ad claim about that row to explain, and un-marking is what the
+    /// sheet's "not an ad" marking mode is for.
     func popoverSpan(chunkIndex: Int) -> DecodedSpan? {
-        adClaimingSpansOverlapping(chunkIndex: chunkIndex).first
-            ?? decodedSpansOverlapping(chunkIndex: chunkIndex).first
+        if let claiming = adClaimingSpansOverlapping(chunkIndex: chunkIndex).first {
+            return claiming
+        }
+        guard !userMarkedChunkIndices.contains(chunkIndex) else { return nil }
+        return decodedSpansOverlapping(chunkIndex: chunkIndex).first
     }
 
     /// What VoiceOver speaks for the row at `chunkIndex`.

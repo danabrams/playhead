@@ -686,6 +686,62 @@ struct TranscriptRowPopoverTargetTests {
         #expect(peek.popoverSpan(chunkIndex: 3) == nil)
         #expect(peek.popoverSpan(chunkIndex: -1) == nil)
     }
+
+    @Test("THE R4 DEFECT: a row lit by the LISTENER'S OWN mark never opens the hint")
+    @MainActor
+    func userMarkedRowDoesNotOpenTheHint() async throws {
+        // The real geometry on 48E903D7: the music-only span is 2044.5–2056.98
+        // and Dan's own post-roll mark is 2052.9–2112.9 (`C0CC71D0`), which he
+        // made because the app MISSED that post-roll. Row 2 sits inside both.
+        let peek = await ClipOutro.loaded(
+            snapshot: ClipOutro.snapshot(
+                spans: [ClipOutro.span(anchors: [ClipOutro.musicAnchor])],
+                adWindows: [ClipOutro.userMarkedWindow(start: 2052.9, end: 2112.9)]
+            )
+        )
+
+        // The row IS painted — by the listener's verdict, not by any claim.
+        #expect(peek.isAdHighlighted(chunkIndex: 2))
+        #expect(peek.adClaimingSpansOverlapping(chunkIndex: 2).isEmpty)
+        #expect(peek.decodedSpansOverlapping(chunkIndex: 2).count == 1)
+
+        #expect(
+            peek.popoverSpan(chunkIndex: 2) == nil,
+            """
+            The fallback exists for an UNPAINTED row. This row is lit by the \
+            listener's own mark, so opening the hint headlines "AD SEGMENT / \
+            DETECTED FROM: sustained music" over their own verdict — and its \
+            "This isn't an ad" reverts by the HINT's range (2044.5–2056.98), \
+            which overlaps and therefore retracts the mark itself, and records \
+            a manualVeto correction over a range they never chose.
+            """
+        )
+
+        // The documented fallback is untouched where its own justification
+        // holds: row 0 is unpainted and still reaches the hint.
+        #expect(peek.isAdHighlighted(chunkIndex: 0) == false)
+        #expect(peek.popoverSpan(chunkIndex: 0)?.id == ClipOutro.span(anchors: []).id)
+    }
+
+    @Test("A user-marked row that ALSO carries a claim still opens the claim")
+    @MainActor
+    func userMarkedRowWithAClaimStillOpensTheClaim() async throws {
+        let peek = await ClipOutro.loaded(
+            snapshot: ClipOutro.snapshot(
+                spans: [
+                    ClipOutro.span(anchors: [ClipOutro.musicAnchor]),
+                    Self.realPostRoll(),
+                ],
+                adWindows: [ClipOutro.userMarkedWindow(start: 2052.9, end: 2112.9)]
+            )
+        )
+
+        #expect(peek.isAdHighlighted(chunkIndex: 2))
+        #expect(
+            peek.popoverSpan(chunkIndex: 2)?.id == "real-postroll",
+            "the user-mark guard must not suppress a claim the row genuinely carries"
+        )
+    }
 }
 
 // MARK: - The shared predicate
