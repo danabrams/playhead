@@ -6960,14 +6960,45 @@ actor AnalysisStore {
     /// never race a read-modify-write. `kickoffCount` large with `firedCount`
     /// zero is the pre-ewag failure, readable without a join.
     ///
-    /// playhead-kg8h: this no longer increments `kickoffCount` on an existing
-    /// row — `noteRediffDayZeroKickoffClaim` owns that counter, and every
-    /// settle is preceded by a claim. The INSERT still writes 1 so a settle
-    /// that finds no row (a claim whose write failed) still records the kickoff
-    /// rather than a row claiming zero of them; the direction of the remaining
-    /// error is deliberate, since undercounting a claim is recoverable and
-    /// double-counting one would break the "large `kickoffCount`, zero
-    /// `firedCount`" reading this table exists for.
+    /// playhead-kg8h: `noteRediffDayZeroKickoffClaim` owns `kickoffCount`, and
+    /// every settle is normally preceded by a claim. But the claim goes through
+    /// `try?` at its call site, so it can fail — and when it does, this settle is
+    /// the only writer that will ever see that kickoff. It must therefore account
+    /// for the claim it never saw, and it does so on BOTH branches:
+    ///
+    ///   * NO ROW AT ALL — the INSERT writes `kickoffCount = 1`.
+    ///   * A ROW WHOSE LAST WORD IS NOT `requested` — an OUTSTANDING CLAIM is the
+    ///     only thing that can be settled without a new kickoff having happened,
+    ///     so a row carrying no outstanding claim gets one added here.
+    ///
+    /// playhead-kg8h R2 (finding F1) added the second branch. Without it the
+    /// derived quantity this table exists to publish could read BELOW ZERO: an
+    /// episode at `k=1, f=1` whose next claim write failed settled through
+    /// ON CONFLICT to `k=1, f=2`, so `kickoffCount - (firedCount + gaveUpCount)`
+    /// — the count of kickoffs owed and never settled — read **-1**. The
+    /// per-episode number was nonsense under any interpretation; the fleet number
+    /// was worse, because `SUM(kickoffCount) - SUM(firedCount + gaveUpCount)`
+    /// silently CANCELS, so one -1 hid a genuinely-owed +1 on another episode and
+    /// the roll-up reported nothing lost at all. Under-reporting a loss is the
+    /// exact failure this bead exists to end.
+    ///
+    /// MEASURED, not argued: across every operation sequence of length <= 6
+    /// (1,092 of them) the pre-R2 statement went negative in 704 and disagreed
+    /// with the true owed count in 844. With the CASE it goes negative in NONE
+    /// and never UNDER-reports what is owed. `kickoffCount >= firedCount +
+    /// gaveUpCount` is now an invariant of the two writers rather than a hope,
+    /// by induction: a claim raises `kickoffCount` and sets the marker, and a
+    /// settle either CONSUMES the marker (adding nothing) or adds its own
+    /// kickoff.
+    ///
+    /// LIMIT, stated because the next reader will find it: `lastOutcome` is a
+    /// ONE-BIT memory, so it reconciles at most one outstanding claim per
+    /// episode. Two claims outstanding at once needs two processes racing the
+    /// same episode — the coordinator's `inFlight` guard makes it impossible
+    /// within one — and where the marker cannot tell, the residual error is
+    /// always in the OVER-reporting direction. That is the direction to be wrong
+    /// in: it sends a support engineer to look at a loss that may not be there,
+    /// never away from one that is.
     func noteRediffDayZeroKickoff(
         episodeId: String,
         source: RediffDayZeroKickoffSource,
@@ -6997,6 +7028,8 @@ actor AnalysisStore {
             VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(episodeId) DO UPDATE SET
                 lastSource = excluded.lastSource,
+                kickoffCount = kickoffCount
+                    + (CASE WHEN lastOutcome = ? THEN 0 ELSE 1 END),
                 firedCount = firedCount + excluded.firedCount,
                 gaveUpCount = gaveUpCount + excluded.gaveUpCount,
                 lastOutcome = excluded.lastOutcome,
@@ -7014,6 +7047,16 @@ actor AnalysisStore {
         bind(stmt, 6, pollCount)
         bind(stmt, 7, waitedSeconds)
         bind(stmt, 8, now)
+        // Parameter 9: the `?` inside the DO UPDATE's CASE. SQLite numbers
+        // anonymous parameters by their order of APPEARANCE in the statement
+        // text, and the conflict clause is textually after the VALUES list.
+        //
+        // Bound rather than written as a `'requested'` literal so a rename of the
+        // raw value moves both writers together. Bare `lastOutcome` here is the
+        // PRE-UPDATE row (`excluded.` is the only way to name the incoming one),
+        // which is what makes "did a claim land for this settle?" answerable at
+        // all.
+        bind(stmt, 9, RediffDayZeroKickoffOutcome.requested.rawValue)
         try step(stmt, expecting: SQLITE_DONE)
     }
 

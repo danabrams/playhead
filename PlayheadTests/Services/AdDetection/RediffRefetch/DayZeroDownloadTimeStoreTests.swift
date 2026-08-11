@@ -224,6 +224,176 @@ struct DayZeroDownloadTimeStoreTests {
         #expect(record.gaveUpCount == 1, "the prior give-up is history and stays counted")
     }
 
+    // MARK: - playhead-kg8h R2 (F1): the counters cannot disagree
+
+    @Test("""
+    F1 — THE FIX: a settle whose claim write FAILED on an ALREADY-SETTLED \
+    episode accounts for the claim it never saw, instead of driving the owed \
+    count NEGATIVE
+    """)
+    func failedClaimOnASettledEpisodeCannotGoNegative() async throws {
+        let store = try await makeTestStore()
+        // One healthy kickoff: claim, then fire. `k=1, f=1`.
+        try await store.noteRediffDayZeroKickoffClaim(
+            episodeId: "ep-f1", source: .backgroundDownload, at: 100
+        )
+        try await store.noteRediffDayZeroKickoff(
+            episodeId: "ep-f1", source: .backgroundDownload,
+            outcome: .fired, pollCount: 1, waitedSeconds: 4, at: 110
+        )
+
+        // A SECOND genuine kickoff whose CLAIM WRITE FAILS. The design already
+        // anticipates this — it is why the settle's INSERT writes 1 — but that
+        // branch only runs when NO ROW EXISTS. Here a row does, so pre-fix the
+        // settle folded in through ON CONFLICT adding only to `firedCount`,
+        // leaving `k=1, f=2, g=0`.
+        try await store.noteRediffDayZeroKickoff(
+            episodeId: "ep-f1", source: .backgroundDownload,
+            outcome: .fired, pollCount: 1, waitedSeconds: 4, at: 200
+        )
+
+        let record = try #require(try await store.fetchRediffDayZeroKickoff(episodeId: "ep-f1"))
+        #expect(record.firedCount == 2)
+        #expect(record.kickoffCount == 2, """
+            The settle must account for the claim it never saw, exactly as its own \
+            INSERT branch already does for a fresh episode. Two kickoffs happened; a \
+            `kickoffCount` of 1 says one did.
+            """)
+        #expect(record.kickoffCount - (record.firedCount + record.gaveUpCount) == 0, """
+            TWO kickoffs, BOTH settled: nothing is owed. Pre-fix this read -1 — not \
+            "kickoffs owed" under any interpretation, and it CANCELS a genuinely-owed \
+            +1 in any fleet roll-up.
+            """)
+    }
+
+    @Test("""
+    F1 — THE CONSEQUENCE: a fleet roll-up cannot cancel, so one episode's lost \
+    claim can no longer hide another episode's owed kickoff
+    """)
+    func fleetRollUpCannotCancelAnOwedKickoff() async throws {
+        let store = try await makeTestStore()
+
+        // Episode A: a kickoff that is GENUINELY OWED — claimed, never settled.
+        // This is the loss the whole bead exists to make visible.
+        try await store.noteRediffDayZeroKickoffClaim(
+            episodeId: "ep-owed-a", source: .backgroundDownload, at: 100
+        )
+
+        // Episode B: settled twice, the second kickoff's claim write having failed.
+        try await store.noteRediffDayZeroKickoffClaim(
+            episodeId: "ep-lostclaim-b", source: .backgroundDownload, at: 200
+        )
+        try await store.noteRediffDayZeroKickoff(
+            episodeId: "ep-lostclaim-b", source: .backgroundDownload,
+            outcome: .fired, pollCount: 1, waitedSeconds: 4, at: 210
+        )
+        try await store.noteRediffDayZeroKickoff(
+            episodeId: "ep-lostclaim-b", source: .backgroundDownload,
+            outcome: .noAnalysisAsset, pollCount: 40, waitedSeconds: 390, at: 300
+        )
+
+        let rows = try await store.fetchRediffDayZeroKickoffs()
+        let owed = rows.reduce(0) { $0 + $1.kickoffCount - ($1.firedCount + $1.gaveUpCount) }
+        #expect(owed == 1, """
+            The fleet number a device pull reads is \
+            `SUM(kickoffCount) - SUM(firedCount + gaveUpCount)`. Pre-fix episode B \
+            contributed -1 and cancelled episode A's real +1, reporting a fleet with \
+            NOTHING owed while a kickoff sat lost. A silently-cancelling roll-up is \
+            worse than a wrong per-episode row: nobody goes looking.
+            """)
+        #expect(rows.allSatisfy { $0.kickoffCount >= $0.firedCount + $0.gaveUpCount }, """
+            `kickoffCount >= firedCount + gaveUpCount` is an invariant of the two \
+            writers, not a coincidence: a claim raises `kickoffCount` and marks the \
+            row `requested`, and a settle either CONSUMES that marker (adding no \
+            kickoff) or adds its own.
+            """)
+    }
+
+    @Test("""
+    F1 — ANTI-VACUITY: the settle still does NOT double-count a kickoff whose \
+    claim DID land, for every settled outcome
+    """)
+    func settleDoesNotDoubleCountAClaimedKickoff() async throws {
+        // Without this, "always increment in the update branch" would pass the two
+        // tests above while inflating `kickoffCount` on every healthy kickoff —
+        // breaking the "large `kickoffCount`, zero `firedCount`" reading this table
+        // exists for, in the opposite direction.
+        for (index, outcome) in [
+            RediffDayZeroKickoffOutcome.fired,
+            .noPinnedFile,
+            .noAnalysisAsset,
+            .cancelled
+        ].enumerated() {
+            let store = try await makeTestStore()
+            let episodeId = "ep-nodouble-\(index)"
+            try await store.noteRediffDayZeroKickoffClaim(
+                episodeId: episodeId, source: .backgroundDownload, at: 100
+            )
+            try await store.noteRediffDayZeroKickoff(
+                episodeId: episodeId, source: .backgroundDownload,
+                outcome: outcome, pollCount: 3, waitedSeconds: 30, at: 110
+            )
+            let record = try #require(
+                try await store.fetchRediffDayZeroKickoff(episodeId: episodeId)
+            )
+            #expect(record.kickoffCount == 1,
+                    "one claim + one settle is ONE kickoff, whatever the outcome (\(outcome.rawValue))")
+            #expect(record.kickoffCount - (record.firedCount + record.gaveUpCount) == 0,
+                    "a settled kickoff owes nothing (\(outcome.rawValue))")
+        }
+    }
+
+    @Test("""
+    F1 — the owed count never goes negative across a long mixed history, \
+    including repeated claim-write failures
+    """)
+    func owedCountNeverGoesNegativeOverAMixedHistory() async throws {
+        let store = try await makeTestStore()
+        // `C` = the claim lands; `F`/`G` = a settle. A settle with no outstanding
+        // claim is a kickoff whose claim write failed — the F1 case — and there
+        // are three here, two of them back to back. Pre-fix this history reaches
+        // -2 part-way through and ends at -1.
+        let script: [Character] = ["C", "F", "F", "C", "C", "G", "F", "G", "C"]
+        var stamp = 100.0
+        for step in script {
+            stamp += 10
+            switch step {
+            case "C":
+                try await store.noteRediffDayZeroKickoffClaim(
+                    episodeId: "ep-mixed", source: .backgroundDownload, at: stamp
+                )
+            case "F":
+                try await store.noteRediffDayZeroKickoff(
+                    episodeId: "ep-mixed", source: .backgroundDownload,
+                    outcome: .fired, pollCount: 1, waitedSeconds: 3, at: stamp
+                )
+            default:
+                try await store.noteRediffDayZeroKickoff(
+                    episodeId: "ep-mixed", source: .backgroundDownload,
+                    outcome: .cancelled, pollCount: 2, waitedSeconds: 8, at: stamp
+                )
+            }
+            let step = try #require(
+                try await store.fetchRediffDayZeroKickoff(episodeId: "ep-mixed")
+            )
+            #expect(step.kickoffCount >= step.firedCount + step.gaveUpCount, """
+                the owed count went NEGATIVE part-way through the history. The \
+                invariant has to hold at EVERY step, not only at the end, because a \
+                device pull reads whatever the row says at the moment it is taken.
+                """)
+        }
+
+        let record = try #require(
+            try await store.fetchRediffDayZeroKickoff(episodeId: "ep-mixed")
+        )
+        // 4 claims that landed + 3 settles whose claim write failed = 7 kickoffs,
+        // 5 of them settled.
+        #expect(record.kickoffCount == 7)
+        #expect(record.firedCount == 3)
+        #expect(record.gaveUpCount == 2)
+        #expect(record.kickoffCount - (record.firedCount + record.gaveUpCount) == 2)
+    }
+
     @Test("an unknown episode reads nil, not a zeroed row that would look like a healthy kickoff")
     func unknownEpisodeIsNil() async throws {
         let store = try await makeTestStore()

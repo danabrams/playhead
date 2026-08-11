@@ -143,6 +143,26 @@ actor RediffDayZeroKickoffCoordinator {
     ///
     /// Both callers already invoke this from a detached `Task`, so no download
     /// completion callback and no playback path waits on the write.
+    ///
+    /// ACCEPTED RESIDUE (playhead-kg8h R2). While parked on the claim the episode
+    /// is in `inFlight` but not yet in `pending`, so a claim that NEVER RETURNS
+    /// loses the kickoff and dedupes the episode out for the rest of the process.
+    /// Three reasons it is accepted rather than fixed:
+    ///
+    ///   * It is not new. `inFlight` has only ever been released by `settle`, at
+    ///     the far end of the wait, so a store wedged at `probe` or at
+    ///     `recordKickoff` held the episode out for exactly as long before this
+    ///     bead. The window moved earlier; it did not appear.
+    ///   * Nothing survives it anyway. The claim can only hang if `AnalysisStore`
+    ///     itself is wedged, and the same actor serves `probe` and
+    ///     `recordKickoff`, so every other episode parks too. A dedupe entry is
+    ///     not the loss in that scenario.
+    ///   * The obvious repair is worse. Appending to `pending` BEFORE the claim
+    ///     would let a drain already running pop and SETTLE the request while the
+    ///     claim is still in flight — and the claim would then land on a settled
+    ///     row, stamping it `requested` and adding a kickoff nobody owes. That
+    ///     reports a loss that did not happen, in a number whose whole job is
+    ///     reporting losses that did.
     func requestKickoff(_ request: RediffDayZeroKickoffRequest) async {
         guard !fired.contains(request.episodeId) else { return }
         guard !inFlight.contains(request.episodeId) else { return }
