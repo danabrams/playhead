@@ -114,7 +114,7 @@ enum CorrectionScope: Sendable, Equatable {
     /// fixpoint, because splitting on a colon and rejoining with a colon is
     /// lossless — which is exactly why nothing downstream ever noticed.
     ///
-    /// Ask `roundTripIsExact` before you trust a `*OnShow` payload, and see
+    /// Ask `fieldSplitIsUnambiguous` before you trust a `*OnShow` payload, and see
     /// `CorrectionEvent.authoritativeShowScopePayload(for:)` for the values
     /// that ARE trustworthy: the event carries `podcastId` and
     /// `targetRefs.sponsorEntity` / `targetRefs.domain` in their own columns.
@@ -184,7 +184,7 @@ enum CorrectionScope: Sendable, Equatable {
     /// string is a fixpoint under either direction) while breaking the one
     /// shape that parses correctly today — `recordVeto`'s colon-free asset-UUID
     /// podcastId — and trading an always-wrong rule for a sometimes-wrong one
-    /// is not a fix. Callers must gate on `roundTripIsExact` instead.
+    /// is not a fix. Callers must gate on `fieldSplitIsUnambiguous` instead.
     private static func ambiguousShowScopeSplit(
         _ remainder: String
     ) -> (podcastId: String, value: String)? {
@@ -195,27 +195,32 @@ enum CorrectionScope: Sendable, Equatable {
         )
     }
 
-    /// Whether `CorrectionScope.deserialize(serialized)` reproduces THIS value
-    /// exactly — i.e. whether the wire string admits exactly one parse.
+    /// Whether the serialized form determines WHERE EACH FIELD BEGINS AND ENDS
+    /// — i.e. whether `deserialize` recovers the fields or guesses at them.
     ///
-    /// Numerator/denominator, because the name of the quantity is the whole
-    /// point (playhead-fzpj): this is a property of the FIELD VALUES this
-    /// scope holds, not of the parser and not of the wire format. It answers
-    /// "if I write this out and read it back, do I get this same value?".
+    /// NAME THE QUANTITY (playhead-fzpj, and it is the whole point of this
+    /// bead). This measures the SPLIT, not the VALUES, and the two are not the
+    /// same question:
     ///
     /// * `.exactSpan` / `.exactTimeSpan` — always `true`. The serializer
     ///   appends exactly two shape-constrained trailing tokens and the parser
     ///   takes the last two, so a colon anywhere in the assetId is absorbed by
-    ///   the re-join. That is the house pattern, and it is a proof rather than
-    ///   a heuristic because the trailing token COUNT is fixed by the writer.
+    ///   the re-join. The trailing token COUNT is fixed by the writer, which
+    ///   makes this a proof rather than a heuristic.
+    ///   **It does NOT promise value equality.** `.exactTimeSpan` serializes
+    ///   through `%.3f`, so a sub-millisecond boundary is quantized on the way
+    ///   out and `deserialize(serialized) != self`. That is a documented
+    ///   precision contract (see `serialized`), not an ambiguity, and callers
+    ///   that need the exact boundary read `targetRefs.exactFeedbackSpan`.
     /// * The five `*OnShow` cases — `true` **only when the podcastId contains
     ///   no colon**, since the parser splits on the first colon of the
     ///   remainder. A feed-URL podcastId (every real one) makes this `false`,
-    ///   and the value that comes back names the URL's scheme.
+    ///   and the podcastId that comes back names the URL's SCHEME while the
+    ///   rest of the URL migrates into the value.
     ///
     /// A reader that binds a `*OnShow` payload without consulting this is
     /// reading `"https"` as a show identity.
-    var roundTripIsExact: Bool {
+    var fieldSplitIsUnambiguous: Bool {
         switch self {
         case .exactSpan, .exactTimeSpan:
             return true
@@ -382,7 +387,7 @@ extension CorrectionEvent {
     /// proof, not a heuristic, and it changes not one byte on disk.
     ///
     /// ALL-OR-NOTHING, deliberately. When the parse is exact
-    /// (`scope.roundTripIsExact`) the parsed pair is returned unchanged — that
+    /// (`scope.fieldSplitIsUnambiguous`) the parsed pair is returned unchanged — that
     /// is today's behaviour and it is correct for every colon-free podcastId,
     /// including `recordVeto`'s asset-UUID one. When it is NOT exact, BOTH
     /// halves must come from columns or this returns `nil`. Mixing an
@@ -422,7 +427,7 @@ extension CorrectionEvent {
             return nil
         }
 
-        if scope.roundTripIsExact {
+        if scope.fieldSplitIsUnambiguous {
             return parsed
         }
         guard let podcastId, !podcastId.isEmpty,

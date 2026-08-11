@@ -687,7 +687,7 @@ final class UserCorrectionStoreTests: XCTestCase {
                 """
                 sponsorOnShow(\(feedURL)) appears to round-trip. If this now \
                 passes, the parse rule changed — re-check every reader gated on \
-                roundTripIsExact, and re-check the four sibling cases.
+                fieldSplitIsUnambiguous, and re-check the four sibling cases.
                 """
             )
             guard case .sponsorOnShow(let parsedPodcastId, let parsedSponsor)? = back else {
@@ -715,7 +715,7 @@ final class UserCorrectionStoreTests: XCTestCase {
         }
     }
 
-    func testRoundTripIsExactIsFalseForEveryShowScopeWithAColonInThePodcastId() {
+    func testFieldSplitIsAmbiguousForEveryShowScopeWithAColonInThePodcastId() {
         let feedURL = "https://feeds.simplecast.com/dHoohVNH"
         let ambiguous: [CorrectionScope] = [
             .sponsorOnShow(podcastId: feedURL, sponsor: "acme"),
@@ -726,38 +726,61 @@ final class UserCorrectionStoreTests: XCTestCase {
         ]
         for scope in ambiguous {
             XCTAssertFalse(
-                scope.roundTripIsExact,
-                "\(scope.serialized) must report an inexact round-trip"
+                scope.fieldSplitIsUnambiguous,
+                "\(scope.serialized) must report an ambiguous field split"
             )
             XCTAssertNotEqual(
                 CorrectionScope.deserialize(scope.serialized), scope,
-                "roundTripIsExact == false must mean the round-trip actually fails"
+                "an ambiguous split must actually lose the fields, not merely be labelled so"
             )
         }
     }
 
-    func testRoundTripIsExactIsTrueWhenThePodcastIdCarriesNoColon() {
-        let exact: [CorrectionScope] = [
+    func testFieldSplitIsUnambiguousWhenThePodcastIdCarriesNoColon() {
+        let unambiguous: [CorrectionScope] = [
             .sponsorOnShow(podcastId: "pod-123", sponsor: "Squarespace: Build It"),
             .phraseOnShow(podcastId: "pod-456", phrase: "go to https://brand.com/promo"),
             .campaignOnShow(podcastId: "pod-789", campaign: "spring:sale:2026"),
             .domainOwnershipOnShow(podcastId: "pod-abc", domain: "nytimes.com"),
             .jingleOnShow(podcastId: "0C2FC22E-5F46-48D3-A53B-E1F702169771", jingleId: "j:7"),
             // Span scopes take their last two shape-constrained tokens, so a
-            // colon anywhere in the assetId is absorbed — always exact.
+            // colon anywhere in the assetId is absorbed by the re-join.
             .exactSpan(assetId: "asset:with:colons", ordinalRange: 10...25),
             .exactTimeSpan(assetId: "asset:with:colons", startTime: 1, endTime: 2),
         ]
-        for scope in exact {
+        for scope in unambiguous {
             XCTAssertTrue(
-                scope.roundTripIsExact,
-                "\(scope.serialized) must report an exact round-trip"
+                scope.fieldSplitIsUnambiguous,
+                "\(scope.serialized) must report an unambiguous field split"
             )
             XCTAssertEqual(
                 CorrectionScope.deserialize(scope.serialized), scope,
-                "roundTripIsExact == true must mean the round-trip actually holds"
+                "an unambiguous split must actually recover the fields"
             )
         }
+    }
+
+    /// The property measures the SPLIT, not value equality, and this is the
+    /// rail that stops the next reader conflating them. `.exactTimeSpan`
+    /// serializes through `%.3f`, so a sub-millisecond boundary is quantized
+    /// on the way out — an unambiguous split over a lossy encoding.
+    func testUnambiguousSplitDoesNotPromiseValueEqualityForExactTimeSpan() {
+        let scope = CorrectionScope.exactTimeSpan(
+            assetId: "asset-precision",
+            startTime: 10.00049,
+            endTime: 20.0
+        )
+        XCTAssertTrue(scope.fieldSplitIsUnambiguous)
+        XCTAssertNotEqual(
+            CorrectionScope.deserialize(scope.serialized), scope,
+            "%.3f quantizes the boundary; the split is exact, the VALUE is not"
+        )
+        guard case .exactTimeSpan(_, let start, _)? =
+                CorrectionScope.deserialize(scope.serialized) else {
+            XCTFail("expected exactTimeSpan")
+            return
+        }
+        XCTAssertEqual(start, 10.0, accuracy: 1e-9)
     }
 
     // MARK: - playhead-fzpj: authoritativeShowScopePayload
