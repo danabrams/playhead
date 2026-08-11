@@ -2515,9 +2515,37 @@ actor DownloadManager {
             logger.error(
                 "Background download for \(episodeId, privacy: .public) was created but not resumed: the background transfer daemon did not answer"
             )
+            abandonUnstartedTransfer(task: task, episodeId: episodeId)
+            deleteDownloadAttribution(episodeId: episodeId)
             return
         }
         logger.info("Queued background download for \(episodeId)")
+    }
+
+    /// playhead-nsjn: a transfer the daemon created but never started is
+    /// worse than no transfer at all. It is suspended, so no delegate
+    /// callback will ever fire for it, so nothing will ever release the
+    /// episode's in-flight slot — every later attempt for that episode is
+    /// refused for the life of the process. Release the slot here and ask
+    /// the daemon to drop the task.
+    ///
+    /// The cancel is deliberately NOT awaited: we only get here because the
+    /// daemon is already not answering, and making the caller wait a second
+    /// bound to clean up after the first one just doubles the stall it is
+    /// trying to escape. If the cancel does land, the delegate's terminal
+    /// callback drains the identity map on the normal path.
+    internal func abandonUnstartedTransfer(
+        task: URLSessionDownloadTask,
+        episodeId: String
+    ) {
+        bgInFlightEpisodes.remove(episodeId)
+        let io = sessionIO
+        Task.detached {
+            _ = await io.perform(
+                label: "cancel unstarted transfer for \(episodeId)",
+                running: { task.cancel() }
+            )
+        }
     }
 
     // MARK: - Cancel

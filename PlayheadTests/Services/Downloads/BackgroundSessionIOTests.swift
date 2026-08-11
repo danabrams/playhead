@@ -265,6 +265,42 @@ struct DownloadManagerDaemonUnavailableTests {
         )
     }
 
+    /// A task the daemon created but never started is SUSPENDED: no
+    /// delegate callback will ever fire for it, so nothing on the normal
+    /// path releases the episode's in-flight slot. Without this release the
+    /// bounded-wait fix would trade an indefinite hang for an indefinite
+    /// per-episode outage — every later attempt refused by the in-flight
+    /// guard for the life of the process.
+    ///
+    /// Uses a task from `URLSession.shared` on purpose: it is a plain task
+    /// with no `nsurlsessiond` registration, so the rail exercises the slot
+    /// bookkeeping without leaving background-transfer residue in the
+    /// simulator (the residue class that poisons the next run).
+    @Test("Abandoning an unstarted transfer releases the episode's in-flight slot")
+    func abandoningAnUnstartedTransferReleasesTheSlot() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let manager = DownloadManager(cacheDirectory: dir)
+        try await manager.bootstrap()
+
+        let episodeId = "nsjn-unstarted"
+        _ = await manager._registerBackgroundTransferForTesting(episodeId: episodeId)
+        #expect(
+            await manager._isBackgroundDownloadInFlightForTesting(episodeId: episodeId),
+            "the rail is vacuous unless the slot was actually taken first"
+        )
+
+        let orphan = URLSession.shared.downloadTask(
+            with: URL(string: "https://cdn.example.com/\(episodeId).mp3")!
+        )
+        await manager.abandonUnstartedTransfer(task: orphan, episodeId: episodeId)
+
+        #expect(
+            await manager._isBackgroundDownloadInFlightForTesting(episodeId: episodeId) == false
+        )
+    }
+
     /// The freshness gate's re-download branch runs THROUGH
     /// `backgroundDownload`, so it inherits the same stall. The blob is
     /// gone by design on that branch (the bytes were provably stale), and

@@ -564,6 +564,11 @@ extension DownloadManager {
             logger.error(
                 "resumeSuspendedTransfer: \(episodeId, privacy: .public) was handed to URLSession but not resumed — the background transfer daemon did not answer; blob retained"
             )
+            // A suspended task fires no delegate callback, so nothing would
+            // ever release the episode's in-flight slot and every later
+            // attempt — including the retry this outcome invites — would be
+            // refused for the life of the process.
+            abandonUnstartedTransfer(task: task, episodeId: episodeId)
             return .daemonUnavailable
         }
 
