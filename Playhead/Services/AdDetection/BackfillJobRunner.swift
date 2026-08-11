@@ -3100,6 +3100,129 @@ actor BackfillJobRunner {
     /// function is where a cursor's claim is CASHED — every segment ending at or
     /// below it is deleted from the attempt, so a bound that only ever spoke for
     /// a handed-over list deletes audio nobody read.
+    /// playhead-15d0: drop segments a DURABLE, REUSABLE coarse row already
+    /// screened, so a second background grant does not re-plan and re-infer
+    /// audio the first one banked.
+    ///
+    /// WHY THIS EXISTS, and it is not the same statement as
+    /// ``narrowedForResume``. That function cashes the CURSOR, which is the end
+    /// of the contiguous covered PREFIX — deliberately conservative, and
+    /// deliberately blind to every screened window above the first hole. The
+    /// rows themselves are not blind: `semantic_scan_results` records exactly
+    /// which windows were screened, and ``AnalysisStore/fetchCoverageSummariesByAssetIds(_:)``
+    /// already reads those same spans, under this same predicate, to decide
+    /// whether the episode counts as ad-scanned. Until this function existed
+    /// the planner was the one reader that did not consult them.
+    ///
+    /// **The measurement that produced it (2026-08-10 device pull,
+    /// `db-evening2`).** Asset 66D32039 has a transcript spanning 1.0–1919.0 s
+    /// and persisted, reusable `passA` rows covering 1.0–194.0 and 196.0–1919.0
+    /// — the whole transcribed extent, at the CURRENT transcript version. Its
+    /// `progressCursor` reads **194.46**, because the plan-list contiguity walk
+    /// stops at a 1.2 s pause in speech between two adjacent plans. Narrowing by
+    /// that cursor alone hands `planPassA` 1,723 s of the 1,918 s transcript
+    /// (89.8 %), of which **zero seconds is unscreened**. `planPassA` then spends
+    /// one `tokenCount` XPC round trip per candidate window over it, all of them
+    /// before the first `respond` and therefore before playhead-26od's
+    /// `onWindowsBanked` can make anything durable. On that pull the job died
+    /// there twice with `metadataStall-refused(peers=0)` — ``FMInferenceDeadline/metadata``
+    /// (30 s) is longer, on its own, than six of the eight background windows
+    /// iOS granted that evening (19, 35, 22, 26, 25, 13, 13, 13 s).
+    ///
+    /// **THE PREDICATE IS BORROWED, NOT INVENTED.** A row licenses a drop only
+    /// when it is
+    ///
+    ///   * `scanPass == `` ``SemanticScanResult/presenceScanPass`` — screening is
+    ///     what passA does; passB is asked WHERE the edges are inside a window
+    ///     passA already called `containsAd`, so a passB row is not evidence
+    ///     that its span was screened for PRESENCE;
+    ///   * ``SemanticScanResult/didExamineWindow`` — playhead-pz32's single
+    ///     definition of "we looked", which excludes refusals, guardrails,
+    ///     cancellations and the no-work sentinel; and
+    ///   * ``SemanticScanResult/isReusable(scanCohortJSON:transcriptVersion:)``
+    ///     — the scan cohort and the transcript version both match, so a grown
+    ///     transcript (which re-segments, and which this device does
+    ///     continuously) inherits no credit from the old windowing.
+    ///
+    /// Those are the same three conditions the coverage reader and the
+    /// suppression guard already apply. Re-deriving them here would be the
+    /// standing defect class — a value that names one thing read as though it
+    /// named another — so the call is to the existing definitions.
+    ///
+    /// **A SEGMENT MUST BE FULLY INSIDE ONE MERGED SCREENED SPAN.** Spans are
+    /// merged only where they OVERLAP OR TOUCH; a gap between two rows is never
+    /// bridged, however narrow, because bridging would claim audio nobody read.
+    /// A segment straddling a boundary is kept. Both directions of the
+    /// asymmetry are deliberate: keeping a screened segment costs one repeated
+    /// FM call, dropping an unscreened one strands that audio for the life of
+    /// the asset (playhead-pmp9's hole, entered through a different door).
+    ///
+    /// Returns `inputs` unchanged when nothing is dropped, so a first run is
+    /// byte-identical to the pre-15d0 path.
+    nonisolated static func narrowedForScreenedWindows(
+        _ inputs: AssetInputs,
+        screenedRows: [SemanticScanResult],
+        scanCohortJSON: String
+    ) -> AssetInputs {
+        let spans = screenedSpans(
+            rows: screenedRows,
+            scanCohortJSON: scanCohortJSON,
+            transcriptVersion: inputs.transcriptVersion
+        )
+        guard !spans.isEmpty else { return inputs }
+        let remaining = inputs.segments.filter { segment in
+            !spans.contains { $0.start <= segment.startTime && segment.endTime <= $0.end }
+        }
+        guard remaining.count != inputs.segments.count else { return inputs }
+        return AssetInputs(
+            analysisAssetId: inputs.analysisAssetId,
+            podcastId: inputs.podcastId,
+            segments: remaining,
+            evidenceCatalog: inputs.evidenceCatalog,
+            transcriptVersion: inputs.transcriptVersion,
+            plannerContext: inputs.plannerContext,
+            acousticBreaks: inputs.acousticBreaks
+        )
+    }
+
+    /// playhead-15d0: the merged, disjoint spans that reusable coarse rows
+    /// prove were screened. Ascending, non-overlapping, never bridged across a
+    /// gap. Empty when no row qualifies.
+    nonisolated static func screenedSpans(
+        rows: [SemanticScanResult],
+        scanCohortJSON: String,
+        transcriptVersion: String
+    ) -> [(start: Double, end: Double)] {
+        let qualifying = rows
+            .filter { row in
+                row.scanPass == SemanticScanResult.presenceScanPass
+                    && row.didExamineWindow
+                    && row.isReusable(
+                        scanCohortJSON: scanCohortJSON,
+                        transcriptVersion: transcriptVersion
+                    )
+                    // A zero-width or inverted window proves nothing about any
+                    // audio, and the coverage reader drops it for the same
+                    // reason (`guard endTime > startTime`).
+                    && row.windowEndTime > row.windowStartTime
+                    && row.windowStartTime.isFinite
+                    && row.windowEndTime.isFinite
+            }
+            .map { (start: $0.windowStartTime, end: $0.windowEndTime) }
+            .sorted { $0.start < $1.start }
+        var merged: [(start: Double, end: Double)] = []
+        for span in qualifying {
+            // `<=` merges spans that TOUCH as well as overlap; anything wider
+            // than touching is a gap and stays a gap.
+            if let last = merged.last, span.start <= last.end {
+                merged[merged.count - 1].end = max(last.end, span.end)
+            } else {
+                merged.append(span)
+            }
+        }
+        return merged
+    }
+
     private static func narrowedForResume(_ inputs: AssetInputs, cursor: EpisodeSeconds?) -> AssetInputs {
         guard let cursor, cursor.rawValue > 0 else { return inputs }
         let remaining = inputs.segments.filter { $0.endTime > cursor.rawValue }
@@ -3130,7 +3253,41 @@ actor BackfillJobRunner {
         // playhead-pmp9: intra-episode RESUME — continue from the honest cursor
         // a prior deferred run left, instead of re-windowing the whole episode.
         // No-op (byte-identical) on a first run with no cursor.
-        let inputs = Self.narrowedForResume(rootInputs, cursor: job.progressCursor?.lastProcessedUpperBoundSec)
+        //
+        // playhead-15d0: and then drop what the durable ROWS already screened
+        // above that cursor. The two narrowings compose in this order because
+        // they answer different questions and the cursor's is the cheaper one:
+        // it needs no store read, and on a first run it leaves the list
+        // untouched so `screenedRows` is empty and the second narrowing is a
+        // no-op too. See ``narrowedForScreenedWindows`` for why the cursor
+        // alone leaves ~90 % of an already-screened episode in the planner's
+        // input on the measured device asset.
+        //
+        // A FAILED READ DROPS NOTHING. `screenedRows` falls back to `[]`, which
+        // means the pass re-screens audio it did not have to — the same cost
+        // this bead removes, and the only safe direction: the alternative is
+        // deleting a segment on the strength of evidence we could not load.
+        let screenedRows: [SemanticScanResult]
+        do {
+            screenedRows = try await store.fetchSemanticScanResults(
+                analysisAssetId: job.analysisAssetId,
+                scanPass: SemanticScanResult.presenceScanPass
+            )
+        } catch {
+            logger.warning(
+                """
+                playhead-15d0: screened-window read failed for asset \
+                \(job.analysisAssetId, privacy: .public); the pass will re-screen \
+                covered audio: \(error.localizedDescription, privacy: .public)
+                """
+            )
+            screenedRows = []
+        }
+        let inputs = Self.narrowedForScreenedWindows(
+            Self.narrowedForResume(rootInputs, cursor: job.progressCursor?.lastProcessedUpperBoundSec),
+            screenedRows: screenedRows,
+            scanCohortJSON: scanCohortJSON
+        )
         var scanResultIds: [String] = []
         var evidenceEventIds: [String] = []
         var detectedAdLineRefs = Set<Int>()
