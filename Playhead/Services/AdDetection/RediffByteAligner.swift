@@ -766,14 +766,40 @@ enum RediffByteAligner {
     /// runs (non-monotonic). Partition the found runs into contiguous monotonic
     /// segments and UNION their divergent regions: walk the runs in A-order,
     /// keep an A-non-overlapping accepted set (a later run that A-overlaps an
-    /// already-kept run is dropped — the same conflict `chainRuns` resolves when
-    /// it drops a run), then emit the inter-run A-gaps (plus head/tail) as slots
-    /// EXACTLY as `align` does for a single chain. A segment BOUNDARY — where B
-    /// jumps backward because an ad's length differs between A and B — simply
-    /// appears as an inter-run gap whose B-width is ≤ 0 (a `removed_in_B` /
-    /// `replaced` divergence), which is precisely the rotated ad that made the
-    /// chain non-monotonic. The union of these gaps across segments is the
-    /// recovered ad set.
+    /// already-kept run is CLIPPED to its uncovered tail — see playhead-3zxd
+    /// below), then emit the inter-run A-gaps (plus head/tail) as slots EXACTLY
+    /// as `align` does for a single chain. A segment BOUNDARY — where B jumps
+    /// backward because an ad's length differs between A and B — simply appears
+    /// as an inter-run gap whose B-width is ≤ 0 (a `removed_in_B` / `replaced`
+    /// divergence), which is precisely the rotated ad that made the chain
+    /// non-monotonic. The union of these gaps across segments is the recovered
+    /// ad set.
+    ///
+    /// playhead-3zxd — WHY THE A-OVERLAPPER IS CLIPPED AND NOT DROPPED. It used
+    /// to be dropped whole, "so the gap arithmetic stays well-formed". The
+    /// arithmetic was fine; the accounting was not. A dropped run's A-span fell
+    /// straight through to `addGap` and was reported as DIVERGENT — an ad — even
+    /// though a run is, by definition, bytes found identically in BOTH copies.
+    /// The aligner was labelling audio it had just proven matched as the exact
+    /// opposite of what it is.
+    ///
+    /// It is not a corner case. A break the FRESH copy has and the played copy
+    /// lacks makes the run after the splice A-overlap the run before it by the
+    /// 4 shared bytes of the CBR frame header the earlier run's greedy
+    /// extension carries across — so the ENTIRE following content block was
+    /// dropped and shipped as one "ad". playhead-pyq7 measured it: 7 of 20
+    /// emitted slots were 100 % show, up to 469.99 s wide, with `maxSlotSeconds`
+    /// (480 s) the only thing standing between a phantom and a listener's tap.
+    ///
+    /// Clipping is sound at the byte level — `A[s..e) == B[t..t+e-s)` implies
+    /// `A[s+k..e) == B[t+k..t+e-s)` — so the retained tail is still a
+    /// byte-verified match. It is also what makes the invariant TRUE BY
+    /// CONSTRUCTION rather than by a filter: the accepted set's A-coverage
+    /// becomes the union of every found run's A-span, so the emitted gaps are
+    /// exactly the A-regions no run covers. And it costs no recall — it GAINS
+    /// some, because reinstating the boundary the drop erased splits pyq7's
+    /// worst shape (a real 30 s ad fused to 299.99 s of show) back into the real
+    /// 30 s ad.
     ///
     /// PRECISION (why segmenting cannot manufacture a spurious slot): every run
     /// is already ≥ `minRunBytes` (from `byteRuns`), so a segment cannot be
@@ -782,6 +808,10 @@ enum RediffByteAligner {
     /// floor over the segmented coverage; and the gate's `minAdSeconds` filter
     /// drops sub-ad gaps. B coordinates feed only the gap KIND and the flank
     /// seconds — the A-timeline slot edges are byte-exact off the aligned runs.
+    /// A clipped run can be short, and a short run's `runASeconds` lowers the
+    /// FLANK confidence of the gaps beside it — the conservative direction, and
+    /// in practice `mergedAndCapped` rejoins across it and keeps the OUTER
+    /// flanks anyway.
     static func segmentDivergentSlots(
         runs: [Run], pa: ParsedMP3, pb: ParsedMP3, bAudioBytes: Int
     ) -> SegmentRecovery {
@@ -791,16 +821,45 @@ enum RediffByteAligner {
             .sorted { ($0.element.aStart, $0.element.bStart, $0.offset)
                 < ($1.element.aStart, $1.element.bStart, $1.offset) }
             .map(\.element)
-        // A-ordered, A-non-overlapping accepted set. Dropping a later
-        // A-overlapper (the conflict `chainRuns` also resolves) keeps the gap
-        // arithmetic below well-formed (every A-gap ≥ 0).
+        // A-ordered, A-non-overlapping accepted set, built by CLIPPING an
+        // A-overlapping run to its uncovered tail — playhead-3zxd. Read the
+        // header note above for why dropping it was a defect and clipping is
+        // sound; what matters here is the post-condition it buys:
+        //
+        //   the accepted set's A-coverage == the UNION of every found run's
+        //   A-span
+        //
+        // which is what makes the inter-run gaps below exactly the A-regions no
+        // run covers. `globalAEnd` is the running MAXIMUM A-end (every branch
+        // either leaves it alone or raises it), so the region skipped between
+        // two accepted runs is genuinely run-free, not merely
+        // not-yet-visited — and the gap arithmetic stays well-formed (every
+        // A-gap ≥ 0) exactly as it did when the run was dropped.
         var accepted: [Run] = []
         var globalAEnd = -1
         var runsAOverlapping = 0
+        var overlapSecondsRecovered = 0.0
         for run in sorted {
-            if run.aStart < globalAEnd { runsAOverlapping += 1; continue }
-            accepted.append(run)
-            globalAEnd = run.aStart + run.bytes
+            let aEnd = run.aStart + run.bytes
+            // Wholly inside A-coverage already accepted: it adds no new
+            // A-region, and — unlike the clipped case — dropping it reports
+            // nothing as divergent, because an accepted run already covers its
+            // whole span. Not counted as an overlap: this bead's counter names
+            // the shape that produced a PHANTOM, and this shape cannot.
+            guard aEnd > globalAEnd else { continue }
+            if run.aStart < globalAEnd {
+                // CLIP, do not DROP. `A[s..e) == B[t..t+e-s)` implies
+                // `A[s+k..e) == B[t+k..t+e-s)`, so the tail is still a
+                // byte-verified match and its A-seconds are still matched audio.
+                let trim = globalAEnd - run.aStart
+                accepted.append(Run(aStart: globalAEnd, bStart: run.bStart + trim, bytes: run.bytes - trim))
+                runsAOverlapping += 1
+                overlapSecondsRecovered +=
+                    timeAt(pa, byteOffset: aEnd) - timeAt(pa, byteOffset: globalAEnd)
+            } else {
+                accepted.append(run)
+            }
+            globalAEnd = aEnd
         }
         let chainedBytes = accepted.reduce(0) { $0 + $1.bytes }
 
@@ -859,7 +918,7 @@ enum RediffByteAligner {
             chainedFractionB: fraction,
             runsChained: accepted.count,
             runsAOverlapping: runsAOverlapping,
-            overlapSecondsRecovered: 0
+            overlapSecondsRecovered: overlapSecondsRecovered
         )
     }
 

@@ -75,15 +75,32 @@ struct RediffSegmentRecoveryPhantomTests {
             in: TimeRange(start: start, end: end), runASpans: alignment.foundRunASpans)
     }
 
-    /// Every slot the byte gate would ACCEPT for this alignment, in both arms,
-    /// as `(label, start, end)` — pre-merge (the aligner's own emission) and
-    /// post-merge (what actually ships as a banner).
+    /// Every slot this alignment can SHIP, as `(label, start, end)` — pre-merge
+    /// (the aligner's own emission) and post-merge (what reaches a banner).
+    ///
+    /// `alignment.slots` is included ONLY when the chain is monotonic-clean, and
+    /// that exemption is a reachability fact, not a convenience. `chainRuns`
+    /// picks a max-bytes monotonic SUBSEQUENCE, so on a non-monotonic alignment
+    /// it too drops runs and their A-spans too fall into `slots` as gaps — the
+    /// same shape this bead fixes. Nothing consumes them: `alignment.slots` has
+    /// exactly one production reader, `gateAndDiffBytes`, and that read sits
+    /// below a `guard alignment.monotonicClean`, which returns
+    /// `.rejectedNonMonotonic` (flag off) or diverts to the SEGMENTED list (flag
+    /// on) before reaching it. `strictSlotsAreUnreachableWhenTheChainDropsRuns`
+    /// below pins that so the exemption cannot quietly become a hole.
+    ///
+    /// It is also why the fix is NOT applied to `chainRuns`: `align`'s strict
+    /// path is a byte-exact port of `scripts/l2f-mp3-forensics.py cmd_align`,
+    /// pinned by `RediffByteAlignerParityTests`, and a chain that dropped runs
+    /// is rejected wholesale by contract rather than trusted and repaired.
     private func emittedSlots(
         _ alignment: RediffByteAligner.Alignment,
         config: RediffSlotOwnership.Configuration = .default
     ) -> [(label: String, start: Double, end: Double)] {
         var out: [(String, Double, Double)] = []
-        for (arm, slots) in [("strict", alignment.slots), ("segmented", alignment.segmentedSlots)] {
+        var arms: [(String, [RediffByteAligner.Slot])] = [("segmented", alignment.segmentedSlots)]
+        if alignment.monotonicClean { arms.append(("strict", alignment.slots)) }
+        for (arm, slots) in arms {
             for slot in slots where slot.aSeconds >= config.minAdSeconds {
                 out.append(("\(arm)/pre-merge", slot.aStartSeconds, slot.aEndSeconds))
             }
@@ -347,7 +364,44 @@ struct RediffSegmentRecoveryPhantomTests {
         #expect(alignment.foundRunASpans.count == alignment.runsFound)
     }
 
-    // MARK: - 6. The probe itself
+    // MARK: - 6. The one exemption, pinned
+
+    @Test("the STRICT slot list is unreachable when the chain drops runs — the exemption is not a hole")
+    func strictSlotsAreUnreachableWhenTheChainDropsRuns() {
+        // `chainRuns` drops runs too, and their A-spans land in `alignment.slots`
+        // as gaps — the SAME shape. The invariant rail exempts that list on a
+        // non-monotonic alignment, which is only legitimate while nothing can
+        // ship it. Both gate arms are checked here, on a fixture that carries a
+        // strict-list phantom by construction, so if a future change ever routes
+        // a non-monotonic strict slot to a listener this test names it.
+        let pair = SegmentRecoveryFixture.build(
+            name: "3zxd/exemption/insertedInB",
+            contentFrames: Array(repeating: Self.content240, count: 2),
+            breaks: [.insertedInB(Self.ad30)]
+        )
+        let alignment = RediffByteAligner.align(aData: pair.aData, bData: pair.bData)
+        #expect(!alignment.monotonicClean, "control: this fixture must reach the exempt branch")
+        let strictPhantomSeconds = alignment.slots
+            .filter { $0.aSeconds >= RediffSlotOwnership.Configuration.default.minAdSeconds }
+            .reduce(0.0) { $0 + alignedSeconds($1.aStartSeconds, $1.aEndSeconds, alignment) }
+        #expect(strictPhantomSeconds > 1.0,
+                "control: the exempt list really does carry matched audio — got \(strictPhantomSeconds) s")
+
+        // Flag OFF: the whole fetch is rejected, so nothing is read.
+        #expect(RediffSlotOwnership.gateAndDiffBytes(alignment: alignment)
+                == .rejectedNonMonotonic(dropped: alignment.runsDroppedNonMonotonic))
+        // Flag ON: whatever is emitted comes from the SEGMENTED list, which the
+        // invariant covers — so nothing matched can ship either way.
+        if case .accepted(let acceptance) = RediffSlotOwnership.gateAndDiffBytes(
+            alignment: alignment, recoverNonMonotonicSegments: true
+        ) {
+            for slot in acceptance.playedSlots {
+                #expect(alignedSeconds(slot.startSeconds, slot.endSeconds, alignment) <= Self.epsilonSeconds)
+            }
+        }
+    }
+
+    // MARK: - 7. The probe itself
 
     @Test("alignedSeconds unions before it measures — overlapping runs are never double-counted")
     func alignedSecondsIsUnionAware() {

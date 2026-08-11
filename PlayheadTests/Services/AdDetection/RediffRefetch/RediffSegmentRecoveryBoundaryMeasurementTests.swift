@@ -2,6 +2,20 @@
 // playhead-pyq7 — THE MEASUREMENT. Are playhead-9s6q segment-recovered rediff
 // boundaries tight enough to auto-skip?
 //
+// STATUS (playhead-3zxd, 2026-08-11). This file was carried onto the 3zxd
+// branch verbatim from pyq7's 93232b52, because it is the specification of the
+// defect 3zxd fixes — the harness placed the gold, so it is the only thing that
+// can say what the recovery arm actually did. Three expectations PINNED the
+// broken behaviour and have been INVERTED in place, each keeping the pre-fix
+// number in its comment as the record: family A's single > 100 s phantom,
+// family B's 120–470 s accept / 540–720 s reject sweep against the 480 s cap,
+// and family D's one slot carrying a real 30 s ad plus 299.99 s of show. What
+// they measured is unchanged and still reported by `report()`; only the verdict
+// they assert moved. The suite is therefore now a REGRESSION RAIL as well as a
+// measurement: a return to the dropping accept reddens here and in
+// `RediffSegmentRecoveryPhantomTests`, from two independent directions (gold
+// overlap here, the gold-free aligned-seconds probe there).
+//
 // WHY SYNTHETIC AND NOT THE CORPUS. The corpus byte oracle
 // (`playhead-dogfood-diagnostics-tier-a-rediff-byte.json`) records
 // `monotonicClean` per episode and STRICT slots only — it predates 9s6q and its
@@ -432,20 +446,28 @@ struct RediffSegmentRecoveryBoundaryMeasurementTests {
             #expect((recovered?.totalShowEatenSeconds ?? 1) <= 1e-6)
         }
 
-        // MEASURED FACT — THE BLOCKER. An inserted-in-B break makes the run
-        // AFTER it A-overlap the run before it (the shared CBR frame header
-        // bleeds the earlier run 4 bytes past the splice), so the greedy
-        // A-order accept in `segmentDivergentSlots` DROPS the whole following
-        // run and reports its entire A-span as one divergent slot. There is no
-        // gold ad anywhere inside it.
+        // MEASURED FACT — THE BLOCKER, AND ITS REMOVAL (playhead-3zxd).
         //
-        // If this ever fails, the phantom class may have been fixed — re-run
-        // playhead-pyq7's measurement and re-decide the promotion rather than
-        // deleting the expectation.
+        // BEFORE: an inserted-in-B break makes the run AFTER it A-overlap the
+        // run before it (the shared CBR frame header bleeds the earlier run
+        // 4 bytes past the splice), so the greedy A-order accept in
+        // `segmentDivergentSlots` DROPPED the whole following run and reported
+        // its entire A-span as one divergent slot. `A/insertedInB30/x2` emitted
+        // exactly 1 phantom, > 100 s wide, with no gold ad anywhere inside it.
+        //
+        // AFTER: the A-overlapper is CLIPPED to its uncovered tail instead of
+        // dropped, so no run's A-span is ever reported as divergent and this
+        // family emits no phantom at all. The instruction in the original
+        // version of this note — "if this ever fails, re-run the measurement and
+        // re-decide the promotion rather than deleting the expectation" — is
+        // what happened; the expectation is INVERTED, not removed, so a
+        // regression to the dropping accept reddens here as well as in
+        // `RediffSegmentRecoveryPhantomTests`.
         let inserted = try? #require(byName["A/insertedInB30/x2"])
-        #expect(inserted?.phantomSlots.count == 1, "an inserted-in-B break emits a slot containing no gold ad")
-        #expect((inserted?.phantomSlots.first?.duration ?? 0) > 100,
-                "the phantom spans the whole content block between the breaks, not a slice of one")
+        #expect(inserted?.phantomSlots.isEmpty == true,
+                "no slot may contain zero gold ad seconds — got \(inserted?.phantomSlots.count ?? -1)")
+        #expect(inserted?.recoveredSlots.isEmpty == true,
+                "an inserted-in-B break leaves NO ad in the played copy, so nothing may be emitted")
     }
 
     /// FAMILY B — the duration cap is the only thing between a phantom slot and
@@ -488,16 +510,21 @@ struct RediffSegmentRecoveryBoundaryMeasurementTests {
         out.append("PYQ7 FAMILY B end")
         print(out.joined(separator: "\n"))
 
-        // MEASURED FACT — `maxSlotSeconds` (480 s) is the ONLY thing standing
-        // between this phantom and a skip, and it does not engage until the
-        // phantom is already eight minutes wide. Below the cap the slot ships;
-        // above it the whole fetch falls back to `.rejectedNonMonotonic`.
-        #expect(acceptedTails == [120.0, 240.0, 360.0, 420.0, 470.0],
-                "phantoms under the 480 s cap are ACCEPTED — got \(acceptedTails)")
-        #expect(rejectedTails == [540.0, 720.0],
-                "only phantoms over the cap are rejected — got \(rejectedTails)")
-        #expect(widest > 460 && widest < RediffSlotOwnership.Configuration.default.maxSlotSeconds,
-                "the widest shippable pure-show phantom measured \(widest) s")
+        // MEASURED FACT — BEFORE playhead-3zxd, `maxSlotSeconds` (480 s) was the
+        // ONLY thing standing between this phantom and a skip, and it did not
+        // engage until the phantom was already eight minutes wide: tails
+        // 120/240/360/420/470 s were ACCEPTED (100 % show, every second), and
+        // only 540/720 s were rejected. The boundary was exact.
+        //
+        // AFTER: the sweep is empty at every width. That is the point of fixing
+        // the CAUSE rather than tightening the cap — a cap bounds the damage at
+        // whatever number it is set to, and a longer content block walks
+        // straight under any such number. `widest` staying 0 is the assertion
+        // that no pure-show slot is emitted at all, not that it is emitted
+        // smaller.
+        #expect(widest == 0, "no pure-show phantom ships at ANY width — widest was \(widest) s")
+        #expect(rejectedTails.count + acceptedTails.count == 7,
+                "VACUITY: all seven widths must be exercised — got \(acceptedTails) + \(rejectedTails)")
     }
 
     /// FAMILY C — outer edges. A pre-roll starts at the episode start and a
@@ -569,18 +596,29 @@ struct RediffSegmentRecoveryBoundaryMeasurementTests {
         out.append("PYQ7 FAMILY D end")
         print(out.joined(separator: "\n"))
 
-        // MEASURED FACT — the worst shape for the promotion question, because
-        // here the phantom is NOT a separate slot the eye could catch: the
-        // dropped run's A-span is fused to a REAL 30 s ad, so ONE emitted slot
-        // carries a genuine ad and 300 s of show, with an inner start edge 300 s
-        // early. A slot like this is indistinguishable at the mint from the
-        // exact ones above unless the aligned-seconds test is applied.
+        // MEASURED FACT — the worst shape for the promotion question.
+        //
+        // BEFORE playhead-3zxd the phantom here was NOT a separate slot the eye
+        // could catch: the dropped run's A-span was fused to a REAL 30 s ad, so
+        // ONE emitted slot carried a genuine ad AND 299.99 s of show, with an
+        // inner start edge 300 s early — indistinguishable at the mint from the
+        // exact ones above unless the aligned-seconds test was applied.
+        //
+        // AFTER: still ONE slot, still overlapping the real ad, but it IS the
+        // real ad. Clipping the A-overlapper reinstates the boundary the drop
+        // had erased, so the fix is a recall GAIN here, not merely a rejection.
+        // The gold-free proxy is what the promotion argument rests on, so it is
+        // still asserted both directions: it may never under-report eaten show,
+        // and with nothing eaten it must itself read zero.
         let fused = try? #require(byName["D/inserted+removed"])
         #expect(fused?.recoveredSlots.count == 1)
         let slot = try? #require(fused?.recoveredSlots.first)
-        #expect(slot?.matchedGoldIndex != nil, "it DOES overlap a real ad — that is what makes it dangerous")
-        #expect((slot?.showEatenSeconds ?? 0) > 250, "and it eats \(slot?.showEatenSeconds ?? 0) s of show alongside it")
-        #expect((slot?.alignedSecondsInSlot ?? 0) >= (slot?.showEatenSeconds ?? 0) - 1e-6,
-                "the gold-free proxy sees it: aligned seconds inside the slot bound the eaten show")
+        #expect(slot?.matchedGoldIndex != nil, "it still finds the real ad")
+        #expect((slot?.showEatenSeconds ?? 1) <= 1e-6,
+                "it no longer eats show — got \(slot?.showEatenSeconds ?? -1) s (was 299.99 s)")
+        #expect((slot?.duration ?? 0) < 31.0,
+                "the slot is the 30 s ad, not the ad fused to a content block — got \(slot?.duration ?? -1) s")
+        #expect((slot?.alignedSecondsInSlot ?? 1) <= 1e-6,
+                "the gold-free proxy agrees: no byte-verified run intersects the emitted slot")
     }
 }
