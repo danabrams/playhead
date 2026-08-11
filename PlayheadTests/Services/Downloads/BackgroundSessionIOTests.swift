@@ -36,6 +36,14 @@ struct BackgroundSessionIOTests {
     /// this bead exists to remove, and a rail that reproduces it while
     /// testing for it is worse than no rail. Deliberately not a race: it is
     /// never what decides the outcome on correct code.
+    ///
+    /// Only safe where the thing it races is a DISPATCH timer armed in the
+    /// same breath as the body is enqueued — true of the two rails that use
+    /// it, where `perform` arms the deadline microseconds after submitting
+    /// the body, so 5s runs against 0.2s of reliable dispatch time. It is
+    /// NOT safe across a gap scheduled on the cooperative pool; see
+    /// `anAbandonedSubmissionNeverStartsItsBody`, which anchors its own
+    /// valve at arming for exactly that reason.
     private static func escapeHatch() -> DispatchTime { .now() + 5 }
 
     /// Every test gets its own queue. The instance-per-queue design is what
@@ -154,14 +162,41 @@ struct BackgroundSessionIOTests {
         let io = Self.makeIO(timeout: 0.2)
         let bodyRan = OSAllocatedUnfairLock<Bool>(initialState: false)
         let holdingTheQueue = OSAllocatedUnfairLock<Bool>(initialState: false)
+        let armed = OSAllocatedUnfairLock<Bool>(initialState: false)
         let release = DispatchSemaphore(value: 0)
 
         // Occupy the serial queue so the second submission cannot start.
         // The blocker holds it until released by hand, so how long it holds
         // is not a wall-clock bet.
+        //
+        // Its safety valve is anchored at ARMING, not at this line, and that
+        // distinction is the whole point. `Self.escapeHatch()` — a fixed 5s
+        // from body start — is measured against a gap that runs entirely on
+        // the COOPERATIVE pool: the poll below, and this test's own
+        // resumption after it. Under the full plan's load that gap is not
+        // small. Measured 2026-08-10 (closer run): this test reported
+        // 127.451s, the valve fired at 5s, the queue drained early, the
+        // starved submission found it EMPTY and ran — failing both
+        // expectations below with nothing whatever wrong in production.
+        //
+        // Anchored at arming, the valve only has to outlast the starved
+        // caller's own bound, and THAT clock is a dispatch timer armed
+        // synchronously by `perform` with no suspension point between it and
+        // the `armed` flag. So the margin is 5s against 0.2s of reliable
+        // dispatch time instead of 5s against unbounded pool scheduling.
+        // The absolute cap is the anti-wedge backstop: a broken deadline
+        // must still FAIL this rail rather than hang it.
         async let blocker: Int? = io.perform(label: "blocker") {
             holdingTheQueue.withLock { $0 = true }
-            _ = release.wait(timeout: Self.escapeHatch())
+            let hardStop = DispatchTime.now() + 120
+            var valve: DispatchTime?
+            while release.wait(timeout: .now() + 0.05) == .timedOut {
+                if valve == nil, armed.withLock({ $0 }) {
+                    valve = .now() + 5
+                }
+                if let valve, DispatchTime.now() > valve { break }
+                if DispatchTime.now() > hardStop { break }
+            }
             return 1
         }
         // POLL for the blocker to actually hold the queue. The earlier form
@@ -180,6 +215,11 @@ struct BackgroundSessionIOTests {
             "the rail is vacuous unless the blocker actually took the queue first"
         )
 
+        // Arm the valve. `perform` reaches `deadlineQueue.asyncAfter` with no
+        // suspension point after this line, so the valve's clock and the
+        // starved caller's own bound start together — which is exactly the
+        // property the fixed-offset form did not have.
+        armed.withLock { $0 = true }
         let starved = await io.perform(label: "starved") {
             bodyRan.withLock { $0 = true }
             return 2
