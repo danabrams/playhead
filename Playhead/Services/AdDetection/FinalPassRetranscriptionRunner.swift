@@ -492,8 +492,65 @@ actor FinalPassRetranscriptionRunner {
                     }
                 }
             } else {
+                // playhead-jzj0 review R1 — JOB IDENTITY IS THE SPAN, BUT THE
+                // jobId IS THE AdWindow ID, AND THE TWO CAN DISAGREE.
+                //
+                // `insertOrIgnoreFinalPassJob` is `INSERT OR IGNORE` against
+                // `final_pass_jobs(jobId TEXT PRIMARY KEY)`, and the jobId is
+                // derived from the canonical AdWindow's id — while the lookup
+                // three lines above keys on the canonical SPAN. An AdWindow's
+                // id is stable across a span change by design:
+                // `AdDetectionService.reconcileHotPathWindows` builds its
+                // `preservedWindow` with `id: existing.id` and
+                // `startTime/endTime` from THIS run (the `sameGeometry`
+                // branch exists precisely because the geometry may differ),
+                // and `AnalysisStore.updateAdWindowHotPathCandidate` writes
+                // the new bounds onto the same row.
+                //
+                // So after a window's span moves: the span lookup MISSES (new
+                // key), the INSERT is silently IGNORED (old jobId already
+                // present), and `newJob` — which says `.queued`, `retryCount 0`
+                // — describes a row that does not exist. Trusting it made
+                // `guard job.status != .complete` pass against a row that is
+                // `complete`, `markFinalPassJobRunning` a silent no-op (its
+                // IN-clause excludes `'complete'`), and the window re-decode +
+                // re-ASR on EVERY admitted sweep, for ever — with
+                // `onFinalPassRetranscribed` re-firing a full
+                // classifier+fusion+boundary revalidation each time. Deleting
+                // the `endTime > watermark` clause is what exposed this: the
+                // frontier used to sit at EOF and suppress the whole path.
+                // That is the same unbounded-churn shape this bead is about,
+                // arrived at from the other side.
+                //
+                // Two steps close it:
+                //   1. If a row already occupies the natural jobId under a
+                //      DIFFERENT canonical span, qualify the id with the span
+                //      so the new span gets its own row. Deterministic — the
+                //      same (window id, span) always yields the same id, so a
+                //      re-enqueue after a crash is still idempotent — and the
+                //      `fpj-<asset>-<adWindowId>` prefix is preserved, so
+                //      jobId-keyed diagnostics still resolve. The old span's
+                //      completed row is left intact; it is real history.
+                //   2. Read back whatever row the insert actually left behind
+                //      and drive the drain off THAT, never off the local
+                //      struct. This also covers the case where the span
+                //      lookup above threw (it is `try?`) while a row for the
+                //      span existed all along.
+                let naturalJobId = "fpj-\(input.analysisAssetId)-\(group.canonicalWindow.id)"
+                let clash = (try? await store.fetchFinalPassJob(byId: naturalJobId)) ?? nil
+                let resolvedJobId: String
+                if let clash,
+                   AnalysisStore.canonicalSpanKey(
+                       start: clash.windowStartTime,
+                       end: clash.windowEndTime
+                   ) != group.canonicalSpanKey {
+                    resolvedJobId = "\(naturalJobId)@\(group.canonicalSpanKey)"
+                    logger.info("Final-pass: jobId \(naturalJobId, privacy: .public) is held by span [\(clash.windowStartTime, privacy: .public)..\(clash.windowEndTime, privacy: .public)]; minting span-qualified id for [\(group.canonicalWindow.startTime, privacy: .public)..\(group.canonicalWindow.endTime, privacy: .public)]")
+                } else {
+                    resolvedJobId = naturalJobId
+                }
                 let newJob = FinalPassJob(
-                    jobId: "fpj-\(input.analysisAssetId)-\(group.canonicalWindow.id)",
+                    jobId: resolvedJobId,
                     analysisAssetId: input.analysisAssetId,
                     podcastId: input.podcastId,
                     adWindowId: group.canonicalWindow.id,
@@ -525,7 +582,10 @@ actor FinalPassRetranscriptionRunner {
                         logger.warning("Final-pass: failed to record alias \(aliasId, privacy: .public) → \(newJob.jobId, privacy: .public): \(error.localizedDescription, privacy: .public)")
                     }
                 }
-                job = newJob
+                // Step 2: the persisted row, not the local struct. On the
+                // happy path these are identical; when they are not, the
+                // table is the authority on status and retryCount.
+                job = ((try? await store.fetchFinalPassJob(byId: newJob.jobId)) ?? nil) ?? newJob
             }
             // Two distinct canonical groups CAN resolve to the same
             // existing jobId in pathological cases (e.g. an upstream

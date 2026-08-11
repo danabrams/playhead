@@ -467,4 +467,124 @@ struct FinalPassRetranscriptionRunnerCanonicalDedupeTests {
         let span24 = try #require(spans.first { $0.canonicalSpanKey == "24.000-38.160" })
         #expect(span24.adWindowIds.sorted() == ["b-1", "b-2"])
     }
+
+    // MARK: - playhead-jzj0 review R1: jobId is the AdWindow id, identity is the span
+
+    @Test("an AdWindow whose span moves under a stable id converges instead of re-ASRing every launch")
+    func spanShiftUnderStableIdConverges() async throws {
+        // The AdWindow id is stable across a span change BY DESIGN:
+        // `AdDetectionService.reconcileHotPathWindows` reuses
+        // `existing.id` while taking `startTime`/`endTime` from the
+        // fresh run, and `AnalysisStore.updateAdWindowHotPathCandidate`
+        // writes the new bounds onto that same row.
+        //
+        // The final-pass job's IDENTITY is the canonical span, but its
+        // jobId is derived from the AdWindow id. After a shift the span
+        // lookup misses (new key) while `INSERT OR IGNORE` is silently
+        // ignored (old jobId) — so an implementation that trusts the
+        // locally-constructed `FinalPassJob` sees `.queued` for a row
+        // that is `complete`, re-decodes and re-transcribes the window,
+        // and does it again on EVERY subsequent launch because nothing
+        // it writes changes the outcome.
+        //
+        // Before playhead-jzj0 the `endTime > watermark` clause hid this
+        // whenever the frontier had passed the window — which is the
+        // normal state. Removing that clause is what exposes it, so the
+        // convergence pin belongs to this bead.
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        try await store.insertAdWindow(
+            makeAdWindow(
+                id: "w-1",
+                analysisAssetId: "asset-fp",
+                startTime: 100.0,
+                endTime: 160.0
+            )
+        )
+
+        let audio = StubAnalysisAudioProvider()
+        audio.shardsToReturn = [
+            AnalysisShard(id: 0, episodeID: "ep-asset-fp", startTime: 100.0, duration: 80.0, samples: [])
+        ]
+        let runner = makeRunner(store: store, audio: audio)
+        let input = makeInput()
+
+        // Drain 1 — the original span.
+        let first = try await runner.runFinalPassBackfill(for: input)
+        #expect(first.reTranscribedWindowIds == ["w-1"])
+        #expect(audio.decodeCallCount == 1)
+
+        // The detector refines the boundary: SAME row id, wider span.
+        let widened = makeAdWindow(
+            id: "w-1",
+            analysisAssetId: "asset-fp",
+            startTime: 100.0,
+            endTime: 175.0
+        )
+        try await store.updateAdWindowHotPathCandidate(widened)
+
+        // Drain 2 — the new span is genuinely new audio, so it SHOULD
+        // run exactly once. (An implementation that reads the persisted
+        // row but never disambiguates the jobId would drop it here and
+        // silently never transcribe [160, 175] — the permanent-exclusion
+        // class this bead closed, arrived at from the other side.)
+        let second = try await runner.runFinalPassBackfill(for: input)
+        #expect(second.reTranscribedWindowIds == ["w-1"],
+                "the widened span is new audio and must get a final pass")
+        #expect(audio.decodeCallCount == 2)
+
+        // Both spans must now hold their own `complete` row — the old
+        // span's completed work is real history and is not overwritten.
+        let spans = try await store.canonicalCompleteFinalPassSpans(forAsset: "asset-fp")
+        #expect(spans.map(\.canonicalSpanKey).sorted()
+                == ["100.000-160.000", "100.000-175.000"],
+                "got \(spans.map(\.canonicalSpanKey).sorted())")
+
+        // Drain 3 — THE PIN. Nothing changed, so nothing may run. A
+        // runner that trusts the local struct decodes and re-ASRs here,
+        // and on every launch after it, for ever.
+        let third = try await runner.runFinalPassBackfill(for: input)
+        #expect(third.reTranscribedWindowIds.isEmpty,
+                "a converged asset must be a no-op; got \(third.reTranscribedWindowIds)")
+        #expect(third.admittedJobIds.isEmpty)
+        #expect(audio.decodeCallCount == 2,
+                "no audio decode may run for a converged asset; decodeCallCount=\(audio.decodeCallCount)")
+    }
+
+    @Test("a span-shifted jobId collision does not resurrect a complete row as queued")
+    func spanShiftDoesNotMisreportPersistedStatus() async throws {
+        // Narrower pin on the same defect, stated in terms of the row
+        // rather than the drain: after the shift, the ORIGINAL row must
+        // still read `complete` (its jobId was never re-inserted) and
+        // the new span must occupy a DIFFERENT jobId that still carries
+        // the `fpj-<asset>-<adWindowId>` prefix diagnostics key off.
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        try await store.insertAdWindow(
+            makeAdWindow(id: "w-1", analysisAssetId: "asset-fp", startTime: 100.0, endTime: 160.0)
+        )
+        let audio = StubAnalysisAudioProvider()
+        audio.shardsToReturn = [
+            AnalysisShard(id: 0, episodeID: "ep-asset-fp", startTime: 100.0, duration: 80.0, samples: [])
+        ]
+        let runner = makeRunner(store: store, audio: audio)
+        _ = try await runner.runFinalPassBackfill(for: makeInput())
+
+        try await store.updateAdWindowHotPathCandidate(
+            makeAdWindow(id: "w-1", analysisAssetId: "asset-fp", startTime: 100.0, endTime: 175.0)
+        )
+        _ = try await runner.runFinalPassBackfill(for: makeInput())
+
+        let rows = try await store.fetchFinalPassJobs(forAsset: "asset-fp")
+        #expect(rows.count == 2, "one row per canonical span; got \(rows.map(\.jobId))")
+        let original = try #require(rows.first { $0.jobId == "fpj-asset-fp-w-1" })
+        #expect(original.status == .complete)
+        #expect(original.windowEndTime == 160.0,
+                "the original row's span must not be rewritten under it")
+        let shifted = try #require(rows.first { $0.jobId != "fpj-asset-fp-w-1" })
+        #expect(shifted.jobId.hasPrefix("fpj-asset-fp-w-1"),
+                "the span-qualified id keeps the jobId prefix diagnostics resolve on; got \(shifted.jobId)")
+        #expect(shifted.windowEndTime == 175.0)
+        #expect(shifted.status == .complete)
+    }
 }
