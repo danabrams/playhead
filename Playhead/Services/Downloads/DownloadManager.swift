@@ -2497,7 +2497,12 @@ actor DownloadManager {
             // reservation and the attribution sidecar — otherwise the
             // episode is wedged "in flight" for the life of the process and
             // a stale sidecar outlives the transfer it describes.
-            bgInFlightEpisodes.remove(episodeId)
+            //
+            // playhead-7l6n: the reservation above and any admission made
+            // DURING the suspension are the same element of a per-episode
+            // set, so releasing it unconditionally would also release a
+            // transfer this call never owned.
+            releaseInFlightReservationIfUnclaimed(episodeId: episodeId)
             deleteDownloadAttribution(episodeId: episodeId)
             logger.error(
                 "Background download for \(episodeId, privacy: .public) NOT started: the background transfer daemon did not answer"
@@ -2564,6 +2569,10 @@ actor DownloadManager {
     /// sight. Retiring the identity also makes a late cancel callback for
     /// the dead task a no-op instead of a spurious failure for whatever
     /// transfer holds the episode by then.
+    ///
+    /// playhead-7l6n: the in-flight slot is released CONDITIONALLY. This
+    /// method retires exactly one identity, so it is not entitled to speak
+    /// for the episode — see `releaseInFlightReservationIfUnclaimed`.
     internal func abandonUnstartedTransfer(
         task: URLSessionDownloadTask,
         session: URLSession,
@@ -2572,7 +2581,7 @@ actor DownloadManager {
         let identity = backgroundTransferIdentity(task: task, session: session)
         retiredBackgroundTransfers.insert(identity)
         activeBackgroundTransfers.removeValue(forKey: identity)
-        bgInFlightEpisodes.remove(episodeId)
+        releaseInFlightReservationIfUnclaimed(episodeId: episodeId)
         let io = sessionIO
         Task.detached {
             _ = await io.perform(
@@ -2766,9 +2775,33 @@ actor DownloadManager {
             activeBackgroundTransfers.removeValue(forKey: identity)
             retiredBackgroundTransfers.remove(identity)
         }
-        if !activeBackgroundTransfers.values.contains(episodeId) {
-            bgInFlightEpisodes.remove(episodeId)
+        releaseInFlightReservationIfUnclaimed(episodeId: episodeId)
+    }
+
+    /// playhead-7l6n: releases the episode's in-flight reservation only when
+    /// no admitted identity still names it.
+    ///
+    /// `bgInFlightEpisodes` is keyed by EPISODE, not by transfer, and it is
+    /// read for two different purposes: `backgroundDownload`'s idempotence
+    /// guard, and eviction protection (`evictIfNeeded` both builds its
+    /// known-episode map from it and skips any episode it contains). More
+    /// than one identity can legitimately name the same episode at once —
+    /// `handleBackgroundDownloadComplete` admits a task reattached from a
+    /// prior process with no in-flight guard at all, and can do so while
+    /// `backgroundDownload` or `resumeSuspendedTransfer` is suspended inside
+    /// a `sessionIO` call. A caller that retired ONE identity therefore does
+    /// not know the episode is free; removing it anyway strips the other
+    /// transfer's eviction protection while its completion is still running.
+    ///
+    /// `retireBackgroundTransfers` is the one place an unconditional removal
+    /// is correct, and the difference is exactly this: it drains EVERY
+    /// identity naming the episode first, so by the time it clears the set
+    /// there is provably no other claimant. Do not copy its shape here.
+    private func releaseInFlightReservationIfUnclaimed(episodeId: String) {
+        guard !activeBackgroundTransfers.values.contains(episodeId) else {
+            return
         }
+        bgInFlightEpisodes.remove(episodeId)
     }
 
     private func handleBackgroundDownloadFailed(

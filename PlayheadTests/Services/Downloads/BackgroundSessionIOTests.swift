@@ -285,23 +285,88 @@ struct DownloadManagerDaemonUnavailableTests {
         try await manager.bootstrap()
 
         let episodeId = "nsjn-unstarted"
-        _ = await manager._registerBackgroundTransferForTesting(episodeId: episodeId)
+        let session = URLSession.shared
+        let orphan = session.downloadTask(
+            with: URL(string: "https://cdn.example.com/\(episodeId).mp3")!
+        )
+        // playhead-7l6n: register the identity that will actually be
+        // abandoned. Registering some OTHER identity and then abandoning
+        // this one would leave a live claimant behind, and asserting the
+        // slot is released in THAT state pins the over-release as correct.
+        _ = await manager._registerBackgroundTransferForTesting(
+            episodeId: episodeId,
+            identity: BackgroundTransferIdentity(
+                sessionIdentifier: session.configuration.identifier ?? "",
+                taskIdentifier: orphan.taskIdentifier
+            )
+        )
         #expect(
             await manager._isBackgroundDownloadInFlightForTesting(episodeId: episodeId),
             "the rail is vacuous unless the slot was actually taken first"
         )
 
-        let orphan = URLSession.shared.downloadTask(
-            with: URL(string: "https://cdn.example.com/\(episodeId).mp3")!
-        )
         await manager.abandonUnstartedTransfer(
             task: orphan,
-            session: URLSession.shared,
+            session: session,
             episodeId: episodeId
         )
 
         #expect(
             await manager._isBackgroundDownloadInFlightForTesting(episodeId: episodeId) == false
+        )
+    }
+
+    /// playhead-7l6n: the counterpart to the rail above — the slot must be
+    /// released when this transfer was the last claimant, and NOT released
+    /// when it was not.
+    ///
+    /// The second identity models `handleBackgroundDownloadComplete`, which
+    /// admits a task reattached from a prior process with no in-flight guard
+    /// at all and can do so while `backgroundDownload` is suspended inside a
+    /// `sessionIO` call. `bgInFlightEpisodes` is also the eviction-protection
+    /// set, so an over-release there exposes the reattached transfer's
+    /// artifact to eviction while its completion is still running.
+    @Test("Abandoning one transfer does not release a slot another live transfer still holds")
+    func abandonKeepsTheSlotAnotherLiveTransferStillHolds() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let manager = DownloadManager(cacheDirectory: dir)
+        try await manager.bootstrap()
+
+        let episodeId = "nsjn-two-claimants"
+        let session = URLSession.shared
+        let orphan = session.downloadTask(
+            with: URL(string: "https://cdn.example.com/\(episodeId).mp3")!
+        )
+        _ = await manager._registerBackgroundTransferForTesting(
+            episodeId: episodeId,
+            identity: BackgroundTransferIdentity(
+                sessionIdentifier: session.configuration.identifier ?? "",
+                taskIdentifier: orphan.taskIdentifier
+            )
+        )
+        let reattached = await manager._registerBackgroundTransferForTesting(
+            episodeId: episodeId
+        )
+
+        await manager.abandonUnstartedTransfer(
+            task: orphan,
+            session: session,
+            episodeId: episodeId
+        )
+        #expect(
+            await manager._isBackgroundDownloadInFlightForTesting(episodeId: episodeId),
+            "the reattached transfer still names this episode — abandoning a DIFFERENT identity must not strip its eviction protection"
+        )
+
+        await manager._finishBackgroundTransferForTesting(
+            identity: reattached,
+            episodeId: episodeId
+        )
+        #expect(
+            await manager._isBackgroundDownloadInFlightForTesting(episodeId: episodeId) == false,
+            "and once the last claimant completes, the slot is released — the retain must be a deferral, not a leak"
         )
     }
 
