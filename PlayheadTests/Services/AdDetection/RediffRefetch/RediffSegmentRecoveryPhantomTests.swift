@@ -35,6 +35,39 @@
 // recall goes UP, not down: the pyq7 worst shape (a real 30 s ad fused to
 // 299.99 s of show) resolves into the real 30 s ad on its own.
 //
+// MEASURED, same harness and same gold as pyq7, 31 synthetic pairs:
+//
+//                                   before        after
+//   Σ showEatenSeconds            2449.9965 s   0.0000 s
+//   pairs eating any show           8 of 31       0 of 31
+//   emitted slots with NO gold ad   7             0
+//   phantom widths (s)              120.01, 240.01, 240.01, 299.99,
+//                                   359.99, 420.00, 469.99   -> none
+//   Σ adLeftSeconds                 —             ≤ 0.0008 s (the 4-byte
+//                                                 header bleed, safe direction)
+//
+// AND THE SEGMENTED COVERAGE RISES, because no run is discarded any more —
+// `segmentedChainedFractionB`, per pair:
+//
+//   A/insertedInB30/x2      0.6154 -> 0.9231   (segChained 2 -> 3)
+//   B/insertedInB/tail470s  0.6429 -> 0.9786   (segChained 1 -> 2)
+//   D/inserted+removed      0.6452 -> 0.9678   (segChained 2 -> 3)
+//   A/removedInB30/x3       1.0000 -> 1.0000   (no A-overlap; UNCHANGED)
+//
+// That last row is here because the first draft of this note cited it as
+// "0.5000 -> 1.0000". 0.5000 is `chainedFractionB` — the STRICT chain's
+// fraction, which this fix does not touch — and reading it as the segmented one
+// is the exact confusion this codebase keeps paying for. The segmented figure
+// for that pair was already 1.0000 before the fix.
+//
+// The rise is honest (each A-region is counted once, and it is genuinely
+// aligned) but it is a real behaviour change beyond the phantom: the gate's
+// re-encode floor is `segmentedChainedFractionB >= minAlignedFractionB` (0.5),
+// so a fetch sitting just under 0.5 before could now clear it and be accepted
+// where it was previously discarded as a re-encode. No pair here crosses that
+// line — the lowest segmented fraction in the set is 0.6154 before and after —
+// so the effect is unobserved rather than shown to be absent.
+//
 // FRAGMENT MERGE IS A SEPARATE, BOUNDED EFFECT — read the numbers with it in
 // mind. `RediffSlotOwnership.mergedAndCapped` joins two slots separated by
 // ≤ `fragmentMergeGapSeconds` (3 s), and the thing separating two gaps is an

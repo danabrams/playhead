@@ -801,6 +801,16 @@ enum RediffByteAligner {
     /// worst shape (a real 30 s ad fused to 299.99 s of show) back into the real
     /// 30 s ad.
     ///
+    /// ONE KNOCK-ON WORTH KNOWING. Because no run is discarded any more, the
+    /// returned `chainedFractionB` (Σ accepted run bytes / B audio bytes) RISES —
+    /// measured 0.6154 → 0.9231, 0.6429 → 0.9786, 0.6452 → 0.9678 on the pyq7
+    /// pairs that had an A-overlap. The number is more honest (each A-region is
+    /// counted exactly once, and it really is aligned), but the gate compares it
+    /// to `minAlignedFractionB` (0.5), so a fetch sitting just under the
+    /// re-encode floor before could now clear it. No measured pair crosses that
+    /// line — the lowest segmented fraction in the set is 0.6154 both before and
+    /// after — so the effect is unobserved, not shown to be absent.
+    ///
     /// PRECISION (why segmenting cannot manufacture a spurious slot): every run
     /// is already ≥ `minRunBytes` (from `byteRuns`), so a segment cannot be
     /// built from sub-min-run noise; the returned `chainedFractionB`
