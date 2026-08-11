@@ -28,6 +28,16 @@ import os
 @Suite("BackgroundSessionIO (playhead-nsjn)")
 struct BackgroundSessionIOTests {
 
+    /// A SAFETY VALVE, not a bound any verdict below depends on. Every
+    /// healthy path signals its semaphore explicitly, so this expires only
+    /// when the deadline machinery is itself broken — and it must, because
+    /// a body held by an unbounded `wait()` would make a BROKEN deadline
+    /// WEDGE the suite instead of failing it. That is precisely the defect
+    /// this bead exists to remove, and a rail that reproduces it while
+    /// testing for it is worse than no rail. Deliberately not a race: it is
+    /// never what decides the outcome on correct code.
+    private static func escapeHatch() -> DispatchTime { .now() + 5 }
+
     /// Every test gets its own queue. The instance-per-queue design is what
     /// lets a rail below block a queue for a full second without stalling
     /// `.shared` — or a sibling test — in the same process.
@@ -88,7 +98,7 @@ struct BackgroundSessionIOTests {
         // released, which makes "outlives its bound" true by construction.
         let release = DispatchSemaphore(value: 0)
         let result = await io.perform(label: "stalled") {
-            release.wait()
+            _ = release.wait(timeout: Self.escapeHatch())
             return 7
         }
         #expect(result == nil)
@@ -118,7 +128,7 @@ struct BackgroundSessionIOTests {
             label: "late",
             discardingLateResult: { value in discarded.withLock { $0.append(value) } },
             running: {
-                release.wait()
+                _ = release.wait(timeout: Self.escapeHatch())
                 return 7
             }
         )
@@ -151,7 +161,7 @@ struct BackgroundSessionIOTests {
         // is not a wall-clock bet.
         async let blocker: Int? = io.perform(label: "blocker") {
             holdingTheQueue.withLock { $0 = true }
-            release.wait()
+            _ = release.wait(timeout: Self.escapeHatch())
             return 1
         }
         // POLL for the blocker to actually hold the queue. The earlier form
