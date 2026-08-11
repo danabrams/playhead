@@ -25,10 +25,16 @@
 //
 //  • State tracking — the `analysis_assets.finalPassCoverageEndTime`
 //    column (added in this bead) carries the maximum `endTime` of any
-//    AdWindow that has been re-transcribed. The runner reads it to
-//    short-circuit fully-covered assets and to skip individual windows
-//    whose end is already covered. This is intentionally watermark-style
-//    rather than per-row bitmap: simpler, monotonic, and resume-safe.
+//    AdWindow that has been re-transcribed. It is still WRITTEN, and it
+//    still feeds `AnalysisCoverageSummary`'s final-pass provenance
+//    fallback, but playhead-jzj0 removed it from the eligibility path.
+//    It measures how far forward this runner has reached; it never
+//    measured which spans were finished, and reading it as the latter
+//    made every window minted behind the frontier permanently
+//    unreachable — including a user's own manual mark. Eligibility now
+//    keys on the per-window record that already existed:
+//    `final_pass_jobs`, queried through
+//    `AnalysisStore.canonicalCompleteFinalPassSpans(forAsset:)`.
 //
 //  • Job table — sibling table `final_pass_jobs`. We chose a sibling
 //    rather than extending `backfill_jobs` with a new phase value because
@@ -60,11 +66,13 @@
 //    final model over the entire episode would burn battery for no
 //    classifier gain.
 //
-//  • Idempotency — the runner consults the watermark before scheduling
-//    work for a window AND consults `transcript_chunks` to confirm there
-//    are no already-persisted `pass='final'` rows that overlap. A second
-//    invocation against an asset whose runner-watermark equals the
-//    maximum confidence-cleared AdWindow endTime is a guaranteed no-op.
+//  • Idempotency — the runner consults the completed-span set before
+//    scheduling work for a window AND consults `transcript_chunks` to
+//    confirm there are no already-persisted `pass='final'` rows that
+//    overlap. A second invocation against an asset every one of whose
+//    confidence-cleared AdWindows has a `complete` job is a guaranteed
+//    no-op. Unlike the pre-jzj0 watermark form, that guarantee no longer
+//    depends on the order candidates arrived in.
 //
 //  • Wiring — composed in `PlayheadRuntime` alongside the existing
 //    `BackfillJobRunner`. `AnalysisJobReconciler.reconcile()` enqueues
@@ -235,10 +243,11 @@ actor FinalPassRetranscriptionRunner {
     ///   1. Top-level admission gate: charge + nominal thermal + LPM=false +
     ///      QualityProfile permits work. Bails with a populated
     ///      `topLevelDeferReason` on the first failed gate.
-    ///   2. Loads the asset's persisted AdWindows and the runner
-    ///      watermark.
+    ///   2. Loads the asset's persisted AdWindows and the set of canonical
+    ///      spans that already have a `complete` final-pass job.
     ///   3. Filters to windows where `confidence >= confidenceFloor` and
-    ///      `endTime > finalPassCoverageEndTime` (idempotent skip).
+    ///      whose own canonical span is not in that completed set
+    ///      (idempotent skip — playhead-jzj0).
     ///   4. Per surviving window: re-checks the gates, calls
     ///      `loadFinalModel()` (idempotent via `activeModelRole`), slices
     ///      the relevant audio shards out of the cached decoded set,
@@ -284,6 +293,52 @@ actor FinalPassRetranscriptionRunner {
             throw error
         }
 
+        // playhead-jzj0 — the per-window "already re-transcribed" record.
+        //
+        // This is what the watermark used to stand in for, and the reason
+        // the substitution was wrong: `finalPassCoverageEndTime` is the
+        // MAX END of any span this runner has drained. Its numerator is
+        // "the furthest point reached"; its denominator is nothing at all.
+        // It is a forward-progress marker, and the old filter read it as a
+        // COMPLETION marker — "everything at or before this point is done".
+        // Those two readings agree only while candidates arrive in
+        // increasing order of endTime, which is not a property this system
+        // has: fusion backfill, semantic sweep and user marks all mint
+        // windows hours after the launch batch, at arbitrary positions.
+        //
+        // `canonicalCompleteFinalPassSpans` answers the question the filter
+        // is actually asking — numerator: canonical spans with a `complete`
+        // `final_pass_jobs` row; denominator: this asset's eligible spans.
+        // It is monotone (the set only grows), durable, and indifferent to
+        // arrival order, so a window minted behind the frontier is judged
+        // on its own record rather than on a neighbour's.
+        //
+        // Cost is ONE grouped read of a table that holds a handful of rows
+        // per asset. It is deliberately fetched BEFORE the eligibility
+        // filter and NOT inside it, so a converged asset still short-
+        // circuits at `guard !eligibleWindows.isEmpty` without touching
+        // `transcript_chunks` — the launch sweep walks every asset in the
+        // library on every cold start, and that early exit is what keeps it
+        // cheap.
+        //
+        // A read failure fails OPEN (empty set). The consequence is a
+        // redundant enqueue, which the loop below still absorbs: the
+        // `findFinalPassJob` lookup returns the pre-existing row and
+        // `guard job.status != .complete` skips it before any ASR runs. The
+        // opposite choice — treating an unreadable table as "everything is
+        // done" — would silently reproduce this bead's defect.
+        let completedSpanKeys: Set<String>
+        do {
+            completedSpanKeys = Set(
+                try await store.canonicalCompleteFinalPassSpans(
+                    forAsset: input.analysisAssetId
+                ).map(\.canonicalSpanKey)
+            )
+        } catch {
+            logger.warning("Final-pass: failed to read completed span keys for \(input.analysisAssetId, privacy: .public): \(error.localizedDescription, privacy: .public) — treating none as complete")
+            completedSpanKeys = []
+        }
+
         // Step 3 — filter. A window is eligible iff:
         //   • its endTime is strictly greater than its startTime (a
         //     window with `endTime <= startTime` is structurally
@@ -296,7 +351,10 @@ actor FinalPassRetranscriptionRunner {
         //     pass through; the 0-length cutoff is `endTime > startTime`,
         //     not a fixed minimum duration), AND
         //   • its confidence cleared the configured floor, AND
-        //   • its endTime is strictly past the watermark (resume guard).
+        //   • its own canonical span has no `complete` final-pass job
+        //     (playhead-jzj0 — the per-window resume guard that replaced
+        //     the global `endTime > watermark` test; see the note above
+        //     `completedSpanKeys`).
         // The per-row `pass='final'` chunk overlap check is in
         // `retranscribeWindow` so it can short-circuit the full audio
         // decode without an extra DB hop here.
@@ -314,11 +372,18 @@ actor FinalPassRetranscriptionRunner {
                 return false
             }
             guard window.confidence >= confidenceFloor else { return false }
-            guard window.endTime > watermark else { return false }
+            // playhead-jzj0: per-window resume guard. The span this window
+            // occupies — not the asset's furthest drained point — decides
+            // whether its audio still owes a final pass.
+            let spanKey = AnalysisStore.canonicalSpanKey(
+                start: window.startTime,
+                end: window.endTime
+            )
+            guard !completedSpanKeys.contains(spanKey) else { return false }
             return true
         }
         guard !eligibleWindows.isEmpty else {
-            logger.debug("Final-pass: no eligible windows for \(input.analysisAssetId, privacy: .public) (windows=\(allWindows.count, privacy: .public), floor=\(self.confidenceFloor, privacy: .public), watermark=\(watermark, privacy: .public))")
+            logger.debug("Final-pass: no eligible windows for \(input.analysisAssetId, privacy: .public) (windows=\(allWindows.count, privacy: .public), floor=\(self.confidenceFloor, privacy: .public), completeSpans=\(completedSpanKeys.count, privacy: .public), watermark=\(watermark, privacy: .public))")
             return .empty
         }
 

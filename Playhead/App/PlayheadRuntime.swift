@@ -3473,7 +3473,10 @@ final class PlayheadRuntime {
     // MARK: - Final-pass re-transcription (Bug 9)
 
     /// Drains the charge-gated final-pass re-transcription pipeline for
-    /// every persisted asset that still has windows past its watermark.
+    /// every persisted asset that still has windows owing a final pass.
+    /// (Pre-playhead-jzj0 this said "past its watermark" — the sweep never
+    /// filtered on the watermark itself, the runner did, and it no longer
+    /// does; eligibility is per-window against `final_pass_jobs`.)
     ///
     /// Resolves each asset's audio URL through the `DownloadManager` cache
     /// (no resume from a deleted file), constructs an `AssetInput`, and
@@ -3487,8 +3490,8 @@ final class PlayheadRuntime {
     /// strong cycle, and so the same code path drives both the launch
     /// hook in the deferred bootstrap Task and any future BG-task entry.
     ///
-    /// Idempotent. Re-runs against an asset whose watermark already
-    /// covers every eligible AdWindow are no-ops.
+    /// Idempotent. Re-runs against an asset every one of whose eligible
+    /// AdWindows already has a `complete` `final_pass_jobs` row are no-ops.
     /// skeptical-review-cycle-3 H-A / cycle-4 H1: bounded wait for the
     /// `setEpisodePodcastIdResolver` install. Polls the lock-protected
     /// box at 50ms intervals up to `timeoutSec`.
