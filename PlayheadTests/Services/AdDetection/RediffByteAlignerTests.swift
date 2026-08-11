@@ -515,6 +515,19 @@ struct RediffByteAlignerTests {
     func acceptanceSurfaceIsATimeOnly() {
         // Structural pin for the xsdz.28 never-persist-B rule: ByteAcceptance
         // exposes exactly scalar diagnostics + played (A-time) slots.
+        //
+        // playhead-3zxd added `diagnostics`, and this pin firing is what made
+        // that a deliberate act rather than a drift. The addition is admissible
+        // because every field on it is an A-timeline second or a count: the run
+        // record is `foundRunASpans`, A-time spans, NOT `RediffByteAligner.Run`
+        // — a `Run` carries `bStart`, a byte offset that LOCATES content in the
+        // re-fetched copy, and that is the coordinate the contract forbids. A
+        // run's LENGTH is identical in both files, so the A-span carries every
+        // quantity the aligned-seconds check needs and none it must not.
+        //
+        // The nested type is mirrored too. A label check one level deep would
+        // pass for a `diagnostics` that had a B offset hidden inside it, which
+        // is precisely the way this pin could stop meaning anything.
         let alignment = alignmentFixture(slots: [byteSlot(100, 160)])
         guard case .accepted(let acceptance) =
             RediffSlotOwnership.gateAndDiffBytes(alignment: alignment) else {
@@ -522,7 +535,17 @@ struct RediffByteAlignerTests {
             return
         }
         let labels = Mirror(reflecting: acceptance).children.compactMap(\.label)
-        #expect(labels == ["chainedFractionB", "runsFound", "runsChained", "playedSlots"])
+        #expect(labels == ["chainedFractionB", "runsFound", "runsChained", "playedSlots", "diagnostics"])
+        let diagnosticLabels = Mirror(reflecting: acceptance.diagnostics).children.compactMap(\.label)
+        #expect(diagnosticLabels == [
+            "runsFound", "runsAOverlapping", "overlapSecondsRecovered",
+            "alignedSecondsInSlots", "maxAlignedSecondsInSlot", "foundRunASpans"
+        ])
+        // The one field carrying a collection is typed `[TimeRange]`, which has
+        // no byte axis at all — that is why it is the type here. Deliberately
+        // NOT asserted with `is [TimeRange]`: the compiler proves that
+        // statically ("'is' test is always true"), so it would be a rail that
+        // cannot fail, and this pin exists precisely to be able to.
     }
 
     // MARK: - xsdz.34 §5 veto gate on BYTE-derived slots (guardrail 2)
