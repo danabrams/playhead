@@ -35,10 +35,16 @@ struct BackfillJobRunnerTests {
         )
     }
 
+    /// playhead-15d0 R4: `plannerContext` defaults to `nil`, which means "the
+    /// cold-start context this fixture has always used" — every pre-existing
+    /// caller is byte-identical. It is overridable so a test can pin a policy
+    /// OTHER than `fullCoverage` against this same three-line transcript; see
+    /// `periodicFullRescanIsNarrowedByItsOwnDurableRows`.
     private func makeInputs(
         assetId: String = "asset-runner",
         podcastId: String = "podcast-runner",
-        transcriptVersion: String = "tx-runner-v1"
+        transcriptVersion: String = "tx-runner-v1",
+        plannerContext: CoveragePlannerContext? = nil
     ) -> BackfillJobRunner.AssetInputs {
         let segments = makeFMSegments(
             analysisAssetId: assetId,
@@ -54,7 +60,7 @@ struct BackfillJobRunnerTests {
             analysisAssetId: assetId,
             transcriptVersion: transcriptVersion
         )
-        let plannerContext = CoveragePlannerContext(
+        let coldStartContext = CoveragePlannerContext(
             observedEpisodeCount: 0,
             stableRecall: false,
             isFirstEpisodeAfterCohortInvalidation: false,
@@ -70,7 +76,7 @@ struct BackfillJobRunnerTests {
             segments: segments,
             evidenceCatalog: evidenceCatalog,
             transcriptVersion: transcriptVersion,
-            plannerContext: plannerContext
+            plannerContext: plannerContext ?? coldStartContext
         )
     }
 
@@ -403,6 +409,152 @@ struct BackfillJobRunnerTests {
         #expect(
             shape(resubmitted) == shape(refsAfterFirst),
             "the re-drive submitted \(shape(resubmitted)) where run 1 submitted \(shape(refsAfterFirst))"
+        )
+    }
+
+    /// playhead-15d0 R4: **THE CALL-SITE GUARD READS `phase`, AND NOT
+    /// `coveragePolicy`.** This is the other direction of
+    /// `targetedPhaseReDriveIsNotNarrowedByItsOwnRows` above — that one pins
+    /// which jobs the narrowing must REFUSE, this one pins which it must SERVE.
+    ///
+    /// **Why it exists.** R3 mutation M-A rewrote the guard in `runJob` from
+    /// `job.phase != .fullEpisodeScan` to `job.coveragePolicy != .fullCoverage`
+    /// and SURVIVED — the whole 125-test scoped gate stayed green. The two
+    /// predicates agree on `fullCoverage` and on all three `targetedWithAudit`
+    /// phases, so nothing that existed could tell them apart. They disagree on
+    /// exactly one plan, and `CoveragePlanner.plan` really does emit it:
+    /// `policy: .periodicFullRescan, phases: [.fullEpisodeScan]`. Under the
+    /// mutant that job reads NO rows, is narrowed by nothing, and re-infers
+    /// audio it already banked — 15d0 goes inert on the one policy whose entire
+    /// job is to re-scan a whole episode, which is also the policy that runs
+    /// most often against an asset that already has durable rows.
+    ///
+    /// **The consequence is a lost SAVING, not lost audio**, and that is why R3
+    /// left the production code alone: the mutant cannot strand audio, advance a
+    /// cursor or corrupt a population. The rail is owed anyway. A guard whose
+    /// mutation nobody notices is a guard a future author will "simplify" to the
+    /// policy spelling — which reads more naturally than the phase spelling, and
+    /// is wrong.
+    ///
+    /// **The cursor is cleared on purpose.** With `progressCursor: nil` the
+    /// `narrowedForResume` half of the composition is an identity, so the ROWS
+    /// are the only thing that can suppress run 2's windows and the assertion
+    /// cannot be satisfied by the cursor doing the work.
+    ///
+    /// The assertion is over the LINE REFS the classifier was handed, for the
+    /// reason `growingTranscriptContinuesTheScan` spells out: scan-result ids
+    /// are deterministic, so a re-drive that re-read the same windows writes
+    /// rows that dedupe onto run 1's. `TestFMRuntime`'s prompt log is the only
+    /// place the difference is visible.
+    @Test("playhead-15d0: a PERIODIC FULL RESCAN is narrowed by its own rows — the guard reads phase, not policy")
+    func periodicFullRescanIsNarrowedByItsOwnDurableRows() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        let fmRuntime = TestFMRuntime(
+            coarseResponses: (0..<20).map { _ in
+                CoarseScreeningSchema(disposition: .noAds, support: nil)
+            }
+        )
+        let runner = makeRunner(store: store, runtime: fmRuntime.runtime)
+
+        // `shouldUseFullCoverage` false (well past the cold-start threshold, no
+        // cohort invalidation, no recall degradation, no audit miss) AND
+        // `shouldUsePeriodicFullRescan` true (the interval has elapsed) is the
+        // one context in which the policy and the phase disagree.
+        let rescanContext = CoveragePlannerContext(
+            observedEpisodeCount: 20,
+            stableRecall: true,
+            isFirstEpisodeAfterCohortInvalidation: false,
+            recallDegrading: false,
+            sponsorDriftDetected: false,
+            auditMissDetected: false,
+            episodesSinceLastFullRescan: 10,
+            periodicFullRescanIntervalEpisodes: 10
+        )
+        let plan = CoveragePlanner().plan(for: rescanContext)
+        #expect(
+            plan.policy == .periodicFullRescan,
+            "the fixture must actually produce a periodic full rescan, or this rail is vacuous"
+        )
+        #expect(
+            plan.phases == [.fullEpisodeScan],
+            """
+            the whole discriminating power of this rail is that a
+            `.periodicFullRescan` plan runs a `.fullEpisodeScan` phase. If the
+            planner stops emitting that pair, M-A becomes equivalent and this
+            test proves nothing — fix the rail, do not delete it.
+            """
+        )
+
+        let inputs = makeInputs(
+            transcriptVersion: "tx-periodic-rescan",
+            plannerContext: rescanContext
+        )
+        let jobId = BackfillJobRunner.makeJobId(
+            analysisAssetId: "asset-runner",
+            phase: .fullEpisodeScan,
+            offset: 0
+        )
+
+        let first = try await runner.runPendingBackfill(for: inputs)
+        #expect(first.admittedJobIds == [jobId], "run 1 must admit the rescan job, or this rail is vacuous")
+        let refsAfterFirst = await fmRuntime.snapshotSubmittedCoarseLineRefs()
+        #expect(!refsAfterFirst.isEmpty, "run 1 must submit coarse windows, or this rail is vacuous")
+
+        // The persisted job is what the guard reads, and its two fields must
+        // genuinely disagree here — otherwise M-A is equivalent on this fixture.
+        let job = try #require(await store.fetchBackfillJob(byId: jobId))
+        #expect(job.phase == .fullEpisodeScan)
+        #expect(
+            job.coveragePolicy == .periodicFullRescan,
+            "the stamped policy must NOT be `fullCoverage`, or the mutant's predicate agrees with the real one"
+        )
+
+        // Run 1's rows must be REUSABLE under run 2's predicate, or the mutant
+        // could survive for a reason that has nothing to do with the guard.
+        let rowsAfterFirst = try await store.fetchSemanticScanResults(
+            analysisAssetId: "asset-runner",
+            scanPass: SemanticScanResult.presenceScanPass
+        )
+        let usableRows = rowsAfterFirst.filter { row in
+            row.didExamineWindow
+                && row.isReusable(
+                    scanCohortJSON: makeTestScanCohortJSON(),
+                    transcriptVersion: inputs.transcriptVersion
+                )
+                && row.windowEndTime > row.windowStartTime
+                && row.jobPhase == BackfillJobPhase.fullEpisodeScan.rawValue
+        }
+        #expect(
+            !usableRows.isEmpty,
+            "run 1 must bank a reusable, examined passA row for this phase, or this rail is vacuous"
+        )
+
+        // Rows banked, job never marked complete, and NO CURSOR: the
+        // orphan-recovery shape, with the cursor's half of the composition
+        // deliberately neutralised.
+        try await store.forceBackfillJobStateForTesting(
+            jobId: jobId,
+            status: .queued,
+            progressCursor: nil
+        )
+
+        let second = try await runner.runPendingBackfill(for: inputs)
+        #expect(second.admittedJobIds == [jobId], "run 2 must re-drive the same job, or this rail is vacuous")
+
+        let resubmitted = Array(
+            (await fmRuntime.snapshotSubmittedCoarseLineRefs()).dropFirst(refsAfterFirst.count)
+        )
+        #expect(
+            resubmitted.isEmpty,
+            """
+            the periodic-full-rescan re-drive submitted \(resubmitted) — audio its OWN durable \
+            rows had already screened. The cursor is nil, so the row-side narrowing is the only \
+            thing that can suppress those windows, and it is reached only when the call-site \
+            guard in `runJob` tests the job's PHASE. A guard written over `coveragePolicy` \
+            waves `.periodicFullRescan` through as "not full coverage", reads no rows, and \
+            leaves playhead-15d0 inert on this policy.
+            """
         )
     }
 

@@ -2106,16 +2106,30 @@ actor BackfillJobRunner {
         /// prefix for this run. `nil` ⇒ nothing was successfully scanned.
         ///
         /// playhead-x0lb: a ``PlanListSeconds``. It is contiguity over the list
-        /// `coarsePassA` was handed, which is `narrowedForResume`'s output and
-        /// need not begin at 0. Publishing it as an episode cursor is
+        /// `coarsePassA` was handed, which is the output of BOTH narrowings —
+        /// ``narrowedForResume`` and then playhead-15d0's
+        /// ``narrowedForScreenedWindows(_:screenedRows:scanCohortJSON:jobPhase:)``
+        /// — and need not begin at 0. Publishing it as an episode cursor is
         /// playhead-5pyq and every such site now says so by name.
         let lastCoveredUpperBoundSec: PlanListSeconds?
         /// playhead-41mu (R2 review): where THIS RUN's plans actually began —
-        /// `inputs.segments.first?.startTime` AFTER `narrowedForResume` has
-        /// trimmed the already-covered prefix, which is the segment list
-        /// `coarsePassA` is handed and therefore the list `planPassA`
-        /// partitions. `nil` ⇒ the run planned nothing (the empty-segments
-        /// short-circuit).
+        /// `inputs.segments.first?.startTime` AFTER BOTH narrowings have run:
+        /// ``narrowedForResume`` trims the already-covered prefix, and then
+        /// playhead-15d0's
+        /// ``narrowedForScreenedWindows(_:screenedRows:scanCohortJSON:jobPhase:)``
+        /// drops what the durable screened rows already cover. That doubly
+        /// narrowed list is the one `coarsePassA` is handed and therefore the one
+        /// `planPassA` partitions. `nil` ⇒ the run planned nothing (the
+        /// empty-segments short-circuit).
+        ///
+        /// **Name both, and the reason is not tidiness.** The row-side narrowing
+        /// deletes segments ABOVE the cursor as well as below it, so this field's
+        /// first segment need not be the first segment above the prior cursor.
+        /// R3 review identified the older "the POST-`narrowedForResume` list"
+        /// wording as the reason the interaction between the two narrowings and
+        /// the head guard below went unexamined for two rounds: a reader who
+        /// believes only the cursor has trimmed the list will reason about a
+        /// prefix, and the list is no longer a prefix.
         ///
         /// It is carried here rather than recomputed by the caller because the
         /// caller holds the PRE-narrowing inputs, and the two differ by exactly
@@ -3196,9 +3210,13 @@ actor BackfillJobRunner {
     /// covering all of it. The outcome is the same because no segment straddles
     /// those pauses; the contiguity was overstated, not the arithmetic. And the
     /// 194.46 cursor is NOT "the walk stopping at a 1.2 s pause in speech":
-    /// ``coarseCheckpointWalk`` never looks at time adjacency at all — it stops
-    /// at the first plan that was not fully covered, capped at the earliest
-    /// uncovered plan's start.
+    /// ``coarseCoverageWalk(plans:windows:failedWindows:unpersistedWindows:)``
+    /// never looks at time adjacency at all — it stops at the first plan that
+    /// was not fully covered, capped at the earliest uncovered plan's start.
+    /// (R3 review corrected the citation:
+    /// ``coarseCheckpointWalk(banked:durableWindowCount:)`` is the mid-flight
+    /// wrapper that splits a banked snapshot into a durable prefix and an
+    /// unpersisted tail; the walk itself is the function above.)
     ///
     /// **THE PREDICATE IS BORROWED, NOT INVENTED.** A row licenses a drop only
     /// when it is
@@ -4157,9 +4175,13 @@ actor BackfillJobRunner {
         let coverageOutcome = CoverageOutcome(
             coarseIncompleteDeferReason: coarseIncompleteDeferReason,
             lastCoveredUpperBoundSec: coverageContiguousUpperBound,
-            // playhead-41mu (R2 review): `inputs` is the POST-`narrowedForResume`
-            // list — the same one handed to `coarsePassA` above and partitioned
-            // by `planPassA` — so this is literally where this run's plans begin.
+            // playhead-41mu (R2 review): `inputs` here is the POST-NARROWING
+            // list, and post BOTH narrowings — `narrowedForResume` and then
+            // playhead-15d0's `narrowedForScreenedWindows` — which is the same
+            // one handed to `coarsePassA` above and partitioned by `planPassA`,
+            // so this is literally where this run's plans begin. It is NOT
+            // "the first segment above the cursor": the row-side narrowing can
+            // delete segments above the cursor too.
             firstPlannedSegmentStartSec: inputs.segments.first.map { PlanListSeconds($0.startTime) }
         )
         // playhead-y3ya: semantic-sweep mark compose. Turn the `containsAd`

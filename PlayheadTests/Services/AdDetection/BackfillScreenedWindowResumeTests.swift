@@ -43,9 +43,12 @@ import Testing
 /// five gaps (0.42, 1.20, 0.36, 1.68, 0.42 s). Same outcome, since no segment
 /// straddles those pauses; the earlier "1.0–194.0 and 196.0–1919.0, the whole
 /// transcribed extent" overstated the contiguity. And the 194.46 cursor is not
-/// the walk stopping at a pause in speech: `coarseCheckpointWalk` never
+/// the walk stopping at a pause in speech: `coarseCoverageWalk` never
 /// examines time adjacency, it stops at the first plan that was not fully
-/// covered.
+/// covered. (R3 review corrected the citation, which named
+/// `coarseCheckpointWalk` — that is the mid-flight wrapper, which splits a
+/// banked snapshot into a durable prefix and an unpersisted tail and delegates
+/// the walk to `coarseCoverageWalk`.)
 ///
 /// The suite is deliberately weighted toward the REFUSALS rather than the
 /// drops. Dropping a segment is irreversible for the life of the asset: the
