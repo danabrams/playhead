@@ -568,7 +568,11 @@ extension DownloadManager {
             // ever release the episode's in-flight slot and every later
             // attempt — including the retry this outcome invites — would be
             // refused for the life of the process.
-            abandonUnstartedTransfer(task: task, episodeId: episodeId)
+            abandonUnstartedTransfer(
+                task: task,
+                session: session,
+                episodeId: episodeId
+            )
             return .daemonUnavailable
         }
 

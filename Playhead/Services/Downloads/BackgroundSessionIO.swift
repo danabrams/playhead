@@ -94,6 +94,19 @@ struct BackgroundSessionIO: Sendable {
         /// itself is covered by `BackgroundSessionIOTests`, so tests of the
         /// *recovery* branches do not have to pay a real timeout.
         case neverAnswers
+
+        /// Test seam: refuse only the calls whose label contains `marker`
+        /// and run every other call normally.
+        ///
+        /// `neverAnswers` refuses the FIRST call, so it can never reach a
+        /// branch that lives BEHIND a successful one — and the
+        /// resume-timeout path in `backgroundDownload` is exactly that:
+        /// creation has to succeed for there to be a task to abandon.
+        /// Refusing everything is also not a safe way to get there, because
+        /// the cleanup `cancel()` would be refused too and a real transfer
+        /// would stay registered with the simulator's `nsurlsessiond` — the
+        /// residue class this bead exists to stop producing.
+        case refusesCallsLabelled(String)
         #endif
     }
 
@@ -184,11 +197,19 @@ struct BackgroundSessionIO: Sendable {
         running body: @escaping @Sendable () -> T
     ) async -> T? {
         #if DEBUG
-        if case .neverAnswers = behavior {
+        switch behavior {
+        case .neverAnswers:
             Self.logger.error(
                 "\(label, privacy: .public): neverAnswers test seam — reporting the daemon as unavailable"
             )
             return nil
+        case .refusesCallsLabelled(let marker) where label.contains(marker):
+            Self.logger.error(
+                "\(label, privacy: .public): refusesCallsLabelled(\(marker, privacy: .public)) test seam — reporting the daemon as unavailable"
+            )
+            return nil
+        default:
+            break
         }
         #endif
 

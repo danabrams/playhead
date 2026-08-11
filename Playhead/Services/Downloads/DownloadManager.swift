@@ -1785,6 +1785,18 @@ actor DownloadManager {
         return identity
     }
 
+    /// playhead-nsjn: drives the real terminal-callback bookkeeping so a rail
+    /// can ask the question that matters about an abandoned transfer — not
+    /// "is the map tidy?" but "does the NEXT attempt's completion still
+    /// release the episode?". Reading the map directly would let an
+    /// implementation that tidies a different collection pass.
+    func _finishBackgroundTransferForTesting(
+        identity: BackgroundTransferIdentity,
+        episodeId: String
+    ) {
+        finishBackgroundTransfer(identity: identity, episodeId: episodeId)
+    }
+
     func _strongPinVerificationHashCountForTesting() -> Int {
         strongPinVerificationHashCount
     }
@@ -2515,7 +2527,11 @@ actor DownloadManager {
             logger.error(
                 "Background download for \(episodeId, privacy: .public) was created but not resumed: the background transfer daemon did not answer"
             )
-            abandonUnstartedTransfer(task: task, episodeId: episodeId)
+            abandonUnstartedTransfer(
+                task: task,
+                session: session,
+                episodeId: episodeId
+            )
             deleteDownloadAttribution(episodeId: episodeId)
             return
         }
@@ -2532,12 +2548,30 @@ actor DownloadManager {
     /// The cancel is deliberately NOT awaited: we only get here because the
     /// daemon is already not answering, and making the caller wait a second
     /// bound to clean up after the first one just doubles the stall it is
-    /// trying to escape. If the cancel does land, the delegate's terminal
-    /// callback drains the identity map on the normal path.
+    /// trying to escape.
+    ///
+    /// The identity map is drained HERE rather than being left to the
+    /// delegate's terminal callback. Both call sites register before
+    /// resuming, so by this point `activeBackgroundTransfers` holds an entry
+    /// for a task that was never started — and on this branch the cancel is
+    /// exactly as likely to go unanswered as the resume was, so no callback
+    /// may ever arrive to drain it. A surviving entry does not merely leak:
+    /// `finishBackgroundTransfer` only releases the in-flight slot when NO
+    /// admitted identity still names the episode, so the abandoned entry
+    /// would make the NEXT attempt's own completion fail to release the
+    /// slot — reinstating the permanent per-episode outage this method
+    /// exists to prevent, one attempt later and with no daemon stall in
+    /// sight. Retiring the identity also makes a late cancel callback for
+    /// the dead task a no-op instead of a spurious failure for whatever
+    /// transfer holds the episode by then.
     internal func abandonUnstartedTransfer(
         task: URLSessionDownloadTask,
+        session: URLSession,
         episodeId: String
     ) {
+        let identity = backgroundTransferIdentity(task: task, session: session)
+        retiredBackgroundTransfers.insert(identity)
+        activeBackgroundTransfers.removeValue(forKey: identity)
         bgInFlightEpisodes.remove(episodeId)
         let io = sessionIO
         Task.detached {

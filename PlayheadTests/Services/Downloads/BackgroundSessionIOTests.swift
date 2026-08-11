@@ -294,10 +294,134 @@ struct DownloadManagerDaemonUnavailableTests {
         let orphan = URLSession.shared.downloadTask(
             with: URL(string: "https://cdn.example.com/\(episodeId).mp3")!
         )
-        await manager.abandonUnstartedTransfer(task: orphan, episodeId: episodeId)
+        await manager.abandonUnstartedTransfer(
+            task: orphan,
+            session: URLSession.shared,
+            episodeId: episodeId
+        )
 
         #expect(
             await manager._isBackgroundDownloadInFlightForTesting(episodeId: episodeId) == false
+        )
+    }
+
+    /// Releasing the slot is only half of it. Both call sites REGISTER the
+    /// task before resuming it, so an abandoned transfer leaves an admitted
+    /// identity behind — and `finishBackgroundTransfer` releases the episode
+    /// only when no admitted identity still names it. So a manager that
+    /// released the slot but kept the entry would let the retry START and
+    /// then fail to release the episode when that retry COMPLETED,
+    /// reinstating the permanent per-episode outage one attempt later, with
+    /// no daemon stall left in sight to explain it.
+    ///
+    /// The identity is built the way production builds it — from the task
+    /// and the session — so an implementation that drains some other
+    /// identity does not pass.
+    @Test("An abandoned transfer does not wedge the episode's NEXT attempt")
+    func abandonedTransferDoesNotWedgeTheNextAttempt() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let manager = DownloadManager(cacheDirectory: dir)
+        try await manager.bootstrap()
+
+        let episodeId = "nsjn-abandon-then-retry"
+        let session = URLSession.shared
+        let orphan = session.downloadTask(
+            with: URL(string: "https://cdn.example.com/\(episodeId).mp3")!
+        )
+        _ = await manager._registerBackgroundTransferForTesting(
+            episodeId: episodeId,
+            identity: BackgroundTransferIdentity(
+                sessionIdentifier: session.configuration.identifier ?? "",
+                taskIdentifier: orphan.taskIdentifier
+            )
+        )
+        await manager.abandonUnstartedTransfer(
+            task: orphan,
+            session: session,
+            episodeId: episodeId
+        )
+        #expect(
+            await manager._isBackgroundDownloadInFlightForTesting(episodeId: episodeId) == false,
+            "the rail is vacuous unless the abandon released the slot at all"
+        )
+
+        // The retry the release exists to invite.
+        let retryIdentity = await manager._registerBackgroundTransferForTesting(
+            episodeId: episodeId
+        )
+        #expect(
+            await manager._isBackgroundDownloadInFlightForTesting(episodeId: episodeId),
+            "the retry must be admitted"
+        )
+        await manager._finishBackgroundTransferForTesting(
+            identity: retryIdentity,
+            episodeId: episodeId
+        )
+        #expect(
+            await manager._isBackgroundDownloadInFlightForTesting(episodeId: episodeId) == false,
+            "the abandoned identity must not outlive its transfer — the retry's own completion has to be able to release the episode"
+        )
+    }
+
+    /// The gap this closes: every rail above drives `abandonUnstartedTransfer`
+    /// by hand. Nothing proved `backgroundDownload` REACHES it, because the
+    /// `neverAnswers` seam refuses the creation call and the resume-timeout
+    /// branch lives behind a creation that succeeded. So the one path on
+    /// which a transfer really is created and really is never started was
+    /// read, not run — and that is where the identity-map leak this round
+    /// fixed was living.
+    @Test("A transfer backgroundDownload created but could not resume is abandoned by backgroundDownload itself")
+    func backgroundDownloadAbandonsATransferItCouldNotResume() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let manager = DownloadManager(
+            cacheDirectory: dir,
+            sessionIO: BackgroundSessionIO(
+                behavior: .refusesCallsLabelled("resume() for"),
+                timeout: 0.1,
+                queueLabel: "nsjn.test.resume-refused.\(UUID().uuidString)"
+            )
+        )
+        try await manager.bootstrap()
+
+        let episodeId = "nsjn-created-not-resumed"
+        await manager.backgroundDownload(
+            episodeId: episodeId,
+            from: URL(string: "https://cdn.example.com/\(episodeId).mp3")!,
+            context: DownloadContext(
+                podcastId: "show-2",
+                isExplicitDownload: false,
+                podcastTitle: "Show",
+                episodeTitle: "Episode"
+            )
+        )
+
+        // Distinguishes this rail from the creation-timeout one above: the
+        // task really WAS admitted, so the abandon path — not the
+        // never-started path — is what ran.
+        #expect(await manager._backgroundDownloadAdmissionCountForTesting() == 1)
+        #expect(
+            await manager._isBackgroundDownloadInFlightForTesting(episodeId: episodeId) == false,
+            "a transfer that was created but never resumed must not hold the slot"
+        )
+        #expect(await manager.loadDownloadAttribution(episodeId: episodeId) == nil)
+
+        // And the identity it registered before resuming must be gone, or
+        // the retry this release invites cannot release the episode when it
+        // finishes.
+        let retryIdentity = await manager._registerBackgroundTransferForTesting(
+            episodeId: episodeId
+        )
+        await manager._finishBackgroundTransferForTesting(
+            identity: retryIdentity,
+            episodeId: episodeId
+        )
+        #expect(
+            await manager._isBackgroundDownloadInFlightForTesting(episodeId: episodeId) == false,
+            "the abandoned registration must not survive to wedge the next attempt"
         )
     }
 
