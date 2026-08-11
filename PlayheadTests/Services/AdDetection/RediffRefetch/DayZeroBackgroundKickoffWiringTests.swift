@@ -596,6 +596,155 @@ final class DayZeroBackgroundKickoffWiringCanaryTests: XCTestCase {
             """
         )
     }
+
+    /// playhead-kg8h R4: the claim must be awaited INLINE — and that is a
+    /// STRUCTURAL question the behavioural rails cannot settle.
+    ///
+    /// `DayZeroKickoffClaimRecorderTests` proves the row lands. It cannot prove
+    /// the row lands BEFORE the recorder returned, because a detached write
+    /// differs from the shipped closure only in SCHEDULING: with the store call
+    /// wrapped in an unstructured task, those tests fail solely when the test's
+    /// own hop into `AnalysisStore` beats the detached task's. That reddened on
+    /// every observation R3 took — and a rail that CAN flake green is the
+    /// dangerous direction, because green is how it reports "no regression".
+    /// This is the same box whose measurement tests blow 60 s budgets under the
+    /// full plan's own load, so "it reddened on a quiet box" is not evidence
+    /// about a loaded one.
+    ///
+    /// Detachment is a defect here and not a matter of taste. `requestKickoff`
+    /// appends to `pending` and starts the drain on the line AFTER
+    /// `await claimKickoff(…)`. A write that is merely SCHEDULED is one the
+    /// drain's own `settle` can overtake — it would then stamp `.requested` onto
+    /// an already-settled row and add a kickoff nobody owes, which is exactly the
+    /// ordering `noClaimIsOvertakenByItsOwnSettle` rails one layer up — and, in
+    /// the background-relaunch process this bead exists for, it is a write the
+    /// process may not survive long enough to perform at all.
+    ///
+    /// Inline-ness is textual, so this reads it textually. Every way Swift has of
+    /// not awaiting something here — an unstructured task, a detached task, a
+    /// GCD hop, a fire-and-forget helper — puts the call inside a closure
+    /// literal. So the property is: the store write sits at closure depth 1,
+    /// inside the returned closure and inside nothing else. Control-flow braces
+    /// are NOT counted (see `closureDepths`), so a later `do { } catch { }`
+    /// around the same inline `await` still reads 1.
+    ///
+    /// WHAT WOULD MAKE THIS COMPILE-ENFORCED, AND WHY IT IS NOT DONE HERE.
+    /// `claimKickoff` could return a receipt that only
+    /// `AnalysisStore.noteRediffDayZeroKickoffClaim` is able to construct, so a
+    /// closure that detached would have nothing to return. That changes the store
+    /// method's signature, the coordinator's seam type and `requestKickoff` — an
+    /// architecture change rather than a rail — and it would still leak, because
+    /// the recorder deliberately swallows store errors with `try?` and therefore
+    /// has to return an optional, which a mutant satisfies with `nil`.
+    func testDayZeroKickoffClaimRecorderAwaitsItsWriteInline() throws {
+        let source = try SwiftSourceInspector.loadSource(
+            repoRelativePath: "Playhead/App/PlayheadRuntime.swift"
+        )
+        guard let body = SwiftSourceInspector.firstBody(
+            in: source,
+            after: "static func makeDayZeroKickoffClaimRecorder("
+        ) else {
+            XCTFail(
+                "Could not locate `makeDayZeroKickoffClaimRecorder`'s body — the day-0 " +
+                "claim recorder's factory moved or was renamed and this canary needs " +
+                "re-anchoring."
+            )
+            return
+        }
+
+        // Comments AND string CONTENTS blanked: the prose above quotes the
+        // detached spelling, and a canary that greps its own explanation is a
+        // canary that is always red.
+        let code = SwiftSourceInspector.strippingCommentsAndStrings(body)
+        XCTAssertFalse(
+            code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+            "ANTI-VACUITY: the factory's body must be readable"
+        )
+
+        let depths = Self.closureDepths(of: "noteRediffDayZeroKickoffClaim(", in: code)
+        XCTAssertFalse(
+            depths.isEmpty,
+            """
+            ANTI-VACUITY: `makeDayZeroKickoffClaimRecorder` no longer calls \
+            `noteRediffDayZeroKickoffClaim` at all. The depth assertion below is \
+            vacuously satisfiable by a factory that writes nothing — which IS \
+            playhead-kg8h's defect — so restore the write or re-anchor this canary.
+            """
+        )
+        XCTAssertEqual(
+            depths, [1],
+            """
+            The day-0 claim is no longer awaited INLINE in \
+            `makeDayZeroKickoffClaimRecorder`: `noteRediffDayZeroKickoffClaim` occurs \
+            at closure depth(s) \(depths) rather than exactly [1], i.e. inside a \
+            nested closure. An unstructured task, a detached task and a GCD hop all \
+            read this way, and all three turn the claim into a write that \
+            `requestKickoff`'s own `pending.append` and drain can overtake — and one \
+            a background-relaunch process may never perform. \
+            `DayZeroKickoffClaimRecorderTests` cannot catch that reliably: against a \
+            detached write it fails only when the test wins a scheduling race. If you \
+            restructured this body deliberately, check FIRST that the await is still \
+            on the closure's own execution path.
+            """
+        )
+    }
+
+    /// Closure-literal nesting depths at which `needle` occurs in `code`.
+    ///
+    /// A `{` counts only when it opens a CLOSURE (or a nested function) — that
+    /// is, when the text back to the previous `{`, `}` or `;` contains no Swift
+    /// control-flow keyword. A trailing closure on a task, a queue or any other
+    /// call counts; `do`, `if`, `guard`, `else`, `for`, `while`, `repeat`,
+    /// `switch`, `case`, `default`, `catch` and `defer` do not, so wrapping the
+    /// same inline `await` in `do { } catch { }` does not red the canary.
+    ///
+    /// The bias is deliberate and one-directional: an unrecognised construct
+    /// carries no keyword, so it reads as a closure and FAILS the depth check. A
+    /// rail that errs loud is repairable; one that errs quiet is the thing this
+    /// exists to replace.
+    ///
+    /// `code` must already have had comments and string contents blanked with
+    /// `SwiftSourceInspector.strippingCommentsAndStrings`, so this walker only
+    /// has to track braces.
+    private static func closureDepths(of needle: String, in code: String) -> [Int] {
+        let controlFlowKeywords: Set<String> = [
+            "do", "if", "else", "guard", "for", "while", "repeat",
+            "switch", "case", "default", "catch", "defer"
+        ]
+        var depths: [Int] = []
+        var closureDepth = 0
+        /// One entry per open brace: `true` when it was counted as a closure, so
+        /// its `}` decrements only what its `{` incremented.
+        var braceStack: [Bool] = []
+        var statementStart = code.startIndex
+        var index = code.startIndex
+
+        while index < code.endIndex {
+            if code[index...].hasPrefix(needle) {
+                depths.append(closureDepth)
+                index = code.index(index, offsetBy: needle.count)
+                continue
+            }
+            switch code[index] {
+            case "{":
+                let preceding = code[statementStart..<index]
+                let words = preceding.split(whereSeparator: { !$0.isLetter })
+                let opensClosure = !words.contains { controlFlowKeywords.contains(String($0)) }
+                braceStack.append(opensClosure)
+                if opensClosure { closureDepth += 1 }
+                statementStart = code.index(after: index)
+            case "}":
+                if braceStack.popLast() == true { closureDepth -= 1 }
+                statementStart = code.index(after: index)
+            case ";":
+                statementStart = code.index(after: index)
+            default:
+                break
+            }
+            index = code.index(after: index)
+        }
+        return depths
+    }
 }
 
 // MARK: - 4. The production claim recorder (playhead-kg8h)
