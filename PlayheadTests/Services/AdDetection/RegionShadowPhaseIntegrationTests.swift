@@ -1163,3 +1163,147 @@ struct SponsorKnowledgeRegionWiringTests {
         )
     }
 }
+
+// MARK: - playhead-shjn R1: the .sponsor bit is NOT inert
+
+/// The shjn branch's own prose says a `SponsorMatch` "reaches nothing" because
+/// `AtomEvidenceProjector` reads only four origin bits and `.sponsor` is not
+/// one of them. That is true of a sponsor-ONLY region — it anchors no atom and
+/// decodes to no span. It is NOT the whole story.
+///
+/// `MusicOffsetLexicalGate.corroboratingOrigins` (MusicOffsetLexicalGate.swift:81)
+/// DOES read `.sponsor`, and both `sustainedMusicProposerEnabled` and
+/// `musicOffsetLexicalGateEnabled` default `true` in the shipped
+/// `AdDetectionConfig` (AdDetectionService.swift:1181-1182). So a sponsor match
+/// that overlaps a cue-less music-only run flips `isUncorroboratedMusicOnly` to
+/// false, the gate stops suppressing it, `AtomEvidenceProjector` Path 5 anchors
+/// it via `.sustainedMusic`, and a `.markOnly` banner appears that would NOT
+/// have existed. That is a real, live, production-reachable effect of pressing
+/// "Always skip <sponsor> on this show" — the first one there is.
+///
+/// This suite is the A/B that pins it: one degree of freedom (the knowledge
+/// store), same fixture, opposite outcomes. If a future change removes
+/// `.sponsor` from `corroboratingOrigins`, or the gate's default flips, this
+/// reddens instead of the behaviour drifting unobserved.
+@Suite("Sponsor corroboration un-suppresses a music-only region (playhead-shjn R1)")
+struct SponsorUnSuppressesMusicOnlyRegionTests {
+
+    private static let brand = "Zorbium"
+    private let assetId = "shjn-r1-gate-corroboration"
+    private let podcastId = "pod-shjn-r1"
+    private let episodeDuration = 90.0
+    private let chunkDuration = 3.0
+
+    /// Chunk index of the brand mention — inside the [60, 74) music run.
+    private let brandChunkIndex = 21
+
+    /// 30 contiguous ad-free 3 s chunks over [0, 90), except chunk 21, which
+    /// names the brand in otherwise unremarkable prose. Nothing here matches a
+    /// `MusicOffsetLexicalGate` ad-cue pattern, so the onset window after the
+    /// music edge stays cue-less and the gate WOULD suppress the run.
+    private func makeChunks() -> [TranscriptChunk] {
+        let count = Int(episodeDuration / chunkDuration)
+        return (0..<count).map { idx in
+            let start = Double(idx) * chunkDuration
+            let text = idx == brandChunkIndex
+                ? "We were listening to \(Self.brand) again while the theme played underneath."
+                : "Segment \(idx) of ordinary spoken conversation about coastal tide pools and slow patient observation."
+            return TranscriptChunk(
+                id: "c\(idx)-\(assetId)", analysisAssetId: assetId,
+                segmentFingerprint: "fp-\(idx)", chunkIndex: idx,
+                startTime: start, endTime: start + chunkDuration,
+                text: text, normalizedText: text.lowercased(),
+                pass: "final", modelVersion: "v", transcriptVersion: nil, atomOrdinal: nil
+            )
+        }
+    }
+
+    private func makeFeatureWindows() -> [FeatureWindow] {
+        var windows: [FeatureWindow] = []
+        var t: Double = 0
+        while t < episodeDuration {
+            let inMusicRun = t >= 60 && t < 74
+            windows.append(FeatureWindow(
+                analysisAssetId: assetId, startTime: t, endTime: t + 2.0,
+                rms: 0.3, spectralFlux: 0.05,
+                musicProbability: inMusicRun ? 0.9 : 0.0,
+                pauseProbability: 0.0, speakerClusterId: 1, jingleHash: nil, featureVersion: 5
+            ))
+            t += 2.0
+        }
+        return windows
+    }
+
+    /// Both flags ON — the SHIPPED configuration, not a test-only combination.
+    private func makeInput(knowledgeStore: SponsorKnowledgeStore?) -> RegionShadowPhase.Input {
+        RegionShadowPhase.Input(
+            analysisAssetId: assetId,
+            chunks: makeChunks(),
+            lexicalCandidates: [],
+            featureWindows: makeFeatureWindows(),
+            episodeDuration: episodeDuration,
+            priors: ShowPriors.from(profile: nil),
+            podcastProfile: nil,
+            fmWindows: [],
+            podcastId: podcastId,
+            knowledgeStore: knowledgeStore,
+            sustainedMusicProposerEnabled: true,
+            musicOffsetLexicalGateEnabled: true
+        )
+    }
+
+    private func musicRegions(_ bundles: [RegionFeatureBundle]) -> [ProposedRegion] {
+        bundles.map(\.region).filter { $0.origins.contains(.sustainedMusic) }
+    }
+
+    @Test("a .sponsor match on a cue-less music-only run flips the gate from SUPPRESS to KEEP")
+    func sponsorMatchUnSuppressesTheMusicOnlyRun() async throws {
+        let store = try await makeTestStore()
+
+        // CONTROL: no knowledge store ⇒ legacy stub ⇒ no sponsor match. The
+        // cue-less music-only run is suppressed, exactly as pre-shjn.
+        let control = try await RegionShadowPhase.run(makeInput(knowledgeStore: nil))
+        #expect(
+            musicRegions(control).isEmpty,
+            "control: the gate must suppress the cue-less music-only run when nothing corroborates it"
+        )
+
+        // TREATMENT: same fixture, one degree of freedom — an `.active` sponsor
+        // entry for this show, i.e. two presses of "Always skip <brand> on this
+        // show" on two distinct episodes.
+        let knowledgeStore = SponsorKnowledgeStore(store: store)
+        for i in 1...2 {
+            try await knowledgeStore.recordCandidate(
+                podcastId: podcastId,
+                entityType: .sponsor,
+                entityValue: Self.brand,
+                analysisAssetId: "asset-shjn-r1-confirm-\(i)",
+                sourceAtomOrdinals: [i],
+                transcriptVersion: "tv-\(i)",
+                confidence: 0.85
+            )
+        }
+        let entry = try await knowledgeStore.entry(
+            podcastId: podcastId,
+            entityType: .sponsor,
+            normalizedValue: Self.brand.lowercased()
+        )
+        #expect(entry?.state == .active, "two confirmations must promote to .active")
+
+        let treatment = try await RegionShadowPhase.run(makeInput(knowledgeStore: knowledgeStore))
+        let survivors = musicRegions(treatment)
+        #expect(
+            !survivors.isEmpty,
+            """
+            a sponsor match must un-suppress the music-only run — `.sponsor` is a \
+            member of `MusicOffsetLexicalGate.corroboratingOrigins`, so the region \
+            is no longer "uncorroborated music-only". This is the branch's first \
+            live production effect and it must not drift unobserved.
+            """
+        )
+        #expect(
+            survivors.allSatisfy { $0.origins.contains(.sponsor) },
+            "the surviving music region must carry the .sponsor origin that corroborated it"
+        )
+    }
+}

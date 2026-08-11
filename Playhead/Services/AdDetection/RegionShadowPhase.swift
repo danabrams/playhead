@@ -89,6 +89,19 @@ enum RegionShadowPhase {
         /// `SponsorMatch` values and therefore `.sponsor`-origin proposals.
         /// When nil (tests, preview, legacy callers) the legacy stub runs
         /// and `sponsorMatches` stays `[]`, byte-identical to pre-shjn.
+        ///
+        /// What a `.sponsor` proposal can actually DO, measured in R1 review —
+        /// a sponsor-ONLY region yields no span (`AtomEvidenceProjector` does
+        /// not read `.sponsor`), but the bit is NOT inert once it merges:
+        /// `MusicOffsetLexicalGate.corroboratingOrigins` reads it, so a sponsor
+        /// match overlapping a cue-less music-only run un-suppresses that run
+        /// into a `.markOnly` banner; `RegionProposalBuilder.merge` unions atom
+        /// ranges, so it can widen an FM/classifier region's INNER edge; and a
+        /// sponsor-only proposal within 1.0 s of a break picks up `.acoustic`,
+        /// which the projector DOES read, feeding `hasAcousticBreakHint` into
+        /// the decoder's Use A boundary snap. See the bound recorded on
+        /// `AdBannerView.alwaysSkipSponsorReceipt` and the rail in
+        /// `SponsorUnSuppressesMusicOnlyRegionTests`.
         let knowledgeStore: SponsorKnowledgeStore?
         /// High-confidence classifier results, threaded through so that
         /// `RegionProposalBuilder.makeClassifierProposals` can seed
