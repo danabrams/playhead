@@ -117,6 +117,60 @@ struct RediffByteMintDiagnosticsTests {
                 "and the emitted slots are pure divergence")
     }
 
+    // MARK: - 1b. The witness can read NON-ZERO
+
+    /// THE VACUITY QUESTION, asked of the instrument itself: what would
+    /// `alignedSecondsInSlots` read if the thing it measures never happened?
+    ///
+    /// Every honest path now scores 0, which is the point of the fix — and it is
+    /// also exactly how a broken instrument looks. A diagnostic that is
+    /// structurally incapable of reporting the defect it names would sit at 0
+    /// forever on the device and be read as "clean". So the alignment here is
+    /// HAND-BUILT with an emitted slot that overlaps a found run, a shape the
+    /// production aligner can no longer produce, purely to prove the meter
+    /// deflects.
+    @Test("the invariant witness is capable of reporting a violation — a zero on device means something")
+    func theWitnessCanReadNonZero() throws {
+        let run = RediffByteAligner.Run(aStart: 0, bStart: 0, bytes: 1)
+        let slot = RediffByteAligner.Slot(
+            kind: .removedInB,
+            aStartByte: 0, aEndByte: 1,
+            aStartSeconds: 100, aEndSeconds: 130,
+            aBytes: 1, bBytes: 0,
+            leftFlankSeconds: 60, rightFlankSeconds: 60
+        )
+        let alignment = RediffByteAligner.Alignment(
+            runsFound: 1,
+            chain: [run],
+            runsDroppedNonMonotonic: 1,        // → the recovery arm
+            chainedBytes: 1,
+            chainedFractionB: 0.9,
+            slots: [],
+            aDurationSeconds: 600,
+            bDurationSeconds: 600,
+            segmentedSlots: [slot],
+            segmentedChainedFractionB: 0.9,    // clears the re-encode floor
+            segmentedRunsChained: 1,
+            // 10 of the slot's 30 A-seconds are byte-verified matched audio.
+            foundRunASpans: [TimeRange(start: 110, end: 120)],
+            segmentedRunsAOverlapping: 1,
+            segmentedOverlapSecondsRecovered: 42
+        )
+        guard case .accepted(let acceptance) = RediffSlotOwnership.gateAndDiffBytes(
+            alignment: alignment, recoverNonMonotonicSegments: true
+        ) else {
+            Issue.record("the fixture must reach an acceptance for the witness to be read"); return
+        }
+        #expect(acceptance.playedSlots.count == 1, "control: a slot really was emitted")
+        #expect(acceptance.diagnostics.alignedSecondsInSlots == 10,
+                "the witness must DEFLECT — got \(acceptance.diagnostics.alignedSecondsInSlots)")
+        #expect(acceptance.diagnostics.maxAlignedSecondsInSlot == 10)
+        // And it is measured against THIS alignment's runs, not a re-derivation:
+        // the pass-through fields come from the same object.
+        #expect(acceptance.diagnostics.runsAOverlapping == 1)
+        #expect(acceptance.diagnostics.overlapSecondsRecovered == 42)
+    }
+
     // MARK: - 2. Aggregation across k-way personas
 
     @Test("combining sums what is additive and takes the MAX of what is a worst case")
