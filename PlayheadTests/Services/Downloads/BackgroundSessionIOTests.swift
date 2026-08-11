@@ -437,6 +437,18 @@ struct DownloadManagerDaemonUnavailableTests {
     /// which a transfer really is created and really is never started was
     /// read, not run — and that is where the identity-map leak this round
     /// fixed was living.
+    ///
+    /// The bound is the PRODUCTION one on purpose. This is the only rail
+    /// here whose setup needs a background-session call to genuinely
+    /// SUCCEED, and `downloadTask(with:)` is the blocking XPC round-trip
+    /// this whole bead is about — a short bound makes the rail a latency
+    /// measurement of `nsurlsessiond`, which is exactly the load-flake
+    /// family the header disowns. Measured: at 0.1s the creation call
+    /// exceeded its bound on a loaded box, the run took the
+    /// creation-timeout branch instead, and the rail failed on its own
+    /// admission-count precondition with nothing wrong in production. The
+    /// bound costs no test time — `refusesCallsLabelled` refuses the resume
+    /// call synchronously, so nothing here ever waits it out.
     @Test("A transfer backgroundDownload created but could not resume is abandoned by backgroundDownload itself")
     func backgroundDownloadAbandonsATransferItCouldNotResume() async throws {
         let dir = try makeTempDir()
@@ -446,7 +458,7 @@ struct DownloadManagerDaemonUnavailableTests {
             cacheDirectory: dir,
             sessionIO: BackgroundSessionIO(
                 behavior: .refusesCallsLabelled("resume() for"),
-                timeout: 0.1,
+                timeout: BackgroundSessionIO.defaultTimeout,
                 queueLabel: "nsjn.test.resume-refused.\(UUID().uuidString)"
             )
         )
