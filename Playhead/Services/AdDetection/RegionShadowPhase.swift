@@ -218,15 +218,30 @@ enum RegionShadowPhase {
         // a real query against a key no writer ever uses. This `guard` is the
         // one place that decides so — `runBackfill` hands the value through
         // verbatim.
+        // A knowledge-store READ FAILURE degrades to "no sponsor matches",
+        // NOT to "no regions". `runBackfill`'s catch around `run` sets
+        // `regionBundles = []`, which would discard the FM / classifier /
+        // music / acoustic proposals too — losing the episode's entire
+        // detection for a failed read of the newest and least load-bearing
+        // source. Before shjn `run` could only throw from the fingerprint
+        // branch, which no production call site can reach, so this is a
+        // throw path shjn would otherwise have introduced.
         let sponsorMatches: [SponsorMatch]
         if let knowledgeStore = input.knowledgeStore,
            let podcastId = input.podcastId,
            !podcastId.isEmpty {
-            sponsorMatches = try await SponsorKnowledgeMatcher.match(
-                atoms: atoms,
-                podcastId: podcastId,
-                knowledgeStore: knowledgeStore
-            )
+            do {
+                sponsorMatches = try await SponsorKnowledgeMatcher.match(
+                    atoms: atoms,
+                    podcastId: podcastId,
+                    knowledgeStore: knowledgeStore
+                )
+            } catch {
+                logger.warning(
+                    "Region shadow phase: sponsor knowledge read failed for asset \(input.analysisAssetId, privacy: .public) — continuing with no sponsor matches: \(error.localizedDescription, privacy: .public)"
+                )
+                sponsorMatches = []
+            }
         } else {
             sponsorMatches = SponsorKnowledgeMatcher.match(atoms: atoms)
         }
