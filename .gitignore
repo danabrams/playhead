@@ -7,8 +7,16 @@
 .beads/dolt
 .beads/dolt-wal
 # Previously polluted by a rogue `br` (beads_rust) install — see playhead-vha
-# era cleanup. bd's canonical data lives in .beads/dolt (also ignored).
-.beads/issues.jsonl
+# era cleanup. These stay ignored: they are br's, or local-only.
+#
+# `.beads/issues.jsonl` is DELIBERATELY TRACKED (playhead-aa72, 2026-08-11).
+# It is bd's own git-oriented export, and ignoring it meant the ENTIRE issue
+# tracker existed only on one machine, in files git was told to skip: dolt and
+# beads.db are ignored above, so `git ls-files .beads/` returned nothing but
+# config and hooks. bd auto-exports here and then runs `git add`, which this
+# line used to block — so every single bd write printed
+# `auto-export: git add failed`, and a warning that fires on every operation
+# trains its audience to stop reading it. It did.
 .beads/interactions.jsonl
 .beads/backup/
 .beads/embeddeddolt/
