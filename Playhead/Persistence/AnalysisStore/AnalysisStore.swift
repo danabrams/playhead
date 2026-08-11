@@ -72,12 +72,28 @@ struct AnalysisAsset: Sendable {
     /// than redo. `nil` on legacy rows (pre-Bug-9) and on assets that
     /// have never had a final-pass run admitted.
     ///
-    /// This watermark is approximate by design: it represents
-    /// "no final-pass work remains for any window ending at or below
-    /// this time" rather than "every second of audio up to this time
-    /// has a final-pass row". The runner reads it as an upper bound to
-    /// short-circuit fully-covered assets and to skip individual
-    /// AdWindows whose `endTime <= finalPassCoverageEndTime`.
+    /// **What it measures, exactly (playhead-jzj0).** The MAXIMUM `endTime`
+    /// among the spans this runner has drained. Numerator: the furthest
+    /// point reached. There is no denominator — it is a forward-progress
+    /// marker, not a fraction and not a completion claim.
+    ///
+    /// It does NOT mean "no final-pass work remains at or below this
+    /// time", and this comment said exactly that until playhead-jzj0. On
+    /// the strength of that sentence the runner used `endTime > watermark`
+    /// as its resume guard, which is sound only if candidates arrive in
+    /// increasing order of `endTime`. They do not: fusion backfill,
+    /// semantic sweep and the user's own manual marks mint AdWindows hours
+    /// after the launch batch, at arbitrary positions. Once one span drove
+    /// this value to EOF, every later-minted window inside the episode was
+    /// excluded permanently — 6 of 9 job-less windows on the 2026-08-02
+    /// device pull, including both of Dan's `userMarked` pod windows.
+    ///
+    /// Eligibility now keys on `final_pass_jobs` per span
+    /// (`canonicalCompleteFinalPassSpans(forAsset:)`). This column is still
+    /// written and is still read by `AnalysisCoverageSummary` as the
+    /// final-pass provenance fallback for assets with no `pass='final'`
+    /// chunks — a use that only asks how far the runner got, which is the
+    /// question it can answer.
     let finalPassCoverageEndTime: Double?
     /// playhead-h7r: classification for storage-budget accounting.
     /// Defaults to ``ArtifactClass/media`` so every existing call-site

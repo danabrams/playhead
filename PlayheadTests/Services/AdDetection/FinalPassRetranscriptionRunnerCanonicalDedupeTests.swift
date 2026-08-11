@@ -467,4 +467,206 @@ struct FinalPassRetranscriptionRunnerCanonicalDedupeTests {
         let span24 = try #require(spans.first { $0.canonicalSpanKey == "24.000-38.160" })
         #expect(span24.adWindowIds.sorted() == ["b-1", "b-2"])
     }
+
+    // MARK: - playhead-jzj0 review R1: jobId is the AdWindow id, identity is the span
+
+    @Test("an AdWindow whose span moves under a stable id converges instead of re-ASRing every launch")
+    func spanShiftUnderStableIdConverges() async throws {
+        // The AdWindow id is stable across a span change BY DESIGN:
+        // `AdDetectionService.reconcileHotPathWindows` reuses
+        // `existing.id` while taking `startTime`/`endTime` from the
+        // fresh run, and `AnalysisStore.updateAdWindowHotPathCandidate`
+        // writes the new bounds onto that same row.
+        //
+        // The final-pass job's IDENTITY is the canonical span, but its
+        // jobId is derived from the AdWindow id. After a shift the span
+        // lookup misses (new key) while `INSERT OR IGNORE` is silently
+        // ignored (old jobId) — so an implementation that trusts the
+        // locally-constructed `FinalPassJob` sees `.queued` for a row
+        // that is `complete`, re-decodes and re-transcribes the window,
+        // and does it again on EVERY subsequent launch because nothing
+        // it writes changes the outcome.
+        //
+        // Before playhead-jzj0 the `endTime > watermark` clause hid this
+        // whenever the frontier had passed the window — which is the
+        // normal state. Removing that clause is what exposes it, so the
+        // convergence pin belongs to this bead.
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        try await store.insertAdWindow(
+            makeAdWindow(
+                id: "w-1",
+                analysisAssetId: "asset-fp",
+                startTime: 100.0,
+                endTime: 160.0
+            )
+        )
+
+        let audio = StubAnalysisAudioProvider()
+        audio.shardsToReturn = [
+            AnalysisShard(id: 0, episodeID: "ep-asset-fp", startTime: 100.0, duration: 80.0, samples: [])
+        ]
+        let runner = makeRunner(store: store, audio: audio)
+        let input = makeInput()
+
+        // Drain 1 — the original span.
+        let first = try await runner.runFinalPassBackfill(for: input)
+        #expect(first.reTranscribedWindowIds == ["w-1"])
+        #expect(audio.decodeCallCount == 1)
+
+        // The detector refines the boundary: SAME row id, wider span.
+        let widened = makeAdWindow(
+            id: "w-1",
+            analysisAssetId: "asset-fp",
+            startTime: 100.0,
+            endTime: 175.0
+        )
+        try await store.updateAdWindowHotPathCandidate(widened)
+
+        // Drain 2 — the new span is genuinely new audio, so it SHOULD
+        // run exactly once. (An implementation that reads the persisted
+        // row but never disambiguates the jobId would drop it here and
+        // silently never transcribe [160, 175] — the permanent-exclusion
+        // class this bead closed, arrived at from the other side.)
+        let second = try await runner.runFinalPassBackfill(for: input)
+        #expect(second.reTranscribedWindowIds == ["w-1"],
+                "the widened span is new audio and must get a final pass")
+        #expect(audio.decodeCallCount == 2)
+
+        // Both spans must now hold their own `complete` row — the old
+        // span's completed work is real history and is not overwritten.
+        let spans = try await store.canonicalCompleteFinalPassSpans(forAsset: "asset-fp")
+        #expect(spans.map(\.canonicalSpanKey).sorted()
+                == ["100.000-160.000", "100.000-175.000"],
+                "got \(spans.map(\.canonicalSpanKey).sorted())")
+
+        // Drain 3 — THE PIN. Nothing changed, so nothing may run. A
+        // runner that trusts the local struct decodes and re-ASRs here,
+        // and on every launch after it, for ever.
+        let third = try await runner.runFinalPassBackfill(for: input)
+        #expect(third.reTranscribedWindowIds.isEmpty,
+                "a converged asset must be a no-op; got \(third.reTranscribedWindowIds)")
+        #expect(third.admittedJobIds.isEmpty)
+        #expect(audio.decodeCallCount == 2,
+                "no audio decode may run for a converged asset; decodeCallCount=\(audio.decodeCallCount)")
+    }
+
+    @Test("a span-shifted jobId collision does not resurrect a complete row as queued")
+    func spanShiftDoesNotMisreportPersistedStatus() async throws {
+        // Narrower pin on the same defect, stated in terms of the row
+        // rather than the drain: after the shift, the ORIGINAL row must
+        // still read `complete` (its jobId was never re-inserted) and
+        // the new span must occupy a DIFFERENT jobId that still carries
+        // the `fpj-<asset>-<adWindowId>` prefix diagnostics key off.
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        try await store.insertAdWindow(
+            makeAdWindow(id: "w-1", analysisAssetId: "asset-fp", startTime: 100.0, endTime: 160.0)
+        )
+        let audio = StubAnalysisAudioProvider()
+        audio.shardsToReturn = [
+            AnalysisShard(id: 0, episodeID: "ep-asset-fp", startTime: 100.0, duration: 80.0, samples: [])
+        ]
+        let runner = makeRunner(store: store, audio: audio)
+        _ = try await runner.runFinalPassBackfill(for: makeInput())
+
+        try await store.updateAdWindowHotPathCandidate(
+            makeAdWindow(id: "w-1", analysisAssetId: "asset-fp", startTime: 100.0, endTime: 175.0)
+        )
+        _ = try await runner.runFinalPassBackfill(for: makeInput())
+
+        let rows = try await store.fetchFinalPassJobs(forAsset: "asset-fp")
+        #expect(rows.count == 2, "one row per canonical span; got \(rows.map(\.jobId))")
+        let original = try #require(rows.first { $0.jobId == "fpj-asset-fp-w-1" })
+        #expect(original.status == .complete)
+        #expect(original.windowEndTime == 160.0,
+                "the original row's span must not be rewritten under it")
+        let shifted = try #require(rows.first { $0.jobId != "fpj-asset-fp-w-1" })
+        #expect(shifted.jobId.hasPrefix("fpj-asset-fp-w-1"),
+                "the span-qualified id keeps the jobId prefix diagnostics resolve on; got \(shifted.jobId)")
+        #expect(shifted.windowEndTime == 175.0)
+        #expect(shifted.status == .complete)
+    }
+
+    @Test("the enqueue branch drives off the PERSISTED row, not the struct it just built")
+    func enqueueBranchReadsBackThePersistedRow() async throws {
+        // playhead-jzj0 review R2 — a pin on the SECOND half of R1's fix.
+        //
+        // R1 closed the span-shift defect with two independent steps:
+        //   1. disambiguate the jobId when a row already holds it under a
+        //      different canonical span, and
+        //   2. read back whatever row `INSERT OR IGNORE` actually left
+        //      behind and drive the drain off THAT.
+        //
+        // Step 1 alone satisfies every span-shift assertion in this file,
+        // so deleting step 2 was a SURVIVING mutant at R2 (`job = newJob`,
+        // 91/91 green). It is not redundant, though: step 1 only fires when
+        // the occupying row's span DIFFERS. When a row occupies the natural
+        // jobId at the SAME span but the span lookup cannot see it, no
+        // disambiguation happens, `INSERT OR IGNORE` is ignored, and only
+        // the read-back stands between the runner and a `.queued`-shaped
+        // local struct describing a row that is `complete` — which is
+        // exactly the H1 shape: `markFinalPassJobRunning` silently no-ops
+        // (its IN-clause excludes `'complete'`), a full decode + ASR runs,
+        // and it runs again on every admitted sweep, for ever.
+        //
+        // In production that corridor is a pre-v25 row whose
+        // `canonicalSpanKey` backfill was missed — `findFinalPassJob`
+        // returns nil for a NULL key by documented contract. That state is
+        // not reachable through the store's API, so the fixture below
+        // constructs the same PRECONDITION through the other documented
+        // route into it: `findFinalPassJob` filters on `analysisAssetId`
+        // while `fetchFinalPassJob(byId:)` does not, so a row whose jobId
+        // is the one THIS asset would mint is invisible to the span lookup
+        // and visible to the id lookup. The runner cannot tell the two
+        // corridors apart — both hand it an occupied PK at a matching span.
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        try await store.insertAsset(makeAsset(id: "asset-other"))
+        try await store.insertAdWindow(
+            makeAdWindow(id: "w-1", analysisAssetId: "asset-fp", startTime: 10, endTime: 30)
+        )
+        // Occupies `fpj-asset-fp-w-1` — the id the runner will compute for
+        // (asset-fp, w-1) — at the SAME span, but owned by another asset.
+        try await store.insertOrIgnoreFinalPassJob(
+            FinalPassJob(
+                jobId: "fpj-asset-fp-w-1",
+                analysisAssetId: "asset-other",
+                podcastId: "pod-1",
+                adWindowId: "w-1",
+                windowStartTime: 10,
+                windowEndTime: 30,
+                status: .queued,
+                retryCount: 0,
+                deferReason: nil,
+                createdAt: 1_000.0
+            )
+        )
+        try await store.markFinalPassJobComplete(jobId: "fpj-asset-fp-w-1")
+
+        let audio = StubAnalysisAudioProvider()
+        audio.shardsToReturn = [
+            AnalysisShard(id: 0, episodeID: "ep-asset-fp", startTime: 0, duration: 30, samples: [])
+        ]
+        let runner = makeRunner(store: store, audio: audio)
+        let result = try await runner.runFinalPassBackfill(for: makeInput())
+
+        // THE PIN. The occupied row is `complete`, so nothing may run —
+        // and `decodeCallCount` is what says the expensive work
+        // specifically did not happen, rather than that the drain merely
+        // reported nothing. A runner that trusts its local struct decodes
+        // and re-ASRs here, and on every launch after it.
+        #expect(result.topLevelDeferReason == nil)
+        #expect(audio.decodeCallCount == 0,
+                "a complete row at the natural jobId must retire the window without a decode; decodeCallCount=\(audio.decodeCallCount)")
+        #expect(result.reTranscribedWindowIds.isEmpty,
+                "got \(result.reTranscribedWindowIds)")
+        #expect(result.admittedJobIds.isEmpty)
+
+        // And no competing row was minted for the span — the PK was
+        // already taken, and the runner accepted that rather than
+        // inventing a second identity for the same work.
+        let rows = try await store.fetchFinalPassJobs(forAsset: "asset-fp")
+        #expect(rows.isEmpty, "got \(rows.map(\.jobId))")
+    }
 }
