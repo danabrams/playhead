@@ -364,6 +364,80 @@ struct RediffSegmentRecoveryPhantomTests {
         #expect(alignment.foundRunASpans.count == alignment.runsFound)
     }
 
+    // MARK: - 5b. The accept rule itself, over run shapes bytes cannot stage
+
+    /// The greedy accept has THREE branches and a real A/B pair only exercises
+    /// two of them: accept-whole and clip. The third — a run whose A-span lies
+    /// WHOLLY inside coverage already accepted — needs two runs at different
+    /// byte deltas nested inside one another, which `byteRuns` prunes for the
+    /// same-delta case and which no plausible stitch produces for the other. So
+    /// it is driven directly, against a real parsed MP3 for the byte→time map.
+    ///
+    /// It is not decoration. Without the containment guard the clip arithmetic
+    /// runs on a run that ends BEHIND the cursor: `bytes` goes negative and
+    /// `globalAEnd` walks BACKWARD, and the next gap is then computed from a
+    /// rewound cursor — emitting a slot that overlaps a run by tens of thousands
+    /// of bytes. That is the same phantom this bead removes, arriving by a
+    /// different door.
+    @Test("the accept rule holds for all three run shapes: whole, clipped, and wholly contained")
+    func acceptRuleHandlesContainedRunsWithoutRewindingTheCursor() {
+        let frame = SyntheticMP3.frameLength
+        let parsedA = RediffByteAligner.parse(
+            SyntheticMP3.file(SyntheticMP3.frames(count: 3000, seed: 0xACC_0001)))
+        let parsedB = RediffByteAligner.parse(
+            SyntheticMP3.file(SyntheticMP3.frames(count: 3000, seed: 0xACC_0002)))
+
+        func run(_ aFrames: ClosedRange<Int>, bStart: Int) -> RediffByteAligner.Run {
+            RediffByteAligner.Run(
+                aStart: aFrames.lowerBound * frame,
+                bStart: bStart,
+                bytes: (aFrames.upperBound - aFrames.lowerBound) * frame
+            )
+        }
+        let runs = [
+            run(0...400, bStart: 0),            // accepted whole
+            run(50...100, bStart: 500_000),     // WHOLLY CONTAINED in the first
+            run(380...800, bStart: 700_000),    // partial overlap → clipped
+            run(1000...1500, bStart: 900_000)   // accepted whole
+        ]
+        let recovery = RediffByteAligner.segmentDivergentSlots(
+            runs: runs,
+            pa: parsedA,
+            pb: parsedB,
+            bAudioBytes: max(1, parsedB.sizeBytes - parsedB.leadingID3Bytes)
+        )
+
+        let runASpans = runs.map {
+            TimeRange(
+                start: RediffByteAligner.timeAt(parsedA, byteOffset: $0.aStart),
+                end: RediffByteAligner.timeAt(parsedA, byteOffset: $0.aStart + $0.bytes)
+            )
+        }
+        for slot in recovery.slots {
+            let matched = RediffByteAligner.alignedSeconds(
+                in: TimeRange(start: slot.aStartSeconds, end: slot.aEndSeconds), runASpans: runASpans)
+            #expect(
+                matched <= Self.epsilonSeconds,
+                """
+                slot \(slot.aStartSeconds)..\(slot.aEndSeconds) contains \(matched) s of \
+                byte-matched audio — the cursor rewound
+                """
+            )
+            #expect(slot.aEndSeconds >= slot.aStartSeconds, "a slot may never have negative width")
+        }
+        // The contained run contributes NO new A-region, so it is absorbed and
+        // — unlike the clipped one — is NOT counted as an opportunity: dropping
+        // it reports nothing as divergent, because an accepted run already
+        // covers its whole span.
+        #expect(recovery.runsChained == 3, "whole + clipped + whole; the contained one is absorbed")
+        #expect(recovery.runsAOverlapping == 1, "only the CLIPPED run is an opportunity")
+        #expect(recovery.overlapSecondsRecovered > 0, "…and its kept tail is real A-seconds")
+        // VACUITY: the fixture must actually produce gaps for the loop above to
+        // have examined anything. Frames 800–1000 and the tail past 1500 are
+        // covered by no run, so two real slots are expected.
+        #expect(recovery.slots.count >= 2, "the fixture must emit slots — got \(recovery.slots.count)")
+    }
+
     // MARK: - 6. The one exemption, pinned
 
     @Test("the STRICT slot list is unreachable when the chain drops runs — the exemption is not a hole")
