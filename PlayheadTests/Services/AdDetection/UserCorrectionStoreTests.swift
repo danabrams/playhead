@@ -715,72 +715,83 @@ final class UserCorrectionStoreTests: XCTestCase {
         }
     }
 
-    func testFieldSplitIsAmbiguousForEveryShowScopeWithAColonInThePodcastId() {
+    func testWireStringWithTwoOrMoreColonsDoesNotDetermineTheSplit() {
         let feedURL = "https://feeds.simplecast.com/dHoohVNH"
-        let ambiguous: [CorrectionScope] = [
+        let undetermined: [CorrectionScope] = [
             .sponsorOnShow(podcastId: feedURL, sponsor: "acme"),
             .phraseOnShow(podcastId: feedURL, phrase: "go to acme dot com"),
             .campaignOnShow(podcastId: feedURL, campaign: "spring-sale-2026"),
             .domainOwnershipOnShow(podcastId: feedURL, domain: "nytimes.com"),
             .jingleOnShow(podcastId: feedURL, jingleId: "jingle-7"),
+            // …and the symmetric case: a colon-free podcastId with a
+            // colon-bearing VALUE. The first-colon rule lands right here, but
+            // the STRING still does not say so, and that distinction is the
+            // whole point.
+            .sponsorOnShow(podcastId: "pod-123", sponsor: "Squarespace: Build It"),
         ]
-        for scope in ambiguous {
+        for scope in undetermined {
             XCTAssertFalse(
-                scope.fieldSplitIsUnambiguous,
-                "\(scope.serialized) must report an ambiguous field split"
-            )
-            XCTAssertNotEqual(
-                CorrectionScope.deserialize(scope.serialized), scope,
-                "an ambiguous split must actually lose the fields, not merely be labelled so"
+                CorrectionScope.showScopeSplitIsDetermined(
+                    bySerialized: scope.serialized
+                ),
+                "\(scope.serialized) admits more than one split"
             )
         }
     }
 
-    func testFieldSplitIsUnambiguousWhenThePodcastIdCarriesNoColon() {
-        let unambiguous: [CorrectionScope] = [
-            .sponsorOnShow(podcastId: "pod-123", sponsor: "Squarespace: Build It"),
-            .phraseOnShow(podcastId: "pod-456", phrase: "go to https://brand.com/promo"),
-            .campaignOnShow(podcastId: "pod-789", campaign: "spring:sale:2026"),
+    func testWireStringWithExactlyOneColonDeterminesTheSplitAndTheParseIsRight() {
+        let determined: [CorrectionScope] = [
+            .sponsorOnShow(podcastId: "pod-123", sponsor: "acme"),
+            .phraseOnShow(podcastId: "pod-456", phrase: "go to acme dot com"),
+            .campaignOnShow(podcastId: "pod-789", campaign: "spring-sale-2026"),
             .domainOwnershipOnShow(podcastId: "pod-abc", domain: "nytimes.com"),
-            .jingleOnShow(podcastId: "0C2FC22E-5F46-48D3-A53B-E1F702169771", jingleId: "j:7"),
-            // Span scopes take their last two shape-constrained tokens, so a
-            // colon anywhere in the assetId is absorbed by the re-join.
-            .exactSpan(assetId: "asset:with:colons", ordinalRange: 10...25),
-            .exactTimeSpan(assetId: "asset:with:colons", startTime: 1, endTime: 2),
+            .jingleOnShow(
+                podcastId: "0C2FC22E-5F46-48D3-A53B-E1F702169771",
+                jingleId: "jingle-7"
+            ),
         ]
-        for scope in unambiguous {
+        for scope in determined {
             XCTAssertTrue(
-                scope.fieldSplitIsUnambiguous,
-                "\(scope.serialized) must report an unambiguous field split"
+                CorrectionScope.showScopeSplitIsDetermined(
+                    bySerialized: scope.serialized
+                ),
+                "\(scope.serialized) admits exactly one split"
             )
             XCTAssertEqual(
                 CorrectionScope.deserialize(scope.serialized), scope,
-                "an unambiguous split must actually recover the fields"
+                "a determined split must actually recover the fields"
             )
         }
     }
 
-    /// The property measures the SPLIT, not value equality, and this is the
-    /// rail that stops the next reader conflating them. `.exactTimeSpan`
-    /// serializes through `%.3f`, so a sub-millisecond boundary is quantized
-    /// on the way out — an unambiguous split over a lossy encoding.
-    func testUnambiguousSplitDoesNotPromiseValueEqualityForExactTimeSpan() {
-        let scope = CorrectionScope.exactTimeSpan(
-            assetId: "asset-precision",
-            startTime: 10.00049,
-            endTime: 20.0
-        )
-        XCTAssertTrue(scope.fieldSplitIsUnambiguous)
-        XCTAssertNotEqual(
-            CorrectionScope.deserialize(scope.serialized), scope,
-            "%.3f quantizes the boundary; the split is exact, the VALUE is not"
-        )
-        guard case .exactTimeSpan(_, let start, _)? =
-                CorrectionScope.deserialize(scope.serialized) else {
-            XCTFail("expected exactTimeSpan")
+    /// The API takes a STRING, and this is the rail that says why. Computing
+    /// the same question over a PARSED scope — "does my podcastId contain a
+    /// colon?" — reports the corrupt scope as clean, because by then the
+    /// podcastId is "https". That is this bead's own defect one layer up, and
+    /// it is what the first implementation of this fix did.
+    func testTheQuestionIsAboutTheWireStringNotTheParsedScope() throws {
+        let feedURL = "https://feeds.simplecast.com/dHoohVNH"
+        let original = CorrectionScope.sponsorOnShow(podcastId: feedURL, sponsor: "acme")
+        let parsed = try XCTUnwrap(CorrectionScope.deserialize(original.serialized))
+
+        guard case .sponsorOnShow(let parsedPodcastId, _) = parsed else {
+            XCTFail("expected sponsorOnShow")
             return
         }
-        XCTAssertEqual(start, 10.0, accuracy: 1e-9)
+        XCTAssertFalse(
+            parsedPodcastId.contains(":"),
+            """
+            the parsed podcastId is "https" — colon-free, and therefore \
+            indistinguishable from a legitimate id by any test over the PARSED \
+            value. Only the wire string carries the evidence.
+            """
+        )
+        // Same string either way (the serialization is a fixpoint), and the
+        // string is what answers.
+        XCTAssertEqual(parsed.serialized, original.serialized)
+        XCTAssertFalse(
+            CorrectionScope.showScopeSplitIsDetermined(bySerialized: parsed.serialized)
+        )
     }
 
     // MARK: - playhead-fzpj: authoritativeShowScopePayload
@@ -816,27 +827,67 @@ final class UserCorrectionStoreTests: XCTestCase {
         XCTAssertEqual(payload?.value, "acme")
     }
 
-    func testAuthoritativePayloadIsNilWhenOnlyTheShowColumnIsPresent() throws {
-        // The half-repaired pair (feedURL, "//feeds.simplecast.com/dHoohVNH:acme")
-        // matches nothing. Refusing is the point: it is the partial fix that is
-        // worse than no fix.
+    /// ONE column is enough, from either end. Knowing the show identity pins
+    /// the division from the left; the value is whatever follows it.
+    func testShowColumnAloneAnchorsTheSplitFromTheLeft() throws {
         let feedURL = "https://feeds.simplecast.com/dHoohVNH"
         let scope = CorrectionScope.sponsorOnShow(podcastId: feedURL, sponsor: "acme")
         let parsed = try XCTUnwrap(CorrectionScope.deserialize(scope.serialized))
         let event = showScopeEvent(scope: scope, podcastIdColumn: feedURL, targetRefs: nil)
-        XCTAssertNil(event.authoritativeShowScopePayload(for: parsed))
+        let payload = event.authoritativeShowScopePayload(for: parsed)
+        XCTAssertEqual(payload?.podcastId, feedURL)
+        XCTAssertEqual(payload?.value, "acme")
     }
 
-    func testAuthoritativePayloadIsNilWhenOnlyTheValueColumnIsPresent() throws {
+    /// …and knowing the value pins it from the right, which is the stronger
+    /// rung: it recovers a colon-bearing sponsor under a colon-bearing
+    /// podcastId, which NO split rule over the string alone can do.
+    func testValueColumnAloneAnchorsTheSplitFromTheRight() throws {
         let feedURL = "https://feeds.simplecast.com/dHoohVNH"
-        let scope = CorrectionScope.sponsorOnShow(podcastId: feedURL, sponsor: "acme")
+        let sponsor = "squarespace: build it"
+        let scope = CorrectionScope.sponsorOnShow(podcastId: feedURL, sponsor: sponsor)
         let parsed = try XCTUnwrap(CorrectionScope.deserialize(scope.serialized))
         let event = showScopeEvent(
             scope: scope,
             podcastIdColumn: nil,
+            targetRefs: CorrectionTargetRefs(sponsorEntity: sponsor)
+        )
+        let payload = event.authoritativeShowScopePayload(for: parsed)
+        XCTAssertEqual(payload?.podcastId, feedURL)
+        XCTAssertEqual(payload?.value, sponsor)
+    }
+
+    /// A column that does not RECONSTRUCT the wire string is not used to
+    /// "correct" it. This is what stops the resolver from inventing a pair
+    /// that no writer ever wrote.
+    func testColumnsThatDoNotReconstructTheWireStringAreRefused() throws {
+        let feedURL = "https://feeds.simplecast.com/dHoohVNH"
+        let scope = CorrectionScope.sponsorOnShow(podcastId: feedURL, sponsor: "acme")
+        let parsed = try XCTUnwrap(CorrectionScope.deserialize(scope.serialized))
+
+        // Value column names a sponsor this scope does not end with.
+        let wrongValue = showScopeEvent(
+            scope: scope,
+            podcastIdColumn: feedURL,
+            targetRefs: CorrectionTargetRefs(sponsorEntity: "someone-else")
+        )
+        XCTAssertNil(wrongValue.authoritativeShowScopePayload(for: parsed))
+
+        // Show column names a feed this scope does not start with.
+        let wrongShow = showScopeEvent(
+            scope: scope,
+            podcastIdColumn: "https://anchor.fm/s/10412e4e0/podcast/rss",
+            targetRefs: nil
+        )
+        XCTAssertNil(wrongShow.authoritativeShowScopePayload(for: parsed))
+
+        // Both present and mutually inconsistent.
+        let disagreeing = showScopeEvent(
+            scope: scope,
+            podcastIdColumn: "https://anchor.fm/s/10412e4e0/podcast/rss",
             targetRefs: CorrectionTargetRefs(sponsorEntity: "acme")
         )
-        XCTAssertNil(event.authoritativeShowScopePayload(for: parsed))
+        XCTAssertNil(disagreeing.authoritativeShowScopePayload(for: parsed))
     }
 
     func testAuthoritativePayloadReturnsTheParsedPairWhenTheSplitIsExact() throws {
@@ -868,27 +919,48 @@ final class UserCorrectionStoreTests: XCTestCase {
         XCTAssertEqual(payload?.value, "nytimes.com")
     }
 
-    func testAuthoritativePayloadIsNilForScopesWithNoColumnToFallBackOn() throws {
-        // phrase / campaign / jingle carry no CorrectionTargetRefs field, so a
-        // colon-bearing podcastId is unresolvable for them BY CONSTRUCTION.
-        // They have no production writer today; this is the seam that has to
-        // grow a column before they get one.
+    /// phrase / campaign / jingle carry no `CorrectionTargetRefs` field of
+    /// their own, so they can only ever reach the SHOW-column rung. With a
+    /// podcastId column they resolve; without one, a colon-bearing podcastId is
+    /// unresolvable for them BY CONSTRUCTION. They have no production writer
+    /// today; this is the seam that has to grow a column before they get one.
+    ///
+    /// The sponsor/domain columns must NOT be borrowed for them — a phrase
+    /// scope whose value is taken from `sponsorEntity` would be a fabricated
+    /// pair, which is the whole failure mode this resolver exists to prevent.
+    func testValuelessShowScopesResolveOnlyThroughTheShowColumn() throws {
         let feedURL = "https://rss.libsyn.com/shows/101338/destinations/535577.xml"
-        let scopes: [CorrectionScope] = [
-            .phraseOnShow(podcastId: feedURL, phrase: "go to acme dot com"),
-            .campaignOnShow(podcastId: feedURL, campaign: "spring-sale-2026"),
-            .jingleOnShow(podcastId: feedURL, jingleId: "jingle-7"),
+        let cases: [(CorrectionScope, String)] = [
+            (.phraseOnShow(podcastId: feedURL, phrase: "go to acme dot com"), "go to acme dot com"),
+            (.campaignOnShow(podcastId: feedURL, campaign: "spring-sale-2026"), "spring-sale-2026"),
+            (.jingleOnShow(podcastId: feedURL, jingleId: "jingle-7"), "jingle-7"),
         ]
-        for scope in scopes {
+        for (scope, expectedValue) in cases {
             let parsed = try XCTUnwrap(CorrectionScope.deserialize(scope.serialized))
-            let event = showScopeEvent(
+
+            // With a podcastId column: resolves, and does NOT borrow the
+            // sponsor/domain columns for its value.
+            let withShow = showScopeEvent(
                 scope: scope,
                 podcastIdColumn: feedURL,
                 targetRefs: CorrectionTargetRefs(domain: "x.com", sponsorEntity: "acme")
             )
+            let payload = withShow.authoritativeShowScopePayload(for: parsed)
+            XCTAssertEqual(payload?.podcastId, feedURL)
+            XCTAssertEqual(
+                payload?.value, expectedValue,
+                "\(scope.serialized) must not take its value from another scope's column"
+            )
+
+            // Without one: nothing on the row says where the split goes.
+            let bare = showScopeEvent(
+                scope: scope,
+                podcastIdColumn: nil,
+                targetRefs: CorrectionTargetRefs(domain: "x.com", sponsorEntity: "acme")
+            )
             XCTAssertNil(
-                event.authoritativeShowScopePayload(for: parsed),
-                "\(scope.serialized) has no column carrying its value; it must refuse"
+                bare.authoritativeShowScopePayload(for: parsed),
+                "\(scope.serialized) has no value column and no show column; it must refuse"
             )
         }
     }
