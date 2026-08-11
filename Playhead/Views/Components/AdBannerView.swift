@@ -1085,11 +1085,21 @@ struct AdBannerView: View {
     /// (`LearningArtifactIngestor.applySponsorSideEffect` →
     /// `SponsorKnowledgeStore.recordCandidate`) and changes no skip anywhere;
     /// the entry needs presses on two DISTINCT episodes to reach `.active`, and
-    /// even then the only production reader of an active sponsor entry is
+    /// even then the only production reader of an active sponsor entry was
     /// `ASRVocabularyProvider` (see the bead's R1 note). A receipt in the
     /// present continuous of "skipping" is therefore a claim about behaviour
     /// that is not happening; "remembering" is a claim about the preference,
     /// which is exactly what did happen.
+    ///
+    /// playhead-shjn added a SECOND production reader — an `.active` entry now
+    /// reaches `SponsorKnowledgeMatcher` and becomes a `.sponsor`-origin
+    /// proposal in `RegionProposalBuilder` — and this wording still stands,
+    /// unchanged, for a reason worth writing down: `AtomEvidenceProjector`
+    /// reads four origin bits (`.foundationModel`, `.acoustic`, `.classifier`,
+    /// `.sustainedMusic`) and `.sponsor` is not one of them, so a sponsor-only
+    /// region anchors no atom and yields no span. The tap still moves no skip
+    /// by itself. See playhead-a1r6 for the open decision that would change
+    /// that; if it lands, THIS is the copy that has to be revisited.
     ///
     /// The label stays imperative ("Always skip …") because that is the
     /// instruction the listener gave — Dan's ruling. The receipt reports what
