@@ -587,4 +587,86 @@ struct FinalPassRetranscriptionRunnerCanonicalDedupeTests {
         #expect(shifted.windowEndTime == 175.0)
         #expect(shifted.status == .complete)
     }
+
+    @Test("the enqueue branch drives off the PERSISTED row, not the struct it just built")
+    func enqueueBranchReadsBackThePersistedRow() async throws {
+        // playhead-jzj0 review R2 — a pin on the SECOND half of R1's fix.
+        //
+        // R1 closed the span-shift defect with two independent steps:
+        //   1. disambiguate the jobId when a row already holds it under a
+        //      different canonical span, and
+        //   2. read back whatever row `INSERT OR IGNORE` actually left
+        //      behind and drive the drain off THAT.
+        //
+        // Step 1 alone satisfies every span-shift assertion in this file,
+        // so deleting step 2 was a SURVIVING mutant at R2 (`job = newJob`,
+        // 91/91 green). It is not redundant, though: step 1 only fires when
+        // the occupying row's span DIFFERS. When a row occupies the natural
+        // jobId at the SAME span but the span lookup cannot see it, no
+        // disambiguation happens, `INSERT OR IGNORE` is ignored, and only
+        // the read-back stands between the runner and a `.queued`-shaped
+        // local struct describing a row that is `complete` — which is
+        // exactly the H1 shape: `markFinalPassJobRunning` silently no-ops
+        // (its IN-clause excludes `'complete'`), a full decode + ASR runs,
+        // and it runs again on every admitted sweep, for ever.
+        //
+        // In production that corridor is a pre-v25 row whose
+        // `canonicalSpanKey` backfill was missed — `findFinalPassJob`
+        // returns nil for a NULL key by documented contract. That state is
+        // not reachable through the store's API, so the fixture below
+        // constructs the same PRECONDITION through the other documented
+        // route into it: `findFinalPassJob` filters on `analysisAssetId`
+        // while `fetchFinalPassJob(byId:)` does not, so a row whose jobId
+        // is the one THIS asset would mint is invisible to the span lookup
+        // and visible to the id lookup. The runner cannot tell the two
+        // corridors apart — both hand it an occupied PK at a matching span.
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        try await store.insertAsset(makeAsset(id: "asset-other"))
+        try await store.insertAdWindow(
+            makeAdWindow(id: "w-1", analysisAssetId: "asset-fp", startTime: 10, endTime: 30)
+        )
+        // Occupies `fpj-asset-fp-w-1` — the id the runner will compute for
+        // (asset-fp, w-1) — at the SAME span, but owned by another asset.
+        try await store.insertOrIgnoreFinalPassJob(
+            FinalPassJob(
+                jobId: "fpj-asset-fp-w-1",
+                analysisAssetId: "asset-other",
+                podcastId: "pod-1",
+                adWindowId: "w-1",
+                windowStartTime: 10,
+                windowEndTime: 30,
+                status: .queued,
+                retryCount: 0,
+                deferReason: nil,
+                createdAt: 1_000.0
+            )
+        )
+        try await store.markFinalPassJobComplete(jobId: "fpj-asset-fp-w-1")
+
+        let audio = StubAnalysisAudioProvider()
+        audio.shardsToReturn = [
+            AnalysisShard(id: 0, episodeID: "ep-asset-fp", startTime: 0, duration: 30, samples: [])
+        ]
+        let runner = makeRunner(store: store, audio: audio)
+        let result = try await runner.runFinalPassBackfill(for: makeInput())
+
+        // THE PIN. The occupied row is `complete`, so nothing may run —
+        // and `decodeCallCount` is what says the expensive work
+        // specifically did not happen, rather than that the drain merely
+        // reported nothing. A runner that trusts its local struct decodes
+        // and re-ASRs here, and on every launch after it.
+        #expect(result.topLevelDeferReason == nil)
+        #expect(audio.decodeCallCount == 0,
+                "a complete row at the natural jobId must retire the window without a decode; decodeCallCount=\(audio.decodeCallCount)")
+        #expect(result.reTranscribedWindowIds.isEmpty,
+                "got \(result.reTranscribedWindowIds)")
+        #expect(result.admittedJobIds.isEmpty)
+
+        // And no competing row was minted for the span — the PK was
+        // already taken, and the runner accepted that rather than
+        // inventing a second identity for the same work.
+        let rows = try await store.fetchFinalPassJobs(forAsset: "asset-fp")
+        #expect(rows.isEmpty, "got \(rows.map(\.jobId))")
+    }
 }
