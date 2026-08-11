@@ -79,15 +79,22 @@ struct BackgroundSessionIOTests {
     @Test("A body that outlives its bound resumes the caller with nil")
     func aBodyThatOutlivesItsBoundReleasesTheCaller() async {
         let io = Self.makeIO(timeout: 0.2)
+        // Models the daemon not answering, and does it WITHOUT a sleep. A
+        // body that sleeps N times the bound makes the verdict a race
+        // between two wall clocks — pass if the deadline timer is scheduled
+        // promptly, fail if a loaded box delays it past N. That is the
+        // load-flake family this bead exists to stop producing, so the body
+        // here simply does not return until the caller has already been
+        // released, which makes "outlives its bound" true by construction.
+        let release = DispatchSemaphore(value: 0)
         let result = await io.perform(label: "stalled") {
-            // Models the daemon not answering. Chosen 5x longer than the
-            // bound so the verdict is about the bound firing, not about how
-            // loaded the box is; and short enough that a REGRESSION fails
-            // this rail in a second rather than hanging the suite.
-            Thread.sleep(forTimeInterval: 1.0)
+            release.wait()
             return 7
         }
         #expect(result == nil)
+        // Let the body finish so the dedicated queue's thread is not
+        // stranded for the life of the test host.
+        release.signal()
     }
 
     /// A late answer must not be silently dropped: for a URLSession task,
@@ -99,16 +106,24 @@ struct BackgroundSessionIOTests {
     func aLateResultIsDiscardedRatherThanDropped() async {
         let io = Self.makeIO(timeout: 0.2)
         let discarded = OSAllocatedUnfairLock<[Int]>(initialState: [])
+        // LATE BY CONSTRUCTION rather than by arithmetic: the body cannot
+        // return until `release.signal()` below, which is already past the
+        // point where the caller gave up. The earlier form slept 0.6s
+        // against a 0.2s bound — only 0.4s of slack for a dispatch timer
+        // under a saturated box, and losing that race fails BOTH
+        // expectations here.
+        let release = DispatchSemaphore(value: 0)
 
         let result = await io.perform(
             label: "late",
             discardingLateResult: { value in discarded.withLock { $0.append(value) } },
             running: {
-                Thread.sleep(forTimeInterval: 0.6)
+                release.wait()
                 return 7
             }
         )
         #expect(result == nil)
+        release.signal()
 
         // The body is still running at this point; poll rather than sleep a
         // fixed interval so the rail is not a latency measurement.
@@ -128,14 +143,32 @@ struct BackgroundSessionIOTests {
     func anAbandonedSubmissionNeverStartsItsBody() async {
         let io = Self.makeIO(timeout: 0.2)
         let bodyRan = OSAllocatedUnfairLock<Bool>(initialState: false)
+        let holdingTheQueue = OSAllocatedUnfairLock<Bool>(initialState: false)
+        let release = DispatchSemaphore(value: 0)
 
         // Occupy the serial queue so the second submission cannot start.
+        // The blocker holds it until released by hand, so how long it holds
+        // is not a wall-clock bet.
         async let blocker: Int? = io.perform(label: "blocker") {
-            Thread.sleep(forTimeInterval: 1.0)
+            holdingTheQueue.withLock { $0 = true }
+            release.wait()
             return 1
         }
-        // Let the blocker actually take the queue before queueing behind it.
-        try? await Task.sleep(for: .milliseconds(100))
+        // POLL for the blocker to actually hold the queue. The earlier form
+        // slept a fixed 100ms and assumed an `async let` child task had been
+        // given a cooperative thread by then — which is precisely the
+        // assumption a saturated pool breaks, and precisely the starvation
+        // this bead is about. If it loses, the starved submission finds an
+        // EMPTY queue, runs immediately, and both expectations below fail.
+        var untilHeld = 600
+        while untilHeld > 0, !holdingTheQueue.withLock({ $0 }) {
+            try? await Task.sleep(for: .milliseconds(10))
+            untilHeld -= 1
+        }
+        #expect(
+            holdingTheQueue.withLock { $0 },
+            "the rail is vacuous unless the blocker actually took the queue first"
+        )
 
         let starved = await io.perform(label: "starved") {
             bodyRan.withLock { $0 = true }
@@ -143,6 +176,7 @@ struct BackgroundSessionIOTests {
         }
         #expect(starved == nil)
 
+        release.signal()
         _ = await blocker
         // Give the drained queue a chance to (wrongly) run the abandoned
         // block before asserting that it did not.
