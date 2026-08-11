@@ -39,8 +39,8 @@ struct BackgroundSessionIOTests {
     private static func escapeHatch() -> DispatchTime { .now() + 5 }
 
     /// Every test gets its own queue. The instance-per-queue design is what
-    /// lets a rail below block a queue for a full second without stalling
-    /// `.shared` — or a sibling test — in the same process.
+    /// lets a rail below hold a queue for as long as it needs without
+    /// stalling `.shared` — or a sibling test — in the same process.
     private static func makeIO(
         timeout: TimeInterval,
         line: Int = #line
