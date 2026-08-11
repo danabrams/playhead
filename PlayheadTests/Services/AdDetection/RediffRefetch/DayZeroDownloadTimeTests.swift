@@ -295,6 +295,22 @@ struct RediffDayZeroKickoffOutcomeTests {
         }
     }
 
+    @Test("playhead-kg8h: `.requested` is NOT a give-up — work still owed is not work that failed")
+    func requestedIsNeitherFiredNorGivenUp() {
+        #expect(RediffDayZeroKickoffOutcome.requested.isGiveUp == false,
+                "a claim counted as a give-up would report every queued kickoff as a failure")
+        #expect(RediffDayZeroKickoffOutcome.requested.invariantCode == nil,
+                "an outstanding claim is not a violation; only a settled give-up is")
+        #expect(RediffDayZeroKickoffOutcome.requested.readinessProgressRank
+            < RediffDayZeroKickoffOutcome.noPinnedFile.readinessProgressRank,
+                "a claim precedes the first probe, so it can never be the furthest progress observed")
+    }
+
+    @Test("the claim's raw value is stable — a device pull greps for it")
+    func requestedRawValueIsStable() {
+        #expect(RediffDayZeroKickoffOutcome.requested.rawValue == "requested")
+    }
+
     @Test("a probe names how far the kickoff got")
     func probeNamesProgress() {
         #expect(DayZeroReadinessProbe.ready(1).reachedOutcome == .fired)
@@ -533,20 +549,87 @@ struct RediffDayZeroKickoffOrderingTests {
 /// internals.
 actor KickoffSpy {
     private(set) var fired: [(episodeId: String, assetId: String)] = []
+    private(set) var claims: [RediffDayZeroKickoffClaim] = []
     private(set) var records: [RediffDayZeroKickoffRecordUpdate] = []
     private(set) var violations: [(code: InvariantViolation.Code, description: String)] = []
+    /// playhead-kg8h: an ORDERED log across all three hooks. The claim's whole
+    /// value is that it lands BEFORE the work, and a per-hook array cannot say
+    /// which happened first.
+    private(set) var timeline: [String] = []
 
     func noteFired(episodeId: String, assetId: String) {
         fired.append((episodeId, assetId))
+        timeline.append("fire(\(episodeId))")
+    }
+
+    func noteClaim(_ claim: RediffDayZeroKickoffClaim) {
+        claims.append(claim)
+        timeline.append("claim(\(claim.episodeId))")
     }
 
     func noteRecord(_ update: RediffDayZeroKickoffRecordUpdate) {
         records.append(update)
+        timeline.append("settle(\(update.episodeId))")
     }
 
     func noteViolation(code: InvariantViolation.Code, description: String) {
         violations.append((code, description))
     }
+}
+
+/// playhead-kg8h: lets a `claimKickoff` closure reach the coordinator that owns
+/// it, so a test can drive a RE-ENTRANT `requestKickoff` from inside the claim's
+/// suspension. The closure is built before the coordinator exists, so it needs a
+/// box to read through at call time.
+actor KickoffCoordinatorBox {
+    private(set) var coordinator: RediffDayZeroKickoffCoordinator?
+
+    func set(_ coordinator: RediffDayZeroKickoffCoordinator) {
+        self.coordinator = coordinator
+    }
+}
+
+/// playhead-kg8h R2: a one-shot gate a `claimKickoff` closure can park on, so a
+/// test can hold the claim OPEN and ask whether `requestKickoff` has returned.
+///
+/// The property this exists for is not "the claim happens" —
+/// `claimPrecedesTheFetch` already pins the ORDER, and a
+/// `Task { await claimKickoff(claim) }` satisfies it after a single
+/// `Task.yield()`. The property is that the claim is AWAITED.
+actor ClaimGate {
+    private var opened = false
+    private var parked: [CheckedContinuation<Void, Never>] = []
+    private var entered = false
+    private var entryWaiters: [CheckedContinuation<Void, Never>] = []
+
+    /// Called from INSIDE the claim closure: announce arrival, then park until
+    /// `open()`.
+    func enterAndPark() async {
+        entered = true
+        for waiter in entryWaiters { waiter.resume() }
+        entryWaiters.removeAll()
+        guard !opened else { return }
+        await withCheckedContinuation { parked.append($0) }
+    }
+
+    /// Resumes once the claim closure has been entered.
+    func waitUntilEntered() async {
+        guard !entered else { return }
+        await withCheckedContinuation { entryWaiters.append($0) }
+    }
+
+    func open() {
+        opened = true
+        for waiter in parked { waiter.resume() }
+        parked.removeAll()
+    }
+}
+
+/// playhead-kg8h R2: records that `requestKickoff` RETURNED — the thing a
+/// fire-and-forget claim makes happen too early.
+actor RequestReturnFlag {
+    private(set) var returned = false
+    func mark() { returned = true }
 }
 
 @Suite("Day-0 kickoff coordinator (playhead-4dqe)")
@@ -579,6 +662,7 @@ struct RediffDayZeroKickoffCoordinatorTests {
             fire: { ready, request in
                 await spy.noteFired(episodeId: request.episodeId, assetId: ready.analysisAssetId)
             },
+            claimKickoff: { await spy.noteClaim($0) },
             recordKickoff: { await spy.noteRecord($0) },
             reportViolation: { code, description in
                 await spy.noteViolation(code: code, description: description)
@@ -714,6 +798,7 @@ struct RediffDayZeroKickoffCoordinatorTests {
                 await Task.yield()
                 await inFlight.decrement()
             },
+            claimKickoff: { await spy.noteClaim($0) },
             recordKickoff: { await spy.noteRecord($0) },
             reportViolation: { _, _ in },
             episodeIdHasher: { $0 },
@@ -735,6 +820,332 @@ struct RediffDayZeroKickoffCoordinatorTests {
         await coordinator.requestKickoff(Self.request("ep-slow"))
         await coordinator.drainForTesting()
         #expect(await spy.records.first?.pollCount == 4)
+    }
+
+    // MARK: - playhead-kg8h: the durable claim
+
+    @Test("THE ACCEPTANCE: a kickoff that never settles STILL leaves a durable row")
+    func aKickoffThatNeverSettlesStillLeavesARow() async {
+        let spy = KickoffSpy()
+        let coordinator = Self.makeCoordinator(spy: spy) { _ in Self.ready("asset-x") }
+        // The drain is held, standing in for every way the work never completes:
+        // a background-URLSession wake whose budget expires inside the readiness
+        // poll, jetsam during the ~66 MB k-way fetch, a force-quit. Before this
+        // bead nothing at all was written until `settle`, so all of those were
+        // byte-identical in the database to a download that never happened.
+        await coordinator.suspendDrainForTesting()
+        await coordinator.requestKickoff(Self.request("ep-unsettled"))
+
+        let claims = await spy.claims
+        #expect(claims.count == 1, "the row is owed the moment the kickoff is requested")
+        #expect(claims.first?.episodeId == "ep-unsettled")
+        #expect(claims.first?.source == .backgroundDownload)
+        #expect(await spy.records.isEmpty, "nothing has settled — and that is the point")
+        #expect(await spy.fired.isEmpty)
+    }
+
+    @Test("the claim lands BEFORE the trigger is fired, not after the re-fetch returns")
+    func claimPrecedesTheFetch() async {
+        let spy = KickoffSpy()
+        let coordinator = Self.makeCoordinator(spy: spy) { _ in Self.ready("asset-order") }
+        await coordinator.requestKickoff(Self.request("ep-order"))
+        await coordinator.drainForTesting()
+
+        #expect(await spy.timeline == ["claim(ep-order)", "fire(ep-order)", "settle(ep-order)"],
+                "a claim written after `fire` would be lost by exactly the failures it exists to record")
+    }
+
+    @Test("A CONTENDED BATCH claims ALL FIVE up front — the serial drain no longer hides four of them")
+    func everyQueuedRequestIsClaimedEvenThoughTheDrainIsSerial() async {
+        let spy = KickoffSpy()
+        let coordinator = Self.makeCoordinator(spy: spy) { _ in Self.ready("asset-batch") }
+        // playhead-kxgh measured five day-0 requests taking 33 minutes through
+        // this strictly serial drain, and `pending` is in-memory (playhead-jra6).
+        // Claiming at enqueue is what makes the four still queued visible.
+        await coordinator.suspendDrainForTesting()
+        for index in 0..<5 {
+            await coordinator.requestKickoff(Self.request("ep-batch-\(index)"))
+        }
+
+        #expect(await spy.claims.count == 5)
+        #expect(await spy.records.isEmpty)
+        #expect(Set(await spy.claims.map(\.episodeId))
+            == Set((0..<5).map { "ep-batch-\($0)" }))
+    }
+
+    @Test("a DEDUPLICATED second request claims nothing — one download, one row, one count")
+    func deduplicatedRequestDoesNotClaimTwice() async {
+        let spy = KickoffSpy()
+        let coordinator = Self.makeCoordinator(spy: spy) { _ in Self.ready("asset-dup2") }
+        await coordinator.suspendDrainForTesting()
+        await coordinator.requestKickoff(Self.request("ep-dup2"))
+        await coordinator.requestKickoff(Self.request("ep-dup2"))
+
+        #expect(await spy.claims.count == 1,
+                "the in-flight guard must run BEFORE the claim, or a doubled request inflates kickoffCount")
+    }
+
+    @Test("the in-flight guard is taken BEFORE the claim suspends — a RE-ENTRANT duplicate claims nothing")
+    func inFlightGuardIsTakenBeforeTheClaimSuspends() async {
+        let spy = KickoffSpy()
+        let reentries = DayZeroProbeCounter()
+        let box = KickoffCoordinatorBox()
+        // The coordinator is an actor, so `requestKickoff` yields the actor at
+        // the claim's store write and ANY other caller may enter while it is
+        // parked there — and in production there really are several (the tap,
+        // the background-completion observer, a force-quit resume). Moving
+        // `inFlight.insert` below that await lets the re-entrant duplicate sail
+        // past both guards and claim the same download twice, which is a
+        // `kickoffCount` of 2 for one episode.
+        let coordinator = RediffDayZeroKickoffCoordinator(
+            maxAttempts: 1,
+            pollNanos: 1,
+            probe: { _ in Self.ready("asset-re") },
+            fire: { _, _ in },
+            claimKickoff: { claim in
+                await spy.noteClaim(claim)
+                guard await reentries.increment() == 1 else { return }
+                guard let coordinator = await box.coordinator else { return }
+                await coordinator.requestKickoff(Self.request("ep-re"))
+            },
+            recordKickoff: { await spy.noteRecord($0) },
+            reportViolation: { _, _ in },
+            episodeIdHasher: { $0 },
+            sleep: { _ in },
+            now: { 1_000 }
+        )
+        await box.set(coordinator)
+        await coordinator.suspendDrainForTesting()
+        await coordinator.requestKickoff(Self.request("ep-re"))
+
+        #expect(await spy.claims.count == 1,
+                "one download must produce one claim even when a duplicate arrives mid-write")
+    }
+
+    @Test("the claim carries the SOURCE, so a pull can still tell a tap from a background download")
+    func claimCarriesItsSource() async {
+        let spy = KickoffSpy()
+        let coordinator = Self.makeCoordinator(spy: spy) { _ in Self.ready("asset-src") }
+        await coordinator.suspendDrainForTesting()
+        await coordinator.requestKickoff(Self.request("ep-tap-src", source: .downloadAndAnalyzeTap))
+        #expect(await spy.claims.first?.source == .downloadAndAnalyzeTap)
+    }
+
+    // MARK: - playhead-kg8h R2: the rails the R1 mutants walked through
+
+    @Test("""
+    THE CLAIM IS AWAITED, not fired and forgotten — `requestKickoff` does not \
+    return until the row is durable
+    """)
+    func requestKickoffDoesNotReturnUntilTheClaimCompletes() async {
+        let spy = KickoffSpy()
+        let gate = ClaimGate()
+        let flag = RequestReturnFlag()
+        let coordinator = RediffDayZeroKickoffCoordinator(
+            maxAttempts: 1,
+            pollNanos: 1,
+            probe: { _ in Self.ready("asset-await") },
+            fire: { _, _ in },
+            claimKickoff: { claim in
+                await spy.noteClaim(claim)
+                await gate.enterAndPark()
+            },
+            recordKickoff: { await spy.noteRecord($0) },
+            reportViolation: { _, _ in },
+            episodeIdHasher: { $0 },
+            sleep: { _ in },
+            now: { 1_000 }
+        )
+
+        let task = Task {
+            await coordinator.requestKickoff(Self.request("ep-await"))
+            await flag.mark()
+        }
+        await gate.waitUntilEntered()
+        // Give a fire-and-forget claim every chance to have let `requestKickoff`
+        // return. Under a genuinely awaited claim this can never become true,
+        // however many times the scheduler runs — the caller is parked on the
+        // gate — so the assertion is deterministic in the direction that matters.
+        for _ in 0..<200 { await Task.yield() }
+
+        #expect(await flag.returned == false, """
+            `requestKickoff` returned while the claim was still in flight. Detaching \
+            the claim into its own `Task` restores the defect this bead closes: the \
+            caller returns before the row exists, so a background-URLSession wake \
+            whose budget expires — or jetsam, or a force-quit — between the two \
+            leaves NO ROW again. `claimPrecedesTheFetch` cannot see this: a single \
+            `Task.yield()` puts the claim back in front of `fire` in any process \
+            that survives, and a surviving process is all that test observes.
+            """)
+        #expect(await spy.claims.count == 1,
+                "ANTI-VACUITY: the claim closure must actually have been entered")
+
+        await gate.open()
+        await task.value
+        #expect(await flag.returned, "ANTI-VACUITY: opening the gate must let the request finish")
+    }
+
+    @Test("""
+    NO CLAIM IS OVERTAKEN BY ITS OWN SETTLE — the request joins `pending` only \
+    AFTER the claim, so a drain that is already running cannot pop it first
+    """)
+    func noClaimIsOvertakenByItsOwnSettle() async throws {
+        let spy = KickoffSpy()
+        let coordinator = RediffDayZeroKickoffCoordinator(
+            maxAttempts: 1,
+            pollNanos: 1,
+            probe: { _ in Self.ready("asset-overtake") },
+            fire: { _, _ in },
+            claimKickoff: { claim in
+                // Hold the claim open across many scheduling points, the way a
+                // real store write does. A drain that can ALREADY SEE this
+                // request will pop, fire and settle it inside this window; one
+                // that cannot has nothing to pop, however long the window is.
+                for _ in 0..<200 { await Task.yield() }
+                await spy.noteClaim(claim)
+            },
+            recordKickoff: { await spy.noteRecord($0) },
+            reportViolation: { _, _ in },
+            episodeIdHasher: { $0 },
+            sleep: { _ in },
+            now: { 1_000 }
+        )
+
+        // The FIRST request starts the drain; every later one arrives while it
+        // is LIVE, which is the only state in which the ordering can be lost.
+        // `suspendDrainForTesting` would defeat the whole test.
+        for index in 0..<4 {
+            await coordinator.requestKickoff(Self.request("ep-overtake-\(index)"))
+        }
+        await coordinator.drainForTesting()
+
+        #expect(await spy.records.count == 4, """
+            ANTI-VACUITY: every request must actually have SETTLED. With nothing \
+            settled the ordering assertion below would hold over an empty timeline \
+            and prove nothing.
+            """)
+        let timeline = await spy.timeline
+        for index in 0..<4 {
+            let episodeId = "ep-overtake-\(index)"
+            let claimed = try #require(
+                timeline.firstIndex(of: "claim(\(episodeId))"),
+                "ANTI-VACUITY: \(episodeId) must have been claimed at all"
+            )
+            let settled = try #require(
+                timeline.firstIndex(of: "settle(\(episodeId))"),
+                "ANTI-VACUITY: \(episodeId) must have been settled at all"
+            )
+            #expect(claimed < settled, """
+                `settle(\(episodeId))` was written BEFORE `claim(\(episodeId))`. \
+                Appending to `pending` before awaiting the claim lets a drain that is \
+                already running pop, fire and settle a request whose claim is still in \
+                flight — and the claim then lands on a SETTLED row, stamping it \
+                `requested` and adding a kickoff nobody owes. That fabricates a loss in \
+                the one number whose whole job is reporting real ones. `requestKickoff`'s \
+                own doc comment names this as the repair that looks obvious and is worse; \
+                nothing measured it until playhead-kg8h R3, where the mutation that swaps \
+                those two lines passed all 44 tests.
+                """)
+        }
+    }
+
+    @Test("""
+    the claim is stamped with the coordinator's LIVE clock — an outstanding \
+    claim's `updatedAt` is the only thing that dates it
+    """)
+    func claimIsStampedWithTheLiveClock() async {
+        // Two coordinators, two clocks. A constant `at` — 0, or any hardcoded
+        // stamp — cannot satisfy both. A claim stamped 0 reads as 1970: it sorts
+        // last in `idx_rediff_day_zero_kickoffs_updated`, which is the index
+        // `fetchRediffDayZeroKickoffs` orders by, so the kickoffs still owed
+        // would be exactly the rows a limited pull drops first.
+        func stamp(clock: @escaping @Sendable () -> Double, episodeId: String) async -> Double? {
+            let spy = KickoffSpy()
+            let coordinator = RediffDayZeroKickoffCoordinator(
+                maxAttempts: 1,
+                pollNanos: 1,
+                probe: { _ in Self.ready("asset-clock") },
+                fire: { _, _ in },
+                claimKickoff: { await spy.noteClaim($0) },
+                recordKickoff: { await spy.noteRecord($0) },
+                reportViolation: { _, _ in },
+                episodeIdHasher: { $0 },
+                sleep: { _ in },
+                now: clock
+            )
+            await coordinator.suspendDrainForTesting()
+            await coordinator.requestKickoff(Self.request(episodeId))
+            return await spy.claims.first?.at
+        }
+
+        let earlier = await stamp(clock: { 1_722_000_000 }, episodeId: "ep-clock-a")
+        let later = await stamp(clock: { 1_733_000_000 }, episodeId: "ep-clock-b")
+        #expect(earlier == 1_722_000_000,
+                "the claim carries the clock it was requested at, not a constant")
+        #expect(later == 1_733_000_000)
+        #expect((earlier ?? 0) < (later ?? 0),
+                "two claims made at different times must be orderable — a constant stamp collapses them")
+    }
+
+    @Test("""
+    AN EPISODE THAT ALREADY FIRED IS NOT CLAIMED AGAIN — the `fired` guard, \
+    which `inFlight` cannot stand in for once the kickoff has settled
+    """)
+    func anAlreadyFiredEpisodeIsNotClaimedAgain() async {
+        let spy = KickoffSpy()
+        let coordinator = Self.makeCoordinator(spy: spy) { _ in Self.ready("asset-refire") }
+        await coordinator.requestKickoff(Self.request("ep-refire"))
+        await coordinator.drainForTesting()
+        #expect(await spy.records.first?.outcome == .fired, """
+            ANTI-VACUITY: the first kickoff must genuinely have FIRED, or `fired` \
+            never gained the episode and this test would prove nothing about it.
+            """)
+        #expect(await spy.claims.count == 1)
+
+        // The tap after a completed background download, or a second completion
+        // for the same episode. `settle` already released `inFlight`, so
+        // `inFlightKickoffIsDeduplicated` says nothing here — only the `fired`
+        // guard stops it.
+        await coordinator.requestKickoff(
+            Self.request("ep-refire", source: .downloadAndAnalyzeTap)
+        )
+        await coordinator.drainForTesting()
+
+        #expect(await spy.claims.count == 1, """
+            A second claim for an episode whose kickoff already fired is a \
+            `kickoffCount` of 2 for one piece of work. The trigger's own per-asset \
+            backoff owns everything after `fire`, so the re-run is pure waste — and \
+            now that `kickoffCount` counts CLAIMS, the extra one reads forever as a \
+            kickoff owed and never settled: a fabricated loss in the very number this \
+            bead added in order to measure real ones.
+            """)
+        #expect(await spy.records.count == 1)
+        #expect(await spy.fired.count == 1)
+    }
+
+    @Test("""
+    ANTI-VACUITY for the `fired` guard: an episode that GAVE UP is still allowed \
+    a second kickoff, and claims again
+    """)
+    func aGivenUpEpisodeMayBeClaimedAgain() async {
+        let spy = KickoffSpy()
+        let coordinator = Self.makeCoordinator(spy: spy) { _ in .awaitingAnalysisAsset }
+        await coordinator.requestKickoff(Self.request("ep-retry"))
+        await coordinator.drainForTesting()
+        #expect(await spy.records.first?.outcome == .noAnalysisAsset)
+        #expect(await spy.claims.count == 1)
+
+        // `fired` is deliberately NOT extended to give-ups — see its own doc
+        // comment. One early failure while dispatch is still warming up must not
+        // lock the episode out for the whole session. A guard that also swallowed
+        // give-ups would pass the test above and silently restore that lockout.
+        await coordinator.requestKickoff(
+            Self.request("ep-retry", source: .downloadAndAnalyzeTap)
+        )
+        await coordinator.drainForTesting()
+        #expect(await spy.claims.count == 2,
+                "a give-up produced nothing, so a later download or tap is allowed to try again")
+        #expect(await spy.claims.last?.source == .downloadAndAnalyzeTap)
     }
 }
 

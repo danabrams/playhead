@@ -1777,6 +1777,13 @@ final class PlayheadRuntime {
                         forceDeepScanOptIn: true
                     )
                 },
+                // playhead-kg8h: the DURABLE CLAIM, written before the request
+                // is even queued. Everything below this line — the ~6.5-minute
+                // readiness wait, the serial drain, and `fire`'s ~66 MB k-way
+                // re-fetch — can be cut short by a background-wake budget or
+                // jetsam, and until this existed that left NO row: identical in
+                // the database to a download that never happened.
+                claimKickoff: Self.makeDayZeroKickoffClaimRecorder(store: kickoffStore),
                 recordKickoff: { update in
                     try? await kickoffStore.noteRediffDayZeroKickoff(
                         episodeId: update.episodeId,
@@ -5542,6 +5549,46 @@ final class PlayheadRuntime {
                 ) else { return }
                 await coordinator.requestKickoff(request)
             }
+        }
+    }
+
+    /// playhead-kg8h: the production `claimKickoff` closure — the one write that
+    /// makes a day-0 kickoff durable BEFORE any of the work it stands for runs.
+    ///
+    /// EXTRACTED FROM `init` in playhead-kg8h R2 so a test can drive the REAL
+    /// closure against a REAL store. The required-parameter discipline on
+    /// `RediffDayZeroKickoffCoordinator.init` stops the wiring being OMITTED; it
+    /// does nothing about it being MIS-WIRED, and nothing in the suite touched
+    /// this closure — every coordinator test injects its own spy. So
+    /// `claimKickoff: { _ in }`, or an `at:` that does not carry the claim's own
+    /// stamp, would compile, leave the whole suite green, and restore this bead's
+    /// defect in full: a kickoff the process does not survive leaves no row,
+    /// visible only as an absence.
+    ///
+    /// Two instruments now cover it, because neither is sufficient alone.
+    /// `DayZeroKickoffClaimRecorderTests` exercises what this RETURNS;
+    /// `DayZeroBackgroundKickoffWiringCanaryTests` pins that the coordinator is
+    /// actually BUILT with it, which no behavioural test can see without standing
+    /// up the whole runtime.
+    ///
+    /// `static` and Sendable-only by construction, for the same reason
+    /// `installDayZeroBackgroundDownloadKickoff` is: this runs from a URLSession
+    /// completion callback and must not capture the `@MainActor` runtime.
+    ///
+    /// `try?` for the same reason every other day-0 recorder uses it — a store
+    /// error must not take down a download-completion callback. What the SETTLE
+    /// path then does about a claim that never landed is
+    /// `AnalysisStore.noteRediffDayZeroKickoff`'s job; see its doc comment for
+    /// why the direction of that error is deliberate.
+    nonisolated static func makeDayZeroKickoffClaimRecorder(
+        store: AnalysisStore
+    ) -> @Sendable (RediffDayZeroKickoffClaim) async -> Void {
+        { claim in
+            try? await store.noteRediffDayZeroKickoffClaim(
+                episodeId: claim.episodeId,
+                source: claim.source,
+                at: claim.at
+            )
         }
     }
 

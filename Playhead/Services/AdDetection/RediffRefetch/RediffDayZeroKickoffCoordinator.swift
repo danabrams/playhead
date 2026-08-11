@@ -48,6 +48,13 @@ actor RediffDayZeroKickoffCoordinator {
     private let probe: @Sendable (String) async -> DayZeroReadinessProbe<DayZeroKickoffReady>
     /// Hands a ready kickoff to `DayZeroRediffTrigger.triggerIfEligible`.
     private let fire: @Sendable (DayZeroKickoffReady, RediffDayZeroKickoffRequest) async -> Void
+    /// playhead-kg8h: durably CLAIMS one requested kickoff BEFORE it is queued
+    /// (production: `AnalysisStore.noteRediffDayZeroKickoffClaim`).
+    ///
+    /// This is the difference between "every downloaded episode gets a row" and
+    /// "every downloaded episode whose process survived the next 6.5 minutes
+    /// plus a 66 MB re-fetch gets a row". See `.requested`.
+    private let claimKickoff: @Sendable (RediffDayZeroKickoffClaim) async -> Void
     /// Persists one settled kickoff (production: `rediff_day_zero_kickoffs`).
     private let recordKickoff: @Sendable (RediffDayZeroKickoffRecordUpdate) async -> Void
     /// Surfaces a give-up on the JSON Lines session file the device pull reads.
@@ -82,6 +89,13 @@ actor RediffDayZeroKickoffCoordinator {
         pollNanos: UInt64,
         probe: @escaping @Sendable (String) async -> DayZeroReadinessProbe<DayZeroKickoffReady>,
         fire: @escaping @Sendable (DayZeroKickoffReady, RediffDayZeroKickoffRequest) async -> Void,
+        // DELIBERATELY NOT DEFAULTED (playhead-kg8h), the same discipline
+        // `DayZeroRediffTrigger`'s recorders are held to. A `{ _ in }` default
+        // reproduces this bead's defect exactly — every kickoff the process does
+        // not survive leaves nothing — and it would do so with the whole suite
+        // green, because a missing claim is only visible as an absence. A
+        // required parameter makes dropping the wiring a compile error.
+        claimKickoff: @escaping @Sendable (RediffDayZeroKickoffClaim) async -> Void,
         recordKickoff: @escaping @Sendable (RediffDayZeroKickoffRecordUpdate) async -> Void,
         reportViolation: @escaping @Sendable (InvariantViolation.Code, String) async -> Void,
         episodeIdHasher: @escaping @Sendable (String) -> String,
@@ -94,6 +108,7 @@ actor RediffDayZeroKickoffCoordinator {
         self.pollNanos = pollNanos
         self.probe = probe
         self.fire = fire
+        self.claimKickoff = claimKickoff
         self.recordKickoff = recordKickoff
         self.reportViolation = reportViolation
         self.episodeIdHasher = episodeIdHasher
@@ -104,12 +119,59 @@ actor RediffDayZeroKickoffCoordinator {
     // MARK: Entry point
 
     /// Ask for a day-0 kickoff for an episode whose download just completed (or
-    /// whose "Download & Analyze" was just tapped). Cheap and non-blocking: it
-    /// enqueues and returns; the drain runs on its own task.
-    func requestKickoff(_ request: RediffDayZeroKickoffRequest) {
+    /// whose "Download & Analyze" was just tapped). Non-blocking in the sense
+    /// that matters — it never waits for the readiness poll or the re-fetch —
+    /// but it DOES await one bounded store write before returning: the durable
+    /// claim.
+    ///
+    /// playhead-kg8h — WHY THE CLAIM IS AWAITED HERE AND NOT INSIDE THE DRAIN.
+    /// Three losses sit between "a download completed" and "a row exists", and
+    /// only the first is covered by claiming at the head of `process`:
+    ///
+    ///   1. the ~6.5-minute readiness wait,
+    ///   2. `fire`, which is the entire day-0 re-fetch (~66 MB k-way, plus a
+    ///      possible 30 s same-session retry and a second fetch),
+    ///   3. the PENDING QUEUE itself — the drain is strictly serial
+    ///      (playhead-kxgh measured five requests taking 33 minutes), and
+    ///      `pending` is in-memory (playhead-jra6), so a batch of five leaves
+    ///      four requests holding nothing durable for half an hour.
+    ///
+    /// Claiming before `pending.append` covers all three. The dedupe guards and
+    /// the `inFlight` insert run BEFORE the await, so a concurrent duplicate is
+    /// still rejected while the claim is in flight; the append and the drain
+    /// start AFTER it, so `settle` can never overtake the claim it updates.
+    ///
+    /// Both callers already invoke this from a detached `Task`, so no download
+    /// completion callback and no playback path waits on the write.
+    ///
+    /// ACCEPTED RESIDUE (playhead-kg8h R2). While parked on the claim the episode
+    /// is in `inFlight` but not yet in `pending`, so a claim that NEVER RETURNS
+    /// loses the kickoff and dedupes the episode out for the rest of the process.
+    /// Three reasons it is accepted rather than fixed:
+    ///
+    ///   * It is not new. `inFlight` has only ever been released by `settle`, at
+    ///     the far end of the wait, so a store wedged at `probe` or at
+    ///     `recordKickoff` held the episode out for exactly as long before this
+    ///     bead. The window moved earlier; it did not appear.
+    ///   * Nothing survives it anyway. The claim can only hang if `AnalysisStore`
+    ///     itself is wedged, and the same actor serves `probe` and
+    ///     `recordKickoff`, so every other episode parks too. A dedupe entry is
+    ///     not the loss in that scenario.
+    ///   * The obvious repair is worse. Appending to `pending` BEFORE the claim
+    ///     would let a drain already running pop and SETTLE the request while the
+    ///     claim is still in flight — and the claim would then land on a settled
+    ///     row, stamping it `requested` and adding a kickoff nobody owes. That
+    ///     reports a loss that did not happen, in a number whose whole job is
+    ///     reporting losses that did.
+    func requestKickoff(_ request: RediffDayZeroKickoffRequest) async {
         guard !fired.contains(request.episodeId) else { return }
         guard !inFlight.contains(request.episodeId) else { return }
         inFlight.insert(request.episodeId)
+        await claimKickoff(RediffDayZeroKickoffClaim(
+            episodeId: request.episodeId,
+            source: request.source,
+            at: now()
+        ))
         pending.append(request)
         startDrainIfNeeded()
     }

@@ -521,4 +521,288 @@ final class DayZeroBackgroundKickoffWiringCanaryTests: XCTestCase {
             """
         )
     }
+
+    /// playhead-kg8h R2: the coordinator must be built with the REAL claim
+    /// recorder.
+    ///
+    /// `claimKickoff` is a REQUIRED init parameter, which makes an OMITTED claim
+    /// a compile error — and does nothing whatsoever about a MIS-WIRED one.
+    /// `claimKickoff: { _ in }` compiles, satisfies that discipline, and passes
+    /// every coordinator test in the suite, because they all inject their own spy
+    /// and none of them touches this closure. It also restores playhead-kg8h's
+    /// defect in full: a kickoff the process does not survive leaves NO ROW,
+    /// byte-identical in the database to a download that never happened, and a
+    /// missing claim is only ever visible as an absence.
+    ///
+    /// Two instruments, because neither is sufficient alone.
+    /// `DayZeroKickoffClaimRecorderTests` drives what
+    /// `makeDayZeroKickoffClaimRecorder` RETURNS against a real store — proving
+    /// the closure writes the row, with the claim's own source and stamp. This
+    /// canary proves the coordinator is actually built with it, which no
+    /// behavioural test can see without standing up the whole runtime.
+    func testDayZeroKickoffCoordinatorIsWiredToTheRealClaimRecorder() throws {
+        let source = try SwiftSourceInspector.loadSource(
+            repoRelativePath: "Playhead/App/PlayheadRuntime.swift"
+        )
+
+        // ANTI-VACUITY: both anchors must exist and be in order, or the bounded
+        // search below would silently run over the wrong region — or over none.
+        guard let construction = source.range(
+            of: "RediffDayZeroKickoffCoordinator("
+        ) else {
+            XCTFail(
+                "Could not locate the `RediffDayZeroKickoffCoordinator(` construction — " +
+                "re-anchor this canary."
+            )
+            return
+        }
+        guard let lastArgument = source.range(
+            of: "episodeIdHasher: surfaceStatusHasher",
+            range: construction.upperBound..<source.endIndex
+        ) else {
+            XCTFail(
+                "Could not locate `episodeIdHasher: surfaceStatusHasher`, the coordinator's " +
+                "final argument — re-anchor this canary."
+            )
+            return
+        }
+
+        let argumentList = SwiftSourceInspector.strippingComments(
+            String(source[construction.upperBound..<lastArgument.lowerBound])
+        )
+        XCTAssertFalse(
+            argumentList.isEmpty,
+            "ANTI-VACUITY: the coordinator's argument list must be readable"
+        )
+        XCTAssertNotNil(
+            argumentList.range(of: "recordKickoff:"),
+            """
+            ANTI-VACUITY: the argument list must contain the coordinator's OTHER \
+            recorder. Without this the assertion below could pass over a region that \
+            is empty or mis-bounded.
+            """
+        )
+
+        XCTAssertNotNil(
+            argumentList.range(of: "claimKickoff: Self.makeDayZeroKickoffClaimRecorder("),
+            """
+            The day-0 kickoff coordinator is no longer built with the real claim \
+            recorder. `claimKickoff` being a REQUIRED parameter stops the wiring being \
+            OMITTED; it says nothing about it being replaced with `{ _ in }`, or with \
+            any other closure that never reaches `rediff_day_zero_kickoffs`. Either \
+            compiles and leaves the whole suite green — every coordinator test injects \
+            its own spy — and restores playhead-kg8h's defect: every kickoff the \
+            process does not survive leaves nothing behind.
+            """
+        )
+    }
+
+    /// playhead-kg8h R4: the claim must be awaited INLINE — and that is a
+    /// STRUCTURAL question the behavioural rails cannot settle.
+    ///
+    /// `DayZeroKickoffClaimRecorderTests` proves the row lands. It cannot prove
+    /// the row lands BEFORE the recorder returned, because a detached write
+    /// differs from the shipped closure only in SCHEDULING: with the store call
+    /// wrapped in an unstructured task, those tests fail solely when the test's
+    /// own hop into `AnalysisStore` beats the detached task's. That reddened on
+    /// every observation R3 took — and a rail that CAN flake green is the
+    /// dangerous direction, because green is how it reports "no regression".
+    /// This is the same box whose measurement tests blow 60 s budgets under the
+    /// full plan's own load, so "it reddened on a quiet box" is not evidence
+    /// about a loaded one.
+    ///
+    /// Detachment is a defect here and not a matter of taste. `requestKickoff`
+    /// appends to `pending` and starts the drain on the line AFTER
+    /// `await claimKickoff(…)`. A write that is merely SCHEDULED is one the
+    /// drain's own `settle` can overtake — it would then stamp `.requested` onto
+    /// an already-settled row and add a kickoff nobody owes, which is exactly the
+    /// ordering `noClaimIsOvertakenByItsOwnSettle` rails one layer up — and, in
+    /// the background-relaunch process this bead exists for, it is a write the
+    /// process may not survive long enough to perform at all.
+    ///
+    /// Inline-ness is textual, so this reads it textually. Every way Swift has of
+    /// not awaiting something here — an unstructured task, a detached task, a
+    /// GCD hop, a fire-and-forget helper — puts the call inside a closure
+    /// literal. So the property is: the store write sits at closure depth 1,
+    /// inside the returned closure and inside nothing else. Control-flow braces
+    /// are NOT counted (see `closureDepths`), so a later `do { } catch { }`
+    /// around the same inline `await` still reads 1.
+    ///
+    /// WHAT WOULD MAKE THIS COMPILE-ENFORCED, AND WHY IT IS NOT DONE HERE.
+    /// `claimKickoff` could return a receipt that only
+    /// `AnalysisStore.noteRediffDayZeroKickoffClaim` is able to construct, so a
+    /// closure that detached would have nothing to return. That changes the store
+    /// method's signature, the coordinator's seam type and `requestKickoff` — an
+    /// architecture change rather than a rail — and it would still leak, because
+    /// the recorder deliberately swallows store errors with `try?` and therefore
+    /// has to return an optional, which a mutant satisfies with `nil`.
+    func testDayZeroKickoffClaimRecorderAwaitsItsWriteInline() throws {
+        let source = try SwiftSourceInspector.loadSource(
+            repoRelativePath: "Playhead/App/PlayheadRuntime.swift"
+        )
+        guard let body = SwiftSourceInspector.firstBody(
+            in: source,
+            after: "static func makeDayZeroKickoffClaimRecorder("
+        ) else {
+            XCTFail(
+                "Could not locate `makeDayZeroKickoffClaimRecorder`'s body — the day-0 " +
+                "claim recorder's factory moved or was renamed and this canary needs " +
+                "re-anchoring."
+            )
+            return
+        }
+
+        // Comments AND string CONTENTS blanked: the prose above quotes the
+        // detached spelling, and a canary that greps its own explanation is a
+        // canary that is always red.
+        let code = SwiftSourceInspector.strippingCommentsAndStrings(body)
+        XCTAssertFalse(
+            code.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+            "ANTI-VACUITY: the factory's body must be readable"
+        )
+
+        let depths = Self.closureDepths(of: "noteRediffDayZeroKickoffClaim(", in: code)
+        XCTAssertFalse(
+            depths.isEmpty,
+            """
+            ANTI-VACUITY: `makeDayZeroKickoffClaimRecorder` no longer calls \
+            `noteRediffDayZeroKickoffClaim` at all. The depth assertion below is \
+            vacuously satisfiable by a factory that writes nothing — which IS \
+            playhead-kg8h's defect — so restore the write or re-anchor this canary.
+            """
+        )
+        XCTAssertEqual(
+            depths, [1],
+            """
+            The day-0 claim is no longer awaited INLINE in \
+            `makeDayZeroKickoffClaimRecorder`: `noteRediffDayZeroKickoffClaim` occurs \
+            at closure depth(s) \(depths) rather than exactly [1], i.e. inside a \
+            nested closure. An unstructured task, a detached task and a GCD hop all \
+            read this way, and all three turn the claim into a write that \
+            `requestKickoff`'s own `pending.append` and drain can overtake — and one \
+            a background-relaunch process may never perform. \
+            `DayZeroKickoffClaimRecorderTests` cannot catch that reliably: against a \
+            detached write it fails only when the test wins a scheduling race. If you \
+            restructured this body deliberately, check FIRST that the await is still \
+            on the closure's own execution path.
+            """
+        )
+    }
+
+    /// Closure-literal nesting depths at which `needle` occurs in `code`.
+    ///
+    /// A `{` counts only when it opens a CLOSURE (or a nested function) — that
+    /// is, when the text back to the previous `{`, `}` or `;` contains no Swift
+    /// control-flow keyword. A trailing closure on a task, a queue or any other
+    /// call counts; `do`, `if`, `guard`, `else`, `for`, `while`, `repeat`,
+    /// `switch`, `case`, `default`, `catch` and `defer` do not, so wrapping the
+    /// same inline `await` in `do { } catch { }` does not red the canary.
+    ///
+    /// The bias is deliberate and one-directional: an unrecognised construct
+    /// carries no keyword, so it reads as a closure and FAILS the depth check. A
+    /// rail that errs loud is repairable; one that errs quiet is the thing this
+    /// exists to replace.
+    ///
+    /// `code` must already have had comments and string contents blanked with
+    /// `SwiftSourceInspector.strippingCommentsAndStrings`, so this walker only
+    /// has to track braces.
+    private static func closureDepths(of needle: String, in code: String) -> [Int] {
+        let controlFlowKeywords: Set<String> = [
+            "do", "if", "else", "guard", "for", "while", "repeat",
+            "switch", "case", "default", "catch", "defer"
+        ]
+        var depths: [Int] = []
+        var closureDepth = 0
+        /// One entry per open brace: `true` when it was counted as a closure, so
+        /// its `}` decrements only what its `{` incremented.
+        var braceStack: [Bool] = []
+        var statementStart = code.startIndex
+        var index = code.startIndex
+
+        while index < code.endIndex {
+            if code[index...].hasPrefix(needle) {
+                depths.append(closureDepth)
+                index = code.index(index, offsetBy: needle.count)
+                continue
+            }
+            switch code[index] {
+            case "{":
+                let preceding = code[statementStart..<index]
+                let words = preceding.split(whereSeparator: { !$0.isLetter })
+                let opensClosure = !words.contains { controlFlowKeywords.contains(String($0)) }
+                braceStack.append(opensClosure)
+                if opensClosure { closureDepth += 1 }
+                statementStart = code.index(after: index)
+            case "}":
+                if braceStack.popLast() == true { closureDepth -= 1 }
+                statementStart = code.index(after: index)
+            case ";":
+                statementStart = code.index(after: index)
+            default:
+                break
+            }
+            index = code.index(after: index)
+        }
+        return depths
+    }
+}
+
+// MARK: - 4. The production claim recorder (playhead-kg8h)
+
+@Suite("Day-0 kickoff claim recorder — the PRODUCTION closure (playhead-kg8h)")
+struct DayZeroKickoffClaimRecorderTests {
+
+    @Test("""
+    THE PRODUCTION CLOSURE WRITES THE ROW: `makeDayZeroKickoffClaimRecorder` \
+    lands a durable `requested` row carrying the claim's own source and stamp
+    """)
+    func productionClaimRecorderWritesADurableRow() async throws {
+        let store = try await makeTestStore()
+        let record = PlayheadRuntime.makeDayZeroKickoffClaimRecorder(store: store)
+
+        await record(RediffDayZeroKickoffClaim(
+            episodeId: "ep-wired", source: .downloadAndAnalyzeTap, at: 1_722_000_042
+        ))
+
+        let row = try #require(try await store.fetchRediffDayZeroKickoff(episodeId: "ep-wired"))
+        #expect(row.lastOutcome == .requested)
+        #expect(row.kickoffCount == 1)
+        #expect(row.firedCount == 0)
+        #expect(row.gaveUpCount == 0)
+        // EVERY field, because a mis-wiring drops them one at a time and each
+        // loss is silent. A dropped `source` makes a tap indistinguishable from a
+        // background download — the one thing this ledger exists to tell a
+        // support engineer. A dropped `at` stamps the row 1970, which sorts it
+        // last in `idx_rediff_day_zero_kickoffs_updated`, so the kickoffs still
+        // owed become exactly the rows a limited pull drops first.
+        #expect(row.lastSource == .downloadAndAnalyzeTap)
+        #expect(row.updatedAt == 1_722_000_042)
+    }
+
+    @Test("""
+    the recorder is idempotent per REQUEST, not per episode — a retry download \
+    or a tap after a background attempt is a SECOND kickoff and counts
+    """)
+    func productionClaimRecorderCountsEachRequest() async throws {
+        let store = try await makeTestStore()
+        let record = PlayheadRuntime.makeDayZeroKickoffClaimRecorder(store: store)
+
+        await record(RediffDayZeroKickoffClaim(
+            episodeId: "ep-twice", source: .backgroundDownload, at: 100
+        ))
+        await record(RediffDayZeroKickoffClaim(
+            episodeId: "ep-twice", source: .downloadAndAnalyzeTap, at: 200
+        ))
+
+        let row = try #require(try await store.fetchRediffDayZeroKickoff(episodeId: "ep-twice"))
+        #expect(row.kickoffCount == 2, """
+            Collapsing two genuine requests into one row-with-one-count would hide the \
+            second kickoff entirely — and it is the second one, arriving after a failed \
+            background attempt, that a support engineer is most likely to be chasing.
+            """)
+        #expect(row.kickoffCount - (row.firedCount + row.gaveUpCount) == 2,
+                "both are owed: neither has settled")
+        #expect(row.lastSource == .downloadAndAnalyzeTap)
+        #expect(row.updatedAt == 200)
+    }
 }
