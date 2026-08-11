@@ -3162,12 +3162,14 @@ actor BackfillJobRunner {
     nonisolated static func narrowedForScreenedWindows(
         _ inputs: AssetInputs,
         screenedRows: [SemanticScanResult],
-        scanCohortJSON: String
+        scanCohortJSON: String,
+        jobPhase: BackfillJobPhase
     ) -> AssetInputs {
         let spans = screenedSpans(
             rows: screenedRows,
             scanCohortJSON: scanCohortJSON,
-            transcriptVersion: inputs.transcriptVersion
+            transcriptVersion: inputs.transcriptVersion,
+            jobPhase: jobPhase
         )
         guard !spans.isEmpty else { return inputs }
         let remaining = inputs.segments.filter { segment in
@@ -3188,14 +3190,45 @@ actor BackfillJobRunner {
     /// playhead-15d0: the merged, disjoint spans that reusable coarse rows
     /// prove were screened. Ascending, non-overlapping, never bridged across a
     /// gap. Empty when no row qualifies.
+    ///
+    /// **A ROW ONLY SPEAKS FOR ITS OWN PHASE (R1 review).** `jobPhase` is not a
+    /// tidiness filter — it is the second half of the scoping the call site
+    /// starts, and without it the guard is one-directional. The call site
+    /// declines to narrow a TARGETED job by anyone's rows; this declines to
+    /// narrow ANY job by a targeted phase's rows, and that is the direction
+    /// that strands audio.
+    ///
+    /// The reason is that a phase's window bounds are only honest about the
+    /// segment list that phase was handed. `TargetedWindowNarrower.narrow`
+    /// returns the union of DISJOINT per-anchor intervals
+    /// (`narrowedResult` → `orderedSegments.filter { covered.contains(…) }`),
+    /// and `FoundationModelClassifier.planPassA` packs a window from a
+    /// contiguous slice of *that array* while stamping
+    /// `startTime = min(startTime)`, `endTime = max(endTime)` over the slice.
+    /// A window straddling two intervals therefore persists a span covering
+    /// every segment BETWEEN them — segments that were never in the prompt.
+    /// `.scanRandomAuditWindows` is the worst case: a sparse sample across the
+    /// whole episode, whose rows would license dropping nearly all of it.
+    ///
+    /// `.fullEpisodeScan` has no such gap, and that is a property of the
+    /// composition rather than luck: the only holes in ITS input list are the
+    /// ones ``narrowedForScreenedWindows`` and ``narrowedForResume`` punched,
+    /// and both punch exactly where a screened span already is. A straddling
+    /// window there over-claims only audio a previous window already claimed.
+    ///
+    /// Measured on the 2026-08-10 and 2026-08-06 device pulls: all 188 `passA`
+    /// rows across both carry `jobPhase = fullEpisodeScan`, so this clause
+    /// removes no benefit that exists today. It removes the one that does not.
     nonisolated static func screenedSpans(
         rows: [SemanticScanResult],
         scanCohortJSON: String,
-        transcriptVersion: String
+        transcriptVersion: String,
+        jobPhase: BackfillJobPhase
     ) -> [(start: Double, end: Double)] {
         let qualifying = rows
             .filter { row in
                 row.scanPass == SemanticScanResult.presenceScanPass
+                    && row.jobPhase == jobPhase.rawValue
                     && row.didExamineWindow
                     && row.isReusable(
                         scanCohortJSON: scanCohortJSON,
@@ -3281,6 +3314,14 @@ actor BackfillJobRunner {
         //
         // `.fullEpisodeScan` has no such sibling: it is the whole coverage lane,
         // one phase, and its rows ARE the coverage numerator.
+        //
+        // R1 review: THE SAME SCOPING IS ALSO APPLIED ROW-SIDE, in
+        // ``screenedSpans``, and the two are not redundant. This guard says
+        // "a targeted job is narrowed by nothing"; the row-side one says "no
+        // job is narrowed by a TARGETED phase's rows". Only the second closes
+        // the direction that loses audio — a `.fullEpisodeScan` job reading the
+        // sparse-window spans a targeted phase persisted. See `screenedSpans`
+        // for why those spans over-claim.
         let screenedRows: [SemanticScanResult]
         if job.phase != .fullEpisodeScan {
             screenedRows = []
@@ -3304,7 +3345,8 @@ actor BackfillJobRunner {
         let inputs = Self.narrowedForScreenedWindows(
             Self.narrowedForResume(rootInputs, cursor: job.progressCursor?.lastProcessedUpperBoundSec),
             screenedRows: screenedRows,
-            scanCohortJSON: scanCohortJSON
+            scanCohortJSON: scanCohortJSON,
+            jobPhase: job.phase
         )
         var scanResultIds: [String] = []
         var evidenceEventIds: [String] = []

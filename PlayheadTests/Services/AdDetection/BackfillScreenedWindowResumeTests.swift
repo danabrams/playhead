@@ -47,7 +47,8 @@ struct BackfillScreenedWindowResumeTests {
         let narrowed = BackfillJobRunner.narrowedForScreenedWindows(
             inputs,
             screenedRows: rows,
-            scanCohortJSON: Self.cohort
+            scanCohortJSON: Self.cohort,
+            jobPhase: .fullEpisodeScan
         )
 
         // Every segment is inside a screened span, so the pass has nothing to
@@ -70,7 +71,8 @@ struct BackfillScreenedWindowResumeTests {
         let narrowed = BackfillJobRunner.narrowedForScreenedWindows(
             inputs,
             screenedRows: rows,
-            scanCohortJSON: Self.cohort
+            scanCohortJSON: Self.cohort,
+            jobPhase: .fullEpisodeScan
         )
 
         #expect(narrowed.segments.map(\.segmentIndex) == [1])
@@ -93,7 +95,8 @@ struct BackfillScreenedWindowResumeTests {
         let narrowed = BackfillJobRunner.narrowedForScreenedWindows(
             inputs,
             screenedRows: rows,
-            scanCohortJSON: Self.cohort
+            scanCohortJSON: Self.cohort,
+            jobPhase: .fullEpisodeScan
         )
 
         #expect(narrowed.segments.count == 1)
@@ -112,7 +115,8 @@ struct BackfillScreenedWindowResumeTests {
         let narrowed = BackfillJobRunner.narrowedForScreenedWindows(
             inputs,
             screenedRows: rows,
-            scanCohortJSON: Self.cohort
+            scanCohortJSON: Self.cohort,
+            jobPhase: .fullEpisodeScan
         )
 
         #expect(narrowed.segments.isEmpty)
@@ -128,7 +132,8 @@ struct BackfillScreenedWindowResumeTests {
         let narrowed = BackfillJobRunner.narrowedForScreenedWindows(
             inputs,
             screenedRows: rows,
-            scanCohortJSON: Self.cohort
+            scanCohortJSON: Self.cohort,
+            jobPhase: .fullEpisodeScan
         )
 
         #expect(narrowed.segments.count == 1)
@@ -157,7 +162,8 @@ struct BackfillScreenedWindowResumeTests {
             let narrowed = BackfillJobRunner.narrowedForScreenedWindows(
                 inputs,
                 screenedRows: rows,
-                scanCohortJSON: Self.cohort
+                scanCohortJSON: Self.cohort,
+                jobPhase: .fullEpisodeScan
             )
 
             #expect(narrowed.segments.count == 1, "\(status.rawValue) must not license a drop")
@@ -186,7 +192,8 @@ struct BackfillScreenedWindowResumeTests {
         let narrowed = BackfillJobRunner.narrowedForScreenedWindows(
             inputs,
             screenedRows: rows,
-            scanCohortJSON: Self.cohort
+            scanCohortJSON: Self.cohort,
+            jobPhase: .fullEpisodeScan
         )
 
         #expect(narrowed.segments.count == 1)
@@ -203,7 +210,8 @@ struct BackfillScreenedWindowResumeTests {
         let narrowed = BackfillJobRunner.narrowedForScreenedWindows(
             inputs,
             screenedRows: rows,
-            scanCohortJSON: Self.cohort
+            scanCohortJSON: Self.cohort,
+            jobPhase: .fullEpisodeScan
         )
 
         #expect(narrowed.segments.count == 1)
@@ -217,7 +225,8 @@ struct BackfillScreenedWindowResumeTests {
         let narrowed = BackfillJobRunner.narrowedForScreenedWindows(
             inputs,
             screenedRows: rows,
-            scanCohortJSON: Self.cohort
+            scanCohortJSON: Self.cohort,
+            jobPhase: .fullEpisodeScan
         )
 
         #expect(narrowed.segments.count == 1)
@@ -234,7 +243,91 @@ struct BackfillScreenedWindowResumeTests {
         let narrowed = BackfillJobRunner.narrowedForScreenedWindows(
             inputs,
             screenedRows: rows,
-            scanCohortJSON: Self.cohort
+            scanCohortJSON: Self.cohort,
+            jobPhase: .fullEpisodeScan
+        )
+
+        #expect(narrowed.segments.count == 1)
+    }
+
+    @Test("a row from ANOTHER PHASE licenses nothing, however examined it is")
+    func otherPhaseRowsLicenseNothing() throws {
+        // R1 review. The call site already declines to narrow a TARGETED job.
+        // This is the other direction, and it is the one that loses audio: a
+        // `.fullEpisodeScan` job reading the spans a targeted phase persisted.
+        //
+        // Those spans OVER-CLAIM by construction. `TargetedWindowNarrower`
+        // hands the classifier the union of DISJOINT per-anchor intervals, and
+        // `planPassA` packs each window from a contiguous slice of that array
+        // while stamping min(start)/max(end) over the slice — so a window
+        // straddling two intervals persists a span covering every segment
+        // between them, none of which was ever in a prompt. A random-audit
+        // sample is the worst case: a handful of scattered windows whose
+        // merged span is nearly the whole episode.
+        //
+        // The row below is otherwise perfect — examined, current cohort,
+        // current transcript version, passA — so ONLY the phase clause can
+        // refuse it.
+        for phase in [
+            BackfillJobPhase.scanRandomAuditWindows,
+            .scanHarvesterProposals,
+            .scanLikelyAdSlots,
+            .metadataSeededRegion,
+            .specialistHostReadScan
+        ] {
+            let rows = [makeRow(id: "r-\(phase.rawValue)", start: 0.0, end: 1919.0, jobPhase: phase)]
+            let inputs = makeInputs(segments: [makeSegment(index: 0, start: 10.0, end: 90.0)])
+
+            let narrowed = BackfillJobRunner.narrowedForScreenedWindows(
+                inputs,
+                screenedRows: rows,
+                scanCohortJSON: Self.cohort,
+                jobPhase: .fullEpisodeScan
+            )
+
+            #expect(
+                narrowed.segments.count == 1,
+                "\(phase.rawValue) rows must not license a fullEpisodeScan drop"
+            )
+        }
+    }
+
+    @Test("the legacy unattributed jobPhase sentinel licenses nothing")
+    func legacyShadowJobPhaseLicensesNothing() throws {
+        // Rows written before the phase column was attributed carry the string
+        // `"shadow"`. Under-claiming on them costs one repeated FM call;
+        // crediting them would credit a population nobody can identify.
+        let rows = [
+            SemanticScanResult(
+                id: "r-legacy",
+                analysisAssetId: "asset-15d0",
+                windowFirstAtomOrdinal: 0,
+                windowLastAtomOrdinal: 1,
+                windowStartTime: 0.0,
+                windowEndTime: 1919.0,
+                scanPass: "passA",
+                transcriptQuality: .good,
+                disposition: .noAds,
+                spansJSON: "[]",
+                status: .success,
+                attemptCount: 1,
+                errorContext: nil,
+                inputTokenCount: nil,
+                outputTokenCount: nil,
+                latencyMs: nil,
+                prewarmHit: false,
+                scanCohortJSON: Self.cohort,
+                transcriptVersion: Self.transcriptVersion
+                // `jobPhase` left at its "shadow" default on purpose.
+            )
+        ]
+        let inputs = makeInputs(segments: [makeSegment(index: 0, start: 10.0, end: 90.0)])
+
+        let narrowed = BackfillJobRunner.narrowedForScreenedWindows(
+            inputs,
+            screenedRows: rows,
+            scanCohortJSON: Self.cohort,
+            jobPhase: .fullEpisodeScan
         )
 
         #expect(narrowed.segments.count == 1)
@@ -251,7 +344,8 @@ struct BackfillScreenedWindowResumeTests {
         let narrowed = BackfillJobRunner.narrowedForScreenedWindows(
             inputs,
             screenedRows: rows,
-            scanCohortJSON: Self.cohort
+            scanCohortJSON: Self.cohort,
+            jobPhase: .fullEpisodeScan
         )
 
         #expect(narrowed.segments.count == 1)
@@ -267,7 +361,8 @@ struct BackfillScreenedWindowResumeTests {
         let narrowed = BackfillJobRunner.narrowedForScreenedWindows(
             inputs,
             screenedRows: [],
-            scanCohortJSON: Self.cohort
+            scanCohortJSON: Self.cohort,
+            jobPhase: .fullEpisodeScan
         )
 
         #expect(narrowed.segments.count == inputs.segments.count)
@@ -291,7 +386,8 @@ struct BackfillScreenedWindowResumeTests {
         let spans = BackfillJobRunner.screenedSpans(
             rows: rows,
             scanCohortJSON: Self.cohort,
-            transcriptVersion: Self.transcriptVersion
+            transcriptVersion: Self.transcriptVersion,
+            jobPhase: .fullEpisodeScan
         )
 
         // [0,100] ∪ [50,150] ∪ [150,200] collapse; [300,400] stays separate
@@ -316,7 +412,8 @@ struct BackfillScreenedWindowResumeTests {
         let spans = BackfillJobRunner.screenedSpans(
             rows: rows,
             scanCohortJSON: Self.cohort,
-            transcriptVersion: Self.transcriptVersion
+            transcriptVersion: Self.transcriptVersion,
+            jobPhase: .fullEpisodeScan
         )
 
         #expect(spans.count == 1)
@@ -380,7 +477,8 @@ struct BackfillScreenedWindowResumeTests {
         scanPass: String = "passA",
         transcriptVersion: String = BackfillScreenedWindowResumeTests.transcriptVersion,
         scanCohortJSON: String = BackfillScreenedWindowResumeTests.cohort,
-        errorContext: String? = nil
+        errorContext: String? = nil,
+        jobPhase: BackfillJobPhase = .fullEpisodeScan
     ) -> SemanticScanResult {
         SemanticScanResult(
             id: id,
@@ -402,6 +500,7 @@ struct BackfillScreenedWindowResumeTests {
             prewarmHit: false,
             scanCohortJSON: scanCohortJSON,
             transcriptVersion: transcriptVersion,
+            jobPhase: jobPhase.rawValue,
             createdAt: 1_700_000_000.0
         )
     }
