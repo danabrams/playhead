@@ -3110,24 +3110,95 @@ actor BackfillJobRunner {
     /// deliberately blind to every screened window above the first hole. The
     /// rows themselves are not blind: `semantic_scan_results` records exactly
     /// which windows were screened, and ``AnalysisStore/fetchCoverageSummariesByAssetIds(_:)``
-    /// already reads those same spans, under this same predicate, to decide
-    /// whether the episode counts as ad-scanned. Until this function existed
-    /// the planner was the one reader that did not consult them.
+    /// already reads those same spans to decide whether the episode counts as
+    /// ad-scanned. Until this function existed the planner was the one reader
+    /// that did not consult them.
+    ///
+    /// **R2 review: it reads them under a WIDER predicate, and the earlier
+    /// wording here ("under this same predicate") was false.**
+    /// `AnalysisStore.readScannedRegions` filters on `scanPass`,
+    /// ``SemanticScanResult/didExamineWindow(status:errorContext:)`` and a
+    /// positive width — and nothing else. No cohort, no transcript version, no
+    /// phase. So the two readers genuinely disagree, and on the measured asset
+    /// they disagree completely: the coverage reader credits all ten of
+    /// 66D32039's `passA` rows and reports the episode ad-scanned, while this
+    /// function qualifies **zero** of them. Both quantities name "audio we
+    /// screened". The direction here is the safe one — under-claiming costs one
+    /// repeated FM call, over-claiming strands audio — but do not describe the
+    /// predicates as shared. The store side is filed as playhead-7cjo.
     ///
     /// **The measurement that produced it (2026-08-10 device pull,
-    /// `db-evening2`).** Asset 66D32039 has a transcript spanning 1.0–1919.0 s
-    /// and persisted, reusable `passA` rows covering 1.0–194.0 and 196.0–1919.0
-    /// — the whole transcribed extent, at the CURRENT transcript version. Its
-    /// `progressCursor` reads **194.46**, because the plan-list contiguity walk
-    /// stops at a 1.2 s pause in speech between two adjacent plans. Narrowing by
-    /// that cursor alone hands `planPassA` 1,723 s of the 1,918 s transcript
-    /// (89.8 %), of which **zero seconds is unscreened**. `planPassA` then spends
-    /// one `tokenCount` XPC round trip per candidate window over it, all of them
+    /// `db-evening2`), and what it does NOT say.** Asset 66D32039 carries a
+    /// transcript spanning 0.78–1919.4 s and ten `passA` rows. Its
+    /// `progressCursor` reads **194.46**, two windows into the four its first
+    /// attempt banked. Narrowing by that cursor alone hands `planPassA`
+    /// 1,724.94 s of the 1,918.62 s transcript (89.9 %), and the rows above the
+    /// cursor cover 1,721.28 s of it — **99.8 %**. `planPassA` then spends one
+    /// `tokenCount` XPC round trip per candidate window over that, all of them
     /// before the first `respond` and therefore before playhead-26od's
     /// `onWindowsBanked` can make anything durable. On that pull the job died
     /// there twice with `metadataStall-refused(peers=0)` — ``FMInferenceDeadline/metadata``
     /// (30 s) is longer, on its own, than six of the eight background windows
     /// iOS granted that evening (19, 35, 22, 26, 25, 13, 13, 13 s).
+    ///
+    /// **99.8 % is what this function WOULD have saved had the versions
+    /// matched. On that asset it saves ZERO, and R1 was right to correct it.**
+    /// R2 recomputed the current `transcriptVersion` from the persisted chunks
+    /// exactly as `runBackfill` does (canonicalize → `canonicalTimeOrder` →
+    /// ``TranscriptAtomizer/transcriptVersionHash(chunks:)``) and reproduced
+    /// `backfill_jobs.attemptTranscriptVersion` byte-for-byte on two of the
+    /// three jobs in that pull. 66D32039 currently hashes to `9e574deb…`; its
+    /// ten rows carry `9afa5627…` (4) and `200ebdd5…` (6). Nothing qualifies,
+    /// so nothing is dropped. `9afa5627…` is byte-exact the hash of the 299
+    /// fast chunks ending at or below 300 s — the first attempt ran on a 300 s
+    /// transcript, the second on a longer one 20 s later, and the version has
+    /// moved again since.
+    ///
+    /// **What it is worth, measured on three pulls, and IT IS NOT INERT.**
+    /// Applying this exact predicate and merge rule to every coverage job:
+    ///
+    ///   * `db-evening2` + `db-vtjxverdict` (22 resumable jobs, 2026-08-06/10):
+    ///     three fire, nineteen drop nothing — 715.7 s of 60,594.2 s of
+    ///     above-cursor audio, **1.18 %**.
+    ///   * `db-overnight5` (5 jobs; virgin install, run overnight, pulled
+    ///     2026-08-11): FOUR of five fire — 726.9 s of 6,472.1 s, **11.2 %**.
+    ///     Counting only the jobs that can still resume (two are terminally
+    ///     `failed`), 343.4 s of 4,747.2 s, **7.2 %**.
+    ///
+    /// The spread is not noise and it is the thing to understand before
+    /// quoting either number. **The yield is whatever the LAST attempt banked
+    /// after the transcript stopped moving, and nothing else.**
+    /// `transcriptVersion` is
+    /// ``TranscriptAtomizer/transcriptVersionHash(chunks:)`` — a SHA-256 over
+    /// the length-prefixed `normalizedText` of every canonical chunk — so it
+    /// is a per-EPISODE identity answering a per-WINDOW question, and ONE
+    /// appended chunk invalidates every row for that asset at once, including
+    /// rows over audio the append did not touch. A scan that races its own
+    /// transcription therefore banks its early windows under versions that are
+    /// dead before the next grant. On `db-overnight5` the two assets whose
+    /// transcript had settled before scanning match at 10/10 and 4/4; the three
+    /// that raced match at 7/18, 1/34 and 1/29.
+    ///
+    /// **R1's "self-priming" is CONFIRMED, and the qualifier is the point.**
+    /// 66D32039 had ZERO qualifying rows on `db-evening2` and has SEVEN on
+    /// `db-overnight5` — the priming completed. It bought nothing there only
+    /// because the job reached `failed` / `expiredWithoutProgress` first, which
+    /// is this bead's parent problem rather than this function's. Priming
+    /// completes when transcription does; it cannot complete before.
+    ///
+    /// Do not quote 99.8 % as this function's yield.
+    ///
+    /// **The rows do not merge into two spans.** The six above are
+    /// 0.78–115.26, 115.68–194.46, 195.66–276.18, 276.54–941.64, 943.32–1902.78
+    /// and 1903.2–1919.4, and the `<=` touch-or-overlap rule below bridges none
+    /// of the five gaps (0.42, 1.20, 0.36, 1.68, 0.42 s). Six merged spans
+    /// covering 1,914.54 of the transcript's 1,918.62 s extent, not two spans
+    /// covering all of it. The outcome is the same because no segment straddles
+    /// those pauses; the contiguity was overstated, not the arithmetic. And the
+    /// 194.46 cursor is NOT "the walk stopping at a 1.2 s pause in speech":
+    /// ``coarseCheckpointWalk`` never looks at time adjacency at all — it stops
+    /// at the first plan that was not fully covered, capped at the earliest
+    /// uncovered plan's start.
     ///
     /// **THE PREDICATE IS BORROWED, NOT INVENTED.** A row licenses a drop only
     /// when it is
@@ -3144,10 +3215,13 @@ actor BackfillJobRunner {
     ///     transcript (which re-segments, and which this device does
     ///     continuously) inherits no credit from the old windowing.
     ///
-    /// Those are the same three conditions the coverage reader and the
-    /// suppression guard already apply. Re-deriving them here would be the
-    /// standing defect class — a value that names one thing read as though it
-    /// named another — so the call is to the existing definitions.
+    /// Each of those calls an EXISTING definition rather than re-deriving it,
+    /// which is the point: re-deriving would be the standing defect class — a
+    /// value that names one thing read as though it named another. What is NOT
+    /// true, and was asserted here before R2, is that some other reader already
+    /// applies all three. `readScannedRegions` applies one (`didExamineWindow`);
+    /// this is the only reader in the tree that requires reusability as well,
+    /// and the `jobPhase` clause below has no counterpart anywhere.
     ///
     /// **A SEGMENT MUST BE FULLY INSIDE ONE MERGED SCREENED SPAN.** Spans are
     /// merged only where they OVERLAP OR TOUCH; a gap between two rows is never
@@ -3309,8 +3383,20 @@ actor BackfillJobRunner {
         // it is a corrupted population: the audit phase exists to sample the
         // episode and estimate what the other phases MISS, so an audit whose
         // sample is filtered by what another phase happened to look at measures
-        // something else entirely. Caught by
-        // `targeted phases persist distinct passA rows on narrowed subsets`.
+        // something else entirely.
+        //
+        // R2 review: that is not the only thing this guard stops, and the test
+        // named here before ("targeted phases persist distinct passA rows on
+        // narrowed subsets") does NOT catch its removal — R2 deleted this guard
+        // outright and the whole scoped gate stayed green, because that test
+        // only ever drives a FIRST run and the row-side clause in
+        // ``screenedSpans`` matches a phase's own rows perfectly. The case that
+        // loses audio is a targeted phase's RE-DRIVE reading the spans it
+        // itself banked, which over-claim across its disjoint per-anchor
+        // intervals exactly the way another phase's would. The rail is now
+        // `a targeted phase's re-drive is narrowed by nothing — not even its
+        // own rows`, which asserts over the submitted LINE REFS because the
+        // persisted rows dedupe and cannot see the difference.
         //
         // `.fullEpisodeScan` has no such sibling: it is the whole coverage lane,
         // one phase, and its rows ARE the coverage numerator.

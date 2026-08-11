@@ -283,6 +283,129 @@ struct BackfillJobRunnerTests {
         }
     }
 
+    /// playhead-15d0 R2: a TARGETED phase must not be narrowed by its OWN
+    /// durable rows on a re-drive.
+    ///
+    /// **This test exists because the guard it pins had NO rail.** R2 mutation
+    /// M1 deleted the call-site guard in `runJob`
+    /// (`job.phase != .fullEpisodeScan → screenedRows = []`) outright, and the
+    /// whole 82-test scoped gate stayed GREEN. The row-side clause R1 added
+    /// cannot stand in for it: `screenedSpans` refuses a job the rows of
+    /// ANOTHER phase, and here the phase is its OWN — `row.jobPhase ==
+    /// jobPhase.rawValue` matches, every other clause matches, and the phase's
+    /// entire narrowed subset vanishes.
+    ///
+    /// Why that loses audio rather than saving work.
+    /// `TargetedWindowNarrower.narrow` hands the classifier the union of
+    /// DISJOINT per-anchor intervals, and `planPassA` packs each window from a
+    /// contiguous slice of that sparse array while stamping
+    /// `startTime = min(...)`, `endTime = max(...)` over the slice. One window
+    /// over a non-contiguous subset therefore persists a span covering every
+    /// segment BETWEEN the intervals — segments no prompt ever contained.
+    /// Crediting that span on the next grant deletes audio nobody read, and for
+    /// `.scanRandomAuditWindows` it additionally corrupts the population the
+    /// audit exists to measure.
+    ///
+    /// The assertion is over the LINE REFS the classifier was handed, for the
+    /// reason `growingTranscriptContinuesTheScan` spells out at length:
+    /// scan-result ids are deterministic, so a re-drive that re-read the same
+    /// windows writes rows that dedupe onto the first run's. The persisted row
+    /// set, the row count and the job count are all IDENTICAL either way;
+    /// `TestFMRuntime`'s prompt log is the only place the difference is visible.
+    @Test("playhead-15d0: a targeted phase's re-drive is narrowed by nothing — not even its own rows")
+    func targetedPhaseReDriveIsNotNarrowedByItsOwnRows() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-targeted-redrive"
+        try await store.insertAsset(makeAsset(id: assetId))
+
+        let runtime = TestFMRuntime()
+        let runner = makeRunner(store: store, runtime: runtime.runtime)
+        let targetedContext = CoveragePlannerContext(
+            observedEpisodeCount: 20,
+            stableRecall: true,
+            isFirstEpisodeAfterCohortInvalidation: false,
+            recallDegrading: false,
+            sponsorDriftDetected: false,
+            auditMissDetected: false,
+            episodesSinceLastFullRescan: 1,
+            periodicFullRescanIntervalEpisodes: 10
+        )
+        let inputs = makeTargetedInputs(
+            assetId: assetId,
+            podcastId: "podcast-targeted-redrive",
+            transcriptVersion: "tx-targeted-redrive-v1",
+            plannerContext: targetedContext
+        )
+
+        let first = try await runner.runPendingBackfill(for: inputs)
+        #expect(first.admittedJobIds.count == 3, "targetedWithAudit should admit one job per targeted phase")
+        let refsAfterFirst = await runtime.snapshotSubmittedCoarseLineRefs()
+        #expect(!refsAfterFirst.isEmpty, "run 1 must submit coarse windows, or this rail is vacuous")
+
+        // The rows run 1 banked must be REUSABLE under run 2's predicate.
+        // Without this the mutant could survive for a reason that has nothing
+        // to do with the guard — a stale cohort or an unexamined status would
+        // refuse them anyway and the test would pass while proving nothing.
+        let rowsAfterFirst = try await store.fetchSemanticScanResults(
+            analysisAssetId: assetId,
+            scanPass: SemanticScanResult.presenceScanPass
+        )
+        #expect(!rowsAfterFirst.isEmpty, "run 1 must bank passA rows, or this rail is vacuous")
+        for row in rowsAfterFirst {
+            #expect(
+                row.didExamineWindow,
+                "row \(row.id) is not examined, so the phase clause is not what would refuse it"
+            )
+            #expect(
+                row.isReusable(
+                    scanCohortJSON: makeTestScanCohortJSON(),
+                    transcriptVersion: inputs.transcriptVersion
+                ),
+                "row \(row.id) is not reusable, so the phase clause is not what would refuse it"
+            )
+            #expect(
+                row.windowEndTime > row.windowStartTime,
+                "row \(row.id) is degenerate, so the phase clause is not what would refuse it"
+            )
+        }
+
+        // Re-drive the same three jobs. `.queued` with no cursor is the
+        // orphan-recovery shape: rows banked, job never marked complete.
+        for jobId in first.admittedJobIds {
+            try await store.forceBackfillJobStateForTesting(
+                jobId: jobId,
+                status: .queued,
+                progressCursor: nil
+            )
+        }
+
+        let second = try await runner.runPendingBackfill(for: inputs)
+        #expect(
+            Set(second.admittedJobIds) == Set(first.admittedJobIds),
+            "run 2 must re-drive the same three targeted jobs, or this rail is vacuous"
+        )
+
+        let resubmitted = Array(
+            (await runtime.snapshotSubmittedCoarseLineRefs()).dropFirst(refsAfterFirst.count)
+        )
+        #expect(
+            resubmitted.count == refsAfterFirst.count,
+            """
+            the targeted re-drive submitted \(resubmitted.count) coarse windows where run 1 \
+            submitted \(refsAfterFirst.count). A targeted phase was narrowed by its own rows — \
+            whose spans cover the gaps BETWEEN its disjoint per-anchor intervals, so the audio \
+            in those gaps is now deleted from every future attempt without ever having been read.
+            """
+        )
+        let shape: ([[Int]]) -> [[Int]] = { refs in
+            refs.map { $0.sorted() }.sorted { $0.lexicographicallyPrecedes($1) }
+        }
+        #expect(
+            shape(resubmitted) == shape(refsAfterFirst),
+            "the re-drive submitted \(shape(resubmitted)) where run 1 submitted \(shape(refsAfterFirst))"
+        )
+    }
+
     // Cycle 10 Rev3-M5: production-path rail for the `runMode` discriminator.
     //
     // The schema column, struct field, and decoder were wired in cycle 2, but
