@@ -572,6 +572,16 @@ actor DownloadManager {
     /// if routing needs to differ per-lane.
     private let sessionDelegate: EpisodeDownloadDelegate
 
+    /// playhead-nsjn: every call into a background `URLSession` goes
+    /// through here rather than being made inline on the actor. See
+    /// `BackgroundSessionIO.swift` — those calls block the calling thread
+    /// in a synchronous XPC round-trip to `nsurlsessiond`, and this actor
+    /// runs on the fixed-width cooperative pool.
+    ///
+    /// Injected so tests can substitute `.neverAnswers` and drive the
+    /// daemon-unavailable branches without a genuinely wedged daemon.
+    internal let sessionIO: BackgroundSessionIO
+
     // MARK: - Streams
 
     private let progressContinuation: AsyncStream<DownloadProgress>.Continuation
@@ -598,8 +608,10 @@ actor DownloadManager {
         cacheDirectory: URL? = nil,
         maxCacheBytes: Int64 = DownloadManager.defaultMaxCacheBytes,
         preAnalysisConfig: PreAnalysisConfig? = nil,
-        workJournalRecorder: WorkJournalRecording = NoopWorkJournalRecorder()
+        workJournalRecorder: WorkJournalRecording = NoopWorkJournalRecorder(),
+        sessionIO: BackgroundSessionIO = .shared
     ) {
+        self.sessionIO = sessionIO
         let root = cacheDirectory ?? Self.defaultCacheDirectory()
         self.cacheDirectory = root
         self.partialsDirectory = root.appendingPathComponent("partials", isDirectory: true)
@@ -1773,6 +1785,18 @@ actor DownloadManager {
         return identity
     }
 
+    /// playhead-nsjn: drives the real terminal-callback bookkeeping so a rail
+    /// can ask the question that matters about an abandoned transfer — not
+    /// "is the map tidy?" but "does the NEXT attempt's completion still
+    /// release the episode?". Reading the map directly would let an
+    /// implementation that tidies a different collection pass.
+    func _finishBackgroundTransferForTesting(
+        identity: BackgroundTransferIdentity,
+        episodeId: String
+    ) {
+        finishBackgroundTransfer(identity: identity, episodeId: episodeId)
+    }
+
     func _strongPinVerificationHashCountForTesting() -> Int {
         strongPinVerificationHashCount
     }
@@ -2398,11 +2422,18 @@ actor DownloadManager {
     /// unconditionally, so every auto/background download recorded a NULL
     /// `analysis_jobs.podcastId`. A defaulted parameter would let the next
     /// caller reintroduce that silently.
+    ///
+    /// playhead-nsjn: `async` because creating the URLSession task is a
+    /// blocking synchronous XPC call to `nsurlsessiond` that must not run
+    /// on a cooperative thread (see `BackgroundSessionIO.swift`). Every
+    /// caller already awaited this actor method, so no call site changes;
+    /// what does change is that the method now contains a suspension point,
+    /// which is why the in-flight slot below is reserved BEFORE it.
     func backgroundDownload(
         episodeId: String,
         from url: URL,
         context: DownloadContext
-    ) {
+    ) async {
         guard activeStreamingTransfer?.episodeId != episodeId else {
             logger.debug(
                 "Skipping background download for \(episodeId): foreground stream active"
@@ -2443,8 +2474,42 @@ actor DownloadManager {
         let session = useDualBackgroundSessions
             ? backgroundSession(for: .maintenance)
             : backgroundSession(for: .legacy)
-        let task = session.downloadTask(with: url)
-        task.taskDescription = episodeId
+
+        // playhead-nsjn: RESERVE the in-flight slot before suspending.
+        // Creating the task now crosses an `await`, and actors are
+        // re-entrant: without this, a second caller for the same episode
+        // could clear the in-flight guard above while the first is still
+        // inside the daemon call, and we would start two transfers.
+        // Released again on every path that does not hand off a task.
+        bgInFlightEpisodes.insert(episodeId)
+
+        let handoff = await sessionIO.perform(
+            label: "downloadTask(with:) for \(episodeId)",
+            discardingLateResult: { $0.cancel() },
+            running: {
+                let task = session.downloadTask(with: url)
+                task.taskDescription = episodeId
+                return task
+            }
+        )
+        guard let task = handoff else {
+            // The daemon never answered. Nothing was started, so undo the
+            // reservation and the attribution sidecar — otherwise the
+            // episode is wedged "in flight" for the life of the process and
+            // a stale sidecar outlives the transfer it describes.
+            //
+            // playhead-7l6n: the reservation above and any admission made
+            // DURING the suspension are the same element of a per-episode
+            // set, so releasing it unconditionally would also release a
+            // transfer this call never owned.
+            releaseInFlightReservationIfUnclaimed(episodeId: episodeId)
+            deleteDownloadAttribution(episodeId: episodeId)
+            logger.error(
+                "Background download for \(episodeId, privacy: .public) NOT started: the background transfer daemon did not answer"
+            )
+            return
+        }
+
         registerBackgroundTransfer(
             task: task,
             session: session,
@@ -2453,12 +2518,77 @@ actor DownloadManager {
         #if DEBUG
         backgroundDownloadAdmissionCountForTesting += 1
         #endif
-        bgInFlightEpisodes.insert(episodeId)
         // playhead-3xtw (L2): reset the progress high-water mark for a fresh
         // transfer so a retry's early ticks aren't dropped as "stale".
         lastBackgroundProgressBytes[episodeId] = nil
-        task.resume()
+        // `resume()` re-enters the same session queue, so it carries the
+        // same blocking risk as the creation above and gets the same bound.
+        // Registration precedes it so a fast terminal callback cannot beat
+        // its own transfer into the identity map.
+        if await sessionIO.perform(
+            label: "resume() for \(episodeId)",
+            running: { task.resume() }
+        ) == nil {
+            logger.error(
+                "Background download for \(episodeId, privacy: .public) was created but not resumed: the background transfer daemon did not answer"
+            )
+            abandonUnstartedTransfer(
+                task: task,
+                session: session,
+                episodeId: episodeId
+            )
+            deleteDownloadAttribution(episodeId: episodeId)
+            return
+        }
         logger.info("Queued background download for \(episodeId)")
+    }
+
+    /// playhead-nsjn: a transfer the daemon created but never started is
+    /// worse than no transfer at all. It is suspended, so no delegate
+    /// callback will ever fire for it, so nothing will ever release the
+    /// episode's in-flight slot — every later attempt for that episode is
+    /// refused for the life of the process. Release the slot here and ask
+    /// the daemon to drop the task.
+    ///
+    /// The cancel is deliberately NOT awaited: we only get here because the
+    /// daemon is already not answering, and making the caller wait a second
+    /// bound to clean up after the first one just doubles the stall it is
+    /// trying to escape.
+    ///
+    /// The identity map is drained HERE rather than being left to the
+    /// delegate's terminal callback. Both call sites register before
+    /// resuming, so by this point `activeBackgroundTransfers` holds an entry
+    /// for a task that was never started — and on this branch the cancel is
+    /// exactly as likely to go unanswered as the resume was, so no callback
+    /// may ever arrive to drain it. A surviving entry does not merely leak:
+    /// `finishBackgroundTransfer` only releases the in-flight slot when NO
+    /// admitted identity still names the episode, so the abandoned entry
+    /// would make the NEXT attempt's own completion fail to release the
+    /// slot — reinstating the permanent per-episode outage this method
+    /// exists to prevent, one attempt later and with no daemon stall in
+    /// sight. Retiring the identity also makes a late cancel callback for
+    /// the dead task a no-op instead of a spurious failure for whatever
+    /// transfer holds the episode by then.
+    ///
+    /// playhead-7l6n: the in-flight slot is released CONDITIONALLY. This
+    /// method retires exactly one identity, so it is not entitled to speak
+    /// for the episode — see `releaseInFlightReservationIfUnclaimed`.
+    internal func abandonUnstartedTransfer(
+        task: URLSessionDownloadTask,
+        session: URLSession,
+        episodeId: String
+    ) {
+        let identity = backgroundTransferIdentity(task: task, session: session)
+        retiredBackgroundTransfers.insert(identity)
+        activeBackgroundTransfers.removeValue(forKey: identity)
+        releaseInFlightReservationIfUnclaimed(episodeId: episodeId)
+        let io = sessionIO
+        Task.detached {
+            _ = await io.perform(
+                label: "cancel unstarted transfer for \(episodeId)",
+                running: { task.cancel() }
+            )
+        }
     }
 
     // MARK: - Cancel
@@ -2645,9 +2775,33 @@ actor DownloadManager {
             activeBackgroundTransfers.removeValue(forKey: identity)
             retiredBackgroundTransfers.remove(identity)
         }
-        if !activeBackgroundTransfers.values.contains(episodeId) {
-            bgInFlightEpisodes.remove(episodeId)
+        releaseInFlightReservationIfUnclaimed(episodeId: episodeId)
+    }
+
+    /// playhead-7l6n: releases the episode's in-flight reservation only when
+    /// no admitted identity still names it.
+    ///
+    /// `bgInFlightEpisodes` is keyed by EPISODE, not by transfer, and it is
+    /// read for two different purposes: `backgroundDownload`'s idempotence
+    /// guard, and eviction protection (`evictIfNeeded` both builds its
+    /// known-episode map from it and skips any episode it contains). More
+    /// than one identity can legitimately name the same episode at once —
+    /// `handleBackgroundDownloadComplete` admits a task reattached from a
+    /// prior process with no in-flight guard at all, and can do so while
+    /// `backgroundDownload` or `resumeSuspendedTransfer` is suspended inside
+    /// a `sessionIO` call. A caller that retired ONE identity therefore does
+    /// not know the episode is free; removing it anyway strips the other
+    /// transfer's eviction protection while its completion is still running.
+    ///
+    /// `retireBackgroundTransfers` is the one place an unconditional removal
+    /// is correct, and the difference is exactly this: it drains EVERY
+    /// identity naming the episode first, so by the time it clears the set
+    /// there is provably no other claimant. Do not copy its shape here.
+    private func releaseInFlightReservationIfUnclaimed(episodeId: String) {
+        guard !activeBackgroundTransfers.values.contains(episodeId) else {
+            return
         }
+        bgInFlightEpisodes.remove(episodeId)
     }
 
     private func handleBackgroundDownloadFailed(
