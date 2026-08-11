@@ -510,6 +510,13 @@ enum EvidenceCatalogBuilder {
             ".org/",
             ".io/",
             ".co/",
+            // playhead-absa: keep this list in step with the URL patterns.
+            // Without a separator entry a `.ai` match yields NO brand stem, so
+            // "whisperflow.ai" would anchor but never seed the brandSpan
+            // corroboration that "betterhelp.com" does.
+            ".ai/",
+            ".fm/",
+            ".tv/",
             " dot com slash ",
             " dot org slash ",
             " dot io slash ",
@@ -522,10 +529,16 @@ enum EvidenceCatalogBuilder {
             ".org",
             ".io",
             ".co",
+            ".ai",
+            ".fm",
+            ".tv",
             " dot com",
             " dot org",
             " dot io",
             " dot co",
+            " dot ai",
+            " dot fm",
+            " dot tv",
         ]
 
         for separator in separators {
@@ -757,6 +770,70 @@ enum EvidenceCatalogBuilder {
             #"\b\w+\.co\/\w+"#,                       // short domains: something.co/offer
             #"\b\w+\.org\/\w+"#,                      // .org URLs
             #"\b\w+\.io\/\w+"#,                       // .io URLs
+
+            // playhead-absa: TLDs beyond .com/.org/.io. Every one of these
+            // requires a literal dot with NO space in front of the TLD (or the
+            // spoken "dot X" form). Measured over 94,692 device transcript
+            // chunks (31 assets, fast + final): `.ai` fired 44 times, EVERY
+            // one a real sponsor URL and zero on show content — 41 of the 44
+            // are ONE advertiser under two ASR spellings (netsuite.ai ×28 +
+            // netsweet.ai ×13), the rest whisperflow.ai, flow.ai, jerry.ai;
+            // spoken "dot ai" once ("J-E-R-R-Y dot AI", a spelled-out ad URL);
+            // `.co` 12 times, every one marketreach.co(.uk) in a sponsor read.
+            //
+            // Decoded-span attribution, same corpus, one term at a time — and
+            // WHICH FRAME the count is in matters, because production scans a
+            // CANONICALIZED transcript. Scoring each (asset, pass) as its own
+            // atom sequence gives `.ai` +11 spans, `.co` +2, `.fm`/`.tv` +0,
+            // 9 → 22 overall. That over-counts: `runBackfill` calls
+            // `TranscriptChunkCanonicalizer.canonicalize` FIRST, so a final
+            // chunk REPLACES the fast coverage it fully spans and the 31 assets
+            // yield ONE atom sequence each (90,927 atoms after 3,765 fast
+            // chunks are dropped) with ONE deduplicated catalog, not two.
+            // Re-measured in that shape the production-equivalent delta is
+            // `.ai` +8, `.co` +1, and `.fm`/`.tv` +0 — 6 → 15 spans, +9 and −0.
+            // Quote +9, not +13. Under either frame the added spans are the
+            // same TWO advertiser reads: the NetSuite pre-roll, which recurs on
+            // 8 of the 31 assets, and one MarketReach read on a ninth.
+            //
+            // WHY A BARE TWO-LETTER TLD IS SAFE — and it is NOT that "ASR
+            // always puts a space after a period", which is an absolute nobody
+            // measured. What was measured is the whole risk surface: 259
+            // `<word>.<word>` no-space periods exist in those 94,692 chunks,
+            // and of the ones whose right-hand token is EXACTLY two characters
+            // there are 60 — 56 inside sponsor URLs and 4 decimal numbers
+            // (2.00, 3.30, 5.30, 99.99). Not one English word. Numerals can
+            // never collide with a letter TLD, so the observed false-positive
+            // surface for the bare literal-dot patterns is empty; the spoken
+            // "dot X" forms are a separate surface, bounded separately by the
+            // raw counts above (`dot ai` 1, `dot co`/`dot fm`/`dot tv` 0).
+            //
+            // Those 56 split BY RIGHT-HAND TOKEN as `ai` 44, `co` 11 and `uk`
+            // 1 — not `.co` 12. The 12 is the `\b\w+\.co\b` REGEX hit count,
+            // which is a different frame: it also fires on the "marketreach.co"
+            // INSIDE "marketreach.co.uk", where the token census instead sees
+            // "www.marketreach" + "co.uk" and books the two-character token as
+            // `uk`. Both counts are right about their own question; only the
+            // token census bounds this risk, so do not carry the 12 into it.
+            //
+            // That bound, not "family symmetry", is why `.fm`/`.tv` ship
+            // having fired ZERO times: they are unmeasured MEMBERS of a
+            // measured FAMILY. Anyone adding a further TLD (`.net`, `.app`,
+            // `.gg`) owes the same two-letter census on a corpus that contains
+            // the population — this one has no `.fm`/`.tv` text at all, ad or
+            // content, so it bounds the family and says nothing about them
+            // individually.
+            #"\b\w+\.ai\/\w+"#,                       // .ai URLs with a path
+            #"\b\w+\.ai\b"#,                          // bare domain: whisperflow.ai
+            #"\b\w+ dot ai\b"#,                       // spoken: "whisperflow dot ai"
+            #"\b\w+\.co\b"#,                          // bare short domain: marketreach.co(.uk)
+            #"\b\w+ dot co\b"#,                       // spoken bare .co
+            #"\b\w+\.fm\/\w+"#,                       // .fm URLs with a path
+            #"\b\w+\.fm\b"#,                          // bare domain: something.fm
+            #"\b\w+ dot fm\b"#,                       // spoken bare .fm
+            #"\b\w+\.tv\/\w+"#,                       // .tv URLs with a path
+            #"\b\w+\.tv\b"#,                          // bare domain: something.tv
+            #"\b\w+ dot tv\b"#,                       // spoken bare .tv
         ])
 
         // Promo codes — require qualifying prefix to avoid false positives
@@ -782,6 +859,52 @@ enum EvidenceCatalogBuilder {
             #"\btap the link\b"#,
             #"\bcheck it out\b"#,
             #"\bhead over to\b"#,
+            // playhead-absa. "head to" is far more common in ordinary speech
+            // than "head over to", so it earns its place only because
+            // ctaPhrase is a CONTEXT category: it is extracted solely from
+            // atoms within ±2 of a url/promoCode/disclosure anchor
+            // (`contextCategories` / `commercialContextOrdinals`). Measured
+            // over the same 94,692 chunks: 12 raw occurrences, of which the
+            // two non-ad ones ("head to the gym", "get stretched head to toe")
+            // are BOTH outside commercial context and never extracted. The
+            // 8 that survive the gate are all sponsor reads (pipedrive.com,
+            // functionhealth.com, pro.5.com), and the .ai patterns above open
+            // two more — both the WhisperFlow "all you have to do is head to"
+            // — for 10/10 in-ad after this change.
+            //
+            // Re-checked against the WIDENED anchor set, which is the gate
+            // that actually ships: the `.ai`/`.co`/"our sponsor called"
+            // anchors move two hits from out-of-context to in-context (the two
+            // WhisperFlow reads), and leave BOTH non-ad hits still out. The
+            // term's decoded-span attribution is ZERO — it anchors atoms and
+            // widens ATTENTION, and adds no claim anywhere in the corpus.
+            //
+            // The 12/8/10 above are per-(asset, pass) counts. In the
+            // PRODUCTION frame — one canonicalized sequence per asset, 90,927
+            // atoms — the same census reads 9 raw, 5 in-context before this
+            // change and 7 after, with both ordinary uses still out. The
+            // qualitative claim is unchanged; the numbers are not.
+            //
+            // HOW MUCH MARGIN the ±2 gate has, measured rather than asserted,
+            // because "no ordinary 'head to' happened to land near a URL" is
+            // otherwise indistinguishable from luck:
+            //   • only 704 of the 90,927 canonicalized atoms are inside
+            //     commercial context at all — a 0.77 % base rate, so landing
+            //     in-context is the rare event, not the default;
+            //   • the two ordinary uses are 104 and 833 atoms from the nearest
+            //     anchor. Against a radius of 2 that is 52× and 416× the gate
+            //     width — nowhere near a near-miss;
+            //   • a control battery of 12 ordinary phrases absent from this
+            //     lexicon ("talk about", "think about", "make sure", "listen
+            //     to", "come back", "find out", "pick up", …) lands in
+            //     commercial context 1 time in 343 (0.29 %), while "head to"
+            //     lands there 7 times in 9 (78 %) — the same band as the
+            //     commercial "head over" (3/3) and "sign up" (6/10), and a
+            //     ~270× separation from the ordinary band.
+            // A term whose in-context rate does NOT separate from that 0.29 %
+            // control band has not earned the gate's protection and should be
+            // rejected, however good its in-ad examples look.
+            #"\bhead to\b"#,
             #"\bgo check out\b"#,
             #"\btry it free\b"#,
             #"\btry it today\b"#,
@@ -808,6 +931,13 @@ enum EvidenceCatalogBuilder {
             #"\bsupported by\b"#,
             #"\btoday s sponsor\b"#,
             #"\btoday's sponsor\b"#,
+            // playhead-absa: "because of our sponsor called Whisper Flow" —
+            // the DE0784D8 pod's disclosure, which no existing pattern saw.
+            // 2 occurrences in 94,692 chunks, both the same sponsor read on
+            // two assets, zero on content. The broader `\bsponsor called\b`
+            // was measured too and produced an IDENTICAL hit set, so nothing
+            // in the evidence argues for the wider form — the narrow one ships.
+            #"\bour sponsor called\b"#,
         ])
 
         return groups
