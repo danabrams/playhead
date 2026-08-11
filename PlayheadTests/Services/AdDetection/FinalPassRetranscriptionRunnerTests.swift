@@ -1,6 +1,6 @@
 // FinalPassRetranscriptionRunnerTests.swift
 // Tests for the Bug 9 charge-gated final-pass re-transcription phase.
-// These tests pin the runner's gating, idempotency, and watermark
+// These tests pin the runner's gating, idempotency, and resume-guard
 // invariants without booting the live Speech framework — the speech
 // service runs against `StubSpeechRecognizer` (returns empty transcripts),
 // the audio provider returns canned shards, and the AnalysisStore is a
@@ -376,24 +376,216 @@ struct FinalPassRetranscriptionRunnerTests {
         #expect(result.reTranscribedWindowIds.isEmpty)
     }
 
-    @Test("watermark short-circuits already-covered windows")
-    func testWatermarkSkipsCoveredWindows() async throws {
+    // MARK: - playhead-jzj0: the resume guard is per-window, not a frontier
+    //
+    // What these four tests are pinning, and why the shape matters.
+    //
+    // `analysis_assets.finalPassCoverageEndTime` is the MAX END of any span
+    // this runner has drained — a forward-progress marker. The pre-jzj0
+    // filter used `endTime > watermark` as the resume guard, which reads
+    // that marker as a COMPLETION claim: "everything at or before this is
+    // done". Those two readings agree only while candidates arrive in
+    // increasing order of `endTime`, which is false in production — fusion
+    // backfill, semantic sweep and the user's own manual marks mint windows
+    // hours after the launch batch, at arbitrary positions.
+    //
+    // The pair below is deliberately a POSITIVE and a NEGATIVE over the
+    // same fixture shape, because either one alone is passable by a broken
+    // runner: a runner that ignores every guard passes the positive, and a
+    // runner that runs nothing at all passes the negative.
+
+    @Test("a completed job for the window's own span short-circuits it")
+    func testCompletedSpanJobSkipsWindow() async throws {
         let store = try await makeTestStore()
         try await store.insertAsset(makeAsset())
-        try await store.advanceFinalPassCoverage(id: "asset-fp", endTime: 100.0)
         try await store.insertAdWindow(
             makeAdWindow(id: "w1", analysisAssetId: "asset-fp", startTime: 10, endTime: 30, confidence: 0.9)
         )
-        try await store.insertAdWindow(
-            makeAdWindow(id: "w2", analysisAssetId: "asset-fp", startTime: 60, endTime: 90, confidence: 0.9)
+        // The window's OWN span already has a `complete` job. The watermark
+        // is left nil on purpose: nothing but the per-window record can be
+        // producing the skip.
+        try await store.insertOrIgnoreFinalPassJob(
+            FinalPassJob(
+                jobId: "fpj-asset-fp-w1",
+                analysisAssetId: "asset-fp",
+                podcastId: "pod-1",
+                adWindowId: "w1",
+                windowStartTime: 10,
+                windowEndTime: 30,
+                status: .queued,
+                retryCount: 0,
+                deferReason: nil,
+                createdAt: 1_000.0
+            )
         )
-        let runner = makeRunner(
+        try await store.markFinalPassJobComplete(jobId: "fpj-asset-fp-w1")
+
+        let audio = StubAnalysisAudioProvider()
+        audio.shardsToReturn = [
+            AnalysisShard(id: 0, episodeID: "ep-asset-fp", startTime: 0, duration: 30, samples: [])
+        ]
+        let recognizer = CountingShardRecognizer()
+        let runner = makeRunnerWithBox(
             store: store,
-            snapshot: makeSnapshot()
+            box: SnapshotBox(makeSnapshot()),
+            recognizer: recognizer,
+            audioProvider: audio
         )
         let result = try await runner.runFinalPassBackfill(for: makeInput())
+
+        #expect(result.topLevelDeferReason == nil)
         #expect(result.admittedJobIds.isEmpty)
         #expect(result.reTranscribedWindowIds.isEmpty)
+        // The load-bearing assertions. The three counters above are all
+        // satisfied by a runner that never runs anything at all; these two
+        // say the expensive work specifically did not happen, and they are
+        // what would catch a future refactor that let a settled window
+        // reach `retranscribeWindow` and rely on the weak `coversWindow`
+        // chunk-containment test to bail after paying for the decode.
+        #expect(recognizer.transcribeCount == 0)
+        #expect(audio.decodeCallCount == 0)
+    }
+
+    @Test("a window minted BEHIND the coverage frontier is still re-transcribed")
+    func testWindowBehindFrontierIsEligible() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        // The bead's witness in miniature: an earlier drain drove the
+        // frontier to 100 (in production, to EOF via a post-roll window),
+        // and a candidate for [10, 30] arrives afterwards — a fusion
+        // backfill window or one of Dan's manual marks. It has never had a
+        // final-pass job of its own.
+        try await store.advanceFinalPassCoverage(id: "asset-fp", endTime: 100.0)
+        try await store.insertAdWindow(
+            makeAdWindow(id: "w-late", analysisAssetId: "asset-fp", startTime: 10, endTime: 30, confidence: 0.9)
+        )
+
+        let audio = StubAnalysisAudioProvider()
+        audio.shardsToReturn = [
+            AnalysisShard(id: 0, episodeID: "ep-asset-fp", startTime: 0, duration: 30, samples: [])
+        ]
+        let recognizer = CountingShardRecognizer()
+        let runner = makeRunnerWithBox(
+            store: store,
+            box: SnapshotBox(makeSnapshot()),
+            recognizer: recognizer,
+            audioProvider: audio
+        )
+        let result = try await runner.runFinalPassBackfill(for: makeInput())
+
+        #expect(result.topLevelDeferReason == nil)
+        #expect(result.reTranscribedWindowIds == ["w-late"])
+        #expect(recognizer.transcribeCount == 1)
+        // And the work is durably recorded, so the NEXT drain skips it —
+        // the fix must not trade a permanent skip for a permanent redo.
+        let job = try await store.fetchFinalPassJob(byId: "fpj-asset-fp-w-late")
+        #expect(job?.status == .complete)
+        let second = try await runner.runFinalPassBackfill(for: makeInput())
+        #expect(second.reTranscribedWindowIds.isEmpty)
+        #expect(recognizer.transcribeCount == 1)
+    }
+
+    @Test("a FAILED job behind the frontier is retried, not stranded")
+    func testFailedJobBehindFrontierIsRetried() async throws {
+        // The second witness on the 2026-08-02 V47 pull: asset F7BB38BB
+        // holds a `failed` job for span 0.000-72.180 and a `complete` one
+        // for 87.9-150.0. The completed neighbour pushed the frontier to
+        // 150, so the failed span — which produced NO final-pass audio —
+        // could never be re-admitted. Only a `complete` job may retire a
+        // span; `failed`, `deferred` and `queued` must all stay eligible.
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        try await store.insertAdWindow(
+            makeAdWindow(id: "w-failed", analysisAssetId: "asset-fp", startTime: 0, endTime: 30, confidence: 0.9)
+        )
+        try await store.insertOrIgnoreFinalPassJob(
+            FinalPassJob(
+                jobId: "fpj-asset-fp-w-failed",
+                analysisAssetId: "asset-fp",
+                podcastId: "pod-1",
+                adWindowId: "w-failed",
+                windowStartTime: 0,
+                windowEndTime: 30,
+                status: .queued,
+                retryCount: 0,
+                deferReason: nil,
+                createdAt: 1_000.0
+            )
+        )
+        try await store.markFinalPassJobFailed(jobId: "fpj-asset-fp-w-failed", reason: "retranscribeFailed")
+        // A later, unrelated span completed and drove the frontier past it.
+        try await store.advanceFinalPassCoverage(id: "asset-fp", endTime: 150.0)
+
+        let audio = StubAnalysisAudioProvider()
+        audio.shardsToReturn = [
+            AnalysisShard(id: 0, episodeID: "ep-asset-fp", startTime: 0, duration: 30, samples: [])
+        ]
+        let recognizer = CountingShardRecognizer()
+        let runner = makeRunnerWithBox(
+            store: store,
+            box: SnapshotBox(makeSnapshot()),
+            recognizer: recognizer,
+            audioProvider: audio
+        )
+        let result = try await runner.runFinalPassBackfill(for: makeInput())
+
+        #expect(result.reTranscribedWindowIds == ["w-failed"])
+        #expect(recognizer.transcribeCount == 1)
+        let job = try await store.fetchFinalPassJob(byId: "fpj-asset-fp-w-failed")
+        #expect(job?.status == .complete)
+    }
+
+    @Test("eligibility does not depend on the order candidates arrive in")
+    func testEligibilityIsArrivalOrderIndependent() async throws {
+        // The defect was an ORDER dependence, so the invariant worth pinning
+        // is order-independence itself, not another instance of the fix.
+        // Two runs over the same three spans, differing only in which span
+        // was present at the first drain, must converge on the same set of
+        // completed spans. Numerator: spans with a `complete` job at
+        // convergence. Denominator: the three spans, in both runs.
+        func completedSpans(lateArrival: Bool) async throws -> [String] {
+            let store = try await makeTestStore()
+            let assetId = lateArrival ? "asset-late" : "asset-early"
+            try await store.insertAsset(makeAsset(id: assetId))
+            let input = makeInput(assetId: assetId, episodeId: "ep-\(assetId)")
+            let audio = StubAnalysisAudioProvider()
+            audio.shardsToReturn = [
+                AnalysisShard(id: 0, episodeID: "ep-\(assetId)", startTime: 0, duration: 30, samples: []),
+                AnalysisShard(id: 1, episodeID: "ep-\(assetId)", startTime: 30, duration: 30, samples: []),
+                AnalysisShard(id: 2, episodeID: "ep-\(assetId)", startTime: 60, duration: 30, samples: [])
+            ]
+            let runner = makeRunner(store: store, snapshot: makeSnapshot(), audioProvider: audio)
+
+            // `mid` is the span that arrives out of order in the late case.
+            let early = ["lo": (0.0, 20.0), "hi": (60.0, 90.0)]
+            let mid = ("mid", 30.0, 50.0)
+            for (id, span) in early.sorted(by: { $0.key < $1.key }) {
+                try await store.insertAdWindow(
+                    makeAdWindow(id: id, analysisAssetId: assetId, startTime: span.0, endTime: span.1, confidence: 0.9)
+                )
+            }
+            if !lateArrival {
+                try await store.insertAdWindow(
+                    makeAdWindow(id: mid.0, analysisAssetId: assetId, startTime: mid.1, endTime: mid.2, confidence: 0.9)
+                )
+            }
+            _ = try await runner.runFinalPassBackfill(for: input)
+            if lateArrival {
+                // Minted AFTER the frontier has been driven to 90 by `hi`.
+                try await store.insertAdWindow(
+                    makeAdWindow(id: mid.0, analysisAssetId: assetId, startTime: mid.1, endTime: mid.2, confidence: 0.9)
+                )
+                _ = try await runner.runFinalPassBackfill(for: input)
+            }
+            return try await store.canonicalCompleteFinalPassSpans(forAsset: assetId)
+                .map(\.canonicalSpanKey)
+                .sorted()
+        }
+
+        let early = try await completedSpans(lateArrival: false)
+        let late = try await completedSpans(lateArrival: true)
+        #expect(early == ["0.000-20.000", "30.000-50.000", "60.000-90.000"])
+        #expect(late == early)
     }
 
     // MARK: - Job lifecycle
@@ -631,8 +823,10 @@ struct FinalPassRetranscriptionRunnerTests {
         let first = try await runner.runFinalPassBackfill(for: makeInput())
         #expect(first.reTranscribedWindowIds.count == 1)
 
-        // Second run: watermark advanced past w1.endTime, so no eligible
-        // windows remain — empty result.
+        // Second run: w1's span now carries a `complete` final_pass_jobs
+        // row, so no eligible windows remain — empty result. (Pre-jzj0 the
+        // advanced watermark is what produced this; the outcome is the
+        // same, the reason is now per-window.)
         let second = try await runner.runFinalPassBackfill(for: makeInput())
         #expect(second.admittedJobIds.isEmpty)
         #expect(second.reTranscribedWindowIds.isEmpty)

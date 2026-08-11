@@ -31,10 +31,10 @@
 //    It measures how far forward this runner has reached; it never
 //    measured which spans were finished, and reading it as the latter
 //    made every window minted behind the frontier permanently
-//    unreachable — including a user's own manual mark. Eligibility now
-//    keys on the per-window record that already existed:
-//    `final_pass_jobs`, queried through
-//    `AnalysisStore.canonicalCompleteFinalPassSpans(forAsset:)`.
+//    unreachable — including a user's own manual mark. The resume guard
+//    is now the per-window record that already existed: this window's own
+//    `final_pass_jobs` row, resolved by canonical span key and retired
+//    only when its status is `complete`.
 //
 //  • Job table — sibling table `final_pass_jobs`. We chose a sibling
 //    rather than extending `backfill_jobs` with a new phase value because
@@ -66,13 +66,14 @@
 //    final model over the entire episode would burn battery for no
 //    classifier gain.
 //
-//  • Idempotency — the runner consults the completed-span set before
-//    scheduling work for a window AND consults `transcript_chunks` to
-//    confirm there are no already-persisted `pass='final'` rows that
-//    overlap. A second invocation against an asset every one of whose
-//    confidence-cleared AdWindows has a `complete` job is a guaranteed
-//    no-op. Unlike the pre-jzj0 watermark form, that guarantee no longer
-//    depends on the order candidates arrived in.
+//  • Idempotency — the runner consults each window's own canonical
+//    `final_pass_jobs` row before scheduling work for it AND consults
+//    `transcript_chunks` to confirm there are no already-persisted
+//    `pass='final'` rows that overlap. A second invocation against an
+//    asset every one of whose confidence-cleared AdWindows has a
+//    `complete` job is a guaranteed no-op. Unlike the pre-jzj0 watermark
+//    form, that guarantee no longer depends on the order the candidates
+//    arrived in.
 //
 //  • Wiring — composed in `PlayheadRuntime` alongside the existing
 //    `BackfillJobRunner`. `AnalysisJobReconciler.reconcile()` enqueues
@@ -243,12 +244,14 @@ actor FinalPassRetranscriptionRunner {
     ///   1. Top-level admission gate: charge + nominal thermal + LPM=false +
     ///      QualityProfile permits work. Bails with a populated
     ///      `topLevelDeferReason` on the first failed gate.
-    ///   2. Loads the asset's persisted AdWindows and the set of canonical
-    ///      spans that already have a `complete` final-pass job.
-    ///   3. Filters to windows where `confidence >= confidenceFloor` and
-    ///      whose own canonical span is not in that completed set
-    ///      (idempotent skip — playhead-jzj0).
-    ///   4. Per surviving window: re-checks the gates, calls
+    ///   2. Loads the asset's persisted AdWindows.
+    ///   3. Filters to windows where `confidence >= confidenceFloor`
+    ///      (playhead-jzj0 removed the `endTime > watermark` clause that
+    ///      used to sit here; the idempotent skip is per-window, at step 4).
+    ///   4. Groups survivors by canonical span, resolves each span to its
+    ///      existing `final_pass_jobs` row (or enqueues one), and DROPS any
+    ///      whose row is already `complete` — the per-window resume guard.
+    ///      Per surviving job: re-checks the gates, calls
     ///      `loadFinalModel()` (idempotent via `activeModelRole`), slices
     ///      the relevant audio shards out of the cached decoded set,
     ///      transcribes each shard, and appends the resulting
@@ -293,52 +296,6 @@ actor FinalPassRetranscriptionRunner {
             throw error
         }
 
-        // playhead-jzj0 — the per-window "already re-transcribed" record.
-        //
-        // This is what the watermark used to stand in for, and the reason
-        // the substitution was wrong: `finalPassCoverageEndTime` is the
-        // MAX END of any span this runner has drained. Its numerator is
-        // "the furthest point reached"; its denominator is nothing at all.
-        // It is a forward-progress marker, and the old filter read it as a
-        // COMPLETION marker — "everything at or before this point is done".
-        // Those two readings agree only while candidates arrive in
-        // increasing order of endTime, which is not a property this system
-        // has: fusion backfill, semantic sweep and user marks all mint
-        // windows hours after the launch batch, at arbitrary positions.
-        //
-        // `canonicalCompleteFinalPassSpans` answers the question the filter
-        // is actually asking — numerator: canonical spans with a `complete`
-        // `final_pass_jobs` row; denominator: this asset's eligible spans.
-        // It is monotone (the set only grows), durable, and indifferent to
-        // arrival order, so a window minted behind the frontier is judged
-        // on its own record rather than on a neighbour's.
-        //
-        // Cost is ONE grouped read of a table that holds a handful of rows
-        // per asset. It is deliberately fetched BEFORE the eligibility
-        // filter and NOT inside it, so a converged asset still short-
-        // circuits at `guard !eligibleWindows.isEmpty` without touching
-        // `transcript_chunks` — the launch sweep walks every asset in the
-        // library on every cold start, and that early exit is what keeps it
-        // cheap.
-        //
-        // A read failure fails OPEN (empty set). The consequence is a
-        // redundant enqueue, which the loop below still absorbs: the
-        // `findFinalPassJob` lookup returns the pre-existing row and
-        // `guard job.status != .complete` skips it before any ASR runs. The
-        // opposite choice — treating an unreadable table as "everything is
-        // done" — would silently reproduce this bead's defect.
-        let completedSpanKeys: Set<String>
-        do {
-            completedSpanKeys = Set(
-                try await store.canonicalCompleteFinalPassSpans(
-                    forAsset: input.analysisAssetId
-                ).map(\.canonicalSpanKey)
-            )
-        } catch {
-            logger.warning("Final-pass: failed to read completed span keys for \(input.analysisAssetId, privacy: .public): \(error.localizedDescription, privacy: .public) — treating none as complete")
-            completedSpanKeys = []
-        }
-
         // Step 3 — filter. A window is eligible iff:
         //   • its endTime is strictly greater than its startTime (a
         //     window with `endTime <= startTime` is structurally
@@ -350,11 +307,45 @@ actor FinalPassRetranscriptionRunner {
         //     Non-zero but tiny spans (e.g. 0.001 s) are valid and
         //     pass through; the 0-length cutoff is `endTime > startTime`,
         //     not a fixed minimum duration), AND
-        //   • its confidence cleared the configured floor, AND
-        //   • its own canonical span has no `complete` final-pass job
-        //     (playhead-jzj0 — the per-window resume guard that replaced
-        //     the global `endTime > watermark` test; see the note above
-        //     `completedSpanKeys`).
+        //   • its confidence cleared the configured floor.
+        //
+        // playhead-jzj0 — THERE IS NO LONGER A THIRD CLAUSE, and the one
+        // that was here is the whole of this bead. It read
+        // `endTime > asset.finalPassCoverageEndTime`.
+        //
+        // That column holds the MAXIMUM END of any span this runner has
+        // drained: a forward-progress marker whose numerator is "the
+        // furthest point reached" and which has no denominator at all. The
+        // filter read it as a COMPLETION claim — "everything at or before
+        // this point is done". The two readings coincide only while
+        // candidates arrive in increasing order of `endTime`, and they do
+        // not: fusion backfill, semantic sweep and the user's own manual
+        // marks mint AdWindows hours after the launch batch, at arbitrary
+        // positions. Once a post-roll window drove the value to EOF, every
+        // window ending inside the episode was excluded PERMANENTLY —
+        // 6 of the 9 job-less windows on the 2026-08-02 device pull,
+        // including both of Dan's `userMarked` pod windows at confidence
+        // 1.0, and a `failed` job that could never be retried because an
+        // unrelated later span had passed it.
+        //
+        // Nothing replaces it, because the per-window record it was
+        // standing in for already exists and is already consulted a few
+        // lines below: `findFinalPassJob(forAssetId:canonicalSpanKey:)`
+        // resolves this window's own span to its own job, and
+        // `guard job.status != .complete` retires it. That guard is
+        // monotone, durable and indifferent to arrival order — a window
+        // minted behind the frontier is now judged on its own record
+        // rather than on a neighbour's.
+        //
+        // Deleting the clause rather than replacing it with a completed-span
+        // SET is deliberate. A set-membership filter here would also drop
+        // already-complete windows before the grouping loop, and that loop
+        // is where playhead-hygc.1.5 records a same-span window as an ALIAS
+        // of the canonical job covering it. Filtering early is cheaper and
+        // silently narrows that audit contract; the cost is instead paid
+        // back by deferring the `transcript_chunks` read below until the
+        // job list is known to be non-empty.
+        //
         // The per-row `pass='final'` chunk overlap check is in
         // `retranscribeWindow` so it can short-circuit the full audio
         // decode without an extra DB hop here.
@@ -372,33 +363,13 @@ actor FinalPassRetranscriptionRunner {
                 return false
             }
             guard window.confidence >= confidenceFloor else { return false }
-            // playhead-jzj0: per-window resume guard. The span this window
-            // occupies — not the asset's furthest drained point — decides
-            // whether its audio still owes a final pass.
-            let spanKey = AnalysisStore.canonicalSpanKey(
-                start: window.startTime,
-                end: window.endTime
-            )
-            guard !completedSpanKeys.contains(spanKey) else { return false }
             return true
         }
         guard !eligibleWindows.isEmpty else {
-            logger.debug("Final-pass: no eligible windows for \(input.analysisAssetId, privacy: .public) (windows=\(allWindows.count, privacy: .public), floor=\(self.confidenceFloor, privacy: .public), completeSpans=\(completedSpanKeys.count, privacy: .public), watermark=\(watermark, privacy: .public))")
+            logger.debug("Final-pass: no eligible windows for \(input.analysisAssetId, privacy: .public) (windows=\(allWindows.count, privacy: .public), floor=\(self.confidenceFloor, privacy: .public), watermark=\(watermark, privacy: .public))")
             return .empty
         }
 
-        // Materialize the existing pass='final' chunks so the per-window
-        // inner check can run without an extra DB hop per window.
-        // skeptical-review-cycle-16 L-3: declared `let` because neither
-        // branch mutates the binding after assignment.
-        let existingFinalChunks: [TranscriptChunk]
-        do {
-            existingFinalChunks = try await store.fetchTranscriptChunks(
-                assetId: input.analysisAssetId
-            ).filter { $0.pass == TranscriptPassType.final_.rawValue }
-        } catch {
-            existingFinalChunks = []
-        }
         // skeptical-review-cycle-5 M-Y1: track windows successfully
         // re-transcribed in this drain. If two eligible AdWindows are
         // spatially overlapping, the second iteration's `coversWindow`
@@ -574,6 +545,35 @@ actor FinalPassRetranscriptionRunner {
             guard job.status != .complete else { continue }
             if seenJobIds.insert(job.jobId).inserted {
                 jobs.append(job)
+            }
+        }
+
+        // Materialize the existing pass='final' chunks so the per-window
+        // inner check can run without an extra DB hop per window.
+        // skeptical-review-cycle-16 L-3: declared `let` because neither
+        // branch mutates the binding after assignment.
+        //
+        // playhead-jzj0 moved this read from before the eligibility filter
+        // to here, after the job list is known. It materializes EVERY chunk
+        // for the asset (fast and final — ~1,900 rows on the 2026-08-02
+        // pull's largest episode) and the launch sweep walks every asset in
+        // the library on every cold start. Before this bead the watermark
+        // clause usually made `eligibleWindows` empty for a converged asset,
+        // so the read was rarely reached; deleting that clause would have
+        // left it running unconditionally. Gating on an empty `jobs` array
+        // restores the same short-circuit from the honest signal — every
+        // canonical span already has a `complete` row — instead of from a
+        // frontier that was never evidence of completion.
+        let existingFinalChunks: [TranscriptChunk]
+        if jobs.isEmpty {
+            existingFinalChunks = []
+        } else {
+            do {
+                existingFinalChunks = try await store.fetchTranscriptChunks(
+                    assetId: input.analysisAssetId
+                ).filter { $0.pass == TranscriptPassType.final_.rawValue }
+            } catch {
+                existingFinalChunks = []
             }
         }
 
