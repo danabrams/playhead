@@ -68,6 +68,27 @@ enum RediffDayZeroKickoffSource: String, Sendable, Equatable, Codable, CaseItera
 /// bounded readiness wait can end, so `guard let ready else { return }` is no
 /// longer expressible as a single indistinguishable silence.
 enum RediffDayZeroKickoffOutcome: String, Sendable, Equatable, Codable, CaseIterable {
+    /// playhead-kg8h: the kickoff was REQUESTED and durably claimed, and has not
+    /// settled. Not a terminal state — it is what the row says while the work is
+    /// still owed, and what it goes on saying forever if the process never lives
+    /// to settle it.
+    ///
+    /// WHY A CLAIM EXISTS AT ALL. Every other case below is written by `settle`,
+    /// which runs AFTER the bounded readiness wait (up to ~6.5 min) and AFTER
+    /// `fire` — and `fire` is the whole day-0 re-fetch: ~66 MB of k-way
+    /// downloads, plus a possible 30 s same-session retry and a second fetch.
+    /// A process that dies anywhere in that window — a background-URLSession
+    /// wake whose budget expires, jetsam, a force-quit — used to leave NO ROW,
+    /// which is byte-identical in the database to a kickoff that was never
+    /// requested and to an observer that was never installed. The same silence
+    /// playhead-4dqe removed from the give-up path was still sitting on the
+    /// path taken by every kickoff that got FURTHEST.
+    ///
+    /// This is the playhead-fil5 / playhead-3oyz durable-claim shape: write the
+    /// row BEFORE the work, so `kickoffCount > firedCount + gaveUpCount` is the
+    /// queryable signature of "requested, never settled".
+    case requested
+
     /// Both preconditions resolved and `DayZeroRediffTrigger.triggerIfEligible`
     /// was invoked. Whatever the trigger then decided (gate, backoff, budget,
     /// mint) is recorded in `rediff_day_zero_attempts` against the asset — this
@@ -95,7 +116,19 @@ enum RediffDayZeroKickoffOutcome: String, Sendable, Equatable, Codable, CaseIter
 
     /// Whether the kickoff failed to reach the trigger. The single predicate the
     /// ledger's `gaveUpCount` accumulates.
-    var isGiveUp: Bool { self != .fired }
+    ///
+    /// Written as an exhaustive switch rather than `self != .fired` because
+    /// `.requested` is neither: it is the state of a kickoff that has not
+    /// settled at all, so counting it as a give-up would report work still
+    /// owed as work that failed. The store's settle path derives its two
+    /// counters from its own exhaustive switch for the same reason — see
+    /// `AnalysisStore.noteRediffDayZeroKickoff`.
+    var isGiveUp: Bool {
+        switch self {
+        case .fired, .requested: return false
+        case .noPinnedFile, .noAnalysisAsset, .cancelled: return true
+        }
+    }
 
     /// The invariant code this outcome SURFACES on the JSON Lines session file
     /// that ships in the diagnostics bundle and that a device pull reads, or
@@ -112,7 +145,7 @@ enum RediffDayZeroKickoffOutcome: String, Sendable, Equatable, Codable, CaseIter
     /// stream, which costs more than the line is worth.
     var invariantCode: InvariantViolation.Code? {
         switch self {
-        case .fired, .cancelled: return nil
+        case .fired, .cancelled, .requested: return nil
         case .noPinnedFile: return .rediffDayZeroKickoffNoPinnedFile
         case .noAnalysisAsset: return .rediffDayZeroKickoffNoAnalysisAsset
         }
@@ -125,6 +158,9 @@ enum RediffDayZeroKickoffOutcome: String, Sendable, Equatable, Codable, CaseIter
     /// report about a kickoff that got further than that.
     var readinessProgressRank: Int {
         switch self {
+        // Below every probe outcome: a claim is written before the first probe
+        // runs, so it can never be the FURTHEST progress a wait observed.
+        case .requested: return -1
         case .noPinnedFile: return 0
         case .noAnalysisAsset: return 1
         case .cancelled: return 2
@@ -288,6 +324,24 @@ struct RediffDayZeroKickoffRecord: Sendable, Equatable {
         self.lastPollCount = lastPollCount
         self.lastWaitedSeconds = lastWaitedSeconds
         self.updatedAt = updatedAt
+    }
+}
+
+/// playhead-kg8h: one REQUESTED kickoff, as handed to whoever persists the
+/// claim. Deliberately a different type from `RediffDayZeroKickoffRecordUpdate`
+/// rather than the same one carrying `.requested`: a claim has no outcome, no
+/// poll count and no wait to report — it is written before any of those exist —
+/// and giving it fields it cannot honestly fill is how a zero comes to be read
+/// as a measurement.
+struct RediffDayZeroKickoffClaim: Sendable, Equatable {
+    let episodeId: String
+    let source: RediffDayZeroKickoffSource
+    let at: Double
+
+    init(episodeId: String, source: RediffDayZeroKickoffSource, at: Double) {
+        self.episodeId = episodeId
+        self.source = source
+        self.at = at
     }
 }
 

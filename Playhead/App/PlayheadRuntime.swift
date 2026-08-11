@@ -1777,6 +1777,19 @@ final class PlayheadRuntime {
                         forceDeepScanOptIn: true
                     )
                 },
+                // playhead-kg8h: the DURABLE CLAIM, written before the request
+                // is even queued. Everything below this line — the ~6.5-minute
+                // readiness wait, the serial drain, and `fire`'s ~66 MB k-way
+                // re-fetch — can be cut short by a background-wake budget or
+                // jetsam, and until this existed that left NO row: identical in
+                // the database to a download that never happened.
+                claimKickoff: { claim in
+                    try? await kickoffStore.noteRediffDayZeroKickoffClaim(
+                        episodeId: claim.episodeId,
+                        source: claim.source,
+                        at: claim.at
+                    )
+                },
                 recordKickoff: { update in
                     try? await kickoffStore.noteRediffDayZeroKickoff(
                         episodeId: update.episodeId,

@@ -70,6 +70,13 @@ struct DayZeroDownloadTimeStoreTests {
     func countsAccumulate() async throws {
         let store = try await makeTestStore()
         for index in 0..<3 {
+            // playhead-kg8h: a real kickoff is a CLAIM followed by a settle, and
+            // `kickoffCount` now counts the claims (which is what its name and
+            // its own doc comment have always said). Driving three settles with
+            // no claims would be a state the coordinator cannot produce.
+            try await store.noteRediffDayZeroKickoffClaim(
+                episodeId: "ep-1", source: .backgroundDownload, at: 1_000 + Double(index)
+            )
             try await store.noteRediffDayZeroKickoff(
                 episodeId: "ep-1",
                 source: .backgroundDownload,
@@ -102,9 +109,15 @@ struct DayZeroDownloadTimeStoreTests {
     @Test("a mixed history keeps BOTH numbers — a device that recovered is distinguishable from one that never worked")
     func mixedHistoryKeepsBothNumbers() async throws {
         let store = try await makeTestStore()
+        try await store.noteRediffDayZeroKickoffClaim(
+            episodeId: "ep-mix", source: .backgroundDownload, at: 100
+        )
         try await store.noteRediffDayZeroKickoff(
             episodeId: "ep-mix", source: .backgroundDownload,
             outcome: .noAnalysisAsset, pollCount: 40, waitedSeconds: 390, at: 100
+        )
+        try await store.noteRediffDayZeroKickoffClaim(
+            episodeId: "ep-mix", source: .backgroundDownload, at: 200
         )
         try await store.noteRediffDayZeroKickoff(
             episodeId: "ep-mix", source: .backgroundDownload,
@@ -115,6 +128,100 @@ struct DayZeroDownloadTimeStoreTests {
         #expect(record.firedCount == 1)
         #expect(record.gaveUpCount == 1)
         #expect(record.lastOutcome == .fired)
+    }
+
+    // MARK: - playhead-kg8h: the durable claim
+
+    @Test("THE ACCEPTANCE, PERSISTED: a claim alone is a queryable row — a kickoff that never settled")
+    func claimAloneLeavesAQueryableRow() async throws {
+        let store = try await makeTestStore()
+        try await store.noteRediffDayZeroKickoffClaim(
+            episodeId: "ep-claim", source: .backgroundDownload, at: 1_700_000_000
+        )
+        let record = try #require(try await store.fetchRediffDayZeroKickoff(episodeId: "ep-claim"))
+        #expect(record.lastOutcome == .requested)
+        #expect(record.kickoffCount == 1)
+        #expect(record.firedCount == 0)
+        #expect(record.gaveUpCount == 0,
+                "a kickoff still owed is not a kickoff that gave up — conflating them is how the in-memory queue's losses would read as network failures")
+        #expect(record.lastSource == .backgroundDownload)
+        #expect(record.updatedAt == 1_700_000_000)
+    }
+
+    @Test("a CLAIM then a SETTLE is ONE kickoff, not two — the claim owns `kickoffCount`")
+    func claimThenSettleCountsOneKickoff() async throws {
+        let store = try await makeTestStore()
+        try await store.noteRediffDayZeroKickoffClaim(
+            episodeId: "ep-cs", source: .downloadAndAnalyzeTap, at: 100
+        )
+        try await store.noteRediffDayZeroKickoff(
+            episodeId: "ep-cs", source: .downloadAndAnalyzeTap,
+            outcome: .fired, pollCount: 2, waitedSeconds: 15.8, at: 116
+        )
+        let record = try #require(try await store.fetchRediffDayZeroKickoff(episodeId: "ep-cs"))
+        #expect(record.kickoffCount == 1, "double-counting would break the pre-ewag reading this table exists for")
+        #expect(record.firedCount == 1)
+        #expect(record.gaveUpCount == 0)
+        #expect(record.lastOutcome == .fired)
+        #expect(record.lastPollCount == 2)
+        #expect(record.lastWaitedSeconds == 15.8)
+    }
+
+    @Test("`kickoffCount - (firedCount + gaveUpCount)` counts the kickoffs the process never lived to settle")
+    func unsettledKickoffsAreCountable() async throws {
+        let store = try await makeTestStore()
+        // Two claims, one settle: the second kickoff is still owed — the shape a
+        // serial drain (playhead-kxgh) leaves behind when the wake window ends.
+        try await store.noteRediffDayZeroKickoffClaim(
+            episodeId: "ep-owed", source: .backgroundDownload, at: 100
+        )
+        try await store.noteRediffDayZeroKickoff(
+            episodeId: "ep-owed", source: .backgroundDownload,
+            outcome: .fired, pollCount: 1, waitedSeconds: 3, at: 110
+        )
+        try await store.noteRediffDayZeroKickoffClaim(
+            episodeId: "ep-owed", source: .backgroundDownload, at: 200
+        )
+        let record = try #require(try await store.fetchRediffDayZeroKickoff(episodeId: "ep-owed"))
+        #expect(record.kickoffCount == 2)
+        #expect(record.firedCount + record.gaveUpCount == 1)
+        #expect(record.kickoffCount - (record.firedCount + record.gaveUpCount) == 1)
+        #expect(record.lastOutcome == .requested, "the row's last word is that a kickoff is owed")
+    }
+
+    @Test("a settle whose claim write FAILED still records the kickoff rather than a row claiming zero of them")
+    func settleWithoutAClaimStillCountsOne() async throws {
+        let store = try await makeTestStore()
+        // The claim goes through `try?` in production, so a transient SQLite
+        // failure is possible. The settle must not then write kickoffCount = 0.
+        try await store.noteRediffDayZeroKickoff(
+            episodeId: "ep-noclaim", source: .backgroundDownload,
+            outcome: .noPinnedFile, pollCount: 40, waitedSeconds: 390, at: 500
+        )
+        let record = try #require(try await store.fetchRediffDayZeroKickoff(episodeId: "ep-noclaim"))
+        #expect(record.kickoffCount == 1)
+        #expect(record.gaveUpCount == 1)
+    }
+
+    @Test("a claim never RESURRECTS a settled row's evidence — the poll count and wait reset with it")
+    func aFreshClaimResetsTheSettledEvidence() async throws {
+        let store = try await makeTestStore()
+        try await store.noteRediffDayZeroKickoffClaim(
+            episodeId: "ep-reset", source: .backgroundDownload, at: 100
+        )
+        try await store.noteRediffDayZeroKickoff(
+            episodeId: "ep-reset", source: .backgroundDownload,
+            outcome: .noAnalysisAsset, pollCount: 40, waitedSeconds: 390, at: 490
+        )
+        try await store.noteRediffDayZeroKickoffClaim(
+            episodeId: "ep-reset", source: .downloadAndAnalyzeTap, at: 600
+        )
+        let record = try #require(try await store.fetchRediffDayZeroKickoff(episodeId: "ep-reset"))
+        #expect(record.lastPollCount == 0,
+                "carrying the PRIOR kickoff's 40 polls onto an outstanding claim would report a wait that this kickoff has not run")
+        #expect(record.lastWaitedSeconds == 0)
+        #expect(record.lastSource == .downloadAndAnalyzeTap)
+        #expect(record.gaveUpCount == 1, "the prior give-up is history and stays counted")
     }
 
     @Test("an unknown episode reads nil, not a zeroed row that would look like a healthy kickoff")

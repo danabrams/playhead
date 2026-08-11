@@ -6907,11 +6907,67 @@ actor AnalysisStore {
         try setSchemaVersion(47)
     }
 
+    /// playhead-kg8h: durably CLAIM one REQUESTED day-0 kickoff, before any of
+    /// the work it stands for has run.
+    ///
+    /// `kickoffCount` is incremented HERE and only here, which is what its own
+    /// documentation has said since playhead-4dqe ("total kickoffs REQUESTED for
+    /// this episode") and what the settle path — which ran only after a
+    /// ~6.5-minute wait and a ~66 MB re-fetch — could never honestly count. Two
+    /// consequences worth knowing before changing either writer:
+    ///
+    ///   * a kickoff the process never lived to settle now leaves a row saying
+    ///     `requested`, instead of leaving nothing at all;
+    ///   * `kickoffCount - (firedCount + gaveUpCount)` becomes the queryable
+    ///     count of kickoffs that were owed and never settled — the
+    ///     playhead-jra6 / playhead-kxgh loss, measurable from a device pull
+    ///     rather than inferred from an absence.
+    ///
+    /// Idempotent per REQUEST, not per episode: a second genuine kickoff for the
+    /// same episode (a retry download, the tap after a background attempt) is a
+    /// second claim and counts. The coordinator's `inFlight` / `fired` guards are
+    /// what stop one download from claiming twice.
+    func noteRediffDayZeroKickoffClaim(
+        episodeId: String,
+        source: RediffDayZeroKickoffSource,
+        at now: Double
+    ) throws {
+        let sql = """
+            INSERT INTO rediff_day_zero_kickoffs
+            (episodeId, lastSource, kickoffCount, firedCount, gaveUpCount,
+             lastOutcome, lastPollCount, lastWaitedSeconds, updatedAt)
+            VALUES (?, ?, 1, 0, 0, ?, 0, 0, ?)
+            ON CONFLICT(episodeId) DO UPDATE SET
+                lastSource = excluded.lastSource,
+                kickoffCount = kickoffCount + 1,
+                lastOutcome = excluded.lastOutcome,
+                lastPollCount = 0,
+                lastWaitedSeconds = 0,
+                updatedAt = excluded.updatedAt
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, episodeId)
+        bind(stmt, 2, source.rawValue)
+        bind(stmt, 3, RediffDayZeroKickoffOutcome.requested.rawValue)
+        bind(stmt, 4, now)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
     /// Fold ONE settled day-0 kickoff into its episode's row.
     ///
     /// The counters accumulate in SQL rather than in Swift so two writers can
     /// never race a read-modify-write. `kickoffCount` large with `firedCount`
     /// zero is the pre-ewag failure, readable without a join.
+    ///
+    /// playhead-kg8h: this no longer increments `kickoffCount` on an existing
+    /// row — `noteRediffDayZeroKickoffClaim` owns that counter, and every
+    /// settle is preceded by a claim. The INSERT still writes 1 so a settle
+    /// that finds no row (a claim whose write failed) still records the kickoff
+    /// rather than a row claiming zero of them; the direction of the remaining
+    /// error is deliberate, since undercounting a claim is recoverable and
+    /// double-counting one would break the "large `kickoffCount`, zero
+    /// `firedCount`" reading this table exists for.
     func noteRediffDayZeroKickoff(
         episodeId: String,
         source: RediffDayZeroKickoffSource,
@@ -6920,8 +6976,20 @@ actor AnalysisStore {
         waitedSeconds: Double,
         at now: Double
     ) throws {
-        let fired = outcome.isGiveUp ? 0 : 1
-        let gaveUp = outcome.isGiveUp ? 1 : 0
+        // Exhaustive rather than `isGiveUp ? …`, so a future outcome case has to
+        // be classified here rather than falling into whichever bucket the
+        // predicate happens to put it in. `.requested` is neither: it is written
+        // by the claim path above and never settles anything.
+        let fired: Int
+        let gaveUp: Int
+        switch outcome {
+        case .fired:
+            (fired, gaveUp) = (1, 0)
+        case .requested:
+            (fired, gaveUp) = (0, 0)
+        case .noPinnedFile, .noAnalysisAsset, .cancelled:
+            (fired, gaveUp) = (0, 1)
+        }
         let sql = """
             INSERT INTO rediff_day_zero_kickoffs
             (episodeId, lastSource, kickoffCount, firedCount, gaveUpCount,
@@ -6929,7 +6997,6 @@ actor AnalysisStore {
             VALUES (?, ?, 1, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(episodeId) DO UPDATE SET
                 lastSource = excluded.lastSource,
-                kickoffCount = kickoffCount + 1,
                 firedCount = firedCount + excluded.firedCount,
                 gaveUpCount = gaveUpCount + excluded.gaveUpCount,
                 lastOutcome = excluded.lastOutcome,
