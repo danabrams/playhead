@@ -1085,11 +1085,52 @@ struct AdBannerView: View {
     /// (`LearningArtifactIngestor.applySponsorSideEffect` →
     /// `SponsorKnowledgeStore.recordCandidate`) and changes no skip anywhere;
     /// the entry needs presses on two DISTINCT episodes to reach `.active`, and
-    /// even then the only production reader of an active sponsor entry is
+    /// even then the only production reader of an active sponsor entry was
     /// `ASRVocabularyProvider` (see the bead's R1 note). A receipt in the
     /// present continuous of "skipping" is therefore a claim about behaviour
     /// that is not happening; "remembering" is a claim about the preference,
     /// which is exactly what did happen.
+    ///
+    /// playhead-shjn added a SECOND production reader — an `.active` entry now
+    /// reaches `SponsorKnowledgeMatcher` and becomes a `.sponsor`-origin
+    /// proposal in `RegionProposalBuilder` — and this wording still stands.
+    /// A sponsor-ONLY region still yields nothing: `AtomEvidenceProjector`
+    /// reads four origin bits (`.foundationModel`, `.acoustic`, `.classifier`,
+    /// `.sustainedMusic`), `.sponsor` is not one of them, so it anchors no atom
+    /// and decodes to no span. See playhead-a1r6 for the open decision that
+    /// would change that; if it lands, THIS is the copy that has to be revisited.
+    ///
+    /// playhead-shjn R1 review — the honest bound, because "reaches nothing" is
+    /// NOT true of the `.sponsor` bit once it merges with another origin, and a
+    /// receipt is a promise:
+    ///   • `MusicOffsetLexicalGate.corroboratingOrigins` DOES read `.sponsor`.
+    ///     Both `sustainedMusicProposerEnabled` and
+    ///     `musicOffsetLexicalGateEnabled` default `true` in the shipped
+    ///     config, so a sponsor match overlapping a cue-less music-only run
+    ///     flips it from "uncorroborated" to "corroborated", the gate stops
+    ///     suppressing it, and a `.markOnly` BANNER appears that would not have
+    ///     existed. Pinned by `SponsorUnSuppressesMusicOnlyRegionTests`.
+    ///   • `RegionProposalBuilder.merge` UNIONS atom ranges, so a sponsor match
+    ///     overlapping an FM/classifier region WIDENS it — including backward
+    ///     across an INNER edge, which per Dan's outer-free/inner-precious
+    ///     ruling is the expensive direction. It cannot create an auto-skip,
+    ///     but it can move one it did not create.
+    ///   • Even UNMERGED, a sponsor-only proposal within
+    ///     `acousticBreakAssociationTolerance` (1.0 s) of a break gets
+    ///     `.acoustic` inserted by `RegionProposalBuilder.build`, and
+    ///     `AtomEvidenceProjector` DOES read `.acoustic` — so its whole atom
+    ///     range becomes `hasAcousticBreakHint`, which drives
+    ///     `MinimalContiguousSpanDecoder`'s Use A boundary SNAP (documented to
+    ///     snap to the OUTERMOST hint "to maximize expansion") and Use B
+    ///     anti-merge. Another edge-mover, on a span the sponsor did not
+    ///     propose.
+    /// Exposure today is nil, measured, not assumed: `sponsor_knowledge_entries`
+    /// holds 0 rows and 0 of 30/30/27/0/0 recorded corrections carry a
+    /// `sponsorOnShow` scope across the five device pulls. Every effect above is
+    /// LATENT until a listener presses this button twice on one show.
+    /// Neither effect makes the receipt's "Remembering" wrong — the tap still
+    /// starts no skip of its own — but neither is nothing, and both are live
+    /// the moment a second press promotes an entry to `.active`.
     ///
     /// The label stays imperative ("Always skip …") because that is the
     /// instruction the listener gave — Dan's ruling. The receipt reports what

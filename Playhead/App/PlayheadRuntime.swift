@@ -2142,6 +2142,23 @@ final class PlayheadRuntime {
             await adDetectionService.setUserCorrectionStore(correctionStore)
         }
 
+        // playhead-shjn: hand the SAME `SponsorKnowledgeStore` that
+        // `LearningArtifactIngestor` writes to (constructed above, next to
+        // the correction store) to the READ side. Without this the
+        // store-backed `SponsorKnowledgeMatcher` overload has zero callers
+        // and an `.active` sponsor entry reaches nothing but
+        // `ASRVocabularyProvider`'s contextual strings — i.e. "Always skip
+        // <sponsor> on this show" buys a transcription hint and no proposal.
+        //
+        // Race note, same shape as `setUserCorrectionStore` above: until this
+        // Task completes `adDetectionService.sponsorKnowledgeStore` is nil, so
+        // a backfill that starts first falls back to the legacy stub and sees
+        // no sponsor matches. That is the safe default (no proposal, not a
+        // wrong one), and it self-corrects on the next backfill of that asset.
+        Task { [adDetectionService, sponsorKnowledgeStore] in
+            await adDetectionService.setSponsorKnowledgeStore(sponsorKnowledgeStore)
+        }
+
         // playhead-q45f: install the TrustScoringService on
         // AdDetectionService so `recordListenRewind` can route its
         // weak-false-signal side-effect through the state machine

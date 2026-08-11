@@ -1883,6 +1883,24 @@ actor AdDetectionService {
     /// spans gate to `.blockedByUserCorrection` without making the struct async.
     private(set) var correctionStore: (any UserCorrectionStore)?
 
+    /// playhead-shjn: optional sponsor knowledge store. When non-nil,
+    /// `runBackfill` hands it to `RegionShadowPhase.Input` so
+    /// `SponsorKnowledgeMatcher` reads `.active` entries for the episode's
+    /// podcast and emits `.sponsor`-origin proposals.
+    ///
+    /// Set post-init via `setSponsorKnowledgeStore(_:)`, mirroring
+    /// `setUserCorrectionStore`. Until that setter runs — and in every test
+    /// that does not call it — the property is nil, the shadow phase falls
+    /// back to the legacy stub, and `sponsorMatches` stays `[]`: the safe
+    /// default, byte-identical to pre-shjn behaviour.
+    ///
+    /// Why this exists at all: before shjn the ONLY production reader of an
+    /// `.active` `SponsorKnowledgeEntry` was `ASRVocabularyProvider`
+    /// (contextual strings for the transcriber). The store-backed
+    /// `SponsorKnowledgeMatcher` overload had zero production callers
+    /// because nothing populated this field.
+    private(set) var sponsorKnowledgeStore: SponsorKnowledgeStore?
+
     /// playhead-q45f: the TrustScoringService that owns the per-show
     /// trust state machine. Set post-init via `setTrustScoringService(_:)`
     /// so the runtime can wire it without a circular init dependency
@@ -2467,6 +2485,15 @@ actor AdDetectionService {
     /// (actor property writes must be asynchronous from an init context).
     func setUserCorrectionStore(_ store: any UserCorrectionStore) {
         self.correctionStore = store
+    }
+
+    /// playhead-shjn: install the sponsor knowledge store post-init. Mirrors
+    /// `setUserCorrectionStore`. `PlayheadRuntime` already constructs one
+    /// `SponsorKnowledgeStore` for `LearningArtifactIngestor` (the WRITE
+    /// side); this hands the SAME instance to the READ side so a sponsor the
+    /// user confirmed on two episodes can propose a region on the next one.
+    func setSponsorKnowledgeStore(_ store: SponsorKnowledgeStore?) {
+        self.sponsorKnowledgeStore = store
     }
 
     /// playhead-xsdz.11: install the per-show threshold controller store
@@ -4394,6 +4421,15 @@ actor AdDetectionService {
             priors: showPriors,
             podcastProfile: currentPodcastProfile,
             fmWindows: fmRefinementWindows,
+            // playhead-shjn: `podcastId` is handed through VERBATIM (empty
+            // string included) — `RegionShadowPhase.run` is the single place
+            // that decides an empty id means "no podcast identity", the same
+            // reasoning `SemanticScanClaim.claimRow` records above. Note this
+            // does NOT arm the store-backed FINGERPRINT branch ten lines
+            // below it: that branch also requires `fingerprintStore`, which
+            // no production call site has ever passed.
+            podcastId: podcastId,
+            knowledgeStore: sponsorKnowledgeStore,
             classifierResults: classifierResults,
             sustainedMusicProposerEnabled: config.sustainedMusicProposerEnabled,
             musicOffsetLexicalGateEnabled: config.musicOffsetLexicalGateEnabled,
