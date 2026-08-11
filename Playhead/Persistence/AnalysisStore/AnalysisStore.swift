@@ -1799,7 +1799,7 @@ actor AnalysisStore {
     /// assertions automatically follow the production constant — hardcoding
     /// the integer in tests has been a recurring source of stale-assertion
     /// flakes whenever the schema bumps.
-    nonisolated static let currentSchemaVersion = 47
+    nonisolated static let currentSchemaVersion = 48
 
     /// H1: minimum age (in seconds) a `backfill_jobs` / `final_pass_jobs`
     /// row stuck in `status='running'` must reach before the launch-time
@@ -2659,6 +2659,10 @@ actor AnalysisStore {
             // actuation number into it, restoring each row's detection number
             // from the `decision_events` row that produced it.
             try migrateAdWindowSkipConfidenceSplitV47IfNeeded()
+            // playhead-3zxd: the day-0 byte diff leaves its own evidence — the
+            // phantom-slot instrumentation, so the fix can be validated on the
+            // real audio a device pull can reach.
+            try migrateRediffDayZeroByteDiagnosticsV48IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -3024,6 +3028,9 @@ actor AnalysisStore {
         // row is repaired, which is the correct answer when the witness that
         // would justify a repair is absent.
         try migrateAdWindowSkipConfidenceSplitV47IfNeeded()
+        // playhead-3zxd (v48): guarded on `tableExists`, so a seeded fixture
+        // without `rediff_day_zero_attempts` still reaches v48.
+        try migrateRediffDayZeroByteDiagnosticsV48IfNeeded()
     }
     #endif
 
@@ -6907,6 +6914,78 @@ actor AnalysisStore {
         try setSchemaVersion(47)
     }
 
+    // MARK: - V48: the day-0 byte diff leaves its own evidence (playhead-3zxd)
+    //
+    // Six additive, nullable-or-defaulted columns on `rediff_day_zero_attempts`.
+    // They exist because the phantom-slot fix was measured on SYNTHETIC pairs
+    // and honestly so — `TestFixtures/Corpus/Audio` is empty and the checked-in
+    // byte oracle predates playhead-9s6q — so nothing on disk could say whether
+    // the defect ever fired on real audio, or whether the fix holds there.
+    //
+    // Day-0 rediff runs on every download against the real CDN, so the phone is
+    // already the capture harness; it just was not recording. The three counters
+    // the aligner kept (`runsFound`, `runsDroppedNonMonotonic`,
+    // `segmentedRunsChained`) say how much structure was found and cannot say
+    // whether an EMITTED slot is made of audio the aligner proved matched, which
+    // is the entire question.
+    //
+    // WHAT THEY MEASURE, spelled out because the standing defect class is a
+    // value that names one thing being read as another:
+    //
+    //   lastRunsFound               Σ runs found, over ACCEPTED personas only.
+    //                               VACUITY CONTROL: 0 ⇒ nothing below is
+    //                               evidence.
+    //   lastRunsAOverlapping        Σ runs whose A-span partly overlapped
+    //                               already-accepted A-coverage. THE
+    //                               OPPORTUNITY: > 0 ⇒ a pre-3zxd build could
+    //                               have emitted a phantom on this episode.
+    //   lastOverlapSecondsRecovered Σ A-seconds of matched audio kept by
+    //                               CLIPPING those runs instead of dropping
+    //                               them — an UPPER BOUND on the show a pre-3zxd
+    //                               build would have called an ad here.
+    //   lastAlignedSecondsInSlots   Σ over EMITTED slots of A-seconds a found
+    //                               run covers. THE INVARIANT: 0 after 3zxd.
+    //   lastMaxAlignedSecondsInSlot The worst SINGLE emitted slot, so a large
+    //                               value cannot hide inside a sum.
+    //   lastAlignedRunSpans         The capped A-time run spans themselves, so a
+    //                               question nobody has thought of yet can still
+    //                               be asked of data already collected.
+    //
+    // NOTHING B-SIDE IS RECORDED. Every quantity is an A-timeline second or a
+    // count; a persisted B byte offset would locate content in the re-fetched
+    // copy, which xsdz.28 never-persist-B forbids. A run's length is identical
+    // in both files, so the A-span carries everything the check needs. Local
+    // only: this is written to the on-device store and read by a device pull.
+    //
+    // No backfill, and the defaults are the truth for every existing row: no
+    // build before this one computed any of it. `lastAlignedRunSpans` is
+    // NULL-able because "no spans recorded" and "an empty span list" are
+    // different facts.
+
+    /// V48 migration — the day-0 byte-diff instrumentation columns. Idempotent
+    /// (`addColumnIfNeeded`) and guarded on `tableExists` so a seeded fixture
+    /// without the day-0 table still reaches v48.
+    private func migrateRediffDayZeroByteDiagnosticsV48IfNeeded() throws {
+        let observed = (try schemaVersion() ?? 1)
+        guard observed < 48 else { return }
+        // DO NOT STEP OVER A ROLLED-BACK V39 — same rationale as V40–V47.
+        guard observed >= 47 else { return }
+        if try tableExists("rediff_day_zero_attempts") {
+            for (column, definition) in [
+                ("lastRunsFound", "INTEGER NOT NULL DEFAULT 0"),
+                ("lastRunsAOverlapping", "INTEGER NOT NULL DEFAULT 0"),
+                ("lastOverlapSecondsRecovered", "REAL NOT NULL DEFAULT 0"),
+                ("lastAlignedSecondsInSlots", "REAL NOT NULL DEFAULT 0"),
+                ("lastMaxAlignedSecondsInSlot", "REAL NOT NULL DEFAULT 0"),
+                ("lastAlignedRunSpans", "TEXT")
+            ] {
+                try addColumnIfNeeded(
+                    table: "rediff_day_zero_attempts", column: column, definition: definition)
+            }
+        }
+        try setSchemaVersion(48)
+    }
+
     /// playhead-kg8h: durably CLAIM one REQUESTED day-0 kickoff, before any of
     /// the work it stands for has run.
     ///
@@ -7636,8 +7715,10 @@ actor AnalysisStore {
              lastBSideCount, lastBSidesAccepted, lastBSidesGateRejected,
              lastBSidesUnreadable, lastDivergentSlotCount, lastFullFetchBytes,
              totalFullFetchBytes, suppressedCount, lastSuppressedAt, lastDetail,
-             policyGeneration, rescueAttemptCount, retryClaimCount, lastRetryClaimAt)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             policyGeneration, rescueAttemptCount, retryClaimCount, lastRetryClaimAt,
+             lastRunsFound, lastRunsAOverlapping, lastOverlapSecondsRecovered,
+             lastAlignedSecondsInSlots, lastMaxAlignedSecondsInSlot, lastAlignedRunSpans)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(analysisAssetId) DO UPDATE SET
                 attemptCount = excluded.attemptCount,
                 lastAttemptAt = excluded.lastAttemptAt,
@@ -7652,7 +7733,18 @@ actor AnalysisStore {
                 totalFullFetchBytes = excluded.totalFullFetchBytes,
                 lastDetail = excluded.lastDetail,
                 policyGeneration = excluded.policyGeneration,
-                rescueAttemptCount = excluded.rescueAttemptCount
+                rescueAttemptCount = excluded.rescueAttemptCount,
+                -- playhead-3zxd: overwritten, never accumulated. These describe
+                -- the diffs the LAST attempt ran; a running total of
+                -- `lastAlignedSecondsInSlots` could never fall back to zero once
+                -- a pre-fix row had contributed to it, which is the opposite of
+                -- what an invariant witness has to be able to do.
+                lastRunsFound = excluded.lastRunsFound,
+                lastRunsAOverlapping = excluded.lastRunsAOverlapping,
+                lastOverlapSecondsRecovered = excluded.lastOverlapSecondsRecovered,
+                lastAlignedSecondsInSlots = excluded.lastAlignedSecondsInSlots,
+                lastMaxAlignedSecondsInSlot = excluded.lastMaxAlignedSecondsInSlot,
+                lastAlignedRunSpans = excluded.lastAlignedRunSpans
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -7688,6 +7780,18 @@ actor AnalysisStore {
             bind(stmt, 19, retryClaimAt)
         } else {
             sqlite3_bind_null(stmt, 19)
+        }
+        // playhead-3zxd byte-diff instrumentation.
+        let diagnostics = record.byteDiagnostics
+        bind(stmt, 20, diagnostics.runsFound)
+        bind(stmt, 21, diagnostics.runsAOverlapping)
+        bind(stmt, 22, diagnostics.overlapSecondsRecovered)
+        bind(stmt, 23, diagnostics.alignedSecondsInSlots)
+        bind(stmt, 24, diagnostics.maxAlignedSecondsInSlot)
+        if let spans = diagnostics.alignedRunSpans {
+            bind(stmt, 25, spans)
+        } else {
+            sqlite3_bind_null(stmt, 25)
         }
         try step(stmt, expecting: SQLITE_DONE)
     }
@@ -7851,7 +7955,9 @@ actor AnalysisStore {
                lastBSideCount, lastBSidesAccepted, lastBSidesGateRejected,
                lastBSidesUnreadable, lastDivergentSlotCount, lastFullFetchBytes,
                totalFullFetchBytes, lastDetail, suppressedCount, lastSuppressedAt,
-               policyGeneration, rescueAttemptCount, retryClaimCount, lastRetryClaimAt
+               policyGeneration, rescueAttemptCount, retryClaimCount, lastRetryClaimAt,
+               lastRunsFound, lastRunsAOverlapping, lastOverlapSecondsRecovered,
+               lastAlignedSecondsInSlots, lastMaxAlignedSecondsInSlot, lastAlignedRunSpans
         FROM rediff_day_zero_attempts
         """
 
@@ -7888,7 +7994,19 @@ actor AnalysisStore {
             // playhead-3oyz: a row written before v46 reads 0 / NULL — no
             // retry ever claimed — which is the truth for every one of them.
             retryClaimCount: Int(sqlite3_column_int64(stmt, 17)),
-            lastRetryClaimAt: sqlite3_column_type(stmt, 18) == SQLITE_NULL ? nil : sqlite3_column_double(stmt, 18)
+            lastRetryClaimAt: sqlite3_column_type(stmt, 18) == SQLITE_NULL ? nil : sqlite3_column_double(stmt, 18),
+            // playhead-3zxd: same discipline again. A row written before v48
+            // reads 0 / NULL — no byte diff was ever instrumented — and
+            // `runsFound == 0` is precisely the vacuity signal that says so, so
+            // a pre-v48 row can never be mistaken for a clean measurement.
+            byteDiagnostics: RediffByteMintDiagnostics(
+                runsFound: Int(sqlite3_column_int64(stmt, 19)),
+                runsAOverlapping: Int(sqlite3_column_int64(stmt, 20)),
+                overlapSecondsRecovered: sqlite3_column_double(stmt, 21),
+                alignedSecondsInSlots: sqlite3_column_double(stmt, 22),
+                maxAlignedSecondsInSlot: sqlite3_column_double(stmt, 23),
+                alignedRunSpans: sqlite3_column_type(stmt, 24) == SQLITE_NULL ? nil : text(stmt, 24)
+            )
         )
     }
 

@@ -388,6 +388,87 @@ enum RediffSlotOwnership {
         /// `candidates(...)` → `resolveSpan(...)` → disposition flow, so the
         /// xsdz.34 §5 veto gate and all grading apply identically.
         let playedSlots: [PlayedSlot]
+        /// playhead-3zxd instrumentation for THIS diff (see `ByteDiagnostics`).
+        /// A-time seconds and counts only, so the never-persist-B contract above
+        /// is untouched: `foundRunASpans` carries A-timeline spans, never a B
+        /// offset, and a run's length is identical in both files.
+        let diagnostics: ByteDiagnostics
+    }
+
+    /// playhead-3zxd — what one byte diff can tell a device pull about the
+    /// phantom-slot defect, WITHOUT gold and without a second detector.
+    ///
+    /// The three counters the aligner already kept (`runsFound`,
+    /// `runsDroppedNonMonotonic`, `segmentedRunsChained`) can say how much
+    /// structure was found. None of them can say whether an EMITTED slot is made
+    /// of audio the aligner itself proved matched, which is the whole question.
+    /// These can, and they are computable on the day-0 path — which mints before
+    /// a second has been transcribed — so every episode Dan adds is a real data
+    /// point instead of a staged fixture.
+    struct ByteDiagnostics: Sendable, Equatable {
+        /// Runs `byteRuns` found. VACUITY CONTROL: `0` means the aligner had
+        /// nothing to work with (a re-encoding CDN, or bytes that are not MP3
+        /// at all), and every other field below says nothing.
+        var runsFound: Int = 0
+        /// See `RediffByteAligner.Alignment.segmentedRunsAOverlapping` — the
+        /// OPPORTUNITY counter. `> 0` means a pre-playhead-3zxd build could have
+        /// emitted a phantom on this diff.
+        var runsAOverlapping: Int = 0
+        /// See `RediffByteAligner.Alignment.segmentedOverlapSecondsRecovered` —
+        /// an UPPER BOUND on the show-seconds a pre-3zxd build would have
+        /// reported as an ad here.
+        var overlapSecondsRecovered: Double = 0
+        /// Σ over the EMITTED slots of the A-seconds a found run covers — the
+        /// invariant witness. Zero by construction after playhead-3zxd.
+        ///
+        /// Measured over the slots as they SHIP (post `mergedAndCapped`), not
+        /// over the aligner's raw gaps, because a banner the listener can tap is
+        /// the thing at stake. That admits ONE known non-phantom contributor:
+        /// `mergedAndCapped` joins slots separated by ≤ `fragmentMergeGapSeconds`
+        /// (3 s), and what separates two gaps is an accepted RUN — impossible to
+        /// join over at 128 kbps CBR (a 65536-byte run is 4.1 s) but possible at
+        /// ≥192 kbps. So read the MAGNITUDE: ≤ 3 s per join is that effect,
+        /// filed separately; this bead's phantom is minutes.
+        var alignedSecondsInSlots: Double = 0
+        /// The worst single emitted slot, so a large value cannot hide inside a
+        /// sum spread over many slots.
+        var maxAlignedSecondsInSlot: Double = 0
+        /// A-TIME span of every FOUND run. The raw material: with it a later
+        /// question can be re-asked of data already collected, rather than only
+        /// the scalars somebody thought to define today. Bounded by the caller
+        /// before it is persisted (`RediffByteMintDiagnostics`).
+        var foundRunASpans: [TimeRange] = []
+
+        static let empty = ByteDiagnostics()
+    }
+
+    /// Measure `playedSlots` against the runs the alignment FOUND.
+    ///
+    /// `playedSlots` must be the list this alignment actually emitted — passing
+    /// slots from a different diff would silently describe the wrong pair, which
+    /// is why this is private and called only from the two acceptance sites.
+    private static func byteDiagnostics(
+        alignment: RediffByteAligner.Alignment,
+        playedSlots: [PlayedSlot]
+    ) -> ByteDiagnostics {
+        var total = 0.0
+        var worst = 0.0
+        for slot in playedSlots {
+            let matched = RediffByteAligner.alignedSeconds(
+                in: TimeRange(start: slot.startSeconds, end: slot.endSeconds),
+                runASpans: alignment.foundRunASpans
+            )
+            total += matched
+            worst = max(worst, matched)
+        }
+        return ByteDiagnostics(
+            runsFound: alignment.runsFound,
+            runsAOverlapping: alignment.segmentedRunsAOverlapping,
+            overlapSecondsRecovered: alignment.segmentedOverlapSecondsRecovered,
+            alignedSecondsInSlots: total,
+            maxAlignedSecondsInSlot: worst,
+            foundRunASpans: alignment.foundRunASpans
+        )
     }
 
     /// Gate a byte alignment (the PRIMARY differ) into played slots, mirroring
@@ -443,7 +524,8 @@ enum RediffSlotOwnership {
             chainedFractionB: alignment.chainedFractionB,
             runsFound: alignment.runsFound,
             runsChained: alignment.chain.count,
-            playedSlots: playedSlots
+            playedSlots: playedSlots,
+            diagnostics: byteDiagnostics(alignment: alignment, playedSlots: playedSlots)
         ))
     }
 
@@ -484,7 +566,8 @@ enum RediffSlotOwnership {
             chainedFractionB: alignment.segmentedChainedFractionB,
             runsFound: alignment.runsFound,
             runsChained: alignment.segmentedRunsChained,
-            playedSlots: playedSlots
+            playedSlots: playedSlots,
+            diagnostics: byteDiagnostics(alignment: alignment, playedSlots: playedSlots)
         ))
     }
 

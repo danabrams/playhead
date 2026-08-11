@@ -292,6 +292,11 @@ struct RediffDayZeroMintOutcome: Sendable, Equatable {
     /// Free-text detail (an error description). Truncated by the recorder
     /// before it reaches the database.
     var detail: String?
+    /// playhead-3zxd: what THIS mint's byte diffs saw — the phantom-slot
+    /// instrumentation, aggregated across the personas the gate accepted. See
+    /// `RediffByteMintDiagnostics`. `.empty` on every exit that never reached a
+    /// diff, which is honest: no diff ran, so there is nothing to report.
+    var byteDiagnostics: RediffByteMintDiagnostics = .empty
 
     /// Convenience for the pure pre-fetch / guard exits, which have no
     /// B-copies and no slots.
@@ -380,6 +385,16 @@ struct RediffDayZeroAttemptRecord: Sendable, Equatable {
     /// Unix seconds of the most recent retry claim, `nil` when none was ever
     /// made.
     let lastRetryClaimAt: Double?
+    /// playhead-3zxd: the byte-diff instrumentation from the most recent
+    /// ATTEMPT — the six `rediff_day_zero_attempts` columns a device pull reads
+    /// to answer "did the phantom fire, and did the fix prevent it?".
+    ///
+    /// Overwritten by every attempt, including a FREE one that never reached a
+    /// diff, exactly as `lastMarkCount` and the per-B census are. That is
+    /// deliberate and matches this record's contract: these fields describe the
+    /// LAST attempt, not a high-water mark, and `runsFound == 0` is what says
+    /// so.
+    let byteDiagnostics: RediffByteMintDiagnostics
 
     init(
         analysisAssetId: String,
@@ -400,7 +415,8 @@ struct RediffDayZeroAttemptRecord: Sendable, Equatable {
         policyGeneration: Int = DayZeroRediffAttemptPolicy.currentGeneration,
         rescueAttemptCount: Int = 0,
         retryClaimCount: Int = 0,
-        lastRetryClaimAt: Double? = nil
+        lastRetryClaimAt: Double? = nil,
+        byteDiagnostics: RediffByteMintDiagnostics = .empty
     ) {
         self.analysisAssetId = analysisAssetId
         self.attemptCount = attemptCount
@@ -421,6 +437,7 @@ struct RediffDayZeroAttemptRecord: Sendable, Equatable {
         self.rescueAttemptCount = rescueAttemptCount
         self.retryClaimCount = retryClaimCount
         self.lastRetryClaimAt = lastRetryClaimAt
+        self.byteDiagnostics = byteDiagnostics
     }
 }
 
@@ -740,7 +757,13 @@ enum DayZeroRediffAttemptPolicy {
             // history — a historical fact `noteRediffDayZeroRetryClaim` owns
             // and increments in place; an attempt never resets it.
             retryClaimCount: record?.retryClaimCount ?? 0,
-            lastRetryClaimAt: record?.lastRetryClaimAt
+            lastRetryClaimAt: record?.lastRetryClaimAt,
+            // playhead-3zxd: NOT carried forward and NOT accumulated. These
+            // describe the diffs THIS attempt ran; a stale set from an earlier
+            // attempt would read as evidence about the current build's aligner,
+            // and a running total of `alignedSecondsInSlots` could never fall
+            // back to zero once a pre-fix row had contributed to it.
+            byteDiagnostics: outcome.byteDiagnostics
         )
     }
 
