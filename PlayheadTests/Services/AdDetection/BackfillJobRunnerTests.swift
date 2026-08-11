@@ -2178,11 +2178,29 @@ struct BackfillJobRunnerTests {
                 "expected no duplicate rows: \(secondRows.count) rows vs \(uniqueKeys.count) unique keys")
         // And the re-run must not have grown the table beyond the first
         // run's unique-key count.
-        var firstKeys = Set<String>()
-        for row in firstRows {
-            firstKeys.insert("\(row.analysisAssetId)|\(row.scanPass)|\(row.windowFirstAtomOrdinal)|\(row.windowLastAtomOrdinal)")
+        //
+        // playhead-15d0: compared over the SCAN rows, excluding the no-work
+        // sentinel. The re-run is now narrowed by the first run's own durable
+        // rows, so it has nothing left to screen, reaches the empty-segments
+        // short-circuit and writes the `noWork:` sentinel Bug 11 requires of
+        // every admitted job. That sentinel is a legitimately NEW logical key
+        // and it is not a scan row — `didExamineWindow` excludes it everywhere,
+        // including from the narrowing that produced it, so it can never be
+        // read as coverage.
+        func scanKeys(_ rows: [SemanticScanResult]) -> Set<String> {
+            Set(
+                rows
+                    .filter { !$0.isNoWorkSentinel }
+                    .map { "\($0.analysisAssetId)|\($0.scanPass)|\($0.windowFirstAtomOrdinal)|\($0.windowLastAtomOrdinal)" }
+            )
         }
-        #expect(uniqueKeys == firstKeys, "second run introduced new logical keys")
+        #expect(scanKeys(secondRows) == scanKeys(firstRows), "second run introduced new logical keys")
+        // Stronger than the original assertion, and the reason the sentinel is
+        // tolerated above: the re-run must have made NO new FM screening at all.
+        #expect(
+            secondRows.filter { !$0.isNoWorkSentinel }.count == firstRows.filter { !$0.isNoWorkSentinel }.count,
+            "the re-run must not have added a scan row — every window was already screened"
+        )
     }
 
     @Test("H-R3-2: permanent store errors exhaust retries immediately, not after maxRetries attempts")

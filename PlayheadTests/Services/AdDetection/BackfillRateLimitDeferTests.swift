@@ -230,8 +230,16 @@ struct BackfillRateLimitDeferTests {
         #expect(deferredRow.progressCursor?.lastProcessedUpperBoundSec == 10)
 
         // Run 2: no rate-limiting. The M-5 gate re-drives the deferred row; the
-        // runner RESUMES from cursor 10 and scans ONLY the remainder (windows 1
-        // and 2 = segments at end 20 and 30), skipping window 0 (end 10).
+        // runner RESUMES from cursor 10 and scans ONLY the remainder — which
+        // playhead-15d0 narrowed from two windows to ONE.
+        //
+        // This fixture is the exact shape 15d0 is about, and the note on the
+        // cursor assertion above already spelled it out: window 2 (20..30)
+        // SUCCEEDED in run 1, after the hole, so its `semantic_scan_results` row
+        // is durable — but the cursor is a contiguous PREFIX and stops at 10, so
+        // resume used to re-plan and re-infer window 2 as well. The runner now
+        // narrows by the durable rows too, so run 2 scans the one window that
+        // genuinely was not screened: window 1 (10..20).
         let rt2 = TestFMRuntime(
             contextSize: Self.contextSize,
             coarseSchemaTokenCount: Self.coarseSchemaTokenCount,
@@ -239,8 +247,12 @@ struct BackfillRateLimitDeferTests {
         )
         let run2 = try await makeRunner(store: store, runtime: rt2.runtime).runPendingBackfill(for: inputs)
 
-        // Only the two remaining windows were scanned — NOT all three.
-        #expect(await rt2.coarseCallCount == 2, "resume must scan only the un-scanned remainder (2 windows), not re-window the whole episode")
+        // Only the genuinely un-screened window was scanned — not all three
+        // (no resume at all), and not two (resume by cursor alone).
+        #expect(
+            await rt2.coarseCallCount == 1,
+            "resume must scan only what no durable row covers (window 1), not re-infer window 2's banked screening"
+        )
         #expect(run2.admittedJobIds.contains(jobId))
         #expect(run2.deferredJobIds.isEmpty)
 

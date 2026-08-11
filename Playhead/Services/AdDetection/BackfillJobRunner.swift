@@ -3267,21 +3267,39 @@ actor BackfillJobRunner {
         // means the pass re-screens audio it did not have to — the same cost
         // this bead removes, and the only safe direction: the alternative is
         // deleting a segment on the strength of evidence we could not load.
+        // THE COVERAGE LANE ONLY, and this is a correctness bound rather than a
+        // scope choice. `targetedWithAudit` enqueues THREE phases against ONE
+        // asset (`CoveragePlanner.plan(for:)`), each narrowed by
+        // `narrowedInputs` to its own subset, and those subsets may overlap.
+        // Asset-wide narrowing let the harvester phase's rows delete the
+        // likely-slot and RANDOM-AUDIT phases' windows — which is not a saving,
+        // it is a corrupted population: the audit phase exists to sample the
+        // episode and estimate what the other phases MISS, so an audit whose
+        // sample is filtered by what another phase happened to look at measures
+        // something else entirely. Caught by
+        // `targeted phases persist distinct passA rows on narrowed subsets`.
+        //
+        // `.fullEpisodeScan` has no such sibling: it is the whole coverage lane,
+        // one phase, and its rows ARE the coverage numerator.
         let screenedRows: [SemanticScanResult]
-        do {
-            screenedRows = try await store.fetchSemanticScanResults(
-                analysisAssetId: job.analysisAssetId,
-                scanPass: SemanticScanResult.presenceScanPass
-            )
-        } catch {
-            logger.warning(
-                """
-                playhead-15d0: screened-window read failed for asset \
-                \(job.analysisAssetId, privacy: .public); the pass will re-screen \
-                covered audio: \(error.localizedDescription, privacy: .public)
-                """
-            )
+        if job.phase != .fullEpisodeScan {
             screenedRows = []
+        } else {
+            do {
+                screenedRows = try await store.fetchSemanticScanResults(
+                    analysisAssetId: job.analysisAssetId,
+                    scanPass: SemanticScanResult.presenceScanPass
+                )
+            } catch {
+                logger.warning(
+                    """
+                    playhead-15d0: screened-window read failed for asset \
+                    \(job.analysisAssetId, privacy: .public); the pass will re-screen \
+                    covered audio: \(error.localizedDescription, privacy: .public)
+                    """
+                )
+                screenedRows = []
+            }
         }
         let inputs = Self.narrowedForScreenedWindows(
             Self.narrowedForResume(rootInputs, cursor: job.progressCursor?.lastProcessedUpperBoundSec),
