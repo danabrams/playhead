@@ -572,6 +572,16 @@ actor DownloadManager {
     /// if routing needs to differ per-lane.
     private let sessionDelegate: EpisodeDownloadDelegate
 
+    /// playhead-nsjn: every call into a background `URLSession` goes
+    /// through here rather than being made inline on the actor. See
+    /// `BackgroundSessionIO.swift` — those calls block the calling thread
+    /// in a synchronous XPC round-trip to `nsurlsessiond`, and this actor
+    /// runs on the fixed-width cooperative pool.
+    ///
+    /// Injected so tests can substitute `.neverAnswers` and drive the
+    /// daemon-unavailable branches without a genuinely wedged daemon.
+    internal let sessionIO: BackgroundSessionIO
+
     // MARK: - Streams
 
     private let progressContinuation: AsyncStream<DownloadProgress>.Continuation
@@ -598,8 +608,10 @@ actor DownloadManager {
         cacheDirectory: URL? = nil,
         maxCacheBytes: Int64 = DownloadManager.defaultMaxCacheBytes,
         preAnalysisConfig: PreAnalysisConfig? = nil,
-        workJournalRecorder: WorkJournalRecording = NoopWorkJournalRecorder()
+        workJournalRecorder: WorkJournalRecording = NoopWorkJournalRecorder(),
+        sessionIO: BackgroundSessionIO = .shared
     ) {
+        self.sessionIO = sessionIO
         let root = cacheDirectory ?? Self.defaultCacheDirectory()
         self.cacheDirectory = root
         self.partialsDirectory = root.appendingPathComponent("partials", isDirectory: true)
@@ -2398,11 +2410,18 @@ actor DownloadManager {
     /// unconditionally, so every auto/background download recorded a NULL
     /// `analysis_jobs.podcastId`. A defaulted parameter would let the next
     /// caller reintroduce that silently.
+    ///
+    /// playhead-nsjn: `async` because creating the URLSession task is a
+    /// blocking synchronous XPC call to `nsurlsessiond` that must not run
+    /// on a cooperative thread (see `BackgroundSessionIO.swift`). Every
+    /// caller already awaited this actor method, so no call site changes;
+    /// what does change is that the method now contains a suspension point,
+    /// which is why the in-flight slot below is reserved BEFORE it.
     func backgroundDownload(
         episodeId: String,
         from url: URL,
         context: DownloadContext
-    ) {
+    ) async {
         guard activeStreamingTransfer?.episodeId != episodeId else {
             logger.debug(
                 "Skipping background download for \(episodeId): foreground stream active"
@@ -2443,8 +2462,37 @@ actor DownloadManager {
         let session = useDualBackgroundSessions
             ? backgroundSession(for: .maintenance)
             : backgroundSession(for: .legacy)
-        let task = session.downloadTask(with: url)
-        task.taskDescription = episodeId
+
+        // playhead-nsjn: RESERVE the in-flight slot before suspending.
+        // Creating the task now crosses an `await`, and actors are
+        // re-entrant: without this, a second caller for the same episode
+        // could clear the in-flight guard above while the first is still
+        // inside the daemon call, and we would start two transfers.
+        // Released again on every path that does not hand off a task.
+        bgInFlightEpisodes.insert(episodeId)
+
+        let handoff = await sessionIO.perform(
+            label: "downloadTask(with:) for \(episodeId)",
+            discardingLateResult: { $0.cancel() },
+            running: {
+                let task = session.downloadTask(with: url)
+                task.taskDescription = episodeId
+                return task
+            }
+        )
+        guard let task = handoff else {
+            // The daemon never answered. Nothing was started, so undo the
+            // reservation and the attribution sidecar — otherwise the
+            // episode is wedged "in flight" for the life of the process and
+            // a stale sidecar outlives the transfer it describes.
+            bgInFlightEpisodes.remove(episodeId)
+            deleteDownloadAttribution(episodeId: episodeId)
+            logger.error(
+                "Background download for \(episodeId, privacy: .public) NOT started: the background transfer daemon did not answer"
+            )
+            return
+        }
+
         registerBackgroundTransfer(
             task: task,
             session: session,
@@ -2453,11 +2501,22 @@ actor DownloadManager {
         #if DEBUG
         backgroundDownloadAdmissionCountForTesting += 1
         #endif
-        bgInFlightEpisodes.insert(episodeId)
         // playhead-3xtw (L2): reset the progress high-water mark for a fresh
         // transfer so a retry's early ticks aren't dropped as "stale".
         lastBackgroundProgressBytes[episodeId] = nil
-        task.resume()
+        // `resume()` re-enters the same session queue, so it carries the
+        // same blocking risk as the creation above and gets the same bound.
+        // Registration precedes it so a fast terminal callback cannot beat
+        // its own transfer into the identity map.
+        if await sessionIO.perform(
+            label: "resume() for \(episodeId)",
+            running: { task.resume() }
+        ) == nil {
+            logger.error(
+                "Background download for \(episodeId, privacy: .public) was created but not resumed: the background transfer daemon did not answer"
+            )
+            return
+        }
         logger.info("Queued background download for \(episodeId)")
     }
 

@@ -68,6 +68,13 @@ enum SuspendedTransferResumeOutcome: Sendable, Equatable {
     /// splice a different-length stitch into the played file — the blob is
     /// discarded and a FRESH full download is started to a new artifact.
     case redownloadedFresh
+    /// playhead-nsjn: the blob was usable and fresh, but `nsurlsessiond`
+    /// did not answer within the bound, so no transfer was started. The
+    /// blob is DELIBERATELY retained — it is the only copy of the bytes
+    /// already fetched, and a later attempt (next launch, or the user
+    /// tapping Resume again) can still use it. Distinct from `.corrupted`,
+    /// which means the blob itself is unusable and has been deleted.
+    case daemonUnavailable
 }
 
 // MARK: - Resume-data blob store
@@ -509,7 +516,7 @@ extension DownloadManager {
                         reason: .resumeWithoutRecordedShow,
                         isExplicitDownload: false
                     )
-                backgroundDownload(
+                await backgroundDownload(
                     episodeId: episodeId,
                     from: sourceURL,
                     context: recovered
@@ -521,14 +528,44 @@ extension DownloadManager {
         // Route through the interactive session — force-quit resumes
         // are always user-initiated.
         let session = backgroundSession(for: .interactive)
-        let task = session.downloadTask(withResumeData: blob)
-        task.taskDescription = episodeId
+        // playhead-nsjn: this is the call the wedged-gate `sample` caught.
+        // `downloadTask(withResumeData:)` blocks the calling thread in a
+        // synchronous XPC round-trip to `nsurlsessiond`, and this actor runs
+        // on the fixed-width cooperative pool — so it goes off-pool and
+        // under a deadline. See `BackgroundSessionIO.swift`.
+        let handoff = await sessionIO.perform(
+            label: "downloadTask(withResumeData:) for \(episodeId)",
+            discardingLateResult: { $0.cancel() },
+            running: {
+                let task = session.downloadTask(withResumeData: blob)
+                task.taskDescription = episodeId
+                return task
+            }
+        )
+        guard let task = handoff else {
+            // NOTHING owns this transfer, so the blob must SURVIVE — it is
+            // the only copy of the bytes already fetched. Deleting it here
+            // (as the success path below does) would turn a recoverable
+            // daemon stall into a full re-download.
+            logger.error(
+                "resumeSuspendedTransfer: \(episodeId, privacy: .public) NOT resumed — the background transfer daemon did not answer; blob retained for a later attempt"
+            )
+            return .daemonUnavailable
+        }
         registerBackgroundTransfer(
             task: task,
             session: session,
             episodeId: episodeId
         )
-        task.resume()
+        if await sessionIO.perform(
+            label: "resume() for \(episodeId)",
+            running: { task.resume() }
+        ) == nil {
+            logger.error(
+                "resumeSuspendedTransfer: \(episodeId, privacy: .public) was handed to URLSession but not resumed — the background transfer daemon did not answer; blob retained"
+            )
+            return .daemonUnavailable
+        }
 
         // The OS owns the transfer from here; drop our blob so a
         // future force-quit-scan does not re-emit preempted. Use
