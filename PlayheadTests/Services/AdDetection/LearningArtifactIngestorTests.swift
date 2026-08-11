@@ -1182,6 +1182,109 @@ struct LearningArtifactIngestorTests {
         )
     }
 
+    /// The OTHER way into that counter, and the one the counter's own prose
+    /// used to deny existed (playhead-fzpj R1 review). Here the columns are
+    /// PRESENT — they simply contradict the scope the same row stores. The
+    /// refusal must still fire, must still be counted, and must still write
+    /// nothing under either candidate identity: a half-repaired pair
+    /// (`podcastId` from the column, sponsor from the parse) is the outcome
+    /// this resolver exists to prevent.
+    @Test("""
+    playhead-fzpj: columns that CONTRADICT the stored scope are refused and \
+    counted, not reconciled into a half-repaired identity
+    """)
+    func contradictingColumnsAreRefusedAndCounted() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        let knowledge = SponsorKnowledgeStore(store: store)
+        let ingestor = LearningArtifactIngestor(
+            store: store,
+            knowledgeStore: knowledge
+        )
+
+        let scopeFeedURL = "https://feeds.simplecast.com/dHoohVNH"
+        let columnFeedURL = "https://anchor.fm/s/10412e4e0/podcast/rss"
+        let correction = CorrectionEvent(
+            analysisAssetId: assetId,
+            scope: CorrectionScope.sponsorOnShow(
+                podcastId: scopeFeedURL,
+                sponsor: "acme"
+            ).serialized,
+            createdAt: 1_700_000_500,
+            source: .falseNegative,
+            podcastId: columnFeedURL,
+            correctionType: .falseNegative,
+            targetRefs: CorrectionTargetRefs(sponsorEntity: "acme")
+        )
+
+        let result = try await ingestor.ingest(correction: correction)
+        #expect(result.outcome == .ingested)
+
+        for candidate in [scopeFeedURL, columnFeedURL, "https"] {
+            let rows = try await knowledge.allEntries(forPodcast: candidate)
+            #expect(
+                rows.isEmpty,
+                """
+                a sponsor row was keyed on \(candidate) from a row whose scope \
+                and whose podcastId column name different shows
+                """
+            )
+        }
+
+        let diagnostics = await ingestor.diagnostics()
+        #expect(diagnostics.sponsorSideEffectsSkippedUnresolvableShow == 1)
+        #expect(diagnostics.sponsorCandidatesConfirmed == 0)
+        #expect(diagnostics.skippedMalformed == 0)
+    }
+
+    /// A column holding `""` is ABSENCE, not a show whose id is the empty
+    /// string — `authoritativeShowScopePayload` maps it to "no column" and
+    /// this pins that the ingestor agrees. The event still carries a usable
+    /// `sponsorEntity`, so the value column alone anchors the split and the
+    /// row lands on the real feed URL rather than being refused.
+    @Test("""
+    playhead-fzpj: an EMPTY podcastId column is absence, and the value column \
+    still resolves the split on its own
+    """)
+    func emptyShowColumnIsTreatedAsAbsent() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        let knowledge = SponsorKnowledgeStore(store: store)
+        let ingestor = LearningArtifactIngestor(
+            store: store,
+            knowledgeStore: knowledge
+        )
+
+        let feedURL = "https://rss2.flightcast.com/xmsftuzjjykcmqwolaqn6mdn"
+        let correction = CorrectionEvent(
+            analysisAssetId: assetId,
+            scope: CorrectionScope.sponsorOnShow(
+                podcastId: feedURL,
+                sponsor: "acme"
+            ).serialized,
+            createdAt: 1_700_000_500,
+            source: .falseNegative,
+            podcastId: "",
+            correctionType: .falseNegative,
+            targetRefs: CorrectionTargetRefs(sponsorEntity: "acme")
+        )
+        _ = try await ingestor.ingest(correction: correction)
+
+        let entry = try await knowledge.entry(
+            podcastId: feedURL,
+            entityType: .sponsor,
+            normalizedValue: "acme"
+        )
+        #expect(entry?.confirmationCount == 1)
+        let emptyKeyed = try await knowledge.allEntries(forPodcast: "")
+        #expect(
+            emptyKeyed.isEmpty,
+            "an empty podcastId column must never become a show identity"
+        )
+        let diagnostics = await ingestor.diagnostics()
+        #expect(diagnostics.sponsorSideEffectsSkippedUnresolvableShow == 0)
+    }
+
     @Test("""
     playhead-fzpj: a colon-free podcastId still takes the parsed pair, so \
     recordVeto's asset-UUID scoping is unchanged
