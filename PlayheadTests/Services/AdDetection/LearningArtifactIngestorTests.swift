@@ -1033,4 +1033,295 @@ struct LearningArtifactIngestorTests {
         #expect(diagnostics.ingested == 4)
         #expect(diagnostics.deduped == 0)
     }
+
+    // MARK: - playhead-fzpj: the podcastId is a FEED URL
+
+    /// Every `podcastId` fixture above is colon-free ("pod-ing-1"), and so was
+    /// every fixture in the shjn suite that shipped this path. THAT is why the
+    /// defect survived: the wire form `sponsorOnShow:<podcastId>:<sponsor>` is
+    /// parsed by splitting on the FIRST colon, which is exact for "pod-ing-1"
+    /// and wrong for every podcastId the app actually holds.
+    ///
+    /// These four are the real values, read off the device DB
+    /// (`analysis_jobs.podcastId`, db-corrected2, 4 distinct, all with "://").
+    private static let realFeedURLs = [
+        "https://rss2.flightcast.com/xmsftuzjjykcmqwolaqn6mdn",
+        "https://feeds.simplecast.com/dHoohVNH",
+        "https://rss.libsyn.com/shows/101338/destinations/535577.xml",
+        "https://anchor.fm/s/10412e4e0/podcast/rss",
+    ]
+
+    private func alwaysSkipSponsorCorrection(
+        feedURL: String,
+        sponsor: String
+    ) -> CorrectionEvent {
+        // Mirrors NowPlayingView.onAlwaysSkipSponsorAsync exactly: the scope
+        // carries the feed URL, and so do the podcastId / sponsorEntity
+        // columns.
+        CorrectionEvent(
+            analysisAssetId: assetId,
+            scope: CorrectionScope.sponsorOnShow(
+                podcastId: feedURL,
+                sponsor: sponsor
+            ).serialized,
+            createdAt: 1_700_000_500,
+            source: .falseNegative,
+            podcastId: feedURL,
+            correctionType: .falseNegative,
+            targetRefs: CorrectionTargetRefs(sponsorEntity: sponsor)
+        )
+    }
+
+    @Test("""
+    playhead-fzpj: an always-skip-sponsor tap on a REAL feed URL keys the \
+    knowledge row the way the reader queries for it
+    """)
+    func sponsorKnowledgeIsKeyedOnTheFeedURLNotItsScheme() async throws {
+        for feedURL in Self.realFeedURLs {
+            let store = try await makeTestStore()
+            try await store.insertAsset(makeAsset())
+            let knowledge = SponsorKnowledgeStore(store: store)
+            let ingestor = LearningArtifactIngestor(
+                store: store,
+                knowledgeStore: knowledge
+            )
+
+            _ = try await ingestor.ingest(
+                correction: alwaysSkipSponsorCorrection(
+                    feedURL: feedURL,
+                    sponsor: "acme"
+                )
+            )
+
+            // The read side (RegionShadowPhase → activeEntriesWithNegativeMemory
+            // → loadKnowledgeEntries WHERE podcastId = ?) asks with the feed URL.
+            // The write side must have used the same key.
+            let entry = try await knowledge.entry(
+                podcastId: feedURL,
+                entityType: .sponsor,
+                normalizedValue: "acme"
+            )
+            #expect(
+                entry != nil,
+                """
+                no sponsor_knowledge_entries row at (podcastId: \(feedURL), \
+                normalizedValue: "acme") — the write side keyed it somewhere \
+                the reader will never look
+                """
+            )
+            #expect(entry?.confirmationCount == 1)
+
+            // And the row must NOT exist under the URL's scheme, which is what
+            // the first-colon split hands back.
+            let schemeKeyed: [SponsorKnowledgeEntry] =
+                try await knowledge.allEntries(forPodcast: "https")
+            #expect(
+                schemeKeyed.isEmpty,
+                """
+                a knowledge row is keyed on podcastId "https" — that is the \
+                URL's SCHEME being read as a show identity (playhead-fzpj)
+                """
+            )
+
+            let diagnostics = await ingestor.diagnostics()
+            #expect(diagnostics.sponsorCandidatesConfirmed == 1)
+            #expect(diagnostics.sponsorSideEffectsSkippedUnresolvableShow == 0)
+        }
+    }
+
+    @Test("""
+    playhead-fzpj: a colon-carrying podcastId with no columns to fall back on \
+    is REFUSED, not keyed on a fabricated identity
+    """)
+    func unresolvableShowIdentityRefusesRatherThanFabricates() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        let knowledge = SponsorKnowledgeStore(store: store)
+        let ingestor = LearningArtifactIngestor(
+            store: store,
+            knowledgeStore: knowledge
+        )
+
+        let feedURL = "https://feeds.simplecast.com/dHoohVNH"
+        // No podcastId column, no sponsorEntity: nothing on this row says what
+        // the split should have been.
+        let correction = CorrectionEvent(
+            analysisAssetId: assetId,
+            scope: CorrectionScope.sponsorOnShow(
+                podcastId: feedURL,
+                sponsor: "acme"
+            ).serialized,
+            createdAt: 1_700_000_500,
+            source: .falseNegative,
+            podcastId: nil,
+            correctionType: .falseNegative
+        )
+
+        let result = try await ingestor.ingest(correction: correction)
+
+        // The correction itself is NOT malformed and is still persisted — only
+        // the derived sponsor row is withheld.
+        #expect(result.outcome == .ingested)
+        let persisted = try await store.loadCorrectionEvents(
+            analysisAssetId: assetId
+        )
+        #expect(persisted.count == 1)
+        #expect(persisted.first?.scope == correction.scope)
+
+        let schemeKeyed = try await knowledge.allEntries(forPodcast: "https")
+        let urlKeyed = try await knowledge.allEntries(forPodcast: feedURL)
+        #expect(schemeKeyed.isEmpty)
+        #expect(urlKeyed.isEmpty)
+
+        let diagnostics = await ingestor.diagnostics()
+        #expect(diagnostics.sponsorSideEffectsSkippedUnresolvableShow == 1)
+        #expect(diagnostics.sponsorCandidatesConfirmed == 0)
+        #expect(
+            diagnostics.skippedMalformed == 0,
+            "an unresolvable SPLIT is not a malformed SCOPE — the counters must not conflate them"
+        )
+    }
+
+    /// The OTHER way into that counter, and the one the counter's own prose
+    /// used to deny existed (playhead-fzpj R1 review). Here the columns are
+    /// PRESENT — they simply contradict the scope the same row stores. The
+    /// refusal must still fire, must still be counted, and must still write
+    /// nothing under either candidate identity: a half-repaired pair
+    /// (`podcastId` from the column, sponsor from the parse) is the outcome
+    /// this resolver exists to prevent.
+    @Test("""
+    playhead-fzpj: columns that CONTRADICT the stored scope are refused and \
+    counted, not reconciled into a half-repaired identity
+    """)
+    func contradictingColumnsAreRefusedAndCounted() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        let knowledge = SponsorKnowledgeStore(store: store)
+        let ingestor = LearningArtifactIngestor(
+            store: store,
+            knowledgeStore: knowledge
+        )
+
+        let scopeFeedURL = "https://feeds.simplecast.com/dHoohVNH"
+        let columnFeedURL = "https://anchor.fm/s/10412e4e0/podcast/rss"
+        let correction = CorrectionEvent(
+            analysisAssetId: assetId,
+            scope: CorrectionScope.sponsorOnShow(
+                podcastId: scopeFeedURL,
+                sponsor: "acme"
+            ).serialized,
+            createdAt: 1_700_000_500,
+            source: .falseNegative,
+            podcastId: columnFeedURL,
+            correctionType: .falseNegative,
+            targetRefs: CorrectionTargetRefs(sponsorEntity: "acme")
+        )
+
+        let result = try await ingestor.ingest(correction: correction)
+        #expect(result.outcome == .ingested)
+
+        for candidate in [scopeFeedURL, columnFeedURL, "https"] {
+            let rows = try await knowledge.allEntries(forPodcast: candidate)
+            #expect(
+                rows.isEmpty,
+                """
+                a sponsor row was keyed on \(candidate) from a row whose scope \
+                and whose podcastId column name different shows
+                """
+            )
+        }
+
+        let diagnostics = await ingestor.diagnostics()
+        #expect(diagnostics.sponsorSideEffectsSkippedUnresolvableShow == 1)
+        #expect(diagnostics.sponsorCandidatesConfirmed == 0)
+        #expect(diagnostics.skippedMalformed == 0)
+    }
+
+    /// A column holding `""` is ABSENCE, not a show whose id is the empty
+    /// string — `authoritativeShowScopePayload` maps it to "no column" and
+    /// this pins that the ingestor agrees. The event still carries a usable
+    /// `sponsorEntity`, so the value column alone anchors the split and the
+    /// row lands on the real feed URL rather than being refused.
+    @Test("""
+    playhead-fzpj: an EMPTY podcastId column is absence, and the value column \
+    still resolves the split on its own
+    """)
+    func emptyShowColumnIsTreatedAsAbsent() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        let knowledge = SponsorKnowledgeStore(store: store)
+        let ingestor = LearningArtifactIngestor(
+            store: store,
+            knowledgeStore: knowledge
+        )
+
+        let feedURL = "https://rss2.flightcast.com/xmsftuzjjykcmqwolaqn6mdn"
+        let correction = CorrectionEvent(
+            analysisAssetId: assetId,
+            scope: CorrectionScope.sponsorOnShow(
+                podcastId: feedURL,
+                sponsor: "acme"
+            ).serialized,
+            createdAt: 1_700_000_500,
+            source: .falseNegative,
+            podcastId: "",
+            correctionType: .falseNegative,
+            targetRefs: CorrectionTargetRefs(sponsorEntity: "acme")
+        )
+        _ = try await ingestor.ingest(correction: correction)
+
+        let entry = try await knowledge.entry(
+            podcastId: feedURL,
+            entityType: .sponsor,
+            normalizedValue: "acme"
+        )
+        #expect(entry?.confirmationCount == 1)
+        let emptyKeyed = try await knowledge.allEntries(forPodcast: "")
+        #expect(
+            emptyKeyed.isEmpty,
+            "an empty podcastId column must never become a show identity"
+        )
+        let diagnostics = await ingestor.diagnostics()
+        #expect(diagnostics.sponsorSideEffectsSkippedUnresolvableShow == 0)
+    }
+
+    @Test("""
+    playhead-fzpj: a colon-free podcastId still takes the parsed pair, so \
+    recordVeto's asset-UUID scoping is unchanged
+    """)
+    func colonFreePodcastIdStillUsesTheParsedPair() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        let knowledge = SponsorKnowledgeStore(store: store)
+        let ingestor = LearningArtifactIngestor(
+            store: store,
+            knowledgeStore: knowledge
+        )
+
+        // recordVeto's shape: scope podcastId is the asset UUID (colon-free),
+        // and the event's own podcastId column is nil.
+        let uuid = "0C2FC22E-5F46-48D3-A53B-E1F702169771"
+        let correction = CorrectionEvent(
+            analysisAssetId: assetId,
+            scope: CorrectionScope.sponsorOnShow(
+                podcastId: uuid,
+                sponsor: "acme"
+            ).serialized,
+            createdAt: 1_700_000_500,
+            source: .falseNegative,
+            podcastId: nil,
+            correctionType: .falseNegative,
+            targetRefs: CorrectionTargetRefs(sponsorEntity: "acme")
+        )
+        _ = try await ingestor.ingest(correction: correction)
+
+        let entry = try await knowledge.entry(
+            podcastId: uuid,
+            entityType: .sponsor,
+            normalizedValue: "acme"
+        )
+        #expect(entry?.confirmationCount == 1)
+        let diagnostics = await ingestor.diagnostics()
+        #expect(diagnostics.sponsorSideEffectsSkippedUnresolvableShow == 0)
+    }
 }

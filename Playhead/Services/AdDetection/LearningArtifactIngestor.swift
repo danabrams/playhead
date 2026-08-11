@@ -72,6 +72,29 @@ struct LearningIngestionDiagnostics: Sendable, Equatable {
     /// `.sponsorOnShow` FP corrections that triggered a knowledge
     /// rollback.
     var sponsorRollbacksApplied: Int = 0
+    /// `.sponsorOnShow` corrections whose SHOW IDENTITY could not be
+    /// resolved, so no sponsor-knowledge row was written (playhead-fzpj).
+    ///
+    /// Distinct from `skippedMalformed`: the scope parsed fine and the
+    /// `correction_events` row IS persisted. What could not be recovered is
+    /// the `type:podcastId:value` split, because the podcastId carries a
+    /// colon (every feed URL does) and the event's own columns did not
+    /// settle it.
+    ///
+    /// TWO CONDITIONS LAND HERE AND THEY WANT OPPOSITE INVESTIGATIONS, so
+    /// read the accompanying `reason=` in the log rather than this number
+    /// alone (playhead-fzpj R1 review).
+    ///
+    ///   • **ABSENCE** — neither a `podcastId` column nor a
+    ///     `targetRefs.sponsorEntity`, and the wire string admits more than
+    ///     one split. Some writer is producing show-scoped corrections
+    ///     without the columns that carry their identity.
+    ///   • **CONTRADICTION** — a column IS present and does not reconstruct
+    ///     the stored scope string, or both are present and disagree. Some
+    ///     writer is producing rows whose scope and whose columns describe
+    ///     different things. This is the more serious of the two and it is
+    ///     invisible to anyone who reads this counter as "columns missing".
+    var sponsorSideEffectsSkippedUnresolvableShow: Int = 0
 }
 
 // MARK: - LearningArtifactIngestor
@@ -210,7 +233,7 @@ actor LearningArtifactIngestor {
             // sponsor knowledge.
             if wasNewlyInserted {
                 switch parsedScope {
-                case .sponsorOnShow(let podcastId, let sponsor):
+                case .sponsorOnShow:
                     // `source` is the canonical FN-vs-FP discriminator —
                     // `CorrectionSource` only has two shapes, falsePositive
                     // (`.manualVeto` / `.listenRevert`) and falseNegative
@@ -232,8 +255,8 @@ actor LearningArtifactIngestor {
                     let kind: CorrectionKind = correction.source?.kind
                         ?? Self.kindFor(correction.effectiveCorrectionType)
                     try await applySponsorSideEffect(
-                        podcastId: podcastId,
-                        sponsor: sponsor,
+                        correction: correction,
+                        parsedScope: parsedScope,
                         kind: kind
                     )
                 default:
@@ -318,15 +341,12 @@ actor LearningArtifactIngestor {
 
         do {
             if wasNewlyInserted,
-               case .sponsorOnShow(
-                    let podcastId,
-                    let sponsor
-               ) = parsedScope {
+               case .sponsorOnShow = parsedScope {
                 let kind: CorrectionKind = correction.source?.kind
                     ?? Self.kindFor(correction.effectiveCorrectionType)
                 try await applySponsorSideEffect(
-                    podcastId: podcastId,
-                    sponsor: sponsor,
+                    correction: correction,
+                    parsedScope: parsedScope,
                     kind: kind
                 )
             }
@@ -361,12 +381,67 @@ actor LearningArtifactIngestor {
 
     // MARK: - Internals
 
+    /// Apply the sponsor-knowledge side effect for a `.sponsorOnShow`
+    /// correction.
+    ///
+    /// THE IDENTITY COMES FROM THE EVENT'S COLUMNS, NOT FROM THE SCOPE STRING
+    /// (playhead-fzpj). This used to bind `(podcastId, sponsor)` straight out
+    /// of the parsed scope, and for every real podcastId — a feed URL — that
+    /// pair was `("https", "//feeds.simplecast.com/dHoohVNH:acme")`. The row
+    /// this method writes is keyed on exactly those two values
+    /// (`sponsor_knowledge_entries.podcastId` + `.normalizedValue`), so a
+    /// mis-split here is DURABLE corruption, and the reader that has to find it
+    /// again — `SponsorKnowledgeStore.activeEntriesWithNegativeMemory`,
+    /// queried with the correct feed URL — never would.
+    ///
+    /// `authoritativeShowScopePayload(for:)` returns the parsed pair unchanged
+    /// when the wire string determines it, and the column-carried pair when it
+    /// does not. `nil` means the event does not say: we refuse rather than key
+    /// a durable row on a fabricated show identity, count it, and leave the
+    /// `correction_events` row itself persisted (it is not malformed — the
+    /// scope is fine, it is the SPLIT that is unrecoverable).
     private func applySponsorSideEffect(
-        podcastId: String,
-        sponsor: String,
+        correction: CorrectionEvent,
+        parsedScope: CorrectionScope,
         kind: CorrectionKind
     ) async throws {
         guard let knowledgeStore else { return }
+        guard let payload = correction.authoritativeShowScopePayload(
+            for: parsedScope
+        ) else {
+            counters.sponsorSideEffectsSkippedUnresolvableShow += 1
+            // EMPTINESS IS ABSENCE, and the booleans must say what the
+            // resolver saw (playhead-fzpj R1 review). These used to be
+            // `!= nil`, which reports `true` for a column holding `""` —
+            // while `authoritativeShowScopePayload` maps `""` to "no
+            // column" and refuses. A reader chasing
+            // `hasPodcastIdColumn=true` would be looking for a column the
+            // resolver never had.
+            let hasShowColumn = correction.podcastId?.isEmpty == false
+            let hasValueColumn =
+                correction.targetRefs?.sponsorEntity?.isEmpty == false
+            // The refusal has two causes and the old message asserted only
+            // one of them ("carries no podcastId/sponsorEntity columns") —
+            // then printed `hasPodcastIdColumn=true` on the same line when
+            // the real cause was a column that CONTRADICTS the stored
+            // scope. If either column is present, the resolver reached a
+            // reconstruction rung and that reconstruction failed; only with
+            // neither is this genuinely a missing-identity report.
+            let reason = hasShowColumn || hasValueColumn
+                ? "a column on this row does not reconstruct its stored scope"
+                : "no podcastId/sponsorEntity column, and the wire split is a guess"
+            logger.warning(
+                """
+                applySponsorSideEffect: refusing to key sponsor knowledge on an \
+                unresolvable show identity — reason=\(reason, privacy: .public) \
+                (hasPodcastIdColumn=\(hasShowColumn, privacy: .public), \
+                hasSponsorEntityColumn=\(hasValueColumn, privacy: .public))
+                """
+            )
+            return
+        }
+        let podcastId = payload.podcastId
+        let sponsor = payload.value
         switch kind {
         case .falseNegative:
             // FN on a sponsor scope means "every episode of this show

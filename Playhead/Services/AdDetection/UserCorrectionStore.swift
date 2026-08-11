@@ -100,6 +100,28 @@ enum CorrectionScope: Sendable, Equatable {
     /// campaign names). The type prefix is extracted first; then the remainder
     /// is split with the minimum number of splits needed for each case.
     ///
+    /// ⚠️ THE FIVE `*OnShow` CASES DO NOT ROUND-TRIP FOR A REAL podcastId
+    /// (playhead-fzpj). Their wire form is `type:podcastId:value` where
+    /// NEITHER field is shape-constrained, so the string genuinely does not
+    /// determine the split — and the rule below (first colon wins) is exact
+    /// only while the podcastId contains no colon. **A podcastId in this app
+    /// is a FEED URL** (`Episode.resolvedShowIdentity` →
+    /// `Podcast.feedURL.absoluteString`; measured on device, 4 distinct
+    /// values, every one carrying `://`), so the first colon is the URL's
+    /// SCHEME colon and the pair comes back as
+    /// `(podcastId: "https", sponsor: "//feeds.simplecast.com/…:acme")`.
+    /// Both fields are wrong; the SERIALIZED STRING is nevertheless a
+    /// fixpoint, because splitting on a colon and rejoining with a colon is
+    /// lossless — which is exactly why nothing downstream ever noticed.
+    ///
+    /// Never bind a `*OnShow` payload straight out of this. Resolve it through
+    /// `CorrectionEvent.authoritativeShowScopePayload(for:)`, which reads the
+    /// values that ARE trustworthy — the event's own `podcastId` and
+    /// `targetRefs.sponsorEntity` / `targetRefs.domain` columns — and falls
+    /// back to the parse only when
+    /// `showScopeSplitIsDetermined(bySerialized:)` says the wire string
+    /// admits exactly one split.
+    ///
     /// Contract: the `.exactTimeSpan` parser depends on `serialized` using
     /// non-localized fixed-point decimal output (`String(format: "%.3f", …)`)
     /// for startTime/endTime. If you change the formatter (e.g. scientific
@@ -133,34 +155,79 @@ enum CorrectionScope: Sendable, Equatable {
             let assetId = parts[0..<(parts.count - 2)].joined(separator: ":")
             return .exactTimeSpan(assetId: assetId, startTime: startTime, endTime: endTime)
         case "sponsorOnShow":
-            // remainder = "podcastId:sponsor" — split on first colon only so sponsor may contain colons.
-            guard let sep = remainder.firstIndex(of: ":") else { return nil }
-            let podcastId = String(remainder[remainder.startIndex..<sep])
-            let sponsor = String(remainder[remainder.index(after: sep)...])
-            return .sponsorOnShow(podcastId: podcastId, sponsor: sponsor)
+            guard let split = ambiguousShowScopeSplit(remainder) else { return nil }
+            return .sponsorOnShow(podcastId: split.podcastId, sponsor: split.value)
         case "phraseOnShow":
-            guard let sep = remainder.firstIndex(of: ":") else { return nil }
-            let podcastId = String(remainder[remainder.startIndex..<sep])
-            let phrase = String(remainder[remainder.index(after: sep)...])
-            return .phraseOnShow(podcastId: podcastId, phrase: phrase)
+            guard let split = ambiguousShowScopeSplit(remainder) else { return nil }
+            return .phraseOnShow(podcastId: split.podcastId, phrase: split.value)
         case "campaignOnShow":
-            guard let sep = remainder.firstIndex(of: ":") else { return nil }
-            let podcastId = String(remainder[remainder.startIndex..<sep])
-            let campaign = String(remainder[remainder.index(after: sep)...])
-            return .campaignOnShow(podcastId: podcastId, campaign: campaign)
+            guard let split = ambiguousShowScopeSplit(remainder) else { return nil }
+            return .campaignOnShow(podcastId: split.podcastId, campaign: split.value)
         case "domainOwnershipOnShow":
-            guard let sep = remainder.firstIndex(of: ":") else { return nil }
-            let podcastId = String(remainder[remainder.startIndex..<sep])
-            let domain = String(remainder[remainder.index(after: sep)...])
-            return .domainOwnershipOnShow(podcastId: podcastId, domain: domain)
+            guard let split = ambiguousShowScopeSplit(remainder) else { return nil }
+            return .domainOwnershipOnShow(podcastId: split.podcastId, domain: split.value)
         case "jingleOnShow":
-            guard let sep = remainder.firstIndex(of: ":") else { return nil }
-            let podcastId = String(remainder[remainder.startIndex..<sep])
-            let jingleId = String(remainder[remainder.index(after: sep)...])
-            return .jingleOnShow(podcastId: podcastId, jingleId: jingleId)
+            guard let split = ambiguousShowScopeSplit(remainder) else { return nil }
+            return .jingleOnShow(podcastId: split.podcastId, jingleId: split.value)
         default:
             return nil
         }
+    }
+
+    /// The `type:podcastId:value` split shared by all five `*OnShow` cases.
+    ///
+    /// THE NAME IS THE WARNING. This split is a GUESS whenever the podcastId
+    /// itself contains a colon, and it is the SAME guess for all five cases —
+    /// which is why it lives in one place rather than being spelled five
+    /// times. The five copies it replaces were how `sponsorOnShow` came to be
+    /// "the broken one" while four identical siblings read as untouched.
+    ///
+    /// It returns the FIRST-colon split, unchanged from the rule that shipped,
+    /// because changing the rule would change nothing on disk (the serialized
+    /// string is a fixpoint under either direction) while breaking the one
+    /// shape that parses correctly today — `recordVeto`'s colon-free asset-UUID
+    /// podcastId — and trading an always-wrong rule for a sometimes-wrong one
+    /// is not a fix. Callers resolve through
+    /// `CorrectionEvent.authoritativeShowScopePayload(for:)` instead.
+    private static func ambiguousShowScopeSplit(
+        _ remainder: String
+    ) -> (podcastId: String, value: String)? {
+        guard let sep = remainder.firstIndex(of: ":") else { return nil }
+        return (
+            podcastId: String(remainder[remainder.startIndex..<sep]),
+            value: String(remainder[remainder.index(after: sep)...])
+        )
+    }
+
+    /// Whether a `*OnShow` WIRE STRING determines where its two fields divide
+    /// — i.e. whether `deserialize` recovered the split or guessed at it.
+    ///
+    /// THE ARGUMENT IS A STRING AND THAT IS LOAD-BEARING (playhead-fzpj). The
+    /// obvious spelling is an instance property on `CorrectionScope`, asking
+    /// "does MY podcastId contain a colon?" — and it is a trap, because by the
+    /// time you hold a parsed scope the podcastId is already `"https"`, which
+    /// contains no colon and so reports itself unambiguous. That is this
+    /// bead's own defect committed one layer up: a quantity computed over the
+    /// pre-serialization population, read on the post-parse one. The wire
+    /// string is the only artifact that carries the question.
+    ///
+    /// A remainder with exactly ONE colon admits exactly one split, so the
+    /// parse is a proof. Two or more and the string is genuinely undecidable:
+    /// `sponsorOnShow:a:b:c` is consistent with `(a, "b:c")` and with
+    /// `("a:b", c)`, and nothing in the format says which. This answers `false`
+    /// there even when the shipped first-colon rule happens to land right —
+    /// "the rule guessed correctly" is not "the string said so", and only the
+    /// second is something a durable key may rest on.
+    ///
+    /// Not defined for `.exactSpan` / `.exactTimeSpan`: their trailing token
+    /// COUNT is fixed by the writer and the parser takes the last two, so
+    /// their split is determined for every input. (That is about the SPLIT
+    /// only — `.exactTimeSpan` still quantizes through `%.3f`, a documented
+    /// precision contract rather than an ambiguity.)
+    static func showScopeSplitIsDetermined(bySerialized string: String) -> Bool {
+        guard let typeEnd = string.firstIndex(of: ":") else { return false }
+        let remainder = string[string.index(after: typeEnd)...]
+        return remainder.filter { $0 == ":" }.count == 1
     }
 
     // MARK: - Layer B Mapping
@@ -302,6 +369,106 @@ extension CorrectionEvent {
                 persistedCorrectionIdentityKey
                 ?? explicitReceiptIdentityKey
                 ?? ""
+        )
+    }
+
+    /// The `(show, value)` pair a show-wide scope names, resolved from the
+    /// columns that CARRY those facts rather than re-derived by splitting the
+    /// scope string (playhead-fzpj).
+    ///
+    /// Why this exists. `CorrectionScope.deserialize` cannot recover the pair
+    /// from a `*OnShow` wire string once the podcastId contains a colon, and
+    /// every real podcastId does — it is a feed URL. But the event already
+    /// holds both facts, correctly, in their own columns: `podcastId`, and
+    /// `targetRefs.sponsorEntity` / `targetRefs.domain`. Reading them is a
+    /// proof, not a heuristic, and it changes not one byte on disk.
+    ///
+    /// RESOLUTION BY RECONSTRUCTION, not by re-splitting. Either column pins
+    /// one end of the division and the wire string supplies the other, and the
+    /// result is CHECKED against the string before it is returned:
+    ///
+    /// 1. **The value column anchors from the right.** Knowing the value, the
+    ///    split point is determined — `podcastId` is the remainder with
+    ///    `":" + value` removed from its end. One column is enough; no guess
+    ///    is involved, and this recovers even a colon-bearing sponsor under a
+    ///    colon-bearing podcastId.
+    /// 2. **The `podcastId` column anchors from the left**, symmetrically.
+    /// 3. **Both present** must reconstruct the same string, or the row is
+    ///    internally inconsistent and this refuses.
+    /// 4. **Neither present** falls back to the parse, and ONLY when
+    ///    `showScopeSplitIsDetermined(bySerialized:)` says the string admits
+    ///    one split.
+    ///
+    /// A column that does not reconstruct the wire string is not used to
+    /// "correct" it. Mixing an authoritative show identity with a parsed value
+    /// would produce `(feedURL, "//feeds.simplecast.com/dHoohVNH:acme")` — a
+    /// pair that is half-repaired and therefore matches nothing, which is
+    /// precisely the partial fix that is worse than no fix.
+    ///
+    /// `nil` means "this event does not say, and guessing would key a durable
+    /// row on a fabricated identity". `.phraseOnShow`, `.campaignOnShow` and
+    /// `.jingleOnShow` have no value column at all, so they can only ever
+    /// reach rung 2 or rung 4 — they have no production writer or reader
+    /// today, and this is the seam that has to grow a column before they get
+    /// one.
+    ///
+    /// `parsedScope` is used only to name the CASE (and therefore which
+    /// column carries the value). Every field comes from `self.scope`.
+    func authoritativeShowScopePayload(
+        for parsedScope: CorrectionScope
+    ) -> (podcastId: String, value: String)? {
+        let typePrefix: String
+        let columnValue: String?
+        switch parsedScope {
+        case .sponsorOnShow:
+            typePrefix = "sponsorOnShow"
+            columnValue = targetRefs?.sponsorEntity
+        case .domainOwnershipOnShow:
+            typePrefix = "domainOwnershipOnShow"
+            columnValue = targetRefs?.domain
+        case .phraseOnShow:
+            typePrefix = "phraseOnShow"
+            columnValue = nil
+        case .campaignOnShow:
+            typePrefix = "campaignOnShow"
+            columnValue = nil
+        case .jingleOnShow:
+            typePrefix = "jingleOnShow"
+            columnValue = nil
+        case .exactSpan, .exactTimeSpan:
+            return nil
+        }
+
+        // The WIRE STRING is the artifact. A `parsedScope` whose case does not
+        // match the stored scope is not something to reconcile — refuse.
+        guard scope.hasPrefix(typePrefix + ":") else { return nil }
+        let remainder = String(scope.dropFirst(typePrefix.count + 1))
+        let showColumn = podcastId.flatMap { $0.isEmpty ? nil : $0 }
+        let valueColumn = columnValue.flatMap { $0.isEmpty ? nil : $0 }
+
+        if let valueColumn {
+            let suffix = ":" + valueColumn
+            guard remainder.hasSuffix(suffix) else { return nil }
+            let resolvedShow = String(remainder.dropLast(suffix.count))
+            if let showColumn, showColumn != resolvedShow { return nil }
+            return (podcastId: resolvedShow, value: valueColumn)
+        }
+        if let showColumn {
+            let prefix = showColumn + ":"
+            guard remainder.hasPrefix(prefix) else { return nil }
+            return (
+                podcastId: showColumn,
+                value: String(remainder.dropFirst(prefix.count))
+            )
+        }
+        guard CorrectionScope.showScopeSplitIsDetermined(bySerialized: scope),
+              let sep = remainder.firstIndex(of: ":")
+        else {
+            return nil
+        }
+        return (
+            podcastId: String(remainder[remainder.startIndex..<sep]),
+            value: String(remainder[remainder.index(after: sep)...])
         )
     }
 
