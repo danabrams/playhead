@@ -1152,14 +1152,25 @@ private struct DumpStingerRefinement: Encodable {
     }
 }
 
-/// One candidate decoded span observed by the FragilityDiagnosticObserver
-/// during this episode's backfill. Added for playhead-4xqf (DAI boundary-
-/// undersizing investigation): enables identifying WHICH candidate spans
-/// the candidate generator emitted vs which ones the fusion/AdWindow stage
-/// kept, by comparing this list against `adWindows` and against rediff
-/// slot boundaries. The `fragilityScore` field is "free" — the observer
-/// already records it for every span. JSON field order is deliberate to
-/// match `DumpAdWindow`'s layout for downstream comparison scripts.
+/// One span observed by the FragilityDiagnosticObserver during this
+/// episode's backfill. Added for playhead-4xqf (DAI boundary-undersizing
+/// investigation).
+///
+/// ⚠️ NAME IS MISLEADING — READ THIS BEFORE USING IT AS "the candidate".
+/// The observer fires at `AdDetectionService`'s fragility gate, which is
+/// DOWNSTREAM of every boundary refiner, and it records `refinedSpan`, not
+/// the decoder's output. `FragilitySpanDiagnostic.spanStart` says so in its
+/// own docstring ("the persisted fusion `AdWindow.startTime` is built from
+/// [it] verbatim"), and it is observably true: across all 53 episodes of
+/// `playhead-dogfood-diagnostics-pipeline-dump-new9.json` this list is
+/// interval-for-interval IDENTICAL to `adWindows`, 132 rows of 132.
+///
+/// So this field CANNOT answer "did candidate generation undersize, or did
+/// fusion drop a wider candidate?" — both readings produce the same bytes.
+/// Use `decoderOutputSpanList` (below) for the upstream side of that
+/// comparison. This field is retained unchanged for the existing consumers
+/// that read it as the per-window fragility geometry, which is what it
+/// actually is.
 private struct DumpDecodedSpan: Encodable {
     let spanId: String
     let startTime: Double
@@ -1167,6 +1178,30 @@ private struct DumpDecodedSpan: Encodable {
     let proposalConfidence: Double
     let skipConfidence: Double
     let fragilityScore: Double
+}
+
+/// One span as the CANDIDATE GENERATOR emitted it — the persisted
+/// `decoded_spans` row, read back after `runBackfill`.
+///
+/// This is the pre-refinement geometry `MinimalContiguousSpanDecoder.decode`
+/// produced (FORM RUNS → MERGE at 3.0 s → SPLIT at 180 s → SNAP ±8 s → DROP
+/// under 5 s), after the rediff-slot ownership rewrite but BEFORE the
+/// bracket/legacy/stinger refiners and before fusion. Persisted by
+/// `AdDetectionService.runBackfill` itself, so it needs no observer.
+///
+/// Added 2026-08-11 for playhead-4xqf: paired with `adWindows` it splits the
+/// width loss into an upstream term (slot width the decoder never proposed)
+/// and a downstream term (proposed width the rest of the pipeline lost),
+/// which `candidateDecodedSpanList` is structurally unable to do.
+private struct DumpDecoderOutputSpan: Encodable {
+    let spanId: String
+    let startTime: Double
+    let endTime: Double
+    let firstAtomOrdinal: Int
+    let lastAtomOrdinal: Int
+    /// `AnchorRef.provenanceKind` for each anchor that made this run's atoms
+    /// eligible — the answer to "which channel proposed this width".
+    let anchorProvenanceKinds: [String]
 }
 
 /// Per-episode dump row.
@@ -1181,10 +1216,15 @@ private struct DumpEpisode: Encodable {
     /// for backward compatibility with existing consumers (current dump
     /// readers only check this int field).
     let candidateDecodedSpans: Int
-    /// Per-candidate decoded-span boundaries + fragility geometry. Added
-    /// 2026-06-01 for playhead-4xqf boundary-undersizing investigation.
+    /// Per-window fragility geometry. Added 2026-06-01 for playhead-4xqf.
     /// One row per `observer.spanRows(for: assetId)` entry, in record order.
+    /// NOT the candidate generator's output despite the name — see
+    /// `DumpDecodedSpan`.
     let candidateDecodedSpanList: [DumpDecodedSpan]
+    /// The candidate generator's actual output (persisted `decoded_spans`),
+    /// pre-refinement. Added 2026-08-11 for playhead-4xqf — see
+    /// `DumpDecoderOutputSpan`.
+    let decoderOutputSpanList: [DumpDecoderOutputSpan]
     let adWindows: [DumpAdWindow]
 }
 
@@ -3456,6 +3496,24 @@ private extension PipelineDumpLiveTests {
                 )
             }
 
+        // playhead-4xqf: the candidate generator's own output, read back from
+        // the rows `runBackfill` persisted before the refinement loop. This is
+        // the upstream half of the width-loss split; `dumpDecodedSpans` below
+        // is post-refinement and cannot serve that role.
+        let dumpDecoderOutputSpans: [DumpDecoderOutputSpan] =
+            ((try? await store.fetchDecodedSpans(assetId: assetId)) ?? [])
+            .sorted { ($0.startTime, $0.endTime, $0.id) < ($1.startTime, $1.endTime, $1.id) }
+            .map {
+                DumpDecoderOutputSpan(
+                    spanId: $0.id,
+                    startTime: $0.startTime,
+                    endTime: $0.endTime,
+                    firstAtomOrdinal: $0.firstAtomOrdinal,
+                    lastAtomOrdinal: $0.lastAtomOrdinal,
+                    anchorProvenanceKinds: $0.anchorProvenance.map(\.provenanceKind)
+                )
+            }
+
         let dumpDecodedSpans: [DumpDecodedSpan] = decodedSpanRows
             .sorted {
                 ($0.spanStart, $0.spanEnd, $0.spanId)
@@ -3502,6 +3560,7 @@ private extension PipelineDumpLiveTests {
                 episodeDurationSeconds: episodeDuration,
                 candidateDecodedSpans: decodedSpanCount,
                 candidateDecodedSpanList: dumpDecodedSpans,
+                decoderOutputSpanList: dumpDecoderOutputSpans,
                 adWindows: dumpWindows
             ),
             transcriptSHA256: finalTranscriptSHA256,
@@ -4509,6 +4568,7 @@ struct PipelineDumpEncodingTests {
                                 proposalConfidence: 0.9, skipConfidence: 0.88,
                                 fragilityScore: 0.1),
             ],
+            decoderOutputSpanList: [],
             adWindows: []
         )
         let data = try JSONEncoder().encode(episode)
@@ -4528,6 +4588,78 @@ struct PipelineDumpEncodingTests {
         // values to document the EXPECTED invariant downstream readers
         // should assume holds in real dumps.
         #expect(list.count == (parsed["candidateDecodedSpans"] as? Int))
+    }
+
+    @Test("DumpDecoderOutputSpan encodes the pre-refinement geometry and its anchor kinds")
+    func dumpDecoderOutputSpanEncodesAllFields() throws {
+        // playhead-4xqf: this field exists to answer a question
+        // `candidateDecodedSpanList` structurally cannot — see that struct's
+        // docstring. The keys ARE the contract (a Python consumer reads them
+        // by name), and `anchorProvenanceKinds` is the load-bearing one: it
+        // names WHICH channel proposed the width, which is what separates
+        // "the decoder never proposed this second of audio" from "it did and
+        // something downstream lost it".
+        let span = DumpDecoderOutputSpan(
+            spanId: "span-7",
+            startTime: 3238.6,
+            endTime: 3261.3,
+            firstAtomOrdinal: 3238,
+            lastAtomOrdinal: 3255,
+            anchorProvenanceKinds: ["sustainedMusicOffset"]
+        )
+        let data = try JSONEncoder().encode(span)
+        let parsed = try #require(
+            try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        #expect(Set(parsed.keys) == Set([
+            "spanId", "startTime", "endTime",
+            "firstAtomOrdinal", "lastAtomOrdinal", "anchorProvenanceKinds",
+        ]))
+        #expect((parsed["startTime"] as? Double) == 3238.6)
+        #expect((parsed["endTime"] as? Double) == 3261.3)
+        #expect((parsed["firstAtomOrdinal"] as? Int) == 3238)
+        #expect((parsed["lastAtomOrdinal"] as? Int) == 3255)
+        #expect((parsed["anchorProvenanceKinds"] as? [String]) == ["sustainedMusicOffset"])
+    }
+
+    @Test("DumpEpisode carries decoderOutputSpanList independently of candidateDecodedSpanList")
+    func dumpEpisodeCarriesDecoderOutputSeparately() throws {
+        // The two lists are DIFFERENT populations — one pre-refinement, one
+        // post. A schema change that made them the same field (or dropped the
+        // new one) would re-open exactly the hole this bead found, so lock
+        // that they encode as two independent keys with independent counts.
+        let episode = DumpEpisode(
+            episodeId: "ep-2",
+            audioFingerprint: "sha256:" + String(repeating: "b", count: 64),
+            showSlug: "show-y",
+            publishDate: "2026-08-11",
+            episodeDurationSeconds: 3600.0,
+            candidateDecodedSpans: 1,
+            candidateDecodedSpanList: [
+                DumpDecodedSpan(spanId: "w", startTime: 3235.6, endTime: 3264.3,
+                                proposalConfidence: 0.82, skipConfidence: 0.82,
+                                fragilityScore: 0.5),
+            ],
+            decoderOutputSpanList: [
+                DumpDecoderOutputSpan(spanId: "d1", startTime: 3238.6, endTime: 3261.3,
+                                      firstAtomOrdinal: 3238, lastAtomOrdinal: 3255,
+                                      anchorProvenanceKinds: ["sustainedMusicOffset"]),
+                DumpDecoderOutputSpan(spanId: "d2", startTime: 3321.4, endTime: 3330.0,
+                                      firstAtomOrdinal: 3344, lastAtomOrdinal: 3349,
+                                      anchorProvenanceKinds: ["sustainedMusicOffset"]),
+            ],
+            adWindows: []
+        )
+        let data = try JSONEncoder().encode(episode)
+        let parsed = try #require(
+            try JSONSerialization.jsonObject(with: data) as? [String: Any]
+        )
+        let refined = try #require(parsed["candidateDecodedSpanList"] as? [[String: Any]])
+        let decoded = try #require(parsed["decoderOutputSpanList"] as? [[String: Any]])
+        #expect(refined.count == 1)
+        #expect(decoded.count == 2)
+        #expect((decoded[0]["spanId"] as? String) == "d1")
+        #expect((decoded[1]["startTime"] as? Double) == 3321.4)
     }
 
     // MARK: - playhead-4xqf FUSION_DROP suspect fields
