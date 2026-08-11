@@ -823,3 +823,343 @@ private func mockRecovery(
         return verdict
     }
 }
+
+// MARK: - playhead-shjn: sponsor knowledge → region proposal wiring
+
+/// The production call-site rail for shape (a) of `playhead-shjn`.
+///
+/// Before shjn the ONLY production reader of an `.active`
+/// `SponsorKnowledgeEntry` was `ASRVocabularyProvider` (ASR contextual
+/// strings). `SponsorKnowledgeMatcher.match(atoms:podcastId:knowledgeStore:)`
+/// had ZERO production callers: `RegionShadowPhase.swift:188` called the
+/// legacy stub that returns `[]` unconditionally, and `Input` had no
+/// `knowledgeStore` field at all.
+///
+/// These tests drive the REAL production entry point
+/// (`AdDetectionService.runBackfill`), not `RegionShadowPhase.run` directly,
+/// because the field and the overload existing is not the defect — nothing
+/// POPULATING them was. A regression that re-adds the field but drops the
+/// argument at the `RegionShadowPhase.Input(...)` call site fails here.
+///
+/// The sponsor brand used below (`Zorbium`) is deliberately NOT a member of
+/// any shipped lexicon, so a `.sponsor` origin can only come from the
+/// knowledge store — never from `SharedSponsorLexicon` or a lexical hit.
+@Suite("Sponsor knowledge → region proposals (playhead-shjn)")
+struct SponsorKnowledgeRegionWiringTests {
+
+    private static let brand = "Zorbium"
+    private static let episodeDuration: Double = 90
+
+    private func makeAsset(id: String) -> AnalysisAsset {
+        AnalysisAsset(
+            id: id,
+            episodeId: "ep-\(id)",
+            assetFingerprint: "fp-\(id)",
+            weakFingerprint: nil,
+            sourceURL: "file:///tmp/\(id).m4a",
+            featureCoverageEndTime: nil,
+            fastTranscriptCoverageEndTime: nil,
+            confirmedAdCoverageEndTime: nil,
+            analysisState: "new",
+            analysisVersion: 1,
+            capabilitySnapshot: nil
+        )
+    }
+
+    /// Atoms are one-per-chunk (`TranscriptAtomizer.atomize`), so the brand
+    /// occupies exactly chunk index 1 — atom ordinal 1, 30.0…60.0 s. Chunks 0
+    /// and 2 are ordinary show talk and never name the brand.
+    private func makeChunks(assetId: String) -> [TranscriptChunk] {
+        let texts = [
+            "Welcome back to the show. Today we are talking about tide pools and the animals that live in them.",
+            "Before we continue: this stretch is sponsored by \(Self.brand), and we have used it for years.",
+            "Now back to the interview. So tell us how you first got interested in marine biology."
+        ]
+        return texts.enumerated().map { idx, text in
+            TranscriptChunk(
+                id: "c\(idx)-\(assetId)",
+                analysisAssetId: assetId,
+                segmentFingerprint: "fp-\(idx)",
+                chunkIndex: idx,
+                startTime: Double(idx) * 30,
+                endTime: Double(idx + 1) * 30,
+                text: text,
+                normalizedText: text.lowercased(),
+                pass: "final",
+                modelVersion: "test-v1",
+                transcriptVersion: nil,
+                atomOrdinal: nil
+            )
+        }
+    }
+
+    private func makeFeatureWindows(assetId: String) -> [FeatureWindow] {
+        var windows: [FeatureWindow] = []
+        var t: Double = 0
+        while t < Self.episodeDuration {
+            let inAd = t >= 28 && t < 62
+            windows.append(
+                FeatureWindow(
+                    analysisAssetId: assetId,
+                    startTime: t,
+                    endTime: t + 2.0,
+                    rms: inAd ? 0.15 : 0.55,
+                    spectralFlux: inAd ? 0.3 : 0.08,
+                    musicProbability: inAd ? 0.2 : 0.0,
+                    speakerChangeProxyScore: inAd ? 0.5 : 0.0,
+                    musicBedChangeScore: inAd ? 0.4 : 0.0,
+                    pauseProbability: inAd ? 0.1 : 0.0,
+                    speakerClusterId: inAd ? 2 : 1,
+                    jingleHash: nil,
+                    featureVersion: 1
+                )
+            )
+            t += 2.0
+        }
+        return windows
+    }
+
+    private func makeService(
+        store: AnalysisStore,
+        observer: RegionShadowObserver
+    ) -> AdDetectionService {
+        AdDetectionService(
+            store: store,
+            classifier: RuleBasedClassifier(),
+            metadataExtractor: FallbackExtractor(),
+            config: AdDetectionConfig(
+                candidateThreshold: 0.40,
+                confirmationThreshold: 0.70,
+                suppressionThreshold: 0.25,
+                hotPathLookahead: 90.0,
+                detectorVersion: "test-shjn-sponsor-wiring",
+                fmBackfillMode: .off
+            ),
+            regionShadowObserver: observer
+        )
+    }
+
+    /// Confirm `brand` on `podcastId` `times` times. Two confirmations on two
+    /// DISTINCT assets is what the "Always skip <sponsor> on this show" button
+    /// requires before an entry reaches `.active` — one press stays inert.
+    private func confirm(
+        _ knowledgeStore: SponsorKnowledgeStore,
+        podcastId: String,
+        times: Int
+    ) async throws {
+        for i in 1...times {
+            try await knowledgeStore.recordCandidate(
+                podcastId: podcastId,
+                entityType: .sponsor,
+                entityValue: Self.brand,
+                analysisAssetId: "asset-shjn-confirm-\(podcastId)-\(i)",
+                sourceAtomOrdinals: [i],
+                transcriptVersion: "tv-\(i)",
+                confidence: 0.85
+            )
+        }
+    }
+
+    private func sponsorBundles(
+        _ bundles: [RegionFeatureBundle]
+    ) -> [RegionFeatureBundle] {
+        bundles.filter { $0.region.origins.contains(.sponsor) }
+    }
+
+    @Test("an .active sponsor entry proposes a .sponsor-origin region through runBackfill")
+    func activeEntryProposesSponsorRegion() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-shjn-active"
+        let podcastId = "pod-shjn-active"
+        try await store.insertAsset(makeAsset(id: assetId))
+        try await store.insertFeatureWindows(makeFeatureWindows(assetId: assetId))
+
+        let knowledgeStore = SponsorKnowledgeStore(store: store)
+        try await confirm(knowledgeStore, podcastId: podcastId, times: 2)
+        let entry = try await knowledgeStore.entry(
+            podcastId: podcastId,
+            entityType: .sponsor,
+            normalizedValue: Self.brand.lowercased()
+        )
+        #expect(entry?.state == .active, "two confirmations must promote to .active")
+
+        let observer = RegionShadowObserver()
+        let service = makeService(store: store, observer: observer)
+        await service.setSponsorKnowledgeStore(knowledgeStore)
+
+        try await service.runBackfill(
+            chunks: makeChunks(assetId: assetId),
+            analysisAssetId: assetId,
+            podcastId: podcastId,
+            episodeDuration: Self.episodeDuration
+        )
+
+        let recordCount = await observer.recordCount(for: assetId)
+        #expect(recordCount == 1)
+        let recorded = await observer.latestBundles(for: assetId)
+        let bundles = try #require(recorded)
+        let sponsored = sponsorBundles(bundles)
+        #expect(
+            !sponsored.isEmpty,
+            "an .active sponsor entry must reach RegionProposalBuilder as a .sponsor origin"
+        )
+
+        // WHERE, not just whether: atoms are one-per-chunk, and only chunk 1
+        // names the brand. A proposal anchored anywhere else would mean the
+        // matcher's atom ordinals are not the ones the proposal builder used.
+        #expect(
+            sponsored.contains { $0.region.firstAtomOrdinal <= 1 && $0.region.lastAtomOrdinal >= 1 },
+            "the .sponsor region must cover atom ordinal 1 — the only atom naming the brand"
+        )
+        #expect(
+            sponsored.allSatisfy { $0.region.sponsorMatches.contains { $0.entityName.lowercased() == Self.brand.lowercased() } },
+            "the carried SponsorMatch must name the confirmed brand"
+        )
+    }
+
+    @Test("ONE press stays quarantined and proposes nothing")
+    func singleConfirmationProposesNothing() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-shjn-one-press"
+        let podcastId = "pod-shjn-one-press"
+        try await store.insertAsset(makeAsset(id: assetId))
+        try await store.insertFeatureWindows(makeFeatureWindows(assetId: assetId))
+
+        let knowledgeStore = SponsorKnowledgeStore(store: store)
+        try await confirm(knowledgeStore, podcastId: podcastId, times: 1)
+        let entry = try await knowledgeStore.entry(
+            podcastId: podcastId,
+            entityType: .sponsor,
+            normalizedValue: Self.brand.lowercased()
+        )
+        #expect(entry?.state == .quarantined, "one confirmation must NOT reach .active")
+
+        let observer = RegionShadowObserver()
+        let service = makeService(store: store, observer: observer)
+        await service.setSponsorKnowledgeStore(knowledgeStore)
+
+        try await service.runBackfill(
+            chunks: makeChunks(assetId: assetId),
+            analysisAssetId: assetId,
+            podcastId: podcastId,
+            episodeDuration: Self.episodeDuration
+        )
+
+        let recordCount = await observer.recordCount(for: assetId)
+        #expect(recordCount == 1, "the phase must have run")
+        let recorded = await observer.latestBundles(for: assetId)
+        let bundles = try #require(recorded)
+        #expect(
+            sponsorBundles(bundles).isEmpty,
+            "a .quarantined entry must propose nothing — the two-press corroboration gate"
+        )
+    }
+
+    @Test("an .active entry on a DIFFERENT podcast proposes nothing")
+    func activeEntryOnOtherPodcastProposesNothing() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-shjn-other-pod"
+        try await store.insertAsset(makeAsset(id: assetId))
+        try await store.insertFeatureWindows(makeFeatureWindows(assetId: assetId))
+
+        let knowledgeStore = SponsorKnowledgeStore(store: store)
+        try await confirm(knowledgeStore, podcastId: "pod-shjn-elsewhere", times: 2)
+
+        let observer = RegionShadowObserver()
+        let service = makeService(store: store, observer: observer)
+        await service.setSponsorKnowledgeStore(knowledgeStore)
+
+        // Same brand in the transcript, but this episode belongs to a
+        // different show. "Always skip <sponsor> ON THIS SHOW" is per-podcast;
+        // a matcher that queried every podcast would pass the positive test
+        // and fail this one.
+        try await service.runBackfill(
+            chunks: makeChunks(assetId: assetId),
+            analysisAssetId: assetId,
+            podcastId: "pod-shjn-listening",
+            episodeDuration: Self.episodeDuration
+        )
+
+        let recordCount = await observer.recordCount(for: assetId)
+        #expect(recordCount == 1, "the phase must have run")
+        let recorded = await observer.latestBundles(for: assetId)
+        let bundles = try #require(recorded)
+        #expect(
+            sponsorBundles(bundles).isEmpty,
+            "sponsor knowledge is scoped per podcast — another show's entry must not fire here"
+        )
+    }
+
+    @Test("no store installed ⇒ no .sponsor origin, even with an .active row in the DB")
+    func unwiredStoreProposesNothing() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-shjn-unwired"
+        let podcastId = "pod-shjn-unwired"
+        try await store.insertAsset(makeAsset(id: assetId))
+        try await store.insertFeatureWindows(makeFeatureWindows(assetId: assetId))
+
+        let knowledgeStore = SponsorKnowledgeStore(store: store)
+        try await confirm(knowledgeStore, podcastId: podcastId, times: 2)
+        let entry = try await knowledgeStore.entry(
+            podcastId: podcastId,
+            entityType: .sponsor,
+            normalizedValue: Self.brand.lowercased()
+        )
+        #expect(entry?.state == .active)
+
+        let observer = RegionShadowObserver()
+        let service = makeService(store: store, observer: observer)
+        // setSponsorKnowledgeStore deliberately NOT called: this is the state
+        // every legacy caller and every pre-wiring launch window is in, and it
+        // must stay byte-identical to pre-shjn (legacy stub ⇒ no matches).
+
+        try await service.runBackfill(
+            chunks: makeChunks(assetId: assetId),
+            analysisAssetId: assetId,
+            podcastId: podcastId,
+            episodeDuration: Self.episodeDuration
+        )
+
+        let recordCount = await observer.recordCount(for: assetId)
+        #expect(recordCount == 1, "the phase must have run")
+        let recorded = await observer.latestBundles(for: assetId)
+        let bundles = try #require(recorded)
+        #expect(
+            sponsorBundles(bundles).isEmpty,
+            "a nil knowledge store must fall back to the legacy stub"
+        )
+    }
+
+    @Test("an EMPTY podcastId is an absent identity, not a podcast named \"\"")
+    func emptyPodcastIdProposesNothing() async throws {
+        let store = try await makeTestStore()
+        let assetId = "asset-shjn-empty-pod"
+        try await store.insertAsset(makeAsset(id: assetId))
+        try await store.insertFeatureWindows(makeFeatureWindows(assetId: assetId))
+
+        // An entry stored under the empty-string key. If `run` treated "" as a
+        // podcast identity rather than an absence, this would fire.
+        let knowledgeStore = SponsorKnowledgeStore(store: store)
+        try await confirm(knowledgeStore, podcastId: "", times: 2)
+
+        let observer = RegionShadowObserver()
+        let service = makeService(store: store, observer: observer)
+        await service.setSponsorKnowledgeStore(knowledgeStore)
+
+        try await service.runBackfill(
+            chunks: makeChunks(assetId: assetId),
+            analysisAssetId: assetId,
+            podcastId: "",
+            episodeDuration: Self.episodeDuration
+        )
+
+        let recordCount = await observer.recordCount(for: assetId)
+        #expect(recordCount == 1, "the phase must have run")
+        let recorded = await observer.latestBundles(for: assetId)
+        let bundles = try #require(recorded)
+        #expect(
+            sponsorBundles(bundles).isEmpty,
+            "an empty podcastId names no podcast — the store must not be queried with it"
+        )
+    }
+}

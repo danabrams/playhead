@@ -63,10 +63,33 @@ enum RegionShadowPhase {
         /// Phase 9 (playhead-4my.9.1): optional fingerprint store for
         /// store-backed fingerprint matching. When nil, falls back to the
         /// legacy stub that returns empty results.
+        ///
+        /// NOTE (playhead-shjn): production has never populated this field.
+        /// The only production construction of `Input`
+        /// (`AdDetectionService.runBackfill`) passes neither
+        /// `fingerprintStore` nor — until shjn — `podcastId`, so the
+        /// store-backed fingerprint overload below is still unreachable in
+        /// production. Filed separately; shjn deliberately did NOT wire it.
         let fingerprintStore: AdCopyFingerprintStore?
         /// Phase 9 (playhead-4my.9.1): podcast identifier for fingerprint
         /// store queries. Required when fingerprintStore is non-nil.
+        ///
+        /// playhead-shjn: ALSO the lookup key for `knowledgeStore`. Handed
+        /// through VERBATIM from `runBackfill` — an empty string is a
+        /// podcast identity that is ABSENT, and `run` below is the single
+        /// place that decides so, rather than the call site pre-converting
+        /// to `nil` (the same reasoning `SemanticScanClaim.claimRow`
+        /// records at its own call site).
         let podcastId: String?
+        /// playhead-shjn: optional sponsor knowledge store. When non-nil AND
+        /// `podcastId` names a podcast, `run` calls the store-backed
+        /// `SponsorKnowledgeMatcher` overload so that `.active` sponsor
+        /// entries — the ones "Always skip <sponsor> on this show" promotes
+        /// after two presses on two distinct episodes — become
+        /// `SponsorMatch` values and therefore `.sponsor`-origin proposals.
+        /// When nil (tests, preview, legacy callers) the legacy stub runs
+        /// and `sponsorMatches` stays `[]`, byte-identical to pre-shjn.
+        let knowledgeStore: SponsorKnowledgeStore?
         /// High-confidence classifier results, threaded through so that
         /// `RegionProposalBuilder.makeClassifierProposals` can seed
         /// classifier-origin proposals. When empty (legacy callers), no
@@ -119,6 +142,7 @@ enum RegionShadowPhase {
             fmWindows: [FMRefinementWindowOutput] = [],
             fingerprintStore: AdCopyFingerprintStore? = nil,
             podcastId: String? = nil,
+            knowledgeStore: SponsorKnowledgeStore? = nil,
             classifierResults: [ClassifierResult] = [],
             sustainedMusicProposerEnabled: Bool = false,
             sustainedMusicProposerConfig: SustainedMusicOffsetProposer.Config = .default,
@@ -136,6 +160,7 @@ enum RegionShadowPhase {
             self.fmWindows = fmWindows
             self.fingerprintStore = fingerprintStore
             self.podcastId = podcastId
+            self.knowledgeStore = knowledgeStore
             self.classifierResults = classifierResults
             self.sustainedMusicProposerEnabled = sustainedMusicProposerEnabled
             self.sustainedMusicProposerConfig = sustainedMusicProposerConfig
@@ -184,8 +209,27 @@ enum RegionShadowPhase {
             )
             : []
 
-        // Phase 8 sponsor matcher: stub (returns []) when no store provided.
-        let sponsorMatches = SponsorKnowledgeMatcher.match(atoms: atoms)
+        // Phase 8 sponsor matcher (playhead-shjn): use the store-backed
+        // overload when a knowledge store AND a podcast identity are both
+        // present; otherwise fall back to the legacy stub that returns [].
+        //
+        // An EMPTY `podcastId` is an ABSENT podcast identity, not a podcast
+        // whose id happens to be "": `activeEntries(forPodcast: "")` would be
+        // a real query against a key no writer ever uses. This `guard` is the
+        // one place that decides so — `runBackfill` hands the value through
+        // verbatim.
+        let sponsorMatches: [SponsorMatch]
+        if let knowledgeStore = input.knowledgeStore,
+           let podcastId = input.podcastId,
+           !podcastId.isEmpty {
+            sponsorMatches = try await SponsorKnowledgeMatcher.match(
+                atoms: atoms,
+                podcastId: podcastId,
+                knowledgeStore: knowledgeStore
+            )
+        } else {
+            sponsorMatches = SponsorKnowledgeMatcher.match(atoms: atoms)
+        }
 
         // Phase 9 fingerprint matcher: use store-backed overload when both
         // a fingerprintStore and podcastId are provided; otherwise fall back
