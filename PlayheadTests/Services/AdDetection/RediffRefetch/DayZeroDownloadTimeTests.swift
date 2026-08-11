@@ -986,6 +986,70 @@ struct RediffDayZeroKickoffCoordinatorTests {
     }
 
     @Test("""
+    NO CLAIM IS OVERTAKEN BY ITS OWN SETTLE — the request joins `pending` only \
+    AFTER the claim, so a drain that is already running cannot pop it first
+    """)
+    func noClaimIsOvertakenByItsOwnSettle() async throws {
+        let spy = KickoffSpy()
+        let coordinator = RediffDayZeroKickoffCoordinator(
+            maxAttempts: 1,
+            pollNanos: 1,
+            probe: { _ in Self.ready("asset-overtake") },
+            fire: { _, _ in },
+            claimKickoff: { claim in
+                // Hold the claim open across many scheduling points, the way a
+                // real store write does. A drain that can ALREADY SEE this
+                // request will pop, fire and settle it inside this window; one
+                // that cannot has nothing to pop, however long the window is.
+                for _ in 0..<200 { await Task.yield() }
+                await spy.noteClaim(claim)
+            },
+            recordKickoff: { await spy.noteRecord($0) },
+            reportViolation: { _, _ in },
+            episodeIdHasher: { $0 },
+            sleep: { _ in },
+            now: { 1_000 }
+        )
+
+        // The FIRST request starts the drain; every later one arrives while it
+        // is LIVE, which is the only state in which the ordering can be lost.
+        // `suspendDrainForTesting` would defeat the whole test.
+        for index in 0..<4 {
+            await coordinator.requestKickoff(Self.request("ep-overtake-\(index)"))
+        }
+        await coordinator.drainForTesting()
+
+        #expect(await spy.records.count == 4, """
+            ANTI-VACUITY: every request must actually have SETTLED. With nothing \
+            settled the ordering assertion below would hold over an empty timeline \
+            and prove nothing.
+            """)
+        let timeline = await spy.timeline
+        for index in 0..<4 {
+            let episodeId = "ep-overtake-\(index)"
+            let claimed = try #require(
+                timeline.firstIndex(of: "claim(\(episodeId))"),
+                "ANTI-VACUITY: \(episodeId) must have been claimed at all"
+            )
+            let settled = try #require(
+                timeline.firstIndex(of: "settle(\(episodeId))"),
+                "ANTI-VACUITY: \(episodeId) must have been settled at all"
+            )
+            #expect(claimed < settled, """
+                `settle(\(episodeId))` was written BEFORE `claim(\(episodeId))`. \
+                Appending to `pending` before awaiting the claim lets a drain that is \
+                already running pop, fire and settle a request whose claim is still in \
+                flight — and the claim then lands on a SETTLED row, stamping it \
+                `requested` and adding a kickoff nobody owes. That fabricates a loss in \
+                the one number whose whole job is reporting real ones. `requestKickoff`'s \
+                own doc comment names this as the repair that looks obvious and is worse; \
+                nothing measured it until playhead-kg8h R3, where the mutation that swaps \
+                those two lines passed all 44 tests.
+                """)
+        }
+    }
+
+    @Test("""
     the claim is stamped with the coordinator's LIVE clock — an outstanding \
     claim's `updatedAt` is the only thing that dates it
     """)
