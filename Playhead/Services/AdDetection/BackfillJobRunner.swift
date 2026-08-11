@@ -2106,16 +2106,30 @@ actor BackfillJobRunner {
         /// prefix for this run. `nil` ⇒ nothing was successfully scanned.
         ///
         /// playhead-x0lb: a ``PlanListSeconds``. It is contiguity over the list
-        /// `coarsePassA` was handed, which is `narrowedForResume`'s output and
-        /// need not begin at 0. Publishing it as an episode cursor is
+        /// `coarsePassA` was handed, which is the output of BOTH narrowings —
+        /// ``narrowedForResume`` and then playhead-15d0's
+        /// ``narrowedForScreenedWindows(_:screenedRows:scanCohortJSON:jobPhase:)``
+        /// — and need not begin at 0. Publishing it as an episode cursor is
         /// playhead-5pyq and every such site now says so by name.
         let lastCoveredUpperBoundSec: PlanListSeconds?
         /// playhead-41mu (R2 review): where THIS RUN's plans actually began —
-        /// `inputs.segments.first?.startTime` AFTER `narrowedForResume` has
-        /// trimmed the already-covered prefix, which is the segment list
-        /// `coarsePassA` is handed and therefore the list `planPassA`
-        /// partitions. `nil` ⇒ the run planned nothing (the empty-segments
-        /// short-circuit).
+        /// `inputs.segments.first?.startTime` AFTER BOTH narrowings have run:
+        /// ``narrowedForResume`` trims the already-covered prefix, and then
+        /// playhead-15d0's
+        /// ``narrowedForScreenedWindows(_:screenedRows:scanCohortJSON:jobPhase:)``
+        /// drops what the durable screened rows already cover. That doubly
+        /// narrowed list is the one `coarsePassA` is handed and therefore the one
+        /// `planPassA` partitions. `nil` ⇒ the run planned nothing (the
+        /// empty-segments short-circuit).
+        ///
+        /// **Name both, and the reason is not tidiness.** The row-side narrowing
+        /// deletes segments ABOVE the cursor as well as below it, so this field's
+        /// first segment need not be the first segment above the prior cursor.
+        /// R3 review identified the older "the POST-`narrowedForResume` list"
+        /// wording as the reason the interaction between the two narrowings and
+        /// the head guard below went unexamined for two rounds: a reader who
+        /// believes only the cursor has trimmed the list will reason about a
+        /// prefix, and the list is no longer a prefix.
         ///
         /// It is carried here rather than recomputed by the caller because the
         /// caller holds the PRE-narrowing inputs, and the two differ by exactly
@@ -3100,6 +3114,240 @@ actor BackfillJobRunner {
     /// function is where a cursor's claim is CASHED — every segment ending at or
     /// below it is deleted from the attempt, so a bound that only ever spoke for
     /// a handed-over list deletes audio nobody read.
+    /// playhead-15d0: drop segments a DURABLE, REUSABLE coarse row already
+    /// screened, so a second background grant does not re-plan and re-infer
+    /// audio the first one banked.
+    ///
+    /// WHY THIS EXISTS, and it is not the same statement as
+    /// ``narrowedForResume``. That function cashes the CURSOR, which is the end
+    /// of the contiguous covered PREFIX — deliberately conservative, and
+    /// deliberately blind to every screened window above the first hole. The
+    /// rows themselves are not blind: `semantic_scan_results` records exactly
+    /// which windows were screened, and ``AnalysisStore/fetchCoverageSummariesByAssetIds(_:)``
+    /// already reads those same spans to decide whether the episode counts as
+    /// ad-scanned. Until this function existed the planner was the one reader
+    /// that did not consult them.
+    ///
+    /// **R2 review: it reads them under a WIDER predicate, and the earlier
+    /// wording here ("under this same predicate") was false.**
+    /// `AnalysisStore.readScannedRegions` filters on `scanPass`,
+    /// ``SemanticScanResult/didExamineWindow(status:errorContext:)`` and a
+    /// positive width — and nothing else. No cohort, no transcript version, no
+    /// phase. So the two readers genuinely disagree, and on the measured asset
+    /// they disagree completely: the coverage reader credits all ten of
+    /// 66D32039's `passA` rows and reports the episode ad-scanned, while this
+    /// function qualifies **zero** of them. Both quantities name "audio we
+    /// screened". The direction here is the safe one — under-claiming costs one
+    /// repeated FM call, over-claiming strands audio — but do not describe the
+    /// predicates as shared. The store side is filed as playhead-7cjo.
+    ///
+    /// **The measurement that produced it (2026-08-10 device pull,
+    /// `db-evening2`), and what it does NOT say.** Asset 66D32039 carries a
+    /// transcript spanning 0.78–1919.4 s and ten `passA` rows. Its
+    /// `progressCursor` reads **194.46**, two windows into the four its first
+    /// attempt banked. Narrowing by that cursor alone hands `planPassA`
+    /// 1,724.94 s of the 1,918.62 s transcript (89.9 %), and the rows above the
+    /// cursor cover 1,721.28 s of it — **99.8 %**. `planPassA` then spends one
+    /// `tokenCount` XPC round trip per candidate window over that, all of them
+    /// before the first `respond` and therefore before playhead-26od's
+    /// `onWindowsBanked` can make anything durable. On that pull the job died
+    /// there twice with `metadataStall-refused(peers=0)` — ``FMInferenceDeadline/metadata``
+    /// (30 s) is longer, on its own, than six of the eight background windows
+    /// iOS granted that evening (19, 35, 22, 26, 25, 13, 13, 13 s).
+    ///
+    /// **99.8 % is what this function WOULD have saved had the versions
+    /// matched. On that asset it saves ZERO, and R1 was right to correct it.**
+    /// R2 recomputed the current `transcriptVersion` from the persisted chunks
+    /// exactly as `runBackfill` does (canonicalize → `canonicalTimeOrder` →
+    /// ``TranscriptAtomizer/transcriptVersionHash(chunks:)``) and reproduced
+    /// `backfill_jobs.attemptTranscriptVersion` byte-for-byte on two of the
+    /// three jobs in that pull. 66D32039 currently hashes to `9e574deb…`; its
+    /// ten rows carry `9afa5627…` (4) and `200ebdd5…` (6). Nothing qualifies,
+    /// so nothing is dropped. `9afa5627…` is byte-exact the hash of the 299
+    /// fast chunks ending at or below 300 s — the first attempt ran on a 300 s
+    /// transcript, the second on a longer one 20 s later, and the version has
+    /// moved again since.
+    ///
+    /// **What it is worth, measured on three pulls, and IT IS NOT INERT.**
+    /// Applying this exact predicate and merge rule to every coverage job:
+    ///
+    ///   * `db-evening2` + `db-vtjxverdict` (22 resumable jobs, 2026-08-06/10):
+    ///     three fire, nineteen drop nothing — 715.7 s of 60,594.2 s of
+    ///     above-cursor audio, **1.18 %**.
+    ///   * `db-overnight5` (5 jobs; virgin install, run overnight, pulled
+    ///     2026-08-11): FOUR of five fire — 726.9 s of 6,472.1 s, **11.2 %**.
+    ///     Counting only the jobs that can still resume (two are terminally
+    ///     `failed`), 343.4 s of 4,747.2 s, **7.2 %**.
+    ///
+    /// The spread is not noise and it is the thing to understand before
+    /// quoting either number. **The yield is whatever the LAST attempt banked
+    /// after the transcript stopped moving, and nothing else.**
+    /// `transcriptVersion` is
+    /// ``TranscriptAtomizer/transcriptVersionHash(chunks:)`` — a SHA-256 over
+    /// the length-prefixed `normalizedText` of every canonical chunk — so it
+    /// is a per-EPISODE identity answering a per-WINDOW question, and ONE
+    /// appended chunk invalidates every row for that asset at once, including
+    /// rows over audio the append did not touch. A scan that races its own
+    /// transcription therefore banks its early windows under versions that are
+    /// dead before the next grant. On `db-overnight5` the two assets whose
+    /// transcript had settled before scanning match at 10/10 and 4/4; the three
+    /// that raced match at 7/18, 1/34 and 1/29.
+    ///
+    /// **R1's "self-priming" is CONFIRMED, and the qualifier is the point.**
+    /// 66D32039 had ZERO qualifying rows on `db-evening2` and has SEVEN on
+    /// `db-overnight5` — the priming completed. It bought nothing there only
+    /// because the job reached `failed` / `expiredWithoutProgress` first, which
+    /// is this bead's parent problem rather than this function's. Priming
+    /// completes when transcription does; it cannot complete before.
+    ///
+    /// Do not quote 99.8 % as this function's yield.
+    ///
+    /// **The rows do not merge into two spans.** The six above are
+    /// 0.78–115.26, 115.68–194.46, 195.66–276.18, 276.54–941.64, 943.32–1902.78
+    /// and 1903.2–1919.4, and the `<=` touch-or-overlap rule below bridges none
+    /// of the five gaps (0.42, 1.20, 0.36, 1.68, 0.42 s). Six merged spans
+    /// covering 1,914.54 of the transcript's 1,918.62 s extent, not two spans
+    /// covering all of it. The outcome is the same because no segment straddles
+    /// those pauses; the contiguity was overstated, not the arithmetic. And the
+    /// 194.46 cursor is NOT "the walk stopping at a 1.2 s pause in speech":
+    /// ``coarseCoverageWalk(plans:windows:failedWindows:unpersistedWindows:)``
+    /// never looks at time adjacency at all — it stops at the first plan that
+    /// was not fully covered, capped at the earliest uncovered plan's start.
+    /// (R3 review corrected the citation:
+    /// ``coarseCheckpointWalk(banked:durableWindowCount:)`` is the mid-flight
+    /// wrapper that splits a banked snapshot into a durable prefix and an
+    /// unpersisted tail; the walk itself is the function above.)
+    ///
+    /// **THE PREDICATE IS BORROWED, NOT INVENTED.** A row licenses a drop only
+    /// when it is
+    ///
+    ///   * `scanPass == `` ``SemanticScanResult/presenceScanPass`` — screening is
+    ///     what passA does; passB is asked WHERE the edges are inside a window
+    ///     passA already called `containsAd`, so a passB row is not evidence
+    ///     that its span was screened for PRESENCE;
+    ///   * ``SemanticScanResult/didExamineWindow`` — playhead-pz32's single
+    ///     definition of "we looked", which excludes refusals, guardrails,
+    ///     cancellations and the no-work sentinel; and
+    ///   * ``SemanticScanResult/isReusable(scanCohortJSON:transcriptVersion:)``
+    ///     — the scan cohort and the transcript version both match, so a grown
+    ///     transcript (which re-segments, and which this device does
+    ///     continuously) inherits no credit from the old windowing.
+    ///
+    /// Each of those calls an EXISTING definition rather than re-deriving it,
+    /// which is the point: re-deriving would be the standing defect class — a
+    /// value that names one thing read as though it named another. What is NOT
+    /// true, and was asserted here before R2, is that some other reader already
+    /// applies all three. `readScannedRegions` applies one (`didExamineWindow`);
+    /// this is the only reader in the tree that requires reusability as well,
+    /// and the `jobPhase` clause below has no counterpart anywhere.
+    ///
+    /// **A SEGMENT MUST BE FULLY INSIDE ONE MERGED SCREENED SPAN.** Spans are
+    /// merged only where they OVERLAP OR TOUCH; a gap between two rows is never
+    /// bridged, however narrow, because bridging would claim audio nobody read.
+    /// A segment straddling a boundary is kept. Both directions of the
+    /// asymmetry are deliberate: keeping a screened segment costs one repeated
+    /// FM call, dropping an unscreened one strands that audio for the life of
+    /// the asset (playhead-pmp9's hole, entered through a different door).
+    ///
+    /// Returns `inputs` unchanged when nothing is dropped, so a first run is
+    /// byte-identical to the pre-15d0 path.
+    nonisolated static func narrowedForScreenedWindows(
+        _ inputs: AssetInputs,
+        screenedRows: [SemanticScanResult],
+        scanCohortJSON: String,
+        jobPhase: BackfillJobPhase
+    ) -> AssetInputs {
+        let spans = screenedSpans(
+            rows: screenedRows,
+            scanCohortJSON: scanCohortJSON,
+            transcriptVersion: inputs.transcriptVersion,
+            jobPhase: jobPhase
+        )
+        guard !spans.isEmpty else { return inputs }
+        let remaining = inputs.segments.filter { segment in
+            !spans.contains { $0.start <= segment.startTime && segment.endTime <= $0.end }
+        }
+        guard remaining.count != inputs.segments.count else { return inputs }
+        return AssetInputs(
+            analysisAssetId: inputs.analysisAssetId,
+            podcastId: inputs.podcastId,
+            segments: remaining,
+            evidenceCatalog: inputs.evidenceCatalog,
+            transcriptVersion: inputs.transcriptVersion,
+            plannerContext: inputs.plannerContext,
+            acousticBreaks: inputs.acousticBreaks
+        )
+    }
+
+    /// playhead-15d0: the merged, disjoint spans that reusable coarse rows
+    /// prove were screened. Ascending, non-overlapping, never bridged across a
+    /// gap. Empty when no row qualifies.
+    ///
+    /// **A ROW ONLY SPEAKS FOR ITS OWN PHASE (R1 review).** `jobPhase` is not a
+    /// tidiness filter — it is the second half of the scoping the call site
+    /// starts, and without it the guard is one-directional. The call site
+    /// declines to narrow a TARGETED job by anyone's rows; this declines to
+    /// narrow ANY job by a targeted phase's rows, and that is the direction
+    /// that strands audio.
+    ///
+    /// The reason is that a phase's window bounds are only honest about the
+    /// segment list that phase was handed. `TargetedWindowNarrower.narrow`
+    /// returns the union of DISJOINT per-anchor intervals
+    /// (`narrowedResult` → `orderedSegments.filter { covered.contains(…) }`),
+    /// and `FoundationModelClassifier.planPassA` packs a window from a
+    /// contiguous slice of *that array* while stamping
+    /// `startTime = min(startTime)`, `endTime = max(endTime)` over the slice.
+    /// A window straddling two intervals therefore persists a span covering
+    /// every segment BETWEEN them — segments that were never in the prompt.
+    /// `.scanRandomAuditWindows` is the worst case: a sparse sample across the
+    /// whole episode, whose rows would license dropping nearly all of it.
+    ///
+    /// `.fullEpisodeScan` has no such gap, and that is a property of the
+    /// composition rather than luck: the only holes in ITS input list are the
+    /// ones ``narrowedForScreenedWindows`` and ``narrowedForResume`` punched,
+    /// and both punch exactly where a screened span already is. A straddling
+    /// window there over-claims only audio a previous window already claimed.
+    ///
+    /// Measured on the 2026-08-10 and 2026-08-06 device pulls: all 188 `passA`
+    /// rows across both carry `jobPhase = fullEpisodeScan`, so this clause
+    /// removes no benefit that exists today. It removes the one that does not.
+    nonisolated static func screenedSpans(
+        rows: [SemanticScanResult],
+        scanCohortJSON: String,
+        transcriptVersion: String,
+        jobPhase: BackfillJobPhase
+    ) -> [(start: Double, end: Double)] {
+        let qualifying = rows
+            .filter { row in
+                row.scanPass == SemanticScanResult.presenceScanPass
+                    && row.jobPhase == jobPhase.rawValue
+                    && row.didExamineWindow
+                    && row.isReusable(
+                        scanCohortJSON: scanCohortJSON,
+                        transcriptVersion: transcriptVersion
+                    )
+                    // A zero-width or inverted window proves nothing about any
+                    // audio, and the coverage reader drops it for the same
+                    // reason (`guard endTime > startTime`).
+                    && row.windowEndTime > row.windowStartTime
+                    && row.windowStartTime.isFinite
+                    && row.windowEndTime.isFinite
+            }
+            .map { (start: $0.windowStartTime, end: $0.windowEndTime) }
+            .sorted { $0.start < $1.start }
+        var merged: [(start: Double, end: Double)] = []
+        for span in qualifying {
+            // `<=` merges spans that TOUCH as well as overlap; anything wider
+            // than touching is a gap and stays a gap.
+            if let last = merged.last, span.start <= last.end {
+                merged[merged.count - 1].end = max(last.end, span.end)
+            } else {
+                merged.append(span)
+            }
+        }
+        return merged
+    }
+
     private static func narrowedForResume(_ inputs: AssetInputs, cursor: EpisodeSeconds?) -> AssetInputs {
         guard let cursor, cursor.rawValue > 0 else { return inputs }
         let remaining = inputs.segments.filter { $0.endTime > cursor.rawValue }
@@ -3130,7 +3378,80 @@ actor BackfillJobRunner {
         // playhead-pmp9: intra-episode RESUME — continue from the honest cursor
         // a prior deferred run left, instead of re-windowing the whole episode.
         // No-op (byte-identical) on a first run with no cursor.
-        let inputs = Self.narrowedForResume(rootInputs, cursor: job.progressCursor?.lastProcessedUpperBoundSec)
+        //
+        // playhead-15d0: and then drop what the durable ROWS already screened
+        // above that cursor. The two narrowings compose in this order because
+        // they answer different questions and the cursor's is the cheaper one:
+        // it needs no store read, and on a first run it leaves the list
+        // untouched so `screenedRows` is empty and the second narrowing is a
+        // no-op too. See ``narrowedForScreenedWindows`` for why the cursor
+        // alone leaves ~90 % of an already-screened episode in the planner's
+        // input on the measured device asset.
+        //
+        // A FAILED READ DROPS NOTHING. `screenedRows` falls back to `[]`, which
+        // means the pass re-screens audio it did not have to — the same cost
+        // this bead removes, and the only safe direction: the alternative is
+        // deleting a segment on the strength of evidence we could not load.
+        // THE COVERAGE LANE ONLY, and this is a correctness bound rather than a
+        // scope choice. `targetedWithAudit` enqueues THREE phases against ONE
+        // asset (`CoveragePlanner.plan(for:)`), each narrowed by
+        // `narrowedInputs` to its own subset, and those subsets may overlap.
+        // Asset-wide narrowing let the harvester phase's rows delete the
+        // likely-slot and RANDOM-AUDIT phases' windows — which is not a saving,
+        // it is a corrupted population: the audit phase exists to sample the
+        // episode and estimate what the other phases MISS, so an audit whose
+        // sample is filtered by what another phase happened to look at measures
+        // something else entirely.
+        //
+        // R2 review: that is not the only thing this guard stops, and the test
+        // named here before ("targeted phases persist distinct passA rows on
+        // narrowed subsets") does NOT catch its removal — R2 deleted this guard
+        // outright and the whole scoped gate stayed green, because that test
+        // only ever drives a FIRST run and the row-side clause in
+        // ``screenedSpans`` matches a phase's own rows perfectly. The case that
+        // loses audio is a targeted phase's RE-DRIVE reading the spans it
+        // itself banked, which over-claim across its disjoint per-anchor
+        // intervals exactly the way another phase's would. The rail is now
+        // `a targeted phase's re-drive is narrowed by nothing — not even its
+        // own rows`, which asserts over the submitted LINE REFS because the
+        // persisted rows dedupe and cannot see the difference.
+        //
+        // `.fullEpisodeScan` has no such sibling: it is the whole coverage lane,
+        // one phase, and its rows ARE the coverage numerator.
+        //
+        // R1 review: THE SAME SCOPING IS ALSO APPLIED ROW-SIDE, in
+        // ``screenedSpans``, and the two are not redundant. This guard says
+        // "a targeted job is narrowed by nothing"; the row-side one says "no
+        // job is narrowed by a TARGETED phase's rows". Only the second closes
+        // the direction that loses audio — a `.fullEpisodeScan` job reading the
+        // sparse-window spans a targeted phase persisted. See `screenedSpans`
+        // for why those spans over-claim.
+        let screenedRows: [SemanticScanResult]
+        if job.phase != .fullEpisodeScan {
+            screenedRows = []
+        } else {
+            do {
+                screenedRows = try await store.fetchSemanticScanResults(
+                    analysisAssetId: job.analysisAssetId,
+                    scanPass: SemanticScanResult.presenceScanPass
+                )
+            } catch {
+                logger.warning(
+                    """
+                    playhead-15d0: screened-window read failed for asset \
+                    \(job.analysisAssetId, privacy: .public); the pass will re-screen \
+                    covered audio: \(error.localizedDescription, privacy: .public)
+                    """
+                )
+                screenedRows = []
+            }
+        }
+        let inputs = Self.narrowedForScreenedWindows(
+            Self.narrowedForResume(rootInputs, cursor: job.progressCursor?.lastProcessedUpperBoundSec),
+            screenedRows: screenedRows,
+            scanCohortJSON: scanCohortJSON,
+            jobPhase: job.phase
+        )
         var scanResultIds: [String] = []
         var evidenceEventIds: [String] = []
         var detectedAdLineRefs = Set<Int>()
@@ -3854,9 +4175,13 @@ actor BackfillJobRunner {
         let coverageOutcome = CoverageOutcome(
             coarseIncompleteDeferReason: coarseIncompleteDeferReason,
             lastCoveredUpperBoundSec: coverageContiguousUpperBound,
-            // playhead-41mu (R2 review): `inputs` is the POST-`narrowedForResume`
-            // list — the same one handed to `coarsePassA` above and partitioned
-            // by `planPassA` — so this is literally where this run's plans begin.
+            // playhead-41mu (R2 review): `inputs` here is the POST-NARROWING
+            // list, and post BOTH narrowings — `narrowedForResume` and then
+            // playhead-15d0's `narrowedForScreenedWindows` — which is the same
+            // one handed to `coarsePassA` above and partitioned by `planPassA`,
+            // so this is literally where this run's plans begin. It is NOT
+            // "the first segment above the cursor": the row-side narrowing can
+            // delete segments above the cursor too.
             firstPlannedSegmentStartSec: inputs.segments.first.map { PlanListSeconds($0.startTime) }
         )
         // playhead-y3ya: semantic-sweep mark compose. Turn the `containsAd`
