@@ -146,7 +146,14 @@ struct AdWindowSkipConfidenceSplitV47MigrationTests {
         // Drift guard, pinned to the LITERAL head. Written as
         // `== AnalysisStore.currentSchemaVersion` it would pass for every
         // possible value and police nothing.
-        #expect(AnalysisStore.currentSchemaVersion == 48)
+        //
+        // 48 → 49 (playhead-mn5e/2qz6). Worth a second look here because V47
+        // was itself a REPAIR migration over `ad_windows.confidence`, and V49
+        // is another data-changing rung: it resets
+        // `podcast_profiles.observationCount` to 0. Different table, no
+        // overlap — V49 names neither `ad_windows` nor `decision_events`, so
+        // the repaired detection number this suite pins is not re-touched.
+        #expect(AnalysisStore.currentSchemaVersion == 49)
         #expect(try columnPresent(in: dir))
     }
 

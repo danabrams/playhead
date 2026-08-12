@@ -1835,7 +1835,7 @@ actor AnalysisStore {
     /// assertions automatically follow the production constant — hardcoding
     /// the integer in tests has been a recurring source of stale-assertion
     /// flakes whenever the schema bumps.
-    nonisolated static let currentSchemaVersion = 48
+    nonisolated static let currentSchemaVersion = 49
 
     /// H1: minimum age (in seconds) a `backfill_jobs` / `final_pass_jobs`
     /// row stuck in `status='running'` must reach before the launch-time
@@ -2699,6 +2699,10 @@ actor AnalysisStore {
             // phantom-slot instrumentation, so the fix can be validated on the
             // real audio a device pull can reach.
             try migrateRediffDayZeroByteDiagnosticsV48IfNeeded()
+            // playhead-mn5e/2qz6: `observationCount` starts counting EPISODES.
+            // RESETS every existing row to 0 — see the block comment on the
+            // migration for why reconstruction was rejected.
+            try migrateTrustEpisodeObservationsV49IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -3067,6 +3071,10 @@ actor AnalysisStore {
         // playhead-3zxd (v48): guarded on `tableExists`, so a seeded fixture
         // without `rediff_day_zero_attempts` still reaches v48.
         try migrateRediffDayZeroByteDiagnosticsV48IfNeeded()
+        // playhead-mn5e/2qz6 (v49): guarded on `tableExists` for the profile
+        // reset, so a seeded fixture without `podcast_profiles` still reaches
+        // v49.
+        try migrateTrustEpisodeObservationsV49IfNeeded()
     }
     #endif
 
@@ -7031,6 +7039,91 @@ actor AnalysisStore {
         try setSchemaVersion(48)
     }
 
+    // MARK: V49 — observationCount counts EPISODES (playhead-mn5e / 2qz6)
+    //
+    // THIS MIGRATION RESETS DATA, deliberately, and that is the part to read
+    // before changing it.
+    //
+    // `observationCount` counted completed backfills, roughly 9 per episode.
+    // From playhead-mn5e forward it counts EPISODES, deduped through the new
+    // `trust_episode_observations` claim table. Every row written by an older
+    // binary is therefore in the WRONG UNIT — 26 and 10 on the 2026-08-12
+    // device pull, for 4 episodes between them.
+    //
+    // WHY RESET RATHER THAN RECONSTRUCT. A faithful reconstruction would need
+    // to know which episodes contributed, and that fact was never recorded —
+    // it is precisely what this bead adds. Every reconstruction available
+    // (count distinct `ad_windows.analysisAssetId` joined through
+    // `backfill_jobs.podcastId`; parse the `::` show prefix out of
+    // `analysis_assets.episodeId`) is another proxy standing in for the fact,
+    // which is the shape of the original defect. Zero says "we do not know",
+    // which is true, and it is the CONSERVATIVE direction for a counter whose
+    // consumer decides whether the app may cut audio unasked.
+    //
+    // WHAT A FIELD DEVICE DOES ON UPGRADE: every profile's `observationCount`
+    // goes to 0. `mode`, `skipTrustScore` and `recentFalseSkipSignals` are NOT
+    // touched — a show demoted by user vetoes stays demoted, and no show
+    // changes mode as a result of this migration. A show then needs 3 real
+    // episodes to reach `manual`, which is what `TrustScoringConfig`'s
+    // `shadowToManualObservations` has always said and has never meant.
+    //
+    // R6: this used to add "and 8 to reach `auto`". There is no such rung any
+    // more — playhead-lqcp closed `manual` -> `auto` on this same branch, so
+    // `manualToAutoObservations` has no production reader and no number of
+    // episodes reaches `auto`. The conservative-direction argument above is
+    // unaffected (it is about `manual`), but the sentence promised a ladder
+    // whose top rung had already been removed.
+    //
+    // The OTHER readers of the column were handed the same inflated number and
+    // are corrected by the same reset. R3: there are FOUR, not the two an
+    // earlier draft of this comment named — and the count is worth getting
+    // right here, because "how many things read this quantity, and as what?"
+    // is the question the whole bead exists to have asked.
+    //
+    //   * `ShowLocalPriorsBuilder` -> `ShowLocalPriors.episodeCount`, which
+    //     `PriorHierarchyResolver` gates at >= 5. At 0 the show-local tier is
+    //     simply not activated and the resolver falls back to the broader tier.
+    //   * `NetworkPriors.decayedWeight(episodesObserved:)`. At 0 the NETWORK
+    //     prior carries its full 0.5 weight instead of a decayed one — again
+    //     the broader tier, which is the right reading of "this show has no
+    //     maturity of its own yet".
+    //   * `ClassifierService.showPriors` -> `ShowPriors.trustWeight`, which is
+    //     `min(observationCount / 20, 1)`. This is the reader the reset moves
+    //     FURTHEST and it does not fall back to anything — the show's own
+    //     priors are simply weighted at 0 until it matures. Note what that
+    //     means: under the per-backfill unit it saturated after ~2 episodes,
+    //     so "saturating around 20" (its own comment) had never once been
+    //     true. Twenty REAL episodes is slower, and finally honest.
+    //   * `DetectorTrustLedger.seed` copies it into a per-class entry, so a
+    //     class with no materialized entry seeds at 0 and must earn its own
+    //     three observations before it can leave shadow.
+    //
+    // All four under-credit maturity at 0, which is the conservative direction
+    // for every one of them.
+
+    /// V49 migration — the episode-observation claim table, plus the reset of
+    /// every `observationCount` written in the old (per-backfill) unit.
+    /// Idempotent: `CREATE TABLE IF NOT EXISTS`, and the UPDATE is guarded by
+    /// the version ladder so it cannot run twice.
+    private func migrateTrustEpisodeObservationsV49IfNeeded() throws {
+        let observed = (try schemaVersion() ?? 1)
+        guard observed < 49 else { return }
+        // DO NOT STEP OVER A ROLLED-BACK V39 — same rationale as V40–V48.
+        guard observed >= 48 else { return }
+        try exec("""
+            CREATE TABLE IF NOT EXISTS trust_episode_observations (
+                podcastId       TEXT NOT NULL,
+                analysisAssetId TEXT NOT NULL,
+                recordedAt      REAL NOT NULL DEFAULT (strftime('%s', 'now')),
+                PRIMARY KEY (podcastId, analysisAssetId)
+            )
+            """)
+        if try tableExists("podcast_profiles") {
+            try exec("UPDATE podcast_profiles SET observationCount = 0")
+        }
+        try setSchemaVersion(49)
+    }
+
     /// playhead-kg8h: durably CLAIM one REQUESTED day-0 kickoff, before any of
     /// the work it stands for has run.
     ///
@@ -9218,6 +9311,63 @@ actor AnalysisStore {
                 recentFalseSkipSignals      INTEGER NOT NULL DEFAULT 0,
                 traitProfileJSON            TEXT,
                 title                       TEXT
+            )
+            """)
+
+        // trust_episode_observations (playhead-mn5e / playhead-2qz6)
+        //
+        // ONE ROW PER ANALYSIS ASSET THAT HAS CONTRIBUTED A TRUST OBSERVATION,
+        // and the reason it is a table rather than a flag derived from
+        // something already persisted.
+        //
+        // **THE KEY IS THE ASSET, NOT THE EPISODE, AND THE TWO ARE NOT THE
+        // SAME THING (playhead-89x6).** `analysis_assets.id` is a fresh UUID,
+        // never derived from `episodeId`, and V39's uniqueness index is on
+        // `(episodeId, assetFingerprint)` — its own doc explicitly declines to
+        // make `episodeId` unique, because two rows for one episode under
+        // different fingerprints are legitimate. So one episode can hold two
+        // assets and contribute two observations: by design on a feed
+        // correction or re-download (`AnalysisWorkScheduler.resolveAnalysisAssetId`
+        // deliberately mints a second permanent row), and by race while
+        // `AnalysisCoordinator.resolveSession` still does check-then-insert
+        // instead of `insertAssetIfEpisodeHasNone`.
+        //
+        // That is a bounded residual, not the thing this table fixes. The
+        // defect being closed is ~9 observations per episode from repeated
+        // backfills of ONE asset, which the key does dedupe completely; what is
+        // left is at most 2 on the episodes that hit those two paths. Do not
+        // read "episode" in the name as a guarantee — it names the intent, and
+        // 89x6 is the bead that would make it true.
+        //
+        // `podcast_profiles.observationCount` was incremented once per
+        // completed `runBackfill`, and a single episode is backfilled many
+        // times (hot path, final pass, re-drives). Measured on the 2026-08-12
+        // device pull: 36 observations across 4 assets — ~9x. Every consumer
+        // reads it as episodes, in so many words: `ShowLocalPriorsBuilder`
+        // calls it "number of episodes processed", `NetworkPriors.decayedWeight`
+        // names its parameter `episodesObserved`, and `TrustScoringConfig`
+        // spells its thresholds `shadowToManualObservations`. The standing
+        // defect class, three times over.
+        //
+        // WHY NOT DERIVE IT. Everything already persisted that looks like the
+        // answer is a PROXY, and a proxy that drifted is how this happened:
+        //   * `analysis_assets.confirmedAdCoverageEndTime` says how far
+        //     confirmation reached, not that an observation was counted.
+        //   * `analysis_assets.analysisState` is a lifecycle, not a ledger.
+        //   * `analysis_assets.episodeId` embeds the show as a `::` prefix, so
+        //     counting by it means parsing an identifier for a fact it was
+        //     never promised to carry.
+        //   * `podcast_planner_state.observedEpisodeCount` has the SAME bug
+        //     (21 and 6 for the same ~4 episodes on that pull).
+        // So the fact is recorded as itself. The PRIMARY KEY *is* the dedupe
+        // key, which is what makes `INSERT … DO NOTHING` a claim rather than a
+        // check-then-write with a race in the middle.
+        try exec("""
+            CREATE TABLE IF NOT EXISTS trust_episode_observations (
+                podcastId       TEXT NOT NULL,
+                analysisAssetId TEXT NOT NULL,
+                recordedAt      REAL NOT NULL DEFAULT (strftime('%s', 'now')),
+                PRIMARY KEY (podcastId, analysisAssetId)
             )
             """)
 
@@ -13885,6 +14035,82 @@ actor AnalysisStore {
     // (`insertSkipCue`, `insertSkipCues`, `fetchSkipCues`,
     // `markSkipCueSkipped`, `markSkipCueDismissed`, `readSkipCue`)
     // were deleted along with the table.
+
+    // MARK: - CRUD: trust_episode_observations (playhead-mn5e / 2qz6)
+
+    /// Durably CLAIM one episode's trust observation for one show.
+    ///
+    /// Returns `true` exactly once per `(podcastId, analysisAssetId)` pair, for
+    /// the caller that got there first; every later call for the same pair
+    /// returns `false`. That is what stops `observationCount` counting
+    /// BACKFILLS: a single asset is backfilled many times — hot path, final
+    /// pass, a re-drive, a transcript-version bump, playhead-15d0's resume —
+    /// and only the first of those may move the trust ladder.
+    ///
+    /// **It dedupes the ASSET, which is not quite the episode (playhead-89x6).**
+    /// One episode can hold two `analysis_assets` rows, so it can claim twice.
+    /// See the table's own comment in `createTables` for the two paths and for
+    /// why that residual is bounded at 2 against the ~9 this closes.
+    ///
+    /// **BOTH WRITERS CLAIM HERE, and that is the point (playhead-fh5v).** The
+    /// backfill (`AdDetectionService.recordConfirmedWindowObservation`) and the
+    /// banner Yes (`TrustScoringService.recordCorrectObservation`) share this
+    /// one key, so whichever arrives first counts the episode and the other
+    /// does not count it again. A second incrementer with its own private
+    /// notion of "an observation" is what made the counter unauditable before.
+    ///
+    /// **The claim and the test are ONE statement.** `INSERT … ON CONFLICT DO
+    /// NOTHING` plus `sqlite3_changes` cannot interleave the way a
+    /// `SELECT`-then-`INSERT` pair can, so two concurrent backfills of the same
+    /// asset cannot both read "not yet claimed" and both count. The row is the
+    /// claim; there is no separate flag that could disagree with it.
+    ///
+    /// **The claim is taken only when the observation is actually recorded.**
+    /// The caller claims immediately before calling
+    /// `TrustScoringService.recordSuccessfulObservation`, so a backfill that
+    /// cannot record (no trust service installed) leaves the episode STILL
+    /// CLAIMABLE and a later backfill of it counts normally. A claim that
+    /// stood for an observation nobody made would silently cost the show an
+    /// episode of credit, permanently.
+    ///
+    /// The pair is keyed on the SHOW as well as the asset, so an asset that
+    /// legitimately belongs to a different show (a re-subscribed feed under a
+    /// new URL) is a distinct claim rather than a suppressed one.
+    func claimEpisodeTrustObservation(
+        podcastId: String,
+        analysisAssetId: String
+    ) throws -> Bool {
+        guard !podcastId.isEmpty, !analysisAssetId.isEmpty else { return false }
+        let stmt = try prepare("""
+            INSERT INTO trust_episode_observations (podcastId, analysisAssetId)
+            VALUES (?, ?)
+            ON CONFLICT (podcastId, analysisAssetId) DO NOTHING
+        """)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, podcastId)
+        bind(stmt, 2, analysisAssetId)
+        try step(stmt, expecting: SQLITE_DONE)
+        return sqlite3_changes(db) > 0
+    }
+
+    /// How many distinct episodes have contributed a trust observation to this
+    /// show. Diagnostic / test seam: `podcast_profiles.observationCount` is the
+    /// value the ladder reads, and this is the independent count it must agree
+    /// with. Two numbers that are supposed to be equal, so a drift is
+    /// observable rather than inferred.
+    func episodeTrustObservationCount(podcastId: String) throws -> Int {
+        let stmt = try prepare("""
+            SELECT COUNT(*) FROM trust_episode_observations WHERE podcastId = ?
+        """)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, podcastId)
+        guard try nextRow(stmt) else {
+            throw AnalysisStoreError.queryFailed(
+                "episode trust-observation count returned no row"
+            )
+        }
+        return Int(sqlite3_column_int64(stmt, 0))
+    }
 
     // MARK: - CRUD: podcast_profiles
 

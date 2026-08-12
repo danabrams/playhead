@@ -185,6 +185,68 @@ struct DetectorTrustLedger: Codable, Sendable, Equatable {
         )
     }
 
+    // MARK: Restoration (playhead-u0vv)
+
+    /// The mode a class holds once a decay has DISCHARGED the last of the veto
+    /// evidence against it.
+    ///
+    /// Dan's ruling, recorded on playhead-mn5e: *"Rediff is incredibly high
+    /// confidence, it should always be auto. But other evidence isn't as
+    /// strong."* `showIndependentSeedMode` implements the first half, but as a
+    /// SEED it stopped applying at the listener's first gesture of any kind —
+    /// an attributed veto materializes every class's entry, and from then on
+    /// the stored entry wins over the seed forever. Two vetoes then demoted the
+    /// class to `manual` and playhead-lqcp had removed the only route back, so
+    /// the exemption survived exactly until it was first tested.
+    ///
+    /// **This is a RESTORATION, and the three guards below are what keep it
+    /// from being a promotion.** Read them in order; each one is somewhere a
+    /// promotion would have said yes.
+    ///
+    ///  1. **The discharge must be a DECAY, not a state.** `weightBefore > 0`
+    ///     — a weight that was already zero has not *decayed* to zero, and the
+    ///     difference is load-bearing rather than pedantic:
+    ///     `setUserOverride` writes every entry at weight 0 with an explicitly
+    ///     chosen mode, so a state-based rule would let the next banner Yes
+    ///     silently overwrite a live user instruction with the seed. It also
+    ///     means the only gesture that can restore anything is a USER's, so a
+    ///     detector can never restore itself on its own output.
+    ///
+    ///     **R6, having enumerated them: TWO writers lower a
+    ///     `falseSkipWeight`, not one.** `applyCorrectObservation` decays it by
+    ///     a unit (the banner Yes) and `setUserOverride` zeroes every entry.
+    ///     Only the first calls this function — that, not "sole decayer", is
+    ///     what makes a restoration a listener's gesture. The second's zeroing
+    ///     is exactly what this guard reads as "nothing was owed". The residual
+    ///     — an override whose weight is later RECHARGED by a veto and then
+    ///     discharged — is playhead-cc3l, and it is why this guard on its own
+    ///     cannot be the whole answer.
+    ///  2. **Somebody other than this show must have set the mode.**
+    ///     `authority` is `SkipDetectorClass.modeAuthority`, `nil` for every
+    ///     class whose eligibility the show's history genuinely governs. A
+    ///     show-governed class returns `currentMode` unchanged.
+    ///  3. **The mode is the AUTHORITY's, never this function's.** It is read
+    ///     off `DetectorModeAuthority.declaredMode`; nothing here can name a
+    ///     mode of its own, so a class can only ever return to what some other
+    ///     authority already granted it.
+    ///
+    /// What this deliberately does NOT do is touch `trustScore`,
+    /// `observationCount` or `falseSkipWeight` — it returns a MODE. The caller
+    /// keeps the quantities the class actually earned, so a restored class
+    /// carries its real record and a subsequent veto demotes it again on the
+    /// ordinary `evaluateDemotion` arithmetic. Restoration is a return trip,
+    /// not immunity.
+    static func restoredMode(
+        under authority: DetectorModeAuthority?,
+        currentMode: SkipMode,
+        weightBefore: Double,
+        weightAfter: Double
+    ) -> SkipMode {
+        guard weightBefore > 0, weightAfter <= 0 else { return currentMode }
+        guard let authority else { return currentMode }
+        return authority.declaredMode
+    }
+
     // MARK: Writes
 
     /// Replace one class's entry, leaving every other key — including keys this

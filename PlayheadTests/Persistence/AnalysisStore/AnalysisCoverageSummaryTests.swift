@@ -1643,10 +1643,16 @@ struct FastTranscriptCoverageV37MigrationTests {
     func freshDbReachesV37() async throws {
         let (store, _) = try await makeTestStoreWithDirectory()
         #expect(try await store.schemaVersion() == AnalysisStore.currentSchemaVersion)
-        // Drift guard, pinned to the LITERAL head (45 → 46, playhead-3oyz's
-        // additive day-0 retry-claim columns). Never `== currentSchemaVersion`:
-        // that passes for every value and stops policing anything.
-        #expect(AnalysisStore.currentSchemaVersion == 48)
+        // Drift guard, pinned to the LITERAL head (48 → 49, playhead-mn5e/2qz6's
+        // `trust_episode_observations` ledger + the `observationCount` reset).
+        // Never `== currentSchemaVersion`: that passes for every value and stops
+        // policing anything.
+        //
+        // Read for THIS suite: the V37 watermark reconciliation this file
+        // exercises derives `fastTranscriptCoverageEndTime` from
+        // `transcript_chunks`. V49 writes only `podcast_profiles` and a new
+        // table, so it cannot move a coverage watermark in either direction.
+        #expect(AnalysisStore.currentSchemaVersion == 49)
     }
 
     /// THE MIGRATION EVIDENCE. An asset already on disk — written by a

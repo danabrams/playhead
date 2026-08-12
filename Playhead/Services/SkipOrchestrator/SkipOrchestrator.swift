@@ -346,8 +346,11 @@ actor SkipOrchestrator {
     /// playhead-gard: test override for the per-detector CORRECT-observation
     /// write — the escape from `manual`. Production leaves this nil and uses
     /// `trustService`.
+    /// R3: carries `analysisAssetId` as its second argument. Without it the
+    /// seam could not observe the id production passes, and that argument had
+    /// no coverage at its only call site.
     private var correctObservationHandlerForTesting:
-        (@Sendable (String, SkipDetectorClass) async -> Void)?
+        (@Sendable (String, String, SkipDetectorClass) async -> Void)?
     private var feedbackPersistenceBarrierForTesting:
         (@Sendable () async -> Void)?
     /// Test-only suspension point for the fire-and-forget durable applied
@@ -988,7 +991,7 @@ actor SkipOrchestrator {
     }
 
     func _setCorrectObservationHandlerForTesting(
-        _ handler: (@Sendable (String, SkipDetectorClass) async -> Void)?
+        _ handler: (@Sendable (String, String, SkipDetectorClass) async -> Void)?
     ) {
         correctObservationHandlerForTesting = handler
     }
@@ -5916,16 +5919,36 @@ actor SkipOrchestrator {
             // `.userAsserted`, which is what the promoted row's `boundaryState`
             // now says. `suggested` is the pre-promotion row and still carries
             // the producer's own provenance.
+            // playhead-fh5v: the episode this tap is about. `observationCount`
+            // counts EPISODES through `trust_episode_observations`, so the
+            // recorder needs the asset identity to claim against — without
+            // it, four Yes taps in one episode bought four episodes of
+            // credit and wrote no ledger row to disagree with. `assetId` is
+            // `suggested.analysisAssetId`, captured above with the rest of
+            // the source material so a `beginEpisode` during the awaits
+            // cannot re-point it at a different episode.
+            //
+            // R3: HOISTED ABOVE THE TEST SEAM DELIBERATELY. It used to be
+            // declared inside the `trustService` branch, so the handler branch
+            // — the only one any test exercises — never saw it, and replacing
+            // this value with `""` passed the entire suite. An empty id is not
+            // a harmless default: `claimEpisodeTrustObservation` refuses it, so
+            // `countsAsEpisode` would be false forever and a banner Yes could
+            // never be the first witness for an episode, which is the whole
+            // point of sharing the claim. Both branches now read ONE local, so
+            // a test that asserts the seam's id pins production's.
+            let observedAssetId = assetId
             if let handler = correctObservationHandlerForTesting {
                 let detector = detectorClass(for: suggested)
                 Task {
-                    await handler(podcastId, detector)
+                    await handler(podcastId, observedAssetId, detector)
                 }
             } else if let trustService {
                 let detector = detectorClass(for: suggested)
                 Task {
                     await trustService.recordCorrectObservation(
                         podcastId: podcastId,
+                        analysisAssetId: observedAssetId,
                         detector: detector
                     )
                 }

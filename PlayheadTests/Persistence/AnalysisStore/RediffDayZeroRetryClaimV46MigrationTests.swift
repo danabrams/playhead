@@ -104,7 +104,13 @@ struct RediffDayZeroRetryClaimV46MigrationTests {
         // next has to come here and read this rung. Written as
         // `== AnalysisStore.currentSchemaVersion` it would pass for every
         // possible value and police nothing.
-        #expect(AnalysisStore.currentSchemaVersion == 48)
+        //
+        // 48 → 49 read for this rung (playhead-mn5e/2qz6): V49 adds
+        // `trust_episode_observations` and resets
+        // `podcast_profiles.observationCount`. `rediff_day_zero_attempts` and
+        // its retry-claim pair are not referenced by either statement, so the
+        // column probe below is unaffected.
+        #expect(AnalysisStore.currentSchemaVersion == 49)
         #expect(try columnsPresent(in: dir))
     }
 

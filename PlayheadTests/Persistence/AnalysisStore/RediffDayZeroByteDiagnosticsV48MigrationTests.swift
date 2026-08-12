@@ -103,7 +103,14 @@ struct RediffDayZeroByteDiagnosticsV48MigrationTests {
         #expect(try await store.schemaVersion() == AnalysisStore.currentSchemaVersion)
         // Drift guard, pinned to the LITERAL head, so whoever bumps the schema
         // next has to come here and read this rung.
-        #expect(AnalysisStore.currentSchemaVersion == 48)
+        //
+        // 48 → 49 (playhead-mn5e/2qz6). This suite is the rung DIRECTLY below
+        // the new one, so it is the one that would notice first if V49 had been
+        // spliced in ahead of V48 rather than after it: the seeded-v47 test
+        // below climbs 47 → 48 → 49, and V49's `guard observed >= 48` means it
+        // can only land once V48 has set the version. The six byte-diagnostics
+        // columns live on `rediff_day_zero_attempts`, which V49 never names.
+        #expect(AnalysisStore.currentSchemaVersion == 49)
         #expect(try columnsPresent(in: dir))
     }
 

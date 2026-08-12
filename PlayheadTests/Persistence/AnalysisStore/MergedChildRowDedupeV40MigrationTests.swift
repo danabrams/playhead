@@ -536,8 +536,14 @@ struct MergedChildRowDedupeV40MigrationTests {
         try await store.migrate()
 
         #expect(try await store.schemaVersion() == AnalysisStore.currentSchemaVersion)
-        // 46 = V46, the playhead-3oyz day-0 retry-claim columns.
-        #expect(AnalysisStore.currentSchemaVersion == 48)
+        // 48 -> 49: playhead-mn5e/2qz6's `trust_episode_observations` ledger,
+        // plus a RESET of every `podcast_profiles.observationCount`. Read
+        // deliberately for this rung: what this test proves is that a v39 seed
+        // climbs the WHOLE remaining ladder and that V40's dedupe left exactly
+        // one `transcript_chunks` row. V49 creates a table and writes only to
+        // `podcast_profiles`, which this fixture never populates — so the
+        // dedupe assertion below is unchanged by it.
+        #expect(AnalysisStore.currentSchemaVersion == 49)
 
         let db = try openRaw(dir)
         defer { sqlite3_close_v2(db) }

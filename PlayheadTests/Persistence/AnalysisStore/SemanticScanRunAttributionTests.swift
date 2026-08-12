@@ -159,10 +159,17 @@ struct SemanticScanRunAttributionTests {
         let (store, dir) = try await makeTestStoreWithDirectory()
 
         #expect(try await store.schemaVersion() == AnalysisStore.currentSchemaVersion)
-        // Drift guard, pinned to the LITERAL head (45 → 46, playhead-3oyz's
-        // additive day-0 retry-claim columns). Never `== currentSchemaVersion`:
-        // that passes for every value and stops policing anything.
-        #expect(AnalysisStore.currentSchemaVersion == 48)
+        // Drift guard, pinned to the LITERAL head (48 → 49, playhead-mn5e/2qz6's
+        // `trust_episode_observations` ledger + the `observationCount` reset).
+        // Never `== currentSchemaVersion`: that passes for every value and stops
+        // policing anything.
+        //
+        // Read against THIS suite's real claim — "nothing is invented for a row
+        // that never had one". V49's only data statement is
+        // `UPDATE podcast_profiles SET observationCount = 0`; it writes no
+        // `semantic_scan_results` column and back-fills nothing, so the
+        // no-backfill proof below still has something to prove.
+        #expect(AnalysisStore.currentSchemaVersion == 49)
         for column in ["createdAt", "scenePhase", "runCorrelationId"] {
             #expect(
                 try probeColumnExists(in: dir, table: "semantic_scan_results", column: column),

@@ -944,7 +944,8 @@ struct TrustScoringTests {
         let store = try await makeTestStore()
         let trust = TrustScoringService(store: store)
         await trust.recordSuccessfulObservation(
-            podcastId: "show-1", averageConfidence: 0.60
+            podcastId: "show-1", averageConfidence: 0.60,
+            detectors: []
         )
         let mode = await trust.effectiveMode(podcastId: "show-1")
         #expect(mode == .shadow,
@@ -956,7 +957,8 @@ struct TrustScoringTests {
         let store = try await makeTestStore()
         let trust = TrustScoringService(store: store)
         await trust.recordSuccessfulObservation(
-            podcastId: "show-2", averageConfidence: 0.95
+            podcastId: "show-2", averageConfidence: 0.95,
+            detectors: []
         )
         let mode = await trust.effectiveMode(podcastId: "show-2")
         #expect(mode == .manual,
@@ -982,27 +984,30 @@ struct TrustScoringTests {
 
         // First observation creates the profile at 0.2 trust.
         await trust.recordSuccessfulObservation(
-            podcastId: "show-3", averageConfidence: 0.50
+            podcastId: "show-3", averageConfidence: 0.50,
+            detectors: []
         )
         #expect(await trust.effectiveMode(podcastId: "show-3") == .shadow)
 
         // Second observation: trust = 0.3.
         await trust.recordSuccessfulObservation(
-            podcastId: "show-3", averageConfidence: 0.50
+            podcastId: "show-3", averageConfidence: 0.50,
+            detectors: []
         )
         #expect(await trust.effectiveMode(podcastId: "show-3") == .shadow)
 
         // Third observation: trust = 0.4, obs = 3 -> promote to manual.
         await trust.recordSuccessfulObservation(
-            podcastId: "show-3", averageConfidence: 0.50
+            podcastId: "show-3", averageConfidence: 0.50,
+            detectors: []
         )
         let mode = await trust.effectiveMode(podcastId: "show-3")
         #expect(mode == .manual,
                 "3 observations at trust 0.4 should promote to manual")
     }
 
-    @Test("Promotion manual -> auto after many observations with high trust")
-    func manualToAuto() async throws {
+    @Test("playhead-lqcp: many observations with high trust stop at manual")
+    func manualToAutoIsClosed() async throws {
         let store = try await makeTestStore()
         // Pre-seed a profile in manual mode with trust near auto threshold.
         let profile = makePodcastProfile(
@@ -1013,13 +1018,20 @@ struct TrustScoringTests {
         let config = TrustScoringConfig.default
         let trust = TrustScoringService(store: store, config: config)
 
-        // Next observation bumps trust to 0.77 and obs to 8.
+        // Next observation bumps trust to 0.77 and obs to 8 — every legacy
+        // clause of the auto rung. The rung is closed: auto cuts audio with no
+        // gesture, and Dan's ruling makes that conditional on a HIGH-CONFIDENCE
+        // quantity that does not exist yet (`AutoPromotionConfidenceEvidence`).
         await trust.recordSuccessfulObservation(
-            podcastId: "podcast-1", averageConfidence: 0.80
+            podcastId: "podcast-1", averageConfidence: 0.80,
+            detectors: []
         )
         let mode = await trust.effectiveMode(podcastId: "podcast-1")
-        #expect(mode == .auto,
-                "8 observations at 0.77 trust should promote to auto")
+        #expect(mode == .manual,
+                "8 observations at 0.77 trust must NOT self-promote to auto; got \(String(describing: mode))")
+        // Non-vacuous: the observation itself was recorded.
+        let after = try #require(await store.fetchProfile(podcastId: "podcast-1"))
+        #expect(after.observationCount == 8)
     }
 
     @Test("Demotion auto -> manual on false signals")

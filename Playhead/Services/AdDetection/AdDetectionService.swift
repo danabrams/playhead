@@ -6841,6 +6841,17 @@ actor AdDetectionService {
         if podcastId.isEmpty {
             logger.info("Backfill: skipping priors update — missing podcastId for asset \(analysisAssetId)")
         } else {
+            // playhead-mn5e: the production caller `recordSuccessfulObservation`
+            // never had. Ordered BEFORE `updatePriors` deliberately — see
+            // `recordConfirmedWindowObservation` for why. It is one of the two
+            // writers of `observationCount` (the other is the banner Yes), and
+            // both claim the same episode row so the column counts EPISODES
+            // rather than backfills or taps (playhead-2qz6 / playhead-fh5v).
+            await recordConfirmedWindowObservation(
+                podcastId: podcastId,
+                analysisAssetId: analysisAssetId,
+                confirmedWindows: nonSuppressedWindows
+            )
             try await updatePriors(
                 podcastId: podcastId,
                 nonSuppressedWindows: nonSuppressedWindows,
@@ -12873,6 +12884,14 @@ actor AdDetectionService {
     /// no-signal neutral defaults and never exercise the real producer
     /// math). No defaults — callers without a real signal pass `[]`
     /// explicitly so the choice is visible at the call site.
+    ///
+    /// playhead-mn5e/2qz6: this shim drives the PRIORS MERGE only. It does not
+    /// move `observationCount`. Exactly two things do — this file's
+    /// `recordConfirmedWindowObservation` (reachable end-to-end through
+    /// `runBackfill`) and `TrustScoringService.recordCorrectObservation` (the
+    /// banner Yes) — and playhead-fh5v put BOTH behind the same
+    /// `trust_episode_observations` claim, so they cannot double-count one
+    /// episode between them.
     func updatePriorsForTesting(
         podcastId: String,
         nonSuppressedWindows: [AdWindow],
@@ -12889,6 +12908,157 @@ actor AdDetectionService {
         )
     }
     #endif
+
+    // MARK: - Trust Observation (playhead-mn5e)
+
+    /// Record this backfill's ad windows as a trust observation, running the
+    /// promotion ladder. **This is the production caller
+    /// `TrustScoringService.recordSuccessfulObservation` never had.**
+    ///
+    /// **It is one of the two writers of `observationCount`, and both go
+    /// through the same claim** (playhead-2qz6 / playhead-fh5v). The other is
+    /// `TrustScoringService.recordCorrectObservation`, the banner Yes — a
+    /// stronger witness than this one, so it is allowed to be the FIRST to
+    /// claim an episode, and it counts nothing on an episode already claimed
+    /// here. Before this, the counter was incremented once per
+    /// completed backfill and an episode is backfilled ~9 times — measured 36
+    /// observations across 4 assets on the 2026-08-12 device pull — so
+    /// `shadowToManualObservations: 3` meant "a third of one episode". Every
+    /// consumer already reads the column as episodes in so many words:
+    /// `ShowLocalPriorsBuilder` calls it "number of episodes processed" and
+    /// `NetworkPriors.decayedWeight` names its parameter `episodesObserved`.
+    ///
+    /// The unit event is "a backfill of THIS asset confirmed at least one ad
+    /// window, and this asset has not contributed an observation for this show
+    /// before". The dedupe key is `(podcastId, analysisAssetId)` and it lives
+    /// in `trust_episode_observations`, claimed atomically — see
+    /// `AnalysisStore.claimEpisodeTrustObservation` for why the claim is a row
+    /// rather than a flag derived from a coverage watermark or a lifecycle
+    /// state.
+    ///
+    /// ORDER MATTERS AND IS NOT ARBITRARY: the claim is taken only when the
+    /// observation is about to be recorded. A backfill that cannot record one
+    /// (no trust service) claims nothing, so the episode stays claimable and a
+    /// later backfill counts it. A claim standing for an observation nobody
+    /// made would cost the show that episode's credit permanently.
+    ///
+    /// **WHAT THE EVIDENCE IS, and why this one.** Two candidates were on the
+    /// table: "this episode's ad windows were confirmed" and "the user did not
+    /// veto them". This implements the FIRST.
+    ///
+    /// The second is a value that names an ABSENCE, and it cannot tell
+    /// "no veto because the detections were right" from "no veto because
+    /// nobody ever pressed play". On the device that motivated this bead those
+    /// are not hypothetical alternatives — 4 episodes analysed, ZERO played,
+    /// ZERO correction events — so a listen-gated rule promotes nothing at all
+    /// and a downloaded-but-unplayed library stays in shadow forever. The
+    /// first is a positive fact available at the moment the pipeline finishes.
+    ///
+    /// **WHAT THAT COSTS, stated rather than hidden.** Confirmed windows are
+    /// the detector's own output, so this is self-certification: the show is
+    /// promoted on evidence it produced itself. **playhead-lqcp is what
+    /// actually bounds that: `manual` -> `auto` DOES NOT FIRE AT ALL** while
+    /// `AutoPromotionConfidenceEvidence` has only its `.unavailable` case, so
+    /// the highest rung self-observation can reach is `manual`, which skips
+    /// nothing without a tap. That closure exists precisely
+    /// because this method un-freezes `skipTrustScore` and would otherwise have
+    /// carried a fresh subscription to auto at episode 8 with no gesture at
+    /// all. One further bound is unchanged: the demotion path stays entirely
+    /// user-driven and asymmetric (`recordFalseSkipSignal`, two vetoes demote
+    /// `auto` -> `manual`).
+    ///
+    /// **R6 struck two claims that used to sit here.** "…`manual`, which
+    /// unlocks a BANNER" was false — `.shadow` and `.manual` are behaviourally
+    /// identical at `SkipOrchestrator.evaluateWindow`, and the suggest banner
+    /// is not mode-gated, so `manual` unlocks nothing (see the R6 note on
+    /// `AutoPromotionConfidenceEvidence`). And "the legacy auto clauses still
+    /// required `recentFalseSkipSignals == 0`, which only a banner Yes can
+    /// restore" was written in the present tense about clauses playhead-lqcp
+    /// DELETED two paragraphs above; there are no auto clauses left to require
+    /// anything.
+    ///
+    /// **AN EPISODE THAT CONFIRMED NOTHING IS NOT EVIDENCE.** An empty window
+    /// set is not a clean observation, it is the absence of an observation:
+    /// counting it would let a show whose detection found nothing at all climb
+    /// the ladder on exactly the quantity a broken detector produces. The guard
+    /// below is what keeps "confirmed ad windows" from reading the same as
+    /// "detection never worked here".
+    ///
+    /// **ORDERING.** Called BEFORE `updatePriors` so that (a) a brand-new
+    /// profile is created by the trust owner rather than by the priors merge,
+    /// and (b) `updatePriors` — which runs last and refreshes
+    /// `currentPodcastProfile` / `showPriors` — reads the POST-promotion row,
+    /// so the in-memory copy can never disagree with the persisted mode.
+    @discardableResult
+    private func recordConfirmedWindowObservation(
+        podcastId: String,
+        analysisAssetId: String,
+        confirmedWindows: [AdWindow]
+    ) async -> Bool {
+        guard let trustScoringService else {
+            // Not a silent drop: without the service the promotion ladder
+            // cannot run at all this launch, which is the exact failure this
+            // bead exists to make impossible. No claim is taken, so this
+            // episode can still be counted by a later backfill.
+            logger.warning(
+                "[mn5e] No TrustScoringService installed — trust observation dropped for podcast \(podcastId, privacy: .public); promotion cannot run"
+            )
+            return false
+        }
+        guard !confirmedWindows.isEmpty else {
+            logger.info(
+                "[mn5e] Backfill confirmed no ad windows for podcast \(podcastId, privacy: .public) — no trust observation recorded"
+            )
+            return false
+        }
+        // playhead-2qz6: one observation per EPISODE. This is the dedupe, and
+        // it is durable — a re-drive after relaunch, a transcript-version bump
+        // and the 15d0 resume path all re-enter here for an asset already
+        // claimed, and all of them must be no-ops.
+        let claimed: Bool
+        do {
+            claimed = try await store.claimEpisodeTrustObservation(
+                podcastId: podcastId,
+                analysisAssetId: analysisAssetId
+            )
+        } catch {
+            logger.warning(
+                "[mn5e] Could not claim the episode trust observation for asset \(analysisAssetId, privacy: .public): \(error.localizedDescription, privacy: .public); not counting it"
+            )
+            return false
+        }
+        guard claimed else {
+            logger.info(
+                "[mn5e] Asset \(analysisAssetId, privacy: .public) already contributed its trust observation for podcast \(podcastId, privacy: .public) — not counting it again"
+            )
+            return false
+        }
+        // DETECTION confidence, not actuation: `recordSuccessfulObservation`
+        // asks "how strongly did the evidence say these were ads on this
+        // show", which is exactly what `AdWindow.confidence` carries (see its
+        // playhead-ar60 doc comment). `skipConfidence` is the actuation
+        // number and would fold the user-correction factor into a quantity
+        // that is supposed to describe the DETECTOR.
+        let averageConfidence =
+            confirmedWindows.reduce(0.0) { $0 + $1.confidence }
+            / Double(confirmedWindows.count)
+        // R4: WHICH classes drew these windows, not just how confident they
+        // were. `SkipOrchestrator`'s gate reads a PER-CLASS mode, and once any
+        // attributed user gesture has forked the ledger the show scalar is not
+        // what it reads — so an observation that names no class promotes
+        // nothing the listener can feel. Credit follows the same rule blame
+        // does: only the classes that actually produced this episode's
+        // evidence. Read from the rows' own columns (`AdWindow.detectorClass`);
+        // this service has no ingest anchor stamp to prefer, which is what that
+        // property is documented as the fallback for.
+        let observedDetectors = Set(confirmedWindows.map(\.detectorClass))
+        await trustScoringService.recordSuccessfulObservation(
+            podcastId: podcastId,
+            averageConfidence: averageConfidence,
+            detectors: observedDetectors
+        )
+        return true
+    }
 
     // MARK: - Prior Updates
 
@@ -12934,6 +13104,22 @@ actor AdDetectionService {
     /// defaults — invisible to most behavioral tests because the EMA
     /// path still increments `episodesObserved`. Required parameters
     /// surface the choice at the call site.
+    ///
+    /// playhead-mn5e / playhead-2qz6: **this method no longer writes
+    /// `observationCount` at all** — it carries the stored value through, the
+    /// way it has always carried `skipTrustScore` through. It used to be the
+    /// only production incrementer, ticking once per completed backfill, and
+    /// an episode is backfilled ~9 times; that is what made
+    /// `shadowToManualObservations: 3` mean "a third of one episode". The
+    /// counter now belongs to `recordConfirmedWindowObservation`, which claims
+    /// one observation per EPISODE through `trust_episode_observations` and
+    /// increments inside the same atomic mutate that evaluates promotion.
+    ///
+    /// Deliberately UNCONDITIONAL, with no fallback flag: a path that cannot
+    /// record an episode observation must not write a per-backfill number into
+    /// a column whose consumers all read it as episodes. When no trust service
+    /// is installed nothing is counted and no claim is taken, so the episode
+    /// stays claimable and the next backfill counts it properly.
     private func updatePriors(
         podcastId: String,
         nonSuppressedWindows: [AdWindow],
@@ -13032,7 +13218,14 @@ actor AdDetectionService {
                         jingleFingerprints: nil,
                         implicitFalsePositiveCount: 0,
                         skipTrustScore: 0.5,
-                        observationCount: 1,
+                        // playhead-mn5e/2qz6: ZERO, not 1. This create path is
+                        // only reached when the trust path did NOT create the
+                        // profile — i.e. no observation was recorded and no
+                        // claim was taken — so crediting an episode here would
+                        // count one that nothing witnessed. The next backfill
+                        // that does record one takes the claim and increments
+                        // from 0.
+                        observationCount: 0,
                         mode: "shadow",
                         recentFalseSkipSignals: 0,
                         traitProfileJSON: initialTraitProfileJSON,
@@ -13164,7 +13357,10 @@ actor AdDetectionService {
                         jingleFingerprints: existing.jingleFingerprints,
                         implicitFalsePositiveCount: existing.implicitFalsePositiveCount,
                         skipTrustScore: existing.skipTrustScore,
-                        observationCount: existing.observationCount + 1,
+                        // playhead-mn5e/2qz6: CARRY FORWARD, never increment.
+                        // `recordConfirmedWindowObservation` is the sole
+                        // writer and it counts episodes, not backfills.
+                        observationCount: existing.observationCount,
                         mode: existing.mode,
                         recentFalseSkipSignals: existing.recentFalseSkipSignals,
                         traitProfileJSON: resolvedTraitProfileJSON,
