@@ -1798,6 +1798,111 @@ struct SeedRestorationTests {
         )
     }
 
+    /// R6: the structural claim — "nothing a class ACCUMULATES can reach this
+    /// decision" — was carried by `restoredMode`'s SIGNATURE and by nothing
+    /// behavioural, and a signature is not a test.
+    ///
+    /// `explicitOverrideSurvivesACorrectObservation` above looks like it covers
+    /// the case and does not: its seed profile carries 10 observations, but
+    /// `DetectorTrustLedger.seed` deliberately DISCARDS the show's record for
+    /// `.rediffByteExact`, so the entry `setUserOverride` writes has
+    /// `observationCount == 0`. A mutant that routes the class's own record in
+    /// through the weight argument — `weightBefore: entry.falseSkipWeight +
+    /// Double(entry.observationCount)` — therefore passed the entire suite
+    /// (R6/MU2, exit 0). In production that mutant undoes an explicit override
+    /// with ONE banner Yes on any class that has already earned a record, which
+    /// is the state every restored class is in.
+    ///
+    /// So the override here lands on an entry that has genuinely accumulated
+    /// one, and the `#require`s below are what stop this test decaying back
+    /// into the vacuous one.
+    @Test("An override lands on an EARNED record, and the next Yes still restores nothing")
+    func overrideSurvivesEvenOnAnEarnedRecord() async throws {
+        let (sut, store) = try await gardService(seed: freshShowProfile())
+        for _ in 0..<2 {
+            await sut.recordFalseSkipSignal(
+                podcastId: gardPodcastId,
+                attributions: [
+                    DetectorVetoAttribution(
+                        detector: .rediffByteExact, tier: .deterministic
+                    )
+                ]
+            )
+        }
+        for index in 0..<3 {
+            await sut.recordCorrectObservation(
+                podcastId: gardPodcastId,
+                analysisAssetId: "r6-earned-\(index)",
+                detector: .rediffByteExact
+            )
+        }
+        var modes = await sut.resolveDetectorModes(podcastId: gardPodcastId)
+        try #require(
+            modes.mode(for: .rediffByteExact) == .auto,
+            "the class must have made the round trip, or there is no record to override"
+        )
+
+        await sut.setUserOverride(podcastId: gardPodcastId, mode: .manual)
+        let stored = try #require(
+            await store.fetchProfile(podcastId: gardPodcastId)
+        )
+        let entry = try #require(
+            stored.detectorTrustLedger
+                .entries[SkipDetectorClass.rediffByteExact.rawValue]
+        )
+        try #require(
+            entry.observationCount >= 3,
+            "the entry must CARRY a record here or the mutation this test kills is unreachable; got \(entry.observationCount)"
+        )
+        try #require(
+            entry.falseSkipWeight == 0,
+            "and it must owe nothing, so the ONLY thing that could fire a restoration is the record itself"
+        )
+
+        await sut.recordCorrectObservation(
+            podcastId: gardPodcastId,
+            analysisAssetId: "r6-earned-after-override",
+            detector: .rediffByteExact
+        )
+        modes = await sut.resolveDetectorModes(podcastId: gardPodcastId)
+        #expect(
+            modes.mode(for: .rediffByteExact) == .manual,
+            "nothing a class ACCUMULATED may substitute for a discharge; got \(modes.mode(for: .rediffByteExact))"
+        )
+    }
+
+    /// R6: the restoration must not have SWALLOWED the ladder it wraps.
+    ///
+    /// `applyCorrectObservation` computes `evaluatePromotion` and then hands its
+    /// result to `restoredMode` as `currentMode`. Feeding `entry.skipMode`
+    /// instead — dropping the promotion on the floor for every class — passed
+    /// the whole suite (R6/MU3, exit 0), because every existing test that
+    /// exercises this path starts from an entry already at `.manual`. What that
+    /// mutant silently removes is the escape hatch `applyCorrectObservation`'s
+    /// own doc comment names: "that class could never leave `shadow` on its own
+    /// evidence".
+    @Test("A banner Yes still promotes a class OUT OF SHADOW — the restoration did not swallow the ladder")
+    func correctObservationsStillPromoteOutOfShadow() async throws {
+        let (sut, _) = try await gardService(seed: freshShowProfile())
+        var modes = await sut.resolveDetectorModes(podcastId: gardPodcastId)
+        try #require(
+            modes.mode(for: .segmentAggregated) == .shadow,
+            "a show-governed class starts at the show's mode, which is shadow here"
+        )
+        for index in 0..<3 {
+            await sut.recordCorrectObservation(
+                podcastId: gardPodcastId,
+                analysisAssetId: "r6-shadow-\(index)",
+                detector: .segmentAggregated
+            )
+        }
+        modes = await sut.resolveDetectorModes(podcastId: gardPodcastId)
+        #expect(
+            modes.mode(for: .segmentAggregated) == .manual,
+            "three Yeses is 3 observations at trust 0.5, which clears shadow -> manual; got \(modes.mode(for: .segmentAggregated))"
+        )
+    }
+
     /// Self-observation must not be able to restore. Only a listener's gesture
     /// decays a weight, so only a listener's gesture can discharge one — the
     /// property that keeps the detector from arguing its own case.

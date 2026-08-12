@@ -7064,8 +7064,15 @@ actor AnalysisStore {
     // goes to 0. `mode`, `skipTrustScore` and `recentFalseSkipSignals` are NOT
     // touched — a show demoted by user vetoes stays demoted, and no show
     // changes mode as a result of this migration. A show then needs 3 real
-    // episodes to reach `manual` and 8 to reach `auto`, which is what
-    // `TrustScoringConfig`'s numbers have always said and have never meant.
+    // episodes to reach `manual`, which is what `TrustScoringConfig`'s
+    // `shadowToManualObservations` has always said and has never meant.
+    //
+    // R6: this used to add "and 8 to reach `auto`". There is no such rung any
+    // more — playhead-lqcp closed `manual` -> `auto` on this same branch, so
+    // `manualToAutoObservations` has no production reader and no number of
+    // episodes reaches `auto`. The conservative-direction argument above is
+    // unaffected (it is about `manual`), but the sentence promised a ladder
+    // whose top rung had already been removed.
     //
     // The OTHER readers of the column were handed the same inflated number and
     // are corrected by the same reset. R3: there are FOUR, not the two an

@@ -12959,16 +12959,23 @@ actor AdDetectionService {
     /// promoted on evidence it produced itself. **playhead-lqcp is what
     /// actually bounds that: `manual` -> `auto` DOES NOT FIRE AT ALL** while
     /// `AutoPromotionConfidenceEvidence` has only its `.unavailable` case, so
-    /// the highest rung self-observation can reach is `manual`, which unlocks
-    /// a BANNER and skips nothing without a tap. That closure exists precisely
+    /// the highest rung self-observation can reach is `manual`, which skips
+    /// nothing without a tap. That closure exists precisely
     /// because this method un-freezes `skipTrustScore` and would otherwise have
     /// carried a fresh subscription to auto at episode 8 with no gesture at
-    /// all. Two further bounds are unchanged: the demotion path stays entirely
+    /// all. One further bound is unchanged: the demotion path stays entirely
     /// user-driven and asymmetric (`recordFalseSkipSignal`, two vetoes demote
-    /// `auto` -> `manual`), and the legacy auto clauses still required
-    /// `recentFalseSkipSignals == 0`,
-    /// which only a banner Yes (`recordCorrectObservation`) can restore once a
-    /// veto has landed.
+    /// `auto` -> `manual`).
+    ///
+    /// **R6 struck two claims that used to sit here.** "…`manual`, which
+    /// unlocks a BANNER" was false — `.shadow` and `.manual` are behaviourally
+    /// identical at `SkipOrchestrator.evaluateWindow`, and the suggest banner
+    /// is not mode-gated, so `manual` unlocks nothing (see the R6 note on
+    /// `AutoPromotionConfidenceEvidence`). And "the legacy auto clauses still
+    /// required `recentFalseSkipSignals == 0`, which only a banner Yes can
+    /// restore" was written in the present tense about clauses playhead-lqcp
+    /// DELETED two paragraphs above; there are no auto clauses left to require
+    /// anything.
     ///
     /// **AN EPISODE THAT CONFIRMED NOTHING IS NOT EVIDENCE.** An empty window
     /// set is not a clean observation, it is the absence of an observation:

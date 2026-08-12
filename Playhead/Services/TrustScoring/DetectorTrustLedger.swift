@@ -209,10 +209,18 @@ struct DetectorTrustLedger: Codable, Sendable, Equatable {
     ///     `setUserOverride` writes every entry at weight 0 with an explicitly
     ///     chosen mode, so a state-based rule would let the next banner Yes
     ///     silently overwrite a live user instruction with the seed. It also
-    ///     means the only gesture that can restore anything is a USER's
-    ///     (`applyCorrectObservation` is the sole decayer — self-observation
-    ///     carries the weight through untouched, deliberately), so a detector
-    ///     can never restore itself on its own output.
+    ///     means the only gesture that can restore anything is a USER's, so a
+    ///     detector can never restore itself on its own output.
+    ///
+    ///     **R6, having enumerated them: TWO writers lower a
+    ///     `falseSkipWeight`, not one.** `applyCorrectObservation` decays it by
+    ///     a unit (the banner Yes) and `setUserOverride` zeroes every entry.
+    ///     Only the first calls this function — that, not "sole decayer", is
+    ///     what makes a restoration a listener's gesture. The second's zeroing
+    ///     is exactly what this guard reads as "nothing was owed". The residual
+    ///     — an override whose weight is later RECHARGED by a veto and then
+    ///     discharged — is playhead-cc3l, and it is why this guard on its own
+    ///     cannot be the whole answer.
     ///  2. **Somebody other than this show must have set the mode.**
     ///     `authority` is `SkipDetectorClass.modeAuthority`, `nil` for every
     ///     class whose eligibility the show's history genuinely governs. A

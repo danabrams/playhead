@@ -2,8 +2,12 @@
 // Per-show trust scoring that controls skip mode.
 //
 // Each podcast starts in shadow mode (detection runs but no skips fire).
-// As the model proves precision on that show, the mode promotes through
-// manual (user-tapped skip) to auto (full auto-skip).
+// As the model proves precision on that show, the mode promotes to manual.
+// It does NOT go on to auto: playhead-lqcp closed that rung (see
+// `AutoPromotionConfidenceEvidence`), so `.auto` is now reachable only by an
+// explicit user override or by `SkipDetectorClass.showIndependentSeedMode`,
+// the byte-exact rediff seed. This header said "promotes through manual to
+// auto" until R6; it was the first thing a reader saw and it was false.
 //
 // Demotion happens when the user signals false positives: tapping "Listen"
 // to revert a skip, or rewinding back into a skipped segment.
@@ -172,8 +176,20 @@ struct SkipModeSnapshot: Sendable, Equatable {
 /// **A conditional whose condition cannot be evaluated is not satisfied.** So
 /// the rung is CLOSED, deliberately and in the open, rather than left to fall
 /// through a threshold that cannot bite. `shadow -> manual` is unaffected and
-/// still proceeds on self-observation: it unlocks a BANNER, and the worst case
-/// is a card the user ignores.
+/// still proceeds on self-observation.
+///
+/// **R6 correction: that rung does not "unlock a BANNER", which is what this
+/// paragraph used to claim, and the difference matters because it was the
+/// closure's stated safety argument.** Measured on this tree:
+/// `SkipOrchestrator.evaluateWindow` returns `.confirmed` for BOTH `.shadow`
+/// and `.manual` and only the log reason differs; `evaluateAndPush` emits a
+/// banner only on `.applied`; and the suggest-tier banner is not mode-gated at
+/// all (`registerSuggestedWindow` / `emitSuggestBannersOnPlayheadEntry` consult
+/// the playhead, never the mode). So `shadow -> manual` moves one log string
+/// and the Now Playing pill's label and actuates nothing. The closure is
+/// therefore SAFER than it was argued to be — the highest rung self-observation
+/// can reach does nothing at all — but a later hand reasoning from "manual
+/// unlocks the card" would be reasoning from a behaviour that does not exist.
 ///
 /// **What would open it.** A named, persisted, show-level detection-confidence
 /// quantity, plus Dan's floor for it — the next bead, which needs field data
@@ -1283,12 +1299,21 @@ actor TrustScoringService {
     /// three taps inside one episode buy an unasked skip.
     ///
     /// **playhead-u0vv: this is also the only place a class can be RESTORED to
-    /// its authority's mode**, because it is the only writer that lowers a
-    /// `falseSkipWeight` — the veto path only ever raises one, and
-    /// self-observation carries it through untouched by design. That is not an
-    /// implementation accident: it means the sole gesture that can hand
-    /// byte-exact rediff its `.auto` back is a LISTENER's banner Yes, never a
-    /// detector's own output. See `DetectorTrustLedger.restoredMode`.
+    /// its authority's mode**, because it is the only site that CALLS
+    /// `DetectorTrustLedger.restoredMode`. That is not an implementation
+    /// accident: it means the sole gesture that can hand byte-exact rediff its
+    /// `.auto` back is a LISTENER's banner Yes, never a detector's own output —
+    /// the veto path only ever raises a weight, and self-observation carries it
+    /// through untouched by design.
+    ///
+    /// **R6 correction, because this reason was checked and is not the one
+    /// given.** The paragraph used to read "because it is the only writer that
+    /// lowers a `falseSkipWeight`". That is false: `setUserOverride` writes
+    /// EVERY entry at `falseSkipWeight: 0`, which is a lowering. The conclusion
+    /// survives — that writer never calls `restoredMode`, and it writes the mode
+    /// the listener chose — but the missed writer is precisely the one
+    /// playhead-cc3l is about, so do not re-derive the safety property from
+    /// "sole decayer". Derive it from the single call site.
     fileprivate static func applyCorrectObservation(
         config: TrustScoringConfig,
         profile: PodcastProfile,
