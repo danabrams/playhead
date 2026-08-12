@@ -1890,7 +1890,7 @@ struct ReplaySimulatorE2ETests {
 @Suite("Pipeline Integration – Trust Scoring Lifecycle")
 struct TrustScoringLifecycleTests {
 
-    @Test("Full trust lifecycle: shadow -> manual -> auto with observations")
+    @Test("Full trust lifecycle: shadow -> manual, the closed auto rung, then demotion")
     func fullTrustLifecycle() async throws {
         let store = try await makeIntegrationStore()
         let trust = TrustScoringService(store: store)
@@ -1910,22 +1910,33 @@ struct TrustScoringLifecycleTests {
         #expect(afterShadow == .manual,
                 "3 observations with decent confidence should promote to manual")
 
-        // Continue observations to reach auto.
+        // Ten observations clear every legacy clause of the auto rung, and the
+        // whole sequence contains no user gesture at all — which is precisely
+        // the reachability playhead-lqcp closes, because auto cuts audio
+        // unasked and Dan's ruling makes it conditional on a high-confidence
+        // quantity that does not exist yet.
         for _ in 0..<7 {
             await trust.recordSuccessfulObservation(
                 podcastId: podcastId, averageConfidence: 0.80
             )
         }
         let afterManual = await trust.effectiveMode(podcastId: podcastId)
-        #expect(afterManual == .auto,
-                "10 total observations with high confidence should promote to auto")
+        #expect(afterManual == .manual,
+                "playhead-lqcp: 10 self-observations must not buy an auto-skip; got \(String(describing: afterManual))")
+        // Non-vacuous: the observations really were recorded and really did
+        // move trust to its ceiling.
+        let observed = try #require(await store.fetchProfile(podcastId: podcastId))
+        #expect(observed.observationCount == 10)
+        #expect(observed.skipTrustScore >= 0.75)
 
-        // False signals demote back.
-        await trust.recordFalseSkipSignal(podcastId: podcastId)
-        await trust.recordFalseSkipSignal(podcastId: podcastId)
+        // Demotion still works from where the ladder can actually reach: 4
+        // vetoes take manual -> shadow.
+        for _ in 0..<4 {
+            await trust.recordFalseSkipSignal(podcastId: podcastId)
+        }
         let afterDemotion = await trust.effectiveMode(podcastId: podcastId)
-        #expect(afterDemotion == .manual,
-                "2 false signals should demote auto -> manual")
+        #expect(afterDemotion == .shadow,
+                "4 false signals should demote manual -> shadow")
     }
 }
 
@@ -2019,16 +2030,29 @@ struct CombinedTuningReplayTests {
             // --- Layer 3: Trust scoring (uses updated bonus=0.10) ---
             let trustService = TrustScoringService(store: trustStore)
 
-            // Simulate trust build-up: record enough observations to reach auto.
-            // With bonus=0.10, 8 observations should suffice (0.2 initial + 8*0.10 = 1.0).
+            // Simulate trust build-up. With bonus=0.10, 8 observations take a
+            // fresh show from 0.2 to 1.0 and clear every legacy clause of the
+            // auto rung.
             for _ in 0..<8 {
                 await trustService.recordSuccessfulObservation(
                     podcastId: podcastId, averageConfidence: 0.80
                 )
             }
+            let selfObservedMode = await trustService.effectiveMode(podcastId: podcastId)
+            #expect(selfObservedMode == .manual,
+                    "playhead-lqcp: self-observation stops at manual for \(podcastId); got \(String(describing: selfObservedMode))")
+
+            // What Layer 4 below measures is the AUTO-MODE SKIP PATH — candidate
+            // promotion without waiting for backfill confirmation. Under
+            // playhead-lqcp the ladder no longer puts a show there on its own
+            // evidence, so the replay has to say out loud how the show got to
+            // auto. A user override is the honest answer and the only remaining
+            // one: it is a listener instruction, which is exactly the posture
+            // this corpus is meant to be measuring the skip behaviour under.
+            await trustService.setUserOverride(podcastId: podcastId, mode: .auto)
             let mode = await trustService.effectiveMode(podcastId: podcastId)
             #expect(mode == .auto,
-                    "8 observations with bonus=0.10 should reach auto mode for \(podcastId)")
+                    "the explicit override must reach auto for \(podcastId)")
 
             // --- Layer 4: Skip orchestrator (uses auto-mode candidate promotion) ---
             let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
@@ -2126,31 +2150,33 @@ struct CombinedTuningReplayTests {
         }
     }
 
-    @Test("Trust promotion speed: bonus=0.10 reaches auto mode within expected observations")
+    @Test("Trust promotion speed: bonus=0.10 reaches manual fast, and auto not at all")
     func corpusTrustPromotionSpeed() async throws {
-        // Verify a fresh show reaches auto in fewer observations with bonus=0.10.
+        // With bonus=0.10 a fresh show reaches MANUAL quickly and stops there.
         let freshStore = try await makeIntegrationStore()
         let freshTrust = TrustScoringService(store: freshStore)
         let freshPodcastId = "int-fresh-promotion-test"
 
+        var firstManualObservation: Int?
         for i in 1...10 {
             await freshTrust.recordSuccessfulObservation(
                 podcastId: freshPodcastId, averageConfidence: 0.80
             )
             let currentMode = await freshTrust.effectiveMode(podcastId: freshPodcastId)
-            if currentMode == .auto {
-                // With bonus=0.10: initial trust=0.2, after 8 obs = 0.2 + 8*0.10 = 1.0.
-                // manualToAutoObservations=8, manualToAutoTrustScore=0.75.
-                // shadowToManual happens at obs=3, trust >= 0.4 (0.2 + 3*0.10 = 0.5).
-                // manualToAuto at obs=8, trust >= 0.75 (0.2 + 8*0.10 = 1.0).
-                #expect(i <= 9,
-                        "With bonus=0.10, auto promotion should happen by observation 9 (got \(i))")
-                break
+            if currentMode == .manual, firstManualObservation == nil {
+                firstManualObservation = i
             }
+            #expect(currentMode != .auto,
+                    "playhead-lqcp: self-observation must never reach auto (observation \(i))")
         }
+        // The speed claim the bonus retune was about: shadowToManual needs 3
+        // observations and trust >= 0.4, and 0.2 + 0.10*2 = 0.4 lands exactly
+        // at observation 3.
+        #expect(firstManualObservation == 3,
+                "With bonus=0.10, manual should be reached at observation 3 (got \(String(describing: firstManualObservation)))")
         let finalMode = await freshTrust.effectiveMode(podcastId: freshPodcastId)
-        #expect(finalMode == .auto,
-                "Fresh show should reach auto mode within 10 observations at bonus=0.10")
+        #expect(finalMode == .manual,
+                "Fresh show stops at manual, which is a banner; got \(String(describing: finalMode))")
 
         // Also verify per-episode trust in the full corpus replay.
         let result = try await runCorpusReplay()
