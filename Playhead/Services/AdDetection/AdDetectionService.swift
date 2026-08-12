@@ -6841,12 +6841,22 @@ actor AdDetectionService {
         if podcastId.isEmpty {
             logger.info("Backfill: skipping priors update — missing podcastId for asset \(analysisAssetId)")
         } else {
+            // playhead-mn5e: the production caller `recordSuccessfulObservation`
+            // never had. Ordered BEFORE `updatePriors` deliberately — see
+            // `recordConfirmedWindowObservation` for why — and its return value
+            // is what stops `observationCount` being incremented twice for one
+            // backfill.
+            let trustOwnsObservation = await recordConfirmedWindowObservation(
+                podcastId: podcastId,
+                confirmedWindows: nonSuppressedWindows
+            )
             try await updatePriors(
                 podcastId: podcastId,
                 nonSuppressedWindows: nonSuppressedWindows,
                 episodeDuration: episodeDuration,
                 featureWindows: featureWindows,
-                chunks: canonicalChunks
+                chunks: canonicalChunks,
+                countsObservation: !trustOwnsObservation
             )
         }
 
@@ -12873,22 +12883,113 @@ actor AdDetectionService {
     /// no-signal neutral defaults and never exercise the real producer
     /// math). No defaults — callers without a real signal pass `[]`
     /// explicitly so the choice is visible at the call site.
+    ///
+    /// playhead-mn5e: `countsObservation` defaults to `true` HERE ONLY — this
+    /// shim drives the priors merge in isolation, with no trust service in
+    /// play, so `true` is the honest answer to "did anything else already
+    /// count this observation?" and it keeps the pre-mn5e counter semantics
+    /// that the existing `PriorHierarchyWireUpTests` assert. The production
+    /// parameter has no default, deliberately.
     func updatePriorsForTesting(
         podcastId: String,
         nonSuppressedWindows: [AdWindow],
         episodeDuration: Double,
         featureWindows: [FeatureWindow],
-        chunks: [TranscriptChunk]
+        chunks: [TranscriptChunk],
+        countsObservation: Bool = true
     ) async throws {
         try await updatePriors(
             podcastId: podcastId,
             nonSuppressedWindows: nonSuppressedWindows,
             episodeDuration: episodeDuration,
             featureWindows: featureWindows,
-            chunks: chunks
+            chunks: chunks,
+            countsObservation: countsObservation
         )
     }
     #endif
+
+    // MARK: - Trust Observation (playhead-mn5e)
+
+    /// Record this backfill's ad windows as a trust observation, running the
+    /// promotion ladder. **This is the production caller
+    /// `TrustScoringService.recordSuccessfulObservation` never had.**
+    ///
+    /// Returns `true` when the trust service actually recorded the
+    /// observation — and therefore OWNS this backfill's `observationCount`
+    /// increment. `updatePriors` must not increment as well; two writers
+    /// ticking one counter would halve every threshold in
+    /// `TrustScoringConfig` without anybody choosing to.
+    ///
+    /// **WHAT THE EVIDENCE IS, and why this one.** Two candidates were on the
+    /// table: "this episode's ad windows were confirmed" and "the user did not
+    /// veto them". This implements the FIRST.
+    ///
+    /// The second is a value that names an ABSENCE, and it cannot tell
+    /// "no veto because the detections were right" from "no veto because
+    /// nobody ever pressed play". On the device that motivated this bead those
+    /// are not hypothetical alternatives — 4 episodes analysed, ZERO played,
+    /// ZERO correction events — so a listen-gated rule promotes nothing at all
+    /// and a downloaded-but-unplayed library stays in shadow forever. The
+    /// first is a positive fact available at the moment the pipeline finishes.
+    ///
+    /// **WHAT THAT COSTS, stated rather than hidden.** Confirmed windows are
+    /// the detector's own output, so this is self-certification: the show is
+    /// promoted on evidence it produced itself. Three things bound it —
+    /// `shadow` -> `manual` only unlocks a BANNER (nothing is skipped without a
+    /// tap); the demotion path stays entirely user-driven and asymmetric
+    /// (`recordFalseSkipSignal`, two vetoes demote `auto` -> `manual`); and
+    /// `manual` -> `auto` additionally requires `recentFalseSkipSignals == 0`,
+    /// which only a banner Yes (`recordCorrectObservation`) can restore once a
+    /// veto has landed.
+    ///
+    /// **AN EPISODE THAT CONFIRMED NOTHING IS NOT EVIDENCE.** An empty window
+    /// set is not a clean observation, it is the absence of an observation:
+    /// counting it would let a show whose detection found nothing at all climb
+    /// the ladder on exactly the quantity a broken detector produces. The guard
+    /// below is what keeps "confirmed ad windows" from reading the same as
+    /// "detection never worked here".
+    ///
+    /// **ORDERING.** Called BEFORE `updatePriors` so that (a) a brand-new
+    /// profile is created by the trust owner rather than by the priors merge,
+    /// and (b) `updatePriors` — which runs last and refreshes
+    /// `currentPodcastProfile` / `showPriors` — reads the POST-promotion row,
+    /// so the in-memory copy can never disagree with the persisted mode.
+    private func recordConfirmedWindowObservation(
+        podcastId: String,
+        confirmedWindows: [AdWindow]
+    ) async -> Bool {
+        guard let trustScoringService else {
+            // Not a silent drop: without the service the promotion ladder
+            // cannot run at all this launch, which is the exact failure this
+            // bead exists to make impossible. `updatePriors` keeps the
+            // increment so the counter's meaning is unchanged.
+            logger.warning(
+                "[mn5e] No TrustScoringService installed — trust observation dropped for podcast \(podcastId, privacy: .public); promotion cannot run"
+            )
+            return false
+        }
+        guard !confirmedWindows.isEmpty else {
+            logger.info(
+                "[mn5e] Backfill confirmed no ad windows for podcast \(podcastId, privacy: .public) — no trust observation recorded"
+            )
+            return false
+        }
+        // DETECTION confidence, not actuation: `recordSuccessfulObservation`
+        // asks "how strongly did the evidence say these were ads on this
+        // show", which is exactly what `AdWindow.confidence` carries (see its
+        // playhead-ar60 doc comment). `skipConfidence` is the actuation
+        // number and would fold the user-correction factor into a quantity
+        // that is supposed to describe the DETECTOR.
+        let averageConfidence =
+            confirmedWindows.reduce(0.0) { $0 + $1.confidence }
+            / Double(confirmedWindows.count)
+        await trustScoringService.recordSuccessfulObservation(
+            podcastId: podcastId,
+            averageConfidence: averageConfidence
+        )
+        return true
+    }
 
     // MARK: - Prior Updates
 
@@ -12934,12 +13035,28 @@ actor AdDetectionService {
     /// defaults — invisible to most behavioral tests because the EMA
     /// path still increments `episodesObserved`. Required parameters
     /// surface the choice at the call site.
+    ///
+    /// playhead-mn5e: `countsObservation` names WHICH WRITER owns this
+    /// backfill's `observationCount` increment, and it has no default for the
+    /// same reason as the two parameters above. Before mn5e this method was
+    /// the only production incrementer; now
+    /// `TrustScoringService.recordSuccessfulObservation` runs first and
+    /// increments as part of the same read-modify-write that evaluates
+    /// promotion, so this method must stand down whenever that one ran.
+    /// Passing `true` here while the trust call also succeeded would tick the
+    /// counter twice per backfill and silently HALVE
+    /// `shadowToManualObservations` and `manualToAutoObservations` — a policy
+    /// change nobody chose. `false` is therefore the normal production value;
+    /// `true` is the fallback for the paths where no trust observation was
+    /// recorded (no service installed, or an episode that confirmed no
+    /// windows), and it reproduces the pre-mn5e counter exactly.
     private func updatePriors(
         podcastId: String,
         nonSuppressedWindows: [AdWindow],
         episodeDuration: Double,
         featureWindows: [FeatureWindow],
-        chunks: [TranscriptChunk]
+        chunks: [TranscriptChunk],
+        countsObservation: Bool
     ) async throws {
         guard !nonSuppressedWindows.isEmpty, episodeDuration > 0 else { return }
 
@@ -13164,7 +13281,14 @@ actor AdDetectionService {
                         jingleFingerprints: existing.jingleFingerprints,
                         implicitFalsePositiveCount: existing.implicitFalsePositiveCount,
                         skipTrustScore: existing.skipTrustScore,
-                        observationCount: existing.observationCount + 1,
+                        // playhead-mn5e: single-writer. When the trust
+                        // service recorded this backfill's observation it
+                        // already incremented (inside its own atomic
+                        // mutate, alongside the promotion evaluation), so
+                        // incrementing again here would double-count.
+                        observationCount: countsObservation
+                            ? existing.observationCount + 1
+                            : existing.observationCount,
                         mode: existing.mode,
                         recentFalseSkipSignals: existing.recentFalseSkipSignals,
                         traitProfileJSON: resolvedTraitProfileJSON,
