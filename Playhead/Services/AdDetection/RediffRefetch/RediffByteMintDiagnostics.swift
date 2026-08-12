@@ -33,20 +33,32 @@ import Foundation
 /// with in R1. `AdDetectionService.mintByteExactDayZeroMarks` is what guarantees
 /// the alignment; see the `defer` there.
 struct RediffByteMintDiagnostics: Sendable, Equatable {
-    /// Σ runs found across accepted personas. VACUITY CONTROL — `0` means the
-    /// aligner found nothing and every other field says nothing.
+    /// Σ runs found across accepted personas. VACUITY CONTROL — `0` means every
+    /// other field says nothing.
+    ///
+    /// R3 REVIEW: `0` means NO PERSONA WAS ACCEPTED, not "the aligner found
+    /// nothing". An accepted persona always carries ≥ 1 run, and a rejected one
+    /// contributes a zeroed entry however much structure the aligner found — so
+    /// this restates `RediffDayZeroExit.noAcceptedByteDiff` and is not, by
+    /// itself, evidence about the CDN.
     var runsFound: Int = 0
     /// Σ runs whose A-span partly overlapped already-accepted A-coverage.
     /// THE OPPORTUNITY COUNTER: `> 0` means a pre-playhead-3zxd build could have
     /// emitted a phantom on this episode. `0` across a corpus means the defect
     /// never got a chance there — which is weak evidence, not a confirmation.
     var runsAOverlapping: Int = 0
-    /// Σ A-seconds of byte-verified matched audio retained by CLIPPING those
-    /// runs instead of dropping them. THE AVERTED DAMAGE, as an upper bound: a
-    /// pre-3zxd build would have left exactly these seconds uncovered by every
-    /// accepted run and therefore reported them inside a divergent gap. Upper
-    /// bound rather than realised, because the resulting gap still had to clear
-    /// `minAdSeconds` and `maxSlotSeconds` to ship.
+    /// Σ, over accepted personas, of the A-seconds a build that DROPPED the
+    /// A-overlapper would have left uncovered by every accepted run and
+    /// therefore reported inside a divergent gap. THE AVERTED DAMAGE, as an
+    /// upper bound: the resulting gap still had to clear `minAdSeconds` and
+    /// `maxSlotSeconds` to ship.
+    ///
+    /// Per persona it is a DIFFERENCE of two coverages, not a Σ of clipped
+    /// tails — see `RediffByteAligner.segmentDivergentSlots` (R3 review). The
+    /// Σ ACROSS personas is still a plain total over independent diffs and may
+    /// count the same A-region twice if two personas both recovered it; that is
+    /// the same direction (upper bound) and is why the magnitude, not the
+    /// number, is what a device pull reads.
     var overlapSecondsRecovered: Double = 0
     /// Σ over EMITTED slots of the A-seconds a found run covers. THE INVARIANT
     /// WITNESS — zero by construction after playhead-3zxd. See

@@ -11,6 +11,8 @@
 //
 //   SELECT analysisAssetId, datetime(lastAttemptAt,'unixepoch') AS at,
 //          lastExit, lastMarkCount, lastDivergentSlotCount,
+//          lastBSideCount, lastBSidesAccepted, lastBSidesGateRejected,
+//          lastBSidesUnreadable,
 //          lastRunsFound, lastRunsAOverlapping, lastOverlapSecondsRecovered,
 //          lastAlignedSecondsInSlots, lastMaxAlignedSecondsInSlot,
 //          lastAlignedRunSpans
@@ -33,10 +35,28 @@
 //                                            decline itself — see
 //                                            `DayZeroRediffAttemptPolicy
 //                                            .advance`.
-//   lastRunsFound = 0                     -> VACUOUS. The aligner found nothing
-//                                            (re-encoding CDN, or the bytes are
-//                                            not MP3); no other column on the
-//                                            row is evidence.
+//   lastRunsFound = 0                     -> VACUOUS: no column on the row is
+//                                            evidence about an emitted slot.
+//                                            R3 review — it does NOT establish a
+//                                            re-encoding CDN, and reading it
+//                                            that way would be the same
+//                                            fabrication F1 was. The sum runs
+//                                            over ACCEPTED personas only and an
+//                                            accepted persona always has ≥ 1
+//                                            run, so 0 means NO PERSONA WAS
+//                                            ACCEPTED — i.e. it is
+//                                            `lastExit = no_accepted_byte_diff`
+//                                            restated, carrying nothing the exit
+//                                            did not. The aligner may have found
+//                                            plenty and been rejected on
+//                                            non-monotonicity with no shippable
+//                                            segment. `lastBSidesGateRejected`
+//                                            vs `lastBSidesUnreadable` is what
+//                                            separates "the gate refused every
+//                                            copy" from "no copy was readable";
+//                                            neither separates the gate's three
+//                                            refusal reasons, which are not
+//                                            persisted (playhead-vhuc).
 //   lastRunsAOverlapping = 0              -> the defect had no OPPORTUNITY on
 //                                            this episode. Unfalsified, not
 //                                            confirmed.

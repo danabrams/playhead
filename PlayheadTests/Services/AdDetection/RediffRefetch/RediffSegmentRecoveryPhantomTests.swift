@@ -389,6 +389,95 @@ struct RediffSegmentRecoveryPhantomTests {
         #expect(alignment.segmentedOverlapSecondsRecovered < 471)
     }
 
+    /// R3 REVIEW (F5) — THE AVERTED-DAMAGE FIGURE WAS A SUM OF CLIPPED TAILS,
+    /// AND THAT IS NOT THE QUANTITY ITS NAME CLAIMS.
+    ///
+    /// `overlapSecondsRecovered` is persisted as `lastOverlapSecondsRecovered`
+    /// and read off a device pull as "the show a pre-3zxd build would have
+    /// banner-marked on this episode". It was accumulated one clipped tail at a
+    /// time, which is right for ONE overlap and wrong the moment two chain —
+    /// the ordinary shape for two inserted-in-B breaks, i.e. exactly the
+    /// multi-break population playhead-9s6q exists to recover. The pre-3zxd rule
+    /// DROPPED the first overlapper and then ACCEPTED the next run whole,
+    /// because that run's `aStart` sits past a cursor the drop never advanced.
+    /// Only the first tail was ever reported as an ad; the tail sum counted
+    /// both and inflated the averted damage by an entire content block.
+    ///
+    /// The counterfactual is computed here from the PRE-3zxd rule itself,
+    /// written out longhand, so the rail cannot agree with production by sharing
+    /// its arithmetic. The final expectation is the discriminating one: the
+    /// naive tail sum is asserted to be STRICTLY LARGER than the truth on this
+    /// fixture, so a revert to it cannot pass.
+    ///
+    /// Hand-built runs, for the reason § 5c gives: a real pair's only A-overlap
+    /// is the 4-byte CBR header bleed, which is microseconds wide — the error
+    /// would be real but unmeasurable. Here the blocks are hundreds of frames.
+    @Test("the recovered-seconds figure is what the DROPPING rule would have lost, not a sum of tails")
+    func recoveredSecondsIsTheDifferenceInCoverageNotTheSumOfTails() {
+        let frame = SyntheticMP3.frameLength
+        let parsedA = RediffByteAligner.parse(
+            SyntheticMP3.file(SyntheticMP3.frames(count: 3000, seed: 0xF5_0001)))
+        let parsedB = RediffByteAligner.parse(
+            SyntheticMP3.file(SyntheticMP3.frames(count: 3000, seed: 0xF5_0002)))
+        func run(_ span: Range<Int>, bStart: Int) -> RediffByteAligner.Run {
+            RediffByteAligner.Run(
+                aStart: span.lowerBound * frame,
+                bStart: bStart,
+                bytes: (span.upperBound - span.lowerBound) * frame
+            )
+        }
+        // TWO CHAINED CLIPS. Under the dropping rule: run 1 accepted [0,400);
+        // run 2 starts at 300 → DROPPED; run 3 starts at 600, which is past the
+        // un-advanced cursor 400 → ACCEPTED WHOLE. So the only region that rule
+        // left uncovered-but-run-covered is [400,600) — 200 frames.
+        let runs = [
+            run(0..<400, bStart: 0),
+            run(300..<700, bStart: 500_000),
+            run(600..<1000, bStart: 900_000),
+            run(1400..<1800, bStart: 1_300_000)
+        ]
+        let recovery = RediffByteAligner.segmentDivergentSlots(
+            runs: runs, pa: parsedA, pb: parsedB,
+            bAudioBytes: max(1, parsedB.sizeBytes - parsedB.leadingID3Bytes))
+        #expect(recovery.runsAOverlapping == 2,
+                "control: the fixture must stage TWO chained clips — got \(recovery.runsAOverlapping)")
+
+        func seconds(_ fromFrame: Int, _ toFrame: Int) -> Double {
+            RediffByteAligner.timeAt(parsedA, byteOffset: toFrame * frame)
+                - RediffByteAligner.timeAt(parsedA, byteOffset: fromFrame * frame)
+        }
+        // THE COUNTERFACTUAL, longhand: the pre-3zxd accept rule, and the
+        // A-seconds it covered.
+        var droppingRuleCovered = 0.0
+        var droppingRuleAEnd = -1
+        for one in runs.sorted(by: { $0.aStart < $1.aStart }) where one.aStart >= droppingRuleAEnd {
+            droppingRuleCovered +=
+                RediffByteAligner.timeAt(parsedA, byteOffset: one.aStart + one.bytes)
+                    - RediffByteAligner.timeAt(parsedA, byteOffset: one.aStart)
+            droppingRuleAEnd = one.aStart + one.bytes
+        }
+        #expect(abs(droppingRuleCovered - seconds(0, 1200)) < Self.epsilonSeconds,
+                "control: the dropping rule covers 1200 frames — got \(droppingRuleCovered) s")
+        // This rule's coverage is the found-run union, 1400 frames (§ 5c pins
+        // that independently through `chainedFractionB`).
+        let truth = seconds(0, 1400) - droppingRuleCovered
+
+        #expect(abs(recovery.overlapSecondsRecovered - truth) < Self.epsilonSeconds,
+                """
+                averted damage must be the 200 frames [400,600) the dropping rule \
+                lost — expected \(truth) s, got \(recovery.overlapSecondsRecovered) s
+                """)
+        #expect(abs(recovery.overlapSecondsRecovered - seconds(400, 600)) < Self.epsilonSeconds,
+                "…which is exactly the region no accepted run of that rule covered")
+
+        // THE DISCRIMINATOR. The superseded formula — Σ clipped tails — is
+        // [400,700) + [700,1000) = 600 frames, three times the truth. Without
+        // this the rail would pass on a revert.
+        let sumOfClippedTails = seconds(400, 700) + seconds(700, 1000)
+        #expect(sumOfClippedTails > recovery.overlapSecondsRecovered + 1.0,
+                "control: the two formulas must actually disagree on this fixture")
+    }
+
     @Test("a monotonic-clean alignment reports zero opportunity — segmenting never ran")
     func monotonicCleanReportsNoOpportunity() {
         let content = SyntheticMP3.frames(count: 60, seed: 0x3D_0001)

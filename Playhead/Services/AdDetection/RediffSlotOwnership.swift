@@ -406,9 +406,11 @@ enum RediffSlotOwnership {
     /// a second has been transcribed — so every episode Dan adds is a real data
     /// point instead of a staged fixture.
     struct ByteDiagnostics: Sendable, Equatable {
-        /// Runs `byteRuns` found. VACUITY CONTROL: `0` means the aligner had
-        /// nothing to work with (a re-encoding CDN, or bytes that are not MP3
-        /// at all), and every other field below says nothing.
+        /// Runs `byteRuns` found. VACUITY CONTROL: `0` means every other field
+        /// below says nothing. Note that this struct is `.empty` on every
+        /// rejection, so at the mint level `0` reads as "no persona was
+        /// accepted" rather than as any particular cause — R3 review, and see
+        /// `RediffByteMintDiagnostics.runsFound`.
         var runsFound: Int = 0
         /// See `RediffByteAligner.Alignment.segmentedRunsAOverlapping` — the
         /// OPPORTUNITY counter. `> 0` means a pre-playhead-3zxd build could have

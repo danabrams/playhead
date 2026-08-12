@@ -215,7 +215,13 @@ enum RediffByteAligner {
         /// reported inside a divergent gap. It is an UPPER BOUND on the show a
         /// pre-3zxd build would have banner-marked, not the realised damage: the
         /// resulting gap still had to clear `minAdSeconds` and `maxSlotSeconds`
-        /// downstream to ship. Always `0` for a monotonic-clean alignment.
+        /// downstream to ship (and the lower `chainedFractionB` a dropping build
+        /// computed could have failed the re-encode floor outright). Always `0`
+        /// for a monotonic-clean alignment.
+        ///
+        /// R3 REVIEW — this is a DIFFERENCE OF TWO COVERAGES, not a sum of
+        /// clipped tails, and the distinction is the whole quantity. See
+        /// `segmentDivergentSlots`.
         let segmentedOverlapSecondsRecovered: Double
 
         var monotonicClean: Bool { runsDroppedNonMonotonic == 0 }
@@ -862,12 +868,36 @@ enum RediffByteAligner {
         // two accepted runs is genuinely run-free, not merely
         // not-yet-visited — and the gap arithmetic stays well-formed (every
         // A-gap ≥ 0) exactly as it did when the run was dropped.
+        //
+        // R3 REVIEW — THE AVERTED-DAMAGE FIGURE IS A DIFFERENCE, NOT A SUM.
+        // `overlapSecondsRecovered` names "the A-seconds a pre-3zxd build would
+        // have reported as divergent though a run covered them". Summing the
+        // clipped TAILS is not that quantity as soon as two clips chain, which
+        // is the ordinary shape for two inserted-in-B breaks: the pre-3zxd rule
+        // dropped the FIRST overlapper and then ACCEPTED the next run whole (its
+        // `aStart` is past the un-advanced cursor), so only the first tail ever
+        // became a phantom. The tail sum counted both and over-reported the
+        // averted damage by the whole second block — a value that names one
+        // thing read as though it named another, in the instrument built to
+        // detect exactly that. So the pre-3zxd rule is RUN ALONGSIDE, as a
+        // cursor and a coverage total and nothing else, and the figure is the
+        // difference between what this rule covers and what that one did.
         var accepted: [Run] = []
         var globalAEnd = -1
         var runsAOverlapping = 0
-        var overlapSecondsRecovered = 0.0
+        var acceptedCoveredSeconds = 0.0
+        // The PRE-3zxd accept rule, verbatim: accept iff `aStart >= cursor`,
+        // i.e. drop any A-overlapper whole. Its accepted runs are A-disjoint by
+        // the same argument this rule's are, so a running sum IS its coverage.
+        var droppingRuleAEnd = -1
+        var droppingRuleCoveredSeconds = 0.0
         for run in sorted {
             let aEnd = run.aStart + run.bytes
+            if run.aStart >= droppingRuleAEnd {
+                droppingRuleCoveredSeconds +=
+                    timeAt(pa, byteOffset: aEnd) - timeAt(pa, byteOffset: run.aStart)
+                droppingRuleAEnd = aEnd
+            }
             // Wholly inside A-coverage already accepted: it adds no new
             // A-region, and — unlike the clipped case — dropping it reports
             // nothing as divergent, because an accepted run already covers its
@@ -881,13 +911,21 @@ enum RediffByteAligner {
                 let trim = globalAEnd - run.aStart
                 accepted.append(Run(aStart: globalAEnd, bStart: run.bStart + trim, bytes: run.bytes - trim))
                 runsAOverlapping += 1
-                overlapSecondsRecovered +=
+                acceptedCoveredSeconds +=
                     timeAt(pa, byteOffset: aEnd) - timeAt(pa, byteOffset: globalAEnd)
             } else {
                 accepted.append(run)
+                acceptedCoveredSeconds +=
+                    timeAt(pa, byteOffset: aEnd) - timeAt(pa, byteOffset: run.aStart)
             }
             globalAEnd = aEnd
         }
+        // Well-defined and non-negative by containment, not by clamping: the
+        // dropping rule's accepted runs are a SUBSET of the found runs, and this
+        // rule's coverage is the union of ALL of them (the post-condition
+        // above). `max` is float hygiene over a difference of two sums, not a
+        // correction. Both sides are A-disjoint, so each sum is a true coverage.
+        let overlapSecondsRecovered = max(0, acceptedCoveredSeconds - droppingRuleCoveredSeconds)
         let chainedBytes = accepted.reduce(0) { $0 + $1.bytes }
 
         var slots: [Slot] = []

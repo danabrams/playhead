@@ -6934,15 +6934,24 @@ actor AnalysisStore {
     //
     //   lastRunsFound               Σ runs found, over ACCEPTED personas only.
     //                               VACUITY CONTROL: 0 ⇒ nothing below is
-    //                               evidence.
+    //                               evidence. R3 review — 0 means NO PERSONA WAS
+    //                               ACCEPTED (an accepted one always has ≥ 1
+    //                               run), so it restates
+    //                               `lastExit = no_accepted_byte_diff` and is
+    //                               NOT on its own an observation that the CDN
+    //                               re-encodes.
     //   lastRunsAOverlapping        Σ runs whose A-span partly overlapped
     //                               already-accepted A-coverage. THE
     //                               OPPORTUNITY: > 0 ⇒ a pre-3zxd build could
     //                               have emitted a phantom on this episode.
-    //   lastOverlapSecondsRecovered Σ A-seconds of matched audio kept by
-    //                               CLIPPING those runs instead of dropping
-    //                               them — an UPPER BOUND on the show a pre-3zxd
-    //                               build would have called an ad here.
+    //   lastOverlapSecondsRecovered A-seconds of matched audio a build that
+    //                               DROPPED the overlapper would have left
+    //                               uncovered and reported as divergent — an
+    //                               UPPER BOUND on the show a pre-3zxd build
+    //                               would have called an ad here. R3 review: a
+    //                               DIFFERENCE of two coverages, not a Σ of
+    //                               clipped tails, which over-reports as soon as
+    //                               two clips chain.
     //   lastAlignedSecondsInSlots   Σ over EMITTED slots of A-seconds a found
     //                               run covers. THE INVARIANT: 0 after 3zxd.
     //   lastMaxAlignedSecondsInSlot The worst SINGLE emitted slot, so a large

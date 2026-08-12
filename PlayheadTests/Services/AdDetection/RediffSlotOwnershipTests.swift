@@ -190,13 +190,13 @@ struct RediffSlotOwnershipTests {
     }
 
     @Test("fragments ≤3s apart merge into one slot carrying the OUTER flanks")
-    func fragmentMergeJoinsNearbySlots() {
+    func fragmentMergeJoinsNearbySlots() throws {
         let slots = [
             Self.differSlot(start: 10, end: 20, left: 40, right: 5),
             Self.differSlot(start: 22, end: 30, left: 5, right: 70),   // 2s gap → merge
         ]
         let cleaned = RediffSlotOwnership.cleanedPlayedSlots(from: slots)
-        #expect(cleaned.count == 1)
+        try #require(cleaned.count == 1)
         #expect(cleaned[0].startSeconds == 10 && cleaned[0].endSeconds == 30)
         // Outer flanks: left from the first, right from the last.
         #expect(cleaned[0].leftRunSeconds == 40 && cleaned[0].rightRunSeconds == 70)
@@ -213,13 +213,13 @@ struct RediffSlotOwnershipTests {
     }
 
     @Test("a slot longer than the 8-minute cap is dropped as an alignment breakdown")
-    func durationCapDropsGiantSlot() {
+    func durationCapDropsGiantSlot() throws {
         let slots = [
             Self.differSlot(start: 10, end: 40),          // 30s — keep
             Self.differSlot(start: 100, end: 100 + 600),  // 10min — drop
         ]
         let cleaned = RediffSlotOwnership.cleanedPlayedSlots(from: slots)
-        #expect(cleaned.count == 1)
+        try #require(cleaned.count == 1)
         #expect(cleaned[0].endSeconds == 40)
     }
 
@@ -267,13 +267,13 @@ struct RediffSlotOwnershipTests {
     }
 
     @Test("unionedPlayedSlots collapses overlapping detections of the SAME pod to one slot")
-    func unionCollapsesOverlappingSamePod() {
+    func unionCollapsesOverlappingSamePod() throws {
         // Two personas detect the same pod at slightly different byte edges; the
         // union must merge them (not duplicate), widening to the outer edges.
         let b = [Self.played(100, 160, left: 200, right: 5)]
         let c = [Self.played(99, 161, left: 5, right: 300)]
         let union = RediffSlotOwnership.unionedPlayedSlots([b, c])
-        #expect(union.count == 1, "same-pod overlap merges, not duplicated")
+        try #require(union.count == 1, "same-pod overlap merges, not duplicated")
         #expect(union[0].startSeconds == 99 && union[0].endSeconds == 161)
     }
 
@@ -452,7 +452,7 @@ struct RediffSlotOwnershipTests {
     }
 
     @Test("candidates are index-aligned; a non-covered span gets slot=nil (status-quo, not acoustic)")
-    func candidatesRediffSoleSetter() {
+    func candidatesRediffSoleSetter() throws {
         let spans = [
             Self.span("s0", 12, 20, 1, 2),   // inside a rediff slot
             Self.span("s1", 200, 210, 9, 10), // NO overlapping rediff slot
@@ -465,7 +465,7 @@ struct RediffSlotOwnershipTests {
             coreBankMatch: [false, false],
             slotBankMatch: [false, false]
         )
-        #expect(bundle.candidates.count == 2)
+        try #require(bundle.candidates.count == 2)
         #expect(bundle.synthesizedSlots[0] != nil, "covered span gets a rediff slot")
         #expect(bundle.synthesizedSlots[1] == nil, "non-covered span falls to status-quo width")
         #expect(bundle.diagnostics[1].failureReason == .noCandidatePairs)
@@ -617,7 +617,7 @@ struct RediffSlotOwnershipTests {
     // MARK: - Shadow rows (reused builder + rediff breadcrumb tag)
 
     @Test("shadow rows describe the rediff dispositions and format under the rediffslot.shadow tag")
-    func shadowRowsRediffSourced() {
+    func shadowRowsRediffSourced() throws {
         let spans = [
             Self.span("s0", 12, 20, 1, 2),
             Self.span("s1", 200, 210, 9, 10),
@@ -636,7 +636,7 @@ struct RediffSlotOwnershipTests {
             diagnostics: bundle.diagnostics,
             dispositions: result.dispositions)
 
-        #expect(rows.count == 2)
+        try #require(rows.count == 2)
         // s0: qualifying rediff slot row.
         #expect(rows[0].qualified)
         #expect(rows[0].reason == .qualifying)
