@@ -58,12 +58,13 @@ struct DownloadTimeAssetRegistrationTests {
 
     private func makeScheduler(
         store: AnalysisStore,
-        downloadProvider: StubDownloadProvider
+        downloadProvider: any DownloadProviding,
+        capabilities: any CapabilitiesProviding = StubCapabilitiesProvider()
     ) -> AnalysisWorkScheduler {
         AnalysisWorkScheduler(
             store: store,
             jobRunner: makeRunner(store: store),
-            capabilitiesService: StubCapabilitiesProvider(),
+            capabilitiesService: capabilities,
             downloadManager: downloadProvider,
             batteryProvider: {
                 let battery = StubBatteryProvider()
@@ -80,10 +81,12 @@ struct DownloadTimeAssetRegistrationTests {
     /// all three (SHA-256 identity, AVAsset duration, an mmap-able A-side).
     private func writeSynthAudio(
         seconds: TimeInterval,
-        sampleRate: Double = 44_100
+        sampleRate: Double = 44_100,
+        destination: URL? = nil
     ) throws -> URL {
         let tempDir = URL(fileURLWithPath: NSTemporaryDirectory())
-        let fileURL = tempDir.appendingPathComponent("fzrw-\(UUID().uuidString).caf")
+        let fileURL = destination
+            ?? tempDir.appendingPathComponent("fzrw-\(UUID().uuidString).caf")
 
         guard let format = AVAudioFormat(
             commonFormat: .pcmFormatFloat32,
@@ -147,7 +150,71 @@ struct DownloadTimeAssetRegistrationTests {
             "the row the day-0 readiness probe waits for must exist at enqueue"
         )
         #expect(asset.assetFingerprint == sha)
-        #expect(asset.analysisState == "queued")
+        // R2: REGISTERED, not `SessionState.queued` — nothing has queued this
+        // episode for analysis. See `registeredRowLeavesTheControlRestingAndTappable`
+        // for what the other spelling did to the library row.
+        #expect(asset.analysisState == AnalysisAsset.registeredNotQueuedState)
+    }
+
+    // MARK: - R2 / F1 — what the row SAYS about itself
+
+    @Test("the registered row leaves the library control RESTING and TAPPABLE")
+    func registeredRowLeavesTheControlRestingAndTappable() async throws {
+        let store = try await makeTestStore()
+        let provider = StubDownloadProvider()
+        let scheduler = makeScheduler(store: store, downloadProvider: provider)
+
+        let url = try writeSynthAudio(seconds: 4.5)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let sha = try FileHasher.sha256(fileURL: url)
+        provider.cachedURLs["ep-bar"] = url
+        provider.fingerprints["ep-bar"] = AudioFingerprint(weak: "weak-bar", strong: sha)
+
+        await scheduler.enqueue(
+            episodeId: "ep-bar",
+            podcastId: "pod-bar",
+            downloadId: "dl-bar",
+            sourceFingerprint: sha,
+            isExplicitDownload: false
+        )
+
+        let asset = try #require(try await store.fetchAssetByEpisodeId("ep-bar"))
+
+        // THE POPULATION THIS BEAD SERVES: downloaded by the auto/background
+        // lane, never tapped, no transfer in flight, no coverage summary yet.
+        // Registering the row must not change one pixel of what the library row
+        // says — it is a day-0 enabler, not a UI event.
+        let analysis = episodePreparationAnalysisInputs(asset: asset, coverage: nil)
+        #expect(
+            !analysis.analysisActive,
+            "a REGISTERED row must not claim the analysis lane is working on this episode"
+        )
+
+        let readiness = deriveEpisodePreparationReadiness(EpisodePreparationInputs(
+            isDownloaded: true,
+            downloadInFlight: false,
+            downloadFraction: 1,
+            analysisActive: analysis.analysisActive,
+            analysisComplete: analysis.analysisComplete,
+            analysisTerminatedComplete: analysis.analysisTerminatedComplete,
+            analysisFailed: analysis.analysisFailed,
+            adScanFraction: analysis.adScanFraction,
+            userInitiated: false,
+            downloadPermitted: true
+        ))
+
+        // `.idle` is the resting ✦ — and it is the ONLY outcome under which
+        // `EpisodePreparationStatusModel.isActionable` is true for a downloaded
+        // episode, so it is also the statement that the tap still reaches
+        // `prepareEpisodeForAnalysis` → `enqueueUserIntentAnalysis` (playhead-kanf's
+        // promote-to-`.now` escape hatch). `.analyzing` would disable it for
+        // exactly the episodes the lane is hours away from.
+        #expect(readiness.state == .idle)
+        #expect(readiness.state != .analyzing)
+        #expect(
+            episodePreparationCaption(readiness) == nil,
+            "no caption at all — never a frozen \"Downloaded · analyzing 0%\""
+        )
     }
 
     @Test("the registered row carries a RESOLVABLE A-side, not just an id")
@@ -434,6 +501,207 @@ struct DownloadTimeAssetRegistrationTests {
         let rows = try await store.fetchAllAssets().filter { $0.episodeId == "ep-reuse" }
         #expect(rows.count == 1, "dispatch must reuse the registered row, not mint a second")
         #expect(rows.first?.id == registered.id)
+    }
+
+    // MARK: - R2 / F2 — the check-then-insert window
+
+    @Test("a placeholder minted DURING the registration cannot produce a second row")
+    func concurrentPlaceholderCannotProduceASecondRow() async throws {
+        let store = try await makeTestStore()
+        let provider = StubDownloadProvider()
+        let racer = PlaceholderRacer(
+            store: store,
+            episodeId: "ep-race",
+            placeholderId: "asset-race-placeholder"
+        )
+        let scheduler = makeScheduler(
+            store: store,
+            downloadProvider: provider,
+            capabilities: racer
+        )
+
+        let url = try writeSynthAudio(seconds: 3.5)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let sha = try FileHasher.sha256(fileURL: url)
+        provider.cachedURLs["ep-race"] = url
+        provider.fingerprints["ep-race"] = AudioFingerprint(weak: "weak-race", strong: sha)
+
+        await scheduler.enqueue(
+            episodeId: "ep-race",
+            podcastId: "pod-race",
+            downloadId: "dl-race",
+            sourceFingerprint: sha,
+            isExplicitDownload: false
+        )
+
+        // ANTI-VACUITY: the seam must actually have fired INSIDE the window. If
+        // the registration ever stops reaching `currentSnapshot` — or bails at
+        // an earlier guard — every assertion below is trivially satisfiable.
+        #expect(racer.didPlantPlaceholder, "the competing writer never ran; the race was not exercised")
+
+        let rows = try await store.fetchAllAssets().filter { $0.episodeId == "ep-race" }
+        // Two rows here is playhead-0hi9 returning, and the V39 uniqueness index
+        // cannot stop it: it is on `(episodeId, assetFingerprint)`, and the
+        // placeholder's fingerprint is its own UUID, so the pair differs and
+        // BOTH rows survive. The one-shot repair sweep
+        // (`did_duplicate_asset_reconcile_v1`) is already spent on shipped devices.
+        #expect(rows.count == 1, "the registration must lose the race, not duplicate the episode")
+        #expect(rows.first?.id == "asset-race-placeholder")
+
+        // And the job must be left UNSTAMPED. `resolveAnalysisAssetId` returns on
+        // `job.analysisAssetId` before any identity work, so a job stamped with a
+        // row that lost would permanently skip the weak-upgrade arm that folds
+        // the placeholder onto the canonical SHA.
+        let jobs = try await store.fetchJobsByState("queued").filter { $0.episodeId == "ep-race" }
+        let job = try #require(jobs.first)
+        #expect(
+            job.analysisAssetId == nil,
+            "a lost registration must not stamp the job with a row it did not write"
+        )
+    }
+
+    /// A `CapabilitiesProviding` that mints a COMPETING `analysis_assets` row
+    /// from inside `currentSnapshot` — the FIRST suspension point between the
+    /// registration's "does this episode have a row?" check
+    /// (`AnalysisWorkScheduler.swift`, guard 3) and its insert.
+    ///
+    /// WHY THIS SEAM AND NOT `DownloadProviding.fingerprint(for:)`, which is the
+    /// window's other suspension point. `enqueue` already calls
+    /// `downloadManager.fingerprint(for:)` twice BEFORE the registration runs
+    /// (`AnalysisWorkScheduler.swift:1379`, `:1413`), so a racer hung on that
+    /// method lands its placeholder before guard 3 rather than after it — which
+    /// exercises the guard, not the window, and passes whether or not the insert
+    /// is atomic. `capabilitiesService.currentSnapshot` is reached exactly once
+    /// on this path and only from inside the registration.
+    ///
+    /// The row it writes is `AnalysisCoordinator.resolveSession`'s placeholder
+    /// verbatim: `assetFingerprint` is the row's OWN UUID, which is what makes
+    /// it invisible to the V39 `(episodeId, assetFingerprint)` uniqueness index.
+    /// Production reaches this interleaving whenever a download completes while
+    /// the user presses play, which is routine.
+    final class PlaceholderRacer: CapabilitiesProviding, @unchecked Sendable {
+        private let inner = StubCapabilitiesProvider()
+        private let store: AnalysisStore
+        private let episodeId: String
+        private let placeholderId: String
+        private let lock = NSLock()
+        private var didRace = false
+
+        init(store: AnalysisStore, episodeId: String, placeholderId: String) {
+            self.store = store
+            self.episodeId = episodeId
+            self.placeholderId = placeholderId
+        }
+
+        /// Whether the placeholder was actually planted. Asserted by the test so
+        /// a seam that stops being reached fails LOUDLY instead of turning the
+        /// race assertions vacuous.
+        var didPlantPlaceholder: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return didRace
+        }
+
+        var currentSnapshot: CapabilitySnapshot {
+            get async {
+                let shouldRace: Bool = {
+                    lock.lock()
+                    defer { lock.unlock() }
+                    guard !didRace else { return false }
+                    didRace = true
+                    return true
+                }()
+                if shouldRace {
+                    try? await store.insertAsset(AnalysisAsset(
+                        id: placeholderId,
+                        episodeId: episodeId,
+                        assetFingerprint: placeholderId,
+                        weakFingerprint: nil,
+                        sourceURL: "complete/\(placeholderId).mp3",
+                        featureCoverageEndTime: nil,
+                        fastTranscriptCoverageEndTime: nil,
+                        confirmedAdCoverageEndTime: nil,
+                        analysisState: SessionState.queued.rawValue,
+                        analysisVersion: 1,
+                        capabilitySnapshot: nil
+                    ))
+                }
+                return inner.currentSnapshot
+            }
+        }
+
+        func capabilityUpdates() async -> AsyncStream<CapabilitySnapshot> {
+            await inner.capabilityUpdates()
+        }
+    }
+
+    // MARK: - R2 / M7 — playhead-b8hj container portability at the new site
+
+    @Test("the registered row's sourceURL is CONTAINER-PORTABLE, not an absolute path")
+    func registeredRowSourceURLIsContainerPortable() async throws {
+        let store = try await makeTestStore()
+        let provider = StubDownloadProvider()
+        let scheduler = makeScheduler(store: store, downloadProvider: provider)
+
+        // The fixture MUST live under the audio-cache root. `portableString`
+        // stores anything outside the cache verbatim, so for a file in
+        // `NSTemporaryDirectory()` — which is where every other fixture in this
+        // suite lives — it and `absoluteString` return the identical bytes and
+        // the b8hj property is untestable. That is why the pre-existing A-side
+        // test could not see `portableString` -> `absoluteString` (mutant M7).
+        let cacheRoot = DownloadManager.defaultCacheDirectory()
+        let completeDir = cacheRoot.appendingPathComponent("complete", isDirectory: true)
+        try FileManager.default.createDirectory(at: completeDir, withIntermediateDirectories: true)
+        let name = "fzrw-portable-\(UUID().uuidString).caf"
+        let url = try writeSynthAudio(
+            seconds: 2.0,
+            destination: completeDir.appendingPathComponent(name)
+        )
+        defer { try? FileManager.default.removeItem(at: url) }
+
+        let sha = try FileHasher.sha256(fileURL: url)
+        provider.cachedURLs["ep-portable"] = url
+        provider.fingerprints["ep-portable"] = AudioFingerprint(weak: "weak-portable", strong: sha)
+
+        await scheduler.enqueue(
+            episodeId: "ep-portable",
+            podcastId: "pod-portable",
+            downloadId: "dl-portable",
+            sourceFingerprint: sha,
+            isExplicitDownload: false
+        )
+
+        let asset = try #require(try await store.fetchAssetByEpisodeId("ep-portable"))
+
+        // (a) The stored FORM. `sourceURL` is write-once, so a path carrying the
+        // Data-container UUID is permanently dead once iOS re-creates the
+        // container on reinstall or restore (playhead-b8hj measured 12 distinct
+        // container UUIDs across 36 rows in 9 days).
+        #expect(asset.sourceURL == "complete/\(name)")
+        #expect(!asset.sourceURL.hasPrefix("/"), "an absolute path dies with the container")
+        #expect(!asset.sourceURL.contains("://"), "not a file:// URL either")
+
+        // (b) What the form BUYS, stated operationally: the same string resolves
+        // against a DIFFERENT container root. An `absoluteString` row resolves
+        // against step 1 (a usable absolute path is taken as-is) and lands back
+        // in the old container instead.
+        let otherRoot = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("fzrw-other-container-\(UUID().uuidString)", isDirectory: true)
+        let otherComplete = otherRoot.appendingPathComponent("complete", isDirectory: true)
+        try FileManager.default.createDirectory(at: otherComplete, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: otherRoot) }
+        try FileManager.default.copyItem(at: url, to: otherComplete.appendingPathComponent(name))
+
+        let resolved = try #require(
+            AudioCacheLocation.resolve(asset.sourceURL, cacheRoot: otherRoot) { candidate in
+                (try? candidate.resourceValues(forKeys: [.isRegularFileKey]).isRegularFile) == true
+            },
+            "the stored reference must re-root onto the current container"
+        )
+        #expect(
+            resolved.path.hasPrefix(otherRoot.path),
+            "resolution must land in the container it was asked about, not the one that wrote the row"
+        )
     }
 
     // MARK: - Coordinator harness

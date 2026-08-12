@@ -6522,11 +6522,23 @@ actor AnalysisWorkScheduler {
     /// record) and its `sourceURL` (the read-only pinned A-side —
     /// `AdDetectionService.resolveDayZeroASide`, the one resolver shared by the
     /// mint and its free pre-fetch blocker). No duration, no fingerprint, no
-    /// transcript; nothing the analysis lane produces. And what is written here
-    /// is field-for-field what ``resolveAnalysisAssetId``'s fall-through insert
-    /// would have written — same fingerprints, same portable `sourceURL`, same
-    /// `"queued"` state, same consumed title/duration stashes. The row is the
-    /// same row, earlier.
+    /// transcript; nothing the analysis lane produces. What is written here is
+    /// what ``resolveAnalysisAssetId``'s fall-through insert would have written
+    /// — same fingerprints, same portable `sourceURL`, same consumed
+    /// title/duration stashes — in every column but ONE.
+    ///
+    /// THE ONE COLUMN THAT DIFFERS, AND WHY (R2). `analysisState` is
+    /// ``AnalysisAsset/registeredNotQueuedState``, not `SessionState.queued`.
+    /// The lazy insert runs from inside `processJob`, so its `"queued"` is true
+    /// for the seconds before the session starts. Writing the same token here
+    /// would make it true for HOURS — up to 13,678 s on the pull above — and
+    /// the surface layer reads `"queued"` as *the lane is working on this*: the
+    /// library row lights a frozen "Downloaded · analyzing 0%" bar and, because
+    /// `.analyzing` is not actionable, DISABLES the tap that routes to
+    /// `enqueueUserIntentAnalysis` — playhead-kanf's promote-to-`.now` escape
+    /// hatch, taken away from precisely the episodes it exists for. See the
+    /// constant for the whole chain. The surface answer is now identical to the
+    /// one it gave before this bead, when there was no row at all.
     ///
     /// THREE PRECONDITIONS, AND EACH IS LOAD-BEARING. Everything they exclude
     /// falls through to the lazy path completely unchanged.
@@ -6570,6 +6582,15 @@ actor AnalysisWorkScheduler {
               cachedAudioCanonicalSHA == job.sourceFingerprint else { return }
 
         // (3) No asset row for this episode at all.
+        //
+        // R2: this is the CHEAP arm only — it avoids paying for a capability
+        // snapshot and a fingerprint read on an episode that already has a row.
+        // It is NOT what makes the insert safe: two suspension points sit
+        // between here and the write, and the competing writer
+        // (`AnalysisCoordinator.resolveSession`, fired by `handlePlayStarted`)
+        // runs on a different actor. ``insertAssetIfEpisodeHasNone`` re-asks the
+        // question inside the writing statement, which is where the answer has
+        // to be true.
         do {
             guard try await store.fetchAssetByEpisodeId(job.episodeId) == nil else { return }
         } catch {
@@ -6616,16 +6637,30 @@ actor AnalysisWorkScheduler {
             featureCoverageEndTime: nil,
             fastTranscriptCoverageEndTime: nil,
             confirmedAdCoverageEndTime: nil,
-            analysisState: "queued",
+            // R2: REGISTERED, not queued. `"queued"` names the analysis lane
+            // having the episode in hand, and nothing here has queued anything
+            // — see ``AnalysisAsset/registeredNotQueuedState``.
+            analysisState: AnalysisAsset.registeredNotQueuedState,
             analysisVersion: PreAnalysisConfig.analysisVersion,
             capabilitySnapshot: capabilityJSON,
             episodeDurationSec: stashedDuration,
             episodeTitle: stashedEpisodeTitle
         )
+        // R2: conditional insert, not `insertAsset`. Guard (3) above answered
+        // "no row" two suspension points ago; only the write itself can answer
+        // it at the instant of writing. A lost race falls through to the lazy
+        // path with the stashes intact and the job UNSTAMPED, which is what
+        // lets `resolveAnalysisAssetId` reach its weak-upgrade arm and fold the
+        // competitor's placeholder in rather than leaving a second row.
+        let registered: Bool
         do {
-            try await store.insertAsset(asset)
+            registered = try await store.insertAssetIfEpisodeHasNone(asset)
         } catch {
             logger.warning("Download-time asset registration failed for \(job.episodeId): \(error)")
+            return
+        }
+        guard registered else {
+            logger.info("Download-time asset registration lost to a concurrent writer for \(job.episodeId); leaving the lazy path to resolve identity")
             return
         }
         pendingEpisodeTitles.removeValue(forKey: job.episodeId)
