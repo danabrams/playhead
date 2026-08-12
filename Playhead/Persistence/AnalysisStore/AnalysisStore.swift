@@ -9709,6 +9709,51 @@ actor AnalysisStore {
         return sqlite3_changes(db) > 0
     }
 
+    /// playhead-fzrw R3 — promote a REGISTERED row to `queued` when the
+    /// analysis lane actually takes the episode in hand, and only then.
+    ///
+    /// WHY THIS EXISTS. R2 gave the download-time registration
+    /// ``AnalysisAsset/registeredNotQueuedState`` so a downloaded-but-unanalysed
+    /// episode stops claiming the lane is working on it. That is right for the
+    /// hours the episode spends waiting. It is WRONG the moment the lane
+    /// arrives — and nothing moved it, because the only writer of this column
+    /// is `AnalysisCoordinator`, which runs on the PLAY path
+    /// (`handlePlayStarted` → `resolveSession`); the scheduler lane never goes
+    /// near it (`AnalysisJobRunner.run`'s own header says so). Before this bead
+    /// the token was written by ``AnalysisWorkScheduler/resolveAnalysisAssetId``
+    /// at exactly the instant the lane picked the job up, so the library's
+    /// working bar was correct by accident. With the row minted earlier and
+    /// that insert skipped, `episodePreparationAnalysisActive` read `false` for
+    /// the WHOLE analysis: the ✦ resting glyph and no "Downloaded · analyzing
+    /// N%" caption while the pipeline was genuinely running, then a jump
+    /// straight to ✓ when ad-scan coverage crossed 0.98.
+    ///
+    /// CONDITIONAL, not a plain `UPDATE`. The predicate is the whole safety
+    /// argument: only a row still carrying the registration token moves, so
+    /// this can never overwrite a `SessionState` the coordinator wrote (a
+    /// terminal, or a live mid-pipeline state) no matter how the two lanes
+    /// interleave. Decision and write are one statement on one connection
+    /// inside this actor, the same discipline as
+    /// ``insertAssetIfEpisodeHasNone(_:)``.
+    ///
+    /// - Returns: `true` when this call promoted the row; `false` when it was
+    ///   already carrying some other state and nothing was written.
+    @discardableResult
+    func markRegisteredAssetQueued(id: String) throws -> Bool {
+        let sql = """
+            UPDATE analysis_assets
+            SET analysisState = ?
+            WHERE id = ? AND analysisState = ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, SessionState.queued.rawValue)
+        bind(stmt, 2, id)
+        bind(stmt, 3, AnalysisAsset.registeredNotQueuedState)
+        try step(stmt, expecting: SQLITE_DONE)
+        return sqlite3_changes(db) > 0
+    }
+
     /// playhead-h7r: count `analysis_assets` rows grouped by
     /// `artifact_class`. Used by ``StorageBudget`` as a lightweight way
     /// to observe per-class cardinality; byte accounting is the job of

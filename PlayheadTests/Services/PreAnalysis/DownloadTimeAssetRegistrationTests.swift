@@ -503,6 +503,126 @@ struct DownloadTimeAssetRegistrationTests {
         #expect(rows.first?.id == registered.id)
     }
 
+    // MARK: - R3 / F3 — the registration token must not outlive the wait
+
+    @Test("once the lane RUNS the episode, the control shows the working bar again")
+    func dispatchPromotesTheRegisteredRowOffTheRestingToken() async throws {
+        let store = try await makeTestStore()
+        let provider = StubDownloadProvider()
+        let scheduler = makeScheduler(store: store, downloadProvider: provider)
+
+        let url = try writeSynthAudio(seconds: 5.25)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let sha = try FileHasher.sha256(fileURL: url)
+        provider.cachedURLs["ep-promote"] = url
+        provider.fingerprints["ep-promote"] = AudioFingerprint(weak: "weak-promote", strong: sha)
+
+        await scheduler.enqueue(
+            episodeId: "ep-promote",
+            podcastId: "pod-promote",
+            downloadId: "dl-promote",
+            sourceFingerprint: sha,
+            isExplicitDownload: false
+        )
+
+        // WHILE WAITING: resting, tappable — R2's F1 fix, unchanged.
+        let waiting = try #require(try await store.fetchAssetByEpisodeId("ep-promote"))
+        #expect(waiting.analysisState == AnalysisAsset.registeredNotQueuedState)
+        #expect(!episodePreparationAnalysisInputs(asset: waiting, coverage: nil).analysisActive)
+
+        let processed = await scheduler.processNextDispatchableJobForTesting()
+        #expect(processed)
+
+        // ONCE THE LANE HAS IT: the registration token is gone.
+        //
+        // Nothing else could remove it. `AnalysisCoordinator` is the only other
+        // writer of this column and it runs on the PLAY path — no playback here
+        // — while `resolveAnalysisAssetId` returns early on the stamped
+        // `job.analysisAssetId` without touching state. So before R3 this row
+        // read `new` for the entire analysis and the library drew the resting ✦
+        // with no caption: F1's lie pointing the other way.
+        let running = try #require(try await store.fetchAssetByEpisodeId("ep-promote"))
+        #expect(
+            running.analysisState != AnalysisAsset.registeredNotQueuedState,
+            "a row the lane has taken in hand must not still read as merely registered"
+        )
+
+        let analysis = episodePreparationAnalysisInputs(asset: running, coverage: nil)
+        #expect(
+            analysis.analysisActive,
+            "the lane is working on this episode; the control must say so"
+        )
+        let readiness = deriveEpisodePreparationReadiness(EpisodePreparationInputs(
+            isDownloaded: true,
+            downloadInFlight: false,
+            downloadFraction: 1,
+            analysisActive: analysis.analysisActive,
+            analysisComplete: analysis.analysisComplete,
+            analysisTerminatedComplete: analysis.analysisTerminatedComplete,
+            analysisFailed: analysis.analysisFailed,
+            adScanFraction: analysis.adScanFraction,
+            userInitiated: false,
+            downloadPermitted: true
+        ))
+        #expect(readiness.state == .analyzing)
+        #expect(episodePreparationCaption(readiness) != nil)
+    }
+
+    @Test("the promotion is CONDITIONAL — it cannot overwrite a state the coordinator wrote")
+    func promotionNeverClobbersACoordinatorWrittenState() async throws {
+        let store = try await makeTestStore()
+
+        // The registration token: promoted, exactly once.
+        let registered = AnalysisAsset(
+            id: "asset-registered",
+            episodeId: "ep-registered",
+            assetFingerprint: String(repeating: "a", count: 64),
+            weakFingerprint: "weak-registered",
+            sourceURL: "Library/Caches/audio/ep-registered.mp3",
+            featureCoverageEndTime: nil,
+            fastTranscriptCoverageEndTime: nil,
+            confirmedAdCoverageEndTime: nil,
+            analysisState: AnalysisAsset.registeredNotQueuedState,
+            analysisVersion: PreAnalysisConfig.analysisVersion,
+            capabilitySnapshot: nil
+        )
+        try await store.insertAsset(registered)
+        #expect(try await store.markRegisteredAssetQueued(id: "asset-registered"))
+        #expect(
+            try await store.fetchAsset(id: "asset-registered")?.analysisState
+                == SessionState.queued.rawValue
+        )
+        #expect(
+            try await store.markRegisteredAssetQueued(id: "asset-registered") == false,
+            "the second call has nothing to promote — the predicate no longer matches"
+        )
+
+        // A TERMINAL the coordinator wrote. An unconditional UPDATE here would
+        // rewind a finished episode to `queued` and relight the working bar on
+        // an episode that is done — which is why the predicate is in the SQL
+        // rather than in a caller's `if`.
+        let finished = AnalysisAsset(
+            id: "asset-finished",
+            episodeId: "ep-finished",
+            assetFingerprint: String(repeating: "b", count: 64),
+            weakFingerprint: "weak-finished",
+            sourceURL: "Library/Caches/audio/ep-finished.mp3",
+            featureCoverageEndTime: 100,
+            fastTranscriptCoverageEndTime: 100,
+            confirmedAdCoverageEndTime: 100,
+            analysisState: SessionState.completeFull.rawValue,
+            analysisVersion: PreAnalysisConfig.analysisVersion,
+            capabilitySnapshot: nil
+        )
+        try await store.insertAsset(finished)
+        #expect(try await store.markRegisteredAssetQueued(id: "asset-finished") == false)
+        #expect(
+            try await store.fetchAsset(id: "asset-finished")?.analysisState
+                == SessionState.completeFull.rawValue,
+            "a completion terminal must survive the promotion untouched"
+        )
+    }
+
     // MARK: - R2 / F2 — the check-then-insert window
 
     @Test("a placeholder minted DURING the registration cannot produce a second row")

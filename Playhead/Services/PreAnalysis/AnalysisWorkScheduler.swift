@@ -4887,6 +4887,30 @@ actor AnalysisWorkScheduler {
                 return
             }
 
+            // playhead-fzrw R3: THE LANE NOW HAS THIS EPISODE IN HAND, SO SAY SO.
+            //
+            // R2's registration mints the row in
+            // ``AnalysisAsset/registeredNotQueuedState`` precisely so the hours
+            // it spends waiting do not light a working bar. Nothing then moved
+            // it off that token: the only writer of `analysis_assets.analysisState`
+            // is `AnalysisCoordinator`, which runs on the PLAY path, and
+            // `resolveAnalysisAssetId` — which used to write `"queued"` at this
+            // very moment — returns early on the stamped `job.analysisAssetId`
+            // and reuses an existing row without touching its state. So the
+            // library control read `analysisActive == false` for the WHOLE
+            // analysis and showed the resting ✦ with no caption while the
+            // pipeline ran: F1's lie in the other direction.
+            //
+            // Placed AFTER the cancel guard rather than next to the asset
+            // resolution, so a job cancelled before its runner ever started
+            // leaves the row resting and tappable instead of stranding it at a
+            // frozen "analyzing 0%". The store method is conditional on the
+            // registration token, so it can never overwrite a coordinator-written
+            // state; `writeIfStillOwned` drops it if the lease was reclaimed.
+            await writeIfStillOwned("assetRegistration.promoteToQueued") {
+                _ = try await store.markRegisteredAssetQueued(id: assetId)
+            }
+
             let runTask = Task<AnalysisOutcome, Error> {
                 try Task.checkCancellation()
                 let result = await self.jobRunner.run(request)
