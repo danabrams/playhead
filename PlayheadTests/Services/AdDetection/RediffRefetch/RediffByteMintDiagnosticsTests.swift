@@ -61,10 +61,43 @@
 //                                            this episode. Unfalsified, not
 //                                            confirmed.
 //   lastRunsAOverlapping > 0 AND
-//   lastAlignedSecondsInSlots = 0         -> THE PHANTOM FIRED AND THE FIX HELD.
-//                                            lastOverlapSecondsRecovered is the
-//                                            show a pre-3zxd build would have
-//                                            banner-marked on that episode.
+//   lastAlignedSecondsInSlots = 0         -> the defect HAD its opportunity here
+//                                            and the fix held. Read
+//                                            `lastDivergentSlotCount` alongside:
+//                                            > 0 means the invariant witness was
+//                                            EXERCISED over shipped slots and
+//                                            scored clean; = 0 means nothing
+//                                            shipped, so the witness is VACUOUS
+//                                            and it is the slot count, not the
+//                                            witness, that carries the conclusion.
+//                                            This bead's flagship shape — a 470 s
+//                                            pure-show tail — lands in the second
+//                                            case: post-fix it emits no slot at
+//                                            all. (R4 review; same shape as the
+//                                            `lastRunsFound = 0` rule above.)
+//   lastOverlapSecondsRecovered           -> an UPPER BOUND on the show a pre-3zxd
+//                                            build would have banner-marked, never
+//                                            the realised figure — read it as a
+//                                            magnitude, not as a saved-seconds
+//                                            total. R4 review, MEASURED on this
+//                                            branch's own width sweep
+//                                            (`nothingShipsBelowOrAboveTheDuration
+//                                            Cap`): at tails of 540 s and 720 s
+//                                            the column reads 540.00 and 720.01
+//                                            while the pre-3zxd gap EXCEEDED
+//                                            `maxSlotSeconds` (480 s) and shipped
+//                                            NOTHING — 2 of the 7 swept widths, so
+//                                            the bound is loose, and loose in the
+//                                            flattering direction. The gap also
+//                                            had to clear `minAdSeconds` (5 s),
+//                                            and a pre-3zxd build computed a LOWER
+//                                            `segmentedChainedFractionB` that
+//                                            could have failed the re-encode floor
+//                                            outright. See
+//                                            `RediffByteAligner.Alignment
+//                                            .segmentedOverlapSecondsRecovered`,
+//                                            which has said "not the realised
+//                                            damage" all along.
 //   lastAlignedSecondsInSlots > 0         -> a shipped slot contains audio the
 //                                            aligner proved matched. Check the
 //                                            MAGNITUDE first: ≤ 3 s per join is

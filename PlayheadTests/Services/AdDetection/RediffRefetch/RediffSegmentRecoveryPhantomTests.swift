@@ -393,8 +393,12 @@ struct RediffSegmentRecoveryPhantomTests {
     /// AND THAT IS NOT THE QUANTITY ITS NAME CLAIMS.
     ///
     /// `overlapSecondsRecovered` is persisted as `lastOverlapSecondsRecovered`
-    /// and read off a device pull as "the show a pre-3zxd build would have
-    /// banner-marked on this episode". It was accumulated one clipped tail at a
+    /// and read off a device pull as an UPPER BOUND on "the show a pre-3zxd build
+    /// would have banner-marked on this episode" — R4 review: an upper bound and
+    /// never the realised figure, because the resulting gap still had to clear
+    /// `minAdSeconds` and `maxSlotSeconds` to ship. § 3's sweep measures the gap
+    /// exactly: at 540 s and 720 s tails this figure reads 540.00 / 720.01 while
+    /// a pre-3zxd build shipped nothing at all. It was accumulated one clipped tail at a
     /// time, which is right for ONE overlap and wrong the moment two chain —
     /// the ordinary shape for two inserted-in-B breaks, i.e. exactly the
     /// multi-break population playhead-9s6q exists to recover. The pre-3zxd rule
