@@ -476,7 +476,8 @@ struct AdDetectionSelfPromotionTests {
 
         // No profile exists — this drives the CREATE closure.
         await trust.recordSuccessfulObservation(
-            podcastId: podcastId, averageConfidence: 0.95
+            podcastId: podcastId, averageConfidence: 0.95,
+            detectors: [.fusion]
         )
 
         let profile = try #require(await store.fetchProfile(podcastId: podcastId))
@@ -499,7 +500,8 @@ struct AdDetectionSelfPromotionTests {
         let trust = TrustScoringService(store: store)
 
         await trust.recordSuccessfulObservation(
-            podcastId: podcastId, averageConfidence: 0.91
+            podcastId: podcastId, averageConfidence: 0.91,
+            detectors: [.fusion]
         )
 
         let profile = try #require(await store.fetchProfile(podcastId: podcastId))

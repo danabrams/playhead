@@ -1219,6 +1219,198 @@ private actor ObservedCorrectObservations {
     func snapshot() -> [Record] { records }
 }
 
+// MARK: - Self-promotion reaches the gate, not just the pill (R4)
+
+/// The bead's promotion has to move the value the SKIP GATE reads.
+///
+/// `SkipOrchestrator.skipMode(for:)` resolves
+/// `activeDetectorSkipModes.mode(for:)` — a per-class verdict — and a class
+/// tracks `profile.mode` only for as long as it has NO stored ledger entry.
+/// Every production veto site names a detector, and an attributed gesture
+/// materializes the whole ledger, so the first time a listener rejects
+/// anything, every class is pinned. Measured before this was fixed: show
+/// scalar `manual`, `.fusion` and `.segmentAggregated` still `shadow`, forever.
+@Suite("playhead-mn5e/R4 — self-promotion reaches the per-detector gate", .serialized)
+struct SelfObservationReachesTheGateTests {
+    /// One veto, then ten clean episodes. The gate must move.
+    @Test("a forked ledger still promotes the classes that drew the evidence")
+    func selfPromotionReachesTheDetectorGate() async throws {
+        let (sut, store) = try await gardService(
+            seed: gardProfile(
+                mode: SkipMode.shadow.rawValue,
+                trustScore: 0.2,
+                observations: 0,
+                falseSignals: 0
+            )
+        )
+        // Day 0. `.rediffByteExact` seeds at `.auto` with no profile history,
+        // so a byte-exact span auto-skips on a brand-new show. The listener
+        // rejects that one skip. The gesture NAMES a detector, so it forks the
+        // ledger: every class gets a stored entry pinned at the pre-veto
+        // profile, which is `shadow`.
+        await sut.recordFalseSkipSignal(
+            podcastId: gardPodcastId,
+            attributions: [
+                DetectorVetoAttribution(
+                    detector: .rediffByteExact,
+                    tier: .deterministic
+                )
+            ]
+        )
+        let forked = try #require(
+            await store.fetchProfile(podcastId: gardPodcastId)
+        )
+        try #require(
+            forked.detectorTrustJSON != nil,
+            "the veto must have forked the ledger, or this test proves nothing"
+        )
+        // Ten clean episodes of backfill self-observation, each confirming
+        // windows drawn by the aggregator and the fusion bucket — the
+        // production caller playhead-mn5e adds.
+        for _ in 0..<10 {
+            await sut.recordSuccessfulObservation(
+                podcastId: gardPodcastId,
+                averageConfidence: 0.8,
+                detectors: [.segmentAggregated, .fusion]
+            )
+        }
+        let profile = try #require(
+            await store.fetchProfile(podcastId: gardPodcastId)
+        )
+        #expect(
+            SkipMode(rawValue: profile.mode) == .manual,
+            "the show scalar must have promoted; got \(profile.mode)"
+        )
+        let modes = await sut.resolveDetectorModes(podcastId: gardPodcastId)
+        #expect(modes.showMode == .manual)
+        #expect(
+            modes.mode(for: .fusion) == .manual,
+            "fusion is what the skip gate reads; got \(modes.mode(for: .fusion))"
+        )
+        #expect(
+            modes.mode(for: .segmentAggregated) == .manual,
+            "segmentAggregated got \(modes.mode(for: .segmentAggregated))"
+        )
+    }
+
+    /// Credit is not shared. A class that drew nothing this episode has earned
+    /// nothing — the same rule blame follows, and the reason gard exists.
+    @Test("a class that drew no window this episode is not credited")
+    func unnamedClassIsNotCredited() async throws {
+        let (sut, store) = try await gardService(
+            seed: gardProfile(
+                mode: SkipMode.shadow.rawValue,
+                trustScore: 0.2,
+                observations: 0,
+                falseSignals: 0
+            )
+        )
+        await sut.recordFalseSkipSignal(
+            podcastId: gardPodcastId,
+            attributions: [
+                DetectorVetoAttribution(
+                    detector: .rediffByteExact,
+                    tier: .deterministic
+                )
+            ]
+        )
+        for _ in 0..<10 {
+            await sut.recordSuccessfulObservation(
+                podcastId: gardPodcastId,
+                averageConfidence: 0.8,
+                detectors: [.fusion]
+            )
+        }
+        let modes = await sut.resolveDetectorModes(podcastId: gardPodcastId)
+        #expect(modes.mode(for: .fusion) == .manual)
+        #expect(
+            modes.mode(for: .segmentAggregated) == .shadow,
+            "the aggregator produced nothing on these episodes and must not ride the fusion bucket's credit; got \(modes.mode(for: .segmentAggregated))"
+        )
+    }
+
+    /// A show that has never diverged keeps writing NULL. The seed already
+    /// tracks the scalar there, and forking on every backfill would start
+    /// persisting a ledger for every show on the device.
+    @Test("an un-forked ledger stays NULL through self-observation")
+    func virginLedgerIsNotForkedByABackfill() async throws {
+        let (sut, store) = try await gardService(
+            seed: gardProfile(
+                mode: SkipMode.shadow.rawValue,
+                trustScore: 0.2,
+                observations: 0,
+                falseSignals: 0
+            )
+        )
+        for _ in 0..<10 {
+            await sut.recordSuccessfulObservation(
+                podcastId: gardPodcastId,
+                averageConfidence: 0.8,
+                detectors: [.segmentAggregated, .fusion]
+            )
+        }
+        let profile = try #require(
+            await store.fetchProfile(podcastId: gardPodcastId)
+        )
+        #expect(
+            profile.detectorTrustJSON == nil,
+            "a show with no gesture history must stay byte-identical to a pre-gard row; got \(String(describing: profile.detectorTrustJSON))"
+        )
+        // …and the seed carries the promotion to every show-governed class.
+        let modes = await sut.resolveDetectorModes(podcastId: gardPodcastId)
+        #expect(modes.mode(for: .fusion) == .manual)
+        #expect(modes.mode(for: .segmentAggregated) == .manual)
+    }
+
+    /// Self-observation must not launder a veto. The weighted counter the
+    /// per-detector demotion reads is carried through untouched, exactly as
+    /// the show's `recentFalseSkipSignals` already was.
+    @Test("self-observation does not decay a detector's false-skip weight")
+    func selfObservationDoesNotDecayFalseSkipWeight() async throws {
+        let (sut, store) = try await gardService(
+            seed: gardProfile(
+                mode: SkipMode.manual.rawValue,
+                trustScore: 0.5,
+                observations: 5,
+                falseSignals: 0
+            )
+        )
+        await sut.recordFalseSkipSignal(
+            podcastId: gardPodcastId,
+            attributions: [
+                DetectorVetoAttribution(detector: .fusion, tier: .deterministic)
+            ]
+        )
+        let charged = try #require(
+            await store.fetchProfile(podcastId: gardPodcastId)
+        )
+        let chargedWeight = DetectorTrustLedger
+            .decode(charged.detectorTrustJSON)
+            .entry(for: .fusion, seededFrom: charged)
+            .falseSkipWeight
+        try #require(chargedWeight > 0, "the veto must have charged the class")
+
+        for _ in 0..<10 {
+            await sut.recordSuccessfulObservation(
+                podcastId: gardPodcastId,
+                averageConfidence: 0.8,
+                detectors: [.fusion]
+            )
+        }
+        let after = try #require(
+            await store.fetchProfile(podcastId: gardPodcastId)
+        )
+        let afterWeight = DetectorTrustLedger
+            .decode(after.detectorTrustJSON)
+            .entry(for: .fusion, seededFrom: after)
+            .falseSkipWeight
+        #expect(
+            afterWeight == chargedWeight,
+            "only a banner Yes may decay a veto; got \(afterWeight) from \(chargedWeight)"
+        )
+    }
+}
+
 // MARK: - Source access
 
 /// Resolve a repo-relative production source path from the test bundle.

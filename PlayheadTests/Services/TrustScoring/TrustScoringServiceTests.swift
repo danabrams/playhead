@@ -106,7 +106,7 @@ struct TrustScoringServiceTests {
     @Test("First observation with low confidence creates .shadow profile")
     func firstObservationLowConfidenceCreatesShadow() async throws {
         let (sut, store) = try await makeSUT()
-        await sut.recordSuccessfulObservation(podcastId: testPodcastId, averageConfidence: 0.60)
+        await sut.recordSuccessfulObservation(podcastId: testPodcastId, averageConfidence: 0.60, detectors: [])
 
         let profile = try await store.fetchProfile(podcastId: testPodcastId)
         #expect(profile != nil)
@@ -120,7 +120,7 @@ struct TrustScoringServiceTests {
     @Test("Exceptional first episode (avgConfidence >= 0.92) starts .manual with score 0.5")
     func exceptionalFirstEpisodePromotesToManual() async throws {
         let (sut, store) = try await makeSUT()
-        await sut.recordSuccessfulObservation(podcastId: testPodcastId, averageConfidence: 0.95)
+        await sut.recordSuccessfulObservation(podcastId: testPodcastId, averageConfidence: 0.95, detectors: [])
 
         let profile = try await store.fetchProfile(podcastId: testPodcastId)
         #expect(profile != nil)
@@ -132,7 +132,7 @@ struct TrustScoringServiceTests {
     @Test("Confidence exactly at 0.92 threshold triggers exceptional path")
     func exceptionalAtExactThreshold() async throws {
         let (sut, store) = try await makeSUT()
-        await sut.recordSuccessfulObservation(podcastId: testPodcastId, averageConfidence: 0.92)
+        await sut.recordSuccessfulObservation(podcastId: testPodcastId, averageConfidence: 0.92, detectors: [])
 
         let profile = try await store.fetchProfile(podcastId: testPodcastId)
         #expect(profile?.mode == SkipMode.manual.rawValue)
@@ -142,7 +142,7 @@ struct TrustScoringServiceTests {
     @Test("Confidence just below 0.92 does not trigger exceptional path")
     func justBelowExceptionalThreshold() async throws {
         let (sut, store) = try await makeSUT()
-        await sut.recordSuccessfulObservation(podcastId: testPodcastId, averageConfidence: 0.919)
+        await sut.recordSuccessfulObservation(podcastId: testPodcastId, averageConfidence: 0.919, detectors: [])
 
         let profile = try await store.fetchProfile(podcastId: testPodcastId)
         #expect(profile?.mode == SkipMode.shadow.rawValue)
@@ -157,7 +157,7 @@ struct TrustScoringServiceTests {
         let seed = makeProfile(mode: "shadow", trustScore: 0.3, observations: 2)
         let (sut, store) = try await makeSUT(seedProfile: seed)
 
-        await sut.recordSuccessfulObservation(podcastId: testPodcastId, averageConfidence: 0.70)
+        await sut.recordSuccessfulObservation(podcastId: testPodcastId, averageConfidence: 0.70, detectors: [])
 
         let profile = try await store.fetchProfile(podcastId: testPodcastId)
         #expect(profile?.mode == SkipMode.manual.rawValue)
@@ -171,7 +171,7 @@ struct TrustScoringServiceTests {
         let seed = makeProfile(mode: "shadow", trustScore: 0.5, observations: 1)
         let (sut, store) = try await makeSUT(seedProfile: seed)
 
-        await sut.recordSuccessfulObservation(podcastId: testPodcastId, averageConfidence: 0.70)
+        await sut.recordSuccessfulObservation(podcastId: testPodcastId, averageConfidence: 0.70, detectors: [])
 
         let profile = try await store.fetchProfile(podcastId: testPodcastId)
         #expect(profile?.mode == SkipMode.shadow.rawValue)
@@ -183,7 +183,7 @@ struct TrustScoringServiceTests {
         let seed = makeProfile(mode: "shadow", trustScore: 0.2, observations: 2)
         let (sut, store) = try await makeSUT(seedProfile: seed)
 
-        await sut.recordSuccessfulObservation(podcastId: testPodcastId, averageConfidence: 0.70)
+        await sut.recordSuccessfulObservation(podcastId: testPodcastId, averageConfidence: 0.70, detectors: [])
 
         let profile = try await store.fetchProfile(podcastId: testPodcastId)
         // 0.2 + 0.10 = 0.3 < 0.4 threshold
@@ -197,7 +197,7 @@ struct TrustScoringServiceTests {
         let seed = makeProfile(mode: "shadow", trustScore: 0.29, observations: 2)
         let (sut, store) = try await makeSUT(seedProfile: seed)
 
-        await sut.recordSuccessfulObservation(podcastId: testPodcastId, averageConfidence: 0.70)
+        await sut.recordSuccessfulObservation(podcastId: testPodcastId, averageConfidence: 0.70, detectors: [])
 
         let profile = try await store.fetchProfile(podcastId: testPodcastId)
         #expect(profile?.mode == SkipMode.shadow.rawValue)
@@ -221,7 +221,7 @@ struct TrustScoringServiceTests {
         let seed = makeProfile(mode: "manual", trustScore: 0.65, observations: 7, falseSignals: 0)
         let (sut, store) = try await makeSUT(seedProfile: seed)
 
-        await sut.recordSuccessfulObservation(podcastId: testPodcastId, averageConfidence: 0.85)
+        await sut.recordSuccessfulObservation(podcastId: testPodcastId, averageConfidence: 0.85, detectors: [])
 
         let profile = try await store.fetchProfile(podcastId: testPodcastId)
         #expect(profile?.mode == SkipMode.manual.rawValue)
@@ -238,7 +238,7 @@ struct TrustScoringServiceTests {
         let seed = makeProfile(mode: "manual", trustScore: 0.80, observations: 9, falseSignals: 1)
         let (sut, store) = try await makeSUT(seedProfile: seed)
 
-        await sut.recordSuccessfulObservation(podcastId: testPodcastId, averageConfidence: 0.90)
+        await sut.recordSuccessfulObservation(podcastId: testPodcastId, averageConfidence: 0.90, detectors: [])
 
         let profile = try await store.fetchProfile(podcastId: testPodcastId)
         #expect(profile?.mode == SkipMode.manual.rawValue)
@@ -249,7 +249,7 @@ struct TrustScoringServiceTests {
         let seed = makeProfile(mode: "manual", trustScore: 0.80, observations: 6)
         let (sut, store) = try await makeSUT(seedProfile: seed)
 
-        await sut.recordSuccessfulObservation(podcastId: testPodcastId, averageConfidence: 0.90)
+        await sut.recordSuccessfulObservation(podcastId: testPodcastId, averageConfidence: 0.90, detectors: [])
 
         let profile = try await store.fetchProfile(podcastId: testPodcastId)
         #expect(profile?.mode == SkipMode.manual.rawValue)
@@ -261,7 +261,7 @@ struct TrustScoringServiceTests {
         let seed = makeProfile(mode: "manual", trustScore: 0.60, observations: 9)
         let (sut, store) = try await makeSUT(seedProfile: seed)
 
-        await sut.recordSuccessfulObservation(podcastId: testPodcastId, averageConfidence: 0.90)
+        await sut.recordSuccessfulObservation(podcastId: testPodcastId, averageConfidence: 0.90, detectors: [])
 
         let profile = try await store.fetchProfile(podcastId: testPodcastId)
         // 0.60 + 0.10 = 0.70 < 0.75
@@ -422,7 +422,7 @@ struct TrustScoringServiceTests {
         let seed = makeProfile(mode: "auto", trustScore: 0.95, observations: 20)
         let (sut, store) = try await makeSUT(seedProfile: seed)
 
-        await sut.recordSuccessfulObservation(podcastId: testPodcastId, averageConfidence: 0.99)
+        await sut.recordSuccessfulObservation(podcastId: testPodcastId, averageConfidence: 0.99, detectors: [])
 
         let profile = try await store.fetchProfile(podcastId: testPodcastId)
         // 0.95 + 0.10 = 1.05 -> capped to 1.0
@@ -474,7 +474,7 @@ struct TrustScoringServiceTests {
         let seed = makeProfile(mode: "shadow", trustScore: 0.30, observations: 1)
         let (sut, store) = try await makeSUT(seedProfile: seed)
 
-        await sut.recordSuccessfulObservation(podcastId: testPodcastId, averageConfidence: 0.70)
+        await sut.recordSuccessfulObservation(podcastId: testPodcastId, averageConfidence: 0.70, detectors: [])
 
         let profile = try await store.fetchProfile(podcastId: testPodcastId)
         expectScore(profile?.skipTrustScore, equals: 0.40)
@@ -521,7 +521,7 @@ struct TrustScoringServiceTests {
         let seed = makeProfile(mode: "auto", trustScore: 0.90, observations: 20)
         let (sut, store) = try await makeSUT(seedProfile: seed)
 
-        await sut.recordSuccessfulObservation(podcastId: testPodcastId, averageConfidence: 0.99)
+        await sut.recordSuccessfulObservation(podcastId: testPodcastId, averageConfidence: 0.99, detectors: [])
 
         let profile = try await store.fetchProfile(podcastId: testPodcastId)
         #expect(profile?.mode == SkipMode.auto.rawValue)
@@ -548,23 +548,23 @@ struct TrustScoringServiceTests {
         let (sut, store) = try await makeSUT()
 
         // First observation creates shadow profile
-        await sut.recordSuccessfulObservation(podcastId: testPodcastId, averageConfidence: 0.70)
+        await sut.recordSuccessfulObservation(podcastId: testPodcastId, averageConfidence: 0.70, detectors: [])
         var profile = try await store.fetchProfile(podcastId: testPodcastId)
         #expect(profile?.mode == SkipMode.shadow.rawValue)
 
         // Build up observations to promote shadow -> manual (need 3 obs, score >= 0.4)
         // After obs 1: score=0.2, obs=1
         // After obs 2: score=0.3, obs=2
-        await sut.recordSuccessfulObservation(podcastId: testPodcastId, averageConfidence: 0.70)
+        await sut.recordSuccessfulObservation(podcastId: testPodcastId, averageConfidence: 0.70, detectors: [])
         // After obs 3: score=0.4, obs=3 -> promote!
-        await sut.recordSuccessfulObservation(podcastId: testPodcastId, averageConfidence: 0.70)
+        await sut.recordSuccessfulObservation(podcastId: testPodcastId, averageConfidence: 0.70, detectors: [])
         profile = try await store.fetchProfile(podcastId: testPodcastId)
         #expect(profile?.mode == SkipMode.manual.rawValue)
 
         // Climb past every legacy clause of the auto rung: 8 obs, score >= 0.75,
         // 0 false signals. obs 4: 0.5, obs 5: 0.6, obs 6: 0.7, obs 7: 0.8.
         for _ in 4...7 {
-            await sut.recordSuccessfulObservation(podcastId: testPodcastId, averageConfidence: 0.90)
+            await sut.recordSuccessfulObservation(podcastId: testPodcastId, averageConfidence: 0.90, detectors: [])
         }
         profile = try await store.fetchProfile(podcastId: testPodcastId)
         #expect(profile?.mode == SkipMode.manual.rawValue) // not yet, only 7 obs
@@ -572,7 +572,7 @@ struct TrustScoringServiceTests {
         // obs 8: 0.9, obs=8 — this is where the pre-lqcp ladder promoted, and
         // it is EPISODE 8 OF A FRESH SUBSCRIPTION with no user gesture in the
         // whole sequence above. That is the reachability the closure is for.
-        await sut.recordSuccessfulObservation(podcastId: testPodcastId, averageConfidence: 0.90)
+        await sut.recordSuccessfulObservation(podcastId: testPodcastId, averageConfidence: 0.90, detectors: [])
         profile = try await store.fetchProfile(podcastId: testPodcastId)
         #expect(
             profile?.mode == SkipMode.manual.rawValue,
@@ -610,7 +610,7 @@ struct TrustScoringServiceTests {
         let (sut, store) = try await makeSUT(config: config, seedProfile: seed)
 
         // One observation: 0.0 + 0.20 = 0.20 >= 0.1, obs=1 >= 1 -> manual
-        await sut.recordSuccessfulObservation(podcastId: testPodcastId, averageConfidence: 0.50)
+        await sut.recordSuccessfulObservation(podcastId: testPodcastId, averageConfidence: 0.50, detectors: [])
         var profile = try await store.fetchProfile(podcastId: testPodcastId)
         #expect(profile?.mode == SkipMode.manual.rawValue)
 
@@ -620,7 +620,7 @@ struct TrustScoringServiceTests {
         // config cannot reopen it: that is deliberate, because a threshold a
         // caller can lower is exactly how "high confidence" would quietly stop
         // meaning anything.
-        await sut.recordSuccessfulObservation(podcastId: testPodcastId, averageConfidence: 0.50)
+        await sut.recordSuccessfulObservation(podcastId: testPodcastId, averageConfidence: 0.50, detectors: [])
         profile = try await store.fetchProfile(podcastId: testPodcastId)
         #expect(profile?.mode == SkipMode.manual.rawValue)
         expectScore(profile?.skipTrustScore, equals: 0.40)

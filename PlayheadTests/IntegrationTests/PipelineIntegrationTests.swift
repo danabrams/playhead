@@ -1903,7 +1903,8 @@ struct TrustScoringLifecycleTests {
         // Record several successful observations to promote through modes.
         for _ in 0..<3 {
             await trust.recordSuccessfulObservation(
-                podcastId: podcastId, averageConfidence: 0.60
+                podcastId: podcastId, averageConfidence: 0.60,
+                detectors: []
             )
         }
         let afterShadow = await trust.effectiveMode(podcastId: podcastId)
@@ -1917,7 +1918,8 @@ struct TrustScoringLifecycleTests {
         // quantity that does not exist yet.
         for _ in 0..<7 {
             await trust.recordSuccessfulObservation(
-                podcastId: podcastId, averageConfidence: 0.80
+                podcastId: podcastId, averageConfidence: 0.80,
+                detectors: []
             )
         }
         let afterManual = await trust.effectiveMode(podcastId: podcastId)
@@ -2042,7 +2044,8 @@ struct CombinedTuningReplayTests {
                 // the auto rung.
                 for _ in 0..<8 {
                     await trustService.recordSuccessfulObservation(
-                        podcastId: podcastId, averageConfidence: 0.80
+                        podcastId: podcastId, averageConfidence: 0.80,
+                        detectors: []
                     )
                 }
                 let selfObservedMode = await trustService.effectiveMode(podcastId: podcastId)
@@ -2169,7 +2172,8 @@ struct CombinedTuningReplayTests {
         var firstManualObservation: Int?
         for i in 1...10 {
             await freshTrust.recordSuccessfulObservation(
-                podcastId: freshPodcastId, averageConfidence: 0.80
+                podcastId: freshPodcastId, averageConfidence: 0.80,
+                detectors: []
             )
             let currentMode = await freshTrust.effectiveMode(podcastId: freshPodcastId)
             if currentMode == .manual, firstManualObservation == nil {

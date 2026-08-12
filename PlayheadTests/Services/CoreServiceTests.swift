@@ -944,7 +944,8 @@ struct TrustScoringTests {
         let store = try await makeTestStore()
         let trust = TrustScoringService(store: store)
         await trust.recordSuccessfulObservation(
-            podcastId: "show-1", averageConfidence: 0.60
+            podcastId: "show-1", averageConfidence: 0.60,
+            detectors: []
         )
         let mode = await trust.effectiveMode(podcastId: "show-1")
         #expect(mode == .shadow,
@@ -956,7 +957,8 @@ struct TrustScoringTests {
         let store = try await makeTestStore()
         let trust = TrustScoringService(store: store)
         await trust.recordSuccessfulObservation(
-            podcastId: "show-2", averageConfidence: 0.95
+            podcastId: "show-2", averageConfidence: 0.95,
+            detectors: []
         )
         let mode = await trust.effectiveMode(podcastId: "show-2")
         #expect(mode == .manual,
@@ -982,19 +984,22 @@ struct TrustScoringTests {
 
         // First observation creates the profile at 0.2 trust.
         await trust.recordSuccessfulObservation(
-            podcastId: "show-3", averageConfidence: 0.50
+            podcastId: "show-3", averageConfidence: 0.50,
+            detectors: []
         )
         #expect(await trust.effectiveMode(podcastId: "show-3") == .shadow)
 
         // Second observation: trust = 0.3.
         await trust.recordSuccessfulObservation(
-            podcastId: "show-3", averageConfidence: 0.50
+            podcastId: "show-3", averageConfidence: 0.50,
+            detectors: []
         )
         #expect(await trust.effectiveMode(podcastId: "show-3") == .shadow)
 
         // Third observation: trust = 0.4, obs = 3 -> promote to manual.
         await trust.recordSuccessfulObservation(
-            podcastId: "show-3", averageConfidence: 0.50
+            podcastId: "show-3", averageConfidence: 0.50,
+            detectors: []
         )
         let mode = await trust.effectiveMode(podcastId: "show-3")
         #expect(mode == .manual,
@@ -1018,7 +1023,8 @@ struct TrustScoringTests {
         // gesture, and Dan's ruling makes that conditional on a HIGH-CONFIDENCE
         // quantity that does not exist yet (`AutoPromotionConfidenceEvidence`).
         await trust.recordSuccessfulObservation(
-            podcastId: "podcast-1", averageConfidence: 0.80
+            podcastId: "podcast-1", averageConfidence: 0.80,
+            detectors: []
         )
         let mode = await trust.effectiveMode(podcastId: "podcast-1")
         #expect(mode == .manual,

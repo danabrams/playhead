@@ -502,9 +502,44 @@ actor TrustScoringService {
 
     /// Record a successful observation (episode processed, no false signals).
     /// Call from AdDetectionService backfill after confirming ad windows.
+    ///
+    /// **`detectors` is what the confirmed windows were DRAWN BY, and without
+    /// it this promotion never reaches the skip gate (R4).** The gate is
+    /// `SkipOrchestrator.skipMode(for:)`, which reads
+    /// `activeDetectorSkipModes.mode(for:)` — a PER-CLASS verdict, not
+    /// `profile.mode`. A class with no stored ledger entry resolves through
+    /// `DetectorTrustLedger.seed`, which for the three show-governed classes IS
+    /// the legacy scalar, so on a virgin ledger moving the scalar is enough.
+    /// **The first attributed user gesture ends that.** Every production veto
+    /// site passes at least one attribution (`SkipOrchestrator` lines 4558,
+    /// 4992, 5229, 5374; `AdDetectionService.recordListenRewind`), and
+    /// `applyFalseSkipSignal` MATERIALIZES the whole ledger on any attributed
+    /// gesture — deliberately, so blame cannot leak through the seed. From that
+    /// moment every class has a stored entry pinned at the pre-veto profile,
+    /// and a writer that moves only the scalar moves nothing the gate reads.
+    ///
+    /// Measured before this argument existed: a fresh show, ONE veto of a
+    /// day-0 byte-exact auto-skip, then ten clean backfills — `profile.mode`
+    /// reached `manual` and `resolveDetectorModes` still answered `shadow` for
+    /// `.fusion` and `.segmentAggregated`. The pill said one thing and the gate
+    /// did another, permanently, on exactly the shows the listener had touched.
+    ///
+    /// Credit goes ONLY to the classes that drew this episode's confirmed
+    /// windows, for the same reason blame does: a class that produced no
+    /// evidence here has earned nothing, and crediting all four would rebuild
+    /// the shared scalar playhead-gard exists to remove. An EMPTY ledger is
+    /// left empty — the seed already tracks the scalar, and forking it on every
+    /// backfill would start writing `detectorTrustJSON` on shows that have
+    /// never diverged.
+    ///
+    /// `falseSkipWeight` is carried through UNCHANGED, matching what this
+    /// method already does with the show's `recentFalseSkipSignals`: a
+    /// detector's own output is not a witness against a user's veto. Only a
+    /// banner Yes (`recordCorrectObservation`) decays one.
     func recordSuccessfulObservation(
         podcastId: String,
-        averageConfidence: Double
+        averageConfidence: Double,
+        detectors: Set<SkipDetectorClass>
     ) async {
         // skeptical-review-cycle-1: atomic merge inside AnalysisStore
         // closes the actor-reentrancy lost-update window between fetch
@@ -534,46 +569,10 @@ actor TrustScoringService {
                     )
                 },
                 update: { profile in
-                    let newObservations = profile.observationCount + 1
-                    let newTrust = min(1.0, profile.skipTrustScore + config.correctObservationBonus)
-                    let currentMode = SkipMode(rawValue: profile.mode) ?? .shadow
-                    let newMode = Self.evaluatePromotion(
+                    Self.applySuccessfulObservation(
                         config: config,
-                        currentMode: currentMode,
-                        trustScore: newTrust,
-                        observations: newObservations,
-                        recentFalseSignals: profile.recentFalseSkipSignals
-                    )
-                    return PodcastProfile(
-                        podcastId: profile.podcastId,
-                        sponsorLexicon: profile.sponsorLexicon,
-                        normalizedAdSlotPriors: profile.normalizedAdSlotPriors,
-                        repeatedCTAFragments: profile.repeatedCTAFragments,
-                        jingleFingerprints: profile.jingleFingerprints,
-                        implicitFalsePositiveCount: profile.implicitFalsePositiveCount,
-                        skipTrustScore: newTrust,
-                        observationCount: newObservations,
-                        mode: newMode.rawValue,
-                        recentFalseSkipSignals: profile.recentFalseSkipSignals,
-                        traitProfileJSON: profile.traitProfileJSON,
-                        title: profile.title,
-                        // playhead-084j: explicit carry-forward of the ad-
-                        // duration-stats column. Belt-and-suspenders: the
-                        // upsert SQL already COALESCEs nil writes against the
-                        // persisted column, but matching the established
-                        // `traitProfileJSON` pattern keeps this constructor
-                        // self-explanatory to future readers and survives
-                        // a hypothetical future change to the COALESCE rule.
-                        adDurationStatsJSON: profile.adDurationStatsJSON,
-                        // playhead-spxs: explicit carry-forward of the
-                        // network-identity column. COALESCE-protected in
-                        // upsertProfile, but matched here for parity with
-                        // the established traitProfileJSON / adDurationStatsJSON
-                        // patterns.
-                        networkId: profile.networkId,
-                        // playhead-gard: explicit carry-forward of the
-                        // per-detector ledger, same reasoning again.
-                        detectorTrustJSON: profile.detectorTrustJSON
+                        profile: profile,
+                        detectors: detectors
                     )
                 }
             )
@@ -1178,6 +1177,80 @@ actor TrustScoringService {
                 showDemotion: showDemotion,
                 detectorDemotions: detectorDemotions
             )
+        )
+    }
+
+    /// The backfill's self-observation, as one pure transform.
+    ///
+    /// The legacy per-show triple is byte-for-byte what it was: +1 observation,
+    /// +`correctObservationBonus` capped at 1.0, `recentFalseSkipSignals`
+    /// untouched, promotion re-evaluated. What is added is the per-detector
+    /// half — see `recordSuccessfulObservation` for why moving only the scalar
+    /// left the skip gate reading a value nothing updated.
+    ///
+    /// **An empty ledger stays empty.** `encoded()` returns `nil` for it and
+    /// `upsertProfile` COALESCEs a `nil` write against the stored column, so a
+    /// show that has never diverged keeps writing NULL and stays byte-identical
+    /// to a pre-gard row. Only a ledger some gesture already forked is advanced
+    /// — which is exactly the population where the seed has stopped tracking.
+    fileprivate static func applySuccessfulObservation(
+        config: TrustScoringConfig,
+        profile: PodcastProfile,
+        detectors: Set<SkipDetectorClass>
+    ) -> PodcastProfile {
+        let newObservations = profile.observationCount + 1
+        let newTrust = min(
+            1.0, profile.skipTrustScore + config.correctObservationBonus
+        )
+        let currentMode = SkipMode(rawValue: profile.mode) ?? .shadow
+        let newMode = evaluatePromotion(
+            config: config,
+            currentMode: currentMode,
+            trustScore: newTrust,
+            observations: newObservations,
+            recentFalseSignals: profile.recentFalseSkipSignals
+        )
+
+        var ledger = profile.detectorTrustLedger
+        if !ledger.entries.isEmpty {
+            // Stable order, for the same reason `applyFalseSkipSignal` iterates
+            // `allCases`: a dictionary's order must not reach a persisted value.
+            for detector in SkipDetectorClass.allCases
+            where detectors.contains(detector) {
+                let entry = ledger.entry(for: detector, seededFrom: profile)
+                let entryObservations = entry.observationCount + 1
+                let entryTrust = min(
+                    1.0, entry.trustScore + config.correctObservationBonus
+                )
+                let entryMode = evaluatePromotion(
+                    config: config,
+                    currentMode: entry.skipMode,
+                    trustScore: entryTrust,
+                    observations: entryObservations,
+                    // CARRIED, not decayed. A detector's own output is not
+                    // evidence against a veto the listener gave.
+                    falseSkipWeight: entry.falseSkipWeight
+                )
+                ledger.set(
+                    DetectorTrustEntry(
+                        trustScore: entryTrust,
+                        mode: entryMode.rawValue,
+                        falseSkipWeight: entry.falseSkipWeight,
+                        observationCount: entryObservations
+                    ),
+                    for: detector
+                )
+            }
+        }
+
+        return rebuild(
+            profile,
+            implicitFalsePositiveCount: profile.implicitFalsePositiveCount,
+            skipTrustScore: newTrust,
+            observationCount: newObservations,
+            mode: newMode.rawValue,
+            recentFalseSkipSignals: profile.recentFalseSkipSignals,
+            detectorTrustJSON: ledger.encoded()
         )
     }
 

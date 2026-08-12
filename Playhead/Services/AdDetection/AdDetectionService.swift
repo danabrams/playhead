@@ -13035,9 +13035,20 @@ actor AdDetectionService {
         let averageConfidence =
             confirmedWindows.reduce(0.0) { $0 + $1.confidence }
             / Double(confirmedWindows.count)
+        // R4: WHICH classes drew these windows, not just how confident they
+        // were. `SkipOrchestrator`'s gate reads a PER-CLASS mode, and once any
+        // attributed user gesture has forked the ledger the show scalar is not
+        // what it reads — so an observation that names no class promotes
+        // nothing the listener can feel. Credit follows the same rule blame
+        // does: only the classes that actually produced this episode's
+        // evidence. Read from the rows' own columns (`AdWindow.detectorClass`);
+        // this service has no ingest anchor stamp to prefer, which is what that
+        // property is documented as the fallback for.
+        let observedDetectors = Set(confirmedWindows.map(\.detectorClass))
         await trustScoringService.recordSuccessfulObservation(
             podcastId: podcastId,
-            averageConfidence: averageConfidence
+            averageConfidence: averageConfidence,
+            detectors: observedDetectors
         )
         return true
     }

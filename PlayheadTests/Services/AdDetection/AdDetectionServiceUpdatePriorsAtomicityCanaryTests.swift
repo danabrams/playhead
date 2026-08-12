@@ -943,13 +943,24 @@ final class AdDetectionServiceUpdatePriorsAtomicityCanaryTests: XCTestCase {
         // `testEachTrustScoringMutationMethodCarriesNetworkIdForward` proves
         // each method reaches it. Do not lower this floor further without the
         // same accounting: name where each missing constructor went.
+        //
+        // R4 MOVED IT FROM 3 TO 2, and here is where the third went.
+        // `recordSuccessfulObservation` now delegates to
+        // `Self.applySuccessfulObservation`, a pure transform that ends in the
+        // same shared `rebuild` — the identical shape gard gave the other four,
+        // taken for the identical reason. Worth recording: the inline
+        // constructor it replaced named THIRTEEN columns where `rebuild` names
+        // fifteen, so it was dropping `daiStitchNetwork` and `daiExpected` from
+        // the value it returned. That never reached disk only because
+        // `upsertProfile` does not write those two columns — which is precisely
+        // the accident this file exists to stop the codebase depending on.
         XCTAssertGreaterThanOrEqual(
-            profileConstructingClosureCount, 3,
+            profileConstructingClosureCount, 2,
             """
-            playhead-gard floor: expected at least 3 `profile in` \
+            playhead-gard floor: expected at least 2 `profile in` \
             closures that construct `PodcastProfile(...)` directly \
-            (recordSuccessfulObservation, recordFalseNegativeSignal, \
-            decayFalseSignals). Found \(profileConstructingClosureCount). \
+            (recordFalseNegativeSignal, decayFalseSignals). \
+            Found \(profileConstructingClosureCount). \
             The whole-file networkId scan has gone blind to its targets in \
             TrustScoringService; either restore the constructors OR move \
             this floor down with an explanation of where the mutation \
@@ -2325,11 +2336,21 @@ final class AdDetectionServiceUpdatePriorsAtomicityCanaryTests: XCTestCase {
     /// `assertSharedRebuildCarriesColumn` below does — and then delegation
     /// is a valid way to satisfy the contract.
     ///
-    /// Delegation is accepted ONLY to these three names. A closure that
+    /// Delegation is accepted ONLY to these four names. A closure that
     /// hands off to some other helper is not covered by that pin and must
     /// still name the column itself.
+    ///
+    /// R4 added the fourth, `applySuccessfulObservation` — the backfill's
+    /// self-observation, moved out of an inline constructor into the shared
+    /// `rebuild` for the same reason the other three were. Note what the move
+    /// fixed on the way past: the inline constructor it replaced named
+    /// thirteen columns and `rebuild` names fifteen, so `daiStitchNetwork` and
+    /// `daiExpected` were being dropped from the value this method returned.
+    /// Harmless today only because `upsertProfile` does not write those two
+    /// columns at all — exactly the accident this canary exists to stop
+    /// depending on.
     fileprivate static let trustRebuildDelegationPattern: String =
-        #"\bSelf\s*\.\s*(?:rebuild|applyFalseSkipSignal|applyCorrectObservation)\s*\("#
+        #"\bSelf\s*\.\s*(?:rebuild|applyFalseSkipSignal|applyCorrectObservation|applySuccessfulObservation)\s*\("#
 
     /// Assert the one shared rebuild site carries `column` forward.
     ///
