@@ -67,6 +67,107 @@ Three further arms close the ways a failure could hide without being seen:
   * FICTION — zero failures against a non-empty baseline. Against a measured
     floor of dozens that is categorical, not quiet.
 
+A CRASHED HOST PRODUCES NO VERDICT, AND THAT IS NOT A FAILURE (playhead-tl6l)
+----------------------------------------------------------------------------
+Everything above reads per-test result lines. A test whose HOST died emits
+none: no `failed after`, no `Test Case … failed`, no issue. It is therefore
+absent from the run's observed set entirely — matched against the baseline as
+neither "known" nor reported as NEW. It falls out of the arithmetic in BOTH
+directions, silently, and the run still prints a confident `RED (N known /
+0 new)` and exits 0. Same shape as the wedge `scripts/disk_preflight.py` exists
+to catch: the failure destroys the evidence of itself.
+
+MEASURED on two full-plan runs, 2026-08-12 (main @ 76b0a09a and bead/mn5e).
+Both carry xcodebuild's restart marker, and after discounting skips:
+
+    main:  33 Swift Testing tests started and reported NOTHING
+    mn5e:  15                    "                          "
+
+and the baseline file — 117 tests over 9 observed runs — has never once
+recorded any of them. Nine runs of silence.
+
+So this module now tracks a third outcome and a fourth verdict category:
+
+  * SKIPPED is parsed (`➜ Test "x" skipped:` and XCTest's `skipped (0.0s)`),
+    because "started and said nothing" is only meaningful once a deliberate
+    skip has been subtracted from it. Without that the no-verdict set on those
+    same two logs reads 45 and 63, of which 30 are PerfGate skips — a number
+    that means one thing and is read as another, which is this repo's standing
+    defect class.
+  * NO VERDICT — started, then neither passed, failed nor skipped. Exact,
+    console-only, no name mapping required. This is the census.
+  * HOST RESTART — xcodebuild's own `Restarting after unexpected exit, crash,
+    or test timeout` line, quoted as corroborating evidence.
+
+WHY THE `Failing tests:` BLOCK IS A LEAD AND NOT A CENSUS
+---------------------------------------------------------
+The obvious fix — diff xcodebuild's `Failing tests:` summary against the tests
+that reported — cannot be done soundly from a log, and the reason is worth
+writing down because it is what the bead's own evidence tripped over.
+
+The summary prints `SuiteType.function()`. Swift Testing's console prints the
+test's DISPLAY NAME, `@Test("A completion delivered to a NEW manager instance
+still carries the show")`. The two spellings share nothing. Grepping a summary
+entry against the console therefore returns zero for a test that reported
+perfectly well — which is exactly how playhead-tl6l came to be filed claiming
+19 invisible failures. Re-measured through the source-level mapping: of the 15
+distinct summary names in the mn5e run, ALL 15 had reported and were already
+counted; of the 14 on main, 13 had. The real number of block entries invisible
+to this module was 0 and 1, not 19 and 18. The blindness is real, the
+population named in the bead was not.
+
+And the residue cuts both ways: `Suite.cancelReapsAttribution()` (reported
+under a display name) and `Suite.failedSuggestNoRestoresLatestBufferedRevision()`
+(the one genuine casualty on main, which never emitted a line at all) are
+INDISTINGUISHABLE from the log. Resolving them would mean parsing
+`PlayheadTests/**.swift` for `@Test("…")` attributes, which trades a sound
+log-only tool for a source-coupled heuristic whose every miss is a false crash
+alarm. Not worth it: the NO VERDICT census above already covers every casualty
+that got as far as starting.
+
+So the block is parsed, reported with an exact entries-vs-distinct count, and
+labelled a LEAD. It earns its place three ways: it names a casualty that never
+started (invisible to the started-set); it makes the duplicate entries legible
+(xcodebuild repeats a name it retried — 4 of 19 on mn5e); and it lets an ABSENT
+baseline member be reported with the RIGHT CAUSE. Before this, a crashed
+baseline member read `(renamed, deleted or newly skipped)`, sending the reader
+to look for a rename that never happened.
+
+WHAT NO VERDICT DOES TO THE EXIT CODE, AND WHY
+----------------------------------------------
+It does not fail the gate on its own. It changes the headline, forecloses
+GREEN, and protects the baseline from being quietly shrunk by a crash.
+
+The argument, in the terms this repo already uses. A run that produced no
+verdict for part of the plan is arguably worse than one with a known
+regression — but it fires on main TODAY, on a pre-existing crash owned by a
+different bead, so arming it here would make every full-plan gate on this box
+exit 65 for a reason nobody in the middle of a bead can fix. CLAUDE.md is
+explicit that this is the worse trade: "one red rule and everyone learns to
+route around the gate, which is strictly worse than having no linter". The
+repo's own answer to "red for a pre-existing reason" is to RECORD it and diff
+against the record — and this bead is not permitted to refresh the baseline,
+which is the only place such a record could live.
+
+What it does instead is remove every way to misread the run:
+
+  * the headline carries it, so the reassuring `RED (N known / 0 new)` can
+    never stand alone again — it reads `RED (N known / 0 new) — 33 tests got
+    NO VERDICT (crashed host)`;
+  * GREEN is unreachable while the count is non-zero, on the same principle
+    that already forbids GREEN for a run that executed nothing;
+  * a baseline member with no verdict still fails the gate, because it is
+    ABSENT — unchanged policy, now with the crash named as the cause;
+  * `accept` CARRIES FORWARD a baseline entry that got no verdict instead of
+    dropping it. `merge` prunes anything the run did not reach, on the theory
+    that it was renamed or deleted; a crash makes that theory false, and the
+    command meant to maintain the file would have silently deleted exactly the
+    entries the crash hid. It is announced, not silent.
+
+Arming it is a one-line change (`no_verdict` into `exit_code`) and should
+happen once the host crash (playhead-rouw) is fixed and a run can be observed
+at zero. That is playhead-buvn — this module deliberately does not decide it.
+
 THE FILE CONVERGES; IT DOES NOT ARRIVE COMPLETE
 -----------------------------------------------
 The recorded set is the UNION of what has been observed, and with a measured
@@ -204,9 +305,15 @@ _ST_PASS_NAMED = re.compile(r'✔ Test "(.+?)" (?:with \d+ test cases? )?passed 
 _ST_PASS_FUNC = re.compile(r'✔ Test ([A-Za-z_][A-Za-z0-9_]*\(\)) (?:with \d+ test cases? )?passed after ([\d.]+) seconds')
 _ST_START_NAMED = re.compile(r'◇ Test "(.+?)" started')
 _ST_START_FUNC = re.compile(r'◇ Test ([A-Za-z_][A-Za-z0-9_]*\(\)) started')
+# A DELIBERATE skip is a third outcome, not silence. PerfGate alone accounts for
+# 30 XCTest skips and ~11 Swift Testing skips in a full run; without this the
+# no-verdict census reads 45 where the truth is 15.
+_ST_SKIP_NAMED = re.compile(r'➜ Test "(.+?)" skipped')
+_ST_SKIP_FUNC = re.compile(r'➜ Test ([A-Za-z_][A-Za-z0-9_]*\(\)) skipped')
 
 _XC_RESULT = re.compile(
-    r"Test Case '-\[([A-Za-z0-9_.]+) ([A-Za-z0-9_:]+)\]' (failed|passed) \(([\d.]+) seconds\)"
+    r"Test Case '-\[([A-Za-z0-9_.]+) ([A-Za-z0-9_:]+)\]' (failed|passed|skipped) "
+    r"\(([\d.]+) seconds\)"
 )
 _XC_START = re.compile(r"Test Case '-\[([A-Za-z0-9_.]+) ([A-Za-z0-9_:]+)\]' started")
 
@@ -215,6 +322,26 @@ _TERMINAL = re.compile(r"\*\* TEST (FAILED|SUCCEEDED) \*\*|Test run with \d+ tes
 _WEDGED_SIM = "fast-gate: wedged simulator"
 
 _TIME_LIMIT = "Time limit was exceeded"
+
+# playhead-tl6l. xcodebuild's own words when the test host died and it started a
+# new one. Unambiguous, needs no name mapping, and present in both full-plan runs
+# measured on 2026-08-12 — while the verdict printed above it said nothing.
+_HOST_RESTART = re.compile(
+    r"Restarting after unexpected exit, crash, or test timeout"
+)
+
+# The summary block xcodebuild prints after the terminal marker:
+#
+#     Failing tests:
+#     \tDownloadShowAttributionTests.attributionSurvivesProcessRestart()
+#     \tDownloadShowAttributionTests.attributionSurvivesProcessRestart()
+#
+# A repeated name is a RETRY, not two tests. Entries and distinct names are both
+# reported, because a count that silently means one when read as the other is
+# this repo's standing defect class.
+_FAILING_TESTS_HEADER = re.compile(r"^\s*Failing tests:\s*$")
+_BLOCK_ENTRY = re.compile(r"^[ \t]+(\S.*?)\s*$")
+_BLOCK_NAME = re.compile(r"^([A-Za-z_][A-Za-z0-9_.]*)\.([A-Za-z_][A-Za-z0-9_]*)(\(\))?$")
 
 
 def st_key(name):
@@ -244,13 +371,40 @@ class RunResult(object):
     def __init__(self):
         self.failures = {}
         self.passed = set()
+        self.skipped = set()
         self.started = set()
         self.complete = False
+        # playhead-tl6l
+        self.host_restarts = 0
+        self.restart_evidence = None
+        self.blamed_entries = []   # `Failing tests:` lines, duplicates INTACT
 
     @property
     def ran(self):
-        """Keys with a definite outcome. Started-but-silent is NOT an outcome."""
+        """Keys with a definite outcome. Started-but-silent is NOT an outcome.
+
+        A SKIP is deliberately not in here. It is an outcome for the purpose of
+        "did the host die", and no outcome at all for the purpose of "is this
+        baseline entry still failing" — the ABSENT arm must keep firing on a
+        newly-skipped member, which is what makes PerfGate-ing a family visible
+        rather than a quiet loss of coverage.
+        """
         return set(self.failures) | self.passed
+
+    @property
+    def blamed(self):
+        """The `Failing tests:` names, de-duplicated, first-seen order kept."""
+        return list(dict.fromkeys(self.blamed_entries))
+
+    @property
+    def no_verdict(self):
+        """Started, then said nothing at all — the crashed-host casualties.
+
+        Exact and console-only: both the start line and the outcome line carry
+        the same identity, so this needs no mapping between xcodebuild's
+        `Suite.function()` spelling and Swift Testing's display names.
+        """
+        return self.started - self.ran - self.skipped
 
 
 def last_attempt(text):
@@ -280,9 +434,29 @@ def parse_run(text):
             failures[key] = Failure(key, framework, name)
         return failures[key]
 
+    in_block = False
     for line in last_attempt(text).splitlines():
         if not run.complete and _TERMINAL.search(line):
             run.complete = True
+
+        # --- xcodebuild's own summary block (playhead-tl6l) -----------------
+        # Read before anything else: its entries are indented names, and a
+        # `Suite.func()` line must never be mistaken for something else.
+        if in_block:
+            m = _BLOCK_ENTRY.match(line)
+            if m:
+                run.blamed_entries.append(m.group(1))
+                continue
+            in_block = False
+        if _FAILING_TESTS_HEADER.match(line):
+            in_block = True
+            continue
+
+        if _HOST_RESTART.search(line):
+            run.host_restarts += 1
+            if run.restart_evidence is None:
+                run.restart_evidence = line.strip()
+            continue
 
         # --- Swift Testing -------------------------------------------------
         m = _ST_ISSUE_NAMED.search(line) or _ST_ISSUE_FUNC.search(line)
@@ -308,6 +482,11 @@ def parse_run(text):
             run.passed.add(st_key(m.group(1)))
             continue
 
+        m = _ST_SKIP_NAMED.search(line) or _ST_SKIP_FUNC.search(line)
+        if m:
+            run.skipped.add(st_key(m.group(1)))
+            continue
+
         m = _ST_START_NAMED.search(line) or _ST_START_FUNC.search(line)
         if m:
             run.started.add(st_key(m.group(1)))
@@ -318,7 +497,9 @@ def parse_run(text):
         if m:
             suite, method, outcome, seconds = m.groups()
             key = xc_key(suite, method)
-            if outcome == "failed":
+            if outcome == "skipped":
+                run.skipped.add(key)
+            elif outcome == "failed":
                 failure = failure_for(key, FRAMEWORK_XCTEST, suite + "/" + method)
                 # XCTest reports assertions, never time-limit issues. A 3.5s
                 # XCTest failure is as real as a 0.025s one — the slow-is-a-flake
@@ -342,6 +523,12 @@ def parse_run(text):
     # tests in different suites collide on one key. Resolve toward FAILED: a
     # colliding pass must never erase a real failure.
     run.passed -= set(failures)
+    # Same rule one step further out: a skip colliding with a real outcome must
+    # never swallow it. The residue is unchanged and is the one already written
+    # down above — two same-named tests share a key, so a skipped twin still
+    # accounts for a SILENT twin. That is the 0.57%-of-names collision cost,
+    # not a new hole.
+    run.skipped -= set(failures) | run.passed
     return run
 
 
@@ -471,6 +658,12 @@ def merge(baseline, run, plan):
     }
 
     old = baseline.get("tests", {})
+    # playhead-tl6l. A crashed host is not a rename, and the prune below cannot
+    # tell them apart on its own — so a run whose host died would have DELETED
+    # every recorded entry it took down with it, quietly, from inside the one
+    # command whose job is to maintain the file. Carry those forward untouched:
+    # unchanged counts, no observation credited, still on the list.
+    protected = run.no_verdict
     for key in sorted(set(old) | set(run.failures)):
         previous = old.get(key)
         failure = run.failures.get(key)
@@ -488,6 +681,8 @@ def merge(baseline, run, plan):
             continue
 
         if not reached:
+            if key in protected:
+                merged["tests"][key] = dict(previous)
             continue  # renamed, deleted or skipped — it is not knowledge
 
         entry = dict(previous)
@@ -522,15 +717,60 @@ class Verdict(object):
         self.runs_observed = 0
         self.total_failures = 0
         self.baseline_size = 0
+        # playhead-tl6l — the run's SILENCE, tracked as its own thing.
+        self.no_verdict = []
+        self.absent_crashed = set()
+        self.host_restarts = 0
+        self.restart_evidence = None
+        self.blamed_entry_count = 0
+        self.blamed_distinct = []
+        self.blamed_unmatched = []
 
     @property
     def ok(self):
         return self.exit_code == EXIT_OK
 
     @property
+    def crashed_host(self):
+        """Did this run fail to produce a verdict for part of the plan?
+
+        Any one of the three is enough, and they are independent evidence:
+        xcodebuild said it restarted the host; tests started and said nothing;
+        or the summary block blamed a name that never emitted a console line.
+        """
+        return bool(self.host_restarts or self.no_verdict or self.blamed_unmatched)
+
+    @property
+    def headline_tail(self):
+        """What rides on the RED line. Says only what was actually observed.
+
+        Three different observations, three different sentences — a headline
+        reading `0 tests got NO VERDICT` because some OTHER piece of evidence
+        fired would be precisely the number that means one thing and is read as
+        another.
+        """
+        if self.no_verdict:
+            return " — %d test%s got NO VERDICT (crashed host)" % (
+                len(self.no_verdict), "" if len(self.no_verdict) == 1 else "s",
+            )
+        if self.host_restarts:
+            return " — the test host CRASHED and was restarted"
+        if self.blamed_unmatched:
+            return " — %d name(s) in `Failing tests:` matched no console result" % (
+                len(self.blamed_unmatched),
+            )
+        return ""
+
+    @property
     def exit_code(self):
         if self.cannot_evaluate:
             return EXIT_CANNOT_EVALUATE
+        # NO VERDICT is deliberately NOT here. See the module docstring: it
+        # fires on main today, on a pre-existing crash owned by playhead-rouw,
+        # and a gate that is red for a reason the reader cannot fix is one they
+        # learn to route around. It changes the headline, forecloses GREEN, and
+        # protects `accept`; a baseline member with no verdict still fails, via
+        # `absent`, exactly as it did before. Arming it is playhead-buvn.
         if (self.new_failures or self.kind_changed or self.deterministic_passed
                 or self.absent or self.baseline_fiction):
             return EXIT_REGRESSION
@@ -553,13 +793,22 @@ class Verdict(object):
             len(self.new_failures),
             "NEW" if self.new_failures else "new",
         )
+        # playhead-tl6l: the count rides ON the headline, not under it. The whole
+        # hazard was that a crashed run could print the reassuring `RED (N known
+        # / 0 new)` — the exact string CLAUDE.md tells people to read as an
+        # all-clear — while an entire test family never reached a verdict. That
+        # string can no longer stand alone.
+        tail = self.headline_tail
         # GREEN is reserved for "nothing failed AND nothing else is wrong". A run
         # that executed no tests has zero failures too, and calling that GREEN is
-        # how a broken run reads as a clean sweep.
-        if self.ok and self.total_failures == 0:
+        # how a broken run reads as a clean sweep. A run that lost part of the
+        # plan to a dead host is the same claim with the same answer.
+        if self.ok and self.total_failures == 0 and not self.crashed_host:
             out.append("gate-baseline: GREEN (%s)" % headline)
         else:
-            out.append("gate-baseline: RED (%s)" % headline)
+            out.append("gate-baseline: RED (%s)%s" % (headline, tail))
+
+        out.extend(self._render_no_verdict())
 
         for key in self.new_failures:
             out.append("  NEW FAILURE      %s" % key)
@@ -575,7 +824,13 @@ class Verdict(object):
                 "zero tests)." % (len(self.absent), self.baseline_size)
             )
         for key in self.absent[:_MAX_LISTED]:
-            out.append("  DID NOT RUN      %s  (renamed, deleted or newly skipped)" % key)
+            # The CAUSE, not a guess at it. Before playhead-tl6l every absent
+            # member was reported as a rename, which sent the reader looking for
+            # a rename that had not happened.
+            cause = ("no verdict — the host died mid-test"
+                     if key in self.absent_crashed
+                     else "renamed, deleted or newly skipped")
+            out.append("  DID NOT RUN      %s  (%s)" % (key, cause))
         if len(self.absent) > _MAX_LISTED:
             out.append("  DID NOT RUN      … and %d more"
                        % (len(self.absent) - _MAX_LISTED))
@@ -609,6 +864,90 @@ class Verdict(object):
             out.append("a reason.")
         return "\n".join(out)
 
+    def _render_no_verdict(self):
+        """The crashed-host block. Its own category, because its REMEDY differs.
+
+        A NEW failure is triaged against the diff. A test with no verdict was
+        never judged at all, and the only honest response is to run it again —
+        so it must not be folded into NEW, where it would read as something a
+        reader could act on by looking at their own change.
+        """
+        if not self.crashed_host:
+            return []
+        out = []
+        if self.no_verdict:
+            out.extend([
+                "  NO VERDICT — %d test(s) started and then reported neither pass, "
+                "fail nor skip." % len(self.no_verdict),
+                "  The run made NO CLAIM about them: they count as neither known nor "
+                "NEW, so the",
+                "  known/new split above is a verdict about the REST of the plan. "
+                "Re-run before",
+                "  reading it as one.",
+            ])
+        else:
+            out.append(
+                "  NO VERDICT — every test that started reported an outcome, but the "
+                "evidence below says part of this run was still lost. Read it before "
+                "reading the split above."
+            )
+        if self.host_restarts:
+            out.append(
+                "  HOST RESTART     xcodebuild restarted the test host %d time(s): %r"
+                % (self.host_restarts, self.restart_evidence or "")
+            )
+        for key in self.no_verdict[:_MAX_LISTED]:
+            out.append("  NO VERDICT       %s" % key)
+        if len(self.no_verdict) > _MAX_LISTED:
+            out.append("  NO VERDICT       … and %d more"
+                       % (len(self.no_verdict) - _MAX_LISTED))
+        if self.blamed_distinct:
+            out.append(
+                "  BLAMED           xcodebuild's `Failing tests:` summary: %d entries, "
+                "%d distinct name(s); %d matched no console line in any spelling."
+                % (self.blamed_entry_count, len(self.blamed_distinct),
+                   len(self.blamed_unmatched))
+            )
+            out.append(
+                "                   A repeated entry is a RETRY, not a second test. "
+                "The unmatched list is a LEAD, not a count: the summary spells a test "
+                "`Suite.function()` while Swift Testing's console prints its @Test "
+                "display name, so a display-named test that reported perfectly well "
+                "is unmatched here too. Cross-check it against the census above."
+            )
+            for name in self.blamed_unmatched[:_MAX_LISTED]:
+                out.append("  BLAMED, UNMATCHED %s" % name)
+            if len(self.blamed_unmatched) > _MAX_LISTED:
+                out.append("  BLAMED, UNMATCHED … and %d more"
+                           % (len(self.blamed_unmatched) - _MAX_LISTED))
+        return out
+
+
+def _blamed_is_matched(entry, identities):
+    """Can this `Failing tests:` entry be tied to a console identity BY NAME?
+
+    Only two spellings are ever comparable, and both are exact — no fuzzy
+    matching, because a false match here hides a casualty and a false miss
+    manufactures one:
+
+      * XCTest, whose console key is `Target.Suite/method`; and
+      * a Swift Testing test with NO custom display name, whose console line
+        prints the bare `function()`.
+
+    A Swift Testing test WITH a display name is unmatchable in principle and is
+    reported as such rather than guessed at. See the module docstring.
+    """
+    m = _BLOCK_NAME.match(entry)
+    if not m:
+        return False
+    suite, method = m.group(1), m.group(2)
+    if st_key(method + "()") in identities:
+        return True
+    tail = "." + suite + "/" + method
+    return any(key.startswith(FRAMEWORK_XCTEST + "::")
+               and (key.endswith(tail) or key == xc_key(suite, method))
+               for key in identities)
+
 
 def verdict(baseline, run, plan=None):
     """Compare one run against the baseline. Pure; the CLI only prints it."""
@@ -630,6 +969,19 @@ def verdict(baseline, run, plan=None):
             "cut looks like it never ran"
         )
         return result
+
+    # playhead-tl6l. Computed before the baseline comparison so the ABSENT arm
+    # below can name the CAUSE it now knows.
+    no_verdict = run.no_verdict
+    result.no_verdict = sorted(no_verdict)
+    result.host_restarts = run.host_restarts
+    result.restart_evidence = run.restart_evidence
+    blamed = run.blamed
+    result.blamed_entry_count = len(run.blamed_entries)
+    result.blamed_distinct = blamed
+    identities = run.ran | run.passed | run.skipped | run.started
+    result.blamed_unmatched = [name for name in blamed
+                               if not _blamed_is_matched(name, identities)]
 
     entries = baseline.get("tests", {})
 
@@ -659,6 +1011,8 @@ def verdict(baseline, run, plan=None):
                 result.load_sensitive_passed.append(key)
         else:
             result.absent.append(key)
+            if key in no_verdict:
+                result.absent_crashed.add(key)
 
     if entries and not run.failures:
         result.baseline_fiction = True
@@ -734,6 +1088,30 @@ def main(argv=None):
             print("  - %s" % key)
         if not added and not removed:
             print("  (membership unchanged; counts updated)")
+        # playhead-tl6l: say what the crash cost this observation. An accept is
+        # a claim a human signs in a commit message, and "27 of these entries
+        # were never actually observed" is part of the claim.
+        no_verdict = run.no_verdict
+        if no_verdict:
+            protected = sorted(set(no_verdict) & set(merged["tests"]))
+            print(
+                "  NO VERDICT: the host died and %d test(s) reported nothing%s. This "
+                "observation says nothing about them."
+                % (len(no_verdict),
+                   " (xcodebuild restarted the test host %d time(s))" % run.host_restarts
+                   if run.host_restarts else "")
+            )
+            if protected:
+                print(
+                    "  CARRIED FORWARD: %d recorded entr%s kept unchanged rather than "
+                    "pruned — a crash is not a rename, and dropping them here is how "
+                    "the file would shrink without anyone deciding to shrink it."
+                    % (len(protected), "y was" if len(protected) == 1 else "ies were")
+                )
+                for key in protected[:_MAX_LISTED]:
+                    print("  = %s" % key)
+                if len(protected) > _MAX_LISTED:
+                    print("  = … and %d more" % (len(protected) - _MAX_LISTED))
         if promoted:
             print(
                 "  ARMED: %d entr%s crossed into DETERMINISTIC — failed in every one "

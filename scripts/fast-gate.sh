@@ -59,6 +59,18 @@
 # in the commit message: the file is the record of what is known-broken, so a
 # shrinking diff is good news and a growing one needs a reason.
 #
+# A CRASHED TEST HOST PRODUCES NO VERDICT (playhead-tl6l). A test whose host
+# died emits no per-test line, so it used to be counted as neither known nor
+# NEW — the first line above could be printed by a run that lost an entire test
+# family, because the crash destroyed the evidence of itself. It now reads
+#
+#     RED (85 known / 0 new) — 33 tests got NO VERDICT (crashed host)
+#
+# and GREEN is unreachable while that count is non-zero. It does NOT change the
+# exit code, deliberately: it fires on main today on a pre-existing crash, and a
+# gate red for a reason its reader cannot fix is one they route around. Read the
+# line, not just the code, on a full-plan run.
+#
 # The check applies ONLY to a full-plan run. A selective invocation
 # (`-only-testing:`/`-skip-testing:`, which is how scripts/mutation-battery.sh
 # drives this script) is a different population — the baseline names hundreds of
