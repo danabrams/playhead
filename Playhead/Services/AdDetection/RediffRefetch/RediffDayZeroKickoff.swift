@@ -104,9 +104,20 @@ enum RediffDayZeroKickoffOutcome: String, Sendable, Equatable, Codable, CaseIter
     ///
     /// **This is the pre-ewag signature.** Dispatch was frozen, so nothing
     /// registered an asset, so this wait expired for every download and day-0
-    /// never ran. Post-ewag (#310) the asset registers within seconds; a device
-    /// where this count is climbing again means dispatch has re-stalled, and
-    /// that is a completely different repair from a networking problem.
+    /// never ran.
+    ///
+    /// "Post-ewag (#310) the asset registers within seconds" used to stand
+    /// here. It was wrong, and playhead-fzrw measured how wrong: the row was
+    /// minted by `AnalysisWorkScheduler.resolveAnalysisAssetId`, whose only
+    /// caller is `processJob`, so it appeared when the SERIAL analysis lane
+    /// reached the episode — 0 s, 382 s, 957 s, 13,580 s and 13,678 s after the
+    /// five downloads of the 2026-08-10 pull, against a 400 s budget. Dispatch
+    /// was not stalled; it was simply BUSY, which is its normal condition and
+    /// not a repair. `AnalysisWorkScheduler.registerDownloadedAssetRowIfAbsent`
+    /// now registers the row at ENQUEUE, so on the download path this outcome
+    /// again means what it says — nothing registered an asset — rather than
+    /// "the queue ahead of this episode was longer than six and a half
+    /// minutes".
     case noAnalysisAsset = "no_analysis_asset"
 
     /// The detached task was cancelled before the budget elapsed (app

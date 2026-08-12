@@ -1212,8 +1212,16 @@ actor AnalysisWorkScheduler {
         // flag below. When no intent is pending there is nothing to serve, so
         // the (no-op) clear runs exactly as it always did.
         var userIntentServed = !userInitiated
+        // playhead-fzrw: hoisted out of the `do` so the download-time asset
+        // registration at the end of this method knows whether `job.jobId`
+        // names a real row. `insertJob` is `INSERT OR IGNORE` on `workKey`, so
+        // a call that lost to an existing key left `job` a struct nobody
+        // persisted — and stamping its id with an asset id would be an update
+        // against a row that does not exist.
+        var jobRowInserted = false
         do {
             let inserted = try await store.insertJob(job)
+            jobRowInserted = inserted
             if inserted {
                 // The minted row already carries `priority` == 20.
                 userIntentServed = true
@@ -1341,13 +1349,28 @@ actor AnalysisWorkScheduler {
         //     canonical SHA job sees an older canonical asset for the
         //     same episode with different bytes, do not mutate the old
         //     asset; the probed duration belongs to the new SHA row.
-        if let cachedURL = await downloadManager.cachedFileURL(for: episodeId),
+        //
+        // playhead-fzrw: the cached file and its canonical hash are resolved
+        // ONCE here and shared by this block and the asset registration at the
+        // end of the method. The hash used to be computed inside the `if`, so
+        // it never ran when the duration probe failed; hoisting changes only
+        // WHEN it is paid. The registration cannot be sound without it — the
+        // row it writes asserts "the bytes at this path hash to this
+        // fingerprint", and this comparison is the only thing that establishes
+        // it.
+        let cachedURL = await downloadManager.cachedFileURL(for: episodeId)
+        let sourceIsCanonicalSHA = CrossUserAnalysisShareKey
+            .isCanonicalFullFileSHA(sourceFingerprint)
+        var cachedAudioFingerprint: String?
+        if sourceIsCanonicalSHA, let cachedURL {
+            cachedAudioFingerprint = cachedAudioCanonicalFingerprint(
+                cachedURL: cachedURL,
+                episodeId: episodeId
+            )
+        }
+
+        if let cachedURL,
            let probedDuration = await AudioFileDurationProbe.probeDuration(at: cachedURL) {
-            let sourceIsCanonicalSHA = CrossUserAnalysisShareKey
-                .isCanonicalFullFileSHA(sourceFingerprint)
-            let cachedAudioFingerprint = sourceIsCanonicalSHA
-                ? cachedAudioCanonicalFingerprint(cachedURL: cachedURL, episodeId: episodeId)
-                : nil
             if sourceIsCanonicalSHA, cachedAudioFingerprint == nil {
                 logger.warning("Skipping probed duration for canonical-SHA enqueue on episode \(episodeId): cached audio could not be hashed")
             } else if let cachedAudioFingerprint,
@@ -1440,6 +1463,19 @@ actor AnalysisWorkScheduler {
             clearPendingDownloadState(episodeId: episodeId)
             return
         }
+
+        // playhead-fzrw: register the `analysis_assets` row NOW, not when the
+        // serial analysis lane eventually reaches this episode. See the method
+        // for the measurement and for why an early row is the same row rather
+        // than a placeholder.
+        await registerDownloadedAssetRowIfAbsent(
+            job: job,
+            jobRowInserted: jobRowInserted,
+            cachedURL: cachedURL,
+            cachedAudioCanonicalSHA: cachedAudioFingerprint,
+            capturedRetirementGeneration: capturedRetirementGeneration
+        )
+
         wakeSchedulerLoop()
 
         // playhead-gjz6 (Gap-4 second half): if the app is currently
@@ -6460,6 +6496,155 @@ actor AnalysisWorkScheduler {
             createdAt: now,
             updatedAt: now
         )
+    }
+
+    /// playhead-fzrw — REGISTER THE ASSET ROW WHEN THE BYTES LAND, NOT WHEN THE
+    /// LANE GETS TO THEM.
+    ///
+    /// THE MEASUREMENT (`scratchpad/db-prewipe6/analysis.sqlite`, the 2026-08-10
+    /// overnight pull). Five downloads landed as one batch — five `preAnalysis`
+    /// jobs created between 09:02:21 and 09:02:58 — and their `analysis_assets`
+    /// rows arrived at 09:02:21, 09:08:46, 09:18:23, 12:48:53 and 12:50:56. Lags
+    /// of 0 s, 382 s, 957 s, 13,580 s and 13,678 s, against the day-0 kickoff's
+    /// `40 × 10 s = 400 s` readiness budget. THREE OF FIVE could not have
+    /// reached the trigger by any drain strategy, on any network, in any process
+    /// that survived — they would give up `no_analysis_asset`, which is exactly
+    /// what playhead-kxgh's pull recorded five times with `lastPollCount = 40`.
+    ///
+    /// The lag is not a bug in the kickoff plumbing. ``resolveAnalysisAssetId``
+    /// is called from `processJob` and nowhere else, so the row appears when the
+    /// SERIAL analysis lane reaches the episode; on that pull the lane was 3h46m
+    /// behind by episode four.
+    ///
+    /// WHY AN EARLY ROW IS NOT A PLACEHOLDER, and why moving the failure is not
+    /// what this does. The day-0 path reads exactly two things off the row: its
+    /// `id` (the mint key, and the key of every day-0 attempt/suppression
+    /// record) and its `sourceURL` (the read-only pinned A-side —
+    /// `AdDetectionService.resolveDayZeroASide`, the one resolver shared by the
+    /// mint and its free pre-fetch blocker). No duration, no fingerprint, no
+    /// transcript; nothing the analysis lane produces. And what is written here
+    /// is field-for-field what ``resolveAnalysisAssetId``'s fall-through insert
+    /// would have written — same fingerprints, same portable `sourceURL`, same
+    /// `"queued"` state, same consumed title/duration stashes. The row is the
+    /// same row, earlier.
+    ///
+    /// THREE PRECONDITIONS, AND EACH IS LOAD-BEARING. Everything they exclude
+    /// falls through to the lazy path completely unchanged.
+    ///
+    ///   1. A cached file must exist. Without an A-side there is nothing for the
+    ///      byte differ to read, so a row registered here would only turn a
+    ///      `no_analysis_asset` give-up into an `aSideNotAnchored` mint exit.
+    ///   2. The bytes on disk must HASH to this job's fingerprint. The row
+    ///      asserts that its `sourceURL` holds the audio its `assetFingerprint`
+    ///      names; only the comparison proves it. A feed correction or a
+    ///      re-download that landed different audio is exactly the case
+    ///      `processJob`'s stale-canonical check exists for, and it must keep
+    ///      owning it.
+    ///   3. The episode must have NO asset row at all. Every reuse arm in
+    ///      ``resolveAnalysisAssetId`` — exact canonical match, weak-asset
+    ///      upgrade, plain latest-row reuse — requires an existing row, so with
+    ///      none present this insert is provably its fall-through and nothing
+    ///      else. It is also what keeps playhead-0hi9 closed: a Pipeline A
+    ///      placeholder minted at play time may be upgradeable to this canonical
+    ///      SHA, but that decision needs fingerprint proof that may not exist
+    ///      yet, and guessing it here is how a second row gets minted for one
+    ///      episode.
+    ///
+    /// Best-effort throughout: a store failure logs and leaves the lazy path to
+    /// do what it always did. The retirement generation is re-read after every
+    /// suspension, the same discipline `enqueue` applies around its own writes,
+    /// so a download deleted mid-flight cannot leave a row behind it.
+    private func registerDownloadedAssetRowIfAbsent(
+        job: AnalysisJob,
+        jobRowInserted: Bool,
+        cachedURL: URL?,
+        cachedAudioCanonicalSHA: String?,
+        capturedRetirementGeneration: UInt64
+    ) async {
+        // (1) An A-side must be on disk.
+        guard let cachedURL, let localAudioURL = LocalAudioURL(cachedURL) else { return }
+        // (2) …and it must be THIS job's bytes. `cachedAudioCanonicalSHA` is
+        // computed only when the source fingerprint is a canonical full-file
+        // SHA, so equality here also establishes canonicality.
+        guard let cachedAudioCanonicalSHA,
+              cachedAudioCanonicalSHA == job.sourceFingerprint else { return }
+
+        // (3) No asset row for this episode at all.
+        do {
+            guard try await store.fetchAssetByEpisodeId(job.episodeId) == nil else { return }
+        } catch {
+            logger.warning("Download-time asset registration skipped for \(job.episodeId): \(error)")
+            return
+        }
+        guard downloadRetirementGenerationByEpisode[
+            job.episodeId,
+            default: 0
+        ] == capturedRetirementGeneration else { return }
+
+        let capabilityJSON: String?
+        do {
+            let snapshot = await capabilitiesService.currentSnapshot
+            let data = try JSONEncoder().encode(snapshot)
+            capabilityJSON = String(data: data, encoding: .utf8)
+        } catch {
+            capabilityJSON = nil
+        }
+        let durationStashKey = Self.durationStashKey(
+            episodeId: job.episodeId,
+            sourceFingerprint: job.sourceFingerprint
+        )
+        // READ, don't consume: the stashes are cleared only once the row is
+        // actually on disk, so a failed insert leaves the lazy path everything
+        // it needs rather than an episode whose title and measured duration
+        // were spent on a write that never happened.
+        let stashedEpisodeTitle = pendingEpisodeTitles[job.episodeId]
+        let stashedDuration = pendingProbedEpisodeDurations[durationStashKey]
+        let observedWeak = await downloadManager.fingerprint(for: job.episodeId)?.weak
+        guard downloadRetirementGenerationByEpisode[
+            job.episodeId,
+            default: 0
+        ] == capturedRetirementGeneration else { return }
+
+        let asset = AnalysisAsset(
+            id: UUID().uuidString,
+            episodeId: job.episodeId,
+            assetFingerprint: job.sourceFingerprint,
+            weakFingerprint: AudioFingerprint.nonEmptyWeak(observedWeak),
+            // playhead-b8hj: container-PORTABLE, never `absoluteString` — the
+            // column is write-once and an absolute path dies with the container.
+            sourceURL: AudioCacheLocation.portableString(for: localAudioURL.url),
+            featureCoverageEndTime: nil,
+            fastTranscriptCoverageEndTime: nil,
+            confirmedAdCoverageEndTime: nil,
+            analysisState: "queued",
+            analysisVersion: PreAnalysisConfig.analysisVersion,
+            capabilitySnapshot: capabilityJSON,
+            episodeDurationSec: stashedDuration,
+            episodeTitle: stashedEpisodeTitle
+        )
+        do {
+            try await store.insertAsset(asset)
+        } catch {
+            logger.warning("Download-time asset registration failed for \(job.episodeId): \(error)")
+            return
+        }
+        pendingEpisodeTitles.removeValue(forKey: job.episodeId)
+        pendingProbedEpisodeDurations.removeValue(forKey: durationStashKey)
+        // Stamping the job closes the loop: `resolveAnalysisAssetId` returns on
+        // `job.analysisAssetId` before any identity work, so dispatch reuses
+        // this row rather than re-deriving one. Skipped when the job row was
+        // swallowed by a `workKey` collision — there is no row to stamp, and
+        // the surviving job still finds this asset through the exact-fingerprint
+        // arm.
+        guard jobRowInserted else { return }
+        do {
+            try await store.updateJobAnalysisAssetId(
+                jobId: job.jobId,
+                analysisAssetId: asset.id
+            )
+        } catch {
+            logger.warning("Could not stamp job \(job.jobId) with registered asset: \(error)")
+        }
     }
 
     private func resolveAnalysisAssetId(
