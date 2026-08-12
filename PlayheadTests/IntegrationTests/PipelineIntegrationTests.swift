@@ -1975,6 +1975,12 @@ struct CombinedTuningReplayTests {
         var episodeReports: [EpisodeReplayReport] = []
         var allClassifierResults: [String: [ClassifierResult]] = [:]
         var allDecisionLogs: [String: [SkipDecisionRecord]] = [:]
+        // The corpus holds several episodes per show, and `trustStore` is
+        // shared across the whole loop — so the trust posture is set ONCE per
+        // show. Re-running the build-up on a show already posed would be
+        // reading the previous iteration's own override back as if the ladder
+        // had produced it.
+        var posedShows: Set<String> = []
 
         for annotation in annotations {
             let assetId = annotation.episode.episodeId
@@ -2030,26 +2036,29 @@ struct CombinedTuningReplayTests {
             // --- Layer 3: Trust scoring (uses updated bonus=0.10) ---
             let trustService = TrustScoringService(store: trustStore)
 
-            // Simulate trust build-up. With bonus=0.10, 8 observations take a
-            // fresh show from 0.2 to 1.0 and clear every legacy clause of the
-            // auto rung.
-            for _ in 0..<8 {
-                await trustService.recordSuccessfulObservation(
-                    podcastId: podcastId, averageConfidence: 0.80
-                )
-            }
-            let selfObservedMode = await trustService.effectiveMode(podcastId: podcastId)
-            #expect(selfObservedMode == .manual,
-                    "playhead-lqcp: self-observation stops at manual for \(podcastId); got \(String(describing: selfObservedMode))")
+            if posedShows.insert(podcastId).inserted {
+                // Simulate trust build-up. With bonus=0.10, 8 observations take
+                // a fresh show from 0.2 to 1.0 and clear every legacy clause of
+                // the auto rung.
+                for _ in 0..<8 {
+                    await trustService.recordSuccessfulObservation(
+                        podcastId: podcastId, averageConfidence: 0.80
+                    )
+                }
+                let selfObservedMode = await trustService.effectiveMode(podcastId: podcastId)
+                #expect(selfObservedMode == .manual,
+                        "playhead-lqcp: self-observation stops at manual for \(podcastId); got \(String(describing: selfObservedMode))")
 
-            // What Layer 4 below measures is the AUTO-MODE SKIP PATH — candidate
-            // promotion without waiting for backfill confirmation. Under
-            // playhead-lqcp the ladder no longer puts a show there on its own
-            // evidence, so the replay has to say out loud how the show got to
-            // auto. A user override is the honest answer and the only remaining
-            // one: it is a listener instruction, which is exactly the posture
-            // this corpus is meant to be measuring the skip behaviour under.
-            await trustService.setUserOverride(podcastId: podcastId, mode: .auto)
+                // What Layer 4 below measures is the AUTO-MODE SKIP PATH —
+                // candidate promotion without waiting for backfill
+                // confirmation. Under playhead-lqcp the ladder no longer puts a
+                // show there on its own evidence, so the replay has to say out
+                // loud how the show got to auto. A user override is the honest
+                // answer and the only remaining one: it is a listener
+                // instruction, which is exactly the posture this corpus is
+                // meant to be measuring the skip behaviour under.
+                await trustService.setUserOverride(podcastId: podcastId, mode: .auto)
+            }
             let mode = await trustService.effectiveMode(podcastId: podcastId)
             #expect(mode == .auto,
                     "the explicit override must reach auto for \(podcastId)")
