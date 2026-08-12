@@ -98,11 +98,20 @@
 //                                            .segmentedOverlapSecondsRecovered`,
 //                                            which has said "not the realised
 //                                            damage" all along.
-//   lastAlignedSecondsInSlots > 0         -> a shipped slot contains audio the
-//                                            aligner proved matched. Check the
-//                                            MAGNITUDE first: ≤ 3 s per join is
-//                                            the known fragment-merge effect;
-//                                            this bead's phantom is minutes.
+//   lastAlignedSecondsInSlots > 0         -> a slot some persona emitted contains
+//                                            audio that persona proved matched.
+//                                            Check the MAGNITUDE first: ≤ 3 s per
+//                                            join is fragment-merge; this bead's
+//                                            phantom is minutes. R5 review — this
+//                                            is a PER-PERSONA score, taken before
+//                                            `unionedPlayedSlots` re-merges the
+//                                            personas into the geometry that
+//                                            ships, so it also UNDER-reports by
+//                                            up to 3 s per cross-persona join.
+//                                            Optimistic by seconds, never
+//                                            pessimistic; see
+//                                            `RediffSlotOwnership.ByteDiagnostics
+//                                            .alignedSecondsInSlots`.
 
 import Foundation
 import Testing
@@ -237,6 +246,87 @@ struct RediffByteMintDiagnosticsTests {
         // the pass-through fields come from the same object.
         #expect(acceptance.diagnostics.runsAOverlapping == 1)
         #expect(acceptance.diagnostics.overlapSecondsRecovered == 42)
+    }
+
+    /// R4 REVIEW RESIDUAL, closed here. `maxAlignedSecondsInSlot` is the field
+    /// that exists so a large value cannot hide inside a sum spread over many
+    /// slots — and until this test the only non-zero assertion on it
+    /// (`theWitnessCanReadNonZero` above) used a SINGLE-slot fixture, where
+    /// `worst = max(worst, matched)` and `worst += matched` are indistinguishable.
+    /// The per-persona `max` in `RediffSlotOwnership.byteDiagnostics` was
+    /// therefore unpinned as a MAX; only `combining`'s max-of-maxes was pinned.
+    /// A rail nobody has watched redden is not a rail.
+    ///
+    /// THREE slots, not two, and the largest is in the MIDDLE on purpose. With
+    /// two the max coincides with the first, so `worst = <the first slot's
+    /// value>` would also survive. Here the four readings a mutation could
+    /// plausibly produce are all distinct: Σ = 18, max = 10, first = 3, last = 5.
+    ///
+    /// The alignment is hand-built for the same reason `theWitnessCanReadNonZero`
+    /// is: after playhead-3zxd the production aligner cannot emit a slot that
+    /// contains a found run at all, so the only way to prove the meter reads
+    /// correctly ACROSS slots is to hand it a shape it will never see in the
+    /// field. Everything below the `Alignment` boundary — the gate, the
+    /// `minAdSeconds` filter, `mergedAndCapped`, and the diagnostics fold — is
+    /// the real production path.
+    @Test("the per-slot worst case is a MAX across slots, not a running total")
+    func maxAlignedSecondsIsAMaxAcrossSlotsNotASum() throws {
+        func slot(_ start: Double, _ end: Double) -> RediffByteAligner.Slot {
+            RediffByteAligner.Slot(
+                kind: .removedInB,
+                aStartByte: 0, aEndByte: 1,
+                aStartSeconds: start, aEndSeconds: end,
+                aBytes: 1, bBytes: 0,
+                leftFlankSeconds: 60, rightFlankSeconds: 60
+            )
+        }
+        let alignment = RediffByteAligner.Alignment(
+            runsFound: 3,
+            chain: [RediffByteAligner.Run(aStart: 0, bStart: 0, bytes: 1)],
+            runsDroppedNonMonotonic: 1,        // → the recovery arm
+            chainedBytes: 1,
+            chainedFractionB: 0.9,
+            slots: [],
+            aDurationSeconds: 600,
+            bDurationSeconds: 600,
+            // Three emitted slots, each wider than `minAdSeconds` and separated
+            // by far more than `fragmentMergeGapSeconds`, so `mergedAndCapped`
+            // passes all three through unjoined.
+            segmentedSlots: [slot(100, 130), slot(200, 240), slot(300, 330)],
+            segmentedChainedFractionB: 0.9,    // clears the re-encode floor
+            segmentedRunsChained: 3,
+            // One run inside each slot: 3 s, 10 s, 5 s of byte-verified audio.
+            foundRunASpans: [
+                TimeRange(start: 110, end: 113),
+                TimeRange(start: 210, end: 220),
+                TimeRange(start: 310, end: 315)
+            ],
+            segmentedRunsAOverlapping: 3,
+            segmentedOverlapSecondsRecovered: 42
+        )
+        guard case .accepted(let acceptance) = RediffSlotOwnership.gateAndDiffBytes(
+            alignment: alignment, recoverNonMonotonicSegments: true
+        ) else {
+            Issue.record("the fixture must reach an acceptance for the witness to be read"); return
+        }
+        // CONTROLS: three slots really did ship, in this order, unmerged — the
+        // whole discrimination below rests on there being more than one.
+        #expect(acceptance.playedSlots.count == 3,
+                "got \(acceptance.playedSlots.map { ($0.startSeconds, $0.endSeconds) })")
+        #expect(acceptance.playedSlots.map(\.startSeconds) == [100, 200, 300])
+
+        #expect(acceptance.diagnostics.alignedSecondsInSlots == 18,
+                "the SUM over slots — got \(acceptance.diagnostics.alignedSecondsInSlots)")
+        // 10, not 18 (a running total), not 3 (the first slot), not 5 (the last).
+        #expect(acceptance.diagnostics.maxAlignedSecondsInSlot == 10,
+                """
+                the worst SINGLE slot — got \(acceptance.diagnostics.maxAlignedSecondsInSlot). \
+                18 means the max became a sum, which is exactly the reading this \
+                field exists to make impossible
+                """)
+        #expect(acceptance.diagnostics.maxAlignedSecondsInSlot
+                < acceptance.diagnostics.alignedSecondsInSlots,
+                "control: on this fixture a max and a sum MUST disagree")
     }
 
     // MARK: - 2. Aggregation across k-way personas

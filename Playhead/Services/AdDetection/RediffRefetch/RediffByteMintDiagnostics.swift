@@ -61,13 +61,20 @@ struct RediffByteMintDiagnostics: Sendable, Equatable {
     /// number, is what a device pull reads.
     var overlapSecondsRecovered: Double = 0
     /// Σ over EMITTED slots of the A-seconds a found run covers. THE INVARIANT
-    /// WITNESS — zero by construction after playhead-3zxd. See
-    /// `RediffSlotOwnership.ByteDiagnostics.alignedSecondsInSlots` for the one
-    /// known non-phantom contributor (fragment-merge, ≤ 3 s per join) and why
-    /// the magnitude discriminates.
+    /// WITNESS — zero by construction after playhead-3zxd.
+    ///
+    /// Each persona scored its OWN slots against its OWN runs, and this is their
+    /// plain sum. It is therefore measured BEFORE `unionedPlayedSlots` re-merges
+    /// the personas into the geometry that actually ships. See
+    /// `RediffSlotOwnership.ByteDiagnostics.alignedSecondsInSlots` (R5 review)
+    /// for the TWO known non-phantom contributors — fragment-merge within a
+    /// persona, which this number sees, and the k-way re-merge across them,
+    /// which it does not — both ≤ 3 s per join, both under-reporting, and why
+    /// the magnitude still discriminates.
     var alignedSecondsInSlots: Double = 0
     /// The worst SINGLE emitted slot across every persona, so a large value
-    /// cannot hide inside a sum spread over many slots.
+    /// cannot hide inside a sum spread over many slots. Same per-persona,
+    /// pre-re-merge measurement as `alignedSecondsInSlots` above.
     var maxAlignedSecondsInSlot: Double = 0
     /// A-time run spans, capped and encoded — see `RediffAlignedRunSpanCodec`.
     /// `nil` when no accepted persona produced a run.

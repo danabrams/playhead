@@ -423,17 +423,39 @@ enum RediffSlotOwnership {
         /// Σ over the EMITTED slots of the A-seconds a found run covers — the
         /// invariant witness. Zero by construction after playhead-3zxd.
         ///
-        /// Measured over the slots as they SHIP (post `mergedAndCapped`), not
-        /// over the aligner's raw gaps, because a banner the listener can tap is
-        /// the thing at stake. That admits ONE known non-phantom contributor:
-        /// `mergedAndCapped` joins slots separated by ≤ `fragmentMergeGapSeconds`
-        /// (3 s), and what separates two gaps is an accepted RUN — impossible to
-        /// join over at 128 kbps CBR (a 65536-byte run is 4.1 s) but possible at
-        /// ≥192 kbps. So read the MAGNITUDE: ≤ 3 s per join is that effect,
-        /// filed separately; this bead's phantom is minutes.
+        /// Measured post `mergedAndCapped` rather than over the aligner's raw
+        /// gaps, because a banner the listener can tap is the thing at stake.
+        ///
+        /// PER-PERSONA, and that pairing is deliberate, not incidental: THIS
+        /// diff's slots against THIS diff's runs. Scoring one persona's runs
+        /// against the k-way UNION would be wrong by minutes — the union is
+        /// quorum-1 (`unionedPlayedSlots`: a slot mints if ANY persona diverged
+        /// on it), so a region persona 0 matched while persona 1 diverged is the
+        /// collision-recovery this design exists for, not a phantom.
+        ///
+        /// R5 REVIEW — WHAT THAT PAIRING COSTS, because "the slots as they SHIP"
+        /// is what an earlier draft of this note claimed and it is not exactly
+        /// true. `mintByteExactDayZeroMarks` runs `unionedPlayedSlots` over the
+        /// accepted personas, which re-runs `mergedAndCapped` across their
+        /// concatenation; whenever ≥ 2 personas are accepted — the ordinary k-way
+        /// shape — the geometry that reaches a listener is that RE-MERGE, and no
+        /// persona measured it. So there are two joins, both bounded by
+        /// `fragmentMergeGapSeconds` (3 s) and both non-phantom:
+        ///
+        ///   * WITHIN a persona this number DOES see the join, and the join is
+        ///     hard to make: what separates two shippable gaps is a run accepted
+        ///     WHOLE, 4.1 s at 128 kbps CBR, joinable only at ≥192 kbps
+        ///     (playhead-yzra, filed separately).
+        ///   * ACROSS personas it sees nothing at all — the separator there is
+        ///     not a run, so nothing stops the join, and the miss is silent.
+        ///
+        /// Both are ≤ 3 s per join and both UNDER-report, so the number is
+        /// optimistic by single-digit seconds and never pessimistic. Read the
+        /// MAGNITUDE: seconds is merge; this bead's phantom is minutes.
         var alignedSecondsInSlots: Double = 0
         /// The worst single emitted slot, so a large value cannot hide inside a
-        /// sum spread over many slots.
+        /// sum spread over many slots. Per-persona and pre-re-merge for the same
+        /// reason, and with the same ≤ 3 s under-report — see above.
         var maxAlignedSecondsInSlot: Double = 0
         /// A-TIME span of every FOUND run. The raw material: with it a later
         /// question can be re-asked of data already collected, rather than only
