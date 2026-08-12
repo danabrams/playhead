@@ -2494,9 +2494,13 @@ actor AnalysisWorkScheduler {
     /// against full-suite cooperative-pool load.
     @discardableResult
     func processNextDispatchableJobForTesting(
-        cancelAfterRunnerStart cause: InternalMissCause? = nil
+        cancelAfterRunnerStart cause: InternalMissCause? = nil,
+        cancelBeforeRunnerStart beforeCause: InternalMissCause? = nil
     ) async -> Bool {
-        await runSingleDispatchPass(cancelAfterRunnerStart: cause)
+        await runSingleDispatchPass(
+            cancelAfterRunnerStart: cause,
+            cancelBeforeRunnerStart: beforeCause
+        )
     }
 
     /// Test-only accessor for the live playhead position field.
@@ -3299,7 +3303,8 @@ actor AnalysisWorkScheduler {
     /// which the loop would sleep and re-poll.
     @discardableResult
     private func runSingleDispatchPass(
-        cancelAfterRunnerStart cause: InternalMissCause? = nil
+        cancelAfterRunnerStart cause: InternalMissCause? = nil,
+        cancelBeforeRunnerStart beforeCause: InternalMissCause? = nil
     ) async -> Bool {
         guard config.isEnabled else { return false }
 
@@ -3356,7 +3361,8 @@ actor AnalysisWorkScheduler {
             job,
             cascadeWindow: selected.cascadeWindow,
             desiredCoverageOverride: coverageOverride,
-            testCancelAfterRunnerStart: cause
+            testCancelAfterRunnerStart: cause,
+            testCancelBeforeRunnerStart: beforeCause
         )
         return true
     }
@@ -4442,11 +4448,23 @@ actor AnalysisWorkScheduler {
     ///   job's real target, so a thermal hold would silently downgrade how much
     ///   of the episode ever gets analysed. `nil` (every other caller) reads
     ///   the row's own target, exactly as before.
+    /// - Parameter testCancelBeforeRunnerStart: playhead-fzrw R5. DEBUG-only
+    ///   mirror of `testCancelAfterRunnerStart` that raises the cancel BEFORE
+    ///   the `shouldCancelCurrentJob` guard rather than after the runner is
+    ///   armed. It exists because the cancel-before-runner-start arm is the one
+    ///   the registration promote's PLACEMENT is chosen for, and it is
+    ///   otherwise undrivable: the guard and the runner sit back-to-back inside
+    ///   one actor message, so an external canceller has no window to land in
+    ///   (`AnalysisWorkSchedulerJournalEmissionTests` says as much in its
+    ///   header). Without a seam here, moving the promote above the guard —
+    ///   which strands a cancelled episode at a frozen "analyzing 0%" with the
+    ///   tap disabled — passes every test in the suite.
     private func processJob(
         _ job: AnalysisJob,
         cascadeWindow: CandidateWindow? = nil,
         desiredCoverageOverride: Double? = nil,
-        testCancelAfterRunnerStart: InternalMissCause? = nil
+        testCancelAfterRunnerStart: InternalMissCause? = nil,
+        testCancelBeforeRunnerStart: InternalMissCause? = nil
     ) async {
         // Resolve audio URL from download cache.
         guard let fileURL = await downloadManager.cachedFileURL(for: job.episodeId) else {
@@ -4803,6 +4821,19 @@ actor AnalysisWorkScheduler {
             windowRange: resolvedCascadeWindow?.range
         )
 
+        #if DEBUG
+        // playhead-fzrw R5: raise the cancel the way a real canceller would —
+        // `shouldCancelCurrentJob` plus a cause — at the last moment before the
+        // guard reads it. `runningJobs[job.jobId]` exists (created at lease
+        // acquisition) and `shouldCancelCurrentJob` was cleared there, so this
+        // is the first write since, exactly as an external `cancelCurrentJob`
+        // arriving in this instant would be.
+        if let testCancelBeforeRunnerStart {
+            pendingCancelCause = testCancelBeforeRunnerStart
+            shouldCancelCurrentJob = true
+        }
+        #endif
+
         let jobSignpost = PreAnalysisInstrumentation.beginJobDuration(jobId: job.jobId)
         do {
             // playhead-lmrx (review round 3): EITHER the global flag OR this
@@ -4892,9 +4923,19 @@ actor AnalysisWorkScheduler {
             // R2's registration mints the row in
             // ``AnalysisAsset/registeredNotQueuedState`` precisely so the hours
             // it spends waiting do not light a working bar. Nothing then moved
-            // it off that token: the only writer of `analysis_assets.analysisState`
-            // is `AnalysisCoordinator`, which runs on the PLAY path, and
-            // `resolveAnalysisAssetId` — which used to write `"queued"` at this
+            // it off that token. FIVE statements write
+            // `analysis_assets.analysisState` and no others (R5 — an earlier
+            // draft of this comment said "the only writer is
+            // `AnalysisCoordinator`", which omitted three of them, two added by
+            // this bead): the two INSERTs — `insertAsset`, serving this file's
+            // lazy fall-through AND `AnalysisCoordinator`'s placeholder, and
+            // `insertAssetIfEpisodeHasNone`, serving the registration — the two
+            // `updateAssetState` overloads, called only by `AnalysisCoordinator`
+            // on the PLAY path and by the one-shot duplicate-fold sweep inside
+            // `AnalysisStore` itself, and THIS method. On a registered row for
+            // an episode the user never played, not one of the other four runs:
+            // both inserts are already spent, the coordinator is not on this path,
+            // and `resolveAnalysisAssetId` — which used to write `"queued"` at this
             // very moment — returns early on the stamped `job.analysisAssetId`
             // and reuses an existing row without touching its state. So the
             // library control read `analysisActive == false` for the WHOLE
@@ -4907,6 +4948,19 @@ actor AnalysisWorkScheduler {
             // frozen "analyzing 0%". The store method is conditional on the
             // registration token, so it can never overwrite a coordinator-written
             // state; `writeIfStillOwned` drops it if the lease was reclaimed.
+            //
+            // WHAT THAT SENTENCE DOES *NOT* COVER (R5/F5). It is true of the
+            // REGISTERED population only. An episode that fails any of the
+            // registration's three preconditions has no row at this point, so
+            // `resolveAnalysisAssetId` above took its fall-through insert and
+            // wrote `analysisState: "queued"` there — BEFORE this guard, and
+            // unconditionally. A cancel arriving before the runner therefore
+            // strands such a row at `"queued"` exactly as it did before this
+            // bead. That is not a regression and it is not fixed here; moving
+            // the insert would change which row identity dispatch resolves, and
+            // it is the pre-bead behaviour for a population this bead does not
+            // claim. The promote's placement buys the guarantee for the
+            // registered population and no wider.
             await writeIfStillOwned("assetRegistration.promoteToQueued") {
                 _ = try await store.markRegisteredAssetQueued(id: assetId)
             }

@@ -45,25 +45,34 @@ struct DownloadTimeAssetRegistrationTests {
 
     // MARK: - Construction helpers
 
-    private func makeRunner(store: AnalysisStore) -> AnalysisJobRunner {
+    private func makeRunner(
+        store: AnalysisStore,
+        audioProvider: StubAnalysisAudioProvider = StubAnalysisAudioProvider()
+    ) -> AnalysisJobRunner {
         let speechService = SpeechService(recognizer: StubSpeechRecognizer())
         return AnalysisJobRunner(
             store: store,
-            audioProvider: StubAnalysisAudioProvider(),
+            audioProvider: audioProvider,
             featureService: FeatureExtractionService(store: store),
             transcriptEngine: TranscriptEngineService(speechService: speechService, store: store),
             adDetection: StubAdDetectionProvider()
         )
     }
 
+    /// - Parameter audioProvider: injectable so a test can assert the runner
+    ///   NEVER decoded. `decodeCallCount` is the only observation that
+    ///   distinguishes "the cancel-before-runner-start arm fired" from "the job
+    ///   ran and happened to leave the row alone", which is what keeps
+    ///   `cancelBeforeRunnerStartLeavesTheRegisteredRowResting` non-vacuous.
     private func makeScheduler(
         store: AnalysisStore,
         downloadProvider: any DownloadProviding,
-        capabilities: any CapabilitiesProviding = StubCapabilitiesProvider()
+        capabilities: any CapabilitiesProviding = StubCapabilitiesProvider(),
+        audioProvider: StubAnalysisAudioProvider = StubAnalysisAudioProvider()
     ) -> AnalysisWorkScheduler {
         AnalysisWorkScheduler(
             store: store,
-            jobRunner: makeRunner(store: store),
+            jobRunner: makeRunner(store: store, audioProvider: audioProvider),
             capabilitiesService: capabilities,
             downloadManager: downloadProvider,
             batteryProvider: {
@@ -535,12 +544,17 @@ struct DownloadTimeAssetRegistrationTests {
 
         // ONCE THE LANE HAS IT: the registration token is gone.
         //
-        // Nothing else could remove it. `AnalysisCoordinator` is the only other
-        // writer of this column and it runs on the PLAY path — no playback here
-        // — while `resolveAnalysisAssetId` returns early on the stamped
-        // `job.analysisAssetId` without touching state. So before R3 this row
-        // read `new` for the entire analysis and the library drew the resting ✦
-        // with no caption: F1's lie pointing the other way.
+        // Nothing else could remove it. Five statements write this column (R5 —
+        // an earlier draft of this comment named only `AnalysisCoordinator`):
+        // the two INSERTs, both already spent on this row; the two
+        // `updateAssetState` overloads, reached only from `AnalysisCoordinator`
+        // on the PLAY path — no playback here — and from the duplicate-fold
+        // sweep, which needs a second row; and `markRegisteredAssetQueued`,
+        // which is the one under test. Meanwhile `resolveAnalysisAssetId`
+        // returns early on the stamped `job.analysisAssetId` without touching
+        // state. So before R3 this row read `new` for the entire analysis and
+        // the library drew the resting ✦ with no caption: F1's lie pointing the
+        // other way.
         let running = try #require(try await store.fetchAssetByEpisodeId("ep-promote"))
         #expect(
             running.analysisState != AnalysisAsset.registeredNotQueuedState,
@@ -566,6 +580,113 @@ struct DownloadTimeAssetRegistrationTests {
         ))
         #expect(readiness.state == .analyzing)
         #expect(episodePreparationCaption(readiness) != nil)
+    }
+
+    // MARK: - R5 / F4 — the promote's PLACEMENT, not just its existence
+
+    @Test("a job cancelled BEFORE its runner starts leaves the registered row resting and TAPPABLE")
+    func cancelBeforeRunnerStartLeavesTheRegisteredRowResting() async throws {
+        // WHY THIS TEST EXISTS. R3 put `markRegisteredAssetQueued` AFTER
+        // `processJob`'s cancel guard and said in a comment that the placement
+        // was the point. R4 moved it three lines up, above the guard, and all
+        // 275 tests in this population still passed — so the sentence was
+        // load-bearing and unwitnessed. Above the guard, a job cancelled before
+        // its runner ever started promotes the row to `queued` and then
+        // returns: the library row lights a "Downloaded · analyzing 0%" bar for
+        // an episode with nothing running, and because `.analyzing` is not
+        // actionable it DISABLES the tap — playhead-kanf's promote-to-`.now`
+        // escape hatch, removed from an episode that just lost its slot. The
+        // bar never moves, because the next dispatch's promote is conditional
+        // on a token this row no longer carries.
+        //
+        // The arm is otherwise undrivable: the guard and the runner sit
+        // back-to-back inside one actor message, which is why
+        // `AnalysisWorkSchedulerJournalEmissionTests` declares
+        // `cancelRace.releaseLease` unreachable in stub form. The DEBUG-only
+        // `cancelBeforeRunnerStart` seam raises the cancel the way a real
+        // canceller would, at the last instant before the guard reads it.
+        let store = try await makeTestStore()
+        let provider = StubDownloadProvider()
+        let audio = StubAnalysisAudioProvider()
+        let scheduler = makeScheduler(
+            store: store,
+            downloadProvider: provider,
+            audioProvider: audio
+        )
+
+        let url = try writeSynthAudio(seconds: 5.0)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let sha = try FileHasher.sha256(fileURL: url)
+        provider.cachedURLs["ep-cancelrace"] = url
+        provider.fingerprints["ep-cancelrace"] = AudioFingerprint(weak: "weak-cancelrace", strong: sha)
+
+        await scheduler.enqueue(
+            episodeId: "ep-cancelrace",
+            podcastId: "pod-cancelrace",
+            downloadId: "dl-cancelrace",
+            sourceFingerprint: sha,
+            isExplicitDownload: false
+        )
+
+        let registered = try #require(try await store.fetchAssetByEpisodeId("ep-cancelrace"))
+        #expect(registered.analysisState == AnalysisAsset.registeredNotQueuedState)
+
+        let processed = await scheduler.processNextDispatchableJobForTesting(
+            cancelBeforeRunnerStart: .userCancelled
+        )
+        #expect(processed, "the pass must have dispatched — otherwise nothing was cancelled")
+
+        // ANTI-VACUITY. Without these, a run that simply never reached the
+        // guard would satisfy every assertion below for the wrong reason.
+        #expect(
+            audio.decodeCallCount == 0,
+            "the runner must never have started; this is the cancel-BEFORE-runner arm"
+        )
+        let job = try #require(
+            try await store.fetchJobsByState("queued").first { $0.episodeId == "ep-cancelrace" },
+            "the arm reverts 'running' to 'queued' — a job stuck at 'running' with no lease is invisible to every recovery path"
+        )
+        #expect(job.leaseOwner == nil, "the arm releases the lease")
+        #expect(
+            job.attemptCount == 0,
+            "cancel-before-runner-start deliberately spends no attempt — no decode work was performed"
+        )
+
+        // THE PROPERTY. The lane gave the episode back; the row must say so.
+        let after = try #require(try await store.fetchAssetByEpisodeId("ep-cancelrace"))
+        #expect(
+            after.analysisState == AnalysisAsset.registeredNotQueuedState,
+            "a job that never started its runner must leave the registration token in place"
+        )
+
+        let analysis = episodePreparationAnalysisInputs(asset: after, coverage: nil)
+        #expect(
+            !analysis.analysisActive,
+            "nothing is running; the control must not claim the lane is working on this episode"
+        )
+        let readiness = deriveEpisodePreparationReadiness(EpisodePreparationInputs(
+            isDownloaded: true,
+            downloadInFlight: false,
+            downloadFraction: 1,
+            analysisActive: analysis.analysisActive,
+            analysisComplete: analysis.analysisComplete,
+            analysisTerminatedComplete: analysis.analysisTerminatedComplete,
+            analysisFailed: analysis.analysisFailed,
+            adScanFraction: analysis.adScanFraction,
+            userInitiated: false,
+            downloadPermitted: true
+        ))
+        // `.idle` is the resting ✦ AND the only state under which
+        // `EpisodePreparationStatusModel.isActionable` is true for a downloaded
+        // episode — i.e. the statement that the tap still reaches
+        // `enqueueUserIntentAnalysis`. A cancelled episode is precisely the one
+        // that needs it.
+        #expect(readiness.state == .idle)
+        #expect(readiness.state != .analyzing)
+        #expect(
+            episodePreparationCaption(readiness) == nil,
+            "no caption at all — never a frozen \"Downloaded · analyzing 0%\" on an episode with nothing running"
+        )
     }
 
     @Test("the promotion is CONDITIONAL — it cannot overwrite a state the coordinator wrote")

@@ -9716,10 +9716,20 @@ actor AnalysisStore {
     /// ``AnalysisAsset/registeredNotQueuedState`` so a downloaded-but-unanalysed
     /// episode stops claiming the lane is working on it. That is right for the
     /// hours the episode spends waiting. It is WRONG the moment the lane
-    /// arrives — and nothing moved it, because the only writer of this column
-    /// is `AnalysisCoordinator`, which runs on the PLAY path
-    /// (`handlePlayStarted` → `resolveSession`); the scheduler lane never goes
-    /// near it (`AnalysisJobRunner.run`'s own header says so). Before this bead
+    /// arrives — and nothing moved it. FIVE statements write this column and no
+    /// others (R5 — this comment previously said "the only writer of this column
+    /// is `AnalysisCoordinator`", which omitted three of them, two added by this
+    /// bead): the two INSERTs, ``insertAsset(_:)`` — serving the scheduler's
+    /// lazy fall-through AND `AnalysisCoordinator`'s placeholder — and
+    /// ``insertAssetIfEpisodeHasNone(_:)``, serving the registration; the two
+    /// ``updateAssetState(id:state:)`` overloads, called only by
+    /// `AnalysisCoordinator` on the PLAY path (`handlePlayStarted` →
+    /// `resolveSession`) and by the one-shot duplicate-fold sweep further down
+    /// this file; and this method. On a registered row for an episode the user
+    /// never played, not one of the other four runs: both inserts are already
+    /// spent and the coordinator never fires, so before this method existed the
+    /// token had no way off the row — the scheduler lane never goes near the
+    /// column (`AnalysisJobRunner.run`'s own header says so). Before this bead
     /// the token was written by ``AnalysisWorkScheduler/resolveAnalysisAssetId``
     /// at exactly the instant the lane picked the job up, so the library's
     /// working bar was correct by accident. With the row minted earlier and
