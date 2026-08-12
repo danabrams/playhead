@@ -168,9 +168,17 @@ struct AdDetectionServiceTrustScoreCarryForwardTests {
             "Bug 4a regression: skipTrustScore was clobbered by updatePriors. expected 0.90, got \(after.skipTrustScore)"
         )
 
-        // Other priors that updatePriors DOES own should advance.
-        #expect(after.observationCount == seed.observationCount + 1,
-                "updatePriors retains responsibility for observationCount")
+        // playhead-mn5e/2qz6: `observationCount` is CARRIED FORWARD here, not
+        // incremented. It used to advance once per completed backfill, and an
+        // episode is backfilled ~9 times — which is what made
+        // `shadowToManualObservations: 3` mean "a third of one episode". The
+        // counter now belongs to `recordConfirmedWindowObservation`, which
+        // claims one observation per EPISODE and needs a TrustScoringService;
+        // this service has none installed, so nothing counts and the seeded
+        // value must survive untouched. That carry-forward is the same
+        // contract this suite exists to pin for `skipTrustScore`.
+        #expect(after.observationCount == seed.observationCount,
+                "updatePriors must carry observationCount forward, not increment it (playhead-2qz6)")
     }
 
     // MARK: - Test 2 — Unit-level carry-forward semantics
@@ -269,6 +277,16 @@ struct AdDetectionServiceTrustScoreCarryForwardTests {
             abs(profile.skipTrustScore - 0.5) < scoreTolerance,
             "First-time updatePriors default should be 0.5 (got \(profile.skipTrustScore))"
         )
-        #expect(profile.observationCount == 1)
+        // playhead-mn5e/2qz6: ZERO, not 1. This service has no
+        // TrustScoringService installed, so no episode observation was
+        // recorded and no claim was taken — and `updatePriors`' create path
+        // must not credit an episode that nothing witnessed. The episode
+        // remains claimable, so a later backfill with the service installed
+        // counts it properly. Crediting 1 here is how a per-backfill number
+        // gets back into a column every consumer reads as episodes.
+        #expect(
+            profile.observationCount == 0,
+            "updatePriors must not invent an observation it did not record (playhead-2qz6); got \(profile.observationCount)"
+        )
     }
 }

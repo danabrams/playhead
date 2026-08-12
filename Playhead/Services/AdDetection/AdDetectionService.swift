@@ -6843,11 +6843,11 @@ actor AdDetectionService {
         } else {
             // playhead-mn5e: the production caller `recordSuccessfulObservation`
             // never had. Ordered BEFORE `updatePriors` deliberately — see
-            // `recordConfirmedWindowObservation` for why — and its return value
-            // is what stops `observationCount` being incremented twice for one
-            // backfill.
-            let trustOwnsObservation = await recordConfirmedWindowObservation(
+            // `recordConfirmedWindowObservation` for why. It is the ONLY writer
+            // of `observationCount`, and it counts EPISODES (playhead-2qz6).
+            await recordConfirmedWindowObservation(
                 podcastId: podcastId,
+                analysisAssetId: analysisAssetId,
                 confirmedWindows: nonSuppressedWindows
             )
             try await updatePriors(
@@ -6855,8 +6855,7 @@ actor AdDetectionService {
                 nonSuppressedWindows: nonSuppressedWindows,
                 episodeDuration: episodeDuration,
                 featureWindows: featureWindows,
-                chunks: canonicalChunks,
-                countsObservation: !trustOwnsObservation
+                chunks: canonicalChunks
             )
         }
 
@@ -12884,27 +12883,23 @@ actor AdDetectionService {
     /// math). No defaults — callers without a real signal pass `[]`
     /// explicitly so the choice is visible at the call site.
     ///
-    /// playhead-mn5e: `countsObservation` defaults to `true` HERE ONLY — this
-    /// shim drives the priors merge in isolation, with no trust service in
-    /// play, so `true` is the honest answer to "did anything else already
-    /// count this observation?" and it keeps the pre-mn5e counter semantics
-    /// that the existing `PriorHierarchyWireUpTests` assert. The production
-    /// parameter has no default, deliberately.
+    /// playhead-mn5e/2qz6: this shim drives the PRIORS MERGE only. It does not
+    /// move `observationCount` — nothing does any more except
+    /// `recordConfirmedWindowObservation`, which is reachable end-to-end
+    /// through `runBackfill`.
     func updatePriorsForTesting(
         podcastId: String,
         nonSuppressedWindows: [AdWindow],
         episodeDuration: Double,
         featureWindows: [FeatureWindow],
-        chunks: [TranscriptChunk],
-        countsObservation: Bool = true
+        chunks: [TranscriptChunk]
     ) async throws {
         try await updatePriors(
             podcastId: podcastId,
             nonSuppressedWindows: nonSuppressedWindows,
             episodeDuration: episodeDuration,
             featureWindows: featureWindows,
-            chunks: chunks,
-            countsObservation: countsObservation
+            chunks: chunks
         )
     }
     #endif
@@ -12915,11 +12910,28 @@ actor AdDetectionService {
     /// promotion ladder. **This is the production caller
     /// `TrustScoringService.recordSuccessfulObservation` never had.**
     ///
-    /// Returns `true` when the trust service actually recorded the
-    /// observation — and therefore OWNS this backfill's `observationCount`
-    /// increment. `updatePriors` must not increment as well; two writers
-    /// ticking one counter would halve every threshold in
-    /// `TrustScoringConfig` without anybody choosing to.
+    /// **It is the only writer of `observationCount`, and it counts EPISODES**
+    /// (playhead-2qz6). Before this, the counter was incremented once per
+    /// completed backfill and an episode is backfilled ~9 times — measured 36
+    /// observations across 4 assets on the 2026-08-12 device pull — so
+    /// `shadowToManualObservations: 3` meant "a third of one episode". Every
+    /// consumer already reads the column as episodes in so many words:
+    /// `ShowLocalPriorsBuilder` calls it "number of episodes processed" and
+    /// `NetworkPriors.decayedWeight` names its parameter `episodesObserved`.
+    ///
+    /// The unit event is "a backfill of THIS asset confirmed at least one ad
+    /// window, and this asset has not contributed an observation for this show
+    /// before". The dedupe key is `(podcastId, analysisAssetId)` and it lives
+    /// in `trust_episode_observations`, claimed atomically — see
+    /// `AnalysisStore.claimEpisodeTrustObservation` for why the claim is a row
+    /// rather than a flag derived from a coverage watermark or a lifecycle
+    /// state.
+    ///
+    /// ORDER MATTERS AND IS NOT ARBITRARY: the claim is taken only when the
+    /// observation is about to be recorded. A backfill that cannot record one
+    /// (no trust service) claims nothing, so the episode stays claimable and a
+    /// later backfill counts it. A claim standing for an observation nobody
+    /// made would cost the show that episode's credit permanently.
     ///
     /// **WHAT THE EVIDENCE IS, and why this one.** Two candidates were on the
     /// table: "this episode's ad windows were confirmed" and "the user did not
@@ -12955,15 +12967,17 @@ actor AdDetectionService {
     /// and (b) `updatePriors` — which runs last and refreshes
     /// `currentPodcastProfile` / `showPriors` — reads the POST-promotion row,
     /// so the in-memory copy can never disagree with the persisted mode.
+    @discardableResult
     private func recordConfirmedWindowObservation(
         podcastId: String,
+        analysisAssetId: String,
         confirmedWindows: [AdWindow]
     ) async -> Bool {
         guard let trustScoringService else {
             // Not a silent drop: without the service the promotion ladder
             // cannot run at all this launch, which is the exact failure this
-            // bead exists to make impossible. `updatePriors` keeps the
-            // increment so the counter's meaning is unchanged.
+            // bead exists to make impossible. No claim is taken, so this
+            // episode can still be counted by a later backfill.
             logger.warning(
                 "[mn5e] No TrustScoringService installed — trust observation dropped for podcast \(podcastId, privacy: .public); promotion cannot run"
             )
@@ -12972,6 +12986,28 @@ actor AdDetectionService {
         guard !confirmedWindows.isEmpty else {
             logger.info(
                 "[mn5e] Backfill confirmed no ad windows for podcast \(podcastId, privacy: .public) — no trust observation recorded"
+            )
+            return false
+        }
+        // playhead-2qz6: one observation per EPISODE. This is the dedupe, and
+        // it is durable — a re-drive after relaunch, a transcript-version bump
+        // and the 15d0 resume path all re-enter here for an asset already
+        // claimed, and all of them must be no-ops.
+        let claimed: Bool
+        do {
+            claimed = try await store.claimEpisodeTrustObservation(
+                podcastId: podcastId,
+                analysisAssetId: analysisAssetId
+            )
+        } catch {
+            logger.warning(
+                "[mn5e] Could not claim the episode trust observation for asset \(analysisAssetId, privacy: .public): \(error.localizedDescription, privacy: .public); not counting it"
+            )
+            return false
+        }
+        guard claimed else {
+            logger.info(
+                "[mn5e] Asset \(analysisAssetId, privacy: .public) already contributed its trust observation for podcast \(podcastId, privacy: .public) — not counting it again"
             )
             return false
         }
@@ -13036,27 +13072,27 @@ actor AdDetectionService {
     /// path still increments `episodesObserved`. Required parameters
     /// surface the choice at the call site.
     ///
-    /// playhead-mn5e: `countsObservation` names WHICH WRITER owns this
-    /// backfill's `observationCount` increment, and it has no default for the
-    /// same reason as the two parameters above. Before mn5e this method was
-    /// the only production incrementer; now
-    /// `TrustScoringService.recordSuccessfulObservation` runs first and
-    /// increments as part of the same read-modify-write that evaluates
-    /// promotion, so this method must stand down whenever that one ran.
-    /// Passing `true` here while the trust call also succeeded would tick the
-    /// counter twice per backfill and silently HALVE
-    /// `shadowToManualObservations` and `manualToAutoObservations` — a policy
-    /// change nobody chose. `false` is therefore the normal production value;
-    /// `true` is the fallback for the paths where no trust observation was
-    /// recorded (no service installed, or an episode that confirmed no
-    /// windows), and it reproduces the pre-mn5e counter exactly.
+    /// playhead-mn5e / playhead-2qz6: **this method no longer writes
+    /// `observationCount` at all** — it carries the stored value through, the
+    /// way it has always carried `skipTrustScore` through. It used to be the
+    /// only production incrementer, ticking once per completed backfill, and
+    /// an episode is backfilled ~9 times; that is what made
+    /// `shadowToManualObservations: 3` mean "a third of one episode". The
+    /// counter now belongs to `recordConfirmedWindowObservation`, which claims
+    /// one observation per EPISODE through `trust_episode_observations` and
+    /// increments inside the same atomic mutate that evaluates promotion.
+    ///
+    /// Deliberately UNCONDITIONAL, with no fallback flag: a path that cannot
+    /// record an episode observation must not write a per-backfill number into
+    /// a column whose consumers all read it as episodes. When no trust service
+    /// is installed nothing is counted and no claim is taken, so the episode
+    /// stays claimable and the next backfill counts it properly.
     private func updatePriors(
         podcastId: String,
         nonSuppressedWindows: [AdWindow],
         episodeDuration: Double,
         featureWindows: [FeatureWindow],
-        chunks: [TranscriptChunk],
-        countsObservation: Bool
+        chunks: [TranscriptChunk]
     ) async throws {
         guard !nonSuppressedWindows.isEmpty, episodeDuration > 0 else { return }
 
@@ -13149,7 +13185,14 @@ actor AdDetectionService {
                         jingleFingerprints: nil,
                         implicitFalsePositiveCount: 0,
                         skipTrustScore: 0.5,
-                        observationCount: 1,
+                        // playhead-mn5e/2qz6: ZERO, not 1. This create path is
+                        // only reached when the trust path did NOT create the
+                        // profile — i.e. no observation was recorded and no
+                        // claim was taken — so crediting an episode here would
+                        // count one that nothing witnessed. The next backfill
+                        // that does record one takes the claim and increments
+                        // from 0.
+                        observationCount: 0,
                         mode: "shadow",
                         recentFalseSkipSignals: 0,
                         traitProfileJSON: initialTraitProfileJSON,
@@ -13281,14 +13324,10 @@ actor AdDetectionService {
                         jingleFingerprints: existing.jingleFingerprints,
                         implicitFalsePositiveCount: existing.implicitFalsePositiveCount,
                         skipTrustScore: existing.skipTrustScore,
-                        // playhead-mn5e: single-writer. When the trust
-                        // service recorded this backfill's observation it
-                        // already incremented (inside its own atomic
-                        // mutate, alongside the promotion evaluation), so
-                        // incrementing again here would double-count.
-                        observationCount: countsObservation
-                            ? existing.observationCount + 1
-                            : existing.observationCount,
+                        // playhead-mn5e/2qz6: CARRY FORWARD, never increment.
+                        // `recordConfirmedWindowObservation` is the sole
+                        // writer and it counts episodes, not backfills.
+                        observationCount: existing.observationCount,
                         mode: existing.mode,
                         recentFalseSkipSignals: existing.recentFalseSkipSignals,
                         traitProfileJSON: resolvedTraitProfileJSON,

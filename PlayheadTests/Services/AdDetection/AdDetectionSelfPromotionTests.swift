@@ -141,9 +141,12 @@ struct AdDetectionSelfPromotionTests {
         store: AnalysisStore,
         service: AdDetectionService,
         podcastId: String,
-        assetId: String
+        assetId: String,
+        insertAsset: Bool = true
     ) async throws -> PodcastProfile {
-        try await store.insertAsset(makeAsset(id: assetId))
+        if insertAsset {
+            try await store.insertAsset(makeAsset(id: assetId))
+        }
         try await service.runBackfill(
             chunks: makeAdBearingChunks(assetId: assetId),
             analysisAssetId: assetId,
@@ -211,22 +214,30 @@ struct AdDetectionSelfPromotionTests {
         #expect(after.mode == SkipMode.shadow.rawValue)
         #expect(
             abs(after.skipTrustScore - 0.5) < scoreTolerance,
-            "This is the device's measured state: obs climbs, trust stays pinned at its creation value"
+            "This is the device's measured state: trust stays pinned at its creation value"
         )
-        // The fallback still counts the observation, so the counter's meaning
-        // is unchanged from pre-mn5e.
+        // playhead-2qz6: with no trust service nothing can record an episode
+        // observation, so nothing may write the counter either. `updatePriors`
+        // no longer increments — a path that cannot count episodes must not
+        // write a per-backfill number into a column everything reads as
+        // episodes.
         #expect(
-            after.observationCount == 3,
-            "The no-service fallback must reproduce the pre-mn5e counter exactly"
+            after.observationCount == 2,
+            "No trust service means no observation and no claim — the counter must not move. Got \(after.observationCount)"
+        )
+        #expect(
+            try await store.episodeTrustObservationCount(podcastId: podcastId) == 0,
+            "and no claim may be taken, so a later backfill can still count this episode"
         )
     }
 
-    // MARK: - 2. Exactly one writer counts each backfill
+    // MARK: - 2. The counter counts EPISODES (playhead-2qz6)
 
-    @Test("One backfill counts exactly ONE observation, not two")
-    func oneBackfillCountsExactlyOneObservation() async throws {
+    @Test("One episode counts exactly ONE observation, however many times it is backfilled")
+    func oneEpisodeCountsOnceAcrossRepeatedBackfills() async throws {
         let store = try await makeTestStore()
-        let podcastId = "podcast-mn5e-singlewriter"
+        let podcastId = "podcast-mn5e-episodeunit"
+        let assetId = "asset-mn5e-episodeunit"
 
         try await store.upsertProfile(
             makeProfile(podcastId: podcastId, mode: .shadow, trust: 0.5, observations: 7)
@@ -235,14 +246,95 @@ struct AdDetectionSelfPromotionTests {
         let service = makeService(store: store)
         await service.setTrustScoringService(TrustScoringService(store: store))
 
-        let after = try await runOneAdBearingBackfill(
-            store: store, service: service,
-            podcastId: podcastId, assetId: "asset-mn5e-singlewriter"
+        let afterFirst = try await runOneAdBearingBackfill(
+            store: store, service: service, podcastId: podcastId, assetId: assetId
         )
+        #expect(afterFirst.observationCount == 8)
 
+        // The SAME episode, backfilled twice more — the hot path, the final
+        // pass, a re-drive, a transcript-version bump and the 15d0 resume path
+        // all re-enter `runBackfill` for an asset already counted. On the
+        // device this happened ~9 times per episode.
+        for _ in 0..<2 {
+            _ = try await runOneAdBearingBackfill(
+                store: store, service: service,
+                podcastId: podcastId, assetId: assetId, insertAsset: false
+            )
+        }
+
+        let after = try #require(await store.fetchProfile(podcastId: podcastId))
         #expect(
             after.observationCount == 8,
-            "Two incrementers (updatePriors AND recordSuccessfulObservation) would land 9 and silently HALVE every observation threshold in TrustScoringConfig. Got \(after.observationCount)"
+            "Three backfills of ONE episode is ONE observation. Pre-2qz6 this landed 10 and 'shadowToManualObservations: 3' meant a third of one episode. Got \(after.observationCount)"
+        )
+        #expect(
+            try await store.episodeTrustObservationCount(podcastId: podcastId) == 1,
+            "exactly one episode claim"
+        )
+        #expect(
+            abs(after.skipTrustScore - 0.6) < scoreTolerance,
+            "and the trust bonus is paid once per episode too, not once per backfill; got \(after.skipTrustScore)"
+        )
+    }
+
+    @Test("Two distinct episodes count twice — the dedupe is per episode, not per show")
+    func distinctEpisodesEachCount() async throws {
+        let store = try await makeTestStore()
+        let podcastId = "podcast-mn5e-twoeps"
+
+        try await store.upsertProfile(
+            makeProfile(podcastId: podcastId, mode: .shadow, trust: 0.5, observations: 0)
+        )
+
+        let service = makeService(store: store)
+        await service.setTrustScoringService(TrustScoringService(store: store))
+
+        for idx in 0..<2 {
+            _ = try await runOneAdBearingBackfill(
+                store: store, service: service,
+                podcastId: podcastId, assetId: "asset-mn5e-twoeps-\(idx)"
+            )
+        }
+
+        let after = try #require(await store.fetchProfile(podcastId: podcastId))
+        #expect(
+            after.observationCount == 2,
+            "A per-show claim rather than a per-episode one would freeze this at 1; got \(after.observationCount)"
+        )
+        #expect(try await store.episodeTrustObservationCount(podcastId: podcastId) == 2)
+    }
+
+    @Test("The claim ledger and observationCount agree — two numbers that must be equal")
+    func claimLedgerAgreesWithObservationCount() async throws {
+        let store = try await makeTestStore()
+        let podcastId = "podcast-mn5e-agree"
+
+        try await store.upsertProfile(
+            makeProfile(podcastId: podcastId, mode: .shadow, trust: 0.5, observations: 0)
+        )
+        let service = makeService(store: store)
+        await service.setTrustScoringService(TrustScoringService(store: store))
+
+        // Three episodes, one of them backfilled twice.
+        for idx in 0..<3 {
+            _ = try await runOneAdBearingBackfill(
+                store: store, service: service,
+                podcastId: podcastId, assetId: "asset-mn5e-agree-\(idx)"
+            )
+        }
+        _ = try await runOneAdBearingBackfill(
+            store: store, service: service,
+            podcastId: podcastId, assetId: "asset-mn5e-agree-0", insertAsset: false
+        )
+
+        let after = try #require(await store.fetchProfile(podcastId: podcastId))
+        let claims = try await store.episodeTrustObservationCount(podcastId: podcastId)
+        #expect(after.observationCount == claims,
+                "observationCount=\(after.observationCount) but \(claims) episodes are claimed — the counter has drifted from what it names")
+        #expect(claims == 3)
+        #expect(
+            after.mode == SkipMode.manual.rawValue,
+            "3 real episodes is what shadowToManualObservations: 3 has always said; got \(after.mode)"
         )
     }
 
@@ -348,6 +440,81 @@ struct AdDetectionSelfPromotionTests {
             after.recentFalseSkipSignals == 2,
             "recordSuccessfulObservation must not decay the veto counter — only a banner Yes (recordCorrectObservation) may. Got \(after.recentFalseSkipSignals)"
         )
+    }
+
+    // MARK: - 5. The never-run exceptionalFirstEpisodeConfidence branch
+    //
+    // Before playhead-mn5e, `recordSuccessfulObservation` had no production
+    // caller, so its CREATE path — and with it
+    // `exceptionalFirstEpisodeConfidence` (0.92) — had never executed in a
+    // shipped build. It is now reachable on a brand-new show, which is exactly
+    // the state of Dan's next install. These pin what it does.
+
+    @Test("A first episode at average confidence >= 0.92 creates the show already in manual")
+    func exceptionalFirstEpisodeCreatesManual() async throws {
+        let store = try await makeTestStore()
+        let podcastId = "podcast-mn5e-exceptional"
+        let trust = TrustScoringService(store: store)
+
+        // No profile exists — this drives the CREATE closure.
+        await trust.recordSuccessfulObservation(
+            podcastId: podcastId, averageConfidence: 0.95
+        )
+
+        let profile = try #require(await store.fetchProfile(podcastId: podcastId))
+        #expect(
+            profile.mode == SkipMode.manual.rawValue,
+            "0.95 >= exceptionalFirstEpisodeConfidence (0.92) creates in manual, skipping shadow entirely; got \(profile.mode)"
+        )
+        #expect(abs(profile.skipTrustScore - 0.5) < scoreTolerance)
+        #expect(profile.observationCount == 1)
+        #expect(
+            profile.mode != SkipMode.auto.rawValue,
+            "SAFETY: manual shows a banner. One episode must never reach auto, which cuts audio unasked"
+        )
+    }
+
+    @Test("A first episode below 0.92 creates the show in shadow at trust 0.2")
+    func ordinaryFirstEpisodeCreatesShadow() async throws {
+        let store = try await makeTestStore()
+        let podcastId = "podcast-mn5e-ordinary"
+        let trust = TrustScoringService(store: store)
+
+        await trust.recordSuccessfulObservation(
+            podcastId: podcastId, averageConfidence: 0.91
+        )
+
+        let profile = try #require(await store.fetchProfile(podcastId: podcastId))
+        #expect(profile.mode == SkipMode.shadow.rawValue)
+        #expect(
+            abs(profile.skipTrustScore - 0.2) < scoreTolerance,
+            "the non-exceptional seed is 0.2, so shadowToManualTrustScore (0.4) finally binds — two more clean episodes reach it exactly as observations reach 3; got \(profile.skipTrustScore)"
+        )
+    }
+
+    @Test("SAFETY: a brand-new show cannot reach auto on its first real episode")
+    func brandNewShowNeverReachesAutoOnEpisodeOne() async throws {
+        let store = try await makeTestStore()
+        let podcastId = "podcast-mn5e-brandnew"
+
+        // No seeded profile at all — the real first-install path.
+        let service = makeService(store: store)
+        await service.setTrustScoringService(TrustScoringService(store: store))
+
+        let after = try await runOneAdBearingBackfill(
+            store: store, service: service,
+            podcastId: podcastId, assetId: "asset-mn5e-brandnew"
+        )
+
+        #expect(
+            after.mode != SkipMode.auto.rawValue,
+            "One episode must never buy an auto-skip; got \(after.mode)"
+        )
+        #expect(
+            after.observationCount == 1,
+            "and it counts as exactly one episode; got \(after.observationCount)"
+        )
+        #expect(try await store.episodeTrustObservationCount(podcastId: podcastId) == 1)
     }
 
     @Test("A clean manual show does reach auto, so the vetoed case above is not vacuous")
