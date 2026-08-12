@@ -96,10 +96,10 @@ struct RediffByteAlignerTests {
     // MARK: - Parse: frame walk
 
     @Test("plain frame sequence parses with exact offsets, lengths, and times")
-    func parsePlainFrames() {
+    func parsePlainFrames() throws {
         let data = SyntheticMP3.file(SyntheticMP3.frames(count: 40, seed: 1))
         let parsed = RediffByteAligner.parse(data)
-        #expect(parsed.frameOffsets.count == 40)
+        try #require(parsed.frameOffsets.count == 40)
         #expect(parsed.leadingID3Bytes == 0)
         #expect(parsed.frameOffsets[0] == 0)
         #expect(parsed.frameOffsets[1] == SyntheticMP3.frameLength)
@@ -120,25 +120,25 @@ struct RediffByteAlignerTests {
     }
 
     @Test("mid-file ID3v2 block is skipped without losing sync")
-    func parseMidfileID3() {
+    func parseMidfileID3() throws {
         let frames = SyntheticMP3.frames(count: 12, seed: 3)
         let data = SyntheticMP3.file(
             Array(frames[0..<6]) + [SyntheticMP3.id3v2(payloadBytes: 64)] + Array(frames[6...])
         )
         let parsed = RediffByteAligner.parse(data)
-        #expect(parsed.frameOffsets.count == 12)
+        try #require(parsed.frameOffsets.count == 12)
         // Frame 6 sits after the embedded block.
         #expect(parsed.frameOffsets[6] == 6 * SyntheticMP3.frameLength + 74)
     }
 
     @Test("junk bytes force a resync to the next double-validated header")
-    func parseResyncOverJunk() {
+    func parseResyncOverJunk() throws {
         let frames = SyntheticMP3.frames(count: 10, seed: 4)
         // 100 junk bytes that cannot form a valid header pair.
         let junk = [UInt8](repeating: 0x00, count: 100)
         let data = SyntheticMP3.file(Array(frames[0..<5]) + [junk] + Array(frames[5...]))
         let parsed = RediffByteAligner.parse(data)
-        #expect(parsed.frameOffsets.count == 10)
+        try #require(parsed.frameOffsets.count == 10)
         #expect(parsed.frameOffsets[5] == 5 * SyntheticMP3.frameLength + 100)
     }
 
@@ -260,7 +260,7 @@ struct RediffByteAlignerTests {
     }
 
     @Test("a frame duplicated within A is not an anchor (uniqueness in BOTH files)")
-    func duplicatedFrameIsNotAnAnchor() {
+    func duplicatedFrameIsNotAnAnchor() throws {
         let content = SyntheticMP3.frames(count: 30, seed: 13)
         // A repeats frame 5 at the end; that frame's hash count in A is 2, so
         // it may not anchor — but unique neighbors still align everything.
@@ -270,8 +270,10 @@ struct RediffByteAlignerTests {
             aData: aData, bData: bData, config: SyntheticMP3.smallRunConfig)
         #expect(alignment.monotonicClean)
         #expect(alignment.chain.count == 1)
-        // The tail gap is A's duplicated trailing frame.
-        #expect(alignment.slots.count == 1)
+        // The tail gap is A's duplicated trailing frame. `#require` so a mutant
+        // that emits no gap FAILS this test instead of trapping and taking the
+        // runner down with it (R3 review — see `gateCleaningParity`).
+        try #require(alignment.slots.count == 1, "expected one tail gap, got \(alignment.slots.count)")
         #expect(alignment.slots[0].kind == .tail)
         #expect(alignment.slots[0].aBytes == SyntheticMP3.frameLength)
     }
@@ -487,8 +489,19 @@ struct RediffByteAlignerTests {
         )
     }
 
+    /// R3 REVIEW (playhead-3zxd) — the count is asserted through `#require`, and
+    /// the indices are reached only after it holds.
+    ///
+    /// This test used to read `playedSlots[0]` / `playedSlots[1]` directly. When
+    /// R2's MQ mutant widened the merge window the two slots collapsed into one,
+    /// and the subscript TRAPPED — `Fatal error: Index out of range`, which in
+    /// Swift Testing kills the whole runner process rather than failing one
+    /// test. It truncated the 20-suite run five times, and a truncated run whose
+    /// last line is a crash is indistinguishable at a glance from one that
+    /// simply ended. A mutant that collapses these slots must REDDEN this test,
+    /// not delete the evidence for every other one.
     @Test("gate filters sub-minAdSeconds slots, fragment-merges, and duration-caps like the chroma path")
-    func gateCleaningParity() {
+    func gateCleaningParity() throws {
         let alignment = alignmentFixture(slots: [
             byteSlot(10, 12),                      // < 5 s → filtered
             byteSlot(100, 130, left: 200, right: 1),
@@ -501,7 +514,8 @@ struct RediffByteAlignerTests {
             Issue.record("expected acceptance")
             return
         }
-        #expect(acceptance.playedSlots.count == 2)
+        try #require(acceptance.playedSlots.count == 2,
+                     "expected 2 cleaned slots, got \(acceptance.playedSlots.count)")
         let merged = acceptance.playedSlots[0]
         #expect(merged.startSeconds == 100)
         #expect(merged.endSeconds == 160)
@@ -515,6 +529,19 @@ struct RediffByteAlignerTests {
     func acceptanceSurfaceIsATimeOnly() {
         // Structural pin for the xsdz.28 never-persist-B rule: ByteAcceptance
         // exposes exactly scalar diagnostics + played (A-time) slots.
+        //
+        // playhead-3zxd added `diagnostics`, and this pin firing is what made
+        // that a deliberate act rather than a drift. The addition is admissible
+        // because every field on it is an A-timeline second or a count: the run
+        // record is `foundRunASpans`, A-time spans, NOT `RediffByteAligner.Run`
+        // — a `Run` carries `bStart`, a byte offset that LOCATES content in the
+        // re-fetched copy, and that is the coordinate the contract forbids. A
+        // run's LENGTH is identical in both files, so the A-span carries every
+        // quantity the aligned-seconds check needs and none it must not.
+        //
+        // The nested type is mirrored too. A label check one level deep would
+        // pass for a `diagnostics` that had a B offset hidden inside it, which
+        // is precisely the way this pin could stop meaning anything.
         let alignment = alignmentFixture(slots: [byteSlot(100, 160)])
         guard case .accepted(let acceptance) =
             RediffSlotOwnership.gateAndDiffBytes(alignment: alignment) else {
@@ -522,7 +549,17 @@ struct RediffByteAlignerTests {
             return
         }
         let labels = Mirror(reflecting: acceptance).children.compactMap(\.label)
-        #expect(labels == ["chainedFractionB", "runsFound", "runsChained", "playedSlots"])
+        #expect(labels == ["chainedFractionB", "runsFound", "runsChained", "playedSlots", "diagnostics"])
+        let diagnosticLabels = Mirror(reflecting: acceptance.diagnostics).children.compactMap(\.label)
+        #expect(diagnosticLabels == [
+            "runsFound", "runsAOverlapping", "overlapSecondsRecovered",
+            "alignedSecondsInSlots", "maxAlignedSecondsInSlot", "foundRunASpans"
+        ])
+        // The one field carrying a collection is typed `[TimeRange]`, which has
+        // no byte axis at all — that is why it is the type here. Deliberately
+        // NOT asserted with `is [TimeRange]`: the compiler proves that
+        // statically ("'is' test is always true"), so it would be a rail that
+        // cannot fail, and this pin exists precisely to be able to.
     }
 
     // MARK: - xsdz.34 §5 veto gate on BYTE-derived slots (guardrail 2)
@@ -740,7 +777,11 @@ struct RediffByteAlignerTests {
             alignment: alignment, recoverNonMonotonicSegments: true) else {
             Issue.record("expected acceptance under recovery"); return
         }
-        #expect(acceptance.playedSlots.count == 2, "both divergent ads recovered (unioned across segments)")
+        // R3 REVIEW: `#require`, not `#expect` — the two subscripts below trap
+        // (and take the whole runner with them) when a mutant collapses these
+        // slots into one. See `gateCleaningParity` for the incident.
+        try #require(acceptance.playedSlots.count == 2,
+                     "both divergent ads recovered (unioned across segments) — got \(acceptance.playedSlots.count)")
         let spf = SyntheticMP3.secondsPerFrame
         // ad1 spans A-frames [250,500) ≈ [6.53, 13.06]; ad2 [750,1000) ≈ [19.59, 26.12].
         let s0 = try #require(acceptance.playedSlots.first)

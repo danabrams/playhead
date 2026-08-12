@@ -97,7 +97,7 @@ struct RediffRefetchStateV28MigrationTests {
         // additive). The V28 rediff_refetch_state tables probed below are
         // unchanged by any of it. Pinned to the LITERAL: comparing against
         // `currentSchemaVersion` would pass for every value.
-        #expect(AnalysisStore.currentSchemaVersion == 47)
+        #expect(AnalysisStore.currentSchemaVersion == 48)
         // Probe by using the API — both tables must be queryable.
         #expect(try await store.fetchRediffRefetchStates().isEmpty)
         #expect(try await store.fetchRediffBandwidthTotals() == RediffBandwidthTotals())

@@ -12027,9 +12027,32 @@ actor AdDetectionService {
         // certainty: a monotonic-clean chain proves its A-timeline mapping at
         // every edge, a segment-recovered one dropped runs to get there.
         var strictPerBSideSlots: [[RediffSlotOwnership.PlayedSlot]] = []
+        // playhead-3zxd: the phantom-slot instrumentation, INDEX-ALIGNED WITH
+        // `bSideURLs` — exactly one entry per B-copy, in k-way fetch order.
+        //
+        // A persona the gate did not accept contributes a ZEROED entry, which is
+        // two facts at once and both are load-bearing. It adds nothing to any
+        // sum (it minted no slot, so it has no emitted slots to measure, and
+        // folding its run counts in would inflate the vacuity control into
+        // looking like evidence) AND it holds its position, because
+        // `RediffAlignedRunSpanCodec` labels each span group with its index and
+        // documents that index as "the persona's position in the k-way fetch".
+        //
+        // R2 REVIEW: this list used to be APPENDED TO ONLY ON ACCEPTANCE, so it
+        // arrived at the codec already compacted and `<bIndex>` silently became
+        // the ordinal among ACCEPTED personas. One rejected copy ahead of an
+        // accepted one and the payload said `0:` for persona 1 — an identity
+        // that is not an identity. The codec's own test pins that it preserves
+        // gaps without renumbering; production simply never handed it a gap.
+        // The `defer` is what makes the alignment structural: every iteration
+        // appends exactly once, down every `continue`, so an exit added here
+        // later cannot silently re-compact the list.
+        var perBSideByteDiagnostics: [RediffSlotOwnership.ByteDiagnostics] = []
         var unreadable = 0
         var gateRejected = 0
         for bSideURL in bSideURLs {
+            var personaDiagnostics = RediffSlotOwnership.ByteDiagnostics.empty
+            defer { perBSideByteDiagnostics.append(personaDiagnostics) }
             guard Self.isAnchoredRegularFile(bSideURL) else {
                 unreadable += 1
                 continue
@@ -12055,10 +12078,12 @@ actor AdDetectionService {
                 continue
             }
             perBSideSlots.append(acceptance.playedSlots)
+            personaDiagnostics = acceptance.diagnostics
             if alignment.monotonicClean {
                 strictPerBSideSlots.append(acceptance.playedSlots)
             }
         }
+        let byteDiagnostics = RediffByteMintDiagnostics.combining(perBSideByteDiagnostics)
 
         /// Every counted outcome from here on carries the same per-B census.
         func outcome(
@@ -12077,7 +12102,8 @@ actor AdDetectionService {
                 bSidesUnreadable: unreadable,
                 divergentSlotCount: divergentSlotCount,
                 strictMarkCount: strictMarkCount,
-                supersededMarkCount: supersededMarkCount
+                supersededMarkCount: supersededMarkCount,
+                byteDiagnostics: byteDiagnostics
             )
         }
 

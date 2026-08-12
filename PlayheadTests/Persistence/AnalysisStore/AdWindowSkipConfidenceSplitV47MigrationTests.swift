@@ -146,7 +146,7 @@ struct AdWindowSkipConfidenceSplitV47MigrationTests {
         // Drift guard, pinned to the LITERAL head. Written as
         // `== AnalysisStore.currentSchemaVersion` it would pass for every
         // possible value and police nothing.
-        #expect(AnalysisStore.currentSchemaVersion == 47)
+        #expect(AnalysisStore.currentSchemaVersion == 48)
         #expect(try columnPresent(in: dir))
     }
 

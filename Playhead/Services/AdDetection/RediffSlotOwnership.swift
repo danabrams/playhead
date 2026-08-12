@@ -388,6 +388,111 @@ enum RediffSlotOwnership {
         /// `candidates(...)` → `resolveSpan(...)` → disposition flow, so the
         /// xsdz.34 §5 veto gate and all grading apply identically.
         let playedSlots: [PlayedSlot]
+        /// playhead-3zxd instrumentation for THIS diff (see `ByteDiagnostics`).
+        /// A-time seconds and counts only, so the never-persist-B contract above
+        /// is untouched: `foundRunASpans` carries A-timeline spans, never a B
+        /// offset, and a run's length is identical in both files.
+        let diagnostics: ByteDiagnostics
+    }
+
+    /// playhead-3zxd — what one byte diff can tell a device pull about the
+    /// phantom-slot defect, WITHOUT gold and without a second detector.
+    ///
+    /// The three counters the aligner already kept (`runsFound`,
+    /// `runsDroppedNonMonotonic`, `segmentedRunsChained`) can say how much
+    /// structure was found. None of them can say whether an EMITTED slot is made
+    /// of audio the aligner itself proved matched, which is the whole question.
+    /// These can, and they are computable on the day-0 path — which mints before
+    /// a second has been transcribed — so every episode Dan adds is a real data
+    /// point instead of a staged fixture.
+    struct ByteDiagnostics: Sendable, Equatable {
+        /// Runs `byteRuns` found. VACUITY CONTROL: `0` means every other field
+        /// below says nothing. Note that this struct is `.empty` on every
+        /// rejection, so at the mint level `0` reads as "no persona was
+        /// accepted" rather than as any particular cause — R3 review, and see
+        /// `RediffByteMintDiagnostics.runsFound`.
+        var runsFound: Int = 0
+        /// See `RediffByteAligner.Alignment.segmentedRunsAOverlapping` — the
+        /// OPPORTUNITY counter. `> 0` means a pre-playhead-3zxd build could have
+        /// emitted a phantom on this diff.
+        var runsAOverlapping: Int = 0
+        /// See `RediffByteAligner.Alignment.segmentedOverlapSecondsRecovered` —
+        /// an UPPER BOUND on the show-seconds a pre-3zxd build would have
+        /// reported as an ad here.
+        var overlapSecondsRecovered: Double = 0
+        /// Σ over the EMITTED slots of the A-seconds a found run covers — the
+        /// invariant witness. Zero by construction after playhead-3zxd.
+        ///
+        /// Measured post `mergedAndCapped` rather than over the aligner's raw
+        /// gaps, because a banner the listener can tap is the thing at stake.
+        ///
+        /// PER-PERSONA, and that pairing is deliberate, not incidental: THIS
+        /// diff's slots against THIS diff's runs. Scoring one persona's runs
+        /// against the k-way UNION would be wrong by minutes — the union is
+        /// quorum-1 (`unionedPlayedSlots`: a slot mints if ANY persona diverged
+        /// on it), so a region persona 0 matched while persona 1 diverged is the
+        /// collision-recovery this design exists for, not a phantom.
+        ///
+        /// R5 REVIEW — WHAT THAT PAIRING COSTS, because "the slots as they SHIP"
+        /// is what an earlier draft of this note claimed and it is not exactly
+        /// true. `mintByteExactDayZeroMarks` runs `unionedPlayedSlots` over the
+        /// accepted personas, which re-runs `mergedAndCapped` across their
+        /// concatenation; whenever ≥ 2 personas are accepted — the ordinary k-way
+        /// shape — the geometry that reaches a listener is that RE-MERGE, and no
+        /// persona measured it. So there are two joins, both bounded by
+        /// `fragmentMergeGapSeconds` (3 s) and both non-phantom:
+        ///
+        ///   * WITHIN a persona this number DOES see the join, and the join is
+        ///     hard to make: what separates two shippable gaps is a run accepted
+        ///     WHOLE, 4.1 s at 128 kbps CBR, joinable only at ≥192 kbps
+        ///     (playhead-yzra, filed separately).
+        ///   * ACROSS personas it sees nothing at all — the separator there is
+        ///     not a run, so nothing stops the join, and the miss is silent.
+        ///
+        /// Both are ≤ 3 s per join and both UNDER-report, so the number is
+        /// optimistic by single-digit seconds and never pessimistic. Read the
+        /// MAGNITUDE: seconds is merge; this bead's phantom is minutes.
+        var alignedSecondsInSlots: Double = 0
+        /// The worst single emitted slot, so a large value cannot hide inside a
+        /// sum spread over many slots. Per-persona and pre-re-merge for the same
+        /// reason, and with the same ≤ 3 s under-report — see above.
+        var maxAlignedSecondsInSlot: Double = 0
+        /// A-TIME span of every FOUND run. The raw material: with it a later
+        /// question can be re-asked of data already collected, rather than only
+        /// the scalars somebody thought to define today. Bounded by the caller
+        /// before it is persisted (`RediffByteMintDiagnostics`).
+        var foundRunASpans: [TimeRange] = []
+
+        static let empty = ByteDiagnostics()
+    }
+
+    /// Measure `playedSlots` against the runs the alignment FOUND.
+    ///
+    /// `playedSlots` must be the list this alignment actually emitted — passing
+    /// slots from a different diff would silently describe the wrong pair, which
+    /// is why this is private and called only from the two acceptance sites.
+    private static func byteDiagnostics(
+        alignment: RediffByteAligner.Alignment,
+        playedSlots: [PlayedSlot]
+    ) -> ByteDiagnostics {
+        var total = 0.0
+        var worst = 0.0
+        for slot in playedSlots {
+            let matched = RediffByteAligner.alignedSeconds(
+                in: TimeRange(start: slot.startSeconds, end: slot.endSeconds),
+                runASpans: alignment.foundRunASpans
+            )
+            total += matched
+            worst = max(worst, matched)
+        }
+        return ByteDiagnostics(
+            runsFound: alignment.runsFound,
+            runsAOverlapping: alignment.segmentedRunsAOverlapping,
+            overlapSecondsRecovered: alignment.segmentedOverlapSecondsRecovered,
+            alignedSecondsInSlots: total,
+            maxAlignedSecondsInSlot: worst,
+            foundRunASpans: alignment.foundRunASpans
+        )
     }
 
     /// Gate a byte alignment (the PRIMARY differ) into played slots, mirroring
@@ -443,7 +548,8 @@ enum RediffSlotOwnership {
             chainedFractionB: alignment.chainedFractionB,
             runsFound: alignment.runsFound,
             runsChained: alignment.chain.count,
-            playedSlots: playedSlots
+            playedSlots: playedSlots,
+            diagnostics: byteDiagnostics(alignment: alignment, playedSlots: playedSlots)
         ))
     }
 
@@ -452,8 +558,10 @@ enum RediffSlotOwnership {
     ///   • re-encode floor — `segmentedChainedFractionB` (Σ segment run bytes /
     ///     B audio bytes) must clear `minAlignedFractionB`, so a low-coverage
     ///     island (a re-encode) is STILL rejected wholesale (not widened);
-    ///   • min-run-bytes — intrinsic (every segmented run is already ≥
-    ///     `minRunBytes` from `byteRuns`);
+    ///   • min-run-bytes — intrinsic at the SOURCE (`byteRuns` emits nothing
+    ///     shorter). NOT of an ACCEPTED run: playhead-3zxd's clip can leave a
+    ///     run of one byte. See `RediffByteAligner.segmentDivergentSlots` for
+    ///     why the fragment-merge bound below survives that anyway;
     ///   • min-ad-width + fragment-merge + duration-cap — the SAME
     ///     `mergedAndCapped` cleaning the strict path applies, so sub-ad and
     ///     alignment-breakdown gaps are dropped.
@@ -484,7 +592,8 @@ enum RediffSlotOwnership {
             chainedFractionB: alignment.segmentedChainedFractionB,
             runsFound: alignment.runsFound,
             runsChained: alignment.segmentedRunsChained,
-            playedSlots: playedSlots
+            playedSlots: playedSlots,
+            diagnostics: byteDiagnostics(alignment: alignment, playedSlots: playedSlots)
         ))
     }
 

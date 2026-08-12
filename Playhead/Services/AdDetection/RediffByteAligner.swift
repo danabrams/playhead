@@ -173,6 +173,57 @@ enum RediffByteAligner {
         /// when `monotonicClean`.
         let segmentedRunsChained: Int
 
+        // playhead-3zxd INSTRUMENTATION — the per-run A-time record. Everything
+        // above is a COUNT; a count cannot answer "is this emitted slot made of
+        // audio the aligner itself proved matched?", which is the question the
+        // phantom-slot defect turns on. These three fields make that question
+        // answerable off a device pull, on real audio, with no gold.
+        //
+        // A-TIME ONLY, deliberately (xsdz.28 never-persist-B). `Run.bStart`
+        // exists on the in-memory runs and is NOT reflected here: a persisted B
+        // byte offset locates content in the re-fetched copy, which is exactly
+        // what the never-persist-B contract forbids. A run's LENGTH is identical
+        // in both files, so the A-span carries every quantity the aligned-seconds
+        // check needs and none that the contract excludes.
+
+        /// A-TIME span of every run `byteRuns` FOUND, in A order — before
+        /// chaining, before segmenting, before any accept/drop decision. FOUND
+        /// is the strong population on purpose: a run is a byte-verified region
+        /// present in BOTH copies, so its A-seconds are matched audio no matter
+        /// which downstream stage did or did not keep it.
+        ///
+        /// Runs MAY overlap one another in A (that overlap is the very thing the
+        /// segmented accept has to resolve), so never sum these lengths — use
+        /// `alignedSeconds(in:runASpans:)`, which unions before it measures.
+        let foundRunASpans: [TimeRange]
+        /// How many found runs the segmented accept met with their A-span
+        /// already partly covered by an accepted run.
+        ///
+        /// This is the OPPORTUNITY counter for the playhead-3zxd defect class,
+        /// not a fault count. Before playhead-3zxd such a run was DROPPED whole
+        /// and its A-span then fell through to `addGap`, i.e. was reported as
+        /// divergent — an ad — on audio the aligner had just proven matched.
+        /// It is now CLIPPED to its uncovered tail instead. `> 0` means this
+        /// alignment is one a pre-3zxd build could have emitted a phantom on.
+        /// Always `0` for a monotonic-clean alignment (nothing is segmented).
+        let segmentedRunsAOverlapping: Int
+        /// A-seconds of byte-verified matched audio the segmented accept KEPT by
+        /// clipping those runs rather than dropping them.
+        ///
+        /// Numerator: A-timeline seconds. It is exactly the A-region a pre-3zxd
+        /// build would have left uncovered by every accepted run — and therefore
+        /// reported inside a divergent gap. It is an UPPER BOUND on the show a
+        /// pre-3zxd build would have banner-marked, not the realised damage: the
+        /// resulting gap still had to clear `minAdSeconds` and `maxSlotSeconds`
+        /// downstream to ship (and the lower `chainedFractionB` a dropping build
+        /// computed could have failed the re-encode floor outright). Always `0`
+        /// for a monotonic-clean alignment.
+        ///
+        /// R3 REVIEW — this is a DIFFERENCE OF TWO COVERAGES, not a sum of
+        /// clipped tails, and the distinction is the whole quantity. See
+        /// `segmentDivergentSlots`.
+        let segmentedOverlapSecondsRecovered: Double
+
         var monotonicClean: Bool { runsDroppedNonMonotonic == 0 }
 
         init(
@@ -186,7 +237,10 @@ enum RediffByteAligner {
             bDurationSeconds: Double,
             segmentedSlots: [Slot] = [],
             segmentedChainedFractionB: Double = 0,
-            segmentedRunsChained: Int = 0
+            segmentedRunsChained: Int = 0,
+            foundRunASpans: [TimeRange] = [],
+            segmentedRunsAOverlapping: Int = 0,
+            segmentedOverlapSecondsRecovered: Double = 0
         ) {
             self.runsFound = runsFound
             self.chain = chain
@@ -199,7 +253,45 @@ enum RediffByteAligner {
             self.segmentedSlots = segmentedSlots
             self.segmentedChainedFractionB = segmentedChainedFractionB
             self.segmentedRunsChained = segmentedRunsChained
+            self.foundRunASpans = foundRunASpans
+            self.segmentedRunsAOverlapping = segmentedRunsAOverlapping
+            self.segmentedOverlapSecondsRecovered = segmentedOverlapSecondsRecovered
         }
+    }
+
+    // MARK: - Aligned-seconds probe (playhead-3zxd)
+
+    /// A-seconds of `span` covered by at least one FOUND run.
+    ///
+    /// THE INVARIANT this bead installs: for every slot the byte path emits,
+    /// this is **zero**. A run is a byte-verified region present in both copies,
+    /// so any positive value means a slot is claiming, as divergent, audio the
+    /// aligner itself proved matched — a phantom.
+    ///
+    /// It is deliberately UNION-aware rather than a sum of overlaps: found runs
+    /// may overlap one another in A (that is the conflict `segmentDivergentSlots`
+    /// resolves), and a sum would double-count the shared part and report more
+    /// aligned seconds than the span even contains.
+    ///
+    /// GOLD-FREE, which is the whole point. It needs no transcript, no gold ad
+    /// spans and no second detector, so it is computable on the day-0 path —
+    /// where nothing has been transcribed yet — and on real audio, where gold
+    /// does not exist at all.
+    static func alignedSeconds(in span: TimeRange, runASpans: [TimeRange]) -> Double {
+        guard span.length > 0, !runASpans.isEmpty else { return 0 }
+        let sorted = runASpans.sorted { ($0.start, $0.end) < ($1.start, $1.end) }
+        var total = 0.0
+        var cursor = span.start
+        for run in sorted {
+            guard run.end > cursor else { continue }
+            let low = max(run.start, cursor)
+            guard low < span.end else { break }
+            let high = min(run.end, span.end)
+            guard high > low else { continue }
+            total += high - low
+            cursor = high
+        }
+        return total
     }
 
     // MARK: - MP3 frame header (exact port of python _parse_header)
@@ -627,15 +719,33 @@ enum RediffByteAligner {
         let segmentedSlots: [Slot]
         let segmentedChainedFractionB: Double
         let segmentedRunsChained: Int
+        let segmentedRunsAOverlapping: Int
+        let segmentedOverlapSecondsRecovered: Double
         if dropped == 0 {
             segmentedSlots = slots
             segmentedChainedFractionB = chainedFractionB
             segmentedRunsChained = chain.count
+            segmentedRunsAOverlapping = 0
+            segmentedOverlapSecondsRecovered = 0
         } else {
             let seg = segmentDivergentSlots(runs: runs, pa: pa, pb: pb, bAudioBytes: bAudioBytes)
             segmentedSlots = seg.slots
             segmentedChainedFractionB = seg.chainedFractionB
             segmentedRunsChained = seg.runsChained
+            segmentedRunsAOverlapping = seg.runsAOverlapping
+            segmentedOverlapSecondsRecovered = seg.overlapSecondsRecovered
+        }
+
+        // playhead-3zxd: the A-time record of every FOUND run — the population
+        // the aligned-seconds invariant is stated over. Computed here (rather
+        // than by a caller re-running `byteRuns`) so there is exactly one run
+        // set and no way for a diagnostic to describe a different alignment
+        // than the one that produced the slots.
+        let foundRunASpans = runs.map {
+            TimeRange(
+                start: timeAt(pa, byteOffset: $0.aStart),
+                end: timeAt(pa, byteOffset: $0.aStart + $0.bytes)
+            )
         }
 
         return Alignment(
@@ -649,7 +759,10 @@ enum RediffByteAligner {
             bDurationSeconds: pb.durationSeconds,
             segmentedSlots: segmentedSlots,
             segmentedChainedFractionB: segmentedChainedFractionB,
-            segmentedRunsChained: segmentedRunsChained
+            segmentedRunsChained: segmentedRunsChained,
+            foundRunASpans: foundRunASpans,
+            segmentedRunsAOverlapping: segmentedRunsAOverlapping,
+            segmentedOverlapSecondsRecovered: segmentedOverlapSecondsRecovered
         )
     }
 
@@ -659,41 +772,160 @@ enum RediffByteAligner {
     /// runs (non-monotonic). Partition the found runs into contiguous monotonic
     /// segments and UNION their divergent regions: walk the runs in A-order,
     /// keep an A-non-overlapping accepted set (a later run that A-overlaps an
-    /// already-kept run is dropped — the same conflict `chainRuns` resolves when
-    /// it drops a run), then emit the inter-run A-gaps (plus head/tail) as slots
-    /// EXACTLY as `align` does for a single chain. A segment BOUNDARY — where B
-    /// jumps backward because an ad's length differs between A and B — simply
-    /// appears as an inter-run gap whose B-width is ≤ 0 (a `removed_in_B` /
-    /// `replaced` divergence), which is precisely the rotated ad that made the
-    /// chain non-monotonic. The union of these gaps across segments is the
-    /// recovered ad set.
+    /// already-kept run is CLIPPED to its uncovered tail — see playhead-3zxd
+    /// below), then emit the inter-run A-gaps (plus head/tail) as slots EXACTLY
+    /// as `align` does for a single chain. A segment BOUNDARY — where B jumps
+    /// backward because an ad's length differs between A and B — simply appears
+    /// as an inter-run gap whose B-width is ≤ 0 (a `removed_in_B` / `replaced`
+    /// divergence), which is precisely the rotated ad that made the chain
+    /// non-monotonic. The union of these gaps across segments is the recovered
+    /// ad set.
     ///
-    /// PRECISION (why segmenting cannot manufacture a spurious slot): every run
-    /// is already ≥ `minRunBytes` (from `byteRuns`), so a segment cannot be
-    /// built from sub-min-run noise; the returned `chainedFractionB`
-    /// (Σ accepted run bytes / B audio bytes) lets the gate keep its re-encode
-    /// floor over the segmented coverage; and the gate's `minAdSeconds` filter
-    /// drops sub-ad gaps. B coordinates feed only the gap KIND and the flank
-    /// seconds — the A-timeline slot edges are byte-exact off the aligned runs.
+    /// playhead-3zxd — WHY THE A-OVERLAPPER IS CLIPPED AND NOT DROPPED. It used
+    /// to be dropped whole, "so the gap arithmetic stays well-formed". The
+    /// arithmetic was fine; the accounting was not. A dropped run's A-span fell
+    /// straight through to `addGap` and was reported as DIVERGENT — an ad — even
+    /// though a run is, by definition, bytes found identically in BOTH copies.
+    /// The aligner was labelling audio it had just proven matched as the exact
+    /// opposite of what it is.
+    ///
+    /// It is not a corner case. A break the FRESH copy has and the played copy
+    /// lacks makes the run after the splice A-overlap the run before it by the
+    /// 4 shared bytes of the CBR frame header the earlier run's greedy
+    /// extension carries across — so the ENTIRE following content block was
+    /// dropped and shipped as one "ad". playhead-pyq7 measured it: 7 of 20
+    /// emitted slots were 100 % show, up to 469.99 s wide, with `maxSlotSeconds`
+    /// (480 s) the only thing standing between a phantom and a listener's tap.
+    ///
+    /// Clipping is sound at the byte level — `A[s..e) == B[t..t+e-s)` implies
+    /// `A[s+k..e) == B[t+k..t+e-s)` — so the retained tail is still a
+    /// byte-verified match. It is also what makes the invariant TRUE BY
+    /// CONSTRUCTION rather than by a filter: the accepted set's A-coverage
+    /// becomes the union of every found run's A-span, so the emitted gaps are
+    /// exactly the A-regions no run covers. And it costs no recall — it GAINS
+    /// some, because reinstating the boundary the drop erased splits pyq7's
+    /// worst shape (a real 30 s ad fused to 299.99 s of show) back into the real
+    /// 30 s ad.
+    ///
+    /// ONE KNOCK-ON WORTH KNOWING. Because no run is discarded any more, the
+    /// returned `chainedFractionB` (Σ accepted run bytes / B audio bytes) RISES —
+    /// measured 0.6154 → 0.9231, 0.6429 → 0.9786, 0.6452 → 0.9678 on the pyq7
+    /// pairs that had an A-overlap. The number is more honest (each A-region is
+    /// counted exactly once, and it really is aligned), but the gate compares it
+    /// to `minAlignedFractionB` (0.5), so a fetch sitting just under the
+    /// re-encode floor before could now clear it. No measured pair crosses that
+    /// line — the lowest segmented fraction in the set is 0.6154 both before and
+    /// after — so the effect is unobserved, not shown to be absent.
+    ///
+    /// PRECISION (why segmenting cannot manufacture a spurious slot). Three
+    /// guards, and clipping changed the ARGUMENT for the first one without
+    /// changing its conclusion — R2 review, and worth reading before touching
+    /// either the clip or `mergedAndCapped`:
+    ///
+    ///   * SUB-MIN-RUN NOISE. `byteRuns` emits nothing under `minRunBytes`, so
+    ///     no segment is built out of noise. That no longer bounds the length of
+    ///     an ACCEPTED run: a clipped run is `bytes - trim`, floored only by
+    ///     `guard aEnd > globalAEnd`, i.e. ONE BYTE. What actually keeps
+    ///     `mergedAndCapped` from joining two slots across a byte-verified run
+    ///     is structural rather than numeric — a clipped run's `aStart` IS the
+    ///     previous accepted run's `aEnd`, so the gap before it has zero A-width
+    ///     and `minAdSeconds` drops it. Every SHIPPABLE gap is therefore
+    ///     followed immediately by a run accepted WHOLE, and two consecutive
+    ///     shippable slots stay at least `minRunBytes` of A apart — 4.1 s at
+    ///     128 kbps CBR, above `fragmentMergeGapSeconds` (3 s). Pinned by
+    ///     `RediffSegmentRecoveryPhantomTests.aShortClippedRunIsNeverMergedOver`.
+    ///     (The ≥192 kbps case, where `minRunBytes` is itself under 3 s, is
+    ///     playhead-yzra and is untouched by this bead.)
+    ///   * RE-ENCODE. The returned `chainedFractionB` (Σ accepted run bytes /
+    ///     B audio bytes) lets the gate keep its floor over the segmented
+    ///     coverage.
+    ///   * SUB-AD GAPS. The gate's `minAdSeconds` filter drops them.
+    ///
+    /// B coordinates feed only the gap KIND and the flank seconds — the
+    /// A-timeline slot edges are byte-exact off the aligned runs. A short
+    /// clipped run does lower the `runASeconds` FLANK confidence of the gap
+    /// after it, which is the conservative direction.
     static func segmentDivergentSlots(
         runs: [Run], pa: ParsedMP3, pb: ParsedMP3, bAudioBytes: Int
-    ) -> (slots: [Slot], chainedFractionB: Double, runsChained: Int) {
-        guard !runs.isEmpty else { return ([], 0, 0) }
+    ) -> SegmentRecovery {
+        guard !runs.isEmpty else { return SegmentRecovery() }
         // The SAME stable order `chainRuns` uses.
         let sorted = runs.enumerated()
             .sorted { ($0.element.aStart, $0.element.bStart, $0.offset)
                 < ($1.element.aStart, $1.element.bStart, $1.offset) }
             .map(\.element)
-        // A-ordered, A-non-overlapping accepted set. Dropping a later
-        // A-overlapper (the conflict `chainRuns` also resolves) keeps the gap
-        // arithmetic below well-formed (every A-gap ≥ 0).
+        // A-ordered, A-non-overlapping accepted set, built by CLIPPING an
+        // A-overlapping run to its uncovered tail — playhead-3zxd. Read the
+        // header note above for why dropping it was a defect and clipping is
+        // sound; what matters here is the post-condition it buys:
+        //
+        //   the accepted set's A-coverage == the UNION of every found run's
+        //   A-span
+        //
+        // which is what makes the inter-run gaps below exactly the A-regions no
+        // run covers. `globalAEnd` is the running MAXIMUM A-end (every branch
+        // either leaves it alone or raises it), so the region skipped between
+        // two accepted runs is genuinely run-free, not merely
+        // not-yet-visited — and the gap arithmetic stays well-formed (every
+        // A-gap ≥ 0) exactly as it did when the run was dropped.
+        //
+        // R3 REVIEW — THE AVERTED-DAMAGE FIGURE IS A DIFFERENCE, NOT A SUM.
+        // `overlapSecondsRecovered` names "the A-seconds a pre-3zxd build would
+        // have reported as divergent though a run covered them". Summing the
+        // clipped TAILS is not that quantity as soon as two clips chain, which
+        // is the ordinary shape for two inserted-in-B breaks: the pre-3zxd rule
+        // dropped the FIRST overlapper and then ACCEPTED the next run whole (its
+        // `aStart` is past the un-advanced cursor), so only the first tail ever
+        // became a phantom. The tail sum counted both and over-reported the
+        // averted damage by the whole second block — a value that names one
+        // thing read as though it named another, in the instrument built to
+        // detect exactly that. So the pre-3zxd rule is RUN ALONGSIDE, as a
+        // cursor and a coverage total and nothing else, and the figure is the
+        // difference between what this rule covers and what that one did.
         var accepted: [Run] = []
         var globalAEnd = -1
+        var runsAOverlapping = 0
+        var acceptedCoveredSeconds = 0.0
+        // The PRE-3zxd accept rule, verbatim: accept iff `aStart >= cursor`,
+        // i.e. drop any A-overlapper whole. Its accepted runs are A-disjoint by
+        // the same argument this rule's are, so a running sum IS its coverage.
+        var droppingRuleAEnd = -1
+        var droppingRuleCoveredSeconds = 0.0
         for run in sorted {
-            if run.aStart < globalAEnd { continue }
-            accepted.append(run)
-            globalAEnd = run.aStart + run.bytes
+            let aEnd = run.aStart + run.bytes
+            if run.aStart >= droppingRuleAEnd {
+                droppingRuleCoveredSeconds +=
+                    timeAt(pa, byteOffset: aEnd) - timeAt(pa, byteOffset: run.aStart)
+                droppingRuleAEnd = aEnd
+            }
+            // Wholly inside A-coverage already accepted: it adds no new
+            // A-region, and — unlike the clipped case — dropping it reports
+            // nothing as divergent, because an accepted run already covers its
+            // whole span. Not counted as an overlap: this bead's counter names
+            // the shape that produced a PHANTOM, and this shape cannot.
+            guard aEnd > globalAEnd else { continue }
+            if run.aStart < globalAEnd {
+                // CLIP, do not DROP. `A[s..e) == B[t..t+e-s)` implies
+                // `A[s+k..e) == B[t+k..t+e-s)`, so the tail is still a
+                // byte-verified match and its A-seconds are still matched audio.
+                let trim = globalAEnd - run.aStart
+                accepted.append(Run(aStart: globalAEnd, bStart: run.bStart + trim, bytes: run.bytes - trim))
+                runsAOverlapping += 1
+                acceptedCoveredSeconds +=
+                    timeAt(pa, byteOffset: aEnd) - timeAt(pa, byteOffset: globalAEnd)
+            } else {
+                accepted.append(run)
+                acceptedCoveredSeconds +=
+                    timeAt(pa, byteOffset: aEnd) - timeAt(pa, byteOffset: run.aStart)
+            }
+            globalAEnd = aEnd
         }
+        // Well-defined and non-negative by containment, not by clamping: the
+        // dropping rule's accepted runs are a SUBSET of the found runs, and this
+        // rule's coverage is the union of ALL of them (the post-condition
+        // above). `max` is float hygiene over a difference of two sums, not a
+        // correction. Both sides are A-disjoint, so each sum is a true coverage.
+        let overlapSecondsRecovered = max(0, acceptedCoveredSeconds - droppingRuleCoveredSeconds)
         let chainedBytes = accepted.reduce(0) { $0 + $1.bytes }
 
         var slots: [Slot] = []
@@ -746,6 +978,25 @@ enum RediffByteAligner {
             )
         }
         let fraction = Double(chainedBytes) / Double(max(1, bAudioBytes))
-        return (slots, fraction, accepted.count)
+        return SegmentRecovery(
+            slots: slots,
+            chainedFractionB: fraction,
+            runsChained: accepted.count,
+            runsAOverlapping: runsAOverlapping,
+            overlapSecondsRecovered: overlapSecondsRecovered
+        )
+    }
+
+    /// The segmented-recovery result. A named type rather than a tuple because
+    /// playhead-3zxd added two diagnostic members and an unlabelled 5-tuple is
+    /// how a caller comes to read one quantity as another.
+    struct SegmentRecovery: Sendable, Equatable {
+        var slots: [Slot] = []
+        var chainedFractionB: Double = 0
+        var runsChained: Int = 0
+        /// See `Alignment.segmentedRunsAOverlapping`.
+        var runsAOverlapping: Int = 0
+        /// See `Alignment.segmentedOverlapSecondsRecovered`.
+        var overlapSecondsRecovered: Double = 0
     }
 }

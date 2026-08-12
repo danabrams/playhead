@@ -97,12 +97,12 @@ struct RediffStrictByteExactMaskTests {
     /// moved edge is exactly what an anchor claims not to be. The merged slot
     /// must fall back to mark-only even though a strict persona contributed.
     @Test("a recovered persona that WIDENS a strict slot revokes the anchor")
-    func widenedSlotLosesStrictness() {
+    func widenedSlotLosesStrictness() throws {
         let strictList = [Self.slot(100, 160)]
         // Overlapping + longer: `mergedAndCapped` fuses these into [100, 200].
         let recoveredList = [Self.slot(150, 200)]
         let unioned = RediffSlotOwnership.unionedPlayedSlots([strictList, recoveredList])
-        #expect(unioned.count == 1, "fixture control: the two overlapping slots merged")
+        try #require(unioned.count == 1, "fixture control: the two overlapping slots merged")
         #expect(unioned[0].endSeconds == 200, "fixture control: the recovered persona widened the end")
 
         let mask = RediffSlotOwnership.strictByteExactMask(

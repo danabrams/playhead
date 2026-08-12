@@ -61,7 +61,7 @@ struct AdWindowEdgeAnchorsV29MigrationTests {
         // additive). The edge-anchor columns probed below are unchanged by
         // any of it. Pinned to the LITERAL: comparing against
         // `currentSchemaVersion` would pass for every value.
-        #expect(AnalysisStore.currentSchemaVersion == 47)
+        #expect(AnalysisStore.currentSchemaVersion == 48)
         #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "startEdgeAnchor"))
         #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "endEdgeAnchor"))
     }

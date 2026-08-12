@@ -292,6 +292,11 @@ struct RediffDayZeroMintOutcome: Sendable, Equatable {
     /// Free-text detail (an error description). Truncated by the recorder
     /// before it reaches the database.
     var detail: String?
+    /// playhead-3zxd: what THIS mint's byte diffs saw — the phantom-slot
+    /// instrumentation, aggregated across the personas the gate accepted. See
+    /// `RediffByteMintDiagnostics`. `.empty` on every exit that never reached a
+    /// diff, which is honest: no diff ran, so there is nothing to report.
+    var byteDiagnostics: RediffByteMintDiagnostics = .empty
 
     /// Convenience for the pure pre-fetch / guard exits, which have no
     /// B-copies and no slots.
@@ -380,6 +385,26 @@ struct RediffDayZeroAttemptRecord: Sendable, Equatable {
     /// Unix seconds of the most recent retry claim, `nil` when none was ever
     /// made.
     let lastRetryClaimAt: Double?
+    /// playhead-3zxd: the byte-diff instrumentation from the most recent
+    /// attempt that RAN A DIFF — the six `rediff_day_zero_attempts` columns a
+    /// device pull reads to answer "did the phantom fire, and did the fix
+    /// prevent it?".
+    ///
+    /// THE INVARIANT, and it is the only thing that makes these columns
+    /// readable: **this describes the attempt `lastAttemptAt` names.** So it is
+    /// overwritten exactly when `lastAttemptAt` moves — see
+    /// `DayZeroRediffAttemptPolicy.advance` — and NOT, as an earlier draft had
+    /// it, by every attempt including the free ones.
+    ///
+    /// It is deliberately NOT grouped with `lastMarkCount` and the per-B census,
+    /// which do update on a free exit. Those report something real about the
+    /// decline (which exit fired, how many B-copies were on hand); these report
+    /// a MEASUREMENT of a diff, and a decline ran none — so overwriting them
+    /// destroys an observation and substitutes nothing. Worse than nothing: the
+    /// validation query reads `lastRunsFound = 0` as VACUOUS ("re-encoding CDN,
+    /// or the bytes are not MP3"), so the zeroes are read as an observation
+    /// about the CDN that nobody made.
+    let byteDiagnostics: RediffByteMintDiagnostics
 
     init(
         analysisAssetId: String,
@@ -400,7 +425,8 @@ struct RediffDayZeroAttemptRecord: Sendable, Equatable {
         policyGeneration: Int = DayZeroRediffAttemptPolicy.currentGeneration,
         rescueAttemptCount: Int = 0,
         retryClaimCount: Int = 0,
-        lastRetryClaimAt: Double? = nil
+        lastRetryClaimAt: Double? = nil,
+        byteDiagnostics: RediffByteMintDiagnostics = .empty
     ) {
         self.analysisAssetId = analysisAssetId
         self.attemptCount = attemptCount
@@ -421,6 +447,7 @@ struct RediffDayZeroAttemptRecord: Sendable, Equatable {
         self.rescueAttemptCount = rescueAttemptCount
         self.retryClaimCount = retryClaimCount
         self.lastRetryClaimAt = lastRetryClaimAt
+        self.byteDiagnostics = byteDiagnostics
     }
 }
 
@@ -694,9 +721,24 @@ enum DayZeroRediffAttemptPolicy {
     ///    flag, is what stops it spinning") would be false. `lastExit` and the
     ///    per-B census still update, so the decline stays diagnosable.
     ///
+    ///    playhead-3zxd R2: `byteDiagnostics` moves with `lastAttemptAt`, NOT
+    ///    with the census. The census reports the decline; the diagnostics
+    ///    report a diff, and a free exit ran none. See the third bullet below.
     /// 2. A record from an older `currentGeneration` contributes no attempt
     ///    count: this build's day-0 has not spent anything yet. Cumulative
     ///    bytes and suppression history are historical facts and still carry.
+    ///
+    /// 3. playhead-3zxd R2 — a FREE exit does not overwrite `byteDiagnostics`
+    ///    either, for the SAME reason and by the SAME discriminator. The six
+    ///    V48 columns are a measurement of a byte diff; an exit that ran no
+    ///    diff carries `.empty`, and the upsert's `ON CONFLICT` sets all six
+    ///    from `excluded` — so writing them unconditionally ZEROED a prior real
+    ///    diff while `lastAttemptAt` kept advertising that diff's timestamp.
+    ///    The row then read `lastRunsFound = 0`, which the validation query
+    ///    calls VACUOUS ("re-encoding CDN"), i.e. a re-encode observation
+    ///    nobody made. That is the standing defect class — a value that names
+    ///    one thing read as though it named another — landing inside the
+    ///    instrument built to detect it.
     static func advance(
         record: RediffDayZeroAttemptRecord?,
         assetId: String,
@@ -740,7 +782,42 @@ enum DayZeroRediffAttemptPolicy {
             // history — a historical fact `noteRediffDayZeroRetryClaim` owns
             // and increments in place; an attempt never resets it.
             retryClaimCount: record?.retryClaimCount ?? 0,
-            lastRetryClaimAt: record?.lastRetryClaimAt
+            lastRetryClaimAt: record?.lastRetryClaimAt,
+            // playhead-3zxd: NEVER accumulated, and carried forward on exactly
+            // the same test `lastAttemptAt` uses — so the two always describe
+            // the SAME attempt.
+            //
+            //   spent bytes           -> THIS attempt's, whatever they are. A
+            //                            running total could never fall back to
+            //                            zero once a pre-fix row had
+            //                            contributed, and a stale set would
+            //                            read as evidence about the current
+            //                            build's aligner.
+            //   free, budgeted row    -> the prior attempt's, because
+            //                            `lastAttemptAt` is the prior
+            //                            attempt's. Zeroing here is what R2
+            //                            found: a real diff erased by a
+            //                            locally-blocked replay.
+            //   free, no budgeted row -> `.empty`, because `lastAttemptAt`
+            //                            becomes `now` and nothing was measured
+            //                            at `now`. `budgeted`, not `record`:
+            //                            a foreign-generation row does not
+            //                            carry its timestamp forward, so
+            //                            carrying its diagnostics would re-open
+            //                            the mismatch one generation out.
+            //
+            // NOT `outcome.bSideCount > 0` as the discriminator, which is the
+            // reading this round first proposed. `mintByteExactDayZeroMarks`
+            // resolves the A-side AFTER the k-way fetch and returns
+            // `.aSideNotAnchored` / `.aSideReadFailed` / `.assetRowMissing` /
+            // `.assetFetchFailed` with `bSideCount: bSideURLs.count`, which is
+            // ≥ 2 there (it is past the `tooFewBCopies` floor) — so that test
+            // reads TRUE on precisely the four free exits it was meant to
+            // exclude. `spentBandwidth` is a property of the exit and cannot
+            // drift from the timestamp it is paired with.
+            byteDiagnostics: spentBandwidth
+                ? outcome.byteDiagnostics
+                : (budgeted?.byteDiagnostics ?? .empty)
         )
     }
 
