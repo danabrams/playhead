@@ -994,19 +994,34 @@ actor TrustScoringService {
         // that has just appeared. That skips counting ONE episode; the next one
         // counts. The reverse — claiming for a row that vanished — cannot
         // happen.
-        let profileExists: Bool
+        // R3: `nil` means COULD NOT TELL, and it is a third case rather than a
+        // reason to give up. This read is new — before this bead the method
+        // went straight to the mutation below — so answering a read failure
+        // with `return` would make a transient SQLite error DISCARD the whole
+        // gesture, and this tap is the only production path that decays
+        // `recentFalseSkipSignals`, the counter whose reaching zero is required
+        // to leave `manual`. A read error would silently restore the one-way
+        // door playhead-gard opened. Falling through cannot do harm in the
+        // other direction either: the mutation is `…IfExists` and is a no-op
+        // when the row really is absent, and no claim is taken, so the cost is
+        // at most one uncounted episode — the same conservative direction this
+        // method already accepts for a stale "absent" read.
+        let profileExists: Bool?
         do {
             profileExists = try await store.fetchProfile(podcastId: podcastId) != nil
         } catch {
-            logger.warning("Could not read the profile for \(podcastId) before a correct observation: \(error.localizedDescription)")
-            return
+            logger.warning("Could not read the profile for \(podcastId) before a correct observation: \(error.localizedDescription); no episode is counted, but the gesture still applies if the row is there")
+            profileExists = nil
         }
         // Claim BEFORE mutating, so the increment and the ledger row are
         // decided by one atomic statement rather than by two readers agreeing.
         // A failure to claim is reported and the gesture still moves everything
         // that is per-gesture — trust, the false-signal decay, the ledger.
         var countsAsEpisode = false
-        if !profileExists {
+        if profileExists == nil {
+            // Already logged above. No claim: an episode must not be spent on a
+            // mutation we cannot show happened.
+        } else if profileExists == false {
             logger.info("No profile for \(podcastId) yet; the correct observation cannot be recorded and the episode stays claimable")
         } else if analysisAssetId.isEmpty {
             logger.warning("Correct observation for \(podcastId) carried no analysisAssetId; trust moves but no episode is counted")

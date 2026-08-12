@@ -938,8 +938,12 @@ struct ManualModeEscapabilityTests {
         )
         let observed = ObservedCorrectObservations()
         await orchestrator._setCorrectObservationHandlerForTesting {
-            podcastId, detector in
-            await observed.record(podcastId: podcastId, detector: detector)
+            podcastId, analysisAssetId, detector in
+            await observed.record(
+                podcastId: podcastId,
+                analysisAssetId: analysisAssetId,
+                detector: detector
+            )
         }
         await orchestrator.setSkipCueHandler { _ in }
         await orchestrator.beginEpisode(
@@ -987,6 +991,15 @@ struct ManualModeEscapabilityTests {
         #expect(recorded.count == 1)
         #expect(recorded.first?.podcastId == gardPodcastId)
         #expect(recorded.first?.detector == .segmentAggregated)
+        // playhead-fh5v / R3: the tap must carry the SUGGESTION's asset, which
+        // is what `trust_episode_observations` is claimed against. Before this
+        // assertion the production id could be replaced with `""` and the whole
+        // suite still passed — and an empty id is refused by the claim, so a
+        // banner Yes would silently stop being able to count an episode.
+        #expect(
+            recorded.first?.analysisAssetId == "asset-1",
+            "the claim key must be the suggestion's own episode; got \(String(describing: recorded.first?.analysisAssetId))"
+        )
     }
 
     /// The canary that fails if the wiring is removed.
@@ -1178,13 +1191,28 @@ struct PerDetectorSkipGateTests {
 private actor ObservedCorrectObservations {
     struct Record: Sendable, Equatable {
         let podcastId: String
+        /// R3: the episode the tap was about. `observationCount` is claimed per
+        /// `(podcastId, analysisAssetId)`, so this argument is what decides
+        /// whether a banner Yes can count an episode at all — and it had no
+        /// coverage until this field existed.
+        let analysisAssetId: String
         let detector: SkipDetectorClass
     }
 
     private var records: [Record] = []
 
-    func record(podcastId: String, detector: SkipDetectorClass) {
-        records.append(Record(podcastId: podcastId, detector: detector))
+    func record(
+        podcastId: String,
+        analysisAssetId: String,
+        detector: SkipDetectorClass
+    ) {
+        records.append(
+            Record(
+                podcastId: podcastId,
+                analysisAssetId: analysisAssetId,
+                detector: detector
+            )
+        )
     }
 
     func count() -> Int { records.count }

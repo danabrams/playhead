@@ -7067,11 +7067,32 @@ actor AnalysisStore {
     // episodes to reach `manual` and 8 to reach `auto`, which is what
     // `TrustScoringConfig`'s numbers have always said and have never meant.
     //
-    // The two other readers of the column (`ShowLocalPriorsBuilder`'s
-    // `episodeCount`, and `NetworkPriors.decayedWeight(episodesObserved:)`)
-    // were being handed the same inflated number and are corrected by the same
-    // reset. Both under-credit maturity at 0, which falls back to the broader
-    // prior tier — again the conservative direction.
+    // The OTHER readers of the column were handed the same inflated number and
+    // are corrected by the same reset. R3: there are FOUR, not the two an
+    // earlier draft of this comment named — and the count is worth getting
+    // right here, because "how many things read this quantity, and as what?"
+    // is the question the whole bead exists to have asked.
+    //
+    //   * `ShowLocalPriorsBuilder` -> `ShowLocalPriors.episodeCount`, which
+    //     `PriorHierarchyResolver` gates at >= 5. At 0 the show-local tier is
+    //     simply not activated and the resolver falls back to the broader tier.
+    //   * `NetworkPriors.decayedWeight(episodesObserved:)`. At 0 the NETWORK
+    //     prior carries its full 0.5 weight instead of a decayed one — again
+    //     the broader tier, which is the right reading of "this show has no
+    //     maturity of its own yet".
+    //   * `ClassifierService.showPriors` -> `ShowPriors.trustWeight`, which is
+    //     `min(observationCount / 20, 1)`. This is the reader the reset moves
+    //     FURTHEST and it does not fall back to anything — the show's own
+    //     priors are simply weighted at 0 until it matures. Note what that
+    //     means: under the per-backfill unit it saturated after ~2 episodes,
+    //     so "saturating around 20" (its own comment) had never once been
+    //     true. Twenty REAL episodes is slower, and finally honest.
+    //   * `DetectorTrustLedger.seed` copies it into a per-class entry, so a
+    //     class with no materialized entry seeds at 0 and must earn its own
+    //     three observations before it can leave shadow.
+    //
+    // All four under-credit maturity at 0, which is the conservative direction
+    // for every one of them.
 
     /// V49 migration — the episode-observation claim table, plus the reset of
     /// every `observationCount` written in the old (per-backfill) unit.
