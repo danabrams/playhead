@@ -70,13 +70,23 @@
 //
 // FRAGMENT MERGE IS A SEPARATE, BOUNDED EFFECT — read the numbers with it in
 // mind. `RediffSlotOwnership.mergedAndCapped` joins two slots separated by
-// ≤ `fragmentMergeGapSeconds` (3 s), and the thing separating two gaps is an
-// accepted RUN. At the default `minRunBytes` (65536) a run is 4.1 s at 128 kbps
-// CBR, so it cannot be joined over; at ≥192 kbps it is under 3 s and can be.
-// That is a second, much smaller instance of the same class, bounded at 3 s per
-// join versus this bead's minutes, and it is filed separately rather than fixed
-// here. The synthetic pairs below are all 128 kbps, so no merge fires and the
-// post-merge assertions are exact.
+// ≤ `fragmentMergeGapSeconds` (3 s), and the thing separating two SHIPPABLE
+// gaps is always a run accepted WHOLE. At the default `minRunBytes` (65536)
+// such a run is 4.1 s at 128 kbps CBR, so it cannot be joined over; at
+// ≥192 kbps it is under 3 s and can be. That is a second, much smaller instance
+// of the same class, bounded at 3 s per join versus this bead's minutes, and it
+// is filed separately (playhead-yzra) rather than fixed here. The synthetic
+// pairs below are all 128 kbps, so no merge fires and the post-merge assertions
+// are exact.
+//
+// "ACCEPTED WHOLE" IS LOAD-BEARING AND WAS ADDED IN R2 REVIEW. An earlier draft
+// of this note said "the thing separating two gaps is an accepted RUN", which
+// this bead's own fix falsified: a CLIPPED run is `bytes - trim`, floored only
+// by `guard aEnd > globalAEnd` — one byte — so the ≥ `minRunBytes` premise no
+// longer holds of the accepted set. The conclusion survives for a different
+// reason: a clipped run's `aStart` IS the previous accepted run's `aEnd`, so the
+// gap before it has zero A-width and `minAdSeconds` drops it, and a clipped run
+// can therefore never be what separates two shippable slots. § 5d pins that.
 
 import Foundation
 import Testing
@@ -469,6 +479,224 @@ struct RediffSegmentRecoveryPhantomTests {
         // have examined anything. Frames 800–1000 and the tail past 1500 are
         // covered by no run, so two real slots are expected.
         #expect(recovery.slots.count >= 2, "the fixture must emit slots — got \(recovery.slots.count)")
+    }
+
+    // MARK: - 5c. The accept rule's stated POST-CONDITION, asserted
+
+    /// THE OTHER HALF OF THE RAIL. Everything above forbids matched audio from
+    /// landing INSIDE an emitted slot. Nothing above requires run-free audio to
+    /// land inside one — so the rail was ONE-SIDED, and any change that merely
+    /// SHRINKS the emitted set passed it. Three arithmetic mutants survived the
+    /// whole delivered suite on that hole (R1 measured each at `GATE_EXIT=0`):
+    ///
+    ///   * clip by `k + 1` — a 1-byte A-gap, ≈ 2.4 µs, harmless but unpinned;
+    ///   * the clipped run keeps its FULL `bytes` — it then claims `trim` bytes
+    ///     it never verified, `Σ accepted bytes` stops being the A-union, and
+    ///     the following gap starts late, so DIVERGENT AUDIO IS SWALLOWED. This
+    ///     is the serious one, and it is invisible at `trim = 4` but grows in
+    ///     proportion to `trim`;
+    ///   * `globalAEnd` not advanced on the clip branch — needs two CONSECUTIVE
+    ///     A-overlaps, which no A/B fixture in this file stages.
+    ///
+    /// The assertion is not invented for the mutants: it is
+    /// `segmentDivergentSlots`'s own documented post-condition, quoted from the
+    /// header above the accept loop —
+    ///
+    ///     the accepted set's A-coverage == the UNION of every found run's
+    ///     A-span
+    ///
+    /// — plus its converse, which is what makes the inter-run gaps *exactly*
+    /// the A-regions no run covers rather than merely a subset of them.
+    ///
+    /// It is driven with hand-built runs for the same reason § 5b is: a real
+    /// pair's only A-overlap is the 4-byte CBR frame header the greedy
+    /// extension bleeds across a splice, so every length error a synthetic pair
+    /// can express is microseconds wide. Here the overlaps are 100 frames, at a
+    /// magnitude a slot could actually be made of, and there are TWO of them
+    /// back to back so the second clip runs against a cursor the first moved.
+    @Test("accepted A-coverage EQUALS the found-run union, and run-free audio still ships")
+    func acceptedCoverageEqualsFoundRunUnionAndGapsStillShip() {
+        let frame = SyntheticMP3.frameLength
+        let parsedA = RediffByteAligner.parse(
+            SyntheticMP3.file(SyntheticMP3.frames(count: 3000, seed: 0x81_0001)))
+        let parsedB = RediffByteAligner.parse(
+            SyntheticMP3.file(SyntheticMP3.frames(count: 3000, seed: 0x81_0002)))
+        func run(_ span: Range<Int>, bStart: Int) -> RediffByteAligner.Run {
+            RediffByteAligner.Run(
+                aStart: span.lowerBound * frame,
+                bStart: bStart,
+                bytes: (span.upperBound - span.lowerBound) * frame
+            )
+        }
+        let runs = [
+            run(0..<400, bStart: 0),
+            run(300..<700, bStart: 500_000),      // clipped against run 1
+            run(600..<1000, bStart: 900_000),     // clipped against run 2's TAIL
+            run(1400..<1800, bStart: 1_300_000)
+        ]
+        let bAudioBytes = max(1, parsedB.sizeBytes - parsedB.leadingID3Bytes)
+        let recovery = RediffByteAligner.segmentDivergentSlots(
+            runs: runs, pa: parsedA, pb: parsedB, bAudioBytes: bAudioBytes)
+
+        // CONTROL: the fixture must actually stage the shape under test. Two
+        // consecutive clips, and a gap for the containment assertion to find —
+        // without these a future change could satisfy the expectations below by
+        // doing nothing at all.
+        #expect(recovery.runsAOverlapping == 2,
+                "the fixture must stage TWO consecutive clips — got \(recovery.runsAOverlapping)")
+        #expect(recovery.slots.count >= 2, "the fixture must emit slots — got \(recovery.slots.count)")
+
+        // The union, computed here by a sweep that shares no code with the
+        // production accept loop.
+        var unionBytes = 0
+        var cursor = -1
+        for one in runs.sorted(by: { $0.aStart < $1.aStart }) {
+            let end = one.aStart + one.bytes
+            guard end > cursor else { continue }
+            unionBytes += end - max(one.aStart, cursor)
+            cursor = end
+        }
+        #expect(unionBytes == 1400 * frame, "control: the union is 1400 frames of A")
+        // `chainedFractionB` is `Σ accepted bytes / bAudioBytes`, and it is the
+        // only window onto the accepted set's total from outside. The round trip
+        // is exact to well under a byte at these magnitudes (~1.25 MB against a
+        // 53-bit significand), so `.rounded()` recovers the integer and a
+        // ONE-BYTE discrepancy is still visible.
+        let acceptedBytes = Int((recovery.chainedFractionB * Double(bAudioBytes)).rounded())
+        #expect(
+            acceptedBytes == unionBytes,
+            "accepted A-coverage \(acceptedBytes) B != found-run union \(unionBytes) B"
+        )
+
+        // THE CONVERSE. Frames 1000–1400 are covered by no run at all, so they
+        // are divergent by definition and must ship as a slot. A clip that
+        // over-claims its length starts the following gap late and eats into
+        // this region — silently, because the one-sided rail above is satisfied
+        // by emitting less.
+        let holeStart = RediffByteAligner.timeAt(parsedA, byteOffset: 1000 * frame)
+        let holeEnd = RediffByteAligner.timeAt(parsedA, byteOffset: 1400 * frame)
+        let covered = recovery.slots.contains {
+            $0.aStartSeconds <= holeStart + Self.epsilonSeconds
+                && $0.aEndSeconds >= holeEnd - Self.epsilonSeconds
+        }
+        #expect(
+            covered,
+            """
+            run-free A-region \(holeStart)..\(holeEnd) must ship as divergent — \
+            emitted \(recovery.slots.map { ($0.aStartSeconds, $0.aEndSeconds) })
+            """
+        )
+    }
+
+    // MARK: - 5d. R2 REVIEW — a SHORT clipped run cannot be merged over
+
+    /// R2 REVIEW (F4). The precision note above `segmentDivergentSlots` used to
+    /// read "every run is already ≥ `minRunBytes` (from `byteRuns`)", and this
+    /// file's header used that fact to bound fragment merge. THIS BEAD
+    /// FALSIFIED THE PREMISE: a clipped run is `bytes - trim`, floored only by
+    /// `guard aEnd > globalAEnd` — one byte. The aligner's own note even said
+    /// so and then drew the wrong conclusion from it, that "in practice
+    /// `mergedAndCapped` rejoins across it". If that happened it would be this
+    /// bead's defect returning through the merge door: a merged slot spanning a
+    /// byte-verified run is matched audio inside an emitted slot, which is
+    /// exactly what § 1 forbids.
+    ///
+    /// IT CANNOT HAPPEN, and the reason is structural rather than numeric. A
+    /// clipped run's `aStart` IS the previous accepted run's `aEnd`, so the gap
+    /// before it has zero A-width and `minAdSeconds` drops it. Every SHIPPABLE
+    /// gap is therefore followed immediately by a run accepted WHOLE, and the
+    /// separation between two consecutive shipped slots is still at least
+    /// `minRunBytes` of A. Nothing asserted that, so it is asserted here.
+    ///
+    /// The fixture composes the REAL `segmentDivergentSlots` with the REAL gate
+    /// and merge; only `Alignment`'s plumbing fields are supplied. Its clipped
+    /// tail is 1.31 s — well inside the 3 s merge window, so the shape the old
+    /// note worried about is genuinely staged rather than assumed away.
+    @Test("a clipped run shorter than the merge window still cannot be joined over")
+    func aShortClippedRunIsNeverMergedOver() {
+        let frame = SyntheticMP3.frameLength
+        let config = RediffSlotOwnership.Configuration.default
+        let parsedA = RediffByteAligner.parse(
+            SyntheticMP3.file(SyntheticMP3.frames(count: 3000, seed: 0x5D_0001)))
+        let parsedB = RediffByteAligner.parse(
+            SyntheticMP3.file(SyntheticMP3.frames(count: 2000, seed: 0x5D_0002)))
+        func run(_ span: Range<Int>, bStart: Int) -> RediffByteAligner.Run {
+            RediffByteAligner.Run(
+                aStart: span.lowerBound * frame,
+                bStart: bStart,
+                bytes: (span.upperBound - span.lowerBound) * frame
+            )
+        }
+        // Every run is ≥ `minRunBytes` (200 frames = 83 400 B > 65 536), so each
+        // is a length `byteRuns` could really have emitted. The THIRD overlaps
+        // the second by 150 frames, leaving a clipped tail of 50 frames.
+        let runs = [
+            run(0..<400, bStart: 0),
+            run(1000..<1400, bStart: 200_000),
+            run(1250..<1450, bStart: 400_000),      // → clipped to [1400, 1450)
+            run(2000..<2400, bStart: 600_000)
+        ]
+        let bAudioBytes = max(1, parsedB.sizeBytes - parsedB.leadingID3Bytes)
+        let recovery = RediffByteAligner.segmentDivergentSlots(
+            runs: runs, pa: parsedA, pb: parsedB, bAudioBytes: bAudioBytes)
+
+        // CONTROLS: the fixture must stage a clipped run INSIDE the merge
+        // window, and must clear the re-encode floor on its own numbers.
+        let clippedSeconds = RediffByteAligner.timeAt(parsedA, byteOffset: 1450 * frame)
+            - RediffByteAligner.timeAt(parsedA, byteOffset: 1400 * frame)
+        #expect(clippedSeconds < config.fragmentMergeGapSeconds,
+                "the clipped tail must be shorter than the merge window — got \(clippedSeconds) s")
+        #expect(recovery.runsAOverlapping == 1, "exactly one run is clipped here")
+        #expect(recovery.chainedFractionB >= config.minAlignedFractionB,
+                "the fixture must clear the re-encode floor — got \(recovery.chainedFractionB)")
+
+        let foundRunASpans = runs.map {
+            TimeRange(
+                start: RediffByteAligner.timeAt(parsedA, byteOffset: $0.aStart),
+                end: RediffByteAligner.timeAt(parsedA, byteOffset: $0.aStart + $0.bytes)
+            )
+        }
+        let alignment = RediffByteAligner.Alignment(
+            runsFound: runs.count,
+            chain: [runs[0]],
+            runsDroppedNonMonotonic: 1,            // → the recovery arm
+            chainedBytes: runs[0].bytes,
+            chainedFractionB: 0,
+            slots: [],
+            aDurationSeconds: parsedA.durationSeconds,
+            bDurationSeconds: parsedB.durationSeconds,
+            segmentedSlots: recovery.slots,
+            segmentedChainedFractionB: recovery.chainedFractionB,
+            segmentedRunsChained: recovery.runsChained,
+            foundRunASpans: foundRunASpans,
+            segmentedRunsAOverlapping: recovery.runsAOverlapping,
+            segmentedOverlapSecondsRecovered: recovery.overlapSecondsRecovered
+        )
+        guard case .accepted(let acceptance) = RediffSlotOwnership.gateAndDiffBytes(
+            alignment: alignment, config: config, recoverNonMonotonicSegments: true
+        ) else {
+            Issue.record("the recovery arm must accept this fixture"); return
+        }
+        // CONTROL: more than one slot ships, so a merge is possible at all.
+        #expect(acceptance.playedSlots.count == 3,
+                "three run-free regions ship — got \(acceptance.playedSlots.map { ($0.startSeconds, $0.endSeconds) })")
+
+        // THE STRUCTURAL PROPERTY. Separation is measured in A-seconds against
+        // `minRunBytes`, because that is the bound the merge argument rests on.
+        let minRunSeconds = Double(RediffByteAligner.Configuration.default.minRunBytes)
+            / Double(frame) * SyntheticMP3.secondsPerFrame
+        for (left, right) in zip(acceptance.playedSlots, acceptance.playedSlots.dropFirst()) {
+            let separation = right.startSeconds - left.endSeconds
+            #expect(separation >= minRunSeconds - Self.epsilonSeconds,
+                    "slots \(separation) s apart — a CLIPPED run became a slot separator")
+            #expect(separation > config.fragmentMergeGapSeconds,
+                    "…which is what stops the merge joining across a byte-verified run")
+        }
+
+        // THE INVARIANT, read through the production witness, POST-merge.
+        #expect(acceptance.diagnostics.alignedSecondsInSlots == 0,
+                "a shipped slot carries \(acceptance.diagnostics.alignedSecondsInSlots) s of matched audio")
+        #expect(acceptance.diagnostics.maxAlignedSecondsInSlot == 0)
     }
 
     // MARK: - 6. The one exemption, pinned

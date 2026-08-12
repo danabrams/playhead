@@ -21,11 +21,17 @@
 import Foundation
 
 /// One day-0 mint's byte-diff instrumentation, aggregated across the k-way
-/// B-side personas that the gate ACCEPTED.
+/// B-side personas.
 ///
-/// Rejected personas contribute nothing on purpose: they minted no slot, so they
-/// have no emitted slots to measure and including their run counts would inflate
-/// the vacuity control into looking like evidence.
+/// A persona the gate REJECTED contributes a zeroed entry, not a missing one.
+/// Zeroed because it minted no slot, so it has no emitted slots to measure and
+/// including its run counts would inflate the vacuity control into looking like
+/// evidence. PRESENT because `alignedRunSpans` labels each group with the
+/// persona's position in the k-way fetch, and a list handed over already
+/// compacted turns that label into the ordinal among accepted personas instead —
+/// the identity-that-is-not-an-identity this bead's own instrumentation shipped
+/// with in R1. `AdDetectionService.mintByteExactDayZeroMarks` is what guarantees
+/// the alignment; see the `defer` there.
 struct RediffByteMintDiagnostics: Sendable, Equatable {
     /// Σ runs found across accepted personas. VACUITY CONTROL — `0` means the
     /// aligner found nothing and every other field says nothing.

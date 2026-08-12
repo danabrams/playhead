@@ -534,8 +534,10 @@ enum RediffSlotOwnership {
     ///   • re-encode floor — `segmentedChainedFractionB` (Σ segment run bytes /
     ///     B audio bytes) must clear `minAlignedFractionB`, so a low-coverage
     ///     island (a re-encode) is STILL rejected wholesale (not widened);
-    ///   • min-run-bytes — intrinsic (every segmented run is already ≥
-    ///     `minRunBytes` from `byteRuns`);
+    ///   • min-run-bytes — intrinsic at the SOURCE (`byteRuns` emits nothing
+    ///     shorter). NOT of an ACCEPTED run: playhead-3zxd's clip can leave a
+    ///     run of one byte. See `RediffByteAligner.segmentDivergentSlots` for
+    ///     why the fragment-merge bound below survives that anyway;
     ///   • min-ad-width + fragment-merge + duration-cap — the SAME
     ///     `mergedAndCapped` cleaning the strict path applies, so sub-ad and
     ///     alignment-breakdown gaps are dropped.

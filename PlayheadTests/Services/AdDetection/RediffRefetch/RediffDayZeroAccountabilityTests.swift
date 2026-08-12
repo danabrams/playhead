@@ -1572,6 +1572,58 @@ struct RediffDayZeroMintExitTests {
         #expect(outcome.bSideCount == 2)
     }
 
+    /// REVIEW ROUND 2 (playhead-3zxd) — `<bIndex>` WAS NOT THE PERSONA INDEX.
+    ///
+    /// `RediffAlignedRunSpanCodec`'s format doc says the label is "the persona's
+    /// position in the k-way fetch", and the codec's own half of that is pinned
+    /// in `RediffByteMintDiagnosticsTests`: it preserves gaps rather than
+    /// compacting them. But the mint only APPENDED to its diagnostics list on
+    /// acceptance, so the list arrived already compacted and the codec had no
+    /// gap left to preserve — `<bIndex>` silently became the ordinal among
+    /// ACCEPTED personas. Reject persona 0, accept persona 1, and the persisted
+    /// payload said `0:`.
+    ///
+    /// That is an identity that is not an identity, in a column whose whole job
+    /// is to let a later question be re-asked of data already collected. It is
+    /// unobservable from inside the codec (which is honest about the list it is
+    /// given) and from inside the aggregate scalars (which are sums), so it
+    /// takes the real mint over real bytes to see it — which is what this is.
+    @Test("the persisted run-span index is the persona's k-way POSITION, not its rank among the accepted")
+    func alignedRunSpanIndexIsTheKWayPosition() async throws {
+        let dir = try makeTempDir(prefix: "R2SpanIndex")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let aURL = dir.appendingPathComponent("a.mp3")
+        try writeMP3(to: aURL)
+        let readable = dir.appendingPathComponent("b1.mp3")
+        try FileManager.default.copyItem(at: aURL, to: readable)
+        let missing = dir.appendingPathComponent("gone.mp3")
+
+        let store = try await makeTestStore()
+        try await insertAsset(store: store, assetId: "a1", sourceURL: aURL.absoluteString)
+        let service = makeService(store: store)
+
+        // REJECTED FIRST. The only accepted persona is at k-way position 1.
+        let rejectedFirst = await service.mintByteExactDayZeroMarks(
+            analysisAssetId: "a1", bSideURLs: [missing, readable])
+        #expect(rejectedFirst.bSidesAccepted == 1, "control: exactly one copy diffed")
+        #expect(rejectedFirst.bSidesUnreadable == 1, "control: the other was skipped before the aligner")
+        #expect(rejectedFirst.byteDiagnostics.runsFound > 0,
+                "VACUITY: the accepted copy must have produced runs for the label to exist")
+        let spansAtOne = try #require(rejectedFirst.byteDiagnostics.alignedRunSpans)
+        #expect(spansAtOne.hasPrefix("v1;1:"),
+                "persona 1's runs must be labelled 1 — got \(spansAtOne)")
+
+        // …and the label is not a constant: the same copy at position 0 reads 0.
+        let acceptedFirst = await service.mintByteExactDayZeroMarks(
+            analysisAssetId: "a1", bSideURLs: [readable, missing])
+        #expect(acceptedFirst.bSidesAccepted == 1)
+        let spansAtZero = try #require(acceptedFirst.byteDiagnostics.alignedRunSpans)
+        #expect(spansAtZero.hasPrefix("v1;0:"), "…and persona 0's runs are labelled 0 — got \(spansAtZero)")
+        // Same bytes, same runs — ONLY the position differs.
+        #expect(spansAtZero.dropFirst("v1;0:".count) == spansAtOne.dropFirst("v1;1:".count),
+                "the spans themselves must be identical; only the label moved")
+    }
+
     /// playhead-b8hj: `resolveDayZeroASide` is the shared A-side resolution for
     /// BOTH the mint and its free pre-check, and it reads the asset row's
     /// `sourceURL` — a string whose leading segment is the app Data-container

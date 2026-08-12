@@ -811,17 +811,34 @@ enum RediffByteAligner {
     /// line — the lowest segmented fraction in the set is 0.6154 both before and
     /// after — so the effect is unobserved, not shown to be absent.
     ///
-    /// PRECISION (why segmenting cannot manufacture a spurious slot): every run
-    /// is already ≥ `minRunBytes` (from `byteRuns`), so a segment cannot be
-    /// built from sub-min-run noise; the returned `chainedFractionB`
-    /// (Σ accepted run bytes / B audio bytes) lets the gate keep its re-encode
-    /// floor over the segmented coverage; and the gate's `minAdSeconds` filter
-    /// drops sub-ad gaps. B coordinates feed only the gap KIND and the flank
-    /// seconds — the A-timeline slot edges are byte-exact off the aligned runs.
-    /// A clipped run can be short, and a short run's `runASeconds` lowers the
-    /// FLANK confidence of the gaps beside it — the conservative direction, and
-    /// in practice `mergedAndCapped` rejoins across it and keeps the OUTER
-    /// flanks anyway.
+    /// PRECISION (why segmenting cannot manufacture a spurious slot). Three
+    /// guards, and clipping changed the ARGUMENT for the first one without
+    /// changing its conclusion — R2 review, and worth reading before touching
+    /// either the clip or `mergedAndCapped`:
+    ///
+    ///   * SUB-MIN-RUN NOISE. `byteRuns` emits nothing under `minRunBytes`, so
+    ///     no segment is built out of noise. That no longer bounds the length of
+    ///     an ACCEPTED run: a clipped run is `bytes - trim`, floored only by
+    ///     `guard aEnd > globalAEnd`, i.e. ONE BYTE. What actually keeps
+    ///     `mergedAndCapped` from joining two slots across a byte-verified run
+    ///     is structural rather than numeric — a clipped run's `aStart` IS the
+    ///     previous accepted run's `aEnd`, so the gap before it has zero A-width
+    ///     and `minAdSeconds` drops it. Every SHIPPABLE gap is therefore
+    ///     followed immediately by a run accepted WHOLE, and two consecutive
+    ///     shippable slots stay at least `minRunBytes` of A apart — 4.1 s at
+    ///     128 kbps CBR, above `fragmentMergeGapSeconds` (3 s). Pinned by
+    ///     `RediffSegmentRecoveryPhantomTests.aShortClippedRunIsNeverMergedOver`.
+    ///     (The ≥192 kbps case, where `minRunBytes` is itself under 3 s, is
+    ///     playhead-yzra and is untouched by this bead.)
+    ///   * RE-ENCODE. The returned `chainedFractionB` (Σ accepted run bytes /
+    ///     B audio bytes) lets the gate keep its floor over the segmented
+    ///     coverage.
+    ///   * SUB-AD GAPS. The gate's `minAdSeconds` filter drops them.
+    ///
+    /// B coordinates feed only the gap KIND and the flank seconds — the
+    /// A-timeline slot edges are byte-exact off the aligned runs. A short
+    /// clipped run does lower the `runASeconds` FLANK confidence of the gap
+    /// after it, which is the conservative direction.
     static func segmentDivergentSlots(
         runs: [Run], pa: ParsedMP3, pb: ParsedMP3, bAudioBytes: Int
     ) -> SegmentRecovery {

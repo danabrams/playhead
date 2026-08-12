@@ -17,7 +17,22 @@
 //     FROM rediff_day_zero_attempts
 //    ORDER BY lastAttemptAt DESC;
 //
-// read as:
+// read as — AND READ `lastExit` FIRST, because `lastRunsFound = 0` is two
+// different facts and only the exit separates them (R2 review):
+//   lastExit ∈ {marked, no_divergent_slot,
+//               all_slots_already_covered,
+//               no_accepted_byte_diff}    -> a diff RAN. The columns below are
+//                                            about that diff.
+//   any other lastExit                    -> no diff ran on this attempt, and
+//                                            the six columns describe whichever
+//                                            earlier attempt `lastAttemptAt`
+//                                            names (a FREE exit carries both
+//                                            forward together) or are the
+//                                            never-measured defaults. They are
+//                                            never zeroed to represent the
+//                                            decline itself — see
+//                                            `DayZeroRediffAttemptPolicy
+//                                            .advance`.
 //   lastRunsFound = 0                     -> VACUOUS. The aligner found nothing
 //                                            (re-encoding CDN, or the bytes are
 //                                            not MP3); no other column on the
@@ -246,6 +261,12 @@ struct RediffByteMintDiagnosticsTests {
         // The index is the persona's position in the k-way fetch, so it must not
         // be compacted: a reader pairing spans back to personas would otherwise
         // attribute persona 2's runs to persona 1.
+        //
+        // THIS IS ONLY HALF THE PROPERTY, and R2 review found the other half
+        // missing: the codec preserves whatever gaps it is given, but the mint
+        // was handing it a list already compacted to the ACCEPTED personas, so
+        // there was never a gap to preserve. The production side is pinned by
+        // `RediffDayZeroMintExitTests.alignedRunSpanIndexIsTheKWayPosition`.
         let encoded = RediffAlignedRunSpanCodec.encode(perBSide: [
             [], [TimeRange(start: 5, end: 6)], []
         ])
@@ -305,5 +326,125 @@ struct RediffByteMintDiagnosticsTests {
         #expect(advanced.byteDiagnostics.runsFound == 0,
                 "no diff ran, so the vacuity control is what the row must say")
         #expect(advanced.byteDiagnostics.alignedRunSpans == nil)
+        // …and `lastAttemptAt` is `now` here, which is what makes `.empty`
+        // honest rather than a hole: there IS no earlier attempt for the row to
+        // be describing. See `aFreeExitNeverErasesAnEarlierDiff` below for the
+        // case where there is one.
+        #expect(advanced.lastAttemptAt == 100)
+    }
+
+    // MARK: - 4b. R2 REVIEW (F1) — a free exit must not ERASE a real diff
+
+    /// THE PAIRING INVARIANT: `byteDiagnostics` describes the attempt
+    /// `lastAttemptAt` names. `advance` deliberately does not move
+    /// `attemptCount` or `lastAttemptAt` on a FREE exit — an exit that spent no
+    /// bandwidth must consume no budget — but it used to write
+    /// `outcome.byteDiagnostics` unconditionally, and a free exit carries
+    /// `.empty`. Since `upsertRediffDayZeroAttempt`'s `ON CONFLICT` sets all six
+    /// V48 columns from `excluded`, that ZEROED a prior real diff and left the
+    /// row advertising that diff's timestamp beside six measurements of an event
+    /// which ran no diff.
+    ///
+    /// The consequence is not a missing number, it is a FABRICATED one: the
+    /// validation query's first branch reads `lastRunsFound = 0` as VACUOUS —
+    /// "the aligner found nothing (re-encoding CDN, or the bytes are not MP3)".
+    /// So a locally-blocked replay manufactures a re-encode observation about an
+    /// asset a real diff had already measured, which is the standing defect
+    /// class inside the instrument built to detect it.
+    ///
+    /// The exit staged here is deliberately the IN-MINT shape, with
+    /// `bSideCount: 2`. `mintByteExactDayZeroMarks` resolves the A-side AFTER
+    /// the k-way fetch and returns `.aSideNotAnchored` with
+    /// `bSideCount: bSideURLs.count`, which is ≥ 2 there — so a `bSideCount > 0`
+    /// discriminator would read TRUE on exactly the exit it was meant to
+    /// exclude. `spentBandwidth` is the property that cannot drift.
+    @Test("a FREE exit never erases the diff an earlier attempt measured")
+    func aFreeExitNeverErasesAnEarlierDiff() {
+        let measured = RediffByteMintDiagnostics(
+            runsFound: 6, runsAOverlapping: 2, overlapSecondsRecovered: 469.99,
+            alignedSecondsInSlots: 0, maxAlignedSecondsInSlot: 0,
+            alignedRunSpans: "v1;0:0.00-900.00"
+        )
+        let prior = RediffDayZeroAttemptRecord(
+            analysisAssetId: "asset",
+            attemptCount: 1,
+            lastAttemptAt: 1_000,
+            lastExit: .noDivergentSlot,
+            byteDiagnostics: measured
+        )
+        // The A-side was deleted after listening, so the next granted attempt is
+        // blocked locally — past the fetch, hence two B-copies on hand.
+        let blocked = RediffDayZeroMintOutcome(exit: .aSideNotAnchored, bSideCount: 2)
+        #expect(!blocked.exit.spentBandwidth, "control: this exit is FREE")
+        #expect(blocked.byteDiagnostics == .empty, "control: a free exit carries no measurement")
+        #expect(blocked.bSideCount > 0,
+                "control: `bSideCount > 0` is TRUE on this free exit — it cannot be the discriminator")
+
+        let advanced = DayZeroRediffAttemptPolicy.advance(
+            record: prior, assetId: "asset", outcome: blocked, fullFetchBytes: 0, at: 9_000)
+
+        #expect(advanced.lastAttemptAt == 1_000, "control: a free exit does not move the timestamp")
+        #expect(advanced.attemptCount == 1, "control: a free exit does not spend the budget")
+        #expect(advanced.byteDiagnostics == measured,
+                "the diagnostics must describe the attempt `lastAttemptAt` names")
+        #expect(advanced.byteDiagnostics.runsFound == 6,
+                "runsFound = 0 here would read as VACUOUS — a re-encode observation nobody made")
+        #expect(advanced.byteDiagnostics.alignedRunSpans == "v1;0:0.00-900.00")
+        // The decline itself is still fully diagnosable — this fix narrows what
+        // a free exit overwrites, it does not make the row silent.
+        #expect(advanced.lastExit == .aSideNotAnchored)
+        #expect(advanced.lastBSideCount == 2)
+    }
+
+    /// The other direction, so the fix cannot be "carry forward always". An
+    /// attempt that SPENT bytes moves `lastAttemptAt` to now, so its
+    /// diagnostics must move too — even when they are empty, which is what a
+    /// fetch whose every persona gate-rejected honestly measured. The row stays
+    /// self-consistent: a fresh timestamp beside a fresh (empty) measurement,
+    /// with `lastExit` naming why.
+    @Test("an attempt that SPENT bytes overwrites the diagnostics, even with an empty measurement")
+    func aBandwidthSpendingExitStillOverwrites() {
+        let prior = RediffDayZeroAttemptRecord(
+            analysisAssetId: "asset",
+            attemptCount: 1,
+            lastAttemptAt: 1_000,
+            lastExit: .marked,
+            byteDiagnostics: RediffByteMintDiagnostics(runsFound: 6, runsAOverlapping: 2)
+        )
+        let rejected = RediffDayZeroMintOutcome(
+            exit: .noAcceptedByteDiff, bSideCount: 2, bSidesGateRejected: 2)
+        #expect(rejected.exit.spentBandwidth, "control: this exit paid for the fetch")
+
+        let advanced = DayZeroRediffAttemptPolicy.advance(
+            record: prior, assetId: "asset", outcome: rejected,
+            fullFetchBytes: 108_000_000, at: 9_000)
+
+        #expect(advanced.lastAttemptAt == 9_000)
+        #expect(advanced.byteDiagnostics == .empty,
+                "a stale set would read as evidence about the diffs THIS attempt ran")
+    }
+
+    /// A record from a FOREIGN generation does not carry its `lastAttemptAt`
+    /// forward — `advance` stamps `now` — so it must not carry its diagnostics
+    /// forward either, or the pairing invariant re-opens one generation out.
+    /// This is why the carry-forward reads `budgeted`, not `record`.
+    @Test("a free exit over a FOREIGN-generation record records EMPTY, matching its fresh timestamp")
+    func aFreeExitOverAForeignGenerationRecordsEmpty() {
+        let prior = RediffDayZeroAttemptRecord(
+            analysisAssetId: "asset",
+            attemptCount: 3,
+            lastAttemptAt: 1_000,
+            lastExit: .noDivergentSlot,
+            policyGeneration: DayZeroRediffAttemptPolicy.currentGeneration - 1,
+            byteDiagnostics: RediffByteMintDiagnostics(runsFound: 6, runsAOverlapping: 2)
+        )
+        let advanced = DayZeroRediffAttemptPolicy.advance(
+            record: prior, assetId: "asset",
+            outcome: RediffDayZeroMintOutcome(exit: .aSideNotAnchored, bSideCount: 2),
+            fullFetchBytes: 0, at: 9_000)
+
+        #expect(advanced.lastAttemptAt == 9_000, "control: a foreign generation does not carry the timestamp")
+        #expect(advanced.byteDiagnostics == .empty,
+                "…so the diagnostics must not be carried either — they would describe another generation")
     }
 }
