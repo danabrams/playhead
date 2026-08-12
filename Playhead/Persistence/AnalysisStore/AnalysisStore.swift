@@ -52,6 +52,42 @@ enum ArtifactClass: String, Sendable, Hashable, CaseIterable {
 }
 
 struct AnalysisAsset: Sendable {
+    /// playhead-fzrw R2 — the ``analysisState`` of a row that has been
+    /// REGISTERED but never QUEUED for analysis.
+    ///
+    /// Two different facts used to share the token `"queued"` and the surface
+    /// layer could not tell them apart:
+    ///
+    ///   * *the analysis lane has this episode queued and is working toward
+    ///     it* — what `AnalysisCoordinator.resolveSession` and
+    ///     `AnalysisWorkScheduler.resolveAnalysisAssetId` mean when they write
+    ///     `SessionState.queued`. Both write it from inside the path that is
+    ///     about to run the pipeline, so it is true for seconds;
+    ///   * *a row exists so day-0 rediff can resolve an A-side* — what
+    ///     `registerDownloadedAssetRowIfAbsent` means when the bytes land. On
+    ///     the 2026-08-10 pull the serial lane was up to 13,678 s away, so this
+    ///     one is true for HOURS.
+    ///
+    /// Read as the first, the second lights the library's working bar at a
+    /// frozen "Downloaded · analyzing 0%" and — because `.analyzing` is not
+    /// actionable — DISABLES the tap, which is the playhead-kanf promote-to-now
+    /// escape hatch the starving episode most needs.
+    /// (`EpisodePreparationReadiness` states the rule this broke: "a working
+    /// bar would promise progress that will never arrive".)
+    ///
+    /// This value is not a new vocabulary word. `'new'` is the column's own
+    /// `DEFAULT` in the `analysis_assets` schema — the value a row carries when
+    /// nothing has yet written a session state onto it, which is exactly what a
+    /// registration is. It is deliberately NOT a ``SessionState`` (there is no
+    /// session), so `EpisodeSurfaceStatusObserver.analysisState(from:)`
+    /// projects it to ``AnalysisState/PersistedStatus/new``, which
+    /// `episodePreparationAnalysisActive` enumerates as NOT active — the same
+    /// answer the surface gave before this bead, when there was no row at all.
+    ///
+    /// No migration: no shipped build has ever written this value, and no
+    /// existing `"queued"` row changes meaning.
+    static let registeredNotQueuedState = "new"
+
     let id: String
     let episodeId: String
     let assetFingerprint: String
@@ -9607,6 +9643,125 @@ actor AnalysisStore {
         bind(stmt, 14, asset.episodeTitle)
         bind(stmt, 15, asset.finalPassCoverageEndTime)
         try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// playhead-fzrw R2 — insert an asset ONLY IF the episode has no
+    /// `analysis_assets` row yet, deciding and writing in ONE statement.
+    ///
+    /// WHY A SEPARATE METHOD RATHER THAN A GUARD AT THE CALL SITE. A caller
+    /// that asks ``fetchAssetByEpisodeId(_:)`` and then calls ``insertAsset``
+    /// has made two `await`s on this actor, and any suspension between them is
+    /// a window for a writer on a DIFFERENT actor to mint a row for the same
+    /// episode. `AnalysisWorkScheduler.registerDownloadedAssetRowIfAbsent` is
+    /// exactly that shape (a capability snapshot and a fingerprint read sit
+    /// between its check and its insert) and its competitor,
+    /// `AnalysisCoordinator.resolveSession`, fires on play start — an event
+    /// that routinely coincides with a download completing.
+    ///
+    /// The V39 uniqueness index cannot catch it: it is on
+    /// `(episodeId, assetFingerprint)`, and `resolveSession`'s placeholder
+    /// writes its own UUID as the fingerprint, so the two rows differ on the
+    /// indexed pair and BOTH survive. That is playhead-0hi9's duplicate, whose
+    /// one-shot repair sweep (`did_duplicate_asset_reconcile_v1`) is already
+    /// spent on shipped devices.
+    ///
+    /// `NOT EXISTS` inside the INSERT makes the decision and the write one
+    /// statement on one connection inside this actor, so no interleaving is
+    /// possible. The caller learns which way it went and can fall through to
+    /// the lazy path — the important half, because
+    /// `resolveAnalysisAssetId` returns early on a stamped `job.analysisAssetId`
+    /// and would otherwise never reach the weak-upgrade arm that folds the
+    /// placeholder in.
+    ///
+    /// - Returns: `true` when this call wrote the row; `false` when the episode
+    ///   already had one and nothing was written.
+    func insertAssetIfEpisodeHasNone(_ asset: AnalysisAsset) throws -> Bool {
+        let sql = """
+            INSERT INTO analysis_assets
+            (id, episodeId, assetFingerprint, weakFingerprint, sourceURL,
+             featureCoverageEndTime, fastTranscriptCoverageEndTime, confirmedAdCoverageEndTime,
+             analysisState, analysisVersion, capabilitySnapshot, artifact_class,
+             episodeDurationSec, episodeTitle, finalPassCoverageEndTime)
+            SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            WHERE NOT EXISTS (
+                SELECT 1 FROM analysis_assets WHERE episodeId = ?
+            )
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, asset.id)
+        bind(stmt, 2, asset.episodeId)
+        bind(stmt, 3, asset.assetFingerprint)
+        bind(stmt, 4, asset.weakFingerprint)
+        bind(stmt, 5, asset.sourceURL)
+        bind(stmt, 6, asset.featureCoverageEndTime)
+        bind(stmt, 7, asset.fastTranscriptCoverageEndTime)
+        bind(stmt, 8, asset.confirmedAdCoverageEndTime)
+        bind(stmt, 9, asset.analysisState)
+        bind(stmt, 10, asset.analysisVersion)
+        bind(stmt, 11, asset.capabilitySnapshot)
+        bind(stmt, 12, asset.artifactClass.rawValue)
+        bind(stmt, 13, asset.episodeDurationSec)
+        bind(stmt, 14, asset.episodeTitle)
+        bind(stmt, 15, asset.finalPassCoverageEndTime)
+        bind(stmt, 16, asset.episodeId)
+        try step(stmt, expecting: SQLITE_DONE)
+        return sqlite3_changes(db) > 0
+    }
+
+    /// playhead-fzrw R3 — promote a REGISTERED row to `queued` when the
+    /// analysis lane actually takes the episode in hand, and only then.
+    ///
+    /// WHY THIS EXISTS. R2 gave the download-time registration
+    /// ``AnalysisAsset/registeredNotQueuedState`` so a downloaded-but-unanalysed
+    /// episode stops claiming the lane is working on it. That is right for the
+    /// hours the episode spends waiting. It is WRONG the moment the lane
+    /// arrives — and nothing moved it. FIVE statements write this column and no
+    /// others (R5 — this comment previously said "the only writer of this column
+    /// is `AnalysisCoordinator`", which omitted three of them, two added by this
+    /// bead): the two INSERTs, ``insertAsset(_:)`` — serving the scheduler's
+    /// lazy fall-through AND `AnalysisCoordinator`'s placeholder — and
+    /// ``insertAssetIfEpisodeHasNone(_:)``, serving the registration; the two
+    /// ``updateAssetState(id:state:)`` overloads, called only by
+    /// `AnalysisCoordinator` on the PLAY path (`handlePlayStarted` →
+    /// `resolveSession`) and by the one-shot duplicate-fold sweep further down
+    /// this file; and this method. On a registered row for an episode the user
+    /// never played, not one of the other four runs: both inserts are already
+    /// spent and the coordinator never fires, so before this method existed the
+    /// token had no way off the row — the scheduler lane never goes near the
+    /// column (`AnalysisJobRunner.run`'s own header says so). Before this bead
+    /// the token was written by ``AnalysisWorkScheduler/resolveAnalysisAssetId``
+    /// at exactly the instant the lane picked the job up, so the library's
+    /// working bar was correct by accident. With the row minted earlier and
+    /// that insert skipped, `episodePreparationAnalysisActive` read `false` for
+    /// the WHOLE analysis: the ✦ resting glyph and no "Downloaded · analyzing
+    /// N%" caption while the pipeline was genuinely running, then a jump
+    /// straight to ✓ when ad-scan coverage crossed 0.98.
+    ///
+    /// CONDITIONAL, not a plain `UPDATE`. The predicate is the whole safety
+    /// argument: only a row still carrying the registration token moves, so
+    /// this can never overwrite a `SessionState` the coordinator wrote (a
+    /// terminal, or a live mid-pipeline state) no matter how the two lanes
+    /// interleave. Decision and write are one statement on one connection
+    /// inside this actor, the same discipline as
+    /// ``insertAssetIfEpisodeHasNone(_:)``.
+    ///
+    /// - Returns: `true` when this call promoted the row; `false` when it was
+    ///   already carrying some other state and nothing was written.
+    @discardableResult
+    func markRegisteredAssetQueued(id: String) throws -> Bool {
+        let sql = """
+            UPDATE analysis_assets
+            SET analysisState = ?
+            WHERE id = ? AND analysisState = ?
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, SessionState.queued.rawValue)
+        bind(stmt, 2, id)
+        bind(stmt, 3, AnalysisAsset.registeredNotQueuedState)
+        try step(stmt, expecting: SQLITE_DONE)
+        return sqlite3_changes(db) > 0
     }
 
     /// playhead-h7r: count `analysis_assets` rows grouped by
