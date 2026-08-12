@@ -1275,7 +1275,12 @@ actor TrustScoringService {
     /// episode, which with the `manual -> auto` rung closed (playhead-lqcp)
     /// reaches at most `shadow -> manual`, i.e. a banner. Under-crediting a
     /// user-driven escape is worse than over-crediting a banner, so it stays.
-    /// The right fix is a per-detector claim axis; filed, not improvised here.
+    /// The right fix is a per-detector claim axis: **playhead-p1w3**. R5 filed
+    /// it because this sentence used to read "filed, not improvised here" and
+    /// no such bead existed. Note the bound above has an EXPIRY — it holds only
+    /// while playhead-lqcp keeps `manual -> auto` closed, so p1w3 has to be
+    /// resolved before playhead-yhfr reopens the rung, not after: at that point
+    /// three taps inside one episode buy an unasked skip.
     fileprivate static func applyCorrectObservation(
         config: TrustScoringConfig,
         profile: PodcastProfile,

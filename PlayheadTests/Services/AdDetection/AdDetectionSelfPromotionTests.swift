@@ -530,6 +530,29 @@ struct AdDetectionSelfPromotionTests {
             after.mode != SkipMode.auto.rawValue,
             "One episode must never buy an auto-skip; got \(after.mode)"
         )
+        // R5: `!= .auto` alone does not pin the CREATE closure's confidence
+        // branch, and that branch is the only consumer of the second quantity
+        // `recordConfirmedWindowObservation` derives. Measured: replacing the
+        // whole production expression
+        // `confirmedWindows.reduce(0.0){ $0 + $1.confidence } / count` with the
+        // constant `1.0` — which flips every brand-new show from `shadow` to
+        // `manual`, i.e. a banner from episode one on every show a listener
+        // adds — passed the entire trust plan (R5 mutant M5, 95 of 95, and the
+        // only failure in that run belonged to a different mutant). So the
+        // ordinary branch is asserted exactly: `shadow` at the 0.2 seed, which
+        // is what an average BELOW `exceptionalFirstEpisodeConfidence` (0.92)
+        // produces and nothing else does. This also pins the playhead-ar60
+        // half of the choice — `AdWindow.confidence` is the DETECTION number,
+        // and reading `skipConfidence` (actuation, which folds in the
+        // user-correction factor) here would describe the wrong thing.
+        #expect(
+            after.mode == SkipMode.shadow.rawValue,
+            "real corpus ad-window confidences are 0.38-0.63, far below the 0.92 exceptional floor, so a first episode must create in shadow; got \(after.mode)"
+        )
+        #expect(
+            abs(after.skipTrustScore - 0.2) < scoreTolerance,
+            "the ordinary create branch seeds trust at 0.2; the exceptional one seeds 0.5, so this distinguishes them; got \(after.skipTrustScore)"
+        )
         #expect(
             after.observationCount == 1,
             "and it counts as exactly one episode; got \(after.observationCount)"
@@ -655,5 +678,99 @@ struct AdDetectionSelfPromotionTests {
 
         let after = try #require(await store.fetchProfile(podcastId: podcastId))
         #expect(after.mode == SkipMode.auto.rawValue, "got \(after.mode)")
+    }
+
+    // MARK: - 7. The credit reaches the PER-CLASS gate, end to end (R5)
+
+    /// R4 gave `recordSuccessfulObservation` a `detectors:` argument so a
+    /// promotion could reach the value the skip gate actually reads —
+    /// `SkipOrchestrator.skipMode(for:)` resolves `activeDetectorSkipModes`,
+    /// a PER-CLASS verdict, and a forked ledger stops tracking the show
+    /// scalar. It covered that argument with unit calls that pass the set BY
+    /// HAND (`SelfObservationReachesTheGateTests`), and every end-to-end test
+    /// in this suite runs on a VIRGIN ledger, where the seed still tracks the
+    /// scalar and moving the scalar alone is enough.
+    ///
+    /// So nothing connected PRODUCTION's derivation of that set —
+    /// `Set(confirmedWindows.map(\.detectorClass))` in
+    /// `AdDetectionService.recordConfirmedWindowObservation` — to the ladder.
+    /// R5 measured it: replacing that expression with `[]`, which is EXACTLY
+    /// the pre-R4 behaviour R4 exists to fix ("moves only the scalar"), passed
+    /// the whole trust plan — 94 of 94, exit 0. The argument existed and
+    /// nothing proved the caller filled it.
+    ///
+    /// This is the missing link, and the fork is what makes it bite: until an
+    /// attributed gesture materializes the ledger, a class with no stored
+    /// entry reads through `DetectorTrustLedger.seed` and the show scalar is
+    /// the answer. The veto below names `.userAsserted` — a class a backfill
+    /// can never draw, since every fusion row carries
+    /// `AdBoundaryState.acousticRefined` — so the fork is created without
+    /// charging the class whose credit is under test.
+    @Test("R5: a real backfill credits the classes ITS OWN windows were drawn by")
+    func backfillCreditsTheClassesItsWindowsWereDrawnBy() async throws {
+        let store = try await makeTestStore()
+        let podcastId = "podcast-mn5e-r5-forked"
+        let assetId = "asset-mn5e-r5-forked"
+
+        // obs=2 so this backfill is the third — `shadowToManualObservations`.
+        try await store.upsertProfile(
+            makeProfile(podcastId: podcastId, mode: .shadow, trust: 0.5, observations: 2)
+        )
+        let trust = TrustScoringService(store: store)
+        await trust.recordFalseSkipSignal(
+            podcastId: podcastId,
+            attributions: [
+                DetectorVetoAttribution(detector: .userAsserted, tier: .none)
+            ]
+        )
+        let forked = try #require(await store.fetchProfile(podcastId: podcastId))
+        try #require(
+            forked.detectorTrustJSON != nil,
+            "the veto must have forked the ledger, or the seed still tracks the scalar and this test proves nothing"
+        )
+
+        let service = makeService(store: store)
+        await service.setTrustScoringService(trust)
+        let after = try await runOneAdBearingBackfill(
+            store: store, service: service,
+            podcastId: podcastId, assetId: assetId
+        )
+
+        // The classes production actually named, read the way production reads
+        // them: the non-suppressed rows' own `detectorClass`.
+        let drawnBy = Set(
+            try await store.fetchAdWindows(assetId: assetId)
+                .filter { $0.decisionState != AdDecisionState.suppressed.rawValue }
+                .map(\.detectorClass)
+        )
+        try #require(
+            !drawnBy.isEmpty,
+            "the fixture must leave non-suppressed windows, or the observation never runs"
+        )
+        try #require(
+            !drawnBy.contains(.userAsserted),
+            "premise: the vetoed class must not be one a backfill draws; got \(drawnBy)"
+        )
+
+        #expect(
+            after.mode == SkipMode.manual.rawValue,
+            "the show scalar must promote; got \(after.mode) obs=\(after.observationCount)"
+        )
+        let ledger = after.detectorTrustLedger
+        let modes = await trust.resolveDetectorModes(podcastId: podcastId)
+        for detector in drawnBy.sorted(by: { $0.rawValue < $1.rawValue }) {
+            let entry = try #require(
+                ledger.entries[detector.rawValue],
+                "\(detector.rawValue) drew a confirmed window and must have a stored entry"
+            )
+            #expect(
+                entry.observationCount == 3,
+                "\(detector.rawValue) must have been credited this episode; got \(entry.observationCount)"
+            )
+            #expect(
+                modes.mode(for: detector) == .manual,
+                "\(detector.rawValue) is what the skip gate reads, and it must have moved with the scalar; got \(String(describing: modes.mode(for: detector)))"
+            )
+        }
     }
 }
