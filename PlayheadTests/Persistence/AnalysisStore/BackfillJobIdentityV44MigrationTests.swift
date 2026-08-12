@@ -59,10 +59,12 @@ struct BackfillJobIdentityV44MigrationTests {
         try await store.migrate()
 
         #expect(try await store.schemaVersion() == AnalysisStore.currentSchemaVersion)
-        // Drift guard, pinned to the LITERAL head (45 → 46, playhead-3oyz's
-        // additive day-0 retry-claim columns). Never `== currentSchemaVersion`:
-        // that passes for every value and stops policing anything.
-        #expect(AnalysisStore.currentSchemaVersion == 48)
+        // Drift guard, pinned to the LITERAL head (48 → 49, playhead-mn5e/2qz6's
+        // `trust_episode_observations` ledger + the `observationCount` reset).
+        // Never `== currentSchemaVersion`: that passes for every value and stops
+        // policing anything. V49 touches only `podcast_profiles` and a new
+        // table, so the `attemptTranscriptVersion` probe below is untouched.
+        #expect(AnalysisStore.currentSchemaVersion == 49)
 
         try await store.insertAsset(makeAsset(id: "asset-fresh"))
         try await store.insertBackfillJob(
@@ -139,7 +141,16 @@ struct BackfillJobIdentityV44MigrationTests {
         // A v43-seeded DB must climb the WHOLE remaining ladder, not just the
         // V44 rung under test — pinned to the literal head for the same reason
         // as the drift guard above.
-        #expect(try await store.schemaVersion() == 48)
+        //
+        // This one is NOT the same assertion as the drift guard: it reads the
+        // version off the DATABASE, not off the constant, so it is the only pin
+        // in the suite that would still fail if a new rung were added to the
+        // constant but never reached from an old seed. That is exactly the risk
+        // V49 carries — `migrateTrustEpisodeObservationsV49IfNeeded` refuses to
+        // run below 48 (the deliberate don't-step-over-a-rolled-back-V39 rule),
+        // so a v43 seed only reaches 49 if every rung from 44 up actually ran.
+        // 49 here is therefore a real claim about the ladder, not a restatement.
+        #expect(try await store.schemaVersion() == 49)
         #expect(try await store.fetchBackfillJob(byId: "fm-legacy-complete") == nil,
                 "a completed row minted under the old preimage cannot be addressed again")
         #expect(try await store.fetchBackfillJob(byId: "fm-legacy-queued") == nil,

@@ -1001,8 +1001,8 @@ struct TrustScoringTests {
                 "3 observations at trust 0.4 should promote to manual")
     }
 
-    @Test("Promotion manual -> auto after many observations with high trust")
-    func manualToAuto() async throws {
+    @Test("playhead-lqcp: many observations with high trust stop at manual")
+    func manualToAutoIsClosed() async throws {
         let store = try await makeTestStore()
         // Pre-seed a profile in manual mode with trust near auto threshold.
         let profile = makePodcastProfile(
@@ -1013,13 +1013,19 @@ struct TrustScoringTests {
         let config = TrustScoringConfig.default
         let trust = TrustScoringService(store: store, config: config)
 
-        // Next observation bumps trust to 0.77 and obs to 8.
+        // Next observation bumps trust to 0.77 and obs to 8 — every legacy
+        // clause of the auto rung. The rung is closed: auto cuts audio with no
+        // gesture, and Dan's ruling makes that conditional on a HIGH-CONFIDENCE
+        // quantity that does not exist yet (`AutoPromotionConfidenceEvidence`).
         await trust.recordSuccessfulObservation(
             podcastId: "podcast-1", averageConfidence: 0.80
         )
         let mode = await trust.effectiveMode(podcastId: "podcast-1")
-        #expect(mode == .auto,
-                "8 observations at 0.77 trust should promote to auto")
+        #expect(mode == .manual,
+                "8 observations at 0.77 trust must NOT self-promote to auto; got \(String(describing: mode))")
+        // Non-vacuous: the observation itself was recorded.
+        let after = try #require(await store.fetchProfile(podcastId: "podcast-1"))
+        #expect(after.observationCount == 8)
     }
 
     @Test("Demotion auto -> manual on false signals")

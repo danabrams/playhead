@@ -679,23 +679,41 @@ struct ManualModeEscapabilityTests {
     /// production callers, so the counter was monotonically increasing and the
     /// show could never earn its way back. A confirmed banner was wired to
     /// `recordFalseNegativeSignal`, which lowers trust further.
-    @Test("THE DOOR OPENS: correct observations walk the device row back to auto")
+    /// playhead-lqcp REVISED THE DESTINATION OF THIS TEST, not its subject.
+    ///
+    /// The door this bead opened is the one out of a VETO — the false-signal
+    /// counter decaying to 0 — and that is still exactly what happens. What no
+    /// longer happens is the last step, `manual -> auto`: it is closed at
+    /// `AutoPromotionConfidenceEvidence.unavailable` because Dan's ruling makes
+    /// auto conditional on HIGH CONFIDENCE and no quantity on this tree can
+    /// evaluate that. Auto is the rung that cuts audio with no gesture, so the
+    /// unevaluable conditional resolves closed.
+    ///
+    /// The assertion is therefore `.manual` with the counter at 0 — a show that
+    /// has earned back everything it can earn, standing at the closed rung.
+    @Test("THE DOOR OPENS: correct observations walk the device row back out of the veto")
     func correctObservationsEscapeManual() async throws {
         let (sut, store) = try await gardService(seed: danFieldProfile())
 
         var modes = await sut.resolveDetectorModes(podcastId: gardPodcastId)
         #expect(modes.mode(for: .fusion) == .manual, "the starting posture")
 
-        // manual → auto needs observations >= 8, trust >= 0.75, no signals.
-        // From (obs 1, trust 0.20, signals 3): 8 confirmations clear all three.
-        for _ in 0..<8 {
+        // Eight confirmations, each on a DIFFERENT episode (playhead-fh5v: the
+        // show's `observationCount` is claimed per `(podcastId,
+        // analysisAssetId)`, so eight taps on one asset would be one episode).
+        for index in 0..<8 {
             await sut.recordCorrectObservation(
-                podcastId: gardPodcastId, detector: .fusion
+                podcastId: gardPodcastId,
+                analysisAssetId: "asset-escape-\(index)",
+                detector: .fusion
             )
         }
 
         modes = await sut.resolveDetectorModes(podcastId: gardPodcastId)
-        #expect(modes.mode(for: .fusion) == .auto)
+        #expect(
+            modes.mode(for: .fusion) == .manual,
+            "playhead-lqcp: the observations clear every legacy clause, and the auto rung is closed anyway; got \(String(describing: modes.mode(for: .fusion)))"
+        )
 
         let profile = try #require(
             await store.fetchProfile(podcastId: gardPodcastId)
@@ -705,16 +723,91 @@ struct ManualModeEscapabilityTests {
             "the counter DECAYS — the property that made the door one-way"
         )
         #expect(
-            profile.mode == SkipMode.auto.rawValue,
-            "the show-level scalar escapes too, so an older binary is not stranded"
+            abs(profile.skipTrustScore - 1.0) < 1e-9,
+            "and trust is at the ceiling, so nothing but the closed rung is holding it; got \(profile.skipTrustScore)"
         )
+        #expect(
+            profile.mode == SkipMode.manual.rawValue,
+            "the show-level scalar stands at the same closed rung as the detector"
+        )
+        // playhead-fh5v: eight taps on eight distinct episodes are eight
+        // episodes, and the ledger is the independent witness for that.
+        #expect(profile.observationCount == 9, "the seeded 1 plus eight claimed episodes; got \(profile.observationCount)")
+        #expect(try await store.episodeTrustObservationCount(podcastId: gardPodcastId) == 8)
+    }
+
+    /// playhead-fh5v: the same eight taps INSIDE ONE EPISODE.
+    ///
+    /// Before the fix this method was a second, unledgered writer of
+    /// `observationCount`, so this scenario bought eight episodes of credit for
+    /// one episode — and made the bead's own "the two numbers must agree"
+    /// diagnostic unusable, since one side had no rows to count. Everything
+    /// per-GESTURE still moves eight times; only the episode count is claimed.
+    @Test("playhead-fh5v: eight banner Yeses in ONE episode count as ONE episode")
+    func repeatedTapsInOneEpisodeCountOnce() async throws {
+        let (sut, store) = try await gardService(seed: danFieldProfile())
+
+        for _ in 0..<8 {
+            await sut.recordCorrectObservation(
+                podcastId: gardPodcastId,
+                analysisAssetId: "asset-one-episode",
+                detector: .fusion
+            )
+        }
+
+        let profile = try #require(
+            await store.fetchProfile(podcastId: gardPodcastId)
+        )
+        #expect(
+            profile.observationCount == 2,
+            "the seeded 1 plus the ONE episode these taps were about; got \(profile.observationCount)"
+        )
+        #expect(
+            try await store.episodeTrustObservationCount(podcastId: gardPodcastId) == 1,
+            "and the ledger agrees, which is the whole point of having it"
+        )
+        // The per-gesture quantities are untouched by the claim: eight decays
+        // floor the veto counter at 0 and eight bonuses cap trust at 1.0.
+        #expect(profile.recentFalseSkipSignals == 0)
+        #expect(abs(profile.skipTrustScore - 1.0) < 1e-9)
+    }
+
+    /// The claim is shared with the backfill, not a private one — so an episode
+    /// the analysis lane already counted is not counted a second time by a tap.
+    @Test("playhead-fh5v: a Yes on an episode the backfill already claimed adds no episode")
+    func tapOnAnAlreadyClaimedEpisodeAddsNothing() async throws {
+        let (sut, store) = try await gardService(seed: danFieldProfile())
+
+        // Stand in for the backfill: it takes the claim first.
+        #expect(try await store.claimEpisodeTrustObservation(
+            podcastId: gardPodcastId, analysisAssetId: "asset-backfilled"
+        ))
+
+        await sut.recordCorrectObservation(
+            podcastId: gardPodcastId,
+            analysisAssetId: "asset-backfilled",
+            detector: .fusion
+        )
+
+        let profile = try #require(
+            await store.fetchProfile(podcastId: gardPodcastId)
+        )
+        #expect(
+            profile.observationCount == 1,
+            "unchanged from the seed — the episode was already counted; got \(profile.observationCount)"
+        )
+        #expect(try await store.episodeTrustObservationCount(podcastId: gardPodcastId) == 1)
+        // But the gesture still did its per-gesture work.
+        #expect(profile.recentFalseSkipSignals == 2, "one unit of veto evidence decayed")
     }
 
     @Test("Each correct observation decays exactly one unit of false-signal evidence")
     func decayIsOneUnitPerObservation() async throws {
         let (sut, store) = try await gardService(seed: danFieldProfile())
         await sut.recordCorrectObservation(
-            podcastId: gardPodcastId, detector: .segmentAggregated
+            podcastId: gardPodcastId,
+            analysisAssetId: "asset-decay-1",
+            detector: .segmentAggregated
         )
         let profile = try #require(
             await store.fetchProfile(podcastId: gardPodcastId)
@@ -727,30 +820,68 @@ struct ManualModeEscapabilityTests {
         )
     }
 
+    /// Credit is still per-class; what changed under playhead-lqcp is that the
+    /// two classes are now separated by their EVIDENCE rather than by their
+    /// destination. `.fusion` earns eight confirmations and a cleared veto
+    /// counter; `.segmentAggregated` earns nothing and keeps its own weight.
+    /// Both stand at `.manual` because the auto rung is closed for everybody,
+    /// so the ledger's per-class state is what this asserts.
     @Test("Credit goes to the observed detector only")
     func creditIsNotShared() async throws {
-        let (sut, _) = try await gardService(seed: danFieldProfile())
-        for _ in 0..<8 {
+        let (sut, store) = try await gardService(seed: danFieldProfile())
+        for index in 0..<8 {
             await sut.recordCorrectObservation(
-                podcastId: gardPodcastId, detector: .fusion
+                podcastId: gardPodcastId,
+                analysisAssetId: "asset-credit-\(index)",
+                detector: .fusion
             )
         }
         let modes = await sut.resolveDetectorModes(podcastId: gardPodcastId)
-        #expect(modes.mode(for: .fusion) == .auto)
+        #expect(modes.mode(for: .fusion) == .manual)
         #expect(
             modes.mode(for: .segmentAggregated) == .manual,
             "the aggregator earned nothing and stays where it was"
         )
+        // The modes agree, so the separation has to be read off the ledger —
+        // otherwise this test would pass with credit shared show-wide.
+        let ledger = try #require(
+            await store.fetchProfile(podcastId: gardPodcastId)
+        ).detectorTrustLedger
+        let fusion = try #require(ledger.entries[SkipDetectorClass.fusion.rawValue])
+        let aggregator = try #require(
+            ledger.entries[SkipDetectorClass.segmentAggregated.rawValue]
+        )
+        #expect(fusion.falseSkipWeight == 0, "eight decays cleared it")
+        #expect(
+            aggregator.falseSkipWeight == 3,
+            "the aggregator's own seeded weight is untouched; got \(aggregator.falseSkipWeight)"
+        )
+        #expect(fusion.trustScore > aggregator.trustScore)
     }
 
     @Test("A correct observation on a show with no profile creates nothing")
     func noLazyCreate() async throws {
         let (sut, store) = try await gardService(seed: nil)
         await sut.recordCorrectObservation(
-            podcastId: gardPodcastId, detector: .fusion
+            podcastId: gardPodcastId,
+            analysisAssetId: "asset-nolazy",
+            detector: .fusion
         )
         let profile = try await store.fetchProfile(podcastId: gardPodcastId)
         #expect(profile == nil)
+        // playhead-fh5v: and the episode's claim must NOT have been spent on a
+        // mutation that never happened — a burnt claim would cost this episode
+        // its credit permanently once the profile does appear.
+        #expect(
+            try await store.episodeTrustObservationCount(podcastId: gardPodcastId) == 0,
+            "no profile, no observation, therefore no claim"
+        )
+        #expect(
+            try await store.claimEpisodeTrustObservation(
+                podcastId: gardPodcastId, analysisAssetId: "asset-nolazy"
+            ),
+            "the episode is still claimable afterwards"
+        )
     }
 
     @Test("An explicit user override clears the stale evidence against every detector")

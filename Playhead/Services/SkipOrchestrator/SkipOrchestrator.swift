@@ -5923,9 +5923,19 @@ actor SkipOrchestrator {
                 }
             } else if let trustService {
                 let detector = detectorClass(for: suggested)
+                // playhead-fh5v: the episode this tap is about. `observationCount`
+                // counts EPISODES through `trust_episode_observations`, so the
+                // recorder needs the asset identity to claim against — without
+                // it, four Yes taps in one episode bought four episodes of
+                // credit and wrote no ledger row to disagree with. `assetId` is
+                // `suggested.analysisAssetId`, captured above with the rest of
+                // the source material so a `beginEpisode` during the awaits
+                // cannot re-point it at a different episode.
+                let observedAssetId = assetId
                 Task {
                     await trustService.recordCorrectObservation(
                         podcastId: podcastId,
+                        analysisAssetId: observedAssetId,
                         detector: detector
                     )
                 }

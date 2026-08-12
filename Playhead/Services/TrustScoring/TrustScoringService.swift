@@ -144,6 +144,51 @@ struct SkipModeSnapshot: Sendable, Equatable {
 
 // MARK: - Trust Scoring Configuration
 
+/// What the `manual -> auto` rung is allowed to believe about a show's
+/// detection confidence — **and why it has exactly one case today.**
+///
+/// playhead-lqcp. Dan's ruling on self-promotion is a CONDITIONAL: a show
+/// "should go all the way to auto IF IT IS HIGH CONFIDENCE". Auto is the rung
+/// where the app cuts audio with no gesture, so the condition is the whole
+/// ruling — and **nothing on this tree can evaluate it.** Three measurements,
+/// not opinions:
+///
+///   * `recordSuccessfulObservation` takes `averageConfidence`, reads it once
+///     in the CREATE closure (`exceptionalFirstEpisodeConfidence`, 0.92) and
+///     DISCARDS it on every update. No confidence a show accumulates is
+///     persisted anywhere, so there is no show-level quantity to threshold.
+///   * `manualToAutoTrustScore` (0.75) looks like the missing condition and is
+///     not: `skipTrustScore` moves in lockstep with the observation counter
+///     (+`correctObservationBonus` per observation from a 0.2 floor), so it
+///     clears at N=7 while `manualToAutoObservations` demands N=8. It has never
+///     been able to withhold a promotion. A counter wearing a confidence's name
+///     is the standing defect class, and it is why this gate is not written as
+///     one more threshold.
+///   * Measured real ad-window confidences on the production corpus are
+///     0.38–0.63 (`DE0784D8MidRollPodFixture`), against the 0.7 floor used
+///     elsewhere. Whatever "high confidence" turns out to mean, today's numbers
+///     are not it.
+///
+/// **A conditional whose condition cannot be evaluated is not satisfied.** So
+/// the rung is CLOSED, deliberately and in the open, rather than left to fall
+/// through a threshold that cannot bite. `shadow -> manual` is unaffected and
+/// still proceeds on self-observation: it unlocks a BANNER, and the worst case
+/// is a card the user ignores.
+///
+/// **What would open it.** A named, persisted, show-level detection-confidence
+/// quantity, plus Dan's floor for it — the next bead, which needs field data
+/// that only exists once this ships. Adding the second case here is a compile
+/// error at every `switch` below, which is the point: the rung reopens because
+/// somebody decided to reopen it, not because a number drifted past a
+/// threshold. Do not replace this with a `Bool` or a `Double?`; either can be
+/// flipped without supplying the evidence, which is exactly the accident this
+/// type exists to prevent.
+enum AutoPromotionConfidenceEvidence: Sendable, Equatable {
+    /// No quantity exists that can answer "is this show's detection HIGH
+    /// CONFIDENCE?". While this is the only case, `manual -> auto` never fires.
+    case unavailable
+}
+
 struct TrustScoringConfig: Sendable {
     /// Minimum observations before promoting shadow -> manual.
     let shadowToManualObservations: Int
@@ -171,6 +216,17 @@ struct TrustScoringConfig: Sendable {
     /// while still running `evaluateDemotion` so two rewinds in a row
     /// genuinely demote auto -> manual.
     let weakFalseSignalPenalty: Double
+
+    /// playhead-lqcp: the evidence the `manual -> auto` rung requires. There is
+    /// exactly one case and it means "cannot be evaluated", so the rung is
+    /// CLOSED — see `AutoPromotionConfidenceEvidence` for the measurements
+    /// behind that and for what would open it.
+    ///
+    /// A `let` with a default is deliberately OMITTED from the synthesized
+    /// memberwise initializer: the four test call sites that build a custom
+    /// config keep compiling, and none of them can open the rung by passing a
+    /// different value. Opening it is a source edit here, next to the reasons.
+    let autoPromotionConfidence: AutoPromotionConfidenceEvidence = .unavailable
 
     static let `default` = TrustScoringConfig(
         shadowToManualObservations: 3,
@@ -894,11 +950,76 @@ actor TrustScoringService {
     /// Both representations move together so the pill and the policy cannot
     /// disagree. No lazy-create: a show with no profile row has never been
     /// observed and stubbing one would invent priors.
+    ///
+    /// **`analysisAssetId` is what stops this being a second, uncounted writer
+    /// of `observationCount` (playhead-fh5v).** The column counts EPISODES —
+    /// `ShowLocalPriorsBuilder` calls it "number of episodes processed",
+    /// `NetworkPriors.decayedWeight` names its parameter `episodesObserved` —
+    /// and playhead-2qz6 gave it a ledger, `trust_episode_observations`, so
+    /// that claim is checkable rather than asserted. This method was
+    /// incrementing the same column once per GESTURE and writing no ledger row,
+    /// so four banner Yeses inside one episode bought four episodes of credit
+    /// AND broke the "the two numbers must agree" diagnostic by construction.
+    ///
+    /// So the tap goes through the SAME claim the backfill takes, on the same
+    /// `(podcastId, analysisAssetId)` key. Two consequences, both intended:
+    ///
+    ///   * A Yes on an episode the backfill already counted moves trust, decays
+    ///     a false signal and credits the detector — but does NOT count a
+    ///     second episode. It is the same episode.
+    ///   * A Yes on an episode nothing has claimed — the backfill found no
+    ///     confirmed windows, or ran with no trust service, or has not run yet
+    ///     — TAKES the claim and counts. That is the case for choosing "claim
+    ///     the same episode" over "carry the count forward and let only the
+    ///     backfill write it": a user's Yes is a better witness than the
+    ///     detector's own output, and it should be able to be the first one.
+    ///
+    /// The per-detector entry's own `observationCount` is deliberately NOT
+    /// claim-gated; see `applyCorrectObservation`.
     func recordCorrectObservation(
         podcastId: String,
+        analysisAssetId: String,
         detector: SkipDetectorClass
     ) async {
         let config = self.config
+        // DO NOT SPEND THE CLAIM ON A SHOW WITH NO PROFILE ROW. The mutation
+        // below is `…IfExists` and no-ops for such a show, and a claim taken
+        // for a mutation that did not happen would cost that episode its credit
+        // permanently — the exact failure `recordConfirmedWindowObservation`
+        // orders its own claim to avoid.
+        //
+        // The gap between this read and the claim is benign in one direction
+        // only, which is why it is acceptable: profiles are created but never
+        // deleted, so the read can only be stale by saying "absent" about a row
+        // that has just appeared. That skips counting ONE episode; the next one
+        // counts. The reverse — claiming for a row that vanished — cannot
+        // happen.
+        let profileExists: Bool
+        do {
+            profileExists = try await store.fetchProfile(podcastId: podcastId) != nil
+        } catch {
+            logger.warning("Could not read the profile for \(podcastId) before a correct observation: \(error.localizedDescription)")
+            return
+        }
+        // Claim BEFORE mutating, so the increment and the ledger row are
+        // decided by one atomic statement rather than by two readers agreeing.
+        // A failure to claim is reported and the gesture still moves everything
+        // that is per-gesture — trust, the false-signal decay, the ledger.
+        var countsAsEpisode = false
+        if !profileExists {
+            logger.info("No profile for \(podcastId) yet; the correct observation cannot be recorded and the episode stays claimable")
+        } else if analysisAssetId.isEmpty {
+            logger.warning("Correct observation for \(podcastId) carried no analysisAssetId; trust moves but no episode is counted")
+        } else {
+            do {
+                countsAsEpisode = try await store.claimEpisodeTrustObservation(
+                    podcastId: podcastId,
+                    analysisAssetId: analysisAssetId
+                )
+            } catch {
+                logger.warning("Could not claim the episode trust observation for \(podcastId): \(error.localizedDescription); trust moves but no episode is counted")
+            }
+        }
         let outcome: (profile: PodcastProfile, captured: SkipMode)?
         do {
             outcome = try await store.updateProfileIfExistsCapturing(
@@ -907,7 +1028,8 @@ actor TrustScoringService {
                     Self.applyCorrectObservation(
                         config: config,
                         profile: profile,
-                        detector: detector
+                        detector: detector,
+                        countsAsEpisode: countsAsEpisode
                     )
                 }
             )
@@ -920,7 +1042,7 @@ actor TrustScoringService {
             return
         }
         let result = outcome.profile
-        logger.info("Correct observation \(podcastId) detector=\(detector.rawValue): detectorMode=\(outcome.captured.rawValue) showMode=\(result.mode) trust=\(result.skipTrustScore, format: .fixed(precision: 2)) falseSignals=\(result.recentFalseSkipSignals)")
+        logger.info("Correct observation \(podcastId) detector=\(detector.rawValue): detectorMode=\(outcome.captured.rawValue) showMode=\(result.mode) trust=\(result.skipTrustScore, format: .fixed(precision: 2)) falseSignals=\(result.recentFalseSkipSignals) newEpisode=\(countsAsEpisode)")
     }
 
     private func logDetectorDemotions(
@@ -1046,13 +1168,34 @@ actor TrustScoringService {
 
     /// The correct-observation write, as one pure transform. Captures the
     /// detector's resulting mode so the caller can log it.
+    ///
+    /// `countsAsEpisode` is the result of this gesture's
+    /// `trust_episode_observations` claim (playhead-fh5v). It gates the SHOW's
+    /// `observationCount` and nothing else — the trust bonus, the false-signal
+    /// decay and the whole per-detector entry are PER-GESTURE quantities and
+    /// move on every tap.
+    ///
+    /// **The per-detector entry's `observationCount` is deliberately not
+    /// gated, and the asymmetry is a real decision rather than an oversight.**
+    /// The show column has a ledger that defines it as episodes; the entry's
+    /// counter has none, and the only writer that could give it one is this
+    /// method. Gate it on the same claim and it freezes: the backfill path
+    /// claims almost every episode without ever touching the ledger, so an
+    /// entry materialized early would sit at its seed forever and that class
+    /// could never leave `shadow` on its own evidence — the escape hatch
+    /// playhead-gard exists to provide. Left ungated it over-counts within one
+    /// episode, which with the `manual -> auto` rung closed (playhead-lqcp)
+    /// reaches at most `shadow -> manual`, i.e. a banner. Under-crediting a
+    /// user-driven escape is worse than over-crediting a banner, so it stays.
+    /// The right fix is a per-detector claim axis; filed, not improvised here.
     fileprivate static func applyCorrectObservation(
         config: TrustScoringConfig,
         profile: PodcastProfile,
-        detector: SkipDetectorClass
+        detector: SkipDetectorClass,
+        countsAsEpisode: Bool
     ) -> (PodcastProfile, SkipMode) {
         // --- Legacy triple: bonus, ONE unit of decay, promotion.
-        let newObservations = profile.observationCount + 1
+        let newObservations = profile.observationCount + (countsAsEpisode ? 1 : 0)
         let newTrust = min(1.0, profile.skipTrustScore + config.correctObservationBonus)
         let newFalseSignals = max(0, profile.recentFalseSkipSignals - 1)
         let currentMode = SkipMode(rawValue: profile.mode) ?? .shadow
@@ -1177,10 +1320,37 @@ actor TrustScoringService {
                 return .manual
             }
         case .manual:
-            if observations >= config.manualToAutoObservations
-                && trustScore >= config.manualToAutoTrustScore
-                && recentFalseSignals == 0 {
-                return .auto
+            // playhead-lqcp: THE AUTO RUNG IS CLOSED. This is not an oversight
+            // and it is not dead code — read `AutoPromotionConfidenceEvidence`
+            // before touching it.
+            //
+            // Until playhead-mn5e nothing in production called
+            // `recordSuccessfulObservation`, so `skipTrustScore` sat frozen at
+            // its seed on every device row and this rung never ran. Wiring the
+            // backfill up un-freezes it: trust climbs +0.10 per episode and the
+            // clauses below all clear at episode 8 — **auto, with zero user
+            // gestures.** It reaches real skips, too: `DetectorTrustLedger.seed`
+            // copies `profile.mode` verbatim into every show-governed class,
+            // and `SkipOrchestrator` acts on `.auto` (it promotes candidates
+            // without waiting for backfill confirmation, and fires the cue).
+            //
+            // Dan's ruling allows exactly that — "it should go all the way to
+            // auto IF IT IS HIGH CONFIDENCE" — and the condition is the part
+            // that cannot be evaluated today. So the conditional is not
+            // satisfied and the rung does not fire.
+            //
+            // The clauses it used to fire on were
+            // `observations >= manualToAutoObservations (8)`,
+            // `trustScore >= manualToAutoTrustScore (0.75)` and
+            // `recentFalseSignals == 0`. They are deleted rather than kept
+            // inert, because leaving an unreachable predicate behind invites
+            // the next hand to re-enable it by deleting the guard — and note
+            // what the list does NOT contain: any notion of confidence. That
+            // absence is the whole bead, so the reopening bead should compose
+            // its own gate deliberately rather than inherit these three.
+            switch config.autoPromotionConfidence {
+            case .unavailable:
+                break
             }
         case .auto:
             break // Already at max.
@@ -1241,10 +1411,20 @@ actor TrustScoringService {
                 return .manual
             }
         case .manual:
-            if observations >= config.manualToAutoObservations
-                && trustScore >= config.manualToAutoTrustScore
-                && falseSkipWeight <= 0 {
-                return .auto
+            // playhead-lqcp: CLOSED here too, and this sibling is the reason
+            // gating only the show-level one would have been half a fix.
+            //
+            // A per-detector entry is seeded from the SHOW
+            // (`DetectorTrustLedger.seed` copies `skipTrustScore`,
+            // `observationCount` and `mode` straight across), so once
+            // self-observation has carried a show to trust 1.0 / 8 episodes, a
+            // single banner Yes materializes an entry at those values and this
+            // rung promotes that ONE CLASS to `.auto` — the same unasked skip,
+            // one layer below the show scalar. Same ruling, same unevaluable
+            // condition, same answer.
+            switch config.autoPromotionConfidence {
+            case .unavailable:
+                break
             }
         case .auto:
             break

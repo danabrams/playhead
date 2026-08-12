@@ -25,6 +25,13 @@
 //      set; the new caller matches that guard so the two cannot drift.)
 //   5. SAFETY: a promoted show can still be demoted, and a vetoed show cannot
 //      climb back to `.auto` on self-observation alone.
+//   6. SAFETY (playhead-lqcp): `manual -> auto` does not fire AT ALL, at either
+//      the show scalar or a per-detector ledger entry, while
+//      `AutoPromotionConfidenceEvidence` has only its `.unavailable` case. This
+//      is the finding wiring up (1) created: un-freezing `skipTrustScore`
+//      un-freezes the top rung too, and that rung cuts audio with no gesture.
+//      Section 6 also pins what the closure must NOT break — an explicit user
+//      override still reaches auto.
 
 import Foundation
 import Testing
@@ -381,12 +388,16 @@ struct AdDetectionSelfPromotionTests {
 
     // MARK: - 4. Safety: demotion still works after a promotion
 
-    @Test("A show promoted to auto can still be demoted by user vetoes")
+    @Test("A show sitting in auto can still be demoted by user vetoes")
     func promotedShowCanStillBeDemoted() async throws {
         let store = try await makeTestStore()
         let podcastId = "podcast-mn5e-demote"
 
-        // Stand where self-promotion can leave a show: `.auto`, clean record.
+        // `.auto` with a clean record. Under playhead-lqcp self-observation can
+        // no longer put a show here — an explicit user override can, and a row
+        // written by an older binary already is — so this is the posture the
+        // demotion path has to keep working for, and the seed is written
+        // directly rather than promoted into.
         try await store.upsertProfile(
             makeProfile(podcastId: podcastId, mode: .auto, trust: 0.9, observations: 20)
         )
@@ -415,8 +426,15 @@ struct AdDetectionSelfPromotionTests {
         let podcastId = "podcast-mn5e-vetoed"
 
         // A show the user has vetoed twice: demoted to manual, counter at 2.
-        // Observations and trust are both already past the manual -> auto bar,
-        // so `recentFalseSkipSignals == 0` is the ONLY thing holding it.
+        // Observations and trust are both already past the manual -> auto bar.
+        //
+        // playhead-lqcp made this test WEAKER than it was written to be, and
+        // saying so is the honest move: with the auto rung closed outright,
+        // `recentFalseSkipSignals` is no longer the operative clause here —
+        // `cleanManualShowDoesNotReachAuto` proves the identical profile with
+        // the counter at 0 also stays manual. What survives is the claim in the
+        // second assertion, which is about the counter itself and is unchanged:
+        // self-observation must not decay a user's veto.
         try await store.upsertProfile(
             makeProfile(
                 podcastId: podcastId, mode: .manual, trust: 0.9,
@@ -434,7 +452,7 @@ struct AdDetectionSelfPromotionTests {
 
         #expect(
             after.mode == SkipMode.manual.rawValue,
-            "manual -> auto requires recentFalseSkipSignals == 0. Self-observation must NOT relitigate a user veto; got \(after.mode)"
+            "self-observation must not move a vetoed show up; got \(after.mode)"
         )
         #expect(
             after.recentFalseSkipSignals == 2,
@@ -517,14 +535,35 @@ struct AdDetectionSelfPromotionTests {
         #expect(try await store.episodeTrustObservationCount(podcastId: podcastId) == 1)
     }
 
-    @Test("A clean manual show does reach auto, so the vetoed case above is not vacuous")
-    func cleanManualShowReachesAuto() async throws {
+    // MARK: - 6. playhead-lqcp: the auto rung is CLOSED
+    //
+    // This is the safety finding this bead's own wiring created. Un-freezing
+    // `skipTrustScore` un-freezes the whole ladder, and its top rung cuts audio
+    // with no gesture: from a fresh install, +0.10 trust and +1 episode each
+    // time, `manual -> auto` cleared at EPISODE 8 with the user never having
+    // touched anything.
+    //
+    // Dan's ruling permits that, conditionally — "it should go all the way to
+    // auto IF IT IS HIGH CONFIDENCE" — and the condition has no quantity behind
+    // it: `averageConfidence` is read once in the create closure and discarded
+    // on every update, `manualToAutoTrustScore` (0.75) is cleared by the
+    // observation counter itself one episode early and so can never withhold a
+    // promotion, and measured real ad confidences on this corpus are 0.38-0.63.
+    // A conditional whose condition cannot be evaluated is not satisfied.
+    //
+    // These tests pin the closure at the two places `evaluatePromotion` is
+    // reachable — the SHOW scalar and a per-detector LEDGER entry — because
+    // gating only the first leaves the second promoting one class to auto off
+    // the same self-observed numbers, one layer down.
+
+    @Test("playhead-lqcp: the exact profile that used to reach auto stays manual")
+    func cleanManualShowDoesNotReachAuto() async throws {
         let store = try await makeTestStore()
         let podcastId = "podcast-mn5e-toauto"
 
         // IDENTICAL to `vetoedShowCannotSelfPromoteBackToAuto` except
-        // falseSignals: 0. If this test and that one both pass, the veto
-        // counter is provably the operative clause.
+        // falseSignals: 0 — i.e. every legacy clause of the auto rung is
+        // satisfied and the veto counter is not what is holding it.
         try await store.upsertProfile(
             makeProfile(
                 podcastId: podcastId, mode: .manual, trust: 0.9,
@@ -541,8 +580,78 @@ struct AdDetectionSelfPromotionTests {
         )
 
         #expect(
-            after.mode == SkipMode.auto.rawValue,
-            "obs=21 >= 8, trust=1.0 >= 0.75, falseSignals=0 — the ladder must reach auto; got \(after.mode)"
+            after.mode == SkipMode.manual.rawValue,
+            "obs=21 >= 8, trust=1.0 >= 0.75, falseSignals=0 — every legacy clause clears, and the rung is closed anyway; got \(after.mode)"
         )
+        // NOT VACUOUS: the observation really was recorded, so this is the
+        // closed rung and not a backfill that quietly did nothing.
+        #expect(
+            after.observationCount == 21,
+            "the episode still counts; got \(after.observationCount)"
+        )
+        #expect(
+            abs(after.skipTrustScore - 1.0) < scoreTolerance,
+            "and trust still moved; got \(after.skipTrustScore)"
+        )
+    }
+
+    /// The same closure, one layer down. `DetectorTrustLedger.seed` copies the
+    /// show's trust, episode count and mode straight into a class's entry, so a
+    /// show carried to (trust 1.0, obs 20) by self-observation would hand a
+    /// single banner Yes everything the WEIGHTED `evaluatePromotion` needs to
+    /// promote that one class to `.auto` — the same unasked skip, reached
+    /// through `SkipOrchestrator`'s per-detector mode instead of the scalar.
+    @Test("playhead-lqcp: a per-detector entry cannot reach auto either")
+    func perDetectorEntryDoesNotReachAuto() async throws {
+        let store = try await makeTestStore()
+        let podcastId = "podcast-mn5e-detector-auto"
+
+        try await store.upsertProfile(
+            makeProfile(
+                podcastId: podcastId, mode: .manual, trust: 0.9,
+                observations: 20, falseSignals: 0
+            )
+        )
+
+        let trust = TrustScoringService(store: store)
+        await trust.recordCorrectObservation(
+            podcastId: podcastId,
+            analysisAssetId: "asset-mn5e-detector-auto",
+            detector: .fusion
+        )
+
+        let modes = await trust.resolveDetectorModes(podcastId: podcastId)
+        #expect(
+            modes.mode(for: .fusion) == .manual,
+            "the class the Yes credited must not promote itself to auto; got \(String(describing: modes.mode(for: .fusion)))"
+        )
+        let profile = try #require(await store.fetchProfile(podcastId: podcastId))
+        #expect(profile.mode == SkipMode.manual.rawValue)
+        // Non-vacuous: the entry exists and really did earn its bonus.
+        let entry = try #require(
+            profile.detectorTrustLedger.entries[SkipDetectorClass.fusion.rawValue]
+        )
+        #expect(entry.observationCount == 21, "got \(entry.observationCount)")
+        #expect(abs(entry.trustScore - 1.0) < scoreTolerance)
+    }
+
+    /// The closure must not be mistaken for "modes never change". A user who
+    /// explicitly asks for auto still gets it — `setUserOverride` writes the
+    /// mode directly and does not go through `evaluatePromotion`, which is the
+    /// correct asymmetry: the ruling is about what the app may conclude on its
+    /// own, not about what the listener may instruct.
+    @Test("playhead-lqcp: an explicit user override still reaches auto")
+    func userOverrideStillReachesAuto() async throws {
+        let store = try await makeTestStore()
+        let podcastId = "podcast-mn5e-override"
+        try await store.upsertProfile(
+            makeProfile(podcastId: podcastId, mode: .manual, trust: 0.9, observations: 20)
+        )
+
+        let trust = TrustScoringService(store: store)
+        await trust.setUserOverride(podcastId: podcastId, mode: .auto)
+
+        let after = try #require(await store.fetchProfile(podcastId: podcastId))
+        #expect(after.mode == SkipMode.auto.rawValue, "got \(after.mode)")
     }
 }

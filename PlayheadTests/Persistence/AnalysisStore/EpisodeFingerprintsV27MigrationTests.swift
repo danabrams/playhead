@@ -75,14 +75,15 @@ struct EpisodeFingerprintsV27MigrationTests {
         try await store.migrate()
 
         #expect(try await store.schemaVersion() == AnalysisStore.currentSchemaVersion)
-        // Head has moved on repeatedly since V27 — most recently 45 → 46
-        // (playhead-3oyz day-0 retry-claim columns, additive). The V27 table
-        // pins below are unchanged by any of it.
+        // Head has moved on repeatedly since V27 — most recently 48 → 49
+        // (playhead-mn5e/2qz6: the `trust_episode_observations` ledger, plus a
+        // reset of `podcast_profiles.observationCount`). The V27
+        // `episode_fingerprints` table probed below is unchanged by any of it.
         //
         // PIN THE LITERAL. Writing this as `== AnalysisStore.currentSchemaVersion`
         // would make it pass for every possible value and destroy the canary;
         // its whole job is to fail when head moves so the ladder gets read.
-        #expect(AnalysisStore.currentSchemaVersion == 48)
+        #expect(AnalysisStore.currentSchemaVersion == 49)
         #expect(try probeTableExists(in: dir, table: "episode_fingerprints"))
     }
 

@@ -6843,8 +6843,10 @@ actor AdDetectionService {
         } else {
             // playhead-mn5e: the production caller `recordSuccessfulObservation`
             // never had. Ordered BEFORE `updatePriors` deliberately — see
-            // `recordConfirmedWindowObservation` for why. It is the ONLY writer
-            // of `observationCount`, and it counts EPISODES (playhead-2qz6).
+            // `recordConfirmedWindowObservation` for why. It is one of the two
+            // writers of `observationCount` (the other is the banner Yes), and
+            // both claim the same episode row so the column counts EPISODES
+            // rather than backfills or taps (playhead-2qz6 / playhead-fh5v).
             await recordConfirmedWindowObservation(
                 podcastId: podcastId,
                 analysisAssetId: analysisAssetId,
@@ -12884,9 +12886,12 @@ actor AdDetectionService {
     /// explicitly so the choice is visible at the call site.
     ///
     /// playhead-mn5e/2qz6: this shim drives the PRIORS MERGE only. It does not
-    /// move `observationCount` — nothing does any more except
-    /// `recordConfirmedWindowObservation`, which is reachable end-to-end
-    /// through `runBackfill`.
+    /// move `observationCount`. Exactly two things do — this file's
+    /// `recordConfirmedWindowObservation` (reachable end-to-end through
+    /// `runBackfill`) and `TrustScoringService.recordCorrectObservation` (the
+    /// banner Yes) — and playhead-fh5v put BOTH behind the same
+    /// `trust_episode_observations` claim, so they cannot double-count one
+    /// episode between them.
     func updatePriorsForTesting(
         podcastId: String,
         nonSuppressedWindows: [AdWindow],
@@ -12910,8 +12915,12 @@ actor AdDetectionService {
     /// promotion ladder. **This is the production caller
     /// `TrustScoringService.recordSuccessfulObservation` never had.**
     ///
-    /// **It is the only writer of `observationCount`, and it counts EPISODES**
-    /// (playhead-2qz6). Before this, the counter was incremented once per
+    /// **It is one of the two writers of `observationCount`, and both go
+    /// through the same claim** (playhead-2qz6 / playhead-fh5v). The other is
+    /// `TrustScoringService.recordCorrectObservation`, the banner Yes — a
+    /// stronger witness than this one, so it is allowed to be the FIRST to
+    /// claim an episode, and it counts nothing on an episode already claimed
+    /// here. Before this, the counter was incremented once per
     /// completed backfill and an episode is backfilled ~9 times — measured 36
     /// observations across 4 assets on the 2026-08-12 device pull — so
     /// `shadowToManualObservations: 3` meant "a third of one episode". Every
@@ -12947,11 +12956,17 @@ actor AdDetectionService {
     ///
     /// **WHAT THAT COSTS, stated rather than hidden.** Confirmed windows are
     /// the detector's own output, so this is self-certification: the show is
-    /// promoted on evidence it produced itself. Three things bound it —
-    /// `shadow` -> `manual` only unlocks a BANNER (nothing is skipped without a
-    /// tap); the demotion path stays entirely user-driven and asymmetric
-    /// (`recordFalseSkipSignal`, two vetoes demote `auto` -> `manual`); and
-    /// `manual` -> `auto` additionally requires `recentFalseSkipSignals == 0`,
+    /// promoted on evidence it produced itself. **playhead-lqcp is what
+    /// actually bounds that: `manual` -> `auto` DOES NOT FIRE AT ALL** while
+    /// `AutoPromotionConfidenceEvidence` has only its `.unavailable` case, so
+    /// the highest rung self-observation can reach is `manual`, which unlocks
+    /// a BANNER and skips nothing without a tap. That closure exists precisely
+    /// because this method un-freezes `skipTrustScore` and would otherwise have
+    /// carried a fresh subscription to auto at episode 8 with no gesture at
+    /// all. Two further bounds are unchanged: the demotion path stays entirely
+    /// user-driven and asymmetric (`recordFalseSkipSignal`, two vetoes demote
+    /// `auto` -> `manual`), and the legacy auto clauses still required
+    /// `recentFalseSkipSignals == 0`,
     /// which only a banner Yes (`recordCorrectObservation`) can restore once a
     /// veto has landed.
     ///

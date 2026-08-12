@@ -98,10 +98,12 @@ struct SpecialistScanResultsV31MigrationTests {
         try await store.migrate()
 
         #expect(try await store.schemaVersion() == AnalysisStore.currentSchemaVersion)
-        // Drift guard, pinned to the LITERAL head (45 → 46, playhead-3oyz's
-        // additive day-0 retry-claim columns). Never `== currentSchemaVersion`:
-        // that passes for every value and stops policing anything.
-        #expect(AnalysisStore.currentSchemaVersion == 48)
+        // Drift guard, pinned to the LITERAL head (48 → 49, playhead-mn5e/2qz6's
+        // `trust_episode_observations` ledger + the `observationCount` reset;
+        // it touches neither `specialist_scan_results` nor its index). Never
+        // `== currentSchemaVersion`: that passes for every value and stops
+        // policing anything.
+        #expect(AnalysisStore.currentSchemaVersion == 49)
         #expect(try probeTableExists(in: dir, table: "specialist_scan_results"))
     }
 

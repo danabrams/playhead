@@ -205,20 +205,32 @@ struct TrustScoringServiceTests {
         expectScore(profile?.skipTrustScore, equals: 0.39)
     }
 
-    // MARK: AC 4 — Promotion .manual -> .auto
+    // MARK: AC 4 — Promotion .manual -> .auto is CLOSED (playhead-lqcp)
+    //
+    // AC 4 was written when `recordSuccessfulObservation` had no production
+    // caller, so this rung had never fired in a shipped build. playhead-mn5e
+    // wired the caller up and the rung became reachable at episode 8 with no
+    // user gesture at all. Dan's ruling permits auto only IF THE SHOW IS HIGH
+    // CONFIDENCE, and nothing on this tree can evaluate that condition — see
+    // `AutoPromotionConfidenceEvidence`. So the rung is closed and the AC's
+    // expectation is inverted here rather than deleted: the three legacy
+    // clauses are still exercised, and the mode still does not move.
 
-    @Test("Promotion manual->auto after >= 8 observations with score >= 0.75 and zero false signals")
-    func promotionManualToAuto() async throws {
+    @Test("playhead-lqcp: >= 8 observations, score >= 0.75 and zero false signals do NOT reach auto")
+    func promotionManualToAutoIsClosed() async throws {
         let seed = makeProfile(mode: "manual", trustScore: 0.65, observations: 7, falseSignals: 0)
         let (sut, store) = try await makeSUT(seedProfile: seed)
 
         await sut.recordSuccessfulObservation(podcastId: testPodcastId, averageConfidence: 0.85)
 
         let profile = try await store.fetchProfile(podcastId: testPodcastId)
-        #expect(profile?.mode == SkipMode.auto.rawValue)
+        #expect(profile?.mode == SkipMode.manual.rawValue)
+        // Non-vacuous: the observation was recorded and every legacy clause of
+        // the rung is satisfied by the values below. Only the closure holds it.
         #expect(profile?.observationCount == 8)
         // 0.65 + 0.10 = 0.75
         expectScore(profile?.skipTrustScore, equals: 0.75)
+        #expect(profile?.recentFalseSkipSignals == 0)
     }
 
     @Test("No promotion manual->auto when false signals > 0")
@@ -531,7 +543,7 @@ struct TrustScoringServiceTests {
 
     // MARK: - Full lifecycle
 
-    @Test("Full lifecycle: shadow -> manual -> auto -> manual demotion")
+    @Test("Full lifecycle: shadow -> manual, then the closed auto rung, then demotion")
     func fullLifecycle() async throws {
         let (sut, store) = try await makeSUT()
 
@@ -549,24 +561,33 @@ struct TrustScoringServiceTests {
         profile = try await store.fetchProfile(podcastId: testPodcastId)
         #expect(profile?.mode == SkipMode.manual.rawValue)
 
-        // Build up to auto: need 8 obs, score >= 0.75, 0 false signals
-        // obs 4: 0.5, obs 5: 0.6, obs 6: 0.7, obs 7: 0.8 (>= 0.75 but only 7 obs)
+        // Climb past every legacy clause of the auto rung: 8 obs, score >= 0.75,
+        // 0 false signals. obs 4: 0.5, obs 5: 0.6, obs 6: 0.7, obs 7: 0.8.
         for _ in 4...7 {
             await sut.recordSuccessfulObservation(podcastId: testPodcastId, averageConfidence: 0.90)
         }
         profile = try await store.fetchProfile(podcastId: testPodcastId)
         #expect(profile?.mode == SkipMode.manual.rawValue) // not yet, only 7 obs
 
-        // obs 8: 0.9, obs=8 -> promote!
+        // obs 8: 0.9, obs=8 — this is where the pre-lqcp ladder promoted, and
+        // it is EPISODE 8 OF A FRESH SUBSCRIPTION with no user gesture in the
+        // whole sequence above. That is the reachability the closure is for.
         await sut.recordSuccessfulObservation(podcastId: testPodcastId, averageConfidence: 0.90)
         profile = try await store.fetchProfile(podcastId: testPodcastId)
-        #expect(profile?.mode == SkipMode.auto.rawValue)
+        #expect(
+            profile?.mode == SkipMode.manual.rawValue,
+            "playhead-lqcp: self-observation stops at manual, which is a banner; got \(profile?.mode ?? "nil")"
+        )
+        #expect(profile?.observationCount == 8)
+        expectScore(profile?.skipTrustScore, equals: 0.90)
 
-        // Demotion: 2 false signals -> auto -> manual
-        await sut.recordFalseSkipSignal(podcastId: testPodcastId)
-        await sut.recordFalseSkipSignal(podcastId: testPodcastId)
+        // Demotion still works from where the ladder can actually reach:
+        // 4 false signals take manual -> shadow.
+        for _ in 0..<4 {
+            await sut.recordFalseSkipSignal(podcastId: testPodcastId)
+        }
         profile = try await store.fetchProfile(podcastId: testPodcastId)
-        #expect(profile?.mode == SkipMode.manual.rawValue)
+        #expect(profile?.mode == SkipMode.shadow.rawValue)
     }
 
     // MARK: - Custom config
@@ -593,15 +614,21 @@ struct TrustScoringServiceTests {
         var profile = try await store.fetchProfile(podcastId: testPodcastId)
         #expect(profile?.mode == SkipMode.manual.rawValue)
 
-        // Second observation: 0.40 >= 0.3, obs=2 >= 2 -> auto
+        // Second observation: 0.40 >= 0.3, obs=2 >= 2 — the custom config's own
+        // auto clauses all clear, and it STILL does not promote. playhead-lqcp
+        // closes the rung at the state machine, not at the thresholds, so a
+        // config cannot reopen it: that is deliberate, because a threshold a
+        // caller can lower is exactly how "high confidence" would quietly stop
+        // meaning anything.
         await sut.recordSuccessfulObservation(podcastId: testPodcastId, averageConfidence: 0.50)
         profile = try await store.fetchProfile(podcastId: testPodcastId)
-        #expect(profile?.mode == SkipMode.auto.rawValue)
+        #expect(profile?.mode == SkipMode.manual.rawValue)
+        expectScore(profile?.skipTrustScore, equals: 0.40)
 
-        // One false signal -> demote to manual (threshold = 1)
+        // One false signal -> demote to shadow (manualToShadowFalseSignals = 1)
         await sut.recordFalseSkipSignal(podcastId: testPodcastId)
         profile = try await store.fetchProfile(podcastId: testPodcastId)
-        #expect(profile?.mode == SkipMode.manual.rawValue)
+        #expect(profile?.mode == SkipMode.shadow.rawValue)
         // 0.40 - 0.25 = 0.15
         expectScore(profile?.skipTrustScore, equals: 0.15)
 

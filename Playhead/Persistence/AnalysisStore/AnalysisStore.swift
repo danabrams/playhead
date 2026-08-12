@@ -9288,9 +9288,28 @@ actor AnalysisStore {
 
         // trust_episode_observations (playhead-mn5e / playhead-2qz6)
         //
-        // ONE ROW PER EPISODE THAT HAS CONTRIBUTED A TRUST OBSERVATION, and
-        // the reason it is a table rather than a flag derived from something
-        // already persisted.
+        // ONE ROW PER ANALYSIS ASSET THAT HAS CONTRIBUTED A TRUST OBSERVATION,
+        // and the reason it is a table rather than a flag derived from
+        // something already persisted.
+        //
+        // **THE KEY IS THE ASSET, NOT THE EPISODE, AND THE TWO ARE NOT THE
+        // SAME THING (playhead-89x6).** `analysis_assets.id` is a fresh UUID,
+        // never derived from `episodeId`, and V39's uniqueness index is on
+        // `(episodeId, assetFingerprint)` — its own doc explicitly declines to
+        // make `episodeId` unique, because two rows for one episode under
+        // different fingerprints are legitimate. So one episode can hold two
+        // assets and contribute two observations: by design on a feed
+        // correction or re-download (`AnalysisWorkScheduler.resolveAnalysisAssetId`
+        // deliberately mints a second permanent row), and by race while
+        // `AnalysisCoordinator.resolveSession` still does check-then-insert
+        // instead of `insertAssetIfEpisodeHasNone`.
+        //
+        // That is a bounded residual, not the thing this table fixes. The
+        // defect being closed is ~9 observations per episode from repeated
+        // backfills of ONE asset, which the key does dedupe completely; what is
+        // left is at most 2 on the episodes that hit those two paths. Do not
+        // read "episode" in the name as a guarantee — it names the intent, and
+        // 89x6 is the bead that would make it true.
         //
         // `podcast_profiles.observationCount` was incremented once per
         // completed `runBackfill`, and a single episode is backfilled many
@@ -13995,10 +14014,22 @@ actor AnalysisStore {
     ///
     /// Returns `true` exactly once per `(podcastId, analysisAssetId)` pair, for
     /// the caller that got there first; every later call for the same pair
-    /// returns `false`. That is what makes `observationCount` count EPISODES
-    /// rather than backfills: a single episode is backfilled many times — hot
-    /// path, final pass, a re-drive, a transcript-version bump, playhead-15d0's
-    /// resume — and only the first of those may move the trust ladder.
+    /// returns `false`. That is what stops `observationCount` counting
+    /// BACKFILLS: a single asset is backfilled many times — hot path, final
+    /// pass, a re-drive, a transcript-version bump, playhead-15d0's resume —
+    /// and only the first of those may move the trust ladder.
+    ///
+    /// **It dedupes the ASSET, which is not quite the episode (playhead-89x6).**
+    /// One episode can hold two `analysis_assets` rows, so it can claim twice.
+    /// See the table's own comment in `createTables` for the two paths and for
+    /// why that residual is bounded at 2 against the ~9 this closes.
+    ///
+    /// **BOTH WRITERS CLAIM HERE, and that is the point (playhead-fh5v).** The
+    /// backfill (`AdDetectionService.recordConfirmedWindowObservation`) and the
+    /// banner Yes (`TrustScoringService.recordCorrectObservation`) share this
+    /// one key, so whichever arrives first counts the episode and the other
+    /// does not count it again. A second incrementer with its own private
+    /// notion of "an observation" is what made the counter unauditable before.
     ///
     /// **The claim and the test are ONE statement.** `INSERT … ON CONFLICT DO
     /// NOTHING` plus `sqlite3_changes` cannot interleave the way a
