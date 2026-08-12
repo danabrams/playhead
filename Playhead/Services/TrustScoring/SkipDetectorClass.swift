@@ -102,13 +102,23 @@ enum SkipDetectorClass: String, Sendable, Hashable, CaseIterable, Codable {
         }
     }
 
-    /// The mode a class starts at on a show that has no ledger entry for it
-    /// yet, when `consultsShowTrust` is `false`.
+    /// The mode a class holds on a show whose ledger has nothing to say about
+    /// it, when `consultsShowTrust` is `false`.
     ///
     /// Only `.rediffByteExact` reads this. Every other class seeds from the
     /// legacy per-show scalar (see `DetectorTrustLedger.seed(for:from:)`), so
     /// no show silently changes posture on upgrade except for the one class
     /// this bead deliberately releases.
+    ///
+    /// **playhead-u0vv: this is a FLOOR the class returns to, not only a seed
+    /// it starts from.** As a pure seed it stopped applying the instant a
+    /// listener touched the show at all: any attributed gesture materializes
+    /// every class's entry (`TrustScoringService.applyFalseSkipSignal`), after
+    /// which `DetectorTrustLedger.seed` is never consulted again for that show
+    /// — so two vetoes demoted byte-exact rediff to `manual` with no way back,
+    /// permanently disabling the one signal that works on a FIRST listen. See
+    /// `DetectorModeAuthority` for the return trip and for why it is not the
+    /// self-certification playhead-lqcp closed.
     static let showIndependentSeedMode: SkipMode = .auto
 
     // MARK: Classification
@@ -150,6 +160,67 @@ enum SkipDetectorClass: String, Sendable, Hashable, CaseIterable, Codable {
             return .segmentAggregated
         }
         return .fusion
+    }
+}
+
+// MARK: - DetectorModeAuthority (playhead-u0vv)
+
+/// WHO decided a detector class's mode — and therefore who may put it back
+/// after the class's own evidence has stopped arguing otherwise.
+///
+/// This is the counterpart to `AutoPromotionConfidenceEvidence`, and it is
+/// deliberately a SEPARATE type, because the two answer different questions and
+/// letting them blur is how playhead-lqcp gets reopened by accident:
+///
+///   * `AutoPromotionConfidenceEvidence` asks **"has this show's own history
+///     EARNED an auto?"** That is self-certification — a class accumulating its
+///     own observations and declaring itself trustworthy — and lqcp closed it,
+///     because Dan's ruling makes auto conditional on high confidence and no
+///     quantity on this tree can evaluate that condition.
+///   * This type asks **"who set this class's mode before the show had any
+///     history at all, and does that decision still stand?"** The answer is a
+///     CONSTANT written by a different authority — `showIndependentSeedMode`,
+///     which encodes a property of the INSTRUMENT ("the byte differ reports
+///     what the origin served; that is a measurement, not a model output") —
+///     and nothing a class accumulates can change it.
+///
+/// **The structural reason a restoration cannot become a promotion.** The mode
+/// a restoration produces is READ OFF THIS VALUE. `observationCount` and
+/// `trustScore` are not inputs to it and cannot be: the only thing a class's
+/// own history is allowed to do is WITHHOLD the restoration while the class
+/// still owes veto evidence. So no amount of self-observation reaches a mode
+/// nobody granted — which is precisely the property lqcp was protecting — and
+/// re-opening the promotion rung would still be a source edit inside
+/// `AutoPromotionConfidenceEvidence`, next to the reasons.
+enum DetectorModeAuthority: Sendable, Equatable {
+    /// `SkipDetectorClass.showIndependentSeedMode`, carried BY VALUE so that a
+    /// consumer returns the authority's answer rather than one of its own. A
+    /// retune of that constant therefore retunes the restoration with it; a
+    /// consumer that hard-codes `.auto` is a defect this payload makes visible.
+    case showIndependentSeed(SkipMode)
+
+    /// The mode this authority declares. The only way to obtain a mode from an
+    /// authority — there is no default and no fallback.
+    var declaredMode: SkipMode {
+        switch self {
+        case .showIndependentSeed(let mode):
+            return mode
+        }
+    }
+}
+
+extension SkipDetectorClass {
+    /// The authority governing this class's mode, or `nil` when the mode is the
+    /// SHOW's own trust history to decide.
+    ///
+    /// `nil` for every `consultsShowTrust == true` class, and that is the guard
+    /// that keeps restoration to the one class the exemption was written for. A
+    /// show-governed class has no authority above its own record: the ladder
+    /// measures exactly the right thing for it, so there is nothing to restore
+    /// it TO except a value it would have had to earn.
+    var modeAuthority: DetectorModeAuthority? {
+        guard !consultsShowTrust else { return nil }
+        return .showIndependentSeed(Self.showIndependentSeedMode)
     }
 }
 

@@ -1281,6 +1281,14 @@ actor TrustScoringService {
     /// while playhead-lqcp keeps `manual -> auto` closed, so p1w3 has to be
     /// resolved before playhead-yhfr reopens the rung, not after: at that point
     /// three taps inside one episode buy an unasked skip.
+    ///
+    /// **playhead-u0vv: this is also the only place a class can be RESTORED to
+    /// its authority's mode**, because it is the only writer that lowers a
+    /// `falseSkipWeight` — the veto path only ever raises one, and
+    /// self-observation carries it through untouched by design. That is not an
+    /// implementation accident: it means the sole gesture that can hand
+    /// byte-exact rediff its `.auto` back is a LISTENER's banner Yes, never a
+    /// detector's own output. See `DetectorTrustLedger.restoredMode`.
     fileprivate static func applyCorrectObservation(
         config: TrustScoringConfig,
         profile: PodcastProfile,
@@ -1309,12 +1317,32 @@ actor TrustScoringService {
         let entryObservations = entry.observationCount + 1
         let entryTrust = min(1.0, entry.trustScore + config.correctObservationBonus)
         let entryWeight = max(0, entry.falseSkipWeight - 1.0)
-        let entryMode = evaluatePromotion(
+        let promotedMode = evaluatePromotion(
             config: config,
             currentMode: entry.skipMode,
             trustScore: entryTrust,
             observations: entryObservations,
             falseSkipWeight: entryWeight
+        )
+        // playhead-u0vv: and, if this Yes discharged the LAST of the veto
+        // evidence, the class returns to the mode its authority declared —
+        // which for `.rediffByteExact` is the `.auto` that
+        // `SkipDetectorClass.showIndependentSeedMode` grants a byte differ on
+        // any show, before any history exists.
+        //
+        // **This is not the rung above.** `evaluatePromotion` asks whether this
+        // show's own record has EARNED a higher mode and answers no, for every
+        // class, always (`AutoPromotionConfidenceEvidence.unavailable`) — and it
+        // still does; the call above is unchanged and its result is the input
+        // here. `restoredMode` asks a different question with different inputs:
+        // it cannot see `entryTrust` or `entryObservations` at all, so nothing
+        // the class accumulated can move it. Read `DetectorModeAuthority`
+        // before touching either.
+        let entryMode = DetectorTrustLedger.restoredMode(
+            under: detector.modeAuthority,
+            currentMode: promotedMode,
+            weightBefore: entry.falseSkipWeight,
+            weightAfter: entryWeight
         )
         ledger.set(
             DetectorTrustEntry(
@@ -1441,6 +1469,15 @@ actor TrustScoringService {
             // what the list does NOT contain: any notion of confidence. That
             // absence is the whole bead, so the reopening bead should compose
             // its own gate deliberately rather than inherit these three.
+            //
+            // playhead-u0vv added a way for ONE class to hold `.auto` again and
+            // it does not run through here. `DetectorTrustLedger.restoredMode`
+            // returns a class to a mode a DIFFERENT authority granted it
+            // (`SkipDetectorClass.showIndependentSeedMode`) once its veto debt
+            // is discharged; it reads neither observations nor trust, so it
+            // cannot certify anything. This rung — "has the show EARNED more?"
+            // — stays closed, and a restoration is not evidence that it should
+            // open.
             switch config.autoPromotionConfidence {
             case .unavailable:
                 break
@@ -1515,6 +1552,12 @@ actor TrustScoringService {
             // rung promotes that ONE CLASS to `.auto` — the same unasked skip,
             // one layer below the show scalar. Same ruling, same unevaluable
             // condition, same answer.
+            //
+            // playhead-u0vv: a class that RETURNS to `.auto` after discharging
+            // its veto debt does so through `DetectorTrustLedger.restoredMode`,
+            // applied to this function's RESULT by the caller — never by a
+            // clause added here. The two are kept apart on purpose: this one
+            // reads what the class accumulated, that one cannot see it.
             switch config.autoPromotionConfidence {
             case .unavailable:
                 break

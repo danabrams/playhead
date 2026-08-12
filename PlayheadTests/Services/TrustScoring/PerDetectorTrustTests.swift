@@ -1411,6 +1411,537 @@ struct SelfObservationReachesTheGateTests {
     }
 }
 
+// MARK: - Restoration to the seed on decay (playhead-u0vv)
+
+/// The exemption was written as a SEED and behaved as a default that a listener
+/// lost on their first gesture.
+///
+/// `SkipDetectorClass.showIndependentSeedMode` is read by
+/// `DetectorTrustLedger.seed` only for a class with NO stored entry — and the
+/// first ATTRIBUTED gesture of any kind materializes all four classes, which
+/// every production veto site sends. From that moment `.rediffByteExact` has a
+/// stored entry forever, two vetoes demote it (1.5 + 1.5 = 3.0, over the
+/// threshold of 2), and playhead-lqcp had removed the only route back. Two
+/// gestures permanently disabled the one signal that works on a FIRST listen,
+/// before any transcript exists.
+///
+/// Dan's ruling: the class returns to its authority's mode once its
+/// `falseSkipWeight` has DECAYED to 0. Vetoes still demote exactly as
+/// playhead-gard designed; banner Yeses earn it back.
+///
+/// **Restoration is not promotion, and these tests are where that is held.**
+/// A promotion asks whether a class's own record earned a higher mode; a
+/// restoration returns it to a mode a different authority already granted. The
+/// unit tests below pin each of the three guards separately, because each one
+/// is a place a promotion would have said yes.
+@Suite("playhead-u0vv — a discharged veto restores the class's authority mode")
+struct SeedRestorationTests {
+
+    // MARK: The three guards, one test each
+
+    @Test("The restored mode is the AUTHORITY's, never the function's own")
+    func restorationReturnsTheAuthoritysMode() {
+        // The payload is `.manual` here, so a `restoredMode` that names `.auto`
+        // itself — rather than reading the authority — fails this outright.
+        #expect(
+            DetectorTrustLedger.restoredMode(
+                under: .showIndependentSeed(.manual),
+                currentMode: .shadow,
+                weightBefore: 3.0,
+                weightAfter: 0
+            ) == .manual,
+            "a seed retuned below auto must restore below auto"
+        )
+        #expect(
+            DetectorTrustLedger.restoredMode(
+                under: .showIndependentSeed(.shadow),
+                currentMode: .manual,
+                weightBefore: 1.0,
+                weightAfter: 0
+            ) == .shadow
+        )
+    }
+
+    @Test("Only a class the show's history does NOT govern has an authority")
+    func authorityIsTheExemptClassOnly() {
+        for detector in SkipDetectorClass.allCases {
+            if detector.consultsShowTrust {
+                #expect(
+                    detector.modeAuthority == nil,
+                    "\(detector.rawValue) is governed by the show's own record; nothing may restore it over that"
+                )
+            } else {
+                #expect(
+                    detector.modeAuthority
+                        == .showIndependentSeed(
+                            SkipDetectorClass.showIndependentSeedMode
+                        ),
+                    "the authority must CARRY the seed constant, so retuning the seed retunes the restoration; got \(String(describing: detector.modeAuthority))"
+                )
+            }
+        }
+        // Named, not filtered: a mutation that makes every class exempt would
+        // otherwise empty the `if` arm and this test would describe nothing.
+        #expect(SkipDetectorClass.rediffByteExact.modeAuthority != nil)
+        for detector in [SkipDetectorClass.segmentAggregated, .userAsserted, .fusion] {
+            #expect(detector.modeAuthority == nil)
+        }
+    }
+
+    @Test("A class with no authority is left exactly where it stands")
+    func noAuthorityRestoresNothing() {
+        #expect(
+            DetectorTrustLedger.restoredMode(
+                under: nil,
+                currentMode: .manual,
+                weightBefore: 3.0,
+                weightAfter: 0
+            ) == .manual
+        )
+        #expect(
+            DetectorTrustLedger.restoredMode(
+                under: SkipDetectorClass.fusion.modeAuthority,
+                currentMode: .shadow,
+                weightBefore: 3.0,
+                weightAfter: 0
+            ) == .shadow
+        )
+    }
+
+    @Test("A weight that was ALREADY zero has not decayed to zero")
+    func restorationNeedsADischarge() {
+        let authority = SkipDetectorClass.rediffByteExact.modeAuthority
+        #expect(
+            DetectorTrustLedger.restoredMode(
+                under: authority,
+                currentMode: .manual,
+                weightBefore: 0,
+                weightAfter: 0
+            ) == .manual,
+            "nothing was owed, so nothing was discharged — this is what stops a Yes from overwriting a mode somebody set deliberately"
+        )
+        #expect(
+            DetectorTrustLedger.restoredMode(
+                under: authority,
+                currentMode: .manual,
+                weightBefore: 3.0,
+                weightAfter: 2.0
+            ) == .manual,
+            "a PARTIAL discharge restores nothing"
+        )
+        #expect(
+            DetectorTrustLedger.restoredMode(
+                under: authority,
+                currentMode: .manual,
+                weightBefore: 1.0,
+                weightAfter: 0
+            ) == SkipDetectorClass.showIndependentSeedMode,
+            "…and the last unit does"
+        )
+    }
+
+    // MARK: The bead, at the service
+
+    /// A fresh show, the exact sequence the bead describes.
+    @Test("THE BEAD: two vetoes disable byte-exact rediff, and banner Yeses earn it back")
+    func vetoesAreNoLongerPermanent() async throws {
+        let (sut, store) = try await gardService(seed: freshShowProfile())
+
+        var modes = await sut.resolveDetectorModes(podcastId: gardPodcastId)
+        #expect(
+            modes.mode(for: .rediffByteExact) == .auto,
+            "day 0: the byte differ needs no show history"
+        )
+
+        for _ in 0..<2 {
+            await sut.recordFalseSkipSignal(
+                podcastId: gardPodcastId,
+                attributions: [
+                    DetectorVetoAttribution(
+                        detector: .rediffByteExact, tier: .deterministic
+                    )
+                ]
+            )
+        }
+        modes = await sut.resolveDetectorModes(podcastId: gardPodcastId)
+        #expect(
+            modes.mode(for: .rediffByteExact) == .manual,
+            "the demotion is playhead-gard's and stands; got \(modes.mode(for: .rediffByteExact))"
+        )
+
+        // 3.0 of weight, one unit per banner Yes. The first two decay it; the
+        // third discharges the last of it and the class returns to its seed.
+        for index in 0..<2 {
+            await sut.recordCorrectObservation(
+                podcastId: gardPodcastId,
+                analysisAssetId: "asset-u0vv-\(index)",
+                detector: .rediffByteExact
+            )
+            modes = await sut.resolveDetectorModes(podcastId: gardPodcastId)
+            #expect(
+                modes.mode(for: .rediffByteExact) == .manual,
+                "still owed after \(index + 1) of 3; got \(modes.mode(for: .rediffByteExact))"
+            )
+        }
+        await sut.recordCorrectObservation(
+            podcastId: gardPodcastId,
+            analysisAssetId: "asset-u0vv-2",
+            detector: .rediffByteExact
+        )
+        modes = await sut.resolveDetectorModes(podcastId: gardPodcastId)
+        #expect(
+            modes.mode(for: .rediffByteExact) == .auto,
+            "THE FIX: the debt is discharged, so the class returns to the mode its authority granted; got \(modes.mode(for: .rediffByteExact))"
+        )
+        let profile = try #require(
+            await store.fetchProfile(podcastId: gardPodcastId)
+        )
+        #expect(
+            profile.detectorTrustLedger
+                .entries[SkipDetectorClass.rediffByteExact.rawValue]?
+                .falseSkipWeight == 0
+        )
+    }
+
+    /// BOUND: a class the show's history governs must never reach `.auto` this
+    /// way — and this one clears every clause playhead-lqcp deleted, so it is
+    /// also the re-pin of that closure.
+    @Test("BOUND: a show-governed class is NOT restored, however clean its record")
+    func showGovernedClassIsNeverRestored() async throws {
+        let (sut, store) = try await gardService(
+            seed: gardProfile(
+                mode: SkipMode.auto.rawValue, trustScore: 0.9,
+                observations: 10, falseSignals: 0
+            )
+        )
+        for _ in 0..<2 {
+            await sut.recordFalseSkipSignal(
+                podcastId: gardPodcastId,
+                attributions: [
+                    DetectorVetoAttribution(detector: .fusion, tier: .corroborated)
+                ]
+            )
+        }
+        var modes = await sut.resolveDetectorModes(podcastId: gardPodcastId)
+        try #require(
+            modes.mode(for: .fusion) == .manual,
+            "the demotion must have happened or this test proves nothing"
+        )
+
+        for index in 0..<2 {
+            await sut.recordCorrectObservation(
+                podcastId: gardPodcastId,
+                analysisAssetId: "asset-u0vv-fusion-\(index)",
+                detector: .fusion
+            )
+        }
+        modes = await sut.resolveDetectorModes(podcastId: gardPodcastId)
+        #expect(
+            modes.mode(for: .fusion) == .manual,
+            "fusion has no authority above the show's own record; got \(modes.mode(for: .fusion))"
+        )
+
+        let stored = try #require(
+            await store.fetchProfile(podcastId: gardPodcastId)
+        )
+        let entry = try #require(
+            stored.detectorTrustLedger
+                .entries[SkipDetectorClass.fusion.rawValue]
+        )
+        #expect(entry.falseSkipWeight == 0, "the debt IS discharged — that is not the reason it stayed")
+        #expect(
+            entry.observationCount >= TrustScoringConfig.default.manualToAutoObservations,
+            "and it clears the observation clause lqcp deleted; got \(entry.observationCount)"
+        )
+        #expect(
+            entry.trustScore >= TrustScoringConfig.default.manualToAutoTrustScore,
+            "and the trust clause too; got \(entry.trustScore)"
+        )
+    }
+
+    /// BOUND: the MODE is restored and nothing else. A restored class carries
+    /// the record it actually earned — which here clears NEITHER promotion
+    /// clause, so a fabricated `observationCount` or `trustScore` would show up
+    /// as a class that could self-certify next time.
+    @Test("BOUND: restoration moves the mode only — no observation or trust is invented")
+    func restorationFabricatesNothing() async throws {
+        let (sut, store) = try await gardService(seed: freshShowProfile())
+        for _ in 0..<2 {
+            await sut.recordFalseSkipSignal(
+                podcastId: gardPodcastId,
+                attributions: [
+                    DetectorVetoAttribution(
+                        detector: .rediffByteExact, tier: .deterministic
+                    )
+                ]
+            )
+        }
+        for index in 0..<3 {
+            await sut.recordCorrectObservation(
+                podcastId: gardPodcastId,
+                analysisAssetId: "asset-u0vv-only-\(index)",
+                detector: .rediffByteExact
+            )
+        }
+        let stored = try #require(
+            await store.fetchProfile(podcastId: gardPodcastId)
+        )
+        let entry = try #require(
+            stored.detectorTrustLedger
+                .entries[SkipDetectorClass.rediffByteExact.rawValue]
+        )
+        #expect(entry.skipMode == .auto, "the restoration happened")
+        // The seed is trust 0.5; two vetoes took 0.10 each; three Yeses gave
+        // 0.10 each. Nothing rounded up to a promotion threshold.
+        #expect(
+            abs(entry.trustScore - 0.6) < 1e-9,
+            "0.5 - 0.2 + 0.3, exactly what the gestures were worth; got \(entry.trustScore)"
+        )
+        #expect(
+            entry.observationCount == 3,
+            "three Yeses, not the eight a promotion would have needed; got \(entry.observationCount)"
+        )
+        #expect(
+            entry.trustScore < TrustScoringConfig.default.manualToAutoTrustScore,
+            "it holds `.auto` while FAILING the promotion trust clause — which is the difference between a restoration and a promotion"
+        )
+        #expect(
+            entry.observationCount < TrustScoringConfig.default.manualToAutoObservations,
+            "and the observation clause"
+        )
+    }
+
+    /// BOUND: a return trip, not immunity.
+    @Test("BOUND: a restored class still demotes on the next two vetoes")
+    func restorationIsNotImmunity() async throws {
+        let (sut, _) = try await gardService(seed: freshShowProfile())
+        for _ in 0..<2 {
+            await sut.recordFalseSkipSignal(
+                podcastId: gardPodcastId,
+                attributions: [
+                    DetectorVetoAttribution(
+                        detector: .rediffByteExact, tier: .deterministic
+                    )
+                ]
+            )
+        }
+        for index in 0..<3 {
+            await sut.recordCorrectObservation(
+                podcastId: gardPodcastId,
+                analysisAssetId: "asset-u0vv-again-\(index)",
+                detector: .rediffByteExact
+            )
+        }
+        var modes = await sut.resolveDetectorModes(podcastId: gardPodcastId)
+        try #require(modes.mode(for: .rediffByteExact) == .auto)
+
+        await sut.recordFalseSkipSignal(
+            podcastId: gardPodcastId,
+            attributions: [
+                DetectorVetoAttribution(
+                    detector: .rediffByteExact, tier: .deterministic
+                )
+            ]
+        )
+        modes = await sut.resolveDetectorModes(podcastId: gardPodcastId)
+        #expect(
+            modes.mode(for: .rediffByteExact) == .auto,
+            "1.5 is under the threshold of 2, exactly as before the restoration"
+        )
+        await sut.recordFalseSkipSignal(
+            podcastId: gardPodcastId,
+            attributions: [
+                DetectorVetoAttribution(
+                    detector: .rediffByteExact, tier: .deterministic
+                )
+            ]
+        )
+        modes = await sut.resolveDetectorModes(podcastId: gardPodcastId)
+        #expect(
+            modes.mode(for: .rediffByteExact) == .manual,
+            "…and the second crosses it. The user can still shut this off; got \(modes.mode(for: .rediffByteExact))"
+        )
+    }
+
+    /// The discharge guard, stated as the behaviour it protects.
+    ///
+    /// `setUserOverride` writes EVERY class's entry at `falseSkipWeight: 0`
+    /// with the mode the listener chose. A restoration keyed on the STATE
+    /// "weight is zero" would let the listener's very next banner Yes overwrite
+    /// that instruction with the seed — a live user instruction undone by an
+    /// automatic path, which is `feedback_manual_marks_override_2026-07-29`
+    /// pointed the wrong way. Keyed on the DECAY, it cannot.
+    @Test("A listener who turned auto-skip OFF is not overruled by their next Yes")
+    func explicitOverrideSurvivesACorrectObservation() async throws {
+        let (sut, _) = try await gardService(
+            seed: gardProfile(
+                mode: SkipMode.auto.rawValue, trustScore: 0.9,
+                observations: 10, falseSignals: 0
+            )
+        )
+        await sut.setUserOverride(podcastId: gardPodcastId, mode: .manual)
+        var modes = await sut.resolveDetectorModes(podcastId: gardPodcastId)
+        try #require(
+            modes.mode(for: .rediffByteExact) == .manual,
+            "the override reaches the exempt class too"
+        )
+
+        await sut.recordCorrectObservation(
+            podcastId: gardPodcastId,
+            analysisAssetId: "asset-u0vv-override",
+            detector: .rediffByteExact
+        )
+        modes = await sut.resolveDetectorModes(podcastId: gardPodcastId)
+        #expect(
+            modes.mode(for: .rediffByteExact) == .manual,
+            "a Yes on a class that owed nothing must not restore anything; got \(modes.mode(for: .rediffByteExact))"
+        )
+    }
+
+    /// Self-observation must not be able to restore. Only a listener's gesture
+    /// decays a weight, so only a listener's gesture can discharge one — the
+    /// property that keeps the detector from arguing its own case.
+    @Test("Ten clean backfills do NOT restore a demoted class")
+    func selfObservationCannotRestore() async throws {
+        let (sut, _) = try await gardService(seed: freshShowProfile())
+        for _ in 0..<2 {
+            await sut.recordFalseSkipSignal(
+                podcastId: gardPodcastId,
+                attributions: [
+                    DetectorVetoAttribution(
+                        detector: .rediffByteExact, tier: .deterministic
+                    )
+                ]
+            )
+        }
+        for _ in 0..<10 {
+            await sut.recordSuccessfulObservation(
+                podcastId: gardPodcastId,
+                averageConfidence: 0.8,
+                detectors: [.rediffByteExact]
+            )
+        }
+        let modes = await sut.resolveDetectorModes(podcastId: gardPodcastId)
+        #expect(
+            modes.mode(for: .rediffByteExact) == .manual,
+            "the detector's own output is not evidence against the listener's veto; got \(modes.mode(for: .rediffByteExact))"
+        )
+    }
+}
+
+/// A show nobody has vetoed yet: the state the bead's sequence starts from.
+private func freshShowProfile() -> PodcastProfile {
+    gardProfile(
+        mode: SkipMode.shadow.rawValue,
+        trustScore: 0.2,
+        observations: 0,
+        falseSignals: 0
+    )
+}
+
+// MARK: - The probe: the SKIP GATE, not the ledger struct (playhead-u0vv)
+
+/// R4's lesson, applied to this bead: a test that asserts on the ledger cannot
+/// prove the gate agrees.
+///
+/// `SkipOrchestrator.skipMode(for:)` reads `activeDetectorSkipModes`, resolved
+/// once per episode — so the whole round trip is driven here through the real
+/// orchestrator, and the assertion is whether a byte-exact span produces a SKIP
+/// CUE. Every veto carries an ATTRIBUTION, which is the shape production sends
+/// and the shape that forks the ledger; an unattributed veto is the one shape
+/// that would not reproduce the state this bead is about.
+@Suite("playhead-u0vv — restoration reaches the skip gate", .serialized)
+struct SeedRestorationReachesTheGateTests {
+
+    private static func makeProbe() async throws -> (SkipOrchestrator, TrustScoringService) {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeSkipTestAnalysisAsset())
+        let trustStore = try await makeTestStore()
+        try await trustStore.upsertProfile(
+            gardProfile(
+                mode: SkipMode.shadow.rawValue, trustScore: 0.2,
+                observations: 0, falseSignals: 0
+            )
+        )
+        let trust = TrustScoringService(store: trustStore)
+        return (
+            SkipOrchestrator(store: store, trustService: trust),
+            trust
+        )
+    }
+
+    /// Re-resolve trust for the episode and offer a fresh byte-exact span.
+    /// Returns the cues the orchestrator pushed — 1 means it auto-skips.
+    private static func cuesForAByteExactSpan(
+        _ orchestrator: SkipOrchestrator,
+        windowId: String
+    ) async -> Int {
+        nonisolated(unsafe) var pushedCues: [CMTimeRange] = []
+        await orchestrator.setSkipCueHandler { pushedCues = $0 }
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: "asset-1",
+            podcastId: gardPodcastId
+        )
+        await orchestrator.receiveAdWindows([rediffWindow(id: windowId)])
+        return pushedCues.count
+    }
+
+    private static func vetoAByteExactSpan(_ trust: TrustScoringService) async {
+        await trust.recordFalseSkipSignal(
+            podcastId: gardPodcastId,
+            attributions: [
+                DetectorVetoAttribution(
+                    detector: .rediffByteExact, tier: .deterministic
+                )
+            ]
+        )
+    }
+
+    @Test("THE PROBE: skips on day 0, stops after two vetoes, skips again once they are paid off")
+    func theGateFollowsTheRestoration() async throws {
+        let (orchestrator, trust) = try await Self.makeProbe()
+
+        #expect(
+            await Self.cuesForAByteExactSpan(orchestrator, windowId: "probe-day0") == 1,
+            "day 0: the byte differ auto-skips before any transcript or history exists"
+        )
+
+        await Self.vetoAByteExactSpan(trust)
+        await Self.vetoAByteExactSpan(trust)
+        #expect(
+            await Self.cuesForAByteExactSpan(orchestrator, windowId: "probe-vetoed") == 0,
+            "two vetoes demote the class and the GATE stops skipping — playhead-gard, working"
+        )
+
+        for index in 0..<3 {
+            await trust.recordCorrectObservation(
+                podcastId: gardPodcastId,
+                analysisAssetId: "asset-1",
+                detector: .rediffByteExact
+            )
+            let cues = await Self.cuesForAByteExactSpan(
+                orchestrator, windowId: "probe-yes-\(index)"
+            )
+            if index < 2 {
+                #expect(cues == 0, "still owed after \(index + 1) of 3 Yeses")
+            } else {
+                #expect(
+                    cues == 1,
+                    "THE FIX AT THE GATE: the debt is discharged and the byte differ skips again"
+                )
+            }
+        }
+
+        await Self.vetoAByteExactSpan(trust)
+        await Self.vetoAByteExactSpan(trust)
+        #expect(
+            await Self.cuesForAByteExactSpan(orchestrator, windowId: "probe-redemoted") == 0,
+            "and it is still demotable afterwards — a return trip, not immunity"
+        )
+    }
+}
+
 // MARK: - Source access
 
 /// Resolve a repo-relative production source path from the test bundle.
