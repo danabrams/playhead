@@ -64,12 +64,14 @@
 # NEW — the first line above could be printed by a run that lost an entire test
 # family, because the crash destroyed the evidence of itself. It now reads
 #
-#     RED (85 known / 0 new) — 33 tests got NO VERDICT (crashed host)
+#     RED (85 known / 0 new) — 30 tests got NO VERDICT (crashed host)
 #
 # and GREEN is unreachable while that count is non-zero. It does NOT change the
 # exit code, deliberately: it fires on main today on a pre-existing crash, and a
-# gate red for a reason its reader cannot fix is one they route around. Read the
-# line, not just the code, on a full-plan run.
+# gate red for a reason its reader cannot fix is one they route around. So READ
+# THE LINE, NOT JUST THE CODE, on a full-plan run — a change that crashes the
+# test host kills healthy tests that are in nobody's baseline, and that run
+# exits 0 with the count as its only witness.
 #
 # The check applies ONLY to a full-plan run. A selective invocation
 # (`-only-testing:`/`-skip-testing:`, which is how scripts/mutation-battery.sh

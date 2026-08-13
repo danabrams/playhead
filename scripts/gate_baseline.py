@@ -80,20 +80,33 @@ to catch: the failure destroys the evidence of itself.
 MEASURED on two full-plan runs, 2026-08-12 (main @ 76b0a09a and bead/mn5e).
 Both carry xcodebuild's restart marker, and after discounting skips:
 
-    main:  33 Swift Testing tests started and reported NOTHING
-    mn5e:  15                    "                          "
+    main:  30 Swift Testing tests started and reported NOTHING
+    mn5e:  14                    "                          "
 
 and the baseline file — 117 tests over 9 observed runs — has never once
 recorded any of them. Nine runs of silence.
+
+THOSE NUMBERS WERE 33 AND 15 UNTIL R1 REVIEW RE-DERIVED THEM, and the
+correction is the same defect class as the bead itself. Three of main's 10,910
+`passed after` lines — and one of mn5e's — were truncated MID-TOKEN by
+interleaved app output (`passed after 100.732 secon` + a spliced log line), and
+the pattern required the literal word `seconds`. Four tests that demonstrably
+PASSED were being counted as crashed-host casualties. See the regex comments
+below; the rails are TruncatedOutcomeLineTests, and they are synthetic because
+the two 7.2 MB logs live in a session scratchpad that will not outlive it.
 
 So this module now tracks a third outcome and a fourth verdict category:
 
   * SKIPPED is parsed (`➜ Test "x" skipped:` and XCTest's `skipped (0.0s)`),
     because "started and said nothing" is only meaningful once a deliberate
     skip has been subtracted from it. Without that the no-verdict set on those
-    same two logs reads 45 and 63, of which 30 are PerfGate skips — a number
-    that means one thing and is read as another, which is this repo's standing
-    defect class.
+    same two logs reads 60 on main and 44 on mn5e, and every one of the 30
+    subtracted on each is an XCTest PerfGate skip — a number that means one
+    thing and is read as another, this repo's standing defect class. (Swift
+    Testing's own
+    skips contribute nothing to that difference: a trait-disabled test never
+    emits a `started` line, so it can never be in `started - ran`. The ➜
+    pattern is defensive, not load-bearing — measured, R1.)
   * NO VERDICT — started, then neither passed, failed nor skipped. Exact,
     console-only, no name mapping required. This is the census.
   * HOST RESTART — xcodebuild's own `Restarting after unexpected exit, crash,
@@ -152,7 +165,7 @@ which is the only place such a record could live.
 What it does instead is remove every way to misread the run:
 
   * the headline carries it, so the reassuring `RED (N known / 0 new)` can
-    never stand alone again — it reads `RED (N known / 0 new) — 33 tests got
+    never stand alone again — it reads `RED (N known / 0 new) — 30 tests got
     NO VERDICT (crashed host)`;
   * GREEN is unreachable while the count is non-zero, on the same principle
     that already forbids GREEN for a run that executed nothing;
@@ -164,9 +177,24 @@ What it does instead is remove every way to misread the run:
     command meant to maintain the file would have silently deleted exactly the
     entries the crash hid. It is announced, not silent.
 
+WHAT NON-FATAL STILL LETS THROUGH, STATED PLAINLY (R1 review). The four
+mitigations above are all addressed to a HUMAN READER. None of them is an exit
+code, so the one regression class this module cannot catch is a change that
+CRASHES THE TEST HOST — because the crash destroys the evidence of itself, and
+the tests it kills are healthy tests that are NOT baseline members. Then:
+`new_failures` is empty (they emitted no failure line), `absent` is empty (they
+were never recorded), and the gate exits 0. Verified as a rail, not reasoned
+about: see CrashedHostSafetyPropertyTests. The `absent` arm covers only tests
+ALREADY KNOWN to be broken; a crash in fresh code is invisible to it.
+
+That is a real hole and it is accepted knowingly, on the grounds above — but it
+is a hole, not a residue, and it should not be quoted as "the gate covers this".
 Arming it is a one-line change (`no_verdict` into `exit_code`) and should
 happen once the host crash (playhead-rouw) is fixed and a run can be observed
 at zero. That is playhead-buvn — this module deliberately does not decide it.
+The middle path buvn should weigh before taking the one-liner is the one this
+module already embodies everywhere else: RECORD the count and diff against the
+record, so a pre-existing crash is quiet and a WORSE one is fatal.
 
 THE FILE CONVERGES; IT DOES NOT ARRIVE COMPLETE
 -----------------------------------------------
@@ -294,26 +322,42 @@ class CannotEvaluate(Exception):
 # anchored `^\W*` misses the ones whose junk happens to be a word character —
 # a silently dropped failure, in the direction that reads as success.
 
-_ST_FAIL_NAMED = re.compile(r'✘ Test "(.+?)" (?:with \d+ test cases? )?failed after ([\d.]+) seconds')
-_ST_FAIL_FUNC = re.compile(r'✘ Test ([A-Za-z_][A-Za-z0-9_]*\(\)) (?:with \d+ test cases? )?failed after ([\d.]+) seconds')
+# THE TRAILING ` seconds` IS NOT REQUIRED, AND THAT IS LOAD-BEARING (playhead-tl6l
+# R1 review). The same interleaving the comment above describes also truncates a
+# line MID-TOKEN: three of main's 10,910 pass lines end `passed after 100.732
+# secon` with an app log line spliced straight onto them. Requiring the word
+# turned three tests that DEMONSTRABLY PASSED into crashed-host casualties — the
+# census read 33 where the truth was 30, and 15 where it was 14. A verdict line
+# that loses its duration is still a verdict; the duration is decoration and is
+# captured only when it survived intact. Fail and XCTest are widened with it
+# because the exposure is proportional to line count, not to kind — 88 fail lines
+# against 10,910 pass lines is why only the passes were hit here, and a LOST
+# FAILURE is the far worse direction.
+_ST_FAIL_NAMED = re.compile(r'✘ Test "(.+?)" (?:with \d+ test cases? )?failed after(?: ([\d.]+) seconds)?')
+_ST_FAIL_FUNC = re.compile(r'✘ Test ([A-Za-z_][A-Za-z0-9_]*\(\)) (?:with \d+ test cases? )?failed after(?: ([\d.]+) seconds)?')
 # Greedy `.*` before ` at <file>.swift:` so parameterised runs — which splice
 # "with 2 arguments depth → 8, mix → preAnalysis" in between — resolve to the
 # LAST such marker, which is the source location rather than an argument value.
 _ST_ISSUE_NAMED = re.compile(r'✘ Test "(.+?)" recorded an issue(?P<mid>.*?)(?: at ([A-Za-z0-9_+]+\.swift):(\d+):(\d+))?: (.*)$')
 _ST_ISSUE_FUNC = re.compile(r'✘ Test ([A-Za-z_][A-Za-z0-9_]*\(\)) recorded an issue(?P<mid>.*?)(?: at ([A-Za-z0-9_+]+\.swift):(\d+):(\d+))?: (.*)$')
-_ST_PASS_NAMED = re.compile(r'✔ Test "(.+?)" (?:with \d+ test cases? )?passed after ([\d.]+) seconds')
-_ST_PASS_FUNC = re.compile(r'✔ Test ([A-Za-z_][A-Za-z0-9_]*\(\)) (?:with \d+ test cases? )?passed after ([\d.]+) seconds')
+_ST_PASS_NAMED = re.compile(r'✔ Test "(.+?)" (?:with \d+ test cases? )?passed after')
+_ST_PASS_FUNC = re.compile(r'✔ Test ([A-Za-z_][A-Za-z0-9_]*\(\)) (?:with \d+ test cases? )?passed after')
 _ST_START_NAMED = re.compile(r'◇ Test "(.+?)" started')
 _ST_START_FUNC = re.compile(r'◇ Test ([A-Za-z_][A-Za-z0-9_]*\(\)) started')
-# A DELIBERATE skip is a third outcome, not silence. PerfGate alone accounts for
-# 30 XCTest skips and ~11 Swift Testing skips in a full run; without this the
-# no-verdict census reads 45 where the truth is 15.
+# A DELIBERATE skip is a third outcome, not silence. The 30 XCTest PerfGate skips
+# are what the census actually depends on subtracting — without them it reads 44
+# on mn5e and 60 on main where the truth is 14 and 30. These two ➜ patterns are
+# DEFENSIVE rather than load-bearing, and R1 review measured the difference at
+# exactly zero: Swift Testing's ~11 skips are trait-disabled, and a
+# trait-disabled test never emits `◇ Test "x" started`, so it cannot be in
+# `started - ran` to begin with. Kept because a skip spelled at runtime (a thrown
+# skip after the start line) would be, and that is one Swift-Testing release away.
 _ST_SKIP_NAMED = re.compile(r'➜ Test "(.+?)" skipped')
 _ST_SKIP_FUNC = re.compile(r'➜ Test ([A-Za-z_][A-Za-z0-9_]*\(\)) skipped')
 
 _XC_RESULT = re.compile(
-    r"Test Case '-\[([A-Za-z0-9_.]+) ([A-Za-z0-9_:]+)\]' (failed|passed|skipped) "
-    r"\(([\d.]+) seconds\)"
+    r"Test Case '-\[([A-Za-z0-9_.]+) ([A-Za-z0-9_:]+)\]' (failed|passed|skipped)"
+    r"(?: \(([\d.]+) seconds\))?"
 )
 _XC_START = re.compile(r"Test Case '-\[([A-Za-z0-9_.]+) ([A-Za-z0-9_:]+)\]' started")
 
@@ -472,9 +516,13 @@ def parse_run(text):
         if m:
             name = m.group(1)
             failure = failure_for(st_key(name), FRAMEWORK_SWIFT_TESTING, name)
-            seconds = float(m.group(2))
-            if failure.seconds is None or seconds > failure.seconds:
-                failure.seconds = seconds
+            # None when the line was truncated before its duration. The FAILURE
+            # is what matters and is already recorded; a missing duration must
+            # never discard it.
+            if m.group(2) is not None:
+                seconds = float(m.group(2))
+                if failure.seconds is None or seconds > failure.seconds:
+                    failure.seconds = seconds
             continue
 
         m = _ST_PASS_NAMED.search(line) or _ST_PASS_FUNC.search(line)
@@ -506,7 +554,8 @@ def parse_run(text):
                 # heuristic belongs to Swift Testing alone and must never be
                 # applied here.
                 failure.kinds.add(KIND_ASSERTION)
-                failure.seconds = float(seconds)
+                if seconds is not None:
+                    failure.seconds = float(seconds)
             else:
                 run.passed.add(key)
             continue
