@@ -4321,15 +4321,26 @@ actor DownloadManager {
     /// Same `set…` shape as `setAnalysisWorkScheduler` / `setDAIStitchRecorder`.
     /// playhead-cnql: installing an observer also DRAINS whatever completed
     /// before it arrived. Without this the buffer would only ever grow.
+    ///
+    /// playhead-oa82: RETURNS how many buffered completions the install drained.
+    /// The installer records that number on the diagnostics session file, and it
+    /// is the only evidence available about which side of the race the install
+    /// landed on: a non-zero drain says completions had already arrived and were
+    /// replayed, which is a materially different story from an install that got
+    /// there first. `@discardableResult` because every existing caller installs
+    /// for the side effect and the count is new information, not a new
+    /// obligation.
+    @discardableResult
     func setBackgroundDownloadCompletionObserver(
         _ observer: @escaping @Sendable (String, URL?) -> Void
-    ) {
+    ) -> Int {
         self.backgroundDownloadCompletionObserver = observer
         let backlog = pendingBackgroundDownloadCompletions
         pendingBackgroundDownloadCompletions.removeAll()
         for completed in backlog {
             observer(completed.episodeId, completed.sourceURL)
         }
+        return backlog.count
     }
 
     private func notifyBackgroundDownloadCompleted(episodeId: String, sourceURL: URL?) {

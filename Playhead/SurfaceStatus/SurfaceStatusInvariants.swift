@@ -496,6 +496,96 @@ struct InvariantViolation: Sendable, Hashable, Codable {
         /// analysis dispatcher.
         case rediffDayZeroKickoffNoAnalysisAsset =
             "rediff_day_zero_kickoff_no_analysis_asset"
+
+        /// playhead-oa82: a day-0 kickoff CLAIM was ATTEMPTED — written
+        /// immediately before the store write it stands for, and therefore the
+        /// only evidence that survives when that write neither lands nor throws.
+        ///
+        /// **Healthy by design**, on the ``adWindowIngestCensus`` precedent and
+        /// for the identical reason. `rediff_day_zero_kickoffs` is the ledger
+        /// built to make a lost kickoff visible, and on the 2026-08-12 pull it
+        /// held ZERO rows on a virgin database with four downloads. Both of its
+        /// writers go through `try?`, so "the claim write failed" and
+        /// "`requestKickoff` never ran" produce a BYTE-IDENTICAL database — the
+        /// ledger has a silent total-failure mode of its own, and only a line
+        /// that is always present can tell the two apart.
+        ///
+        /// THREE OUTCOMES, READ BY WHAT ACCOMPANIES THIS LINE:
+        ///   * this line + a `rediff_day_zero_kickoffs` row ⇒ the claim landed;
+        ///   * this line + ``rediffDayZeroKickoffClaimWriteFailed`` ⇒ the write
+        ///     THREW (the error is in the description);
+        ///   * this line and NEITHER ⇒ the write never returned — the store
+        ///     actor was parked, which is the residue
+        ///     `RediffDayZeroKickoffCoordinator.requestKickoff` documents as
+        ///     accepted and which no failure path can see, because nothing
+        ///     throws;
+        ///   * NO line at all ⇒ the claim was never reached: `requestKickoff`
+        ///     did not run, or the coordinator's dedupe guards returned first.
+        case rediffDayZeroKickoffClaimAttempted =
+            "rediff_day_zero_kickoff_claim_attempted"
+
+        /// playhead-oa82: the day-0 kickoff claim write THREW, and `try?` at the
+        /// call site swallowed it.
+        ///
+        /// Its own code rather than a field on the attempt line because this is
+        /// the one branch that names a broken store rather than a lost hop, and
+        /// its remedy is unrelated to every other day-0 code here. The
+        /// description carries the thrown error verbatim: `no such table` and
+        /// `database is locked` are different bugs with different owners.
+        case rediffDayZeroKickoffClaimWriteFailed =
+            "rediff_day_zero_kickoff_claim_write_failed"
+
+        /// playhead-oa82: the background-download completion observer was
+        /// INSTALLED, with the count of buffered completions the install drained.
+        ///
+        /// Healthy by design, for the reason the background leg needs it most:
+        /// it is the leg with the most un-awaited hops in front of it — `init`'s
+        /// `Task {}`, the `await` into the `DownloadManager` actor, then the
+        /// observer's own `Task {}` — and until this line existed, "the observer
+        /// was never installed" was indistinguishable from "the claim threw" and
+        /// from "the request never happened". All three left nothing.
+        ///
+        /// The drained count is part of the record because it is the only
+        /// evidence of the ORDERING: a non-zero drain says completions had
+        /// already landed and were replayed into the coordinator, which is a
+        /// different story from an install that arrived first.
+        case rediffDayZeroBackgroundObserverInstalled =
+            "rediff_day_zero_background_observer_installed"
+
+        /// playhead-oa82: a completed background download reached the observer
+        /// but carried NO enclosure URL from either source — neither the
+        /// SwiftData facts box nor the download's own URL — so
+        /// `DayZeroBackgroundKickoff.request` returned nil and no claim was ever
+        /// attempted.
+        ///
+        /// This is the third silence on the background leg and it sits BETWEEN
+        /// the other two codes: the observer line proves the install happened,
+        /// this line proves the completion arrived, and the absence of a claim
+        /// attempt is then explained rather than merely observed. Without it, a
+        /// URL-less completion reads exactly like an observer that was never
+        /// installed.
+        case rediffDayZeroBackgroundKickoffNoURL =
+            "rediff_day_zero_background_kickoff_no_url"
+
+        /// playhead-oa82: the day-0 kickoff COORDINATOR was not constructed at
+        /// launch, so no completion observer will be installed and no kickoff
+        /// can be requested from either download path.
+        ///
+        /// The ANTI-VACUITY control for
+        /// ``rediffDayZeroBackgroundObserverInstalled``. Without it the ABSENCE
+        /// of an install line is ambiguous between "there was no coordinator to
+        /// install for" and "`init`'s un-awaited install task never ran" — two
+        /// conditions with unrelated remedies. It also makes the nil-chain
+        /// answerable from a device pull instead of from source: today that
+        /// chain is five inferences deep and its load-bearing link is that
+        /// `EpisodeFingerprintCapture.captureEnabledByDefault` is still `false`,
+        /// which is one flag flip from making `episode_fingerprints` evidence of
+        /// nothing.
+        ///
+        /// Never expected in a shipped build — day-0 is on by default — and
+        /// suppressed entirely in preview runtimes, where nothing is expected.
+        case rediffDayZeroKickoffCoordinatorAbsent =
+            "rediff_day_zero_kickoff_coordinator_absent"
     }
 
     let code: Code
