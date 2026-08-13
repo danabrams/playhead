@@ -71,12 +71,17 @@
 //
 // SAFETY CONTRACT (each item is pinned by a test)
 // -----------------------------------------------
-//   • MARK-ONLY, ALWAYS. Every emitted row is a NEW window with a hard-coded
+//   • MARK-ONLY, ALWAYS. Every emitted row is a NEW window with
 //     `eligibilityGate == .markOnly`, `decisionState == .candidate`, and BOTH
 //     edge anchors `.unanchored`. Under playhead-2350 an unanchored edge can
 //     never auto-skip, so recovered pod material becomes a BANNER — which is
 //     exactly the certainty-tiered policy: auto-skip only the deterministic
 //     (byte-exact rediff) material, MARK the rest.
+//     playhead-mqqd: the gate is now DERIVED from the row's own extent through
+//     `ComposedMarkGate`, not typed as a literal beside it. The value is
+//     unchanged and the reason it is unchanged is now stated where a
+//     measurement could revisit it — see ``extentSupport``, which also records
+//     why a continuation must not inherit a neighbour's byte-exact edge.
 //   • IT NEVER TOUCHES AN EXISTING WINDOW. No seed's geometry, gate, anchors,
 //     confidence or id is modified — the pass is purely additive. That makes
 //     playhead-ye0n's rule (never demote a whole window for extending one edge)
@@ -1116,20 +1121,56 @@ enum AdPodContinuation {
 
     // MARK: - Emit
 
+    /// The EXTENT this producer can prove, and the single source of truth for
+    /// both the row's anchor columns and — through ``ComposedMarkGate`` — its
+    /// `eligibilityGate` (playhead-mqqd).
+    ///
+    /// `.unanchored` on both edges, and unlike the sweep lane's version of this
+    /// claim the reason here is not "there is no anchor nearby". There often
+    /// IS one: a residue is bounded by the edge of an adjacent visible window,
+    /// and playhead-oa82's day-0 rediff will start putting `.rediffByteExact`
+    /// on exactly those edges. **A continuation must not inherit it**, for two
+    /// reasons that are worth spelling out because the inheritance looks free:
+    ///
+    ///   * IT PROVES THE NEIGHBOUR, NOT THIS SPAN. A byte-exact splice at the
+    ///     residue's start is the differ's statement about where the PREVIOUS
+    ///     creative ended. This span begins there only because that is where
+    ///     coverage ran out.
+    ///   * AND ITS OWN LOGIC ARGUES AGAINST A CUT HERE. Material the differ did
+    ///     NOT find swapped is byte-stable across fetches, so a continuation
+    ///     bracketed by two byte-exact slots is precisely the population that is
+    ///     either show or a HOST-READ ad — the class Dan's certainty-tiered
+    ///     ruling says to MARK, never to cut. Two proven edges around it would
+    ///     not change that; the doubt is about the interior.
+    ///
+    /// The far edge is separately unprovable in any case: it is the last chain
+    /// link's end, and the seconds before it are bounded extrapolation across
+    /// `maxLinkGapSeconds` rather than a per-second observation. See the file
+    /// header's note on the bridge.
+    ///
+    /// Stated as a constant BECAUSE IT IS ONE. What it is not is three
+    /// constants that have to agree.
+    static let extentSupport: SpanExtentSupport = .unanchored
+
     /// Build the content-addressed mark-only `AdWindow` for a recovered span.
     ///
-    /// Every authority field is a hard-coded literal, not a derivation: the gate
-    /// is `.markOnly`, the state is `.candidate`, and both edge anchors are
-    /// `.unanchored`. There is no code path in this file that can produce
-    /// anything else, which is what makes "a continuation can never auto-skip"
-    /// a property rather than a promise.
+    /// The state is a hard-coded `.candidate`; the gate and both edge anchors
+    /// are DERIVED from the single ``extentSupport`` value (playhead-mqqd), and
+    /// compute to `.markOnly` / `.unanchored` for every span this file can
+    /// produce. "A continuation can never auto-skip" therefore remains a
+    /// property rather than a promise — but it is now a property of the
+    /// evidence, which somebody can revisit with a measurement, instead of a
+    /// property of a constant nobody can.
     static func makeMark(
         start: Double,
         end: Double,
         confidence: Double,
         analysisAssetId: String
     ) -> AdWindow {
-        AdWindow(
+        // playhead-mqqd: ONE value, used twice — the anchor columns below and
+        // the gate derived from it. Never two expressions that happen to agree.
+        let support = extentSupport
+        return AdWindow(
             id: markId(analysisAssetId: analysisAssetId, start: start, end: end),
             analysisAssetId: analysisAssetId,
             startTime: start,
@@ -1152,14 +1193,18 @@ enum AdPodContinuation {
             wasSkipped: false,
             userDismissedBanner: false,
             evidenceSources: nil,
-            // ALWAYS markOnly — hard-coded literal, never a policy switch.
-            eligibilityGate: SkipEligibilityGate.markOnly.rawValue,
+            // playhead-mqqd: DERIVED from `support`, not typed. `markOnly`
+            // today because a continuation proves neither edge — see
+            // `extentSupport` — and no longer a literal free to disagree with
+            // the two anchor columns below.
+            eligibilityGate: ComposedMarkGate.eligibility(for: support).rawValue,
             catalogStoreMatchSimilarity: nil,
-            // Belt+suspenders: under playhead-2350 an unanchored edge auto-skips
-            // nothing, so even a future edge policy running over these rows
-            // cannot promote recovered pod material to a silent skip.
-            startEdgeAnchor: AutoSkipEdgeAnchor.unanchored.rawValue,
-            endEdgeAnchor: AutoSkipEdgeAnchor.unanchored.rawValue
+            // The same `support`. Belt+suspenders: under playhead-2350 an
+            // unanchored edge auto-skips nothing, so even a future edge policy
+            // running over these rows cannot promote recovered pod material to
+            // a silent skip.
+            startEdgeAnchor: support.startAnchor.rawValue,
+            endEdgeAnchor: support.endAnchor.rawValue
         )
     }
 
