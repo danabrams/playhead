@@ -447,6 +447,28 @@ struct BackgroundSessionCreationRecoveryTests {
         /// instance and this test another.
         let io: BackgroundSessionIO
 
+        /// A bound that cannot expire while a rail is holding the crossing
+        /// open, and the reason this is NOT `BackgroundSessionIO.defaultTimeout`.
+        ///
+        /// `Daemon` above deliberately uses the production bound, and is right
+        /// to: its refusal is synchronous, so nothing there ever waits a bound
+        /// out. These rails are the opposite case — they hold the crossing
+        /// open ON PURPOSE, so the production 10 s bound is a clock racing the
+        /// barrier. In the 2026-08-13 merge gate it won:
+        ///
+        ///     [BackgroundSessionIO] URLSession(background:) for
+        ///     com.playhead.episode-downloads: reached the daemon queue after
+        ///     its caller had already given up — not started
+        ///     ↳ await first → nil
+        ///
+        /// The bound expired mid-barrier, so the body was never run at all and
+        /// the rail failed on a `nil` that had nothing to do with the property
+        /// under test. Ten minutes is not a latency claim; it is "longer than
+        /// any barrier below can possibly take", and no rail ever waits it out
+        /// because every one of them is released by an event rather than a
+        /// clock.
+        static let heldCrossingBound: TimeInterval = 600
+
         init(admittingFirst admitted: Int) {
             let counter = OSAllocatedUnfairLock<Int>(initialState: 0)
             self.counter = counter
@@ -460,10 +482,7 @@ struct BackgroundSessionCreationRecoveryTests {
                         }
                     }
                 ),
-                // The PRODUCTION bound: the admitted crossing has to genuinely
-                // succeed, and a short bound would turn that into a latency
-                // measurement of `nsurlsessiond`.
-                timeout: BackgroundSessionIO.defaultTimeout,
+                timeout: Self.heldCrossingBound,
                 queueLabel: "gpdb.test.crossings.\(UUID().uuidString)"
             )
         }
@@ -503,12 +522,33 @@ struct BackgroundSessionCreationRecoveryTests {
         return release
     }
 
-    /// How long a rail waits for a SECOND crossing to show up before
-    /// concluding there is not going to be one. Only a broken implementation
-    /// ever spends it: the duplicate appears within microseconds of the
-    /// callers arriving, so this is the budget the GREEN path pays and the
-    /// RED path exits early from.
-    private static let duplicateCrossingWindow = 200
+    /// Waits until `condition` holds, and reports whether it ever did.
+    ///
+    /// playhead-gpdb R1 review, second pass. EVERY caller of this waits on an
+    /// event that is GUARANTEED to happen — a caller arriving at the crossing
+    /// decision, a crossing being submitted — so load can make the wait longer
+    /// and can never change the answer. That is the whole difference from what
+    /// the merge gate rejected, which waited a fixed number of ticks for a
+    /// duplicate crossing that a CORRECT implementation never produces, and so
+    /// always ran to its cap.
+    ///
+    /// The deadline is a safety net, not an input to any assertion: it exists
+    /// so a genuinely broken build fails instead of hanging the whole plan
+    /// (playhead-nsjn's failure mode), and it is deliberately enormous next to
+    /// what the waits actually cost. For scale, the run that exposed the old
+    /// rail dilated a 1 ms sleep to roughly 160 ms; these barriers need a
+    /// handful of polls, so 120 s is around two orders of magnitude of
+    /// headroom.
+    private static func waited(
+        until condition: () async -> Bool
+    ) async -> Bool {
+        let deadline = ContinuousClock.now + .seconds(120)
+        while ContinuousClock.now < deadline {
+            if await condition() { return true }
+            try? await Task.sleep(for: .milliseconds(2))
+        }
+        return await condition()
+    }
 
     /// Making construction failable made it a SUSPENSION POINT, and
     /// `DownloadManager` is a re-entrant actor — so two callers that both find
@@ -524,6 +564,20 @@ struct BackgroundSessionCreationRecoveryTests {
     /// sessions — and neither assertion means anything at all unless the three
     /// callers genuinely overlap, which is what `holdingQueue` arranges and
     /// what this rail did not do before the R1 review.
+    ///
+    /// THREE THINGS HAVE TO BE TRUE AT ONCE, and the rail failed the merge
+    /// gate the first time because only two of them were:
+    ///   1. the crossing is HELD, so the callers can overlap (`holdingQueue`);
+    ///   2. the hold ends on an EVENT that both implementations reach, not on
+    ///      a clock — `sessionCrossingArrivalsForTesting == 3`. The previous
+    ///      version waited a fixed number of ticks for a DUPLICATE crossing,
+    ///      which a correct implementation never produces, so the wait always
+    ///      ran to its cap and its cost was whatever the box was doing;
+    ///   3. the held crossing's own bound cannot expire while (2) is waiting
+    ///      (`CrossingCounter.heldCrossingBound`). Under the full plan the
+    ///      production 10 s bound expired ~22 s before the barrier ended, the
+    ///      body was never run at all, and `await first` was `nil`.
+    /// With all three, load changes how long this rail takes and nothing else.
     @Test("Concurrent requests for one role share a single construction")
     func concurrentRequestsDoNotOpenTwoSessions() async throws {
         let dir = try makeTempDir()
@@ -538,26 +592,28 @@ struct BackgroundSessionCreationRecoveryTests {
         async let second = manager.backgroundSessionForTesting(role: .legacy)
         async let third = manager.backgroundSessionForTesting(role: .legacy)
 
-        // The first crossing is a deterministic wait: it cannot complete while
-        // the queue is held, so it is observable for as long as we care to
-        // look.
-        var ticks = 0
-        while daemon.crossings < 1, ticks < 2_000 {
-            try await Task.sleep(for: .milliseconds(1))
-            ticks += 1
+        // THE BARRIER. All three callers reaching the crossing decision is an
+        // event that happens on BOTH implementations — the correct one joins
+        // there, the broken one starts a second crossing there — so waiting
+        // for it is a wait, not a race. Only once every caller has committed
+        // to join-or-cross is it safe to let the crossing answer; releasing
+        // any earlier is what made the previous version of this rail a
+        // wall-clock guess.
+        let allArrived = await Self.waited {
+            await manager.sessionCrossingArrivalsForTesting == 3
         }
-        #expect(
-            daemon.crossings >= 1,
-            "the rail is vacuous unless a crossing was actually submitted"
-        )
-        // A duplicate, if there is going to be one, is submitted by a caller
-        // that has already found the memo empty — i.e. within microseconds.
-        ticks = 0
-        while daemon.crossings == 1, ticks < Self.duplicateCrossingWindow {
-            try await Task.sleep(for: .milliseconds(1))
-            ticks += 1
-        }
+        // Read while the crossing is still held, so the number describes the
+        // barrier rather than whatever happened after it. Safe to spend an
+        // actor hop here only because `heldCrossingBound` cannot expire.
+        let arrivals = await manager.sessionCrossingArrivalsForTesting
         release.signal()
+        #expect(
+            allArrived,
+            """
+            the rail is vacuous unless all three callers reached the crossing \
+            decision while it was held: \(arrivals) of 3 arrived
+            """
+        )
 
         // Asserted BEFORE the results are unwrapped: a duplicated crossing is
         // refused by `CrossingCounter`, so an implementation without the join
@@ -628,13 +684,11 @@ struct BackgroundSessionCreationRecoveryTests {
             )
         }
 
-        var ticks = 0
-        while daemon.crossings < 1, ticks < 2_000 {
-            try await Task.sleep(for: .milliseconds(1))
-            ticks += 1
-        }
+        // A guaranteed event again: `backgroundDownload` must submit the
+        // session crossing, and while the queue is held it cannot get past it.
+        let reachedTheCrossing = await Self.waited { daemon.crossings >= 1 }
         #expect(
-            daemon.crossings >= 1,
+            reachedTheCrossing,
             "the rail is vacuous unless the download actually reached the session crossing"
         )
         #expect(

@@ -571,6 +571,33 @@ actor DownloadManager {
     private var _sessionCreationsInFlight:
         [BackgroundSessionRole: Task<URLSession?, Never>] = [:]
 
+    #if DEBUG
+    /// How many callers have reached the CROSSING DECISION — found no
+    /// memoized session, and are about to either join an in-flight crossing
+    /// or start one.
+    ///
+    /// playhead-gpdb R1 review. This exists because a correct implementation
+    /// leaves NO OTHER TRACE there, and a test that cannot see the arrival
+    /// cannot know when it is safe to let the crossing answer:
+    ///
+    ///   * a caller that JOINS writes nothing at all;
+    ///   * `_sessionCreationsInFlight` is keyed by role, so a caller that
+    ///     WRONGLY starts a second crossing overwrites the entry rather than
+    ///     growing the map;
+    ///   * two `URLSession`s on one background identifier both report that
+    ///     identifier, so `_sessionsByRole` and every identifier-shaped
+    ///     observable read the same on both implementations.
+    ///
+    /// Without it the rail could only wait a while and hope every caller had
+    /// arrived. That guess is what failed the 2026-08-13 merge gate: under a
+    /// full plan it ran ~32 s while holding open a crossing whose own bound is
+    /// 10 s, so the crossing expired mid-barrier and the rail failed for a
+    /// reason unrelated to the property. Counting the arrival turns the
+    /// barrier's exit condition into an event that is GUARANTEED to happen, so
+    /// load can make the wait longer but can no longer change the answer.
+    private(set) var sessionCrossingArrivalsForTesting = 0
+    #endif
+
     /// Feature flag that gates the 24cm dual-session split. Copied from
     /// `PreAnalysisConfig.useDualBackgroundSessions` at init time and
     /// re-exposed via `setUseDualBackgroundSessions(_:)` so tests can
@@ -1400,6 +1427,14 @@ actor DownloadManager {
         }()
 
         if let existing = _sessionsByRole[resolvedRole] { return existing }
+
+        #if DEBUG
+        // playhead-gpdb R1: this caller found no memoized session, so it is
+        // about to either join an in-flight crossing or start one. See
+        // `sessionCrossingArrivalsForTesting` for why the arrival needs to be
+        // counted here and cannot be inferred anywhere else.
+        sessionCrossingArrivalsForTesting += 1
+        #endif
 
         // Somebody is already inside the daemon for this role. Join them
         // rather than opening a second `URLSession` on the same background
