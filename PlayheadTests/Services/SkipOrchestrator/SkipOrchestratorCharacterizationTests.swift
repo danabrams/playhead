@@ -175,11 +175,22 @@ struct SkipOrchestratorCharacterizationHysteresisTests {
             decisionState: "candidate"
         )
         await orchestrator.receiveAdWindows([introWindow, closeWindow])
-        #expect(await orchestrator.activeWindowIDs() == Set(["ad-intro", "ad-close"]))
+        // playhead-wq34: asked across BOTH tiers. The subject here is
+        // RETIREMENT — that `retireAdWindows` removes a window from live
+        // orchestration — and on this shadow-mode show the rows now live in the
+        // suggest tier. A check phrased over `activeWindowIDs()` alone would
+        // read "both retired" before `retireAdWindows` was even called, which
+        // is a test that cannot fail for its own reason.
+        func liveWindowIDs() async -> Set<String> {
+            let managed = await orchestrator.activeWindowIDs()
+            let suggested = await orchestrator.activeSuggestWindowIDs()
+            return managed.union(suggested)
+        }
+        #expect(await liveWindowIDs() == Set(["ad-intro", "ad-close"]))
 
         await orchestrator.retireAdWindows(ids: ["ad-close"])
 
-        #expect(await orchestrator.activeWindowIDs() == Set(["ad-intro"]))
+        #expect(await liveWindowIDs() == Set(["ad-intro"]))
     }
 
     @Test("Seek suppresses auto-skip temporarily")
@@ -328,7 +339,17 @@ struct SkipOrchestratorCharacterizationHysteresisTests {
         #expect(!reverted.isEmpty)
     }
 
-    @Test("Shadow mode confirms but never applies")
+    /// playhead-wq34 rewrote what this test asserts, because what it asserted
+    /// WAS the defect. "Shadow mode confirms" named a `.confirmed` decision the
+    /// listener could not see: no skip, no card, only a passive timeline block
+    /// — strictly LESS than the identical row stamped `.markOnly` would have
+    /// produced, in the mode a brand-new show starts in.
+    ///
+    /// The claim worth pinning survives and is now stated in full: shadow mode
+    /// removes no audio, AND the row still reaches the listener as a card it
+    /// can answer. Both halves matter — the first alone is what let the silence
+    /// ship.
+    @Test("Shadow mode never applies, and offers the span instead of swallowing it")
     func shadowModeNoSkip() async throws {
         let store = try await makeTestStore()
         try await store.insertAsset(makeSkipTestAnalysisAsset())
@@ -347,12 +368,22 @@ struct SkipOrchestratorCharacterizationHysteresisTests {
 
         let log = await orchestrator.getDecisionLog()
         let applied = log.filter { $0.decision == .applied }
-        let confirmed = log.filter { $0.decision == .confirmed }
-        #expect(applied.isEmpty)
-        #expect(!confirmed.isEmpty)
+        #expect(applied.isEmpty, "shadow mode removes no audio")
+        #expect(
+            await orchestrator.activeSuggestWindowIDs() == ["ad-shadow"],
+            "playhead-wq34: and the span is OFFERED rather than silently confirmed"
+        )
+        #expect(
+            (await orchestrator.activeWindowIDs()).isEmpty,
+            "the managed tier can do nothing with it, so it does not hold it"
+        )
     }
 
-    @Test("Manual mode confirms but does not auto-apply")
+    /// playhead-wq34: same rewrite, same reason as `shadowModeNoSkip` above —
+    /// and `.manual` is the mode that made the old assertion most misleading,
+    /// since `evaluateWindow`'s `.manual` arm logs "awaiting user tap" for a
+    /// window there was no way to tap.
+    @Test("Manual mode does not auto-apply, and offers the span for the tap it promises")
     func manualModeNoAutoSkip() async throws {
         let store = try await makeTestStore()
         try await store.insertAsset(makeSkipTestAnalysisAsset())
@@ -379,22 +410,42 @@ struct SkipOrchestratorCharacterizationHysteresisTests {
 
         let log = await orchestrator.getDecisionLog()
         let applied = log.filter { $0.decision == .applied }
-        #expect(applied.isEmpty)
-
-        let confirmed = await orchestrator.confirmedWindows()
-        #expect(!confirmed.isEmpty)
+        #expect(applied.isEmpty, "manual mode removes no audio on its own")
+        #expect(
+            await orchestrator.activeSuggestWindowIDs() == ["ad-manual"],
+            "playhead-wq34: the tap the mode's own log line promises is a real affordance"
+        )
     }
 
+    /// playhead-wq34 changed how this test reaches a managed `.confirmed`
+    /// window, and the new route is the more honest one.
+    ///
+    /// It used to use a `.manual`-mode show, relying on `evaluateWindow`'s
+    /// `.manual` arm to park the row in the managed tier — which is exactly the
+    /// silent state wq34 removed, so the row is now a suggest card and
+    /// `applyManualSkip` has nothing to act on. The seam still needs a managed
+    /// window that the auto path declined to skip, and the production state
+    /// that produces one is playhead-98co's edge-padding veto: with padding ON
+    /// and no anchored start there is no late-safe window, so the row stays
+    /// `.confirmed` rather than promoting. A user skipping that by hand is
+    /// precisely what this seam is for — and `applyManualSkip` marks it
+    /// user-initiated, which is what exempts it from the padding that vetoed it.
+    ///
+    /// (Both `applyManualSkip` and `confirmedWindows()` have no production
+    /// callers today — measured — so this is a seam test either way. Reaching
+    /// the seam through a state production can actually be in is what keeps it
+    /// from becoming a test of nothing.)
     @Test("Manual skip applies a confirmed window")
     func manualSkipApplies() async throws {
         let store = try await makeTestStore()
         try await store.insertAsset(makeSkipTestAnalysisAsset())
         let trustService = try await makeSkipTestTrustService(
-            mode: "manual",
-            trustScore: 0.6,
-            observations: 5
+            mode: "auto",
+            trustScore: 0.9,
+            observations: 10
         )
         let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
+        await orchestrator.setEdgePaddingEnabled(true)
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-1",
             episodeId: "asset-1",
@@ -410,6 +461,13 @@ struct SkipOrchestratorCharacterizationHysteresisTests {
         )
         try await store.insertAdWindow(ad)
         await orchestrator.receiveAdWindows([ad])
+
+        // The padding veto held it at `.confirmed` — a managed window that did
+        // NOT auto-skip, which is the only thing there is to manually skip.
+        #expect(
+            (await orchestrator.confirmedWindows()).contains { $0.id == "ad-mskip" },
+            "setup: the unanchored span must be vetoed to .confirmed, not applied"
+        )
 
         await orchestrator.applyManualSkip(windowId: "ad-mskip")
 
@@ -898,12 +956,25 @@ struct SkipOrchestratorAdDecisionContractTests {
         let shadowApplied = shadowLog.filter { $0.decision == .applied }
         #expect(shadowApplied.isEmpty, "Shadow mode must never auto-apply, even for eligible AdDecisionResults")
 
-        // Manual mode: no auto-skip, window should be confirmed awaiting user action.
+        // Manual mode: no auto-skip.
         let manualLog = await manualOrchestrator.getDecisionLog()
         let manualApplied = manualLog.filter { $0.decision == .applied }
         #expect(manualApplied.isEmpty, "Manual mode must never auto-apply AdDecisionResults")
-        let manualConfirmed = await manualOrchestrator.confirmedWindows()
-        #expect(!manualConfirmed.isEmpty, "Manual mode must expose eligible AdDecisionResult spans as confirmed windows")
+
+        // playhead-wq34: "expose … as CONFIRMED windows" was the defect stated
+        // as a requirement. `receiveAdDecisionResults` admits only `.eligible`
+        // rows, so before wq34 every span it delivered to a non-`.auto` show
+        // became a `.confirmed` the listener could not see — no skip and no
+        // card, from the door that carries the pipeline's most-corroborated
+        // output. Both orchestrators must now OFFER the span.
+        #expect(
+            await manualOrchestrator.activeSuggestWindowIDs() == ["eligible-non-auto"],
+            "Manual mode must offer an eligible AdDecisionResult span, not swallow it"
+        )
+        #expect(
+            await shadowOrchestrator.activeSuggestWindowIDs() == ["eligible-non-auto"],
+            "and so must shadow — the suggest tier never consulted the mode"
+        )
     }
 
     @Test("Fusion result with same id as an open suggest entry clears the suggest entry (playhead-rfu-sad)")
@@ -927,10 +998,18 @@ struct SkipOrchestratorAdDecisionContractTests {
         try await store.insertAsset(
             makeSkipTestAnalysisAsset(episodeId: "asset-1")
         )
+        // playhead-wq34: `.auto`, and the mode is load-bearing rather than
+        // incidental. The race under test is a gate flip PROMOTING a span into
+        // the managed tier while its suggest card is still on screen — and
+        // after wq34 that promotion only happens when the detector class can
+        // act, because a row the managed tier would silently confirm is now
+        // routed to the suggest tier instead. Under the old `.manual` harness
+        // the flip would leave the row exactly where it was and the test would
+        // pass without the symmetric clear it is named for.
         let trustService = try await makeSkipTestTrustService(
-            mode: "manual",
-            trustScore: 0.6,
-            observations: 5
+            mode: "auto",
+            trustScore: 0.9,
+            observations: 10
         )
         let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
         await orchestrator.beginEpisode(
@@ -980,11 +1059,15 @@ struct SkipOrchestratorAdDecisionContractTests {
         //    window.
         await orchestrator.acceptSuggestedSkip(windowId: "ad-shared-id")
 
-        let confirmed = await orchestrator.confirmedWindows()
-        let onSpan = confirmed.filter { $0.startTime == 60 && $0.endTime == 120 }
+        // playhead-wq34: counted over the managed DICTIONARY. On the `.auto`
+        // show this test now needs, the fusion window promotes to `.applied`,
+        // which `confirmedWindows()` filters out — the same playhead-ugy4 lens
+        // error the assertion at the end of this test already names, applied to
+        // these two as well.
+        let onSpan = await orchestrator.activeWindowIDs()
         #expect(onSpan.count == 1,
             "Exactly one managed window should cover the span (the fusion-managed one); got \(onSpan.count)")
-        #expect(onSpan.first?.id == "ad-shared-id",
+        #expect(onSpan.first == "ad-shared-id",
             "The surviving window must be the fusion-managed entry, not a UUID-keyed late promotion")
         // playhead-ugy4: `confirmedWindows()` filters to `.confirmed`, and a
         // late promotion lands as `.applied` — so the two assertions above
@@ -1336,7 +1419,16 @@ struct SkipOrchestratorSuggestTierTests {
     ) async throws {
         let store = try await makeTestStore()
         try await store.insertAsset(makeSkipTestAnalysisAsset())
-        let orchestrator = SkipOrchestrator(store: store)
+        // playhead-wq34: the three stamps under test are exactly the ones that
+        // ADMIT a row to the managed tier, so the show must be one that can use
+        // that tier. Without a trust profile it resolves `.shadow`, and all
+        // three would be routed to the suggest tier for a reason that has
+        // nothing to do with the stamp — turning three positive controls into
+        // three assertions about the mode.
+        let trustService = try await makeSkipTestTrustService(
+            mode: "auto", trustScore: 0.9, observations: 10
+        )
+        let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-1",
             episodeId: "asset-1",
@@ -1344,9 +1436,8 @@ struct SkipOrchestratorSuggestTierTests {
         )
 
         // Inline-build the AdWindow at high confidence with
-        // `decisionState: "confirmed"` so a successful entry into the
-        // standard path is observable via `confirmedWindows()`. The
-        // factory in TestHelpers does not expose `eligibilityGate`.
+        // `decisionState: "confirmed"`. The factory in TestHelpers does not
+        // expose `eligibilityGate`.
         let windowId = "ad-non-markonly-\(label)"
         let window = AdWindow(
             id: windowId,
@@ -1373,11 +1464,14 @@ struct SkipOrchestratorSuggestTierTests {
 
         await orchestrator.receiveAdWindows([window])
 
-        // Positive: the window IS in the standard managed path.
-        let confirmed = await orchestrator.confirmedWindows()
+        // Positive: the window IS in the standard managed path. Read off the
+        // managed DICTIONARY (playhead-wq34 / playhead-ugy4): on an `.auto`
+        // show these rows promote to `.applied`, which `confirmedWindows()`
+        // filters out, so that accessor cannot see the thing being asserted.
+        let managed = await orchestrator.activeWindowIDs()
         #expect(
-            confirmed.contains { $0.id == windowId },
-            "[\(label)] eligibilityGate=\(String(describing: gate)) must enter standard confirmed-windows path; got \(confirmed.map(\.id))"
+            managed.contains(windowId),
+            "[\(label)] eligibilityGate=\(String(describing: gate)) must enter the managed path; got \(managed)"
         )
 
         // Negative: no suggest-tier state was registered. This actor snapshot
@@ -1667,10 +1761,17 @@ struct SkipOrchestratorSuggestTierTests {
         try await store.insertAsset(
             makeSkipTestAnalysisAsset(episodeId: "asset-1")
         )
+        // playhead-wq34: `.auto`, for the same reason as
+        // `fusionResultClearsSharedIdSuggestEntry` — the race this test is
+        // named for is a gate flip PROMOTING the span into the managed tier
+        // while its card is still visible, and after wq34 a flip on a
+        // non-`.auto` show simply re-registers the row in the suggest tier,
+        // where a Yes is a legitimate answer rather than the stale tap this
+        // guard exists to defuse.
         let trustService = try await makeSkipTestTrustService(
-            mode: "manual",
-            trustScore: 0.6,
-            observations: 5
+            mode: "auto",
+            trustScore: 0.9,
+            observations: 10
         )
         let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
         await orchestrator.beginEpisode(
@@ -1716,11 +1817,15 @@ struct SkipOrchestratorSuggestTierTests {
         )
         await orchestrator.receiveAdWindows([promotedSameId])
 
-        // 3. Confirmed window for this id should now exist (manual mode
-        //    keeps it at .confirmed).
-        let confirmedAfterFlip = await orchestrator.confirmedWindows()
-        #expect(confirmedAfterFlip.contains { $0.id == "ad-gate-flip" },
+        // 3. The id must now be in the MANAGED set. playhead-wq34 moved this
+        //    read off `confirmedWindows()`: in `.auto` the flip promotes to
+        //    `.applied`, which that accessor filters out — the same
+        //    playhead-ugy4 lens error the assertion at the end of this test
+        //    already calls out.
+        #expect((await orchestrator.activeWindowIDs()).contains("ad-gate-flip"),
             "After gate flip, the same id must enter the managed-window set")
+        #expect(!(await orchestrator.activeSuggestWindowIDs()).contains("ad-gate-flip"),
+            "and the suggest entry must be gone — that clear is what this test is named for")
 
         // 4. A late `acceptSuggestedSkip` call (e.g. a stale banner tap
         //    arriving after the gate flip) must NOT synthesize a
@@ -1728,15 +1833,16 @@ struct SkipOrchestratorSuggestTierTests {
         //    when the gate flipped, so this is a no-op.
         await orchestrator.acceptSuggestedSkip(windowId: "ad-gate-flip")
 
-        let confirmedAfterAccept = await orchestrator.confirmedWindows()
-        // Exactly one window covering the original span should exist —
-        // the one created by the gate flip. No duplicate from
-        // acceptSuggestedSkip's `promotedId = UUID().uuidString` path.
-        let matching = confirmedAfterAccept.filter {
-            $0.startTime == markOnly.startTime && $0.endTime == markOnly.endTime
-        }
-        #expect(matching.count == 1,
-            "Stale acceptSuggestedSkip after gate flip must be a no-op; got \(matching.count) windows on the same span")
+        // Exactly one window covering the original span should exist — the one
+        // created by the gate flip. No duplicate from acceptSuggestedSkip's
+        // `promotedId = UUID().uuidString` path. Counted over the managed
+        // dictionary rather than `confirmedWindows()` (playhead-wq34 /
+        // playhead-ugy4: the duplicate lands as `.applied`, which that accessor
+        // cannot see — the very blind spot the final assertion below was added
+        // for, applied here too).
+        let matchingIDs = await orchestrator.activeWindowIDs()
+        #expect(matchingIDs.count == 1,
+            "Stale acceptSuggestedSkip after gate flip must be a no-op; got \(matchingIDs.count) windows on the same span")
         // playhead-auz3: `confirmedWindows()` filters to `.confirmed`, and the
         // duplicate this test is named for lands as `.applied` — so the two
         // assertions above structurally cannot observe it. `activeWindowIDs()`

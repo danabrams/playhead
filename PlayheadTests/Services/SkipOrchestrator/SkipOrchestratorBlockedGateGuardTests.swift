@@ -182,7 +182,15 @@ struct SkipOrchestratorActuationReadTests {
     func malformedActuationIsRefused() async throws {
         let store = try await makeTestStore()
         try await store.insertAsset(makeSkipTestAnalysisAsset())
-        let orchestrator = SkipOrchestrator(store: store)
+        // playhead-wq34: this suite's subject is the GATE guard — which raw
+        // values reach the managed tier — so the show has to be one whose
+        // detector classes can use that tier. Without a trust profile the show
+        // resolves `.shadow`, and every `.eligible` row is routed to the
+        // suggest tier for a reason that has nothing to do with its gate.
+        let trustService = try await makeSkipTestTrustService(
+            mode: "auto", trustScore: 0.9, observations: 10
+        )
+        let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-1",
             episodeId: "asset-1",
@@ -418,7 +426,15 @@ struct SkipOrchestratorBlockedGateGuardTests {
 
         let store = try await makeTestStore()
         try await store.insertAsset(makeSkipTestAnalysisAsset())
-        let orchestrator = SkipOrchestrator(store: store)
+        // playhead-wq34: this suite's subject is the GATE guard — which raw
+        // values reach the managed tier — so the show has to be one whose
+        // detector classes can use that tier. Without a trust profile the show
+        // resolves `.shadow`, and every `.eligible` row is routed to the
+        // suggest tier for a reason that has nothing to do with its gate.
+        let trustService = try await makeSkipTestTrustService(
+            mode: "auto", trustScore: 0.9, observations: 10
+        )
+        let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-1",
             episodeId: "asset-1",
@@ -462,7 +478,15 @@ struct SkipOrchestratorBlockedGateGuardTests {
 
         let store = try await makeTestStore()
         try await store.insertAsset(makeSkipTestAnalysisAsset())
-        let orchestrator = SkipOrchestrator(store: store)
+        // playhead-wq34: this suite's subject is the GATE guard — which raw
+        // values reach the managed tier — so the show has to be one whose
+        // detector classes can use that tier. Without a trust profile the show
+        // resolves `.shadow`, and every `.eligible` row is routed to the
+        // suggest tier for a reason that has nothing to do with its gate.
+        let trustService = try await makeSkipTestTrustService(
+            mode: "auto", trustScore: 0.9, observations: 10
+        )
+        let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-1",
             episodeId: "asset-1",
@@ -504,7 +528,15 @@ struct SkipOrchestratorBlockedGateGuardTests {
     func eligibleGateFlowsThrough() async throws {
         let store = try await makeTestStore()
         try await store.insertAsset(makeSkipTestAnalysisAsset())
-        let orchestrator = SkipOrchestrator(store: store)
+        // playhead-wq34: this suite's subject is the GATE guard — which raw
+        // values reach the managed tier — so the show has to be one whose
+        // detector classes can use that tier. Without a trust profile the show
+        // resolves `.shadow`, and every `.eligible` row is routed to the
+        // suggest tier for a reason that has nothing to do with its gate.
+        let trustService = try await makeSkipTestTrustService(
+            mode: "auto", trustScore: 0.9, observations: 10
+        )
+        let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-1",
             episodeId: "asset-1",
@@ -537,10 +569,16 @@ struct SkipOrchestratorBlockedGateGuardTests {
 
         await orchestrator.receiveAdWindows([window])
 
-        let confirmed = await orchestrator.confirmedWindows()
+        // playhead-wq34: read the MANAGED DICTIONARY, which is what this test's
+        // own name says it is about. `confirmedWindows()` filters to
+        // `.confirmed`, and on the `.auto` show this suite now needs, an
+        // eligible row promotes straight to `.applied` — so that accessor
+        // cannot see the window it is describing (the same playhead-ugy4 lens
+        // error called out in SkipOrchestratorCharacterizationTests).
+        let active = await orchestrator.activeWindowIDs()
         #expect(
-            confirmed.contains { $0.id == windowId },
-            "eligible-gate window must enter confirmed-windows skip path; got \(confirmed.map(\.id))"
+            active.contains(windowId),
+            "eligible-gate window must enter the managed-window set; got \(active)"
         )
     }
 }

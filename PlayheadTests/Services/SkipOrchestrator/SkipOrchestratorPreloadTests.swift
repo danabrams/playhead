@@ -169,6 +169,24 @@ final class SkipOrchestratorPreloadTests: XCTestCase {
 
     // MARK: - Tests
 
+    /// playhead-wq34: which TIER a preloaded row lands in now depends on the
+    /// show's mode, and this suite's shared `orchestrator` has no trust service
+    /// — so it resolves `.shadow`, and a nil-gate row is routed to the SUGGEST
+    /// tier rather than sitting silently in the managed one.
+    ///
+    /// Every test below whose subject is the preload's ADMISSION FILTER (which
+    /// rows survived the read of `ad_windows`) therefore asks this, not
+    /// `confirmedWindows()`. The distinction matters: an assertion phrased over
+    /// one tier is satisfied by a row that quietly moved to the other, which is
+    /// how a filtering test goes vacuous without failing. Tests whose subject
+    /// really IS the managed tier (the two edge-anchor tests above, the banner
+    /// tests below) keep their own auto-mode orchestrators and are untouched.
+    private func deliveredWindowIDs() async -> Set<String> {
+        let managed = await orchestrator.activeWindowIDs()
+        let suggested = await orchestrator.activeSuggestWindowIDs()
+        return managed.union(suggested)
+    }
+
     func testBeginEpisodeLoadsHighConfidenceAdWindows() async throws {
         // Seed two high-confidence ad_windows (≥ 0.7) directly into the store.
         try await store.insertAdWindow(
@@ -190,15 +208,25 @@ final class SkipOrchestratorPreloadTests: XCTestCase {
 
         // beginEpisode should load the windows and push them through the pipeline.
         await orchestrator.beginEpisode(analysisAssetId: "asset-1", episodeId: "asset-1")
-        // The orchestrator should have processed the pre-loaded windows.
-        // In default shadow mode, windows are confirmed (not applied), so the
-        // decision log should have entries for the preloaded windows.
-        let log = await orchestrator.getDecisionLog()
-        XCTAssertFalse(log.isEmpty, "Decision log should contain entries from preloaded windows")
 
-        // Confirmed windows should be available.
-        let confirmed = await orchestrator.confirmedWindows()
-        XCTAssertEqual(confirmed.count, 2, "Both preloaded windows should appear as confirmed windows")
+        // Both rows must reach the live session. playhead-wq34: in the default
+        // shadow mode they reach it as SUGGEST-tier rows — the listener is
+        // asked — rather than as the silent `.confirmed` managed rows this
+        // assertion used to name. That silence was the defect wq34 removed: a
+        // `.markOnly` twin of either row would have produced a card, so the
+        // stronger stamp was reaching the listener with less.
+        let delivered = await deliveredWindowIDs()
+        XCTAssertEqual(
+            delivered,
+            ["win-1", "win-2"],
+            "Both preloaded windows should reach the live session"
+        )
+        let suggested = await orchestrator.activeSuggestWindowIDs()
+        XCTAssertEqual(
+            suggested,
+            ["win-1", "win-2"],
+            "On a shadow-mode show the managed tier can do nothing with them, so they are offered as cards"
+        )
 
         // The handler observation isn't asserted here — shadow-mode runs do
         // not push cues through to the playback service, but the lock cell
@@ -229,9 +257,11 @@ final class SkipOrchestratorPreloadTests: XCTestCase {
 
         await orchestrator.beginEpisode(analysisAssetId: "asset-1", episodeId: "asset-1")
 
-        let confirmed = await orchestrator.confirmedWindows()
-        XCTAssertEqual(confirmed.count, 1, "Only the ≥0.7 window should preload")
-        XCTAssertEqual(confirmed.first?.id, "win-high")
+        // Asked across BOTH tiers (playhead-wq34): the claim is that the
+        // low-confidence row never survived the preload, and a check phrased
+        // over one tier would also pass if it had merely landed in the other.
+        let delivered = await deliveredWindowIDs()
+        XCTAssertEqual(delivered, ["win-high"], "Only the ≥0.7 window should preload")
     }
 
     func testZeroLengthAdWindowFilteredFromPreload() async throws {
@@ -244,8 +274,12 @@ final class SkipOrchestratorPreloadTests: XCTestCase {
 
         await orchestrator.beginEpisode(analysisAssetId: "asset-1", episodeId: "asset-1")
 
-        let confirmed = await orchestrator.confirmedWindows()
-        XCTAssertTrue(confirmed.isEmpty, "Zero-length window must not preload")
+        // Both tiers, for the reason in `deliveredWindowIDs`: after
+        // playhead-wq34 a `confirmedWindows().isEmpty` check on this shadow
+        // orchestrator is true whether or not the filter did anything, which
+        // would make this test pass while proving nothing.
+        let delivered = await deliveredWindowIDs()
+        XCTAssertTrue(delivered.isEmpty, "Zero-length window must not preload")
     }
 
     /// Cycle-21 H-1: only `.suppressed` and `.reverted` are filtered
@@ -278,11 +312,24 @@ final class SkipOrchestratorPreloadTests: XCTestCase {
         await orchestrator.beginEpisode(analysisAssetId: "asset-1", episodeId: "asset-1")
 
         // .confirmed and .applied survive; .suppressed and .reverted are filtered.
-        let active = await orchestrator.activeWindowIDs()
+        // Asked across both tiers (playhead-wq34): this test's subject is the
+        // DECISION-STATE filter, and on a shadow-mode show `win-confirmed` now
+        // survives into the suggest tier while `win-applied` stays managed. A
+        // check phrased over `activeWindowIDs()` alone would report the
+        // survivor as filtered.
+        let delivered = await deliveredWindowIDs()
         XCTAssertEqual(
-            active,
+            delivered,
             ["win-confirmed", "win-applied"],
             "Preload must drop only `.suppressed` and `.reverted`; `.applied` must survive so the skip cue re-pushes on the next app launch (cross-launch auto-skip continuity)."
+        )
+        // playhead-wq34's `.applied` exclusion, from the other side: a durable
+        // receipt is NOT re-offered as a question, whatever the mode, because
+        // the skip it records already happened.
+        let managed = await orchestrator.activeWindowIDs()
+        XCTAssertTrue(
+            managed.contains("win-applied"),
+            "A durably-applied row must stay in the managed tier so its cue re-pushes"
         )
     }
 
@@ -546,7 +593,15 @@ final class SkipOrchestratorPreloadTests: XCTestCase {
             "win-\(SkipDecisionState.applied.rawValue)"
         ].sorted()
 
-        let active = await orchestrator.activeWindowIDs().sorted()
+        // Asked across BOTH tiers (playhead-wq34). The partition under test is
+        // over `SkipDecisionState`, and on this shadow-mode orchestrator its
+        // three survivors no longer share a tier: `.applied` stays managed (a
+        // receipt is never re-offered as a question) while `.candidate` and
+        // `.confirmed` are routed to the suggest tier. Reading
+        // `activeWindowIDs()` alone would report two correctly-admitted rows as
+        // filtered, and would then go on failing for a reason that has nothing
+        // to do with the partition this test guards.
+        let active = await deliveredWindowIDs().sorted()
         XCTAssertEqual(
             active,
             expectedActive,
@@ -597,9 +652,18 @@ final class SkipOrchestratorPreloadTests: XCTestCase {
         await orchestrator.receiveAdWindows([liveWindow])
 
         // The orchestrator must NOT create a duplicate -- the same window ID
-        // means the existing managed window is updated (not duplicated).
-        let confirmed = await orchestrator.confirmedWindows()
-        XCTAssertEqual(confirmed.count, 1, "Duplicate window must not create a second confirmed entry")
+        // means the existing entry is updated (not duplicated). Asked across
+        // both tiers (playhead-wq34): on this shadow-mode orchestrator the row
+        // lives in the suggest tier, and the dedup claim is about the ID, not
+        // about which tier holds it.
+        let delivered = await deliveredWindowIDs()
+        XCTAssertEqual(delivered, ["win-pre"], "Duplicate window must not create a second entry")
+        let managed = await orchestrator.activeWindowIDs()
+        let suggested = await orchestrator.activeSuggestWindowIDs()
+        XCTAssertTrue(
+            managed.isDisjoint(with: suggested),
+            "playhead-rfu-sad: a window must never occupy both tiers at once"
+        )
     }
 
     /// Cycle-24 missing-test: pin that `endEpisode` clears

@@ -2896,6 +2896,18 @@ actor SkipOrchestrator {
 
             let existingManaged = windows[adWindow.id]
             let existingState = existingManaged?.decisionState
+            // playhead-wq34: hoisted from the edge-anchor stamp site at the end
+            // of this loop, which is its only other reader. It is a pure
+            // function of `existingManaged` and `adWindow`, neither of which is
+            // rebound below, so the move is behaviour-neutral — and the tier
+            // routing needs it, because the anchors the stamp will INSTALL are
+            // what `evaluateWindow` will later classify on.
+            let replacesManagedMaterial = existingManaged.map {
+                !AdWindowMaterialIdentity.sameProducerRevision(
+                    $0.adWindow,
+                    adWindow
+                )
+            } ?? false
 
             // A user-reverted window is terminal. Applied windows remain
             // terminal only while the newest precision gate still permits the
@@ -3064,7 +3076,25 @@ actor SkipOrchestrator {
             // recognised non-eligible cases before they reach
             // `evaluateAndPush`. Only nil and the explicit `"autoSkip"`
             // literal use the non-enum producer contract.
+            // playhead-wq34: THE MONOTONICITY FALLBACK. A row the managed tier
+            // cannot act on takes the SAME door a mark-only row takes, so the
+            // stronger stamp can never reach the listener with less than the
+            // weaker one. See `managedTierWouldBeSilent` for the rule and for
+            // why it is applied HERE rather than inside `evaluateWindow`'s mode
+            // switch.
+            let admissionMode = admissionSkipMode(
+                for: adWindow,
+                replacesManagedMaterial: replacesManagedMaterial
+            )
+            let silentManagedTier =
+                (decodedGate == nil || decodedGate == .eligible)
+                && managedTierWouldBeSilent(
+                    mode: admissionMode,
+                    incomingState: incomingState,
+                    existingState: existingState
+                )
             if decodedGate == .markOnly
+                || silentManagedTier
                 || (
                     catalogProvenanceMustFailClosed
                     && (decodedGate == nil || decodedGate == .eligible)
@@ -3074,9 +3104,13 @@ actor SkipOrchestrator {
                     logger.warning(
                         "AdWindow \(adWindow.id, privacy: .public) has untrusted catalog provenance — surfacing as suggest tier"
                     )
-                } else {
+                } else if decodedGate == .markOnly {
                     logger.debug(
                         "AdWindow \(adWindow.id, privacy: .public) eligibilityGate=markOnly — surfacing as suggest tier"
+                    )
+                } else {
+                    logger.debug(
+                        "AdWindow \(adWindow.id, privacy: .public) is eligible but its detector class is \(admissionMode.rawValue, privacy: .public) — surfacing as suggest tier rather than silently confirming"
                     )
                 }
                 // playhead-bllt: the census carries WHY a row is in the suggest
@@ -3089,9 +3123,26 @@ actor SkipOrchestrator {
                 // appear somewhere else. `nil` (and therefore no detail token)
                 // for a fully-anchored row, deliberately: a detail that fires
                 // on every delivery says nothing.
-                let extentDetail = HotPathExtentGate.censusDetail(
-                    for: resolvedExtentSupport(for: adWindow)
-                )
+                //
+                // playhead-wq34: when the reason is the MODE rather than the
+                // extent, the detail says so. A byte-exact row demoted to
+                // suggest because its class is no longer `.auto` is fully
+                // anchored, so `censusDetail` returns nil for it and the row
+                // would be indistinguishable in a device pull from an ordinary
+                // mark-only delivery — the same "a value that names one thing
+                // read as though it named another" shape the extent detail was
+                // added to remove. The mode reason wins only when it is the
+                // ONLY reason: a `.markOnly` row (or an untrusted catalog
+                // claim) would be here regardless of mode, so it keeps the
+                // extent detail it has always carried.
+                let extentDetail: String?
+                if decodedGate == .markOnly || catalogProvenanceMustFailClosed {
+                    extentDetail = HotPathExtentGate.censusDetail(
+                        for: resolvedExtentSupport(for: adWindow)
+                    )
+                } else {
+                    extentDetail = "silent_managed_tier_\(admissionMode.rawValue)"
+                }
                 if banneredWindowIds.contains(adWindow.id) {
                     noteIngestOutcome(
                         .droppedAlreadyBannered,
@@ -3244,12 +3295,8 @@ actor SkipOrchestrator {
             // preloaded row's id but not its fusion-derived anchors). In
             // production there is no `setEdgeAnchors` caller, so the persisted
             // anchors win on first arrival — the common path.
-            let replacesManagedMaterial = existingManaged.map {
-                !AdWindowMaterialIdentity.sameProducerRevision(
-                    $0.adWindow,
-                    adWindow
-                )
-            } ?? false
+            // playhead-wq34: `replacesManagedMaterial` is computed once, above
+            // the tier-routing branch. Same expression, same value.
             if edgeAnchorsByWindowId[adWindow.id] == nil
                 || replacesManagedMaterial {
                 edgeAnchorsByWindowId[adWindow.id] = (
@@ -3530,6 +3577,51 @@ actor SkipOrchestrator {
                 continue
             }
 
+            // playhead-wq34: the SAME monotonicity fallback as
+            // `receiveAdWindows`, because this is the same admission decision
+            // through a second door — the final-pass backfill's fusion handoff
+            // (`AdDetectionService.runBackfill`). This door is the PUREST
+            // instance of the defect: it admits ONLY `.eligible` rows, so
+            // before this bead every row it delivered for a non-`.auto` class
+            // was silent by construction. Leaving it would put the inversion
+            // BETWEEN THE DOORS — the identical row carded when the preload
+            // delivered it and vanished when backfill did — which is the
+            // divergence `forwardPersistedAdWindows` is documented to exist to
+            // prevent. One rule, stated once, asked twice.
+            //
+            // `replacesManagedMaterial` is resolved from `producerRevision`
+            // (the exact durable row this decision is fenced against), matching
+            // the stamp site at the end of this loop.
+            let replacesManagedMaterial = existingManaged.map {
+                !AdWindowMaterialIdentity.sameProducerRevision(
+                    $0.adWindow,
+                    producerRevision
+                )
+            } ?? false
+            let admissionMode = admissionSkipMode(
+                for: producerRevision,
+                replacesManagedMaterial: replacesManagedMaterial
+            )
+            if managedTierWouldBeSilent(
+                mode: admissionMode,
+                // This door forces `.confirmed` when it builds its
+                // `ManagedWindow`, so the durable row's own state is what an
+                // applied receipt is legible in.
+                incomingState: SkipDecisionState(
+                    rawValue: producerRevision.decisionState
+                ) ?? .confirmed,
+                existingState: existingState
+            ) {
+                retireManagedWindowIfPresent(windowId: result.id)
+                if !banneredWindowIds.contains(result.id) {
+                    registerSuggestedWindow(producerRevision)
+                }
+                logger.debug(
+                    "AdDecisionResult \(result.id, privacy: .public) is eligible but its detector class is \(admissionMode.rawValue, privacy: .public) — surfacing as suggest tier rather than silently confirming"
+                )
+                continue
+            }
+
             // playhead-rfu-sad: symmetric gate-flip clear. If a fusion
             // result for this id arrives eligible after the same id was
             // first surfaced as a markOnly suggest entry, drop the
@@ -3564,12 +3656,8 @@ actor SkipOrchestrator {
                 )
             }
             windows[result.id] = managed
-            let replacesManagedMaterial = existingManaged.map {
-                !AdWindowMaterialIdentity.sameProducerRevision(
-                    $0.adWindow,
-                    producerRevision
-                )
-            } ?? false
+            // playhead-wq34: `replacesManagedMaterial` is computed once, above
+            // the tier-routing branch. Same expression, same value.
             if edgeAnchorsByWindowId[result.id] == nil
                 || replacesManagedMaterial {
                 edgeAnchorsByWindowId[result.id] = (
@@ -6394,7 +6482,25 @@ actor SkipOrchestrator {
     }
 
     /// Override the active skip mode for the current episode and re-evaluate pending windows.
-    func setActiveSkipMode(_ mode: SkipMode) {
+    ///
+    /// playhead-wq34 made this `async`, and the reason is a regression this bead
+    /// would otherwise have shipped. `setActiveSkipMode` is the PRODUCTION pill
+    /// (`PlayheadRuntime.setShowSkipMode`, the Settings / Now Playing control)
+    /// and it is the only writer of `activeDetectorSkipModes` that does NOT
+    /// clear `windows` — so it is the one place a live episode's rows can
+    /// outlive the mode they were admitted under.
+    ///
+    /// Before wq34, a row delivered on a `.shadow` show sat silently in the
+    /// managed tier, and flipping the pill to `.auto` promoted it on the spot.
+    /// After wq34 that row is a suggest card instead, and `evaluateAndPush`
+    /// iterates `windows` — which no longer holds it. Left there, "turn
+    /// auto-skip on" would have stopped working for everything already
+    /// delivered, which is exactly the "must not alter behaviour for a class
+    /// that IS `.auto`" line this bead was told not to cross.
+    ///
+    /// The remedy is to ASK THE DOOR AGAIN rather than to re-route by hand —
+    /// see `readmitModeDivertedSuggestions`.
+    func setActiveSkipMode(_ mode: SkipMode) async {
         activeSkipMode = mode
         // playhead-gard: an explicit session choice governs EVERY detector,
         // including the show-trust-exempt one. `.rediffByteExact` is exempt
@@ -6417,6 +6523,63 @@ actor SkipOrchestrator {
         // playhead-usn1: an explicit choice is a transition like any other.
         publishSkipMode()
         evaluateAndPush()
+        await readmitModeDivertedSuggestions()
+    }
+
+    /// playhead-wq34: re-run ADMISSION for the suggest-tier rows a previous
+    /// mode may have put there, so an explicit instruction takes effect on the
+    /// episode the listener is actually holding.
+    ///
+    /// **It re-delivers through `receiveAdWindows` rather than moving rows
+    /// between the two maps**, and that is the whole design. A hand-rolled
+    /// promotion would be a SECOND admission path — it would have to re-derive
+    /// the catalog-authority check, the inventory filter, the terminal-state
+    /// fences and the edge-anchor stamp, and every one of those is a place the
+    /// two copies could come to disagree. Re-delivery gets all of them by
+    /// construction, and three properties fall out for free rather than needing
+    /// their own invariants:
+    ///
+    ///   * A row diverted by `catalogProvenanceMustFailClosed` FAILS CLOSED
+    ///     AGAIN, because the check simply runs again. A user saying "auto-skip
+    ///     on this show" is not permission to trust a catalog claim nobody can
+    ///     authenticate, and no bookkeeping set is needed to remember which
+    ///     rows those were.
+    ///   * A card the listener has already been shown is not shown twice:
+    ///     `registerSuggestedWindow` sees an exact replay and declines to
+    ///     re-arm (`suggestReplayNotRearmed`).
+    ///   * A row the user has already answered is refused by
+    ///     `hasTerminalSuggestResolution`.
+    ///
+    /// `.markOnly` rows are excluded because their tier is a PRECISION verdict
+    /// about the row, not a consequence of the mode — no instruction promotes
+    /// them, and re-delivering them would only churn the ingest census.
+    ///
+    /// SCOPE, deliberately: this is the UPWARD direction only — the one wq34
+    /// would otherwise have broken. The downward case (a row admitted to the
+    /// managed tier under `.auto`, still un-applied when the listener turns the
+    /// control down, going silent) is pre-existing and is filed as
+    /// playhead-4xw4. Re-delivering managed rows would also resurrect ones the
+    /// runtime has since `.suppressed`, since the producer row carries the
+    /// original `decisionState` — a bigger change than this bead is allowed.
+    ///
+    /// ONE KNOWN NARROWNESS, stated rather than papered over: re-delivery takes
+    /// a fresh producer-mutation generation, so a genuine producer revision for
+    /// the same id that is suspended at the catalog-authority hop when the pill
+    /// is tapped will find itself stale and be dropped. The listener loses one
+    /// revision of one window, and the next hot-path or backfill push delivers
+    /// it again. That is preferable to the alternative — skipping re-admission
+    /// for ids with a delivery in flight — which would make whether the pill
+    /// worked at all depend on timing the listener cannot see.
+    private func readmitModeDivertedSuggestions() async {
+        guard activeAssetId != nil else { return }
+        let candidates = suggestWindows.values
+            .filter { window in
+                guard let raw = window.eligibilityGate else { return true }
+                return SkipEligibilityGate(rawValue: raw) != .markOnly
+            }
+            .sorted { $0.id < $1.id }
+        guard !candidates.isEmpty else { return }
+        await receiveAdWindows(candidates)
     }
 
     /// The show identity this session actually resolved, including one
@@ -6715,6 +6878,130 @@ actor SkipOrchestrator {
         activeDetectorSkipModes.mode(for: detectorClass(for: window))
     }
 
+    /// playhead-wq34: the mode `evaluateWindow` WILL read for this row, asked
+    /// at ADMISSION — before the row has been stamped into
+    /// `edgeAnchorsByWindowId`.
+    ///
+    /// Not `skipMode(for:)`, and the difference is the whole point. That reads
+    /// the CURRENT stamp; both admission doors REPLACE an older stamp whenever
+    /// the row is a materially changed producer revision. Routing on the
+    /// pre-stamp anchors and evaluating on the post-stamp ones would be two
+    /// expressions of one question — the playhead-6qvf shape — and a revision
+    /// that changes a window's detector class (byte-exact edges replaced by
+    /// unanchored ones, say) would slip back into the silent managed tier. This
+    /// resolves the anchors exactly as the stamp site will, then classifies.
+    private func admissionSkipMode(
+        for adWindow: AdWindow,
+        replacesManagedMaterial: Bool
+    ) -> SkipMode {
+        let anchors: (start: AutoSkipEdgeAnchor, end: AutoSkipEdgeAnchor)
+        if let stamped = edgeAnchorsByWindowId[adWindow.id],
+           !replacesManagedMaterial {
+            anchors = stamped
+        } else {
+            // playhead-bllt: through the SHARED row decode, for the reason
+            // `resolvedEdgeAnchors` states one screen down — the row→anchors
+            // read had grown three spellings and was about to grow a fourth.
+            // A router that exists to stop two expressions of one question
+            // (see the doc above) must not be a fourth expression of another.
+            let support = adWindow.extentSupport
+            anchors = (start: support.startAnchor, end: support.endAnchor)
+        }
+        return activeDetectorSkipModes.mode(
+            for: SkipDetectorClass.classify(
+                boundaryState: adWindow.boundaryState,
+                startAnchor: anchors.start,
+                endAnchor: anchors.end
+            )
+        )
+    }
+
+    // MARK: - playhead-wq34: the eligibility ladder is an ORDINAL
+
+    /// Would admitting this row to the managed tier produce NOTHING the
+    /// listener can see or act on?
+    ///
+    /// THE DEFECT THIS EXISTS TO REMOVE. `eligibilityGate` is a ladder — a row
+    /// that earned `.eligible` carries strictly more provenance than one
+    /// stamped `.markOnly` — and until this bead the ladder INVERTED at the
+    /// listener:
+    ///
+    ///   * `.markOnly` routes to the SUGGEST tier, which arms a card and fires
+    ///     it when the playhead enters the span. The suggest path never reads
+    ///     the skip mode, so the card appears in `.shadow`, `.manual` and
+    ///     `.auto` alike.
+    ///   * `.eligible` (and `nil`, and the `"autoSkip"` literal) routes to the
+    ///     MANAGED tier, where `evaluateWindow` returns `.confirmed` for
+    ///     `.shadow` and `.manual` and `evaluateAndPush` banners only on
+    ///     `.applied`. For any class that is not `.auto`: no skip AND no card.
+    ///
+    /// Post-playhead-lqcp, `.segmentAggregated`, `.fusion` and `.userAsserted`
+    /// cannot reach `.auto` without an explicit user override, so on the
+    /// shipped default the pipeline's HIGHEST-confidence output was the one the
+    /// listener never saw. A row that earned more produced less.
+    ///
+    /// **The rule: a row the managed tier cannot act on takes the suggest tier
+    /// instead.** Not "emits a card of its own" — takes the same door, the same
+    /// arming, the same emit trigger, the same Yes/No transaction. That is what
+    /// makes the monotonicity claim airtight rather than approximately true:
+    /// the two paths are not compared, they are THE SAME PATH.
+    ///
+    /// WHY HERE AND NOT IN `evaluateWindow`'S MODE SWITCH. The mode switch is
+    /// where the decision's cause lives, so it looks like the natural home. It
+    /// is not, for a reason that is not stylistic: `evaluateWindow` applies the
+    /// late-detection check, seek suppression, `enterThreshold`/`stayThreshold`
+    /// hysteresis, `minimumSpanSeconds` and `shortSpanOverrideConfidence`
+    /// BEFORE it ever reaches the mode switch, and each of those RETURNS EARLY.
+    /// The suggest tier applies none of them. So a fallback inside the mode
+    /// switch would leave a sub-threshold `.eligible` row silent while the
+    /// identical row stamped `.markOnly` still got a card — the same inversion,
+    /// moved from the gate axis onto the confidence axis. There is also a
+    /// structural reason: the two tiers are DISJOINT by construction
+    /// (playhead-rfu-sad — a window in both `windows` and `suggestWindows` can
+    /// re-fire `acceptSuggestedSkip` and synthesize a duplicate managed window
+    /// under a fresh UUID), and tier membership is decided at exactly one place
+    /// per door. A fallback inside an evaluation pass would either create that
+    /// forbidden state or reach across from inside a loop that runs on every
+    /// `evaluateAndPush` rather than once per producer revision.
+    ///
+    /// `.shadow` AND `.manual` ARE TREATED IDENTICALLY, and after this bead
+    /// that is a requirement rather than the coincidence it used to be. A
+    /// `.markOnly` row cards in BOTH, because the suggest path does not consult
+    /// the mode at all. Making `.eligible` silent in `.shadow` and carded in
+    /// `.manual` would therefore re-create the inversion for `.shadow`
+    /// specifically. Monotonicity forces the two arms together; only the
+    /// justification differs (in `.shadow` the answer is also the observation
+    /// the ladder needs to learn from; in `.manual` the card IS the "awaiting
+    /// user tap" that mode's own comment promises).
+    ///
+    /// THE TWO `.applied` EXCLUSIONS ARE NOT DEFENSIVENESS. An already-applied
+    /// row is a durable receipt for a skip that HAPPENED, and both are
+    /// reachable with a non-`.auto` mode — through `applyManualSkip`, through
+    /// `acceptSuggestedSkip`'s promoted row, or through a class that was
+    /// `.auto` when the row was applied in an earlier session and has since
+    /// demoted. Diverting either would turn a receipt back into a question, and
+    /// the incoming case is worse than cosmetic: `forwardPersistedAdWindows`
+    /// pre-populates `banneredWindowIds` for durably-`.applied` rows, so such a
+    /// row would land on `.droppedAlreadyBannered` — retired from the managed
+    /// tier, no card, and no cue. Cross-launch auto-skip would silently
+    /// regress. Nothing here changes behaviour for a class that IS `.auto`: the
+    /// predicate is false for it, at both doors.
+    private func managedTierWouldBeSilent(
+        mode: SkipMode,
+        incomingState: SkipDecisionState,
+        existingState: SkipDecisionState?
+    ) -> Bool {
+        guard incomingState != .applied, existingState != .applied else {
+            return false
+        }
+        switch mode {
+        case .shadow, .manual:
+            return true
+        case .auto:
+            return false
+        }
+    }
+
     /// playhead-gard: what a veto of this window is evidence about — the
     /// detector that drew it, and how certain that span's EXTENT was.
     private func vetoAttribution(
@@ -6834,6 +7121,16 @@ actor SkipOrchestrator {
         // — a deterministic signal that was 2 of 2 on the same corpus. A
         // detector class's own error history governs its own eligibility, and
         // nothing else's.
+        //
+        // playhead-wq34: THE `.shadow` AND `.manual` ARMS ARE IDENTICAL BY
+        // DESIGN — they differ only in a log string — and after wq34 a row that
+        // reaches either one is a row the listener has ALREADY been offered as
+        // a suggest-tier card, or one no producer door could route (an
+        // `injectUserMarkedAd` in-session mark, a mid-episode `setActiveSkipMode`
+        // demotion of a row admitted while the class was `.auto`). The silent
+        // `.confirmed` these return is no longer the ONLY thing a non-`.auto`
+        // class produces; see `managedTierWouldBeSilent`, which is where the
+        // fallback lives and which explains why it cannot live here.
         switch windowSkipMode {
         case .shadow:
             let decision = SkipDecisionState.confirmed

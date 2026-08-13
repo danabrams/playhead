@@ -70,7 +70,33 @@ enum HotPathAdmission: Int, Sendable, Hashable, Comparable, CaseIterable {
     /// The suggest tier. The listener is ASKED, by a banner that fires when the
     /// playhead ENTERS the span (playhead-d3g0). No audio is removed.
     case banner = 1
-    /// The managed tier. Audio is removed without asking.
+    /// The managed tier. Audio is removed without asking — **when the row's
+    /// detector class is in `.auto`, and only then.**
+    ///
+    /// playhead-wq34: that qualifier used to be missing, and with it this whole
+    /// ordinal was false in fact. The managed tier returned a silent
+    /// `.confirmed` for `.shadow` and `.manual`, and banners only on
+    /// `.applied` — so for the three show-governed classes, which post-lqcp
+    /// cannot reach `.auto` without an explicit user override, `autoSkip`
+    /// reached the listener with LESS than `banner` did, and `gatedLabel`'s
+    /// only transition (`autoSkip -> markOnly`) INCREASED what they
+    /// experienced. `SkipOrchestrator.managedTierWouldBeSilent` is what makes
+    /// the rung honest: a row the managed tier cannot act on is routed to the
+    /// suggest tier instead, so this case is now either a skip or the rung
+    /// below it. Nothing in this file changed; the claim it was making became
+    /// true.
+    ///
+    /// TRUE AT THE TWO ADMISSION DOORS, which is where tier membership is
+    /// decided — not everywhere, and the R1 review round found the unqualified
+    /// version of this sentence worth correcting rather than leaving as the
+    /// next reader's premise. Three ways in bypass those doors and can still
+    /// reach the listener with nothing: an in-session `injectUserMarkedAd`
+    /// (playhead-d2it), a row admitted while its class was `.auto` and demoted
+    /// mid-episode by the skip control (playhead-4xw4), and a materially
+    /// changed revision of an already-applied row, which the `.applied`
+    /// exclusion keeps in the managed tier (playhead-gybg). Read the rung as
+    /// honest for what a PRODUCER delivers, and read those three before
+    /// stating it unconditionally.
     case autoSkip = 2
 
     static func < (lhs: Self, rhs: Self) -> Bool { lhs.rawValue < rhs.rawValue }

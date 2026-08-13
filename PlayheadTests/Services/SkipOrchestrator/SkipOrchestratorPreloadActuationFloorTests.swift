@@ -103,7 +103,19 @@ struct SkipOrchestratorPreloadActuationFloorTests {
         for row in rows {
             try await store.insertAdWindow(row)
         }
-        let orchestrator = SkipOrchestrator(store: store)
+        // playhead-wq34: the show must be in `.auto`, and that is a
+        // precondition of the MEASUREMENT rather than a convenience. This suite
+        // reads admission off `getDecisionLog()`, and only the managed tier
+        // reaches `evaluateWindow` — which is also where the vacuity argument
+        // above lives (a corrected-DOWN row is admitted by the floor and then
+        // suppressed by the same number). On a show whose classes are not
+        // `.auto`, wq34 routes an admitted row to the suggest tier, which logs
+        // no decision, so every rail here would read "excluded" and the suite
+        // would pass whatever the floor did.
+        let trustService = try await makeSkipTestTrustService(
+            mode: "auto", trustScore: 0.9, observations: 10
+        )
+        let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-1",
             episodeId: "asset-1",

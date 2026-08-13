@@ -569,11 +569,21 @@ struct BackfillReconcileOrchestratorTests {
         )
         try await store.insertAdWindow(hot)
 
-        // Shadow mode: preloaded candidate is managed (logged) but never applied,
-        // so it stays a nonterminal, retire-eligible row.
+        // playhead-wq34: the preloaded candidate must be MANAGED for the
+        // retire-before-replace path to have anything to retire, and after wq34
+        // a shadow-mode show routes it to the suggest tier instead. The mode is
+        // set through the pill rather than a trust service because this episode
+        // deliberately begins with `podcastId: nil` — there is no show for a
+        // profile to attach to, and that unresolved identity is part of the
+        // fixture. Edge padding is turned ON and the row is unanchored, so it
+        // is held at `.confirmed` rather than promoted — managed and NEVER
+        // APPLIED, which is what the sentence above requires and what plain
+        // `.auto` would not have given.
         let orchestrator = SkipOrchestrator(store: store, trustService: nil)
         let service = makeReconcileService(store: store, orchestrator: orchestrator)
+        await orchestrator.setEdgePaddingEnabled(true)
         await orchestrator.beginEpisode(analysisAssetId: assetId, episodeId: assetId, podcastId: nil)
+        await orchestrator.setActiveSkipMode(.auto)
         #expect((await orchestrator.activeWindowIDs()).contains("hot-dup-t12"),
                 "precondition: the hot candidate is managed via preload")
 
