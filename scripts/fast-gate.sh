@@ -59,19 +59,29 @@
 # in the commit message: the file is the record of what is known-broken, so a
 # shrinking diff is good news and a growing one needs a reason.
 #
-# A CRASHED TEST HOST PRODUCES NO VERDICT (playhead-tl6l). A test whose host
-# died emits no per-test line, so it used to be counted as neither known nor
-# NEW — the first line above could be printed by a run that lost an entire test
-# family, because the crash destroyed the evidence of itself. It now reads
+# A CRASHED TEST HOST PRODUCES NO VERDICT (playhead-tl6l / playhead-buvn). A
+# test whose host died emits no per-test line, so it used to be counted as
+# neither known nor NEW — the first line above could be printed by a run that
+# lost an entire test family, because the crash destroyed the evidence of
+# itself. It now reads
 #
-#     RED (85 known / 0 new) — 30 tests got NO VERDICT (crashed host)
+#     RED (85 known / 0 new) — 11 tests got NO VERDICT (crashed host)
 #
-# and GREEN is unreachable while that count is non-zero. It does NOT change the
-# exit code, deliberately: it fires on main today on a pre-existing crash, and a
-# gate red for a reason its reader cannot fix is one they route around. So READ
-# THE LINE, NOT JUST THE CODE, on a full-plan run — a change that crashes the
-# test host kills healthy tests that are in nobody's baseline, and that run
-# exits 0 with the count as its only witness.
+# GREEN is unreachable while that count is non-zero, and the census is ARMED the
+# same way everything above it is armed — on the DIFF, not the count:
+#
+#     a name that lost its verdict and is NOT recorded  -> exit 65, named
+#     a recorded name that reported again               -> exit 0, good news
+#     the count alone, or a bare host restart           -> exit 0
+#
+# The record is a SET OF NAMES under `no_verdict` in the same per-plan file,
+# because the two measured runs lost the SAME ELEVEN TESTS on different trees —
+# so substitution, which a count cannot see, is the event worth catching.
+#
+# UNRECORDED IS NOT ZERO: a baseline with no `no_verdict` key has never recorded
+# the population, the arm is INERT, and the verdict says so. The first
+# `--accept-baseline` records the set and arms it. That is what keeps this from
+# turning main red today for a pre-existing crash owned by playhead-rouw.
 #
 # The check applies ONLY to a full-plan run. A selective invocation
 # (`-only-testing:`/`-skip-testing:`, which is how scripts/mutation-battery.sh

@@ -80,20 +80,42 @@ to catch: the failure destroys the evidence of itself.
 MEASURED on two full-plan runs, 2026-08-12 (main @ 76b0a09a and bead/mn5e).
 Both carry xcodebuild's restart marker, and after discounting skips:
 
-    main:  30 Swift Testing tests started and reported NOTHING
-    mn5e:  14                    "                          "
+    main:  11 Swift Testing tests started and reported NOTHING
+    mn5e:  11                    "                          "
 
-and the baseline file — 117 tests over 9 observed runs — has never once
-recorded any of them. Nine runs of silence.
+and they are THE SAME ELEVEN — every one a download/cache/streaming test, the
+same family xcodebuild's own `Failing tests:` block names. The baseline file
+(117 tests over 9 observed runs) had never once recorded any of them.
 
-THOSE NUMBERS WERE 33 AND 15 UNTIL R1 REVIEW RE-DERIVED THEM, and the
-correction is the same defect class as the bead itself. Three of main's 10,910
-`passed after` lines — and one of mn5e's — were truncated MID-TOKEN by
-interleaved app output (`passed after 100.732 secon` + a spliced log line), and
-the pattern required the literal word `seconds`. Four tests that demonstrably
-PASSED were being counted as crashed-host casualties. See the regex comments
-below; the rails are TruncatedOutcomeLineTests, and they are synthetic because
-the two 7.2 MB logs live in a session scratchpad that will not outlive it.
+THAT NUMBER HAS BEEN WRONG THREE TIMES, each for a different reason and every
+one the same defect class as the bead itself — a value that names one thing
+read as though it named another. The history is kept because it is the best
+evidence there is about how this census fails:
+
+  * 19 / 18 — the bead's own filing, from grepping the `Failing tests:` block's
+    `Suite.function()` spelling against a console that prints Swift Testing
+    DISPLAY NAMES. That grep can only ever return zero. See below.
+  * 33 / 15 — right method, but every outcome pattern required the literal word
+    `seconds`, and xcodebuild splices app output MID-TOKEN (`passed after
+    100.732 secon` + a log line). Four tests that PASSED were counted as
+    casualties. Fixed at R1 review: the patterns match on the VERB now.
+  * 30 / 14 — R1's own re-derivation, by two routes that agreed with each
+    other and were both wrong the same way. The splice does not stop at the
+    duration: it lands inside the NAME (`✔ Test "a b` + `yte-exact span…`),
+    inside the verb (`" pa` + `ssed after 107.082 seconds.`), and once inside
+    the word `Test` itself (`✔ Tes` + `t "watermark within…`). Eighteen such
+    lines on main and three on mn5e, EVERY ONE a passing test. No pattern over
+    `Test "` can see them, because the intrusion carries its own newline and
+    splits one logical line into two physical ones. Fixed at R2 review by
+    REJOINING before parsing — see `rejoin_spliced_lines`.
+
+Two lessons worth more than the number. First, a wrong census here is not
+noise: playhead-buvn arms the gate on it, and 19 of main's 30 were an artefact
+of how chatty the app happened to be on that run — arming on that would have
+been arming on log interleaving. Second, the direction that has never yet been
+hit is the dangerous one: 88 fail lines against 10,910 pass lines is the only
+reason it was passes that got severed, and a severed FAIL is a LOST FAILURE
+that reads as a crash casualty.
 
 So this module now tracks a third outcome and a fourth verdict category:
 
@@ -146,55 +168,87 @@ baseline member be reported with the RIGHT CAUSE. Before this, a crashed
 baseline member read `(renamed, deleted or newly skipped)`, sending the reader
 to look for a rename that never happened.
 
-WHAT NO VERDICT DOES TO THE EXIT CODE, AND WHY
-----------------------------------------------
-It does not fail the gate on its own. It changes the headline, forecloses
-GREEN, and protects the baseline from being quietly shrunk by a crash.
+WHAT NO VERDICT DOES TO THE EXIT CODE, AND WHY (playhead-buvn)
+--------------------------------------------------------------
+It is ARMED — on the DIFF against a record, exactly like every other category
+in this file, and not on the count.
 
-The argument, in the terms this repo already uses. A run that produced no
-verdict for part of the plan is arguably worse than one with a known
-regression — but it fires on main TODAY, on a pre-existing crash owned by a
-different bead, so arming it here would make every full-plan gate on this box
-exit 65 for a reason nobody in the middle of a bead can fix. CLAUDE.md is
-explicit that this is the worse trade: "one red rule and everyone learns to
-route around the gate, which is strictly worse than having no linter". The
-repo's own answer to "red for a pre-existing reason" is to RECORD it and diff
-against the record — and this bead is not permitted to refresh the baseline,
-which is the only place such a record could live.
+tl6l shipped it reportable-but-not-fatal, and the argument was sound as far as
+it went: the condition fires on main today, on a pre-existing crash owned by
+playhead-rouw, so a flat arm would make every full-plan gate on this box exit
+65 for a reason nobody in the middle of an unrelated bead can fix — and
+CLAUDE.md is explicit that "one red rule and everyone learns to route around
+the gate" is strictly worse than having no linter. But that is an argument
+against arming it FLAT, not against arming it. Every mitigation tl6l shipped
+addresses a HUMAN READER, and none of them is an exit code, so the regression
+class it could not catch was a change that CRASHES THE TEST HOST: the tests it
+kills are healthy ones in nobody's failure baseline, so `new_failures` is empty
+(they emitted no failure line) and `absent` is empty (that arm covers only
+already-recorded tests) — and the run exits 0. The crash destroys the evidence
+of itself, which is the exact shape the bead was filed against.
 
-What it does instead is remove every way to misread the run:
+So the record is `no_verdict` in the per-plan baseline file, and:
 
-  * the headline carries it, so the reassuring `RED (N known / 0 new)` can
-    never stand alone again — it reads `RED (N known / 0 new) — 30 tests got
-    NO VERDICT (crashed host)`;
+  * a name that lost its verdict and is NOT in the record is a NEW CASUALTY and
+    FAILS the gate. That is the arm, and it is the only thing in this module
+    that can see a fresh crash;
+  * a name that IS in the record is quiet — the pre-existing crash stays
+    somebody else's bead;
+  * a recorded name that reported an outcome is REPORTED AGAIN, good news, not
+    fatal. One quiet run is not evidence a crash is fixed, which is the same
+    reason a load-sensitive failure passing is a candidate and not a verdict;
+  * the COUNT alone is not fatal, and neither is a bare HOST RESTART. A restart
+    that costs nobody a verdict means every test was re-run and no information
+    was lost; it is reported, it forecloses GREEN, and it stops there.
+
+A SET OF NAMES, NOT A COUNT — and that is a measurement, not a preference. A
+count is blind to substitution: eleven tests die, eleven different ones recover,
+the total is unchanged and the gate says nothing. A set is precise but noisy in
+proportion to how much the population churns, and the churn was measured. The
+two 2026-08-12 runs, on DIFFERENT trees, lost THE SAME ELEVEN TESTS — Jaccard
+1.00, against 0.46 for the failure set on IDENTICAL code. A union with
+observation counts exists to survive churn there is none of; a set costs
+nothing here and catches substitution, so a set it is, REPLACED on each accept
+rather than unioned. (A union can only grow, so a crash that is genuinely fixed
+would stay recorded forever and the gate would never speak about those names
+again.) The rail that would reopen the question is
+test_BOTH_runs_lost_THE_SAME_ELEVEN_TESTS.
+
+WHAT THE SET CANNOT SEE, named rather than glossed:
+
+  * A TEST THAT NEVER STARTED. The census is `started - ran - skipped`, so a
+    host that dies before a test's start line leaves nothing to subtract. That
+    casualty is invisible here and shows up, if at all, as an unmatched
+    `Failing tests:` entry — a LEAD, below, and deliberately not armed.
+  * IDENTITY IS THE DISPLAY NAME, so two same-named tests in different suites
+    share one key (0.57 % of names, measured). A casualty whose twin reported
+    is not in the set.
+  * A RENAME reads as one recovery plus one new casualty, i.e. a false RED. The
+    remedy is the one a rename already demands of the failure baseline —
+    `--accept-baseline` — and it is the price of precision, paid knowingly.
+  * HOW MUCH WAS LOST. Eleven names may be eleven tests or the visible edge of
+    a suite that died before any of it started. The set says which verdicts are
+    missing, never how much of the plan went unjudged.
+
+UNRECORDED IS NOT ZERO. A baseline with no `no_verdict` key has never recorded
+the population: the arm is INERT and the verdict says so out loud. A key
+present but EMPTY is a positive claim that no test should lose a verdict, and
+it is armed. This is what lets the arming land without turning main red today,
+and the two are deliberately not spelled the same way, because reading an
+absence as a measurement is this repo's standing defect class.
+
+The other three tl6l mitigations are unchanged and still carry the run:
+
+  * the headline carries the count, so the reassuring `RED (N known / 0 new)`
+    can never stand alone again — it reads `RED (85 known / 0 new) — 11 tests
+    got NO VERDICT (crashed host)`;
   * GREEN is unreachable while the count is non-zero, on the same principle
     that already forbids GREEN for a run that executed nothing;
   * a baseline member with no verdict still fails the gate, because it is
-    ABSENT — unchanged policy, now with the crash named as the cause;
+    ABSENT — unchanged policy, with the crash named as the cause;
   * `accept` CARRIES FORWARD a baseline entry that got no verdict instead of
-    dropping it. `merge` prunes anything the run did not reach, on the theory
-    that it was renamed or deleted; a crash makes that theory false, and the
-    command meant to maintain the file would have silently deleted exactly the
-    entries the crash hid. It is announced, not silent.
-
-WHAT NON-FATAL STILL LETS THROUGH, STATED PLAINLY (R1 review). The four
-mitigations above are all addressed to a HUMAN READER. None of them is an exit
-code, so the one regression class this module cannot catch is a change that
-CRASHES THE TEST HOST — because the crash destroys the evidence of itself, and
-the tests it kills are healthy tests that are NOT baseline members. Then:
-`new_failures` is empty (they emitted no failure line), `absent` is empty (they
-were never recorded), and the gate exits 0. Verified as a rail, not reasoned
-about: see CrashedHostSafetyPropertyTests. The `absent` arm covers only tests
-ALREADY KNOWN to be broken; a crash in fresh code is invisible to it.
-
-That is a real hole and it is accepted knowingly, on the grounds above — but it
-is a hole, not a residue, and it should not be quoted as "the gate covers this".
-Arming it is a one-line change (`no_verdict` into `exit_code`) and should
-happen once the host crash (playhead-rouw) is fixed and a run can be observed
-at zero. That is playhead-buvn — this module deliberately does not decide it.
-The middle path buvn should weigh before taking the one-liner is the one this
-module already embodies everywhere else: RECORD the count and diff against the
-record, so a pre-existing crash is quiet and a WORSE one is fatal.
+    pruning it as a rename, so a crash cannot shrink the file from inside the
+    one command meant to maintain it.
 
 THE FILE CONVERGES; IT DOES NOT ARRIVE COMPLETE
 -----------------------------------------------
@@ -365,6 +419,114 @@ _TERMINAL = re.compile(r"\*\* TEST (FAILED|SUCCEEDED) \*\*|Test run with \d+ tes
 
 _WEDGED_SIM = "fast-gate: wedged simulator"
 
+# THE SPLICE, AND WHY IT NEEDS A REJOIN RATHER THAN A WIDER PATTERN (R2 review).
+#
+# xcodebuild interleaves the app's stdout into the runner's, and it does it
+# mid-write INCLUDING THE APP LINE'S OWN NEWLINE. So one logical verdict line
+# becomes TWO physical lines, split at an arbitrary byte:
+#
+#     ✔ Test "flag OFF is byte-identical<TS> Playhead[…] [Capabilities] fm.…
+#      for both the exempt and the guarded shape" passed after 96.203 seconds.
+#
+# Neither half is a verdict on its own. R1 review widened the outcome patterns
+# so a line cut inside the trailing ` seconds` still reads as a verdict, which
+# fixes the case where the cut lands AFTER the verb — three lines on main, one
+# on mn5e. It cannot fix the far commoner case where the cut lands inside the
+# NAME or inside the verb itself, and those are invisible to any pattern:
+#
+#     ✔ Test "a b<TS> …            + `yte-exact span outside the 90s window…`
+#     ✔ Test "fast transcript chunks override stale transcript watermark" pa<TS>
+#     ✔ Tes<TS> …                  + `t "watermark within one shard past the …`
+#
+# The last one severs the word `Test`. No regex over `Test "` can ever see it.
+#
+# MEASURED on the two preserved 2026-08-12 full-plan runs: 18 such lines on main
+# and 3 on mn5e, EVERY ONE a test that passed. Scored as silence they became
+# crashed-host casualties, which is how the census read 30 and 14 where the
+# truth is 11 and 11 — the same defect class as the two corrections before it,
+# a value that names one thing read as though it named another.
+#
+# Undoing the splice recovers the original line BYTE-FOR-BYTE, so the name is
+# exact rather than matched by prefix. Doing it here rather than in each pattern
+# fixes start, pass, fail, issue, skip and XCTest at once — and the direction
+# that matters most is the one these two logs happened not to contain: a severed
+# FAIL line is a LOST FAILURE, and 88 fail lines against 10,910 pass lines is the
+# only reason it was the passes that got hit.
+_APP_LOG_INTRUSION = re.compile(
+    r"\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d{6}[-+]\d{4} \w+\[\d+:"
+)
+# Cheap pre-filter: a head worth trying to repair carries a Swift Testing marker
+# glyph or the start of XCTest's own line. Anything else is app output that
+# merely happens to contain a timestamp, and must be left exactly as it is.
+_REPAIRABLE_HEAD = re.compile(r"[◇✔✘➜]|Test Case '-\[")
+
+
+def _parses_as_a_test_line(text):
+    """Does this text carry a per-test event any of the patterns below can read?"""
+    return bool(
+        _ST_ISSUE_NAMED.search(text) or _ST_ISSUE_FUNC.search(text)
+        or _ST_FAIL_NAMED.search(text) or _ST_FAIL_FUNC.search(text)
+        or _ST_PASS_NAMED.search(text) or _ST_PASS_FUNC.search(text)
+        or _ST_SKIP_NAMED.search(text) or _ST_SKIP_FUNC.search(text)
+        or _ST_START_NAMED.search(text) or _ST_START_FUNC.search(text)
+        or _XC_RESULT.search(text) or _XC_START.search(text)
+    )
+
+
+def rejoin_spliced_lines(lines):
+    """Undo the app-log intrusion described above. Returns the repaired lines.
+
+    Conservative by construction — three conditions must all hold, and the
+    middle one is what makes the repair unable to invent a verdict:
+
+      1. the line carries an app-log timestamp at a position that is NOT the
+         start of the line (a line that merely IS app output is untouched);
+      2. the head — the bytes before that timestamp — carries a test marker and
+         does NOT already read as a test line. A verdict that survived intact is
+         never rewritten;
+      3. the NEXT line does NOT read as a test line on its own. A record that
+         stands up by itself is never swallowed into somebody else's;
+      4. head + that next line does read as a test line.
+
+    Only then are the two lines replaced by the reconstruction plus the
+    displaced app output, so nothing is dropped and nothing is counted twice.
+
+    CONDITION 3 IS NOT DECORATION — it was added because a rail caught the
+    repair without it fabricating a test. Two consecutive severed lines for the
+    same test glued into `✘ Test "victim" recorded an iss✘ Test "victim" failed
+    after 0.03 secon…`, which the fail pattern reads with the name
+    `victim" recorded an iss✘ Test "victim`: one real failure turned into one
+    phantom under a name nobody can ever reconcile. Together with condition 2 it
+    also forces the match to SPAN the join — it cannot live wholly in either
+    half — which is what makes a reconstruction a reconstruction.
+
+    WHAT IT CANNOT SEE, named rather than glossed: a line cut twice (the tail
+    displaced past the following line); a cut whose tail is the very last line
+    of a truncated log; a cut landing inside the app-log timestamp itself; and,
+    by condition 3, a cut whose tail happens to be a whole verdict on its own.
+    All four leave a head that stays unparseable, so the failure direction is a
+    casualty that is REPORTED — never a verdict invented.
+    """
+    out = []
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        match = _APP_LOG_INTRUSION.search(line)
+        if match and match.start() > 0 and index + 1 < len(lines):
+            head = line[:match.start()]
+            following = lines[index + 1]
+            if (_REPAIRABLE_HEAD.search(head)
+                    and not _parses_as_a_test_line(head)
+                    and not _parses_as_a_test_line(following)
+                    and _parses_as_a_test_line(head + following)):
+                out.append(head + following)
+                out.append(line[match.start():])
+                index += 2
+                continue
+        out.append(line)
+        index += 1
+    return out
+
 _TIME_LIMIT = "Time limit was exceeded"
 
 # playhead-tl6l. xcodebuild's own words when the test host died and it started a
@@ -479,7 +641,9 @@ def parse_run(text):
         return failures[key]
 
     in_block = False
-    for line in last_attempt(text).splitlines():
+    # Repair the splice BEFORE anything reads a line. Every pattern below is
+    # line-oriented, so a verdict cut in half is silence to all of them at once.
+    for line in rejoin_spliced_lines(last_attempt(text).splitlines()):
         if not run.complete and _TERMINAL.search(line):
             run.complete = True
 
@@ -577,6 +741,19 @@ def parse_run(text):
     # down above — two same-named tests share a key, so a skipped twin still
     # accounts for a SILENT twin. That is the 0.57%-of-names collision cost,
     # not a new hole.
+    #
+    # THIS LINE IS A NO-OP TODAY AND IS KEPT AS AN INVARIANT, not as behaviour
+    # — R1 review's mutation rail M23 survived deleting it and was called a
+    # proven equivalent mutant on the evidence of two logs rendering
+    # identically. R2 review checked the claim instead of accepting it, and it
+    # is true for EVERY input, which is a stronger statement than two logs:
+    # `run.passed` has already had `failures` removed one line up, so the set
+    # subtracted here is exactly `ran`. Both of the only two readers of
+    # `run.skipped` — `no_verdict`, which subtracts `ran` first, and
+    # `identities`, which unions `ran` in — are indifferent to whether a member
+    # of `ran` is also in `skipped`. What the line buys is that a THIRD reader
+    # cannot be written against a `skipped` set that overlaps `ran`; delete it
+    # only together with that guarantee.
     run.skipped -= set(failures) | run.passed
     return run
 
@@ -585,8 +762,27 @@ def parse_run(text):
 # The baseline file
 # ---------------------------------------------------------------------------
 
+# playhead-buvn. The recorded crashed-host census, as a SORTED LIST OF KEYS.
+#
+# ABSENT vs EMPTY IS THE WHOLE DESIGN, and they are different claims. A baseline
+# with no such key at all has never recorded the population — the arm is INERT
+# and says so, which is what lets this land without turning main red for a
+# pre-existing crash nobody in the middle of an unrelated bead can fix. A key
+# present but EMPTY is a positive claim that no test should lose a verdict, and
+# it is armed. "Unknown" and "known to be zero" must never be spelled the same
+# way; reading one as the other is this repo's standing defect class.
+NO_VERDICT_KEY = "no_verdict"
+
+
 def empty_baseline(plan):
-    return {"plan": plan, "mode": "full-plan", "runs_observed": 0, "tests": {}}
+    return {"plan": plan, "mode": "full-plan", "runs_observed": 0, "tests": {},
+            NO_VERDICT_KEY: []}
+
+
+def recorded_no_verdict(baseline):
+    """The recorded census, or None when the population was never recorded."""
+    value = baseline.get(NO_VERDICT_KEY)
+    return None if value is None else set(value)
 
 
 def load_baseline(path):
@@ -704,6 +900,25 @@ def merge(baseline, run, plan):
         "mode": baseline.get("mode", "full-plan"),
         "runs_observed": baseline.get("runs_observed", 0) + 1,
         "tests": {},
+        # playhead-buvn. REPLACED, not unioned — and that is the one place this
+        # category deliberately departs from `tests` above.
+        #
+        # `tests` unions because the failure set churns: two full runs on
+        # identical code shared 19 of 41 names, a Jaccard of 0.46, so a flat
+        # exact set could not survive. The crashed-host census was measured the
+        # same way and behaved oppositely — the two 2026-08-12 runs, on
+        # DIFFERENT trees, produced the SAME ELEVEN NAMES, Jaccard 1.00. A union
+        # exists to survive churn there is none of, and its cost is real: a
+        # union can only grow, so a crash that gets genuinely fixed would stay
+        # recorded forever and the gate would never speak about those names
+        # again. Replacing makes the shrink visible in the accept diff, which is
+        # what the operator has to justify in the commit message.
+        #
+        # (Those two runs are also why this is a SET rather than a count. A
+        # count cannot see substitution — eleven tests die, eleven different
+        # ones recover, total unchanged — and with a set this stable,
+        # substitution is precisely the event worth catching.)
+        NO_VERDICT_KEY: sorted(run.no_verdict),
     }
 
     old = baseline.get("tests", {})
@@ -768,6 +983,12 @@ class Verdict(object):
         self.baseline_size = 0
         # playhead-tl6l — the run's SILENCE, tracked as its own thing.
         self.no_verdict = []
+        # playhead-buvn — and diffed against the record, like everything else.
+        # None means the population has never been recorded, which is NOT the
+        # same as a recorded empty set. See NO_VERDICT_KEY.
+        self.no_verdict_recorded = None
+        self.new_casualties = []
+        self.recovered_casualties = []
         self.absent_crashed = set()
         self.host_restarts = 0
         self.restart_evidence = None
@@ -799,8 +1020,16 @@ class Verdict(object):
         another.
         """
         if self.no_verdict:
-            return " — %d test%s got NO VERDICT (crashed host)" % (
+            # playhead-buvn: the count alone is not what turned the gate red, so
+            # the headline must not imply it did. A run reading `RED (85 known /
+            # 0 new) — 12 tests got NO VERDICT` and exiting 65 sends the reader
+            # to hunt a regression in a category that says `0 new`; the fatal
+            # fact is that ONE of the twelve is not in the record, and that is
+            # the number the first line has to carry.
+            return " — %d test%s got NO VERDICT (crashed host)%s" % (
                 len(self.no_verdict), "" if len(self.no_verdict) == 1 else "s",
+                ", %d NOT RECORDED" % len(self.new_casualties)
+                if self.new_casualties else "",
             )
         if self.host_restarts:
             return " — the test host CRASHED and was restarted"
@@ -814,14 +1043,23 @@ class Verdict(object):
     def exit_code(self):
         if self.cannot_evaluate:
             return EXIT_CANNOT_EVALUATE
-        # NO VERDICT is deliberately NOT here. See the module docstring: it
-        # fires on main today, on a pre-existing crash owned by playhead-rouw,
-        # and a gate that is red for a reason the reader cannot fix is one they
-        # learn to route around. It changes the headline, forecloses GREEN, and
-        # protects `accept`; a baseline member with no verdict still fails, via
-        # `absent`, exactly as it did before. Arming it is playhead-buvn.
+        # playhead-buvn. NO VERDICT is armed the same way every other category
+        # in this module is armed: not on the COUNT, on the DIFF against the
+        # record. A name that lost its verdict and is not in the record is a
+        # NEW CASUALTY and fails the gate — which is what closes the one
+        # regression class tl6l left open, a change that CRASHES the test host
+        # and so destroys the evidence of itself (its victims are healthy tests
+        # in nobody's baseline, so `new_failures` and `absent` are both empty
+        # and the run used to exit 0).
+        #
+        # The count ALONE is still not fatal, deliberately, and neither is a
+        # bare host restart: a run at or under the record is the pre-existing
+        # crash playhead-rouw owns, and a gate red for a reason its reader
+        # cannot fix is one they learn to route around. A restart that costs
+        # nobody a verdict means every test got re-run and no information was
+        # lost — it is reported, it forecloses GREEN, and it stops there.
         if (self.new_failures or self.kind_changed or self.deterministic_passed
-                or self.absent or self.baseline_fiction):
+                or self.absent or self.baseline_fiction or self.new_casualties):
             return EXIT_REGRESSION
         return EXIT_OK
 
@@ -922,7 +1160,11 @@ class Verdict(object):
         reader could act on by looking at their own change.
         """
         if not self.crashed_host:
-            return []
+            # Nothing was lost — but the record may still say something WAS,
+            # and a shrinking census is the good news this file exists to make
+            # visible. Report it on its own rather than swallowing it with the
+            # crash block it no longer belongs to.
+            return self._render_casualty_diff() if self.recovered_casualties else []
         out = []
         if self.no_verdict:
             out.extend([
@@ -945,6 +1187,7 @@ class Verdict(object):
                 "  HOST RESTART     xcodebuild restarted the test host %d time(s): %r"
                 % (self.host_restarts, self.restart_evidence or "")
             )
+        out.extend(self._render_casualty_diff())
         for key in self.no_verdict[:_MAX_LISTED]:
             out.append("  NO VERDICT       %s" % key)
         if len(self.no_verdict) > _MAX_LISTED:
@@ -969,6 +1212,50 @@ class Verdict(object):
             if len(self.blamed_unmatched) > _MAX_LISTED:
                 out.append("  BLAMED, UNMATCHED … and %d more"
                            % (len(self.blamed_unmatched) - _MAX_LISTED))
+        return out
+
+    def _render_casualty_diff(self):
+        """playhead-buvn: the census against its record, in both directions."""
+        if self.no_verdict_recorded is None:
+            return [
+                "  NOT RECORDED     this baseline has never recorded a crashed-host "
+                "census, so the arm below is INERT: a run that loses MORE tests than "
+                "this one would still exit 0.",
+                "                   `scripts/fast-gate.sh --accept-baseline` records "
+                "the set and arms it. Recording ZERO is a real claim and is armed too; "
+                "recording NOTHING, which is where this baseline is, is not.",
+            ]
+        out = []
+        # Truncated like every other category. A change that kills the host can
+        # take down hundreds at once, and a verdict nobody reads to the end is a
+        # verdict nobody acts on — which is the note at _MAX_LISTED.
+        for key in self.new_casualties[:_MAX_LISTED]:
+            out.append("  NEW CASUALTY     %s  (lost its verdict; not in the record)"
+                       % key)
+        if len(self.new_casualties) > _MAX_LISTED:
+            out.append("  NEW CASUALTY     … and %d more"
+                       % (len(self.new_casualties) - _MAX_LISTED))
+        if self.new_casualties:
+            out.append(
+                "                   These are the crash's own witnesses. A change that "
+                "kills the test host takes down HEALTHY tests, which are in nobody's "
+                "failure baseline — so this is the only arm that can see it. Re-run to "
+                "separate a real regression from a worse day on the box; if the loss is "
+                "genuinely pre-existing, record it."
+            )
+        for key in self.recovered_casualties[:_MAX_LISTED]:
+            out.append("  REPORTED AGAIN   %s  (recorded as losing its verdict; "
+                       "removal candidate)" % key)
+        if len(self.recovered_casualties) > _MAX_LISTED:
+            out.append("  REPORTED AGAIN   … and %d more"
+                       % (len(self.recovered_casualties) - _MAX_LISTED))
+        if self.recovered_casualties:
+            out.append(
+                "                   Good news, and NOT fatal: one quiet run is not "
+                "evidence a crash is fixed, which is the same reason a load-sensitive "
+                "failure passing is a candidate rather than a verdict. Shrink the "
+                "record with `--accept-baseline` when you believe it."
+            )
         return out
 
 
@@ -1025,6 +1312,17 @@ def verdict(baseline, run, plan=None):
     result.no_verdict = sorted(no_verdict)
     result.host_restarts = run.host_restarts
     result.restart_evidence = run.restart_evidence
+    # playhead-buvn. The DIFF against the recorded census, computed exactly the
+    # way `new_failures` is: a name nobody recorded is a regression, and a
+    # recorded name that came back is reported as good news but is not fatal —
+    # one quiet run is not proof a crash is fixed, and the removal is the
+    # operator's to make with `--accept-baseline`.
+    recorded = recorded_no_verdict(baseline)
+    result.no_verdict_recorded = recorded
+    if recorded is not None:
+        result.new_casualties = sorted(no_verdict - recorded)
+        result.recovered_casualties = sorted(recorded - no_verdict)
+
     blamed = run.blamed
     result.blamed_entry_count = len(run.blamed_entries)
     result.blamed_distinct = blamed
@@ -1140,6 +1438,39 @@ def main(argv=None):
         # playhead-tl6l: say what the crash cost this observation. An accept is
         # a claim a human signs in a commit message, and "27 of these entries
         # were never actually observed" is part of the claim.
+        #
+        # playhead-buvn: and say what the RECORD is now, in both directions.
+        # This accept is what arms the census — from here on, a name that loses
+        # its verdict and is not on this list fails the gate — so the operator
+        # signing the commit message has to be shown the list they are arming,
+        # exactly as `ARMED:` below shows them the tier promotions.
+        was = recorded_no_verdict(base if base.get("plan") == plan else {})
+        now = set(merged[NO_VERDICT_KEY])
+        if was is None:
+            # Deliberately NOT the word `ARMED`, which belongs to tier
+            # promotion below and has a rail asserting it appears only for one.
+            print(
+                "  CENSUS NOW LIVE: %d crashed-host name(s) recorded, where nothing was "
+                "recorded before. From now on a test that loses its verdict and is NOT "
+                "on this list fails the gate; the ones on it do not. Say in the commit "
+                "message why this loss is the pre-existing one."
+                % len(now)
+            )
+            for key in sorted(now)[:_MAX_LISTED]:
+                print("  ~ %s" % key)
+            if len(now) > _MAX_LISTED:
+                print("  ~ … and %d more" % (len(now) - _MAX_LISTED))
+        elif was != now:
+            for key in sorted(now - was):
+                print("  ~+ NOW LOSES ITS VERDICT  %s" % key)
+            for key in sorted(was - now):
+                print("  ~- reports again          %s" % key)
+            print(
+                "  crashed-host census: %d -> %d. It is REPLACED, not unioned, so a "
+                "name that came back is gone from the record and the gate will call it "
+                "a NEW CASUALTY if it goes silent again."
+                % (len(was), len(now))
+            )
         no_verdict = run.no_verdict
         if no_verdict:
             protected = sorted(set(no_verdict) & set(merged["tests"]))

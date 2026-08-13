@@ -52,6 +52,7 @@ import sys
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 GB = "scripts/gate_baseline.py"
 FG = "scripts/fast-gate.sh"
+TF = "scripts/tests/test_gate_baseline.py"
 SUITE = "scripts.tests.test_gate_baseline"
 
 V = SUITE + ".VerdictTests."
@@ -65,6 +66,11 @@ CLI = SUITE + ".CLITests."
 W = SUITE + ".FastGateWiringTests."
 TC = SUITE + ".TierChangeTests."
 T = SUITE + ".AcceptOutputTests."
+CH = SUITE + ".CrashedHostVerdictTests."
+AC = SUITE + ".ArmedCensusTests."
+RC = SUITE + ".RealCrashedRunTests."
+TR = SUITE + ".TruncatedOutcomeLineTests."
+SP = SUITE + ".CrashedHostSafetyPropertyTests."
 
 
 # name, file, description, old, new, expected-to-fail test ids
@@ -114,8 +120,13 @@ MUTATIONS = [
         "R06", GB,
         "XCTest output stops being parsed at all — the exact shape that let "
         "playhead-ynmk (#313) merge unnoticed",
-        r'''    r"Test Case '-\[([A-Za-z0-9_.]+) ([A-Za-z0-9_:]+)\]' (failed|passed) \(([\d.]+) seconds\)"''',
-        r'''    r"Test Kase '-\[([A-Za-z0-9_.]+) ([A-Za-z0-9_:]+)\]' (failed|passed) \(([\d.]+) seconds\)"''',
+        # RE-ANCHORED at R2 review. tl6l added `skipped` as a third outcome and
+        # made the duration optional, so this rail's anchor had been dead since
+        # 40ac7dcc — and the battery REFUSES TO START on a drifted anchor, which
+        # is how it is known that neither the implementer's round nor R1's ever
+        # ran the committed battery. Both ran scratchpad ones instead.
+        r'''    r"Test Case '-\[([A-Za-z0-9_.]+) ([A-Za-z0-9_:]+)\]' (failed|passed|skipped)"''',
+        r'''    r"Test Kase '-\[([A-Za-z0-9_.]+) ([A-Za-z0-9_:]+)\]' (failed|passed|skipped)"''',
         [X + "test_xctest_failure_is_captured_fully_qualified",
          V + "test_a_NEW_xctest_failure_fails_the_gate"],
     ),
@@ -190,8 +201,10 @@ MUTATIONS = [
         "R14", GB,
         "a renamed or deleted test is kept in the baseline, where it reads as "
         "ABSENT forever and the gate can never go green",
-        "        if not reached:\n            continue",
-        "        if False:\n            continue",
+        # RE-ANCHORED at R2 review, same cause as R06: tl6l inserted the
+        # carry-forward clause inside this branch and the anchor died with it.
+        "        if not reached:\n            if key in protected:",
+        "        if False:\n            if key in protected:",
         [M + "test_merge_DROPS_a_baseline_member_that_no_longer_exists"],
     ),
     (
@@ -304,7 +317,9 @@ MUTATIONS = [
         "R27", GB,
         "a run with zero failures is called GREEN even when it executed nothing "
         "— zero failures is not zero problems",
-        "        if self.ok and self.total_failures == 0:",
+        # RE-ANCHORED at R2 review, same cause as R06 and R14: tl6l added
+        # `and not self.crashed_host` to this condition.
+        "        if self.ok and self.total_failures == 0 and not self.crashed_host:",
         "        if self.total_failures == 0:",
         [V + "test_a_run_that_executed_NOTHING_is_never_called_GREEN"],
     ),
@@ -348,6 +363,205 @@ MUTATIONS = [
         '  if ! python3 scripts/disk_preflight.py "${PREFLIGHT_ARGS[@]}"; then',
         '  if ! true "${PREFLIGHT_ARGS[@]}"; then',
         [W + "test_the_disk_preflight_runs_BEFORE_xcodebuild"],
+    ),
+    # ---- playhead-tl6l R2: the splice repair, and the armed census ----
+    #
+    # These rails are in THIS FILE rather than in a scratchpad script, which is
+    # the point. tl6l's implementer ran a 17-rail battery and R1 review ran a
+    # 37-rail one; neither is committed, so neither can be re-run and neither
+    # protects the next edit. A rail that exists only in a session directory is
+    # the same defect as a test that skips itself — see playhead-fer3.
+    (
+        "RC1", GB,
+        "the app-log splice is not repaired, so a verdict line cut in half "
+        "reads as silence — 18 passing tests on main become crashed-host "
+        "casualties and the census reads 30 where the truth is 11",
+        "    for line in rejoin_spliced_lines(last_attempt(text).splitlines()):",
+        "    for line in last_attempt(text).splitlines():",
+        [RC + "test_the_main_control_run",
+         RC + "test_BOTH_runs_lost_THE_SAME_ELEVEN_TESTS",
+         RC + "test_the_spliced_verdict_lines_are_read_as_PASSES"],
+    ),
+    (
+        "RC2", GB,
+        "the repair swallows a line that is already a whole record, gluing two "
+        "severed lines for one test into a phantom named "
+        "`victim\" recorded an iss<glyph> Test \"victim`",
+        "                    and not _parses_as_a_test_line(following)\n",
+        "",
+        [TR + "test_a_truncated_FAIL_line_is_still_a_FAILURE"],
+    ),
+    (
+        "RC3", GB,
+        "an INTACT verdict line is rewritten anyway, so it absorbs the next "
+        "line — a pass followed by the restart banner is claimed by the restart "
+        "handler and the test that passed becomes a casualty",
+        "                    and not _parses_as_a_test_line(head)\n",
+        "",
+        [TR + "test_an_INTACT_verdict_followed_by_app_output_is_NOT_rewritten"],
+    ),
+    (
+        "RC4", GB,
+        "the reconstruction is assembled tail-first, so the recovered name is "
+        "garbage in a way no assertion about counts alone would notice",
+        "                out.append(head + following)",
+        "                out.append(following + head)",
+        [TR + "test_the_reconstruction_is_HEAD_then_TAIL_and_not_the_other_way",
+         RC + "test_BOTH_runs_lost_THE_SAME_ELEVEN_TESTS"],
+    ),
+    (
+        "RC5", GB,
+        "the displaced app output is dropped rather than kept, so anything that "
+        "landed after the intrusion on that line — including xcodebuild's own "
+        "restart banner — is lost with it",
+        "                out.append(line[match.start():])",
+        "                pass",
+        [TR + "test_the_DISPLACED_app_output_is_kept_and_still_scanned"],
+    ),
+    (
+        "RA1", GB,
+        "NO VERDICT leaves the exit code again, so a change that CRASHES the "
+        "test host exits 0 — its victims are healthy tests in nobody's "
+        "baseline, and the crash destroys the evidence of itself",
+        "                or self.absent or self.baseline_fiction or self.new_casualties):",
+        "                or self.absent or self.baseline_fiction):",
+        [AC + "test_a_casualty_NOT_in_the_record_FAILS_the_gate",
+         AC + "test_the_SAME_COUNT_with_a_DIFFERENT_NAME_still_fails",
+         AC + "test_a_RECORDED_EMPTY_census_is_a_CLAIM_and_is_armed"],
+    ),
+    (
+        "RA2", GB,
+        "an UNRECORDED census is read as a recorded ZERO, so the arm fires on "
+        "main today for a pre-existing crash nobody in an unrelated bead can "
+        "fix — the gate everyone learns to route around",
+        "    return None if value is None else set(value)",
+        "    return set(value or [])",
+        [CH + "test_it_is_REPORTED_but_does_NOT_by_itself_fail_the_gate",
+         AC + "test_an_UNRECORDED_census_is_inert_even_for_a_LARGE_loss"],
+    ),
+    (
+        "RA3", GB,
+        "the census is UNIONED into the record instead of replaced, so a crash "
+        "that is genuinely fixed stays recorded forever and the gate never "
+        "speaks about those names again",
+        "        NO_VERDICT_KEY: sorted(run.no_verdict),",
+        "        NO_VERDICT_KEY: sorted(set(baseline.get(NO_VERDICT_KEY) or []) "
+        "| run.no_verdict),",
+        [AC + "test_accept_RECORDS_the_census_and_REPLACES_it_on_the_next_accept",
+         AC + "test_accept_on_a_CLEAN_run_records_the_EMPTY_set_which_arms_it_fully"],
+    ),
+    (
+        "RA4", GB,
+        "the census diff is computed in the wrong direction, so a recovery is "
+        "reported as a new casualty and a genuine new casualty is reported as "
+        "good news",
+        "        result.new_casualties = sorted(no_verdict - recorded)",
+        "        result.new_casualties = sorted(recorded - no_verdict)",
+        [AC + "test_a_casualty_NOT_in_the_record_FAILS_the_gate",
+         AC + "test_FEWER_casualties_than_recorded_reports_the_IMPROVEMENT"],
+    ),
+    (
+        "RA5", GB,
+        "a recorded casualty that REPORTED AGAIN is treated as fatal, so good "
+        "news fails the gate and the record can never be shrunk without a red "
+        "run first",
+        "        result.recovered_casualties = sorted(recorded - no_verdict)",
+        "        result.recovered_casualties = []\n"
+        "        result.new_casualties += sorted(recorded - no_verdict)",
+        [AC + "test_FEWER_casualties_than_recorded_reports_the_IMPROVEMENT",
+         AC + "test_a_run_that_loses_NOTHING_still_reports_the_whole_record_as_recovered",
+         AC + "test_a_casualty_that_IS_in_the_record_is_quiet"],
+    ),
+    (
+        "RA6", GB,
+        "the arm compares COUNTS rather than NAMES, so eleven tests dying while "
+        "eleven different ones recover reads as no change at all",
+        "        result.new_casualties = sorted(no_verdict - recorded)\n"
+        "        result.recovered_casualties = sorted(recorded - no_verdict)",
+        "        excess = len(no_verdict) - len(recorded)\n"
+        "        result.new_casualties = sorted(no_verdict - recorded)[:max(excess, 0)]\n"
+        "        result.recovered_casualties = sorted(recorded - no_verdict)",
+        [AC + "test_the_SAME_COUNT_with_a_DIFFERENT_NAME_still_fails"],
+    ),
+    (
+        "RA7", GB,
+        "the `Failing tests:` block is allowed to arm the gate, but it spells a "
+        "test `Suite.function()` where the console prints a display name — so "
+        "every display-named test that reported perfectly well becomes a "
+        "casualty (this is exactly how the bead came to be filed at 19)",
+        "    result.blamed_unmatched = [name for name in blamed\n"
+        "                               if not _blamed_is_matched(name, identities)]",
+        "    result.blamed_unmatched = [name for name in blamed\n"
+        "                               if not _blamed_is_matched(name, identities)]\n"
+        "    result.new_casualties = sorted(set(result.new_casualties)\n"
+        "                                   | set(result.blamed_unmatched))",
+        [AC + "test_a_BLAMED_name_alone_is_a_LEAD_and_never_a_NEW_CASUALTY"],
+    ),
+    # ---- the four safety properties tl6l ARGUES FROM, pinned durably ----
+    #
+    # R1 review found all four correct in the code and asserted nowhere, and
+    # added CrashedHostSafetyPropertyTests. Those rails then lived only in a
+    # scratchpad battery, so nothing stopped the next edit from removing them
+    # together with the behaviour. They are rails here now.
+    (
+        "RB1", GB,
+        "the census stops counting as crash evidence, so a run where tests "
+        "started and said nothing — with no restart banner and no summary "
+        "block, which is exactly what a hang produces — reads as GREEN",
+        "        return bool(self.host_restarts or self.no_verdict or self.blamed_unmatched)",
+        "        return bool(self.host_restarts or self.blamed_unmatched)",
+        [SP + "test_NO_VERDICT_alone_forecloses_GREEN"],
+    ),
+    (
+        "RB2", GB,
+        "ABSENT leaves the exit code, so a baseline member the crash took down "
+        "is reported and the gate exits 0 anyway",
+        "                or self.absent or self.baseline_fiction or self.new_casualties):",
+        "                or self.baseline_fiction or self.new_casualties):",
+        [SP + "test_an_ABSENT_baseline_member_makes_the_gate_EXIT_NONZERO",
+         SP + "test_a_baseline_member_lost_to_the_CRASH_is_still_fatal"],
+    ),
+    (
+        "RB3", GB,
+        "a test that lost its verdict is folded into NEW FAILURE, sending the "
+        "reader to triage a regression in their own diff for a test that was "
+        "never judged at all",
+        "    result.no_verdict = sorted(no_verdict)",
+        "    result.no_verdict = sorted(no_verdict)\n"
+        "    result.new_failures = sorted(no_verdict)",
+        [SP + "test_a_lost_test_is_NEVER_rendered_under_NEW_FAILURE"],
+    ),
+    (
+        "RB4", GB,
+        "`accept` stops carrying forward a recorded entry the crash silenced, "
+        "so the crash shrinks the baseline from inside the one command whose "
+        "job is to maintain it — and the shrinking diff reads as good news",
+        '                merged["tests"][key] = dict(previous)',
+        "                pass",
+        [SP + "test_accept_CARRIES_FORWARD_across_a_SECOND_and_THIRD_crash"],
+    ),
+    (
+        "RB5", GB,
+        "a deliberate SKIP is no longer subtracted from the census, so the 30 "
+        "XCTest PerfGate skips read as crashed-host casualties on every single "
+        "full-plan run",
+        "        return self.started - self.ran - self.skipped",
+        "        return self.started - self.ran",
+        [RC + "test_the_skips_are_subtracted_and_it_MATTERS",
+         RC + "test_the_main_control_run"],
+    ),
+    (
+        "RF1", TF,
+        "the real-data rails point at a fixture that is not there — they must "
+        "FAIL, never skip. A rail that reports OK without running is the defect "
+        "playhead-fer3 was filed for and is the same shape as a gate reporting "
+        "an all-clear for a run that lost part of the plan",
+        'FIXTURES = ROOT / "scripts" / "tests" / "fixtures"',
+        'FIXTURES = ROOT / "scripts" / "tests" / "fixtures-that-are-not-there"',
+        [RC + "test_the_main_control_run",
+         RC + "test_the_mn5e_branch_run",
+         RC + "test_BOTH_runs_lost_THE_SAME_ELEVEN_TESTS",
+         C + "test_a_real_log_cut_short_is_reported_incomplete"],
     ),
     (
         "R99", GB,
