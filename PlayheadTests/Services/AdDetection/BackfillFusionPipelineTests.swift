@@ -624,11 +624,21 @@ struct BackfillOrchestratorWiringTests {
             #expect(window.endEdgeAnchor == AutoSkipEdgeAnchor.unanchored.rawValue)
         }
 
-        // With windows produced, step 17 must have forwarded them to the orchestrator.
-        // Shadow mode (no TrustScoringService) means windows arrive as .confirmed and
-        // are logged but not applied as skip cues — the decision log is the observable.
-        let log = await orchestrator.getDecisionLog()
-        #expect(!log.isEmpty, "Orchestrator decision log must be populated after step-17 forwarding (wiring regression check)")
+        // With windows produced, step 17 must have forwarded them to the
+        // orchestrator. playhead-wq34 changed the OBSERVABLE, not the claim:
+        // this orchestrator has no trust service, so the show resolves
+        // `.shadow`, and a row the managed tier could only confirm silently is
+        // now routed to the suggest tier — which the listener can answer and
+        // which logs no decision. The wiring check therefore reads the tier the
+        // rows actually reach. (Asking `getDecisionLog()` here would now be a
+        // test that can only fail, and asking either tier alone would be one
+        // that stops noticing a real un-wiring.)
+        let managed = await orchestrator.activeWindowIDs()
+        let suggested = await orchestrator.activeSuggestWindowIDs()
+        #expect(
+            !managed.union(suggested).isEmpty,
+            "Orchestrator must hold the forwarded windows after step-17 forwarding (wiring regression check)"
+        )
     }
 
     @Test("runBackfill with nil orchestrator completes without step 17 (nil guard)")

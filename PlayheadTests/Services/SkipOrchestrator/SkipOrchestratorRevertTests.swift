@@ -1792,8 +1792,17 @@ struct SkipOrchestratorRevertTests {
         let storage = AnalysisStoreRepeatedAdCacheStorage(store: store)
         let repeatedCache = RepeatedAdCacheService(storage: storage)
         let correctionStore = PersistentUserCorrectionStore(store: store)
+        // playhead-wq34: this test needs a MANAGED window to veto, and a row
+        // only reaches the managed tier on a show whose detector classes can
+        // act on it. Without a trust profile the show resolves `.shadow`, the
+        // row is routed to the suggest tier, and the gesture under test has
+        // nothing to find.
+        let trustService = try await makeSkipTestTrustService(
+            mode: "auto", trustScore: 0.9, observations: 10
+        )
         let orchestrator = SkipOrchestrator(
             store: store,
+            trustService: trustService,
             correctionStore: correctionStore,
             repeatedAdCache: repeatedCache
         )
@@ -1874,8 +1883,17 @@ struct SkipOrchestratorRevertTests {
         let store = try await makeTestStore()
         try await store.insertAsset(makeSkipTestAnalysisAsset())
         let correctionStore = PersistentUserCorrectionStore(store: store)
+        // playhead-wq34: this test needs a MANAGED window to veto, and a row
+        // only reaches the managed tier on a show whose detector classes can
+        // act on it. Without a trust profile the show resolves `.shadow`, the
+        // row is routed to the suggest tier, and the gesture under test has
+        // nothing to find.
+        let trustService = try await makeSkipTestTrustService(
+            mode: "auto", trustScore: 0.9, observations: 10
+        )
         let orchestrator = SkipOrchestrator(
             store: store,
+            trustService: trustService,
             correctionStore: correctionStore
         )
         await orchestrator.beginEpisode(
@@ -1883,7 +1901,8 @@ struct SkipOrchestratorRevertTests {
             episodeId: "asset-1",
             podcastId: "podcast-1"
         )
-        await orchestrator.setActiveSkipMode(.manual)
+        // playhead-wq34: `.auto` — the gesture under test needs a MANAGED window.
+        await orchestrator.setActiveSkipMode(.auto)
         let ad = makeSkipTestAdWindow(
             id: "round3-invalid-veto-range",
             startTime: 60,
@@ -1950,8 +1969,17 @@ struct SkipOrchestratorRevertTests {
         let store = try await makeTestStore()
         try await store.insertAsset(makeSkipTestAnalysisAsset())
         let correctionStore = PersistentUserCorrectionStore(store: store)
+        // playhead-wq34: this test needs a MANAGED window to veto, and a row
+        // only reaches the managed tier on a show whose detector classes can
+        // act on it. Without a trust profile the show resolves `.shadow`, the
+        // row is routed to the suggest tier, and the gesture under test has
+        // nothing to find.
+        let trustService = try await makeSkipTestTrustService(
+            mode: "auto", trustScore: 0.9, observations: 10
+        )
         let orchestrator = SkipOrchestrator(
             store: store,
+            trustService: trustService,
             correctionStore: correctionStore
         )
         await orchestrator.beginEpisode(
@@ -1959,7 +1987,8 @@ struct SkipOrchestratorRevertTests {
             episodeId: "asset-1",
             podcastId: "podcast-1"
         )
-        await orchestrator.setActiveSkipMode(.manual)
+        // playhead-wq34: `.auto` — the gesture under test needs a MANAGED window.
+        await orchestrator.setActiveSkipMode(.auto)
         let displayed = makeSkipTestAdWindow(
             id: "round3-range-same-id",
             startTime: 60,
@@ -2039,7 +2068,8 @@ struct SkipOrchestratorRevertTests {
             podcastId: "round3-show-a",
             playbackLifecycleGeneration: 41
         )
-        await orchestrator.setActiveSkipMode(.manual)
+        // playhead-wq34: `.auto` — the gesture under test needs a MANAGED window.
+        await orchestrator.setActiveSkipMode(.auto)
         await orchestrator.receiveAdWindows([source])
 
         let replacement = makeSkipTestAdWindow(
@@ -2056,7 +2086,8 @@ struct SkipOrchestratorRevertTests {
             podcastId: "round3-show-b",
             playbackLifecycleGeneration: 42
         )
-        await orchestrator.setActiveSkipMode(.manual)
+        // playhead-wq34: `.auto` — the gesture under test needs a MANAGED window.
+        await orchestrator.setActiveSkipMode(.auto)
 
         #expect(
             !(await orchestrator.revertByTimeRange(
@@ -2088,8 +2119,17 @@ struct SkipOrchestratorRevertTests {
         let store = try await makeTestStore()
         try await store.insertAsset(makeSkipTestAnalysisAsset())
         let correctionStore = PersistentUserCorrectionStore(store: store)
+        // playhead-wq34: this test needs a MANAGED window to veto, and a row
+        // only reaches the managed tier on a show whose detector classes can
+        // act on it. Without a trust profile the show resolves `.shadow`, the
+        // row is routed to the suggest tier, and the gesture under test has
+        // nothing to find.
+        let trustService = try await makeSkipTestTrustService(
+            mode: "auto", trustScore: 0.9, observations: 10
+        )
         let orchestrator = SkipOrchestrator(
             store: store,
+            trustService: trustService,
             correctionStore: correctionStore
         )
         await orchestrator.beginEpisode(
@@ -2097,7 +2137,8 @@ struct SkipOrchestratorRevertTests {
             episodeId: "asset-1",
             podcastId: "podcast-1"
         )
-        await orchestrator.setActiveSkipMode(.manual)
+        // playhead-wq34: `.auto` — the gesture under test needs a MANAGED window.
+        await orchestrator.setActiveSkipMode(.auto)
         let ads = [
             makeSkipTestAdWindow(
                 id: "round3-atomic-a",
@@ -2399,8 +2440,17 @@ struct SkipOrchestratorRevertTests {
         let store = try await makeTestStore()
         try await store.insertAsset(makeSkipTestAnalysisAsset())
         let correctionStore = PersistentUserCorrectionStore(store: store)
+        // playhead-wq34: this test needs a MANAGED window to veto, and a row
+        // only reaches the managed tier on a show whose detector classes can
+        // act on it. Without a trust profile the show resolves `.shadow`, the
+        // row is routed to the suggest tier, and the gesture under test has
+        // nothing to find.
+        let trustService = try await makeSkipTestTrustService(
+            mode: "auto", trustScore: 0.9, observations: 10
+        )
         let orchestrator = SkipOrchestrator(
             store: store,
+            trustService: trustService,
             correctionStore: correctionStore
         )
         await orchestrator.beginEpisode(
@@ -2408,7 +2458,8 @@ struct SkipOrchestratorRevertTests {
             episodeId: "asset-1",
             podcastId: "podcast-1"
         )
-        await orchestrator.setActiveSkipMode(.manual)
+        // playhead-wq34: `.auto` — the gesture under test needs a MANAGED window.
+        await orchestrator.setActiveSkipMode(.auto)
         let displayed = makeSkipTestAdWindow(
             id: "round3-generic-same-id",
             startTime: 60,
@@ -2455,8 +2506,17 @@ struct SkipOrchestratorRevertTests {
         let store = try await makeTestStore()
         try await store.insertAsset(makeSkipTestAnalysisAsset())
         let correctionStore = PersistentUserCorrectionStore(store: store)
+        // playhead-wq34: this test needs a MANAGED window to veto, and a row
+        // only reaches the managed tier on a show whose detector classes can
+        // act on it. Without a trust profile the show resolves `.shadow`, the
+        // row is routed to the suggest tier, and the gesture under test has
+        // nothing to find.
+        let trustService = try await makeSkipTestTrustService(
+            mode: "auto", trustScore: 0.9, observations: 10
+        )
         let orchestrator = SkipOrchestrator(
             store: store,
+            trustService: trustService,
             correctionStore: correctionStore
         )
         await orchestrator.beginEpisode(
@@ -2464,7 +2524,8 @@ struct SkipOrchestratorRevertTests {
             episodeId: "asset-1",
             podcastId: "podcast-1"
         )
-        await orchestrator.setActiveSkipMode(.manual)
+        // playhead-wq34: `.auto` — the gesture under test needs a MANAGED window.
+        await orchestrator.setActiveSkipMode(.auto)
         let displayed = makeSkipTestAdWindow(
             id: "round3-listen-same-id",
             startTime: 60,
@@ -3472,8 +3533,17 @@ struct SkipOrchestratorRevertTests {
         )
         let persistentCorrections = PersistentUserCorrectionStore(store: store)
         let persistenceGate = ControlledAsyncGate()
+        // playhead-wq34: this test needs a MANAGED window to veto, and a row
+        // only reaches the managed tier on a show whose detector classes can
+        // act on it. Without a trust profile the show resolves `.shadow`, the
+        // row is routed to the suggest tier, and the gesture under test has
+        // nothing to find.
+        let trustService = try await makeSkipTestTrustService(
+            mode: "auto", trustScore: 0.9, observations: 10
+        )
         let orchestrator = SkipOrchestrator(
             store: store,
+            trustService: trustService,
             correctionStore: persistentCorrections
         )
         await orchestrator._setFeedbackPersistenceBarrierForTesting {
@@ -7367,7 +7437,15 @@ struct SkipOrchestratorRevertTests {
         try await store.insertAsset(
             makeSkipTestAnalysisAsset(id: "asset-2", episodeId: "episode-2")
         )
-        let orchestrator = SkipOrchestrator(store: store)
+        // playhead-wq34: this test needs a MANAGED window to veto, and a row
+        // only reaches the managed tier on a show whose detector classes can
+        // act on it. Without a trust profile the show resolves `.shadow`, the
+        // row is routed to the suggest tier, and the gesture under test has
+        // nothing to find.
+        let trustService = try await makeSkipTestTrustService(
+            mode: "auto", trustScore: 0.9, observations: 10
+        )
+        let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
         await orchestrator.beginEpisode(
             analysisAssetId: "asset-1",
             episodeId: "episode-1",
@@ -7403,6 +7481,13 @@ struct SkipOrchestratorRevertTests {
             podcastId: "podcast-2",
             playbackLifecycleGeneration: 52
         )
+        // playhead-wq34: episode 2 plays a DIFFERENT show, and the seeded trust
+        // profile only covers `podcast-1` — so `podcast-2` resolves to the
+        // new-show default and its rows would be routed to the suggest tier.
+        // The claim below is about the MANAGED set, so say which mode it is
+        // asking under rather than inheriting whichever one the fixture happens
+        // to produce.
+        await orchestrator.setActiveSkipMode(.auto)
         let secondEpisodeWindow = makeSkipTestAdWindow(
             id: reusedID,
             assetId: "asset-2",

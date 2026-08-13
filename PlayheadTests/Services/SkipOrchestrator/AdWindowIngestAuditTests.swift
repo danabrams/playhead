@@ -74,8 +74,20 @@ private enum IngestFixture {
         try await store.insertAsset(
             makeSkipTestAnalysisAsset(id: assetId, episodeId: episodeId)
         )
+        // playhead-wq34: the show must be able to USE the managed tier, or half
+        // this census is unreachable. `ingest_admitted_managed` is now a
+        // statement about the row AND the detector class's mode — a row the
+        // managed tier would silently confirm is routed to the suggest tier
+        // instead — so on a show with no trust profile (which resolves
+        // `.shadow`) every `.eligible` row here would land on `armedSuggest`
+        // and the `admittedManaged` rails would be asserting the wrong
+        // outcome's absence rather than the right outcome's presence.
+        let trustService = try await makeSkipTestTrustService(
+            mode: "auto", trustScore: 0.9, observations: 10
+        )
         return SkipOrchestrator(
             store: store,
+            trustService: trustService,
             correctionStore: PersistentUserCorrectionStore(store: store),
             invariantLogger: invariantLogger,
             inventoryFilter: InventorySanityFilter(

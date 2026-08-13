@@ -70,7 +70,21 @@ enum HotPathAdmission: Int, Sendable, Hashable, Comparable, CaseIterable {
     /// The suggest tier. The listener is ASKED, by a banner that fires when the
     /// playhead ENTERS the span (playhead-d3g0). No audio is removed.
     case banner = 1
-    /// The managed tier. Audio is removed without asking.
+    /// The managed tier. Audio is removed without asking — **when the row's
+    /// detector class is in `.auto`, and only then.**
+    ///
+    /// playhead-wq34: that qualifier used to be missing, and with it this whole
+    /// ordinal was false in fact. The managed tier returned a silent
+    /// `.confirmed` for `.shadow` and `.manual`, and banners only on
+    /// `.applied` — so for the three show-governed classes, which post-lqcp
+    /// cannot reach `.auto` without an explicit user override, `autoSkip`
+    /// reached the listener with LESS than `banner` did, and `gatedLabel`'s
+    /// only transition (`autoSkip -> markOnly`) INCREASED what they
+    /// experienced. `SkipOrchestrator.managedTierWouldBeSilent` is what makes
+    /// the rung honest: a row the managed tier cannot act on is routed to the
+    /// suggest tier instead, so this case is now either a skip or the rung
+    /// below it, never nothing. Nothing in this file changed; the claim it was
+    /// making simply became true.
     case autoSkip = 2
 
     static func < (lhs: Self, rhs: Self) -> Bool { lhs.rawValue < rhs.rawValue }

@@ -126,10 +126,17 @@ struct SkipOrchestratorAutoSkipFiredEmissionTests {
 
         let store = try await makeTestStore()
         try await store.insertAsset(makeSkipTestAnalysisAsset(id: assetId, episodeId: episodeId))
+        // playhead-wq34: `.auto` with the edge-padding policy ON. `.manual`
+        // used to park the row in the managed tier silently; wq34 routes such a
+        // row to the suggest tier, so `applyManualSkip` would have nothing to
+        // promote. The padding veto holds the unanchored span at `.confirmed`
+        // and fires no cue, which is the managed-but-not-skipped state this
+        // test needs — and it keeps the emission under test attributable to the
+        // TAP rather than to an auto promotion.
         let trustService = try await makeSkipTestTrustService(
-            mode: "manual",
-            trustScore: 0.6,
-            observations: 5
+            mode: "auto",
+            trustScore: 0.9,
+            observations: 10
         )
         let orchestrator = SkipOrchestrator(
             store: store,
@@ -137,6 +144,7 @@ struct SkipOrchestratorAutoSkipFiredEmissionTests {
             invariantLogger: logger,
             episodeIdHasher: hasher
         )
+        await orchestrator.setEdgePaddingEnabled(true)
         await orchestrator.beginEpisode(
             analysisAssetId: assetId,
             episodeId: episodeId,
@@ -156,9 +164,10 @@ struct SkipOrchestratorAutoSkipFiredEmissionTests {
         try await store.insertAdWindow(window)
         await orchestrator.receiveAdWindows([window])
 
-        // In manual mode, evaluateWindow keeps the window at .confirmed
-        // — no auto path emission yet. Tapping "Skip Ad" promotes it to
-        // .applied.
+        // The padding veto keeps the window at .confirmed — no auto path
+        // emission yet. Tapping "Skip Ad" promotes it to .applied, and
+        // `applyManualSkip` marks it user-initiated, which is what exempts it
+        // from the very policy that vetoed it.
         await orchestrator.applyManualSkip(windowId: window.id)
 
         logger.flushForTesting()

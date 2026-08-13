@@ -886,13 +886,25 @@ struct AddedMarkAutoSkipEligibleTests {
             analysisAssetId: assetId, episodeId: assetId, podcastId: "podcast-1"
         )
 
-        let overMark = await orchestrator.getDecisionLog().filter {
-            $0.snappedStart <= markStart + 0.01 && $0.snappedEnd >= markEnd - 0.01
+        // playhead-wq34: the claim is unchanged — a user mark does not auto-skip
+        // on a `.manual` show — but the anti-vacuity half had to move tiers.
+        // `AdDetectionService.recordUserMarkedAd` stamps the row `.eligible`,
+        // and `SkipDetectorClass.classify` tests `UserSpanAssertion` FIRST, so
+        // it is `.userAsserted`: show-governed, `modeAuthority == nil`, never
+        // `.auto` without an explicit override. Before wq34 that combination
+        // produced a `.confirmed` decision nobody could see — the strongest
+        // "this IS an ad" signal the app can write, reaching the listener with
+        // less than a `.markOnly` row would have. It is now offered as a card.
+        let suggested = await orchestrator.activeSuggestWindowIDs()
+        #expect(!suggested.isEmpty,
+                "the eligible user mark must still be INGESTED (not dropped) — else the no-skip assertion below is vacuous")
+        let applied = await orchestrator.getDecisionLog().filter {
+            $0.snappedStart <= markStart + 0.01
+                && $0.snappedEnd >= markEnd - 0.01
+                && $0.decision == .applied
         }
-        #expect(!overMark.isEmpty,
-                "the eligible user mark must still be INGESTED and evaluated in manual mode (not dropped) — else the no-skip assertion below is vacuous")
-        #expect(!overMark.contains { $0.decision == .applied },
-                "a definitive user mark must NOT auto-skip in manual mode — the mode gate governs the skip; over-mark decisions=\(overMark.map { $0.decision })")
+        #expect(applied.isEmpty,
+                "a definitive user mark must NOT auto-skip in manual mode — the mode gate governs the skip")
     }
 }
 

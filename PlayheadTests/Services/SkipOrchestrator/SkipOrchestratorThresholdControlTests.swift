@@ -130,6 +130,14 @@ struct SkipOrchestratorThresholdControlTests {
         await orchestrator.setPerShowThresholdControllerStore(controllerStore)
         await orchestrator.setSkipCueHandler { _ in }
         await orchestrator.beginEpisode(analysisAssetId: "asset-1", episodeId: episodeId, podcastId: podcastId)
+        // playhead-wq34: the window must be MANAGED for `recordListenRevert` to
+        // find it, and after wq34 that needs the detector class to be `.auto`.
+        // `setActiveSkipMode` is used rather than a trust service ON PURPOSE:
+        // the long note above this test explains that wiring no trust service
+        // is the whole point — it is what makes the `guard trustService != nil`
+        // mutation redden here and nowhere else. The pill writes
+        // `activeDetectorSkipModes` directly, so the rail keeps its shape.
+        await orchestrator.setActiveSkipMode(.auto)
 
         let ad = makeSkipTestAdWindow(id: "ad-fp", startTime: 60, endTime: 120, confidence: 0.85, decisionState: "confirmed")
         try await store.insertAdWindow(ad)

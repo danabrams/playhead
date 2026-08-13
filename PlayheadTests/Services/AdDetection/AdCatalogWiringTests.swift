@@ -769,7 +769,14 @@ struct AdCatalogWiringTests {
             episodeId: "episode-o4qr-manual",
             podcastId: "show-o4qr"
         )
-        await orchestrator.setActiveSkipMode(.manual)
+        // playhead-wq34: `.auto` with the edge-padding policy ON. `.manual`
+        // used to park the row in the managed tier silently; wq34 routes such a
+        // row to the suggest tier, so `applyManualSkip` would find nothing. The
+        // padding veto holds an unanchored span at `.confirmed` without firing
+        // a cue, which is the managed-but-not-skipped state this test needs —
+        // and `lifecycleWindow` carries no edge anchors, so the veto is certain.
+        await orchestrator.setActiveSkipMode(.auto)
+        await orchestrator.setEdgePaddingEnabled(true)
         let window = lifecycleWindow(
             id: "window-o4qr-manual",
             assetId: assetId
@@ -796,6 +803,13 @@ struct AdCatalogWiringTests {
             episodeId: "episode-o4qr-legacy-local",
             podcastId: "show-o4qr"
         )
+        // playhead-wq34: the claim is about which rows reach the MANAGED tier,
+        // so the show's classes must be able to use it. Set through the pill
+        // rather than a seeded profile because this suite's show is
+        // `show-o4qr` and `makeSkipTestTrustService` only ever seeds
+        // `podcast-1` — a trust service here would resolve nothing and leave
+        // the show in shadow anyway.
+        await orchestrator.setActiveSkipMode(.auto)
 
         let legacyPositive = AdWindow(
             id: "window-o4qr-legacy-positive",
@@ -1494,7 +1508,12 @@ struct AdCatalogWiringTests {
             episodeId: "episode-o4qr-veto",
             podcastId: "show-o4qr"
         )
-        await orchestrator.setActiveSkipMode(.manual)
+        // playhead-wq34: `.auto` + padding ON, for the reason spelled out at
+        // `manualSkipLearnsWithExplicitProvenance` — the veto under test needs
+        // a MANAGED window, and `.manual` no longer produces one. The padding
+        // veto holds the unanchored span at `.confirmed` without firing a cue.
+        await orchestrator.setActiveSkipMode(.auto)
+        await orchestrator.setEdgePaddingEnabled(true)
         let window = lifecycleWindow(
             id: "window-o4qr-veto",
             assetId: assetId,
@@ -1868,7 +1887,15 @@ struct AdCatalogWiringTests {
             episodeId: "ep-\(assetA)",
             podcastId: "show-o4qr-source"
         )
-        await orchestrator.setActiveSkipMode(.manual)
+        // playhead-wq34: `.auto` + padding ON. `.manual` used to park the row
+        // in the managed tier silently; wq34 routes such a row to the suggest
+        // tier, and `revertWindow` then returns before it ever reaches the
+        // feedback barrier below — which does not just fail this test, it HANGS
+        // it, because `barrier.waitUntilStarted()` waits for a gesture that
+        // gave up. The padding veto holds the unanchored span at `.confirmed`:
+        // managed, and not skipped out from under the veto.
+        await orchestrator.setEdgePaddingEnabled(true)
+        await orchestrator.setActiveSkipMode(.auto)
         await orchestrator.receiveAdWindows([source])
 
         let barrier = CatalogAppliedPersistenceGate()
@@ -1887,7 +1914,9 @@ struct AdCatalogWiringTests {
             episodeId: "ep-\(assetB)",
             podcastId: "show-o4qr-replacement"
         )
-        await orchestrator.setActiveSkipMode(.manual)
+        // Same reason as above: the replacement episode's row must be managed
+        // for the `applyManualSkip` below to have anything to promote.
+        await orchestrator.setActiveSkipMode(.auto)
         await barrier.release()
         #expect(await oldVeto.value)
         await orchestrator

@@ -513,8 +513,16 @@ struct AutoSkipEdgePaddingWiringTests {
     func onManualSkipExempt() async throws {
         let store = try await makeTestStore()
         try await store.insertAsset(makeSkipTestAnalysisAsset())
+        // playhead-wq34: `.auto`, and the window is held back by THIS POLICY
+        // rather than by the mode. `.manual` used to park the row in the
+        // managed tier silently; wq34 routes such a row to the suggest tier, so
+        // `applyManualSkip` would have nothing to act on. The padding veto is
+        // the honest way to reach the state this test needs — a managed window
+        // the auto path declined to skip — and it is the very policy the tap is
+        // being asserted exempt from, so the fixture is now closer to the
+        // claim, not further from it.
         let trustService = try await makeSkipTestTrustService(
-            mode: "manual", trustScore: 0.9, observations: 10
+            mode: "auto", trustScore: 0.9, observations: 10
         )
         let orchestrator = SkipOrchestrator(store: store, trustService: trustService)
         nonisolated(unsafe) var pushedCues: [CMTimeRange] = []
@@ -529,7 +537,10 @@ struct AutoSkipEdgePaddingWiringTests {
             confidence: 0.9, decisionState: "confirmed"
         )
         await orchestrator.receiveAdWindows([ad])
-        #expect(pushedCues.isEmpty, "Manual mode fires no cue before the user taps")
+        #expect(
+            pushedCues.isEmpty,
+            "the unanchored span has no late-safe window, so padding fires no cue before the user taps"
+        )
 
         await orchestrator.applyManualSkip(windowId: "ad-manual")
 
