@@ -91,11 +91,21 @@
 //      choice while this lane is new; revisiting it is a measurement, not a
 //      guess. `anOverlappedVerdictProducesNothing` asserts the loss.
 //
-//   6. EMIT. `eligibilityGate == .markOnly` as a HARD-CODED literal, never
-//      derived from a policy switch; `decisionState == .candidate`; BOTH edge
-//      anchors `.unanchored`; `metadataConfidence == nil` so the banner copy is
-//      generic and no advertiser is hallucinated. Content-addressed id, so a
-//      recompose over unchanged inputs is a true no-op.
+//   6. EMIT. `eligibilityGate == .markOnly`; `decisionState == .candidate`;
+//      BOTH edge anchors `.unanchored`; `metadataConfidence == nil` so the
+//      banner copy is generic and no advertiser is hallucinated.
+//      Content-addressed id, so a recompose over unchanged inputs is a true
+//      no-op.
+//
+//      playhead-mqqd: THE GATE IS DERIVED, NOT TYPED. It used to be a
+//      hard-coded literal sitting beside two more hard-coded literals (the edge
+//      anchors) with nothing enforcing that the three agreed — 24 of the 45
+//      rows on the 2026-08-12 device pull, mark-only by constant rather than by
+//      evidence. `makeMark` now reads ONE ``extentSupport`` value for the anchor
+//      columns and hands the same value to ``ComposedMarkGate``. The computed
+//      answer is `.markOnly`, identically, for every mark this lane can emit;
+//      what changed is that the reason lives in ``extentSupport`` where a
+//      measurement can revisit it.
 //
 //      `confidence` is DERIVED from the evidence under the extent — the model's
 //      own `CertaintyBand`, the quality of the transcript it read, and whether
@@ -161,9 +171,10 @@
 //      TWO 0.70 GATES THAT LOOK LIVE AND ARE NOT, checked rather than assumed:
 //      `AnalysisJobRunner.isCueWindow` and the cross-user shareable-cue
 //      predicate both ALSO require `SkipEligibilityGate.eligible`, and every
-//      sweep mark is `.markOnly` by hard-coded literal — so neither has ever
-//      seen a sweep mark at any confidence. A sweep mark is additionally
-//      local-only (`isLocalOnlyBoundaryState`), so it is never exported.
+//      sweep mark computes to `.markOnly` (playhead-mqqd; a hard-coded literal
+//      when this was written) — so neither has ever seen a sweep mark at any
+//      confidence. A sweep mark is additionally local-only
+//      (`isLocalOnlyBoundaryState`), so it is never exported.
 //
 //      THE ID STILL ADDRESSES GEOMETRY ONLY, and that is deliberate. A mark's
 //      grade depends on the WHOLE row set — the corroboration term counts every
@@ -836,9 +847,41 @@ enum SemanticSweepMarkComposer {
 
     // MARK: - Stage 6: emit
 
+    /// The EXTENT this producer can prove, and the single source of truth for
+    /// both the row's anchor columns and — through ``ComposedMarkGate`` — its
+    /// `eligibilityGate` (playhead-mqqd).
+    ///
+    /// `.unanchored` on both edges, and it is a MEASURED claim about the lane
+    /// rather than a policy preference:
+    ///
+    ///   * A stage-1/2 extent is the coarse lane's OWN window geometry — a ~95 s
+    ///     tile, or pass B's narrowing of one. Nobody observed a boundary there;
+    ///     the model reported presence over a region it was handed.
+    ///   * A stage-4 CLIP does not change this, and that is the pre-existing
+    ///     argument this bead deliberately did not overturn: an anchor sitting
+    ///     within `anchorClipRadiusSeconds` of an FM edge proves that A boundary
+    ///     is there, not that it is THIS ad's boundary. Calling the clipped edge
+    ///     proven would ship a neighbouring row's evidence as this row's, which
+    ///     is the substitution playhead-2350 exists to have undone. It would
+    ///     also be self-feeding: ``provenAnchorEdges`` harvests anchors off
+    ///     persisted rows, so a sweep mark that minted its own anchor would
+    ///     become clip material for the next sweep mark.
+    ///   * Stage 5 refuses to emit over any existing window, so this producer's
+    ///     population and the anchored population are nearly disjoint by
+    ///     construction — there is usually no anchor within reach to argue about.
+    ///
+    /// Stated as a constant BECAUSE IT IS ONE, today. What it is not is three
+    /// constants that have to agree: `makeMark` reads this value for the anchor
+    /// columns and hands the same value to the gate, so a change here moves the
+    /// eligibility with it and cannot silently fail to.
+    static let extentSupport: SpanExtentSupport = .unanchored
+
     /// Build the content-addressed mark-only `AdWindow` for a surviving extent.
     static func makeMark(_ extent: Extent, analysisAssetId: String) -> AdWindow {
-        AdWindow(
+        // playhead-mqqd: ONE value, used twice — the anchor columns below and
+        // the gate derived from it. Never two expressions that happen to agree.
+        let support = extentSupport
+        return AdWindow(
             id: markId(
                 analysisAssetId: analysisAssetId,
                 start: extent.start,
@@ -865,16 +908,20 @@ enum SemanticSweepMarkComposer {
             wasSkipped: false,
             userDismissedBanner: false,
             evidenceSources: nil,
-            // ALWAYS markOnly — a hard-coded literal, never a policy switch.
-            eligibilityGate: SkipEligibilityGate.markOnly.rawValue,
+            // playhead-mqqd: DERIVED from `support`, not typed. It reads
+            // `markOnly` today because the coarse lane proved no edge — see
+            // `extentSupport` for why it cannot — and it will read whatever the
+            // extent earns if that ever changes. It was a hard-coded literal,
+            // which made it a policy decision no evidence could revisit and
+            // left it free to disagree with the two anchor columns below.
+            eligibilityGate: ComposedMarkGate.eligibility(for: support).rawValue,
             catalogStoreMatchSimilarity: nil,
-            // The coarse lane proved no edge. Saying so is what keeps
+            // The same `support`, so the row's stamp and its evidence are one
+            // statement. Saying "the coarse lane proved no edge" is what keeps
             // playhead-2350's gate true by construction rather than by
-            // evaluation — and a clip in stage 4 does NOT change this, because
-            // an anchor near an FM edge proved that a boundary is there, not
-            // that it is THIS ad's boundary.
-            startEdgeAnchor: AutoSkipEdgeAnchor.unanchored.rawValue,
-            endEdgeAnchor: AutoSkipEdgeAnchor.unanchored.rawValue
+            // evaluation.
+            startEdgeAnchor: support.startAnchor.rawValue,
+            endEdgeAnchor: support.endAnchor.rawValue
         )
     }
 
