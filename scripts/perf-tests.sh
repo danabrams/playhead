@@ -75,6 +75,21 @@ MEASUREMENT_TESTS=(
   # reading the database from inside the running pass; only the real
   # abandonment is measured here.
   "PlayheadTests/BackfillCoarseCheckpointTests/abandonedPassLeavesItsScreenedWindowsBehind()"
+  # playhead-o89d. Both admitted on an ISOLATED-vs-IN-GATE measurement rather
+  # than on a suite name — see the bead for why a name list rots (two
+  # measurements fifteen days apart shared not one suite, and Chao1 on the
+  # committed baseline puts the load-sensitive population at >=377 against 136
+  # ever observed). These two are here because the wall-clock quantity IS the
+  # assertion, which is the one sub-property that does not rotate.
+  #
+  #   benchmarkGate            budget 5,000 ms; alone <1,900 ms (3 tests, 1.9 s
+  #                            total, PASS); 443-test scoped selection 25,243 ms
+  #                            (FAIL); full plan 105,491 / 162,396 ms (FAIL).
+  #   expirationWait…Reserve   a 20 s BOUND separating "about 0 s" (correct)
+  #                            from "60 s" (spends the reclaimed reserve). Passes
+  #                            5/5 scoped; failed 100 % of recorded full-plan runs.
+  "PlayheadTests/Phase3ShadowReplayHarnessTests/benchmarkGate()"
+  "PlayheadTests/BackfillExpiryDurabilityTests/expirationWaitIsBoundedByTheGraceNotTheReserve()"
   # Note: AnalysisWorkSchedulerOutcomeBookkeepingTests is intentionally NOT
   # here — its cancel-mid-decode tests were rewritten to be deterministic
   # (via processNextDispatchableJobForTesting) and un-gated, so they run in

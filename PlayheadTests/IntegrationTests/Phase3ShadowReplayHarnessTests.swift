@@ -181,7 +181,21 @@ struct Phase3ShadowReplayHarnessTests {
         #expect(baselineWindows.count == shadowWindows.count)
     }
 
-    @Test("benchmark gate: 3 episodes finish under the orchestration budget")
+    /// PerfGate'd on measurement, playhead-o89d. The budget IS the assertion
+    /// here, so what it reports is whatever share of the box the test got:
+    ///
+    ///     alone (this suite only, 3 tests)          <1.9 s total   PASS
+    ///     52-suite scoped selection (443 tests)     25.2 s         FAIL  5x over
+    ///     full PlayheadFastTests plan (~11.9k)      105–162 s      FAIL  21–32x over
+    ///
+    /// Measured 2026-08-13 over 5 scoped runs and the two preserved full-plan
+    /// logs. It has failed every recorded full-plan run since the baseline
+    /// began, and each of those was triaged as one more starvation flake — so
+    /// a genuine orchestration regression (the N^2 walk the comment below
+    /// warns about) would have been indistinguishable from the noise. Serial
+    /// pass only, where the number means what it says.
+    @Test("benchmark gate: 3 episodes finish under the orchestration budget",
+          .enabled(if: PerfGate.runsMeasurementTests, "perf pass only — see playhead-zx0l"))
     func benchmarkGate() async throws {
         let store = try await makeTestStore()
         let episodes = (0..<3).map { makeEpisode(index: $0) }
