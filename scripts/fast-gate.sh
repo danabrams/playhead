@@ -70,18 +70,28 @@
 # GREEN is unreachable while that count is non-zero, and the census is ARMED the
 # same way everything above it is armed — on the DIFF, not the count:
 #
-#     a name that lost its verdict and is NOT recorded  -> exit 65, named
-#     a recorded name that reported again               -> exit 0, good news
-#     the count alone, or a bare host restart           -> exit 0
+#     a name lost its verdict and is NOT recorded    -> named; exit 65 once ARMED
+#     a DETERMINISTIC recorded name reported again   -> exit 65, named
+#     a load-sensitive recorded name reported again  -> exit 0, good news
+#     the count alone, or a bare host restart        -> exit 0
 #
-# The record is a SET OF NAMES under `no_verdict` in the same per-plan file,
-# because the two measured runs lost the SAME ELEVEN TESTS on different trees —
-# so substitution, which a count cannot see, is the event worth catching.
+# The record lives under `no_verdict` in the same per-plan file and is shaped
+# EXACTLY like `tests`: a UNION of names carrying seen/lost observation counts,
+# with the tier falling out of the counts. Two runs lost the same eleven tests
+# (Jaccard 1.00) and a third lost fifteen — the same eleven plus four that had
+# PASSED in both — so after three accepts eleven names stand at 3/3 and are
+# DETERMINISTIC while the four stand at 1/1 and are LOAD-SENSITIVE (a name
+# accrues observations only from the accept that first records it; 1/1 means
+# ONE OBSERVATION, not one of three). It is a set of NAMES rather than a count
+# because substitution (eleven die, eleven different ones recover) is what a
+# count cannot see.
 #
-# UNRECORDED IS NOT ZERO: a baseline with no `no_verdict` key has never recorded
-# the population, the arm is INERT, and the verdict says so. The first
-# `--accept-baseline` records the set and arms it. That is what keeps this from
-# turning main red today for a pre-existing crash owned by playhead-rouw.
+# UNRECORDED IS NOT ZERO, AND PROVISIONAL IS NEITHER. No `no_verdict` key means
+# nobody has recorded the population: INERT, and the verdict says so. One or two
+# observations is PROVISIONAL — a casualty nobody recorded is NAMED and is not
+# fatal, because two observations do not bound a population this load-sensitive.
+# Three arms it. That ladder is what keeps this from turning main red today for
+# a pre-existing crash owned by playhead-rouw.
 #
 # The check applies ONLY to a full-plan run. A selective invocation
 # (`-only-testing:`/`-skip-testing:`, which is how scripts/mutation-battery.sh

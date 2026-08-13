@@ -153,7 +153,8 @@ def log(*chunks, terminal=TERMINAL_FAILED):
     )
 
 
-def baseline(tests, runs=3, plan="PlayheadFastTests", no_verdict=None):
+def baseline(tests, runs=3, plan="PlayheadFastTests", no_verdict=None,
+             census_runs=None, census_lost=None):
     """Build a baseline dict. `tests` is {key: (failed_runs, kinds)}.
 
     `no_verdict` defaults to None, which builds a file with NO recorded
@@ -161,6 +162,13 @@ def baseline(tests, runs=3, plan="PlayheadFastTests", no_verdict=None):
     accepts one, and the shape whose arm is inert. Pass a list (including an
     EMPTY list, which is a positive claim rather than an absence) to build a
     recorded one.
+
+    The census is a UNION WITH OBSERVATION COUNTS (playhead-tl6l R4), so a
+    recorded name needs a `seen_runs`/`lost_runs` pair. `census_runs` is how
+    many observations back the record — it defaults to the threshold, i.e. an
+    ARMED record, because that is the state most rails are about — and
+    `census_lost` overrides `lost_runs` per name so a LOAD-SENSITIVE entry can
+    be built (lost in some observations, not all).
     """
     out = {
         "plan": plan,
@@ -169,7 +177,17 @@ def baseline(tests, runs=3, plan="PlayheadFastTests", no_verdict=None):
         "tests": {},
     }
     if no_verdict is not None:
-        out[gb.NO_VERDICT_KEY] = sorted(no_verdict)
+        observations = (gb.MIN_RUNS_FOR_DETERMINISTIC if census_runs is None
+                        else census_runs)
+        lost = dict(census_lost or {})
+        out[gb.NO_VERDICT_KEY] = {
+            gb.CENSUS_RUNS_KEY: observations,
+            gb.CENSUS_TESTS_KEY: {
+                key: {"seen_runs": observations,
+                      "lost_runs": lost.get(key, observations)}
+                for key in sorted(no_verdict)
+            },
+        }
     for key, (failed, kinds) in tests.items():
         framework, name = key.split("::", 1)
         out["tests"][key] = {
@@ -803,6 +821,18 @@ class ArmedCensusTests(unittest.TestCase):
         self.assertEqual(["swift-testing::anything"], v.new_casualties)
         self.assertEqual(gb.EXIT_REGRESSION, v.exit_code)
 
+    def test_a_FRESH_baseline_records_NOTHING_rather_than_a_ZERO(self):
+        # `{"runs_observed": 0, "tests": {}}` would spell "nobody has looked"
+        # as a measurement of zero. Three states, three claims: absent is
+        # INERT, 1-2 observations is PROVISIONAL, 3+ is ARMED.
+        fresh = gb.empty_baseline("PlayheadFastTests")
+        self.assertNotIn(gb.NO_VERDICT_KEY, fresh)
+        self.assertIsNone(gb.recorded_census(fresh))
+        v = gb.verdict(fresh, self._run("anything"), plan="PlayheadFastTests")
+        self.assertIsNone(v.no_verdict_recorded)
+        self.assertEqual(gb.EXIT_OK, v.exit_code)
+        self.assertIn("INERT", v.render())
+
     def test_an_UNRECORDED_census_is_inert_even_for_a_LARGE_loss(self):
         v = gb.verdict(baseline({}), self._run(*("lost-%d" % i for i in range(40))))
         self.assertEqual(40, len(v.no_verdict))
@@ -855,27 +885,168 @@ class ArmedCensusTests(unittest.TestCase):
         self.assertEqual([], v.new_casualties)
         self.assertEqual(gb.EXIT_OK, v.exit_code)
 
-    def test_accept_RECORDS_the_census_and_REPLACES_it_on_the_next_accept(self):
+    def test_accept_UNIONS_the_census_and_COUNTS_the_observations(self):
+        """playhead-tl6l R4 — the record's shape, and why it changed.
+
+        R2 recorded a SET and REPLACED it on every accept, arguing from two
+        runs whose casualty sets were IDENTICAL (Jaccard 1.00) that churn was
+        not a risk. A third full-plan run on this branch lost FIFTEEN where
+        those two lost eleven — the same eleven all three times, four more on a
+        loud night, none ever recovering. Under replace, a run like that
+        reports four NEW casualties on a record that has never been wrong; the
+        union records the four instead and lets the counts say which is which.
+        """
         base = baseline({})
         first = gb.merge(base, self._run("a", "b"), plan="PlayheadFastTests")
-        self.assertEqual(["swift-testing::a", "swift-testing::b"],
-                         first[gb.NO_VERDICT_KEY])
-        # …and a later run that loses a different set REPLACES it rather than
-        # unioning. A union can only grow, so a crash that gets fixed would stay
-        # recorded forever and the gate would never speak about it again.
-        second = gb.merge(first, self._run("b", "c"), plan="PlayheadFastTests")
-        self.assertEqual(["swift-testing::b", "swift-testing::c"],
-                         second[gb.NO_VERDICT_KEY])
+        census = gb.recorded_census(first)
+        self.assertEqual(1, census.runs_observed)
+        self.assertEqual({"swift-testing::a", "swift-testing::b"}, census.names)
+        # A later run that loses a DIFFERENT set adds to the record rather than
+        # replacing it, and every entry carries how often it was seen and lost.
+        second = gb.recorded_census(
+            gb.merge(first, self._run("b", "c"), plan="PlayheadFastTests"))
+        self.assertEqual(2, second.runs_observed)
+        self.assertEqual({"swift-testing::a", "swift-testing::b",
+                          "swift-testing::c"}, second.names)
+        # `a` was never reached on the second (crashed) run, so it is carried
+        # forward untouched; `b` lost twice; `c` is new.
+        self.assertEqual({"seen_runs": 1, "lost_runs": 1},
+                         second.tests["swift-testing::a"])
+        self.assertEqual({"seen_runs": 2, "lost_runs": 2},
+                         second.tests["swift-testing::b"])
+        self.assertEqual({"seen_runs": 1, "lost_runs": 1},
+                         second.tests["swift-testing::c"])
 
-    def test_accept_on_a_CLEAN_run_records_the_EMPTY_set_which_arms_it_fully(self):
-        base = baseline({"swift-testing::known": (3, ["timeout"])},
-                        no_verdict=["swift-testing::a"])
-        merged = gb.merge(base, gb.parse_run(log(st_fail_timeout("known"))),
-                          plan="PlayheadFastTests")
-        self.assertEqual([], merged[gb.NO_VERDICT_KEY])
-        # From here a single lost verdict is fatal — the record says zero.
-        v = gb.verdict(merged, self._run("anything"))
+    def test_a_recorded_name_that_REPORTS_is_DEMOTED_not_deleted(self):
+        # The other half of the union, and the answer to R2's objection to one:
+        # a name that comes back must be able to LEAVE the record eventually,
+        # or a union is a licence nobody can revoke. It leaves by losing ground
+        # on the counts, one observation at a time, not by being silently
+        # dropped on the strength of a single quiet run.
+        base = baseline({}, no_verdict=["swift-testing::a"], census_runs=3)
+        merged = gb.recorded_census(gb.merge(
+            base, gb.parse_run(log(st_pass("a"), st_pass("healthy"))),
+            plan="PlayheadFastTests"))
+        self.assertIn("swift-testing::a", merged.names)
+        self.assertEqual({"seen_runs": 4, "lost_runs": 3},
+                         merged.tests["swift-testing::a"])
+        self.assertEqual(gb.TIER_LOAD_SENSITIVE,
+                         merged.tier("swift-testing::a"))
+
+    def test_a_DETERMINISTIC_entry_that_REPORTS_AGAIN_fails_the_gate(self):
+        """The pass-direction arm, and the price of the union.
+
+        Dan's rule for the failure baseline applied where it is sound: the
+        entry claims this test loses its verdict in EVERY observation, the run
+        watched it start and report, so the record has rotted. Without this a
+        crash that gets genuinely fixed stays recorded forever and the gate
+        never speaks about those names again.
+        """
+        base = baseline({}, no_verdict=["swift-testing::a"], census_runs=3)
+        run = gb.parse_run(log(st_pass("a"), st_pass("healthy")))
+        v = gb.verdict(base, run)
+        self.assertEqual(["swift-testing::a"], v.census_now_reports)
         self.assertEqual(gb.EXIT_REGRESSION, v.exit_code)
+        self.assertIn("NOW REPORTS      swift-testing::a", v.render())
+
+    def test_a_LOAD_SENSITIVE_entry_that_reports_again_is_NOT_fatal(self):
+        # Lost in 2 of its 3 observations: it does not claim to be lost every
+        # time, so reporting is exactly what it said might happen.
+        base = baseline({}, no_verdict=["swift-testing::a"], census_runs=3,
+                        census_lost={"swift-testing::a": 2})
+        v = gb.verdict(base, gb.parse_run(log(st_pass("a"), st_pass("healthy"))))
+        self.assertEqual([], v.census_now_reports)
+        self.assertEqual(["swift-testing::a"], v.recovered_casualties)
+        self.assertEqual(gb.EXIT_OK, v.exit_code)
+
+    def test_a_recorded_name_that_is_now_SKIPPED_is_fatal_and_that_is_a_choice(self):
+        """Decided rather than fallen into, because it could go either way.
+
+        The entry claims this test cannot produce an outcome; the run watched
+        it start and produce one. That the outcome was a SKIP does not make the
+        claim less falsified — the host survived long enough to report it — and
+        the population has plainly changed, which is a refresh the operator
+        should have to sign. It is also what `tests` already does: a newly
+        skipped baseline member is ABSENT and fatal, which is what makes
+        PerfGate-ing a family visible instead of a quiet loss of coverage.
+
+        (Swift Testing's own trait-disabled skips can never reach here: they
+        emit no `started` line, so they are in neither set.)
+        """
+        base = baseline({}, no_verdict=["xctest::PlayheadTests.PerfTests/testSlow"],
+                        census_runs=3)
+        run = gb.parse_run(log(xc_skip("PerfTests", "testSlow"), st_pass("healthy")))
+        v = gb.verdict(base, run)
+        self.assertEqual(["xctest::PlayheadTests.PerfTests/testSlow"],
+                         v.census_now_reports)
+        self.assertEqual(gb.EXIT_REGRESSION, v.exit_code)
+
+    def test_a_recorded_name_that_NEVER_STARTED_is_never_fatal(self):
+        # A rename, a deletion and a host that died before the start line are
+        # indistinguishable from a log. The arm fires on positive evidence
+        # only, so it never fires here — however deterministic the entry.
+        base = baseline({}, no_verdict=["swift-testing::a"], census_runs=9)
+        v = gb.verdict(base, gb.parse_run(log(st_pass("healthy"))))
+        self.assertEqual(gb.TIER_DETERMINISTIC,
+                         gb.recorded_census(base).tier("swift-testing::a"))
+        self.assertEqual([], v.census_now_reports)
+        self.assertEqual(gb.EXIT_OK, v.exit_code)
+        self.assertIn("did not start at all this run", v.render())
+
+    def test_a_PROVISIONAL_census_NAMES_a_new_casualty_without_failing(self):
+        """Tonight's four, and the reason the arm waits.
+
+        Two observations do not bound a population this load-sensitive — this
+        one was measured not to be bounded by them. The casualty is named on
+        every run from the first, because a newly-observed casualty is
+        indistinguishable from a regression; what the third observation buys is
+        the right to make it fatal.
+        """
+        base = baseline({}, no_verdict=self.RECORD, census_runs=2)
+        v = gb.verdict(base, self._run("known-casualty", "fresh-casualty"))
+        self.assertFalse(v.census_armed)
+        self.assertEqual(["swift-testing::fresh-casualty"], v.new_casualties)
+        self.assertEqual(gb.EXIT_OK, v.exit_code)
+        rendered = v.render()
+        self.assertIn("NEW CASUALTY     swift-testing::fresh-casualty", rendered)
+        self.assertIn("PROVISIONAL", rendered)
+        # …and the headline must not shout what it is not going to act on.
+        first = rendered.splitlines()[0]
+        self.assertIn("not yet recorded", first)
+        self.assertNotIn("NOT RECORDED", first)
+
+    def test_the_THIRD_observation_ARMS_it(self):
+        base = baseline({}, no_verdict=self.RECORD, census_runs=3)
+        v = gb.verdict(base, self._run("known-casualty", "fresh-casualty"))
+        self.assertTrue(v.census_armed)
+        self.assertEqual(gb.EXIT_REGRESSION, v.exit_code)
+        self.assertNotIn("PROVISIONAL", v.render())
+
+    def test_the_OLD_LIST_SHAPE_is_read_as_ONE_observation_and_arms_nothing(self):
+        # No committed file ever carried it, but reading a bare list as an
+        # armed record would arm a pass-direction check on counts nobody
+        # measured. It is read as the weakest true claim it supports.
+        base = baseline({})
+        base[gb.NO_VERDICT_KEY] = ["swift-testing::a"]
+        v = gb.verdict(base, self._run("a", "b"))
+        self.assertEqual({"swift-testing::a"}, v.no_verdict_recorded)
+        self.assertEqual(1, v.census_runs_observed)
+        self.assertFalse(v.census_armed)
+        self.assertEqual(gb.EXIT_OK, v.exit_code)
+        self.assertIn("OLD CENSUS SHAPE", v.render())
+
+    def test_accept_on_a_CLEAN_run_CREDITS_an_observation_not_an_erasure(self):
+        # Under the replaced set a single clean run wiped the record, which is
+        # how eleven measured casualties could be forgotten by one quiet night.
+        base = baseline({"swift-testing::known": (3, ["timeout"])},
+                        no_verdict=["swift-testing::a"], census_runs=3)
+        merged = gb.merge(base, gb.parse_run(log(st_fail_timeout("known"),
+                                                 st_pass("a"))),
+                          plan="PlayheadFastTests")
+        census = gb.recorded_census(merged)
+        self.assertEqual(4, census.runs_observed)
+        self.assertEqual({"seen_runs": 4, "lost_runs": 3},
+                         census.tests["swift-testing::a"])
 
     def test_the_record_is_PER_PLAN_and_never_crosses(self):
         base = baseline({}, plan="PlayheadIntegrationTests",
@@ -883,8 +1054,11 @@ class ArmedCensusTests(unittest.TestCase):
         merged = gb.merge(base, self._run("b"), plan="PlayheadFastTests")
         self.assertEqual("PlayheadFastTests", merged["plan"])
         # A different plan is a different population; carrying the old census
-        # across would name tests this plan never runs.
-        self.assertEqual(["swift-testing::b"], merged[gb.NO_VERDICT_KEY])
+        # across would name tests this plan never runs — including its
+        # observation COUNT, which is what would otherwise arrive pre-armed.
+        census = gb.recorded_census(merged)
+        self.assertEqual({"swift-testing::b"}, census.names)
+        self.assertEqual(1, census.runs_observed)
 
 
 class BlamedBlockTests(unittest.TestCase):
@@ -1168,6 +1342,123 @@ class CrashedHostMergeTests(unittest.TestCase):
         run = gb.parse_run(log(st_fail_timeout("anchor"), st_skip("known")))
         merged = gb.merge(base, run, plan="PlayheadFastTests")
         self.assertNotIn("swift-testing::known", merged["tests"])
+
+
+class CensusMergeTests(unittest.TestCase):
+    """playhead-tl6l R4 — what the UNION owes, and what it must not do.
+
+    A union that only ever grows is a licence nobody can revoke, and a union
+    that prunes on a crashed run is the same defect `protected` closes for
+    `tests` one layer down: the crash shrinks the record from inside the one
+    command whose job is to maintain it. Both directions are pinned here.
+    """
+
+    def _census(self, base, run_log):
+        return gb.recorded_census(
+            gb.merge(base, gb.parse_run(run_log), plan="PlayheadFastTests"))
+
+    def test_a_CRASHED_run_carries_an_unreached_census_entry_forward(self):
+        base = baseline({}, no_verdict=["swift-testing::a"], census_runs=3)
+        census = self._census(
+            base, log(st_pass("healthy"), st_silent("b")) + HOST_RESTART)
+        # `a` never started. On a run whose host died that is exactly what the
+        # crash does, so it keeps its counts and is credited NO observation.
+        self.assertEqual({"seen_runs": 3, "lost_runs": 3},
+                         census.tests["swift-testing::a"])
+        self.assertEqual(4, census.runs_observed)
+
+    def test_a_HEALTHY_run_PRUNES_a_census_entry_that_never_started(self):
+        # The shrink path. Without it a renamed or deleted test stays in the
+        # record for good, and the record stops describing the tree.
+        base = baseline({}, no_verdict=["swift-testing::gone"], census_runs=3)
+        census = self._census(base, log(st_pass("healthy")))
+        self.assertEqual(set(), census.names)
+
+    def test_the_census_OBSERVATION_COUNT_is_its_own_and_not_the_files(self):
+        # The file may have nine observations of FAILURES and none of the
+        # census — which is the state main is in today. Sharing one counter
+        # would arrive pre-armed off observations nobody made.
+        base = baseline({"swift-testing::k": (9, ["timeout"])}, runs=9)
+        census = self._census(base, log(st_fail_timeout("k"), st_silent("lost"))
+                              + HOST_RESTART)
+        self.assertEqual(10, base["runs_observed"] + 1)
+        self.assertEqual(1, census.runs_observed)
+        self.assertFalse(census.armed)
+
+    def test_repeated_accepts_over_the_SAME_crash_PROMOTE_it(self):
+        # Three observations of the same loss is what buys the right to call it
+        # deterministic — and arms its recovery, which is how it can ever leave.
+        merged = baseline({"swift-testing::anchor": (5, ["timeout"])}, runs=5)
+        crashed = log(st_fail_timeout("anchor"), st_silent("lost")) + HOST_RESTART
+        tiers = []
+        for _ in range(3):
+            merged = gb.merge(merged, gb.parse_run(crashed),
+                              plan="PlayheadFastTests")
+            census = gb.recorded_census(merged)
+            tiers.append(census.tier("swift-testing::lost"))
+        self.assertEqual([gb.TIER_LOAD_SENSITIVE, gb.TIER_LOAD_SENSITIVE,
+                          gb.TIER_DETERMINISTIC], tiers)
+        self.assertEqual({"seen_runs": 3, "lost_runs": 3},
+                         census.tests["swift-testing::lost"])
+
+    def test_a_crash_can_never_SHRINK_the_census_across_repeated_accepts(self):
+        # The census analogue of test_accept_CARRIES_FORWARD_across_a_SECOND
+        # _and_THIRD_crash: the record is maintained BY repeated accepts, so one
+        # carry-forward proves nothing.
+        base = baseline({"swift-testing::anchor": (5, ["timeout"])}, runs=5,
+                        no_verdict=["swift-testing::a", "swift-testing::b"],
+                        census_runs=4)
+        crashed = log(st_fail_timeout("anchor"), st_silent("a")) + HOST_RESTART
+        merged = base
+        for _ in range(3):
+            merged = gb.merge(merged, gb.parse_run(crashed),
+                              plan="PlayheadFastTests")
+            census = gb.recorded_census(merged)
+            self.assertEqual({"swift-testing::a", "swift-testing::b"},
+                             census.names)
+            self.assertEqual({"seen_runs": 4, "lost_runs": 4},
+                             census.tests["swift-testing::b"])
+
+    def test_the_accept_ANNOUNCES_a_census_promotion_and_the_ARMING(self):
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory() as d:
+            d = pathlib.Path(d)
+            gb.save_baseline(d / "b.json", baseline(
+                {"swift-testing::anchor": (5, ["timeout"])}, runs=5,
+                no_verdict=["swift-testing::lost"], census_runs=2,
+                census_lost={"swift-testing::lost": 2}))
+            (d / "run.log").write_text(
+                log(st_fail_timeout("anchor"), st_silent("lost")) + HOST_RESTART,
+                encoding="utf-8")
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                rc = gb.main(["accept", "--log", str(d / "run.log"),
+                              "--baseline", str(d / "b.json")])
+            out = buffer.getvalue()
+        self.assertEqual(0, rc)
+        # Crossing arms a hard failure on that name, so it must be named.
+        self.assertIn("!~ now deterministic 3/3  swift-testing::lost", out)
+        self.assertIn("CENSUS ARMED: 3 observations recorded", out)
+
+    def test_the_accept_NAMES_a_census_entry_that_reported_again(self):
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory() as d:
+            d = pathlib.Path(d)
+            gb.save_baseline(d / "b.json", baseline(
+                {"swift-testing::anchor": (5, ["timeout"])}, runs=5,
+                no_verdict=["swift-testing::back"], census_runs=2))
+            (d / "run.log").write_text(
+                log(st_fail_timeout("anchor"), st_pass("back")), encoding="utf-8")
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                rc = gb.main(["accept", "--log", str(d / "run.log"),
+                              "--baseline", str(d / "b.json")])
+            out = buffer.getvalue()
+        self.assertEqual(0, rc)
+        self.assertIn("~= reported again         2/3  swift-testing::back", out)
+        self.assertIn("UNIONED with counts", out)
 
 
 class PlanScopeTests(unittest.TestCase):
@@ -1643,12 +1934,19 @@ FULL_LOG_DIR = pathlib.Path(
     )
 )
 
-# fixture -> (full log, no_verdict, blamed entries, blamed distinct, known, new)
+# fixture -> (full log, no_verdict, blamed entries, blamed distinct, known, new,
+#             host restarts)
 REAL_RUNS = {
     "crashed-run-main-76b0a09a.log": (
-        "main-control/main-fullplan.log", 11, 18, 14, 85, 14),
+        "main-control/main-fullplan.log", 11, 18, 14, 85, 14, 1),
     "crashed-run-mn5e.log": (
-        "mn5e-r6/fullplan.log", 11, 19, 15, 71, 16),
+        "mn5e-r6/fullplan.log", 11, 19, 15, 71, 16, 1),
+    # playhead-tl6l R4. The THIRD observation, and the only one that could have
+    # shown the record's shape was wrong: a real full-plan gate on the armed
+    # code, 2026-08-12 23:10. Fifteen casualties where the first two runs had
+    # eleven — the same eleven, plus four that had PASSED in both.
+    "crashed-run-tl6l-realgate.log": (
+        "tl6l-realgate/realgate.log", 15, 14, 12, 68, 6, 2),
 }
 
 
@@ -1693,10 +1991,10 @@ class RealCrashedRunTests(unittest.TestCase):
         return gb.parse_run(path.read_text(encoding="utf-8"))
 
     def _check(self, fixture):
-        _, expected, entries, distinct, known, new = REAL_RUNS[fixture]
+        _, expected, entries, distinct, known, new, restarts = REAL_RUNS[fixture]
         run = self._run(fixture)
         self.assertTrue(run.complete)
-        self.assertEqual(1, run.host_restarts)
+        self.assertEqual(restarts, run.host_restarts)
         self.assertEqual(expected, len(run.no_verdict))
         self.assertEqual(entries, len(run.blamed_entries))
         self.assertEqual(distinct, len(run.blamed))
@@ -1730,21 +2028,128 @@ class RealCrashedRunTests(unittest.TestCase):
         )
 
     def test_BOTH_runs_lost_THE_SAME_ELEVEN_TESTS(self):
-        """The measurement the record's design rests on (R2 review).
+        """The measurement R2's design rested on, kept because it still holds.
 
         Two full-plan runs, DIFFERENT trees, and the casualty sets are
         identical — Jaccard 1.00, against 0.46 for the failure set on identical
-        code. That is why the crashed-host census is recorded as a SET and
-        REPLACED rather than unioned: a union exists to survive churn, and the
-        churn measured here is zero. Every one of the eleven is a
-        download/cache/streaming test, the same family xcodebuild's own
-        `Failing tests:` block names.
+        code. Every one of the eleven is a download/cache/streaming test, the
+        same family xcodebuild's own `Failing tests:` block names.
 
-        If this ever stops holding, the union question is genuinely reopened.
+        R2 read this as licence to record a SET and REPLACE it on each accept,
+        and wrote here that a third result would reopen the union question. It
+        did — see the next rail. What survives unchanged is the other half of
+        R2's argument: the record is a set of NAMES rather than a count,
+        because a count cannot see eleven tests dying while eleven different
+        ones recover.
         """
-        sets = [set(self._run(name).no_verdict) for name in REAL_RUNS]
+        sets = [set(self._run(name).no_verdict)
+                for name in ("crashed-run-main-76b0a09a.log",
+                             "crashed-run-mn5e.log")]
         self.assertEqual(sets[0], sets[1])
         self.assertEqual(11, len(sets[0]))
+
+    def test_the_THIRD_run_REOPENED_the_union_question_and_ANSWERED_it(self):
+        """playhead-tl6l R4 — why the record is a union with counts.
+
+        Two observations put the churn at zero. The third, a real full-plan
+        gate on the armed code, lost FIFTEEN: the same eleven yet again, plus
+        four that had PASSED in both earlier runs. Jaccard falls 1.00 -> 0.73,
+        nothing has EVER recovered, and the eleven are now a deterministic core
+        measured across three different trees.
+
+        Under a replaced set an armed gate on a night like that reports four
+        NEW casualties and exits 65 — red for a reason its reader cannot fix,
+        which is the hazard R2's own exit-code argument was built to avoid.
+        The counts say instead that eleven names are 3/3 and the four enter at
+        1/1, and that is the distinction the tiers already know how to express.
+        """
+        runs = {name: self._run(name) for name in REAL_RUNS}
+        sets = {name: set(run.no_verdict) for name, run in runs.items()}
+        third = sets["crashed-run-tl6l-realgate.log"]
+        first = sets["crashed-run-main-76b0a09a.log"]
+        second = sets["crashed-run-mn5e.log"]
+        self.assertEqual(15, len(third))
+        core = first & second & third
+        self.assertEqual(11, len(core))
+        self.assertEqual(4, len(third - core))
+        # Nothing has ever recovered: the core is present in all three.
+        self.assertEqual(set(), (first | second) - third)
+        # …and the four are casualties in NEITHER earlier run. That they
+        # actively PASSED in both — the fact that makes them load-sensitive
+        # rather than newly-added tests — is measured on the 7.2 MB originals
+        # in test_the_four_CHURN_NAMES_passed_in_the_earlier_runs below. The
+        # distillation cannot carry it: run 1 and run 2 drop the start/pass
+        # PAIR of every test that is uninteresting IN THAT RUN, and these four
+        # were uninteresting in both.
+        for key in third - core:
+            for name in ("crashed-run-main-76b0a09a.log", "crashed-run-mn5e.log"):
+                self.assertNotIn(key, runs[name].no_verdict,
+                                 "%s / %s" % (name, key))
+
+    def test_the_THREE_runs_PROMOTE_ELEVEN_and_leave_FOUR_load_sensitive(self):
+        """The tier split, end to end on real data, through `merge` itself.
+
+        This is the rail that would go red if the counts stopped meaning what
+        they say: three accepts of the three real runs must leave exactly the
+        eleven deterministic and the four load-sensitive.
+        """
+        base = gb.load_baseline(
+            ROOT / "scripts" / "gate-baseline.PlayheadFastTests.json")
+        merged = base
+        for name in ("crashed-run-main-76b0a09a.log", "crashed-run-mn5e.log",
+                     "crashed-run-tl6l-realgate.log"):
+            merged = gb.merge(merged, self._run(name), plan="PlayheadFastTests")
+        census = gb.recorded_census(merged)
+        self.assertEqual(3, census.runs_observed)
+        self.assertTrue(census.armed)
+        tiers = {}
+        for key in census.tests:
+            tiers.setdefault(census.tier(key), []).append(key)
+        self.assertEqual(11, len(tiers[gb.TIER_DETERMINISTIC]))
+        self.assertEqual(4, len(tiers[gb.TIER_LOAD_SENSITIVE]))
+        for key in tiers[gb.TIER_DETERMINISTIC]:
+            self.assertEqual({"seen_runs": 3, "lost_runs": 3}, census.tests[key])
+        # ONE OBSERVATION, not one of three: the earlier runs reached these
+        # four and watched them pass, but there was no entry to credit. Pinned
+        # because "1" here and "1 of 3" in the prose are different quantities
+        # that read the same, which is this file's standing defect class.
+        for key in tiers[gb.TIER_LOAD_SENSITIVE]:
+            self.assertEqual({"seen_runs": 1, "lost_runs": 1}, census.tests[key])
+
+    def test_the_THIRD_run_would_NOT_have_failed_the_gate_on_a_TWO_RUN_record(self):
+        """The defect this round exists to fix, checked against the run itself.
+
+        The record R2's design would have held on the night of run 3 is the one
+        built by accepting runs 1 and 2 — eleven names, two observations. The
+        `tests` half is taken from run 3 so that NEW FAILURES cannot be what
+        turns it red; the census is then the only thing that can, which is the
+        vacuity trap R3 fell into and named.
+        """
+        base = gb.load_baseline(
+            ROOT / "scripts" / "gate-baseline.PlayheadFastTests.json")
+        third = self._run("crashed-run-tl6l-realgate.log")
+        # Failures accepted from run 3 itself -> zero NEW failures, zero absent.
+        tests_side = gb.merge(base, third, plan="PlayheadFastTests")
+        # Census from runs 1 and 2 only.
+        census_side = base
+        for name in ("crashed-run-main-76b0a09a.log", "crashed-run-mn5e.log"):
+            census_side = gb.merge(census_side, self._run(name),
+                                   plan="PlayheadFastTests")
+        probe = dict(tests_side)
+        probe[gb.NO_VERDICT_KEY] = census_side[gb.NO_VERDICT_KEY]
+        v = gb.verdict(probe, third, plan="PlayheadFastTests")
+        self.assertEqual([], v.new_failures)
+        self.assertEqual([], v.absent)
+        self.assertFalse(v.baseline_fiction)
+        self.assertEqual(2, v.census_runs_observed)
+        self.assertFalse(v.census_armed)
+        self.assertEqual(4, len(v.new_casualties))
+        self.assertEqual(gb.EXIT_OK, v.exit_code)
+        # Named, though — silence is not the remedy, waiting is.
+        rendered = v.render()
+        self.assertIn("PROVISIONAL", rendered)
+        for key in v.new_casualties:
+            self.assertIn("NEW CASUALTY     %s" % key, rendered)
 
     def test_the_skips_are_subtracted_and_it_MATTERS(self):
         # Without parsing skips the census is 30 higher on both runs, and every
@@ -1840,6 +2245,36 @@ class RealCrashedRunTests(unittest.TestCase):
                 "fixtures above still ran."
             )
 
+    def test_the_four_CHURN_NAMES_passed_in_the_earlier_runs(self):
+        """Load-sensitive, not newly-added — and only the full logs can say so.
+
+        The tier split rests on the four having been REACHED in runs 1 and 2,
+        because a name that merely did not exist yet would also enter the
+        record at 1/1. Measured 2026-08-13 on all three originals: every one of
+        the four is in `passed` on BOTH earlier runs. The distilled fixtures
+        drop those pass lines by construction — a test uninteresting in the run
+        being distilled loses its start/pass pair whole, which is where all the
+        size goes — so this is the one claim that has to live here. It skips
+        for the same reason its neighbour does, and it is the only claim the
+        committed rails do not otherwise carry.
+        """
+        available = {name: FULL_LOG_DIR / relative
+                     for name, (relative, *_r) in REAL_RUNS.items()
+                     if (FULL_LOG_DIR / relative).exists()}
+        if len(available) != len(REAL_RUNS):
+            self.skipTest("the full-plan source logs are not all on this machine")
+        runs = {name: gb.parse_run(path.read_text(encoding="utf-8", errors="replace"))
+                for name, path in available.items()}
+        third = set(runs["crashed-run-tl6l-realgate.log"].no_verdict)
+        earlier = ("crashed-run-main-76b0a09a.log", "crashed-run-mn5e.log")
+        core = third.intersection(*[set(runs[n].no_verdict) for n in earlier])
+        self.assertEqual(11, len(core))
+        churn = sorted(third - core)
+        self.assertEqual(4, len(churn))
+        for key in churn:
+            for name in earlier:
+                self.assertIn(key, runs[name].passed, "%s / %s" % (name, key))
+
 
 class CommittedBaselineTests(unittest.TestCase):
     """The file the gate actually reads must stay loadable and self-consistent."""
@@ -1857,22 +2292,34 @@ class CommittedBaselineTests(unittest.TestCase):
             for key, entry in data["tests"].items():
                 self.assertTrue(key.startswith(entry["framework"] + "::"), key)
                 self.assertGreaterEqual(entry["seen_runs"], entry["failed_runs"], key)
-            # playhead-buvn. The crashed-host census is ARMED, so a hand-edit
-            # that spells it wrong silently disarms it — `{}` or `null` both
-            # read as "never recorded" and the gate goes quiet about the one
-            # regression class only this arm can see.
-            if gb.NO_VERDICT_KEY in data:
-                census = data[gb.NO_VERDICT_KEY]
-                self.assertIsInstance(census, list, path.name)
-                self.assertEqual(sorted(set(census)), census, path.name)
-                for key in census:
-                    self.assertRegex(key, r"^(swift-testing|xctest)::", path.name)
+                # THESE FOUR RAN ON NOTHING until playhead-tl6l R4. R2 added the
+                # census block below and indented them into it, so every
+                # per-entry invariant on the file the gate actually reads was
+                # conditional on a key no committed baseline has ever carried —
+                # and `entry`/`key` were whatever the loops above had leaked.
+                # They hold on the committed file; nothing was checking that.
                 self.assertGreaterEqual(entry["failed_runs"], 1, key)
                 self.assertLessEqual(entry["seen_runs"], data["runs_observed"], key)
                 self.assertTrue(entry["kinds"], key)
                 for kind in entry["kinds"]:
                     self.assertIn(kind, (gb.KIND_TIMEOUT, gb.KIND_ASSERTION,
                                          gb.KIND_UNKNOWN), key)
+            # playhead-buvn. The crashed-host census is ARMED, so a hand-edit
+            # that spells it wrong silently disarms it — `{}` or `null` both
+            # read as "never recorded" and the gate goes quiet about the one
+            # regression class only this arm can see.
+            if gb.NO_VERDICT_KEY in data:
+                census = data[gb.NO_VERDICT_KEY]
+                self.assertIsInstance(census, dict, path.name)
+                self.assertGreaterEqual(census[gb.CENSUS_RUNS_KEY], 1, path.name)
+                self.assertLessEqual(census[gb.CENSUS_RUNS_KEY],
+                                     data["runs_observed"], path.name)
+                for key, entry in census[gb.CENSUS_TESTS_KEY].items():
+                    self.assertRegex(key, r"^(swift-testing|xctest)::", path.name)
+                    self.assertGreaterEqual(entry["lost_runs"], 1, key)
+                    self.assertGreaterEqual(entry["seen_runs"], entry["lost_runs"], key)
+                    self.assertLessEqual(entry["seen_runs"],
+                                         census[gb.CENSUS_RUNS_KEY], key)
 
 
 class FastGateWiringTests(unittest.TestCase):

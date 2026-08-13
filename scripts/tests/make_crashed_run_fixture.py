@@ -89,6 +89,31 @@ def distil(text, baseline_keys=()):
             if number + 1 < len(raw):
                 spliced.add(number + 1)
 
+    # A KEPT SPLICED LINE DRAGS ITS TEST IN WITH IT. Found by this script's own
+    # refusal on the third real log (playhead-tl6l R4): the splice landed in two
+    # tests' STARTED lines, which are kept byte-exact by the rule above, while
+    # their PASS lines were dropped as uninteresting — and the distillation grew
+    # two crashed-host casualties out of two tests that passed. That is the
+    # fixture manufacturing the exact defect the fixture exists to measure.
+    # Whatever a spliced line refers to, in any of its three readable forms, is
+    # interesting; keeping more lines can only ever be safe.
+    # The REPAIRED form is the one that names the test, and it is `head +
+    # following` with the intrusion cut out — not `raw[n] + raw[n+1]`, which
+    # still has the app log wedged in the middle and parses as nothing. Getting
+    # that wrong leaves the refusal firing with no explanation, which is how
+    # this was found the second time.
+    for number in sorted(spliced):
+        forms = [raw[number]]
+        match = gb._APP_LOG_INTRUSION.search(raw[number])
+        if number + 1 < len(raw):
+            forms.append(raw[number + 1])
+            if match:
+                forms.append(raw[number][:match.start()] + raw[number + 1])
+        for form in forms:
+            key = _identity(form)
+            if key is not None:
+                interesting.add(key)
+
     kept = []
     in_block = False
     for number, line in enumerate(raw):

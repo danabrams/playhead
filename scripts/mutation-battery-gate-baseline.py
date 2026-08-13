@@ -71,6 +71,7 @@ AC = SUITE + ".ArmedCensusTests."
 RC = SUITE + ".RealCrashedRunTests."
 TR = SUITE + ".TruncatedOutcomeLineTests."
 SP = SUITE + ".CrashedHostSafetyPropertyTests."
+CM = SUITE + ".CensusMergeTests."
 
 
 # name, file, description, old, new, expected-to-fail test ids
@@ -423,32 +424,116 @@ MUTATIONS = [
         "NO VERDICT leaves the exit code again, so a change that CRASHES the "
         "test host exits 0 — its victims are healthy tests in nobody's "
         "baseline, and the crash destroys the evidence of itself",
-        "                or self.absent or self.baseline_fiction or self.new_casualties):",
-        "                or self.absent or self.baseline_fiction):",
+        "                or (self.new_casualties and self.census_armed)",
+        "                or False",
         [AC + "test_a_casualty_NOT_in_the_record_FAILS_the_gate",
          AC + "test_the_SAME_COUNT_with_a_DIFFERENT_NAME_still_fails",
-         AC + "test_a_RECORDED_EMPTY_census_is_a_CLAIM_and_is_armed"],
+         AC + "test_a_RECORDED_EMPTY_census_is_a_CLAIM_and_is_armed",
+         AC + "test_the_THIRD_observation_ARMS_it"],
     ),
     (
         "RA2", GB,
         "an UNRECORDED census is read as a recorded ZERO, so the arm fires on "
         "main today for a pre-existing crash nobody in an unrelated bead can "
         "fix — the gate everyone learns to route around",
-        "    return None if value is None else set(value)",
-        "    return set(value or [])",
+        "    if value is None:\n        return None",
+        "    if value is None:\n        return Census(MIN_RUNS_FOR_DETERMINISTIC)",
         [CH + "test_it_is_REPORTED_but_does_NOT_by_itself_fail_the_gate",
-         AC + "test_an_UNRECORDED_census_is_inert_even_for_a_LARGE_loss"],
+         AC + "test_an_UNRECORDED_census_is_inert_even_for_a_LARGE_loss",
+         AC + "test_a_FRESH_baseline_records_NOTHING_rather_than_a_ZERO"],
     ),
+    # ---- playhead-tl6l R4: the record is a UNION WITH COUNTS ----
+    #
+    # RA3 used to assert the OPPOSITE — that the census is replaced, not
+    # unioned — on the strength of two runs whose casualty sets were identical.
+    # A third full-plan run lost fifteen where those two lost eleven, and under
+    # replace an armed gate on such a night exits 65 for four healthy tests
+    # nobody can do anything about. The rail is inverted, not deleted: what it
+    # protects now is that an accept RECORDS an observation instead of
+    # overwriting the record with a snapshot.
     (
         "RA3", GB,
-        "the census is UNIONED into the record instead of replaced, so a crash "
-        "that is genuinely fixed stays recorded forever and the gate never "
-        "speaks about those names again",
-        "        NO_VERDICT_KEY: sorted(run.no_verdict),",
-        "        NO_VERDICT_KEY: sorted(set(baseline.get(NO_VERDICT_KEY) or []) "
-        "| run.no_verdict),",
-        [AC + "test_accept_RECORDS_the_census_and_REPLACES_it_on_the_next_accept",
-         AC + "test_accept_on_a_CLEAN_run_records_the_EMPTY_set_which_arms_it_fully"],
+        "the census is REPLACED by each run's snapshot instead of unioned with "
+        "counts, so one loud night manufactures NEW casualties out of healthy "
+        "tests and one quiet night forgets eleven measured ones",
+        "        NO_VERDICT_KEY: merge_census(recorded_census(baseline), run).to_json(),",
+        "        NO_VERDICT_KEY: Census(1, {key: {\"seen_runs\": 1, \"lost_runs\": 1}\n"
+        "                                  for key in run.no_verdict}).to_json(),",
+        [AC + "test_accept_UNIONS_the_census_and_COUNTS_the_observations",
+         AC + "test_accept_on_a_CLEAN_run_CREDITS_an_observation_not_an_erasure",
+         RC + "test_the_THREE_runs_PROMOTE_ELEVEN_and_leave_FOUR_load_sensitive"],
+    ),
+    (
+        "RA8", GB,
+        "the census tier is read off the FAILURE numerator, so `lost_runs` is "
+        "never consulted and every entry with enough observations reads as "
+        "deterministic — arming a hard failure on names that were only ever "
+        "lost once",
+        '    return _tier(entry["seen_runs"], entry["lost_runs"])',
+        '    return _tier(entry["seen_runs"], entry["seen_runs"])',
+        [AC + "test_a_LOAD_SENSITIVE_entry_that_reports_again_is_NOT_fatal",
+         RC + "test_the_THREE_runs_PROMOTE_ELEVEN_and_leave_FOUR_load_sensitive"],
+    ),
+    (
+        "RA9", GB,
+        "a DETERMINISTIC census entry that reports again is no longer fatal, so "
+        "a crash that is genuinely fixed stays recorded forever and the gate "
+        "never speaks about those names again — R2's whole objection to a "
+        "union, left unanswered",
+        "                or self.census_now_reports):",
+        "                or False):",
+        [AC + "test_a_DETERMINISTIC_entry_that_REPORTS_AGAIN_fails_the_gate"],
+    ),
+    (
+        "RA10", GB,
+        "the pass-direction arm fires on a recorded name that never STARTED, so "
+        "a rename — or a host that died before the test got there — reads as "
+        "proof the crash is fixed and hard-fails the gate",
+        "            if key in result.census_started",
+        "            if True",
+        [AC + "test_a_recorded_name_that_NEVER_STARTED_is_never_fatal"],
+    ),
+    (
+        "RA11", GB,
+        "a crashed run PRUNES the census entries it silenced, so the crash "
+        "shrinks the record from inside `accept` — the same defect `protected` "
+        "closes for `tests`, one layer down, and the shrinking diff reads as "
+        "good news",
+        "        elif crashed:\n            tests[key] = dict(previous)",
+        "        elif False:\n            tests[key] = dict(previous)",
+        [CM + "test_a_CRASHED_run_carries_an_unreached_census_entry_forward",
+         CM + "test_a_crash_can_never_SHRINK_the_census_across_repeated_accepts"],
+    ),
+    (
+        "RA12", GB,
+        "a name that started and REPORTED is credited a LOST observation "
+        "anyway, so nothing can ever demote and the union really does become a "
+        "licence nobody can revoke",
+        '        elif key in run.started:\n            tests[key] = {"seen_runs": previous["seen_runs"] + 1,\n'
+        '                          "lost_runs": previous["lost_runs"]}',
+        '        elif key in run.started:\n            tests[key] = {"seen_runs": previous["seen_runs"] + 1,\n'
+        '                          "lost_runs": previous["lost_runs"] + 1}',
+        [AC + "test_a_recorded_name_that_REPORTS_is_DEMOTED_not_deleted",
+         RC + "test_the_THREE_runs_PROMOTE_ELEVEN_and_leave_FOUR_load_sensitive"],
+    ),
+    (
+        "RA13", GB,
+        "the census borrows the FILE's observation count instead of its own, so "
+        "a record with one observation of the census arrives pre-armed off nine "
+        "observations of something else",
+        "    return Census(value.get(CENSUS_RUNS_KEY, 0), value.get(CENSUS_TESTS_KEY, {}))",
+        "    return Census(baseline.get(\"runs_observed\", 0), "
+        "value.get(CENSUS_TESTS_KEY, {}))",
+        [CM + "test_the_census_OBSERVATION_COUNT_is_its_own_and_not_the_files"],
+    ),
+    (
+        "RA14", GB,
+        "a census tier PROMOTION goes unannounced, so an accept arms a hard "
+        "failure on N names and says nothing about any of them — exactly the "
+        "defect playhead-26od R5 closed for the failure tiers",
+        "        if promoted_c:",
+        "        if False:",
+        [CM + "test_the_accept_ANNOUNCES_a_census_promotion_and_the_ARMING"],
     ),
     (
         "RA4", GB,
@@ -516,8 +601,8 @@ MUTATIONS = [
         "RB2", GB,
         "ABSENT leaves the exit code, so a baseline member the crash took down "
         "is reported and the gate exits 0 anyway",
-        "                or self.absent or self.baseline_fiction or self.new_casualties):",
-        "                or self.baseline_fiction or self.new_casualties):",
+        "                or self.absent or self.baseline_fiction\n",
+        "                or self.baseline_fiction\n",
         [SP + "test_an_ABSENT_baseline_member_makes_the_gate_EXIT_NONZERO",
          SP + "test_a_baseline_member_lost_to_the_CRASH_is_still_fatal"],
     ),

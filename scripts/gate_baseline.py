@@ -77,15 +77,19 @@ directions, silently, and the run still prints a confident `RED (N known /
 0 new)` and exits 0. Same shape as the wedge `scripts/disk_preflight.py` exists
 to catch: the failure destroys the evidence of itself.
 
-MEASURED on two full-plan runs, 2026-08-12 (main @ 76b0a09a and bead/mn5e).
-Both carry xcodebuild's restart marker, and after discounting skips:
+MEASURED on THREE full-plan runs, 2026-08-12/13. All three carry xcodebuild's
+restart marker, and after discounting skips:
 
-    main:  11 Swift Testing tests started and reported NOTHING
-    mn5e:  11                    "                          "
+    main @ 76b0a09a  11 Swift Testing tests started and reported NOTHING
+    bead/mn5e        11                    "                          "
+    bead/tl6l        15                    "                          "
 
-and they are THE SAME ELEVEN — every one a download/cache/streaming test, the
-same family xcodebuild's own `Failing tests:` block names. The baseline file
-(117 tests over 9 observed runs) had never once recorded any of them.
+The first two are THE SAME ELEVEN — every one a download/cache/streaming test,
+the same family xcodebuild's own `Failing tests:` block names. The baseline file
+(117 tests over 9 observed runs) had never once recorded any of them. The third
+run is those eleven again plus four from other families that had PASSED in both
+earlier runs, and it is the reason the record is a union with counts rather than
+a replaced set — see "A UNION WITH OBSERVATION COUNTS" below.
 
 THAT NUMBER HAS BEEN WRONG THREE TIMES, each for a different reason and every
 one the same defect class as the bead itself — a value that names one thing
@@ -189,30 +193,88 @@ of itself, which is the exact shape the bead was filed against.
 
 So the record is `no_verdict` in the per-plan baseline file, and:
 
-  * a name that lost its verdict and is NOT in the record is a NEW CASUALTY and
-    FAILS the gate. That is the arm, and it is the only thing in this module
-    that can see a fresh crash;
+  * a name that lost its verdict and is NOT in the record is a NEW CASUALTY. It
+    is NAMED on every run, and it FAILS the gate once the record is ARMED. That
+    is the arm, and it is the only thing in this module that can see a fresh
+    crash;
   * a name that IS in the record is quiet — the pre-existing crash stays
     somebody else's bead;
-  * a recorded name that reported an outcome is REPORTED AGAIN, good news, not
-    fatal. One quiet run is not evidence a crash is fixed, which is the same
-    reason a load-sensitive failure passing is a candidate and not a verdict;
+  * a recorded LOAD-SENSITIVE name that reported an outcome is REPORTED AGAIN,
+    good news, not fatal. One quiet run is not evidence a crash is fixed, which
+    is the same reason a load-sensitive failure passing is a candidate and not
+    a verdict;
+  * a recorded DETERMINISTIC name that reported an outcome FAILS the gate. Its
+    entry claims it loses its verdict in every observation and it did not, so
+    the licence has rotted — Dan's pass-direction call, applied where it is
+    sound. See below for why this one is not optional;
   * the COUNT alone is not fatal, and neither is a bare HOST RESTART. A restart
     that costs nobody a verdict means every test was re-run and no information
     was lost; it is reported, it forecloses GREEN, and it stops there.
 
-A SET OF NAMES, NOT A COUNT — and that is a measurement, not a preference. A
-count is blind to substitution: eleven tests die, eleven different ones recover,
-the total is unchanged and the gate says nothing. A set is precise but noisy in
-proportion to how much the population churns, and the churn was measured. The
-two 2026-08-12 runs, on DIFFERENT trees, lost THE SAME ELEVEN TESTS — Jaccard
-1.00, against 0.46 for the failure set on IDENTICAL code. A union with
-observation counts exists to survive churn there is none of; a set costs
-nothing here and catches substitution, so a set it is, REPLACED on each accept
-rather than unioned. (A union can only grow, so a crash that is genuinely fixed
-would stay recorded forever and the gate would never speak about those names
-again.) The rail that would reopen the question is
-test_BOTH_runs_lost_THE_SAME_ELEVEN_TESTS.
+A UNION WITH OBSERVATION COUNTS, NOT A REPLACED SET (playhead-tl6l R4)
+---------------------------------------------------------------------
+R2 recorded a SET and REPLACED it on each accept. The argument was measured and
+it was wrong, and the way it was wrong is worth more than the conclusion: two
+full-plan runs on DIFFERENT trees lost THE SAME ELEVEN TESTS — Jaccard 1.00,
+against 0.46 for the failure set on IDENTICAL code — so a union looked like
+machinery for churn there was none of.
+
+A THIRD full-plan run, on the armed code, lost FIFTEEN. The same eleven for the
+third time, plus four that had PASSED in both earlier runs, and nothing has ever
+recovered. Jaccard 1.00 -> 0.73. Two observations could not have shown it, which
+is the whole of the lesson: this population's churn is a property of how starved
+the box was that night, exactly like the failure set's, and one quiet pair of
+runs is not a measurement of it.
+
+Under a replaced set, an armed gate on a night like that reports four NEW
+casualties and exits 65 — red for a reason its reader cannot fix, which is the
+hazard R2's own exit-code argument was constructed to avoid, and which CLAUDE.md
+calls strictly worse than having no linter. So the census is recorded the way
+`tests` is: a union, each entry carrying `seen_runs`/`lost_runs`, with the tier
+falling out of the counts. Accept the three runs in order and the eleven stand
+at 3/3, DETERMINISTIC; the four stand at 1/1, LOAD-SENSITIVE. Nobody labels
+either.
+
+READ 1/1 AS "ONE OBSERVATION", NOT "ONE OF THREE". A name accrues observations
+only from the accept that first RECORDS it — the two earlier runs reached those
+four and watched them pass, but there was no entry to credit. `tests` behaves
+the same way and for the same reason. The distinction matters here because the
+across-run measurement (lost in one of three runs) and the recorded entry (1/1)
+are different quantities that both read "one", and this file's whole history is
+values that name one thing being read as though they named another.
+
+WHAT ARMS, AND WHY EACH WAITS FOR WHAT IT WAITS FOR:
+
+  * A NEW CASUALTY is fatal only once the census has
+    MIN_RUNS_FOR_DETERMINISTIC observations. It is NAMED from the first, because
+    a newly-observed casualty is indistinguishable from a regression and
+    absorbing it silently is the hole this module exists to close. What three
+    observations buy is the right to make it fatal — and the reason the census
+    gets that grace where a NEW FAILURE does not is the remedy, not the
+    evidence: a new failure names a test that failed and can be triaged against
+    the diff, while a test with no verdict was never judged at all and the only
+    honest response is to run the whole plan again.
+  * A DETERMINISTIC entry REPORTING AGAIN is fatal, and this is the price of
+    the union rather than a bonus. R2's one real objection to unioning stands
+    otherwise: a union can only grow, so a crash that is genuinely fixed would
+    stay recorded forever and the gate would never speak about those names
+    again. The pass-direction arm is what makes a fixed crash LOUD, on the
+    first run that fixes it, so the record can shrink. It cannot fire before
+    three observations by construction, and it fires only on POSITIVE evidence
+    — the test started and reported. A recorded name that never started at all
+    is a rename, a deletion or a host that died earlier, three things
+    indistinguishable from a log, so it is reported and never armed.
+
+The record is still a set of NAMES rather than a count, which is the half of
+R2's argument the third run does not touch: a count cannot see eleven tests
+dying while eleven different ones recover.
+
+WHAT AN ACCEPT DOES TO IT: a name that lost its verdict again is credited
+`seen + 1, lost + 1`; a name that started and REPORTED is credited `seen + 1`
+alone, which is the only thing that demotes an entry; a name that never started
+is PRUNED on a healthy run (renamed, deleted, newly skipped) and CARRIED FORWARD
+untouched on a crashed one, because pruning there is how a crash would shrink
+the record from inside the one command meant to maintain it.
 
 WHAT THE SET CANNOT SEE, named rather than glossed:
 
@@ -267,12 +329,17 @@ the display-name collision cost is 64 colliding names over 141 ids, 0.59 % of
 10,833, with NONE of the eleven sharing a name with a test that reported: the
 collision limit above is real but does not touch this census.
 
-UNRECORDED IS NOT ZERO. A baseline with no `no_verdict` key has never recorded
-the population: the arm is INERT and the verdict says so out loud. A key
-present but EMPTY is a positive claim that no test should lose a verdict, and
-it is armed. This is what lets the arming land without turning main red today,
-and the two are deliberately not spelled the same way, because reading an
-absence as a measurement is this repo's standing defect class.
+UNRECORDED IS NOT ZERO, AND PROVISIONAL IS NEITHER. A baseline with no
+`no_verdict` key has never recorded the population: the arm is INERT and the
+verdict says so out loud. A key present with 1-2 observations is PROVISIONAL: a
+real measurement, too few observations to bound a population this
+load-sensitive, so a casualty nobody recorded is named and is not fatal. A key
+present with MIN_RUNS_FOR_DETERMINISTIC or more is ARMED — including a recorded
+census that is EMPTY, which is a positive claim that no test should lose a
+verdict. This is what lets the arming land without turning main red today, and
+the three are deliberately not spelled the same way, because reading an absence
+as a measurement is this repo's standing defect class and this key has now been
+its site twice.
 
 The other three tl6l mitigations are unchanged and still carry the run:
 
@@ -799,27 +866,89 @@ def parse_run(text):
 # The baseline file
 # ---------------------------------------------------------------------------
 
-# playhead-buvn. The recorded crashed-host census, as a SORTED LIST OF KEYS.
+# playhead-buvn / playhead-tl6l R4. The recorded crashed-host census, shaped
+# EXACTLY like `tests`: a mapping of key -> observation counts, unioned across
+# accepts, with the tier falling out of the counts rather than a hand label.
 #
-# ABSENT vs EMPTY IS THE WHOLE DESIGN, and they are different claims. A baseline
-# with no such key at all has never recorded the population — the arm is INERT
-# and says so, which is what lets this land without turning main red for a
-# pre-existing crash nobody in the middle of an unrelated bead can fix. A key
-# present but EMPTY is a positive claim that no test should lose a verdict, and
-# it is armed. "Unknown" and "known to be zero" must never be spelled the same
-# way; reading one as the other is this repo's standing defect class.
+#   "no_verdict": {
+#     "runs_observed": 3,
+#     "tests": {"swift-testing::clearCache …": {"seen_runs": 3, "lost_runs": 3}}
+#   }
+#
+# THREE STATES, THREE DIFFERENT CLAIMS, and they must never be spelled the same
+# way — reading an absence as a measurement is this repo's standing defect
+# class, and this key has now been the site of it twice:
+#
+#   * the key is ABSENT   — nobody has ever recorded the population. The arm is
+#     INERT and the verdict says so out loud. This is what let the arming land
+#     without turning main red for a pre-existing crash owned by playhead-rouw;
+#   * 1..2 observations   — PROVISIONAL. Measured, but not enough observations
+#     to bound a population this load-sensitive (see below). A casualty nobody
+#     recorded is NAMED and forecloses GREEN; it does not fail the gate;
+#   * >= MIN_RUNS_FOR_DETERMINISTIC observations — ARMED.
 NO_VERDICT_KEY = "no_verdict"
+CENSUS_RUNS_KEY = "runs_observed"
+CENSUS_TESTS_KEY = "tests"
+
+
+class Census(object):
+    """The recorded crashed-host population, with its observation counts."""
+
+    def __init__(self, runs_observed=0, tests=None, legacy=False):
+        self.runs_observed = runs_observed
+        self.tests = dict(tests or {})
+        # True when the record was read in the pre-R4 shape (a bare list). It
+        # carries no counts, so it is read as the WEAKEST true claim it
+        # supports — one observation — which lands it in PROVISIONAL and arms
+        # nothing off numbers nobody measured.
+        self.legacy = legacy
+
+    @property
+    def names(self):
+        return set(self.tests)
+
+    @property
+    def armed(self):
+        return self.runs_observed >= MIN_RUNS_FOR_DETERMINISTIC
+
+    def tier(self, key):
+        return census_tier_of(self.tests[key])
+
+    def to_json(self):
+        return {CENSUS_RUNS_KEY: self.runs_observed,
+                CENSUS_TESTS_KEY: {key: dict(entry)
+                                   for key, entry in sorted(self.tests.items())}}
 
 
 def empty_baseline(plan):
-    return {"plan": plan, "mode": "full-plan", "runs_observed": 0, "tests": {},
-            NO_VERDICT_KEY: []}
+    """A file nobody has accepted anything into yet.
+
+    It carries NO census key on purpose. `{"runs_observed": 0, "tests": {}}`
+    would spell "nobody has looked" as a measurement of zero, which is the
+    exact conflation the three states above exist to keep apart. A census with
+    zero observations is only ever produced by writing one by hand.
+    """
+    return {"plan": plan, "mode": "full-plan", "runs_observed": 0, "tests": {}}
+
+
+def recorded_census(baseline):
+    """The recorded census, or None when the population was never recorded."""
+    value = baseline.get(NO_VERDICT_KEY)
+    if value is None:
+        return None
+    if isinstance(value, list):
+        # The pre-R4 shape: a bare set of names, replaced on each accept. No
+        # instance was ever committed, but reading one silently as "armed"
+        # would arm a pass-direction check on counts that do not exist.
+        return Census(1, {key: {"seen_runs": 1, "lost_runs": 1} for key in value},
+                      legacy=True)
+    return Census(value.get(CENSUS_RUNS_KEY, 0), value.get(CENSUS_TESTS_KEY, {}))
 
 
 def recorded_no_verdict(baseline):
-    """The recorded census, or None when the population was never recorded."""
-    value = baseline.get(NO_VERDICT_KEY)
-    return None if value is None else set(value)
+    """Just the NAMES, or None when the population was never recorded."""
+    census = recorded_census(baseline)
+    return None if census is None else census.names
 
 
 def load_baseline(path):
@@ -833,11 +962,29 @@ def save_baseline(path, data):
     path.write_text(payload + "\n", encoding="utf-8")
 
 
+def _tier(seen_runs, hit_runs):
+    """The tier rule itself, over a numerator and a denominator.
+
+    Shared by the failure baseline (`failed_runs` / `seen_runs`) and the
+    crashed-host census (`lost_runs` / `seen_runs`) so there is ONE definition
+    of "deterministic" in this file rather than two that can drift. It takes
+    the two numbers rather than an entry precisely so neither caller can pass
+    the other's field by accident — the fields are deliberately NOT spelled the
+    same, because a value that names one thing read as though it named another
+    is the defect class this whole module keeps tripping over.
+    """
+    return (TIER_DETERMINISTIC
+            if seen_runs >= MIN_RUNS_FOR_DETERMINISTIC and hit_runs == seen_runs
+            else TIER_LOAD_SENSITIVE)
+
+
 def tier_of(entry):
-    if (entry["seen_runs"] >= MIN_RUNS_FOR_DETERMINISTIC
-            and entry["failed_runs"] == entry["seen_runs"]):
-        return TIER_DETERMINISTIC
-    return TIER_LOAD_SENSITIVE
+    return _tier(entry["seen_runs"], entry["failed_runs"])
+
+
+def census_tier_of(entry):
+    """The same rule on a census entry: lost its verdict in every observation."""
+    return _tier(entry["seen_runs"], entry["lost_runs"])
 
 
 def tier_changes(baseline, merged):
@@ -892,6 +1039,86 @@ def kind_census(entries):
     return census
 
 
+def merge_census(prior, run):
+    """Fold one run's crashed-host observations into the recorded census.
+
+    UNION WITH COUNTS, not a replaced set, and the difference is a measurement
+    rather than a preference — see the module docstring for the three-run
+    numbers. Each recorded name is credited an observation whenever the run
+    REACHED it, which for this population means "emitted a start line":
+
+      * lost its verdict again -> seen + 1, lost + 1;
+      * started and reported   -> seen + 1, lost unchanged. This is the only
+        thing that can DEMOTE an entry out of `deterministic`, and it is what
+        keeps a union from ossifying into a licence nobody can revoke;
+      * never started at all   -> ambiguous, and the tie is broken by whether
+        this run's host died. On a healthy run it is a rename, a deletion or a
+        new skip, and the entry is PRUNED. On a crashed one it is exactly what
+        the crash does, so the entry is CARRIED FORWARD at its original counts
+        and no observation is credited. Pruning there is how a crash would
+        shrink the record from inside the one command meant to maintain it —
+        the same defect `protected` closes for `tests`, one layer down.
+    """
+    prior = prior or Census()
+    lost = run.no_verdict
+    # Deliberately NOT `run.blamed_entries`. xcodebuild prints a `Failing
+    # tests:` block on every run that has any failure at all, so counting it as
+    # crash evidence would make `crashed` true on essentially every full-plan
+    # run and disable the prune entirely — the record would then never shrink
+    # for a rename, which is the other half of what makes a union affordable.
+    crashed = bool(run.host_restarts or lost)
+    tests = {}
+    for key in sorted(set(prior.tests) | lost):
+        previous = prior.tests.get(key)
+        if previous is None:
+            tests[key] = {"seen_runs": 1, "lost_runs": 1}
+        elif key in lost:
+            tests[key] = {"seen_runs": previous["seen_runs"] + 1,
+                          "lost_runs": previous["lost_runs"] + 1}
+        elif key in run.started:
+            tests[key] = {"seen_runs": previous["seen_runs"] + 1,
+                          "lost_runs": previous["lost_runs"]}
+        elif crashed:
+            tests[key] = dict(previous)
+    return Census(prior.runs_observed + 1, tests)
+
+
+def census_changes(prior, merged):
+    """`(added, reported_again, dropped)` between two censuses, for the accept.
+
+    Pure, so the CLI only has to print it. An accept is a claim a human signs
+    in a commit message, and under a union the interesting event is no longer
+    "the list was replaced" — it is which names ENTERED, which ones came back
+    (and so lost ground toward deterministic), and which ones the prune
+    dropped.
+    """
+    before = prior.tests if prior else {}
+    added = sorted(set(merged.tests) - set(before))
+    dropped = sorted(set(before) - set(merged.tests))
+    reported = sorted(
+        key for key in merged.tests
+        if key in before
+        and merged.tests[key]["lost_runs"] == before[key]["lost_runs"]
+        and merged.tests[key]["seen_runs"] > before[key]["seen_runs"]
+    )
+    return added, reported, dropped
+
+
+def census_tier_changes(prior, merged):
+    """Which census entries crossed INTO `deterministic` in this merge.
+
+    Same reason `tier_changes` exists for failures: crossing arms a hard
+    failure — from here their REPORTING AGAIN fails the gate — and a hard
+    failure armed silently is the one thing this file exists not to do.
+    """
+    before = prior.tests if prior else {}
+    promoted = [key for key, entry in merged.tests.items()
+                if census_tier_of(entry) == TIER_DETERMINISTIC
+                and not (key in before
+                         and census_tier_of(before[key]) == TIER_DETERMINISTIC)]
+    return sorted(promoted)
+
+
 def merge(baseline, run, plan):
     """Fold one run's observations into the baseline and return the new file.
 
@@ -937,25 +1164,19 @@ def merge(baseline, run, plan):
         "mode": baseline.get("mode", "full-plan"),
         "runs_observed": baseline.get("runs_observed", 0) + 1,
         "tests": {},
-        # playhead-buvn. REPLACED, not unioned — and that is the one place this
-        # category deliberately departs from `tests` above.
+        # playhead-tl6l R4. UNIONED WITH OBSERVATION COUNTS, exactly like
+        # `tests` above, and for the same measured reason: the population
+        # churns. Two runs said it did not — Jaccard 1.00, which is what R2
+        # replaced a union with a set on — and the THIRD run, a real full-plan
+        # gate on this branch, lost 15 where those two lost 11. Same eleven all
+        # three times, four more on the loud night, and nothing ever recovered.
+        # Two observations could not have shown that, which is the whole
+        # argument for counting observations rather than replacing a snapshot.
         #
-        # `tests` unions because the failure set churns: two full runs on
-        # identical code shared 19 of 41 names, a Jaccard of 0.46, so a flat
-        # exact set could not survive. The crashed-host census was measured the
-        # same way and behaved oppositely — the two 2026-08-12 runs, on
-        # DIFFERENT trees, produced the SAME ELEVEN NAMES, Jaccard 1.00. A union
-        # exists to survive churn there is none of, and its cost is real: a
-        # union can only grow, so a crash that gets genuinely fixed would stay
-        # recorded forever and the gate would never speak about those names
-        # again. Replacing makes the shrink visible in the accept diff, which is
-        # what the operator has to justify in the commit message.
-        #
-        # (Those two runs are also why this is a SET rather than a count. A
-        # count cannot see substitution — eleven tests die, eleven different
-        # ones recover, total unchanged — and with a set this stable,
-        # substitution is precisely the event worth catching.)
-        NO_VERDICT_KEY: sorted(run.no_verdict),
+        # It is still a set of NAMES, never a count, for R2's reason, which the
+        # third run does not touch: a count cannot see substitution — eleven
+        # tests die, eleven different ones recover, the total is unchanged.
+        NO_VERDICT_KEY: merge_census(recorded_census(baseline), run).to_json(),
     }
 
     old = baseline.get("tests", {})
@@ -1026,6 +1247,19 @@ class Verdict(object):
         self.no_verdict_recorded = None
         self.new_casualties = []
         self.recovered_casualties = []
+        # playhead-tl6l R4 — the record now carries observation counts, so the
+        # verdict can say which of the three states it is in and which
+        # recoveries are evidence rather than weather.
+        self.census_runs_observed = 0
+        self.census_armed = False
+        self.census_legacy = False
+        # Recorded names that came back AND demonstrably started this run,
+        # whose entry claims they lose their verdict every single time. The
+        # pass-direction arm, on the only population where it is sound.
+        self.census_now_reports = []
+        # Recorded names this run demonstrably STARTED — the only ones about
+        # which a recovery is evidence rather than an absence.
+        self.census_started = set()
         self.absent_crashed = set()
         self.host_restarts = 0
         self.restart_evidence = None
@@ -1063,10 +1297,19 @@ class Verdict(object):
             # to hunt a regression in a category that says `0 new`; the fatal
             # fact is that ONE of the twelve is not in the record, and that is
             # the number the first line has to carry.
+            # Case carries signal here as it does in the known/new split: the
+            # capitals are the shout, and an unrecorded casualty on a
+            # PROVISIONAL record is reported without being fatal, so it must
+            # not be shouted.
+            if self.new_casualties and self.census_armed:
+                unrecorded = ", %d NOT RECORDED" % len(self.new_casualties)
+            elif self.new_casualties:
+                unrecorded = ", %d not yet recorded" % len(self.new_casualties)
+            else:
+                unrecorded = ""
             return " — %d test%s got NO VERDICT (crashed host)%s" % (
                 len(self.no_verdict), "" if len(self.no_verdict) == 1 else "s",
-                ", %d NOT RECORDED" % len(self.new_casualties)
-                if self.new_casualties else "",
+                unrecorded,
             )
         if self.host_restarts:
             return " — the test host CRASHED and was restarted"
@@ -1095,8 +1338,32 @@ class Verdict(object):
         # cannot fix is one they learn to route around. A restart that costs
         # nobody a verdict means every test got re-run and no information was
         # lost — it is reported, it forecloses GREEN, and it stops there.
+        #
+        # TWO CONDITIONS ARMED, AND THE PAIR IS WHAT MAKES A UNION SAFE
+        # (playhead-tl6l R4):
+        #
+        #   * a NEW CASUALTY, once the record is ARMED. Not while it is
+        #     PROVISIONAL: two observations do not bound a load-sensitive
+        #     population, and this one was measured not to be bounded by them
+        #     — run 3 lost four names runs 1 and 2 had both seen PASS. A
+        #     newly-observed casualty is indistinguishable from a regression,
+        #     which is why it is named on every run from the first; what three
+        #     observations buy is the right to make it fatal;
+        #   * a DETERMINISTIC entry that REPORTED AGAIN. Its record claims it
+        #     loses its verdict in every observation and it did not, so the
+        #     licence has rotted and must be revoked. This is Dan's
+        #     pass-direction call applied where it is sound, and it is the
+        #     price of the union: without it a crash that gets genuinely fixed
+        #     stays recorded forever and the gate never speaks about those
+        #     names again, which is R2's whole objection to unioning.
+        #
+        # A LOAD-SENSITIVE entry reporting again is neither — one quiet run is
+        # not evidence a crash is fixed, exactly as for a load-sensitive
+        # failure that passes.
         if (self.new_failures or self.kind_changed or self.deterministic_passed
-                or self.absent or self.baseline_fiction or self.new_casualties):
+                or self.absent or self.baseline_fiction
+                or (self.new_casualties and self.census_armed)
+                or self.census_now_reports):
             return EXIT_REGRESSION
         return EXIT_OK
 
@@ -1263,6 +1530,22 @@ class Verdict(object):
                 "recording NOTHING, which is where this baseline is, is not.",
             ]
         out = []
+        if self.census_legacy:
+            out.append(
+                "  OLD CENSUS SHAPE the record is a bare list of names with no "
+                "observation counts. It is read as ONE observation — the weakest "
+                "claim it supports — so nothing is armed off numbers nobody "
+                "measured. `--accept-baseline` rewrites it."
+            )
+        if not self.census_armed:
+            out.append(
+                "  PROVISIONAL      the census has %d observation(s); it takes %d "
+                "before an unrecorded casualty can fail the gate. Two runs said this "
+                "population was stable (Jaccard 1.00) and the third lost four more "
+                "names that had PASSED in both — so a casualty nobody has recorded "
+                "yet is named here and is not fatal."
+                % (self.census_runs_observed, MIN_RUNS_FOR_DETERMINISTIC)
+            )
         # Truncated like every other category. A change that kills the host can
         # take down hundreds at once, and a verdict nobody reads to the end is a
         # verdict nobody acts on — which is the note at _MAX_LISTED.
@@ -1280,18 +1563,40 @@ class Verdict(object):
                 "separate a real regression from a worse day on the box; if the loss is "
                 "genuinely pre-existing, record it."
             )
-        for key in self.recovered_casualties[:_MAX_LISTED]:
-            out.append("  REPORTED AGAIN   %s  (recorded as losing its verdict; "
-                       "removal candidate)" % key)
-        if len(self.recovered_casualties) > _MAX_LISTED:
-            out.append("  REPORTED AGAIN   … and %d more"
-                       % (len(self.recovered_casualties) - _MAX_LISTED))
-        if self.recovered_casualties:
+        for key in self.census_now_reports[:_MAX_LISTED]:
+            out.append("  NOW REPORTS      %s  (recorded as losing its verdict in "
+                       "EVERY observation)" % key)
+        if len(self.census_now_reports) > _MAX_LISTED:
+            out.append("  NOW REPORTS      … and %d more"
+                       % (len(self.census_now_reports) - _MAX_LISTED))
+        if self.census_now_reports:
             out.append(
-                "                   Good news, and NOT fatal: one quiet run is not "
-                "evidence a crash is fixed, which is the same reason a load-sensitive "
-                "failure passing is a candidate rather than a verdict. Shrink the "
-                "record with `--accept-baseline` when you believe it."
+                "                   Good news that is nonetheless FATAL, and for the "
+                "same reason a deterministic failure passing is: the record says these "
+                "lose their verdict every single time and they did not, so it has "
+                "rotted. Refresh it with `--accept-baseline` — that is what lets a "
+                "fixed crash leave a record that otherwise only grows."
+            )
+        rest = [key for key in self.recovered_casualties
+                if key not in set(self.census_now_reports)]
+        for key in rest[:_MAX_LISTED]:
+            # The CAUSE, not a guess at it. A name that started and reported is
+            # positive evidence; a name that never started at all is a rename,
+            # a deletion, or a host that died before it got there — three
+            # things this module cannot tell apart, so it never arms on them.
+            cause = ("recorded as losing its verdict; reported again — removal "
+                     "candidate" if key in self.census_started
+                     else "recorded as losing its verdict; did not start at all this "
+                          "run, so this says nothing either way")
+            out.append("  REPORTED AGAIN   %s  (%s)" % (key, cause))
+        if len(rest) > _MAX_LISTED:
+            out.append("  REPORTED AGAIN   … and %d more" % (len(rest) - _MAX_LISTED))
+        if rest:
+            out.append(
+                "                   NOT fatal: one quiet run is not evidence a crash "
+                "is fixed, which is the same reason a load-sensitive failure passing "
+                "is a candidate rather than a verdict. Shrink the record with "
+                "`--accept-baseline` when you believe it."
             )
         return out
 
@@ -1354,11 +1659,26 @@ def verdict(baseline, run, plan=None):
     # recorded name that came back is reported as good news but is not fatal —
     # one quiet run is not proof a crash is fixed, and the removal is the
     # operator's to make with `--accept-baseline`.
-    recorded = recorded_no_verdict(baseline)
+    census = recorded_census(baseline)
+    recorded = None if census is None else census.names
     result.no_verdict_recorded = recorded
     if recorded is not None:
+        result.census_runs_observed = census.runs_observed
+        result.census_armed = census.armed
+        result.census_legacy = census.legacy
         result.new_casualties = sorted(no_verdict - recorded)
         result.recovered_casualties = sorted(recorded - no_verdict)
+        # playhead-tl6l R4. The pass-direction arm, and it fires only on
+        # POSITIVE evidence: the entry claims this test loses its verdict in
+        # every observation, and this run watched it start and report. A
+        # recorded name that never started is a rename, a deletion or a host
+        # that died earlier — indistinguishable from here, so never fatal.
+        result.census_started = recorded & run.started
+        result.census_now_reports = sorted(
+            key for key in result.recovered_casualties
+            if key in result.census_started
+            and census.tier(key) == TIER_DETERMINISTIC
+        )
 
     blamed = run.blamed
     result.blamed_entry_count = len(run.blamed_entries)
@@ -1481,32 +1801,58 @@ def main(argv=None):
         # its verdict and is not on this list fails the gate — so the operator
         # signing the commit message has to be shown the list they are arming,
         # exactly as `ARMED:` below shows them the tier promotions.
-        was = recorded_no_verdict(base if base.get("plan") == plan else {})
-        now = set(merged[NO_VERDICT_KEY])
+        was = recorded_census(base if base.get("plan") == plan else {})
+        now = recorded_census(merged)
+        added_c, reported_c, dropped_c = census_changes(was, now)
+        promoted_c = census_tier_changes(was, now)
         if was is None:
             # Deliberately NOT the word `ARMED`, which belongs to tier
             # promotion below and has a rail asserting it appears only for one.
             print(
-                "  CENSUS NOW LIVE: %d crashed-host name(s) recorded, where nothing was "
-                "recorded before. From now on a test that loses its verdict and is NOT "
-                "on this list fails the gate; the ones on it do not. Say in the commit "
-                "message why this loss is the pre-existing one."
-                % len(now)
+                "  CENSUS NOW LIVE: %d crashed-host name(s) recorded over 1 "
+                "observation, where nothing was recorded before. It takes %d before an "
+                "unrecorded casualty can fail the gate — until then they are named and "
+                "not fatal. Say in the commit message why this loss is the "
+                "pre-existing one."
+                % (len(now.tests), MIN_RUNS_FOR_DETERMINISTIC)
             )
-            for key in sorted(now)[:_MAX_LISTED]:
+            for key in sorted(now.tests)[:_MAX_LISTED]:
                 print("  ~ %s" % key)
-            if len(now) > _MAX_LISTED:
-                print("  ~ … and %d more" % (len(now) - _MAX_LISTED))
-        elif was != now:
-            for key in sorted(now - was):
+            if len(now.tests) > _MAX_LISTED:
+                print("  ~ … and %d more" % (len(now.tests) - _MAX_LISTED))
+        else:
+            for key in added_c:
                 print("  ~+ NOW LOSES ITS VERDICT  %s" % key)
-            for key in sorted(was - now):
-                print("  ~- reports again          %s" % key)
+            for key in reported_c:
+                entry = now.tests[key]
+                print("  ~= reported again         %d/%d  %s"
+                      % (entry["lost_runs"], entry["seen_runs"], key))
+            for key in dropped_c:
+                print("  ~- dropped (never started this run — renamed, deleted or "
+                      "skipped)  %s" % key)
             print(
-                "  crashed-host census: %d -> %d. It is REPLACED, not unioned, so a "
-                "name that came back is gone from the record and the gate will call it "
-                "a NEW CASUALTY if it goes silent again."
-                % (len(was), len(now))
+                "  crashed-host census: %d -> %d name(s) over %d observation(s). It is "
+                "UNIONED with counts, like `tests`: a name that came back is DEMOTED, "
+                "not deleted, because one quiet run is not evidence a crash is fixed."
+                % (len(was.tests), len(now.tests), now.runs_observed)
+            )
+        if promoted_c:
+            print(
+                "  ARMED: %d census entr%s crossed into DETERMINISTIC — lost their "
+                "verdict in every one of their observations. Each of these REPORTING "
+                "AGAIN now fails the gate, which is what lets this record shrink when "
+                "the crash is fixed."
+                % (len(promoted_c), "y" if len(promoted_c) == 1 else "ies")
+            )
+            for key in promoted_c:
+                entry = now.tests[key]
+                print("  !~ now deterministic %d/%d  %s"
+                      % (entry["lost_runs"], entry["seen_runs"], key))
+        if was is not None and not was.armed and now.armed:
+            print(
+                "  CENSUS ARMED: %d observations recorded. From this accept on, a test "
+                "that loses its verdict and is NOT in the record fails the gate."
+                % now.runs_observed
             )
         no_verdict = run.no_verdict
         if no_verdict:

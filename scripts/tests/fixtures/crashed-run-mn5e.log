@@ -96,6 +96,8 @@ Test Case '-[PlayheadTests.PlayheadRuntimeMainActorFreedomTests testMainActorIsN
 ◇ Test "cache deletion while background analysis enqueue is blocked leaves no resurrected artifacts" started.
 ◇ Test "identity-qualified staging isolates a retired task from its replacement" started.
 ◇ Test "cache deletion during journal finalization revokes the stale finalized tail" started.
+◇ Test "quantization improves cache hit rate for nearby candidates" started.
+◇ Test "Pathologically large stubChapterCount (Int.max) is clamped to maxStubChapterCount, preventing Double-overflow in latency math and Int-overflow in aggregates" started.
 ◇ Test "Phone call interruption pauses playback" started.
 ◇ Test "Siri dismissal with shouldResume restores playback" started.
 ◇ Test "Siri activation interruption pauses playback" started.
@@ -148,6 +150,10 @@ Test Case '-[PlayheadTests.PlayheadRuntimeMainActorFreedomTests testMainActorIsN
 ◇ Test "a second row for one (asset, pass, fingerprint) is refused, and the survivor still takes the speakerId upgrade" started.
 ◇ Test "Route change notification handled on actor without crash" started.
 ◇ Test "Interruption notification handled on actor without crash" started.
+◇ Test "watermark within one shard past the duration is tolerated; beyond it is not" started.
+◇ Test "Detections without matching GT produce FPs" started.
+◇ Test "a guid containing the separator still recovers the feed URL" started.
+◇ Test "shadowConfidence outside [0, 1] is clamped defensively" started.
 ◇ Test "Model loading is outside the permit, so a cold asset install cannot spend the budget" started.
 ◇ Test "explicit cancellation invalidates the matching streaming transfer" started.
 ➜ Test "Build FrozenTrace fixtures from .xcappdata bundle" skipped.
@@ -190,6 +196,7 @@ Test Case '-[PlayheadTests.PlayheadRuntimeMainActorFreedomTests testMainActorIsN
 ◇ Test "Headphone disconnect (oldDeviceUnavailable) pauses immediately" started.
 ◇ Test "Concurrent callers cannot overspend the budget" started.
 ​➜ Test "an abandoned coarse pass leaves its screened windows in the database" skipped: "shrinks the FM no-progress bound — perf pass only (playhead-zx0l)"
+◇ Test "a kickoff that FIRED increments only `firedCount` — a success is never counted as a give-up" started.
 ◇ Test "both phases and the poll spend ONE deadline, anchored at the grant's start" started.
 ◇ Test "the coarse phase observes the queue BEFORE the drain has dispatched anything" started.
 ◇ Test "The expiration handler is armed before the handler awaits anything" started.
@@ -216,10 +223,13 @@ Test Case '-[PlayheadTests.PlayheadRuntimeMainActorFreedomTests testMainActorIsN
 ✔ Test "Episode-bound seek rejects a stale same-episode lifecycle token" passed after 110.076 seconds.
 ✔ Test "Pathologically large stubChapterCount (Int.max)2026-08-12 16:46:28.541048-0400 Playhead[88753:53577519] [Downloads] Background download complete for background-finalization-delete-race
  is clamped to maxStubChapterCount, preventing Double-overflow in latency math and Int-overflow in aggregates" passed after 110.126 seconds.
+✔ Test "quantization improves cache hit rate for nearby candidates" passed after 110.127 seconds.
 ✔ Tes2026-08-12 16:46:36.522213-0400 Playhead[88753:53577623] [LanePreemption] preempting 1 job(s) in lanes lower than now for cause=user_preempted
 t "watermark within one shard past the duration is tolerated; beyond it is not" passed after 117.944 seconds.
+✔ Test "Detections without matching GT produce FPs" passed after 117.945 seconds.
 ✔ Test "shadowConfidence outside [0, 1] is clampe2026-08-12 16:46:36.550378-0400 Playhead[88753:53577623] [LanePreemption] preempting 1 job(s) in lanes lower than now for cause=user_preempted
 d defensively" passed after 117.970 seconds.
+✔ Test "a guid containing the separator still recovers the feed URL" passed after 117.973 seconds.
 ✘ Test "A force-quit resume re-queues the fresh download against the recovered show" recorded an issue at DownloadShowAttributionTests.swift:328:9: Expectation failed: await manager.loadDownloadAttribution(episodeId: episodeId)?
 ✘ Test "A completion delivered to a NEW manager instance still carries the show" recorded an issue at DownloadShowAttributionTests.swift:182:9: Expectation failed: await relaunched.loadDownloadAttribution(episodeId: episodeId)?
 ✘ Test "Cancelling a download reaps its attribution" recorded an issue at DownloadShowAttributionTests.swift:353:9: Expectation failed: await manager.loadDownloadAttribution(episodeId: episodeId) != nil
