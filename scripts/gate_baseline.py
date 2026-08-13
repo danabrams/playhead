@@ -446,6 +446,32 @@ observations, so a casualty NOT in the record is now fatal — and while it was
 spelled `CENSUS ARMED:` it read as the counterpart of `CENSUS DISARMED:`, which
 it is not.
 
+A SPELLING IS HALF A BANNER; THE OTHER HALF IS THE EVENT, AND EACH ROUND PINNED
+THE HALF IT WAS LOOKING AT (playhead-o89d R4). R1 fixed the `tests` demotion.
+R2 fixed the census demotion, wrote the rule down for the direction it had just
+fixed, and left both promotions interchangeable. R3 fixed both promotions and
+stated the rule as "the SPELLING and the EVENT it names" — then pinned the event
+on the two promotions only. So R4 mutated EVERY banner and membership line the
+accept path can print, one at a time, against the whole suite: 28 mutants, 15
+survivors, all fifteen on lines nobody had come back to. Among them, in the
+words an operator signs a commit message against: the record-level census arm
+said a casualty that IS in the record fails the gate; both demotions said
+accepting KEEPS the licence and the next pass/report is STILL fatal; the first
+census said an unrecorded casualty is ALREADY fatal when one observation is
+PROVISIONAL; a name losing its verdict for the FIRST time was rendered as one
+that had lost it before (RA16's defect, one line down); the prune was announced
+as a recovery; the crash headline counted the carried-forward entries instead of
+the casualties. Rails RA20–RA30. **The lesson is the method, not the list: pin
+the CONSEQUENCE clause of a banner, not just its first four letters, and mutate
+the counterpart in BOTH directions before writing down that a class is closed.**
+
+Three survivors are deliberately left, and named here rather than quietly: the
+mutants that swap only the LEADING GLYPH between the two records' detail lines
+(`!` / `!~` / `~` / `~!`). Their words still say the right thing and the `[kind]`
+label still appears on the `tests` side and never on the census side, so the
+glyph is redundant discrimination — pinning it would be taste, and this repo's
+own rule is that a taste rule in a gate is how gates get routed around.
+
 USAGE
 -----
     gate_baseline.py check  --log RUN.log --baseline scripts/gate-baseline.json

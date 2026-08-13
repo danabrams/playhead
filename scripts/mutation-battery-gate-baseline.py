@@ -603,6 +603,137 @@ MUTATIONS = [
         '                "PASSING now fails the gate, which is what lets this record "',
         [CM + "test_the_accept_ANNOUNCES_a_census_promotion_and_the_ARMING"],
     ),
+    # ------------------------------------------------------------------------
+    # playhead-o89d R4. R3 closed the two PROMOTION banners and wrote the rule
+    # down as "the SPELLING and the EVENT it names". Every OTHER banner in the
+    # accept path was then mutated one at a time against the whole suite: 28
+    # mutants, 15 survivors. R3's own fix had been applied to the direction R3
+    # was looking at, exactly as R2's had — the fourth round in a row on that
+    # shape. The rails below are the survivors that misstate a FACT or a
+    # CONSEQUENCE. Three survivors are deliberately NOT railed and are named in
+    # the module docstring instead: they swap only the leading GLYPH between the
+    # two records' detail lines, whose words and `[kind]` label still
+    # discriminate, and pinning a glyph is taste rather than a defect.
+    # ------------------------------------------------------------------------
+    (
+        # The sharpest one: this banner was RENAMED by R3, in the commit that
+        # stated the spelling-and-event rule, and only its spelling was pinned.
+        "RA20", GB,
+        "the record-level census arm states the OPPOSITE rule — the operator "
+        "signs a commit message saying it is a casualty IN the record that now "
+        "fails the gate, which is the one thing the arm does not do",
+        '"a test that loses its verdict and is NOT in the record fails the gate."',
+        '"a test that loses its verdict and IS in the record fails the gate."',
+        [CM + "test_the_accept_ANNOUNCES_a_census_promotion_and_the_ARMING"],
+    ),
+    (
+        "RA21", GB,
+        "the `tests` demotion says accepting KEEPS the licence and the next pass "
+        "is STILL fatal — the gate got LOOSER and the line says it did not",
+        '"revokes that licence: from here the entry is load-sensitive and its "\n'
+        '                "next pass is NOT fatal. Say in the commit message why the RECORD was "',
+        '"KEEPS that licence: from here the entry is deterministic and its "\n'
+        '                "next pass is STILL fatal. Say in the commit message why the RECORD was "',
+        [T + "test_a_demotion_is_ANNOUNCED_and_named"],
+    ),
+    (
+        "RA22", GB,
+        "the `tests` demotion names the CENSUS event (`REPORTS AGAIN`) as what "
+        "hard-failed the gate, so the operator looks for a report where there "
+        "was a pass",
+        '"failing in every one of its observations and this run watched it "\n'
+        '                "PASS, which is what hard-failed the gate (`NOW PASSES`). Accepting "',
+        '"failing in every one of its observations and this run watched it "\n'
+        '                "REPORT, which is what hard-failed the gate (`REPORTS AGAIN`). Accepting "',
+        [T + "test_a_demotion_is_ANNOUNCED_and_named"],
+    ),
+    (
+        "RA23", GB,
+        "the CENSUS demotion says accepting KEEPS the licence and the next "
+        "report is STILL fatal — on the only event that ever shrinks the record",
+        '"gate (`REPORTS AGAIN`). Accepting revokes that licence: from here the "\n'
+        '                "entry is load-sensitive and its next report is NOT fatal. That is also "',
+        '"gate (`REPORTS AGAIN`). Accepting KEEPS that licence: from here the "\n'
+        '                "entry is deterministic and its next report is STILL fatal. That is also "',
+        [T + "test_a_CENSUS_demotion_is_ANNOUNCED_and_named"],
+    ),
+    (
+        # R2's `CENSUS DISARMED:` defect one layer down, in the membership lines
+        # under the tier banners: a name that has NEVER lost its verdict before
+        # rendered in the words of one that has.
+        "RA24", GB,
+        "a name losing its verdict for the FIRST time is announced as a name "
+        "that has lost it before — a new casualty read as a recurrence, which "
+        "is the same 'one line, two opposite meanings' RA16 closed above it",
+        'print("  ~+ NOW LOSES ITS VERDICT  %s" % key)',
+        'print("  ~= reported again          %s" % key)',
+        [CM + "test_the_accept_NAMES_a_census_entry_that_lost_its_verdict_for_"
+              "the_FIRST_time"],
+    ),
+    (
+        "RA25", GB,
+        "the census size transition is printed backwards, so a record that GREW "
+        "reads as one that shrank — and shrinking is the direction this record "
+        "is not allowed to take quietly",
+        "% (len(was.tests), len(now.tests), now.runs_observed)",
+        "% (len(now.tests), len(was.tests), now.runs_observed)",
+        [CM + "test_the_accept_NAMES_a_census_entry_that_lost_its_verdict_for_"
+              "the_FIRST_time",
+         CM + "test_the_accept_NAMES_a_census_entry_the_prune_DROPPED"],
+    ),
+    (
+        "RA26", GB,
+        "the PRUNE — a recorded name nobody could reach on a healthy run, i.e. "
+        "renamed, deleted or newly skipped — is announced as a recovery",
+        'print("  ~- dropped (never started this run — renamed, deleted or "\n'
+        '                      "skipped)  %s" % key)',
+        'print("  ~- recovered (started and reported this run)  %s" % key)',
+        [CM + "test_the_accept_NAMES_a_census_entry_the_prune_DROPPED"],
+    ),
+    (
+        # The fourth time this particular number has been wrong; the first three
+        # are in CLAUDE.md and every one was the same defect class.
+        "RA27", GB,
+        "the accept's NO VERDICT headline counts the CARRIED-FORWARD entries "
+        "instead of the casualties, so a run that lost tests can report that it "
+        "lost none",
+        '"observation says nothing about them."\n'
+        '                % (len(no_verdict),',
+        '"observation says nothing about them."\n'
+        '                % (len(protected),',
+        [T + "test_an_accept_over_a_crashed_run_SAYS_SO"],
+    ),
+    (
+        "RA28", GB,
+        "the first-ever census is announced as ALREADY fatal for an unrecorded "
+        "casualty, when one observation is PROVISIONAL — the ladder CLAUDE.md "
+        "records as what let the arming land without turning main red",
+        '"not fatal. Say in the commit message why this loss is the "',
+        '"already fatal. Say in the commit message why this loss is the "',
+        [T + "test_an_accept_over_a_crashed_run_SAYS_SO"],
+    ),
+    (
+        # `+ [kind]` prints only for names ENTERING the file, and a promotion is
+        # by construction a name already in it — so this line is the only place
+        # a promoted entry's kind is ever shown.
+        "RA29", GB,
+        "the promotion detail reports a constant KIND, so the tolerance the "
+        "accept is justified by cannot be checked against the entry it arms",
+        'print("  ! now deterministic [%s] %d/%d  %s" % (\n'
+        '                    _kinds_label(entry), entry["failed_runs"], entry["seen_runs"], key,',
+        'print("  ! now deterministic [%s] %d/%d  %s" % (\n'
+        '                    "timeout", entry["failed_runs"], entry["seen_runs"], key,',
+        [T + "test_a_promotion_detail_carries_the_ENTRYS_OWN_kind"],
+    ),
+    (
+        "RA30", GB,
+        "the accept header prints the entry count as the observation count and "
+        "vice versa — the numerator and denominator of every tier decision in "
+        "the file, interchangeable",
+        '% (merged["plan"], merged["runs_observed"], len(merged["tests"])))',
+        '% (merged["plan"], len(merged["tests"]), merged["runs_observed"]))',
+        [T + "test_a_promotion_is_ANNOUNCED_and_named"],
+    ),
     (
         "RA4", GB,
         "the census diff is computed in the wrong direction, so a recovery is "

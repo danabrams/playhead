@@ -1440,6 +1440,14 @@ class CensusMergeTests(unittest.TestCase):
         # Crossing arms a hard failure on that name, so it must be named.
         self.assertIn("!~ now deterministic 3/3  swift-testing::lost", out)
         self.assertIn("CENSUS RECORD ARMED: 3 observations recorded", out)
+        # playhead-o89d R4. R3 renamed this banner and pinned its SPELLING in the
+        # same commit whose rule was "the SPELLING and the EVENT it names" — and
+        # pinned the event on the two entry-level promotions only. Measured: a
+        # mutant inverting this line to "a test that loses its verdict and IS in
+        # the record fails the gate" SURVIVED all 175 tests. It is the sentence
+        # that states what the operator is arming, and inverted it arms nothing
+        # while claiming the opposite of the rule.
+        self.assertIn("is NOT in the record fails the gate", out)
         # playhead-o89d R3. The banner is spelled for its OWN side, and it says
         # which event became fatal. Both were unpinned: a mutant that respelled
         # this banner as the `tests` promotion verbatim — "Each of these PASSING
@@ -1471,6 +1479,69 @@ class CensusMergeTests(unittest.TestCase):
         self.assertEqual(0, rc)
         self.assertIn("~= reported again         2/3  swift-testing::back", out)
         self.assertIn("UNIONED with counts", out)
+
+    def test_the_accept_NAMES_a_census_entry_that_lost_its_verdict_for_the_FIRST_time(self):
+        """playhead-o89d R4, and it is R2's `CENSUS DISARMED:` defect one layer down.
+
+        R2 fixed a census DEMOTION being spelled identically to a load-sensitive
+        recurrence — "one line, two opposite meanings". The membership lines under
+        it had the same hole and nothing pinned them: a mutant rendering a name
+        that has NEVER lost its verdict before in the words of one that has
+        (`~= reported again`) survived the whole suite. A first loss is what
+        ENTERS the record the census arms on; a recurrence is a name already in
+        it. And the transition count was unpinned in the same block, so a record
+        that GREW could be printed as one that shrank.
+        """
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory() as d:
+            d = pathlib.Path(d)
+            gb.save_baseline(d / "b.json", baseline(
+                {"swift-testing::anchor": (5, ["timeout"])}, runs=5,
+                no_verdict=["swift-testing::a"], census_runs=3))
+            (d / "run.log").write_text(
+                log(st_fail_timeout("anchor"), st_silent("a"), st_silent("b"))
+                + HOST_RESTART, encoding="utf-8")
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                rc = gb.main(["accept", "--log", str(d / "run.log"),
+                              "--baseline", str(d / "b.json")])
+            out = buffer.getvalue()
+        self.assertEqual(0, rc)
+        self.assertIn("~+ NOW LOSES ITS VERDICT  swift-testing::b", out)
+        self.assertNotIn("reported again", out)
+        # 1 -> 2, in that order. The direction is the whole claim.
+        self.assertIn("crashed-host census: 1 -> 2 name(s) over 4 observation(s)", out)
+
+    def test_the_accept_NAMES_a_census_entry_the_prune_DROPPED(self):
+        """playhead-o89d R4. The one census event that SHRINKS the record.
+
+        `merge_census` prunes a recorded name that never started on a HEALTHY
+        run, because there it means renamed, deleted or newly skipped. That is
+        the direction CLAUDE.md calls unforgivable for `tests`, and its line was
+        unpinned: a mutant announcing the prune as `~- recovered (started and
+        reported this run)` survived, telling the operator a name came back when
+        in fact nobody can reach it any more.
+        """
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory() as d:
+            d = pathlib.Path(d)
+            gb.save_baseline(d / "b.json", baseline(
+                {"swift-testing::anchor": (5, ["timeout"])}, runs=5,
+                no_verdict=["swift-testing::gone"], census_runs=3))
+            (d / "run.log").write_text(log(st_fail_timeout("anchor")),
+                                       encoding="utf-8")
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                rc = gb.main(["accept", "--log", str(d / "run.log"),
+                              "--baseline", str(d / "b.json")])
+            out = buffer.getvalue()
+        self.assertEqual(0, rc)
+        self.assertIn("~- dropped (never started this run — renamed, deleted or "
+                      "skipped)  swift-testing::gone", out)
+        self.assertNotIn("recovered", out)
+        self.assertIn("crashed-host census: 1 -> 0 name(s)", out)
 
 
 class PlanScopeTests(unittest.TestCase):
@@ -1633,6 +1704,9 @@ class AcceptOutputTests(unittest.TestCase):
         self.assertEqual(0, rc)
         self.assertIn("+ [timeout] swift-testing::slow", out)
         self.assertIn("+ [assertion] swift-testing::wrong", out)
+        # playhead-o89d R4: …and the accept must not ALSO claim it changed
+        # nothing. The two lines contradict each other and only one is read.
+        self.assertNotIn("membership unchanged", out)
 
     def test_the_added_set_is_summarised_by_kind(self):
         rc, out = self._accept({}, 2, log(st_fail_timeout("slow"),
@@ -1652,6 +1726,28 @@ class AcceptOutputTests(unittest.TestCase):
         # a different record and must not be able to stand in for this one.
         self.assertIn("PASSING now fails the gate", out)
         self.assertNotIn("CENSUS ARMED", out)
+        # playhead-o89d R4. The header's two quantities were interchangeable: a
+        # mutant printing the entry count as the observation count and vice versa
+        # survived. They are the numerator and denominator of every tier decision
+        # in the file, and here they are 3 and 1.
+        self.assertIn("observations=3  known-broken=1", out)
+
+    def test_a_promotion_detail_carries_the_ENTRYS_OWN_kind(self):
+        """playhead-o89d R4. A promoted entry is not in the `added` set.
+
+        `+ [kind]` is rail-pinned, but it only ever prints for names ENTERING the
+        file, and a promotion by construction is a name already in it. So the
+        promotion detail is the ONLY place a promoted entry's kind is shown, and
+        it was unpinned: a mutant hard-coding `[timeout]` there survived. The
+        kind is what the tolerance is built on — "known to time out" does not
+        licence "known to fail its expectations" — so an operator justifying an
+        accept from a constant is justifying it from nothing.
+        """
+        rc, out = self._accept({"swift-testing::x": (2, ["assertion"])}, 2,
+                               log(st_fail_expect("x")))
+        self.assertEqual(0, rc)
+        self.assertIn("now deterministic [assertion] 3/3  swift-testing::x", out)
+        self.assertNotIn("[timeout]", out)
 
     def test_an_accept_that_promotes_NOTHING_stays_quiet(self):
         rc, out = self._accept({"swift-testing::x": (1, ["timeout"])}, 1,
@@ -1679,6 +1775,18 @@ class AcceptOutputTests(unittest.TestCase):
         self.assertIn("no longer deterministic [timeout] 3/4  swift-testing::x", out)
         # …and it is the FAILURE record that moved, not a crashed-host name.
         self.assertNotIn("CENSUS DISARMED", out)
+        # playhead-o89d R4. R3's rule for a tier banner was "the SPELLING and the
+        # EVENT it names", and it applied that to the two PROMOTIONS only. Both
+        # demotion banners still stated their event and their consequence in
+        # unpinned prose: mutants that made this one say the licence is KEPT and
+        # the next pass STILL fatal, or that named the CENSUS event (`REPORTS
+        # AGAIN`) as what hard-failed the gate, both survived. A demotion is the
+        # direction that makes the gate LOOSER, which this test's own docstring
+        # says is the one that has to be justified out loud.
+        self.assertIn("hard-failed the gate (`NOW PASSES`)", out)
+        self.assertIn("revokes that licence", out)
+        self.assertIn("next pass is NOT fatal", out)
+        self.assertNotIn("REPORTS AGAIN", out)
 
     def test_an_accept_that_demotes_NOTHING_stays_quiet(self):
         rc, out = self._accept({"swift-testing::x": (1, ["timeout"])}, 1,
@@ -1710,6 +1818,14 @@ class AcceptOutputTests(unittest.TestCase):
         # Spelled for its own side: a bare `DISARMED:` means a recorded FAILURE
         # stopped being deterministic, and nothing here is one.
         self.assertNotIn("  DISARMED:", out)
+        # playhead-o89d R4, the census half of the same hole: the SPELLING was
+        # pinned and the CONSEQUENCE was not. A mutant saying accepting KEEPS the
+        # licence and the next report is STILL fatal survived — which tells the
+        # operator the record did not loosen, on the only event that loosens it
+        # and the only way this record ever shrinks.
+        self.assertIn("Accepting revokes that licence", out)
+        self.assertIn("its next report is NOT fatal", out)
+        self.assertNotIn("STILL fatal", out)
 
     def test_an_accept_that_demotes_NO_CENSUS_ENTRY_stays_quiet(self):
         """The load-sensitive casualty coming back is the case that must NOT shout."""
@@ -1733,6 +1849,21 @@ class AcceptOutputTests(unittest.TestCase):
         self.assertEqual(0, rc)
         self.assertIn("NO VERDICT", out)
         self.assertIn("restarted the test host", out)
+        # playhead-o89d R4. THE COUNT, not just the word. CLAUDE.md records this
+        # number being wrong three times, every one of them a value that named
+        # one thing read as though it named another — and here the accept path's
+        # headline could be made to count the CARRIED-FORWARD entries instead of
+        # the casualties (a mutant swapping them survived). Nothing recorded is
+        # protected in this scenario, so that mutant reads "the host died and 0
+        # test(s) reported nothing" on a run that lost one.
+        self.assertIn("the host died and 1 test(s) reported nothing", out)
+        # …and the census is announced as PROVISIONAL, which is the state that
+        # makes an unrecorded casualty reportable-but-not-fatal. Both the banner
+        # and its licence were unpinned; a mutant declaring it already fatal
+        # survived, and it is the sentence a first accept is signed against.
+        self.assertIn("CENSUS NOW LIVE: 1 crashed-host name(s)", out)
+        self.assertIn("It takes 3 before an unrecorded casualty can fail the gate", out)
+        self.assertIn("they are named and not fatal", out)
 
     def test_an_accept_ANNOUNCES_what_it_carried_forward(self):
         rc, out = self._accept({"swift-testing::x": (1, ["timeout"]),
