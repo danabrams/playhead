@@ -552,6 +552,52 @@ actor DownloadManager {
     /// See `BackgroundSessionRole` for the three lanes.
     private var _sessionsByRole: [BackgroundSessionRole: URLSession] = [:]
 
+    /// playhead-gpdb: creations already crossing into `nsurlsessiond`, one
+    /// entry per resolved role, removed the moment the crossing answers.
+    ///
+    /// Construction is now a SUSPENSION POINT and `DownloadManager` is a
+    /// re-entrant actor, so without this two callers that both find
+    /// `_sessionsByRole` empty would both cross and construct TWO
+    /// `URLSession`s on the SAME background identifier — a state URLSession
+    /// does not support and the OS answers by logging and misbehaving. Before
+    /// this bead the whole function was synchronous on the actor, so the
+    /// interleaving was impossible; making it failable is what introduces it.
+    /// The second caller joins the first one's crossing instead of starting a
+    /// second.
+    ///
+    /// Holds a `Task`, not a flag: the joiner has to be able to WAIT for the
+    /// answer and receive it. And the entry is dropped on BOTH outcomes — see
+    /// ``backgroundSession(for:requestedBy:)`` — so a refusal is never cached.
+    private var _sessionCreationsInFlight:
+        [BackgroundSessionRole: Task<URLSession?, Never>] = [:]
+
+    #if DEBUG
+    /// How many callers have reached the CROSSING DECISION — found no
+    /// memoized session, and are about to either join an in-flight crossing
+    /// or start one.
+    ///
+    /// playhead-gpdb R1 review. This exists because a correct implementation
+    /// leaves NO OTHER TRACE there, and a test that cannot see the arrival
+    /// cannot know when it is safe to let the crossing answer:
+    ///
+    ///   * a caller that JOINS writes nothing at all;
+    ///   * `_sessionCreationsInFlight` is keyed by role, so a caller that
+    ///     WRONGLY starts a second crossing overwrites the entry rather than
+    ///     growing the map;
+    ///   * two `URLSession`s on one background identifier both report that
+    ///     identifier, so `_sessionsByRole` and every identifier-shaped
+    ///     observable read the same on both implementations.
+    ///
+    /// Without it the rail could only wait a while and hope every caller had
+    /// arrived. That guess is what failed the 2026-08-13 merge gate: under a
+    /// full plan it ran ~32 s while holding open a crossing whose own bound is
+    /// 10 s, so the crossing expired mid-barrier and the rail failed for a
+    /// reason unrelated to the property. Counting the arrival turns the
+    /// barrier's exit condition into an event that is GUARANTEED to happen, so
+    /// load can make the wait longer but can no longer change the answer.
+    private(set) var sessionCrossingArrivalsForTesting = 0
+    #endif
+
     /// Feature flag that gates the 24cm dual-session split. Copied from
     /// `PreAnalysisConfig.useDualBackgroundSessions` at init time and
     /// re-exposed via `setUseDualBackgroundSessions(_:)` so tests can
@@ -616,6 +662,58 @@ actor DownloadManager {
     /// identity rather than one. Filed as playhead-f1wb.
     internal let enumerationIO: BackgroundSessionIO
 
+    /// The bound for background session CONSTRUCTION, on a third serial queue.
+    ///
+    /// playhead-gpdb. `URLSession(configuration: .background(withIdentifier:))`
+    /// looks like object construction and is not: it attaches to
+    /// `nsurlsessiond`, the same daemon playhead-nsjn sampled parked in
+    /// `mach_msg2_trap` and the same one that failed to answer
+    /// `downloadTask(with:)` seventeen times in a single full-plan run. It was
+    /// the ONE remaining unbounded crossing in the download path, and both of
+    /// the calls nsjn and rouw bounded are reached THROUGH it —
+    /// `retireBackgroundTransfers` instantiates all three roles before it
+    /// enumerates anything, so a parked construction bypasses their bounds
+    /// entirely.
+    ///
+    /// WHY A THIRD QUEUE RATHER THAN `sessionIO`'s. The argument is not the
+    /// frequency — construction is memoized, so it happens ONCE per process per
+    /// role and would rarely contend for the queue. It is the CONSEQUENCE when
+    /// it does. ``boundedAllTasks(of:through:)`` spells out the case
+    /// `BackgroundSessionIO` declines to bound: a body whose ENTERING call
+    /// parks in the session's own barrier never returns, so its queue is
+    /// stranded for the life of the process. `sessionIO`'s queue is where
+    /// `downloadTask(with:)`, `resume()` and the abandon-path `cancel()` are
+    /// submitted — every call that makes a download happen — so putting
+    /// construction there means one wedged construction permanently kills
+    /// downloading, which is precisely the outcome this bead exists to convert
+    /// into a reported refusal. `enumerationIO`'s queue is worse still:
+    /// `retireBackgroundTransfers` submits one enumeration per session onto it
+    /// CONCURRENTLY, so three constructions ahead of them would push the
+    /// enumerations past their own deadlines having never run. Construction
+    /// gets the queue it can strand without taking anything else with it.
+    ///
+    /// Same behaviour and same bound as `sessionIO`, so a test that injects
+    /// `.neverAnswers` refuses construction too.
+    internal let sessionCreationIO: BackgroundSessionIO
+
+    /// playhead-gpdb / playhead-oa82: where a refused background-session
+    /// construction is RECORDED, beyond `os_log`.
+    ///
+    /// `nil` in tests that do not care and in every preview runtime; injected
+    /// by `PlayheadRuntime` with the surface-status invariant logger, whose
+    /// JSON Lines session file is the surface a device pull already reads.
+    /// Passed at CONSTRUCTION rather than through a setter on purpose: a
+    /// post-init hop is exactly what fails to run on the launch this record
+    /// matters most on — an iOS relaunch with no scene — and a recorder that
+    /// is nil precisely when the failure happens records nothing.
+    ///
+    /// Synchronous because `SurfaceStatusInvariantLogger.invariantViolated` is
+    /// fire-and-forget onto its own serial write queue; nothing here touches
+    /// the file system on the actor.
+    internal let invariantRecorder: (
+        @Sendable (InvariantViolation.Code, String) -> Void
+    )?
+
     // MARK: - Streams
 
     private let progressContinuation: AsyncStream<DownloadProgress>.Continuation
@@ -643,12 +741,19 @@ actor DownloadManager {
         maxCacheBytes: Int64 = DownloadManager.defaultMaxCacheBytes,
         preAnalysisConfig: PreAnalysisConfig? = nil,
         workJournalRecorder: WorkJournalRecording = NoopWorkJournalRecorder(),
-        sessionIO: BackgroundSessionIO = .shared
+        sessionIO: BackgroundSessionIO = .shared,
+        invariantRecorder: (
+            @Sendable (InvariantViolation.Code, String) -> Void
+        )? = nil
     ) {
         self.sessionIO = sessionIO
         self.enumerationIO = sessionIO.onItsOwnQueue(
             labelled: "\(sessionIO.queueLabel).enumeration"
         )
+        self.sessionCreationIO = sessionIO.onItsOwnQueue(
+            labelled: "\(sessionIO.queueLabel).creation"
+        )
+        self.invariantRecorder = invariantRecorder
         let root = cacheDirectory ?? Self.defaultCacheDirectory()
         self.cacheDirectory = root
         self.partialsDirectory = root.appendingPathComponent("partials", isDirectory: true)
@@ -1250,15 +1355,72 @@ actor DownloadManager {
         }
     }
 
-    /// Returns the URLSession for the given role, instantiating it lazily.
+    /// Who asked for a background session. Carried into the refusal record so
+    /// a device pull can tell the four refusals apart — their consequences are
+    /// unrelated, and so are their remedies.
+    ///
+    /// playhead-gpdb: a parameter rather than a `#function` capture because
+    /// every caller of ``backgroundSession(for:requestedBy:)`` has to
+    /// acknowledge, at the call site, that the daemon can refuse it.
+    enum BackgroundSessionRequestSite: String, Sendable {
+        /// `ForceQuitResumeScan.resumeSuspendedTransfer` — a resume blob is
+        /// waiting and is the only copy of the bytes already fetched.
+        case forceQuitResume = "force_quit_resume"
+        /// `resumeSession(identifier:)` — iOS relaunched the app to deliver
+        /// this session's pending background events.
+        case backgroundRelaunchWake = "background_relaunch_wake"
+        /// `backgroundDownload` — one episode's transfer.
+        case backgroundDownload = "background_download"
+        /// `retireBackgroundTransfers` — cache deletion / explicit cancel.
+        case transferRetirement = "transfer_retirement"
+        /// A test hook. Never reached in production.
+        case testHook = "test_hook"
+    }
+
+    /// Label prefix every session-construction crossing carries, so a
+    /// `refusesCallsLabelled` seam can name exactly this crossing and the
+    /// source canary can pin it.
+    static let sessionCreationLabelPrefix = "URLSession(background:) for "
+
+    /// Returns the URLSession for the given role, instantiating it lazily —
+    /// or `nil` when `nsurlsessiond` did not hand one back inside the bound.
+    ///
     /// When the 24cm feature flag is OFF, callers that ask for `.interactive`
     /// or `.maintenance` are transparently routed to `.legacy` so the
     /// behavior matches the pre-24cm build exactly.
     ///
+    /// ─────────────────────────────────────────────────────────────────────
+    /// playhead-gpdb: WHY THIS IS FAILABLE, AND WHY IT IS NOT A FALLBACK
+    /// ─────────────────────────────────────────────────────────────────────
+    /// Constructing a BACKGROUND `URLSession` attaches to `nsurlsessiond`.
+    /// That is the daemon playhead-nsjn sampled with all ten cooperative
+    /// threads parked in `mach_msg2_trap` behind it, and this actor runs on
+    /// that same fixed-width pool — so an unbounded construction here is the
+    /// hang nsjn and rouw each bounded one layer further in, reached before
+    /// either of their bounds can apply.
+    ///
+    /// Dan's decision (2026-08-13) was BOUND IT AND FAIL THE CALL. The
+    /// alternative on the table — return a plain foreground `URLSession` so
+    /// this signature could stay non-optional — was rejected by name: a
+    /// session that still calls itself `background` while silently having
+    /// stopped being one takes the overnight "wake up to analyzed episodes"
+    /// behaviour away with nothing saying so. **Do not reintroduce it.** A
+    /// caller that cannot get a background session reports that it cannot
+    /// download.
+    ///
+    /// A refusal is NEVER CACHED: `_sessionsByRole` is written only on
+    /// success and `_sessionCreationsInFlight` is cleared on both outcomes,
+    /// so the next call retries naturally. That is the whole difference
+    /// between a transient daemon stall and a dead download subsystem, and it
+    /// is what `sessionCreationRetriesAfterARefusal` pins.
+    ///
     /// Visibility is `internal` (not `private`) so the playhead-hyht
     /// force-quit scan extension in `ForceQuitResumeScan.swift` can hand
     /// a resume-data blob back to the interactive session.
-    internal func backgroundSession(for role: BackgroundSessionRole) -> URLSession {
+    internal func backgroundSession(
+        for role: BackgroundSessionRole,
+        requestedBy site: BackgroundSessionRequestSite
+    ) async -> URLSession? {
         let resolvedRole: BackgroundSessionRole = {
             if !useDualBackgroundSessions, role != .legacy { return .legacy }
             return role
@@ -1266,39 +1428,47 @@ actor DownloadManager {
 
         if let existing = _sessionsByRole[resolvedRole] { return existing }
 
-        let config: URLSessionConfiguration
-        switch resolvedRole {
-        case .interactive:
-            config = URLSessionConfiguration.background(
-                withIdentifier: BackgroundSessionIdentifier.interactive
-            )
-            config.sessionSendsLaunchEvents = true
-            config.isDiscretionary = false
-            config.allowsCellularAccess = true
-        case .maintenance:
-            config = URLSessionConfiguration.background(
-                withIdentifier: BackgroundSessionIdentifier.maintenance
-            )
-            config.sessionSendsLaunchEvents = true
-            config.isDiscretionary = true
-            // UserPreferences.allowsCellular governs the maintenance lane
-            // because auto-downloads are the surface most likely to
-            // surprise users on cellular.
-            config.allowsCellularAccess = UserPreferencesSnapshot.current.allowsCellular
-        case .legacy:
-            config = URLSessionConfiguration.background(
-                withIdentifier: BackgroundSessionIdentifier.legacy
-            )
-            config.sessionSendsLaunchEvents = true
-            config.isDiscretionary = false
-            config.allowsCellularAccess = true
+        #if DEBUG
+        // playhead-gpdb R1: this caller found no memoized session, so it is
+        // about to either join an in-flight crossing or start one. See
+        // `sessionCrossingArrivalsForTesting` for why the arrival needs to be
+        // counted here and cannot be inferred anywhere else.
+        sessionCrossingArrivalsForTesting += 1
+        #endif
+
+        // Somebody is already inside the daemon for this role. Join them
+        // rather than opening a second `URLSession` on the same background
+        // identifier — see `_sessionCreationsInFlight`.
+        if let inFlight = _sessionCreationsInFlight[resolvedRole] {
+            return await inFlight.value
         }
 
-        let session = URLSession(
-            configuration: config,
-            delegate: sessionDelegate,
-            delegateQueue: nil
-        )
+        let creation = Task { [self] () -> URLSession? in
+            await createBackgroundSession(role: resolvedRole)
+        }
+        _sessionCreationsInFlight[resolvedRole] = creation
+        let session = await creation.value
+        // Dropped on BOTH outcomes, and there is no suspension point between
+        // here and the memo write below, so no caller can observe a state
+        // where neither the memo nor an in-flight crossing exists for a role
+        // that has one.
+        _sessionCreationsInFlight[resolvedRole] = nil
+
+        guard let session else {
+            logger.error(
+                "backgroundSession(\(resolvedRole.identifier, privacy: .public)) REFUSED at \(site.rawValue, privacy: .public): the background transfer daemon did not hand back a session"
+            )
+            invariantRecorder?(
+                .backgroundSessionCreationRefused,
+                """
+                site=\(site.rawValue) role=\(resolvedRole.identifier) \
+                bound=\(sessionCreationIO.timeout)s — nsurlsessiond did not \
+                hand back a background URLSession; nothing was cached, the \
+                next request retries
+                """
+            )
+            return nil
+        }
 
         // onBackgroundDownloadStaged is wired once at init — see
         // DownloadManager initializer. No per-session reassignment
@@ -1308,20 +1478,104 @@ actor DownloadManager {
         return session
     }
 
-    /// Legacy single-session accessor preserved for existing call sites
-    /// (`backgroundDownload(episodeId:from:)` below). Routes to the
-    /// legacy identifier unless the feature flag is on — in which case
-    /// user-initiated downloads use the interactive lane.
-    private func backgroundSession() -> URLSession {
-        backgroundSession(for: useDualBackgroundSessions ? .interactive : .legacy)
+    /// The crossing itself: build the configuration AND the session inside one
+    /// bounded, off-pool submission.
+    ///
+    /// Both halves are inside the bound deliberately. The daemon attach is
+    /// documented as belonging to `URLSession.init`, but
+    /// `URLSessionConfiguration.background(withIdentifier:)` is opaque system
+    /// code on the same identifier and nobody has measured that it never
+    /// touches `nsurlsessiond`; splitting them would put an unmeasured call
+    /// back on the cooperative pool to save nothing.
+    ///
+    /// A session that arrives AFTER the caller gave up is invalidated rather
+    /// than dropped, for the same reason a late `downloadTask` is cancelled: a
+    /// live session left registered on that background identifier is what the
+    /// next construction attempt would collide with.
+    private func createBackgroundSession(
+        role: BackgroundSessionRole
+    ) async -> URLSession? {
+        let delegate = sessionDelegate
+        return await sessionCreationIO.perform(
+            label: "\(Self.sessionCreationLabelPrefix)\(role.identifier)",
+            discardingLateResult: { $0.invalidateAndCancel() },
+            running: {
+                let config: URLSessionConfiguration
+                switch role {
+                case .interactive:
+                    config = URLSessionConfiguration.background(
+                        withIdentifier: BackgroundSessionIdentifier.interactive
+                    )
+                    config.sessionSendsLaunchEvents = true
+                    config.isDiscretionary = false
+                    config.allowsCellularAccess = true
+                case .maintenance:
+                    config = URLSessionConfiguration.background(
+                        withIdentifier: BackgroundSessionIdentifier.maintenance
+                    )
+                    config.sessionSendsLaunchEvents = true
+                    config.isDiscretionary = true
+                    // UserPreferences.allowsCellular governs the maintenance
+                    // lane because auto-downloads are the surface most likely
+                    // to surprise users on cellular. Read here rather than on
+                    // the actor because `UserPreferencesSnapshot` is the
+                    // UserDefaults-backed value designed to be read at
+                    // URLSession-construction time, off-main and synchronous.
+                    config.allowsCellularAccess =
+                        UserPreferencesSnapshot.current.allowsCellular
+                case .legacy:
+                    config = URLSessionConfiguration.background(
+                        withIdentifier: BackgroundSessionIdentifier.legacy
+                    )
+                    config.sessionSendsLaunchEvents = true
+                    config.isDiscretionary = false
+                    config.allowsCellularAccess = true
+                }
+                return URLSession(
+                    configuration: config,
+                    delegate: delegate,
+                    delegateQueue: nil
+                )
+            }
+        )
     }
 
     /// Re-instantiates the URLSession for `identifier` so its delegate
     /// callbacks fire. Invoked by `PlayheadAppDelegate` when iOS wakes
     /// the app to relay pending background events.
-    func resumeSession(identifier: String) {
-        guard let role = BackgroundSessionRole.role(for: identifier) else { return }
-        _ = backgroundSession(for: role)
+    ///
+    /// - Returns: `false` when the identifier is unknown, or when the daemon
+    ///   refused the session.
+    ///
+    /// playhead-gpdb: THIS LOOKS LIKE A WARMUP AND IS NOT ONE, and the bead
+    /// that filed this defect guessed the other way — so the decision is
+    /// spelled out rather than left to the `_ =` that used to sit here.
+    ///
+    /// A warmup may swallow a failure because a real call retries it. There is
+    /// no such call here. `PlayheadRuntime` documents this as "the ONLY
+    /// production caller that re-instantiates the background `URLSession` in a
+    /// relaunched process": without it the session object never exists, the
+    /// delegate never fires, `handleBackgroundDownloadComplete` never runs, the
+    /// day-0 kickoff observer has nothing to receive, and the OS completion
+    /// handler is never invoked — which is how an app loses its background
+    /// scheduling budget. Nobody retries any of that. So the refusal is
+    /// RECORDED (by `backgroundSession(for:requestedBy:)`, tagged
+    /// `.backgroundRelaunchWake`) and reported to the caller, on the launch
+    /// where a silence would be least visible and most expensive.
+    ///
+    /// What this deliberately does NOT do is invoke the pending OS completion
+    /// handler on the failure path. Whether an app that could not open the
+    /// session should still tell iOS it is finished is a behaviour question
+    /// about `PlayheadAppDelegate`, not about this call site; filed rather
+    /// than guessed at (playhead-fhh1).
+    @discardableResult
+    func resumeSession(identifier: String) async -> Bool {
+        guard let role = BackgroundSessionRole.role(for: identifier) else {
+            return false
+        }
+        return await backgroundSession(
+            for: role, requestedBy: .backgroundRelaunchWake
+        ) != nil
     }
 
     /// Flip the 24cm feature flag in-process. Called from two paths:
@@ -1338,8 +1592,13 @@ actor DownloadManager {
 
     // MARK: - Test hooks (internal)
 
-    func backgroundSessionForTesting(role: BackgroundSessionRole) -> URLSession {
-        backgroundSession(for: role)
+    /// playhead-gpdb: optional, like the production accessor. A hook that
+    /// force-unwrapped would let a test pass on a build whose construction was
+    /// refused, which is the one thing this bead is about.
+    func backgroundSessionForTesting(
+        role: BackgroundSessionRole
+    ) async -> URLSession? {
+        await backgroundSession(for: role, requestedBy: .testHook)
     }
 
     func instantiatedSessionIdentifiersForTesting() -> Set<String> {
@@ -2504,21 +2763,45 @@ actor DownloadManager {
             )
         }
 
-        // Pre-cache work: route through the maintenance lane when the
-        // dual-session flag is on so it cannot starve user-initiated
-        // (.interactive) downloads. When the flag is off, fall through
-        // to the legacy single session.
-        let session = useDualBackgroundSessions
-            ? backgroundSession(for: .maintenance)
-            : backgroundSession(for: .legacy)
-
         // playhead-nsjn: RESERVE the in-flight slot before suspending.
         // Creating the task now crosses an `await`, and actors are
         // re-entrant: without this, a second caller for the same episode
         // could clear the in-flight guard above while the first is still
         // inside the daemon call, and we would start two transfers.
         // Released again on every path that does not hand off a task.
+        //
+        // playhead-gpdb MOVED THIS UP, above the session lookup, because the
+        // lookup is now a suspension point too. Left where it was, the very
+        // first download of a process — the one that has to construct the
+        // session — would suspend with nothing reserved, and a concurrent
+        // caller for the same episode would sail through the in-flight guard
+        // above. The reservation has to cover every await between the guard
+        // and the handoff, not just the last one.
         bgInFlightEpisodes.insert(episodeId)
+
+        // Pre-cache work: route through the maintenance lane when the
+        // dual-session flag is on so it cannot starve user-initiated
+        // (.interactive) downloads. When the flag is off, fall through
+        // to the legacy single session.
+        let session = await backgroundSession(
+            for: useDualBackgroundSessions ? .maintenance : .legacy,
+            requestedBy: .backgroundDownload
+        )
+        guard let session else {
+            // playhead-gpdb: the daemon would not hand back a session, so
+            // there is nothing to create a task on. Same recovery as the
+            // unanswered `downloadTask(with:)` below — release the
+            // reservation and drop the sidecar, so the episode stays
+            // retryable and no record outlives the transfer it describes —
+            // and the refusal is already recorded by
+            // `backgroundSession(for:requestedBy:)`.
+            releaseInFlightReservationIfUnclaimed(episodeId: episodeId)
+            deleteDownloadAttribution(episodeId: episodeId)
+            logger.error(
+                "Background download for \(episodeId, privacy: .public) NOT started: the background transfer daemon would not open a session"
+            )
+            return
+        }
 
         let handoff = await sessionIO.perform(
             label: "downloadTask(with:) for \(episodeId)",
@@ -2777,7 +3060,21 @@ actor DownloadManager {
         var sessions: [URLSession] = []
         var seenSessionIdentifiers: Set<String> = []
         for role in roles {
-            let session = backgroundSession(for: role)
+            // playhead-gpdb: a role the daemon would not open contributes NO
+            // session, and the sweep carries on with the ones it has. Failing
+            // open here is the same trade playhead-rouw made one layer in for
+            // a lost enumeration, and for the same reason: what is lost is a
+            // SOURCE of transfer identities, never the deletion of the bytes.
+            // The admitted-identity sweep below needs no daemon, the
+            // identity-required guard is armed unconditionally, and every
+            // later callback for a retired identity is discarded — so an
+            // uncancelled transfer runs on and then has its bytes thrown away
+            // on arrival. Returning early instead would leave the user's
+            // delete undone while reporting success. The refusal is recorded
+            // by `backgroundSession(for:requestedBy:)`.
+            guard let session = await backgroundSession(
+                for: role, requestedBy: .transferRetirement
+            ) else { continue }
             let identifier = session.configuration.identifier ?? ""
             if seenSessionIdentifiers.insert(identifier).inserted {
                 sessions.append(session)

@@ -273,6 +273,27 @@ struct DownloadManagerDaemonUnavailableTests {
         )
     }
 
+    /// A daemon that answers everything EXCEPT the task enumeration.
+    ///
+    /// playhead-gpdb: the two rouw rails below used `stalledIO()`, and after
+    /// this bead that would make them vacuous rather than red. `.neverAnswers`
+    /// refuses the FIRST call, and the first call `retireBackgroundTransfers`
+    /// now makes is the bounded SESSION CONSTRUCTION — so the sweep would end
+    /// up with an empty session list and never reach the unanswered-enumeration
+    /// branch these rails exist to cover, while still passing for the
+    /// uninteresting reason that there was nothing to enumerate.
+    ///
+    /// Refusing by LABEL keeps construction exactly as it was before this bead
+    /// (a real background session, which is what these rails always had) and
+    /// refuses only `boundedAllTasks`.
+    private static func enumerationRefusingIO() -> BackgroundSessionIO {
+        BackgroundSessionIO(
+            behavior: .refusesCallsLabelled("allTasks for"),
+            timeout: 0.1,
+            queueLabel: "nsjn.test.enum-refused.\(UUID().uuidString)"
+        )
+    }
+
     /// Before this bead the only outcomes were "started" and "hung". The
     /// reservation matters because `backgroundDownload` now suspends
     /// between its in-flight guard and the handoff: a manager that left the
@@ -661,7 +682,9 @@ struct DownloadManagerDaemonUnavailableTests {
         let dir = try makeTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
 
-        let manager = DownloadManager(cacheDirectory: dir, sessionIO: Self.stalledIO())
+        let manager = DownloadManager(
+            cacheDirectory: dir, sessionIO: Self.enumerationRefusingIO()
+        )
         try await manager.bootstrap()
 
         let episodeId = "rouw-unanswered-enumeration"
@@ -716,7 +739,9 @@ struct DownloadManagerDaemonUnavailableTests {
         let dir = try makeTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
 
-        let manager = DownloadManager(cacheDirectory: dir, sessionIO: Self.stalledIO())
+        let manager = DownloadManager(
+            cacheDirectory: dir, sessionIO: Self.enumerationRefusingIO()
+        )
         try await manager.bootstrap()
 
         for index in 0..<3 {

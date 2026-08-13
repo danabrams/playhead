@@ -1449,7 +1449,21 @@ final class PlayheadRuntime {
             // bootstrap cohort closes the loop.
             scanCohortProvider: { bootstrapCohort }
         )
-        self.downloadManager = DownloadManager()
+        // playhead-gpdb: the surface-status invariant stream is where a
+        // refused background-session construction is recorded — the same JSON
+        // Lines session file a device pull already reads, and the surface
+        // playhead-oa82 established for exactly this question ("did it fail,
+        // or was it never asked for?"). Passed at CONSTRUCTION, not through a
+        // post-init setter: the launch this record matters most on is the one
+        // iOS makes with no scene, and a deferred hop is precisely what does
+        // not run there.
+        self.downloadManager = DownloadManager(
+            invariantRecorder: { [surfaceStatusLogger] code, description in
+                surfaceStatusLogger.invariantViolated(
+                    code: code, description: description
+                )
+            }
+        )
 
         // playhead-o45p: construct the surface-status observer before
         // the coordinator so it can be injected via the coordinator's
