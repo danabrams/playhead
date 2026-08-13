@@ -586,6 +586,37 @@ struct InvariantViolation: Sendable, Hashable, Codable {
         /// suppressed entirely in preview runtimes, where nothing is expected.
         case rediffDayZeroKickoffCoordinatorAbsent =
             "rediff_day_zero_kickoff_coordinator_absent"
+
+        /// playhead-gpdb: `nsurlsessiond` did not hand back a background
+        /// `URLSession` inside `BackgroundSessionIO`'s bound, so the download
+        /// subsystem REFUSED the call that asked for one.
+        ///
+        /// The description names the ROLE, the session identifier, the bound
+        /// that expired, and — load-bearing — the SITE that asked, because the
+        /// four sites have unrelated consequences: a refused
+        /// `backgroundDownload` is one retryable episode, a refused
+        /// `resumeSuspendedTransfer` retains its blob, a refused
+        /// `retireBackgroundTransfers` loses one source of transfer identities
+        /// while the bytes still go, and a refused `resumeSession` is a
+        /// BACKGROUND RELAUNCH that will now deliver no completion callbacks
+        /// at all.
+        ///
+        /// Why it reaches this channel rather than only `os_log`. Session
+        /// construction is memoized and happens ONCE per process per role, at
+        /// the first download — so when it is refused, the download subsystem
+        /// is dead for that entire process launch, and the worst moment for
+        /// that is a relaunch iOS made with no scene, which is exactly the
+        /// launch nobody is watching. Before this line, "the daemon refused a
+        /// session" and "no download was requested" left the same evidence:
+        /// no transfer, no completion, no row, no error. That is
+        /// ``rediffDayZeroKickoffClaimAttempted``'s lesson applied one
+        /// subsystem over — a device pull has to be able to tell an absence
+        /// that was CAUSED from an absence that was never ASKED FOR.
+        ///
+        /// Not expected on healthy hardware: a working daemon answers in
+        /// milliseconds, and the bound is ten seconds.
+        case backgroundSessionCreationRefused =
+            "background_session_creation_refused"
     }
 
     let code: Code

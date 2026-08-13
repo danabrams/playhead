@@ -107,6 +107,22 @@ struct BackgroundSessionIO: Sendable {
         /// would stay registered with the simulator's `nsurlsessiond` — the
         /// residue class this bead exists to stop producing.
         case refusesCallsLabelled(String)
+
+        /// Test seam: refuse the calls whose label contains `marker` for
+        /// exactly as long as `whileRefusing()` answers `true`, and run
+        /// every other call normally.
+        ///
+        /// playhead-gpdb. `refusesCallsLabelled` refuses for the life of the
+        /// instance, so it can prove a refusal is REPORTED but never that it
+        /// was not CACHED — the second attempt is refused by the seam
+        /// whatever the code under test did with the first. A daemon that
+        /// refuses once and then answers is the only shape that separates
+        /// "the memo stayed empty, so the next call retried" from "the
+        /// failure was memoized and the subsystem is dead for the process",
+        /// and those two are byte-identical under every other seam here.
+        case intermittentlyRefusesCallsLabelled(
+            String, whileRefusing: @Sendable () -> Bool
+        )
         #endif
     }
 
@@ -224,6 +240,12 @@ struct BackgroundSessionIO: Sendable {
         case .refusesCallsLabelled(let marker) where label.contains(marker):
             Self.logger.error(
                 "\(label, privacy: .public): refusesCallsLabelled(\(marker, privacy: .public)) test seam — reporting the daemon as unavailable"
+            )
+            return nil
+        case .intermittentlyRefusesCallsLabelled(let marker, let refusing)
+            where label.contains(marker) && refusing():
+            Self.logger.error(
+                "\(label, privacy: .public): intermittentlyRefusesCallsLabelled(\(marker, privacy: .public)) test seam — reporting the daemon as unavailable"
             )
             return nil
         default:

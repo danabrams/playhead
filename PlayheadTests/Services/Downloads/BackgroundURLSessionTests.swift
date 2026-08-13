@@ -212,7 +212,7 @@ struct DownloadManagerDualSessionsTests {
         let ids = await manager.instantiatedSessionIdentifiersForTesting()
         // Flag off → only legacy session (lazy-created on demand).
         // Until a session is requested, the set is empty; request legacy.
-        _ = await manager.backgroundSessionForTesting(role: .legacy)
+        _ = try #require(await manager.backgroundSessionForTesting(role: .legacy))
         let idsAfter = await manager.instantiatedSessionIdentifiersForTesting()
         #expect(idsAfter.contains(BackgroundSessionIdentifier.legacy))
         #expect(!idsAfter.contains(BackgroundSessionIdentifier.interactive))
@@ -229,7 +229,9 @@ struct DownloadManagerDualSessionsTests {
         await manager.setUseDualBackgroundSessions(true)
         try await manager.bootstrap()
 
-        let session = await manager.backgroundSessionForTesting(role: .interactive)
+        let session = try #require(
+            await manager.backgroundSessionForTesting(role: .interactive)
+        )
         #expect(session.configuration.identifier == BackgroundSessionIdentifier.interactive)
         #expect(session.configuration.isDiscretionary == false)
         #expect(session.configuration.sessionSendsLaunchEvents == true)
@@ -244,7 +246,9 @@ struct DownloadManagerDualSessionsTests {
         await manager.setUseDualBackgroundSessions(true)
         try await manager.bootstrap()
 
-        let session = await manager.backgroundSessionForTesting(role: .maintenance)
+        let session = try #require(
+            await manager.backgroundSessionForTesting(role: .maintenance)
+        )
         #expect(session.configuration.identifier == BackgroundSessionIdentifier.maintenance)
         #expect(session.configuration.isDiscretionary == true)
         #expect(session.configuration.sessionSendsLaunchEvents == true)
@@ -259,7 +263,9 @@ struct DownloadManagerDualSessionsTests {
         await manager.setUseDualBackgroundSessions(true)
         try await manager.bootstrap()
 
-        let legacy = await manager.backgroundSessionForTesting(role: .legacy)
+        let legacy = try #require(
+            await manager.backgroundSessionForTesting(role: .legacy)
+        )
         #expect(legacy.configuration.identifier == BackgroundSessionIdentifier.legacy)
     }
 
@@ -269,8 +275,10 @@ struct DownloadManagerDualSessionsTests {
         defer { try? FileManager.default.removeItem(at: dir) }
 
         let manager = DownloadManager(cacheDirectory: dir)
-        await manager.resumeSession(identifier: "com.unknown.session")
-        // No crash, no exception — done.
+        // playhead-gpdb: an unknown identifier reports `false` — the same
+        // answer a refused session gives, because in both cases no session
+        // was woken and the OS events will not be delivered.
+        #expect(await manager.resumeSession(identifier: "com.unknown.session") == false)
     }
 
     @Test("resumeSession(identifier:) wakes the corresponding background session")
@@ -286,7 +294,12 @@ struct DownloadManagerDualSessionsTests {
         let before = await manager.instantiatedSessionIdentifiersForTesting()
         #expect(!before.contains(BackgroundSessionIdentifier.interactive))
 
-        await manager.resumeSession(identifier: BackgroundSessionIdentifier.interactive)
+        #expect(
+            await manager.resumeSession(
+                identifier: BackgroundSessionIdentifier.interactive
+            ),
+            "a healthy daemon must report that the session was actually woken"
+        )
 
         let after = await manager.instantiatedSessionIdentifiersForTesting()
         #expect(after.contains(BackgroundSessionIdentifier.interactive))

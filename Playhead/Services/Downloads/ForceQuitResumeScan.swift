@@ -540,7 +540,22 @@ extension DownloadManager {
 
         // Route through the interactive session — force-quit resumes
         // are always user-initiated.
-        let session = backgroundSession(for: .interactive)
+        //
+        // playhead-gpdb: opening that session is itself a bounded crossing
+        // into `nsurlsessiond`, and it was unbounded until this bead — so on
+        // a cold launch after a force-quit, the very first thing this method
+        // did was the thing most likely to park. A refusal here takes the
+        // SAME branch as an unanswered `downloadTask(withResumeData:)` below
+        // and for the same reason: nothing owns the transfer, so the blob is
+        // the only copy of the bytes already fetched and must survive.
+        guard let session = await backgroundSession(
+            for: .interactive, requestedBy: .forceQuitResume
+        ) else {
+            logger.error(
+                "resumeSuspendedTransfer: \(episodeId, privacy: .public) NOT resumed — the background transfer daemon would not open a session; blob retained for a later attempt"
+            )
+            return .daemonUnavailable
+        }
         // playhead-nsjn: this is the call the wedged-gate `sample` caught.
         // `downloadTask(withResumeData:)` blocks the calling thread in a
         // synchronous XPC round-trip to `nsurlsessiond`, and this actor runs
