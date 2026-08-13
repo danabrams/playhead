@@ -587,15 +587,33 @@ actor DownloadManager {
     ///
     /// playhead-rouw: deliberately not `sessionIO`, and the separation is
     /// load-bearing rather than tidy. `BackgroundSessionIO`'s work queue is
-    /// serial by design, and `retireBackgroundTransfers` submits three
-    /// enumerations per deletion. Sharing the instance with
-    /// `downloadTask(with:)` therefore lets a silent daemon convert one
+    /// serial by design, and `retireBackgroundTransfers` submits one
+    /// enumeration per distinct background session. Sharing the instance
+    /// with `downloadTask(with:)` therefore lets a silent daemon convert one
     /// `removeCache` into ten seconds during which no download can be
-    /// created either — MEASURED: seventeen enumerations blew their bound in
-    /// one full-plan run, and on the shared queue that is nearly three
-    /// minutes of starved download path. Same behaviour and same bound, so a
-    /// test that injects `.neverAnswers` still stalls this; own queue, so the
-    /// stall stays inside the enumeration.
+    /// created either.
+    ///
+    /// MEASURED, and read the attribution carefully because the two numbers
+    /// come from DIFFERENT implementations of this line:
+    ///   * SHARED queue: seventeen enumerations blew their bound in one
+    ///     full-plan run — nearly three minutes of starved download path —
+    ///     and that run lost 217 tests to a crashed host.
+    ///   * OWN queue (what ships): four, in an equivalent run that lost 3.
+    /// The seventeen is the argument FOR the separation, not a property of
+    /// the shipped code. Neither number is stable run to run; the daemon's
+    /// responsiveness on this box is not.
+    ///
+    /// Same behaviour and same bound, so a test that injects `.neverAnswers`
+    /// still stalls this; own queue, so the stall stays inside the
+    /// enumeration.
+    ///
+    /// NOT claimed: that one silent session costs only its own enumeration.
+    /// This queue is serial, so with `useDualBackgroundSessions` on, three
+    /// sessions are enumerated concurrently onto ONE queue and a silent
+    /// first session makes the other two expire without ever being asked.
+    /// The caller still waits at most `io.timeout` — see
+    /// ``boundedAllTasks(of:through:)`` — but it loses all three sources of
+    /// identity rather than one. Filed as playhead-f1wb.
     internal let enumerationIO: BackgroundSessionIO
 
     // MARK: - Streams
@@ -2684,6 +2702,19 @@ actor DownloadManager {
     ///     the body cannot even start, which is what happens when another
     ///     caller is holding the session's barrier.
     /// The caller therefore waits at most `io.timeout`, never longer.
+    ///
+    /// What that does NOT bound is how long the QUEUE stays busy. The two
+    /// deadlines are independent: the outer one starts when the submission
+    /// is made, the inner one when the body reaches the front. A body that
+    /// starts at 9 s and then sits on a silent daemon holds the queue until
+    /// 19 s, with nobody waiting on it from 10 s onward. That is bounded
+    /// (2 × `io.timeout`) and it costs one ordinary thread, which is the
+    /// trade this file exists to make — but a submission arriving inside
+    /// that window is released by its own deadline having never run, and
+    /// logs `did not answer` for a daemon it never spoke to. `starved:
+    /// reached the daemon queue after its caller had already given up` is
+    /// the line that distinguishes the two; read both before concluding the
+    /// daemon is at fault.
     ///
     /// `internal` rather than `private` so the force-quit scan in
     /// `ForceQuitResumeScan.swift` shares this one crossing; it is the only
