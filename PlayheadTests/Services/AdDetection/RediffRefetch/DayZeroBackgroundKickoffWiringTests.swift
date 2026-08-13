@@ -749,6 +749,92 @@ final class DayZeroBackgroundKickoffWiringCanaryTests: XCTestCase {
         )
     }
 
+    /// playhead-oa82 (R1 review): the ATTEMPT line must be emitted BEFORE the
+    /// store write, not merely alongside it.
+    ///
+    /// This is the one property the claim PAIR exists for, and no behavioural
+    /// test in the repo can reach it. `DayZeroKickoffClaimSilenceTests` asserts
+    /// the emitted CODES — `[.attempted]` on the healthy path, `[.attempted,
+    /// .writeFailed]` on a throw — and both sequences are reproduced exactly by
+    /// a recorder that captures the write's outcome first and reports afterwards:
+    ///
+    ///     var thrown: Error?
+    ///     do { try await store.note…() } catch { thrown = error }
+    ///     await reportViolation(.rediffDayZeroKickoffClaimAttempted, …)
+    ///     if let thrown { await reportViolation(.…ClaimWriteFailed, …) }
+    ///
+    /// R1 ran exactly that mutant: every suite here stayed green (10 Swift
+    /// Testing tests + 5 canaries, exit 0). Under it a store write that PARKS —
+    /// state (b), the reason the instrument is a pair and not the single `else`
+    /// the bead description asked for — emits NOTHING, which is byte-identical
+    /// to "the request never happened" and restores the ambiguity this bead
+    /// exists to remove.
+    ///
+    /// A behavioural test would need to inject a parking store, and the factory
+    /// takes a concrete `AnalysisStore`, so there is no seam to inject through.
+    /// Hence textual, on the same reasoning (and with the same anti-vacuity
+    /// discipline) as `testDayZeroKickoffClaimRecorderAwaitsItsWriteInline`
+    /// directly above.
+    func testDayZeroKickoffClaimAttemptIsRecordedBeforeTheStoreWrite() throws {
+        let source = try SwiftSourceInspector.loadSource(
+            repoRelativePath: "Playhead/App/PlayheadRuntime.swift"
+        )
+        guard let body = SwiftSourceInspector.firstBody(
+            in: source,
+            after: "static func makeDayZeroKickoffClaimRecorder("
+        ) else {
+            XCTFail(
+                "Could not locate `makeDayZeroKickoffClaimRecorder`'s body — the day-0 " +
+                "claim recorder's factory moved or was renamed and this canary needs " +
+                "re-anchoring."
+            )
+            return
+        }
+        // Comments and string CONTENTS blanked, for the reason the sibling
+        // canary blanks them: the doc comment above quotes both spellings, and
+        // the description literals name the codes too.
+        let code = SwiftSourceInspector.strippingCommentsAndStrings(body)
+
+        guard let attempt = code.range(of: ".rediffDayZeroKickoffClaimAttempted"),
+              let write = code.range(of: "noteRediffDayZeroKickoffClaim(") else {
+            XCTFail(
+                """
+                ANTI-VACUITY: the factory must contain BOTH the attempt report and \
+                the store write. Missing either makes the ordering assertion below \
+                vacuous — and a factory with no attempt report is precisely the \
+                pre-oa82 defect, while one with no write is playhead-kg8h's.
+                """
+            )
+            return
+        }
+        XCTAssertEqual(
+            SwiftSourceInspector.occurrences(
+                of: ".rediffDayZeroKickoffClaimAttempted", in: code
+            ),
+            1,
+            """
+            ANTI-VACUITY: the attempt code must appear exactly once. Two \
+            occurrences would let one of them sit before the write and satisfy \
+            the ordering assertion below while the reachable one does not.
+            """
+        )
+        XCTAssertLessThan(
+            attempt.lowerBound, write.lowerBound,
+            """
+            The day-0 claim ATTEMPT is no longer reported BEFORE the store write. \
+            That ordering is the whole reason this is a PAIR rather than the single \
+            failure path the bead description asked for: `try?`/`catch` fires on a \
+            THROW, but `RediffDayZeroKickoffCoordinator.requestKickoff` documents, \
+            as accepted residue, that this write can instead PARK on a wedged \
+            `AnalysisStore` and never return — no row, no throw, no failure line. \
+            Only a line written BEFORE the call survives that, and it is what makes \
+            "attempted + neither" readable as the park. Reporting afterwards \
+            reproduces every code sequence this suite asserts while silently \
+            deleting state (b); R1 shipped that mutant and the suite stayed green.
+            """
+        )
+    }
+
     /// Closure-literal nesting depths at which `needle` occurs in `code`.
     ///
     /// A `{` counts only when it opens a CLOSURE (or a nested function) — that
