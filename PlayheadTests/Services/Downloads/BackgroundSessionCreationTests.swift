@@ -420,6 +420,96 @@ struct BackgroundSessionCreationRecoveryTests {
         await manager.invalidateBackgroundSessionsForTesting()
     }
 
+    /// Counts every crossing a manager submits and admits only the first.
+    ///
+    /// playhead-gpdb R1 review. Two things no other seam here provides.
+    ///
+    /// COUNTING. `whileRefusing` is invoked exactly once per submission whose
+    /// label contains the marker (`perform`'s `where` clause short-circuits on
+    /// `label.contains`), so calling it and returning `false` is a call
+    /// counter that needs no production hook. The marker is `" for "` because
+    /// BOTH crossing labels carry it — `URLSession(background:) for <id>` and
+    /// `downloadTask(with:) for <episode>`. The count is the only thing that
+    /// can see a duplicated crossing: two `URLSession`s on one background
+    /// identifier both report that identifier, so
+    /// `instantiatedSessionIdentifiersForTesting()` reads `1` either way, and
+    /// the role map is keyed by role so the second write merely overwrites the
+    /// first.
+    ///
+    /// REFUSING AFTER THE FIRST. Everything past the admitted crossing is
+    /// refused, so no rail below hands a real transfer to the simulator's
+    /// `nsurlsessiond` (playhead-ornc) merely to observe an ordering.
+    private final class CrossingCounter: Sendable {
+        private let counter: OSAllocatedUnfairLock<Int>
+
+        /// Stored, not computed: every `BackgroundSessionIO` owns its own
+        /// dispatch queue, so a computed property would hand the manager one
+        /// instance and this test another.
+        let io: BackgroundSessionIO
+
+        init(admittingFirst admitted: Int) {
+            let counter = OSAllocatedUnfairLock<Int>(initialState: 0)
+            self.counter = counter
+            self.io = BackgroundSessionIO(
+                behavior: .intermittentlyRefusesCallsLabelled(
+                    " for ",
+                    whileRefusing: {
+                        counter.withLock { seen in
+                            seen += 1
+                            return seen > admitted
+                        }
+                    }
+                ),
+                // The PRODUCTION bound: the admitted crossing has to genuinely
+                // succeed, and a short bound would turn that into a latency
+                // measurement of `nsurlsessiond`.
+                timeout: BackgroundSessionIO.defaultTimeout,
+                queueLabel: "gpdb.test.crossings.\(UUID().uuidString)"
+            )
+        }
+
+        var crossings: Int { counter.withLock { $0 } }
+    }
+
+    /// Occupies `io`'s serial work queue and returns the semaphore that frees
+    /// it. Returns only once the queue is provably held.
+    ///
+    /// playhead-gpdb R1 review, and this is the load-bearing part of the rail
+    /// below. Without it the three callers DO NOT OVERLAP: caller one's
+    /// crossing completes in microseconds against a healthy simulator daemon,
+    /// so callers two and three find the memo already populated and return it
+    /// — which is exactly what a correct implementation does, and exactly what
+    /// an implementation with NO in-flight join does too. Measured: deleting
+    /// the join outright left the rail GREEN. Holding the queue is what makes
+    /// the crossing slow enough for the re-entrancy this bead introduces to
+    /// actually happen.
+    private static func holdingQueue(
+        of io: BackgroundSessionIO
+    ) async -> DispatchSemaphore {
+        let release = DispatchSemaphore(value: 0)
+        await withCheckedContinuation { (held: CheckedContinuation<Void, Never>) in
+            Task {
+                // The label deliberately carries no `" for "`, so this
+                // occupancy is neither counted nor refused by `CrossingCounter`.
+                _ = await io.perform(
+                    label: "gpdb.test.occupancy",
+                    running: {
+                        held.resume()
+                        release.wait()
+                    }
+                )
+            }
+        }
+        return release
+    }
+
+    /// How long a rail waits for a SECOND crossing to show up before
+    /// concluding there is not going to be one. Only a broken implementation
+    /// ever spends it: the duplicate appears within microseconds of the
+    /// callers arriving, so this is the budget the GREEN path pays and the
+    /// RED path exits early from.
+    private static let duplicateCrossingWindow = 200
+
     /// Making construction failable made it a SUSPENSION POINT, and
     /// `DownloadManager` is a re-entrant actor — so two callers that both find
     /// the memo empty would both cross into the daemon and open TWO
@@ -428,19 +518,61 @@ struct BackgroundSessionCreationRecoveryTests {
     /// whole function ran synchronously on the actor), so it is a hazard this
     /// change introduces and has to close.
     ///
-    /// Object identity is the assertion because it is the only thing that can
-    /// see the difference: two sessions on one identifier both report that
-    /// identifier, and both are returned to a caller who is none the wiser.
+    /// THE CROSSING COUNT, not object identity, is the assertion that can see
+    /// it. Identity is necessary but not sufficient — see `CrossingCounter`
+    /// for why every other observable reads `1` on a manager that opened three
+    /// sessions — and neither assertion means anything at all unless the three
+    /// callers genuinely overlap, which is what `holdingQueue` arranges and
+    /// what this rail did not do before the R1 review.
     @Test("Concurrent requests for one role share a single construction")
     func concurrentRequestsDoNotOpenTwoSessions() async throws {
         let dir = try makeTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
-        let manager = DownloadManager(cacheDirectory: dir)
+        let daemon = CrossingCounter(admittingFirst: 1)
+        let manager = DownloadManager(cacheDirectory: dir, sessionIO: daemon.io)
         try await manager.bootstrap()
+
+        let release = await Self.holdingQueue(of: await manager.sessionCreationIO)
 
         async let first = manager.backgroundSessionForTesting(role: .legacy)
         async let second = manager.backgroundSessionForTesting(role: .legacy)
         async let third = manager.backgroundSessionForTesting(role: .legacy)
+
+        // The first crossing is a deterministic wait: it cannot complete while
+        // the queue is held, so it is observable for as long as we care to
+        // look.
+        var ticks = 0
+        while daemon.crossings < 1, ticks < 2_000 {
+            try await Task.sleep(for: .milliseconds(1))
+            ticks += 1
+        }
+        #expect(
+            daemon.crossings >= 1,
+            "the rail is vacuous unless a crossing was actually submitted"
+        )
+        // A duplicate, if there is going to be one, is submitted by a caller
+        // that has already found the memo empty — i.e. within microseconds.
+        ticks = 0
+        while daemon.crossings == 1, ticks < Self.duplicateCrossingWindow {
+            try await Task.sleep(for: .milliseconds(1))
+            ticks += 1
+        }
+        release.signal()
+
+        // Asserted BEFORE the results are unwrapped: a duplicated crossing is
+        // refused by `CrossingCounter`, so an implementation without the join
+        // also fails the `#require` below — and `Expectation failed: await
+        // second` names the symptom rather than the defect.
+        #expect(
+            daemon.crossings == 1,
+            """
+            three concurrent callers must produce ONE crossing into \
+            `nsurlsessiond`; \(daemon.crossings) means each caller opened its \
+            own `URLSession` on one background identifier, which is a state \
+            the OS does not support
+            """
+        )
+
         let one = try #require(await first)
         let two = try #require(await second)
         let three = try #require(await third)
@@ -451,6 +583,80 @@ struct BackgroundSessionCreationRecoveryTests {
         )
         #expect(
             await manager.instantiatedSessionIdentifiersForTesting().count == 1
+        )
+
+        await manager.invalidateBackgroundSessionsForTesting()
+    }
+
+    /// `backgroundDownload` reserves its per-episode in-flight slot BEFORE the
+    /// session lookup, and this rail is what makes that ordering a property
+    /// rather than a comment.
+    ///
+    /// playhead-gpdb R1 review: the implementation moved the reservation up
+    /// for exactly this reason and nothing failed when it was moved back —
+    /// measured. The window it closes is the FIRST download of a process, the
+    /// one that has to construct the session: with the reservation below the
+    /// lookup, caller one suspends inside the daemon holding nothing, caller
+    /// two sails through the `bgInFlightEpisodes` guard, and one episode gets
+    /// two transfers. That is the same defect playhead-nsjn closed one
+    /// suspension point later, re-opened by adding an earlier one.
+    ///
+    /// The queue hold is what makes the window observable: while it is held
+    /// the crossing cannot answer, so "caller one is suspended inside
+    /// `backgroundSession`" is a state the rail can stand in and look at.
+    @Test("backgroundDownload holds its in-flight slot across the session crossing")
+    func reservationCoversTheSessionCrossing() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let daemon = CrossingCounter(admittingFirst: 1)
+        let manager = DownloadManager(cacheDirectory: dir, sessionIO: daemon.io)
+        try await manager.bootstrap()
+
+        let release = await Self.holdingQueue(of: await manager.sessionCreationIO)
+
+        let episodeId = "gpdb-reservation-across-the-crossing"
+        let download = Task {
+            await manager.backgroundDownload(
+                episodeId: episodeId,
+                from: URL(string: "https://cdn.example.com/\(episodeId).mp3")!,
+                context: DownloadContext(
+                    podcastId: "show-gpdb",
+                    isExplicitDownload: false,
+                    podcastTitle: "Show",
+                    episodeTitle: "Episode"
+                )
+            )
+        }
+
+        var ticks = 0
+        while daemon.crossings < 1, ticks < 2_000 {
+            try await Task.sleep(for: .milliseconds(1))
+            ticks += 1
+        }
+        #expect(
+            daemon.crossings >= 1,
+            "the rail is vacuous unless the download actually reached the session crossing"
+        )
+        #expect(
+            await manager._isBackgroundDownloadInFlightForTesting(episodeId: episodeId),
+            """
+            the episode must already be reserved while its caller is suspended \
+            inside the session crossing — otherwise a second caller for the \
+            same episode passes the in-flight guard and one episode gets two \
+            transfers
+            """
+        )
+
+        release.signal()
+        await download.value
+
+        // The `downloadTask(with:)` crossing is the second one, so it is
+        // refused: nothing was admitted to the OS, and the reservation the
+        // rail just observed is released again rather than wedging the
+        // episode for the life of the process.
+        #expect(await manager._backgroundDownloadAdmissionCountForTesting() == 0)
+        #expect(
+            await manager._isBackgroundDownloadInFlightForTesting(episodeId: episodeId) == false
         )
 
         await manager.invalidateBackgroundSessionsForTesting()
