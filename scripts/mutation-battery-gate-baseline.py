@@ -536,6 +536,39 @@ MUTATIONS = [
         [CM + "test_the_accept_ANNOUNCES_a_census_promotion_and_the_ARMING"],
     ),
     (
+        # playhead-o89d R1 found and fixed this one; it had unit rails but no
+        # mutation rail, so the battery could not tell you whether they bite.
+        "RA15", GB,
+        "a tier DEMOTION goes unannounced, so an accept REVOKES a hard-failure "
+        "licence in silence — the same defect as RA14 pointed the other way, and "
+        "the direction that makes the gate LOOSER",
+        "        if demoted:",
+        "        if False:",
+        [T + "test_a_demotion_is_ANNOUNCED_and_named"],
+    ),
+    (
+        # playhead-o89d R2. RA14's and RA15's twin, one layer down.
+        "RA16", GB,
+        "a CENSUS tier demotion goes unannounced, so the one census event that "
+        "revokes a hard-failure licence is rendered in the same words as the one "
+        "that revokes nothing (`~= reported again`), and the tier is left to the "
+        "reader's arithmetic",
+        "        if demoted_c:",
+        "        if False:",
+        [T + "test_a_CENSUS_demotion_is_ANNOUNCED_and_named"],
+    ),
+    (
+        # The other half of RA16: a banner that fires for every returning
+        # casualty says nothing, because most of them are good news.
+        "RA17", GB,
+        "the census demotion banner fires for LOAD-SENSITIVE entries too, so a "
+        "casualty coming back — which is good news and costs nobody a licence — "
+        "is announced as a revocation, and the loud line stops meaning anything",
+        "        elif was_deterministic(key) and not now:",
+        "        elif key in before and not now:",
+        [T + "test_an_accept_that_demotes_NO_CENSUS_ENTRY_stays_quiet"],
+    ),
+    (
         "RA4", GB,
         "the census diff is computed in the wrong direction, so a recovery is "
         "reported as a new casualty and a genuine new casualty is reported as "

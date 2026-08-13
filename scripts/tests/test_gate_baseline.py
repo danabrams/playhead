@@ -1596,13 +1596,16 @@ class TierChangeTests(unittest.TestCase):
 class AcceptOutputTests(unittest.TestCase):
     """The accept transcript is the operator's only view of what they accepted."""
 
-    def _accept(self, base_tests, base_runs, run_log):
+    def _accept(self, base_tests, base_runs, run_log, base=None):
+        """`base` overrides the built baseline verbatim — e.g. one with a census."""
         import contextlib
         import io
         with tempfile.TemporaryDirectory() as d:
             d = pathlib.Path(d)
             (d / "run.log").write_text(run_log, encoding="utf-8")
-            if base_tests is not None:
+            if base is not None:
+                gb.save_baseline(d / "b.json", base)
+            elif base_tests is not None:
                 gb.save_baseline(d / "b.json", baseline(base_tests, runs=base_runs))
             buffer = io.StringIO()
             with contextlib.redirect_stdout(buffer):
@@ -1652,10 +1655,12 @@ class AcceptOutputTests(unittest.TestCase):
         rc, out = self._accept({"swift-testing::x": (3, ["timeout"])}, 3,
                                log(st_pass("x"), st_fail_timeout("other")))
         self.assertEqual(0, rc)
-        self.assertIn("DISARMED", out)
+        self.assertIn("  DISARMED:", out)
         self.assertIn("LEFT DETERMINISTIC", out)
         # The counts, so "why the record was wrong" is checkable from the line.
         self.assertIn("no longer deterministic [timeout] 3/4  swift-testing::x", out)
+        # …and it is the FAILURE record that moved, not a crashed-host name.
+        self.assertNotIn("CENSUS DISARMED", out)
 
     def test_an_accept_that_demotes_NOTHING_stays_quiet(self):
         rc, out = self._accept({"swift-testing::x": (1, ["timeout"])}, 1,
@@ -1663,17 +1668,42 @@ class AcceptOutputTests(unittest.TestCase):
         self.assertEqual(0, rc)
         self.assertNotIn("DISARMED", out)
 
-    def test_DISARMED_belongs_to_the_tests_side_only(self):
-        """`ARMED` already has this rail; its counterpart needs one too.
+    def test_a_CENSUS_demotion_is_ANNOUNCED_and_named(self):
+        """playhead-o89d R2. R1 fixed this asymmetry one layer up and left it here.
 
-        The census prints its own promotion banner, and a reader who sees
-        `DISARMED` must be able to conclude a recorded FAILURE stopped being
-        deterministic — not a crashed-host name.
+        A census demotion has exactly one cause, and it is the census twin of
+        the `tests` one: the name was recorded as losing its verdict in EVERY
+        observation, this run watched it start and REPORT, and that report is
+        what hard-failed the gate. Accepting revokes the licence.
+
+        Before this rail the event printed `~= reported again 3/4` — spelled
+        identically to a LOAD-SENSITIVE casualty coming back, where coming back
+        is good news and costs nothing. One line, two opposite meanings, tier
+        left to the reader's arithmetic.
         """
-        rc, out = self._accept({"swift-testing::x": (1, ["timeout"])}, 1,
-                               log(st_fail_timeout("x"), st_silent("lost"))
-                               + HOST_RESTART)
+        base = baseline({}, no_verdict=["swift-testing::lost"], census_runs=3)
+        rc, out = self._accept(None, None,
+                               log(st_pass("lost"), st_fail_timeout("other")),
+                               base=base)
         self.assertEqual(0, rc)
+        self.assertIn("CENSUS DISARMED:", out)
+        self.assertIn("LEFT DETERMINISTIC", out)
+        self.assertIn("no longer deterministic 3/4  swift-testing::lost", out)
+        # Spelled for its own side: a bare `DISARMED:` means a recorded FAILURE
+        # stopped being deterministic, and nothing here is one.
+        self.assertNotIn("  DISARMED:", out)
+
+    def test_an_accept_that_demotes_NO_CENSUS_ENTRY_stays_quiet(self):
+        """The load-sensitive casualty coming back is the case that must NOT shout."""
+        base = baseline({}, no_verdict=["swift-testing::lost"], census_runs=3,
+                        census_lost={"swift-testing::lost": 2})
+        rc, out = self._accept(None, None,
+                               log(st_pass("lost"), st_fail_timeout("other")),
+                               base=base)
+        self.assertEqual(0, rc)
+        # Still ledgered, still with the counts that place it in its tier — the
+        # banner is what a demotion adds, not what it replaces.
+        self.assertIn("reported again         2/4  swift-testing::lost", out)
         self.assertNotIn("DISARMED", out)
 
     def test_an_accept_over_a_crashed_run_SAYS_SO(self):

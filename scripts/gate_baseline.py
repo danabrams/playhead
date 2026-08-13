@@ -416,6 +416,18 @@ a loud `ARMED:` block naming every promotion with its `failed/seen` count. The
 POLICY is untouched — what is deterministic, and that its passing is fatal, is
 Dan's call and lives at `MIN_RUNS_FOR_DETERMINISTIC`. Only the reporting changed.
 
+And the SAME OMISSION EXISTED IN THE OPPOSITE DIRECTION, on both records, which
+is worth stating as one rule rather than two fixes (playhead-o89d R1 and R2). A
+promotion arms a hard failure; a DEMOTION revokes one, which is the gate getting
+LOOSER, and it was the quietest line in the output on the `tests` side (four bare
+words) and had no line at all of its own on the census side (an entry coming back
+was spelled `~= reported again`, identically to the load-sensitive case where
+coming back is good news and costs nothing). Both now print a banner symmetric
+with `ARMED:` — `DISARMED:` for a recorded failure, `CENSUS DISARMED:` for a
+crashed-host casualty — naming the tier being LEFT, the event, and the
+consequence. The two spellings differ so that neither side can be read as the
+other, which is this module's recurring defect wearing its usual clothes.
+
 USAGE
 -----
     gate_baseline.py check  --log RUN.log --baseline scripts/gate-baseline.json
@@ -1105,18 +1117,36 @@ def census_changes(prior, merged):
 
 
 def census_tier_changes(prior, merged):
-    """Which census entries crossed INTO `deterministic` in this merge.
+    """Which census entries changed TIER in this merge: `(promoted, demoted)`.
 
-    Same reason `tier_changes` exists for failures: crossing arms a hard
-    failure — from here their REPORTING AGAIN fails the gate — and a hard
-    failure armed silently is the one thing this file exists not to do.
+    Same reason `tier_changes` exists for failures, and now the same SHAPE —
+    both directions, one signature — because R1 of playhead-o89d fixed the
+    silent-demotion asymmetry on the `tests` side and left the identical one
+    here, one layer down. Crossing INTO `deterministic` arms a hard failure
+    (from here REPORTING AGAIN fails the gate). Crossing OUT of it revokes that
+    licence, and a licence revoked silently is the same defect as one armed
+    silently — it is just pointed the other way, which is the direction that
+    makes the gate LOOSER.
+
+    A census demotion has exactly one cause, and `merge_census` names it: an
+    entry the run STARTED AND REPORTED gets `seen + 1` with `lost` unchanged.
+    That is the same event as the verdict's `census_now_reports`, i.e. the one
+    that hard-failed the run being accepted.
     """
     before = prior.tests if prior else {}
-    promoted = [key for key, entry in merged.tests.items()
-                if census_tier_of(entry) == TIER_DETERMINISTIC
-                and not (key in before
-                         and census_tier_of(before[key]) == TIER_DETERMINISTIC)]
-    return sorted(promoted)
+
+    def was_deterministic(key):
+        return key in before and census_tier_of(before[key]) == TIER_DETERMINISTIC
+
+    promoted = []
+    demoted = []
+    for key, entry in merged.tests.items():
+        now = census_tier_of(entry) == TIER_DETERMINISTIC
+        if now and not was_deterministic(key):
+            promoted.append(key)
+        elif was_deterministic(key) and not now:
+            demoted.append(key)
+    return sorted(promoted), sorted(demoted)
 
 
 def merge(baseline, run, plan):
@@ -1804,7 +1834,7 @@ def main(argv=None):
         was = recorded_census(base if base.get("plan") == plan else {})
         now = recorded_census(merged)
         added_c, reported_c, dropped_c = census_changes(was, now)
-        promoted_c = census_tier_changes(was, now)
+        promoted_c, demoted_c = census_tier_changes(was, now)
         if was is None:
             # Deliberately NOT the word `ARMED`, which belongs to tier
             # promotion below and has a rail asserting it appears only for one.
@@ -1847,6 +1877,35 @@ def main(argv=None):
             for key in promoted_c:
                 entry = now.tests[key]
                 print("  !~ now deterministic %d/%d  %s"
+                      % (entry["lost_runs"], entry["seen_runs"], key))
+        # playhead-o89d R2. The counterpart to the block above, and the same
+        # defect R1 fixed one layer up: the census had a loud `ARMED:` for the
+        # direction that TIGHTENS and nothing at all for the direction that
+        # LOOSENS. A demoted census entry appeared only as `~= reported again
+        # 3/4` — a line spelled identically for a LOAD-SENSITIVE entry coming
+        # back, which is good news and is not fatal. So the one census event
+        # that revokes a hard-failure licence was rendered in the same words as
+        # the one that revokes nothing, and the tier had to be re-derived from
+        # the counts by a reader who already knew the rule.
+        #
+        # `CENSUS DISARMED:` rather than a bare `DISARMED:` so the two sides
+        # can never be confused for one another: a reader who sees the bare
+        # word has watched a recorded FAILURE stop being deterministic, and a
+        # reader who sees this one has watched a crashed-host casualty do it.
+        if demoted_c:
+            print(
+                "  CENSUS DISARMED: %d census entr%s LEFT DETERMINISTIC — each was "
+                "recorded as losing its verdict in every one of its observations and "
+                "this run watched it START AND REPORT, which is what hard-failed the "
+                "gate (`REPORTS AGAIN`). Accepting revokes that licence: from here the "
+                "entry is load-sensitive and its next report is NOT fatal. That is also "
+                "the only way this record ever shrinks, so say in the commit message "
+                "whether the crash is FIXED or the RECORD was wrong."
+                % (len(demoted_c), "y" if len(demoted_c) == 1 else "ies")
+            )
+            for key in demoted_c:
+                entry = now.tests[key]
+                print("  ~! no longer deterministic %d/%d  %s"
                       % (entry["lost_runs"], entry["seen_runs"], key))
         if was is not None and not was.armed and now.armed:
             print(
