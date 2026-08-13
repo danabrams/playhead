@@ -17,8 +17,14 @@
 #
 # Run it alone — do not launch other builds while it measures.
 #
+# READ BOTH OUTPUT FORMATS (playhead-o89d review). This pass runs XCTest suites
+# as well as Swift Testing ones, and `Test run with N tests in M suites passed`
+# counts ONLY the Swift Testing half. A pass can print that line and still end
+# in `** TEST FAILED **` — it does today; see playhead-1och.
+#
 # Env overrides:
-#   PLAYHEAD_DEST     xcodebuild -destination (default: iPhone 17 Pro, iOS 27.0)
+#   PLAYHEAD_DEST     xcodebuild -destination (default: iPhone 17 — must be a
+#                     device that exists; see the note on DEST below)
 #   PLAYHEAD_DERIVED  -derivedDataPath (default: .derivedData-perf)
 #   DEVELOPER_DIR     select a toolchain (e.g. the Xcode 27 beta)
 

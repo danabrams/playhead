@@ -1638,6 +1638,44 @@ class AcceptOutputTests(unittest.TestCase):
         self.assertEqual(0, rc)
         self.assertNotIn("ARMED", out)
 
+    def test_a_demotion_is_ANNOUNCED_and_named(self):
+        """playhead-o89d review. The direction that makes the gate LOOSER.
+
+        A `tests` demotion has one cause — a DETERMINISTIC entry passed, which
+        hard-failed the gate — and accepting it revokes the licence that made
+        that pass fatal. It used to print four bare words, and the accept it
+        first fired on was written up in its commit message as "the
+        pass-direction arm doing its job on a LOAD-SENSITIVE entry: reported,
+        not fatal": the AFTER tier read as though it were the BEFORE tier, on
+        an event that was fatal. The line has to name the tier being left.
+        """
+        rc, out = self._accept({"swift-testing::x": (3, ["timeout"])}, 3,
+                               log(st_pass("x"), st_fail_timeout("other")))
+        self.assertEqual(0, rc)
+        self.assertIn("DISARMED", out)
+        self.assertIn("LEFT DETERMINISTIC", out)
+        # The counts, so "why the record was wrong" is checkable from the line.
+        self.assertIn("no longer deterministic [timeout] 3/4  swift-testing::x", out)
+
+    def test_an_accept_that_demotes_NOTHING_stays_quiet(self):
+        rc, out = self._accept({"swift-testing::x": (1, ["timeout"])}, 1,
+                               log(st_fail_timeout("x")))
+        self.assertEqual(0, rc)
+        self.assertNotIn("DISARMED", out)
+
+    def test_DISARMED_belongs_to_the_tests_side_only(self):
+        """`ARMED` already has this rail; its counterpart needs one too.
+
+        The census prints its own promotion banner, and a reader who sees
+        `DISARMED` must be able to conclude a recorded FAILURE stopped being
+        deterministic — not a crashed-host name.
+        """
+        rc, out = self._accept({"swift-testing::x": (1, ["timeout"])}, 1,
+                               log(st_fail_timeout("x"), st_silent("lost"))
+                               + HOST_RESTART)
+        self.assertEqual(0, rc)
+        self.assertNotIn("DISARMED", out)
+
     def test_an_accept_over_a_crashed_run_SAYS_SO(self):
         # playhead-tl6l. An accept is a claim a human signs in a commit message,
         # and "this observation says nothing about N tests" is part of it.

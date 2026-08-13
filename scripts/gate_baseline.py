@@ -1887,8 +1887,38 @@ def main(argv=None):
                 print("  ! now deterministic [%s] %d/%d  %s" % (
                     _kinds_label(entry), entry["failed_runs"], entry["seen_runs"], key,
                 ))
+        # playhead-o89d review. The counterpart to `ARMED:` above, and it used to
+        # be four bare words — `~ no longer deterministic <key>` — for the single
+        # event this module most wants a human to think about.
+        #
+        # A `tests` demotion has exactly one cause: the entry was recorded as
+        # failing in EVERY observation, this run watched it PASS, and that pass is
+        # what put `NOW PASSES` on the verdict and HARD-FAILED the gate. Accepting
+        # revokes the licence — the entry becomes load-sensitive and its next pass
+        # is no longer fatal. That is the gate getting LOOSER, which is precisely
+        # the direction that has to be justified out loud.
+        #
+        # The asymmetry was not theoretical: this bead's own accept demoted a 4/4
+        # entry and its commit message described it as "the pass-direction arm
+        # doing its job on a LOAD-SENSITIVE entry: reported, not fatal" — the AFTER
+        # tier read as though it were the BEFORE tier, on an event that was in fact
+        # fatal. So the line now names the tier it is leaving, the event, and the
+        # consequence, exactly as the promotion line does.
+        if demoted:
+            print(
+                "  DISARMED: %d entr%s LEFT DETERMINISTIC — each was recorded as "
+                "failing in every one of its observations and this run watched it "
+                "PASS, which is what hard-failed the gate (`NOW PASSES`). Accepting "
+                "revokes that licence: from here the entry is load-sensitive and its "
+                "next pass is NOT fatal. Say in the commit message why the RECORD was "
+                "wrong rather than the run."
+                % (len(demoted), "y" if len(demoted) == 1 else "ies")
+            )
         for key in demoted:
-            print("  ~ no longer deterministic  %s" % key)
+            entry = merged["tests"][key]
+            print("  ~ no longer deterministic [%s] %d/%d  %s" % (
+                _kinds_label(entry), entry["failed_runs"], entry["seen_runs"], key,
+            ))
         return EXIT_OK
 
     if not baseline_path.exists():
