@@ -2707,8 +2707,14 @@ actor DownloadManager {
     /// deadlines are independent: the outer one starts when the submission
     /// is made, the inner one when the body reaches the front. A body that
     /// starts at 9 s and then sits on a silent daemon holds the queue until
-    /// 19 s, with nobody waiting on it from 10 s onward. That is bounded
-    /// (2 × `io.timeout`) and it costs one ordinary thread, which is the
+    /// 19 s, with nobody waiting on it from 10 s onward. 2 × `io.timeout`
+    /// is the bound only while `getAllTasks` RETURNS so the latch wait can
+    /// run; if its entering call parks in the session's own barrier — the
+    /// shape playhead-nsjn sampled for `downloadTask(with:)` — the body never
+    /// returns and this queue is stranded for the life of the process, which
+    /// is precisely what `BackgroundSessionIO`'s header declines to claim
+    /// away. Either way it costs one ordinary thread rather than a slice of
+    /// the cooperative pool, which is the
     /// trade this file exists to make — but a submission arriving inside
     /// that window is released by its own deadline having never run, and
     /// logs `did not answer` for a daemon it never spoke to. `starved:
@@ -2798,10 +2804,23 @@ actor DownloadManager {
         for (session, answer) in taskLists {
             guard let tasks = answer else {
                 // The enumeration is a source of identities, not the only
-                // one. Losing it costs the OS-side `cancel()` for tasks this
-                // process never admitted; the admitted-identity sweep below
-                // still runs, and every later callback for a retired
-                // identity is still discarded.
+                // one — but it is the only source of TASK HANDLES, and
+                // playhead-rouw R2 measured that distinction rather than
+                // assuming it. Losing the enumeration costs the OS-side
+                // `cancel()` for EVERY matching transfer, admitted or not:
+                // the sweep below holds `BackgroundTransferIdentity` values,
+                // never `URLSessionTask`s, so it retires an identity without
+                // being able to cancel the transfer wearing it. (An earlier
+                // draft of this comment said the loss was confined to tasks
+                // this process never admitted; it is not.)
+                //
+                // What survives is the half that protects the BYTES: the
+                // admitted-identity sweep still runs, the identity-required
+                // guard is still armed unconditionally below, and every later
+                // callback for a retired identity is still discarded — so an
+                // uncancelled transfer runs on, and then has its bytes thrown
+                // away on arrival. playhead-sq80 owns the one caller
+                // (`cancelDownload`) that reads the return value.
                 logger.error(
                     "retireBackgroundTransfers: \(session.configuration.identifier ?? "<none>", privacy: .public) did not answer allTasks — retiring from the admitted identity map only"
                 )

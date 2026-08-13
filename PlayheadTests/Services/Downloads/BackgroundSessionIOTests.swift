@@ -857,10 +857,27 @@ struct BackgroundSessionEnumerationSourceCanaryTests {
     ///
     /// `.tasks` is the one that needs care: it is a plausible member name on
     /// types that have nothing to do with URLSession, so it is only counted
-    /// in a file that mentions `URLSession` at all. Measured across
+    /// in a file whose CODE mentions `URLSession`. Measured across
     /// `Playhead/` on 2026-08-13: ZERO occurrences anywhere, URLSession file
     /// or not, so the narrowing costs no coverage today and keeps a future
     /// `scheduler.tasks` from turning this rail red for the wrong reason.
+    ///
+    /// CODE, not raw text, and playhead-rouw R2 got a probe past the earlier
+    /// spelling to establish it. The narrowing used to read the RAW source,
+    /// so any file that merely NAMED `URLSession` in a `see also` comment had
+    /// `.tasks` armed against it: a probe holding `batch.tasks.count` on a
+    /// plain struct, with no networking in it at all, failed this rail with
+    /// the message "asks a URLSession for its task list 1 time(s)". The
+    /// predicate that decides WHETHER to count was reading a different
+    /// population from the count itself. A rail that reddens on a file with
+    /// no networking in it is how a rail gets routed around and then deleted.
+    ///
+    /// STILL OPEN, and deliberately: a file that reaches `session.tasks`
+    /// through a `typealias` declared elsewhere never spells `URLSession`,
+    /// so this narrowing does not arm and the crossing passes. Verified —
+    /// two files, rc=0. Closing it needs type resolution, or counting
+    /// `.tasks` unconditionally and accepting the false positive above back.
+    /// Filed rather than guessed.
     private static let alwaysCountedTokens = [
         ".allTasks", "getAllTasks", "getTasksWithCompletionHandler",
     ]
@@ -947,12 +964,17 @@ struct BackgroundSessionEnumerationSourceCanaryTests {
 
         for path in sources {
             let source = try SwiftSourceInspector.loadSource(repoRelativePath: path)
-            let countsDotTasks = source.contains("URLSession")
             // Fast path: a file whose RAW text mentions nothing cannot
             // contain a token once comments and strings are blanked.
-            guard Self.tokenCount(in: source, countingDotTasks: countsDotTasks) > 0
+            // Deliberately generous — `.tasks` is counted here whatever the
+            // file says about `URLSession`, because the narrowing needs the
+            // STRIPPED text and stripping is the expensive half. It costs
+            // nothing today: zero `.tasks` occurrences under `Playhead/`.
+            guard Self.tokenCount(in: source, countingDotTasks: true) > 0
             else { continue }
             let code = SwiftSourceInspector.strippingCommentsAndStrings(source)
+            // Read the narrowing off the CODE. See `urlSessionOnlyTokens`.
+            let countsDotTasks = code.contains("URLSession")
             let found = Self.tokenCount(in: code, countingDotTasks: countsDotTasks)
             let permitted = (path == Self.crossingFile) ? allowance : 0
             #expect(
