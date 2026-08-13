@@ -50,11 +50,11 @@ final class TestPlanSkipListCanaryTests: XCTestCase {
         // against types this file is guaranteed to contain: itself (a class
         // that reaches XCTestCase through no intermediate) and the enum next
         // to it in the test tree.
-        XCTAssertEqual(index["TestPlanSkipListCanaryTests"]?.kind, "class",
+        XCTAssertEqual(index["TestPlanSkipListCanaryTests"]?.first?.kind, "class",
                        "declaration walk did not find this very file — the walk is broken, not the plans")
         XCTAssertTrue(Self.reachesXCTestCase("TestPlanSkipListCanaryTests", in: index),
                       "XCTestCase ancestry resolution is broken — it cannot see a direct subclass")
-        XCTAssertEqual(index["PerfGate"]?.kind, "enum",
+        XCTAssertEqual(index["PerfGate"]?.first?.kind, "enum",
                        "declaration walk does not distinguish kinds — a struct would pass as a class")
 
         var violations: [String] = []
@@ -63,7 +63,7 @@ final class TestPlanSkipListCanaryTests: XCTestCase {
                 // `Suite/method()` is a legal entry shape; the type name is the
                 // part the filter has to resolve.
                 let typeName = String(entry.name.split(separator: "/").first ?? "")
-                guard let decl = index[typeName] else {
+                guard let decls = index[typeName], !decls.isEmpty else {
                     violations.append(
                         "\(plan.lastPathComponent): \(entry.list) entry '\(entry.name)' resolves "
                         + "to no type under PlayheadTests/ — a renamed or deleted class filters "
@@ -71,24 +71,30 @@ final class TestPlanSkipListCanaryTests: XCTestCase {
                     )
                     continue
                 }
-                guard decl.kind == "class" else {
+                // EVERY declaration of the name has to be a filterable class,
+                // not just whichever one the walk happened to reach first —
+                // see `declarationIndex`'s header for the probe that got a dead
+                // entry past the first-wins version of this check.
+                if let notAClass = decls.first(where: { $0.kind != "class" }) {
                     violations.append(
                         "\(plan.lastPathComponent): \(entry.list) entry '\(entry.name)' is a "
-                        + "\(decl.kind) in \(decl.file). xctestplan filters SILENTLY IGNORE Swift "
-                        + "Testing identifiers, so this entry does nothing and the tests run. "
-                        + "Gate it in SOURCE instead — an env-var trait like "
+                        + "\(notAClass.kind) in \(notAClass.file). xctestplan filters SILENTLY "
+                        + "IGNORE Swift Testing identifiers, so this entry does nothing and the "
+                        + "tests run. Gate it in SOURCE instead — an env-var trait like "
                         + "PlayheadTests/Helpers/PerfGate.swift "
                         + "(.enabled(if:) on the @Test or @Suite) works for both frameworks. "
                         + "See playhead-wwbr."
+                        + Self.ambiguitySuffix(decls)
                     )
                     continue
                 }
-                if !Self.reachesXCTestCase(typeName, in: index) {
+                if let unreachable = decls.first(where: { !Self.reachesXCTestCase(from: $0, in: index) }) {
                     violations.append(
                         "\(plan.lastPathComponent): \(entry.list) entry '\(entry.name)' is a class "
-                        + "in \(decl.file) that does not inherit from XCTestCase "
-                        + "(declared: \(decl.inherits.joined(separator: ", "))) — the filter cannot "
-                        + "match it."
+                        + "in \(unreachable.file) that does not inherit from XCTestCase "
+                        + "(declared: \(unreachable.inherits.joined(separator: ", "))) — the filter "
+                        + "cannot match it."
+                        + Self.ambiguitySuffix(decls)
                     )
                 }
             }
@@ -189,10 +195,27 @@ final class TestPlanSkipListCanaryTests: XCTestCase {
         pattern: #"\b(class|struct|actor|enum)\s+([A-Za-z_][A-Za-z0-9_]*)\s*(?::\s*([^{\n]*?))?\s*\{"#
     )
 
-    private static func declarationIndex(underTestTreeAt root: URL) throws -> [String: Declaration] {
+    /// EVERY declaration of a name, not the first one the walk reaches.
+    ///
+    /// The first version of this file kept one `Declaration` per name and
+    /// dropped the rest ("first declaration wins; a nested type sharing a short
+    /// name must not shadow a top-level suite"). That is the intent, and
+    /// keeping only the first is the opposite of it: `FileManager.enumerator`
+    /// has no documented ordering, so *which* declaration survived was a
+    /// property of the filesystem. Probed at review (playhead-wwbr R1) by
+    /// adding `enum WwbrShadowProbe { final class CombinedTuningReplayTests:
+    /// XCTestCase {} }` to another file in this directory and putting
+    /// `CombinedTuningReplayTests` — a Swift Testing `@Suite struct`, i.e. a
+    /// dead entry — back into `PlayheadFastTests`. The canary reported
+    /// `** TEST SUCCEEDED **`. The shadowing direction is the unsafe one: a
+    /// dead entry reads as live, which is the exact defect this file exists to
+    /// make impossible. 83 names in this tree already carry more than one
+    /// declaration and 9 of those disagree about kind, so the collision is
+    /// ordinary, not contrived.
+    private static func declarationIndex(underTestTreeAt root: URL) throws -> [String: [Declaration]] {
         let testRoot = root.appendingPathComponent("PlayheadTests", isDirectory: true)
         guard let regex = declPattern else { return [:] }
-        var index: [String: Declaration] = [:]
+        var index: [String: [Declaration]] = [:]
 
         let enumerator = FileManager.default.enumerator(
             at: testRoot, includingPropertiesForKeys: nil
@@ -206,9 +229,6 @@ final class TestPlanSkipListCanaryTests: XCTestCase {
                 guard let kindRange = Range(match.range(at: 1), in: source),
                       let nameRange = Range(match.range(at: 2), in: source) else { continue }
                 let name = String(source[nameRange])
-                // First declaration wins; a nested type sharing a short name
-                // must not shadow a top-level suite.
-                guard index[name] == nil else { continue }
                 var inherits: [String] = []
                 if let inheritRange = Range(match.range(at: 3), in: source) {
                     inherits = String(source[inheritRange])
@@ -220,25 +240,49 @@ final class TestPlanSkipListCanaryTests: XCTestCase {
                         }
                         .filter { !$0.isEmpty }
                 }
-                index[name] = Declaration(
-                    kind: String(source[kindRange]),
-                    inherits: inherits,
-                    file: url.lastPathComponent
+                index[name, default: []].append(
+                    Declaration(
+                        kind: String(source[kindRange]),
+                        inherits: inherits,
+                        file: url.lastPathComponent
+                    )
                 )
             }
         }
         return index
     }
 
+    /// Names the other declarations when a name is declared more than once, so
+    /// the reader is not sent to one file to find a violation another file
+    /// caused.
+    private static func ambiguitySuffix(_ decls: [Declaration]) -> String {
+        guard decls.count > 1 else { return "" }
+        let where_ = decls.map { "\($0.kind) in \($0.file)" }.joined(separator: ", ")
+        return " (this name is declared \(decls.count) times — \(where_) — so which one a "
+            + "filesystem walk sees first is undefined; every one of them has to be filterable.)"
+    }
+
     /// XCTest subclassing is transitive: `BackgroundingCycleTests` inherits
     /// from `InterruptionCycleSuiteBase`, which is the `XCTestCase`. A check
     /// that looked only one level up would report eight working entries broken.
+    ///
+    /// A name resolves only when EVERY declaration of it reaches `XCTestCase`;
+    /// an ancestor that is ambiguous is not evidence for the descendant.
     private static func reachesXCTestCase(
         _ name: String,
-        in index: [String: Declaration],
+        in index: [String: [Declaration]],
         depth: Int = 0
     ) -> Bool {
-        guard depth < 16, let decl = index[name] else { return false }
+        guard depth < 16, let decls = index[name], !decls.isEmpty else { return false }
+        return decls.allSatisfy { reachesXCTestCase(from: $0, in: index, depth: depth) }
+    }
+
+    private static func reachesXCTestCase(
+        from decl: Declaration,
+        in index: [String: [Declaration]],
+        depth: Int = 0
+    ) -> Bool {
+        guard depth < 16 else { return false }
         if decl.inherits.contains("XCTestCase") { return true }
         return decl.inherits.contains { reachesXCTestCase($0, in: index, depth: depth + 1) }
     }
