@@ -743,6 +743,20 @@ struct EligibilityLadderMonotonicityTests {
         )
         try #require(pushedCues.isEmpty, "shadow mode skips nothing")
 
+        // THE CONTROL'S OBSERVABLE, chosen because the obvious one does not
+        // work. R1 measured it: deleting the `.markOnly` filter from
+        // `readmitModeDivertedSuggestions` left every assertion below GREEN,
+        // because a re-delivered `.markOnly` row is routed straight back to the
+        // suggest tier by `receiveAdWindows`' own gate. "It is still in the
+        // suggest tier" therefore cannot tell "it was never re-delivered" from
+        // "it was re-delivered and bounced" — and the difference is not
+        // cosmetic: re-delivery takes a fresh producer-mutation generation,
+        // which invalidates any genuine revision for that id that is in flight.
+        // The ingest census can tell them apart, because a swept-up row is
+        // stamped a second time.
+        let armedBeforePill = await orchestrator
+            .adWindowIngestOutcomeCount(.armedSuggest)
+
         // The listener turns the control up.
         await orchestrator.setActiveSkipMode(.auto)
 
@@ -761,10 +775,160 @@ struct EligibilityLadderMonotonicityTests {
         #expect(
             await orchestrator.activeSuggestWindowIDs() == ["wq34-pill-markonly"],
             """
-            THE CONTROL: a `.markOnly` row is in the suggest tier because of a \
-            precision verdict about the ROW, not because of the mode. No \
-            instruction promotes it, and a re-admission that swept it up would \
-            be auto-skipping a population the gate deliberately excluded.
+            a `.markOnly` row is in the suggest tier because of a precision \
+            verdict about the ROW, not because of the mode. No instruction \
+            promotes it, and a re-admission that swept it up would be \
+            auto-skipping a population the gate deliberately excluded.
+            """
+        )
+        #expect(
+            await orchestrator.adWindowIngestOutcomeCount(.armedSuggest)
+                == armedBeforePill,
+            """
+            THE CONTROL, MEASURED: the pill RE-DELIVERED the `.markOnly` row. \
+            The assertion above cannot see that — `receiveAdWindows` puts it \
+            straight back — but the census can, and a re-delivery costs a \
+            producer-mutation generation for a row no instruction can ever \
+            promote.
+            """
+        )
+    }
+
+    // MARK: - 5c. The mode gate the diversion took out of coverage
+
+    /// THE `.shadow` / `.manual` ARMS OF `evaluateWindow`, pinned through the
+    /// one door that still reaches them.
+    ///
+    /// Before this bead, three tests reddened when the `.manual` arm was made
+    /// to return `.applied` — they delivered a row through an admission door on
+    /// a non-`.auto` show and asserted no `.applied` decision, so the mode
+    /// switch was the thing under test. After the diversion those rows never
+    /// reach the switch, the repaired tests assert the diversion instead, and
+    /// the mutation became invisible to the ENTIRE `PlayheadFastTests` plan
+    /// (measured, R1: `RED (76 known / 4 NEW)`, all four NEW in the
+    /// scheduler/grant families this box produces on a clean tree).
+    ///
+    /// The arm is still live production code. `injectUserMarkedAd` — the
+    /// in-session "Hearing an ad" mark and the transcript mark — writes
+    /// STRAIGHT into `windows` and calls `evaluateAndPush`, bypassing both
+    /// admission doors and therefore the fallback (playhead-d2it). For that
+    /// row, and for a row demoted mid-episode by the skip control
+    /// (playhead-4xw4), the mode switch is the only thing between the listener
+    /// and a skip nobody authorised. Two of those three doors are still
+    /// unprobed; see playhead-l8c2.
+    @Test(
+        "A row that bypasses both admission doors is still held by the mode gate",
+        arguments: [SkipMode.shadow, .manual]
+    )
+    func managedRowOnANonAutoShowIsNeverSkipped(mode: SkipMode) async throws {
+        let (orchestrator, _, _) = try await Self.makeHarness(mode: mode)
+        await orchestrator.beginEpisode(
+            analysisAssetId: Self.assetId,
+            episodeId: Self.episodeId,
+            podcastId: Self.podcastId
+        )
+        nonisolated(unsafe) var pushedCues: [CMTimeRange] = []
+        await orchestrator.setSkipCueHandler { pushedCues = $0 }
+
+        let windowId = "wq34-modegate-\(mode.rawValue)"
+        await orchestrator.injectUserMarkedAd(
+            start: Self.spanStart,
+            end: Self.spanEnd,
+            analysisAssetId: Self.assetId,
+            windowId: windowId
+        )
+
+        try #require(
+            await orchestrator.activeWindowIDs().contains(windowId),
+            """
+            setup: the injection writes into `windows` directly, so this row IS \
+            in the managed tier whatever the mode — if that ever stops being \
+            true the assertions below prove nothing
+            """
+        )
+        #expect(
+            pushedCues.isEmpty,
+            "\(mode) is not an authorisation to cut audio, whatever door the row came through"
+        )
+        #expect(
+            !(await orchestrator.getDecisionLog())
+                .contains { $0.decision == .applied },
+            "and no `.applied` decision was logged for it"
+        )
+    }
+
+    // MARK: - 5d. The second door's diversion leaves the managed tier
+
+    /// playhead-rfu-sad AT THE SECOND DOOR, which nothing proved until R1.
+    ///
+    /// `receiveAdDecisionResults`' diversion calls `retireManagedWindowIfPresent`
+    /// before registering the suggestion. Deleting that call left all 133 tests
+    /// in this bead's scope GREEN, because
+    /// `decisionResultDoorAlsoDivertsToSuggest` above delivers a row the
+    /// managed tier never held — there is nothing for the retire to do.
+    ///
+    /// The state it guards is reachable: a row admitted while its class was
+    /// `.auto`, the listener turning the skip control DOWN mid-episode (which
+    /// does not clear `windows` — playhead-4xw4), and then the backfill's
+    /// fusion handoff arriving for the same id. A window in both maps can
+    /// re-fire `acceptSuggestedSkip` and synthesize a duplicate managed window
+    /// under a fresh UUID.
+    ///
+    /// The seek is the fixture, not the subject: it is the one branch of
+    /// `evaluateWindow` that leaves a managed window at `.confirmed`, which is
+    /// what keeps this row clear of the two `.applied` exclusions.
+    @Test("The decision-result door's diversion empties the managed tier it took the row from")
+    func decisionResultDoorDivertsOutOfTheManagedTier() async throws {
+        let (orchestrator, _, _) = try await Self.makeHarness(mode: .auto)
+        await orchestrator.beginEpisode(
+            analysisAssetId: Self.assetId,
+            episodeId: Self.episodeId,
+            podcastId: Self.podcastId
+        )
+        await orchestrator.setSkipCueHandler { _ in }
+        await orchestrator.recordUserSeek(to: 0)
+
+        let row = Self.aggregatedWindow(
+            id: "wq34-door2-both-tiers",
+            gate: .eligible
+        )
+        await orchestrator.receiveAdWindows([row])
+        try #require(
+            await orchestrator.activeWindowIDs().contains(row.id),
+            "setup: an auto-class row reaches the MANAGED tier"
+        )
+
+        // The listener turns the control down. playhead-4xw4: this does NOT
+        // clear `windows`, so the row outlives the mode it was admitted under.
+        await orchestrator.setActiveSkipMode(.manual)
+        try #require(
+            await orchestrator.activeWindowIDs().contains(row.id),
+            "setup: the demotion leaves the already-admitted row managed (playhead-4xw4)"
+        )
+
+        // The backfill's fusion handoff arrives for the same id.
+        await orchestrator.receiveAdDecisionResults([
+            AdDecisionResult(
+                id: row.id,
+                analysisAssetId: row.analysisAssetId,
+                startTime: row.startTime,
+                endTime: row.endTime,
+                skipConfidence: row.actuationConfidence,
+                eligibilityGate: .eligible,
+                recomputationRevision: 1
+            ).withProducerRevision(row)
+        ])
+
+        #expect(
+            await orchestrator.activeSuggestWindowIDs().contains(row.id),
+            "the second door diverts a row its class can no longer act on"
+        )
+        #expect(
+            !(await orchestrator.activeWindowIDs().contains(row.id)),
+            """
+            the row is in BOTH tiers — playhead-rfu-sad: a still-visible suggest \
+            banner over a managed window can re-fire acceptSuggestedSkip and \
+            synthesize a duplicate managed window under a fresh UUID
             """
         )
     }

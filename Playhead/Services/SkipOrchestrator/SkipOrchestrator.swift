@@ -6899,12 +6899,13 @@ actor SkipOrchestrator {
            !replacesManagedMaterial {
             anchors = stamped
         } else {
-            anchors = (
-                start: AutoSkipEdgeAnchor(rawValue: adWindow.startEdgeAnchor)
-                    ?? .unanchored,
-                end: AutoSkipEdgeAnchor(rawValue: adWindow.endEdgeAnchor)
-                    ?? .unanchored
-            )
+            // playhead-bllt: through the SHARED row decode, for the reason
+            // `resolvedEdgeAnchors` states one screen down — the row→anchors
+            // read had grown three spellings and was about to grow a fourth.
+            // A router that exists to stop two expressions of one question
+            // (see the doc above) must not be a fourth expression of another.
+            let support = adWindow.extentSupport
+            anchors = (start: support.startAnchor, end: support.endAnchor)
         }
         return activeDetectorSkipModes.mode(
             for: SkipDetectorClass.classify(

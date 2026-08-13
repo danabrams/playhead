@@ -83,8 +83,20 @@ enum HotPathAdmission: Int, Sendable, Hashable, Comparable, CaseIterable {
     /// experienced. `SkipOrchestrator.managedTierWouldBeSilent` is what makes
     /// the rung honest: a row the managed tier cannot act on is routed to the
     /// suggest tier instead, so this case is now either a skip or the rung
-    /// below it, never nothing. Nothing in this file changed; the claim it was
-    /// making simply became true.
+    /// below it. Nothing in this file changed; the claim it was making became
+    /// true.
+    ///
+    /// TRUE AT THE TWO ADMISSION DOORS, which is where tier membership is
+    /// decided — not everywhere, and the R1 review round found the unqualified
+    /// version of this sentence worth correcting rather than leaving as the
+    /// next reader's premise. Three ways in bypass those doors and can still
+    /// reach the listener with nothing: an in-session `injectUserMarkedAd`
+    /// (playhead-d2it), a row admitted while its class was `.auto` and demoted
+    /// mid-episode by the skip control (playhead-4xw4), and a materially
+    /// changed revision of an already-applied row, which the `.applied`
+    /// exclusion keeps in the managed tier (playhead-gybg). Read the rung as
+    /// honest for what a PRODUCER delivers, and read those three before
+    /// stating it unconditionally.
     case autoSkip = 2
 
     static func < (lhs: Self, rhs: Self) -> Bool { lhs.rawValue < rhs.rawValue }
