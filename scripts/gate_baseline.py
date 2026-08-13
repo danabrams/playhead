@@ -230,6 +230,43 @@ WHAT THE SET CANNOT SEE, named rather than glossed:
     a suite that died before any of it started. The set says which verdicts are
     missing, never how much of the plan went unjudged.
 
+THE `.xcresult` IS NOT A BETTER SOURCE. IT IS A WORSE ONE (R3, 2026-08-13)
+--------------------------------------------------------------------------
+Five censuses in a row were derived from this text log, so the sixth was
+derived from the structured result bundle instead — a database, immune to
+stdout interleaving by construction. It CONFIRMS 11 and 11, the same eleven,
+on both runs. It also shows why the bundle must not replace the console.
+
+  * The bundle's TEST TREE has no unjudged nodes at all: every node carries
+    Passed / Failed / Skipped. "Present but unjudged" is EMPTY there, so a
+    casualty is ABSENT-FROM-BUNDLE, and absence needs a roster to be visible.
+  * The roster is the bundle's ACTION LOG, which carries a `Run test case`
+    section per test titled `Suite/function()` — 11,893 on main, and a strict
+    superset of the 10,845 in the tree (0 in the tree are missing a section).
+  * 1,048 of those sections have `duration: 0` and NO tree node: their results
+    were never committed to the database. 1,035 of the 1,048 demonstrably RAN
+    AND PASSED — `high confidence FM result shows brand name` is in the console
+    as `passed after 195.586 seconds` — because stdout was flushed and the
+    result stream was not. On mn5e it is 1,121 lost and 1,108 with a console
+    verdict.
+  * Exactly 13 of the 1,048 lack a console verdict, and 2 of those are an
+    artefact of resolving a `@Test` whose display name is a Swift multi-line
+    string literal. The remaining ELEVEN are the census, on both runs.
+
+So the bundle is a sound INDEPENDENT ROSTER and a bad outcome source: its own
+casualty population is ~95x larger than the truth. Two things it gives that the
+console cannot, both used by playhead-rouw: the structured `Suite/function()`
+identity (the eleven are DownloadManagerCacheTests 5,
+DownloadManagerImmutableArtifactTests 3, BackgroundDownloadCompletionTests 2,
+StreamingDownloadOwnershipTests 1 — identical on both runs), and the fact that
+the crash banner carries NO message in either the console or the bundle.
+
+Two corroborations fell out of it. The skip parsing is exact — the bundle
+records 41 skips on main and 42 on mn5e, and this module counts 41 and 42. And
+the display-name collision cost is 64 colliding names over 141 ids, 0.59 % of
+10,833, with NONE of the eleven sharing a name with a test that reported: the
+collision limit above is real but does not touch this census.
+
 UNRECORDED IS NOT ZERO. A baseline with no `no_verdict` key has never recorded
 the population: the arm is INERT and the verdict says so out loud. A key
 present but EMPTY is a positive claim that no test should lose a verdict, and
