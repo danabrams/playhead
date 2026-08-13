@@ -22,6 +22,17 @@
 # counts ONLY the Swift Testing half. A pass can print that line and still end
 # in `** TEST FAILED **` — it does today; see playhead-1och.
 #
+# WHAT IS RED, AND WHY IT IS NOT THE TESTS' FAULT (playhead-1och, 2026-08-13).
+# `PlayheadRuntimeLaunchPerfTests.testInitFitsLaunchBudget` and
+# `PlayheadRuntimeMainActorFreedomTests.testMainActorIsNotHeldDuringRuntimeInit`
+# both fail, and they are the same defect measured from two sides:
+# `CapabilitiesService()` — one line of `PlayheadRuntime.init` — holds the MAIN
+# ACTOR 0.47-2.13 s in a synchronous `SystemLanguageModel` probe. Filed as
+# playhead-xul6 (P1). The 250 ms budget was deliberately NOT widened: on the
+# constructions that miss the probe init reads 57-68 ms, so the budget is met
+# with 4x headroom and these two tests are the only things that can see the
+# block. Do not make this pass green by moving either threshold.
+#
 # Env overrides:
 #   PLAYHEAD_DEST     xcodebuild -destination (default: iPhone 17 — must be a
 #                     device that exists; see the note on DEST below)
