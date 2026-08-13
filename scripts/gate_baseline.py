@@ -465,12 +465,52 @@ the casualties. Rails RA20–RA30. **The lesson is the method, not the list: pin
 the CONSEQUENCE clause of a banner, not just its first four letters, and mutate
 the counterpart in BOTH directions before writing down that a class is closed.**
 
-Three survivors are deliberately left, and named here rather than quietly: the
+Two survivors are deliberately left, and named here rather than quietly: the
 mutants that swap only the LEADING GLYPH between the two records' detail lines
 (`!` / `!~` / `~` / `~!`). Their words still say the right thing and the `[kind]`
 label still appears on the `tests` side and never on the census side, so the
 glyph is redundant discrimination — pinning it would be taste, and this repo's
-own rule is that a taste rule in a gate is how gates get routed around.
+own rule is that a taste rule in a gate is how gates get routed around. R5
+re-tested that argument the only way it can be settled — by asking whether any
+OPERATOR acts on the glyph — and nothing does: no script in the repo parses this
+transcript, so the words are the whole interface and the argument holds. It
+holds CONDITIONALLY, which is the part worth writing down: the day something
+greps this output, the glyph stops being redundant and starts being an identity.
+(R4 counted three glyph survivors and there are two: `!~` -> `!` is already
+pinned, by an assertion written for the census promotion rather than for the
+glyph. The set was right about the class and one off about the membership.)
+
+THE FIFTH AXIS IS AN OMISSION, AND FOUR ROUNDS OF MUTANTS COULD NOT SEE IT
+(playhead-o89d R5). R1-R4 pinned four properties of the lines that EXIST —
+spelling, event, consequence, count. R5 enumerated the accept path a second time
+and independently (69 mutants) and found the remaining hole was not a property of
+any line: **a KIND WIDENING had no line at all.** `merge` UNIONS a run's kinds
+into an entry already in the file, so a name recorded `timeout` that fails an
+EXPECTATION comes out recorded `assertion+timeout` and its tolerance doubles.
+Measured end to end: `check` says `FAILS DIFFERENTLY … recorded as timeout,
+failed as assertion` and exits 1; the accept says `(membership unchanged; counts
+updated)`; the identical failure afterwards is GREEN. Fifteen of the 121
+committed entries carry two kinds today. It is the fifth event that makes the
+gate LOOSER — after the two tier demotions, the census prune and the record-level
+arm — and it was the only one nobody had to sign for. `TOLERANCE WIDENED:` and
+`kind_widenings` close it. **An omission cannot be found by mutating a line that
+exists; it is found by enumerating the EVENTS the command can perform and asking
+which of them prints nothing.**
+
+R4's own three fixes were one-directional in exactly the way R1's, R2's and R3's
+were, which is the fifth instance of the pattern and the reason it is now stated
+as a method above: RA29 pinned the PROMOTION detail's `[kind]` and left the
+DEMOTION's; RA22 pinned `DISARMED:`'s EVENT and left `CENSUS DISARMED:`'s; RA27
+pinned the crash headline's COUNT and left `CARRIED FORWARD:`'s. All three
+mirrors survived the whole suite and are rails RA36-RA38.
+
+TWO SURVIVORS THAT ARE NOT COVERAGE HOLES, because the numbers they swap are
+provably equal. Swapping `failed/seen` on the `tests` PROMOTION detail, or
+`lost/seen` on the census one, changes nothing: `_tier` calls an entry
+deterministic only when `hit_runs == seen_runs`, and those lines print only for
+entries that just crossed into it. The same swap on `~= reported again`, where
+the two differ, is KILLED. Record why a survivor is not a hole, or the next round
+re-derives it.
 
 USAGE
 -----
@@ -1076,6 +1116,44 @@ def tier_changes(baseline, merged):
 def _kinds_label(entry):
     """`timeout`, `assertion`, `assertion+timeout` — never blank."""
     return "+".join(sorted(entry.get("kinds", []))) or KIND_UNKNOWN
+
+
+def kind_widenings(baseline, merged):
+    """Entries whose KIND SET GREW in this merge: `[(key, before, after)]`.
+
+    playhead-o89d R5. The fifth LOOSENING event in the accept path, and the only
+    one that had no banner at all — because it is an OMISSION, and four rounds of
+    mutating the lines that exist could not see it.
+
+    Identity in this file is name AND kind: "a load-sensitive entry means MAY
+    TIME OUT, not MAY FAIL" (CLAUDE.md), and it is the sentence the whole
+    tolerance rests on. `merge` UNIONS a run's kinds into an existing entry, so
+    an entry recorded `timeout` that fails an EXPECTATION comes out of the accept
+    recorded `assertion+timeout` — its tolerance doubled. Measured end to end:
+    `check` reports `FAILS DIFFERENTLY … recorded as timeout, failed as
+    assertion` and exits 1; the accept prints `(membership unchanged; counts
+    updated)`; the identical failure afterwards is GREEN. Fifteen of the 121
+    committed entries carry two kinds today, several at 10/10.
+
+    That is exactly the shape R1 fixed for the `tests` demotion and R2 for the
+    census demotion — the gate getting LOOSER with nobody shown what was given
+    away — one layer down, on the quantity rather than the tier.
+
+    Pure, so the CLI only has to print it. A newly ADDED entry can never appear
+    here: its kinds are what it entered with, so a widening is by construction a
+    change to something already recorded, exactly as a tier change is.
+    """
+    old = baseline.get("tests", {}) if baseline.get("plan") == merged.get("plan") else {}
+    widened = []
+    for key, entry in sorted(merged.get("tests", {}).items()):
+        previous = old.get(key)
+        if previous is None:
+            continue
+        before = set(previous.get("kinds", []))
+        after = set(entry.get("kinds", []))
+        if after > before:
+            widened.append((key, _kinds_label(previous), _kinds_label(entry)))
+    return widened
 
 
 def kind_census(entries):
@@ -1847,6 +1925,7 @@ def main(argv=None):
         added = sorted(set(merged["tests"]) - set(base.get("tests", {})))
         removed = sorted(set(base.get("tests", {})) - set(merged["tests"]))
         promoted, demoted = tier_changes(base, merged)
+        widened = kind_widenings(base, merged)
         save_baseline(baseline_path, merged)
         print("gate-baseline: wrote %s" % baseline_path)
         print("  plan=%s  observations=%d  known-broken=%d"
@@ -1864,7 +1943,12 @@ def main(argv=None):
             print("  + [%s] %s" % (_kinds_label(merged["tests"][key]), key))
         for key in removed:
             print("  - %s" % key)
-        if not added and not removed:
+        # playhead-o89d R5: `and not widened`. The parenthetical's second clause
+        # is a positive claim that ONLY counts moved, and a widened KIND is not a
+        # count — it is the tolerance. R4 made the same correction for the added
+        # set (an accept with `+` lines must not also claim it changed nothing);
+        # this is that correction on the one change that has no membership line.
+        if not added and not removed and not widened:
             print("  (membership unchanged; counts updated)")
         # playhead-tl6l: say what the crash cost this observation. An accept is
         # a claim a human signs in a commit message, and "27 of these entries
@@ -2044,6 +2128,25 @@ def main(argv=None):
             print("  ~ no longer deterministic [%s] %d/%d  %s" % (
                 _kinds_label(entry), entry["failed_runs"], entry["seen_runs"], key,
             ))
+        # playhead-o89d R5. The FIFTH loosening event, and the only one that had
+        # no line of its own — see `kind_widenings` for why an omission is the
+        # one shape mutating the existing lines cannot find. Spelled as none of
+        # the six banners above it, because it is neither a tier change nor a
+        # membership change: what moves is the TOLERANCE, which is the thing the
+        # gate's whole "the tolerance is not a hole" argument rests on.
+        if widened:
+            print(
+                "  TOLERANCE WIDENED: %d recorded entr%s failed in a KIND it had not "
+                "shown before, and accepting UNIONS that kind into its record. Each "
+                "was reported `FAILS DIFFERENTLY` this run, which is what hard-failed "
+                "the gate; from here that kind is absorbed as KNOWN and is no longer "
+                "reported NEW. Identity in this file is name AND kind — recorded as "
+                "TIMEOUT does not licence FAILING AN EXPECTATION — so say in the "
+                "commit message why the new kind is the same defect."
+                % (len(widened), "y" if len(widened) == 1 else "ies")
+            )
+            for key, before, after in widened:
+                print("  ± [%s -> %s]  %s" % (before, after, key))
         return EXIT_OK
 
     if not baseline_path.exists():

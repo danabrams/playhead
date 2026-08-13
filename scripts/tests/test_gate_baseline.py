@@ -1457,6 +1457,14 @@ class CensusMergeTests(unittest.TestCase):
         # who reads `PASSING` concludes a failing report is safe. It is not.
         self.assertIn("  CENSUS ARMED: 1 census entry crossed into DETERMINISTIC", out)
         self.assertIn("REPORTING AGAIN now fails the gate", out)
+        # playhead-o89d R5. R4 pinned the CONSEQUENCE clause on both DEMOTION
+        # banners and on the record-level arm, and left this one — the sentence
+        # that says why arming a name is what lets the record ever SHRINK. A
+        # mutant reading "which is why this record can never shrink once the
+        # crash is fixed" survived, and it states R2's objection to a union as
+        # though the design agreed with it.
+        self.assertIn("lets this record shrink when the crash is fixed", out)
+        self.assertNotIn("can never", out)
         self.assertNotIn("PASSING now fails the gate", out)
         # …and a bare `ARMED:` belongs to the failure record, which did not move.
         self.assertNotIn("\n  ARMED:", out)
@@ -1788,11 +1796,97 @@ class AcceptOutputTests(unittest.TestCase):
         self.assertIn("next pass is NOT fatal", out)
         self.assertNotIn("REPORTS AGAIN", out)
 
+    def test_a_demotion_detail_carries_the_ENTRYS_OWN_kind(self):
+        """playhead-o89d R5, the exact mirror of R4's promotion-side rail.
+
+        R4 found the PROMOTION detail's `[kind]` unpinned and closed it (RA29),
+        with the argument that a promoted entry is not in the `added` set so this
+        is the only place its kind is ever shown. Every word of that is true of a
+        DEMOTED entry too, and the demotion assertion above used a timeout entry,
+        so a mutant hard-coding `[timeout]` there passed it. Fifth round, same
+        shape, other direction — which is the pattern this bead is now about.
+        """
+        rc, out = self._accept({"swift-testing::x": (3, ["assertion"])}, 3,
+                               log(st_pass("x"), st_fail_timeout("other")))
+        self.assertEqual(0, rc)
+        self.assertIn("no longer deterministic [assertion] 3/4  swift-testing::x",
+                      out)
+        self.assertNotIn("no longer deterministic [timeout]", out)
+
     def test_an_accept_that_demotes_NOTHING_stays_quiet(self):
         rc, out = self._accept({"swift-testing::x": (1, ["timeout"])}, 1,
                                log(st_fail_timeout("x")))
         self.assertEqual(0, rc)
         self.assertNotIn("DISARMED", out)
+
+    def test_a_REMOVAL_is_named_and_is_not_rendered_as_an_addition(self):
+        """playhead-o89d R5. `+` and `-` are opposite claims about the file.
+
+        A removal is the file SHRINKING — the direction CLAUDE.md calls good news
+        — and it is the only notice an operator gets that a recorded name is no
+        longer known-broken, i.e. that its next failure will be reported NEW.
+        Both a mutant suppressing the line and one rendering it as an ADDITION
+        survived the suite: the same "one line, two opposite meanings" RA24
+        closed on the census side.
+        """
+        rc, out = self._accept({"swift-testing::x": (1, ["timeout"]),
+                                "swift-testing::gone": (1, ["timeout"])}, 1,
+                               log(st_fail_timeout("x")))
+        self.assertEqual(0, rc)
+        self.assertIn("  - swift-testing::gone", out)
+        self.assertNotIn("  + swift-testing::gone", out)
+        self.assertNotIn("membership unchanged", out)
+
+    def test_a_WIDENED_KIND_is_ANNOUNCED_with_both_kinds_and_the_consequence(self):
+        """playhead-o89d R5. The fifth LOOSENING event, and it had NO banner.
+
+        `merge` unions a run's kinds into an existing entry, so a name recorded
+        `timeout` that fails an EXPECTATION comes out recorded
+        `assertion+timeout`. Identity in this file is name AND kind — that is the
+        whole of "the tolerance is not a hole" — so this doubles what the entry
+        absorbs. Measured before the fix: `check` said `FAILS DIFFERENTLY` and
+        exited 1, the accept said `(membership unchanged; counts updated)`, and
+        the identical failure afterwards was GREEN.
+
+        Four rounds missed it because an omission cannot be found by mutating a
+        line that exists. Both kinds are printed, in order, so a mutant echoing
+        one of them twice dies.
+        """
+        rc, out = self._accept({"swift-testing::x": (2, ["timeout"])}, 3,
+                               log(st_fail_expect("x")))
+        self.assertEqual(0, rc)
+        self.assertIn("TOLERANCE WIDENED: 1 recorded entry", out)
+        self.assertIn("± [timeout -> assertion+timeout]  swift-testing::x", out)
+        # The EVENT and the CONSEQUENCE, by the rule R3/R4 wrote down for the
+        # tier banners: what put the gate red, and what accepting gives away.
+        self.assertIn("FAILS DIFFERENTLY", out)
+        self.assertIn("absorbed as KNOWN and is no longer reported NEW", out)
+        # …and it must not claim that only counts moved. A kind is not a count.
+        self.assertNotIn("membership unchanged", out)
+        # Not spelled as any of the six banners whose subject is something else.
+        self.assertNotIn("ARMED", out)
+        self.assertNotIn("DISARMED", out)
+
+    def test_an_accept_that_widens_NO_KIND_stays_quiet(self):
+        """The entry failing in the SAME kind is the case that must not shout."""
+        rc, out = self._accept({"swift-testing::x": (2, ["timeout"])}, 3,
+                               log(st_fail_timeout("x")))
+        self.assertEqual(0, rc)
+        self.assertNotIn("TOLERANCE WIDENED", out)
+        self.assertNotIn("±", out)
+        self.assertIn("(membership unchanged; counts updated)", out)
+
+    def test_an_ADDED_entry_is_never_reported_as_a_widening(self):
+        """A name entering the file has no prior kind to widen from.
+
+        Guards the direction that would make the banner meaningless: if every
+        first sighting counted, the loud line would fire on every accept and stop
+        being read, which is the failure mode RA17 closed for the census.
+        """
+        rc, out = self._accept({}, 2, log(st_fail_timeout("slow"),
+                                          st_fail_expect("wrong")))
+        self.assertEqual(0, rc)
+        self.assertNotIn("TOLERANCE WIDENED", out)
 
     def test_a_CENSUS_demotion_is_ANNOUNCED_and_named(self):
         """playhead-o89d R2. R1 fixed this asymmetry one layer up and left it here.
@@ -1826,6 +1920,16 @@ class AcceptOutputTests(unittest.TestCase):
         self.assertIn("Accepting revokes that licence", out)
         self.assertIn("its next report is NOT fatal", out)
         self.assertNotIn("STILL fatal", out)
+        # playhead-o89d R5, the half R4 pinned on the OTHER demotion and not on
+        # this one: the EVENT. R4 added RA22 because `DISARMED:` could be made to
+        # name the census event (`REPORTS AGAIN`) as what hard-failed the gate;
+        # the mirror — this banner naming the `tests` event (`NOW PASSES`) —
+        # survived. For a census entry it is REPORTING AT ALL that is fatal, pass
+        # OR fail, so an operator sent looking for a PASS is looking for the one
+        # thing that is not what happened. Same argument as RA19, demotion side.
+        self.assertIn("watched it START AND REPORT", out)
+        self.assertIn("(`REPORTS AGAIN`)", out)
+        self.assertNotIn("NOW PASSES", out)
 
     def test_an_accept_that_demotes_NO_CENSUS_ENTRY_stays_quiet(self):
         """The load-sensitive casualty coming back is the case that must NOT shout."""
@@ -1864,15 +1968,69 @@ class AcceptOutputTests(unittest.TestCase):
         self.assertIn("CENSUS NOW LIVE: 1 crashed-host name(s)", out)
         self.assertIn("It takes 3 before an unrecorded casualty can fail the gate", out)
         self.assertIn("they are named and not fatal", out)
+        # playhead-o89d R5. R4 pinned this headline's WORD and its COUNT and left
+        # its CLAIM: a mutant reading "This observation confirms they are still
+        # broken" survived. A test whose host died was never judged at all — that
+        # a lost verdict is not evidence is the whole reason the census exists,
+        # and it is stated in exactly one sentence.
+        self.assertIn("This observation says nothing about them.", out)
 
     def test_an_accept_ANNOUNCES_what_it_carried_forward(self):
+        # playhead-o89d R5. TWO casualties, ONE of them recorded, ONE restart —
+        # three quantities that were interchangeable while all three were 1. R4's
+        # RA27 pinned the crash headline against counting `protected`; the mirror
+        # (this banner counting the whole casualty set) and the restart count
+        # standing in for the casualty count both survived.
         rc, out = self._accept({"swift-testing::x": (1, ["timeout"]),
                                 "swift-testing::lost": (1, ["timeout"])}, 1,
-                               log(st_fail_timeout("x"), st_silent("lost"))
-                               + HOST_RESTART)
+                               log(st_fail_timeout("x"), st_silent("lost"),
+                                   st_silent("stranger")) + HOST_RESTART)
         self.assertEqual(0, rc)
         self.assertIn("CARRIED FORWARD", out)
         self.assertIn("= swift-testing::lost", out)
+        self.assertIn("the host died and 2 test(s) reported nothing", out)
+        self.assertIn("restarted the test host 1 time(s)", out)
+        self.assertIn("CARRIED FORWARD: 1 recorded entry was kept unchanged", out)
+        # …and the reason, which is the argument for carrying rather than pruning.
+        # A mutant inverting it ("a crash IS a rename, and keeping them here is
+        # how the file would grow") survived: it recommends the prune this line
+        # exists to forbid.
+        self.assertIn("a crash is not a rename", out)
+        self.assertIn("the file would shrink without anyone deciding to shrink it",
+                      out)
+
+    def test_the_TRUNCATED_listings_report_the_REMAINDER_not_the_whole_set(self):
+        """playhead-o89d R5. `… and N more` is a REMAINDER, and both said so.
+
+        Two mutants printing the whole set's size there survived — `12 recorded
+        entries were carried forward`, ten listed, `… and 12 more`. It is the
+        count class CLAUDE.md records being wrong four times, in the one place a
+        reader cannot check it against the lines above without counting them.
+        The truncation LENGTH is deliberately not pinned: listing ten or two is a
+        display choice and honest either way, while the remainder is a claim.
+        """
+        silent = ["lost%02d" % i for i in range(12)]
+        loud = ["loud%02d" % i for i in range(12)]
+        rc, out = self._accept(
+            {("swift-testing::" + n): (1, ["timeout"]) for n in silent + loud}, 1,
+            log(*([st_fail_timeout(n) for n in loud]
+                  + [st_silent(n) for n in silent])) + HOST_RESTART)
+        self.assertEqual(0, rc)
+        self.assertIn("CARRIED FORWARD: 12 recorded entries were kept unchanged",
+                      out)
+        self.assertIn("= … and 2 more", out)
+        self.assertNotIn("= … and 12 more", out)
+
+    def test_the_FIRST_census_listing_reports_the_REMAINDER_too(self):
+        """The same claim on the other truncated listing, which had no rail."""
+        silent = ["lost%02d" % i for i in range(12)]
+        rc, out = self._accept(
+            {}, 1, log(*([st_fail_timeout("x")]
+                         + [st_silent(n) for n in silent])) + HOST_RESTART)
+        self.assertEqual(0, rc)
+        self.assertIn("CENSUS NOW LIVE: 12 crashed-host name(s)", out)
+        self.assertIn("~ … and 2 more", out)
+        self.assertNotIn("~ … and 12 more", out)
 
     def test_a_clean_accept_says_nothing_about_crashes(self):
         rc, out = self._accept({"swift-testing::x": (1, ["timeout"])}, 1,
