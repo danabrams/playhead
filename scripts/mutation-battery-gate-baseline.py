@@ -569,6 +569,41 @@ MUTATIONS = [
         [T + "test_an_accept_that_demotes_NO_CENSUS_ENTRY_stays_quiet"],
     ),
     (
+        # playhead-o89d R3. RA16/RA17 gave the two DEMOTIONS distinct spellings
+        # and the module docstring wrote the rule down as "neither side can be
+        # read as the other" — for the direction that LOOSENS only. The two
+        # PROMOTIONS were both `ARMED:`, and this mutant proved they were
+        # interchangeable: it survived the whole suite while telling the operator
+        # that a crashed-host name's PASSING is what becomes fatal.
+        "RA18", GB,
+        "the CENSUS promotion banner is spelled exactly like the `tests` one, so "
+        "the accept that arms a hard failure on a crashed-host name is indis"
+        "tinguishable from the one that arms it on a recorded failure — and "
+        "states the wrong consequence for the record it belongs to",
+        '                "  CENSUS ARMED: %d census entr%s crossed into DETERMINISTIC — lost "\n'
+        '                "their verdict in every one of their observations. Each of these "\n'
+        '                "REPORTING AGAIN now fails the gate, which is what lets this record "\n'
+        '                "shrink when the crash is fixed."',
+        '                "  ARMED: %d entr%s crossed into DETERMINISTIC — failed in every one "\n'
+        '                "of their observations. Each of these PASSING now fails the gate, so "\n'
+        '                "say in the commit message why that is the right reading."',
+        [CM + "test_the_accept_ANNOUNCES_a_census_promotion_and_the_ARMING",
+         T + "test_a_promotion_is_ANNOUNCED_and_named"],
+    ),
+    (
+        # The half of RA18 that survives a rename: keep the prefix, lie about
+        # the event. For a census entry it is REPORTING AT ALL that is fatal —
+        # pass OR fail — so an operator told `PASSES` concludes a failing report
+        # is safe, which is the one thing the census arm exists to deny.
+        "RA19", GB,
+        "the census promotion banner names PASSING as the fatal event, when what "
+        "is fatal for a crashed-host name is REPORTING AT ALL — the operator "
+        "signs a commit message claiming a licence narrower than the one armed",
+        '                "REPORTING AGAIN now fails the gate, which is what lets this record "',
+        '                "PASSING now fails the gate, which is what lets this record "',
+        [CM + "test_the_accept_ANNOUNCES_a_census_promotion_and_the_ARMING"],
+    ),
+    (
         "RA4", GB,
         "the census diff is computed in the wrong direction, so a recovery is "
         "reported as a new casualty and a genuine new casualty is reported as "

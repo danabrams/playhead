@@ -1439,7 +1439,19 @@ class CensusMergeTests(unittest.TestCase):
         self.assertEqual(0, rc)
         # Crossing arms a hard failure on that name, so it must be named.
         self.assertIn("!~ now deterministic 3/3  swift-testing::lost", out)
-        self.assertIn("CENSUS ARMED: 3 observations recorded", out)
+        self.assertIn("CENSUS RECORD ARMED: 3 observations recorded", out)
+        # playhead-o89d R3. The banner is spelled for its OWN side, and it says
+        # which event became fatal. Both were unpinned: a mutant that respelled
+        # this banner as the `tests` promotion verbatim — "Each of these PASSING
+        # now fails the gate", about a crashed-host name — SURVIVED the suite, as
+        # did one that changed `REPORTING AGAIN` here to `PASSES`. For a census
+        # entry it is REPORTING AT ALL that is fatal, pass or fail, so an operator
+        # who reads `PASSING` concludes a failing report is safe. It is not.
+        self.assertIn("  CENSUS ARMED: 1 census entry crossed into DETERMINISTIC", out)
+        self.assertIn("REPORTING AGAIN now fails the gate", out)
+        self.assertNotIn("PASSING now fails the gate", out)
+        # …and a bare `ARMED:` belongs to the failure record, which did not move.
+        self.assertNotIn("\n  ARMED:", out)
 
     def test_the_accept_NAMES_a_census_entry_that_reported_again(self):
         import contextlib
@@ -1632,8 +1644,14 @@ class AcceptOutputTests(unittest.TestCase):
         rc, out = self._accept({"swift-testing::x": (2, ["timeout"])}, 2,
                                log(st_fail_timeout("x")))
         self.assertEqual(0, rc)
-        self.assertIn("ARMED", out)
+        self.assertIn("  ARMED:", out)
         self.assertIn("now deterministic [timeout] 3/3  swift-testing::x", out)
+        # playhead-o89d R3, the mirror of the `DISARMED` discrimination R2
+        # shipped: it is the FAILURE record that moved, and what its promotion
+        # makes fatal is a PASS. The census banner says the opposite thing about
+        # a different record and must not be able to stand in for this one.
+        self.assertIn("PASSING now fails the gate", out)
+        self.assertNotIn("CENSUS ARMED", out)
 
     def test_an_accept_that_promotes_NOTHING_stays_quiet(self):
         rc, out = self._accept({"swift-testing::x": (1, ["timeout"])}, 1,

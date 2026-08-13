@@ -422,11 +422,29 @@ promotion arms a hard failure; a DEMOTION revokes one, which is the gate getting
 LOOSER, and it was the quietest line in the output on the `tests` side (four bare
 words) and had no line at all of its own on the census side (an entry coming back
 was spelled `~= reported again`, identically to the load-sensitive case where
-coming back is good news and costs nothing). Both now print a banner symmetric
-with `ARMED:` — `DISARMED:` for a recorded failure, `CENSUS DISARMED:` for a
-crashed-host casualty — naming the tier being LEFT, the event, and the
-consequence. The two spellings differ so that neither side can be read as the
-other, which is this module's recurring defect wearing its usual clothes.
+coming back is good news and costs nothing). Both now print a banner naming the
+tier being LEFT, the event, and the consequence.
+
+FOUR TIER BANNERS, FOUR SPELLINGS, AND THE RULE IS THE PREFIX (playhead-o89d R3).
+R2 gave the two DEMOTIONS distinct spellings and wrote the rule down as "neither
+side can be read as the other" — while leaving the two PROMOTIONS spelled
+identically, both `ARMED:`, with opposite consequences. Measured at R3: a mutant
+that respells the census promotion as the `tests` one VERBATIM, so the operator
+is told "Each of these PASSING now fails the gate" about a crashed-host name,
+SURVIVED the whole suite; so did one that changed the census banner's own
+`REPORTING AGAIN` to `PASSES`. The rule now holds in both directions and is
+carried by rails rather than by prose:
+
+    ARMED:               a recorded FAILURE became deterministic; its PASSING is fatal
+    DISARMED:            …and stopped being; that licence is revoked
+    CENSUS ARMED:        a recorded CASUALTY became deterministic; its REPORTING is fatal
+    CENSUS DISARMED:     …and stopped being; that licence is revoked
+
+`CENSUS RECORD ARMED:` is deliberately none of the four. Its subject is the
+record rather than an entry — the census reached MIN_RUNS_FOR_DETERMINISTIC
+observations, so a casualty NOT in the record is now fatal — and while it was
+spelled `CENSUS ARMED:` it read as the counterpart of `CENSUS DISARMED:`, which
+it is not.
 
 USAGE
 -----
@@ -1866,12 +1884,28 @@ def main(argv=None):
                 "not deleted, because one quiet run is not evidence a crash is fixed."
                 % (len(was.tests), len(now.tests), now.runs_observed)
             )
+        # playhead-o89d R3. This banner used to be spelled `ARMED:` — the SAME
+        # four letters as the `tests` promotion 70 lines below, whose consequence
+        # is the opposite one (a recorded failure's PASSING becomes fatal; a
+        # recorded casualty's REPORTING AT ALL becomes fatal). R2 gave the two
+        # DEMOTIONS distinct spellings and wrote the rule down as "neither side
+        # can be read as the other", and left the two PROMOTIONS identical.
+        # Measured: a mutant that respells this banner as the `tests` one
+        # verbatim — telling the operator "Each of these PASSING now fails the
+        # gate" about a crashed-host name — SURVIVED the whole suite, as did one
+        # that changed this line's own `REPORTING AGAIN` to `PASSES`. So did
+        # `ARMED/DISARMED:`, which is THE MUTANT R2 NAMED as its reason for
+        # replacing R1's rail: R1's rail was indeed vacuous, and R2's two
+        # replacements did not reach this banner either, because both of their
+        # scenarios demote rather than promote. Diagnosing a vacuous rail and
+        # closing the hole it left open are two jobs. All three are rail-killed
+        # now; see `test_the_accept_ANNOUNCES_a_census_promotion…` and RA18/RA19.
         if promoted_c:
             print(
-                "  ARMED: %d census entr%s crossed into DETERMINISTIC — lost their "
-                "verdict in every one of their observations. Each of these REPORTING "
-                "AGAIN now fails the gate, which is what lets this record shrink when "
-                "the crash is fixed."
+                "  CENSUS ARMED: %d census entr%s crossed into DETERMINISTIC — lost "
+                "their verdict in every one of their observations. Each of these "
+                "REPORTING AGAIN now fails the gate, which is what lets this record "
+                "shrink when the crash is fixed."
                 % (len(promoted_c), "y" if len(promoted_c) == 1 else "ies")
             )
             for key in promoted_c:
@@ -1907,10 +1941,16 @@ def main(argv=None):
                 entry = now.tests[key]
                 print("  ~! no longer deterministic %d/%d  %s"
                       % (entry["lost_runs"], entry["seen_runs"], key))
+        # `CENSUS RECORD ARMED:` rather than `CENSUS ARMED:` (playhead-o89d R3).
+        # Its subject is the RECORD, not an entry: it fires once, when the census
+        # reaches MIN_RUNS_FOR_DETERMINISTIC observations, and what it arms is the
+        # rule for names that are NOT in the record. The banner above is about
+        # named entries that ARE. Sharing a spelling made the second look like the
+        # counterpart of `CENSUS DISARMED:`, which it is not.
         if was is not None and not was.armed and now.armed:
             print(
-                "  CENSUS ARMED: %d observations recorded. From this accept on, a test "
-                "that loses its verdict and is NOT in the record fails the gate."
+                "  CENSUS RECORD ARMED: %d observations recorded. From this accept on, "
+                "a test that loses its verdict and is NOT in the record fails the gate."
                 % now.runs_observed
             )
         no_verdict = run.no_verdict
