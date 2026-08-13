@@ -25,7 +25,13 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-DEST="${PLAYHEAD_DEST:-platform=iOS Simulator,name=iPhone 17 Pro,OS=27.0}"
+# playhead-o89d: was `iPhone 17 Pro,OS=27.0`, which has not existed on this box
+# for as long as anyone has looked — xcodebuild exits before running one test
+# with "Unable to find a device matching the provided destination specifier".
+# That is the whole point of this script failing silently: a PerfGate'd test is
+# only MOVED here rather than deleted if this pass can actually start. Match
+# fast-gate.sh's default so the two agree on one destination.
+DEST="${PLAYHEAD_DEST:-platform=iOS Simulator,name=iPhone 17}"
 DERIVED="${PLAYHEAD_DERIVED:-.derivedData-perf}"
 
 # The measurement tests. Add new load-sensitive tests here AND gate them with
