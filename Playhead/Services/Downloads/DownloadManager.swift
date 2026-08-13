@@ -9,6 +9,7 @@ import CryptoKit
 import Foundation
 import OSLog
 import UIKit
+import os
 // MARK: - Download State Events
 
 /// Progress and completion events for a single episode download.
@@ -582,6 +583,39 @@ actor DownloadManager {
     /// daemon-unavailable branches without a genuinely wedged daemon.
     internal let sessionIO: BackgroundSessionIO
 
+    /// The bound for background task ENUMERATION, on its own serial queue.
+    ///
+    /// playhead-rouw: deliberately not `sessionIO`, and the separation is
+    /// load-bearing rather than tidy. `BackgroundSessionIO`'s work queue is
+    /// serial by design, and `retireBackgroundTransfers` submits one
+    /// enumeration per distinct background session. Sharing the instance
+    /// with `downloadTask(with:)` therefore lets a silent daemon convert one
+    /// `removeCache` into ten seconds during which no download can be
+    /// created either.
+    ///
+    /// MEASURED, and read the attribution carefully because the two numbers
+    /// come from DIFFERENT implementations of this line:
+    ///   * SHARED queue: seventeen enumerations blew their bound in one
+    ///     full-plan run — nearly three minutes of starved download path —
+    ///     and that run lost 217 tests to a crashed host.
+    ///   * OWN queue (what ships): four, in an equivalent run that lost 3.
+    /// The seventeen is the argument FOR the separation, not a property of
+    /// the shipped code. Neither number is stable run to run; the daemon's
+    /// responsiveness on this box is not.
+    ///
+    /// Same behaviour and same bound, so a test that injects `.neverAnswers`
+    /// still stalls this; own queue, so the stall stays inside the
+    /// enumeration.
+    ///
+    /// NOT claimed: that one silent session costs only its own enumeration.
+    /// This queue is serial, so with `useDualBackgroundSessions` on, three
+    /// sessions are enumerated concurrently onto ONE queue and a silent
+    /// first session makes the other two expire without ever being asked.
+    /// The caller still waits at most `io.timeout` — see
+    /// ``boundedAllTasks(of:through:)`` — but it loses all three sources of
+    /// identity rather than one. Filed as playhead-f1wb.
+    internal let enumerationIO: BackgroundSessionIO
+
     // MARK: - Streams
 
     private let progressContinuation: AsyncStream<DownloadProgress>.Continuation
@@ -612,6 +646,9 @@ actor DownloadManager {
         sessionIO: BackgroundSessionIO = .shared
     ) {
         self.sessionIO = sessionIO
+        self.enumerationIO = sessionIO.onItsOwnQueue(
+            labelled: "\(sessionIO.queueLabel).enumeration"
+        )
         let root = cacheDirectory ?? Self.defaultCacheDirectory()
         self.cacheDirectory = root
         self.partialsDirectory = root.appendingPathComponent("partials", isDirectory: true)
@@ -2642,6 +2679,81 @@ actor DownloadManager {
         bgInFlightEpisodes.insert(episodeId)
     }
 
+    /// `URLSession.allTasks` on a BACKGROUND session, bounded and run OFF the
+    /// Swift Concurrency cooperative pool — the same containment
+    /// `backgroundDownload` gets for `downloadTask(with:)`.
+    ///
+    /// playhead-rouw. `await session.allTasks` reads like a property access
+    /// and is not one: on `__NSURLBackgroundSession` it takes a barrier on
+    /// the session's serial work queue and asks `nsurlsessiond` over XPC. It
+    /// therefore carries BOTH hazards playhead-nsjn measured — the entering
+    /// call can park the calling thread, and the reply can simply never
+    /// arrive. Unbounded, on an actor, that is an `await` which never
+    /// resumes: the test that made the call NEVER REPORTS A VERDICT, and a
+    /// full-plan gate that lost eight to eleven download tests per run for
+    /// nine runs was exactly this, with no crash, no message and no crash
+    /// report because nothing crashed.
+    ///
+    /// Two bounds, deliberately, both `io.timeout`:
+    ///   * the INNER one releases the dedicated queue's single thread when
+    ///     the daemon never replies, so one wedged call does not strand
+    ///     `.shared` for the life of the process;
+    ///   * the OUTER one (`perform`'s own deadline) releases the CALLER when
+    ///     the body cannot even start, which is what happens when another
+    ///     caller is holding the session's barrier.
+    /// The caller therefore waits at most `io.timeout`, never longer.
+    ///
+    /// What that does NOT bound is how long the QUEUE stays busy. The two
+    /// deadlines are independent: the outer one starts when the submission
+    /// is made, the inner one when the body reaches the front. A body that
+    /// starts at 9 s and then sits on a silent daemon holds the queue until
+    /// 19 s, with nobody waiting on it from 10 s onward. 2 × `io.timeout`
+    /// is the bound only while `getAllTasks` RETURNS so the latch wait can
+    /// run; if its entering call parks in the session's own barrier — the
+    /// shape playhead-nsjn sampled for `downloadTask(with:)` — the body never
+    /// returns and this queue is stranded for the life of the process, which
+    /// is precisely what `BackgroundSessionIO`'s header declines to claim
+    /// away. Either way it costs one ordinary thread rather than a slice of
+    /// the cooperative pool, which is the
+    /// trade this file exists to make — but a submission arriving inside
+    /// that window is released by its own deadline having never run, and
+    /// logs `did not answer` for a daemon it never spoke to. `starved:
+    /// reached the daemon queue after its caller had already given up` is
+    /// the line that distinguishes the two; read both before concluding the
+    /// daemon is at fault.
+    ///
+    /// `internal` rather than `private` so the force-quit scan in
+    /// `ForceQuitResumeScan.swift` shares this one crossing; it is the only
+    /// other place that enumerates a background session's tasks.
+    internal static func boundedAllTasks(
+        of session: URLSession,
+        through io: BackgroundSessionIO
+    ) async -> [URLSessionTask]? {
+        let identifier = session.configuration.identifier ?? "<non-background>"
+        let bound = io.timeout
+        let answer = await io.perform(
+            label: "allTasks for \(identifier)",
+            running: { () -> [URLSessionTask]? in
+                let reply = OSAllocatedUnfairLock<[URLSessionTask]?>(
+                    initialState: nil
+                )
+                let latch = DispatchSemaphore(value: 0)
+                session.getAllTasks { tasks in
+                    reply.withLock { $0 = tasks }
+                    latch.signal()
+                }
+                guard latch.wait(timeout: .now() + bound) == .success else {
+                    return nil
+                }
+                return reply.withLock { $0 }
+            }
+        )
+        // `perform` reports nil when the CALLER's bound expired; the inner
+        // optional is nil when the daemon never replied. Both are "no
+        // answer", so they flatten.
+        return answer ?? nil
+    }
+
     /// Cancels every matching OS-owned background task and retires both the
     /// enumerated identities and any completion already staged for an actor
     /// hop. All three known session identifiers are instantiated here
@@ -2672,14 +2784,16 @@ actor DownloadManager {
             }
         }
 
-        let taskLists = await withTaskGroup(of: (URLSession, [URLSessionTask]).self) {
-            group in
+        let io = enumerationIO
+        let taskLists = await withTaskGroup(
+            of: (URLSession, [URLSessionTask]?).self
+        ) { group in
             for session in sessions {
                 group.addTask {
-                    (session, await session.allTasks)
+                    (session, await Self.boundedAllTasks(of: session, through: io))
                 }
             }
-            var result: [(URLSession, [URLSessionTask])] = []
+            var result: [(URLSession, [URLSessionTask]?)] = []
             for await item in group {
                 result.append(item)
             }
@@ -2687,7 +2801,31 @@ actor DownloadManager {
         }
 
         var retiredAny = false
-        for (session, tasks) in taskLists {
+        for (session, answer) in taskLists {
+            guard let tasks = answer else {
+                // The enumeration is a source of identities, not the only
+                // one — but it is the only source of TASK HANDLES, and
+                // playhead-rouw R2 measured that distinction rather than
+                // assuming it. Losing the enumeration costs the OS-side
+                // `cancel()` for EVERY matching transfer, admitted or not:
+                // the sweep below holds `BackgroundTransferIdentity` values,
+                // never `URLSessionTask`s, so it retires an identity without
+                // being able to cancel the transfer wearing it. (An earlier
+                // draft of this comment said the loss was confined to tasks
+                // this process never admitted; it is not.)
+                //
+                // What survives is the half that protects the BYTES: the
+                // admitted-identity sweep still runs, the identity-required
+                // guard is still armed unconditionally below, and every later
+                // callback for a retired identity is still discarded — so an
+                // uncancelled transfer runs on, and then has its bytes thrown
+                // away on arrival. playhead-sq80 owns the one caller
+                // (`cancelDownload`) that reads the return value.
+                logger.error(
+                    "retireBackgroundTransfers: \(session.configuration.identifier ?? "<none>", privacy: .public) did not answer allTasks — retiring from the admitted identity map only"
+                )
+                continue
+            }
             for task in tasks {
                 guard let taskEpisodeId = task.taskDescription,
                       episodeId == nil || taskEpisodeId == episodeId

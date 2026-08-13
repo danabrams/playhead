@@ -620,4 +620,425 @@ struct DownloadManagerDaemonUnavailableTests {
             await manager._isBackgroundDownloadInFlightForTesting(episodeId: episodeId) == false
         )
     }
+
+    // MARK: - playhead-rouw: the enumeration crossing
+
+    /// `retireBackgroundTransfers` — the shared body of `removeCache`,
+    /// `clearCache` and `cancelDownload` — enumerates the three background
+    /// sessions' tasks, and that crossing was an unbounded
+    /// `await session.allTasks`. When `nsurlsessiond` stopped answering
+    /// under a full-plan run, the await never resumed and the test that made
+    /// it NEVER REPORTED A VERDICT — no pass, no fail, no skip, no crash
+    /// report, because nothing crashed.
+    ///
+    /// What this rail pins is the RECOVERY the bound makes reachable, not
+    /// the bound itself (the bound is `BackgroundSessionIOTests`'
+    /// subject). An unanswered enumeration is a lost SOURCE of identities,
+    /// never a lost CACHE deletion: the bytes still go, and the
+    /// admitted-identity map — the second source, which needs no daemon —
+    /// still retires the transfer so a late completion callback cannot
+    /// resurrect the artifact. An implementation that returned early on the
+    /// unanswered enumeration would leave both of those undone.
+    ///
+    /// Two things the phrase "never a lost deletion" does NOT cover, and
+    /// the distinction matters because only the first is a data-integrity
+    /// property (playhead-rouw R1):
+    ///   * the OS-side `cancel()`. A task this process never admitted —
+    ///     one started before a force-quit and reattached on relaunch — is
+    ///     known ONLY through the enumeration. Losing it leaves that
+    ///     transfer running to completion for an episode the user deleted.
+    ///     Its bytes are still discarded, because every route through
+    ///     `retireBackgroundTransfers` arms an identity-required guard that
+    ///     needs no daemon: `backgroundIdentityRequiredEpisodes` for a
+    ///     single episode, `requireRegisteredBackgroundIdentityAfterBulkClear`
+    ///     for a clear. THAT is what makes failing open acceptable.
+    ///   * `cancelDownload`'s attribution reap, which is conditional on
+    ///     `retireBackgroundTransfers` returning `true` — and it returns
+    ///     `false` when the enumeration is the only source and it was lost.
+    ///     Filed as playhead-sq80.
+    @Test("Cache deletion completes and still retires when the daemon never answers allTasks")
+    func cacheDeletionSurvivesAnUnansweredEnumeration() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let manager = DownloadManager(cacheDirectory: dir, sessionIO: Self.stalledIO())
+        try await manager.bootstrap()
+
+        let episodeId = "rouw-unanswered-enumeration"
+        let identity = await manager._registerBackgroundTransferForTesting(
+            episodeId: episodeId
+        )
+        #expect(
+            await manager._isBackgroundDownloadInFlightForTesting(episodeId: episodeId),
+            "the rail is vacuous unless there was an admitted transfer to retire"
+        )
+        let completeURL = await manager.completeFileURL(for: episodeId)
+        let bytes = Data(repeating: 0x7E, count: 96)
+        try bytes.write(to: completeURL)
+
+        // The call under test. Before the bound this did not return.
+        try await manager.removeCache(for: episodeId)
+
+        #expect(!FileManager.default.fileExists(atPath: completeURL.path))
+        #expect(
+            await manager._isBackgroundDownloadInFlightForTesting(episodeId: episodeId) == false
+        )
+        // The retired identity's own late completion must be discarded
+        // rather than re-placing the bytes the user just deleted. The staged
+        // deposit is REAL and lives outside the cache, so a manager that
+        // failed to retire would place it — without that, the assertion
+        // below would hold for the uninteresting reason that there was
+        // nothing to place.
+        let staged = dir.appendingPathComponent("rouw-staged-deposit")
+        try Data(repeating: 0x3D, count: 96).write(to: staged)
+        await manager.handleBackgroundDownloadComplete(
+            episodeId: episodeId,
+            stagedURL: staged,
+            originalURL: URL(string: "https://cdn.example.com/rouw.mp3"),
+            metadata: HTTPAssetMetadata(
+                etag: "\"rouw\"", contentLength: 96, lastModified: nil
+            ),
+            transferIdentity: identity
+        )
+        #expect(
+            !FileManager.default.fileExists(atPath: completeURL.path),
+            "an unanswered enumeration must not cost the retirement — a late completion for a deleted episode has to stay discarded"
+        )
+        #expect(await manager.cachedFileURL(for: episodeId) == nil)
+    }
+
+    /// A bulk clear takes the same path with `episodeId: nil`, and its
+    /// fail-closed deletion runs AFTER the enumeration. A `throw` or an
+    /// early return on the unanswered daemon would leave the cache intact
+    /// and report success.
+    @Test("clearCache still clears when the daemon never answers allTasks")
+    func clearCacheSurvivesAnUnansweredEnumeration() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let manager = DownloadManager(cacheDirectory: dir, sessionIO: Self.stalledIO())
+        try await manager.bootstrap()
+
+        for index in 0..<3 {
+            let url = await manager.completeFileURL(for: "rouw-clear-\(index)")
+            try Data("audio-\(index)".utf8).write(to: url)
+        }
+        #expect(
+            try await manager.currentCacheSize() > 0,
+            "the rail is vacuous unless there was something to clear"
+        )
+
+        try await manager.clearCache()
+
+        #expect(try await manager.currentCacheSize() == 0)
+    }
+
+    /// The bound is not free: a submission that sits on a silent daemon holds
+    /// the instance's SERIAL queue, and everything behind it is then released
+    /// by its own deadline having never run. MEASURED on the full-plan run
+    /// that shared the queue: seventeen enumerations blew their ten seconds
+    /// (that run also lost 217 tests to a crashed host). The own-queue build
+    /// that ships measured four in an equivalent run, which lost 3 — so the
+    /// seventeen is the argument FOR this separation, not a description of
+    /// the code it protects. Sharing the instance with `downloadTask(with:)`
+    /// would have spent that stall on the download path as well — trading a
+    /// lost verdict for a starved feature, which is not a fix.
+    ///
+    /// The bound and the behaviour must still be the INJECTED ones, or a test
+    /// that stalls the daemon would quietly stop stalling the enumeration and
+    /// the two rails above would go vacuous.
+    @Test("The enumeration bound has its own queue, and keeps the injected bound")
+    func enumerationDoesNotShareTheDownloadPathsQueue() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let injected = Self.stalledIO()
+        let manager = DownloadManager(cacheDirectory: dir, sessionIO: injected)
+
+        let downloadPath = await manager.sessionIO
+        let enumeration = await manager.enumerationIO
+        #expect(
+            downloadPath.queueLabel == injected.queueLabel,
+            "the download path must still be the instance the caller injected"
+        )
+        #expect(
+            enumeration.queueLabel != injected.queueLabel,
+            "an enumeration stalled on a silent daemon must not hold the queue downloads are created on"
+        )
+        #expect(enumeration.timeout == injected.timeout)
+
+        // playhead-rouw R1: the BEHAVIOUR, observed rather than asserted
+        // about. `onItsOwnQueue` copies three fields and the other two are
+        // pinned above by value; `behavior` is not `Equatable`, so before
+        // this the only thing standing between "the seam propagates" and
+        // "it silently does not" was the comment saying it does.
+        //
+        // That gap is not cosmetic. Drop `behavior:` from `onItsOwnQueue`
+        // and `enumerationIO` reverts to `.dedicatedThread`, so the two
+        // recovery rails above stop stalling anything: the simulator's
+        // `nsurlsessiond` answers `getAllTasks` in milliseconds with an
+        // empty list, `removeCache` deletes the bytes for the ordinary
+        // reason, the retirement happens through the admitted map anyway,
+        // and BOTH rails still pass — while covering nothing. A refused
+        // `perform` returning nil is the one observation that separates the
+        // two, and it needs no daemon, no wall clock and no timeout.
+        let probe = await enumeration.perform(label: "rouw-behaviour-probe") { 1 }
+        #expect(
+            probe == nil,
+            """
+            `onItsOwnQueue` dropped the injected behaviour: this instance ran \
+            the body instead of refusing it. Every rail that injects \
+            `.neverAnswers` to reach an enumeration-failed branch is vacuous \
+            when that happens, and passes.
+            """
+        )
+    }
+}
+
+// MARK: - The structural rail
+
+/// playhead-rouw: no background-session task enumeration may be unbounded.
+///
+/// This is a SOURCE canary because the property is not observable from a
+/// test. The two rails above pass on the unbounded implementation too — the
+/// simulator's `nsurlsessiond` answers in milliseconds when the box is quiet,
+/// and no test can arrange the wedged daemon that a full-plan run produces.
+/// The difference between the two implementations is therefore visible only
+/// in the source: whether the crossing goes through the bound.
+///
+/// ─────────────────────────────────────────────────────────────────────────
+/// WHY THIS IS A COUNT OVER A WHOLE DIRECTORY AND NOT A `contains` OVER TWO
+/// FILES (playhead-rouw R1)
+/// ─────────────────────────────────────────────────────────────────────────
+/// The first version of this canary asserted `!code.contains(".allTasks")`
+/// in two named files. Three probes got the exact hazard past it, each
+/// verified by `xcodebuild test-without-building` against this suite:
+///
+///   * `withCheckedContinuation { session.getAllTasks { … } }` — rc=0. The
+///     never-resuming await, spelled with the callback API instead of the
+///     async property. It could not be banned by name because the FIX calls
+///     `getAllTasks`; only "how many, and where" separates them.
+///   * `await session.tasks` — rc=0. The sibling async property. Same
+///     barrier, same XPC round-trip, one token the reviewer did not think
+///     of.
+///   * a third file, not on the audit list — passes by construction, because
+///     a literal list cannot notice a file that never joins it.
+///
+/// So the rail is no longer "this spelling is forbidden here". It is: across
+/// the WHOLE app target, a background session may be asked for its task list
+/// in exactly ONE place, and that place is
+/// `DownloadManager.boundedAllTasks`. Adding a spelling to `Self.tokens`
+/// widens what counts; it does not widen where the count is allowed to be
+/// non-zero. That is the difference between "one identifier, every spelling"
+/// and "the spellings the last reviewer thought of".
+///
+/// Measured cost of the sweep: every `.swift` under `Playhead/` is read, but
+/// only a file whose RAW text mentions a token is put through the
+/// comment/string stripper — two files today, so the precise pass is O(2).
+@Suite("playhead-rouw: background task enumeration is bounded")
+struct BackgroundSessionEnumerationSourceCanaryTests {
+
+    /// Files that may enumerate a background session's tasks. Listed rather
+    /// than globbed so that a NEW file which needs the enumeration has to
+    /// arrive here deliberately, and gets read.
+    private static let auditedFiles = [
+        "Playhead/Services/Downloads/DownloadManager.swift",
+        "Playhead/Services/Downloads/ForceQuitResumeScan.swift",
+    ]
+
+    /// The single file and signature allowed to hold the crossing.
+    private static let crossingFile =
+        "Playhead/Services/Downloads/DownloadManager.swift"
+    private static let crossingSignature = "static func boundedAllTasks("
+
+    /// Every spelling of "ask a `URLSession` what tasks it holds". All four
+    /// are the same call underneath — a barrier on the session's serial work
+    /// queue plus a synchronous XPC round-trip to `nsurlsessiond`.
+    ///
+    /// `.tasks` is the one that needs care: it is a plausible member name on
+    /// types that have nothing to do with URLSession, so it is only counted
+    /// in a file whose CODE mentions `URLSession`. Measured across
+    /// `Playhead/` on 2026-08-13: ZERO occurrences anywhere, URLSession file
+    /// or not, so the narrowing costs no coverage today and keeps a future
+    /// `scheduler.tasks` from turning this rail red for the wrong reason.
+    ///
+    /// CODE, not raw text, and playhead-rouw R2 got a probe past the earlier
+    /// spelling to establish it. The narrowing used to read the RAW source,
+    /// so any file that merely NAMED `URLSession` in a `see also` comment had
+    /// `.tasks` armed against it: a probe holding `batch.tasks.count` on a
+    /// plain struct, with no networking in it at all, failed this rail with
+    /// the message "asks a URLSession for its task list 1 time(s)". The
+    /// predicate that decides WHETHER to count was reading a different
+    /// population from the count itself. A rail that reddens on a file with
+    /// no networking in it is how a rail gets routed around and then deleted.
+    ///
+    /// STILL OPEN, and deliberately: a file that reaches `session.tasks`
+    /// through a `typealias` declared elsewhere never spells `URLSession`,
+    /// so this narrowing does not arm and the crossing passes. Verified —
+    /// two files, rc=0. Closing it needs type resolution, or counting
+    /// `.tasks` unconditionally and accepting the false positive above back.
+    /// Filed rather than guessed.
+    private static let alwaysCountedTokens = [
+        ".allTasks", "getAllTasks", "getTasksWithCompletionHandler",
+    ]
+    private static let urlSessionOnlyTokens = [".tasks"]
+
+    /// Every `.swift` file under `Playhead/` (the app target), repo-relative.
+    private static func appTargetSources() throws -> [String] {
+        guard let root = SwiftSourceInspector.repositoryRoot(from: #filePath) else {
+            throw NSError(
+                domain: "BackgroundSessionEnumerationSourceCanaryTests",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "could not locate the repo root"]
+            )
+        }
+        let appRoot = root.appendingPathComponent("Playhead", isDirectory: true)
+        guard let walker = FileManager.default.enumerator(
+            at: appRoot,
+            includingPropertiesForKeys: [.isRegularFileKey]
+        ) else { return [] }
+        var found: [String] = []
+        // Deliberately NOT `resolvingSymlinksInPath()`: it rewrites
+        // `/var` to `/private/var`, and the prefix these paths are made
+        // relative to is the UNRESOLVED repo root. Resolving one side and
+        // not the other is how a sweep silently produces absolute paths
+        // that `loadSource(repoRelativePath:)` cannot open.
+        let prefix = root.path.hasSuffix("/") ? root.path : root.path + "/"
+        for case let url as URL in walker where url.pathExtension == "swift" {
+            guard url.path.hasPrefix(prefix) else { continue }
+            found.append(String(url.path.dropFirst(prefix.count)))
+        }
+        return found.sorted()
+    }
+
+    /// How many enumeration tokens `code` contains, given whether the file
+    /// is allowed to have `.tasks` counted against it.
+    private static func tokenCount(in code: String, countingDotTasks: Bool) -> Int {
+        var total = 0
+        for token in alwaysCountedTokens {
+            total += SwiftSourceInspector.occurrences(of: token, in: code)
+        }
+        if countingDotTasks {
+            for token in urlSessionOnlyTokens {
+                total += SwiftSourceInspector.occurrences(of: token, in: code)
+            }
+        }
+        return total
+    }
+
+    @Test("The app target asks a URLSession for its tasks in exactly one place")
+    func theEnumerationCrossingIsSingular() throws {
+        let sources = try Self.appTargetSources()
+        // Anti-vacuity: a sweep that reaches nothing reports zero hazards.
+        // 469 `.swift` files under `Playhead/` on 2026-08-13; 400 is a floor
+        // that a real tree cannot fall through without something being wrong
+        // with the walk itself.
+        #expect(
+            sources.count > 400,
+            "the sweep found \(sources.count) sources — it is not reaching the app target, so a zero-hit result would be vacuous"
+        )
+        #expect(
+            sources.contains(Self.crossingFile),
+            "the sweep must reach the file that holds the one permitted crossing"
+        )
+
+        // The allowance: tokens inside `boundedAllTasks`'s own body.
+        let crossingSource = try SwiftSourceInspector.loadSource(
+            repoRelativePath: Self.crossingFile
+        )
+        let crossingCode = SwiftSourceInspector.strippingCommentsAndStrings(crossingSource)
+        let crossingBody = SwiftSourceInspector.firstBody(
+            in: crossingCode, after: Self.crossingSignature
+        )
+        #expect(
+            crossingBody != nil,
+            "`\(Self.crossingSignature)` is gone from \(Self.crossingFile) — the rail cannot know what to permit"
+        )
+        let allowance = Self.tokenCount(
+            in: crossingBody ?? "", countingDotTasks: true
+        )
+        #expect(
+            allowance == 1,
+            "`boundedAllTasks` should hold exactly ONE enumeration call; it holds \(allowance)"
+        )
+
+        for path in sources {
+            let source = try SwiftSourceInspector.loadSource(repoRelativePath: path)
+            // Fast path: a file whose RAW text mentions nothing cannot
+            // contain a token once comments and strings are blanked.
+            // Deliberately generous — `.tasks` is counted here whatever the
+            // file says about `URLSession`, because the narrowing needs the
+            // STRIPPED text and stripping is the expensive half. It costs
+            // nothing today: zero `.tasks` occurrences under `Playhead/`.
+            guard Self.tokenCount(in: source, countingDotTasks: true) > 0
+            else { continue }
+            let code = SwiftSourceInspector.strippingCommentsAndStrings(source)
+            // Read the narrowing off the CODE. See `urlSessionOnlyTokens`.
+            let countsDotTasks = code.contains("URLSession")
+            let found = Self.tokenCount(in: code, countingDotTasks: countsDotTasks)
+            let permitted = (path == Self.crossingFile) ? allowance : 0
+            #expect(
+                found == permitted,
+                """
+                \(path) asks a URLSession for its task list \(found) time(s); \
+                \(permitted) is permitted. On a BACKGROUND session every \
+                spelling — `.allTasks`, `.tasks`, `getAllTasks`, \
+                `getTasksWithCompletionHandler` — takes a barrier on the \
+                session's serial work queue and a synchronous XPC round-trip \
+                to `nsurlsessiond`. Unbounded, that is an await which never \
+                resumes: the calling test reports no verdict at all, and on \
+                device the caller waits forever. Route it through \
+                `DownloadManager.boundedAllTasks(of:through:)` — which is the \
+                one permitted occurrence — rather than adding a second \
+                crossing here.
+                """
+            )
+        }
+    }
+
+    /// The positive half: the bounded crossing must still exist, still live
+    /// inside `boundedAllTasks`, and still go through `BackgroundSessionIO`.
+    /// Without this, deleting the enumeration outright — or keeping the
+    /// function's name while gutting its body — would satisfy the rail above.
+    @Test("The bounded enumeration exists and runs through BackgroundSessionIO")
+    func theBoundedCrossingIsTheOneThatSurvives() throws {
+        let manager = try SwiftSourceInspector.loadSource(
+            repoRelativePath: Self.crossingFile
+        )
+        // `strippingComments` keeps string literals, because the label the
+        // submission carries is part of what is being pinned.
+        let code = SwiftSourceInspector.strippingComments(manager)
+        #expect(code.contains(Self.crossingSignature))
+        let body = SwiftSourceInspector.firstBody(
+            in: code, after: Self.crossingSignature
+        )
+        #expect(body != nil, "`boundedAllTasks` has no locatable body")
+        let crossing = body ?? ""
+        #expect(
+            crossing.contains("session.getAllTasks"),
+            "the enumeration itself has to be INSIDE `boundedAllTasks`"
+        )
+        #expect(
+            crossing.contains("io.perform(") && crossing.contains("label: \"allTasks for"),
+            """
+            the crossing has to be submitted to `BackgroundSessionIO` FROM \
+            INSIDE `boundedAllTasks`. A file-wide `contains` passed here \
+            while the body called `getAllTasks` directly, because \
+            `abandonUnstartedTransfer` also spells `io.perform(`.
+            """
+        )
+        for caller in Self.auditedFiles {
+            let source = SwiftSourceInspector.strippingComments(
+                try SwiftSourceInspector.loadSource(repoRelativePath: caller)
+            )
+            #expect(
+                source.contains("boundedAllTasks("),
+                "\(caller) must still enumerate — silently dropping the enumeration would pass the negative rail"
+            )
+            #expect(
+                source.contains("let io = enumerationIO"),
+                "\(caller) must submit the enumeration to `enumerationIO`; `sessionIO`'s serial queue is the download path's"
+            )
+        }
+    }
 }
