@@ -27,6 +27,14 @@
 //   3. `DayZeroBackgroundKickoffWiringCanaryTests` — the observer is installed
 //      from the LAUNCH path, not from a scene attach. Structural, because no
 //      unit test can stand up a scene-less relaunch.
+//   4. `DayZeroKickoffClaimRecorderTests` (playhead-kg8h) — the production
+//      claim closure writes a durable `requested` row.
+//   5. `DayZeroKickoffClaimSilenceTests` /
+//      `DayZeroBackgroundObserverInstallRecordTests` (playhead-oa82) — the
+//      four sites on this chain that used to write NOTHING now say so, because
+//      "the claim write failed" and "the request never happened" left a
+//      byte-identical database and the 2026-08-12 pull could not tell them
+//      apart. See the section-5 header for the full accounting.
 //
 // Offline: a temp-dir `DownloadManager`, a pure function, and the repo's own
 // source text. No network, no device, no scene.
@@ -445,6 +453,58 @@ final class DayZeroBackgroundKickoffWiringCanaryTests: XCTestCase {
         )
     }
 
+    /// playhead-oa82: the launch-path block must ALSO record the case where
+    /// there is no coordinator to install an observer for.
+    ///
+    /// Structural for the same reason its sibling above is: nothing in this
+    /// suite constructs a real `PlayheadRuntime`, so no behavioural test can
+    /// reach either arm of this `if let`. The property is worth a rail anyway,
+    /// because the install record is only readable AGAINST ITS OWN ABSENCE — and
+    /// an absent install line has two unrelated causes ("there was no
+    /// coordinator" and "`init`'s un-awaited install task never ran"). Deleting
+    /// the `else` would compile, leave the suite green, and quietly restore the
+    /// ambiguity this bead exists to remove.
+    func testAnAbsentDayZeroCoordinatorIsRecordedOnTheLaunchPath() throws {
+        let source = try SwiftSourceInspector.loadSource(
+            repoRelativePath: "Playhead/App/PlayheadRuntime.swift"
+        )
+        guard let bgTaskRegistration = source.range(
+            of: "BackgroundFeedRefreshService.registerTaskHandler()"
+        ), let bootstrap = source.range(
+            of: "try await downloadManager.bootstrap()"
+        ) else {
+            XCTFail(
+                "Could not locate the launch-path anchors — re-anchor this canary " +
+                "before trusting the assertions below."
+            )
+            return
+        }
+        XCTAssertLessThan(
+            bgTaskRegistration.upperBound, bootstrap.lowerBound,
+            "canary anchors are out of order; re-anchor before trusting the assertions below"
+        )
+        let region = String(source[bgTaskRegistration.upperBound..<bootstrap.lowerBound])
+        XCTAssertNotNil(
+            region.range(of: "Self.installDayZeroBackgroundDownloadKickoff("),
+            """
+            ANTI-VACUITY: the install itself must live in this region, or the \
+            assertion below would be searching a block that no longer decides \
+            anything about the day-0 observer.
+            """
+        )
+        XCTAssertNotNil(
+            region.range(of: "rediffDayZeroKickoffCoordinatorAbsent"),
+            """
+            The launch-path install block no longer records the NO-COORDINATOR \
+            case. Its absence is not neutral: on the 2026-08-12 pull the whole \
+            diagnosis of `rediff_day_zero_kickoffs = 0` rested on a five-link \
+            source inference that the coordinator was non-nil, whose load-bearing \
+            link is a flag on `EpisodeFingerprintCapture`. One line makes that \
+            answerable from the device instead.
+            """
+        )
+    }
+
     /// playhead-cnql R1 review: the observer being installed at launch buys
     /// nothing unless the COMPLETION can reach it, and in a headless relaunch it
     /// could not.
@@ -758,7 +818,11 @@ struct DayZeroKickoffClaimRecorderTests {
     """)
     func productionClaimRecorderWritesADurableRow() async throws {
         let store = try await makeTestStore()
-        let record = PlayheadRuntime.makeDayZeroKickoffClaimRecorder(store: store)
+        let record = PlayheadRuntime.makeDayZeroKickoffClaimRecorder(
+            store: store,
+            reportViolation: { _, _ in },
+            hashEpisodeId: { _ in oa82OpaqueHash }
+        )
 
         await record(RediffDayZeroKickoffClaim(
             episodeId: "ep-wired", source: .downloadAndAnalyzeTap, at: 1_722_000_042
@@ -785,7 +849,11 @@ struct DayZeroKickoffClaimRecorderTests {
     """)
     func productionClaimRecorderCountsEachRequest() async throws {
         let store = try await makeTestStore()
-        let record = PlayheadRuntime.makeDayZeroKickoffClaimRecorder(store: store)
+        let record = PlayheadRuntime.makeDayZeroKickoffClaimRecorder(
+            store: store,
+            reportViolation: { _, _ in },
+            hashEpisodeId: { _ in oa82OpaqueHash }
+        )
 
         await record(RediffDayZeroKickoffClaim(
             episodeId: "ep-twice", source: .backgroundDownload, at: 100
@@ -804,5 +872,382 @@ struct DayZeroKickoffClaimRecorderTests {
                 "both are owed: neither has settled")
         #expect(row.lastSource == .downloadAndAnalyzeTap)
         #expect(row.updatedAt == 200)
+    }
+}
+
+// MARK: - 5. The silences the ledger could not explain (playhead-oa82)
+//
+// THE OBSERVATION. On the 2026-08-12 pull `rediff_day_zero_kickoffs` held ZERO
+// rows on a VIRGIN database where four episodes had been downloaded — and the
+// ledger could not say why, because BOTH of its writers go through `try?`. "The
+// claim write failed" and "`requestKickoff` never ran" produce a BYTE-IDENTICAL
+// database: the only writer that would have recorded either is the one that
+// failed. The ledger built to make a lost kickoff visible had a silent
+// total-failure mode of its own, and it is the only ledger whose complete
+// absence is unexplainable.
+//
+// This is the anchor supply for the whole auto-skip path, which is why it is
+// worth this much rail. `AutoSkipEdgeAnchor` has three cases, so only the
+// stinger refiner and rediff can anchor an edge; on the device the refiner
+// snapped 5 END edges and 0 START edges, so `.rediffByteExact` is the only
+// anchor kind that gets a span past playhead-2350's extent gate. No day-0
+// kickoff ⇒ no rediff window ⇒ every span unanchored at the start ⇒ markOnly.
+//
+// FOUR NEW LINES, EACH AT A SITE THAT PREVIOUSLY WROTE NOTHING:
+//   * the claim ATTEMPT, written before the store call — the only evidence that
+//     survives a write which neither lands nor throws;
+//   * the claim FAILURE, when it throws;
+//   * the background observer INSTALL, with the buffered completions it drained;
+//   * a background completion DROPPED for want of any URL.
+//
+// Together they separate four states that were previously one absence. The
+// attempt line is deliberately written on the HEALTHY path too, on the
+// `adWindowIngestCensus` precedent and for its reason: only a line that is
+// always present can distinguish "it never ran" from "it ran and produced
+// nothing".
+
+/// The reporter seam under test, plus the hasher discipline. A hasher that does
+/// NOT embed its input is used on purpose: it lets a test assert that the RAW
+/// episode id never reaches the stream, which a `"hash(\(id))"` spy could never
+/// show.
+private let oa82OpaqueHash = "OPAQUE-EPISODE-HASH"
+
+@Suite("Day-0 kickoff claim records its ATTEMPT, not only its failure (playhead-oa82)")
+struct DayZeroKickoffClaimSilenceTests {
+
+    private static func makeRecorder(
+        store: AnalysisStore,
+        spy: KickoffSpy
+    ) -> @Sendable (RediffDayZeroKickoffClaim) async -> Void {
+        PlayheadRuntime.makeDayZeroKickoffClaimRecorder(
+            store: store,
+            reportViolation: { code, description in
+                await spy.noteViolation(code: code, description: description)
+            },
+            hashEpisodeId: { _ in oa82OpaqueHash }
+        )
+    }
+
+    @Test("""
+    A CLAIM THAT LANDS STILL SAYS SO: the healthy path writes the attempt line \
+    as well as the row, and writes NO failure line
+    """)
+    func aSuccessfulClaimRecordsItsAttemptAndNoFailure() async throws {
+        let store = try await makeTestStore()
+        let spy = KickoffSpy()
+        let record = Self.makeRecorder(store: store, spy: spy)
+
+        await record(RediffDayZeroKickoffClaim(
+            episodeId: "oa82-lands", source: .backgroundDownload, at: 1_723_000_000
+        ))
+
+        // The row is the ANTI-VACUITY control: without it this suite would pass
+        // against a recorder that logs and never writes, which is a strictly
+        // worse defect than the one it is instrumenting.
+        let row = try #require(
+            try await store.fetchRediffDayZeroKickoff(episodeId: "oa82-lands")
+        )
+        #expect(row.kickoffCount == 1)
+        #expect(row.lastOutcome == .requested)
+
+        let codes = await spy.violations.map(\.code)
+        #expect(codes == [.rediffDayZeroKickoffClaimAttempted], """
+            The attempt must be recorded on the HEALTHY path too. A failure-only \
+            instrument cannot separate "the write threw" from "the write never \
+            returned" from "the request never happened" — all three leave the same \
+            absence, which is the defect this bead exists to remove.
+            """)
+    }
+
+    @Test("""
+    the attempt line names the REQUEST PATH and carries a HASHED episode id — \
+    the raw id never reaches the diagnostics stream
+    """)
+    func theAttemptLineCarriesTheSourceAndAHashedId() async throws {
+        let store = try await makeTestStore()
+        let spy = KickoffSpy()
+        let record = Self.makeRecorder(store: store, spy: spy)
+
+        await record(RediffDayZeroKickoffClaim(
+            episodeId: "oa82-tap-episode", source: .downloadAndAnalyzeTap, at: 42
+        ))
+
+        let description = try #require(await spy.violations.first?.description)
+        #expect(description.contains(RediffDayZeroKickoffSource.downloadAndAnalyzeTap.rawValue), """
+            Which path asked is the first question a reader of this line has, and \
+            the two paths have materially different numbers of hops in front of them.
+            """)
+        #expect(description.contains(oa82OpaqueHash))
+        #expect(!description.contains("oa82-tap-episode"), """
+            The raw episode id must not reach the JSON Lines stream — the same \
+            hashing discipline every other producer on that stream follows.
+            """)
+    }
+
+    @Test("""
+    THE H1 DETECTOR: a claim write that THROWS is recorded rather than swallowed \
+    — and the recorder still returns, because a throw on a URLSession completion \
+    callback is its own hazard
+    """)
+    func aFailedClaimWriteIsRecordedRatherThanSwallowed() async throws {
+        let store = try await makeTestStore()
+        // The exact shape H1 postulates, and the cheapest reproduction of it:
+        // the statement cannot be prepared, so the write throws where `try?` used
+        // to eat it. A wedged store actor and a locked database arrive at the
+        // same call site by a different route.
+        try await store.execForTesting("DROP TABLE rediff_day_zero_kickoffs")
+
+        let spy = KickoffSpy()
+        let record = Self.makeRecorder(store: store, spy: spy)
+
+        await record(RediffDayZeroKickoffClaim(
+            episodeId: "oa82-throws", source: .backgroundDownload, at: 7
+        ))
+
+        let codes = await spy.violations.map(\.code)
+        #expect(codes == [
+            .rediffDayZeroKickoffClaimAttempted,
+            .rediffDayZeroKickoffClaimWriteFailed
+        ], """
+            A claim write that throws must leave a line naming itself. Before this \
+            bead the whole failure was `try?` with no `else`, so a device on which \
+            every claim threw was byte-identical to one on which no kickoff was ever \
+            requested — which is exactly the 2026-08-12 pull.
+            """)
+        let failure = try #require(
+            await spy.violations.last(where: {
+                $0.code == .rediffDayZeroKickoffClaimWriteFailed
+            })?.description
+        )
+        #expect(failure.contains(RediffDayZeroKickoffSource.backgroundDownload.rawValue))
+        #expect(failure.contains(oa82OpaqueHash))
+        #expect(!failure.contains("oa82-throws"))
+        #expect(failure.count > oa82OpaqueHash.count + 40, """
+            ANTI-VACUITY: the thrown error must actually be interpolated into the \
+            description. `no such table` and `database is locked` are different bugs \
+            with different owners, and a line that names neither sends the next \
+            reader nowhere.
+            """)
+    }
+}
+
+@Suite("Day-0 background observer records that it was INSTALLED (playhead-oa82)")
+struct DayZeroBackgroundObserverInstallRecordTests {
+
+    private func makeManager(in dir: URL) async throws -> DownloadManager {
+        let manager = DownloadManager(
+            cacheDirectory: dir,
+            workJournalRecorder: KickoffHandoffJournal()
+        )
+        try await manager.bootstrap()
+        return manager
+    }
+
+    /// A coordinator whose only job here is to say whether a request reached it.
+    private func makeCoordinator(spy: KickoffSpy) -> RediffDayZeroKickoffCoordinator {
+        RediffDayZeroKickoffCoordinator(
+            maxAttempts: 1,
+            pollNanos: 1,
+            probe: { _ in .awaitingPinnedFile },
+            fire: { _, _ in },
+            claimKickoff: { await spy.noteClaim($0) },
+            recordKickoff: { await spy.noteRecord($0) },
+            reportViolation: { _, _ in },
+            episodeIdHasher: { _ in oa82OpaqueHash },
+            sleep: { _ in },
+            now: { 1_000 }
+        )
+    }
+
+    private func install(
+        manager: DownloadManager,
+        coordinator: RediffDayZeroKickoffCoordinator,
+        factsBox: DayZeroKickoffEpisodeFactsBox,
+        reports: KickoffSpy
+    ) async {
+        await PlayheadRuntime.installDayZeroBackgroundDownloadKickoff(
+            downloads: manager,
+            coordinator: coordinator,
+            factsBox: factsBox,
+            reportViolation: { code, description in
+                await reports.noteViolation(code: code, description: description)
+            },
+            hashEpisodeId: { _ in oa82OpaqueHash }
+        )
+    }
+
+    @Test("""
+    THE H2 DETECTOR: the install writes a line AFTER the await returns, so "the \
+    observer was never installed" stops being indistinguishable from "the claim \
+    threw" and from "the request never happened"
+    """)
+    func theInstallRecordsThatItCompleted() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let manager = try await makeManager(in: dir)
+        let reports = KickoffSpy()
+
+        await install(
+            manager: manager,
+            coordinator: makeCoordinator(spy: KickoffSpy()),
+            factsBox: DayZeroKickoffEpisodeFactsBox(),
+            reports: reports
+        )
+
+        let installs = await reports.violations.filter {
+            $0.code == .rediffDayZeroBackgroundObserverInstalled
+        }
+        #expect(installs.count == 1, """
+            This is the leg with the most un-awaited hops in front of it — `init`'s \
+            `Task {}`, the actor await, then the observer's own `Task {}` — and it \
+            served three of the four assets on the 2026-08-12 pull. Its absence was \
+            unattributable.
+            """)
+        #expect(installs.first?.description.contains("drained 0") == true, """
+            An install that found an EMPTY buffer is a different story from one that \
+            replayed completions, and the count is the only evidence of which side \
+            of the race the install landed on.
+            """)
+    }
+
+    @Test("""
+    the install record counts the buffered completions it DRAINED, and those \
+    completions really do reach the coordinator
+    """)
+    func theInstallRecordCountsWhatItDrained() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let manager = try await makeManager(in: dir)
+        let reports = KickoffSpy()
+        let claims = KickoffSpy()
+
+        for index in 0..<2 {
+            await manager._bufferBackgroundDownloadCompletionForTesting(
+                episodeId: "oa82-buffered-\(index)",
+                sourceURL: URL(string: "https://example.com/oa82-\(index).mp3")
+            )
+        }
+
+        await install(
+            manager: manager,
+            coordinator: makeCoordinator(spy: claims),
+            factsBox: DayZeroKickoffEpisodeFactsBox(),
+            reports: reports
+        )
+
+        let installLine = try #require(
+            await reports.violations.first(where: {
+                $0.code == .rediffDayZeroBackgroundObserverInstalled
+            })?.description
+        )
+        #expect(installLine.contains("drained 2"))
+
+        // ANTI-VACUITY: the number must describe completions that actually went
+        // somewhere. A drained count that no kickoff followed would be a worse
+        // lie than no count at all.
+        #expect(await pollUntil { await claims.claims.count == 2 }, """
+            The drained completions must reach `requestKickoff` and claim. Otherwise \
+            the install line reports a hand-off that did not happen.
+            """)
+    }
+
+    @Test("""
+    A COMPLETION WITH NO URL ANYWHERE IS RECORDED, NOT DROPPED SILENTLY: without \
+    this line, a URL-less completion reads exactly like an observer that was \
+    never installed
+    """)
+    func aCompletionWithNoURLRecordsItsOwnDrop() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let manager = try await makeManager(in: dir)
+        let reports = KickoffSpy()
+        let claims = KickoffSpy()
+
+        // No facts resolver (the background-relaunch normal state) AND no
+        // download URL: `DayZeroBackgroundKickoff.request` returns nil.
+        await manager._bufferBackgroundDownloadCompletionForTesting(
+            episodeId: "oa82-urlless",
+            sourceURL: nil
+        )
+
+        await install(
+            manager: manager,
+            coordinator: makeCoordinator(spy: claims),
+            factsBox: DayZeroKickoffEpisodeFactsBox(),
+            reports: reports
+        )
+
+        #expect(await pollUntil {
+            await reports.violations.contains { $0.code == .rediffDayZeroBackgroundKickoffNoURL }
+        }, """
+            The `guard let request … else { return }` inside the observer was the \
+            third silence on this leg. It sits between the other two instruments: \
+            the install line proves the observer exists, this line proves the \
+            completion arrived, and the missing claim is then EXPLAINED rather than \
+            merely observed.
+            """)
+        let drop = try #require(
+            await reports.violations.first(where: {
+                $0.code == .rediffDayZeroBackgroundKickoffNoURL
+            })?.description
+        )
+        #expect(drop.contains(oa82OpaqueHash))
+        #expect(!drop.contains("oa82-urlless"))
+        #expect(await claims.claims.isEmpty, "no claim can be made for a kickoff with no URL")
+    }
+
+    @Test("""
+    ANTI-VACUITY CONTROL: a completion that DOES carry a URL takes the normal \
+    path — it claims, and writes no drop line
+    """)
+    func aCompletionWithAURLClaimsAndWritesNoDropLine() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let manager = try await makeManager(in: dir)
+        let reports = KickoffSpy()
+        let claims = KickoffSpy()
+
+        await manager._bufferBackgroundDownloadCompletionForTesting(
+            episodeId: "oa82-has-url",
+            sourceURL: URL(string: "https://example.com/oa82-has-url.mp3")
+        )
+
+        await install(
+            manager: manager,
+            coordinator: makeCoordinator(spy: claims),
+            factsBox: DayZeroKickoffEpisodeFactsBox(),
+            reports: reports
+        )
+
+        #expect(await pollUntil { await claims.claims.count == 1 })
+        #expect(await claims.claims.first?.source == .backgroundDownload)
+        let drops = await reports.violations.filter {
+            $0.code == .rediffDayZeroBackgroundKickoffNoURL
+        }
+        #expect(drops.isEmpty)
+    }
+
+    @Test("""
+    the DownloadManager seam reports how many completions the install drained — \
+    the number the install record is built from
+    """)
+    func theSetterReturnsTheDrainedCount() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let manager = try await makeManager(in: dir)
+
+        for index in 0..<3 {
+            await manager._bufferBackgroundDownloadCompletionForTesting(
+                episodeId: "oa82-count-\(index)",
+                sourceURL: URL(string: "https://example.com/count-\(index).mp3")
+            )
+        }
+        let drained = await manager.setBackgroundDownloadCompletionObserver { _, _ in }
+        #expect(drained == 3)
+
+        // A SECOND install finds an empty buffer — the count is what THIS install
+        // drained, not a running total.
+        let again = await manager.setBackgroundDownloadCompletionObserver { _, _ in }
+        #expect(again == 0)
     }
 }

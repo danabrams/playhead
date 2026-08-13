@@ -1736,6 +1736,19 @@ final class PlayheadRuntime {
             self.dayZeroRediffTrigger = nil
         }
 
+        // playhead-oa82: ONE reporter for the whole day-0 kickoff chain — the
+        // coordinator's give-up path, the claim recorder's attempt/failure pair,
+        // and the background observer's install record. Declared out here rather
+        // than inside the branch below because the observer install site (the
+        // launch-path block further down `init`) needs the same one, and because
+        // a single definition is what keeps every day-0 line on the same JSON
+        // Lines session file a device pull reads.
+        let dayZeroKickoffViolationReporter: @Sendable (
+            InvariantViolation.Code, String
+        ) async -> Void = { [surfaceStatusLogger] code, description in
+            surfaceStatusLogger.invariantViolated(code: code, description: description)
+        }
+
         // playhead-4dqe: the DOWNLOAD-TIME kickoff coordinator.
         //
         // Constructed here, beside the trigger it feeds, and nil with it — so a
@@ -1783,7 +1796,14 @@ final class PlayheadRuntime {
                 // re-fetch — can be cut short by a background-wake budget or
                 // jetsam, and until this existed that left NO row: identical in
                 // the database to a download that never happened.
-                claimKickoff: Self.makeDayZeroKickoffClaimRecorder(store: kickoffStore),
+                // playhead-oa82: the recorder now also SAYS SO — one line before
+                // the write and one on a throw. Zero rows in this ledger used to
+                // be unattributable; see the factory's doc comment.
+                claimKickoff: Self.makeDayZeroKickoffClaimRecorder(
+                    store: kickoffStore,
+                    reportViolation: dayZeroKickoffViolationReporter,
+                    hashEpisodeId: surfaceStatusHasher
+                ),
                 recordKickoff: { update in
                     try? await kickoffStore.noteRediffDayZeroKickoff(
                         episodeId: update.episodeId,
@@ -1799,9 +1819,7 @@ final class PlayheadRuntime {
                 // stream playhead-djl0 chose, for the same reason: the field
                 // investigation went looking for exactly such a line and the
                 // failure branch wrote nothing at all.
-                reportViolation: { [surfaceStatusLogger] code, description in
-                    surfaceStatusLogger.invariantViolated(code: code, description: description)
-                },
+                reportViolation: dayZeroKickoffViolationReporter,
                 episodeIdHasher: surfaceStatusHasher
             )
         } else {
@@ -3116,13 +3134,39 @@ final class PlayheadRuntime {
         if let dayZeroKickoffCoordinator {
             let kickoffDownloads = downloadManager
             let kickoffFacts = dayZeroKickoffEpisodeFactsBox
+            let kickoffReporter = dayZeroKickoffViolationReporter
+            let kickoffHasher = surfaceStatusHasher
             Task {
                 await Self.installDayZeroBackgroundDownloadKickoff(
                     downloads: kickoffDownloads,
                     coordinator: dayZeroKickoffCoordinator,
-                    factsBox: kickoffFacts
+                    factsBox: kickoffFacts,
+                    // playhead-oa82: the install is the leg with the most hops
+                    // in front of it, and it was the only one that left nothing
+                    // behind at all. It now records that it completed.
+                    reportViolation: kickoffReporter,
+                    hashEpisodeId: kickoffHasher
                 )
             }
+        } else if !isPreviewRuntime {
+            // playhead-oa82: say so when there is nothing to install FOR.
+            //
+            // The install record above is only readable against its own absence,
+            // and an absent install line has two unrelated causes — no
+            // coordinator, or a `Task {}` that never ran. Written synchronously
+            // (the logger's own write is already off-thread) so it cannot itself
+            // become a hop that failed to run. Suppressed in previews, where a
+            // nil coordinator is the expected state and the line would be noise.
+            surfaceStatusLogger.invariantViolated(
+                code: .rediffDayZeroKickoffCoordinatorAbsent,
+                description: """
+                day-0 kickoff coordinator ABSENT — no background-download \
+                completion observer will be installed and no kickoff can be \
+                requested (rediffActivation=\(rediffActivationOn) \
+                trigger=\(self.dayZeroRediffTrigger != nil) \
+                dayZeroEnabled=\(self.dayZeroRediffTrigger?.enabled ?? false))
+                """
+            )
         }
 
         Task { [downloadManager, speechService, backgroundProcessingService, entitlementManager, iCloudSyncCoordinator, capabilitiesService] in
@@ -5529,12 +5573,33 @@ final class PlayheadRuntime {
     /// `static` and Sendable-only by construction: this must not capture the
     /// `@MainActor` runtime, both to keep a URLSession completion callback off
     /// the main thread and so `init` can call it without capturing `self`.
+    ///
+    /// playhead-oa82: THE INSTALL NOW LEAVES A RECORD, and so does the one
+    /// remaining silent drop inside the observer.
+    ///
+    /// This leg has the most un-awaited hops in front of it — `init`'s `Task {}`,
+    /// the `await` into the `DownloadManager` actor below, and then the
+    /// observer's own `Task {}` — and it is the leg that serves the majority
+    /// population (three of the four assets on the 2026-08-12 pull were plain
+    /// downloads). Until this line existed, "the observer was never installed"
+    /// was indistinguishable from "the claim write threw" and from "the request
+    /// never happened": all three leave nothing anywhere. The install record is
+    /// written AFTER the `await` returns, so it witnesses completion of the
+    /// install rather than intent to install, and it carries the number of
+    /// buffered completions the install drained — the only evidence available
+    /// about which side of the race the install landed on.
+    ///
+    /// The `nil`-request branch gets its own line for the same reason: a
+    /// completion whose URL is unknowable from either source produces no claim
+    /// at all, which reads exactly like an observer that was never installed.
     nonisolated static func installDayZeroBackgroundDownloadKickoff(
         downloads: DownloadManager,
         coordinator: RediffDayZeroKickoffCoordinator,
-        factsBox: DayZeroKickoffEpisodeFactsBox
+        factsBox: DayZeroKickoffEpisodeFactsBox,
+        reportViolation: @escaping @Sendable (InvariantViolation.Code, String) async -> Void,
+        hashEpisodeId: @escaping @Sendable (String) -> String
     ) async {
-        await downloads.setBackgroundDownloadCompletionObserver {
+        let drained = await downloads.setBackgroundDownloadCompletionObserver {
             @Sendable episodeId, fallbackURL in
             Task {
                 // `?? nil` flattens the double optional: "no resolver yet" and
@@ -5546,10 +5611,26 @@ final class PlayheadRuntime {
                     facts: facts,
                     fallbackURL: fallbackURL,
                     enqueuedAt: Date().timeIntervalSince1970
-                ) else { return }
+                ) else {
+                    await reportViolation(
+                        .rediffDayZeroBackgroundKickoffNoURL,
+                        """
+                        day-0 background kickoff DROPPED — no enclosure URL from \
+                        the feed or the download (episode \(hashEpisodeId(episodeId)))
+                        """
+                    )
+                    return
+                }
                 await coordinator.requestKickoff(request)
             }
         }
+        await reportViolation(
+            .rediffDayZeroBackgroundObserverInstalled,
+            """
+            day-0 background-download completion observer INSTALLED; \
+            drained \(drained) buffered completion(s)
+            """
+        )
     }
 
     /// playhead-kg8h: the production `claimKickoff` closure — the one write that
@@ -5575,20 +5656,67 @@ final class PlayheadRuntime {
     /// `installDayZeroBackgroundDownloadKickoff` is: this runs from a URLSession
     /// completion callback and must not capture the `@MainActor` runtime.
     ///
-    /// `try?` for the same reason every other day-0 recorder uses it — a store
-    /// error must not take down a download-completion callback. What the SETTLE
-    /// path then does about a claim that never landed is
+    /// The store error is still SWALLOWED rather than propagated — a store
+    /// failure must not take down a download-completion callback, and this runs
+    /// inside `Task {}` / `Task.detached` where a throw is its own hazard. What
+    /// the SETTLE path then does about a claim that never landed is
     /// `AnalysisStore.noteRediffDayZeroKickoff`'s job; see its doc comment for
     /// why the direction of that error is deliberate.
+    ///
+    /// playhead-oa82 — WHAT CHANGED, AND WHY IT IS TWO LINES AND NOT ONE. This
+    /// was `try? await store.noteRediffDayZeroKickoffClaim(…)` with no `else`.
+    /// On the 2026-08-12 pull `rediff_day_zero_kickoffs` held ZERO rows on a
+    /// virgin database where four episodes had been downloaded, and the ledger
+    /// could not say why: a claim write that threw and a `requestKickoff` that
+    /// never ran leave a BYTE-IDENTICAL database, because the only writer that
+    /// would have recorded either is the one that failed. The ledger built to
+    /// make a lost kickoff visible had a silent total-failure mode of its own.
+    ///
+    /// A failure path alone does NOT close that, and this is the part worth
+    /// reading before simplifying it back: `try?` fires on a THROW. The
+    /// coordinator's own `requestKickoff` documents, as accepted residue, that
+    /// this write can instead PARK — the `AnalysisStore` actor is serial and
+    /// serves the transcript pipeline too, so a claim can suspend and never
+    /// return. That leaves no row, no throw and therefore no failure line: a
+    /// third state, identical in the database to the other two. So the recorder
+    /// records the ATTEMPT first, and the three cases separate by what
+    /// accompanies it — row, failure line, or neither. See
+    /// ``InvariantViolation/Code/rediffDayZeroKickoffClaimAttempted``.
+    ///
+    /// `hashEpisodeId` rather than the raw id, and `hashEpisodeId:` rather than
+    /// the `episodeIdHasher:` label the coordinator uses — the same hashing
+    /// discipline every producer on this stream follows, under a label that does
+    /// not collide with the source canary that bounds the coordinator's argument
+    /// list on the coordinator's own final argument.
     nonisolated static func makeDayZeroKickoffClaimRecorder(
-        store: AnalysisStore
+        store: AnalysisStore,
+        reportViolation: @escaping @Sendable (InvariantViolation.Code, String) async -> Void,
+        hashEpisodeId: @escaping @Sendable (String) -> String
     ) -> @Sendable (RediffDayZeroKickoffClaim) async -> Void {
         { claim in
-            try? await store.noteRediffDayZeroKickoffClaim(
-                episodeId: claim.episodeId,
-                source: claim.source,
-                at: claim.at
+            let episodeIdHash = hashEpisodeId(claim.episodeId)
+            await reportViolation(
+                .rediffDayZeroKickoffClaimAttempted,
+                """
+                day-0 kickoff claim ATTEMPTED from \(claim.source.rawValue) \
+                (episode \(episodeIdHash))
+                """
             )
+            do {
+                try await store.noteRediffDayZeroKickoffClaim(
+                    episodeId: claim.episodeId,
+                    source: claim.source,
+                    at: claim.at
+                )
+            } catch {
+                await reportViolation(
+                    .rediffDayZeroKickoffClaimWriteFailed,
+                    """
+                    day-0 kickoff claim write FAILED from \(claim.source.rawValue) \
+                    (episode \(episodeIdHash)): \(error)
+                    """
+                )
+            }
         }
     }
 
