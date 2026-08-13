@@ -1,0 +1,622 @@
+Test Case '-[PlayheadTests.AdPodContinuationDeviceLaneTests testPodContinuationOnDeviceDatabaseNeverEngulfsAUserMark]' started.
+Test Case '-[PlayheadTests.AdPodContinuationDeviceLaneTests testPodContinuationOnDeviceDatabaseNeverEngulfsAUserMark]' skipped (0.052 seconds).
+Test Case '-[PlayheadTests.AudioForensicsTemporalRegLiveABTests testAudioForensicsABAcrossDogfoodCorpus]' started.
+Test Case '-[PlayheadTests.AudioForensicsTemporalRegLiveABTests testAudioForensicsABAcrossDogfoodCorpus]' skipped (0.024 seconds).
+Test Case '-[PlayheadTests.AudioForensicsTemporalRegLiveABTests testMultiRunAggregateAcrossDogfoodCorpus]' started.
+Test Case '-[PlayheadTests.AudioForensicsTemporalRegLiveABTests testMultiRunAggregateAcrossDogfoodCorpus]' skipped (0.006 seconds).
+Test Case '-[PlayheadTests.AudioForensicsTemporalRegLiveABTests testTemporalRegularizationABAcrossDogfoodCorpus]' started.
+Test Case '-[PlayheadTests.AudioForensicsTemporalRegLiveABTests testTemporalRegularizationABAcrossDogfoodCorpus]' skipped (0.003 seconds).
+Test Case '-[PlayheadTests.BrandAppearanceLiveABTests testBothBrandSignalsABAcrossDogfoodCorpus]' started.
+Test Case '-[PlayheadTests.BrandAppearanceLiveABTests testBothBrandSignalsABAcrossDogfoodCorpus]' skipped (0.005 seconds).
+Test Case '-[PlayheadTests.BrandAppearanceLiveABTests testCrossShowSyndicationABAcrossDogfoodCorpus]' started.
+Test Case '-[PlayheadTests.BrandAppearanceLiveABTests testCrossShowSyndicationABAcrossDogfoodCorpus]' skipped (0.001 seconds).
+Test Case '-[PlayheadTests.BrandAppearanceLiveABTests testMultiRunAggregateAcrossDogfoodCorpus]' started.
+Test Case '-[PlayheadTests.BrandAppearanceLiveABTests testMultiRunAggregateAcrossDogfoodCorpus]' skipped (0.006 seconds).
+Test Case '-[PlayheadTests.BrandAppearanceLiveABTests testRhetoricalGrammarABAcrossDogfoodCorpus]' started.
+Test Case '-[PlayheadTests.BrandAppearanceLiveABTests testRhetoricalGrammarABAcrossDogfoodCorpus]' skipped (0.002 seconds).
+Test Case '-[PlayheadTests.ChapterFusionLiftABTests testChapterFusionLiftAcrossDogfoodCorpus]' started.
+Test Case '-[PlayheadTests.ChapterFusionLiftABTests testChapterFusionLiftAcrossDogfoodCorpus]' skipped (0.003 seconds).
+Test Case '-[PlayheadTests.ChapterLabelingDiagnosticTests testDiagnoseLabelingAcrossDogfoodCorpus]' started.
+Test Case '-[PlayheadTests.ChapterLabelingDiagnosticTests testDiagnoseLabelingAcrossDogfoodCorpus]' skipped (0.002 seconds).
+Test Case '-[PlayheadTests.ChapterPlanPipelineSnapshotCaptureTests testCaptureAllDogfoodSnapshots]' started.
+Test Case '-[PlayheadTests.ChapterPlanPipelineSnapshotCaptureTests testCaptureAllDogfoodSnapshots]' skipped (0.012 seconds).
+Test Case '-[PlayheadTests.CrossEpisodeMemoryPerShowThresholdLiveABTests testCrossEpisodeMemoryABAcrossDogfoodCorpus]' started.
+Test Case '-[PlayheadTests.CrossEpisodeMemoryPerShowThresholdLiveABTests testCrossEpisodeMemoryABAcrossDogfoodCorpus]' skipped (0.011 seconds).
+Test Case '-[PlayheadTests.CrossEpisodeMemoryPerShowThresholdLiveABTests testMultiRunAggregateAcrossDogfoodCorpus]' started.
+Test Case '-[PlayheadTests.CrossEpisodeMemoryPerShowThresholdLiveABTests testMultiRunAggregateAcrossDogfoodCorpus]' skipped (0.014 seconds).
+Test Case '-[PlayheadTests.CrossEpisodeMemoryPerShowThresholdLiveABTests testPerShowThresholdABAcrossDogfoodCorpus]' started.
+Test Case '-[PlayheadTests.CrossEpisodeMemoryPerShowThresholdLiveABTests testPerShowThresholdABAcrossDogfoodCorpus]' skipped (0.007 seconds).
+Test Case '-[PlayheadTests.FragilityGateLiveABTests testFragilityDiagnosticAndSweepAcrossDogfoodCorpus]' started.
+Test Case '-[PlayheadTests.FragilityGateLiveABTests testFragilityDiagnosticAndSweepAcrossDogfoodCorpus]' skipped (0.023 seconds).
+Test Case '-[PlayheadTests.FragilityGateLiveABTests testMultiRunAggregateAcrossDogfoodCorpus]' started.
+Test Case '-[PlayheadTests.FragilityGateLiveABTests testMultiRunAggregateAcrossDogfoodCorpus]' skipped (0.001 seconds).
+Test Case '-[PlayheadTests.LexicalScorerLiveABTests testLexicalScorerPerFeatureSweepAcrossDogfoodCorpus]' started.
+Test Case '-[PlayheadTests.LexicalScorerLiveABTests testLexicalScorerPerFeatureSweepAcrossDogfoodCorpus]' skipped (0.001 seconds).
+Test Case '-[PlayheadTests.LexicalScorerLiveABTests testMultiRunAggregateAcrossDogfoodCorpus]' started.
+Test Case '-[PlayheadTests.LexicalScorerLiveABTests testMultiRunAggregateAcrossDogfoodCorpus]' skipped (0.056 seconds).
+Test Case '-[PlayheadTests.PipelineDumpLiveTests testPhysicalDeviceBaselinePreflight]' started.
+Test Case '-[PlayheadTests.PipelineDumpLiveTests testPhysicalDeviceBaselinePreflight]' skipped (0.003 seconds).
+Test Case '-[PlayheadTests.PipelineDumpLiveTests testProductionPipelineDumpOnNewEpisodes]' started.
+Test Case '-[PlayheadTests.PipelineDumpLiveTests testProductionPipelineDumpOnNewEpisodes]' skipped (2.009 seconds).
+Test Case '-[PlayheadTests.PipelineDumpLiveTests testRediffTreatmentPipelineDumpOnNewEpisodes]' started.
+Test Case '-[PlayheadTests.PipelineDumpLiveTests testRediffTreatmentPipelineDumpOnNewEpisodes]' skipped (0.002 seconds).
+Test Case '-[PlayheadTests.PlayheadFMSmokeTests testConanBoundaryExpansionLiftsRecallToAtLeastThree]' started.
+Test Case '-[PlayheadTests.PlayheadFMSmokeTests testConanBoundaryExpansionLiftsRecallToAtLeastThree]' skipped (0.001 seconds).
+Test Case '-[PlayheadTests.PlayheadFMSmokeTests testNoBoundarySyntheticControlKeepsExpansionSilent]' started.
+Test Case '-[PlayheadTests.PlayheadFMSmokeTests testNoBoundarySyntheticControlKeepsExpansionSilent]' skipped (0.001 seconds).
+Test Case '-[PlayheadTests.PlayheadFMSmokeTests testPathologicalSyntheticTruncationLogsExpansionTruncatedOnce]' started.
+Test Case '-[PlayheadTests.PlayheadFMSmokeTests testPathologicalSyntheticTruncationLogsExpansionTruncatedOnce]' skipped (0.002 seconds).
+Test Case '-[PlayheadTests.PlayheadFMSmokeTests testPermissiveAdClassifierEndToEnd]' started.
+Test Case '-[PlayheadTests.PlayheadFMSmokeTests testPermissiveAdClassifierEndToEnd]' skipped (0.001 seconds).
+Test Case '-[PlayheadTests.PlayheadFMSmokeTests testPermissiveTransformationProbeMatrix]' started.
+Test Case '-[PlayheadTests.PlayheadFMSmokeTests testPermissiveTransformationProbeMatrix]' skipped (0.001 seconds).
+Test Case '-[PlayheadTests.PlayheadFMSmokeTests testRefinementPassSafetyClassifierProbeMatrix]' started.
+Test Case '-[PlayheadTests.PlayheadFMSmokeTests testRefinementPassSafetyClassifierProbeMatrix]' skipped (0.001 seconds).
+Test Case '-[PlayheadTests.PlayheadFMSmokeTests testSafetyClassifierProbeMatrix]' started.
+Test Case '-[PlayheadTests.PlayheadFMSmokeTests testSafetyClassifierProbeMatrix]' skipped (0.001 seconds).
+Test Case '-[PlayheadTests.PlayheadRuntimeLaunchPerfTests testInitFitsLaunchBudget]' started.
+Test Case '-[PlayheadTests.PlayheadRuntimeLaunchPerfTests testInitFitsLaunchBudget]' skipped (0.001 seconds).
+Test Case '-[PlayheadTests.PlayheadRuntimeMainActorFreedomTests testMainActorIsNotHeldDuringRuntimeInit]' started.
+Test Case '-[PlayheadTests.PlayheadRuntimeMainActorFreedomTests testMainActorIsNotHeldDuringRuntimeInit]' skipped (0.001 seconds).
+◇ Test "DAY-0 poisoning fix (xsdz.36.4): .dayZeroUnmarked accounts bandwidth but writes NO state; .dayZeroMarked resolves + accounts" started.
+◇ Test "stratifyByTerminalReason produces one rollup per (bucket × config) with correct episode counts" started.
+◇ Test "flag OFF is byte-identical for both the exempt and the guarded shape" started.
+◇ Test "the byte-exact post-roll stays eligible even below the host-read floor" started.
+◇ Test "low plan confidence threads to byte-identical extractor output" started.
+◇ Test "a byte-exact span outside the 90s window is eligible for the ORIGINAL reason too" started.
+➜ Test "the deadline returns promptly even when the call ignores cancellation" skipped: "perf pass only — see playhead-zx0l"
+◇ Test "a PLACEABLE reinforcement on the same asset still boosts the span it names" started.
+◇ Test "Ambiguous legacy extension siblings are withheld through background serving" started.
+◇ Test "a mutable streaming path stays outside the immutable cache surface" started.
+◇ Test "Incomplete pinned file does not block background retry admission" started.
+◇ Test "failed suggest No restores the latest revision received while persistence waits" started.
+◇ Test "stale Auto-Yes cannot commit after durable material changes mid-suspension" started.
+◇ Test "suggest Yes persists episode A feedback across direct replacement" started.
+◇ Test "revertWindow persists episode A feedback across direct replacement" started.
+◇ Test "Episode-bound seek rejects a stale same-episode lifecycle token" started.
+◇ Test "failed suggest Yes restores the latest revision received while persistence waits" started.
+◇ Test "stale suggest completion cannot clear replacement provisional ownership" started.
+◇ Test "An abandoned call is cancelled, so it stops competing for the recognizer" started.
+◇ Test "Cancellation reaches the recognizer call and the permit is not freed until it unwinds" started.
+◇ Test "A never-finishing holder does not wedge a subsequent acquire" started.
+◇ Test "A holder that never returns is abandoned instead of holding forever" started.
+◇ Test "The watchdog does not fire for a call that merely takes a while" started.
+◇ Test "delayed correction revokes its captured show after episode replacement" started.
+◇ Test "revoked catalog rows cannot authorize either runtime admission path" started.
+◇ Test "Empty final clears a preceding partial" started.
+◇ Test "legacy falseNegative correction still creates replay after explicit sources are filtered" started.
+◇ Test "observer derives concentration/depth inputs from the SAME taxonomy the formula uses" started.
+◇ Test "A reply that never arrives resolves to the fallback instead of hanging" started.
+◇ Test "The fallback hook fires at most once even when timeout and cancellation race" started.
+◇ Test "A reply that lands after the timeout is dropped, not double-resumed" started.
+◇ Test "k-way: a mid-batch fetch throw still DELETES the already-fetched copies and does NOT consume (never-persist-B)" started.
+◇ Test "a clean 12s music run yields exactly one span ending at the music→speech drop" started.
+◇ Test "Cancellation resolves with the fallback without waiting out the timeout" started.
+➜ Test "enqueue of 1000 jobs completes quickly" skipped: "load-sensitive 100ms wall-clock budget — perf pass only (playhead-zx0l)"
+◇ Test "Invariant 1: eligible queued work + free capacity drains within bounded passes" started.
+◇ Test "A shard the ASR watchdog abandons costs one shard, not the loop" started.
+◇ Test "Invariant 2: transport does NOT block compute-only pre-analysis (unreachable)" started.
+◇ Test "Invariant 5a: a drain over eligible work strictly decreases pending" started.
+◇ Test "Invariant 2: transport does NOT block compute-only pre-analysis (cellular, no-cellular-pref)" started.
+◇ Test "The backfill handler still completes when the scheduler query times out" started.
+◇ Test "The reschedule latch is released on the timeout path" started.
+◇ Test "The expiration handler is armed before the handler awaits anything" started.
+◇ Test "A pair that abandons overlap is infeasible; joint picks the overlap-preserving snap instead" started.
+◇ Test "Parity P2: a near-grid widening of the same peak strength survives" started.
+◇ Test "Detects 'risk free'" started.
+◇ Test "Detects 'N percent off'" started.
+◇ Test "Multiple events loadable by analysisAssetId" started.
+◇ Test "Detects 'code X at checkout'" started.
+◇ Test "byte counters accept a >Int32.max per-write value (R2: no 32-bit bind trap on an oversized enclosure)" started.
+◇ Test "candidate seeds = current-version fingerprint rows minus resolved; capturedAt is the age baseline" started.
+◇ Test aCancelledRunStillReportsWhatItsShardsFailedWith() started.
+◇ Test appendedShardFailuresAreAccumulatedToo() started.
+◇ Test cancellationIsReportedInsteadOfReturningInSilence() started.
+◇ Test anOverlappingPredecessorDoesNotCreditTheSuccessor() started.
+◇ Test dedupOnlyRerunWithOneBadShardStillCompletes() started.
+◇ Test perRunCountersDoNotLeakIntoTheNextSession() started.
+◇ Test aStoppedRunReportsStoppedThroughItsOwnGate() started.
+◇ Test "Invariant 4 (RECOVERY visibility): preanalysis_recovery records jobsSeen == actual eligible count" started.
+◇ Test "Invariant 3 (BACKGROUND): both BGTask entry points DISPATCH — queued set shrinks + progress outcome, never expired/0-done" started.
+◇ Test "Invariant 1 (DRAIN): eligible queue + free capacity fully drains — any depth, any job type" started.
+◇ Test "Backfill happy path writes a terminal ledger row (noEligibleWork on fresh queue)" started.
+◇ Test "Backfill expiration after work-task completion is idempotent (work-task wins)" started.
+◇ Test "Backfill expirationHandler writes expired outcome before markComplete" started.
+◇ Test "Pre-analysis recovery with no reconciler writes failed/reconciler_unavailable" started.
+◇ Test "the runtime's coordinator recovers a show through the runtime's own resolver" started.
+◇ Test "journal fetch result is threaded into the default bundle's work_journal_tail" started.
+◇ Test observeICloudSyncStatusFlipsOnSignOut() started.
+◇ Test "A banner No whose episode is replaced mid-flight calibrates the captured show" started.
+XCTestOutputBarrier◇ Test "A time-range revert whose episode is replaced mid-loop calibrates the captured show and leaves the replacement alone" started.
+◇ Test "fast transcript chunks override stale transcript watermark" started.
+◇ Test "download snapshot { ep-1: 0.42 } → only ep-1 carries 0.42" started.
+◇ Test "A transcript veto whose episode is replaced mid-flight still names the captured show" started.
+◇ Test "A transfer backgroundDownload created but could not resume is abandoned by backgroundDownload itself" started.
+◇ Test "a second row for one (asset, pass, fingerprint) is refused, and the survivor still takes the speakerId upgrade" started.
+◇ Test "missing recognizer speakerId remains nil in chunks and events" started.
+◇ Test "recognizer speakerIds persist into chunks, events, and trait signals" started.
+◇ Test "duplicate fingerprint can upgrade missing speakerId and avgConfidence and re-emit chunk" started.
+◇ Test "clearCache revokes an active streaming writer before deletion" started.
+◇ Test "clearCache removes all cached files" started.
+◇ Test "removeCache retires a staged background completion and its resume state" started.
+◇ Test "removeCache deletes both partial and complete files" started.
+◇ Test "clearCache retires every staged background completion" started.
+◇ Test "Backfill completes successfully" started.
+◇ Test "Backfill expiration cancels work" started.
+◇ Test "Backfill skipped on thermal throttle via capabilitiesService" started.
+◇ Test "Backfill handler invokes real work method, not startCapabilityObserver" started.
+◇ Test "Overlapping BG handlers each complete their own task independently" started.
+◇ Test "Stop during stalled transcribe: no chunks persisted, no coverage advance, no .completed" started.
+➜ Test "playhead-eu1: @Generable refusal + permissive retry (on-device only — see comment)" skipped: "Requires live Foundation Models; run on a real device via PlayheadFMSmokeTests"
+◇ Test "benchmark gate: 3 episodes finish under the orchestration budget" started.
+◇ Test "resumeSuspendedTransfer consumes the persisted blob on success" started.
+◇ Test "wrj8: a resume whose server validator still matches splices the blob" started.
+◇ Test "A force-quit resume re-queues the fresh download against the recovered show" started.
+◇ Test "A completion delivered to a NEW manager instance still carries the show" started.
+◇ Test "A background download enqueues analysis against the show it was queued with" started.
+◇ Test "Queueing writes the attribution and a terminal completion reaps it" started.
+◇ Test "Cancelling a download reaps its attribution" started.
+◇ Test "Dropping the resume blob leaves the attribution for the resume path" started.
+◇ Test "Clearing the cache takes the attribution with it" started.
+◇ Test "both phases and the poll spend ONE deadline, anchored at the grant's start" started.
+◇ Test "the coarse phase observes the queue BEFORE the drain has dispatched anything" started.
+◇ Test "Model loading is outside the permit, so a cold asset install cannot spend the budget" started.
+​➜ Test "fetchReusableSemanticScanResult is fast under cohort variation" skipped: "load-sensitive 50ms wall-clock budget — perf pass only (playhead-zx0l)"
+◇ Test "Cross-extension replacement purges stale siblings and removal cannot resurrect them" started.
+◇ Test "cleanup keeps the incomplete pin when artifact enumeration fails" started.
+◇ Test "background placement canonicalizes a routing URL suffix" started.
+◇ Test "Posted willResignActive notification drives a real BG task submission end-to-end" started.
+◇ Test "Reconnect headphones + user tap play resumes from same position" started.
+◇ Test "Headphone disconnect preserves currentTime" started.
+◇ Test "Headphone disconnect (oldDeviceUnavailable) pauses immediately" started.
+◇ Test "Detects 'code X at checkout'" started.
+◇ Test "the cancel reaches every job it names" started.
+◇ Test "each cancelled job keeps its own cause, so neither spends an attempt" started.
+◇ Test "recovery's teardown cancelled mid-settle leaves the ending to the expiration handler" started.
+◇ Test "recovery's work-deadline return does not strand the job it leaves running" started.
+◇ Test "identity-qualified staging isolates a retired task from its replacement" started.
+◇ Test "cache deletion during journal finalization revokes the stale finalized tail" started.
+◇ Test "cache deletion while background analysis enqueue is blocked leaves no resurrected artifacts" started.
+​◇ Test "Cancelling one waiter leaves the rest of the queue intact" started.
+➜ Test "60-minute episode: decode + fingerprint under 60 s" skipped: "perf pass only — see playhead-zx0l"
+◇ Test "A cancelled waiter does not release a permit it never held" started.
+◇ Test "A cancel racing the permit hand-off leaves the gate usable either way" started.
+◇ Test "A waiter cancelled while queued unblocks with CancellationError" started.
+◇ Test "make() records slot-arm mass BOTH with and without suppression" started.
+◇ Test "Catches gap at start of timeline" started.
+◇ Test "Accepts cross-family corroboration: textual cue + domain evidence" started.
+◇ Test "Cycle 2 C4: recallSample = 0.0 when prediction misses everything" started.
+◇ Test "Expiration mid-refresh completes task exactly once and reports success=false" started.
+◇ Test "didCompleteWithError(URLError.notConnectedToInternet) emits noNetwork" started.
+◇ Test "delegate staging failure releases ownership and permits retry" started.
+◇ Test "didCompleteWithError(URLError.timedOut) emits failed with taskExpired" started.
+◇ Test "expiry tells the SCHEDULER the grant is over, so the in-flight job requeues" started.
+◇ Test "the work-deadline return does not strand the job it leaves running" started.
+◇ Test "an expired run records what the window achieved, not only that it ended" started.
+◇ Test "the work-deadline return MEASURES its completions too, and writes them" started.
+◇ Test "a teardown cancelled mid-settle leaves the ending to the expiration handler" started.
+◇ Test "the expiration wait spends the post-reclaim grace, not the teardown reserve" started.
+◇ Test "an expired run's completion count is measured, not a literal zero" started.
+◇ Test "PlaybackService deallocates after tearDown (no retain cycles)" started.
+➜ Test "Build FrozenTrace fixtures from .xcappdata bundle" skipped.
+​➜ Test "Scan completes within the 2-second SLA specified by the bead" skipped: "perf pass only — see playhead-zx0l"
+​◇ Test "Scan completes over a 10-blob cache and reports every blob" started.
+◇ Test "overlapping explicit clears keep writers fenced until both finish" started.
+◇ Test "an overlapping clear cannot strand re-enable intent" started.
+◇ Test "Invariant 5: the backfill BGTask window drains eligible work (pending strictly decreases)" started.
+◇ Test "Invariant 6: pre-analysis recovery records jobsSeen >= #eligible queued" started.
+◇ Test "Concurrent callers cannot overspend the budget" started.
+◇ Test "contained intervals collapse to outer width" started.
+◇ Test "Lane A skips windows already present in the store" started.
+◇ Test "Lane B .notIdle when thermal nominal but not charging" started.
+◇ Test "Lane A: dispatcher throws yields .dispatchFailed; no row; token consumed" started.
+◇ Test "awaitJobsSettled waits for a running job and times out rather than lying" started.
+◇ Test "five expired windows in a row still leave the job alive" started.
+◇ Test "Phone call interruption pauses playback" started.
+◇ Test "Phone call ends with shouldResume → playback resumes" started.
+◇ Test "Siri activation interruption pauses playback" started.
+◇ Test "Siri dismissal with shouldResume restores playback" started.
+◇ Test "Full interruption cycle: playing → paused → playing" started.
+◇ Test "Handler fired with no injection times out and completes failure" started.
+◇ Test "Multiple concurrent waiters all wake on injection" started.
+◇ Test "Triggered timeout resumes all parked waiters and reports the count" started.
+◇ Test "Late injection arriving after timeout is a no-op for the timed-out waiter" started.
+◇ Test "Handler fired before injection completes success once injection lands" started.
+◇ Test "scheduleBackfillIfNeeded emits a `submit` row with success=false on throw" started.
+◇ Test "handleBackfillTask emits matching `start` and `complete` rows" started.
+◇ Test "scheduleBackfillIfNeeded emits a `submit` row with success=true" started.
+◇ Test "backfill expirationHandler emits an `expire` row" started.
+◇ Test "A record claiming a different schema rejects" started.
+◇ Test "didFinishLaunching triggers scanForSuspendedTransfers on the registered manager" started.
+◇ Test "Cycle 4 B4 M: 3 ad-free observations ⇒ episodesObservedWithoutSampleCount == 3" started.
+◇ Test "apportionment is robust to extreme word-length variation" started.
+◇ Test "the persisted-chunk version matches what runBackfill atomizes" started.
+◇ Test "didCompleteWithError harvests NSURLSessionDownloadTaskResumeData and writes it to resumeDataDirectory" started.
+◇ Test "didCompleteWithError skips harvest when NSURLSessionDownloadTaskResumeData is absent" started.
+◇ Test "explicit cancellation invalidates the matching streaming transfer" started.
+◇ Test "Interruption notification handled on actor without crash" started.
+◇ Test "Route change notification handled on actor without crash" started.
+◇ Test "beginEpisode cancels prior asset's in-flight lookahead refresh" started.
+◇ Test "recordUserSpeedChange resets planner so next tick re-engages" started.
+◇ Test "Per-show override true ⇒ never engages even with valid plan" started.
+◇ Test "Asset-id change cancels in-flight refresh and resets state" started.
+◇ Test "Override OFF mid-episode forces immediate re-fetch" started.
+​➜ Test "fresh B-side provider decodes a staged .fresh.mp3 to non-empty 16 kHz PCM" skipped.
+◇ Test "Throwing fetchWindows preserves prior plan (no disengage)" started.
+◇ Test "notePlayhead inside a music plan ⇒ engages with varispeed/high rate" started.
+◇ Test "updateKeepFullMusicOverride(true) mid-flight disengages immediately" started.
+◇ Test "Episode begin ⇒ ends any prior compression and refreshes plan" started.
+◇ Test "Episode-bound seek rejects a stale same-episode lifecycle token" started.
+◇ Test "the poll loop is handed a deadline inside the measured grant, not 25 minutes" started.
+◇ Test "the charged sibling's handler spends its own budget" started.
+​➜ Test "an abandoned coarse pass leaves its screened windows in the database" skipped: "shrinks the FM no-progress bound — perf pass only (playhead-zx0l)"
+✔ Test "DAY-0 poisoning fix 2026-08-12 17:02:32.705594-0400 Playhead[93019:53604390] [SkipOrchestrator] beginEpisode: skip mode is shadow because unresolvedShowIdentity — this is NOT a deliberate shadow
+(xsdz.36.4): .dayZeroUnmarked accounts bandwidth but writes NO state; .dayZeroMarked resolves + accounts" passed after 95.914 seconds.
+✔ Test "stratifyByTerminalReason produces one rollup per (bucket ×2026-08-12 17:02:32.877437-0400 Playhead[93019:53604685] [SkipOrchestrator] Begin episode: asset=asset-1
+ config) with correct episode counts" passed after 95.890 seconds.
+✔ Test "flag OFF is byte-identical2026-08-12 17:02:33.141310-0400 Playhead[93019:53599319] [Capabilities] fm.capability.context_window contextSize=0
+ for both the exempt and the guarded shape" passed after 96.203 seconds.
+✔ Test "the byte-exact post-roll stays eligible even below the host-read floor" passed after 96.203 seconds.
+✔ Test "a b2026-08-12 17:02:33.559233-0400 Playhead[93019:53599319] [CoreMLSequenceClassifier] Layer 2 sequence model not bundled — using RuleBasedClassifier fallback for all classifications.
+yte-exact span outside the 90s window is eligible for the ORIGINAL reason too" passed after 96.666 seconds.
+✔ Test "low plan confidence threads to byte-identical extractor output" passed after 96.666 seconds.
+✔ Test "a mutable streaming path stays outside the im2026-08-12 17:02:34.601043-0400 Playhead[93019:53604491] [FoundationModelClassifier] fm.coarse.run_budget contextSize=431 coarseBudget=52 coarseWindows=3
+mutable cache surface" passed after 97.686 seconds.
+✔ Test "a PLACEABLE reinforcement on the same asset still boosts the span it names" passed after 97.689 seconds.
+✔ Test "Episode-bound seek rejects a stale same-episode lifecycle token" passed after 97.846 seconds.
+✔ Test "revoked catalog rows cannot authorize eithe2026-08-12 17:02:34.928384-0400 Playhead[93019:53604391] [AdCatalogStore] AdCatalogStore migrated to schema v3
+r runtime admission path" passed after 98.001 seconds.
+✔ Test "Empty final clears a preceding partial" passed after 98.001 seconds.
+✔ Test "legacy falseNegative correction still 2026-08-12 17:02:34.934008-0400 Playhead[93019:53604390] [FoundationModelClassifier] fm.coarse.run_budget contextSize=4096 coarseBudget=482 coarseWindows=1
+creates replay after explicit sources are filtered" passed after 98.006 seconds.
+✔ Test "observer derives concentration/depth inputs from the SAME taxonomy the formula uses" passed after 98.005 seconds.
+✘ Test "Ambiguous legacy extension siblings are withheld through background serving" recorded an issue at StreamingDownloadTests.swift:445:9: Expectation failed: await manager._isBackgroundDownloadInFlightForTesting(
+✘ Test "Incomplete pinned file does not block background retry admission" recorded an issue at StreamingDownloadTests.swift:485:9: Expectation failed: await manager._isBackgroundDownloadInFlightForTesting(
+✔ Test "a clean 12s music run yields exactly one span ending at the music→speech drop" passed after 982026-08-12 17:02:34.945693-0400 Playhead[93019:53604727] [TranscriptEngineService] Starting transcription loop: 4 shards for asset rt-asset
+.014 seconds.
+✔ Test "k-way: a mid-batch fetch throw still DELETES the already-fetched copies and does NOT consume (never-persist-B)" passed after 98.014 seconds.
+✔ Test "A pair that abandons overlap is infeasi2026-08-12 17:02:37.673219-0400 Playhead[93019:53604390] [Capabilities] fm.capability.context_window contextSize=0
+ble; joint picks the overlap-preserving snap instead" passed after 100.726 seconds.
+✔ Test "Parity P2: a near-grid widening of the same peak strength survives" passed after 100.727 seconds.
+✔ Test "Detects 'risk free'" passed after 100.732 secon2026-08-12 17:02:37.680439-0400 Playhead[93019:53604390] [EvidenceCatalogBuilder] Built evidence catalog: 3 entries from 3 atoms
+ds.
+✔ Test "Detects 'N percent off'" passed after 100.737 seconds.
+✔ Test "Multiple events loadable by analysisAssetId" passed2026-08-12 17:02:37.685085-0400 Playhead[93019:53604390] [LexicalScanner] Scanned 3 chunks, found 3 hits, produced 1 candidates
+ after 100.738 seconds.
+✔ Test "Detects 'code X at checkout'" passed after 100.738 seconds.
+✔ Test "candidate seeds = current-version fingerprint rows minus resolved; ca2026-08-12 17:02:37.709086-0400 Playhead[93019:53604472] [AdDetectionService] Backfill: persisted 1 fusion windows, retired 0 superseded hot-path rows
+pturedAt is the age baseline" passed after 100.758 seconds.
+✔ Test "byte counters accept a >Int32.max per-write value (R2: no 32-bit bind trap on an oversized enclosure)" passed after 100.759 seconds.
+✔ Test "fast transcript chunks override stale transcript watermark" pa2026-08-12 17:02:44.073615-0400 Playhead[93019:53604472] [SkipOrchestrator] Begin episode: asset=asset-1
+ssed after 107.082 seconds.
+✔ Test "download snapshot { ep-1: 0.42 } → only ep-1 carries 0.42" passed after 107.089 seconds.
+✘ Test "A transfer backgroundDownload created but could not resume is abandoned by backgroundDownload itself" recorded an issue at BackgroundSessionIOTests.swift:566:9: Expectation failed: await manager._backgroundDownloadAdmissionCountForTesting() == 1
+✘ Test "wrj8: a resume whose server validator still matches splices the blob" recorded an issue at ForceQuitResumeTests.swift:518:9: Expectation failed: outcome == .resumed
+✘ Test "wrj8: a resume whose server validator still matches splices the blob" recorded an issue at ForceQuitResumeTests.swift:519:9: Expectation failed: try await manager.loadResumeData(episodeId: episodeId) == nil
+✘ Test "resumeSuspendedTransfer consumes the persisted blob on success" recorded an issue at ForceQuitResumeTests.swift:383:9: Expectation failed: outcome == .resumed
+✘ Test "A force-quit resume re-queues the fresh download against the recovered show" recorded an issue at DownloadShowAttributionTests.swift:328:9: Expectation failed: await manager.loadDownloadAttribution(episodeId: episodeId)?
+✘ Test "Cancelling a download reaps its attribution" recorded an issue at DownloadShowAttributionTests.swift:353:9: Expectation failed: await manager.loadDownloadAttribution(episodeId: episodeId) != nil
+✘ Test "A completion delivered to a NEW manager instance still carries the show" recorded an issue at DownloadShowAttributionTests.swift:182:9: Expectation failed: await relaunched.loadDownloadAttribution(episodeId: episodeId)?
+✘ Test "Dropping the resume blob leaves the attribution for the resume path" recorded an issue at DownloadShowAttributionTests.swift:271:9: Expectation failed: await manager.loadDownloadAttribution(episodeId: episodeId)?
+✘ Test "Clearing the cache takes the attribution with it" recorded an issue at DownloadShowAttributionTests.swift:381:9: Expectation failed: await manager.loadDownloadAttribution(episodeId: episodeId) != nil
+✘ Test "Queueing writes the attribution and a terminal completion reaps it" recorded an issue at DownloadShowAttributionTests.swift:227:9: Expectation failed: await manager.loadDownloadAttribution(episodeId: episodeId)?
+✘ Test "resumeSuspendedTransfer consumes the persisted blob on success" recorded an issue at ForceQuitResumeTests.swift:387:9: Expectation failed: loaded == nil
+✔ Test "Detects 'code X at checkout'" passed after 118.320 seconds.
+✔ Test "Catches gap at start2026-08-12 17:03:01.649604-0400 Playhead[93019:53604488] [Downloads] DownloadManager bootstrapped at /Users/dabrams/Library/Developer/CoreSimulator/Devices/19B59D40-3826-4A31-AE37-70F59BA7C96E/data/Containers/Data/Application/DEFAB988-F0BB-468F-8B3D-9A19D6981866/tmp/PlayheadTestScratch/PlayheadTests-13171A8B-8F8C-47CC-99F2-66AE858876B2
+ of timeline" passed after 124.562 seconds.
+✔ Test "make() records slot-arm mass BOTH with and without suppression" passed after 124.564 seconds.
+✔ Test "Accepts cross-family corroborati2026-08-12 17:03:01.820726-0400 Playhead[93019:53604488] [LanePreemption] preempting 1 job(s) in lanes lower than now for cause=user_preempted
+on: textual cue + domain evidence" passed after 124.730 seconds.
+✔ Test "Cycle 2 C4: recallSample = 0.0 when prediction misses everything" passed after 124.730 seconds.
+✔ Test "contained intervals colla2026-08-12 17:03:05.902549-0400 Playhead[93019:53604391] [Capabilities] fm.capability.context_window contextSize=0
+pse to outer width" passed after 128.773 seconds.
+✔ Test "Lane A skips windows already present in the store" passed after 128.773 seconds.
+✔ Test "Lane B .notIdle when thermal nomin2026-08-12 17:03:05.903030-0400 Playhead[93019:53604391] [BackgroundProcessing] Pre-analysis services injected
+al but not charging" passed after 128.776 seconds.
+✔ Test "Lane A: dispatcher throws yields .dispatchFailed; no row; token consumed" passed after 128.777 seconds.
+✔ Test "A record claiming a different schem2026-08-12 17:03:12.189750-0400 Playhead[93019:53604491] [SkipOrchestrator] acceptSuggestedSkip: unanchored extent — presence recorded, markOnly (window CD50F25A-4F43-4F77-BF5A-00A96A70714E)
+a rejects" passed after 135.049 seconds.
+✔ Test "Cycle 2026-08-12 17:03:12.522793-0400 Playhead[93019:53604491] [SkipOrchestrator] ad window ingest: door=cross_launch_preload asset=asset-evc1-d9b513cd forwarded=1 delivered=1 ingest_armed_suggest=1 ingest_armed_suggest:unanchored_extent_start+end=1
+4 B4 M: 3 ad-free observations ⇒ episodesObservedWithoutSampleCount == 3" passed after 135.367 seconds.
+✔ Test "apportionment is robust to extreme word-length variation" passed after 135.2026-08-12 17:03:12.532831-0400 Playhead[93019:53604491] [FoundationModelClassifier] fm.coarse.run_budget contextSize=431 coarseBudget=52 coarseWindows=3
+379 seconds.
+✔ Test "the persisted-chunk version matches what runBackfill atomizes" passed after 135.381 seconds.
+✘ Test "Ambiguous legacy extension siblings are withheld through background serving" failed after 137.861 seconds with 1 issue.
+✘ Test "Incomplete pinned file does not block background retry admission" failed after 137.866 seconds with 1 issue.
+✘ Test "A transfer backgroundDownload created but could not resume is abandoned by backgroundDownload itself" failed after 144.611 seconds with 1 issue.
+✘ Test "wrj8: a resume whose server validator still matches splices the blob" failed after 146.910 seconds with 2 issues.
+✘ Test "A force-quit resume re-queues the fresh download against the recovered show" failed after 146.910 seconds with 1 issue.
+✘ Test "Dropping the resume blob leaves the attribution for the resume path" failed after 146.910 seconds with 1 issue.
+✘ Test "resumeSuspendedTransfer consumes the persisted blob on success" failed after 146.911 seconds with 2 issues.
+✔ Suite "AcousticFeaturePipeline production wiring (gtt9.16)" 2026-08-12 17:03:31.799937-0400 Playhead[93019:53603093] [Capabilities] fm.capability.context_window contextSize=0
+passed after 155.068 seconds.
+✘ Test "A completion delivered to a NEW manager instance still carries the show" recorded an issue at DownloadShowAttributionTests.swift:193:9: Expectation failed: job?.podcastId == Self.showId
+✘ Test "A background download enqueues analysis against the show it was queued with" recorded an issue at DownloadShowAttributionTests.swift:123:9: Expectation failed: attributedJob?.podcastId == Self.showId
+✘ Test "A background download enqueues analysis against the show it was queued with" recorded an issue at DownloadShowAttributionTests.swift:127:9: Expectation failed: attributedJob?.podcastId?.isEmpty == false
+✔ Test "didCompleteWithError(URLError.notConnectedToInternet) emits noNetwork" passed after 156.162 seconds.
+✔ Test "didCompleteWithError(URLError.timedOut) emits failed with taskExpired" passed after 156.162 seconds.
+✘ Test "A completion delivered to a NEW manager instance still carries the show" failed after 156.940 seconds with 2 issues.
+✘ Test "Queueing writes the attribution and a terminal completion reaps it" failed after 156.940 seconds with 1 issue.
+✔ Test "Invariant 2: transport does NOT block compute-only2026-08-12 17:03:35.398251-0400 Playhead[93019:53604491] [Capabilities] fm.capability.context_window contextSize=0
+ pre-analysis (unreachable)" passed after 158.463 seconds.
+✔ Test "Invariant 2: transport does NOT block compute-only pre-analysis (cellular, no-cellular-pref)" passed after 158.465 seconds.
+✘ Test "delegate staging failure releases ownership and permits retry" recorded an issue at BackgroundURLSessionTests.swift:442:9: Expectation failed: await manager._backgroundDownloadAdmissionCountForTesting()
+✔ Test "Scan completes over a 10-blob cache and reports every blob" passed after 158.407 seconds.
+✘ Test "failed suggest No restores the latest revision received while persistence waits" recorded an issue at SkipOrchestratorRevertTests.swift:6473:6: Time limit was exceeded: 60.000 seconds
+✘ Test "stale Auto-Yes cannot commit after durable material changes mid-suspension" recorded an issue at SkipOrchestratorRevertTests.swift:6555:6: Time limit was exceeded: 60.000 seconds
+✘ Test "revertWindow persists episode A feedback across direct replacement" recorded an issue at SkipOrchestratorRevertTests.swift:3455:6: Time limit was exceeded: 60.000 seconds
+✘ Test "suggest Yes persists episode A feedback across direct replacement" recorded an issue at SkipOrchestratorRevertTests.swift:6297:6: Time limit was exceeded: 60.000 seconds
+✘ Test "failed suggest Yes restores the latest revision received while persistence waits" recorded an issue at SkipOrchestratorRevertTests.swift:6390:6: Time limit was exceeded: 60.000 seconds
+✘ Test "stale suggest completion cannot clear replacement provisional ownership" recorded an issue at SkipOrchestratorRevertTests.swift:7420:6: Time limit was exceeded: 60.000 seconds
+✘ Test "An abandoned call is cancelled, so it stops competing for the recognizer" recorded an issue at SpeechRecognitionRequestGateTests.swift:455:6: Time limit was exceeded: 60.000 seconds
+✘ Test "Cancellation reaches the recognizer call and the permit is not freed until it unwinds" recorded an issue at SpeechRecognitionRequestGateTests.swift:545:6: Time limit was exceeded: 60.000 seconds
+✘ Test "A never-finishing holder does not wedge a subsequent acquire" recorded an issue at SpeechRecognitionRequestGateTests.swift:494:6: Time limit was exceeded: 60.000 seconds
+✘ Test "The watchdog does not fire for a call that merely takes a while" recorded an issue at SpeechRecognitionRequestGateTests.swift:525:6: Time limit was exceeded: 60.000 seconds
+✘ Test "A holder that never returns is abandoned instead of holding forever" recorded an issue at SpeechRecognitionRequestGateTests.swift:401:6: Time limit was exceeded: 60.000 seconds
+✘ Test "delayed correction revokes its captured show after episode replacement" recorded an issue at AdCatalogWiringTests.swift:1532:6: Time limit was exceeded: 60.000 seconds
+✘ Test "A reply that never arrives resolves to the fallback instead of hanging" recorded an issue at BoundedContinuationTests.swift:89:6: Time limit was exceeded: 60.000 seconds
+✘ Test "The fallback hook fires at most once even when timeout and cancellation race" recorded an issue at BoundedContinuationTests.swift:214:6: Time limit was exceeded: 60.000 seconds
+✘ Test "A reply that lands after the timeout is dropped, not double-resumed" recorded an issue at BoundedContinuationTests.swift:150:6: Time limit was exceeded: 60.000 seconds
+✘ Test "Cancellation resolves with the fallback without waiting out the timeout" recorded an issue at BoundedContinuationTests.swift:107:6: Time limit was exceeded: 60.000 seconds
+✘ Test "Invariant 1: eligible queued work + free capacity drains within bounded passes" recorded an issue at AnalysisPipelineStallRegressionTests.swift:150:6: Time limit was exceeded: 60.000 seconds
+✘ Test "A shard the ASR watchdog abandons costs one shard, not the loop" recorded an issue at TranscriptEngineTests.swift:1028:6: Time limit was exceeded: 60.000 seconds
+✘ Test "Invariant 5a: a drain over eligible work strictly decreases pending" recorded an issue at AnalysisPipelineStallRegressionTests.swift:344:6: Time limit was exceeded: 60.000 seconds
+✔ Test "missing recognizer speakerId remains nil in chunks and events" passed after 159.215 seconds.
+✔ Test "recognizer speakerIds persist into chunks, events, and trait signals" passed after 159.215 seconds.
+✘ Test "scheduleBackfillIfNeeded emits a `submit` row with success=false on throw" recorded an issue at BackgroundProcessingServiceTelemetryTests.swift:56:9: Expectation failed: submit?.submitSucceeded == false
+✘ Test "scheduleBackfillIfNeeded emits a `submit` row with success=false on throw" recorded an issue at BackgroundProcessingServiceTelemetryTests.swift:57:9: Expectation failed: submit?.submitError != nil
+✘ Test "scheduleBackfillIfNeeded emits a `submit` row with success=true" recorded an issue at BackgroundProcessingServiceTelemetryTests.swift:33:9: Expectation failed: events.count >= 1
+✘ Test "scheduleBackfillIfNeeded emits a `submit` row with success=true" recorded an issue at BackgroundProcessingServiceTelemetryTests.swift:35:9: Expectation failed: submit != nil
+✘ Test "scheduleBackfillIfNeeded emits a `submit` row with success=true" recorded an issue at BackgroundProcessingServiceTelemetryTests.swift:36:9: Expectation failed: submit?.submitSucceeded == true
+✘ Test "suggest Yes persists episode A feedback across direct replacement" failed after 161.200 seconds with 1 issue.
+✘ Test "scheduleBackfillIfNeeded emits a `submit` row with success=false on throw" failed after 161.026 seconds with 2 issues.
+✘ Test "scheduleBackfillIfNeeded emits a `submit` row with success=true" failed after 161.027 seconds with 3 issues.
+✘ Test "The backfill handler still completes when the scheduler query times out" recorded an issue at BackfillSchedulerBoundingTests.swift:143:6: Time limit was exceeded: 60.000 seconds
+✘ Test "failed suggest No restores the latest revision received while persistence waits" failed after 161.320 seconds with 1 issue.
+✘ Test "revertWindow persists episode A feedback across direct replacement" failed after 161.320 seconds with 1 issue.
+✘ Test "failed suggest Yes restores the latest revision received while persistence waits" failed after 161.320 seconds with 1 issue.
+✘ Test "delayed correction revokes its captured show after episode replacement" failed after 161.354 seconds with 1 issue.
+✘ Test "A reply that never arrives resolves to the fallback instead of hanging" failed after 161.350 seconds with 1 issue.
+✘ Test "The fallback hook fires at most once even when timeout and cancellation race" failed after 161.350 seconds with 1 issue.
+✘ Test "A reply that lands after the timeout is dropped, not double-resumed" failed after 161.350 seconds with 1 issue.
+✘ Test "Cancellation resolves with the fallback without waiting out the timeout" failed after 161.350 seconds with 1 issue.
+✘ Test "A shard the ASR watchdog abandons costs one shard, not the loop" failed after 161.347 seconds with 1 issue.
+✔ Test aStoppedRunReportsStoppedThroughItsOwnGate() passed after 163.009 seconds.
+✔ Test perRunCountersDoNotLeakIntoTheNextSession() passed after 163.009 seconds.
+✔ Test appendedShardFailuresAreAccumulatedToo() passed after 163.014 seconds.
+✔ Test dedupOnlyRerunWithOneBadShardStillCompletes() passed after 163.014 seconds.
+✔ Test "a second row for one (asset, pass, fingerprint) is refused, and the survivor still takes the speakerId upgrade" passed after 162.990 seconds.
+✔ Test "duplicate fingerprint can upgrade missing speakerId and avgConfidence and re-emit chunk" passed after 162.991 seconds.
+✘ Test "The reschedule latch is released on the timeout path" recorded an issue at BackfillSchedulerBoundingTests.swift:120:6: Time limit was exceeded: 60.000 seconds
+✘ Test "The expiration handler is armed before the handler awaits anything" recorded an issue at BackfillSchedulerBoundingTests.swift:162:6: Time limit was exceeded: 60.000 seconds
+✘ Test anOverlappingPredecessorDoesNotCreditTheSuccessor() recorded an issue at TranscriptEngineFailureEventTests.swift:1372:6: Time limit was exceeded: 60.000 sec2026-08-12 17:03:40.189824-0400 Playhead[93019:53604491] [AnalysisCoordinator] AnalysisCoordinator stopped
+onds
+✘ Test "Invariant 4 (RECOVERY visibility): preanalysis_recovery records jobsSeen == actual eligible count" recorded an issue with 1 argument depth → 1 at AnalysisPipelineStallInvariantHarnessIntegrationTests.swift:444:6: Time limit was exceeded: 60.000 seconds
+✘ Test "Invariant 4 (RECOVERY visibility): preanalysis_recovery records jobsSeen == actual eligible count" recorded an issue with 1 argument depth → 2 at AnalysisPipelineStallInvariantHarnessIntegrationTests.swift:444:6: Time limit was exceeded: 60.000 seconds
+✘ Test "Invariant 4 (RECOVERY visibility): preanalysis_recovery records jobsSeen == actual eligible count" recorded an issue with 1 argument depth → 5 at AnalysisPipelineStallInvariantHarnessIntegrationTests.swift:444:6: Time limit was exceeded: 60.000 seconds
+✔ Test aCancelledRunStillReportsWhatItsShardsFailedWith() passed after 163.244 seconds.
+✔ Test cancellationIsReportedInsteadOfReturningInSilence() passed after 163.243 seconds.
+✘ Test "Invariant 4 (RECOVERY visibility): preanalysis_recovery records jobsSeen == actual eligible count" recorded an issue with 1 argument depth → 9 at AnalysisPipelineStallInvariantHarnessIntegrationTests.swift:444:6: Time limit was exceeded: 60.000 seconds
+✘ Test "Invariant 3 (BACKGROUND): both BGTask entry points DISPATCH — queued set shrinks + progress outcome, never expired/0-done" recorded an issue with 2 arguments entry → backfill, depth → 1 at AnalysisPipelineStallInvariantHarnessIntegrationTests.swift:324:6: Time limit was exceeded: 60.000 seconds
+✘ Test "Invariant 3 (BACKGROUND): both BGTask entry points DISPATCH — queued set shrinks + progress outcome, never expired/0-done" recorded an issue with 2 arguments entry → backfill, depth → 3 at AnalysisPipelineStallInvariantHarnessIntegrationTests.swift:324:6: Time limit was exceeded: 60.000 seconds
+✘ Test "Invariant 3 (BACKGROUND): both BGTask entry points DISPATCH — queued set shrinks + progress outcome, never expired/0-done" recorded an issue with 2 arguments entry → backfill, depth → 7 at AnalysisPipelineStallInvariantHarnessIntegrationTests.swift:324:6: Time limit was exceeded: 60.000 seconds
+✘ Test "stale suggest completion cannot clear replacement provisional ownership" failed after 165.091 seconds with 1 issue.
+✘ Test "Invariant 1: eligible queued work + free capacity drains within bounded passes" recorded an issue at AnalysisPipelineStallRegressionTests.swift:174:9: Expectation failed: queuedAfter.isEmpty
+✘ Test "Invariant 1: eligible queued work + free capacity drains within bounded passes" recorded an issue at AnalysisPipelineStallRegressionTests.swift:175:9: Expectation failed: try await pendingCount(store) == 0
+✘ Test anOverlappingPredecessorDoesNotCreditTheSuccessor() failed after 165.091 seconds with 1 issue.
+✘ Test "An abandoned call is cancelled, so it stops competing for the recognizer" failed after 165.143 seconds with 1 issue.
+✘ Test "A holder that never returns is abandoned instead of holding forever" failed after 165.143 seconds with 1 issue.
+✘ Test "didCompleteWithError skips harvest when NSURLSessionDownloadTaskResumeData is absent" recorded an issue at ForceQuitResumeTests.swift:729:9: Expectation failed: await manager._backgroundDownloadAdmissionCountForTesting()
+✘ Test "Invariant 3 (BACKGROUND): both BGTask entry points DISPATCH — queued set shrinks + progress outcome, never expired/0-done" recorded an issue with 2 arguments entry → recovery, depth → 1 at AnalysisPipelineStallInvariantHarnessIntegrationTests.swift:324:6: Time limit was exceeded: 60.000 seconds
+✘ Test "Invariant 3 (BACKGROUND): both BGTask entry points DISPATCH — queued set shrinks + progress outcome, never expired/0-done" recorded an issue with 2 arguments entry → recovery, depth → 3 at AnalysisPipelineStallInvariantHarnessIntegrationTests.swift:324:6: Time limit was exceeded: 60.000 seconds
+✘ Test "Invariant 3 (BACKGROUND): both BGTask entry points DISPATCH — queued set shrinks + progress outcome, never expired/0-done" recorded an issue with 2 arguments entry → recovery, depth → 7 at AnalysisPipelineStallInvariantHarnessIntegrationTests.swift:324:6: Time limit was exceeded: 60.000 seconds
+✘ Test "Invariant 1 (DRAIN): eligible queue + free capacity fully drains — any depth, any job type" recorded an issue with 2 arguments depth → 3, mix → preAnalysis at AnalysisPipelineStallInvariantHarnessIntegrationTests.swift:192:6: Time limit was exceeded: 60.000 seconds
+✘ Test "Invariant 1 (DRAIN): eligible queue + free capacity fully drains — any depth, any job type" recorded an issue with 2 arguments depth → 3, mix → backfill at AnalysisPipelineStallInvariantHarnessIntegrationTests.swift:192:6: Time limit was exceeded: 60.000 seconds
+✘ Test "Invariant 1 (DRAIN): eligible queue + free capacity fully drains — any depth, any job type" recorded an issue with 2 arguments depth → 3, mix → mixed at AnalysisPipelineStallInvariantHarnessIntegrationTests.swift:192:6: Time limit was exceeded: 60.000 seconds
+✘ Test "Invariant 1 (DRAIN): eligible queue + free capacity fully drains — any depth, any job type" recorded an issue with 2 arguments depth → 8, mix → preAnalysis at AnalysisPipelineStallInvariantHarnessIntegrationTests.swift:192:6: Time limit was exceeded: 60.000 seconds
+✘ Test "Invariant 1 (DRAIN): eligible queue + free capacity fully drains — any depth, any job type" recorded an issue with 2 arguments depth → 8, mix → backfill at AnalysisPipelineStallInvariantHarnessIntegrationTests.swift:192:6: Time limit was exceeded: 60.000 seconds
+✘ Test "Invariant 1 (DRAIN): eligible queue + free capacity fully drains — any depth, any job type" recorded an issue with 2 arguments depth → 8, mix → mixed at AnalysisPipelineStallInvariantHarnessIntegrationTests.swift:192:6: Time limit was exceeded: 60.000 seconds
+✘ Test "Invariant 1 (DRAIN): eligible queue + free capacity fully drains — any depth, any job type" recorded an issue with 2 arguments depth → 16, mix → preAnalysis at AnalysisPipelineStallInvariantHarnessIntegrationTests.swift:192:6: Time limit was exceeded: 60.000 seconds
+✘ Test "Invariant 1 (DRAIN): eligible queue + free capacity fully drains — any depth, any job type" recorded an issue with 2 arguments depth → 16, mix → backfill at AnalysisPipelineStallInvariantHarnessIntegrationTests.swift:192:6: Time limit was exceeded: 60.000 seconds
+✘ Test "Invariant 1 (DRAIN): eligible queue + free capacity fully drains — any depth, any job type" recorded an issue with 2 arguments depth → 16, mix → mixed at AnalysisPipelineStallInvariantHarnessIntegrationTests.swift:192:6: Time limit was exceeded: 60.000 seconds
+✘ Test "stale Auto-Yes cannot commit after durable material changes mid-suspension" failed after 167.060 seconds with 1 issue.
+✘ Test "Invariant 1: eligible queued work + free capacity drains within bounded passes" failed after 167.045 seconds with 3 issues.
+✘ Test "Invariant 5a: a drain over eligible work strictly decreases pending" failed after 167.044 seconds with 1 issue.
+✘ Test "The watchdog does not fire for a call that merely takes a while" failed after 167.067 seconds with 1 issue.
+✘ Test "The reschedule latch is released on the timeout path" failed after 167.090 seconds with 1 issue.
+✔ Test "overlapping explicit clears keep writers fenced until both finish" passed after 166.989 seconds.
+✔ Test "an overlapping clear cannot strand re-enable intent" passed after 166.988 seconds.
+✘ Test "didCompleteWithError harvests NSURLSessionDownloadTaskResumeData and writes it to resumeDataDirectory" recorded an issue at ForceQuitResumeTests.swift:661:9: Expectation failed: await manager._backgroundDownloadAdmissionCountForTesting()
+✘ Test "Backfill happy path writes a terminal ledger row (noEligibleWork on fresh queue)" recorded an issue at BackgroundProcessingServiceLedgerTests.swift:57:6: Time limit was exceeded: 60.000 seconds
+✘ Test "Pre-analysis recovery with no reconciler writes failed/reconciler_unavailable" recorded an issue at BackgroundProcessingServiceLedgerTests.swift:181:6: Time limit was exceeded: 60.000 seconds
+✘ Test "Backfill expiration after work-task completion is idempotent (work-task wins)" recorded an issue at BackgroundProcessingServiceLedgerTests.swift:126:6: Time limit was exceeded: 60.000 seconds
+✔ Test "A time-range revert whose episode is replaced mid-loop calibrates the captured show and leaves the replacement alone" passed after 167.319 seconds.
+✔ Test "A transcript veto whose episode is replaced mid-flight still names the captured show" passed after 167.306 seconds.
+✘ Test "Backfill expirationHandler writes expired outcome before markComplete" recorded an issue at BackgroundProcessingServiceLedgerTests.swift:87:6: Time limit was exceeded: 60.000 seconds
+✘ Test observeICloudSyncStatusFlipsOnSignOut() recorded an issue at SettingsViewTests.swift:771:6: Time limit was exceeded: 60.000 seconds
+✔ Test "awaitJobsSettled waits for a running job and times out rather than lying" passed after 167.479 seconds.
+✔ Test "Stop during stalled transcribe: no chunks persisted, no coverage advance, no .completed" passed after 167.606 seconds.
+✘ Test "backfill expirationHandler emits an `expire` row" recorded an issue at BackgroundProcessingServiceTelemetryTests.swift:125:9: Expectation failed: expire != nil
+✘ Test "backfill expirationHandler emits an `expire` row" recorded an issue at BackgroundProcessingServiceTelemetryTests.swift:126:9: Expectation failed: expire?.detail == "backfill-task-expired"
+✘ Test "Invariant 1 (DRAIN): eligible queue + free capacity fully drains — any depth, any job type" recorded an issue with 2 arguments depth → 8, mix → preAnalysis at AnalysisPipelineStallInvariantHarnessIntegrationTests.swift:209:9: Expectation failed: queuedAfter.isEmpty
+✘ Test "Invariant 1 (DRAIN): eligible queue + free capacity fully drains — any depth, any job type" recorded an issue with 2 arguments depth → 8, mix → preAnalysis at AnalysisPipelineStallInvariantHarnessIntegrationTests.swift:211:9: Expectation failed: try await pendingCount(store) == 0
+✘ Test "Invariant 1 (DRAIN): eligible queue + free capacity fully drains — any depth, any job type" recorded an issue with 2 arguments depth → 8, mix → backfill at AnalysisPipelineStallInvariantHarnessIntegrationTests.swift:209:9: Expectation failed: queuedAfter.isEmpty
+✘ Test "Invariant 1 (DRAIN): eligible queue + free capacity fully drains — any depth, any job type" recorded an issue with 2 arguments depth → 8, mix → backfill at AnalysisPipelineStallInvariantHarnessIntegrationTests.swift:211:9: Expectation failed: try await pendingCount(store) == 0
+✘ Test "Invariant 1 (DRAIN): eligible queue + free capacity fully drains — any depth, any job type" recorded an issue with 2 arguments depth → 8, mix → mixed at AnalysisPipelineStallInvariantHarnessIntegrationTests.swift:209:9: Expectation failed: queuedAfter.isEmpty
+✘ Test "Invariant 1 (DRAIN): eligible queue + free capacity fully drains — any depth, any job type" recorded an issue with 2 arguments depth → 8, mix → mixed at AnalysisPipelineStallInvariantHarnessIntegrationTests.swift:211:9: Expectation failed: try await pendingCount(store) == 0
+✘ Test "Invariant 1 (DRAIN): eligible queue + free capacity fully drains — any depth, any job type" recorded an issue with 2 arguments depth → 16, mix → preAnalysis at AnalysisPipelineStallInvariantHarnessIntegrationTests.swift:209:9: Expectation failed: queuedAfter.isEmpty
+✘ Test "Invariant 1 (DRAIN): eligible queue + free capacity fully drains — any depth, any job type" recorded an issue with 2 arguments depth → 16, mix → preAnalysis at AnalysisPipelineStallInvariantHarnessIntegrationTests.swift:211:9: Expectation failed: try await pendingCount(store) == 0
+✘ Test "Invariant 1 (DRAIN): eligible queue + free capacity fully drains — any depth, any job type" recorded an issue with 2 arguments depth → 16, mix → backfill at AnalysisPipelineStallInvariantHarnessIntegrationTests.swift:209:9: Expectation failed: queuedAfter.isEmpty
+✘ Test "Invariant 1 (DRAIN): eligible queue + free capacity fully drains — any depth, any job type" recorded an issue with 2 arguments depth → 16, mix → backfill at AnalysisPipelineStallInvariantHarnessIntegrationTests.swift:211:9: Expectation failed: try await pendingCount(store) == 0
+✘ Test "Invariant 1 (DRAIN): eligible queue + free capacity fully drains — any depth, any job type" recorded an issue with 2 arguments depth → 16, mix → mixed at AnalysisPipelineStallInvariantHarnessIntegrationTests.swift:209:9: Expectation failed: queuedAfter.isEmpty
+✘ Test "Invariant 1 (DRAIN): eligible queue + free capacity fully drains — any depth, any job type" recorded an issue with 2 arguments depth → 16, mix → mixed at AnalysisPipelineStallInvariantHarnessIntegrationTests.swift:211:9: Expectation failed: try await pendingCount(store) == 0
+✔ Test "A banner No whose episode is replaced mid-flight calibrates the captured show" passed after 169.107 seconds.
+✘ Test "A background download enqueues analysis against the show it was queued with" failed after 169.084 seconds with 2 issues.
+✘ Test "Invariant 1 (DRAIN): eligible queue + free capacity fully drains — any depth, any job type" with 12 test cases failed after 169.283 seconds with 21 issues.
+✔ Test "A waiter cancelled while queued unblocks with CancellationError" passed after 169.284 seconds.
+✔ Test "the cancel reaches every job it names" passed after 169.450 seconds.
+✔ Test "each cancelled job keeps its own cause, so neither spends an attempt" passed after 169.450 seconds.
+✘ Test "backfill expirationHandler emits an `expire` row" failed after 169.402 seconds with 2 issues.
+✘ Test "Cancellation reaches the recognizer call and the permit is not freed until it unwinds" failed after 169.624 seconds with 1 issue.
+✔ Test "five expired windows in a row still leave the job alive" passed after 169.422 seconds.
+✔ Test "A cancel racing the permit hand-off leaves the gate usable either way" passed after 169.522 seconds.
+✘ Test "A never-finishing holder does not wedge a subsequent acquire" failed after 169.691 seconds with 1 issue.
+✘ Test "Backfill completes successfully" recorded an issue at BackgroundProcessingServiceTests.swift:44:6: Time limit was exceeded: 60.000 seconds
+✘ Test "Backfill expiration cancels work" recorded an issue at BackgroundProcessingServiceTests.swift:86:6: Time limit was exceeded: 60.000 seconds
+✘ Test "Backfill handler invokes real work method, not startCapabilityObserver" recorded an issue at BackgroundProcessingServiceTests.swift:119:6: Time limit was exceeded: 60.000 seconds
+✘ Test "Backfill skipped on thermal throttle via capabilitiesService" recorded an issue at BackgroundProcessingServiceTests.swift:65:6: Time limit was exceeded: 60.000 seconds
+✘ Test "Overlapping BG handlers each complete their own task independently" recorded an issue at BackgroundProcessingServiceTests.swift:145:6: Time limit was exceeded: 60.000 seconds
+✘ Test "both phases and the poll spend ONE deadline, anchored at the grant's start" recorded an issue at BackfillCoarseFirstReorderTests.swift:196:6: Time limit was exceeded: 60.000 seconds
+✘ Test "the coarse phase observes the queue BEFORE the drain has dispatched anything" recorded an issue at BackfillCoarseFirstReorderTests.swift:129:6: Time limit was exceeded: 60.000 seconds
+✘ Test "Model loading is outside the permit, so a cold asset install cannot spend the budget" recorded an issue at SpeechRecognitionRequestGateTests.swift:629:6: Time limit was exceeded: 60.000 seconds
+✔ Test "A cancelled waiter does not release a permit it never held" passed after 173.572 seconds.
+✔ Test "Cancelling one waiter leaves the rest of the queue intact" passed after 175.791 seconds.
+✔ Test "Concurrent callers cannot overspend the budget" passed after 175.799 seconds.
+✘ Test "Posted willResignActive notification drives a real BG task submission end-to-end" recorded an issue at DownloadManagerTests.swift:696:6: Time limit was exceeded: 60.000 seconds
+✘ Test "Reconnect headphones + user tap play resumes from same position" recorded an issue at RouteChangeTests.swift:206:6: Time limit was exceeded: 60.000 seconds
+✘ Test "Headphone disconnect preserves currentTime" recorded an issue at RouteChangeTests.swift:89:6: Time limit was exceeded: 60.000 seconds
+✘ Test "Headphone disconnect (oldDeviceUnavailable) pauses immediately" recorded an issue at RouteChangeTests.swift:50:6: Time limit was exceeded: 60.000 seconds
+​➜ Test "Performance: decode 15,000 atoms with ~50 anchors + ~100 acoustic hints in < 200ms" skipped: "perf pass only — see playhead-zx0l"
+✘ Test "cache deletion while background analysis enqueue is blocked leaves no resurrected artifacts" recorded an issue at BackgroundDownloadCompletionTests.swift:416:6: Time limit was exceeded: 60.000 seconds
+✘ Test "Model loading is outside the permit, so a cold asset install cannot spend the budget" failed after 185.637 seconds with 1 issue.
+✘ Test "expiry tells the SCHEDULER the grant is over, so the in-flight job requeues" recorded an issue at BackgroundGrantBudgetTests.swift:1111:6: Time limit was exceeded: 60.000 seconds
+​➜ Test "Skip transition completes within the 500 ms production budget" skipped: "perf pass only — see playhead-zx0l"
+✘ Test "an expired run records what the window achieved, not only that it ended" recorded an issue at BackgroundGrantBudgetTests.swift:1155:6: Time limit was exceeded: 60.000 seconds
+✘ Test "the work-deadline return MEASURES its completions too, and writes them" recorded an issue at BackgroundGrantBudgetTests.swift:1264:6: Time limit was exceeded: 60.000 seconds
+✘ Test "an expired run's completion count is measured, not a literal zero" recorded an issue at BackgroundGrantBudgetTests.swift:1216:6: Time limit was exceeded: 60.000 seconds
+✘ Test "PlaybackService deallocates after tearDown (no retain cycles)" recorded an issue at LongFormPlaybackTests.swift:37:6: Time limit was exceeded: 60.000 seconds
+✘ Test "Invariant 5: the backfill BGTask window drains eligible work (pending strictly decreases)" recorded an issue at AnalysisPipelineStallBackgroundEntryPointsIntegrationTests.swift:109:6: Time limit was exceeded: 60.000 seconds
+✘ Test "Invariant 6: pre-analysis recovery records jobsSeen >= #eligible queued" recorded an issue at AnalysisPipelineStallBackgroundEntryPointsIntegrationTests.swift:149:6: Time limit was exceeded: 60.000 seconds
+✘ Test "Headphone disconnect preserves currentTime" recorded an issue at RouteChangeTests.swift:124:9: Expectation failed: observed.contains(.paused)
+✘ Test "Headphone disconnect (oldDeviceUnavailable) pauses immediately" recorded an issue at RouteChangeTests.swift:85:9: Expectation failed: observed.contains(.paused)
+✘ Test "Reconnect headphones + user tap play resumes from same position" recorded an issue at RouteChangeTests.swift:244:9: Expectation failed: pausedObserved.contains(.paused)
+✘ Test "Phone call interruption pauses playback" recorded an issue at PlaybackInterruptionTests.swift:61:6: Time limit was exceeded: 60.000 seconds
+✘ Test "Siri activation interruption pauses playback" recorded an issue at PlaybackInterruptionTests.swift:178:6: Time limit was exceeded: 60.000 seconds
+✘ Test "Phone call ends with shouldResume → playback resumes" recorded an issue at PlaybackInterruptionTests.swift:98:6: Time limit was exceeded: 60.000 seconds
+✘ Test "Full interruption cycle: playing → paused → playing" recorded an issue at PlaybackInterruptionTests.swift:261:6: Time limit was exceeded: 60.000 seconds
+✘ Test "Siri dismissal with shouldResume restores playback" recorded an issue at PlaybackInterruptionTests.swift:219:6: Time limit was exceeded: 60.000 seconds
+✘ Test "Handler fired with no injection times out and completes failure" recorded an issue at BackgroundProcessingServiceTests.swift:592:6: Time limit was exceeded: 60.000 seconds
+✘ Test "Multiple concurrent waiters all wake on injection" recorded an issue at BackgroundProcessingServiceTests.swift:556:6: Time limit was exceeded: 60.000 seconds
+✘ Test "the expiration wait spends the post-reclaim grace, not the teardown reserve" recorded an issue at BackgroundGrantBudgetTests.swift:1941:9: Expectation failed: elapsed < .seconds(20)
+✘ Test "Triggered timeout resumes all parked waiters and reports the count" recorded an issue at BackgroundProcessingServiceTests.swift:667:6: Time limit was exceeded: 60.000 seconds
+✘ Test "recovery's work-deadline return does not strand the job it leaves running" recorded an issue at BackgroundGrantBudgetTests.swift:2408:9: Expectation failed: await scheduler.isDispatchClosedForTesting()
+✘ Test "the work-deadline return does not strand the job it leaves running" recorded an issue at BackgroundGrantBudgetTests.swift:1465:9: Expectation failed: await scheduler.isDispatchClosedForTesting()
+✘ Test "Late injection arriving after timeout is a no-op for the timed-out waiter" recorded an issue at BackgroundProcessingServiceTests.swift:615:6: Time limit was exceeded: 60.000 seconds
+✘ Test "Handler fired before injection completes success once injection lands" recorded an issue at BackgroundProcessingServiceTests.swift:518:6: Time limit was exceeded: 60.000 seconds
+✘ Test "handleBackfillTask emits matching `start` and `complete` rows" recorded an issue at BackgroundProcessingServiceTelemetryTests.swift:62:6: Time limit was exceeded: 60.000 seconds
+✘ Test "Headphone disconnect (oldDeviceUnavailable) pauses immediately" failed after 195.664 seconds with 2 issues.
+✘ Test "Backfill expirationHandler writes expired outcome before markComplete" failed after 195.769 seconds with 1 issue.
+✘ Test "Backfill expiration cancels work" failed after 195.724 seconds with 1 issue.
+✘ Test "expiry tells the SCHEDULER the grant is over, so the in-flight job requeues" failed after 195.640 seconds with 1 issue.
+✘ Test "an expired run records what the window achieved, not only that it ended" failed after 195.641 seconds with 1 issue.
+✘ Test "an expired run's completion count is measured, not a literal zero" failed after 195.641 seconds with 1 issue.
+✘ Test "The backfill handler still completes when the scheduler query times out" failed after 195.796 seconds with 1 issue.
+✘ Test "The expiration handler is armed before the handler awaits anything" failed after 195.797 seconds with 1 issue.
+✘ Test "Invariant 4 (RECOVERY visibility): preanalysis_recovery records jobsSeen == actual eligible count" with 4 test cases failed after 195.785 seconds with 4 issues.
+✘ Test "Invariant 3 (BACKGROUND): both BGTask entry points DISPATCH — queued set shrinks + progress outcome, never expired/0-done" with 6 test cases failed after 195.785 seconds with 6 issues.
+✘ Test "Backfill happy path writes a terminal ledger row (noEligibleWork on fresh queue)" failed after 195.792 seconds with 1 issue.
+✘ Test "Backfill completes successfully" failed after 195.761 seconds with 1 issue.
+✘ Test "Backfill handler invokes real work method, not startCapabilityObserver" failed after 195.761 seconds with 1 issue.
+✘ Test "Backfill skipped on thermal throttle via capabilitiesService" failed after 195.761 seconds with 1 issue.
+✘ Test "both phases and the poll spend ONE deadline, anchored at the grant's start" failed after 195.740 seconds with 1 issue.
+✘ Test "the coarse phase observes the queue BEFORE the drain has dispatched anything" failed after 195.746 seconds with 1 issue.
+✘ Test "didFinishLaunching triggers scanForSuspendedTransfers on the registered manager" recorded an issue at ForceQuitResumeTests.swift:744:6: Time limit was exceeded: 60.000 seconds
+✘ Test "Invariant 5: the backfill BGTask window drains eligible work (pending strictly decreases)" failed after 195.728 seconds with 1 issue.
+✘ Test "Invariant 6: pre-analysis recovery records jobsSeen >= #eligible queued" failed after 195.728 seconds with 1 issue.
+✘ Test "Phone call interruption pauses playback" recorded an issue at PlaybackInterruptionTests.swift:94:9: Expectation failed: observed.contains(.paused)
+✘ Test "Siri activation interruption pauses playback" recorded an issue at PlaybackInterruptionTests.swift:215:9: Expectation failed: observed.contains(.paused)
+✘ Test "Phone call ends with shouldResume → playback resumes" recorded an issue at PlaybackInterruptionTests.swift:135:9: Expectation failed: observed.contains(.playing)
+✘ Test "Full interruption cycle: playing → paused → playing" recorded an issue at PlaybackInterruptionTests.swift:306:9: Expectation failed: observed.contains(.paused)
+✘ Test "Siri dismissal with shouldResume restores playback" recorded an issue at PlaybackInterruptionTests.swift:255:9: Expectation failed: observed.contains(.playing)
+✘ Test "Handler fired with no injection times out and completes failure" failed after 195.723 seconds with 1 issue.
+✘ Test "Multiple concurrent waiters all wake on injection" failed after 195.723 seconds with 1 issue.
+✘ Test "didCompleteWithError harvests NSURLSessionDownloadTaskResumeData and writes it to resumeDataDirectory" recorded an issue at ForceQuitResumeTests.swift:594:6: Time limit was exceeded: 60.000 seconds
+✘ Test "Pre-analysis recovery with no reconciler writes failed/reconciler_unavailable" failed after 195.891 seconds with 1 issue.
+✘ Test "the work-deadline return MEASURES its completions too, and writes them" failed after 195.761 seconds with 1 issue.
+✘ Test "Triggered timeout resumes all parked waiters and reports the count" failed after 195.731 seconds with 1 issue.
+✘ Test "Interruption notification handled on actor without crash" recorded an issue at InterruptionHandlingTests.swift:53:6: Time limit was exceeded: 60.000 seconds
+✘ Test "Route change notification handled on actor without crash" recorded an issue at InterruptionHandlingTests.swift:137:6: Time limit was exceeded: 60.000 seconds
+✔ Test "Expiration mid-refresh completes task exactly once and reports success=false" passed after 195.771 seconds.
+✘ Test "beginEpisode cancels prior asset's in-flight lookahead refresh" recorded an issue at SilenceCompressionCoordinatorTests.swift:293:6: Time limit was exceeded: 60.000 seconds
+✘ Test "recordUserSpeedChange resets planner so next tick re-engages" recorded an issue at SilenceCompressionCoordinatorTests.swift:198:6: Time limit was exceeded: 60.000 seconds
+✘ Test "Asset-id change cancels in-flight refresh and resets state" recorded an issue at SilenceCompressionCoordinatorTests.swift:257:6: Time limit was exceeded: 60.000 seconds
+✘ Test "Override OFF mid-episode forces immediate re-fetch" recorded an issue at SilenceCompressionCoordinatorTests.swift:229:6: Time limit was exceeded: 60.000 seconds
+✘ Test "Per-show override true ⇒ never engages even with valid plan" recorded an issue at SilenceCompressionCoordinatorTests.swift:154:6: Time limit was exceeded: 60.000 seconds
+✘ Test "Throwing fetchWindows preserves prior plan (no disengage)" recorded an issue at SilenceCompressionCoordinatorTests.swift:386:6: Time limit was exceeded: 60.000 seconds
+✘ Test "notePlayhead inside a music plan ⇒ engages with varispeed/high rate" recorded an issue at SilenceCompressionCoordinatorTests.swift:130:6: Time limit was exceeded: 60.000 seconds
+✘ Test "updateKeepFullMusicOverride(true) mid-flight disengages immediately" recorded an issue at SilenceCompressionCoordinatorTests.swift:175:6: Time limit was exceeded: 60.000 seconds
+✘ Test "Episode begin ⇒ ends any prior compression and refreshes plan" recorded an issue at SilenceCompressionCoordinatorTests.swift:83:6: Time limit was exceeded: 60.000 seconds
+✘ Test "Episode-bound seek rejects a stale same-episode lifecycle token" recorded an issue at SilenceCompressionCoordinatorTests.swift:95:6: Time limit was exceeded: 60.000 seconds
+✘ Test "Handler fired before injection completes success once injection lands" failed after 195.739 seconds with 1 issue.
+✘ Test "Phone call interruption pauses playback" failed after 195.831 seconds with 2 issues.
+✘ Test "Siri activation interruption pauses playback" failed after 195.831 seconds with 2 issues.
+✘ Test "Phone call ends with shouldResume → playback resumes" failed after 195.831 seconds with 2 issues.
+✘ Test "Siri dismissal with shouldResume restores playback" failed after 195.831 seconds with 2 issues.
+✘ Test "the expiration wait spends the post-reclaim grace, not the teardown reserve" failed after 195.861 seconds with 1 issue.
+✘ Test "handleBackfillTask emits matching `start` and `complete` rows" recorded an issue at BackgroundProcessingServiceTelemetryTests.swift:90:9: Expectation failed: complete != nil
+✘ Test "handleBackfillTask emits matching `start` and `complete` rows" recorded an issue at BackgroundProcessingServiceTelemetryTests.swift:92:9: Expectation failed: start?.taskInstanceID == complete?.taskInstanceID
+✘ Test "handleBackfillTask emits matching `start` and `complete` rows" recorded an issue at BackgroundProcessingServiceTelemetryTests.swift:93:9: Expectation failed: complete?.success == true
+✔ Test "the poll loop is handed a deadline inside the measured grant, not 25 minutes" passed after 195.797 seconds.
+✔ Test "the charged sibling's handler spends its own budget" passed after 195.797 seconds.
+✘ Test "Overlapping BG handlers each complete their own task independently" failed after 195.960 seconds with 1 issue.
+✘ Test "recovery's work-deadline return does not strand the job it leaves running" failed after 195.891 seconds with 1 issue.
+✘ Test "the work-deadline return does not strand the job it leaves running" failed after 195.876 seconds with 1 issue.
+✘ Test "Route change notification handled on actor without crash" failed after 195.816 seconds with 1 issue.
+✘ Test "Interruption notification handled on actor without crash" recorded an issue at InterruptionHandlingTests.swift:95:9: Expectation failed: observed.contains(.paused)
+✘ Test "Headphone disconnect preserves currentTime" failed after 195.927 seconds with 2 issues.
+✘ Test "handleBackfillTask emits matching `start` and `complete` rows" failed after 195.867 seconds with 4 issues.
+✘ Test "Interruption notification handled on actor without crash" failed after 195.842 seconds with 2 issues.
+✘ Test "Full interruption cycle: playing → paused → playing" failed after 195.994 seconds with 2 issues.
+✘ Test "PlaybackService deallocates after tearDown (no retain cycles)" failed after 196.116 seconds with 1 issue.
+✘ Test "Per-show override true ⇒ never engages even with valid plan" failed after 196.947 seconds with 1 issue.
+✘ Test "Episode begin ⇒ ends any prior compression and refreshes plan" failed after 196.946 seconds with 1 issue.
+✘ Test "recovery's teardown cancelled mid-settle leaves the ending to the expiration handler" recorded an issue at BackgroundGrantBudgetTests.swift:2479:9: Expectation failed: task.completedSuccess == nil
+✘ Test "a teardown cancelled mid-settle leaves the ending to the expiration handler" recorded an issue at BackgroundGrantBudgetTests.swift:1585:9: Expectation failed: task.completedSuccess == nil
+✘ Test "recovery's teardown cancelled mid-settle leaves the ending to the expiration handler" recorded an issue at BackgroundGrantBudgetTests.swift:2488:9: Expectation failed: task.setTaskCompletedCallCount == 0
+✘ Test "recovery's teardown cancelled mid-settle leaves the ending to the expiration handler" recorded an issue at BackgroundGrantBudgetTests.swift:2494:9: Expectation failed: task.completedSuccess == false
+✘ Test "a teardown cancelled mid-settle leaves the ending to the expiration handler" recorded an issue at BackgroundGrantBudgetTests.swift:1594:9: Expectation failed: task.setTaskCompletedCallCount == 0
+✘ Test "a teardown cancelled mid-settle leaves the ending to the expiration handler" recorded an issue at BackgroundGrantBudgetTests.swift:1602:9: Expectation failed: task.completedSuccess == false
+✘ Test "Posted willResignActive notification drives a real BG task submission end-to-end" failed after 201.457 seconds with 1 issue.
+✘ Test "Reconnect headphones + user tap play resumes from same position" failed after 201.454 seconds with 2 issues.
+✘ Test "Late injection arriving after timeout is a no-op for the timed-out waiter" failed after 201.435 seconds with 1 issue.
+✘ Test "Backfill expiration after work-task completion is idempotent (work-task wins)" failed after 201.596 seconds with 1 issue.
+✘ Test "didFinishLaunching triggers scanForSuspendedTransfers on the registered manager" failed after 201.454 seconds with 1 issue.
+✘ Test "Asset-id change cancels in-flight refresh and resets state" failed after 201.438 seconds with 1 issue.
+✘ Test "notePlayhead inside a music plan ⇒ engages with varispeed/high rate" failed after 201.438 seconds with 1 issue.
+✘ Test "Override OFF mid-episode forces immediate re-fetch" failed after 201.455 seconds with 1 issue.
+✘ Test "Episode-bound seek rejects a stale same-episode lifecycle token" failed after 201.454 seconds with 1 issue.
+✘ Test "beginEpisode cancels prior asset's in-flight lookahead refresh" failed after 201.462 seconds with 1 issue.
+✔ Test "journal fetch result is threaded into the default bundle's work_journal_tail" p2026-08-12 17:04:18.725929-0400 Playhead[93019:53604488] [BackfillJobRunner] fm.backfill.coarse_coverage job=fm-a2e8931be2d9dca3 examinedSeconds=80.000000 unexaminedSeconds=90.000000 examinedFraction=0.470588 holes=1 transcriptEnd=170.000000
+assed after 201.745 seconds.
+✘ Test observeICloudSyncStatusFlipsOnSignOut() failed after 201.746 seconds with 1 issue.
+✘ Test "a teardown cancelled mid-settle leaves the ending to the expiration handler" failed after 201.654 seconds with 3 issues.
+✘ Test "recovery's teardown cancelled mid-settle leaves the ending to the expiration handler" failed after 201.671 seconds with 3 issues.
+✘ Test "updateKeepFullMusicOverride(true) mid-flight disengages immediately" failed after 201.663 seconds with 1 issue.
+✘ Test "recordUserSpeedChange resets planner so next tick re-engages" failed after 201.664 seconds with 1 issue.
+✘ Test "Throwing fetchWindows preserves prior plan (no disengage)" failed after 201.742 seconds with 1 issue.
+✔ Test "the runtime's coordinator recovers a show through the runtime's own resolver" passed after 201.968 seconds.
+✘ Test "benchmark gate: 3 episodes finish under the orchestration budget" recorded an issue at Phase3ShadowReplayHarnessTests.swift:210:9: Expectation failed: elapsedMillis < 5000.0
+✘ Test "benchmark gate: 3 episodes finish under the orchestration budget" failed after 204.016 seconds with 1 issue.
+Restarting after unexpected exit, crash, or test timeout; summary will include totals from previous launches.
+​➜ Test "Skip transition completes within the 500 ms production budget" skipped: "perf pass only — see playhead-zx0l"
+​➜ Test "Performance: decode 15,000 atoms with ~50 anchors + ~100 acoustic hints in < 200ms" skipped: "perf pass only — see playhead-zx0l"
+Failing tests:
+	StreamingDownloadCachedTests.ambiguousLegacySiblingsFailClosedAcrossServingPath()
+	StreamingDownloadCachedTests.incompletePinnedFileAllowsBackgroundRetry()
+	SkipOrchestratorRevertTests.failedSuggestNoRestoresLatestBufferedRevision()
+	DownloadManagerDaemonUnavailableTests.backgroundDownloadAbandonsATransferItCouldNotResume()
+	ResumeSuspendedTransferTests.resumeFreshValidatorResumes()
+	ResumeSuspendedTransferTests.resumeFreshValidatorResumes()
+	ResumeSuspendedTransferTests.resumeConsumesBlob()
+	ResumeSuspendedTransferTests.resumeConsumesBlob()
+	DownloadShowAttributionTests.forceQuitResumeRecoversTheShow()
+	DownloadShowAttributionTests.attributionSurvivesProcessRestart()
+	DownloadShowAttributionTests.attributionSurvivesProcessRestart()
+	DownloadShowAttributionTests.backgroundDownloadEnqueuesWithPodcastId()
+	DownloadShowAttributionTests.backgroundDownloadEnqueuesWithPodcastId()
+	DownloadShowAttributionTests.attributionIsWrittenThenReaped()
+	DownloadShowAttributionTests.cancelReapsAttribution()
+	DownloadShowAttributionTests.resumeBlobDeletionPreservesAttribution()
+	DownloadShowAttributionTests.clearCacheReapsAttribution()
+	DelegateWorkJournalTests.stagingFailureReleasesOwnership()
+** TEST FAILED **
