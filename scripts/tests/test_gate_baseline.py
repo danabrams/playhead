@@ -1923,6 +1923,29 @@ class CrashedHostSafetyPropertyTests(unittest.TestCase):
 
 FIXTURES = ROOT / "scripts" / "tests" / "fixtures"
 
+# THE BASELINE THESE RAILS RUN AGAINST IS FROZEN, NOT THE LIVE ONE (playhead-o89d).
+#
+# They used to load `scripts/gate-baseline.PlayheadFastTests.json` and assert exact
+# counts off it — 85 known, 14 new, a census of exactly two observations, `absent`
+# empty. Every one of those is a property of the file's CONTENTS on the day the
+# rails were written, and the file's whole purpose is to change: a documented,
+# sanctioned `--accept-baseline` moved it from 117 entries to 121 and turned five
+# of these rails red without touching a line of `gate_baseline.py`.
+#
+# The worst of the five was `test_the_fixture_still_agrees_with_the_FULL_LOG_it_came_from`,
+# and it shows why freezing is the right fix rather than re-typing the numbers.
+# The distilled fixtures drop uninteresting start/pass PAIRS whole; a name that is
+# not a baseline member on distillation day therefore has no lines to keep. Admit
+# that name to the baseline later and the fixture reports it ABSENT while the full
+# log reports it passing — the distillation's "every quantity comes out identical"
+# invariant is broken by an edit to a DIFFERENT file. Re-typing 85 as 83 would buy
+# one accept's worth of green.
+#
+# So: the rails assert things about the ENGINE reading a real crashed run, and they
+# get a baseline that never moves. Regenerate this only alongside the fixtures
+# themselves (scripts/tests/make_crashed_run_fixture.py), never to chase an accept.
+RAILS_BASELINE = FIXTURES / "gate-baseline.crashed-run-rails.json"
+
 # The full 7.2 MB logs, when whoever is running this still has them. Optional by
 # design — the committed fixtures are the rails, and these are a bonus check
 # that the distillation did not drift from its source.
@@ -1998,7 +2021,7 @@ class RealCrashedRunTests(unittest.TestCase):
         self.assertEqual(expected, len(run.no_verdict))
         self.assertEqual(entries, len(run.blamed_entries))
         self.assertEqual(distinct, len(run.blamed))
-        base = gb.load_baseline(ROOT / "scripts" / "gate-baseline.PlayheadFastTests.json")
+        base = gb.load_baseline(RAILS_BASELINE)
         v = gb.verdict(base, run, plan="PlayheadFastTests")
         first = v.render().splitlines()[0]
         self.assertIn("NO VERDICT", first)
@@ -2093,8 +2116,7 @@ class RealCrashedRunTests(unittest.TestCase):
         they say: three accepts of the three real runs must leave exactly the
         eleven deterministic and the four load-sensitive.
         """
-        base = gb.load_baseline(
-            ROOT / "scripts" / "gate-baseline.PlayheadFastTests.json")
+        base = gb.load_baseline(RAILS_BASELINE)
         merged = base
         for name in ("crashed-run-main-76b0a09a.log", "crashed-run-mn5e.log",
                      "crashed-run-tl6l-realgate.log"):
@@ -2125,8 +2147,7 @@ class RealCrashedRunTests(unittest.TestCase):
         turns it red; the census is then the only thing that can, which is the
         vacuity trap R3 fell into and named.
         """
-        base = gb.load_baseline(
-            ROOT / "scripts" / "gate-baseline.PlayheadFastTests.json")
+        base = gb.load_baseline(RAILS_BASELINE)
         third = self._run("crashed-run-tl6l-realgate.log")
         # Failures accepted from run 3 itself -> zero NEW failures, zero absent.
         tests_side = gb.merge(base, third, plan="PlayheadFastTests")
@@ -2224,8 +2245,7 @@ class RealCrashedRunTests(unittest.TestCase):
             full = FULL_LOG_DIR / relative
             if not full.exists():
                 continue
-            base = gb.load_baseline(
-                ROOT / "scripts" / "gate-baseline.PlayheadFastTests.json")
+            base = gb.load_baseline(RAILS_BASELINE)
             source = gb.parse_run(full.read_text(encoding="utf-8", errors="replace"))
             distilled = self._run(fixture)
             self.assertEqual(set(source.no_verdict), set(distilled.no_verdict), fixture)
