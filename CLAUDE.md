@@ -90,6 +90,22 @@ Two corollaries worth knowing before the next `rc=65`:
 - **`rc=65` with no tests is no longer self-diagnosed as a broken tree.** It now names CONTENTION, a WEDGED RUNNER (`blessSimulatorHub` / `service hub IS NOT still alive`, with the `simctl shutdown all` recovery), DISK, OOM, a real BUILD FAILURE, or **UNDIAGNOSED** — and prints the matched line as evidence. `xcrun: error: unable to find utility "simctl"` is labelled a **secondary** symptom: it is xcodebuild's diagnostic collection shelling out through the global `xcode-select`, not the 2026-07-16 clone-parallelism gotcha, and chasing it wastes the round.
 - **The battery has never run `git checkout -- .`, and earlier prose here and in its own header said it did.** `restore_sources` is `git checkout -- "${MUTABLE_FILES[@]}"` and cannot touch a file it does not mutate. The blanket checkout was a *remedy people copied out of that wrong prose*, and on 2026-08-04 three agents destroyed their own uncommitted work running it by hand. If you want to know whether a run left residue, ask: `git status --porcelain -- Playhead`.
 
+### The full plan runs ONCE, before merge — not per review round (Dan 2026-08-13)
+
+**A review round uses `-only-testing:` over the suites its diff touches. The full plan is the merge gate and nothing else.** This is a measured decision, not a preference.
+
+Across **61 preserved full-plan logs**: **649 NEW failures reported, and essentially none real.** Only 8 of the 61 contain a single Swift Testing failure under 97 s or any XCTest failure — and most of those 8 are deliberate mutant runs, controls or probes, where the failure *is* the intended result. Every other one of the 649 was `Time limit was exceeded: 60.000 seconds`, reported at 150–200 s wall clock, in the same handful of suites (`BackfillSchedulerBounding`, `BackgroundGrantBudget`, `TranscriptEngine`, `ShadowRetry`, `DrainEligibleStartGate`, `SpeechModelLoad`).
+
+Those tests assert an **absolute wall-clock budget** while ~8,000 tests saturate a 16 GB box, so the quantity they measure is machine load and the quantity they are read as measuring is code correctness — this repo's standing defect class, living in the harness instead of the product. Selectively re-run, the same tests pass in **2–9 s** (measured repeatedly: 117 tests/10 suites in 8.6 s; 188/10 in 7.2 s; 74/11 in 4.4 s). `playhead-o89d` carries PerfGate-ing them.
+
+The cost being removed is not machine time alone. Every RED gate obliges a reader to triage both failure formats, check every duration against 97 s, and read the `Failing tests:` summary block — a decision point on every round of every bead, which across those runs produced 649 judgements with no defects behind them.
+
+**What this does NOT relax, because "fewer full runs" is easy to misread as "verify less":**
+
+- **Mutation testing is the priority, not the casualty.** Across the seven beads of 2026-08-12/13, *every* real finding came from a surviving mutant, a behavioural probe, or a device pull — **not one came from a full-plan gate**. A scoped run is seconds, so a round should afford *more* mutants, not fewer.
+- The merge gate is still a real full plan, still triaged in both formats, still with its `NO VERDICT` census read.
+- `scripts/lint.sh`, the SHA-256 pin / byte-exact restore discipline, and the never-`git checkout --` rule are unchanged.
+
 **Phase-close verification only (final gate before closing an epic):**
 ```bash
 xcodebuild test -scheme Playhead -testPlan PlayheadIntegrationTests \
