@@ -620,4 +620,205 @@ struct DownloadManagerDaemonUnavailableTests {
             await manager._isBackgroundDownloadInFlightForTesting(episodeId: episodeId) == false
         )
     }
+
+    // MARK: - playhead-rouw: the enumeration crossing
+
+    /// `retireBackgroundTransfers` — the shared body of `removeCache`,
+    /// `clearCache` and `cancelDownload` — enumerates the three background
+    /// sessions' tasks, and that crossing was an unbounded
+    /// `await session.allTasks`. When `nsurlsessiond` stopped answering
+    /// under a full-plan run, the await never resumed and the test that made
+    /// it NEVER REPORTED A VERDICT — no pass, no fail, no skip, no crash
+    /// report, because nothing crashed.
+    ///
+    /// What this rail pins is the RECOVERY the bound makes reachable, not
+    /// the bound itself (the bound is `BackgroundSessionIOTests`'
+    /// subject). An unanswered enumeration is a lost SOURCE of identities,
+    /// never a lost deletion: the bytes still go, and the admitted-identity
+    /// map — the second source, which needs no daemon — still retires the
+    /// transfer so a late completion callback cannot resurrect the artifact.
+    /// An implementation that returned early on the unanswered enumeration
+    /// would leave both of those undone.
+    @Test("Cache deletion completes and still retires when the daemon never answers allTasks")
+    func cacheDeletionSurvivesAnUnansweredEnumeration() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let manager = DownloadManager(cacheDirectory: dir, sessionIO: Self.stalledIO())
+        try await manager.bootstrap()
+
+        let episodeId = "rouw-unanswered-enumeration"
+        let identity = await manager._registerBackgroundTransferForTesting(
+            episodeId: episodeId
+        )
+        #expect(
+            await manager._isBackgroundDownloadInFlightForTesting(episodeId: episodeId),
+            "the rail is vacuous unless there was an admitted transfer to retire"
+        )
+        let completeURL = await manager.completeFileURL(for: episodeId)
+        let bytes = Data(repeating: 0x7E, count: 96)
+        try bytes.write(to: completeURL)
+
+        // The call under test. Before the bound this did not return.
+        try await manager.removeCache(for: episodeId)
+
+        #expect(!FileManager.default.fileExists(atPath: completeURL.path))
+        #expect(
+            await manager._isBackgroundDownloadInFlightForTesting(episodeId: episodeId) == false
+        )
+        // The retired identity's own late completion must be discarded
+        // rather than re-placing the bytes the user just deleted. The staged
+        // deposit is REAL and lives outside the cache, so a manager that
+        // failed to retire would place it — without that, the assertion
+        // below would hold for the uninteresting reason that there was
+        // nothing to place.
+        let staged = dir.appendingPathComponent("rouw-staged-deposit")
+        try Data(repeating: 0x3D, count: 96).write(to: staged)
+        await manager.handleBackgroundDownloadComplete(
+            episodeId: episodeId,
+            stagedURL: staged,
+            originalURL: URL(string: "https://cdn.example.com/rouw.mp3"),
+            metadata: HTTPAssetMetadata(
+                etag: "\"rouw\"", contentLength: 96, lastModified: nil
+            ),
+            transferIdentity: identity
+        )
+        #expect(
+            !FileManager.default.fileExists(atPath: completeURL.path),
+            "an unanswered enumeration must not cost the retirement — a late completion for a deleted episode has to stay discarded"
+        )
+        #expect(await manager.cachedFileURL(for: episodeId) == nil)
+    }
+
+    /// A bulk clear takes the same path with `episodeId: nil`, and its
+    /// fail-closed deletion runs AFTER the enumeration. A `throw` or an
+    /// early return on the unanswered daemon would leave the cache intact
+    /// and report success.
+    @Test("clearCache still clears when the daemon never answers allTasks")
+    func clearCacheSurvivesAnUnansweredEnumeration() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let manager = DownloadManager(cacheDirectory: dir, sessionIO: Self.stalledIO())
+        try await manager.bootstrap()
+
+        for index in 0..<3 {
+            let url = await manager.completeFileURL(for: "rouw-clear-\(index)")
+            try Data("audio-\(index)".utf8).write(to: url)
+        }
+        #expect(
+            try await manager.currentCacheSize() > 0,
+            "the rail is vacuous unless there was something to clear"
+        )
+
+        try await manager.clearCache()
+
+        #expect(try await manager.currentCacheSize() == 0)
+    }
+
+    /// The bound is not free: a submission that sits on a silent daemon holds
+    /// the instance's SERIAL queue, and everything behind it is then released
+    /// by its own deadline having never run. MEASURED on one full-plan run
+    /// after the bound landed: seventeen enumerations blew their ten seconds.
+    /// Sharing the instance with `downloadTask(with:)` would have spent that
+    /// on the download path as well — trading a lost verdict for a starved
+    /// feature, which is not a fix.
+    ///
+    /// The bound and the behaviour must still be the INJECTED ones, or a test
+    /// that stalls the daemon would quietly stop stalling the enumeration and
+    /// the two rails above would go vacuous.
+    @Test("The enumeration bound has its own queue, and keeps the injected bound")
+    func enumerationDoesNotShareTheDownloadPathsQueue() async throws {
+        let dir = try makeTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let injected = Self.stalledIO()
+        let manager = DownloadManager(cacheDirectory: dir, sessionIO: injected)
+
+        let downloadPath = await manager.sessionIO
+        let enumeration = await manager.enumerationIO
+        #expect(
+            downloadPath.queueLabel == injected.queueLabel,
+            "the download path must still be the instance the caller injected"
+        )
+        #expect(
+            enumeration.queueLabel != injected.queueLabel,
+            "an enumeration stalled on a silent daemon must not hold the queue downloads are created on"
+        )
+        #expect(enumeration.timeout == injected.timeout)
+    }
+}
+
+// MARK: - The structural rail
+
+/// playhead-rouw: no background-session task enumeration may be unbounded.
+///
+/// This is a SOURCE canary because the property is not observable from a
+/// test. The two rails above pass on the unbounded implementation too — the
+/// simulator's `nsurlsessiond` answers in milliseconds when the box is quiet,
+/// and no test can arrange the wedged daemon that a full-plan run produces.
+/// The difference between the two implementations is therefore visible only
+/// in the source: whether the crossing goes through the bound.
+///
+/// Scoped to the download services because that is where a background
+/// session lives. `session.allTasks` on a FOREGROUND session is an ordinary
+/// async call and is not what this is about.
+@Suite("playhead-rouw: background task enumeration is bounded")
+struct BackgroundSessionEnumerationSourceCanaryTests {
+
+    /// Files that may enumerate a background session's tasks. Listed rather
+    /// than globbed so that a NEW file which needs the enumeration has to
+    /// arrive here deliberately, and gets read.
+    private static let auditedFiles = [
+        "Playhead/Services/Downloads/DownloadManager.swift",
+        "Playhead/Services/Downloads/ForceQuitResumeScan.swift",
+    ]
+
+    @Test("No source in the download services awaits URLSession.allTasks directly")
+    func noUnboundedAllTasksCrossing() throws {
+        for path in Self.auditedFiles {
+            let source = try SwiftSourceInspector.loadSource(repoRelativePath: path)
+            let code = SwiftSourceInspector.strippingCommentsAndStrings(source)
+            #expect(
+                !code.contains(".allTasks"),
+                """
+                \(path) reaches `URLSession.allTasks` directly. On a background \
+                session that is a barrier plus a synchronous XPC round-trip to \
+                `nsurlsessiond`, so an unanswered call is an await that never \
+                resumes and the calling test reports no verdict at all. Route \
+                it through `DownloadManager.boundedAllTasks(of:through:)`.
+                """
+            )
+        }
+    }
+
+    /// The positive half: the bounded crossing must still exist and still go
+    /// through `BackgroundSessionIO`. Without this, deleting the enumeration
+    /// outright would satisfy the rail above.
+    @Test("The bounded enumeration exists and runs through BackgroundSessionIO")
+    func theBoundedCrossingIsTheOneThatSurvives() throws {
+        let manager = try SwiftSourceInspector.loadSource(
+            repoRelativePath: "Playhead/Services/Downloads/DownloadManager.swift"
+        )
+        let code = SwiftSourceInspector.strippingComments(manager)
+        #expect(code.contains("static func boundedAllTasks("))
+        #expect(code.contains("session.getAllTasks"))
+        #expect(
+            code.contains("io.perform(") && code.contains("label: \"allTasks for"),
+            "the crossing has to be submitted to BackgroundSessionIO, which is what bounds it"
+        )
+        for caller in Self.auditedFiles {
+            let source = SwiftSourceInspector.strippingComments(
+                try SwiftSourceInspector.loadSource(repoRelativePath: caller)
+            )
+            #expect(
+                source.contains("boundedAllTasks("),
+                "\(caller) must still enumerate — silently dropping the enumeration would pass the negative rail"
+            )
+            #expect(
+                source.contains("let io = enumerationIO"),
+                "\(caller) must submit the enumeration to `enumerationIO`; `sessionIO`'s serial queue is the download path's"
+            )
+        }
+    }
 }

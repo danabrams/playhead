@@ -180,6 +180,24 @@ struct BackgroundSessionIO: Sendable {
         self.queue.setSpecific(key: Self.queueLabelKey, value: queueLabel)
     }
 
+    /// A sibling carrying the same behaviour and the same bound on its OWN
+    /// serial queue.
+    ///
+    /// playhead-rouw. The work queue is serial, so two kinds of call that
+    /// share an instance share a stall: a submission sitting on a silent
+    /// daemon delays every later one, and each of those is then released by
+    /// its own deadline having never run. That is right for calls of the same
+    /// kind — they are competing for one session's barrier anyway — and wrong
+    /// across kinds, where it lets an enumeration nobody is waiting on starve
+    /// the download path. A caller that wants the bound WITHOUT the shared
+    /// queue asks for one of these, and keeps the injected behaviour so a
+    /// test's `.neverAnswers` still reaches it.
+    func onItsOwnQueue(labelled label: String) -> BackgroundSessionIO {
+        BackgroundSessionIO(
+            behavior: behavior, timeout: timeout, queueLabel: label
+        )
+    }
+
     /// Runs `body` off the cooperative pool and returns its result, or
     /// `nil` when the deadline passed first.
     ///

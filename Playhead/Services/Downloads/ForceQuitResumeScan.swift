@@ -387,9 +387,22 @@ extension DownloadManager {
     private func liveBackgroundDownloadEpisodeIds() async -> Set<String> {
         let sessions = backgroundSessionsAlreadyInstantiated()
         guard !sessions.isEmpty else { return [] }
+        // playhead-rouw: bounded, and off the cooperative pool. A bare
+        // `await session.allTasks` here is the same never-resuming await that
+        // cost the gate its download verdicts — and this call site is the one
+        // with a 2 s SLA, so an unbounded crossing does not merely stall the
+        // scan, it stalls a cold launch. A session that does not answer
+        // contributes no ids, which is the same failure mode as a session
+        // this scan deliberately does not instantiate: at most one
+        // dismissable phantom prompt, reconciled by the next scan.
+        let io = enumerationIO
         let allTaskLists = await withTaskGroup(of: [URLSessionTask].self) { group in
             for session in sessions {
-                group.addTask { await session.allTasks }
+                group.addTask {
+                    await DownloadManager.boundedAllTasks(
+                        of: session, through: io
+                    ) ?? []
+                }
             }
             var collected: [[URLSessionTask]] = []
             for await tasks in group { collected.append(tasks) }
