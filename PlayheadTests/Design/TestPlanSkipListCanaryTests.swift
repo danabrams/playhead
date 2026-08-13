@@ -57,6 +57,12 @@ final class TestPlanSkipListCanaryTests: XCTestCase {
         XCTAssertEqual(index["PerfGate"]?.first?.kind, "enum",
                        "declaration walk does not distinguish kinds — a struct would pass as a class")
 
+        // Anti-vacuity, the OTHER half — see `assertPlanParserIsNotSilent`.
+        Self.assertPlanParserIsNotSilent(
+            try Self.filterEntries(inPlanAt: Self.planURL(root, "PlayheadFastTests")),
+            "PlayheadFastTests.xctestplan"
+        )
+
         var violations: [String] = []
         for plan in plans {
             for entry in try Self.filterEntries(inPlanAt: plan) {
@@ -123,6 +129,10 @@ final class TestPlanSkipListCanaryTests: XCTestCase {
             inPlanAt: Self.planURL(root, "PlayheadIntegrationTests")
         )
 
+        // This comparison is a SUBTRACTION, so a parser that returns nothing
+        // makes it trivially true in the direction that reads as "fine".
+        Self.assertPlanParserIsNotSilent(fast, "PlayheadFastTests.xctestplan")
+
         let fastSkips = Set(fast.filter { $0.list == "skippedTests" }.map(\.name))
         let integrationSkips = Set(integration.filter { $0.list == "skippedTests" }.map(\.name))
 
@@ -165,6 +175,44 @@ final class TestPlanSkipListCanaryTests: XCTestCase {
             )
         }
         return object
+    }
+
+    /// The plan parser has to actually find something.
+    ///
+    /// `declarationIndex` is pinned above against types this file guarantees;
+    /// nothing pinned the plan side, and it fails towards SILENCE rather than
+    /// towards an error. Both reads in `filterEntries` are
+    /// `as? … ?? []`, so a key that is missing, renamed or reshaped — an Xcode
+    /// plan-format change, a skip list moved under `defaultOptions`, a stray
+    /// edit — yields an empty entry list, and every check downstream of it
+    /// passes on an empty world.
+    ///
+    /// Probed at review (playhead-wwbr R2) by spelling one key
+    /// `testTargetsSCHEMAV2` while a REAL dead entry sat in the plan
+    /// (`CombinedTuningReplayTests`, a Swift Testing `@Suite struct`, i.e. the
+    /// precise thing this file exists to catch): both tests reported
+    /// `** TEST SUCCEEDED **`. A check that examines nothing passes
+    /// everything.
+    ///
+    /// The pin is the fast plan's `skippedTests` because that list is this
+    /// file's subject and is non-empty by construction — the twelve honoured
+    /// XCTest classes. If it is ever legitimately emptied, updating this line
+    /// is the deliberate act that should accompany it.
+    private static func assertPlanParserIsNotSilent(
+        _ entries: [FilterEntry],
+        _ planName: String,
+        file: StaticString = #filePath,
+        line: UInt = #line
+    ) {
+        XCTAssertTrue(
+            entries.contains { $0.list == "skippedTests" },
+            "\(planName) parsed to ZERO skippedTests entries. Either that plan really did "
+            + "empty its skip list — update this pin deliberately — or the parser has gone "
+            + "silent: `testTargets` and `skippedTests` are both read with `as? … ?? []`, so "
+            + "a renamed or reshaped key yields nothing and every check below it passes "
+            + "vacuously. See playhead-wwbr.",
+            file: file, line: line
+        )
     }
 
     private static func filterEntries(inPlanAt url: URL) throws -> [FilterEntry] {
