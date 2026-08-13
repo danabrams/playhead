@@ -416,6 +416,102 @@ a loud `ARMED:` block naming every promotion with its `failed/seen` count. The
 POLICY is untouched — what is deterministic, and that its passing is fatal, is
 Dan's call and lives at `MIN_RUNS_FOR_DETERMINISTIC`. Only the reporting changed.
 
+And the SAME OMISSION EXISTED IN THE OPPOSITE DIRECTION, on both records, which
+is worth stating as one rule rather than two fixes (playhead-o89d R1 and R2). A
+promotion arms a hard failure; a DEMOTION revokes one, which is the gate getting
+LOOSER, and it was the quietest line in the output on the `tests` side (four bare
+words) and had no line at all of its own on the census side (an entry coming back
+was spelled `~= reported again`, identically to the load-sensitive case where
+coming back is good news and costs nothing). Both now print a banner naming the
+tier being LEFT, the event, and the consequence.
+
+FOUR TIER BANNERS, FOUR SPELLINGS, AND THE RULE IS THE PREFIX (playhead-o89d R3).
+R2 gave the two DEMOTIONS distinct spellings and wrote the rule down as "neither
+side can be read as the other" — while leaving the two PROMOTIONS spelled
+identically, both `ARMED:`, with opposite consequences. Measured at R3: a mutant
+that respells the census promotion as the `tests` one VERBATIM, so the operator
+is told "Each of these PASSING now fails the gate" about a crashed-host name,
+SURVIVED the whole suite; so did one that changed the census banner's own
+`REPORTING AGAIN` to `PASSES`. The rule now holds in both directions and is
+carried by rails rather than by prose:
+
+    ARMED:               a recorded FAILURE became deterministic; its PASSING is fatal
+    DISARMED:            …and stopped being; that licence is revoked
+    CENSUS ARMED:        a recorded CASUALTY became deterministic; its REPORTING is fatal
+    CENSUS DISARMED:     …and stopped being; that licence is revoked
+
+`CENSUS RECORD ARMED:` is deliberately none of the four. Its subject is the
+record rather than an entry — the census reached MIN_RUNS_FOR_DETERMINISTIC
+observations, so a casualty NOT in the record is now fatal — and while it was
+spelled `CENSUS ARMED:` it read as the counterpart of `CENSUS DISARMED:`, which
+it is not.
+
+A SPELLING IS HALF A BANNER; THE OTHER HALF IS THE EVENT, AND EACH ROUND PINNED
+THE HALF IT WAS LOOKING AT (playhead-o89d R4). R1 fixed the `tests` demotion.
+R2 fixed the census demotion, wrote the rule down for the direction it had just
+fixed, and left both promotions interchangeable. R3 fixed both promotions and
+stated the rule as "the SPELLING and the EVENT it names" — then pinned the event
+on the two promotions only. So R4 mutated EVERY banner and membership line the
+accept path can print, one at a time, against the whole suite: 28 mutants, 15
+survivors, all fifteen on lines nobody had come back to. Among them, in the
+words an operator signs a commit message against: the record-level census arm
+said a casualty that IS in the record fails the gate; both demotions said
+accepting KEEPS the licence and the next pass/report is STILL fatal; the first
+census said an unrecorded casualty is ALREADY fatal when one observation is
+PROVISIONAL; a name losing its verdict for the FIRST time was rendered as one
+that had lost it before (RA16's defect, one line down); the prune was announced
+as a recovery; the crash headline counted the carried-forward entries instead of
+the casualties. Rails RA20–RA30. **The lesson is the method, not the list: pin
+the CONSEQUENCE clause of a banner, not just its first four letters, and mutate
+the counterpart in BOTH directions before writing down that a class is closed.**
+
+Two survivors are deliberately left, and named here rather than quietly: the
+mutants that swap only the LEADING GLYPH between the two records' detail lines
+(`!` / `!~` / `~` / `~!`). Their words still say the right thing and the `[kind]`
+label still appears on the `tests` side and never on the census side, so the
+glyph is redundant discrimination — pinning it would be taste, and this repo's
+own rule is that a taste rule in a gate is how gates get routed around. R5
+re-tested that argument the only way it can be settled — by asking whether any
+OPERATOR acts on the glyph — and nothing does: no script in the repo parses this
+transcript, so the words are the whole interface and the argument holds. It
+holds CONDITIONALLY, which is the part worth writing down: the day something
+greps this output, the glyph stops being redundant and starts being an identity.
+(R4 counted three glyph survivors and there are two: `!~` -> `!` is already
+pinned, by an assertion written for the census promotion rather than for the
+glyph. The set was right about the class and one off about the membership.)
+
+THE FIFTH AXIS IS AN OMISSION, AND FOUR ROUNDS OF MUTANTS COULD NOT SEE IT
+(playhead-o89d R5). R1-R4 pinned four properties of the lines that EXIST —
+spelling, event, consequence, count. R5 enumerated the accept path a second time
+and independently (69 mutants) and found the remaining hole was not a property of
+any line: **a KIND WIDENING had no line at all.** `merge` UNIONS a run's kinds
+into an entry already in the file, so a name recorded `timeout` that fails an
+EXPECTATION comes out recorded `assertion+timeout` and its tolerance doubles.
+Measured end to end: `check` says `FAILS DIFFERENTLY … recorded as timeout,
+failed as assertion` and exits 1; the accept says `(membership unchanged; counts
+updated)`; the identical failure afterwards is GREEN. Fifteen of the 121
+committed entries carry two kinds today. It is the fifth event that makes the
+gate LOOSER — after the two tier demotions, the census prune and the record-level
+arm — and it was the only one nobody had to sign for. `TOLERANCE WIDENED:` and
+`kind_widenings` close it. **An omission cannot be found by mutating a line that
+exists; it is found by enumerating the EVENTS the command can perform and asking
+which of them prints nothing.**
+
+R4's own three fixes were one-directional in exactly the way R1's, R2's and R3's
+were, which is the fifth instance of the pattern and the reason it is now stated
+as a method above: RA29 pinned the PROMOTION detail's `[kind]` and left the
+DEMOTION's; RA22 pinned `DISARMED:`'s EVENT and left `CENSUS DISARMED:`'s; RA27
+pinned the crash headline's COUNT and left `CARRIED FORWARD:`'s. All three
+mirrors survived the whole suite and are rails RA36-RA38.
+
+TWO SURVIVORS THAT ARE NOT COVERAGE HOLES, because the numbers they swap are
+provably equal. Swapping `failed/seen` on the `tests` PROMOTION detail, or
+`lost/seen` on the census one, changes nothing: `_tier` calls an entry
+deterministic only when `hit_runs == seen_runs`, and those lines print only for
+entries that just crossed into it. The same swap on `~= reported again`, where
+the two differ, is KILLED. Record why a survivor is not a hole, or the next round
+re-derives it.
+
 USAGE
 -----
     gate_baseline.py check  --log RUN.log --baseline scripts/gate-baseline.json
@@ -1022,6 +1118,44 @@ def _kinds_label(entry):
     return "+".join(sorted(entry.get("kinds", []))) or KIND_UNKNOWN
 
 
+def kind_widenings(baseline, merged):
+    """Entries whose KIND SET GREW in this merge: `[(key, before, after)]`.
+
+    playhead-o89d R5. The fifth LOOSENING event in the accept path, and the only
+    one that had no banner at all — because it is an OMISSION, and four rounds of
+    mutating the lines that exist could not see it.
+
+    Identity in this file is name AND kind: "a load-sensitive entry means MAY
+    TIME OUT, not MAY FAIL" (CLAUDE.md), and it is the sentence the whole
+    tolerance rests on. `merge` UNIONS a run's kinds into an existing entry, so
+    an entry recorded `timeout` that fails an EXPECTATION comes out of the accept
+    recorded `assertion+timeout` — its tolerance doubled. Measured end to end:
+    `check` reports `FAILS DIFFERENTLY … recorded as timeout, failed as
+    assertion` and exits 1; the accept prints `(membership unchanged; counts
+    updated)`; the identical failure afterwards is GREEN. Fifteen of the 121
+    committed entries carry two kinds today, several at 10/10.
+
+    That is exactly the shape R1 fixed for the `tests` demotion and R2 for the
+    census demotion — the gate getting LOOSER with nobody shown what was given
+    away — one layer down, on the quantity rather than the tier.
+
+    Pure, so the CLI only has to print it. A newly ADDED entry can never appear
+    here: its kinds are what it entered with, so a widening is by construction a
+    change to something already recorded, exactly as a tier change is.
+    """
+    old = baseline.get("tests", {}) if baseline.get("plan") == merged.get("plan") else {}
+    widened = []
+    for key, entry in sorted(merged.get("tests", {}).items()):
+        previous = old.get(key)
+        if previous is None:
+            continue
+        before = set(previous.get("kinds", []))
+        after = set(entry.get("kinds", []))
+        if after > before:
+            widened.append((key, _kinds_label(previous), _kinds_label(entry)))
+    return widened
+
+
 def kind_census(entries):
     """`{kinds-label: count}` over a list of baseline entries.
 
@@ -1105,18 +1239,36 @@ def census_changes(prior, merged):
 
 
 def census_tier_changes(prior, merged):
-    """Which census entries crossed INTO `deterministic` in this merge.
+    """Which census entries changed TIER in this merge: `(promoted, demoted)`.
 
-    Same reason `tier_changes` exists for failures: crossing arms a hard
-    failure — from here their REPORTING AGAIN fails the gate — and a hard
-    failure armed silently is the one thing this file exists not to do.
+    Same reason `tier_changes` exists for failures, and now the same SHAPE —
+    both directions, one signature — because R1 of playhead-o89d fixed the
+    silent-demotion asymmetry on the `tests` side and left the identical one
+    here, one layer down. Crossing INTO `deterministic` arms a hard failure
+    (from here REPORTING AGAIN fails the gate). Crossing OUT of it revokes that
+    licence, and a licence revoked silently is the same defect as one armed
+    silently — it is just pointed the other way, which is the direction that
+    makes the gate LOOSER.
+
+    A census demotion has exactly one cause, and `merge_census` names it: an
+    entry the run STARTED AND REPORTED gets `seen + 1` with `lost` unchanged.
+    That is the same event as the verdict's `census_now_reports`, i.e. the one
+    that hard-failed the run being accepted.
     """
     before = prior.tests if prior else {}
-    promoted = [key for key, entry in merged.tests.items()
-                if census_tier_of(entry) == TIER_DETERMINISTIC
-                and not (key in before
-                         and census_tier_of(before[key]) == TIER_DETERMINISTIC)]
-    return sorted(promoted)
+
+    def was_deterministic(key):
+        return key in before and census_tier_of(before[key]) == TIER_DETERMINISTIC
+
+    promoted = []
+    demoted = []
+    for key, entry in merged.tests.items():
+        now = census_tier_of(entry) == TIER_DETERMINISTIC
+        if now and not was_deterministic(key):
+            promoted.append(key)
+        elif was_deterministic(key) and not now:
+            demoted.append(key)
+    return sorted(promoted), sorted(demoted)
 
 
 def merge(baseline, run, plan):
@@ -1773,6 +1925,7 @@ def main(argv=None):
         added = sorted(set(merged["tests"]) - set(base.get("tests", {})))
         removed = sorted(set(base.get("tests", {})) - set(merged["tests"]))
         promoted, demoted = tier_changes(base, merged)
+        widened = kind_widenings(base, merged)
         save_baseline(baseline_path, merged)
         print("gate-baseline: wrote %s" % baseline_path)
         print("  plan=%s  observations=%d  known-broken=%d"
@@ -1790,7 +1943,12 @@ def main(argv=None):
             print("  + [%s] %s" % (_kinds_label(merged["tests"][key]), key))
         for key in removed:
             print("  - %s" % key)
-        if not added and not removed:
+        # playhead-o89d R5: `and not widened`. The parenthetical's second clause
+        # is a positive claim that ONLY counts moved, and a widened KIND is not a
+        # count — it is the tolerance. R4 made the same correction for the added
+        # set (an accept with `+` lines must not also claim it changed nothing);
+        # this is that correction on the one change that has no membership line.
+        if not added and not removed and not widened:
             print("  (membership unchanged; counts updated)")
         # playhead-tl6l: say what the crash cost this observation. An accept is
         # a claim a human signs in a commit message, and "27 of these entries
@@ -1804,7 +1962,7 @@ def main(argv=None):
         was = recorded_census(base if base.get("plan") == plan else {})
         now = recorded_census(merged)
         added_c, reported_c, dropped_c = census_changes(was, now)
-        promoted_c = census_tier_changes(was, now)
+        promoted_c, demoted_c = census_tier_changes(was, now)
         if was is None:
             # Deliberately NOT the word `ARMED`, which belongs to tier
             # promotion below and has a rail asserting it appears only for one.
@@ -1836,22 +1994,73 @@ def main(argv=None):
                 "not deleted, because one quiet run is not evidence a crash is fixed."
                 % (len(was.tests), len(now.tests), now.runs_observed)
             )
+        # playhead-o89d R3. This banner used to be spelled `ARMED:` — the SAME
+        # four letters as the `tests` promotion 70 lines below, whose consequence
+        # is the opposite one (a recorded failure's PASSING becomes fatal; a
+        # recorded casualty's REPORTING AT ALL becomes fatal). R2 gave the two
+        # DEMOTIONS distinct spellings and wrote the rule down as "neither side
+        # can be read as the other", and left the two PROMOTIONS identical.
+        # Measured: a mutant that respells this banner as the `tests` one
+        # verbatim — telling the operator "Each of these PASSING now fails the
+        # gate" about a crashed-host name — SURVIVED the whole suite, as did one
+        # that changed this line's own `REPORTING AGAIN` to `PASSES`. So did
+        # `ARMED/DISARMED:`, which is THE MUTANT R2 NAMED as its reason for
+        # replacing R1's rail: R1's rail was indeed vacuous, and R2's two
+        # replacements did not reach this banner either, because both of their
+        # scenarios demote rather than promote. Diagnosing a vacuous rail and
+        # closing the hole it left open are two jobs. All three are rail-killed
+        # now; see `test_the_accept_ANNOUNCES_a_census_promotion…` and RA18/RA19.
         if promoted_c:
             print(
-                "  ARMED: %d census entr%s crossed into DETERMINISTIC — lost their "
-                "verdict in every one of their observations. Each of these REPORTING "
-                "AGAIN now fails the gate, which is what lets this record shrink when "
-                "the crash is fixed."
+                "  CENSUS ARMED: %d census entr%s crossed into DETERMINISTIC — lost "
+                "their verdict in every one of their observations. Each of these "
+                "REPORTING AGAIN now fails the gate, which is what lets this record "
+                "shrink when the crash is fixed."
                 % (len(promoted_c), "y" if len(promoted_c) == 1 else "ies")
             )
             for key in promoted_c:
                 entry = now.tests[key]
                 print("  !~ now deterministic %d/%d  %s"
                       % (entry["lost_runs"], entry["seen_runs"], key))
+        # playhead-o89d R2. The counterpart to the block above, and the same
+        # defect R1 fixed one layer up: the census had a loud `ARMED:` for the
+        # direction that TIGHTENS and nothing at all for the direction that
+        # LOOSENS. A demoted census entry appeared only as `~= reported again
+        # 3/4` — a line spelled identically for a LOAD-SENSITIVE entry coming
+        # back, which is good news and is not fatal. So the one census event
+        # that revokes a hard-failure licence was rendered in the same words as
+        # the one that revokes nothing, and the tier had to be re-derived from
+        # the counts by a reader who already knew the rule.
+        #
+        # `CENSUS DISARMED:` rather than a bare `DISARMED:` so the two sides
+        # can never be confused for one another: a reader who sees the bare
+        # word has watched a recorded FAILURE stop being deterministic, and a
+        # reader who sees this one has watched a crashed-host casualty do it.
+        if demoted_c:
+            print(
+                "  CENSUS DISARMED: %d census entr%s LEFT DETERMINISTIC — each was "
+                "recorded as losing its verdict in every one of its observations and "
+                "this run watched it START AND REPORT, which is what hard-failed the "
+                "gate (`REPORTS AGAIN`). Accepting revokes that licence: from here the "
+                "entry is load-sensitive and its next report is NOT fatal. That is also "
+                "the only way this record ever shrinks, so say in the commit message "
+                "whether the crash is FIXED or the RECORD was wrong."
+                % (len(demoted_c), "y" if len(demoted_c) == 1 else "ies")
+            )
+            for key in demoted_c:
+                entry = now.tests[key]
+                print("  ~! no longer deterministic %d/%d  %s"
+                      % (entry["lost_runs"], entry["seen_runs"], key))
+        # `CENSUS RECORD ARMED:` rather than `CENSUS ARMED:` (playhead-o89d R3).
+        # Its subject is the RECORD, not an entry: it fires once, when the census
+        # reaches MIN_RUNS_FOR_DETERMINISTIC observations, and what it arms is the
+        # rule for names that are NOT in the record. The banner above is about
+        # named entries that ARE. Sharing a spelling made the second look like the
+        # counterpart of `CENSUS DISARMED:`, which it is not.
         if was is not None and not was.armed and now.armed:
             print(
-                "  CENSUS ARMED: %d observations recorded. From this accept on, a test "
-                "that loses its verdict and is NOT in the record fails the gate."
+                "  CENSUS RECORD ARMED: %d observations recorded. From this accept on, "
+                "a test that loses its verdict and is NOT in the record fails the gate."
                 % now.runs_observed
             )
         no_verdict = run.no_verdict
@@ -1887,8 +2096,57 @@ def main(argv=None):
                 print("  ! now deterministic [%s] %d/%d  %s" % (
                     _kinds_label(entry), entry["failed_runs"], entry["seen_runs"], key,
                 ))
+        # playhead-o89d review. The counterpart to `ARMED:` above, and it used to
+        # be four bare words — `~ no longer deterministic <key>` — for the single
+        # event this module most wants a human to think about.
+        #
+        # A `tests` demotion has exactly one cause: the entry was recorded as
+        # failing in EVERY observation, this run watched it PASS, and that pass is
+        # what put `NOW PASSES` on the verdict and HARD-FAILED the gate. Accepting
+        # revokes the licence — the entry becomes load-sensitive and its next pass
+        # is no longer fatal. That is the gate getting LOOSER, which is precisely
+        # the direction that has to be justified out loud.
+        #
+        # The asymmetry was not theoretical: this bead's own accept demoted a 4/4
+        # entry and its commit message described it as "the pass-direction arm
+        # doing its job on a LOAD-SENSITIVE entry: reported, not fatal" — the AFTER
+        # tier read as though it were the BEFORE tier, on an event that was in fact
+        # fatal. So the line now names the tier it is leaving, the event, and the
+        # consequence, exactly as the promotion line does.
+        if demoted:
+            print(
+                "  DISARMED: %d entr%s LEFT DETERMINISTIC — each was recorded as "
+                "failing in every one of its observations and this run watched it "
+                "PASS, which is what hard-failed the gate (`NOW PASSES`). Accepting "
+                "revokes that licence: from here the entry is load-sensitive and its "
+                "next pass is NOT fatal. Say in the commit message why the RECORD was "
+                "wrong rather than the run."
+                % (len(demoted), "y" if len(demoted) == 1 else "ies")
+            )
         for key in demoted:
-            print("  ~ no longer deterministic  %s" % key)
+            entry = merged["tests"][key]
+            print("  ~ no longer deterministic [%s] %d/%d  %s" % (
+                _kinds_label(entry), entry["failed_runs"], entry["seen_runs"], key,
+            ))
+        # playhead-o89d R5. The FIFTH loosening event, and the only one that had
+        # no line of its own — see `kind_widenings` for why an omission is the
+        # one shape mutating the existing lines cannot find. Spelled as none of
+        # the six banners above it, because it is neither a tier change nor a
+        # membership change: what moves is the TOLERANCE, which is the thing the
+        # gate's whole "the tolerance is not a hole" argument rests on.
+        if widened:
+            print(
+                "  TOLERANCE WIDENED: %d recorded entr%s failed in a KIND it had not "
+                "shown before, and accepting UNIONS that kind into its record. Each "
+                "was reported `FAILS DIFFERENTLY` this run, which is what hard-failed "
+                "the gate; from here that kind is absorbed as KNOWN and is no longer "
+                "reported NEW. Identity in this file is name AND kind — recorded as "
+                "TIMEOUT does not licence FAILING AN EXPECTATION — so say in the "
+                "commit message why the new kind is the same defect."
+                % (len(widened), "y" if len(widened) == 1 else "ies")
+            )
+            for key, before, after in widened:
+                print("  ± [%s -> %s]  %s" % (before, after, key))
         return EXIT_OK
 
     if not baseline_path.exists():

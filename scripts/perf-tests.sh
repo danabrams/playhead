@@ -17,15 +17,27 @@
 #
 # Run it alone — do not launch other builds while it measures.
 #
+# READ BOTH OUTPUT FORMATS (playhead-o89d review). This pass runs XCTest suites
+# as well as Swift Testing ones, and `Test run with N tests in M suites passed`
+# counts ONLY the Swift Testing half. A pass can print that line and still end
+# in `** TEST FAILED **` — it does today; see playhead-1och.
+#
 # Env overrides:
-#   PLAYHEAD_DEST     xcodebuild -destination (default: iPhone 17 Pro, iOS 27.0)
+#   PLAYHEAD_DEST     xcodebuild -destination (default: iPhone 17 — must be a
+#                     device that exists; see the note on DEST below)
 #   PLAYHEAD_DERIVED  -derivedDataPath (default: .derivedData-perf)
 #   DEVELOPER_DIR     select a toolchain (e.g. the Xcode 27 beta)
 
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-DEST="${PLAYHEAD_DEST:-platform=iOS Simulator,name=iPhone 17 Pro,OS=27.0}"
+# playhead-o89d: was `iPhone 17 Pro,OS=27.0`, which has not existed on this box
+# for as long as anyone has looked — xcodebuild exits before running one test
+# with "Unable to find a device matching the provided destination specifier".
+# That is the whole point of this script failing silently: a PerfGate'd test is
+# only MOVED here rather than deleted if this pass can actually start. Match
+# fast-gate.sh's default so the two agree on one destination.
+DEST="${PLAYHEAD_DEST:-platform=iOS Simulator,name=iPhone 17}"
 DERIVED="${PLAYHEAD_DERIVED:-.derivedData-perf}"
 
 # The measurement tests. Add new load-sensitive tests here AND gate them with
@@ -75,6 +87,21 @@ MEASUREMENT_TESTS=(
   # reading the database from inside the running pass; only the real
   # abandonment is measured here.
   "PlayheadTests/BackfillCoarseCheckpointTests/abandonedPassLeavesItsScreenedWindowsBehind()"
+  # playhead-o89d. Both admitted on an ISOLATED-vs-IN-GATE measurement rather
+  # than on a suite name — see the bead for why a name list rots (two
+  # measurements fifteen days apart shared not one suite, and Chao1 on the
+  # committed baseline puts the load-sensitive population at >=377 against 136
+  # ever observed). These two are here because the wall-clock quantity IS the
+  # assertion, which is the one sub-property that does not rotate.
+  #
+  #   benchmarkGate            budget 5,000 ms; alone <1,900 ms (3 tests, 1.9 s
+  #                            total, PASS); 443-test scoped selection 25,243 ms
+  #                            (FAIL); full plan 105,491 / 162,396 ms (FAIL).
+  #   expirationWait…Reserve   a 20 s BOUND separating "about 0 s" (correct)
+  #                            from "60 s" (spends the reclaimed reserve). Passes
+  #                            5/5 scoped; failed 100 % of recorded full-plan runs.
+  "PlayheadTests/Phase3ShadowReplayHarnessTests/benchmarkGate()"
+  "PlayheadTests/BackfillExpiryDurabilityTests/expirationWaitIsBoundedByTheGraceNotTheReserve()"
   # Note: AnalysisWorkSchedulerOutcomeBookkeepingTests is intentionally NOT
   # here — its cancel-mid-decode tests were rewritten to be deterministic
   # (via processNextDispatchableJobForTesting) and un-gated, so they run in

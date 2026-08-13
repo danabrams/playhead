@@ -536,6 +536,381 @@ MUTATIONS = [
         [CM + "test_the_accept_ANNOUNCES_a_census_promotion_and_the_ARMING"],
     ),
     (
+        # playhead-o89d R1 found and fixed this one; it had unit rails but no
+        # mutation rail, so the battery could not tell you whether they bite.
+        "RA15", GB,
+        "a tier DEMOTION goes unannounced, so an accept REVOKES a hard-failure "
+        "licence in silence — the same defect as RA14 pointed the other way, and "
+        "the direction that makes the gate LOOSER",
+        "        if demoted:",
+        "        if False:",
+        [T + "test_a_demotion_is_ANNOUNCED_and_named"],
+    ),
+    (
+        # playhead-o89d R2. RA14's and RA15's twin, one layer down.
+        "RA16", GB,
+        "a CENSUS tier demotion goes unannounced, so the one census event that "
+        "revokes a hard-failure licence is rendered in the same words as the one "
+        "that revokes nothing (`~= reported again`), and the tier is left to the "
+        "reader's arithmetic",
+        "        if demoted_c:",
+        "        if False:",
+        [T + "test_a_CENSUS_demotion_is_ANNOUNCED_and_named"],
+    ),
+    (
+        # The other half of RA16: a banner that fires for every returning
+        # casualty says nothing, because most of them are good news.
+        "RA17", GB,
+        "the census demotion banner fires for LOAD-SENSITIVE entries too, so a "
+        "casualty coming back — which is good news and costs nobody a licence — "
+        "is announced as a revocation, and the loud line stops meaning anything",
+        "        elif was_deterministic(key) and not now:",
+        "        elif key in before and not now:",
+        [T + "test_an_accept_that_demotes_NO_CENSUS_ENTRY_stays_quiet"],
+    ),
+    (
+        # playhead-o89d R3. RA16/RA17 gave the two DEMOTIONS distinct spellings
+        # and the module docstring wrote the rule down as "neither side can be
+        # read as the other" — for the direction that LOOSENS only. The two
+        # PROMOTIONS were both `ARMED:`, and this mutant proved they were
+        # interchangeable: it survived the whole suite while telling the operator
+        # that a crashed-host name's PASSING is what becomes fatal.
+        "RA18", GB,
+        "the CENSUS promotion banner is spelled exactly like the `tests` one, so "
+        "the accept that arms a hard failure on a crashed-host name is indis"
+        "tinguishable from the one that arms it on a recorded failure — and "
+        "states the wrong consequence for the record it belongs to",
+        '                "  CENSUS ARMED: %d census entr%s crossed into DETERMINISTIC — lost "\n'
+        '                "their verdict in every one of their observations. Each of these "\n'
+        '                "REPORTING AGAIN now fails the gate, which is what lets this record "\n'
+        '                "shrink when the crash is fixed."',
+        '                "  ARMED: %d entr%s crossed into DETERMINISTIC — failed in every one "\n'
+        '                "of their observations. Each of these PASSING now fails the gate, so "\n'
+        '                "say in the commit message why that is the right reading."',
+        [CM + "test_the_accept_ANNOUNCES_a_census_promotion_and_the_ARMING",
+         T + "test_a_promotion_is_ANNOUNCED_and_named"],
+    ),
+    (
+        # The half of RA18 that survives a rename: keep the prefix, lie about
+        # the event. For a census entry it is REPORTING AT ALL that is fatal —
+        # pass OR fail — so an operator told `PASSES` concludes a failing report
+        # is safe, which is the one thing the census arm exists to deny.
+        "RA19", GB,
+        "the census promotion banner names PASSING as the fatal event, when what "
+        "is fatal for a crashed-host name is REPORTING AT ALL — the operator "
+        "signs a commit message claiming a licence narrower than the one armed",
+        '                "REPORTING AGAIN now fails the gate, which is what lets this record "',
+        '                "PASSING now fails the gate, which is what lets this record "',
+        [CM + "test_the_accept_ANNOUNCES_a_census_promotion_and_the_ARMING"],
+    ),
+    # ------------------------------------------------------------------------
+    # playhead-o89d R4. R3 closed the two PROMOTION banners and wrote the rule
+    # down as "the SPELLING and the EVENT it names". Every OTHER banner in the
+    # accept path was then mutated one at a time against the whole suite: 28
+    # mutants, 15 survivors. R3's own fix had been applied to the direction R3
+    # was looking at, exactly as R2's had — the fourth round in a row on that
+    # shape. The rails below are the survivors that misstate a FACT or a
+    # CONSEQUENCE. Three survivors are deliberately NOT railed and are named in
+    # the module docstring instead: they swap only the leading GLYPH between the
+    # two records' detail lines, whose words and `[kind]` label still
+    # discriminate, and pinning a glyph is taste rather than a defect.
+    # ------------------------------------------------------------------------
+    (
+        # The sharpest one: this banner was RENAMED by R3, in the commit that
+        # stated the spelling-and-event rule, and only its spelling was pinned.
+        "RA20", GB,
+        "the record-level census arm states the OPPOSITE rule — the operator "
+        "signs a commit message saying it is a casualty IN the record that now "
+        "fails the gate, which is the one thing the arm does not do",
+        '"a test that loses its verdict and is NOT in the record fails the gate."',
+        '"a test that loses its verdict and IS in the record fails the gate."',
+        [CM + "test_the_accept_ANNOUNCES_a_census_promotion_and_the_ARMING"],
+    ),
+    (
+        "RA21", GB,
+        "the `tests` demotion says accepting KEEPS the licence and the next pass "
+        "is STILL fatal — the gate got LOOSER and the line says it did not",
+        '"revokes that licence: from here the entry is load-sensitive and its "\n'
+        '                "next pass is NOT fatal. Say in the commit message why the RECORD was "',
+        '"KEEPS that licence: from here the entry is deterministic and its "\n'
+        '                "next pass is STILL fatal. Say in the commit message why the RECORD was "',
+        [T + "test_a_demotion_is_ANNOUNCED_and_named"],
+    ),
+    (
+        "RA22", GB,
+        "the `tests` demotion names the CENSUS event (`REPORTS AGAIN`) as what "
+        "hard-failed the gate, so the operator looks for a report where there "
+        "was a pass",
+        '"failing in every one of its observations and this run watched it "\n'
+        '                "PASS, which is what hard-failed the gate (`NOW PASSES`). Accepting "',
+        '"failing in every one of its observations and this run watched it "\n'
+        '                "REPORT, which is what hard-failed the gate (`REPORTS AGAIN`). Accepting "',
+        [T + "test_a_demotion_is_ANNOUNCED_and_named"],
+    ),
+    (
+        "RA23", GB,
+        "the CENSUS demotion says accepting KEEPS the licence and the next "
+        "report is STILL fatal — on the only event that ever shrinks the record",
+        '"gate (`REPORTS AGAIN`). Accepting revokes that licence: from here the "\n'
+        '                "entry is load-sensitive and its next report is NOT fatal. That is also "',
+        '"gate (`REPORTS AGAIN`). Accepting KEEPS that licence: from here the "\n'
+        '                "entry is deterministic and its next report is STILL fatal. That is also "',
+        [T + "test_a_CENSUS_demotion_is_ANNOUNCED_and_named"],
+    ),
+    (
+        # R2's `CENSUS DISARMED:` defect one layer down, in the membership lines
+        # under the tier banners: a name that has NEVER lost its verdict before
+        # rendered in the words of one that has.
+        "RA24", GB,
+        "a name losing its verdict for the FIRST time is announced as a name "
+        "that has lost it before — a new casualty read as a recurrence, which "
+        "is the same 'one line, two opposite meanings' RA16 closed above it",
+        'print("  ~+ NOW LOSES ITS VERDICT  %s" % key)',
+        'print("  ~= reported again          %s" % key)',
+        [CM + "test_the_accept_NAMES_a_census_entry_that_lost_its_verdict_for_"
+              "the_FIRST_time"],
+    ),
+    (
+        "RA25", GB,
+        "the census size transition is printed backwards, so a record that GREW "
+        "reads as one that shrank — and shrinking is the direction this record "
+        "is not allowed to take quietly",
+        "% (len(was.tests), len(now.tests), now.runs_observed)",
+        "% (len(now.tests), len(was.tests), now.runs_observed)",
+        [CM + "test_the_accept_NAMES_a_census_entry_that_lost_its_verdict_for_"
+              "the_FIRST_time",
+         CM + "test_the_accept_NAMES_a_census_entry_the_prune_DROPPED"],
+    ),
+    (
+        "RA26", GB,
+        "the PRUNE — a recorded name nobody could reach on a healthy run, i.e. "
+        "renamed, deleted or newly skipped — is announced as a recovery",
+        'print("  ~- dropped (never started this run — renamed, deleted or "\n'
+        '                      "skipped)  %s" % key)',
+        'print("  ~- recovered (started and reported this run)  %s" % key)',
+        [CM + "test_the_accept_NAMES_a_census_entry_the_prune_DROPPED"],
+    ),
+    (
+        # The fourth time this particular number has been wrong; the first three
+        # are in CLAUDE.md and every one was the same defect class.
+        "RA27", GB,
+        "the accept's NO VERDICT headline counts the CARRIED-FORWARD entries "
+        "instead of the casualties, so a run that lost tests can report that it "
+        "lost none",
+        '"observation says nothing about them."\n'
+        '                % (len(no_verdict),',
+        '"observation says nothing about them."\n'
+        '                % (len(protected),',
+        [T + "test_an_accept_over_a_crashed_run_SAYS_SO"],
+    ),
+    (
+        "RA28", GB,
+        "the first-ever census is announced as ALREADY fatal for an unrecorded "
+        "casualty, when one observation is PROVISIONAL — the ladder CLAUDE.md "
+        "records as what let the arming land without turning main red",
+        '"not fatal. Say in the commit message why this loss is the "',
+        '"already fatal. Say in the commit message why this loss is the "',
+        [T + "test_an_accept_over_a_crashed_run_SAYS_SO"],
+    ),
+    (
+        # `+ [kind]` prints only for names ENTERING the file, and a promotion is
+        # by construction a name already in it — so this line is the only place
+        # a promoted entry's kind is ever shown.
+        "RA29", GB,
+        "the promotion detail reports a constant KIND, so the tolerance the "
+        "accept is justified by cannot be checked against the entry it arms",
+        'print("  ! now deterministic [%s] %d/%d  %s" % (\n'
+        '                    _kinds_label(entry), entry["failed_runs"], entry["seen_runs"], key,',
+        'print("  ! now deterministic [%s] %d/%d  %s" % (\n'
+        '                    "timeout", entry["failed_runs"], entry["seen_runs"], key,',
+        [T + "test_a_promotion_detail_carries_the_ENTRYS_OWN_kind"],
+    ),
+    (
+        "RA30", GB,
+        "the accept header prints the entry count as the observation count and "
+        "vice versa — the numerator and denominator of every tier decision in "
+        "the file, interchangeable",
+        '% (merged["plan"], merged["runs_observed"], len(merged["tests"])))',
+        '% (merged["plan"], len(merged["tests"]), merged["runs_observed"]))',
+        [T + "test_a_promotion_is_ANNOUNCED_and_named"],
+    ),
+    # ------------------------------------------------------------------------
+    # playhead-o89d R5. The whole accept path was enumerated a SECOND time,
+    # independently (69 mutants, not R4's 28), and the round found two things.
+    #
+    # First, the OMISSION: the accept had NO line at all for a KIND WIDENING —
+    # the fifth event that makes the gate looser, and the only one no mutant of
+    # an existing line can reach. RA31-RA35 pin it.
+    #
+    # Second, R4's own fixes were one-directional in exactly the way R1's, R2's
+    # and R3's were. Three of its new rails have mirrors it did not write:
+    # RA29 pinned the PROMOTION detail's kind and not the DEMOTION's (RA36);
+    # RA22 pinned `DISARMED:`'s event and not `CENSUS DISARMED:`'s (RA37);
+    # RA27 pinned the crash headline's count and not `CARRIED FORWARD:`'s
+    # (RA38). RA39-RA44 are the remaining survivors that misstate a fact or a
+    # consequence.
+    # ------------------------------------------------------------------------
+    (
+        "RA31", GB,
+        "a KIND WIDENING goes unannounced, so an accept doubles what an entry "
+        "absorbs — `known to time out` becomes `known to fail at all` — and the "
+        "transcript says `(membership unchanged; counts updated)`. The fifth "
+        "loosening event, and the one four rounds could not see because it is an "
+        "omission rather than a wrong line",
+        "        if widened:\n            print(\n"
+        '                "  TOLERANCE WIDENED:',
+        "        if False:\n            print(\n"
+        '                "  TOLERANCE WIDENED:',
+        [T + "test_a_WIDENED_KIND_is_ANNOUNCED_with_both_kinds_and_the_consequence"],
+    ),
+    (
+        "RA32", GB,
+        "the widening detail prints the entry's NEW kind as its OLD one, so the "
+        "line shows no change on the one event whose whole content is the change",
+        'print("  ± [%s -> %s]  %s" % (before, after, key))',
+        'print("  ± [%s -> %s]  %s" % (after, after, key))',
+        [T + "test_a_WIDENED_KIND_is_ANNOUNCED_with_both_kinds_and_the_consequence"],
+    ),
+    (
+        "RA33", GB,
+        "the widening banner states the opposite consequence — that the new kind "
+        "is STILL reported NEW — so the operator signs a commit message claiming "
+        "the tolerance did not move",
+        '"the gate; from here that kind is absorbed as KNOWN and is no longer "\n'
+        '                "reported NEW.',
+        '"the gate; from here that kind is still treated as UNKNOWN and is "\n'
+        '                "reported NEW.',
+        [T + "test_a_WIDENED_KIND_is_ANNOUNCED_with_both_kinds_and_the_consequence"],
+    ),
+    (
+        "RA34", GB,
+        "the widening banner fires for every recorded entry that failed at all, "
+        "so a line that should mark the rare tolerance change fires on most of "
+        "the file and stops being read — the failure mode RA17 closed for the "
+        "census demotion",
+        "        if after > before:",
+        "        if after >= before:",
+        [T + "test_an_accept_that_widens_NO_KIND_stays_quiet"],
+    ),
+    (
+        "RA35", GB,
+        "the accept claims `(membership unchanged; counts updated)` on a run that "
+        "widened a KIND — a positive claim that only counts moved, made about the "
+        "one change that is not a count",
+        "        if not added and not removed and not widened:",
+        "        if not added and not removed:",
+        [T + "test_a_WIDENED_KIND_is_ANNOUNCED_with_both_kinds_and_the_consequence"],
+    ),
+    (
+        "RA36", GB,
+        "the DEMOTION detail reports a constant KIND — R4 closed exactly this on "
+        "the promotion side (RA29) with the argument that a promoted entry is not "
+        "in the `added` set, and every word of it is true of a demoted one",
+        'print("  ~ no longer deterministic [%s] %d/%d  %s" % (\n'
+        '                _kinds_label(entry), entry["failed_runs"], entry["seen_runs"], key,',
+        'print("  ~ no longer deterministic [%s] %d/%d  %s" % (\n'
+        '                "timeout", entry["failed_runs"], entry["seen_runs"], key,',
+        [T + "test_a_demotion_detail_carries_the_ENTRYS_OWN_kind"],
+    ),
+    (
+        "RA37", GB,
+        "the CENSUS demotion names the `tests` event (`NOW PASSES`) as what "
+        "hard-failed the gate — the exact mirror of RA22, which R4 wrote for the "
+        "`tests` demotion naming the census event. For a crashed-host name it is "
+        "REPORTING AT ALL that is fatal, so the operator is sent looking for a "
+        "pass that never happened",
+        '"this run watched it START AND REPORT, which is what hard-failed the "\n'
+        '                "gate (`REPORTS AGAIN`).',
+        '"this run watched it PASS, which is what hard-failed the "\n'
+        '                "gate (`NOW PASSES`).',
+        [T + "test_a_CENSUS_demotion_is_ANNOUNCED_and_named"],
+    ),
+    (
+        "RA38", GB,
+        "CARRIED FORWARD counts the whole casualty set instead of the recorded "
+        "entries it protected, so an accept that carried one entry through a "
+        "twelve-test crash reports twelve — RA27's defect pointed the other way, "
+        "and the fifth time this number class has been wrong",
+        '                    % (len(protected), "y was" if len(protected) == 1 else "ies were")',
+        '                    % (len(no_verdict), "y was" if len(protected) == 1 else "ies were")',
+        [T + "test_an_accept_ANNOUNCES_what_it_carried_forward"],
+    ),
+    (
+        "RA39", GB,
+        "the crash headline claims the observation CONFIRMS the lost tests are "
+        "still broken, when a test whose host died was never judged at all — the "
+        "one sentence that states why a lost verdict is not evidence",
+        '"observation says nothing about them."',
+        '"observation confirms they are still broken."',
+        [T + "test_an_accept_over_a_crashed_run_SAYS_SO"],
+    ),
+    (
+        "RA40", GB,
+        "the parenthetical reports the CASUALTY count as the number of host "
+        "restarts, so one restart that cost twelve verdicts reads as twelve "
+        "restarts — two quantities that were interchangeable while both were 1",
+        '" (xcodebuild restarted the test host %d time(s))" % run.host_restarts',
+        '" (xcodebuild restarted the test host %d time(s))" % len(no_verdict)',
+        [T + "test_an_accept_ANNOUNCES_what_it_carried_forward"],
+    ),
+    (
+        "RA41", GB,
+        "CARRIED FORWARD states the opposite reason — that a crash IS a rename "
+        "and keeping the entries is what makes the file grow — recommending the "
+        "prune the line exists to forbid",
+        '"pruned — a crash is not a rename, and dropping them here is how "\n'
+        '                    "the file would shrink without anyone deciding to shrink it."',
+        '"pruned — a crash IS a rename, and keeping them here is how "\n'
+        '                    "the file would grow without anyone deciding to grow it."',
+        [T + "test_an_accept_ANNOUNCES_what_it_carried_forward"],
+    ),
+    (
+        "RA42", GB,
+        "the CENSUS promotion states its consequence backwards — that arming a "
+        "name is why the record can NEVER shrink — which is R2's objection to a "
+        "union stated as though the design agreed with it",
+        '"REPORTING AGAIN now fails the gate, which is what lets this record "\n'
+        '                "shrink when the crash is fixed."',
+        '"REPORTING AGAIN now fails the gate, which is why this record can never "\n'
+        '                "shrink once the crash is fixed."',
+        [CM + "test_the_accept_ANNOUNCES_a_census_promotion_and_the_ARMING"],
+    ),
+    (
+        "RA43", GB,
+        "a REMOVAL is rendered as an ADDITION — opposite claims about the file "
+        "on one line, the shape RA24 closed on the census side",
+        '            print("  - %s" % key)',
+        '            print("  + %s" % key)',
+        [T + "test_a_REMOVAL_is_named_and_is_not_rendered_as_an_addition"],
+    ),
+    (
+        "RA44", GB,
+        "the removal lines are suppressed, so the only notice that a recorded "
+        "name is no longer known-broken — i.e. that its next failure will be "
+        "reported NEW — is gone",
+        "        for key in removed:\n            print(",
+        "        for key in []:\n            print(",
+        [T + "test_a_REMOVAL_is_named_and_is_not_rendered_as_an_addition"],
+    ),
+    (
+        "RA45", GB,
+        "the CARRIED FORWARD listing's `… and N more` reports the WHOLE set "
+        "instead of the remainder, so ten names are listed and the reader is "
+        "told there are twelve more — the count class CLAUDE.md records being "
+        "wrong four times, in the one place it cannot be checked without "
+        "counting the lines above it",
+        '                    print("  = … and %d more" % (len(protected) - _MAX_LISTED))',
+        '                    print("  = … and %d more" % len(protected))',
+        [T + "test_the_TRUNCATED_listings_report_the_REMAINDER_not_the_whole_set"],
+    ),
+    (
+        "RA46", GB,
+        "the same claim on the FIRST-CENSUS listing, which had no rail at all",
+        '                print("  ~ … and %d more" % (len(now.tests) - _MAX_LISTED))',
+        '                print("  ~ … and %d more" % len(now.tests))',
+        [T + "test_the_FIRST_census_listing_reports_the_REMAINDER_too"],
+    ),
+    (
         "RA4", GB,
         "the census diff is computed in the wrong direction, so a recovery is "
         "reported as a new casualty and a genuine new casualty is reported as "
@@ -700,6 +1075,25 @@ def main(argv=None):
         sys.stderr.write("no mutation named %r\n" % args.only)
         return 2
 
+    # playhead-o89d R5. `--only` CANNOT DROP THE CONTROL. Measured on this file:
+    # `--only RA32` printed `control not run` and then `All mutations killed, and
+    # the vacuity control survived.` and exited 0 — a positive claim about a
+    # control that had not run, from a run that had proved nothing about whether
+    # the suite reddens on any edit at all. That is the same hole CLAUDE.md
+    # records being closed in the untypeable battery, still open here, and it is
+    # the standing defect class: a sentence naming one thing read as though it
+    # named another. The disk-preflight battery reuses this engine, so it is
+    # fixed there too.
+    chosen = {m[0] for m in selected}
+    for control in sorted(EXPECT_SURVIVE):
+        if control not in chosen:
+            selected += [m for m in MUTATIONS if m[0] == control]
+            sys.stderr.write(
+                "note: appending the vacuity control %s — a selection that omits "
+                "it can report nothing about whether the rails redden on any "
+                "edit\n" % control
+            )
+
     if args.list:
         for name, path, desc, _, _, expect in selected:
             print("%-5s %-22s %s" % (name, path, desc))
@@ -785,6 +1179,7 @@ def main(argv=None):
             return 4
 
     bad = [r for r in results if r[1] in ("SURVIVED", "ERROR", "CONTROL-KILLED")]
+    control_ran = [r for r in results if r[0] in EXPECT_SURVIVE]
     print("\n%d mutation(s): %d killed, %d survived, %d error, control %s"
           % (len(results),
              sum(1 for r in results if r[1] == "KILLED"),
@@ -800,6 +1195,15 @@ def main(argv=None):
         for name, verdict, detail in bad:
             sys.stderr.write("  %-5s %-14s %s\n" % (name, verdict, detail))
         return 1
+    if not control_ran:
+        # Unreachable while the append above stands; kept because the claim and
+        # the evidence for it must be computed from the same thing.
+        sys.stderr.write(
+            "\nTHE VACUITY CONTROL DID NOT RUN — this run says nothing about "
+            "whether the rails redden on any edit, so it cannot report an "
+            "all-clear.\n"
+        )
+        return 3
     print("All mutations killed, and the vacuity control survived.")
     return 0
 

@@ -1863,8 +1863,16 @@ struct BackfillExpiryDurabilityTests {
         provenance: .assumed
     )
 
+    /// PerfGate'd on measurement, playhead-o89d. The comment below is right
+    /// that 20 s is a BOUND rather than a measurement — but a bound whose two
+    /// arms are "about 0 s" and "60 s" only separates them while the box is
+    /// quiet. Measured 2026-08-13: this passes 5/5 in a 443-test scoped run
+    /// and has failed 100 % of recorded full-plan runs, where the correct
+    /// path's "about 0 s" is itself past 20 s. The discrimination the test
+    /// exists for survives only in the serial pass, so that is where it runs.
     @Test("the expiration wait spends the post-reclaim grace, not the teardown reserve",
-          .timeLimit(.minutes(2)))
+          .timeLimit(.minutes(2)),
+          .enabled(if: PerfGate.runsMeasurementTests, "perf pass only — see playhead-zx0l"))
     func expirationWaitIsBoundedByTheGraceNotTheReserve() async throws {
         // playhead-lmrx review round 2. `teardownReserve` is wall clock carved
         // OUT of `designGrant`; by the time this handler runs the OS has taken
