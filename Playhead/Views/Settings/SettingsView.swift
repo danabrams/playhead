@@ -2133,8 +2133,17 @@ private extension SettingsView {
             // playhead-xx7m.2 (Phase B): fold the live model context-window
             // size into the archive so a real-device diagnostics pull confirms
             // the iOS 27 model reports ~32k without needing Console.app.
+            //
+            // playhead-xul6: this is the ONE production consumer of the value,
+            // and it is what "read it where Settings asks for it" means. The
+            // service reads `SystemLanguageModel.default.contextSize` on this
+            // call (once, then cached) instead of on every capability
+            // snapshot — including the one the main actor used to take during
+            // `PlayheadRuntime.init`. The `await` is a suspension on the
+            // capabilities actor, so however long the framework takes, the
+            // main actor stays free.
             let foundationModelsContextSize = await runtime.capabilitiesService
-                .currentSnapshot.foundationModelsContextSize
+                .foundationModelsContextSize()
             let analysisHealth = DogfoodDiagnosticsAnalysisHealth.build(
                 from: activitySnapshot,
                 foundationModelsContextSize: foundationModelsContextSize,
