@@ -617,6 +617,58 @@ struct InvariantViolation: Sendable, Hashable, Codable {
         /// milliseconds, and the bound is ten seconds.
         case backgroundSessionCreationRefused =
             "background_session_creation_refused"
+
+        /// playhead-dgly: one persisted-state invariant's CENSUS for this
+        /// launch — which invariant, how many rows violate it, how many were
+        /// judged, and how many it abstained on and why. The body is
+        /// ``PersistedStateInvariantReporter/censusDescription(for:)``.
+        ///
+        /// **Healthy by design, and that is the whole mechanism.** One line is
+        /// emitted per invariant per launch WHETHER OR NOT IT FIRED, on the
+        /// ``adWindowIngestCensus`` / ``rediffDayZeroKickoffClaimAttempted``
+        /// precedent and for the identical reason: reporting zero violations is
+        /// a POSITIVE CLAIM, and only a row that is always present can tell
+        /// "the check ran and found nothing" from "the check never ran". Six
+        /// beads of terminal persisted state (`playhead-1e86`, `-wogi`,
+        /// `-e6d3`, `-1216`, `-exy0`, `-8ysk`) were all found by hand, from
+        /// device pulls, because nothing on the device ever said the state was
+        /// impossible.
+        ///
+        /// Volume is `PersistedStateInvariant.allCases.count` lines per launch.
+        ///
+        /// NOTHING is repaired by the producer of this line. Healing is
+        /// `playhead-gyhw` and is sequenced behind it deliberately: a
+        /// reconciler that had silently reset 3C2FFE10's cursor would have
+        /// hidden `playhead-wogi` and produced a phone that quietly re-scans
+        /// forever, which is `playhead-ejr7` arriving by a different door.
+        case persistedStateInvariantCensus = "persisted_state_invariant_census"
+
+        /// playhead-dgly: one VIOLATING row, named. Carries the witness — the
+        /// identifiers and the two quantities that disagree — so the violation
+        /// can be reproduced against a device pull without re-running the
+        /// check.
+        ///
+        /// Capped at
+        /// ``PersistedStateInvariantEvaluator/maxWitnessesPerInvariant`` lines
+        /// per invariant. The cap applies to the ENUMERATION only: the
+        /// accompanying ``persistedStateInvariantCensus`` line carries the true
+        /// count, and says how much of it this list covers. A check that
+        /// quietly examines a subset while reporting on the whole is the
+        /// standing defect class, so the truncation is declared rather than
+        /// inferred.
+        case persistedStateInvariantViolation = "persisted_state_invariant_violation"
+
+        /// playhead-dgly: the invariant snapshot could not be READ, so no
+        /// census line will follow for this launch.
+        ///
+        /// The ANTI-VACUITY control for ``persistedStateInvariantCensus``.
+        /// Without it, a store read that threw and a reporter that was never
+        /// called leave byte-identical evidence — no lines — and the honest
+        /// conclusion from that silence ("nobody checked") is unavailable to a
+        /// reader who cannot tell which happened. The thrown error travels in
+        /// the description.
+        case persistedStateInvariantReadFailed =
+            "persisted_state_invariant_read_failed"
     }
 
     let code: Code

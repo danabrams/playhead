@@ -1054,6 +1054,46 @@ enum AnalysisCoverageMath {
         intervals.filter { $0.start.isFinite && $0.end.isFinite && $0.end > $0.start }
     }
 
+    /// playhead-wogi / playhead-dgly: the largest PREFIX of an episode that a set
+    /// of EXAMINED scan windows actually supports — "how far from zero did
+    /// scanning get before it hit a hole wide enough to be worth re-scanning?".
+    ///
+    /// * numerator / denominator: none — a position.
+    /// * unit: seconds of episode audio, measured FROM ZERO.
+    ///
+    /// **What it reads when the thing it measures never happened.** Zero. An
+    /// asset with no examined window has no supported prefix at all, and one
+    /// whose first examined window starts beyond `rescanThreshold` from the head
+    /// also reads zero — the walk never gets going, which is the honest answer
+    /// for a cursor that claims `[0, x]`.
+    ///
+    /// **ONE RULER, TWO READERS.** This is the walk `playhead-wogi`'s V51
+    /// migration used to lower an over-claimed coarse cursor; it is lifted here
+    /// so ``PersistedStateInvariantEvaluator`` can ask the same question without
+    /// writing a second expression of it. Two expressions of one quantity that
+    /// happen to agree is exactly how the certainty tier and its consumers came
+    /// apart (playhead-6qvf), and it is what this programme exists to remove.
+    ///
+    /// **NOT interchangeable with
+    /// ``BackfillJobRunner/contiguousPlannedReach(spans:rescanThreshold:)``, and
+    /// the difference is the SEED rather than the rule.** That one measures from
+    /// the FIRST span it was handed, because a resume legitimately begins
+    /// mid-episode and measuring from zero would return `nil` for every one of
+    /// them. This one measures from ZERO because its question is what an
+    /// ``EpisodeSeconds`` cursor is entitled to claim, and that claim is
+    /// `[0, x]`.
+    static func supportedScannedPrefix(
+        examinedSpans: [(start: Double, end: Double)],
+        rescanThreshold: RescanThresholdSec
+    ) -> EpisodeSeconds {
+        var reach = 0.0
+        for span in normalize(examinedSpans).sorted(by: { $0.start < $1.start }) {
+            if rescanThreshold.warrantsRescan(gapSec: span.start - reach) { break }
+            reach = max(reach, span.end)
+        }
+        return EpisodeSeconds(reach)
+    }
+
     /// playhead-pz32: the widest untranscribed gap that may be BRIDGED when
     /// measuring semantic ad-scan area — see ``bridgingShortGaps(_:upTo:)``.
     ///
@@ -7339,14 +7379,18 @@ actor AnalysisStore {
         }
         sqlite3_finalize(scanStmt)
 
+        // playhead-dgly: the walk itself now lives in
+        // `AnalysisCoverageMath.supportedScannedPrefix` so the launch-time
+        // reporter judges a cursor by THIS ruler rather than by a second
+        // expression of it. Behaviour here is unchanged — the helper's
+        // normalize step is a no-op on rows the read loop above already
+        // filtered.
         let threshold = RescanThresholdSec.adScanRescanWorthyGapSec
         for (assetId, spans) in spansByAsset {
-            var reach = 0.0
-            for span in spans.sorted(by: { $0.start < $1.start }) {
-                if threshold.warrantsRescan(gapSec: span.start - reach) { break }
-                reach = max(reach, span.end)
-            }
-            supportedPrefix[assetId] = reach
+            supportedPrefix[assetId] = AnalysisCoverageMath.supportedScannedPrefix(
+                examinedSpans: spans,
+                rescanThreshold: threshold
+            ).rawValue
         }
 
         // Every row carrying a cursor, judged against its asset's prefix.
@@ -19186,6 +19230,214 @@ actor AnalysisStore {
     /// newest one would be exactly the misattribution this bead exists to stop.
     ///
     /// Hits `idx_semantic_scan_results_createdAt`.
+    /// playhead-dgly: one read of everything the persisted-state invariant
+    /// REPORTER judges, taken before this process has repaired anything.
+    ///
+    /// **Why one method and not five.** The reporter's whole value is that it
+    /// observes the state that survived the last process. Five separate awaits
+    /// interleaved with the launch chain would each see a slightly different
+    /// store, and the `abstained` counts would then be a statement about
+    /// scheduling rather than about the data.
+    ///
+    /// **Why the supported prefix is computed HERE.** The walk needs every
+    /// examined `passA` span for every asset; materialising them into the
+    /// snapshot would carry thousands of tuples across the actor boundary for a
+    /// result that is one `Double` per asset. The walk itself is
+    /// ``AnalysisCoverageMath/supportedScannedPrefix(examinedSpans:rescanThreshold:)``
+    /// — the SAME expression `playhead-wogi`'s V51 migration uses, not a second
+    /// one that happens to agree.
+    ///
+    /// **Cost.** Four full scans of small tables (`backfill_jobs`,
+    /// `analysis_assets`, `ad_windows` filtered to gated rows, and the `passA`
+    /// slice of `semantic_scan_results`) plus one indexed lookup per asset in a
+    /// registration state — a population that is normally empty. The
+    /// `semantic_scan_results` scan is the only term that grows with library
+    /// size; it hits `idx_semantic_scan_results_asset_pass` and reads five
+    /// columns.
+    ///
+    /// **Nothing here writes.** If you are about to add an `UPDATE`, it belongs
+    /// in playhead-gyhw.
+    func fetchPersistedStateSnapshot() throws -> PersistedStateSnapshot {
+        // --- backfill_jobs -------------------------------------------------
+        var jobs: [PersistedStateSnapshot.BackfillJobRow] = []
+        if try tableExists("backfill_jobs") {
+            let stmt = try prepare(
+                """
+                SELECT jobId, analysisAssetId, status, retryCount, deferReason,
+                       updatedAt, progressCursor
+                  FROM backfill_jobs
+                """
+            )
+            defer { sqlite3_finalize(stmt) }
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                // A cursor that will not decode is read as ABSENT, not as
+                // zero: zero is a claim ("nothing above the head is covered")
+                // and an undecodable blob makes no claim at all.
+                let cursor = (try? decodeJSON(
+                    BackfillProgressCursor.self,
+                    from: optionalText(stmt, 6)
+                )) ?? nil
+                jobs.append(
+                    PersistedStateSnapshot.BackfillJobRow(
+                        jobId: text(stmt, 0),
+                        assetId: text(stmt, 1),
+                        status: text(stmt, 2),
+                        retryCount: optionalInt(stmt, 3) ?? 0,
+                        deferReason: optionalText(stmt, 4),
+                        updatedAt: optionalDouble(stmt, 5) ?? 0,
+                        claimedUpperBoundSec: cursor?.lastProcessedUpperBoundSec?.rawValue
+                    )
+                )
+            }
+        }
+
+        // --- examined passA spans, folded to one prefix per asset ----------
+        var spansByAsset: [String: [(start: Double, end: Double)]] = [:]
+        if try tableExists("semantic_scan_results") {
+            let stmt = try prepare(
+                """
+                SELECT analysisAssetId, windowStartTime, windowEndTime, status, errorContext
+                  FROM semantic_scan_results
+                 WHERE scanPass = ?
+                """
+            )
+            defer { sqlite3_finalize(stmt) }
+            bind(stmt, 1, SemanticScanResult.presenceScanPass)
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                let status = SemanticScanStatus(rawValue: text(stmt, 3))
+                guard SemanticScanResult.didExamineWindow(
+                        status: status,
+                        errorContext: optionalText(stmt, 4)
+                      ),
+                      let start = optionalDouble(stmt, 1),
+                      let end = optionalDouble(stmt, 2) else { continue }
+                spansByAsset[text(stmt, 0), default: []].append((start: start, end: end))
+            }
+        }
+        var supportedPrefix: [String: Double] = [:]
+        for (assetId, spans) in spansByAsset {
+            supportedPrefix[assetId] = AnalysisCoverageMath.supportedScannedPrefix(
+                examinedSpans: spans,
+                rescanThreshold: RescanThresholdSec.adScanRescanWorthyGapSec
+            ).rawValue
+        }
+
+        // --- analysis_assets ------------------------------------------------
+        var assets: [PersistedStateSnapshot.AssetRow] = []
+        if try tableExists("analysis_assets") {
+            let hasFinalPassColumn = try columnExists(
+                table: "analysis_assets",
+                column: "finalPassCoverageEndTime"
+            )
+            let stmt = try prepare(
+                """
+                SELECT id, episodeId, analysisState, fastTranscriptCoverageEndTime
+                       \(hasFinalPassColumn ? ", finalPassCoverageEndTime" : "")
+                  FROM analysis_assets
+                """
+            )
+            defer { sqlite3_finalize(stmt) }
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                let fast = optionalDouble(stmt, 3)
+                let final = hasFinalPassColumn ? optionalDouble(stmt, 4) : nil
+                // The reach is the LARGER watermark. Both name the same
+                // quantity — how far transcription has got — and the resume
+                // plans over whichever is further along.
+                let reach: Double? = [fast, final]
+                    .compactMap { $0 }
+                    .filter { $0.isFinite }
+                    .max()
+                assets.append(
+                    PersistedStateSnapshot.AssetRow(
+                        assetId: text(stmt, 0),
+                        episodeId: text(stmt, 1),
+                        analysisState: text(stmt, 2),
+                        supportedScannedPrefixSec: supportedPrefix[text(stmt, 0)],
+                        transcriptReachSec: reach
+                    )
+                )
+            }
+        }
+
+        // --- newest analysis_jobs row, for registration-state assets only ---
+        let registrationAssets = assets.filter {
+            PersistedStateInvariantEvaluator.registrationStates.contains($0.analysisState)
+        }
+        if !registrationAssets.isEmpty, try tableExists("analysis_jobs") {
+            var byAsset: [String: (state: String, lastErrorCode: String?)] = [:]
+            let stmt = try prepare(
+                """
+                SELECT state, lastErrorCode FROM analysis_jobs
+                 WHERE analysisAssetId = ?
+                 ORDER BY updatedAt DESC, createdAt DESC
+                 LIMIT 1
+                """
+            )
+            defer { sqlite3_finalize(stmt) }
+            for asset in registrationAssets {
+                sqlite3_reset(stmt)
+                sqlite3_clear_bindings(stmt)
+                bind(stmt, 1, asset.assetId)
+                if sqlite3_step(stmt) == SQLITE_ROW {
+                    byAsset[asset.assetId] = (
+                        state: text(stmt, 0),
+                        lastErrorCode: optionalText(stmt, 1)
+                    )
+                }
+            }
+            assets = assets.map { asset in
+                guard let row = byAsset[asset.assetId] else { return asset }
+                return asset.resolvingNewestJob(
+                    state: row.state,
+                    lastErrorCode: row.lastErrorCode
+                )
+            }
+        }
+
+        // --- ad_windows carrying an eligibility gate ------------------------
+        var windows: [PersistedStateSnapshot.AdWindowRow] = []
+        if try tableExists("ad_windows") {
+            // Explicit column list, so the positional reads below are governed
+            // by THIS statement's order rather than by the physical column
+            // order — which differs between a fresh install and an upgraded
+            // one (see the note above `createTables`'s `ad_windows` DDL).
+            let stmt = try prepare(
+                """
+                SELECT id, analysisAssetId, startTime, endTime, boundaryState,
+                       decisionState, eligibilityGate, startEdgeAnchor,
+                       endEdgeAnchor, wasSkipped, userDismissedBanner
+                  FROM ad_windows
+                 WHERE eligibilityGate IS NOT NULL
+                """
+            )
+            defer { sqlite3_finalize(stmt) }
+            while sqlite3_step(stmt) == SQLITE_ROW {
+                windows.append(
+                    PersistedStateSnapshot.AdWindowRow(
+                        windowId: text(stmt, 0),
+                        assetId: text(stmt, 1),
+                        startTime: optionalDouble(stmt, 2) ?? 0,
+                        endTime: optionalDouble(stmt, 3) ?? 0,
+                        boundaryState: text(stmt, 4),
+                        decisionState: text(stmt, 5),
+                        eligibilityGate: optionalText(stmt, 6),
+                        startEdgeAnchor: text(stmt, 7),
+                        endEdgeAnchor: text(stmt, 8),
+                        wasSkipped: (optionalInt(stmt, 9) ?? 0) != 0,
+                        userDismissedBanner: (optionalInt(stmt, 10) ?? 0) != 0
+                    )
+                )
+            }
+        }
+
+        return PersistedStateSnapshot(
+            backfillJobs: jobs,
+            assets: assets,
+            eligibilityGatedAdWindows: windows,
+            coverageLaneRetryCap: AdmissionController.maxRetries
+        )
+    }
+
     func countSemanticScanResults(createdAtOrAfter wallClock: Double) throws -> Int {
         let stmt = try prepare(
             "SELECT COUNT(*) FROM semantic_scan_results WHERE createdAt >= ?"
