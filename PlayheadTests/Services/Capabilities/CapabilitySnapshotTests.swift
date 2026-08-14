@@ -375,6 +375,46 @@ struct CapabilitySnapshotTests {
                 "Unavailable FM must report 0, never the 4096 classifier fallback")
     }
 
+    /// playhead-xul6 (review): the availability/locale reading and the
+    /// context-window reading are now taken at DIFFERENT times — availability
+    /// on the capabilities actor's own refresh, the window only when Settings
+    /// asks. `withContextSize` is the one place the two are folded together,
+    /// and it shipped with no test at all: a mutant that dropped any of the
+    /// three carried-over fields, or that carried the OLD context size, would
+    /// have survived. Both directions are pinned here because the failure that
+    /// matters is silent — an availability verdict resurrected or discarded by
+    /// a fold that is only supposed to touch one field.
+    @Test("withContextSize replaces the window and carries every other field")
+    func testCapabilityStateWithContextSize() {
+        let available = FoundationModelsCapabilityState(
+            available: true,
+            appleIntelligenceEnabled: true,
+            localeSupported: true,
+            contextSize: 0
+        )
+        let folded = available.withContextSize(32_768)
+        #expect(folded.contextSize == 32_768,
+                "the freshly-read window must replace the placeholder 0")
+        #expect(folded.available)
+        #expect(folded.appleIntelligenceEnabled)
+        #expect(folded.localeSupported)
+
+        // The other direction: folding a window in must not make an
+        // unavailable model look available.
+        let unavailable = FoundationModelsCapabilityState(
+            available: false,
+            appleIntelligenceEnabled: false,
+            localeSupported: false,
+            contextSize: 32_768
+        )
+        let refolded = unavailable.withContextSize(4_096)
+        #expect(refolded.contextSize == 4_096,
+                "a second fold must replace the window, not keep the first one")
+        #expect(!refolded.available)
+        #expect(!refolded.appleIntelligenceEnabled)
+        #expect(!refolded.localeSupported)
+    }
+
     // MARK: - Coarse-run budget breadcrumb (playhead-xx7m.2 Phase B)
 
     @Test("coarseRunBudgetBreadcrumb formats contextSize, budget, and window count")

@@ -257,7 +257,24 @@ actor CapabilitiesService {
                 Task { await self.removeContinuation(id: id) }
             }
 
-            Task { await self.storeContinuation(id: id, continuation: continuation) }
+            // playhead-xul6 (review): REGISTER SYNCHRONOUSLY. This closure runs
+            // on this actor — the `yield` above reads actor state — so the hop
+            // was never needed, and it was a hole. Between `capabilityUpdates()`
+            // returning and a deferred `storeContinuation` landing, a
+            // `publish(...)` walks a `continuations` map that does not yet hold
+            // this subscriber and the emission is DROPPED.
+            //
+            // That was harmless while `init` captured the real FoundationModels
+            // reading, because the seed and the first `refreshSnapshot()` agreed.
+            // It is not harmless now: the seed reports FM ABSENT and the first
+            // refresh is the emission that corrects it. A subscriber that loses
+            // exactly that one leaves `CapabilitySnapshotCache` — and the
+            // 4-hour `AnalysisEligibilityEvaluator` verdict computed from it —
+            // holding the absent reading until the next device-state change,
+            // which on a quiet device is not soon. The whole safety case for the
+            // deferred read is "every consumer re-evaluates on the next
+            // emission"; this is what makes that true rather than likely.
+            storeContinuation(id: id, continuation: continuation)
         }
     }
 

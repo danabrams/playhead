@@ -50,6 +50,35 @@
 //        bodies. That is the OVER-approximating direction — more is scanned.
 //   L-5  Protocol witnesses and subclass overrides are not resolved; a call
 //        through an existential reaches nothing.
+//   L-6  A member ACCESS that RUNS CODE is invisible, in both directions.
+//        ``callees`` emits an edge only for `name(`, so `Self.someProperty` —
+//        whose getter executes — reaches nothing; and ``indexFunctions``
+//        records `func` and `init` declarations only, so a computed property's
+//        body is never indexed even if something did reach it. DEMONSTRATED at
+//        review by mutation: a `private static var` returning
+//        `SystemLanguageModel.default.contextSize`, read from
+//        `CapabilitiesService.init` as `_ = Self.thatProperty`, is a real
+//        main-actor block on the launch path and this walk reports it clean.
+//   L-7  A type-scope PROPERTY INITIALISER is invisible. Only the bodies of
+//        `func`/`init` declarations are scanned, so
+//        `private let x = Foo.expensive()` — which runs synchronously inside
+//        EVERY initialiser of that type, i.e. exactly where playhead-xul6's
+//        defect lived — is never seen. DEMONSTRATED at review by the same
+//        mutation run.
+//
+// L-6 and L-7 are documented rather than closed, deliberately. Both cures cost
+// the property that makes this walker worth reading — that every path it
+// reports is a real one. Scanning type-scope declaration text for L-7 reads
+// TYPE ANNOTATIONS as executed code: `private let model: SystemLanguageModel`
+// (PermissiveAdClassifier), `private let session: LanguageModelSession` and
+// `LanguageModelSession.GenerationError.Refusal` (FoundationModelClassifier)
+// are three such lines in the shipped tree, each of which would report as a
+// launch-path FoundationModels touch on any visit to its type. Telling an
+// annotation from an expression is parsing, not scanning. Emitting parenless
+// member edges for L-6 is nearer to feasible but needs the same indexer to
+// tell a type-scope computed property from a local one, and this indexer
+// deliberately descends into function bodies (see ``indexFunctions``). A
+// canary that goes red for a non-defect is how canaries get widened.
 //
 // The walk is therefore an UNDER-approximation of what init really executes,
 // and every path it reports is a real synchronous one. Its value is that the

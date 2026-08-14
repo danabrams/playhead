@@ -334,6 +334,17 @@ final class PlayheadRuntimeInitLaunchPathSourceCanaryTests: XCTestCase {
     /// deferral shapes — are correctly invisible without an allowlist anyone
     /// can grow. See `SwiftSourceCallGraph` for the walker's named limits.
     ///
+    /// What this does NOT say, second edition (review round 1, by mutation):
+    /// that the launch path is free of FoundationModels. It says no
+    /// FUNCTION CALL from init reaches it. Two shapes get past this walk and
+    /// are named as limits L-6 and L-7 in `SwiftSourceCallGraph` — a member
+    /// ACCESS that runs a getter (`_ = Self.someComputedProperty`) and a
+    /// type-scope property initialiser (`private let x = Foo.expensive()`,
+    /// which runs inside every `init` of that type). Both were re-introduced
+    /// into `CapabilitiesService` at review as real main-actor reads and this
+    /// test PASSED on both. Read a green result as "no call path", not as "no
+    /// touch".
+    ///
     /// What this does NOT say: that no FoundationModels work happens at
     /// launch. `CapabilitiesService.refreshSnapshot()` still reads
     /// `SystemLanguageModel.default`, deliberately — it runs on the service
