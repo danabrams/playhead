@@ -136,6 +136,157 @@ final class BackgroundGrantBaselineIds: Sendable {
     var value: Set<String>? { ids.withLock { $0 } }
 }
 
+// MARK: - Coarse-phase accounting (playhead-8ljj)
+
+/// playhead-8ljj: which of the two coverage-lane candidate queries FAILED, as
+/// distinct from answering empty.
+///
+/// `AnalysisCoordinator.runPendingCoarseScans` treats a thrown candidate query
+/// as "empty for this grant" so the drain behind it still gets the window — the
+/// right call, and it has always been logged as the failure it is. But the log
+/// is OSLog, and the ledger row a reader actually queries recorded nothing at
+/// all, so an UNREADABLE population and a genuinely empty one produced the same
+/// durable record. That is the standing defect class: ask what the value would
+/// read if the thing had never happened, and the answer was "the same".
+struct CoarseScanCandidateReadFailures: OptionSet, Sendable, Equatable {
+    let rawValue: Int
+
+    /// `fetchAssetIdsWithResumableBackfillJobs` threw.
+    static let resumable = CoarseScanCandidateReadFailures(rawValue: 1 << 0)
+    /// `fetchAssetIdsMissingCoverageLaneJobs` threw.
+    static let missingCoverageLaneRows = CoarseScanCandidateReadFailures(rawValue: 1 << 1)
+
+    /// `nil` when both queries answered — the ONLY state in which an empty
+    /// candidate list is a measured absence.
+    var label: String? {
+        var parts: [String] = []
+        if contains(.resumable) { parts.append("resumable") }
+        if contains(.missingCoverageLaneRows) { parts.append("missingRows") }
+        return parts.isEmpty ? nil : parts.joined(separator: "+")
+    }
+}
+
+/// playhead-8ljj: what the FM / coarse ad-scan phase DID with a granted window.
+///
+/// The phase is the one that banks `semantic_scan_results` rows — the artifact
+/// this app exists to produce — and until this bead its whole result was an
+/// `Int` that the handler logged and dropped. So a window that drove four
+/// assets and a window that found no candidates at all wrote byte-identical
+/// ledger rows (`expired` / `task_expired` / `jobsSeen=N` / `jobsCompleted=0`).
+/// Measured on the 2026-08-14 device pull: of 73 backfill rows lasting ≥ 60 s,
+/// 22 of the 23 that banked ZERO scan rows carry a tuple that a PRODUCTIVE
+/// window also wrote. The ledger could not answer the one question it exists
+/// for.
+///
+/// The verdicts are ordered by what a reader must be able to tell apart, which
+/// is the bead's acceptance criterion verbatim:
+///   - genuinely nothing to do → ``empty`` with no read failures;
+///   - work the app could not SEE → ``empty`` (or a short candidate list) WITH
+///     a read failure recorded;
+///   - candidates that refused → ``refused``;
+///   - the window ended before a unit finished → ``inflight`` / ``cancelled``.
+enum CoarseScanPhaseVerdict: String, Sendable, Equatable, CaseIterable {
+    /// The phase ran out of CANDIDATES rather than out of budget: every
+    /// candidate was started and at least one returned without throwing.
+    case drove
+    /// Both candidate queries answered, and the candidate list was empty. A
+    /// measured absence — pair it with the read-failure set before believing
+    /// it.
+    case empty
+    /// Candidates existed and every start this phase attempted threw. Nothing
+    /// was driven.
+    case refused
+    /// Stopped STARTING assets because less than one coarse window's budget
+    /// (`minimumWindowBudget`) was left. The remainder went to the drain.
+    case floor
+    /// The OS reclaimed the window, or a caller cancelled, mid-phase.
+    case cancelled
+    /// The coordinator was asked to stop (thermal `stop()`), mid-phase.
+    case stopped
+    /// The phase published a census and then never published a terminal
+    /// verdict — i.e. the window ENDED INSIDE an asset's scan. This is the
+    /// state the report is left in between the census and the loop's exit, so
+    /// it is what a run reclaimed mid-asset reports, and it is why the census
+    /// is published from inside the phase rather than derived from its return
+    /// value: a phase that never returns has no return value to read.
+    case inflight
+}
+
+/// playhead-8ljj: the durable, queryable account of one granted window's coarse
+/// phase. Rendered into `background_task_runs.deferReason`.
+struct CoarseScanPhaseReport: Sendable, Equatable {
+    var verdict: CoarseScanPhaseVerdict
+    /// Assets the phase drove to a non-throwing Stage-4 return. NOT windows
+    /// banked — see ``bankedRows``, and see
+    /// `AnalysisCoordinator.runPendingCoarseScans`'s own doc, which has always
+    /// said so.
+    var scanned: Int
+    /// How many assets the candidate queries offered.
+    var candidates: Int
+    /// Empty when both queries answered.
+    var unreadable: CoarseScanCandidateReadFailures = []
+    /// Rows this whole window added to `semantic_scan_results` — the artifact
+    /// the bead counts, taken at teardown so it covers the drain's Stage-4
+    /// dispatches too. `nil` means the count could not be TAKEN (the query
+    /// threw, or the window ended before teardown), which is not zero and must
+    /// never be rendered as zero.
+    var bankedRows: Int?
+
+    /// The `deferReason` string. Space-separated `key=value` pairs, matching
+    /// the convention `RediffRefetchService` already rides this column with
+    /// (`precheckBytes=… fullFetchBytes=…`) and the `profile=…` the
+    /// capability-defer path writes — so no schema migration, and every
+    /// existing consumer that reads `deferReason` as an opaque annotation
+    /// keeps working.
+    ///
+    /// `banked=?` rather than `banked=0` when the count is `nil`, for the same
+    /// reason `BackgroundGrantCounters` preserves `nil`: "not measured" and
+    /// "measured zero" are different findings and this bead exists because a
+    /// ledger collapsed two such findings into one.
+    var ledgerReason: String {
+        var out = "coarse=\(verdict.rawValue)(\(scanned)/\(candidates))"
+        out += " banked=\(bankedRows.map(String.init) ?? "?")"
+        if let label = unreadable.label { out += " unread=\(label)" }
+        return out
+    }
+}
+
+/// playhead-8ljj: the coarse phase's report, shared with the expiration handler.
+///
+/// A lock rather than actor state for exactly the reason
+/// ``BackgroundGrantCounters`` is one: the expiration handler runs on a
+/// different isolation domain and must read this without first winning a hop
+/// onto a `BackgroundProcessingService` that may be parked inside the very
+/// phase it is expiring. And it MUST read it — 100 of the 181 rows on the
+/// 2026-08-14 pull are `expired`, so the expiration path is the only path most
+/// grants ever reach a terminal ledger write on.
+final class BackgroundGrantCoarsePhase: Sendable {
+    private let state = OSAllocatedUnfairLock<CoarseScanPhaseReport?>(initialState: nil)
+
+    /// Record the phase's latest self-report. Called from inside the phase —
+    /// once when the candidate census is known, once per asset driven, and once
+    /// on every exit — so a window reclaimed mid-phase still leaves the most
+    /// recent true statement behind.
+    func note(_ report: CoarseScanPhaseReport) {
+        state.withLock { $0 = report }
+    }
+
+    /// Attach the teardown row count to whatever the phase last reported.
+    /// A no-op when the phase never reported, because a `banked=` with no
+    /// coarse verdict beside it would name a window nobody can classify.
+    func noteBankedRows(_ count: Int?) {
+        state.withLock { $0?.bankedRows = count }
+    }
+
+    var report: CoarseScanPhaseReport? { state.withLock { $0 } }
+
+    /// `nil` when the phase never got as far as its candidate census — the
+    /// grant ended before the two queries answered. `finishRun` binds
+    /// `deferReason` through `COALESCE(?, deferReason)`, so `nil` leaves the
+    /// column untouched rather than writing a fabricated verdict.
+    var ledgerReason: String? { report?.ledgerReason }
+}
+
 // MARK: - Protocols for Testability
 
 /// Abstracts BGProcessingTask for testability.
@@ -277,10 +428,37 @@ protocol AnalysisCoordinating: Sendable {
     /// one durable coarse window), and must respect `Task.isCancelled`.
     /// Returns how many assets the phase drove. Both parameters are required
     /// for the playhead-lmrx reason `runPendingBackfill`'s deadline is.
+    ///
+    /// playhead-8ljj: `report` is called from INSIDE the phase — once as soon
+    /// as the candidate census is known, once per asset driven, and once on
+    /// every exit. It is not derived from the return value, and it cannot be:
+    /// in the population this bead is about the window ends while the phase is
+    /// still running, so there is no return value to read. A conformance that
+    /// never calls it leaves the ledger exactly as blind as it was before this
+    /// bead, which is why it is a required parameter rather than a defaulted
+    /// one.
     func runPendingCoarseScans(
         deadline: ContinuousClock.Instant,
-        minimumWindowBudget: Duration
+        minimumWindowBudget: Duration,
+        report: @Sendable (CoarseScanPhaseReport) -> Void
     ) async -> Int
+
+    /// playhead-8ljj: how many `semantic_scan_results` rows exist with
+    /// `createdAt >= since` (wall-clock seconds since 1970).
+    ///
+    /// The NUMERATOR the bead counts, asked of the table that owns it, so the
+    /// ledger row can say what the window produced without a reader having to
+    /// join timestamps by hand — which is how every previous measurement of
+    /// this was obtained.
+    ///
+    /// Taken at TEARDOWN rather than when the coarse phase returns, because
+    /// the drain's Stage-4 dispatches bank rows too and they are just as much
+    /// this window's output.
+    ///
+    /// Returns `nil` when the count could not be taken. `nil` is not zero: a
+    /// window whose store read failed has not been shown to be barren, and
+    /// rendering that as `0` is the exact error this bead exists to remove.
+    func semanticScanRowsRecorded(since wallClock: Double) async -> Int?
 
     /// playhead-44h1: continue a foreground-assist download + analysis
     /// inside a `BGContinuedProcessingTask` window.
@@ -1342,6 +1520,13 @@ actor BackgroundProcessingService {
         // extending it. Read synchronously, before the first `await`, for the
         // same playhead-c25o reason the expiration handler is armed here.
         let grantStart = ContinuousClock.now
+        // playhead-8ljj: the same instant on the WALL clock, and read here for
+        // the same playhead-c25o reason — before the first `await`. It is the
+        // lower bound of the `semantic_scan_results.createdAt` range this
+        // window owns, and `ContinuousClock` cannot be compared against a
+        // column stored as seconds-since-1970. Two clocks, two jobs: the
+        // monotonic one bounds the grant, the wall one addresses the rows.
+        let grantStartWallClock = Date().timeIntervalSince1970
         // playhead-lmrx: shared with the expiration handler so an `expired` row
         // reports what the window achieved instead of only that it ended. The
         // baseline IDS live alongside it because `jobsCompleted` must be counted
@@ -1349,6 +1534,12 @@ actor BackgroundProcessingService {
         // `AnalysisWorkScheduler.pendingJobIdsForLedger()`.
         let counters = BackgroundGrantCounters()
         let baselineIdsBox = BackgroundGrantBaselineIds()
+        // playhead-8ljj: and the coarse phase's own account, shared for exactly
+        // the same reason — 100 of the 181 rows on the 2026-08-14 pull are
+        // `expired`, so the expiration handler is the only path most grants
+        // reach a terminal ledger write on, and it cannot see the work task's
+        // locals.
+        let coarsePhase = BackgroundGrantCoarsePhase()
         let startRunTask = Task {
             let scenePhase = await BGTaskTelemetryScenePhase.current()
             await runLedgerForStart.recordRunStart(
@@ -1556,7 +1747,8 @@ actor BackgroundProcessingService {
             // for the post-reorder derivation of both.
             let coarseAssetsDriven = await self.coordinator.runPendingCoarseScans(
                 deadline: workDeadline,
-                minimumWindowBudget: budget.minimumCheckpointBudget
+                minimumWindowBudget: budget.minimumCheckpointBudget,
+                report: { coarsePhase.note($0) }
             )
             self.logger.info("Backfill coarse phase drove \(coarseAssetsDriven, privacy: .public) asset(s); handing the remaining budget to the transcription drain")
 
@@ -1704,6 +1896,16 @@ actor BackgroundProcessingService {
             // "26 jobs admitted, 0 completed" had to be inferred. Measure it —
             // over the baseline POPULATION, and counting terminal SUCCESS only.
             await self.recordGrantCompletions(counters: counters, baselineIds: baselineIds)
+            // playhead-8ljj: what this window actually BANKED, taken here —
+            // after both phases — because the drain's Stage-4 dispatches
+            // produce `semantic_scan_results` rows just as the coarse phase
+            // does, and both are this window's output. Adjacent to
+            // `recordGrantCompletions` because it is the same kind of thing: a
+            // store read that turns a counter into a measurement, taken before
+            // the durable write so the write carries it.
+            coarsePhase.noteBankedRows(
+                await self.coordinator.semanticScanRowsRecorded(since: grantStartWallClock)
+            )
             let achieved = counters.snapshot
             // Wait for the row insert to land before the UPDATE.
             await startRunTask.value
@@ -1711,6 +1913,7 @@ actor BackgroundProcessingService {
                 runId: runId,
                 update: BackgroundTaskRunOutcomeUpdate(
                     outcome: outcome,
+                    deferReason: coarsePhase.ledgerReason,
                     jobsSeen: achieved.jobsSeen,
                     jobsCompleted: achieved.jobsCompleted
                 )
@@ -1881,11 +2084,23 @@ actor BackgroundProcessingService {
                             baselineIds: baselineIds
                         )
                     }
+                    // playhead-8ljj: AND ON THIS PATH ABOVE ALL, because this
+                    // is the path 100 of the 181 rows on the 2026-08-14 pull
+                    // took. Same undercount discipline as the completion count
+                    // above it: taken before the settle wait, so a row banked
+                    // while that wait runs is not counted. The column may say
+                    // less than the window achieved, never more.
+                    coarsePhase.noteBankedRows(
+                        await self.coordinator.semanticScanRowsRecorded(
+                            since: grantStartWallClock
+                        )
+                    )
                     let achieved = counters.snapshot
                     let advanced = await self.runLedger.finishRun(
                         runId: runId,
                         update: BackgroundTaskRunOutcomeUpdate(
                             outcome: .expired,
+                            deferReason: coarsePhase.ledgerReason,
                             cause: InternalMissCause.taskExpired.rawValue,
                             jobsSeen: achieved.jobsSeen,
                             jobsCompleted: achieved.jobsCompleted,

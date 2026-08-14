@@ -468,6 +468,167 @@ struct CoarseScanLoopTests {
         #expect(AnalysisCoordinator.coarseScanCandidates(resumable: [], missingRows: ["x"]) == ["x"],
                 "an asset with no coverage-lane rows at all must still be a candidate")
     }
+
+    // MARK: - playhead-8ljj: every exit names itself
+
+    /// A `Sendable` sink for the reports the loop publishes.
+    private final class ReportLog: @unchecked Sendable {
+        private let lock = NSLock()
+        private var entries: [CoarseScanPhaseReport] = []
+        func note(_ report: CoarseScanPhaseReport) {
+            lock.lock(); defer { lock.unlock() }
+            entries.append(report)
+        }
+        var value: [CoarseScanPhaseReport] {
+            lock.lock(); defer { lock.unlock() }
+            return entries
+        }
+        var last: CoarseScanPhaseReport? { value.last }
+    }
+
+    /// Every way out of the loop must leave a DIFFERENT name behind. Driven as
+    /// one table because the property under test is the partition — a fix that
+    /// published a single constant on every exit would satisfy any one of these
+    /// rows on its own.
+    @Test("each exit publishes its own verdict")
+    func everyExitNamesItself() async {
+        struct StoreHiccup: Error {}
+        let start = ContinuousClock.now
+
+        // Ran out of candidates, having driven them: `drove`.
+        let drove = ReportLog()
+        _ = await AnalysisCoordinator.runCoarseScanLoop(
+            deadline: start + .seconds(600), minimumWindowBudget: .zero,
+            candidates: ["a", "b"],
+            isStopRequested: { false }, scanAsset: { _ in },
+            isTaskCancelled: { false }, now: { start },
+            report: { drove.note($0) }, logger: Self.logger
+        )
+        #expect(drove.last == CoarseScanPhaseReport(verdict: .drove, scanned: 2, candidates: 2))
+
+        // Ran out of candidates, having driven NONE of them because every one
+        // threw: `refused`. This is "there was work and every attempt at it was
+        // turned away", which is not the same finding as an empty queue and
+        // must not read as one.
+        let refused = ReportLog()
+        _ = await AnalysisCoordinator.runCoarseScanLoop(
+            deadline: start + .seconds(600), minimumWindowBudget: .zero,
+            candidates: ["a", "b"],
+            isStopRequested: { false }, scanAsset: { _ in throw StoreHiccup() },
+            isTaskCancelled: { false }, now: { start },
+            report: { refused.note($0) }, logger: Self.logger
+        )
+        #expect(refused.last == CoarseScanPhaseReport(verdict: .refused, scanned: 0, candidates: 2))
+
+        // Ran out of BUDGET: `floor`. Distinct from `drove` even though the
+        // scanned count can be identical.
+        let clock = ClockBox(start)
+        let floor = ReportLog()
+        _ = await AnalysisCoordinator.runCoarseScanLoop(
+            deadline: start + .seconds(70), minimumWindowBudget: .seconds(60),
+            candidates: ["a", "b"],
+            isStopRequested: { false },
+            scanAsset: { _ in clock.advance(by: .seconds(20)) },
+            isTaskCancelled: { false }, now: { clock.now },
+            report: { floor.note($0) }, logger: Self.logger
+        )
+        #expect(floor.last == CoarseScanPhaseReport(verdict: .floor, scanned: 1, candidates: 2))
+
+        // The OS reclaimed the window: `cancelled`.
+        let cancelled = ReportLog()
+        _ = await AnalysisCoordinator.runCoarseScanLoop(
+            deadline: start + .seconds(600), minimumWindowBudget: .zero,
+            candidates: ["a", "b"],
+            isStopRequested: { false }, scanAsset: { _ in throw CancellationError() },
+            isTaskCancelled: { false }, now: { start },
+            report: { cancelled.note($0) }, logger: Self.logger
+        )
+        #expect(cancelled.last == CoarseScanPhaseReport(verdict: .cancelled, scanned: 0, candidates: 2))
+
+        // The thermal brake: `stopped`.
+        let stopped = ReportLog()
+        _ = await AnalysisCoordinator.runCoarseScanLoop(
+            deadline: start + .seconds(600), minimumWindowBudget: .zero,
+            candidates: ["a", "b"],
+            isStopRequested: { true }, scanAsset: { _ in },
+            isTaskCancelled: { false }, now: { start },
+            report: { stopped.note($0) }, logger: Self.logger
+        )
+        #expect(stopped.last == CoarseScanPhaseReport(verdict: .stopped, scanned: 0, candidates: 2))
+
+        // All five verdicts are distinct — the partition, asserted as one.
+        let verdicts = [drove, refused, floor, cancelled, stopped].compactMap { $0.last?.verdict }
+        #expect(Set(verdicts).count == 5, "each exit must be separately nameable")
+    }
+
+    /// **The property the return value cannot carry.** A window reclaimed while
+    /// an asset is mid-scan never returns from this loop, so its account has to
+    /// have been published BEFORE the scan started. The progress publish after
+    /// each asset is what makes the count current when the window dies.
+    @Test("the count is current before each asset, so a reclaim mid-asset has a number")
+    func progressIsPublishedBeforeTheWindowCanEnd() async {
+        let start = ContinuousClock.now
+        let log = ReportLog()
+        // Never returns from the third asset — the shape of a real reclaim.
+        _ = await AnalysisCoordinator.runCoarseScanLoop(
+            deadline: start + .seconds(600), minimumWindowBudget: .zero,
+            candidates: ["a", "b", "c"],
+            isStopRequested: { false },
+            scanAsset: { id in
+                if id == "c" { throw CancellationError() }
+            },
+            isTaskCancelled: { false }, now: { start },
+            report: { log.note($0) }, logger: Self.logger
+        )
+        // After "a" and after "b", each as `inflight` carrying the count so far.
+        #expect(log.value.prefix(2).map(\.verdict) == [.inflight, .inflight])
+        #expect(log.value.prefix(2).map(\.scanned) == [1, 2])
+        #expect(log.last == CoarseScanPhaseReport(verdict: .cancelled, scanned: 2, candidates: 3))
+    }
+
+    /// The read-failure set travels with EVERY report the loop publishes, not
+    /// just the census. A window reclaimed mid-loop must still record that its
+    /// candidate list was built from a half-readable population — otherwise the
+    /// short list it worked from reads as the whole truth.
+    @Test("a read failure rides every report the loop publishes")
+    func readFailureRidesEveryReport() async {
+        let start = ContinuousClock.now
+        let log = ReportLog()
+        _ = await AnalysisCoordinator.runCoarseScanLoop(
+            deadline: start + .seconds(600), minimumWindowBudget: .zero,
+            candidates: ["a"],
+            unreadable: .missingCoverageLaneRows,
+            isStopRequested: { false }, scanAsset: { _ in },
+            isTaskCancelled: { false }, now: { start },
+            report: { log.note($0) }, logger: Self.logger
+        )
+        #expect(!log.value.isEmpty)
+        #expect(log.value.allSatisfy { $0.unreadable == .missingCoverageLaneRows })
+        #expect(log.last?.ledgerReason == "coarse=drove(1/1) banked=? unread=missingRows",
+                "the banked count is not this layer's to know — it stays unmeasured here")
+    }
+
+    /// The rendered string is what lands in `background_task_runs.deferReason`,
+    /// so its shape is a contract with every future reader of that column.
+    @Test("the ledger reason renders as greppable key=value pairs")
+    func ledgerReasonShape() {
+        #expect(CoarseScanPhaseReport(verdict: .empty, scanned: 0, candidates: 0, bankedRows: 0)
+                    .ledgerReason == "coarse=empty(0/0) banked=0")
+        #expect(CoarseScanPhaseReport(verdict: .drove, scanned: 3, candidates: 4, bankedRows: 12)
+                    .ledgerReason == "coarse=drove(3/4) banked=12")
+        // Not measured is not zero.
+        #expect(CoarseScanPhaseReport(verdict: .empty, scanned: 0, candidates: 0, bankedRows: nil)
+                    .ledgerReason == "coarse=empty(0/0) banked=?")
+        #expect(CoarseScanPhaseReport(verdict: .empty, scanned: 0, candidates: 0,
+                                      unreadable: .missingCoverageLaneRows, bankedRows: 0)
+                    .ledgerReason == "coarse=empty(0/0) banked=0 unread=missingRows")
+        // A read failure with candidates still found: the modifier is
+        // independent of the verdict, because a half-readable population is
+        // neither an absence nor a full census.
+        #expect(CoarseScanPhaseReport(verdict: .drove, scanned: 1, candidates: 1,
+                                      unreadable: .resumable, bankedRows: 5)
+                    .ledgerReason == "coarse=drove(1/1) banked=5 unread=resumable")
+    }
 }
 
 // MARK: - The derived floor values

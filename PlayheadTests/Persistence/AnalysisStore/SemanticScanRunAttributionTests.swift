@@ -739,4 +739,86 @@ struct SemanticScanRunAttributionTests {
         #expect(fromSQL.background.realtimeRatio == 2.5)
         #expect(fromSQL.attributedFraction == 0.6)
     }
+
+    // MARK: - playhead-8ljj: what one granted window banked
+
+    /// The numerator a background window's ledger row now carries. It is a
+    /// count over `createdAt`, which is why it lives in this suite: the whole
+    /// reason a window can be attributed at all is the V42 column these tests
+    /// exist to guard.
+    ///
+    /// Three properties, and the second and third are the ones that matter:
+    ///   * the boundary is INCLUSIVE, so a row written in the same instant the
+    ///     grant opened belongs to that grant;
+    ///   * a row written BEFORE the grant is not this window's output — a count
+    ///     over the whole table would report every window as productive the
+    ///     moment any window ever was;
+    ///   * a NULL `createdAt` — a pre-V42 row — counts toward NO window. It is
+    ///     unattributable by construction, and folding it into the newest
+    ///     window is the misattribution this bead exists to stop.
+    @Test("the banked count is scoped to one grant, and NULL belongs to no grant")
+    func bankedCountIsScopedAndExcludesUnattributableRows() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "asset-banked"))
+
+        let grantOpened: Double = 1_700_000_000
+        try await store.insertSemanticScanResult(
+            makeScan(id: "s-before", assetId: "asset-banked", start: 0, end: 60,
+                     latencyMs: 1, createdAt: grantOpened - 1),
+            now: grantOpened
+        )
+        try await store.insertSemanticScanResult(
+            makeScan(id: "s-at", assetId: "asset-banked", start: 60, end: 120,
+                     latencyMs: 1, createdAt: grantOpened),
+            now: grantOpened
+        )
+        try await store.insertSemanticScanResult(
+            makeScan(id: "s-after", assetId: "asset-banked", start: 120, end: 180,
+                     latencyMs: 1, createdAt: grantOpened + 30),
+            now: grantOpened
+        )
+        try await store.insertSemanticScanResult(
+            makeScan(id: "s-null", assetId: "asset-banked", start: 180, end: 240,
+                     latencyMs: 1, createdAt: nil),
+            now: grantOpened
+        )
+        // A genuinely NULL `createdAt` cannot be produced through the insert —
+        // it falls back to the store clock (`result.createdAt ?? now`), which is
+        // the V42 contract and is correct. The rows that DO read NULL are the
+        // pre-V42 ones the migration deliberately left alone, so the fixture
+        // reproduces that state directly.
+        try await store.execForTesting(
+            "UPDATE semantic_scan_results SET createdAt = NULL WHERE id = 's-null'"
+        )
+
+        #expect(try await store.countSemanticScanResults(createdAtOrAfter: grantOpened) == 2,
+                "inclusive at the boundary, and the earlier row is a DIFFERENT window's output")
+        #expect(try await store.countSemanticScanResults(createdAtOrAfter: grantOpened + 1) == 1)
+        #expect(try await store.countSemanticScanResults(createdAtOrAfter: grantOpened + 1_000) == 0,
+                "a window that banked nothing must read zero, not the table's size")
+        // The NULL row is in the table and reachable by every other reader; it
+        // is simply not evidence about any window.
+        #expect(try await store.fetchSemanticScanResults(analysisAssetId: "asset-banked").count == 4)
+    }
+
+    /// A persisted REFUSAL is durable output. `playhead-26od` banks each coarse
+    /// window the moment it lands, whatever it concluded, and a later window
+    /// resumes from it — so a success-only count would report a window that
+    /// examined the episode and refused as barren, which is the opposite of the
+    /// truth.
+    @Test("the banked count includes non-success rows — a persisted refusal is still output")
+    func bankedCountIncludesNonSuccessRows() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "asset-refusal"))
+        let grantOpened: Double = 1_700_000_000
+
+        try await store.insertSemanticScanResult(
+            makeScan(id: "s-fail", assetId: "asset-refusal", start: 0, end: 60,
+                     latencyMs: nil, status: .refusal, errorContext: "refused",
+                     createdAt: grantOpened + 1),
+            now: grantOpened
+        )
+
+        #expect(try await store.countSemanticScanResults(createdAtOrAfter: grantOpened) == 1)
+    }
 }

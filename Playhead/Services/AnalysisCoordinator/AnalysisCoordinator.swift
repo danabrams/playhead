@@ -724,9 +724,17 @@ actor AnalysisCoordinator {
     ///   return. Not windows banked — those are counted where they are
     ///   durable, in `semantic_scan_results` (each row carries `createdAt` and
     ///   a run correlation id).
+    ///   - report: playhead-8ljj. Called with this phase's own account of
+    ///     itself: once the moment the candidate census is known, once per
+    ///     asset driven, and once on every exit. It exists because the return
+    ///     value below is unreachable in the population that matters — a window
+    ///     the OS reclaims mid-asset never returns from here at all, and the
+    ///     ledger row it leaves behind used to say nothing whatsoever about the
+    ///     phase that spent it.
     func runPendingCoarseScans(
         deadline: ContinuousClock.Instant,
-        minimumWindowBudget: Duration
+        minimumWindowBudget: Duration,
+        report: @Sendable (CoarseScanPhaseReport) -> Void
     ) async -> Int {
         // Clear any prior stop request, for the same reason `runPendingBackfill`
         // does: a thermal stop() from a PREVIOUS window must not disable this
@@ -742,12 +750,18 @@ actor AnalysisCoordinator {
         // candidates" answering a store error is the standing defect class:
         // the barren-window ledger reads these lines, and an unreadable
         // population must not be indistinguishable from an empty one.
+        // playhead-8ljj: the failure is recorded in the REPORT as well as the
+        // log, so the durable row can tell an unreadable population from an
+        // empty one. Until this bead the two were indistinguishable everywhere
+        // a reader could actually query.
+        var unreadable: CoarseScanCandidateReadFailures = []
         var resumable: [String] = []
         do {
             resumable = try await store.fetchAssetIdsWithResumableBackfillJobs(
                 limit: Self.coarseScanSweepLimit
             )
         } catch {
+            unreadable.insert(.resumable)
             logger.warning("runPendingCoarseScans: resumable-candidate query FAILED (empty for this grant, not a measured absence): \(String(describing: error))")
         }
         var missingRows: [String] = []
@@ -756,11 +770,26 @@ actor AnalysisCoordinator {
                 limit: Self.coarseScanSweepLimit, offset: 0
             )
         } catch {
+            unreadable.insert(.missingCoverageLaneRows)
             logger.warning("runPendingCoarseScans: zero-row-candidate query FAILED (empty for this grant, not a measured absence): \(String(describing: error))")
         }
         let candidates = Self.coarseScanCandidates(
             resumable: resumable,
             missingRows: missingRows
+        )
+        // playhead-8ljj: PUBLISH THE CENSUS BEFORE DOING ANYTHING WITH IT.
+        // Everything after this line can be cut short by an OS reclaim, and a
+        // report published only on the way out is a report the reclaimed
+        // windows — the majority — never file. `.inflight` is the honest
+        // verdict for "candidates found, nothing concluded yet"; the loop
+        // overwrites it on every exit and after every asset.
+        report(
+            CoarseScanPhaseReport(
+                verdict: candidates.isEmpty ? .empty : .inflight,
+                scanned: 0,
+                candidates: candidates.count,
+                unreadable: unreadable
+            )
         )
         guard !candidates.isEmpty else {
             logger.info("runPendingCoarseScans: no coverage-lane candidates")
@@ -771,6 +800,7 @@ actor AnalysisCoordinator {
             deadline: deadline,
             minimumWindowBudget: minimumWindowBudget,
             candidates: candidates,
+            unreadable: unreadable,
             isStopRequested: { [weak self] in
                 guard let self else { return true }
                 return await self.stopRequested
@@ -779,8 +809,25 @@ actor AnalysisCoordinator {
                 guard let self else { throw CancellationError() }
                 try await self.coarseScanOneAsset(assetId)
             },
+            report: report,
             logger: logger
         )
+    }
+
+    /// playhead-8ljj: how many `semantic_scan_results` rows carry
+    /// `createdAt >= wallClock`.
+    ///
+    /// `nil` on a store failure, and the distinction is the whole point: a
+    /// window whose count could not be TAKEN has not been shown to have banked
+    /// nothing, and `BackgroundGrantCoarsePhase` renders it `banked=?` rather
+    /// than `banked=0`.
+    func semanticScanRowsRecorded(since wallClock: Double) async -> Int? {
+        do {
+            return try await store.countSemanticScanResults(createdAtOrAfter: wallClock)
+        } catch {
+            logger.warning("semanticScanRowsRecorded: count FAILED (reported as unmeasured, not as zero): \(String(describing: error))")
+            return nil
+        }
     }
 
     /// Candidate order for the FM-first phase: assets with RESUMABLE
@@ -818,41 +865,68 @@ actor AnalysisCoordinator {
     ///     reclaimed); any other per-asset error is logged and the loop moves
     ///     on, because one asset's store hiccup must not starve the rest of
     ///     the window.
+    ///   - report: playhead-8ljj. Fired on EVERY exit and after every asset
+    ///     driven, so the last statement it made is true of the moment the
+    ///     window ended — including when the window ends inside `scanAsset`
+    ///     and this function never returns.
     static func runCoarseScanLoop(
         deadline: ContinuousClock.Instant,
         minimumWindowBudget: Duration,
         candidates: [String],
+        unreadable: CoarseScanCandidateReadFailures = [],
         isStopRequested: @Sendable () async -> Bool,
         scanAsset: @Sendable (String) async throws -> Void,
         isTaskCancelled: @Sendable () -> Bool = { Task.isCancelled },
         now: @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now },
+        report: @Sendable (CoarseScanPhaseReport) -> Void = { _ in },
         logger: Logger
     ) async -> Int {
         var scanned = 0
+        func publish(_ verdict: CoarseScanPhaseVerdict) {
+            report(
+                CoarseScanPhaseReport(
+                    verdict: verdict,
+                    scanned: scanned,
+                    candidates: candidates.count,
+                    unreadable: unreadable
+                )
+            )
+        }
         for assetId in candidates {
             guard !isTaskCancelled() else {
+                publish(.cancelled)
                 logger.info("runPendingCoarseScans: cancelled after \(scanned) asset(s)")
                 return scanned
             }
             if await isStopRequested() {
+                publish(.stopped)
                 logger.info("runPendingCoarseScans: coordinator stop requested, exiting after \(scanned) asset(s)")
                 return scanned
             }
             let remaining = now().duration(to: deadline)
             guard remaining > .zero, remaining >= minimumWindowBudget else {
+                publish(.floor)
                 logger.info("runPendingCoarseScans: \(remaining) left is under the \(minimumWindowBudget) window floor; handing the remainder to the drain after \(scanned) asset(s)")
                 return scanned
             }
             do {
                 try await scanAsset(assetId)
                 scanned += 1
+                // Progress, not a verdict: the window can end at any point in
+                // this loop and the count must be current when it does.
+                publish(.inflight)
             } catch is CancellationError {
+                publish(.cancelled)
                 logger.info("runPendingCoarseScans: cancelled mid-asset \(assetId, privacy: .public)")
                 return scanned
             } catch {
                 logger.warning("runPendingCoarseScans: asset \(assetId, privacy: .public) failed (continuing): \(String(describing: error))")
             }
         }
+        // Ran out of CANDIDATES rather than budget. `refused` when every one of
+        // them threw — that is the "there was work and every attempt at it was
+        // turned away" case, and it is not the same finding as an empty queue.
+        publish(scanned == 0 ? .refused : .drove)
         logger.info("runPendingCoarseScans: drove \(scanned) of \(candidates.count) candidate asset(s)")
         return scanned
     }
