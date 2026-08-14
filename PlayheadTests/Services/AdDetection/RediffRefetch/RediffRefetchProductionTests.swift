@@ -102,7 +102,11 @@ struct RediffRefetchStateV28MigrationTests {
         // …and then 49 → 50 (playhead-e6d3), which UPDATEs
         // `backfill_jobs.retryCount` and names no other table, so the V28
         // rediff_refetch_state tables are unchanged by it too.
-        #expect(AnalysisStore.currentSchemaVersion == 50)
+        // 50 → 51 read for this rung (playhead-wogi): V51 lowers
+        // `backfill_jobs.progressCursor` to the prefix each asset's own
+        // `semantic_scan_results` passA rows support, and touches no other
+        // column and no other table. Nothing this rung asserts is named by it.
+        #expect(AnalysisStore.currentSchemaVersion == 51)
         // Probe by using the API — both tables must be queryable.
         #expect(try await store.fetchRediffRefetchStates().isEmpty)
         #expect(try await store.fetchRediffBandwidthTotals() == RediffBandwidthTotals())

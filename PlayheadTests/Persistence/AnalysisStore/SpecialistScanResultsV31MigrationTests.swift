@@ -106,7 +106,11 @@ struct SpecialistScanResultsV31MigrationTests {
         // …and then 49 → 50 (playhead-e6d3's under-coverage retry-budget
         // repair, which UPDATEs `backfill_jobs.retryCount` and touches neither
         // `specialist_scan_results` nor its index).
-        #expect(AnalysisStore.currentSchemaVersion == 50)
+        // 50 → 51 read for this rung (playhead-wogi): V51 lowers
+        // `backfill_jobs.progressCursor` to the prefix each asset's own
+        // `semantic_scan_results` passA rows support, and touches no other
+        // column and no other table. Nothing this rung asserts is named by it.
+        #expect(AnalysisStore.currentSchemaVersion == 51)
         #expect(try probeTableExists(in: dir, table: "specialist_scan_results"))
     }
 

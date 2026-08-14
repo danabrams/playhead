@@ -1835,7 +1835,7 @@ actor AnalysisStore {
     /// assertions automatically follow the production constant — hardcoding
     /// the integer in tests has been a recurring source of stale-assertion
     /// flakes whenever the schema bumps.
-    nonisolated static let currentSchemaVersion = 50
+    nonisolated static let currentSchemaVersion = 51
 
     /// H1: minimum age (in seconds) a `backfill_jobs` / `final_pass_jobs`
     /// row stuck in `status='running'` must reach before the launch-time
@@ -2725,6 +2725,13 @@ actor AnalysisStore {
             // the 2026-08-14 pull, which had emptied the coarse phase's
             // candidate set permanently. See the block comment on the migration.
             try migrateUnderCoverageRetryBudgetV50IfNeeded()
+            // playhead-wogi: withdraw the part of every coverage-lane cursor
+            // that no durable scan row supports. A device that already holds an
+            // over-claiming cursor cannot be repaired by the code fix alone —
+            // every writer merges through `BackfillProgressCursor.monotonic`,
+            // which is what stops a cursor going backwards and therefore what
+            // makes the bad value permanent. See the block comment.
+            try migrateOverclaimedCoarseCursorV51IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -3100,6 +3107,10 @@ actor AnalysisStore {
         // playhead-e6d3 (v50): guarded on `tableExists`, so a seeded fixture
         // without `backfill_jobs` still reaches v50.
         try migrateUnderCoverageRetryBudgetV50IfNeeded()
+        // playhead-wogi (v51): guarded on `tableExists` for BOTH the row it
+        // repairs and the rows it computes the repair from, so a seeded fixture
+        // missing either still reaches v51.
+        try migrateOverclaimedCoarseCursorV51IfNeeded()
     }
     #endif
 
@@ -7231,6 +7242,159 @@ actor AnalysisStore {
             }
         }
         try setSchemaVersion(50)
+    }
+
+    // MARK: V51 — withdraw the part of a coarse cursor no scan row supports
+    //             (playhead-wogi)
+    //
+    // THIS MIGRATION REPAIRS DATA, and unlike V50 it is not optional: without
+    // it the code fix cannot reach a device that is already broken.
+    // `BackfillProgressCursor.monotonic(from:)` is applied by every writer of
+    // this column — it is what stops a stale resume racing a fresh completion —
+    // so a cursor that was published too high can never be lowered by a later,
+    // more honest computation. The bad value is permanent by construction.
+    //
+    // WHAT WENT WRONG. `CoarseCoverageWalk.contiguousUpperBoundSec` is
+    // contiguity over the PLAN LIST, and `planPassA` partitions whatever
+    // segment list it is handed. Two segments either side of an untranscribed
+    // stretch are ADJACENT by `segmentIndex`, so a pass that covered every plan
+    // it was given published a bound spanning audio it never held.
+    // `BackfillJobRunner.narrowedForResume` then cashes that bound against the
+    // transcript AS IT IS THEN — `segments.filter { $0.endTime > cursor }` —
+    // and deletes the chunks that landed afterwards.
+    //
+    // Measured on the 2026-08-14 device pull (`db-pull10`), asset 3C2FFE10: a
+    // 7,999 s episode, 8,839 fast chunks over [150.06, 7914.12] on disk, and a
+    // cursor of 7,998.72 published from an attempt whose two windows were
+    // [584.28, 659.46] and [7939.14, 7998.72]. Measured `adScanFraction` 0.0885
+    // against a transcript ceiling of 0.9960, and the pull carries seventeen
+    // `noWork:emptySegments` sentinels — attempts that held an admission ticket
+    // and a background slot and could not have scanned anything.
+    //
+    // THE REPAIR IS COMPUTED FROM THE ROWS, NOT GUESSED. For each asset the
+    // durable `passA` coverage-lane windows that EXAMINED their span (
+    // `SemanticScanResult.didExamineWindow`, the pipeline's one definition, so
+    // the sentinel rows and the cancellations are excluded) are merged and
+    // walked from zero, stopping before the first gap wider than
+    // `RescanThresholdSec.adScanRescanWorthyGapSec`. That is the largest prefix
+    // the evidence actually supports. A cursor above it is lowered to it; a
+    // cursor at or below it is left exactly where it is.
+    //
+    // WHAT IT DOES ON THE MEASURED DEVICE — ONE ROW OF NINE. Replayed over
+    // `db-pull10`: 3C2FFE10 goes 7,998.72 → 659.46, and every other row is
+    // untouched, including the five whose cursors sit at their transcript's
+    // reach HONESTLY (F4A9D2BD, 7DD870DC, C065AD03, 561CEF5B and C0610BF9 have
+    // each been scanned to within 0.008 of their transcript ceiling — their
+    // episodes are under-covered because they are under-TRANSCRIBED, which is a
+    // different bead). At the coverage bridge tolerance of 5 s instead, the same
+    // replay lowers THREE cursors and two of them are those honest ones; see
+    // `BackfillJobRunner.contiguousPlannedReach` for the table.
+    //
+    // WHAT IT DELIBERATELY DOES NOT TOUCH:
+    //
+    //   * a row whose asset has NO examined coverage-lane row. Its cursor is
+    //     supported by nothing at all, which is playhead-5pyq's shape rather
+    //     than this one, and repairing it here would mean re-scanning an episode
+    //     on the strength of an absence.
+    //   * `status`, `retryCount` and `deferReason`. Lowering the cursor is the
+    //     whole repair: it is what puts segments back above the resume's filter.
+    //   * a cursor at or below the supported prefix — including one BELOW it, of
+    //     which A9F6DF05 is the device instance (cursor 2,882.94, supported
+    //     prefix 6,036.84). Raising a cursor is not a repair, it is the defect.
+
+    /// V51 migration — lower every coverage-lane cursor to the largest prefix
+    /// its own durable scan rows support. Idempotent: the version ladder guards
+    /// it, and re-running it on a repaired store is a no-op because the second
+    /// pass computes the same prefix and finds nothing above it.
+    private func migrateOverclaimedCoarseCursorV51IfNeeded() throws {
+        let observed = (try schemaVersion() ?? 1)
+        guard observed < 51 else { return }
+        // DO NOT STEP OVER A ROLLED-BACK V39 — same rationale as V40–V50.
+        guard observed >= 50 else { return }
+        guard try tableExists("backfill_jobs"), try tableExists("semantic_scan_results") else {
+            try setSchemaVersion(51)
+            return
+        }
+
+        // The supported prefix, per asset, computed once.
+        var supportedPrefix: [String: Double] = [:]
+        let scanSQL = """
+            SELECT analysisAssetId, windowStartTime, windowEndTime, status, errorContext
+              FROM semantic_scan_results
+             WHERE scanPass = ?
+             ORDER BY analysisAssetId, windowStartTime
+            """
+        var spansByAsset: [String: [(start: Double, end: Double)]] = [:]
+        let scanStmt = try prepare(scanSQL)
+        bind(scanStmt, 1, SemanticScanResult.presenceScanPass)
+        while sqlite3_step(scanStmt) == SQLITE_ROW {
+            let assetId = text(scanStmt, 0)
+            let status = SemanticScanStatus(rawValue: text(scanStmt, 3))
+            let errorContext = optionalText(scanStmt, 4)
+            guard SemanticScanResult.didExamineWindow(status: status, errorContext: errorContext),
+                  let start = optionalDouble(scanStmt, 1),
+                  let end = optionalDouble(scanStmt, 2),
+                  start.isFinite, end.isFinite, end > start else { continue }
+            spansByAsset[assetId, default: []].append((start: start, end: end))
+        }
+        sqlite3_finalize(scanStmt)
+
+        let threshold = RescanThresholdSec.adScanRescanWorthyGapSec
+        for (assetId, spans) in spansByAsset {
+            var reach = 0.0
+            for span in spans.sorted(by: { $0.start < $1.start }) {
+                if threshold.warrantsRescan(gapSec: span.start - reach) { break }
+                reach = max(reach, span.end)
+            }
+            supportedPrefix[assetId] = reach
+        }
+
+        // Every row carrying a cursor, judged against its asset's prefix.
+        struct PendingRepair {
+            let jobId: String
+            let cursor: BackfillProgressCursor
+            let supported: Double
+        }
+        var repairs: [PendingRepair] = []
+        let jobStmt = try prepare(
+            "SELECT jobId, analysisAssetId, progressCursor FROM backfill_jobs WHERE progressCursor IS NOT NULL"
+        )
+        while sqlite3_step(jobStmt) == SQLITE_ROW {
+            let jobId = text(jobStmt, 0)
+            let assetId = text(jobStmt, 1)
+            guard let cursor = try decodeJSON(BackfillProgressCursor.self, from: optionalText(jobStmt, 2)),
+                  let claimed = cursor.lastProcessedUpperBoundSec,
+                  // No examined row for this asset ⇒ no evidence in either
+                  // direction. See the block comment.
+                  let supported = supportedPrefix[assetId],
+                  claimed.rawValue > supported else { continue }
+            repairs.append(PendingRepair(jobId: jobId, cursor: cursor, supported: supported))
+        }
+        sqlite3_finalize(jobStmt)
+
+        for repair in repairs {
+            let honest = BackfillProgressCursor(
+                // The phase counter is a statement about how far the JOB got and
+                // is not what over-claimed; only the audio bound is withdrawn.
+                processedPhaseCount: repair.cursor.processedPhaseCount,
+                lastProcessedUpperBoundSec: repair.supported > 0
+                    ? EpisodeSeconds(repair.supported)
+                    : nil
+            )
+            let stmt = try prepare(
+                "UPDATE backfill_jobs SET progressCursor = ?, updatedAt = strftime('%s', 'now') WHERE jobId = ?"
+            )
+            defer { sqlite3_finalize(stmt) }
+            bind(stmt, 1, try encodeJSONString(honest))
+            bind(stmt, 2, repair.jobId)
+            try step(stmt, expecting: SQLITE_DONE)
+        }
+        if !repairs.isEmpty {
+            logger.notice(
+                "playhead-wogi V51: withdrew \(repairs.count, privacy: .public) coarse cursor(s) to the prefix their scan rows support"
+            )
+        }
+        try setSchemaVersion(51)
     }
 
     /// playhead-kg8h: durably CLAIM one REQUESTED day-0 kickoff, before any of

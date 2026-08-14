@@ -66,7 +66,11 @@ struct AdWindowEdgeAnchorsV29MigrationTests {
         // …and then 49 → 50 (playhead-e6d3), which UPDATEs
         // `backfill_jobs.retryCount` and names no other table, so it does not
         // read or write `ad_windows` either.
-        #expect(AnalysisStore.currentSchemaVersion == 50)
+        // 50 → 51 read for this rung (playhead-wogi): V51 lowers
+        // `backfill_jobs.progressCursor` to the prefix each asset's own
+        // `semantic_scan_results` passA rows support, and touches no other
+        // column and no other table. Nothing this rung asserts is named by it.
+        #expect(AnalysisStore.currentSchemaVersion == 51)
         #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "startEdgeAnchor"))
         #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "endEdgeAnchor"))
     }

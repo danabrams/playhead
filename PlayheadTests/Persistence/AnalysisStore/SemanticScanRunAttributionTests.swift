@@ -173,7 +173,12 @@ struct SemanticScanRunAttributionTests {
         // data statement is an UPDATE of `backfill_jobs.retryCount`: it writes
         // no `semantic_scan_results` column and back-fills nothing, so the
         // no-backfill proof below still has something to prove.
-        #expect(AnalysisStore.currentSchemaVersion == 50)
+        // 50 → 51 read for this rung (playhead-wogi): V51 READS
+        // `semantic_scan_results` (passA rows that examined their window) to
+        // compute the prefix it lowers `backfill_jobs.progressCursor` to. It
+        // writes nothing to this table, so every attribution column this rung
+        // pins is untouched.
+        #expect(AnalysisStore.currentSchemaVersion == 51)
         for column in ["createdAt", "scenePhase", "runCorrelationId"] {
             #expect(
                 try probeColumnExists(in: dir, table: "semantic_scan_results", column: column),
