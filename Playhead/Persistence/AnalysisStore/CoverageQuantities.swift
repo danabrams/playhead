@@ -904,12 +904,15 @@ struct BridgeToleranceSec: CoverageQuantity {
 /// * numerator / denominator: none — a width.
 /// * unit: seconds of episode audio.
 ///
-/// **INERT until playhead-a1x0 lands.** ``adScanRescanWorthyGapSec`` is
-/// declared, documented and typed here so that the constant a1x0 introduces
-/// cannot be confused with ``AnalysisCoverageMath/adScanBridgeableGapSec`` at
-/// the moment it is introduced — which is instance 19 of this bead's catalogue,
-/// pre-loaded. Nothing in the runtime reads it yet; wiring the rule to interior
-/// and tail holes is a1x0's job.
+/// **LIVE as of playhead-wogi.** It was declared inert by playhead-x0lb so that
+/// the constant could not be confused with
+/// ``AnalysisCoverageMath/adScanBridgeableGapSec`` at the moment it was
+/// introduced — instance 19 of that bead's catalogue, pre-loaded. Its one reader
+/// is now ``BackfillJobRunner/contiguousPlannedReach(spans:rescanThreshold:)``,
+/// which caps the coarse coverage cursor at the first hole in the run's own
+/// audio; that doc carries the measurement showing what the OTHER constant would
+/// have done to the same device pull (it lowers three cursors instead of one,
+/// two of them honest). a1x0's TAIL-hole half is still open.
 struct RescanThresholdSec: CoverageQuantity {
     let rawValue: Double
     init(_ rawValue: Double) { self.rawValue = rawValue }
@@ -1147,11 +1150,12 @@ extension EpisodeSeconds {
 //   AnalysisCoverageSummary.adScanFraction            ReachRatio      [0,1]    adScanCoveredSec ÷ episodeDurationSec
 //   AnalysisCoverageSummary.transcriptDensity         DensityRatio    [0,1]    fastTranscriptCoveredSec ÷ episodeDurationSec
 //   BackfillProgressCursor.lastProcessedUpperBoundSec EpisodeSeconds       s   position; asserts [0, x] OF THE EPISODE is covered
-//   CoarseCoverageWalk.contiguousUpperBoundSec        PlanListSeconds      s   position; asserts a prefix OF THE HANDED-OVER LIST
+//   CoarseCoverageWalk.contiguousUpperBoundSec        PlanListSeconds      s   position; a CONTIGUOUS prefix of the handed-over list (wogi)
 //   CoverageOutcome.lastCoveredUpperBoundSec          PlanListSeconds      s   same, as the pass reports it
 //   CoverageOutcome.firstPlannedSegmentStartSec       PlanListSeconds      s   where the handed-over list begins
 //   AnalysisCoverageMath.adScanBridgeableGapSec       BridgeToleranceSec   s   width; "small enough to bridge WHEN MEASURING"
-//   RescanThresholdSec.adScanRescanWorthyGapSec       RescanThresholdSec   s   width; "big enough to be worth RE-SCANNING" (a1x0, inert)
+//   RescanThresholdSec.adScanRescanWorthyGapSec       RescanThresholdSec   s   width; "big enough to be worth RE-SCANNING" (a1x0; LIVE since wogi)
+//   BackfillJobRunner.contiguousPlannedReach          PlanListSeconds      s   REACH: how far the run's OWN audio runs unbroken from its head
 //   AnalysisJobRunner.semanticBackfillSufficientAdScanFraction  ReachRatio     the floor a completed ad scan is judged by
 //   episodePreparationCompleteThreshold               ReachRatio      [0,1]    the same number, the same quantity, one definition
 //   AnalysisCoordinator.AdScanCoverage.fraction       ReachRatio      [0,1]    the terminal's copy of adScanFraction

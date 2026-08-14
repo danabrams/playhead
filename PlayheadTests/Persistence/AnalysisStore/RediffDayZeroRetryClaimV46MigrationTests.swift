@@ -115,7 +115,11 @@ struct RediffDayZeroRetryClaimV46MigrationTests {
         // rule. `rediff_day_zero_attempts` and its retry-claim pair are named by
         // neither statement — note that "retry claim" here and "retry budget"
         // there are different quantities on different tables.
-        #expect(AnalysisStore.currentSchemaVersion == 50)
+        // 50 → 51 read for this rung (playhead-wogi): V51 lowers
+        // `backfill_jobs.progressCursor` to the prefix each asset's own
+        // `semantic_scan_results` passA rows support, and touches no other
+        // column and no other table. Nothing this rung asserts is named by it.
+        #expect(AnalysisStore.currentSchemaVersion == 51)
         #expect(try columnsPresent(in: dir))
     }
 

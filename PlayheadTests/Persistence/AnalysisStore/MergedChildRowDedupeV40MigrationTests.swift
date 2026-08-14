@@ -548,7 +548,11 @@ struct MergedChildRowDedupeV40MigrationTests {
         // statement is an UPDATE of `backfill_jobs.retryCount` on already-
         // `failed` rows — a table this fixture never populates, so the dedupe
         // assertion below is unchanged by it too.
-        #expect(AnalysisStore.currentSchemaVersion == 50)
+        // 50 → 51 read for this rung (playhead-wogi): V51 lowers
+        // `backfill_jobs.progressCursor` to the prefix each asset's own
+        // `semantic_scan_results` passA rows support, and touches no other
+        // column and no other table. Nothing this rung asserts is named by it.
+        #expect(AnalysisStore.currentSchemaVersion == 51)
 
         let db = try openRaw(dir)
         defer { sqlite3_close_v2(db) }

@@ -65,7 +65,13 @@ struct BackfillJobIdentityV44MigrationTests {
         // and stops policing anything. V50 touches only `backfill_jobs.retryCount`
         // on already-`failed` rows, so the `attemptTranscriptVersion` probe below
         // is untouched — and this DB has no rows at all when it runs.
-        #expect(AnalysisStore.currentSchemaVersion == 50)
+        // 50 → 51 read for this rung (playhead-wogi): V51 UPDATEs
+        // `backfill_jobs.progressCursor`, which this rung DOES care about — but
+        // only downward, only on rows whose asset has an examined `passA` row,
+        // and never on `jobId`, `analysisAssetId` or the identity columns this
+        // rung is about. A store with no `semantic_scan_results` rows at all is
+        // a no-op for it.
+        #expect(AnalysisStore.currentSchemaVersion == 51)
 
         try await store.insertAsset(makeAsset(id: "asset-fresh"))
         try await store.insertBackfillJob(
@@ -151,7 +157,7 @@ struct BackfillJobIdentityV44MigrationTests {
         // run below 49 (the deliberate don't-step-over-a-rolled-back-V39 rule),
         // so a v43 seed only reaches 50 if every rung from 44 up actually ran.
         // 50 here is therefore a real claim about the ladder, not a restatement.
-        #expect(try await store.schemaVersion() == 50)
+        #expect(try await store.schemaVersion() == 51)
         #expect(try await store.fetchBackfillJob(byId: "fm-legacy-complete") == nil,
                 "a completed row minted under the old preimage cannot be addressed again")
         #expect(try await store.fetchBackfillJob(byId: "fm-legacy-queued") == nil,
@@ -433,5 +439,267 @@ struct UnderCoverageRetryBudgetV50MigrationTests {
         #expect(try await store.fetchBackfillJob(byId: "fm-flat-casualty")?.retryCount
                 == AdmissionController.maxRetries,
                 "…and must not have had its budget refreshed by a rung that never legitimately ran")
+    }
+}
+
+// MARK: - playhead-wogi (schema V51)
+
+/// V51 withdraws the part of a coverage-lane cursor that no durable scan row
+/// supports.
+///
+/// It is not optional the way V50 was. Every writer of
+/// `backfill_jobs.progressCursor` merges through
+/// `BackfillProgressCursor.monotonic(from:)`, so a cursor published too high can
+/// never be lowered by a later, more honest computation — the code fix alone
+/// cannot reach a device that is already broken.
+///
+/// The fixture is the 2026-08-14 device pull (`db-pull10`), whose nine rows are
+/// three distinct shapes and only one of them is a repair.
+///
+/// Same file as the V50 suite, for the same reason: this is a `backfill_jobs`
+/// migration and a new file would oblige an `xcodegen generate` in a worktree
+/// where the gitignored specialist model folder is absent.
+@Suite("backfill_jobs overclaimed coarse cursor V51 migration (playhead-wogi)")
+struct OverclaimedCoarseCursorV51MigrationTests {
+
+    private func freshTempDir() throws -> URL {
+        try makeTempDir(prefix: "OverclaimedCoarseCursorV51")
+    }
+
+    private func makeAsset(id: String, durationSec: Double) -> AnalysisAsset {
+        AnalysisAsset(
+            id: id,
+            episodeId: "ep-\(id)",
+            assetFingerprint: "fp-\(id)",
+            weakFingerprint: nil,
+            sourceURL: "file:///tmp/\(id).m4a",
+            featureCoverageEndTime: nil,
+            fastTranscriptCoverageEndTime: nil,
+            confirmedAdCoverageEndTime: nil,
+            analysisState: "new",
+            analysisVersion: 1,
+            capabilitySnapshot: nil,
+            episodeDurationSec: durationSec
+        )
+    }
+
+    private func makeScan(
+        assetId: String,
+        index: Int,
+        start: Double,
+        end: Double,
+        status: SemanticScanStatus = .success,
+        errorContext: String? = nil
+    ) -> SemanticScanResult {
+        SemanticScanResult(
+            id: "\(assetId)-scan-\(index)",
+            analysisAssetId: assetId,
+            windowFirstAtomOrdinal: index * 10,
+            windowLastAtomOrdinal: index * 10 + 9,
+            windowStartTime: start,
+            windowEndTime: end,
+            scanPass: SemanticScanResult.presenceScanPass,
+            transcriptQuality: .good,
+            disposition: .noAds,
+            spansJSON: "[]",
+            status: status,
+            attemptCount: 1,
+            errorContext: errorContext,
+            inputTokenCount: nil,
+            outputTokenCount: nil,
+            latencyMs: nil,
+            prewarmHit: false,
+            scanCohortJSON: makeTestScanCohortJSON(),
+            transcriptVersion: "tx-v1",
+            reuseScope: "\(assetId)-passA-\(index)"
+        )
+    }
+
+    /// The three device shapes, seeded with the pull's own numbers.
+    private func seed(_ store: AnalysisStore) async throws {
+        // 3C2FFE10 — THE WITNESS. Scanned [0.78, 659.46] and [7939.14, 7998.72];
+        // the 7,280 s between them has never been read. Cursor at 7,998.72.
+        try await store.insertAsset(makeAsset(id: "asset-3C2FFE10", durationSec: 7_999))
+        try await store.insertSemanticScanResult(
+            makeScan(assetId: "asset-3C2FFE10", index: 0, start: 0.78, end: 125.28))
+        try await store.insertSemanticScanResult(
+            makeScan(assetId: "asset-3C2FFE10", index: 1, start: 131.46, end: 659.46))
+        try await store.insertSemanticScanResult(
+            makeScan(assetId: "asset-3C2FFE10", index: 2, start: 7_939.14, end: 7_998.72))
+        // …plus the sentinel the dead attempts wrote. It examined nothing and
+        // must contribute nothing.
+        try await store.insertSemanticScanResult(makeScan(
+            assetId: "asset-3C2FFE10", index: 3, start: 0, end: 0,
+            status: .noAds, errorContext: "noWork:emptySegments"))
+        // …and a CANCELLED window straddling the hole, which the device's own
+        // history carries (its 08-13 attempt ended `[584.28, 659.46] cancelled`).
+        // A window the model was never allowed to answer is not evidence: count
+        // it and the supported prefix becomes 7,998.72 and the repair a no-op.
+        try await store.insertSemanticScanResult(makeScan(
+            assetId: "asset-3C2FFE10", index: 4, start: 659.46, end: 7_939.14,
+            status: .cancelled))
+        try await store.insertBackfillJob(makeBackfillJob(
+            jobId: "fm-3C2FFE10",
+            analysisAssetId: "asset-3C2FFE10",
+            progressCursor: BackfillProgressCursor(
+                processedPhaseCount: 0,
+                lastProcessedUpperBoundSec: EpisodeSeconds(7_998.72)),
+            retryCount: 0,
+            status: .failed
+        ))
+
+        // F4A9D2BD — HONEST. Its cursor sits at its transcript's reach because
+        // the whole transcript really was scanned; the two interior pauses are
+        // 7.8 s and 5.2 s, which are breaths, not holes. This is the row a rule
+        // written against `adScanBridgeableGapSec` would have rewound by 1,191 s.
+        try await store.insertAsset(makeAsset(id: "asset-F4A9D2BD", durationSec: 1_993.2))
+        try await store.insertSemanticScanResult(
+            makeScan(assetId: "asset-F4A9D2BD", index: 0, start: 3.66, end: 801.72))
+        try await store.insertSemanticScanResult(
+            makeScan(assetId: "asset-F4A9D2BD", index: 1, start: 809.52, end: 1_044.78))
+        try await store.insertSemanticScanResult(
+            makeScan(assetId: "asset-F4A9D2BD", index: 2, start: 1_050.0, end: 1_992.9))
+        try await store.insertBackfillJob(makeBackfillJob(
+            jobId: "fm-F4A9D2BD",
+            analysisAssetId: "asset-F4A9D2BD",
+            progressCursor: BackfillProgressCursor(
+                processedPhaseCount: 0,
+                lastProcessedUpperBoundSec: EpisodeSeconds(1_992.9)),
+            status: .failed
+        ))
+
+        // A9F6DF05 — BELOW its own evidence (cursor 2,882.94, scanned to
+        // 6,036.84). Raising a cursor is not a repair, it is the defect.
+        try await store.insertAsset(makeAsset(id: "asset-A9F6DF05", durationSec: 6_874.3))
+        try await store.insertSemanticScanResult(
+            makeScan(assetId: "asset-A9F6DF05", index: 0, start: 0, end: 6_036.84))
+        try await store.insertBackfillJob(makeBackfillJob(
+            jobId: "fm-A9F6DF05",
+            analysisAssetId: "asset-A9F6DF05",
+            progressCursor: BackfillProgressCursor(
+                processedPhaseCount: 0,
+                lastProcessedUpperBoundSec: EpisodeSeconds(2_882.94)),
+            status: .failed
+        ))
+
+        // No examined row at all: no evidence in either direction, so the cursor
+        // is left exactly where it is rather than repaired on the strength of an
+        // absence.
+        try await store.insertAsset(makeAsset(id: "asset-no-rows", durationSec: 1_000))
+        try await store.insertBackfillJob(makeBackfillJob(
+            jobId: "fm-no-rows",
+            analysisAssetId: "asset-no-rows",
+            progressCursor: BackfillProgressCursor(
+                processedPhaseCount: 1,
+                lastProcessedUpperBoundSec: EpisodeSeconds(999)),
+            status: .complete
+        ))
+    }
+
+    @Test("playhead-wogi: v51 lowers the ONE cursor its rows disprove and leaves the other three exactly where they are")
+    func v51RepairsOnlyTheOverclaimedCursor() async throws {
+        let dir = try freshTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        AnalysisStore.resetMigratedPathsForTesting()
+        let store = try AnalysisStore(directory: dir)
+        try await store.migrate()
+        try await seed(store)
+        try await store.setMetaValue(forKey: "schema_version", value: "50")
+
+        try await store.migrateOnlyForTesting()
+
+        #expect(try await store.schemaVersion() == AnalysisStore.currentSchemaVersion)
+
+        #expect(
+            try await store.fetchBackfillJob(byId: "fm-3C2FFE10")?
+                .progressCursor?.lastProcessedUpperBoundSec == EpisodeSeconds(659.46),
+            "the witness keeps the 659.46 s it really read and withdraws the 7,339 s it did not"
+        )
+        // The phase counter is a statement about the JOB, not about audio, and
+        // is not what over-claimed.
+        #expect(try await store.fetchBackfillJob(byId: "fm-3C2FFE10")?
+            .progressCursor?.processedPhaseCount == 0)
+        #expect(try await store.fetchBackfillJob(byId: "fm-3C2FFE10")?.status == .failed,
+                "status, retryCount and deferReason are deliberately untouched")
+
+        #expect(
+            try await store.fetchBackfillJob(byId: "fm-F4A9D2BD")?
+                .progressCursor?.lastProcessedUpperBoundSec == EpisodeSeconds(1_992.9),
+            "an honest cursor was rewound — 7.8 s and 5.2 s are breaths, and re-scanning 1,191 s to recover nothing is the cost a1x0 refused"
+        )
+        #expect(
+            try await store.fetchBackfillJob(byId: "fm-A9F6DF05")?
+                .progressCursor?.lastProcessedUpperBoundSec == EpisodeSeconds(2_882.94),
+            "a cursor BELOW its evidence was raised — the migration may only ever withdraw a claim"
+        )
+        #expect(
+            try await store.fetchBackfillJob(byId: "fm-no-rows")?
+                .progressCursor?.lastProcessedUpperBoundSec == EpisodeSeconds(999),
+            "an asset with no examined row proves nothing, and an absence is not a licence to force a re-scan"
+        )
+    }
+
+    @Test("playhead-wogi: v51 is idempotent — a second ladder pass recomputes the same prefix and withdraws nothing further")
+    func v51DoesNotRunTwice() async throws {
+        let dir = try freshTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        AnalysisStore.resetMigratedPathsForTesting()
+        let store = try AnalysisStore(directory: dir)
+        try await store.migrate()
+        try await seed(store)
+        try await store.setMetaValue(forKey: "schema_version", value: "50")
+        try await store.migrateOnlyForTesting()
+        #expect(try await store.fetchBackfillJob(byId: "fm-3C2FFE10")?
+            .progressCursor?.lastProcessedUpperBoundSec == EpisodeSeconds(659.46))
+
+        try await store.migrateOnlyForTesting()
+        #expect(
+            try await store.fetchBackfillJob(byId: "fm-3C2FFE10")?
+                .progressCursor?.lastProcessedUpperBoundSec == EpisodeSeconds(659.46),
+            "the rung stamped its own version, and the computation is a fixed point regardless"
+        )
+    }
+
+    /// Every rung added after V39 owes this witness — see the V50 suite.
+    @Test("playhead-wogi: v51 does not step over a rolled-back v39")
+    func v51DoesNotStepOverV39() async throws {
+        let dir = try freshTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        AnalysisStore.resetMigratedPathsForTesting()
+        let store = try AnalysisStore(directory: dir)
+        try await store.migrate()
+        try await seed(store)
+
+        let dbURL = dir.appendingPathComponent("analysis.sqlite")
+        var db: OpaquePointer?
+        #expect(sqlite3_open_v2(dbURL.path, &db, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK)
+        let rewind = """
+            DROP INDEX IF EXISTS idx_assets_episode_fingerprint;
+            DROP INDEX IF EXISTS idx_chunks_asset_pass_fingerprint;
+            INSERT INTO analysis_assets
+              (id, episodeId, assetFingerprint, sourceURL, analysisState, createdAt)
+              VALUES ('dupe-old', 'ep-collide', 'ffee', 'file:///tmp/x.mp3', 'pending', 1.0);
+            INSERT INTO analysis_assets
+              (id, episodeId, assetFingerprint, sourceURL, analysisState, createdAt)
+              VALUES ('dupe-new', 'ep-collide', 'ffee', 'file:///tmp/x.mp3', 'pending', 2.0);
+            CREATE TRIGGER wogi_v39_guard BEFORE DELETE ON analysis_assets
+              BEGIN SELECT RAISE(ABORT, 'v51 step-over fixture'); END;
+            UPDATE _meta SET value = '38' WHERE key = 'schema_version';
+            """
+        #expect(sqlite3_exec(db, rewind, nil, nil, nil) == SQLITE_OK)
+        sqlite3_close_v2(db)
+
+        try await store.migrateOnlyForTesting()
+
+        #expect(try await store.schemaVersion() == 38,
+                "a DB held at 38 by a rolled-back v39 must not be stamped 51")
+        #expect(
+            try await store.fetchBackfillJob(byId: "fm-3C2FFE10")?
+                .progressCursor?.lastProcessedUpperBoundSec == EpisodeSeconds(7_998.72),
+            "…and must not have had its cursor rewritten by a rung that never legitimately ran"
+        )
     }
 }

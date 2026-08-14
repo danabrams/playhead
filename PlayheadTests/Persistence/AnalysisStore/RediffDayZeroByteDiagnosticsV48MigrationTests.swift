@@ -114,7 +114,11 @@ struct RediffDayZeroByteDiagnosticsV48MigrationTests {
         // `guard observed >= 49` shape and so can only land once V49 has set the
         // version. The seeded-v47 test below now climbs 47 → 48 → 49 → 50. V50
         // names only `backfill_jobs`.
-        #expect(AnalysisStore.currentSchemaVersion == 50)
+        // 50 → 51 read for this rung (playhead-wogi): V51 lowers
+        // `backfill_jobs.progressCursor` to the prefix each asset's own
+        // `semantic_scan_results` passA rows support, and touches no other
+        // column and no other table. Nothing this rung asserts is named by it.
+        #expect(AnalysisStore.currentSchemaVersion == 51)
         #expect(try columnsPresent(in: dir))
     }
 

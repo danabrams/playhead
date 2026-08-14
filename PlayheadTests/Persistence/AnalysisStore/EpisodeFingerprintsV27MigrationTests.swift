@@ -86,7 +86,11 @@ struct EpisodeFingerprintsV27MigrationTests {
         // …and then 49 → 50 (playhead-e6d3: one fresh retry budget for the
         // coverage-lane rows the flat under-coverage rule retired). It names
         // only `backfill_jobs`; `episode_fingerprints` is untouched by either.
-        #expect(AnalysisStore.currentSchemaVersion == 50)
+        // 50 → 51 read for this rung (playhead-wogi): V51 lowers
+        // `backfill_jobs.progressCursor` to the prefix each asset's own
+        // `semantic_scan_results` passA rows support, and touches no other
+        // column and no other table. Nothing this rung asserts is named by it.
+        #expect(AnalysisStore.currentSchemaVersion == 51)
         #expect(try probeTableExists(in: dir, table: "episode_fingerprints"))
     }
 

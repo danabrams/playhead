@@ -1655,7 +1655,11 @@ struct FastTranscriptCoverageV37MigrationTests {
         // …and 49 → 50 (playhead-e6d3), whose only statement UPDATEs
         // `backfill_jobs.retryCount`, so it cannot move a coverage watermark in
         // either direction either.
-        #expect(AnalysisStore.currentSchemaVersion == 50)
+        // 50 → 51 read for this rung (playhead-wogi): V51 reads the same
+        // `passA` / `didExamineWindow` population this file's coverage numerator
+        // is computed from, and writes only `backfill_jobs.progressCursor`. The
+        // summary quantities are unaffected in both directions.
+        #expect(AnalysisStore.currentSchemaVersion == 51)
     }
 
     /// THE MIGRATION EVIDENCE. An asset already on disk — written by a
