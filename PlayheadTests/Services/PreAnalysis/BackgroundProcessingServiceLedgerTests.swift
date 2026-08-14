@@ -203,4 +203,208 @@ struct BackgroundProcessingServiceLedgerTests {
         #expect(latest?.lastErrorCode == "reconciler_unavailable")
         #expect(latest?.taskIdentifier == BackgroundTaskID.preAnalysisRecovery)
     }
+
+    // MARK: - playhead-8ljj: a barren window must say WHY
+
+    /// **THE BEAD, AS ONE ASSERTION.**
+    ///
+    /// Two granted windows: one banked 37 scan rows, one banked nothing. On the
+    /// 2026-08-14 device pull that pair writes the SAME ledger row — of 73
+    /// backfill rows lasting ≥ 60 s, 22 of the 23 that banked zero carry a
+    /// tuple (`outcome`, `cause`, `jobsSeen`, `jobsCompleted`, `expiration`) a
+    /// productive window also wrote. Everything the runner knew about the
+    /// difference went to OSLog and was dropped.
+    ///
+    /// The test is written as the COMPARISON rather than as a string check on
+    /// one row, because "records something" is not the property; "records
+    /// something DIFFERENT" is. A fix that wrote a constant would pass a
+    /// single-row assertion and fail this one.
+    @Test("A barren window and a productive one no longer write the same row",
+          .timeLimit(.minutes(1)))
+    func barrenAndProductiveWindowsAreDistinguishable() async throws {
+        func run(banked: Int) async throws -> BackgroundTaskRunRecord? {
+            let store = try await makeTestStore()
+            let ledger = AnalysisStoreBackgroundTaskRunLedger(store: store)
+            let coordinator = StubAnalysisCoordinator()
+            coordinator.coarseScanPhaseReport = CoarseScanPhaseReport(
+                verdict: .drove, scanned: 4, candidates: 4
+            )
+            coordinator.runPendingCoarseScansResult = 4
+            coordinator.semanticScanRowsRecordedResult = banked
+            let (bps, _) = makeBPS(ledger: ledger, coordinator: coordinator)
+            let task = StubBackgroundTask()
+            await bps.handleBackfillTask(task)
+            await task.awaitCompletion()
+            return await ledger.fetchLatestRun(for: .backfill)
+        }
+
+        let productive = try #require(await run(banked: 37))
+        let barren = try #require(await run(banked: 0))
+
+        // Every column the ledger carried BEFORE this bead still agrees —
+        // which is precisely why it could not answer the question.
+        #expect(productive.outcome == barren.outcome)
+        #expect(productive.cause == barren.cause)
+        #expect(productive.jobsSeen == barren.jobsSeen)
+        #expect(productive.jobsCompleted == barren.jobsCompleted)
+        #expect(productive.expiration == barren.expiration)
+
+        // And the row now distinguishes them anyway.
+        #expect(productive.deferReason == "coarse=drove(4/4) banked=37")
+        #expect(barren.deferReason == "coarse=drove(4/4) banked=0")
+        #expect(productive.deferReason != barren.deferReason,
+                """
+                A window that banked 37 durable scan rows and a window that \
+                banked none must not leave the same durable record. This is \
+                the whole bead.
+                """)
+    }
+
+    /// The expiration path is the one that matters: 100 of the 181 rows on the
+    /// 2026-08-14 pull are `expired`, so for most grants it is the ONLY path
+    /// that reaches a terminal ledger write. A reason published only on the
+    /// normal return is a reason the majority of windows never file.
+    ///
+    /// The stub publishes its census and then parks, which is exactly what a
+    /// real phase reclaimed mid-asset does — so the verdict under test is
+    /// `inflight`, the state that exists precisely because a phase that never
+    /// returns has no return value to read.
+    @Test("An expired window carries the coarse phase's last true statement",
+          .timeLimit(.minutes(1)))
+    func expiredWindowCarriesTheCoarseReason() async throws {
+        let store = try await makeTestStore()
+        let ledger = AnalysisStoreBackgroundTaskRunLedger(store: store)
+        let coordinator = StubAnalysisCoordinator()
+        coordinator.coarseScanPhaseReport = CoarseScanPhaseReport(
+            verdict: .inflight, scanned: 0, candidates: 4
+        )
+        // Park INSIDE the coarse phase, after the census is published.
+        coordinator.runPendingCoarseScansDuration = .seconds(30)
+        coordinator.semanticScanRowsRecordedResult = 0
+        let (bps, _) = makeBPS(ledger: ledger, coordinator: coordinator)
+
+        let task = StubBackgroundTask()
+        let workTask = Task { await bps.handleBackfillTask(task) }
+        await task.awaitExpirationHandlerInstalled()
+        task.simulateExpiration()
+        _ = await workTask.value
+        await task.awaitCompletion()
+
+        let latest = try #require(await ledger.fetchLatestRun(for: .backfill))
+        #expect(latest.outcome == .expired)
+        #expect(latest.deferReason == "coarse=inflight(0/4) banked=0",
+                """
+                The expiration handler must persist the coarse phase's account \
+                too. Before this bead every `expired` row carried \
+                deferReason=NULL, which is 100 of the 181 rows on the pull.
+                """)
+    }
+
+    /// "Nothing to do" and "could not tell whether there was anything to do"
+    /// are different findings, and the bead's acceptance criterion names the
+    /// distinction explicitly. `runPendingCoarseScans` has always treated a
+    /// thrown candidate query as empty-for-this-grant — the right call — and
+    /// has always logged it as the failure it is. The log is not queryable;
+    /// the row is.
+    @Test("An unreadable candidate population is not an empty one",
+          .timeLimit(.minutes(1)))
+    func unreadableCandidatesAreNotAMeasuredAbsence() async throws {
+        func run(unreadable: CoarseScanCandidateReadFailures) async throws -> String? {
+            let store = try await makeTestStore()
+            let ledger = AnalysisStoreBackgroundTaskRunLedger(store: store)
+            let coordinator = StubAnalysisCoordinator()
+            coordinator.coarseScanPhaseReport = CoarseScanPhaseReport(
+                verdict: .empty, scanned: 0, candidates: 0, unreadable: unreadable
+            )
+            coordinator.semanticScanRowsRecordedResult = 0
+            let (bps, _) = makeBPS(ledger: ledger, coordinator: coordinator)
+            let task = StubBackgroundTask()
+            await bps.handleBackfillTask(task)
+            await task.awaitCompletion()
+            return await ledger.fetchLatestRun(for: .backfill)?.deferReason
+        }
+
+        #expect(try await run(unreadable: []) == "coarse=empty(0/0) banked=0")
+        #expect(try await run(unreadable: .resumable)
+                == "coarse=empty(0/0) banked=0 unread=resumable")
+        #expect(try await run(unreadable: [.resumable, .missingCoverageLaneRows])
+                == "coarse=empty(0/0) banked=0 unread=resumable+missingRows")
+    }
+
+    /// A count that could not be TAKEN is not a count of zero. Same rule
+    /// `BackgroundGrantCounters` follows for `jobsSeen`/`jobsCompleted`, and
+    /// the same reason: this bead exists because a ledger collapsed "not
+    /// measured" into "measured zero".
+    @Test("An unmeasurable banked count reads `?`, never `0`",
+          .timeLimit(.minutes(1)))
+    func unmeasurableBankedCountIsNotZero() async throws {
+        let store = try await makeTestStore()
+        let ledger = AnalysisStoreBackgroundTaskRunLedger(store: store)
+        let coordinator = StubAnalysisCoordinator()
+        coordinator.coarseScanPhaseReport = CoarseScanPhaseReport(
+            verdict: .empty, scanned: 0, candidates: 0
+        )
+        coordinator.semanticScanRowsRecordedResult = nil
+        let (bps, _) = makeBPS(ledger: ledger, coordinator: coordinator)
+        let task = StubBackgroundTask()
+
+        await bps.handleBackfillTask(task)
+        await task.awaitCompletion()
+
+        #expect(await ledger.fetchLatestRun(for: .backfill)?.deferReason
+                == "coarse=empty(0/0) banked=?")
+    }
+
+    /// The count must be scoped to THIS grant. A count over the whole table
+    /// would report every window as productive the moment any window ever was
+    /// — the wrong-population error, arrived at through the fix for it.
+    @Test("The banked count is asked about this grant, not the whole table",
+          .timeLimit(.minutes(1)))
+    func bankedCountIsScopedToTheGrant() async throws {
+        let store = try await makeTestStore()
+        let ledger = AnalysisStoreBackgroundTaskRunLedger(store: store)
+        let coordinator = StubAnalysisCoordinator()
+        coordinator.coarseScanPhaseReport = CoarseScanPhaseReport(
+            verdict: .empty, scanned: 0, candidates: 0
+        )
+        let (bps, _) = makeBPS(ledger: ledger, coordinator: coordinator)
+        let task = StubBackgroundTask()
+
+        let before = Date().timeIntervalSince1970
+        await bps.handleBackfillTask(task)
+        await task.awaitCompletion()
+        let after = Date().timeIntervalSince1970
+
+        let asked = try #require(coordinator.semanticScanRowsRecordedCalls.first)
+        #expect(coordinator.semanticScanRowsRecordedCalls.count == 1)
+        #expect(asked >= before && asked <= after,
+                """
+                The `since` handed to the count must be this grant's own \
+                opening instant — read before the first await, like every \
+                other quantity the handler measures the window with.
+                """)
+    }
+
+    /// A window that never reached the coarse phase at all must leave
+    /// `deferReason` alone rather than fabricate a verdict for a phase that
+    /// did not run. `finishRun` binds through `COALESCE(?, deferReason)`, so
+    /// `nil` is a real "say nothing" and this pins that it stays one.
+    @Test("A phase that never reported writes no coarse verdict",
+          .timeLimit(.minutes(1)))
+    func aPhaseThatNeverReportedWritesNothing() async throws {
+        let store = try await makeTestStore()
+        let ledger = AnalysisStoreBackgroundTaskRunLedger(store: store)
+        let coordinator = StubAnalysisCoordinator()
+        // No `coarseScanPhaseReport` — the stub publishes nothing, which is
+        // what a grant that ended before the candidate queries answered looks
+        // like.
+        coordinator.semanticScanRowsRecordedResult = 0
+        let (bps, _) = makeBPS(ledger: ledger, coordinator: coordinator)
+        let task = StubBackgroundTask()
+
+        await bps.handleBackfillTask(task)
+        await task.awaitCompletion()
+
+        #expect(await ledger.fetchLatestRun(for: .backfill)?.deferReason == nil)
+    }
 }

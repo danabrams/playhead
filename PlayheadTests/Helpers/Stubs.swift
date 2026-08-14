@@ -473,16 +473,32 @@ final class StubAnalysisCoordinator: AnalysisCoordinating, @unchecked Sendable {
     var onRunPendingCoarseScans: (@Sendable () async -> Void)?
     /// The value `runPendingCoarseScans` reports as assets driven.
     var runPendingCoarseScansResult = 0
+    /// playhead-8ljj: what the stub phase reports about ITSELF. Published
+    /// BEFORE the optional sleep, so a test that expires the grant while the
+    /// coarse phase is parked sees exactly what a real reclaimed window sees —
+    /// a census with no terminal verdict.
+    var coarseScanPhaseReport: CoarseScanPhaseReport?
+    /// playhead-8ljj: what `semanticScanRowsRecorded(since:)` answers. `nil`
+    /// models a store read that FAILED, which the ledger must render `banked=?`
+    /// rather than `banked=0`.
+    var semanticScanRowsRecordedResult: Int? = 0
+    /// Every `since` the handler asked about, so a test can pin that the count
+    /// is scoped to the grant rather than to the whole table.
+    private(set) var semanticScanRowsRecordedCalls: [Double] = []
 
     func runPendingCoarseScans(
         deadline: ContinuousClock.Instant,
-        minimumWindowBudget: Duration
+        minimumWindowBudget: Duration,
+        report: @Sendable (CoarseScanPhaseReport) -> Void
     ) async -> Int {
         runPendingCoarseScansCallCount += 1
         grantDriverCallOrder.append("coarse")
         runPendingCoarseScansCalls.append(
             (deadline: deadline, minimumWindowBudget: minimumWindowBudget)
         )
+        if let phaseReport = coarseScanPhaseReport {
+            report(phaseReport)
+        }
         if let hook = onRunPendingCoarseScans {
             await hook()
         }
@@ -490,6 +506,11 @@ final class StubAnalysisCoordinator: AnalysisCoordinating, @unchecked Sendable {
             try? await Task.sleep(for: duration)
         }
         return runPendingCoarseScansResult
+    }
+
+    func semanticScanRowsRecorded(since wallClock: Double) async -> Int? {
+        semanticScanRowsRecordedCalls.append(wallClock)
+        return semanticScanRowsRecordedResult
     }
 
     func continueForegroundAssist(episodeId: String, deadline: Date) async throws {

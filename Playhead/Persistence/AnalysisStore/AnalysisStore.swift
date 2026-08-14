@@ -18868,6 +18868,35 @@ actor AnalysisStore {
         return try readSemanticScanResult(stmt)
     }
 
+    /// playhead-8ljj: how many rows this table has gained at or after a
+    /// wall-clock instant — the durable output of one granted background
+    /// window, asked of the table that owns it.
+    ///
+    /// Counts EVERY row, not only `status = 'success'`. The question the caller
+    /// asks is "did this window bank anything durable", and a persisted refusal
+    /// (playhead-26od banks each coarse window the moment it lands, whatever it
+    /// concluded) is a durable artifact that a later window resumes from. A
+    /// success-only count would report a window that examined the whole episode
+    /// and found no ads as barren, which is the opposite of the truth.
+    ///
+    /// **`createdAt` is nullable and a NULL row is NOT counted.** Rows written
+    /// before the V42 attribution migration carry NULL, and `NULL >= ?` is NULL
+    /// — never true — so SQLite already excludes them. That is the behaviour we
+    /// want and it is stated here rather than inherited: an unattributable row
+    /// cannot be evidence about any particular window, and counting it into the
+    /// newest one would be exactly the misattribution this bead exists to stop.
+    ///
+    /// Hits `idx_semantic_scan_results_createdAt`.
+    func countSemanticScanResults(createdAtOrAfter wallClock: Double) throws -> Int {
+        let stmt = try prepare(
+            "SELECT COUNT(*) FROM semantic_scan_results WHERE createdAt >= ?"
+        )
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, wallClock)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return 0 }
+        return Int(sqlite3_column_int(stmt, 0))
+    }
+
     /// playhead-gqx4: the `status` column alone for one asset's rows on one
     /// scan pass, decoded LENIENTLY — an unrecognised persisted string arrives
     /// as `nil` rather than throwing.

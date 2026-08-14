@@ -351,7 +351,8 @@ struct CoarseScanShowIdentityWireInTests {
     private func runCoarsePhase(_ coordinator: AnalysisCoordinator) async -> Int {
         await coordinator.runPendingCoarseScans(
             deadline: ContinuousClock.now.advanced(by: .seconds(120)),
-            minimumWindowBudget: .seconds(1)
+            minimumWindowBudget: .seconds(1),
+            report: { _ in }
         )
     }
 
@@ -359,6 +360,70 @@ struct CoarseScanShowIdentityWireInTests {
         try await store.fetchBackfillJob(
             byId: SemanticScanClaim.jobId(analysisAssetId: Self.assetId)
         )
+    }
+
+    // MARK: - playhead-8ljj: the phase files its census before it can be cut short
+
+    /// **The census is published BEFORE the guard, and that ordering is the
+    /// fix.** An empty candidate list is the single most common way a granted
+    /// window comes back with nothing, and until this bead it returned `0` and
+    /// logged a line nobody could query. The verdict must reach the caller from
+    /// INSIDE the phase, because the caller in production is a window that may
+    /// never see this function return.
+    @Test("a store with no candidates publishes a MEASURED absence",
+          .timeLimit(.minutes(1)))
+    func emptyStorePublishesAMeasuredAbsence() async throws {
+        let store = try await makeTestStore()
+        let coordinator = makeCoordinator(store: store)
+        let log = ReportBox()
+
+        let scanned = await coordinator.runPendingCoarseScans(
+            deadline: ContinuousClock.now.advanced(by: .seconds(120)),
+            minimumWindowBudget: .seconds(1),
+            report: { log.note($0) }
+        )
+
+        #expect(scanned == 0)
+        #expect(log.value == [CoarseScanPhaseReport(verdict: .empty, scanned: 0, candidates: 0)],
+                """
+                Exactly one report, and it must say `empty` with an EMPTY \
+                read-failure set — both queries answered, so this is a measured \
+                absence rather than an unreadable population.
+                """)
+    }
+
+    /// And when there ARE candidates the first thing published is the census,
+    /// not a verdict — so a window reclaimed inside the first asset's scan
+    /// still leaves `coarse=inflight(0/1)` behind instead of nothing at all.
+    @Test("a candidate census is published before any asset is started",
+          .timeLimit(.minutes(1)))
+    func censusPrecedesTheFirstScan() async throws {
+        let store = try await seededStore()
+        let coordinator = makeCoordinator(store: store)
+        let log = ReportBox()
+
+        _ = await coordinator.runPendingCoarseScans(
+            deadline: ContinuousClock.now.advanced(by: .seconds(120)),
+            minimumWindowBudget: .seconds(1),
+            report: { log.note($0) }
+        )
+
+        #expect(log.value.first == CoarseScanPhaseReport(verdict: .inflight, scanned: 0, candidates: 1),
+                "the census must land before the phase can be cut short by a reclaim")
+        #expect(log.value.count > 1, "and the loop must go on to publish a terminal verdict")
+    }
+
+    private final class ReportBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var entries: [CoarseScanPhaseReport] = []
+        func note(_ report: CoarseScanPhaseReport) {
+            lock.lock(); defer { lock.unlock() }
+            entries.append(report)
+        }
+        var value: [CoarseScanPhaseReport] {
+            lock.lock(); defer { lock.unlock() }
+            return entries
+        }
     }
 
     /// THE PRE-FIX BEHAVIOUR, pinned so the fix cannot be silently reverted.
