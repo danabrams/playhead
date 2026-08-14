@@ -289,6 +289,109 @@ final class PlayheadRuntimeInitLaunchPathSourceCanaryTests: XCTestCase {
         """)
     }
 
+    // MARK: - Transitive rail (playhead-xul6)
+
+    /// The FoundationModels entry points whose first touch is expensive.
+    /// `SystemLanguageModel` is the one that cost 0.47–2.13 s of held main
+    /// actor; `LanguageModelSession` is the sibling the classifier and the
+    /// readiness probe use, and it is on the same daemon.
+    private static let foundationModelsEntryPoints = [
+        "SystemLanguageModel",
+        "LanguageModelSession",
+    ]
+
+    /// Nodes the walk MUST reach. These are not decoration: a resolver that
+    /// silently stops resolving would turn the FM check green while proving
+    /// nothing, and a canary that can only pass is worth less than no canary.
+    /// `CapabilitiesService.init` and `.captureSnapshot` are the two frames
+    /// that carried playhead-xul6's defect, so pinning them means the exact
+    /// path that regressed is still being walked.
+    private static let requiredWalkNodes: [SwiftSourceCallGraph.Node] = [
+        SwiftSourceCallGraph.Node(type: "CapabilitiesService", member: "init"),
+        SwiftSourceCallGraph.Node(type: "CapabilitiesService", member: "captureSnapshot"),
+        SwiftSourceCallGraph.Node(type: "PlaybackService", member: "init"),
+        SwiftSourceCallGraph.Node(type: "FoundationModelsUsabilityProbe", member: "cachedUsability"),
+    ]
+
+    /// **The transitive rail this bead exists for.**
+    ///
+    /// `testInitBodyHasNoFoundationModelsConstruction` above bans
+    /// `SystemLanguageModel(` in init's OWN BODY TEXT — and it passed for the
+    /// six weeks the launch path was holding the main actor on exactly that
+    /// API, because the read had moved one call deeper into a service whose
+    /// initialiser looks free at the call site:
+    ///
+    ///     PlayheadRuntime.init
+    ///       -> CapabilitiesService.init
+    ///         -> CapabilitiesService.captureSnapshot
+    ///           -> CapabilitiesService.checkFoundationModelsState  ← the read
+    ///
+    /// A ban on a spelling inside one function is not a guard on a call graph.
+    /// This walks the graph: every construction, every same-type call, every
+    /// `Type.member(...)`, transitively, following only edges that run
+    /// SYNCHRONOUSLY when init runs. Closure literals are values rather than
+    /// calls, so `Task { }` and `PermissiveClassifierBox { }` — the sanctioned
+    /// deferral shapes — are correctly invisible without an allowlist anyone
+    /// can grow. See `SwiftSourceCallGraph` for the walker's named limits.
+    ///
+    /// What this does NOT say: that no FoundationModels work happens at
+    /// launch. `CapabilitiesService.refreshSnapshot()` still reads
+    /// `SystemLanguageModel.default`, deliberately — it runs on the service
+    /// actor's own executor, reached only through a `Task`, so the main actor
+    /// suspends rather than blocks. The property pinned here is exactly the
+    /// one that was violated: nothing on the SYNCHRONOUS main-actor path
+    /// touches FoundationModels.
+    func testInitSynchronousCallGraphIsFreeOfFoundationModels() throws {
+        let result = try SwiftSourceCallGraph.walk(
+            sourceRoot: "Playhead",
+            rootRelativePath: "Playhead/App/PlayheadRuntime.swift",
+            rootType: "PlayheadRuntime",
+            rootSignature: "init(isPreviewRuntime: Bool = false) {",
+            bannedTokens: Self.foundationModelsEntryPoints
+        )
+
+        // Non-vacuity, in the order a broken walk would fail them.
+        XCTAssertGreaterThan(result.indexedFileCount, 300, """
+        The call-graph index found only \(result.indexedFileCount) Swift files under Playhead/. \
+        The walk cannot resolve what it never read — fix the index before reading the verdict.
+        """)
+        XCTAssertGreaterThan(result.rootBodyByteCount, 20_000, """
+        PlayheadRuntime.init's body measured \(result.rootBodyByteCount) bytes, which is far \
+        smaller than the ~1,000-statement init this canary is written against. The brace walker \
+        or the root signature has drifted; the verdict below would be vacuous.
+        """)
+        XCTAssertGreaterThan(result.visited.count, 100, """
+        The synchronous walk from PlayheadRuntime.init reached only \(result.visited.count) \
+        members. It reached 236 when this canary was written; a collapse means the resolver \
+        stopped resolving, not that the launch path got simpler.
+        """)
+        for node in Self.requiredWalkNodes {
+            XCTAssertTrue(result.visited.contains(node), """
+            The synchronous walk from PlayheadRuntime.init no longer reaches `\(node)`. Either \
+            the launch path genuinely stopped calling it — in which case update \
+            `requiredWalkNodes` and say so — or the walker stopped resolving that edge, in \
+            which case the FoundationModels verdict below is worth nothing. Do not delete this \
+            assertion to make the suite green.
+            """)
+        }
+
+        let report = result.findings.map { "  " + $0.description }.joined(separator: "\n")
+        XCTAssertTrue(result.findings.isEmpty, """
+        \(result.findings.count) synchronous path(s) from PlayheadRuntime.init reach a \
+        FoundationModels entry point:
+
+        \(report)
+
+        `PlayheadRuntime` is @MainActor, so everything on these paths runs on the MAIN ACTOR \
+        before RootView can resolve. Reading `SystemLanguageModel` there cost 0.47–2.13 s per \
+        launch on the simulator (playhead-xul6), where the repeated 2003 ms readings are a \
+        2-second timeout rather than work; playhead-jndk was a multi-minute freeze from the \
+        same API on a device. Move the read behind a `Task { }` onto an actor, or behind a lazy \
+        accessor the way `CapabilitiesService.foundationModelsContextSize()` does it. Widening \
+        this canary is not a fix.
+        """)
+    }
+
     func testInitBodyHasNoSqliteOpenCalls() throws {
         let body = try Self.loadInitBody()
 
