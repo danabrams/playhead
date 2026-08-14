@@ -1835,6 +1835,11 @@ FOCUSED_SUITES=(
   -only-testing:PlayheadTests/BackfillJobRunnerTests
   -only-testing:PlayheadTests/ResumableBackfillJobSelectorTests
   -only-testing:PlayheadTests/BackfillJobIdentityV44MigrationTests
+  # playhead-e6d3: the V50 rung that re-judges the coverage-lane rows the FLAT
+  # under-coverage budget retired. Its own suite because "which rows the repair
+  # touches" is a property of a rung nothing else runs, and the interesting half
+  # is the four shapes it must NOT touch.
+  -only-testing:PlayheadTests/UnderCoverageRetryBudgetV50MigrationTests
   # playhead-13kf: the FM-first reorder rails (RO series). Three suites: the
   # BPS-level order/deadline/floor pins (real store + scheduler, a few
   # seconds), the pure coarse-loop gates (instant), and the budget-constant
@@ -2735,6 +2740,16 @@ T_41MU_PREFIX="a run that starts at the head publishes the honest bound, and lea
 T_41MU_BRIDGE="the hole threshold is the coverage reader's own bridge tolerance, not a fresh constant"
 T_41MU_NONFINITE="R1 — a non-finite MEASUREMENT is an absence, and under-claims like every other reader of it"
 T_41MU_RESUMEHOLE="R2 — the head test measures the RESUME's own first plan, so a hole immediately above the prior cursor freezes it on attempt TWO as well as attempt one"
+
+# playhead-e6d3 — the under-coverage budget counts CONSECUTIVE barren attempts
+# (the EC series). Four runner tests and three migration tests.
+T_E6D3_ADVANCE="playhead-e6d3 — an attempt that advanced the covered prefix spends NO retry, at every point in the budget"
+T_E6D3_BARREN="playhead-e6d3 — the bound survives: three CONSECUTIVE barren attempts still retire the job"
+T_E6D3_FLOOR="playhead-e6d3 — advancing does not resurrect a COVERED episode: the floor still decides \`complete\`"
+T_E6D3_CONVERGE="playhead-e6d3 — an episode whose coverage climbs on EVERY attempt outlives the budget and stays visible to the coarse phase"
+T_E6D3_V50="playhead-e6d3: v50 re-judges the flat-budget casualties and NOTHING else"
+T_E6D3_V50_IDEM="playhead-e6d3: v50 is idempotent — a second ladder pass does not re-open a row the new rule retired"
+T_E6D3_V50_V39="playhead-e6d3: v50 does not step over a rolled-back v39"
 
 # playhead-iu0t — the CN series. What the shadow-retry drain REPLAYS.
 T_IU0T_REACH="the drain screens the whole transcript, not just the candidate-local final tail"
@@ -5062,6 +5077,79 @@ MUTATIONS=(
   "UC09|438|RUNNER|$T_41MU_RESUMEHOLE"
 
   # ---------------------------------------------------------------------------
+  # playhead-e6d3 — the EC series. The under-coverage budget counts CONSECUTIVE
+  # barren attempts, not attempts.
+  #
+  # Every entry is its own batch, for the UC series' reason and one more: EC01,
+  # EC02, EC03 and EC09 all move the SAME four lines of the pure decision in
+  # different directions, and EC06/EC07 both name `$T_E6D3_V50` — a shared batch
+  # would let either mask the other's kill and the run would still read green.
+  #
+  # ON BREADTH. The four runner mutants name one or two victims each and the
+  # three migration mutants name one. The one deliberately broad entry is EC04,
+  # the WRITE: it is the UC04 lesson at the new site, and the reason it is worth
+  # its own rail is that `job.retryCount + 1` is no longer even the right
+  # arithmetic — a re-derivation there does not duplicate the rule, it
+  # contradicts it, and only an END-TO-END test can see that.
+  # ---------------------------------------------------------------------------
+
+  # Batch 500 — EC01. THE FLAT RULE, VERBATIM: the reset is deleted and every
+  # attempt costs one. This is the shipped behaviour that retired eight of nine
+  # coverage-lane rows on the 2026-08-14 pull and emptied the coarse phase's
+  # candidate set permanently.
+  "EC01|500|RUNNER|$T_E6D3_ADVANCE;$T_E6D3_CONVERGE"
+
+  # Batch 501 — EC02. The near-miss: "do not increment" instead of "reset". They
+  # agree on a first attempt and disagree on every attempt after a barren one,
+  # which is the same agrees-until-the-second-attempt signature as UC09. A job
+  # at `retryCount = 2` that then converges must land on 0, not stay at 2.
+  "EC02|501|RUNNER|$T_E6D3_ADVANCE"
+
+  # Batch 502 — EC03. The predicate is INVERTED: an advancing attempt is charged
+  # and a barren one is forgiven. Two directions in one cut — the forgiveness
+  # goes to exactly the population the bound exists to retire.
+  "EC03|502|RUNNER|$T_E6D3_ADVANCE;$T_E6D3_BARREN;$T_41MU_BOUNDED"
+
+  # Batch 503 — EC04. THE WRITE re-derives the count instead of consuming it —
+  # UC04's lesson at the site playhead-e6d3 moved. Every pure test still passes:
+  # the decision is right, and the row records something else.
+  "EC04|503|RUNNER|$T_E6D3_CONVERGE;$T_41MU_RESUMEHOLE"
+
+  # Batch 504 — EC05. The advance test compares the published cursor against
+  # ZERO rather than against the job's own prior cursor, so any job with a cursor
+  # at all reads as converging forever. Invisible to every head-hole fixture (its
+  # cursor is nil, so nil > 0 is false either way) and to the converging fixture
+  # (which really does advance); only a RESUME whose cursor is FROZEN can see it.
+  "EC05|504|RUNNER|$T_41MU_RESUMEHOLE"
+
+  # Batch 505 — EC06. The V50 repair drops the CAUSE predicate, so it re-opens
+  # rows retired by playhead-bkhc's expiry branch (which already reset on
+  # progress, so its exhaustion is three genuinely consecutive barren windows)
+  # and by FM daemon errors — rules this bead did not change.
+  "EC06|505|STORE|$T_E6D3_V50"
+
+  # Batch 506 — EC07. The V50 repair drops the STATUS predicate, so it re-opens
+  # a `complete` row that still carries an old under-coverage defer reason —
+  # B97B8779 on the pull, verbatim. Completion is not exhaustion.
+  "EC07|506|STORE|$T_E6D3_V50"
+
+  # Batch 507 — EC08. The V50 rung steps over a rolled-back V39, i.e. runs on a
+  # database held at 38 that it has no business touching. Every rung added after
+  # V39 owes this witness.
+  "EC08|507|STORE|$T_E6D3_V50_V39"
+
+  # Batch 508 — EC09. The reset is hoisted ABOVE the floor test, so an episode
+  # that is genuinely COVERED defers instead of completing whenever its last
+  # attempt advanced anything — the 41mu terminal turned into a job that can
+  # never finish. The ordering is load-bearing and nothing else pins it.
+  "EC09|508|RUNNER|$T_E6D3_FLOOR;$T_41MU_VACUITY"
+
+  # Batch 509 — EC10. The rung does not stamp its own version, so it re-fires on
+  # every launch and hands the same row a fresh budget forever — an unbounded
+  # loop dressed as a one-shot migration.
+  "EC10|509|STORE|$T_E6D3_V50;$T_E6D3_V50_IDEM"
+
+  # ---------------------------------------------------------------------------
   # playhead-iu0t — WHAT THE SHADOW-RETRY DRAIN REPLAYS (CN01-CN04)
   #
   # One line, four ways to write it, and only one is right. The shipped defect
@@ -6689,6 +6777,16 @@ describe_mutation() {
     UC07) echo "41mu VACUITY CONTROL: the terminal refuses unconditionally, deferring episodes that were genuinely read" ;;
     UC08) echo "41mu R1: a non-finite measured fraction completes the job again — the terminal alone reads an absence as 'read'" ;;
     UC09) echo "41mu R2: the cursor's head test reads the caller's PRE-narrowing segment list again, so no resume can ever detect a hole above its cursor" ;;
+    EC01) echo "e6d3 THE FLAT RULE VERBATIM: the reset is deleted and every under-coverage attempt spends a lifetime retry again" ;;
+    EC02) echo "e6d3: the reset becomes 'do not increment', so a job charged before it converged never clears its run of barren attempts" ;;
+    EC03) echo "e6d3: the advance predicate is inverted — banking new audio costs a retry and banking nothing is forgiven" ;;
+    EC04) echo "e6d3: the WRITE re-derives retryCount instead of consuming the verdict's, so the row records the flat rule the decision rejected" ;;
+    EC05) echo "e6d3: the advance test compares against ZERO, not the job's own prior cursor, so any job with a cursor converges forever" ;;
+    EC06) echo "e6d3: the V50 repair drops the CAUSE predicate and re-opens rows retired by rules this bead did not change" ;;
+    EC07) echo "e6d3: the V50 repair drops the STATUS predicate and re-opens a complete row carrying an old under-coverage reason" ;;
+    EC08) echo "e6d3: the V50 rung steps over a rolled-back V39 and runs on a database held at 38" ;;
+    EC09) echo "e6d3: the reset is hoisted above the floor test, so a genuinely covered episode defers instead of completing" ;;
+    EC10) echo "e6d3: the V50 rung never stamps its version, so it re-fires every launch — an unbounded budget refill dressed as a migration" ;;
     CN01) echo "iu0t: THE SHIPPED DEFECT — the drain replays the final-only chunk set again, verbatim (53FC53E3's discarded 2,490 s)" ;;
     CN02) echo "iu0t: the drain replays fast-only, throwing the re-transcription away — right reach, wrong identity" ;;
     CN03) echo "iu0t: the drain replays the RAW rows, so overlapped audio is scanned twice and the version drifts from runBackfill's" ;;
@@ -12545,10 +12643,15 @@ EOF
         return Self.coverageTerminalDecision(
             phase: job.phase,
             measurement: await measuredAdScanFraction(assetId: job.analysisAssetId),
-            retryCount: job.retryCount
+            retryCount: job.retryCount,
+            cursorAdvanced: Self.cursorAdvanced(
+                from: job.progressCursor,
+                to: Self.underCoverageCursor(prior: job.progressCursor, coverage: coverage)
+            )
         )
 EOF
     snippet NEW <<'EOF'
+        _ = coverage
         return .complete
 EOF
     patch "$file" "$OLD" "$NEW" ;;
@@ -12584,13 +12687,17 @@ EOF
   # support the floor re-drives until something else stops it.
   UC04)
     snippet OLD <<'EOF'
-        return retryCount + 1 >= AdmissionController.maxRetries
-            ? .failUnderCoverage
-            : .deferUnderCoverage
+        let attempts = retryCount + 1
+        return .underCovered(UnderCoverageVerdict(
+            retires: attempts >= AdmissionController.maxRetries,
+            retryCount: attempts
+        ))
 EOF
     snippet NEW <<'EOF'
-        _ = retryCount
-        return .deferUnderCoverage
+        return .underCovered(UnderCoverageVerdict(
+            retires: false,
+            retryCount: retryCount + 1
+        ))
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -12663,6 +12770,135 @@ EOF
 EOF
     snippet NEW <<'EOF'
             firstPlannedSegmentStartSec: rootInputs.segments.first?.startTime
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # ---- playhead-e6d3, the EC series -------------------------------------
+
+  # EC01 — THE FLAT RULE, VERBATIM. The reset is deleted; every under-coverage
+  # attempt costs one of `AdmissionController.maxRetries` again.
+  EC01)
+    snippet OLD <<'EOF'
+        guard !cursorAdvanced else {
+            return .underCovered(UnderCoverageVerdict(retires: false, retryCount: 0))
+        }
+        let attempts = retryCount + 1
+EOF
+    snippet NEW <<'EOF'
+        _ = cursorAdvanced
+        let attempts = retryCount + 1
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # EC02 — the near-miss: "do not increment" where the rule says "RESET". Agrees
+  # with the right answer on a first attempt and on any job that has never been
+  # charged; disagrees on exactly the job the reset exists for.
+  EC02)
+    snippet OLD <<'EOF'
+            return .underCovered(UnderCoverageVerdict(retires: false, retryCount: 0))
+EOF
+    snippet NEW <<'EOF'
+            return .underCovered(UnderCoverageVerdict(retires: false, retryCount: retryCount))
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # EC03 — the predicate is INVERTED. An attempt that banked new audio is
+  # charged and a barren one is forgiven, so the bound is pointed at the
+  # population it exists to protect and away from the one it exists to retire.
+  EC03)
+    snippet OLD <<'EOF'
+        guard !cursorAdvanced else {
+EOF
+    snippet NEW <<'EOF'
+        guard cursorAdvanced else {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # EC04 — the WRITE re-derives the count instead of consuming the verdict's.
+  # UC04's defect at the site this bead moved: the decision is still right and
+  # the ROW records the flat rule's number.
+  EC04)
+    snippet OLD <<'EOF'
+        let attempts = verdict.retryCount
+EOF
+    snippet NEW <<'EOF'
+        let attempts = job.retryCount + 1
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # EC05 — the advance test is taken against ZERO rather than against the job's
+  # own prior cursor, so every job that has ever published a cursor reads as
+  # converging on every subsequent attempt and never retires.
+  EC05)
+    snippet OLD <<'EOF'
+            cursorAdvanced: Self.cursorAdvanced(
+                from: job.progressCursor,
+EOF
+    snippet NEW <<'EOF'
+            cursorAdvanced: Self.cursorAdvanced(
+                from: nil,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # EC06 — the V50 repair loses the CAUSE predicate and re-opens rows retired by
+  # rules this bead did not change (bkhc's expiry branch, FM daemon errors).
+  EC06)
+    snippet OLD <<'EOF'
+                   AND deferReason LIKE 'underCoverageBudgetSpent-%'
+EOF
+    snippet NEW <<'EOF'
+                   AND deferReason IS NOT NULL
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # EC07 — the V50 repair loses the STATUS predicate and re-opens a `complete`
+  # row that still carries an old under-coverage defer reason.
+  EC07)
+    snippet OLD <<'EOF'
+                 WHERE status = 'failed'
+                   AND retryCount >= ?
+EOF
+    snippet NEW <<'EOF'
+                 WHERE status IS NOT NULL
+                   AND retryCount >= ?
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # EC08 — the V50 rung steps over a rolled-back V39 and runs on a database held
+  # at 38.
+  EC08)
+    snippet OLD <<'EOF'
+        // DO NOT STEP OVER A ROLLED-BACK V39 — same rationale as V40–V49.
+        guard observed >= 49 else { return }
+EOF
+    snippet NEW <<'EOF'
+        guard observed >= 38 else { return }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # EC09 — the reset is hoisted ABOVE the floor test, so a COVERED episode whose
+  # last attempt advanced anything defers instead of completing. The ordering of
+  # the two guards is load-bearing and nothing else pins it.
+  EC09)
+    snippet OLD <<'EOF'
+        guard underCovered else { return .complete }
+EOF
+    snippet NEW <<'EOF'
+        if cursorAdvanced {
+            return .underCovered(UnderCoverageVerdict(retires: false, retryCount: 0))
+        }
+        guard underCovered else { return .complete }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # EC10 — the rung never stamps its own version, so the ladder re-runs it on
+  # every launch and the repair becomes an unbounded budget refill.
+  EC10)
+    snippet OLD <<'EOF'
+        try setSchemaVersion(50)
+EOF
+    snippet NEW <<'EOF'
+        try setSchemaVersion(49)
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
