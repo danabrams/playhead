@@ -2399,6 +2399,31 @@ final class PlayheadRuntime {
                 return  // Degraded launch: playback works, analysis does not.
             }
 
+            // playhead-dgly: REPORT every persisted terminal state that is no
+            // longer true, BEFORE this launch repairs any of it. Repairs
+            // nothing itself — healing is playhead-gyhw.
+            //
+            // THE POSITION IS THE POINT. Every step below this one rewrites a
+            // population the reporter counts: `reapOrphansAtLaunch` and
+            // `analysisJobReconciler.reconcile()` clear stranded rows,
+            // `reconcilePersistedTerminalStatesIfNeeded` rewrites
+            // `analysisState`, and `pruneOrphanedScansForCurrentCohort`
+            // DELETES the `semantic_scan_results` rows the cursor invariant
+            // measures against. A reporter placed after them would read a
+            // healthy zero for playhead-1e86 on every launch, and the zero
+            // would be a fact about ordering rather than about the device.
+            //
+            // Awaited rather than detached for the same reason: a detached
+            // Task would race those five and make the reading
+            // non-deterministic, which is the defect class this reporter
+            // exists to find. See `fetchPersistedStateSnapshot` for the cost
+            // bound that makes awaiting it affordable.
+            await Self.reportPersistedStateInvariantsAtLaunch(
+                analysisStore: analysisStore,
+                downloadManager: downloadManager,
+                surfaceStatusLogger: surfaceStatusLogger
+            )
+
             // playhead-hygc.1.4 (R1 fix): reap orphan `.running` ledger
             // rows left behind by a prior process that was killed
             // mid-handler. iOS guarantees the prior process is dead by
@@ -3606,6 +3631,33 @@ final class PlayheadRuntime {
             }
         }
         return box.withLock { $0 }
+    }
+
+    /// playhead-dgly: compose and run the persisted-state invariant REPORTER.
+    ///
+    /// `nonisolated` so neither the snapshot read nor the evaluation costs
+    /// main-actor time — the bootstrap `Task` inherits `PlayheadRuntime`'s
+    /// `@MainActor` isolation (SE-0420) and this is the hop off it.
+    ///
+    /// A free function rather than three lines at the call site because
+    /// SwiftLint's `unhandled_throwing_task` reads a `try` anywhere inside a
+    /// `Task { }` body as an unhandled throw, including one nested in a
+    /// closure that a throwing parameter type is expecting. The reporter
+    /// itself never throws: a read failure is recorded, not propagated.
+    nonisolated static func reportPersistedStateInvariantsAtLaunch(
+        analysisStore: AnalysisStore,
+        downloadManager: DownloadManager,
+        surfaceStatusLogger: SurfaceStatusInvariantLogger?
+    ) async {
+        await PersistedStateInvariantReporter(
+            snapshotProvider: {
+                try await analysisStore.fetchPersistedStateSnapshot()
+            },
+            audioPresenceProbe: { episodeId in
+                await downloadManager.isCached(episodeId: episodeId)
+            },
+            logger: surfaceStatusLogger
+        ).report()
     }
 
     static func runFinalPassBackfillForAllAssetsAtLaunch(
