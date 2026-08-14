@@ -9859,6 +9859,98 @@ actor AnalysisStore {
         return sqlite3_changes(db) > 0
     }
 
+    /// The outcome of ``insertAssetAdoptingIdentity(_:)``: which row now holds
+    /// `(episodeId, assetFingerprint)`, and whether this call is the one that
+    /// put it there.
+    struct AssetIdentityInsert: Sendable, Equatable {
+        /// The id of the row that owns this `(episodeId, assetFingerprint)`
+        /// pair — `asset.id` when this call inserted it, the incumbent's id
+        /// when it did not.
+        let assetId: String
+        /// `true` when this call wrote the row.
+        let didInsert: Bool
+    }
+    /// playhead-1216 — insert an asset, or ADOPT the row that already owns this
+    /// exact `(episodeId, assetFingerprint)` identity. Decides and writes in ONE
+    /// statement, then reads back the surviving id.
+    ///
+    /// WHY THIS EXISTS, measured. On the 2026-08-13 device pull (`db-pull9`)
+    /// FOUR of the FIVE `preAnalysis` jobs enqueued that day carry
+    /// `lastErrorCode = "assetResolution: Insert failed: UNIQUE constraint
+    /// failed: analysis_assets.episodeId, analysis_assets.assetFingerprint"`,
+    /// and for every one of them the job's `sourceFingerprint` is byte-identical
+    /// to the incumbent row's `assetFingerprint`. So it was never a second
+    /// stitch of the same episode — it was the SAME identity, minted twice.
+    ///
+    /// ``AnalysisWorkScheduler/resolveAnalysisAssetId(for:localAudioURL:)``
+    /// asks `fetchAssetByEpisodeId(_:assetFingerprint:)` whether that identity
+    /// already exists, and then makes three `await` hops (a capability read, a
+    /// fingerprint read, the insert itself) before writing. `playhead-fzrw`'s
+    /// `registerDownloadedAssetRowIfAbsent` runs on the SAME actor and mints
+    /// exactly that row at exactly that moment, so the earlier `nil` names
+    /// "no such row WHEN I ASKED" and is then read as "no such row" — this
+    /// repo's standing defect class, and a guaranteed constraint violation
+    /// rather than a probabilistic one once the two writers overlap.
+    ///
+    /// The remedy is the same one `insertAssetIfEpisodeHasNone` was given for
+    /// its own version of this window: let the WRITE answer the question. A
+    /// targeted `ON CONFLICT(episodeId, assetFingerprint) DO NOTHING` names the
+    /// V39 uniqueness index and nothing else, so any OTHER constraint failure
+    /// still throws and is still reported.
+    ///
+    /// Adoption is sound rather than merely convenient: the incumbent has this
+    /// episode id and this canonical fingerprint, which is the whole of an
+    /// asset's identity. It is the row `resolveAnalysisAssetId`'s own
+    /// exact-match arm would have returned had it asked one instant later.
+    func insertAssetAdoptingIdentity(
+        _ asset: AnalysisAsset
+    ) throws -> AssetIdentityInsert {
+        let sql = """
+            INSERT INTO analysis_assets
+            (id, episodeId, assetFingerprint, weakFingerprint, sourceURL,
+             featureCoverageEndTime, fastTranscriptCoverageEndTime, confirmedAdCoverageEndTime,
+             analysisState, analysisVersion, capabilitySnapshot, artifact_class,
+             episodeDurationSec, episodeTitle, finalPassCoverageEndTime)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(episodeId, assetFingerprint) DO NOTHING
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, asset.id)
+        bind(stmt, 2, asset.episodeId)
+        bind(stmt, 3, asset.assetFingerprint)
+        bind(stmt, 4, asset.weakFingerprint)
+        bind(stmt, 5, asset.sourceURL)
+        bind(stmt, 6, asset.featureCoverageEndTime)
+        bind(stmt, 7, asset.fastTranscriptCoverageEndTime)
+        bind(stmt, 8, asset.confirmedAdCoverageEndTime)
+        bind(stmt, 9, asset.analysisState)
+        bind(stmt, 10, asset.analysisVersion)
+        bind(stmt, 11, asset.capabilitySnapshot)
+        bind(stmt, 12, asset.artifactClass.rawValue)
+        bind(stmt, 13, asset.episodeDurationSec)
+        bind(stmt, 14, asset.episodeTitle)
+        bind(stmt, 15, asset.finalPassCoverageEndTime)
+        try step(stmt, expecting: SQLITE_DONE)
+        if sqlite3_changes(db) > 0 {
+            return AssetIdentityInsert(assetId: asset.id, didInsert: true)
+        }
+        // The conflict clause swallowed the write, so an incumbent owns the
+        // pair. Read it back rather than returning the id of a row that does
+        // not exist — the caller stamps this onto `analysis_jobs`, and a
+        // dangling asset id there is the duplicate-identity defect one layer
+        // down.
+        guard let incumbent = try fetchAssetByEpisodeId(
+            asset.episodeId,
+            assetFingerprint: asset.assetFingerprint
+        ) else {
+            throw AnalysisStoreError.insertFailed(
+                "insertAssetAdoptingIdentity: no row inserted and no incumbent owns the identity"
+            )
+        }
+        return AssetIdentityInsert(assetId: incumbent.id, didInsert: false)
+    }
+
     /// playhead-fzrw R3 — promote a REGISTERED row to `queued` when the
     /// analysis lane actually takes the episode in hand, and only then.
     ///
