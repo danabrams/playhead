@@ -782,6 +782,14 @@ struct SemanticScanRunAttributionTests {
                      latencyMs: 1, createdAt: nil),
             now: grantOpened
         )
+        // A genuinely NULL `createdAt` cannot be produced through the insert —
+        // it falls back to the store clock (`result.createdAt ?? now`), which is
+        // the V42 contract and is correct. The rows that DO read NULL are the
+        // pre-V42 ones the migration deliberately left alone, so the fixture
+        // reproduces that state directly.
+        try await store.execForTesting(
+            "UPDATE semantic_scan_results SET createdAt = NULL WHERE id = 's-null'"
+        )
 
         #expect(try await store.countSemanticScanResults(createdAtOrAfter: grantOpened) == 2,
                 "inclusive at the boundary, and the earlier row is a DIFFERENT window's output")
