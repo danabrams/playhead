@@ -70,6 +70,36 @@
 // reverted before the PR was pushed; documented in the commit
 // message for the redesign.
 //
+// **The sample-count guard is FATAL, and it used to take the host
+// down (playhead-1och).** The count check below was a plain
+// `XCTAssertGreaterThan`, which RECORDS a failure and CONTINUES — the
+// class never set `continueAfterFailure = false`. So on a run that
+// collected exactly `warmupSamples` samples, the assertion correctly
+// reported "the probe didn't actually measure anything" and then the
+// very next line subscripted the empty post-warmup array:
+// `Swift/ContiguousArrayBuffer.swift:695: Fatal error: Index out of
+// range`. xcodebuild restarted the host and printed `Test Suite …
+// passed … Executed 0 tests`, so the crash destroyed the evidence of
+// itself AND laundered the failure into a green-looking suite. It is a
+// `guard … else { XCTFail(…); return }` now: a violated precondition
+// stops this test instead of walking into an unguarded read. Note the
+// neighbouring `maxLatency` read was already written defensively
+// (`?? 0`) and the median read was not — fixing the median read alone
+// would have been the wrong fix, because a probe that measured nothing
+// must FAIL LOUDLY rather than report a median over no data.
+//
+// **Each hop records WHEN it was submitted, not just how long it
+// took**, and the init records its own body duration. A low sample
+// count has two readings that want opposite fixes — the racer was
+// starved (probe broken) or the main actor was held for the whole
+// window (product broken) — and a bare count cannot tell them apart.
+// The timeline can: a starved probe shows late submissions with SMALL
+// latencies, a held main shows an early submission whose latency spans
+// the hold. The init-body duration then says whether the hold is
+// init's synchronous body or main-actor work spawned around it, which
+// is the difference between this test's failure message being right
+// and being merely suggestive.
+//
 // XCTest, NOT Swift Testing: keeps the canary class filterable
 // through the Xcode test plan's `skippedTests` list (`xctestplan`
 // ignores Swift Testing identifiers). Mirrors the rationale in
@@ -129,8 +159,13 @@ final class PlayheadRuntimeMainActorFreedomTests: XCTestCase {
         //    and entering the main-actor closure. If init is holding
         //    main, that gap grows by however long the hold has been
         //    in progress.
-        let samples = LatencySampleBuffer()
+        let samples = HopSampleBuffer()
         let stopFlag = AtomicBool()
+        // t0 for every offset reported below. Taken before the racer is
+        // created so "the racer's first hop landed at +Xms" is a
+        // statement about the racer's own start-up, not about when we
+        // happened to start the clock.
+        let probeStartNanos = DispatchTime.now().uptimeNanoseconds
 
         let racer = Task.detached(priority: .userInitiated) {
             // Spin until the test signals stop. Each iteration
@@ -142,8 +177,10 @@ final class PlayheadRuntimeMainActorFreedomTests: XCTestCase {
                 let submittedAtNanos = DispatchTime.now().uptimeNanoseconds
                 await MainActor.run {
                     let enteredAtNanos = DispatchTime.now().uptimeNanoseconds
-                    let latencySeconds = Double(enteredAtNanos - submittedAtNanos) / 1_000_000_000.0
-                    samples.append(latencySeconds)
+                    samples.append(HopSample(
+                        submitOffsetSeconds: elapsedSeconds(probeStartNanos, submittedAtNanos),
+                        latencySeconds: elapsedSeconds(submittedAtNanos, enteredAtNanos)
+                    ))
                 }
                 // No explicit sleep / yield: we want hops as densely
                 // packed as the executor will give us. The
@@ -167,11 +204,24 @@ final class PlayheadRuntimeMainActorFreedomTests: XCTestCase {
         //    production), so this is the production parity shape.
         //    The init is synchronous; once the closure returns the
         //    full body has run.
-        let runtime = await MainActor.run { PlayheadRuntime(isPreviewRuntime: false) }
+        //
+        //    playhead-1och: the init body is timed FROM INSIDE the
+        //    main-actor closure. The hop latencies below say the main
+        //    actor was held; only this says whether it was held by
+        //    init's own synchronous body or by main-actor work init
+        //    spawned. Those are different defects with different fixes,
+        //    and the assertion message at the bottom names the first.
+        let (runtime, initBodyStartNanos, initBodyEndNanos) = await MainActor.run {
+            () -> (PlayheadRuntime, UInt64, UInt64) in
+            let bodyStartNanos = DispatchTime.now().uptimeNanoseconds
+            let created = PlayheadRuntime(isPreviewRuntime: false)
+            return (created, bodyStartNanos, DispatchTime.now().uptimeNanoseconds)
+        }
 
         // 4. Stop the racer and join.
         stopFlag.value = true
         await racer.value
+        let probeEndNanos = DispatchTime.now().uptimeNanoseconds
 
         // 5. Inspect the samples. Drop the warm-up tail, then assert
         //    on `max` of the remainder. See the file-level rationale
@@ -180,20 +230,65 @@ final class PlayheadRuntimeMainActorFreedomTests: XCTestCase {
         //    up as a single outlier and any percentile aggregation
         //    swallows it.
         let allSamples = samples.snapshot()
-        XCTAssertGreaterThan(
-            allSamples.count, Self.warmupSamples + 1,
-            """
-            Main-actor freedom probe collected only \(allSamples.count) samples \
-            during the init window. The racer either failed to start or init \
-            returned before any hops landed. Either way the probe didn't \
-            actually measure anything.
-            """
+
+        // The window description is computed BEFORE the count guard so a
+        // run that measured nothing still reports what the window looked
+        // like. A bare "collected only 2 samples" is what this test used
+        // to emit, and it is unactionable: it names a symptom shared by
+        // two opposite causes.
+        let initBodySeconds = elapsedSeconds(initBodyStartNanos, initBodyEndNanos)
+        let initBodyStartOffset = elapsedSeconds(probeStartNanos, initBodyStartNanos)
+        let initBodyEndOffset = elapsedSeconds(probeStartNanos, initBodyEndNanos)
+        let windowSummary = String(
+            format: "probe window=%.1fms, init body=%.1fms (+%.1fms…+%.1fms)",
+            elapsedSeconds(probeStartNanos, probeEndNanos) * 1000,
+            initBodySeconds * 1000,
+            initBodyStartOffset * 1000,
+            initBodyEndOffset * 1000
         )
 
+        guard allSamples.count > Self.warmupSamples + 1 else {
+            XCTFail("""
+            Main-actor freedom probe collected only \(allSamples.count) samples \
+            during the init window, so it measured nothing. \(windowSummary). \
+            Hops (submitted-at/latency): [\(Self.describe(allSamples))].
+
+            READ THE TIMELINE BEFORE RE-RUNNING — the two causes want opposite \
+            fixes. Late submissions carrying SMALL latencies mean the racer was \
+            never scheduled and the PROBE is broken. An early submission whose \
+            latency spans most of the window means the main actor really was \
+            held for the whole init and the LAUNCH PATH is broken — the same \
+            defect PlayheadRuntimeLaunchPerfTests measures from the other side. \
+            Do not "fix" this by widening the read of an empty array.
+            """)
+            await runtime.shutdown()
+            return
+        }
+
         let postWarmup = Array(allSamples.dropFirst(Self.warmupSamples))
-        let sortedSamples = postWarmup.sorted()
+        let sortedSamples = postWarmup.map(\.latencySeconds).sorted()
         let medianLatency = sortedSamples[sortedSamples.count / 2]
         let maxLatency = sortedSamples.last ?? 0
+
+        // Locate the worst hop against the init body. `median≈0 with one
+        // large max` is the documented signature of a single hold (the
+        // racer is sequential), so WHERE that one hop sits is the whole
+        // diagnosis: a hold that does not overlap the synchronous body
+        // is main-actor work init SPAWNED, not init itself.
+        let worstHopDescription: String
+        if let worstHop = postWarmup.max(by: { $0.latencySeconds < $1.latencySeconds }) {
+            let hopEndOffset = worstHop.submitOffsetSeconds + worstHop.latencySeconds
+            let overlapsInitBody =
+                hopEndOffset > initBodyStartOffset && worstHop.submitOffsetSeconds < initBodyEndOffset
+            worstHopDescription = String(
+                format: " worst hop +%.1fms…+%.1fms (%@ the init body)",
+                worstHop.submitOffsetSeconds * 1000,
+                hopEndOffset * 1000,
+                overlapsInitBody ? "OVERLAPS" : "does NOT overlap"
+            )
+        } else {
+            worstHopDescription = ""
+        }
 
         // Always log so a passing run on CI surfaces the trend.
         // Mirrors the always-on print in PlayheadRuntimeLaunchPerfTests.
@@ -203,7 +298,7 @@ final class PlayheadRuntimeMainActorFreedomTests: XCTestCase {
             maxLatency * 1000,
             postWarmup.count,
             Self.mainHopBudgetSeconds * 1000
-        )
+        ) + ", \(windowSummary)\(worstHopDescription)"
         print("[MainActorFreedom] \(formattedSummary)")
 
         XCTAssertLessThan(
@@ -211,19 +306,45 @@ final class PlayheadRuntimeMainActorFreedomTests: XCTestCase {
             Self.mainHopBudgetSeconds,
             """
             MainActor was held longer than budget during PlayheadRuntime.init. \
-            \(formattedSummary). A synchronous workload added to init is \
-            starving the main actor on the launch path. The historical \
-            culprits were jndk's PermissiveAdClassifier()/SystemLanguageModel \
-            construction and hkn1's main-actor SwiftData fetch — wrap new \
-            heavy work in an off-main `Task { … }` or a lazy factory closure.
+            \(formattedSummary). Heavy work on the launch path is starving the \
+            main actor. The historical culprits were jndk's \
+            PermissiveAdClassifier()/SystemLanguageModel construction and hkn1's \
+            main-actor SwiftData fetch — wrap new heavy work in an off-main \
+            `Task { … }` or a lazy factory closure. Check `worst hop` above \
+            first: if it does NOT overlap the init body, the hold is main-actor \
+            work init SPAWNED rather than the synchronous body, and the fix \
+            belongs at that call site instead.
             """
         )
 
         await runtime.shutdown()
     }
+
+    /// Renders a hop timeline compactly enough for a failure message.
+    private static func describe(_ hops: [HopSample]) -> String {
+        hops
+            .map { String(format: "+%.1fms/%.1fms", $0.submitOffsetSeconds * 1000, $0.latencySeconds * 1000) }
+            .joined(separator: ", ")
+    }
 }
 
 // MARK: - Helpers
+
+/// Monotonic elapsed seconds between two `DispatchTime` uptime readings.
+/// Free function rather than a static so the detached racer can call it
+/// without capturing the test class.
+private func elapsedSeconds(_ fromNanos: UInt64, _ toNanos: UInt64) -> Double {
+    Double(toNanos &- fromNanos) / 1_000_000_000.0
+}
+
+/// One main-actor hop: when the racer submitted it (as an offset from
+/// the probe's t0) and how long the round-trip took. The SUBMIT OFFSET
+/// is the field that makes a starved probe distinguishable from a held
+/// main actor; a latency alone cannot say which.
+private struct HopSample: Sendable {
+    let submitOffsetSeconds: Double
+    let latencySeconds: Double
+}
 
 /// Lock-protected sample buffer. The racer mutates it from a detached
 /// background task; the test method reads it after joining the racer.
@@ -231,14 +352,14 @@ final class PlayheadRuntimeMainActorFreedomTests: XCTestCase {
 /// style of the analogous counter in `PermissiveClassifierBoxLazinessTests`
 /// (the `FactoryInvocationCounter`) and pins the test against future
 /// stricter concurrency lints.
-private final class LatencySampleBuffer: @unchecked Sendable {
+private final class HopSampleBuffer: @unchecked Sendable {
     private let lock = NSLock()
-    private var values: [Double] = []
-    func append(_ value: Double) {
+    private var values: [HopSample] = []
+    func append(_ value: HopSample) {
         lock.lock(); defer { lock.unlock() }
         values.append(value)
     }
-    func snapshot() -> [Double] {
+    func snapshot() -> [HopSample] {
         lock.lock(); defer { lock.unlock() }
         return values
     }
