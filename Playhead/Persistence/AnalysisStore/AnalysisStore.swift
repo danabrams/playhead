@@ -1835,7 +1835,7 @@ actor AnalysisStore {
     /// assertions automatically follow the production constant — hardcoding
     /// the integer in tests has been a recurring source of stale-assertion
     /// flakes whenever the schema bumps.
-    nonisolated static let currentSchemaVersion = 49
+    nonisolated static let currentSchemaVersion = 50
 
     /// H1: minimum age (in seconds) a `backfill_jobs` / `final_pass_jobs`
     /// row stuck in `status='running'` must reach before the launch-time
@@ -2720,6 +2720,11 @@ actor AnalysisStore {
             // RESETS every existing row to 0 — see the block comment on the
             // migration for why reconstruction was rejected.
             try migrateTrustEpisodeObservationsV49IfNeeded()
+            // playhead-e6d3: one fresh budget for every coverage-lane row the
+            // FLAT under-coverage rule retired — the eight-of-nine population on
+            // the 2026-08-14 pull, which had emptied the coarse phase's
+            // candidate set permanently. See the block comment on the migration.
+            try migrateUnderCoverageRetryBudgetV50IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -3092,6 +3097,9 @@ actor AnalysisStore {
         // reset, so a seeded fixture without `podcast_profiles` still reaches
         // v49.
         try migrateTrustEpisodeObservationsV49IfNeeded()
+        // playhead-e6d3 (v50): guarded on `tableExists`, so a seeded fixture
+        // without `backfill_jobs` still reaches v50.
+        try migrateUnderCoverageRetryBudgetV50IfNeeded()
     }
     #endif
 
@@ -7139,6 +7147,90 @@ actor AnalysisStore {
             try exec("UPDATE podcast_profiles SET observationCount = 0")
         }
         try setSchemaVersion(49)
+    }
+
+    // MARK: V50 — re-judge the rows the FLAT under-coverage budget retired
+    //             (playhead-e6d3)
+    //
+    // THIS MIGRATION REPAIRS DATA, deliberately, and the population is narrow.
+    //
+    // Until playhead-e6d3 the coverage-lane under-coverage terminal charged one
+    // of `AdmissionController.maxRetries` on EVERY attempt, including attempts
+    // that advanced the covered prefix. A row that reached the cap is excluded
+    // by `retryCount < maxRetries` from `countResumableBackfillJobs`, from
+    // `fetchAssetIdsWithResumableBackfillJobs` — which is where the coarse
+    // phase's candidate set AND the ad-scan re-drive both start — and from
+    // `markBackfillJobRunning`'s `failed`-under-budget clause, so nothing on the
+    // device can start it again. The only reset,
+    // `reopenBackfillJob(jobId:forTranscriptVersion:)`, fires on a transcript
+    // VERSION change, and a finalized transcript does not change again.
+    //
+    // Measured on the 2026-08-14 device pull: eight of nine `backfill_jobs` rows
+    // were `failed` at `retryCount = 3`, seven of them carrying
+    // `underCoverageBudgetSpent-fullEpisodeScan`. The coarse phase's candidate
+    // set was therefore EMPTY, the newest `semantic_scan_results` row and the
+    // last live job transition are the same second (08-14 06:34:59), and the
+    // three granted background windows after it banked nothing between them.
+    //
+    // WHY THE PREDICATE IS THIS NARROW. Only rows retired by the branch whose
+    // RULE changed are re-judged:
+    //
+    //   * `deferReason LIKE 'underCoverageBudgetSpent-%'` is the exact string
+    //     `BackfillJobRunner.underCoverageExpiryReason(phase:)` writes and
+    //     nothing else writes. `expiredWithoutProgress-…` is deliberately NOT
+    //     matched: playhead-bkhc's branch has always reset on progress, so a row
+    //     it retired really did see three consecutive barren windows and its
+    //     retirement is not disturbed. Nor is any FM/store failure cause.
+    //   * `status = 'failed' AND retryCount >= maxRetries` is the exhausted set.
+    //     A `failed` row already under the budget is re-drivable today and needs
+    //     nothing.
+    //
+    // WHAT A FIELD DEVICE DOES ON UPGRADE. Each matched row gets ONE fresh
+    // budget under the new rule, and the new rule bounds it: an episode whose
+    // cursor already reached its last segment produces an empty plan list, so
+    // `runJob`'s empty-segments guard writes a `noWork:emptySegments` sentinel,
+    // publishes no cursor, and the row retires again after three attempts that
+    // run NO inference. Six of the eight rows on the pull are in exactly that
+    // state (their cursors sit at the episode end). The rows that can still
+    // move — A9F6DF05 at a measured 0.887 against a transcript ceiling of 0.9965
+    // and 4,000 s of unscanned audio above its cursor — are the ones this exists
+    // for.
+    //
+    // `status` is NOT changed. A `failed` row under the budget is already a
+    // candidate everywhere that matters (`fetchAssetIdsWithResumableBackfillJobs`
+    // excludes only `complete` and `running`, and `markBackfillJobRunning`
+    // accepts `failed` under budget since playhead-wxsv), so resetting the
+    // counter alone is the whole repair and the smallest one.
+
+    /// V50 migration — one fresh budget for every coverage-lane row the FLAT
+    /// under-coverage rule retired. Idempotent: the version ladder guards it, and
+    /// the UPDATE is a no-op on a store with no such rows.
+    private func migrateUnderCoverageRetryBudgetV50IfNeeded() throws {
+        let observed = (try schemaVersion() ?? 1)
+        guard observed < 50 else { return }
+        // DO NOT STEP OVER A ROLLED-BACK V39 — same rationale as V40–V49.
+        guard observed >= 49 else { return }
+        if try tableExists("backfill_jobs") {
+            let sql = """
+                UPDATE backfill_jobs
+                   SET retryCount = 0,
+                       updatedAt = strftime('%s', 'now')
+                 WHERE status = 'failed'
+                   AND retryCount >= ?
+                   AND deferReason LIKE 'underCoverageBudgetSpent-%'
+                """
+            let stmt = try prepare(sql)
+            defer { sqlite3_finalize(stmt) }
+            bind(stmt, 1, AdmissionController.maxRetries)
+            try step(stmt, expecting: SQLITE_DONE)
+            let repaired = Int(sqlite3_changes(db))
+            if repaired > 0 {
+                logger.notice(
+                    "playhead-e6d3 V50: re-judged \(repaired, privacy: .public) coverage-lane row(s) retired by the flat under-coverage budget"
+                )
+            }
+        }
+        try setSchemaVersion(50)
     }
 
     /// playhead-kg8h: durably CLAIM one REQUESTED day-0 kickoff, before any of
