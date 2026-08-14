@@ -42,9 +42,11 @@
 //     `updatePlayheadTime`; ingest never emits at registration (the reason d3g0
 //     gave: `currentPlayheadTime` is a stale 0 between `beginEpisode` and the
 //     first observation), and a window still asks at most once per episode.
-//   * playhead-ynmk / qs0d — a 9s6q segment-recovered day-0 slot stays
-//     `unanchored` + `markOnly`, so mid-session delivery MARKS it and skips
-//     nothing.
+//   * playhead-ynmk / qs0d — an `unanchored` + `markOnly` day-0 row is MARKED
+//     by mid-session delivery and skips nothing. (That was the whole 9s6q
+//     segment-recovered lane until playhead-pyq7 promoted it; it is now the
+//     shape of the rows already on disk from before the promotion, which is a
+//     smaller population but a real one and never re-stamped.)
 //   * The preload's own admission rule — a `.reverted` row is not resurrected
 //     by the new door.
 //
@@ -121,7 +123,12 @@ private enum DayZeroDeliveryFixture {
         )
     }
 
-    /// The 9s6q SEGMENT-RECOVERED lane: minted, but unanchored and mark-only.
+    /// An `unanchored` + `markOnly` day-0 row. This was what the 9s6q
+    /// SEGMENT-RECOVERED lane minted until playhead-pyq7 promoted it — so read
+    /// this fixture as the LEGACY shape rather than as what a fresh mint
+    /// produces. It is not hypothetical: nine such rows sit on Dan's device from
+    /// 2026-08-13, they are not re-stamped by the promotion, and the orchestrator
+    /// behaviour asserted below is exactly what they still do.
     static func makeRecoveredDayZeroWindow(
         id: String = "day0-recovered",
         assetId: String = assetId,

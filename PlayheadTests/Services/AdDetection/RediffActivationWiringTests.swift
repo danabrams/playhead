@@ -280,8 +280,10 @@ struct RediffActivationWiringTests {
         // (monotonic-clean) byte gate, and a strict day-0 slot is now
         // auto-skip eligible with `rediffByteExact` on both edges — the whole
         // point of that bead. The mark-only contract this test was written for
-        // still holds for the 9s6q segment-recovered lane, which is asserted in
-        // `RediffDayZeroMintAutoSkipPersistenceTests`.
+        // held for the 9s6q segment-recovered lane until playhead-pyq7
+        // promoted that lane too (2026-08-14); both dispositions are asserted
+        // in `RediffDayZeroMintAutoSkipPersistenceTests`, and the OFF state of
+        // the promotion switch in `RediffDayZeroSkipGradeTests`.
         let windows = try await store.fetchAdWindows(assetId: assetId)
         #expect(windows.count == 1, "exactly the byte-exact ad slot is marked, got \(windows.map { ($0.startTime, $0.endTime) })")
         if let w = windows.first {
