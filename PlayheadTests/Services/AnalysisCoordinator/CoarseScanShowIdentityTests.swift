@@ -413,6 +413,61 @@ struct CoarseScanShowIdentityWireInTests {
         #expect(log.value.count > 1, "and the loop must go on to publish a terminal verdict")
     }
 
+    /// **The distinction the whole bead turns on, driven through the real
+    /// coordinator.** A candidate query that THREW and a candidate list that
+    /// came back empty produce the same `0` return and the same drain
+    /// behaviour — deliberately, because the drain behind the phase must still
+    /// get the window. What must NOT be the same is the durable record.
+    ///
+    /// Reached through a store fault-injection seam because that is the only
+    /// way in: the distinction lives entirely inside two `catch` arms, and
+    /// before the seam existed, deleting `unreadable.insert(.resumable)` left
+    /// every test in this repository green (measured as mutant M7 of this
+    /// bead's battery).
+    ///
+    /// Both queries are driven independently, because one unreadable
+    /// population and two are different findings.
+    @Test("an unreadable candidate query is recorded as unreadable, not as empty",
+          .timeLimit(.minutes(1)))
+    func unreadableCandidateQueriesAreNamed() async throws {
+        func run(
+            _ injection: AnalysisStore.CoarseScanCandidateQueryFaultInjection?
+        ) async throws -> CoarseScanPhaseReport? {
+            let store = try await makeTestStore()
+            await store.setCoarseScanCandidateQueryFaultInjectionForTesting(injection)
+            let coordinator = makeCoordinator(store: store)
+            let log = ReportBox()
+            _ = await coordinator.runPendingCoarseScans(
+                deadline: ContinuousClock.now.advanced(by: .seconds(120)),
+                minimumWindowBudget: .seconds(1),
+                report: { log.note($0) }
+            )
+            return log.value.first
+        }
+
+        // The control: no injection, empty store — a MEASURED absence.
+        let measured = try #require(await run(nil))
+        #expect(measured.unreadable == [])
+        #expect(measured.ledgerReason == "coarse=empty(0/0) banked=?")
+
+        let resumableFailed = try #require(await run(.resumable))
+        #expect(resumableFailed.unreadable == .resumable)
+        #expect(resumableFailed.ledgerReason == "coarse=empty(0/0) banked=? unread=resumable")
+
+        let zeroRowFailed = try #require(await run(.missingCoverageLaneRows))
+        #expect(zeroRowFailed.unreadable == .missingCoverageLaneRows)
+        #expect(zeroRowFailed.ledgerReason == "coarse=empty(0/0) banked=? unread=missingRows")
+
+        let bothFailed = try #require(await run([.resumable, .missingCoverageLaneRows]))
+        #expect(bothFailed.unreadable == [.resumable, .missingCoverageLaneRows])
+        #expect(bothFailed.ledgerReason
+                == "coarse=empty(0/0) banked=? unread=resumable+missingRows")
+
+        // …and the four are genuinely four, not one string written four times.
+        let reasons = [measured, resumableFailed, zeroRowFailed, bothFailed].map(\.ledgerReason)
+        #expect(Set(reasons).count == 4)
+    }
+
     private final class ReportBox: @unchecked Sendable {
         private let lock = NSLock()
         private var entries: [CoarseScanPhaseReport] = []

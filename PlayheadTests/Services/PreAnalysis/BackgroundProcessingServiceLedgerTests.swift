@@ -286,6 +286,13 @@ struct BackgroundProcessingServiceLedgerTests {
         let task = StubBackgroundTask()
         let workTask = Task { await bps.handleBackfillTask(task) }
         await task.awaitExpirationHandlerInstalled()
+        // Wait for the phase to have PUBLISHED before expiring. Firing on the
+        // handler-installed signal alone races the publish — the expiration
+        // path reads the shared box, and a race it wins writes `nil`. The
+        // production ordering is not in doubt (the census lands within the
+        // first seconds of a ~295 s grant); it is the test that has to stop
+        // asking the question before the answer exists.
+        await coordinator.coarsePhaseReported.wait(for: 1)
         task.simulateExpiration()
         _ = await workTask.value
         await task.awaitCompletion()

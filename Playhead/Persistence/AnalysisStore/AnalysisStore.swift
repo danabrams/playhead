@@ -1905,6 +1905,23 @@ actor AnalysisStore {
 
     private var leaseJournalFaultInjection: LeaseJournalFaultInjection?
 
+    /// playhead-8ljj: which coverage-lane CANDIDATE query should throw.
+    ///
+    /// An `OptionSet` rather than an enum because the two queries fail
+    /// INDEPENDENTLY in production — one unreadable population and both are
+    /// different findings, and the ledger reason renders them differently
+    /// (`unread=resumable` vs `unread=resumable+missingRows`). A seam that
+    /// could only express "something failed" could not drive that.
+    struct CoarseScanCandidateQueryFaultInjection: OptionSet, Equatable, Sendable {
+        let rawValue: Int
+        /// `fetchAssetIdsWithResumableBackfillJobs` throws.
+        static let resumable = CoarseScanCandidateQueryFaultInjection(rawValue: 1 << 0)
+        /// `fetchAssetIdsMissingCoverageLaneJobs` throws.
+        static let missingCoverageLaneRows = CoarseScanCandidateQueryFaultInjection(rawValue: 1 << 1)
+    }
+
+    private var coarseScanCandidateQueryFaultInjection: CoarseScanCandidateQueryFaultInjection?
+
     /// playhead-5uvz.3 (Gap-3): test-only fault-injection points for the
     /// `AnalysisWorkScheduler.processJob` outcome arms. The arms now run
     /// inside a single `runSchedulingPass` transaction so progress, the
@@ -17565,6 +17582,11 @@ actor AnalysisStore {
     /// b-tree. That is acceptable at exactly one call per `reconcile()` on a table
     /// with tens of rows; it would not be on a hot path.
     func fetchAssetIdsWithResumableBackfillJobs(limit: Int) throws -> [String] {
+        #if DEBUG
+        if coarseScanCandidateQueryFaultInjection?.contains(.resumable) == true {
+            throw AnalysisStoreError.queryFailed("injected: resumable-candidate query")
+        }
+        #endif
         guard limit > 0 else { return [] }
         let sql = """
             SELECT analysisAssetId, MIN(createdAt) AS oldest
@@ -17639,6 +17661,11 @@ actor AnalysisStore {
     /// offset is clamped to 0 rather than handed to SQLite, which treats it as
     /// no offset at all — same outcome, but stated here rather than inherited.
     func fetchAssetIdsMissingCoverageLaneJobs(limit: Int, offset: Int = 0) throws -> [String] {
+        #if DEBUG
+        if coarseScanCandidateQueryFaultInjection?.contains(.missingCoverageLaneRows) == true {
+            throw AnalysisStoreError.queryFailed("injected: zero-row-candidate query")
+        }
+        #endif
         guard limit > 0 else { return [] }
         let sql = """
             SELECT a.id
@@ -18297,6 +18324,22 @@ actor AnalysisStore {
         _ injection: ProcessJobOutcomeFaultInjection?
     ) {
         processJobOutcomeFaultInjection = injection
+    }
+
+    /// playhead-8ljj: make either coverage-lane CANDIDATE query throw, so a
+    /// test can drive the one distinction the bead turns on — an UNREADABLE
+    /// candidate population versus a genuinely empty one.
+    ///
+    /// It exists because that distinction lives entirely in two `catch` arms,
+    /// and a `catch` nothing can enter is a `catch` no test can reach. Without
+    /// this seam, deleting `unreadable.insert(.resumable)` from
+    /// `AnalysisCoordinator.runPendingCoarseScans` leaves the whole suite
+    /// green — measured, as mutant M7 of this bead's battery, before the seam
+    /// existed. Production code MUST NOT call this.
+    func setCoarseScanCandidateQueryFaultInjectionForTesting(
+        _ injection: CoarseScanCandidateQueryFaultInjection?
+    ) {
+        coarseScanCandidateQueryFaultInjection = injection
     }
     #endif
 

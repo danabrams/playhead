@@ -485,6 +485,16 @@ final class StubAnalysisCoordinator: AnalysisCoordinating, @unchecked Sendable {
     /// Every `since` the handler asked about, so a test can pin that the count
     /// is scoped to the grant rather than to the whole table.
     private(set) var semanticScanRowsRecordedCalls: [Double] = []
+    /// playhead-8ljj: increments AFTER `coarseScanPhaseReport` has been handed
+    /// to the handler.
+    ///
+    /// An expiration test must not fire until the phase has published, or it is
+    /// racing the very write it means to observe — the handler's expiration
+    /// path reads the shared report box, and a `simulateExpiration()` that wins
+    /// finds it empty and writes `deferReason = nil`. That race was real and
+    /// cost a scoped run: 50/50 green on one attempt, one failure on the next,
+    /// same code. Event-driven, per playhead-vsot: no sleep, no deadline.
+    let coarsePhaseReported = TestEventCounter()
 
     func runPendingCoarseScans(
         deadline: ContinuousClock.Instant,
@@ -498,6 +508,7 @@ final class StubAnalysisCoordinator: AnalysisCoordinating, @unchecked Sendable {
         )
         if let phaseReport = coarseScanPhaseReport {
             report(phaseReport)
+            coarsePhaseReported.increment()
         }
         if let hook = onRunPendingCoarseScans {
             await hook()
