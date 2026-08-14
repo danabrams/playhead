@@ -1348,7 +1348,27 @@ struct DayZeroPolicyGenerationCanaryTests {
     /// doc comment names ("it cannot catch a logic edit INSIDE
     /// `gateAndDiffBytes`"). The bump is what lets the assets that were marked
     /// under generation 1 be re-attempted at all.
-    static let calibratedGeneration = 2
+    ///
+    /// **3 (playhead-c7ef), re-calibrated DELIBERATELY and with the bump, and
+    /// this time the canary is catching up rather than leading.** Two more
+    /// outcome-determining changes had landed at generation 2 without one, and
+    /// again neither is visible in the knobs pinned below:
+    ///
+    ///   * playhead-3zxd changed which slots the aligner EMITS — a dropped
+    ///     non-monotonic run's audio is clipped instead of being reported
+    ///     divergent, which took 7 phantom slots and 2,450 s of eaten show to 0;
+    ///   * playhead-pyq7 changed what a mint PERSISTS for the segment-recovered
+    ///     arm (`.rediffByteExact` anchors + `.eligible` where it wrote
+    ///     `unanchored` + `.markOnly`), and playhead-c7ef lets such a re-mint
+    ///     supersede its own degraded row.
+    ///
+    /// pyq7 deliberately declined the bump on the ground that it "re-opens
+    /// nothing this change improves" — correct at the time, because the mint's
+    /// supersede rule still refused every recovered re-mint. c7ef supplies the
+    /// other half, so the bump is now the difference between a fix that reaches
+    /// the owner's existing library and one that only helps episodes he has not
+    /// downloaded yet.
+    static let calibratedGeneration = 3
 
     private static let bumpHint = """
         Day-0's outcome-determining behavior changed. Either bump \

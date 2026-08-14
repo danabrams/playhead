@@ -12174,32 +12174,42 @@ actor AdDetectionService {
             let strict = strictMask[slotIndex]
             let overlapsEmitted = windows.contains { $0.startTime < slot.endSeconds && $0.endTime > slot.startSeconds }
             if overlapsEmitted { continue }
+            // playhead-c7ef: hoisted ABOVE the overlap filter, because the
+            // filter now reads it. Nothing else about it moved.
+            let skipGrade = RediffSlotOwnership.dayZeroSlotIsSkipGrade(
+                strict: strict,
+                segmentRecoveredPromotionEnabled: RediffActivation.dayZeroSegmentRecoveredAutoSkipEnabled
+            )
             let overlappingExisting = existing.filter { $0.startTime < slot.endSeconds && $0.endTime > slot.startSeconds }
             if !overlappingExisting.isEmpty {
                 // playhead-ug9m — THE OVERLAP FILTER, RELAXED IN EXACTLY ONE
                 // DIRECTION. It still drops a slot that collides with anything
-                // already on disk, with one exception: a STRICT slot may
-                // supersede this producer's OWN degraded rows.
+                // already on disk, with one exception: a slot this producer can
+                // prove is better may supersede its OWN degraded rows.
                 //
-                // Both conjuncts are load-bearing and neither is convenience.
+                // playhead-c7ef MOVED THE RULE INTO ONE NAMED PREDICATE and
+                // replaced its `strict` leg. ug9m read `strict` here, which by
+                // playhead-pyq7 no longer meant "provably better": a FRESH
+                // recovered mint stamps anchors and auto-skips, while a
+                // recovered RE-mint over the same episode was refused — so the
+                // nine `unanchored`/`markOnly` rows on the owner's device could
+                // never be improved by anything. `reMintMayReplace` states the
+                // rule in three conjuncts (skip grade, the untouched fidelity
+                // ladder, and one-row containment within the auto-skip margins)
+                // whose joint consequence is a theorem rather than an appeal to
+                // an acceptance arm: EVERY SECOND THIS MAKES AUTO-SKIPPABLE WAS
+                // ALREADY MARKED AS AN AD BY THE ROW IT RETIRES. See the
+                // derivation on the predicate.
                 //
-                //   * `strict` — replace only with something PROVABLY better.
-                //     A rescue re-fetch draws fresh personas and may diverge
-                //     differently; without this a second, worse draw could
-                //     retire two correct banners and mint one. A non-strict
-                //     re-mint therefore changes nothing at all: the slot is
-                //     dropped exactly as before, the existing row survives, and
-                //     the asset ends the attempt still `.frozen` — which it
-                //     then SAYS (`RediffDayZeroExit.rescueExhausted`).
-                //   * `allSatisfy(isSupersedable)` — every overlapped row must
-                //     be a day-0 byte-exact mark, unsettled, and not already
-                //     anchored. A user veto, a dismissed banner, an applied
-                //     skip or another detector's window blocks the slot, as it
-                //     always did. The fidelity ladder is not negotiable by a
-                //     re-fetch.
-                guard strict,
-                      overlappingExisting.allSatisfy(DayZeroMarkCensus.isSupersedable)
-                else { continue }
+                // A refused slot behaves exactly as it always did: dropped, the
+                // existing row survives untouched, and an attempt whose every
+                // slot is refused ends `.allSlotsAlreadyCovered`.
+                guard DayZeroMarkCensus.reMintMayReplace(
+                    slotStartSeconds: slot.startSeconds,
+                    slotEndSeconds: slot.endSeconds,
+                    overlapping: overlappingExisting,
+                    slotIsSkipGrade: skipGrade
+                ) else { continue }
                 for row in overlappingExisting { superseded[row.id] = row }
             }
             // THE BLOCKER this bead exists to clear (measured 2026-07-31): both
@@ -12225,10 +12235,6 @@ actor AdDetectionService {
             // counters below stay SEPARATE for the reason this repo keeps
             // re-learning: `strictMarkCount` names the acceptance ARM and
             // widening it would make one value stand for two different things.
-            let skipGrade = RediffSlotOwnership.dayZeroSlotIsSkipGrade(
-                strict: strict,
-                segmentRecoveredPromotionEnabled: RediffActivation.dayZeroSegmentRecoveredAutoSkipEnabled
-            )
             if strict {
                 strictMarkCount += 1
             } else if skipGrade {

@@ -311,9 +311,15 @@ enum RediffSlotOwnership {
     /// meant `.unanchored` + `.markOnly`. It no longer decides that on its own —
     /// see `dayZeroSlotIsSkipGrade` — but the mask itself is UNCHANGED and still
     /// answers exactly one question: *did a recovered persona touch this
-    /// geometry?* It is still the input to the playhead-ug9m supersede guard,
-    /// which was deliberately NOT widened, and it is still what
+    /// geometry?*, and it is still what
     /// `RediffDayZeroMintOutcome.strictMarkCount` counts.
+    ///
+    /// playhead-c7ef: it is NO LONGER the input to the ug9m supersede guard.
+    /// That guard now reads SKIP GRADE plus a geometric containment rule
+    /// (`DayZeroMarkCensus.reMintMayReplace`), because `strict` names an
+    /// acceptance ARM and the question the guard has to answer — "is the row
+    /// this replaces strictly worse, and does the swap cut anything that was not
+    /// already marked?" — is not a question about arms.
     static func strictByteExactMask(
         unioned: [PlayedSlot],
         strictPerBSideSlots: [[PlayedSlot]],

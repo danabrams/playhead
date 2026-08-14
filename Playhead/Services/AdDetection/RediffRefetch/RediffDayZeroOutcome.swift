@@ -536,7 +536,58 @@ enum DayZeroRediffAttemptPolicy {
     /// this bead lets a strict re-mint supersede its own degraded rows. Assets
     /// that exhausted their budget under generation 1 were measuring a build
     /// whose day-0 could not stamp an anchor at all.
-    static let currentGeneration = 2
+    ///
+    /// **3 (playhead-c7ef), was 2. THIS BUMP IS THE RE-ENTRY, and without it
+    /// nothing else in c7ef reaches a single row on any device that exists.**
+    ///
+    /// Read `decide` below before reading this as bookkeeping. The rescue branch
+    /// requires `record.policyGeneration != currentGeneration`, so on
+    /// `db-pull10` (build 4f6bd5d3, 2026-08-13) — where all five day-0 attempt
+    /// rows read `lastExit = marked`, `policyGeneration = 2`,
+    /// `rescueAttemptCount = 0` against a shipped `currentGeneration = 2` — the
+    /// ug9m rescue lane was **CLOSED, not open**: `decide` fell through to
+    /// `.suppress(reason: .marked)` and spent nothing. c7ef's own filing says a
+    /// rescue "WILL fire … and it will spend ~108 MB per asset to upgrade
+    /// nothing"; measured against the shipped constant, no rescue fires and no
+    /// byte is spent. Widening the mint's supersede rule alone would therefore
+    /// have changed the behaviour of a code path nothing could reach.
+    ///
+    /// WHY A BUMP IS THE RIGHT RE-ENTRY RATHER THAN A LOOSENED TERMINAL CHECK.
+    /// `.marked` stays exactly as terminal as it was — this bead does not touch
+    /// the `isRetryable` ladder, and the rescue still needs all three of its
+    /// conjuncts. What the bump does is make one of those conjuncts true, once,
+    /// deliberately, for assets that were minted by a build whose mint really
+    /// did behave differently. It is accountable in three ways a relaxed guard
+    /// would not be: it is a committed constant with this justification attached,
+    /// it is PERSISTED per asset (`rediff_day_zero_attempts.policyGeneration`, so
+    /// a device pull says which generation minted every row), and it is BOUNDED —
+    /// `maxRescueAttempts = 1` is generation-scoped, so the bump grants exactly
+    /// one further fetch per asset and the second play reads `.rescueExhausted`.
+    ///
+    /// AND THE BEHAVIOUR REALLY DID CHANGE, twice, since generation 2 was
+    /// stamped: playhead-3zxd changed which slots the aligner emits at all (a
+    /// dropped run's audio is clipped rather than reported divergent — 7 phantom
+    /// slots and 2,450 s of eaten show → 0), and playhead-pyq7 changed what a
+    /// mint PERSISTS for the segment-recovered arm (`.rediffByteExact` anchors +
+    /// `.eligible` where it used to write `unanchored` + `.markOnly`). That is
+    /// this constant's own stated bump criterion, met on the nose. pyq7
+    /// deliberately did not bump because on its own a bump "re-opens nothing this
+    /// change improves" — true then, because the mint's supersede rule still
+    /// refused every recovered re-mint. c7ef supplies the missing half, so the
+    /// two land together.
+    ///
+    /// WHAT IT COSTS, stated rather than assumed (`lastFullFetchBytes`, same
+    /// pull): 51.9 + 63.4 + 49.6 MB = **164.9 MB, one-time**, across the three
+    /// Conan assets — and only those three, because the two Diary of a CEO
+    /// assets are `.anchored` and `isRescuable` refuses them for free. Dan's
+    /// framing (2026-08-14): *"it's good to be frugal with bytes if it doesn't
+    /// have other costs"* — frugality that is free is taken (one rescue per asset
+    /// per generation; anchored assets refused without a fetch; the trigger's
+    /// existing wifi/charge/budget-window preconditions unchanged), and
+    /// frugality that would cost the fix is NOT bought: no futility predicate
+    /// gates the spend, because whether a fresh draw comes back monotonic-clean
+    /// is not knowable before drawing it.
+    static let currentGeneration = 3
 
     /// playhead-3oyz — the SAME-SESSION retry bound: how many immediate
     /// re-attempts one trigger invocation may make after a fetch failure that

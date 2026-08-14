@@ -7,13 +7,34 @@
 // `eligibilityGate = .eligible` auto-skips with nothing downstream to catch it —
 // playhead-bllt's `HotPathExtentGate` sits on `runHotPath` and
 // `runSegmentAggregation`, playhead-2350's sits on the fusion path, and the
-// day-0 mint passes through none of them. So the promotion decision is FINAL,
-// and the negative that matters most is that a playhead-9s6q SEGMENT-RECOVERED
-// slot is never promoted. It is asserted three separate ways below: at the
-// policy (a rescue is not even granted when an anchored sibling proves the mint
-// could already stamp anchors), at the mint (a non-strict re-mint supersedes
-// nothing at all), and at the persisted row (the recovered lane still reads
-// `unanchored`/`markOnly` after a rescue).
+// day-0 mint passes through none of them. So the promotion decision is FINAL.
+//
+// UNDER playhead-ug9m the negative that carried that weight was "a playhead-9s6q
+// SEGMENT-RECOVERED slot is never promoted". **playhead-pyq7 measured that arm
+// and promoted it**, and playhead-c7ef extends the promotion to a RE-mint over
+// an episode day-0 has already marked — so that negative is gone and something
+// has to hold the same weight. Three things do, and they are what the tests
+// below are now organised around:
+//
+//   * at the policy — a rescue is not granted at all unless every day-0 mark on
+//     the asset is degraded (one anchored sibling proves the mint could already
+//     stamp anchors), and it is granted at most ONCE per asset per generation;
+//   * at the supersede rule — the fidelity ladder is untouched (a veto, a
+//     dismissal, an applied skip, another producer's window and an already
+//     anchored row all still block the slot), and on top of it a re-mint may
+//     retire exactly ONE row and only with a slot that lies inside the span that
+//     row already marked, so **the padded cut is a subset of what the retired
+//     row had marked as an ad**;
+//   * at the row — the survivor of a successful re-mint is fully anchored, which
+//     is what makes a second pass a no-op rather than a churn.
+//
+// WHY THE GENERATION BUMP IS TESTED AS A RE-ENTRY AND NOT AS A CONSTANT.
+// `.marked` is terminal and playhead-c7ef does not loosen that. The rescue
+// branch needs a FOREIGN `policyGeneration`, and every attempt row on the owner's
+// device carried the generation that shipped — so before this bead the lane was
+// CLOSED, no rescue fired, and no byte was spent. `fieldRecordsAreReachable`
+// pins the literal the field carries rather than `foreignGeneration`, because
+// the derived helper would keep passing through a revert of the bump.
 //
 // WHY THERE IS NO MIGRATION TEST. There is no migration. The strict /
 // segment-recovered classification was never persisted — not on `ad_windows`,
@@ -247,6 +268,159 @@ struct DayZeroMarkCensusTests {
     }
 }
 
+// MARK: - 1b. The re-mint supersede rule (pure, playhead-c7ef)
+
+/// `DayZeroMarkCensus.reMintMayReplace` is the whole of what playhead-c7ef
+/// relaxed, so it gets a matrix rather than only the end-to-end mint tests: with
+/// the promotion switch a compile-time `static let`, the mint can only ever
+/// exercise one column, and the OFF column is the rollback.
+@Suite("Day-0 re-mint supersede rule (playhead-c7ef)")
+struct DayZeroReMintSupersedeRuleTests {
+
+    /// A degraded row spanning [100, 160], the thing a rescue is trying to
+    /// improve.
+    private static let row = RescueFixture.window(id: "degraded", start: 100, end: 160)
+
+    private static func mayReplace(
+        _ start: Double, _ end: Double,
+        overlapping: [AdWindow] = [row],
+        skipGrade: Bool = true
+    ) -> Bool {
+        DayZeroMarkCensus.reMintMayReplace(
+            slotStartSeconds: start, slotEndSeconds: end,
+            overlapping: overlapping, slotIsSkipGrade: skipGrade
+        )
+    }
+
+    @Test("nothing to retire is never a refusal — a first-listen mint is unaffected")
+    func emptyOverlapIsAdmitted() {
+        #expect(Self.mayReplace(100, 160, overlapping: []))
+        #expect(Self.mayReplace(100, 160, overlapping: [], skipGrade: false),
+                "a mark-only slot that collides with nothing still mints, exactly as before")
+    }
+
+    /// CONJUNCT 1, and it is the rollback. With the pyq7 promotion switch off a
+    /// recovered slot is not skip grade, and this rule collapses to ug9m's
+    /// behaviour: nothing is ever superseded.
+    @Test("a slot that is NOT skip grade replaces nothing, however well it fits")
+    func skipGradeIsRequired() {
+        #expect(Self.mayReplace(110, 150, skipGrade: true), "the control: this fit is admissible")
+        #expect(!Self.mayReplace(110, 150, skipGrade: false))
+    }
+
+    /// CONJUNCT 2 — UNCHANGED by this bead, restated here so the matrix is total
+    /// rather than assuming the census tests cover it.
+    @Test("the fidelity ladder still blocks a settled, foreign or anchored row")
+    func fidelityLadderIsUntouched() {
+        for blocked in [
+            RescueFixture.window(id: "vetoed", start: 100, end: 160, decisionState: .reverted),
+            RescueFixture.window(id: "dismissed", start: 100, end: 160, userDismissedBanner: true),
+            RescueFixture.window(id: "skipped", start: 100, end: 160, wasSkipped: true),
+            RescueFixture.window(id: "anchored", start: 100, end: 160, anchor: .rediffByteExact),
+            RescueFixture.window(id: "foreign", start: 100, end: 160,
+                                 boundaryState: AdBoundaryState.segmentAggregated.rawValue)
+        ] {
+            #expect(!Self.mayReplace(110, 150, overlapping: [blocked]),
+                    "\(blocked.id) must still block the slot")
+        }
+    }
+
+    /// CONJUNCT 3a — the hazard ug9m's comment named and `strict` never covered.
+    @Test("a slot straddling TWO degraded rows retires neither")
+    func fuseIsRefused() {
+        let left = RescueFixture.window(id: "left", start: 100, end: 120)
+        let right = RescueFixture.window(id: "right", start: 140, end: 160)
+        #expect(!Self.mayReplace(100, 160, overlapping: [left, right]))
+        #expect(Self.mayReplace(100, 120, overlapping: [left]),
+                "the vacuity witness: one at a time is fine")
+    }
+
+    /// **CONJUNCT 3a, THE CASE MUTATION FOUND AND THE TEST ABOVE CANNOT SEE.**
+    ///
+    /// Mutant ME dropped `overlapping.count == 1` and kept containment, checking
+    /// it against `overlapping.first` — and it SURVIVED the whole first battery,
+    /// because in every fixture written so far the fuse is refused by the
+    /// containment clause anyway (both seeded rows sit inside the slot, so
+    /// whichever one is tested first fails it). That made `count == 1` look
+    /// redundant. It is not, and this is the geometry that proves it:
+    ///
+    ///   * `inner` [100, 120] — CONTAINED by the slot, so containment passes;
+    ///   * `spilling` [115, 200] — overlaps the slot and runs 80 s past it.
+    ///
+    /// The retire loop takes EVERY overlapped row, not the one that was checked.
+    /// So a rule that admits on the first row alone retires `spilling` too, and
+    /// [120, 200] — 80 s a previous draw had marked as an ad — silently stops
+    /// being marked at all. That is a mark deleted by a re-fetch, which is the
+    /// thing the fidelity ladder exists to prevent, arriving through geometry
+    /// rather than through a decision state.
+    ///
+    /// Asserted in BOTH orders because "the first element" is a property of the
+    /// filter's output order, not of the situation.
+    @Test("a slot that CONTAINS one row but clips another retires neither, whatever the order")
+    func containedRowDoesNotLicenseRetiringItsNeighbour() {
+        let inner = RescueFixture.window(id: "inner", start: 100, end: 120)
+        let spilling = RescueFixture.window(id: "spilling", start: 115, end: 200)
+        #expect(!Self.mayReplace(100, 120, overlapping: [inner, spilling]))
+        #expect(!Self.mayReplace(100, 120, overlapping: [spilling, inner]))
+        // The vacuity witness: with the neighbour gone the SAME slot and the
+        // SAME row are admitted, so the refusal above is the neighbour and not
+        // the geometry of `inner`.
+        #expect(Self.mayReplace(100, 120, overlapping: [inner]))
+    }
+
+    /// CONJUNCT 3b — the containment boundary, both edges, both directions, at
+    /// the exact margin. The tolerances are read from `AutoSkipEdgePadding`
+    /// rather than spelled as literals: they are the SAME numbers the cut uses,
+    /// and that identity is the derivation.
+    @Test("containment holds to the auto-skip margin and refuses one epsilon past it")
+    func containmentBoundary() {
+        let startTol = AutoSkipEdgePadding.startMarginRediffByteExactSeconds
+        let endTol = AutoSkipEdgePadding.endMarginRediffByteExactSeconds
+
+        #expect(Self.mayReplace(100 - startTol, 160), "exactly at the start margin")
+        #expect(!Self.mayReplace(100 - startTol - 0.01, 160), "one hundredth past it")
+        #expect(Self.mayReplace(100, 160 + endTol), "exactly at the end margin")
+        #expect(!Self.mayReplace(100, 160 + endTol + 0.01))
+
+        // SHRINKING IS ADMITTED ON PURPOSE — it cuts less than the row marked,
+        // and the seconds it gives up were only ever bannered.
+        #expect(Self.mayReplace(130, 140))
+        // And sub-millisecond arm jitter, the measured +0.0002 s, is nowhere
+        // near the boundary in either direction.
+        #expect(Self.mayReplace(100 - 0.0002, 160 + 0.0002))
+    }
+
+    /// **THE THEOREM**, asserted rather than argued, over a sweep of every
+    /// admitted geometry: the audio a superseding row actually CUTS is a subset
+    /// of the span the row it retired had already marked as an ad. Computed
+    /// through the production `AutoSkipEdgePadding.skipWindow`, so a margin
+    /// change that broke the derivation fails here rather than on a device.
+    @Test("every admitted supersede cuts only seconds the retired row already marked")
+    func admittedSupersedeNeverCutsNewAudio() throws {
+        var admitted = 0
+        var refused = 0
+        for startOffset in stride(from: -2.0, through: 2.0, by: 0.05) {
+            for endOffset in stride(from: -2.0, through: 2.0, by: 0.05) {
+                let slotStart = 100 + startOffset
+                let slotEnd = 160 + endOffset
+                guard slotEnd - slotStart > 0 else { continue }
+                guard Self.mayReplace(slotStart, slotEnd) else { refused += 1; continue }
+                admitted += 1
+                guard let cut = AutoSkipEdgePadding.skipWindow(
+                    spanStart: slotStart, spanEnd: slotEnd,
+                    startAnchor: .rediffByteExact, endAnchor: .rediffByteExact
+                ) else { continue }
+                #expect(cut.start >= Self.row.startTime,
+                        "cut start \(cut.start) escaped the retired row at \(Self.row.startTime)")
+                #expect(cut.end <= Self.row.endTime,
+                        "cut end \(cut.end) escaped the retired row at \(Self.row.endTime)")
+            }
+        }
+        #expect(admitted > 0, "vacuity guard: the sweep really admitted geometries")
+        #expect(refused > 0, "vacuity guard: and really refused some")
+    }
+}
+
 // MARK: - 2. The policy
 
 @Suite("Day-0 rescue policy (playhead-ug9m)")
@@ -401,6 +575,93 @@ struct DayZeroRescuePolicyTests {
         #expect(reasons.allSatisfy { $0 == .rescueExhausted },
                 "every later play must NAME the frozen state — got \(Set(reasons))")
         #expect(!reasons.isEmpty, "vacuity guard: later plays really were evaluated")
+    }
+
+    // MARK: playhead-c7ef — the re-entry
+
+    /// **THE RE-ENTRY RAIL, and the one that would have caught this bead being a
+    /// no-op.** playhead-c7ef's filing says the ug9m rescue lane is "OPEN on all
+    /// three Conan assets right now". It was not. Every day-0 attempt row on
+    /// `db-pull10` (build 4f6bd5d3, 2026-08-13) reads `lastExit = marked`,
+    /// `policyGeneration = 2`, `rescueAttemptCount = 0` — and the rescue branch
+    /// requires a FOREIGN generation, so against a shipped
+    /// `currentGeneration = 2` `decide` returned `.suppress(.marked)` and spent
+    /// nothing. Widening the mint's supersede rule without moving the generation
+    /// would have improved a code path no device could reach.
+    ///
+    /// So this pins the reachability directly, on the LITERAL the field carries
+    /// rather than on `foreignGeneration` (which is defined as
+    /// `currentGeneration - 1` and would keep passing through any bump, including
+    /// a revert of this one).
+    @Test("a generation-2 device record — the shape db-pull10 actually carries — is rescuable NOW")
+    func fieldRecordsAreReachable() {
+        let deviceRecord = RescueFixture.record(
+            attemptCount: 1, lastAttemptAt: 0, lastExit: .marked,
+            lastMarkCount: 3, generation: 2, rescueAttemptCount: 0
+        )
+        #expect(DayZeroRediffAttemptPolicy.decide(
+            record: deviceRecord, markCensus: RescueFixture.degradedCensus, now: 10_000_000
+        ) == .attempt(attemptNumber: 1),
+        "generation 2 must be FOREIGN to this build — the bump is the whole re-entry")
+
+        // The counter-witness, so the assertion above is about the generation
+        // and not about the census or the exit: the SAME record stamped with
+        // this build's generation stays terminal.
+        #expect(DayZeroRediffAttemptPolicy.decide(
+            record: RescueFixture.record(
+                generation: DayZeroRediffAttemptPolicy.currentGeneration
+            ),
+            markCensus: RescueFixture.degradedCensus, now: 10_000_000
+        ) == .suppress(reason: .marked, nextEligibleAt: nil),
+        "`.marked` is NOT loosened — it stays terminal within a generation")
+    }
+
+    /// IDEMPOTENCE at the policy tier, driven from the field's own record shape
+    /// rather than a synthetic one: the bump grants exactly ONE further fetch per
+    /// asset, and every later play names `.rescueExhausted`. The bump re-opens a
+    /// second chance; it does not open a tap.
+    @Test("the c7ef bump buys a device asset exactly ONE rescue, then names itself")
+    func deviceAssetSpendsExactlyOneRescue() {
+        var record: RediffDayZeroAttemptRecord? = RescueFixture.record(
+            attemptCount: 1, lastExit: .marked, lastMarkCount: 3,
+            generation: 2, rescueAttemptCount: 0
+        )
+        var attempts = 0
+        var spent = 0
+        var reasons: [RediffDayZeroExit] = []
+        var now: Double = 0
+        for _ in 0..<8 {
+            now += 30 * 24 * 60 * 60
+            switch DayZeroRediffAttemptPolicy.decide(
+                record: record, markCensus: RescueFixture.degradedCensus, now: now
+            ) {
+            case .attempt:
+                attempts += 1
+                spent += 51_931_606   // AA6CD430's measured `lastFullFetchBytes`
+                record = DayZeroRediffAttemptPolicy.advance(
+                    record: record, assetId: "AA6CD430",
+                    // The pessimistic outcome: the fresh draw is recovered again
+                    // and the marks stay wholly degraded. An unbounded policy
+                    // would loop here forever.
+                    outcome: RediffDayZeroMintOutcome(
+                        markCount: 3, exit: .marked, strictMarkCount: 0,
+                        segmentRecoveredSkipGradeMarkCount: 3, supersededMarkCount: 3
+                    ),
+                    fullFetchBytes: 51_931_606, at: now
+                )
+            case .suppress(let reason, _):
+                reasons.append(reason)
+            }
+        }
+        #expect(attempts == 1)
+        #expect(spent == 51_931_606, "one asset, one fetch, one measured spend")
+        #expect(record?.rescueAttemptCount == 1)
+        #expect(record?.policyGeneration == DayZeroRediffAttemptPolicy.currentGeneration)
+        #expect(record?.totalFullFetchBytes == 51_931_606,
+                "and the spend is ACCOUNTABLE in the record, not only in a log line")
+        #expect(!reasons.isEmpty, "vacuity guard: later plays really were evaluated")
+        #expect(reasons.allSatisfy { $0 == .rescueExhausted },
+                "got \(Set(reasons))")
     }
 
     @Test("advance counts a rescue only for a marked prior that spent bytes")
@@ -567,11 +828,28 @@ struct DayZeroRescueMintTests {
                 "THE point of the bead: this row can now auto-skip")
     }
 
-    /// THE CENTREPIECE NEGATIVE, at the mint tier. A segment-recovered re-mint
-    /// must supersede NOTHING — not even its own degraded row — because a
-    /// second draw that dropped runs is not evidence that it is better than the
-    /// first. The existing row survives, unanchored, and nothing is promoted.
-    @Test("a SEGMENT-RECOVERED re-mint supersedes nothing and promotes nothing")
+    /// THE CENTREPIECE, **INVERTED IN PLACE BY playhead-c7ef** — it is the same
+    /// fixture, the same seeding and the same vacuity control, asserting the
+    /// opposite outcome, and it is left here rather than deleted so the reversal
+    /// is one diff instead of a disappearance.
+    ///
+    /// WHAT IT USED TO ASSERT, and why that stopped being right. Under
+    /// playhead-ug9m this read "a SEGMENT-RECOVERED re-mint supersedes nothing
+    /// and promotes nothing": the mint's guard demanded `strict`, on the
+    /// reasoning that a second draw which dropped runs is not evidence it is
+    /// better than the first. playhead-pyq7 then measured the recovered arm and
+    /// promoted it — a FRESH recovered mint stamps `.rediffByteExact` on both
+    /// edges and auto-skips — which left the two halves contradicting each
+    /// other: the same geometry, from the same arm, was skip-grade on a virgin
+    /// asset and not even good enough to replace an `unanchored` banner on one
+    /// that had been minted before. That is not a safety position, it is a
+    /// leftover.
+    ///
+    /// WHAT REPLACES `strict` IS NOT NOTHING. The seeded rows here are each ONE
+    /// row containing the slot that replaces it, which is exactly what
+    /// `reMintMayReplace` requires; the fuse and the over-run are refused by
+    /// their own tests below.
+    @Test("a SEGMENT-RECOVERED re-mint supersedes its own degraded row and promotes it (playhead-c7ef)")
     func recoveredRescueSupersedesNothing() async throws {
         let dir = try makeTempDir(prefix: "Ug9mRecoveredRescue")
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -609,18 +887,223 @@ struct DayZeroRescueMintTests {
         let outcome = await makeService(store: store)
             .mintByteExactDayZeroMarks(analysisAssetId: "a1", bSideURLs: [pair.b0, pair.b1])
 
-        #expect(outcome.exit == .allSlotsAlreadyCovered,
-                "a non-strict slot may not replace anything — got \(outcome.exit)")
-        #expect(outcome.supersededMarkCount == 0)
+        #expect(outcome.exit == .marked,
+                "a skip-grade recovered slot may now replace its own degraded row — got \(outcome.exit)")
+        #expect(outcome.strictMarkCount == 0,
+                "and it is STILL not strict — the counter names the acceptance ARM")
+        #expect(outcome.supersededMarkCount == staleIds.count)
 
         let rows = try await store.fetchAdWindows(assetId: "a1")
-        #expect(Set(rows.map(\.id)) == Set(staleIds), "every seeded row must survive untouched")
+        #expect(rows.allSatisfy { !staleIds.contains($0.id) },
+                "every seeded degraded row must be RETIRED, not left beside the new one")
+        #expect(rows.count == controlRows.count,
+                "one row out for one row in — got \(rows.count) for \(controlRows.count)")
         for row in rows {
-            #expect(row.startEdgeAnchor == AutoSkipEdgeAnchor.unanchored.rawValue)
-            #expect(row.endEdgeAnchor == AutoSkipEdgeAnchor.unanchored.rawValue)
-            #expect(row.eligibilityGate == SkipEligibilityGate.markOnly.rawValue,
-                    "the SEEDED rows survive exactly as they were — the re-mint replaced nothing (playhead-pyq7 promotes a FRESH recovered mint; it deliberately did NOT widen this supersede guard, so an existing degraded row is still not upgraded)")
+            #expect(row.startEdgeAnchor == AutoSkipEdgeAnchor.rediffByteExact.rawValue)
+            #expect(row.endEdgeAnchor == AutoSkipEdgeAnchor.rediffByteExact.rawValue)
+            #expect(row.eligibilityGate == SkipEligibilityGate.eligible.rawValue,
+                    "THE point of playhead-c7ef: the row Dan has been bannering can now auto-skip")
         }
+
+        // THE THEOREM, asserted on the real rows rather than restated: every
+        // second this rescue made auto-skippable was ALREADY marked as an ad by
+        // the row it retired. Read off `AutoSkipEdgePadding` itself, so a margin
+        // change that broke the derivation would fail here.
+        let seeded = controlRows.map { (start: $0.startTime - 1, end: $0.endTime + 1) }
+        for row in rows {
+            let cut = try #require(AutoSkipEdgePadding.skipWindow(
+                spanStart: row.startTime, spanEnd: row.endTime,
+                startAnchor: .rediffByteExact, endAnchor: .rediffByteExact
+            ), "an anchored row of this width must produce a skip window")
+            let covering = seeded.first { $0.start <= row.startTime && $0.end >= row.endTime }
+            let retired = try #require(covering, "each new row replaced one seeded row")
+            #expect(cut.start >= retired.start && cut.end <= retired.end,
+                    "the padded CUT \(cut) escaped the span the retired row had marked \(retired)")
+        }
+    }
+
+    /// The slot geometry a fixture's mint produces, learned from a control store
+    /// rather than hardcoded, so a fixture tweak cannot silently make a
+    /// containment test vacuous.
+    private func mintedGeometry(
+        pairA: URL, b0: URL, b1: URL
+    ) async throws -> [(start: Double, end: Double)] {
+        let control = try await makeTestStore()
+        try await insertAsset(store: control, assetId: "a1", sourceURL: pairA.absoluteString)
+        let outcome = await makeService(store: control)
+            .mintByteExactDayZeroMarks(analysisAssetId: "a1", bSideURLs: [b0, b1])
+        try #require(outcome.exit == .marked, "fixture control: the pair really diverges")
+        return try await control.fetchAdWindows(assetId: "a1")
+            .sorted { $0.startTime < $1.startTime }
+            .map { (start: $0.startTime, end: $0.endTime) }
+    }
+
+    /// playhead-c7ef, THE HAZARD ug9m's OWN COMMENT NAMED: *"a second, worse
+    /// draw could retire two correct banners and mint one."* `strict` never
+    /// addressed that — it is a statement about the acceptance arm, and a strict
+    /// slot can straddle two marks as easily as a recovered one. The
+    /// one-row clause does, and it is the reason widening the guard is not the
+    /// same thing as removing it.
+    ///
+    /// Both banners survive and the wide slot is dropped, so the listener keeps
+    /// two marks over real ads instead of one auto-skip over the show between
+    /// them.
+    @Test("a re-mint that would FUSE two degraded rows into one cut is refused")
+    func fusedReMintIsRefused() async throws {
+        let dir = try makeTempDir(prefix: "C7efFuse")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let pair = try StrictPair.stage(in: dir)
+        let minted = try await mintedGeometry(pairA: pair.aURL, b0: pair.b0, b1: pair.b1)
+        let slot = try #require(minted.first)
+        try #require(minted.count == 1, "this fixture mints exactly one slot")
+        try #require(slot.end - slot.start > 40, "and it is wide enough to hold two seeded rows")
+
+        let store = try await makeTestStore()
+        try await insertAsset(store: store, assetId: "a1", sourceURL: pair.aURL.absoluteString)
+        // TWO degraded rows, both strictly INSIDE the one slot the re-mint finds
+        // — so every other conjunct passes and only the fuse clause can refuse.
+        let first = try await seedDegradedDayZeroRow(
+            store: store, assetId: "a1", start: slot.start + 5, end: slot.start + 15
+        )
+        let second = try await seedDegradedDayZeroRow(
+            store: store, assetId: "a1", start: slot.end - 15, end: slot.end - 5
+        )
+
+        let outcome = await makeService(store: store)
+            .mintByteExactDayZeroMarks(analysisAssetId: "a1", bSideURLs: [pair.b0, pair.b1])
+
+        #expect(outcome.exit == .allSlotsAlreadyCovered, "got \(outcome.exit)")
+        #expect(outcome.supersededMarkCount == 0)
+        let rows = try await store.fetchAdWindows(assetId: "a1")
+        #expect(Set(rows.map(\.id)) == Set([first, second]), "both banners survive")
+        #expect(rows.allSatisfy { $0.eligibilityGate == SkipEligibilityGate.markOnly.rawValue },
+                "and neither was promoted")
+    }
+
+    /// playhead-c7ef — the mint-tier witness for the geometry mutant ME found.
+    /// One seeded row sits INSIDE the slot and a second one overlaps the slot's
+    /// tail and runs 80 s past it. The retire loop takes every overlapped row,
+    /// so a rule that admitted on the contained row alone would delete a mark
+    /// over [slot.end, slot.end + 80] that a previous draw had made. Both
+    /// survive.
+    @Test("a re-mint may not retire a neighbour that extends beyond it")
+    func neighbourExtendingBeyondTheSlotIsNotRetired() async throws {
+        let dir = try makeTempDir(prefix: "C7efNeighbour")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let pair = try StrictPair.stage(in: dir)
+        let minted = try await mintedGeometry(pairA: pair.aURL, b0: pair.b0, b1: pair.b1)
+        let slot = try #require(minted.first)
+
+        let store = try await makeTestStore()
+        try await insertAsset(store: store, assetId: "a1", sourceURL: pair.aURL.absoluteString)
+        let inner = try await seedDegradedDayZeroRow(
+            store: store, assetId: "a1", start: slot.start + 5, end: slot.end - 5
+        )
+        let spilling = try await seedDegradedDayZeroRow(
+            store: store, assetId: "a1", start: slot.end - 5, end: slot.end + 80
+        )
+
+        let outcome = await makeService(store: store)
+            .mintByteExactDayZeroMarks(analysisAssetId: "a1", bSideURLs: [pair.b0, pair.b1])
+
+        #expect(outcome.exit == .allSlotsAlreadyCovered, "got \(outcome.exit)")
+        #expect(outcome.supersededMarkCount == 0)
+        let rows = try await store.fetchAdWindows(assetId: "a1")
+        #expect(Set(rows.map(\.id)) == Set([inner, spilling]),
+                "neither row may be retired — the tail past the slot was marked and must stay marked")
+    }
+
+    /// playhead-c7ef, THE OTHER DIRECTION. One row, every ladder conjunct
+    /// satisfied — and the slot runs 10 s past the end of the span that row
+    /// marked. Admitting it would auto-skip audio NOTHING had ever marked as an
+    /// ad, which is precisely the inner-edge exposure the containment clause
+    /// exists to refuse.
+    @Test("a re-mint that runs PAST the row it would replace is refused")
+    func overRunningReMintIsRefused() async throws {
+        let dir = try makeTempDir(prefix: "C7efOverRun")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let pair = try StrictPair.stage(in: dir)
+        let minted = try await mintedGeometry(pairA: pair.aURL, b0: pair.b0, b1: pair.b1)
+        let slot = try #require(minted.first)
+
+        let store = try await makeTestStore()
+        try await insertAsset(store: store, assetId: "a1", sourceURL: pair.aURL.absoluteString)
+        // Starts EARLIER than the slot (so the start clause is satisfied) and
+        // ends 10 s short of it — the slot escapes only at the end edge.
+        let staleId = try await seedDegradedDayZeroRow(
+            store: store, assetId: "a1", start: slot.start - 1, end: slot.end - 10
+        )
+
+        let outcome = await makeService(store: store)
+            .mintByteExactDayZeroMarks(analysisAssetId: "a1", bSideURLs: [pair.b0, pair.b1])
+
+        #expect(outcome.exit == .allSlotsAlreadyCovered, "got \(outcome.exit)")
+        let rows = try await store.fetchAdWindows(assetId: "a1")
+        #expect(rows.map(\.id) == [staleId], "the banner survives, unpromoted")
+        #expect(rows.first?.eligibilityGate == SkipEligibilityGate.markOnly.rawValue)
+
+        // THE VACUITY WITNESS: move the SAME seeded row's end just past the slot
+        // and the identical mint supersedes it. Without this the refusal above
+        // could be any of the other conjuncts.
+        let permissive = try await makeTestStore()
+        try await insertAsset(store: permissive, assetId: "a1", sourceURL: pair.aURL.absoluteString)
+        _ = try await seedDegradedDayZeroRow(
+            store: permissive, assetId: "a1", start: slot.start - 1, end: slot.end + 1
+        )
+        let admitted = await makeService(store: permissive)
+            .mintByteExactDayZeroMarks(analysisAssetId: "a1", bSideURLs: [pair.b0, pair.b1])
+        #expect(admitted.exit == .marked, "got \(admitted.exit)")
+        #expect(admitted.supersededMarkCount == 1)
+    }
+
+    /// playhead-c7ef, THE IDEMPOTENCE PROOF at the tier that could actually
+    /// loop. The policy bounds how many times a rescue may FETCH; this bounds
+    /// what a re-mint does if it runs again anyway — a widened supersede rule
+    /// that kept replacing its own output would churn ids and retire rows
+    /// forever, and no attempt counter would ever see it.
+    ///
+    /// It cannot, and the reason is structural rather than a counter: the row a
+    /// successful re-mint leaves behind is `.rediffByteExact` on both edges, so
+    /// `isSupersedable` is false for it and the second pass is refused by the
+    /// UNCHANGED fidelity-ladder conjunct.
+    @Test("running the rescue re-mint a second time is a NO-OP, to the row id")
+    func reMintIsIdempotent() async throws {
+        let dir = try makeTempDir(prefix: "C7efIdempotent")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let pair = try RecoveredPair.stage(in: dir)
+        let minted = try await mintedGeometry(pairA: pair.aURL, b0: pair.b0, b1: pair.b1)
+        try #require(!minted.isEmpty)
+
+        let store = try await makeTestStore()
+        try await insertAsset(store: store, assetId: "a1", sourceURL: pair.aURL.absoluteString)
+        for slot in minted {
+            _ = try await seedDegradedDayZeroRow(
+                store: store, assetId: "a1", start: slot.start - 1, end: slot.end + 1
+            )
+        }
+        let service = makeService(store: store)
+
+        let first = await service.mintByteExactDayZeroMarks(
+            analysisAssetId: "a1", bSideURLs: [pair.b0, pair.b1])
+        #expect(first.exit == .marked, "got \(first.exit)")
+        #expect(first.supersededMarkCount == minted.count)
+        let afterFirst = try await store.fetchAdWindows(assetId: "a1")
+            .sorted { $0.startTime < $1.startTime }
+
+        let second = await service.mintByteExactDayZeroMarks(
+            analysisAssetId: "a1", bSideURLs: [pair.b0, pair.b1])
+        #expect(second.exit == .allSlotsAlreadyCovered,
+                "the second pass must supersede NOTHING — got \(second.exit)")
+        #expect(second.supersededMarkCount == 0)
+
+        let afterSecond = try await store.fetchAdWindows(assetId: "a1")
+            .sorted { $0.startTime < $1.startTime }
+        #expect(afterSecond.map(\.id) == afterFirst.map(\.id),
+                "no row was retired and no id was churned")
+        #expect(afterSecond.map(\.startTime) == afterFirst.map(\.startTime))
+        #expect(afterSecond.map(\.endTime) == afterFirst.map(\.endTime))
+        #expect(afterSecond.map(\.eligibilityGate) == afterFirst.map(\.eligibilityGate))
+        #expect(afterSecond.map(\.startEdgeAnchor) == afterFirst.map(\.startEdgeAnchor))
     }
 
     /// The fidelity ladder is not negotiable by a re-fetch: a user veto blocks
