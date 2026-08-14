@@ -1049,15 +1049,15 @@ actor BackfillJobRunner {
                 // hook makes early in a transcript's life. `fullEpisodeScan` is
                 // the one phase whose contract is the EPISODE, so it is the one
                 // phase whose completion has to be measured against the episode.
-                let terminalDecision = await coverageTerminalDecision(for: job)
+                let terminalDecision = await coverageTerminalDecision(for: job, coverage: coverage)
                 switch terminalDecision {
                 case .complete:
                     break
-                case .deferUnderCoverage, .failUnderCoverage:
+                case let .underCovered(verdict):
                     let outcome = try await recordUnderCoverageTerminal(
                         job: job,
                         coverage: coverage,
-                        decision: terminalDecision
+                        verdict: verdict
                     )
                     if outcome == .deferred {
                         deferred.append(job.jobId)
@@ -1862,17 +1862,33 @@ actor BackfillJobRunner {
     }
 
     /// playhead-41mu: measure this job's episode and decide whether it may
-    /// complete. See ``coverageTerminalDecision(phase:measurement:retryCount:)``
+    /// complete. See
+    /// ``coverageTerminalDecision(phase:measurement:retryCount:cursorAdvanced:)``
     /// for the whole argument; this is the actor-side read that feeds it.
     ///
     /// The store is only asked for the phase that can be refused, so the
     /// targeted lane costs no extra query.
-    private func coverageTerminalDecision(for job: BackfillJob) async -> CoverageTerminalDecision {
+    ///
+    /// playhead-e6d3: `coverage` is now an input because the budget's own
+    /// question — did this attempt advance the covered prefix? — is answered
+    /// from the cursor THIS RUN would publish, i.e. from
+    /// ``underCoverageCursor(prior:coverage:)`` and nothing else. The write
+    /// computes the same cursor from the same two values and persists it, so the
+    /// cursor the decision judged and the cursor the row carries are one value
+    /// derived twice from identical inputs, never two rules.
+    private func coverageTerminalDecision(
+        for job: BackfillJob,
+        coverage: CoverageOutcome
+    ) async -> CoverageTerminalDecision {
         guard job.phase == .fullEpisodeScan else { return .complete }
         return Self.coverageTerminalDecision(
             phase: job.phase,
             measurement: await measuredAdScanFraction(assetId: job.analysisAssetId),
-            retryCount: job.retryCount
+            retryCount: job.retryCount,
+            cursorAdvanced: Self.cursorAdvanced(
+                from: job.progressCursor,
+                to: Self.underCoverageCursor(prior: job.progressCursor, coverage: coverage)
+            )
         )
     }
 
@@ -1887,18 +1903,16 @@ actor BackfillJobRunner {
     /// (playhead-pmp9) and expiry (playhead-t1kq) branches so a crash between the
     /// two leaves durable progress rather than a status with nothing behind it.
     ///
-    /// The retry count advances on every under-coverage attempt. Unlike
-    /// playhead-bkhc's expiry budget there is no "reset on progress" clause,
-    /// and the difference is deliberate: an expiring background window is a
-    /// fragment of one attempt, so charging it would starve a converging job,
-    /// whereas this branch is reached only after a FULL pass over everything the
-    /// job was handed. Each attempt is a whole attempt, so a flat budget of
-    /// ``AdmissionController/maxRetries`` is both finite and never unfair.
+    /// playhead-e6d3: the retry count is CONSUMED from `verdict`, and the
+    /// "reset on progress" clause this doc used to disclaim is now here — see
+    /// ``coverageTerminalDecision(phase:measurement:retryCount:cursorAdvanced:)``
+    /// for why the old argument ("each attempt is a whole attempt") answered
+    /// whether charging is FAIR rather than whether the job is CONVERGING.
     ///
-    /// **Whether the budget is spent is CONSUMED from `decision`, never
+    /// **Whether the budget is spent is CONSUMED from `verdict`, never
     /// recomputed here**, and mutation UC04 is why that sentence exists. This
     /// function originally re-derived `attempts >= AdmissionController.maxRetries`
-    /// for itself, which made `CoverageTerminalDecision.failUnderCoverage` a
+    /// for itself, which made the pure decision's retire flag a
     /// value that was computed and thrown away: UC04 replaced the whole budget
     /// arm of the pure decision with an unconditional defer and the end-to-end
     /// bound test stayed GREEN, because the persistence path was quietly
@@ -1917,7 +1931,7 @@ actor BackfillJobRunner {
     private func recordUnderCoverageTerminal(
         job: BackfillJob,
         coverage: CoverageOutcome,
-        decision: CoverageTerminalDecision
+        verdict: UnderCoverageVerdict
     ) async throws -> UnderCoverageOutcome {
         // playhead-41mu (R2 review): BOTH halves of the cursor rule are CONSUMED
         // from the same producer. `jobInputs` is the PRE-`narrowedForResume`
@@ -1925,8 +1939,12 @@ actor BackfillJobRunner {
         // is the UC04 shape one level down — two rulers for one quantity, and
         // this one silently disagrees on every resume. Mutation UC09.
         let cursor = Self.underCoverageCursor(prior: job.progressCursor, coverage: coverage)
-        let attempts = job.retryCount + 1
-        let terminal = decision == .failUnderCoverage
+        // playhead-e6d3: BOTH of these are consumed. `job.retryCount + 1` is no
+        // longer even the right arithmetic — an attempt that advanced the cursor
+        // persists 0 — so re-deriving either half here would not merely
+        // duplicate the rule, it would contradict it.
+        let attempts = verdict.retryCount
+        let terminal = verdict.retires
         try await store.checkpointBackfillJobProgress(
             jobId: job.jobId,
             progressCursor: cursor,
@@ -2192,13 +2210,33 @@ actor BackfillJobRunner {
         case unreadable
     }
 
+    /// playhead-e6d3: the WHOLE under-coverage verdict — whether the job retires
+    /// and what `retryCount` to persist — as one value.
+    ///
+    /// **Both halves travel together because separating them is how UC04
+    /// happened.** The retire flag used to be the only thing carried, and the
+    /// count was re-derived at the write (`job.retryCount + 1`); the moment the
+    /// count stopped being a fixed function of the prior count — which is
+    /// exactly what playhead-e6d3 changes — a re-derivation at the write would
+    /// have silently disagreed with the decision that authorised it. Two rulers
+    /// for one quantity is the defect family this queue keeps paying out on.
+    struct UnderCoverageVerdict: Sendable, Equatable {
+        /// `true` → the row goes `failed` with
+        /// ``BackfillJobRunner/underCoverageExpiryReason(phase:)``; `false` →
+        /// `deferred`, resumable.
+        let retires: Bool
+        /// The value to PERSIST, not a delta. `0` on an attempt that advanced
+        /// the covered prefix (playhead-bkhc's reset, mirrored here by
+        /// playhead-e6d3/fs2h); otherwise `prior + 1`.
+        let retryCount: Int
+    }
+
     /// playhead-41mu: may this job call itself `complete`?
     enum CoverageTerminalDecision: Sendable, Equatable {
         case complete
-        /// Under-covered and the budget is not spent: non-terminal, resumable.
-        case deferUnderCoverage
-        /// Under-covered and the budget IS spent: terminal, with a named cause.
-        case failUnderCoverage
+        /// Under-covered. The verdict carries BOTH the retire flag and the
+        /// `retryCount` to persist — see ``UnderCoverageVerdict``.
+        case underCovered(UnderCoverageVerdict)
     }
 
     /// playhead-41mu: the pure decision behind the coverage-lane terminal.
@@ -2308,24 +2346,65 @@ actor BackfillJobRunner {
     /// named cause after a bounded number of attempts instead of re-driving
     /// forever.
     ///
-    /// **R1 review — the budget is FLAT, and that diverges from its own
-    /// contract.** `AdmissionController.maxRetries` is documented as "the number
-    /// of FAILED attempts allowed", and playhead-bkhc's expiry branch in this
-    /// same file resets it to zero whenever the cursor advanced, on the argument
-    /// that a lifetime counter would kill a converging job. This branch charges
-    /// every attempt, including one that scanned new audio. The mechanism that
-    /// reaches it with a stable transcript is real — a window-scoped failure the
-    /// pass tolerates leaves coverage short while the pass reports every plan
-    /// attempted, and DE0784D8 on the 2026-08-03 pull carries nine
+    /// **THE BUDGET IS NO LONGER FLAT (playhead-e6d3, taking playhead-fs2h's
+    /// prescription).** `AdmissionController.maxRetries` is documented as "the
+    /// number of FAILED attempts allowed", and playhead-bkhc's expiry branch in
+    /// this same file has always reset it to zero whenever the cursor advanced,
+    /// on the argument that a lifetime counter would kill a converging job. This
+    /// branch used to charge every attempt, including one that scanned new
+    /// audio — so the counter named "times this job failed" while being spent on
+    /// "times this job made progress but not enough", which is this repo's
+    /// standing defect class living in the admission model.
+    ///
+    /// It now mirrors bkhc exactly, through the SAME predicate
+    /// (``cursorAdvanced(from:to:)``) so there is one ruler: an attempt whose
+    /// published cursor is STRICTLY GREATER than the prior one costs nothing;
+    /// any other attempt costs one. `retryCount` therefore means, on this branch
+    /// as on bkhc's, CONSECUTIVE attempts that banked no new audio — which is
+    /// what "failed attempts" was always supposed to mean. It is a narrowing of
+    /// the counter, not a second quantity hidden in it.
+    ///
+    /// **What retires a job, and after how many grants.** Three consecutive
+    /// attempts that do not advance the covered prefix. The forgiveness cannot
+    /// buy an unbounded loop, and bkhc's argument transfers verbatim: a reset is
+    /// only ever issued together with a strictly greater cursor,
+    /// ``BackfillProgressCursor/monotonic(from:)`` keeps the cursor
+    /// non-decreasing, and the cursor is bounded above by the episode end — so
+    /// resets are bounded by the number of coarse windows in the episode and
+    /// each is paid for with audio that is now durable. The saturating case
+    /// closes it: once the cursor reaches the last segment, `narrowedForResume`
+    /// empties the plan list, `runJob`'s empty-segments guard returns a `nil`
+    /// bound, ``underCoverageCursor(prior:coverage:)`` therefore returns the
+    /// prior cursor unchanged, and the job retires after three cheap attempts
+    /// that run no inference at all.
+    ///
+    /// **The population this was measured against.** On the 2026-08-14 device
+    /// pull EIGHT of nine coverage-lane rows were `failed` at `retryCount = 3`
+    /// and seven of them carried `underCoverageBudgetSpent-fullEpisodeScan`,
+    /// which made the coarse phase's candidate set EMPTY and kept it empty: the
+    /// newest `semantic_scan_results` row and the last live job transition are
+    /// the same instant (06:34:59) and the three granted windows after it banked
+    /// nothing (playhead-e6d3, found by playhead-8ljj). The mechanism that
+    /// reaches this terminal with a stable transcript is a window-scoped failure
+    /// the pass tolerates: coverage stays short while the pass reports every
+    /// plan attempted. DE0784D8 on the 2026-08-03 pull carries nine
     /// `permissive_decoding_failure` coverage-lane rows against a 0.9956 ceiling
-    /// at a measured 0.3797. Not changed here, because the fix has to be
-    /// CONSUMED from this decision rather than re-derived at the write (the UC04
-    /// lesson below), which moves both this signature and the persisted
-    /// `retryCount` contract: **playhead-fs2h**.
+    /// at a measured 0.3797.
+    ///
+    /// **What this does NOT rescue, stated so the claim is not read wider than
+    /// it is.** The reset asks whether the CURSOR advanced, and the cursor is
+    /// deliberately conservative: 41mu's head rule freezes it when the run's own
+    /// plans did not begin at the head, so an attempt can bank real audio and
+    /// still be charged (AA6CD430 on the pull scanned 1,398 s of a 1,626 s
+    /// episode and published no cursor at all, because its first segment starts
+    /// at 43.26 s). That is the cursor rule's conservatism, not this budget's,
+    /// and widening the predicate to "the measured fraction moved" would need a
+    /// second persisted quantity — which is the trade this bead declined.
     nonisolated static func coverageTerminalDecision(
         phase: BackfillJobPhase,
         measurement: AdScanMeasurement,
-        retryCount: Int
+        retryCount: Int,
+        cursorAdvanced: Bool
     ) -> CoverageTerminalDecision {
         guard phase == .fullEpisodeScan else { return .complete }
         let underCovered: Bool
@@ -2349,9 +2428,19 @@ actor BackfillJobRunner {
             underCovered = true
         }
         guard underCovered else { return .complete }
-        return retryCount + 1 >= AdmissionController.maxRetries
-            ? .failUnderCoverage
-            : .deferUnderCoverage
+        // playhead-e6d3: bkhc's reset, and it is stated as a RESET to zero
+        // rather than as "do not increment". The two differ on the attempt after
+        // a barren one — `retryCount = 2` followed by a progressing attempt must
+        // land on 0, not stay at 2, because the quantity is CONSECUTIVE barren
+        // attempts and one that banked audio ends the run of them.
+        guard !cursorAdvanced else {
+            return .underCovered(UnderCoverageVerdict(retires: false, retryCount: 0))
+        }
+        let attempts = retryCount + 1
+        return .underCovered(UnderCoverageVerdict(
+            retires: attempts >= AdmissionController.maxRetries,
+            retryCount: attempts
+        ))
     }
 
     /// playhead-41mu: the cursor an under-covered job may publish.
