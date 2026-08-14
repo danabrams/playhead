@@ -6944,10 +6944,55 @@ actor AnalysisWorkScheduler {
             episodeTitle: stashedEpisodeTitle
         )
         guard !lostOwnership else { throw CancellationError() }
-        try await store.insertAsset(asset)
+        // playhead-1216: insert-or-ADOPT, not a bare insert.
+        //
+        // The exact-identity read at the top of this method answered
+        // "no such row WHEN I ASKED", and three `await` hops separate that
+        // answer from this write — one of them a `capabilitiesService` read
+        // that has been measured in seconds. `playhead-fzrw`'s
+        // `registerDownloadedAssetRowIfAbsent` runs on THIS actor and mints
+        // exactly this `(episodeId, assetFingerprint)` row inside that window,
+        // so `insertAsset` here threw
+        // `UNIQUE constraint failed: analysis_assets.episodeId,
+        // analysis_assets.assetFingerprint` on FOUR of the FIVE jobs enqueued
+        // on the 2026-08-13 device pull — every one of them with the
+        // incumbent's fingerprint byte-identical to `job.sourceFingerprint`,
+        // i.e. the same asset, not a re-stitch.
+        //
+        // Why that was a P0 and not a log line: the throw lands in
+        // `processJob`'s asset-resolution catch, which marks the job `failed`
+        // and leaves the registered row at
+        // ``AnalysisAsset/registeredNotQueuedState`` — the token whose whole
+        // point is that it does NOT light the library's working bar. The row
+        // therefore falls back to the resting ✦, which is the same glyph an
+        // episode with no audio at all shows, and the user reads it as
+        // "not downloaded" and taps download again.
+        let identity = try await store.insertAssetAdoptingIdentity(asset)
         guard !lostOwnership else { throw CancellationError() }
-        try await store.updateJobAnalysisAssetId(jobId: job.jobId, analysisAssetId: assetId)
-        return assetId
+        if !identity.didInsert {
+            logger.info("Adopted the existing analysis_assets row \(identity.assetId) for episode \(job.episodeId): a concurrent writer registered this exact identity first")
+            // The stashes were consumed above for a row this call did not
+            // write, so apply them to the row that survived rather than
+            // dropping the enqueue-time title and probed duration on the floor.
+            if let stashedDuration {
+                try? await store.updateEpisodeDuration(
+                    id: identity.assetId,
+                    episodeDurationSec: stashedDuration
+                )
+            }
+            if let stashedEpisodeTitle {
+                try? await store.updateAssetEpisodeTitle(
+                    id: identity.assetId,
+                    episodeTitle: stashedEpisodeTitle
+                )
+            }
+            guard !lostOwnership else { throw CancellationError() }
+        }
+        try await store.updateJobAnalysisAssetId(
+            jobId: job.jobId,
+            analysisAssetId: identity.assetId
+        )
+        return identity.assetId
     }
 
     private func consumePendingProbedDurationIfPresent(

@@ -945,6 +945,277 @@ struct DownloadTimeAssetRegistrationTests {
         )
     }
 
+    // MARK: - playhead-1216 — the identity minted twice, and the ✦ that follows
+
+    /// A `DownloadProviding` that mints the REGISTRATION's row — same episode,
+    /// same canonical SHA — from inside `fingerprint(for:)`.
+    ///
+    /// WHY THAT SEAM AND NOT `capabilitiesService.currentSnapshot`, which is the
+    /// window's other suspension point and the one ``PlaceholderRacer`` uses.
+    /// On the DISPATCH path `currentSnapshot` is reached twice before
+    /// `processJob` gets anywhere near asset resolution
+    /// (`currentLaneAdmission` and `evaluateAdmissionGate`), so a racer hung on
+    /// it plants the row BEFORE `resolveAnalysisAssetId`'s exact-identity read
+    /// — which then finds it and returns early. That exercises the early-return
+    /// arm, not the window, and passes whether or not the insert is atomic.
+    /// `downloadManager.fingerprint(for:)` is first reached at
+    /// `AnalysisWorkScheduler.swift:6794`, i.e. AFTER the exact-identity read at
+    /// `:6779` and BEFORE the fall-through insert.
+    ///
+    /// This models `playhead-fzrw`'s `registerDownloadedAssetRowIfAbsent`
+    /// landing in the lane's own window, which is not hypothetical: `enqueue`
+    /// and the run loop are messages on ONE actor, `insertJob` makes the job
+    /// dispatchable, and the registration then suspends three times before it
+    /// stamps the job. On the 2026-08-13 device pull the lane won that race on
+    /// FOUR of the FIVE jobs enqueued that day.
+    ///
+    /// Unlike ``PlaceholderRacer``, the row planted here shares the job's
+    /// `(episodeId, assetFingerprint)` pair exactly — so the V39 uniqueness
+    /// index DOES see it, and the fall-through insert is a guaranteed
+    /// `UNIQUE constraint failed`, not a second surviving row.
+    final class RegistrationRacer: DownloadProviding, @unchecked Sendable {
+        private let inner: StubDownloadProvider
+        private let store: AnalysisStore
+        private let episodeId: String
+        private let assetId: String
+        private let canonicalFingerprint: String
+        private let lock = NSLock()
+        private var didRace = false
+
+        init(
+            inner: StubDownloadProvider,
+            store: AnalysisStore,
+            episodeId: String,
+            assetId: String,
+            canonicalFingerprint: String
+        ) {
+            self.inner = inner
+            self.store = store
+            self.episodeId = episodeId
+            self.assetId = assetId
+            self.canonicalFingerprint = canonicalFingerprint
+        }
+
+        /// Whether the competing registration was actually planted. Asserted by
+        /// the test so a seam that stops being reached fails LOUDLY rather than
+        /// turning every assertion below into a tautology.
+        var didPlantRegistration: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return didRace
+        }
+
+        func cachedFileURL(for episodeId: String) async -> URL? {
+            await inner.cachedFileURL(for: episodeId)
+        }
+
+        func allCachedEpisodeIds() async -> Set<String> {
+            await inner.allCachedEpisodeIds()
+        }
+
+        func fingerprint(for episodeId: String) async -> AudioFingerprint? {
+            let shouldRace: Bool = {
+                lock.lock()
+                defer { lock.unlock() }
+                guard !didRace, episodeId == self.episodeId else { return false }
+                didRace = true
+                return true
+            }()
+            if shouldRace {
+                _ = try? await store.insertAssetIfEpisodeHasNone(AnalysisAsset(
+                    id: assetId,
+                    episodeId: self.episodeId,
+                    assetFingerprint: canonicalFingerprint,
+                    weakFingerprint: "weak-1216",
+                    sourceURL: "complete/\(assetId).caf",
+                    featureCoverageEndTime: nil,
+                    fastTranscriptCoverageEndTime: nil,
+                    confirmedAdCoverageEndTime: nil,
+                    analysisState: AnalysisAsset.registeredNotQueuedState,
+                    analysisVersion: PreAnalysisConfig.analysisVersion,
+                    capabilitySnapshot: nil
+                ))
+            }
+            return await inner.fingerprint(for: episodeId)
+        }
+    }
+
+    @Test("a registration that lands mid-resolve is ADOPTED, so the library keeps saying downloaded")
+    func laneAdoptsARegistrationThatLandedInsideItsOwnWindow() async throws {
+        let store = try await makeTestStore()
+        let provider = StubDownloadProvider()
+
+        let url = try writeSynthAudio(seconds: 4.0)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let sha = try FileHasher.sha256(fileURL: url)
+        provider.cachedURLs["ep-1216"] = url
+        provider.fingerprints["ep-1216"] = AudioFingerprint(weak: "weak-1216", strong: sha)
+
+        let racer = RegistrationRacer(
+            inner: provider,
+            store: store,
+            episodeId: "ep-1216",
+            assetId: "asset-1216-registered",
+            canonicalFingerprint: sha
+        )
+        let scheduler = makeScheduler(store: store, downloadProvider: racer)
+
+        // The job the lane picked up BEFORE the registration stamped it: a real
+        // `preAnalysis` row with no `analysisAssetId`, which is exactly what
+        // `registerDownloadedAssetRowIfAbsent` leaves behind for the window
+        // between `insertJob` and `updateJobAnalysisAssetId`.
+        try await store.insertJob(makeAnalysisJob(
+            jobId: "job-1216",
+            jobType: "preAnalysis",
+            episodeId: "ep-1216",
+            podcastId: "pod-1216",
+            analysisAssetId: nil,
+            sourceFingerprint: sha,
+            downloadId: "dl-1216",
+            priority: 20,
+            desiredCoverageSec: 60
+        ))
+
+        let processed = await scheduler.processNextDispatchableJobForTesting()
+        #expect(processed, "the job must actually dispatch, or nothing below is exercised")
+
+        // ANTI-VACUITY: the competing writer has to have run INSIDE the window.
+        #expect(
+            racer.didPlantRegistration,
+            "the competing registration never ran; the collision was not exercised"
+        )
+
+        // (1) The identity is minted ONCE. Before this fix the lane's
+        //     fall-through insert threw
+        //     `UNIQUE constraint failed: analysis_assets.episodeId,
+        //     analysis_assets.assetFingerprint`.
+        let rows = try await store.fetchAllAssets().filter { $0.episodeId == "ep-1216" }
+        #expect(rows.count == 1)
+        #expect(
+            rows.first?.id == "asset-1216-registered",
+            "the incumbent owns the identity; the lane must adopt it, not mint beside it"
+        )
+
+        // (2) Asset resolution SUCCEEDED. The throw used to land in
+        //     `processJob`'s asset-resolution catch, which stamps
+        //     `lastErrorCode` with the `assetResolution:` prefix, spends an
+        //     attempt and requeues with a backoff — on the device, four of the
+        //     five jobs enqueued on 2026-08-13, every one of them carrying
+        //     `assetResolution: Insert failed: UNIQUE constraint failed`.
+        //
+        //     The assertions here are on the RESOLUTION arm, not on the job's
+        //     terminal state: what the stub runner then makes of the episode is
+        //     this suite's existing (deliberate) silence — `dispatchReusesTheRegisteredRow`
+        //     and `dispatchPromotesTheRegisteredRowOffTheRestingToken` assert
+        //     nothing about it either, because a synthetic 4-second CAF through
+        //     a stub recogniser has no meaningful analysis outcome. The
+        //     `assetResolution:` prefix is written by exactly one arm and is
+        //     therefore the precise signature of the defect.
+        let job = try #require(try await store.fetchJob(byId: "job-1216"))
+        #expect(
+            job.lastErrorCode?.contains("assetResolution") != true,
+            "asset resolution must not fail when the incumbent IS this job's asset"
+        )
+        #expect(
+            job.analysisAssetId == "asset-1216-registered",
+            "the job must be stamped with the row that actually exists — the throw happened BEFORE any stamping, so an unstamped job is the defect's other fingerprint"
+        )
+
+        // (3) THE USER-VISIBLE PROPERTY, and the reason this is a P0. A failed
+        //     resolution leaves the row on the registration token, whose whole
+        //     purpose is that it does NOT light the working bar — so the library
+        //     control falls back to the resting ✦, the identical glyph an
+        //     episode with no audio at all shows. Dan read that as "not
+        //     downloaded" and tapped download again.
+        let asset = try #require(rows.first)
+        #expect(
+            asset.analysisState != AnalysisAsset.registeredNotQueuedState,
+            "the lane has this episode in hand; the row must say so"
+        )
+        let analysis = episodePreparationAnalysisInputs(asset: asset, coverage: nil)
+        #expect(analysis.analysisActive)
+        let readiness = deriveEpisodePreparationReadiness(EpisodePreparationInputs(
+            isDownloaded: true,
+            downloadInFlight: false,
+            downloadFraction: 1,
+            analysisActive: analysis.analysisActive,
+            analysisComplete: analysis.analysisComplete,
+            analysisTerminatedComplete: analysis.analysisTerminatedComplete,
+            analysisFailed: analysis.analysisFailed,
+            adScanFraction: analysis.adScanFraction,
+            userInitiated: false,
+            downloadPermitted: true
+        ))
+        #expect(
+            readiness.state == .analyzing,
+            "a downloaded episode the lane is working on must show the working bar, not ✦"
+        )
+        #expect(
+            readiness.downloadFraction == 1,
+            "the download zone is what tells the user the audio is already on the device"
+        )
+    }
+
+    @Test("the store adopts an incumbent identity instead of throwing, and never duplicates it")
+    func insertAssetAdoptingIdentityIsIdempotentOnTheIndexedPair() async throws {
+        let store = try await makeTestStore()
+        let sha = String(repeating: "c", count: 64)
+
+        func asset(id: String, title: String?) -> AnalysisAsset {
+            AnalysisAsset(
+                id: id,
+                episodeId: "ep-adopt",
+                assetFingerprint: sha,
+                weakFingerprint: "weak-adopt",
+                sourceURL: "complete/\(id).mp3",
+                featureCoverageEndTime: nil,
+                fastTranscriptCoverageEndTime: nil,
+                confirmedAdCoverageEndTime: nil,
+                analysisState: AnalysisAsset.registeredNotQueuedState,
+                analysisVersion: PreAnalysisConfig.analysisVersion,
+                capabilitySnapshot: nil,
+                episodeTitle: title
+            )
+        }
+
+        let first = try await store.insertAssetAdoptingIdentity(asset(id: "asset-a", title: "A"))
+        #expect(first.didInsert)
+        #expect(first.assetId == "asset-a")
+
+        // The SECOND caller holds a different `id` for the same identity — which
+        // is the whole shape of the defect: two writers each minted a UUID for
+        // one `(episodeId, assetFingerprint)`.
+        let second = try await store.insertAssetAdoptingIdentity(asset(id: "asset-b", title: "B"))
+        #expect(!second.didInsert, "the conflict clause must swallow the write")
+        #expect(
+            second.assetId == "asset-a",
+            "the caller stamps this onto analysis_jobs — it must name the row that EXISTS"
+        )
+
+        let rows = try await store.fetchAllAssets().filter { $0.episodeId == "ep-adopt" }
+        #expect(rows.count == 1)
+        #expect(rows.first?.episodeTitle == "A", "adoption must not overwrite the incumbent")
+
+        // A DIFFERENT fingerprint for the same episode is a different identity
+        // and still inserts — the conflict clause names one index and nothing
+        // else, so a genuine re-stitch is untouched.
+        let other = try await store.insertAssetAdoptingIdentity(AnalysisAsset(
+            id: "asset-c",
+            episodeId: "ep-adopt",
+            assetFingerprint: String(repeating: "d", count: 64),
+            weakFingerprint: "weak-adopt",
+            sourceURL: "complete/asset-c.mp3",
+            featureCoverageEndTime: nil,
+            fastTranscriptCoverageEndTime: nil,
+            confirmedAdCoverageEndTime: nil,
+            analysisState: AnalysisAsset.registeredNotQueuedState,
+            analysisVersion: PreAnalysisConfig.analysisVersion,
+            capabilitySnapshot: nil
+        ))
+        #expect(other.didInsert)
+        #expect(other.assetId == "asset-c")
+    }
+
     // MARK: - Coordinator harness
 
     /// The PRODUCTION probe closure, verbatim from `PlayheadRuntime.init` — the
