@@ -22,12 +22,23 @@
 // anchors, so it reads `.anchored` here and is correctly not rescuable —
 // there is nothing degraded left to improve. Rows ALREADY on disk are not
 // re-stamped (the mint is idempotent), so Dan's nine `unanchored` day-0 rows of
-// 2026-08-13 stay degraded and stay rescuable — and `isSupersedable` +
-// the mint's own `guard strict` mean a rescue re-mint that is again recovered
-// still may not replace them. That is deliberately unchanged here (it is a
-// different question from what a FRESH mint earns) and it is filed, not fixed:
-// after the promotion a recovered re-mint IS "provably better" than a degraded
-// row, which is the exact condition that guard was written to require.
+// 2026-08-13 stay degraded and stay rescuable.
+//
+// playhead-c7ef CLOSES THE OTHER HALF, and the census is STILL untouched — the
+// change is one new rule, `reMintMayReplace` at the bottom of this file, plus a
+// `DayZeroRediffAttemptPolicy.currentGeneration` bump. Two independent
+// mechanisms had those nine rows frozen and BOTH had to move:
+//
+//   * the mint's own `guard strict` refused every recovered re-mint, so even a
+//     granted rescue would have dropped all of its slots as
+//     `.allSlotsAlreadyCovered`. `reMintMayReplace` supersedes that guard;
+//   * `.marked` is terminal, and `decide`'s rescue branch also needs a FOREIGN
+//     generation — which, measured against the shipped `currentGeneration = 2`,
+//     no device row had. The lane was closed, so no rescue fired and no byte was
+//     spent. The bump is the re-entry, and it is deliberate and bounded rather
+//     than a loosened terminal check.
+//
+// Neither half does anything alone, which is why they land together.
 //
 // WHY THE CENSUS IS THE RIGHT INPUT, AND NOT THE ATTEMPT RECORD. The acceptance
 // arm (`alignment.monotonicClean`) that decided each slot's anchor was NEVER
@@ -228,6 +239,93 @@ struct DayZeroMarkCensus: Sendable, Equatable {
     /// better than what this fetch found), and never a settled one.
     static func isSupersedable(_ row: AdWindow) -> Bool {
         isDayZeroByteExactMark(row) && !isSettled(row) && !isFullyAnchored(row)
+    }
+
+    // MARK: - The re-mint supersede rule (playhead-c7ef)
+
+    /// May THIS re-mint slot be persisted, retiring the existing rows it
+    /// collides with?
+    ///
+    /// THE PROBLEM THIS REPLACES. playhead-ug9m spelled the rule inline at the
+    /// mint as `guard strict, overlapping.allSatisfy(isSupersedable)`, and the
+    /// `strict` leg carried the whole "provably better" argument: a
+    /// monotonic-clean chain proves its A-timeline mapping at every edge, so a
+    /// strict row replacing a degraded one is an unambiguous upgrade. That leg
+    /// stopped being the right question when playhead-pyq7 promoted 9s6q
+    /// SEGMENT-RECOVERED slots — a FRESH recovered mint now stamps
+    /// `.rediffByteExact` on both edges and auto-skips, while a recovered
+    /// RE-mint over the same episode was still refused, so the nine
+    /// `unanchored`/`markOnly` day-0 rows on the owner's device (db-pull10, build
+    /// 4f6bd5d3) could never be improved by anything.
+    ///
+    /// Widening `strict` to `skipGrade` and stopping there would have thrown
+    /// away the ONE hazard ug9m's comment actually named: *"a second, worse draw
+    /// could retire two correct banners and mint one."* `strict` never addressed
+    /// that either — it is a statement about the acceptance ARM, not about
+    /// geometry — so this rule states it directly, in three conjuncts, and each
+    /// one refuses a different downgrade.
+    ///
+    ///   1. `slotIsSkipGrade` — the replacement must itself earn
+    ///      `.rediffByteExact` on both edges (`RediffSlotOwnership
+    ///      .dayZeroSlotIsSkipGrade`). A mark-only re-mint changes NOTHING, as
+    ///      before: the slot is dropped, the existing row survives, and the
+    ///      attempt ends `.allSlotsAlreadyCovered`. Combined with conjunct 2 this
+    ///      is what makes the swap a strict rise on the anchor ladder — the row
+    ///      retired is by definition NOT fully anchored, the row minted always
+    ///      is. With the pyq7 promotion switch OFF this conjunct is false for the
+    ///      whole recovered arm and the rule collapses to ug9m's behaviour.
+    ///   2. `overlapping.allSatisfy(isSupersedable)` — UNCHANGED. The fidelity
+    ///      ladder is not negotiable by a re-fetch: a user veto, a dismissed
+    ///      banner, an applied skip, another producer's window or an already
+    ///      anchored row all still block the slot outright.
+    ///   3. THE NEW ONE, and it is what makes "provably better" a theorem rather
+    ///      than a claim about arms. **Exactly one row may be retired, and the
+    ///      slot must lie inside the span that row already marked, to within the
+    ///      auto-skip margins.** So:
+    ///        * a slot that would swallow TWO existing marks plus the show
+    ///          between them is refused — that is ug9m's own named hazard, and
+    ///          the two banners survive;
+    ///        * a slot that runs PAST the row it replaces is refused, so a
+    ///          re-mint can never extend a cut into audio nothing had marked.
+    ///
+    /// WHY THE TOLERANCE IS THE PADDING MARGINS, and it is a derivation rather
+    /// than a fudge. The minted row is `.rediffByteExact` on both edges, so
+    /// `AutoSkipEdgePadding.skipWindow` cuts `[ss + 0.50, se - 0.75]`. Requiring
+    /// `ss >= rs - 0.50` and `se <= re + 0.75` therefore gives
+    /// `ss + 0.50 >= rs` and `se - 0.75 <= re`:
+    ///
+    ///   **every second this rescue makes auto-skippable was already marked as
+    ///   an ad by the row it retires.** Not approximately — the padded cut is a
+    ///   subset of `[rs, re]`, by construction.
+    ///
+    /// That is the whole safety argument, and note what it does NOT rest on: it
+    /// does not require trusting the fresh draw's geometry, or the arm that
+    /// produced it, or the two draws agreeing to any tolerance. A zero tolerance
+    /// would have been the naive reading and is wrong in the *unsafe* direction
+    /// of usefulness rather than safety — the measured inter-arm edge delta is
+    /// +0.0002 s, so an exact containment test would refuse roughly half of all
+    /// genuine upgrades over floating-point dust.
+    ///
+    /// SHRINKING IS ALLOWED, deliberately. A slot strictly inside the retired
+    /// row cuts less than the row marked; the seconds it gives up were only ever
+    /// bannered, never skipped. Refusing that direction would cost the fix and
+    /// buy nothing — the exposure runs the other way.
+    ///
+    /// Pure and total. An EMPTY `overlapping` is `true`: there is nothing to
+    /// retire, so nothing to refuse, and a first-listen mint reaches this with an
+    /// empty list and is unaffected.
+    static func reMintMayReplace(
+        slotStartSeconds: Double,
+        slotEndSeconds: Double,
+        overlapping: [AdWindow],
+        slotIsSkipGrade: Bool
+    ) -> Bool {
+        if overlapping.isEmpty { return true }
+        guard slotIsSkipGrade else { return false }
+        guard overlapping.allSatisfy(isSupersedable) else { return false }
+        guard overlapping.count == 1, let row = overlapping.first else { return false }
+        return slotStartSeconds >= row.startTime - AutoSkipEdgePadding.startMarginRediffByteExactSeconds
+            && slotEndSeconds <= row.endTime + AutoSkipEdgePadding.endMarginRediffByteExactSeconds
     }
 }
 
