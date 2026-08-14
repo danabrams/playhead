@@ -335,6 +335,39 @@ struct DayZeroReMintSupersedeRuleTests {
                 "the vacuity witness: one at a time is fine")
     }
 
+    /// **CONJUNCT 3a, THE CASE MUTATION FOUND AND THE TEST ABOVE CANNOT SEE.**
+    ///
+    /// Mutant ME dropped `overlapping.count == 1` and kept containment, checking
+    /// it against `overlapping.first` — and it SURVIVED the whole first battery,
+    /// because in every fixture written so far the fuse is refused by the
+    /// containment clause anyway (both seeded rows sit inside the slot, so
+    /// whichever one is tested first fails it). That made `count == 1` look
+    /// redundant. It is not, and this is the geometry that proves it:
+    ///
+    ///   * `inner` [100, 120] — CONTAINED by the slot, so containment passes;
+    ///   * `spilling` [115, 200] — overlaps the slot and runs 80 s past it.
+    ///
+    /// The retire loop takes EVERY overlapped row, not the one that was checked.
+    /// So a rule that admits on the first row alone retires `spilling` too, and
+    /// [120, 200] — 80 s a previous draw had marked as an ad — silently stops
+    /// being marked at all. That is a mark deleted by a re-fetch, which is the
+    /// thing the fidelity ladder exists to prevent, arriving through geometry
+    /// rather than through a decision state.
+    ///
+    /// Asserted in BOTH orders because "the first element" is a property of the
+    /// filter's output order, not of the situation.
+    @Test("a slot that CONTAINS one row but clips another retires neither, whatever the order")
+    func containedRowDoesNotLicenseRetiringItsNeighbour() {
+        let inner = RescueFixture.window(id: "inner", start: 100, end: 120)
+        let spilling = RescueFixture.window(id: "spilling", start: 115, end: 200)
+        #expect(!Self.mayReplace(100, 120, overlapping: [inner, spilling]))
+        #expect(!Self.mayReplace(100, 120, overlapping: [spilling, inner]))
+        // The vacuity witness: with the neighbour gone the SAME slot and the
+        // SAME row are admitted, so the refusal above is the neighbour and not
+        // the geometry of `inner`.
+        #expect(Self.mayReplace(100, 120, overlapping: [inner]))
+    }
+
     /// CONJUNCT 3b — the containment boundary, both edges, both directions, at
     /// the exact margin. The tolerances are read from `AutoSkipEdgePadding`
     /// rather than spelled as literals: they are the SAME numbers the cut uses,
@@ -945,6 +978,39 @@ struct DayZeroRescueMintTests {
         #expect(Set(rows.map(\.id)) == Set([first, second]), "both banners survive")
         #expect(rows.allSatisfy { $0.eligibilityGate == SkipEligibilityGate.markOnly.rawValue },
                 "and neither was promoted")
+    }
+
+    /// playhead-c7ef — the mint-tier witness for the geometry mutant ME found.
+    /// One seeded row sits INSIDE the slot and a second one overlaps the slot's
+    /// tail and runs 80 s past it. The retire loop takes every overlapped row,
+    /// so a rule that admitted on the contained row alone would delete a mark
+    /// over [slot.end, slot.end + 80] that a previous draw had made. Both
+    /// survive.
+    @Test("a re-mint may not retire a neighbour that extends beyond it")
+    func neighbourExtendingBeyondTheSlotIsNotRetired() async throws {
+        let dir = try makeTempDir(prefix: "C7efNeighbour")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let pair = try StrictPair.stage(in: dir)
+        let minted = try await mintedGeometry(pairA: pair.aURL, b0: pair.b0, b1: pair.b1)
+        let slot = try #require(minted.first)
+
+        let store = try await makeTestStore()
+        try await insertAsset(store: store, assetId: "a1", sourceURL: pair.aURL.absoluteString)
+        let inner = try await seedDegradedDayZeroRow(
+            store: store, assetId: "a1", start: slot.start + 5, end: slot.end - 5
+        )
+        let spilling = try await seedDegradedDayZeroRow(
+            store: store, assetId: "a1", start: slot.end - 5, end: slot.end + 80
+        )
+
+        let outcome = await makeService(store: store)
+            .mintByteExactDayZeroMarks(analysisAssetId: "a1", bSideURLs: [pair.b0, pair.b1])
+
+        #expect(outcome.exit == .allSlotsAlreadyCovered, "got \(outcome.exit)")
+        #expect(outcome.supersededMarkCount == 0)
+        let rows = try await store.fetchAdWindows(assetId: "a1")
+        #expect(Set(rows.map(\.id)) == Set([inner, spilling]),
+                "neither row may be retired — the tail past the slot was marked and must stay marked")
     }
 
     /// playhead-c7ef, THE OTHER DIRECTION. One row, every ladder conjunct
