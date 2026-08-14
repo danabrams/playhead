@@ -103,7 +103,10 @@ struct SpecialistScanResultsV31MigrationTests {
         // it touches neither `specialist_scan_results` nor its index). Never
         // `== currentSchemaVersion`: that passes for every value and stops
         // policing anything.
-        #expect(AnalysisStore.currentSchemaVersion == 49)
+        // …and then 49 → 50 (playhead-e6d3's under-coverage retry-budget
+        // repair, which UPDATEs `backfill_jobs.retryCount` and touches neither
+        // `specialist_scan_results` nor its index).
+        #expect(AnalysisStore.currentSchemaVersion == 50)
         #expect(try probeTableExists(in: dir, table: "specialist_scan_results"))
     }
 

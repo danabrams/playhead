@@ -153,7 +153,11 @@ struct AdWindowSkipConfidenceSplitV47MigrationTests {
         // `podcast_profiles.observationCount` to 0. Different table, no
         // overlap — V49 names neither `ad_windows` nor `decision_events`, so
         // the repaired detection number this suite pins is not re-touched.
-        #expect(AnalysisStore.currentSchemaVersion == 49)
+        // 49 → 50 (playhead-e6d3) is a THIRD data-changing rung, and gets the
+        // same second look: it UPDATEs `backfill_jobs.retryCount` on rows the
+        // flat under-coverage rule retired. Different table again — it names
+        // neither `ad_windows` nor `decision_events`.
+        #expect(AnalysisStore.currentSchemaVersion == 50)
         #expect(try columnPresent(in: dir))
     }
 

@@ -99,7 +99,10 @@ struct RediffRefetchStateV28MigrationTests {
         // any of it — V49 names neither, and the bandwidth totals it also
         // probes are a separate table. Pinned to the LITERAL: comparing
         // against `currentSchemaVersion` would pass for every value.
-        #expect(AnalysisStore.currentSchemaVersion == 49)
+        // …and then 49 → 50 (playhead-e6d3), which UPDATEs
+        // `backfill_jobs.retryCount` and names no other table, so the V28
+        // rediff_refetch_state tables are unchanged by it too.
+        #expect(AnalysisStore.currentSchemaVersion == 50)
         // Probe by using the API — both tables must be queryable.
         #expect(try await store.fetchRediffRefetchStates().isEmpty)
         #expect(try await store.fetchRediffBandwidthTotals() == RediffBandwidthTotals())

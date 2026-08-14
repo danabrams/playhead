@@ -286,7 +286,10 @@ struct BackfillCoverageTerminalTests {
         let jobId = try #require(first.admittedJobIds.first)
         let afterFirst = try #require(await store.fetchBackfillJob(byId: jobId))
         #expect(afterFirst.progressCursor?.lastProcessedUpperBoundSec == 10)
-        #expect(afterFirst.retryCount == 1)
+        // playhead-e6d3: attempt 1 advanced the covered prefix (nil → 10), so it
+        // is not a failed attempt and costs nothing. Under the flat rule this
+        // read 1.
+        #expect(afterFirst.retryCount == 0)
 
         // Attempt 2 is dispatched with the WHOLE transcript. `narrowedForResume`
         // drops [0,10], so the run's first PLAN starts at 80 — 70 s above the
@@ -306,9 +309,72 @@ struct BackfillCoverageTerminalTests {
         #expect(second.admittedJobIds.first == jobId, "the same row, re-driven by M-5")
         let afterSecond = try #require(await store.fetchBackfillJob(byId: jobId))
         #expect(afterSecond.status == .deferred)
-        #expect(afterSecond.retryCount == 2)
+        // playhead-e6d3: attempt 2 did NOT advance the cursor (that is this
+        // test's whole subject), so it is the FIRST barren attempt and costs
+        // exactly one. Attempt 1 did advance — nil → 10 — and now costs nothing,
+        // which is why this reads 1 rather than the flat rule's 2.
+        #expect(afterSecond.retryCount == 1)
         #expect(afterSecond.progressCursor?.lastProcessedUpperBoundSec == 10,
                 "the 70 s hole above the cursor is unscanned audio — the cursor must not speak for it")
+    }
+
+    // MARK: - 2b. playhead-e6d3: a converging job is not retired for converging
+
+    @available(iOS 26.0, *)
+    @Test("playhead-e6d3 — an episode whose coverage climbs on EVERY attempt outlives the budget and stays visible to the coarse phase")
+    func aConvergingJobSurvivesPastTheFlatBudget() async throws {
+        let assetId = "asset-e6d3-converging"
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: assetId, episodeDurationSec: 100))
+        // The whole episode is transcribed, so the ceiling is 1.0 and nothing
+        // but the budget can stop this job.
+        try await store.insertTranscriptChunks([
+            makeChunk(assetId: assetId, index: 0, start: 0, end: 100, pass: "fast")
+        ])
+
+        // Each attempt is dispatched with ten more seconds of transcript than
+        // the last — the shape of an episode whose scan is genuinely advancing
+        // and is still nowhere near the 0.98 floor. Under the FLAT budget the
+        // third of these retired the row with
+        // `underCoverageBudgetSpent-fullEpisodeScan` at `retryCount = 3`, and
+        // `retryCount < maxRetries` then removed the ASSET from both coarse
+        // candidate queries and from the ad-scan re-drive, permanently.
+        let lines: [(start: Double, end: Double, text: String)] = [
+            (0, 10, "Window zero editorial content about the topic."),
+            (10, 20, "Window one sponsor break maybe present here."),
+            (20, 30, "Window two back to the show conversation."),
+            (30, 40, "Window three more discussion of the same subject.")
+        ]
+
+        var jobId: String?
+        for attempt in 1...lines.count {
+            let run = try await makeRunner(store: store, runtime: makeRuntime().runtime)
+                .runPendingBackfill(for: makeInputs(assetId: assetId, lines: Array(lines[0..<attempt])))
+            let id = try #require(run.admittedJobIds.first)
+            if let jobId { #expect(id == jobId, "the same row, re-driven by M-5") }
+            jobId = id
+
+            let row = try #require(await store.fetchBackfillJob(byId: id))
+            #expect(row.status == .deferred,
+                    "attempt \(attempt) advanced the covered prefix — it is not a failed attempt")
+            #expect(row.status != .failed)
+            #expect(row.retryCount == 0,
+                    "attempt \(attempt) banked new audio, so the run of barren attempts is zero")
+            #expect(row.progressCursor?.lastProcessedUpperBoundSec == EpisodeSeconds(Double(attempt) * 10))
+        }
+
+        // The consequence the bead is named for: after MORE attempts than the
+        // budget has retries, the asset is still reachable by the query the
+        // coarse phase and the ad-scan re-drive both start from.
+        let id = try #require(jobId)
+        #expect(lines.count > AdmissionController.maxRetries,
+                "the fixture must outlast the budget or it proves nothing")
+        #expect(try await store.countResumableBackfillJobs(assetId: assetId) > 0)
+        #expect(try await store.fetchAssetIdsWithResumableBackfillJobs(limit: 10).contains(assetId),
+                "an exhausted row is invisible to the coarse phase FOREVER — that is the defect")
+        let row = try #require(await store.fetchBackfillJob(byId: id))
+        #expect(row.deferReason == "underCoverage-fullEpisodeScan",
+                "still the non-terminal cause, never the budget-spent one")
     }
 
     // MARK: - 3. The payoff: the rescue is no longer blocked
@@ -405,29 +471,45 @@ struct BackfillCoverageTerminalTests {
 
     // MARK: - 6. The pure decision
 
+    /// The expected verdict, spelled out at every call site rather than compared
+    /// against a bare case, because playhead-e6d3's whole subject is the NUMBER
+    /// this value carries.
+    private static func underCovered(
+        retires: Bool,
+        retryCount: Int
+    ) -> BackfillJobRunner.CoverageTerminalDecision {
+        .underCovered(BackfillJobRunner.UnderCoverageVerdict(
+            retires: retires,
+            retryCount: retryCount
+        ))
+    }
+
     @Test("the floor is the pipeline's floor, and the comparison is strict at the boundary")
     func decisionUsesTheSharedFloor() {
         let floor = AnalysisJobRunner.semanticBackfillSufficientAdScanFraction
         #expect(BackfillJobRunner.coverageTerminalDecision(
-            phase: .fullEpisodeScan, measurement: .measured(floor), retryCount: 0
+            phase: .fullEpisodeScan, measurement: .measured(floor), retryCount: 0, cursorAdvanced: false
         ) == .complete)
         #expect(BackfillJobRunner.coverageTerminalDecision(
-            phase: .fullEpisodeScan, measurement: .measured(ReachRatio(floor.rawValue - 0.001)), retryCount: 0
-        ) == .deferUnderCoverage)
+            phase: .fullEpisodeScan,
+            measurement: .measured(ReachRatio(floor.rawValue - 0.001)),
+            retryCount: 0,
+            cursorAdvanced: false
+        ) == Self.underCovered(retires: false, retryCount: 1))
         // The two field fractions, verbatim.
         #expect(BackfillJobRunner.coverageTerminalDecision(
-            phase: .fullEpisodeScan, measurement: .measured(0.0142), retryCount: 0
-        ) == .deferUnderCoverage)
+            phase: .fullEpisodeScan, measurement: .measured(0.0142), retryCount: 0, cursorAdvanced: false
+        ) == Self.underCovered(retires: false, retryCount: 1))
         #expect(BackfillJobRunner.coverageTerminalDecision(
-            phase: .fullEpisodeScan, measurement: .measured(0.2068), retryCount: 0
-        ) == .deferUnderCoverage)
+            phase: .fullEpisodeScan, measurement: .measured(0.2068), retryCount: 0, cursorAdvanced: false
+        ) == Self.underCovered(retires: false, retryCount: 1))
     }
 
     @Test("ONLY the phase that claims the whole episode is judged against an episode-wide floor")
     func narrowPhasesAreNotGated() {
         for phase in BackfillJobPhase.allCases where phase != .fullEpisodeScan {
             #expect(BackfillJobRunner.coverageTerminalDecision(
-                phase: phase, measurement: .measured(0), retryCount: 0
+                phase: phase, measurement: .measured(0), retryCount: 0, cursorAdvanced: false
             ) == .complete, "\(phase.rawValue) never claimed to read the episode")
         }
     }
@@ -437,20 +519,23 @@ struct BackfillCoverageTerminalTests {
         // A missing denominator is the duration-backfill sweep's bug, not this
         // one, and refusing here would strand every legacy row.
         #expect(BackfillJobRunner.coverageTerminalDecision(
-            phase: .fullEpisodeScan, measurement: .notMeasurable, retryCount: 0
+            phase: .fullEpisodeScan, measurement: .notMeasurable, retryCount: 0, cursorAdvanced: false
         ) == .complete)
         // A read that THREW is not evidence the episode was read.
         #expect(BackfillJobRunner.coverageTerminalDecision(
-            phase: .fullEpisodeScan, measurement: .unreadable, retryCount: 0
-        ) == .deferUnderCoverage)
+            phase: .fullEpisodeScan, measurement: .unreadable, retryCount: 0, cursorAdvanced: false
+        ) == Self.underCovered(retires: false, retryCount: 1))
     }
 
     @Test("R1 — a non-finite MEASUREMENT is an absence, and under-claims like every other reader of it")
     func nonFiniteMeasurementDoesNotComplete() {
         for garbage in [Double.nan, .infinity, -.infinity] {
             #expect(BackfillJobRunner.coverageTerminalDecision(
-                phase: .fullEpisodeScan, measurement: .measured(ReachRatio(garbage)), retryCount: 0
-            ) == .deferUnderCoverage,
+                phase: .fullEpisodeScan,
+                measurement: .measured(ReachRatio(garbage)),
+                retryCount: 0,
+                cursorAdvanced: false
+            ) == Self.underCovered(retires: false, retryCount: 1),
             "\(garbage) is not evidence the episode was read")
         }
         // The three call sites this now agrees with, asserted rather than
@@ -466,13 +551,85 @@ struct BackfillCoverageTerminalTests {
         #expect(BackfillJobRunner.coverageTerminalDecision(
             phase: .fullEpisodeScan,
             measurement: .measured(0),
-            retryCount: AdmissionController.maxRetries - 2
-        ) == .deferUnderCoverage)
+            retryCount: AdmissionController.maxRetries - 2,
+            cursorAdvanced: false
+        ) == Self.underCovered(retires: false, retryCount: AdmissionController.maxRetries - 1))
         #expect(BackfillJobRunner.coverageTerminalDecision(
             phase: .fullEpisodeScan,
             measurement: .measured(0),
-            retryCount: AdmissionController.maxRetries - 1
-        ) == .failUnderCoverage)
+            retryCount: AdmissionController.maxRetries - 1,
+            cursorAdvanced: false
+        ) == Self.underCovered(retires: true, retryCount: AdmissionController.maxRetries))
+    }
+
+    // MARK: - 6b. playhead-e6d3: the budget counts CONSECUTIVE barren attempts
+
+    @Test("playhead-e6d3 — an attempt that advanced the covered prefix spends NO retry, at every point in the budget")
+    func anAdvancingAttemptCostsNothing() {
+        // The row that matters: one retry short of retirement, and converging.
+        // Under the flat rule this was `.failUnderCoverage` at `maxRetries` —
+        // the disposition that emptied the coarse phase's candidate set on the
+        // 2026-08-14 pull.
+        #expect(BackfillJobRunner.coverageTerminalDecision(
+            phase: .fullEpisodeScan,
+            measurement: .measured(0.2068),
+            retryCount: AdmissionController.maxRetries - 1,
+            cursorAdvanced: true
+        ) == Self.underCovered(retires: false, retryCount: 0),
+        "an attempt that banked new audio is not a FAILED attempt, and `maxRetries` counts failed attempts")
+
+        // A RESET, not a "do not increment": the run of barren attempts ends.
+        for prior in 0...(AdmissionController.maxRetries + 2) {
+            #expect(BackfillJobRunner.coverageTerminalDecision(
+                phase: .fullEpisodeScan,
+                measurement: .measured(0),
+                retryCount: prior,
+                cursorAdvanced: true
+            ) == Self.underCovered(retires: false, retryCount: 0),
+            "prior=\(prior) must reset to 0, not persist \(prior)")
+        }
+    }
+
+    @Test("playhead-e6d3 — the bound survives: three CONSECUTIVE barren attempts still retire the job")
+    func consecutiveBarrenAttemptsStillRetire() {
+        // Advance, then three barren ones. The reset does not buy an extra
+        // attempt after the run of barren ones has started.
+        var retryCount = BackfillJobRunner.coverageTerminalDecision(
+            phase: .fullEpisodeScan,
+            measurement: .measured(0.5),
+            retryCount: AdmissionController.maxRetries - 1,
+            cursorAdvanced: true
+        )
+        #expect(retryCount == Self.underCovered(retires: false, retryCount: 0))
+
+        var carried = 0
+        for expected in 1...AdmissionController.maxRetries {
+            retryCount = BackfillJobRunner.coverageTerminalDecision(
+                phase: .fullEpisodeScan,
+                measurement: .measured(0.5),
+                retryCount: carried,
+                cursorAdvanced: false
+            )
+            #expect(retryCount == Self.underCovered(
+                retires: expected >= AdmissionController.maxRetries,
+                retryCount: expected
+            ))
+            carried = expected
+        }
+    }
+
+    @Test("playhead-e6d3 — advancing does not resurrect a COVERED episode: the floor still decides `complete`")
+    func advancingDoesNotOverrideTheFloor() {
+        // The reset lives BELOW the floor test, so a covered episode completes
+        // whether or not this attempt advanced anything.
+        for advanced in [true, false] {
+            #expect(BackfillJobRunner.coverageTerminalDecision(
+                phase: .fullEpisodeScan,
+                measurement: .measured(AnalysisJobRunner.semanticBackfillSufficientAdScanFraction),
+                retryCount: 0,
+                cursorAdvanced: advanced
+            ) == .complete)
+        }
     }
 
     // MARK: - 7. The pure cursor rule

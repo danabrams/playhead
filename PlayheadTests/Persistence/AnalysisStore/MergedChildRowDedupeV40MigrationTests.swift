@@ -543,7 +543,12 @@ struct MergedChildRowDedupeV40MigrationTests {
         // one `transcript_chunks` row. V49 creates a table and writes only to
         // `podcast_profiles`, which this fixture never populates — so the
         // dedupe assertion below is unchanged by it.
-        #expect(AnalysisStore.currentSchemaVersion == 49)
+        // 49 -> 50 (playhead-e6d3): one fresh retry budget for the
+        // coverage-lane rows the FLAT under-coverage rule retired. Its only
+        // statement is an UPDATE of `backfill_jobs.retryCount` on already-
+        // `failed` rows — a table this fixture never populates, so the dedupe
+        // assertion below is unchanged by it too.
+        #expect(AnalysisStore.currentSchemaVersion == 50)
 
         let db = try openRaw(dir)
         defer { sqlite3_close_v2(db) }

@@ -110,7 +110,11 @@ struct RediffDayZeroByteDiagnosticsV48MigrationTests {
         // below climbs 47 → 48 → 49, and V49's `guard observed >= 48` means it
         // can only land once V48 has set the version. The six byte-diagnostics
         // columns live on `rediff_day_zero_attempts`, which V49 never names.
-        #expect(AnalysisStore.currentSchemaVersion == 49)
+        // …and then 49 → 50 (playhead-e6d3), which carries the same
+        // `guard observed >= 49` shape and so can only land once V49 has set the
+        // version. The seeded-v47 test below now climbs 47 → 48 → 49 → 50. V50
+        // names only `backfill_jobs`.
+        #expect(AnalysisStore.currentSchemaVersion == 50)
         #expect(try columnsPresent(in: dir))
     }
 
