@@ -306,6 +306,14 @@ enum RediffSlotOwnership {
     ///
     /// Pure and total. An empty `strictPerBSideSlots` yields an all-false mask
     /// — the correct answer when every persona needed recovery.
+    ///
+    /// playhead-pyq7 NOTE ON WHAT `false` NOW COSTS. Before pyq7 a `false` here
+    /// meant `.unanchored` + `.markOnly`. It no longer decides that on its own —
+    /// see `dayZeroSlotIsSkipGrade` — but the mask itself is UNCHANGED and still
+    /// answers exactly one question: *did a recovered persona touch this
+    /// geometry?* It is still the input to the playhead-ug9m supersede guard,
+    /// which was deliberately NOT widened, and it is still what
+    /// `RediffDayZeroMintOutcome.strictMarkCount` counts.
     static func strictByteExactMask(
         unioned: [PlayedSlot],
         strictPerBSideSlots: [[PlayedSlot]],
@@ -317,6 +325,32 @@ enum RediffSlotOwnership {
                 $0.startSeconds == slot.startSeconds && $0.endSeconds == slot.endSeconds
             }
         }
+    }
+
+    // MARK: - Skip grade (playhead-pyq7)
+
+    /// Has this day-0 slot earned `.rediffByteExact` anchors and, under the
+    /// `RediffActivation.dayZeroByteExactAutoSkipEnabled` master switch,
+    /// auto-skip eligibility?
+    ///
+    /// Two arms, because `strictByteExactMask` is a TOTAL classification of the
+    /// unioned slots: `strict` is the monotonic-clean one, and `!strict` is
+    /// exactly "a playhead-9s6q segment-recovered persona created or moved this
+    /// geometry". So the second parameter names the population it governs
+    /// rather than acting as a global override, and the two arms are spelled
+    /// out rather than collapsed to `strict || enabled` for the same reason.
+    ///
+    /// A FUNCTION RATHER THAN AN EXPRESSION AT THE MINT, on purpose. The flag it
+    /// reads is a compile-time `static let`, so the only way a test can exercise
+    /// the OFF state is to hold the flag as a parameter. `false` here is not a
+    /// dead branch — it is the behaviour a rollback restores, and it is pinned
+    /// exhaustively in `RediffDayZeroSkipGradeTests`.
+    static func dayZeroSlotIsSkipGrade(
+        strict: Bool,
+        segmentRecoveredPromotionEnabled: Bool
+    ) -> Bool {
+        if strict { return true }
+        return segmentRecoveredPromotionEnabled
     }
 
     // MARK: - Day-0 k-way minimum (playhead-xsdz.36.4 / playhead-wybg)

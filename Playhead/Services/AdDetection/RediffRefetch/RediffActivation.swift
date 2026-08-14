@@ -185,10 +185,64 @@ enum RediffActivation {
     ///     flag: that is a correctness fix (the edges really were set by the
     ///     byte differ), not a permission grant, and `unanchored` there meant
     ///     "nobody wrote an anchor", never "the boundary is unknown".
-    ///   • It does not promote playhead-9s6q SEGMENT-RECOVERED
-    ///     (non-monotonic) slots. Those stay `.markOnly` AND `.unanchored`
-    ///     pending playhead-pyq7's separate validation — a chain that dropped
-    ///     runs has not proven its A-timeline mapping at the edge.
+    ///   • It does not, ON ITS OWN, promote playhead-9s6q SEGMENT-RECOVERED
+    ///     (non-monotonic) slots — that is
+    ///     `dayZeroSegmentRecoveredAutoSkipEnabled` below, which playhead-pyq7
+    ///     added and which this switch still gates (it is the MASTER: with this
+    ///     `false` nothing day-0 auto-skips, whatever the recovered switch says).
     ///   • It does not enable auto-skip for any other producer.
     static let dayZeroByteExactAutoSkipEnabled = true
+
+    // MARK: - playhead-pyq7 (day-0 SEGMENT-RECOVERED auto-skip promotion)
+
+    /// THE segment-recovered promotion switch. `true` = a day-0 mark minted
+    /// from a playhead-9s6q SEGMENT-RECOVERED (non-monotonic) byte diff is
+    /// stamped `.rediffByteExact` on both edges and — under the
+    /// `dayZeroByteExactAutoSkipEnabled` master above — persisted
+    /// `eligibilityGate = .eligible`, exactly like a strict slot. `false` =
+    /// the playhead-qs0d behaviour, byte-for-byte: recovered slots keep the
+    /// conservative `.unanchored` pair and `.markOnly`.
+    ///
+    /// ACTIVATED `true` (playhead-pyq7, 2026-08-14, Dan's call after the
+    /// read-the-device-then-promote round). Two measurements, one controlled
+    /// and one from the field, and the second is what made the first
+    /// actionable:
+    ///
+    ///  • CONTROLLED, one tree, one build of each (BEFORE = the pre-playhead-3zxd
+    ///    accept rule pinned back in as a mutant; AFTER = shipped main). Over the
+    ///    NON-MONOTONIC population this arm exists for: emitted slots 20 → 13,
+    ///    PHANTOMS (slots containing zero gold ad seconds) **7 → 0**, total show
+    ///    eaten 2449.9965 s → **0.0000 s**, widest emitted slot 469.9949 s →
+    ///    29.9886 s, and slots matching a real gold ad 13 → 13 — the fix cost NO
+    ///    recall. The worst shape `299.99..629.97` (a 30 s ad fused to 299.99 s
+    ///    of show) became `599.98..629.97`: the ad and only the ad.
+    ///  • EDGES, over all 38 emitted slots: INNER start p50 +0.0002 s, p95/max
+    ///    +0.0003 s; INNER end p50/p95/max +0.0000 s; OUTER start all +0.0000 s.
+    ///    The sign is always the SAFE direction (start late, end early) and the
+    ///    residual is the 4-byte shared CBR frame header, 4/417 of a 26 ms
+    ///    frame. `AutoSkipEdgePadding`'s rediff margins (0.50 s in at the start,
+    ///    0.75 s off the end) are three orders of magnitude larger, so the qs0d
+    ///    derivation covers this population with room to spare — stated rather
+    ///    than assumed, because those margins were derived on monotonic-clean
+    ///    chains and this is a different arm.
+    ///  • FIELD, `db-pull10` (build 4f6bd5d3, 5 assets, 13 day-0 marks): three
+    ///    assets took the recovery arm with `lastRunsAOverlapping` 1/2/1 and
+    ///    `lastOverlapSecondsRecovered` 60.3 / 82.9 / **701.0** s — so the defect
+    ///    class was live on real audio and the fix engaged there — while
+    ///    `lastAlignedSecondsInSlots` and `lastMaxAlignedSecondsInSlot` read
+    ///    **0.0000 everywhere**: not one show second inside any emitted slot.
+    ///
+    /// WHAT THE PROMOTION IS WORTH, and why it is not a nicety: 9 of those 13
+    /// marks (69 %) were segment-recovered, and all 9 are on the three Conan
+    /// episodes Dan actually listens to. Zero of three day-0 marks on the show
+    /// he opened were auto-skippable.
+    ///
+    /// WHAT IT DOES NOT DO. It is not a new door into auto-skip: playhead-2350's
+    /// extent rule, `qs0d`'s targeted padding activation and `ynmk`'s
+    /// confirmation semantics are untouched and all three key off the anchor
+    /// PAIR — this switch supplies that pair honestly rather than bypassing
+    /// anything. It does not retro-fit rows already on disk (the mint is
+    /// idempotent), and it does not widen the playhead-ug9m supersede guard,
+    /// which still demands a STRICT re-mint.
+    static let dayZeroSegmentRecoveredAutoSkipEnabled = true
 }

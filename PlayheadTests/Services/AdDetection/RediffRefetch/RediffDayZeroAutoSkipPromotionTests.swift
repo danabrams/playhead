@@ -22,9 +22,12 @@
 // The pipeline skipped exactly the wrong population. These tests pin the four
 // halves of the fix:
 //
-//   1. `RediffSlotOwnership.strictByteExactMask` — WHICH minted slots earn an
-//      anchor (strict monotonic-clean only; 9s6q segment-recovered slots stay
-//      banner, playhead-pyq7 owns validating those).
+//   1. `RediffSlotOwnership.strictByteExactMask` — which acceptance ARM
+//      produced each minted slot. It decided the anchor outright until
+//      playhead-pyq7 (2026-08-14) promoted the 9s6q segment-recovered arm too;
+//      the anchor is now `RediffSlotOwnership.dayZeroSlotIsSkipGrade` over the
+//      mask AND `RediffActivation.dayZeroSegmentRecoveredAutoSkipEnabled`, and
+//      the mask keeps its own job (the ug9m supersede guard, `strictMarkCount`).
 //   2. The mint persists `rediffByteExact` on BOTH edges + `eligible` for a
 //      strict slot, over REAL divergent MP3 bytes, read back from SQLite.
 //   3. `AutoSkipEdgePadding.isActive` — the TARGETED activation: the Gate-2
@@ -264,14 +267,26 @@ struct RediffDayZeroMintAutoSkipPersistenceTests {
         }
     }
 
-    /// The OTHER half of the scope contract, and the one that keeps this bead
-    /// narrow: a 9s6q SEGMENT-RECOVERED slot still mints a banner but keeps the
-    /// conservative `unanchored`/`markOnly` pair. Those boundaries have not
-    /// been validated (playhead-pyq7 owns that), and a chain that dropped runs
-    /// has not proven its A-timeline mapping at the edge.
-    @Test("a SEGMENT-RECOVERED (non-monotonic) day-0 slot stays unanchored and mark-only")
-    func segmentRecoveredSlotStaysUnanchoredMarkOnly() async throws {
-        let dir = try makeTempDir(prefix: "Qs0dRecoveredMint")
+    /// THE playhead-pyq7 DELIVERABLE, and it is the inversion of what this test
+    /// asserted from 2026-07-31 to 2026-08-14: a 9s6q SEGMENT-RECOVERED slot now
+    /// persists `rediffByteExact` on both edges and `eligibilityGate = eligible`,
+    /// exactly like a strict one.
+    ///
+    /// What changed is not the edges — they were never the problem. Measured
+    /// over 38 emitted slots, a recovered INNER start is +0.0002 s (p50) and
+    /// +0.0003 s (max) against a 0.50 s padding margin, and the sign is always
+    /// the safe direction. What blocked promotion was a whole-block false
+    /// positive (7 phantom slots, 2450 s of pure show, worst 470 s) that
+    /// playhead-3zxd removed AT ITS CAUSE: measured on one tree, one build of
+    /// each, phantoms 7 → 0, eaten show 2450 s → 0.0000 s, and real-ad slots
+    /// 13 → 13, so it cost no recall.
+    ///
+    /// This is the row that would have auto-skipped the pre-roll Dan had to draw
+    /// by hand on 2026-08-13 (asset C065AD03: our recovered boundary and his
+    /// hand-drawn mark agree to the last decimal place, 46.55245386192805).
+    @Test("a SEGMENT-RECOVERED (non-monotonic) day-0 slot is anchored and auto-skip eligible")
+    func segmentRecoveredSlotIsAnchoredAndEligible() async throws {
+        let dir = try makeTempDir(prefix: "Pyq7RecoveredMint")
         defer { try? FileManager.default.removeItem(at: dir) }
         let pair = try RecoveredMultiBreakPair.stage(in: dir)
 
@@ -284,6 +299,10 @@ struct RediffDayZeroMintAutoSkipPersistenceTests {
                      "fixture control: the multi-break chain must go NON-monotonic")
         try #require(RediffActivation.nonMonotonicSegmentRecoveryEnabled,
                      "fixture control: day-0 must be opted into segment recovery")
+        try #require(RediffActivation.dayZeroSegmentRecoveredAutoSkipEnabled,
+                     "fixture control: this test asserts the promotion's ON state, which is what ships")
+        try #require(RediffActivation.dayZeroByteExactAutoSkipEnabled,
+                     "fixture control: the qs0d master switch still gates the eligible stamp")
 
         let store = try await makeTestStore()
         try await insertAsset(store: store, assetId: "a1", sourceURL: pair.aURL.absoluteString)
@@ -291,17 +310,259 @@ struct RediffDayZeroMintAutoSkipPersistenceTests {
             .mintByteExactDayZeroMarks(analysisAssetId: "a1", bSideURLs: [pair.b0, pair.b1])
 
         #expect(outcome.exit == .marked,
-                "control: recovery still MINTS a banner — got \(outcome.exit)")
+                "control: recovery still MINTS — got \(outcome.exit)")
+        // The two counters stay SEPARATE. `strictMarkCount` names the acceptance
+        // ARM and must NOT absorb the promotion: every slot here is recovered.
+        #expect(outcome.strictMarkCount == 0,
+                "strictMarkCount names the monotonic-clean arm — promotion must not widen it")
+        #expect(outcome.segmentRecoveredSkipGradeMarkCount == outcome.markCount,
+                "every minted slot was recovered AND promoted")
+
         let rows = try await store.fetchAdWindows(assetId: "a1")
         #expect(!rows.isEmpty, "control: the recovered slots really were persisted")
         for row in rows {
-            #expect(row.startEdgeAnchor == AutoSkipEdgeAnchor.unanchored.rawValue,
-                    "a dropped-run chain has not earned a start anchor")
-            #expect(row.endEdgeAnchor == AutoSkipEdgeAnchor.unanchored.rawValue,
-                    "a dropped-run chain has not earned an end anchor")
-            #expect(row.eligibilityGate == SkipEligibilityGate.markOnly.rawValue,
-                    "9s6q segment-recovered slots stay BANNER until playhead-pyq7 validates them")
+            #expect(row.startEdgeAnchor == AutoSkipEdgeAnchor.rediffByteExact.rawValue,
+                    "the byte differ set this edge; pyq7 measured it at +0.0002 s")
+            #expect(row.endEdgeAnchor == AutoSkipEdgeAnchor.rediffByteExact.rawValue,
+                    "the byte differ set this edge too, at +0.0000 s")
+            #expect(row.eligibilityGate == SkipEligibilityGate.eligible.rawValue,
+                    "9s6q segment-recovered slots joined the auto-skip path (playhead-pyq7)")
+            #expect(row.confidence == 1.0)
         }
+    }
+
+    /// THE WIRING, stated so it survives a ROLLBACK. The test above pins today's
+    /// shipped ON state by name, which is what a reader wants — but it would go
+    /// red the moment somebody flips
+    /// `dayZeroSegmentRecoveredAutoSkipEnabled` off in a hurry, and a rollback
+    /// that turns the suite red teaches people to delete the suite.
+    ///
+    /// This one derives its expectation from the SAME predicate production
+    /// reads, so it is a true statement in BOTH flag states and it fails if the
+    /// mint ever stops honouring the flag — including the case that matters
+    /// most, a build where the constant says `false` and the mint anchors
+    /// anyway. It is not vacuous: it also pins that a recovered slot's two
+    /// edges and its gate all move TOGETHER, which no amount of flag-reading
+    /// gives you.
+    @Test("the recovered slot's anchors and gate follow the promotion switch, whichever way it is set")
+    func recoveredSlotDispositionFollowsTheSwitch() async throws {
+        let dir = try makeTempDir(prefix: "Pyq7RecoveredWiring")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let pair = try RecoveredMultiBreakPair.stage(in: dir)
+        let alignment = RediffByteAligner.align(aData: pair.aData, bData: pair.bData)
+        try #require(!alignment.monotonicClean,
+                     "fixture control: the multi-break chain must go NON-monotonic")
+
+        let skipGrade = RediffSlotOwnership.dayZeroSlotIsSkipGrade(
+            strict: false,
+            segmentRecoveredPromotionEnabled: RediffActivation.dayZeroSegmentRecoveredAutoSkipEnabled
+        )
+        let expectedAnchor = skipGrade
+            ? AutoSkipEdgeAnchor.rediffByteExact.rawValue
+            : AutoSkipEdgeAnchor.unanchored.rawValue
+        let expectedGate = (skipGrade && RediffActivation.dayZeroByteExactAutoSkipEnabled)
+            ? SkipEligibilityGate.eligible.rawValue
+            : SkipEligibilityGate.markOnly.rawValue
+
+        let store = try await makeTestStore()
+        try await insertAsset(store: store, assetId: "a1", sourceURL: pair.aURL.absoluteString)
+        let outcome = await makeService(store: store)
+            .mintByteExactDayZeroMarks(analysisAssetId: "a1", bSideURLs: [pair.b0, pair.b1])
+        try #require(outcome.exit == .marked, "control: recovery still MINTS — got \(outcome.exit)")
+        #expect(outcome.segmentRecoveredSkipGradeMarkCount == (skipGrade ? outcome.markCount : 0),
+                "the recovered counter is a DISPOSITION — it is 0 on a build with the switch off")
+
+        let rows = try await store.fetchAdWindows(assetId: "a1")
+        try #require(!rows.isEmpty, "control: the recovered slots really were persisted")
+        for row in rows {
+            #expect(row.startEdgeAnchor == expectedAnchor)
+            #expect(row.endEdgeAnchor == expectedAnchor)
+            #expect(row.eligibilityGate == expectedGate)
+        }
+    }
+
+    /// A/B/B' TRIPLE where one persona is STRICT and the other RECOVERED, and
+    /// the recovered one WIDENS the strict one's slot.
+    ///
+    /// This is the SECOND population the promotion changes, and it is the one
+    /// nobody would find by reading the flag. `strictByteExactMask` demands an
+    /// EXACT geometry match against the strict-only union, so a slot a strict
+    /// persona found and a recovered persona widened classifies as NON-strict —
+    /// today it falls back to `markOnly` even though a monotonic-clean chain
+    /// proved most of it. Promotion dissolves that fallback.
+    ///
+    ///   A  = c0 + ad1a + ad1b + c1 + ad2 + c2
+    ///   b0 = c0 + ad1a + alt  + c1 + ad2 + c2   (ONE replacement → MONOTONIC-CLEAN)
+    ///   b1 = c0 +               c1 +       c2   (two removals    → NON-monotonic)
+    ///
+    /// so b0 finds `[ad1b]` and b1 finds the wider `[ad1a, ad1b]`, and the union
+    /// keeps the recovered persona's earlier start.
+    ///
+    /// THE BREAK KINDS ARE NOT GUESSES. `RediffSegmentRecoveryBoundaryMeasurementTests`
+    /// FAMILY A measured which structures reach which arm: a REPLACEMENT chains
+    /// monotonically at every break count and length ratio (9s6q is a no-op
+    /// there), and only a break-COUNT disagreement goes non-monotonic. A first
+    /// attempt at this fixture used a single REMOVAL for the strict persona and
+    /// its own control caught it — a removal drives the chain non-monotonic too,
+    /// so both personas landed on the recovery arm and the test would have been
+    /// asserting nothing about the mixed case at all.
+    private struct MixedArmWidenedPair {
+        let aURL: URL
+        let strictB: URL
+        let recoveredB: URL
+        let aData: Data
+        let strictBData: Data
+        let recoveredBData: Data
+
+        static func stage(in dir: URL) throws -> MixedArmWidenedPair {
+            // 300-frame blocks: ≈125 KB (over the 64 KiB min-run) and ≈7.84 s
+            // (over the 5 s min-ad-width), so every block below is independently
+            // shippable as a run AND as a slot.
+            let block = 300
+            let c0 = SyntheticMP3.frames(count: block, seed: 0x1C0_0001)
+            let ad1a = SyntheticMP3.frames(count: block, seed: 0x1A1_0002)
+            let ad1b = SyntheticMP3.frames(count: block, seed: 0x1A2_0003)
+            let c1 = SyntheticMP3.frames(count: block, seed: 0x1C1_0004)
+            let ad2 = SyntheticMP3.frames(count: block, seed: 0x1A3_0005)
+            let c2 = SyntheticMP3.frames(count: block, seed: 0x1C2_0006)
+            // The rotated creative the STRICT persona was served in ad1b's place
+            // — deliberately a different length, which is the `replacedShorterB`
+            // shape FAMILY A measures as monotonic-clean.
+            let alt = SyntheticMP3.frames(count: block / 2, seed: 0x1A4_0007)
+            let aData = SyntheticMP3.file(c0 + ad1a + ad1b + c1 + ad2 + c2)
+            let strictBData = SyntheticMP3.file(c0 + ad1a + alt + c1 + ad2 + c2)
+            let recoveredBData = SyntheticMP3.file(c0 + c1 + c2)
+            let aURL = dir.appendingPathComponent("a.mp3", isDirectory: false)
+            let strictB = dir.appendingPathComponent("b0.strict.mp3", isDirectory: false)
+            let recoveredB = dir.appendingPathComponent("b1.recovered.mp3", isDirectory: false)
+            try aData.write(to: aURL)
+            try strictBData.write(to: strictB)
+            try recoveredBData.write(to: recoveredB)
+            return MixedArmWidenedPair(
+                aURL: aURL, strictB: strictB, recoveredB: recoveredB,
+                aData: aData, strictBData: strictBData, recoveredBData: recoveredBData
+            )
+        }
+    }
+
+    @Test("a STRICT slot WIDENED by a recovered persona is promoted too (the mask's second population)")
+    func widenedStrictSlotIsPromoted() async throws {
+        let dir = try makeTempDir(prefix: "Pyq7MixedArmMint")
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let triple = try MixedArmWidenedPair.stage(in: dir)
+
+        // FIXTURE CONTROLS — this test is worthless unless the two personas
+        // really took DIFFERENT acceptance arms and the recovered one really
+        // moved the strict one's edge. All four are required, not expected.
+        let strictAlignment = RediffByteAligner.align(
+            aData: triple.aData, bData: triple.strictBData)
+        try #require(strictAlignment.monotonicClean,
+                     "fixture control: the one-REPLACEMENT pair must chain CLEANLY")
+        let recoveredAlignment = RediffByteAligner.align(
+            aData: triple.aData, bData: triple.recoveredBData)
+        try #require(!recoveredAlignment.monotonicClean,
+                     "fixture control: the two-removal pair must go NON-monotonic")
+
+        guard case .accepted(let strictAcceptance) = RediffSlotOwnership.gateAndDiffBytes(
+            alignment: strictAlignment,
+            recoverNonMonotonicSegments: RediffActivation.nonMonotonicSegmentRecoveryEnabled
+        ) else {
+            Issue.record("fixture control: the strict persona's diff must be accepted")
+            return
+        }
+        guard case .accepted(let recoveredAcceptance) = RediffSlotOwnership.gateAndDiffBytes(
+            alignment: recoveredAlignment,
+            recoverNonMonotonicSegments: RediffActivation.nonMonotonicSegmentRecoveryEnabled
+        ) else {
+            Issue.record("fixture control: the recovered persona's diff must be accepted")
+            return
+        }
+        let unioned = RediffSlotOwnership.unionedPlayedSlots(
+            [strictAcceptance.playedSlots, recoveredAcceptance.playedSlots])
+        let mask = RediffSlotOwnership.strictByteExactMask(
+            unioned: unioned, strictPerBSideSlots: [strictAcceptance.playedSlots])
+        let strictSlot = try #require(strictAcceptance.playedSlots.first)
+        let widened = try #require(unioned.first)
+        try #require(widened.startSeconds < strictSlot.startSeconds - 1.0,
+                     "fixture control: the recovered persona must WIDEN the strict slot's start")
+        try #require(mask.first == false,
+                     "fixture control: a widened slot is classified NON-strict — that is the population")
+
+        let store = try await makeTestStore()
+        try await insertAsset(store: store, assetId: "a1", sourceURL: triple.aURL.absoluteString)
+        let outcome = await makeService(store: store).mintByteExactDayZeroMarks(
+            analysisAssetId: "a1", bSideURLs: [triple.strictB, triple.recoveredB])
+        try #require(outcome.exit == .marked, "control: the triple diverges — got \(outcome.exit)")
+
+        let rows = try await store.fetchAdWindows(assetId: "a1")
+        try #require(!rows.isEmpty)
+        let expectSkipGrade = RediffSlotOwnership.dayZeroSlotIsSkipGrade(
+            strict: false,
+            segmentRecoveredPromotionEnabled: RediffActivation.dayZeroSegmentRecoveredAutoSkipEnabled
+        )
+        for row in rows {
+            #expect(row.startEdgeAnchor == (expectSkipGrade
+                ? AutoSkipEdgeAnchor.rediffByteExact.rawValue
+                : AutoSkipEdgeAnchor.unanchored.rawValue))
+            #expect(row.eligibilityGate == (expectSkipGrade
+                ? SkipEligibilityGate.eligible.rawValue
+                : SkipEligibilityGate.markOnly.rawValue))
+        }
+        // And the counter split still tells the truth about the ARM: not one of
+        // these slots is strict, however much of one a strict persona found.
+        #expect(outcome.strictMarkCount == 0)
+    }
+}
+
+// MARK: - 2b. Skip grade — the predicate, in BOTH flag states (playhead-pyq7)
+
+@Suite("Day-0 skip grade (playhead-pyq7)")
+struct RediffDayZeroSkipGradeTests {
+
+    /// The whole truth table, because the OFF state is the rollback and a
+    /// rollback nobody tested is not a rollback. The flag a build ships is a
+    /// compile-time `static let`, so this is the ONLY place the `false` column
+    /// can be exercised at all — which is exactly why the mint calls a function
+    /// that takes the flag rather than reading it inline.
+    @Test("skip grade over the whole (strict × promotion) matrix")
+    func skipGradeMatrix() {
+        #expect(RediffSlotOwnership.dayZeroSlotIsSkipGrade(
+            strict: true, segmentRecoveredPromotionEnabled: true),
+                "a strict slot is skip-grade — that is playhead-qs0d and pyq7 does not touch it")
+        #expect(RediffSlotOwnership.dayZeroSlotIsSkipGrade(
+            strict: true, segmentRecoveredPromotionEnabled: false),
+                "ROLLBACK MUST NOT COST THE STRICT LANE — turning the recovered switch off leaves qs0d's own promotion exactly where it was")
+        #expect(RediffSlotOwnership.dayZeroSlotIsSkipGrade(
+            strict: false, segmentRecoveredPromotionEnabled: true),
+                "the pyq7 promotion: a 9s6q segment-recovered slot is skip-grade")
+        #expect(!RediffSlotOwnership.dayZeroSlotIsSkipGrade(
+            strict: false, segmentRecoveredPromotionEnabled: false),
+                "OFF is the qs0d behaviour verbatim — recovered slots banner")
+    }
+
+    /// The switch's SHIPPED value, pinned by name so a flip is a deliberate
+    /// diff on this line rather than a quiet change in behaviour that only the
+    /// device notices.
+    @Test("the promotion switch ships ON, and the qs0d master still gates it")
+    func shippedSwitchValues() {
+        #expect(RediffActivation.dayZeroSegmentRecoveredAutoSkipEnabled)
+        #expect(RediffActivation.dayZeroByteExactAutoSkipEnabled,
+                "the master switch is what makes `.eligible` reachable at all")
+    }
+
+    /// Skip grade decides the ANCHOR; the master switch decides the GATE. A
+    /// build that turned the master off would still stamp anchors — that is
+    /// qs0d's deliberate split (an anchor is a provenance fact, not a
+    /// permission) and pyq7 inherits it rather than re-deciding it.
+    @Test("skip grade does not read the qs0d master switch")
+    func skipGradeIsIndependentOfTheMasterSwitch() {
+        // Stated as a property of the SIGNATURE: the predicate takes exactly the
+        // two inputs it is documented to take, so there is nowhere for the
+        // master switch to enter. If a later edit widens it, this call stops
+        // compiling — which is the point.
+        let grade: (Bool, Bool) -> Bool = RediffSlotOwnership.dayZeroSlotIsSkipGrade(strict:segmentRecoveredPromotionEnabled:)
+        #expect(grade(false, true))
+        #expect(!grade(false, false))
     }
 }
 

@@ -275,15 +275,34 @@ struct RediffDayZeroMintOutcome: Sendable, Equatable {
     /// `allSlotsAlreadyCovered`.
     var divergentSlotCount: Int = 0
     /// playhead-ug9m: how many of `markCount` were STRICT monotonic-clean
-    /// byte-exact slots — the ones that earned `.rediffByteExact` anchors and,
-    /// under `RediffActivation.dayZeroByteExactAutoSkipEnabled`, auto-skip
-    /// eligibility. `markCount - strictMarkCount` is the 9s6q segment-recovered
-    /// remainder, which banners.
+    /// byte-exact slots. `markCount - strictMarkCount` is the 9s6q
+    /// segment-recovered remainder.
     ///
     /// This is the quantity the whole bead turns on, and it was previously
     /// visible only in an os_log line: a mint of 4 marks, 0 of them strict, is
     /// the D9B513CD case — a `.marked` terminal that delivers no skip at all.
+    ///
+    /// playhead-pyq7 KEPT THIS MEANING EXACTLY. It names the ACCEPTANCE ARM
+    /// (`alignment.monotonicClean`), not "how many marks auto-skip" — the two
+    /// stopped being the same number when segment-recovered slots were
+    /// promoted, and widening this counter to cover both would be one value
+    /// standing for two different things, which is the defect class this repo
+    /// keeps finding. The promotion population has its OWN counter below, and
+    /// it is still `strictMarkCount` that the ug9m supersede guard and the
+    /// rescue census are stated over.
     var strictMarkCount: Int = 0
+    /// playhead-pyq7: how many of `markCount` were 9s6q SEGMENT-RECOVERED slots
+    /// PROMOTED to skip grade — `.rediffByteExact` on both edges and, under
+    /// `RediffActivation.dayZeroByteExactAutoSkipEnabled`, `.eligible`.
+    ///
+    /// Read it as a DISPOSITION, not as a population: with
+    /// `RediffActivation.dayZeroSegmentRecoveredAutoSkipEnabled` off it is `0`
+    /// on a mint whose every slot was recovered, and that zero is the switch
+    /// being off rather than the arm not firing. The population itself is
+    /// `markCount - strictMarkCount`, unchanged; the remainder
+    /// `markCount - strictMarkCount - segmentRecoveredSkipGradeMarkCount` is
+    /// what still banners.
+    var segmentRecoveredSkipGradeMarkCount: Int = 0
     /// playhead-ug9m: degraded day-0 rows from an EARLIER attempt that this
     /// mint's strict slots superseded (retired and replaced). `0` on every
     /// first-listen mint; non-zero only on a rescue that actually improved

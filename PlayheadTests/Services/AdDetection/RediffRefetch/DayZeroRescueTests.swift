@@ -619,7 +619,7 @@ struct DayZeroRescueMintTests {
             #expect(row.startEdgeAnchor == AutoSkipEdgeAnchor.unanchored.rawValue)
             #expect(row.endEdgeAnchor == AutoSkipEdgeAnchor.unanchored.rawValue)
             #expect(row.eligibilityGate == SkipEligibilityGate.markOnly.rawValue,
-                    "a 9s6q segment-recovered slot is NEVER promoted")
+                    "the SEEDED rows survive exactly as they were — the re-mint replaced nothing (playhead-pyq7 promotes a FRESH recovered mint; it deliberately did NOT widen this supersede guard, so an existing degraded row is still not upgraded)")
         }
     }
 

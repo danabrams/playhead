@@ -9,13 +9,25 @@
 // not — and playhead-qs0d made the difference matter, because a STRICT
 // monotonic-clean byte-exact slot now earns `.rediffByteExact` anchors and
 // `eligibilityGate = .eligible` (it auto-skips) while a 9s6q segment-recovered
-// one stays `unanchored` + `.markOnly` (it banners, forever). Two populations
+// one stayed `unanchored` + `.markOnly` (it bannered, forever). Two populations
 // are frozen at a degraded first attempt:
 //
 //   * rows minted BEFORE qs0d, which persisted `unanchored` EVEN WHEN STRICT
 //     because no build had yet written an anchor;
 //   * rows minted AFTER qs0d whose every slot came out non-strict, which will
 //     never re-attempt with different personas that might produce a strict one.
+//
+// playhead-pyq7 CHANGES WHO IS IN THE SECOND SET, IN BOTH DIRECTIONS, AND THE
+// CENSUS ITSELF IS UNTOUCHED. Going forward a segment-recovered mint stamps
+// anchors, so it reads `.anchored` here and is correctly not rescuable —
+// there is nothing degraded left to improve. Rows ALREADY on disk are not
+// re-stamped (the mint is idempotent), so Dan's nine `unanchored` day-0 rows of
+// 2026-08-13 stay degraded and stay rescuable — and `isSupersedable` +
+// the mint's own `guard strict` mean a rescue re-mint that is again recovered
+// still may not replace them. That is deliberately unchanged here (it is a
+// different question from what a FRESH mint earns) and it is filed, not fixed:
+// after the promotion a recovered re-mint IS "provably better" than a degraded
+// row, which is the exact condition that guard was written to require.
 //
 // WHY THE CENSUS IS THE RIGHT INPUT, AND NOT THE ATTEMPT RECORD. The acceptance
 // arm (`alignment.monotonicClean`) that decided each slot's anchor was NEVER

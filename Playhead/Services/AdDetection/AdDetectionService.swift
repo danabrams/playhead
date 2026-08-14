@@ -11980,13 +11980,17 @@ actor AdDetectionService {
     ///     Enabled`, default OFF) — a non-monotonic multi-break fetch is
     ///     segment-recovered (each guard re-applied over the segmented coverage)
     ///     rather than discarded; the lagged path keeps the strict reject.
-    ///   • TIERED BY ACCEPTANCE ARM (playhead-qs0d, was blanket MARK-ONLY).
-    ///     A STRICT monotonic-clean slot records `.rediffByteExact` on both
-    ///     edges and — under `RediffActivation.dayZeroByteExactAutoSkipEnabled`
-    ///     — `eligibilityGate = .eligible`, so the orchestrator auto-skips it at
-    ///     98co-padded late-safe bounds. A 9s6q SEGMENT-RECOVERED
-    ///     (non-monotonic) slot keeps `.unanchored` + `.markOnly` — banner only
-    ///     — until playhead-pyq7 validates those boundaries separately.
+    ///   • TIERED BY SKIP GRADE (playhead-qs0d, was blanket MARK-ONLY;
+    ///     playhead-pyq7 widened the tier). A SKIP-GRADE slot records
+    ///     `.rediffByteExact` on both edges and — under
+    ///     `RediffActivation.dayZeroByteExactAutoSkipEnabled` —
+    ///     `eligibilityGate = .eligible`, so the orchestrator auto-skips it at
+    ///     98co-padded late-safe bounds. Skip grade is
+    ///     `RediffSlotOwnership.dayZeroSlotIsSkipGrade`: every STRICT
+    ///     monotonic-clean slot, plus — under
+    ///     `dayZeroSegmentRecoveredAutoSkipEnabled` — every 9s6q
+    ///     SEGMENT-RECOVERED one. With that switch off the recovered arm keeps
+    ///     `.unanchored` + `.markOnly`, which is the qs0d behaviour verbatim.
     /// It does NOT change presence-gating for the lagged path, the chroma differ,
     /// or any non-day-0 flow.
     ///
@@ -12102,6 +12106,7 @@ actor AdDetectionService {
             markCount: Int = 0,
             divergentSlotCount: Int = 0,
             strictMarkCount: Int = 0,
+            segmentRecoveredSkipGradeMarkCount: Int = 0,
             supersededMarkCount: Int = 0
         ) -> RediffDayZeroMintOutcome {
             RediffDayZeroMintOutcome(
@@ -12113,6 +12118,7 @@ actor AdDetectionService {
                 bSidesUnreadable: unreadable,
                 divergentSlotCount: divergentSlotCount,
                 strictMarkCount: strictMarkCount,
+                segmentRecoveredSkipGradeMarkCount: segmentRecoveredSkipGradeMarkCount,
                 supersededMarkCount: supersededMarkCount,
                 byteDiagnostics: byteDiagnostics
             )
@@ -12153,6 +12159,12 @@ actor AdDetectionService {
         )
         var windows: [AdWindow] = []
         var strictMarkCount = 0
+        // playhead-pyq7: the SEPARATE recovered counter. Deliberately not folded
+        // into `strictMarkCount` — that value names the monotonic-clean
+        // acceptance arm and is what the ug9m supersede guard and the rescue
+        // census are stated over. This one names the promotion population, and
+        // it is 0 on every build with the promotion switch off.
+        var segmentRecoveredSkipGradeMarkCount = 0
         // playhead-ug9m: degraded day-0 rows from an EARLIER attempt that a
         // STRICT slot of THIS mint replaces. Keyed by id and carried as the
         // store's `expectedProducerRevisions`, so the retire is validated
@@ -12199,14 +12211,32 @@ actor AdDetectionService {
             // boundary is unknown". The byte differ set BOTH edges of a strict
             // slot; record that.
             //
-            // The anchor stamp is UNCONDITIONAL for strict slots — it is a
+            // The anchor stamp is UNCONDITIONAL for a SKIP-GRADE slot — it is a
             // provenance fact, and it is what `AutoSkipEdgePadding` needs to
             // compute a late-safe window at all. Only the eligibility promotion
             // reads `dayZeroByteExactAutoSkipEnabled`.
-            if strict { strictMarkCount += 1 }
-            let anchor: AutoSkipEdgeAnchor = strict ? .rediffByteExact : .unanchored
+            //
+            // playhead-pyq7: skip grade is no longer the same question as
+            // STRICTNESS. A 9s6q segment-recovered slot is skip-grade too when
+            // `dayZeroSegmentRecoveredAutoSkipEnabled` is on — measured 2026-08-14
+            // (7 phantoms → 0, 2450 s of eaten show → 0.0000 s, no recall lost,
+            // inner edges +0.0002 s against a 0.50 s margin), and 69 % of every
+            // day-0 mark the field has produced is in that population. The two
+            // counters below stay SEPARATE for the reason this repo keeps
+            // re-learning: `strictMarkCount` names the acceptance ARM and
+            // widening it would make one value stand for two different things.
+            let skipGrade = RediffSlotOwnership.dayZeroSlotIsSkipGrade(
+                strict: strict,
+                segmentRecoveredPromotionEnabled: RediffActivation.dayZeroSegmentRecoveredAutoSkipEnabled
+            )
+            if strict {
+                strictMarkCount += 1
+            } else if skipGrade {
+                segmentRecoveredSkipGradeMarkCount += 1
+            }
+            let anchor: AutoSkipEdgeAnchor = skipGrade ? .rediffByteExact : .unanchored
             let gate: SkipEligibilityGate =
-                (strict && RediffActivation.dayZeroByteExactAutoSkipEnabled)
+                (skipGrade && RediffActivation.dayZeroByteExactAutoSkipEnabled)
                     ? .eligible
                     : .markOnly
             windows.append(AdWindow(
@@ -12233,11 +12263,16 @@ actor AdDetectionService {
                 catalogStoreMatchSimilarity: nil,
                 // playhead-qs0d: a STRICT monotonic-clean byte-exact slot
                 // records `.rediffByteExact` on BOTH edges — the byte differ
-                // set both, and refiners never touch a day-0 mark. A 9s6q
-                // SEGMENT-RECOVERED slot keeps the conservative `.unanchored`
-                // pair (and `.markOnly`): playhead-pyq7 owns validating those
-                // boundaries, and until it does, a dropped-run chain has not
-                // earned an anchor claim.
+                // set both, and refiners never touch a day-0 mark.
+                //
+                // playhead-pyq7: a 9s6q SEGMENT-RECOVERED slot records the same
+                // pair, because the validation this comment used to defer to has
+                // been done. What was actually wrong with the recovered arm was
+                // never the EDGE (measured +0.0002 s inner, sign always safe) —
+                // it was a whole-block false positive that playhead-3zxd
+                // removed at its cause. With the promotion switch off it keeps
+                // the conservative `.unanchored` pair and `.markOnly`, and that
+                // is the rollback, not a second code path.
                 startEdgeAnchor: anchor.rawValue,
                 endEdgeAnchor: anchor.rawValue
             ))
@@ -12264,12 +12299,17 @@ actor AdDetectionService {
             failed.detail = String(describing: error)
             return failed
         }
-        logger.info("[xsdz.36.4] day-0 byte-exact minted \(windows.count) banner(s) asset=\(analysisAssetId, privacy: .public) — \(strictMarkCount) STRICT byte-exact (anchored\(RediffActivation.dayZeroByteExactAutoSkipEnabled ? ", auto-skip eligible" : ", mark-only")), \(windows.count - strictMarkCount) segment-recovered (unanchored, mark-only), \(superseded.count) degraded day-0 row(s) superseded [ug9m]")
+        let recoveredMarkOnlyCount = windows.count - strictMarkCount - segmentRecoveredSkipGradeMarkCount
+        let skipGradeDisposition = RediffActivation.dayZeroByteExactAutoSkipEnabled
+            ? "anchored, auto-skip eligible"
+            : "anchored, mark-only"
+        logger.info("[xsdz.36.4] day-0 byte-exact minted \(windows.count) banner(s) asset=\(analysisAssetId, privacy: .public) — \(strictMarkCount) STRICT byte-exact (\(skipGradeDisposition)), \(segmentRecoveredSkipGradeMarkCount) segment-recovered PROMOTED (\(skipGradeDisposition)) [pyq7], \(recoveredMarkOnlyCount) segment-recovered (unanchored, mark-only), \(superseded.count) degraded day-0 row(s) superseded [ug9m]")
         return outcome(
             .marked,
             markCount: windows.count,
             divergentSlotCount: unioned.count,
             strictMarkCount: strictMarkCount,
+            segmentRecoveredSkipGradeMarkCount: segmentRecoveredSkipGradeMarkCount,
             supersededMarkCount: superseded.count
         )
     }

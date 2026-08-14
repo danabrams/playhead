@@ -311,11 +311,16 @@ struct PostRollGuardByteAnchoredExemptionTests {
 
 /// The acceptance asks that a SEGMENT-RECOVERED tail slot still demote. It does,
 /// and the reason is structural rather than a threshold: such a slot never
-/// acquires `.rediffSlot` width provenance on the path the guard sits on, and on
-/// the path where it CAN be minted it is stamped `.unanchored` + `.markOnly`
-/// before any mapper sees it. These tests pin both halves, because "it demotes"
-/// is only trustworthy if the reason it demotes is a property of the producer
-/// rather than an accident of the fixture.
+/// acquires `.rediffSlot` width provenance on the path the guard sits on,
+/// because the LAGGED byte gate rejects a non-monotonic alignment wholesale.
+///
+/// playhead-pyq7 CHANGED THE OTHER HALF OF THIS SENTENCE and it is worth being
+/// exact about which. It used to add "and on the path where it CAN be minted it
+/// is stamped `.unanchored` + `.markOnly` before any mapper sees it". A day-0
+/// recovered slot is now stamped skip-grade — but a day-0 mark never enters
+/// `DecisionMapper` at all (the mint writes `ad_windows` directly), so it was
+/// never this guard that held it, and a STRICT day-0 tail has auto-skipped since
+/// playhead-qs0d. The load-bearing half is the first one, and it is unchanged.
 @Suite("Segment-recovered slots never reach the byte-anchored exemption (playhead-sik9)")
 struct PostRollGuardSegmentRecoveredReachabilityTests {
 
@@ -407,9 +412,10 @@ struct PostRollGuardSegmentRecoveredReachabilityTests {
 
     /// The DAY-0 path, which DOES opt into segment recovery. Its own
     /// classification (`strictByteExactMask`) is what separates the two
-    /// certainties, and a slot no monotonic-clean persona reproduced is not
-    /// strict — so the mint stamps it `.unanchored` and `.markOnly`
-    /// (`AdDetectionService.mintByteExactDayZeroMarks`), never `.eligible`.
+    /// ACCEPTANCE ARMS, and a slot no monotonic-clean persona reproduced is not
+    /// strict. What the mint then STAMPS on it is playhead-pyq7's question, not
+    /// this suite's — the classification pinned here is the input to that
+    /// decision and is unchanged by it.
     @Test("a day-0 slot no strict persona reproduced is classified non-strict")
     func dayZeroSegmentRecoveredSlotIsNotStrict() {
         let recovered = [[RediffSlotOwnership.PlayedSlot(
@@ -423,7 +429,7 @@ struct PostRollGuardSegmentRecoveredReachabilityTests {
             unioned: unioned, strictPerBSideSlots: []
         )
         #expect(mask == [false],
-                "no monotonic-clean persona reproduced this tail slot → not strict → unanchored + markOnly")
+                "no monotonic-clean persona reproduced this tail slot → the 9s6q recovery arm produced it")
     }
 }
 

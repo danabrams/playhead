@@ -325,13 +325,22 @@ enum AdPodContinuation {
     ///    served DIFFERENT BYTES over the range; the row's confidence is 1.00 by
     ///    construction. That is the opposite of a coarse proposal.
     ///
-    ///  • BOTH edge anchors `.rediffByteExact` — the STRICT (monotonic-clean)
-    ///    acceptance arm. A playhead-9s6q SEGMENT-RECOVERED slot keeps
-    ///    `.unanchored` precisely because its chain dropped runs to reach an
-    ///    A-timeline mapping, and playhead-pyq7 owns validating those boundaries.
+    ///  • BOTH edge anchors `.rediffByteExact` — the day-0 SKIP-GRADE stamp.
     ///    A pod walk starts AT a seed edge and steps OUTWARD, so an unvalidated
     ///    edge is the one thing that could put the walk's first step inside the
     ///    show rather than at the pod's rim. One anchored edge is not two.
+    ///
+    ///    WHICH POPULATION THAT IS CHANGED UNDER US (playhead-pyq7, 2026-08-14),
+    ///    and the widening is intended rather than incidental: it used to be the
+    ///    STRICT (monotonic-clean) arm alone, because a 9s6q SEGMENT-RECOVERED
+    ///    slot's chain dropped runs to reach its A-timeline mapping. pyq7
+    ///    measured that mapping — inner edges +0.0002 s, sign always safe — and
+    ///    promoted it, so recovered slots now seed a walk too. This carve reads
+    ///    the ANCHOR PAIR rather than the arm, which is why it needed no edit to
+    ///    follow the decision, and it is exactly why the pair is the thing to
+    ///    read: one place decides skip grade and everything downstream inherits
+    ///    it. Nothing else moves — a continuation mark is still mark-only /
+    ///    candidate / unanchored whatever seeded it.
     ///
     ///    KNOWN AND ACCEPTED CONSEQUENCE: day-0 rows minted BEFORE playhead-qs0d
     ///    (2026-07-31) carry `.unanchored` because no anchor was RECORDED, not
