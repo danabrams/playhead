@@ -22,16 +22,23 @@
 # counts ONLY the Swift Testing half. A pass can print that line and still end
 # in `** TEST FAILED **` — it does today; see playhead-1och.
 #
-# WHAT IS RED, AND WHY IT IS NOT THE TESTS' FAULT (playhead-1och, 2026-08-13).
+# WHAT WAS RED, AND WHY IT WAS NOT THE TESTS' FAULT (playhead-1och diagnosed,
+# playhead-xul6 fixed, 2026-08-13). This pass is GREEN as of playhead-xul6.
 # `PlayheadRuntimeLaunchPerfTests.testInitFitsLaunchBudget` and
 # `PlayheadRuntimeMainActorFreedomTests.testMainActorIsNotHeldDuringRuntimeInit`
-# both fail, and they are the same defect measured from two sides:
-# `CapabilitiesService()` — one line of `PlayheadRuntime.init` — holds the MAIN
-# ACTOR 0.47-2.13 s in a synchronous `SystemLanguageModel` probe. Filed as
-# playhead-xul6 (P1). The 250 ms budget was deliberately NOT widened: on the
-# constructions that miss the probe init reads 57-68 ms, so the budget is met
-# with 4x headroom and these two tests are the only things that can see the
-# block. Do not make this pass green by moving either threshold.
+# both failed, and they were the same defect measured from two sides:
+# `CapabilitiesService()` — one line of `PlayheadRuntime.init` — held the MAIN
+# ACTOR 0.47-2.13 s in a synchronous `SystemLanguageModel` read. The fix took
+# that read out of the launch-time snapshot entirely; measured over three
+# consecutive passes afterwards, MainActorFreedom max = 6.5 / 3.4 / 2.9 ms and
+# LaunchPerf median = 2.0 / 2.3 / 2.1 ms.
+#
+# NEITHER THRESHOLD MOVED, and neither should. The 250 ms budget was
+# deliberately NOT widened while the pass was red: on the constructions that
+# missed the probe init read 57-68 ms, so the budget was being met with 4x
+# headroom and these two tests were the only things that could see the block.
+# Do not make this pass green by moving a threshold — that is what would have
+# deleted the only evidence of a 2-second launch stall.
 #
 # Env overrides:
 #   PLAYHEAD_DEST     xcodebuild -destination (default: iPhone 17 — must be a
