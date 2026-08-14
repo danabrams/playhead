@@ -811,7 +811,7 @@ struct PersistedStateInvariantReporterEmissionTests {
             $0.description == "invariant=stranded_running_backfill_job"
                 + " violations=0 population=9 witnesses=0/0"
         })
-        // Five witnesses in total: one cursor, four windows, two retry rows.
+        // Seven witnesses in total: one cursor, two retry rows, four windows.
         let witnessed = violations.filter { $0.code == .persistedStateInvariantViolation }
         #expect(witnessed.count == 7)
         #expect(witnessed.allSatisfy { $0.description.hasPrefix("invariant=") })
@@ -1094,5 +1094,58 @@ struct PersistedStateSnapshotStoreTests {
         #expect(
             try #require(PersistedStateInvariantEvaluator.evaluate(snapshot)
                 .finding(.eligibleAutoWindowNeverOffered)).violations == 1)
+    }
+
+    /// THE LAUNCH COST, MEASURED. The reporter is AWAITED in the bootstrap
+    /// chain — that ordering is the whole bead — so a cost nobody measured is a
+    /// cost nobody can defend. This seeds a library an order of magnitude
+    /// larger than the 2026-08-14 device (9 assets / 533 `passA` rows) and
+    /// prints what one snapshot read costs.
+    ///
+    /// **No wall-clock ASSERTION, deliberately.** This box runs ~8,000 tests
+    /// against 16 GB, so an absolute budget here would measure machine load
+    /// while being read as code correctness — this repo's standing defect
+    /// class, living in the harness. The assertion is on the RESULT; the
+    /// duration is printed so the order of magnitude is on the record and can
+    /// be re-measured by anyone who doubts it.
+    @Test("Launch cost: one snapshot read over a 90-asset / 5,400-row library")
+    func launchCostOverALargeLibrary() async throws {
+        let (store, _) = try makeStore()
+        try await store.migrate()
+        let assetCount = 90
+        let scansPerAsset = 60
+        for assetIndex in 0..<assetCount {
+            let assetId = String(format: "asset-%03d", assetIndex)
+            try await store.insertAsset(
+                makeAsset(id: assetId, state: "queued", fast: 3_600, final: 3_600))
+            for scanIndex in 0..<scansPerAsset {
+                let start = Double(scanIndex) * 60
+                try await store.insertSemanticScanResult(
+                    makeScan(assetId: assetId, index: scanIndex, start: start, end: start + 59))
+            }
+            try await store.insertBackfillJob(makeBackfillJob(
+                jobId: "job-\(assetId)",
+                analysisAssetId: assetId,
+                progressCursor: BackfillProgressCursor(
+                    processedPhaseCount: 0,
+                    lastProcessedUpperBoundSec: EpisodeSeconds(3_540)),
+                retryCount: 3,
+                status: .failed))
+        }
+
+        let started = ContinuousClock.now
+        let snapshot = try await store.fetchPersistedStateSnapshot()
+        let elapsed = ContinuousClock.now - started
+
+        #expect(snapshot.assets.count == assetCount)
+        #expect(snapshot.backfillJobs.count == assetCount)
+        // 60 windows of 59 s separated by 1 s gaps: every gap bridges, so the
+        // supported prefix is the last window's end for every asset. If the
+        // walk ever stopped early this would read 59.
+        #expect(snapshot.assets.allSatisfy {
+            abs(($0.supportedScannedPrefixSec ?? -1) - 3_599) < 0.001
+        })
+        print("[playhead-dgly] fetchPersistedStateSnapshot over \(assetCount) assets / "
+              + "\(assetCount * scansPerAsset) passA rows: \(elapsed)")
     }
 }
