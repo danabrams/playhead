@@ -63,7 +63,10 @@ struct AdWindowEdgeAnchorsV29MigrationTests {
         // columns probed below are unchanged by any of it. Pinned to the
         // LITERAL: comparing against `currentSchemaVersion` would pass for
         // every value.
-        #expect(AnalysisStore.currentSchemaVersion == 49)
+        // …and then 49 → 50 (playhead-e6d3), which UPDATEs
+        // `backfill_jobs.retryCount` and names no other table, so it does not
+        // read or write `ad_windows` either.
+        #expect(AnalysisStore.currentSchemaVersion == 50)
         #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "startEdgeAnchor"))
         #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "endEdgeAnchor"))
     }

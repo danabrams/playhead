@@ -1652,7 +1652,10 @@ struct FastTranscriptCoverageV37MigrationTests {
         // exercises derives `fastTranscriptCoverageEndTime` from
         // `transcript_chunks`. V49 writes only `podcast_profiles` and a new
         // table, so it cannot move a coverage watermark in either direction.
-        #expect(AnalysisStore.currentSchemaVersion == 49)
+        // …and 49 → 50 (playhead-e6d3), whose only statement UPDATEs
+        // `backfill_jobs.retryCount`, so it cannot move a coverage watermark in
+        // either direction either.
+        #expect(AnalysisStore.currentSchemaVersion == 50)
     }
 
     /// THE MIGRATION EVIDENCE. An asset already on disk — written by a

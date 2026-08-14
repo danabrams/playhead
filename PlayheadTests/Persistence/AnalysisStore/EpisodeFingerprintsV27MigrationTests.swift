@@ -83,7 +83,10 @@ struct EpisodeFingerprintsV27MigrationTests {
         // PIN THE LITERAL. Writing this as `== AnalysisStore.currentSchemaVersion`
         // would make it pass for every possible value and destroy the canary;
         // its whole job is to fail when head moves so the ladder gets read.
-        #expect(AnalysisStore.currentSchemaVersion == 49)
+        // …and then 49 → 50 (playhead-e6d3: one fresh retry budget for the
+        // coverage-lane rows the flat under-coverage rule retired). It names
+        // only `backfill_jobs`; `episode_fingerprints` is untouched by either.
+        #expect(AnalysisStore.currentSchemaVersion == 50)
         #expect(try probeTableExists(in: dir, table: "episode_fingerprints"))
     }
 

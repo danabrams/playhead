@@ -169,7 +169,11 @@ struct SemanticScanRunAttributionTests {
         // `UPDATE podcast_profiles SET observationCount = 0`; it writes no
         // `semantic_scan_results` column and back-fills nothing, so the
         // no-backfill proof below still has something to prove.
-        #expect(AnalysisStore.currentSchemaVersion == 49)
+        // …and the same reading holds for 49 → 50 (playhead-e6d3), whose only
+        // data statement is an UPDATE of `backfill_jobs.retryCount`: it writes
+        // no `semantic_scan_results` column and back-fills nothing, so the
+        // no-backfill proof below still has something to prove.
+        #expect(AnalysisStore.currentSchemaVersion == 50)
         for column in ["createdAt", "scenePhase", "runCorrelationId"] {
             #expect(
                 try probeColumnExists(in: dir, table: "semantic_scan_results", column: column),

@@ -110,7 +110,12 @@ struct RediffDayZeroRetryClaimV46MigrationTests {
         // `podcast_profiles.observationCount`. `rediff_day_zero_attempts` and
         // its retry-claim pair are not referenced by either statement, so the
         // column probe below is unaffected.
-        #expect(AnalysisStore.currentSchemaVersion == 49)
+        // 49 → 50 read for this rung (playhead-e6d3): V50 UPDATEs
+        // `backfill_jobs.retryCount` on rows retired by the flat under-coverage
+        // rule. `rediff_day_zero_attempts` and its retry-claim pair are named by
+        // neither statement — note that "retry claim" here and "retry budget"
+        // there are different quantities on different tables.
+        #expect(AnalysisStore.currentSchemaVersion == 50)
         #expect(try columnsPresent(in: dir))
     }
 
