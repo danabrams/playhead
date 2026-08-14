@@ -55,6 +55,18 @@ struct BackfillCoarseCheckpointTests {
     /// line count.
     private static let segmentSeconds = 30.0
 
+    /// playhead-wogi: the RESUME-narrowed spans the checkpoint now demands, so it
+    /// can refuse to publish a bound across a hole in the run's own audio.
+    ///
+    /// Every fixture here is contiguous 30 s segments, so the interior-hole cap
+    /// is a no-op throughout and each case keeps testing the checkpoint property
+    /// it was written for. `CoarseCoverageWalkInteriorHoleTests` pins the cap.
+    private func plannedSpans(
+        of inputs: BackfillJobRunner.AssetInputs
+    ) -> [BackfillJobRunner.PlannedSegmentSpan] {
+        inputs.segments.map(BackfillJobRunner.PlannedSegmentSpan.init)
+    }
+
     private func makeInputs(
         assetId: String,
         lineCount: Int
@@ -1031,6 +1043,7 @@ struct BackfillCoarseCheckpointTests {
             bankedSnapshot(windows: 3, plans: 4),
             box: box,
             inputs: inputs,
+            plannedAudioSpans: plannedSpans(of: inputs),
             jobId: jobId,
             jobPhase: .fullEpisodeScan,
             priorCursor: nil,
@@ -1075,6 +1088,7 @@ struct BackfillCoarseCheckpointTests {
             bankedSnapshot(windows: 3, plans: 4),
             box: box,
             inputs: inputs,
+            plannedAudioSpans: plannedSpans(of: inputs),
             jobId: jobId,
             jobPhase: .fullEpisodeScan,
             priorCursor: nil,
@@ -1107,6 +1121,7 @@ struct BackfillCoarseCheckpointTests {
             bankedSnapshot(windows: 3, plans: 4),
             box: CoarseCheckpointBox(),
             inputs: makeInputs(assetId: liveAssetId, lineCount: 8),
+            plannedAudioSpans: plannedSpans(of: makeInputs(assetId: liveAssetId, lineCount: 8)),
             jobId: liveJobId,
             jobPhase: .fullEpisodeScan,
             priorCursor: nil,
@@ -1136,6 +1151,7 @@ struct BackfillCoarseCheckpointTests {
             bankedSnapshot(windows: 3, plans: 4),
             box: box,
             inputs: makeInputs(assetId: assetId, lineCount: 8),
+            plannedAudioSpans: plannedSpans(of: makeInputs(assetId: assetId, lineCount: 8)),
             jobId: jobId,
             jobPhase: .fullEpisodeScan,
             priorCursor: nil,
@@ -1290,6 +1306,7 @@ struct BackfillCoarseCheckpointTests {
                 FMCoarseBankedWindows(plans: plans, windows: windows, failedWindows: failedWindows),
                 box: box,
                 inputs: makeInputs(assetId: assetId, lineCount: 8),
+                plannedAudioSpans: plannedSpans(of: makeInputs(assetId: assetId, lineCount: 8)),
                 jobId: jobId,
                 jobPhase: .fullEpisodeScan,
                 priorCursor: nil,
@@ -1373,6 +1390,7 @@ struct BackfillCoarseCheckpointTests {
             bankedSnapshot(windows: 1, plans: 4),
             box: CoarseCheckpointBox(),
             inputs: makeInputs(assetId: assetId, lineCount: 8),
+            plannedAudioSpans: plannedSpans(of: makeInputs(assetId: assetId, lineCount: 8)),
             jobId: jobId,
             jobPhase: .fullEpisodeScan,
             priorCursor: BackfillProgressCursor(
@@ -1416,6 +1434,7 @@ struct BackfillCoarseCheckpointTests {
             bankedSnapshot(windows: 2, plans: 4),
             box: CoarseCheckpointBox(),
             inputs: makeInputs(assetId: assetId, lineCount: 8),
+            plannedAudioSpans: plannedSpans(of: makeInputs(assetId: assetId, lineCount: 8)),
             jobId: jobId,
             // Deliberately NOT the pair every other test uses.
             jobPhase: .scanLikelyAdSlots,
@@ -2128,12 +2147,31 @@ struct CoarseCoverageWalkTests {
         )
     }
 
+    /// playhead-wogi: the segment list these plans were sliced from, which the
+    /// walk now demands so it can refuse to publish a bound across a hole in the
+    /// run's own audio.
+    ///
+    /// Modelling one span per plan is exact for the property these cases pin:
+    /// `planPassA` takes a plan's bounds as the min/max over its own segments,
+    /// so the union of the plans IS the union of the segments. Every fixture in
+    /// this suite is contiguous, so the interior-hole cap is a no-op throughout
+    /// and each case keeps testing the plan-side rule it was written for.
+    /// `CoarseCoverageWalkInteriorHoleTests` is where the cap itself is pinned.
+    private func plannedSpans(
+        of plans: [CoarsePassWindowPlan]
+    ) -> [BackfillJobRunner.PlannedSegmentSpan] {
+        plans.map {
+            BackfillJobRunner.PlannedSegmentSpan(startTime: $0.startTime, endTime: $0.endTime)
+        }
+    }
+
     @Test("an unbroken run of successes advances the cursor to its end")
     func unbrokenPrefixAdvances() {
         let walk = BackfillJobRunner.coarseCoverageWalk(
             plans: (0..<4).map(plan),
             windows: (0..<3).map(window),
-            failedWindows: []
+            failedWindows: [],
+            plannedSegments: plannedSpans(of: (0..<4).map(plan))
         )
         #expect(walk.contiguousUpperBoundSec == 90.0)
         #expect(walk.fullyCovered == false)
@@ -2145,7 +2183,8 @@ struct CoarseCoverageWalkTests {
         let walk = BackfillJobRunner.coarseCoverageWalk(
             plans: (0..<3).map(plan),
             windows: (0..<3).map(window),
-            failedWindows: []
+            failedWindows: [],
+            plannedSegments: plannedSpans(of: (0..<3).map(plan))
         )
         #expect(walk.fullyCovered)
         #expect(walk.contiguousUpperBoundSec == 90.0)
@@ -2159,7 +2198,8 @@ struct CoarseCoverageWalkTests {
         let walk = BackfillJobRunner.coarseCoverageWalk(
             plans: (0..<4).map(plan),
             windows: [window(0), window(2), window(3)],
-            failedWindows: [failure(1)]
+            failedWindows: [failure(1)],
+            plannedSegments: plannedSpans(of: (0..<4).map(plan))
         )
         #expect(walk.contiguousUpperBoundSec == 30.0)
         #expect(walk.fullyCovered == false)
@@ -2173,7 +2213,8 @@ struct CoarseCoverageWalkTests {
         let walk = BackfillJobRunner.coarseCoverageWalk(
             plans: (0..<3).map(plan),
             windows: [window(0), window(1)],
-            failedWindows: [failure(1)]
+            failedWindows: [failure(1)],
+            plannedSegments: plannedSpans(of: (0..<3).map(plan))
         )
         #expect(walk.contiguousUpperBoundSec == 30.0)
         #expect(walk.fullyCovered == false)
@@ -2189,7 +2230,8 @@ struct CoarseCoverageWalkTests {
         let walk = BackfillJobRunner.coarseCoverageWalk(
             plans: [],
             windows: [],
-            failedWindows: []
+            failedWindows: [],
+            plannedSegments: plannedSpans(of: [])
         )
         #expect(walk.fullyCovered == false)
         #expect(walk.contiguousUpperBoundSec == nil)
@@ -2200,7 +2242,8 @@ struct CoarseCoverageWalkTests {
         let walk = BackfillJobRunner.coarseCoverageWalk(
             plans: (0..<3).map(plan),
             windows: [window(1), window(2)],
-            failedWindows: [failure(0)]
+            failedWindows: [failure(0)],
+            plannedSegments: plannedSpans(of: (0..<3).map(plan))
         )
         #expect(walk.contiguousUpperBoundSec == nil)
     }
@@ -2251,6 +2294,7 @@ struct CoarseCoverageWalkTests {
             plans: plans,
             windows: [window(0), firstHalf],
             failedWindows: [],
+            plannedSegments: plannedSpans(of: plans),
             unpersistedWindows: [secondHalf]
         )
         #expect(straddled.contiguousUpperBoundSec == 30.0)
@@ -2267,7 +2311,8 @@ struct CoarseCoverageWalkTests {
         let whole = BackfillJobRunner.coarseCoverageWalk(
             plans: plans,
             windows: [window(0), firstHalf, secondHalf],
-            failedWindows: []
+            failedWindows: [],
+            plannedSegments: plannedSpans(of: plans)
         )
         #expect(whole.contiguousUpperBoundSec == 90.0)
         #expect(whole.fullyCovered)
@@ -2326,7 +2371,8 @@ struct CoarseCoverageWalkTests {
         let walk = BackfillJobRunner.coarseCoverageWalk(
             plans: [covered, uncovered],
             windows: [coveredWindow],
-            failedWindows: []
+            failedWindows: [],
+            plannedSegments: plannedSpans(of: [covered, uncovered])
         )
         #expect(walk.fullyCovered == false)
         #expect(walk.contiguousUpperBoundSec == 65.0)
@@ -2367,6 +2413,7 @@ struct CoarseCoverageWalkTests {
             plans: plans,
             windows: [window(0), window(2)],
             failedWindows: [],
+            plannedSegments: plannedSpans(of: plans),
             unpersistedWindows: [window(1)]
         )
         #expect(walk.contiguousUpperBoundSec == nil)
@@ -2406,7 +2453,8 @@ struct CoarseCoverageWalkTests {
         // Everything landed: the split plan is covered and the cursor clears it.
         let allDurable = BackfillJobRunner.coarseCheckpointWalk(
             banked: banked,
-            durableWindowCount: 3
+            durableWindowCount: 3,
+            plannedSegments: plannedSpans(of: banked.plans)
         )
         #expect(allDurable.contiguousUpperBoundSec == 90.0)
         #expect(allDurable.unpersistedPlanIndices.isEmpty)
@@ -2415,7 +2463,8 @@ struct CoarseCoverageWalkTests {
         // so — the prefix alone still shows a window for plan 1.
         let straddled = BackfillJobRunner.coarseCheckpointWalk(
             banked: banked,
-            durableWindowCount: 2
+            durableWindowCount: 2,
+            plannedSegments: plannedSpans(of: banked.plans)
         )
         #expect(straddled.contiguousUpperBoundSec == 30.0)
         #expect(straddled.unpersistedPlanIndices == [1])
@@ -2424,7 +2473,8 @@ struct CoarseCoverageWalkTests {
         // And nothing at all landed: no cursor, and the PREFIX is what says so.
         let nothingDurable = BackfillJobRunner.coarseCheckpointWalk(
             banked: banked,
-            durableWindowCount: 0
+            durableWindowCount: 0,
+            plannedSegments: plannedSpans(of: banked.plans)
         )
         #expect(nothingDurable.contiguousUpperBoundSec == nil)
         #expect(nothingDurable.succeededPlanIndices.isEmpty)
@@ -2468,7 +2518,8 @@ struct CoarseCoverageWalkTests {
         let single = BackfillJobRunner.coarseCoverageWalk(
             plans: lonePlan,
             windows: [reflessAgainstOnePlan],
-            failedWindows: []
+            failedWindows: [],
+            plannedSegments: plannedSpans(of: lonePlan)
         )
         #expect(
             single.succeededPlanIndices.isEmpty,
@@ -2491,7 +2542,8 @@ struct CoarseCoverageWalkTests {
         let walk = BackfillJobRunner.coarseCoverageWalk(
             plans: plans,
             windows: [refless],
-            failedWindows: []
+            failedWindows: [],
+            plannedSegments: plannedSpans(of: plans)
         )
         #expect(walk.succeededPlanIndices.isEmpty, "an empty needle was credited to a plan")
         #expect(walk.contiguousUpperBoundSec == nil, "the cursor advanced on an outcome that says nothing")
@@ -2509,7 +2561,8 @@ struct CoarseCoverageWalkTests {
         let withFailure = BackfillJobRunner.coarseCoverageWalk(
             plans: plans,
             windows: [window(0), window(1)],
-            failedWindows: [reflessFailure]
+            failedWindows: [reflessFailure],
+            plannedSegments: plannedSpans(of: plans)
         )
         #expect(withFailure.failedPlanIndices == [2], "a refless failure lost its plan")
         #expect(withFailure.contiguousUpperBoundSec == 60.0)
@@ -2525,12 +2578,14 @@ struct CoarseCoverageWalkTests {
         let forward = BackfillJobRunner.coarseCoverageWalk(
             plans: plans,
             windows: [window(0), window(1), window(2)],
-            failedWindows: []
+            failedWindows: [],
+            plannedSegments: plannedSpans(of: plans)
         )
         let shuffled = BackfillJobRunner.coarseCoverageWalk(
             plans: plans,
             windows: [window(2), window(0), window(1)],
-            failedWindows: []
+            failedWindows: [],
+            plannedSegments: plannedSpans(of: plans)
         )
         #expect(forward == shuffled)
     }
@@ -2592,7 +2647,8 @@ struct CoarseCoverageWalkTests {
         let walk = BackfillJobRunner.coarseCoverageWalk(
             plans: shared,
             windows: [subWindow],
-            failedWindows: []
+            failedWindows: [],
+            plannedSegments: plannedSpans(of: shared)
         )
         #expect(
             walk.succeededPlanIndices.isEmpty,
@@ -2625,7 +2681,8 @@ struct CoarseCoverageWalkTests {
         let withFailure = BackfillJobRunner.coarseCoverageWalk(
             plans: shared,
             windows: [wholePlanZero],
-            failedWindows: [ambiguousFailure]
+            failedWindows: [ambiguousFailure],
+            plannedSegments: plannedSpans(of: shared)
         )
         #expect(withFailure.failedPlanIndices == [1], "an ambiguous failure disqualified the wrong plan")
         #expect(withFailure.contiguousUpperBoundSec == nil)
@@ -2650,6 +2707,7 @@ struct CoarseCoverageWalkTests {
             plans: shared,
             windows: [unambiguousForPlanOne],
             failedWindows: [],
+            plannedSegments: plannedSpans(of: shared),
             unpersistedWindows: [subWindow]
         )
         #expect(
@@ -2704,9 +2762,238 @@ struct CoarseCoverageWalkTests {
         let walk = BackfillJobRunner.coarseCoverageWalk(
             plans: plans,
             windows: [subWindow],
-            failedWindows: []
+            failedWindows: [],
+            plannedSegments: plannedSpans(of: plans)
         )
         #expect(walk.succeededPlanIndices == [0], "a unique subset match stopped crediting its plan")
         #expect(walk.contiguousUpperBoundSec == 60.0)
+    }
+}
+
+/// playhead-wogi: the coarse cursor may not stride over a hole in the run's own
+/// audio, however cleanly every plan it was handed was covered.
+///
+/// **The field witness, and it is not a corner case — it is 91 % of an
+/// episode.** Asset 3C2FFE10 on the 2026-08-14 device pull (`db-pull10`), a
+/// 7,999 s episode. Its second attempt was handed a transcript covering
+/// `[0.78, 659.46]` and `[7939.14, 7998.72]` and nothing between; the fast pass
+/// had not yet landed the middle. `planPassA` partitions whatever list it is
+/// handed, so the two segments either side of the 7,280 s hole are ADJACENT by
+/// `segmentIndex`. Both plans were covered, `fullyCovered` read true, and the
+/// row published **7,998.72** on a 7,999 s episode.
+///
+/// `narrowedForResume` is `segments.filter { $0.endTime > cursor }` against the
+/// transcript AS IT IS THEN — so when the 8,839 fast chunks spanning
+/// `[150.06, 7914.12]` did land, every one of them was already below the cursor.
+/// The row's measured `adScanFraction` is 0.0885 against a transcript ceiling of
+/// 0.9960, and the pull carries seventeen `noWork:emptySegments` sentinels
+/// across seven assets: attempts that held an admission ticket, burned a slot in
+/// a granted background window, and could not have scanned anything.
+///
+/// playhead-5pyq's head rule (via `EpisodeSeconds.promoting`) does not fire
+/// here, and correctly so: 584.28 is within the bridge tolerance of the prior
+/// cursor 583.74, so this run really did begin at the head. "Began at the head"
+/// was always a NECESSARY condition; these cases pin the sufficient one.
+@Suite("playhead-wogi: the coarse cursor stops at a hole in the run's own audio")
+struct CoarseCoverageWalkInteriorHoleTests {
+
+    private func span(_ start: Double, _ end: Double) -> BackfillJobRunner.PlannedSegmentSpan {
+        BackfillJobRunner.PlannedSegmentSpan(startTime: start, endTime: end)
+    }
+
+    private func plan(
+        _ index: Int,
+        _ start: Double,
+        _ end: Double,
+        refs: [Int]? = nil
+    ) -> CoarsePassWindowPlan {
+        CoarsePassWindowPlan(
+            windowIndex: index,
+            lineRefs: refs ?? [index],
+            prompt: "prompt-\(index)",
+            promptTokenCount: 10,
+            startTime: start,
+            endTime: end,
+            transcriptQuality: .good
+        )
+    }
+
+    private func window(
+        _ index: Int,
+        _ start: Double,
+        _ end: Double,
+        refs: [Int]? = nil
+    ) -> FMCoarseWindowOutput {
+        FMCoarseWindowOutput(
+            windowIndex: index,
+            lineRefs: refs ?? [index],
+            startTime: start,
+            endTime: end,
+            transcriptQuality: .good,
+            screening: CoarseScreeningSchema(disposition: .noAds, support: nil),
+            latencyMillis: 1.0
+        )
+    }
+
+    // MARK: - The witness
+
+    @Test("THE 3C2FFE10 CASE — two covered plans either side of a 7,280 s hole publish the FIRST plan's end, not the second's")
+    func theDeviceWitnessStopsAtTheHole() {
+        let plans = [plan(0, 584.28, 659.46), plan(1, 7939.14, 7998.72)]
+        let walk = BackfillJobRunner.coarseCoverageWalk(
+            plans: plans,
+            windows: [window(0, 584.28, 659.46), window(1, 7939.14, 7998.72)],
+            failedWindows: [],
+            plannedSegments: [span(584.28, 659.46), span(7939.14, 7998.72)]
+        )
+        // Every plan was covered — that half of the walk is unchanged, and it is
+        // exactly why no plan-side guard could ever have fired here.
+        #expect(walk.fullyCovered)
+        #expect(walk.succeededPlanIndices == [0, 1])
+        #expect(walk.failedPlanIndices.isEmpty)
+
+        #expect(
+            walk.contiguousUpperBoundSec == PlanListSeconds(659.46),
+            "the cursor claimed \(String(describing: walk.contiguousUpperBoundSec)) — 7,280 s of it is audio no plan ever held"
+        )
+
+        // The consumer's own rule, restated over the fast chunks that landed
+        // AFTER this bound was written. Every one of them must survive the
+        // resume; under the shipped 7,998.72 not one of them does.
+        let cursor = walk.contiguousUpperBoundSec?.rawValue ?? 0
+        for lateSegmentEnd in [3_000.0, 7_914.12] {
+            #expect(
+                lateSegmentEnd > cursor,
+                "a resume at cursor \(cursor) deletes the fast chunk ending at \(lateSegmentEnd)"
+            )
+        }
+    }
+
+    /// The same hole with the two sides packed into ONE plan — which is what the
+    /// token budget produces whenever both sides fit a single prompt, and is
+    /// therefore a coin flip of the packer rather than a different defect.
+    ///
+    /// This is the case a rule written over PLAN BOUNDARIES cannot see: there is
+    /// no boundary. It is asserted separately because a plan-boundary
+    /// implementation passes the case above and fails this one.
+    @Test("a hole INSIDE a single covered plan stops the cursor too")
+    func aHoleInsideOnePlanStopsTheCursor() {
+        let onePlan = [plan(0, 584.28, 7998.72, refs: [0, 1])]
+        let walk = BackfillJobRunner.coarseCoverageWalk(
+            plans: onePlan,
+            windows: [window(0, 584.28, 7998.72, refs: [0, 1])],
+            failedWindows: [],
+            plannedSegments: [span(584.28, 659.46), span(7939.14, 7998.72)]
+        )
+        #expect(walk.fullyCovered)
+        #expect(
+            walk.contiguousUpperBoundSec == PlanListSeconds(659.46),
+            "one plan spanning the hole published \(String(describing: walk.contiguousUpperBoundSec))"
+        )
+    }
+
+    // MARK: - The other direction: the rule must not fire on healthy assets
+
+    /// 561CEF5B's real shape from the same pull — a 31.98 s hole between
+    /// `[0, 1860]` and `[1891.98, 1952.16]`, an episode scanned to 0.9766 of a
+    /// 0.9836 ceiling. Its cursor of 1,952.16 is HONEST and must not move.
+    ///
+    /// This is the case that decides the CONSTANT. At
+    /// ``AnalysisCoverageMath/adScanBridgeableGapSec`` (5 s) this fixture is
+    /// capped at 1,860 and the asset re-scans 92 s it already read; replayed
+    /// over the whole pull the 5 s rule lowers THREE cursors, two of them
+    /// honest, and repairs the witness above to 125.28 instead of 659.46.
+    @Test("a hole narrower than the rescan threshold does not move the cursor — 561CEF5B stays whole")
+    func aNarrowHoleDoesNotCapTheCursor() {
+        let plans = [plan(0, 0, 1_860), plan(1, 1_891.98, 1_952.16)]
+        let walk = BackfillJobRunner.coarseCoverageWalk(
+            plans: plans,
+            windows: [window(0, 0, 1_860), window(1, 1_891.98, 1_952.16)],
+            failedWindows: [],
+            plannedSegments: [span(0, 1_860), span(1_891.98, 1_952.16)]
+        )
+        #expect(walk.contiguousUpperBoundSec == PlanListSeconds(1_952.16))
+    }
+
+    /// The two constants are not interchangeable, and the rule reads the one
+    /// that answers "is this hole worth paying FM wall-clock to re-scan?".
+    ///
+    /// Pinned as an ordering rather than as two literals so it survives a change
+    /// to either value: a gap strictly between them must NOT cap. Swapping the
+    /// constants at the call site makes this fail while every other case in this
+    /// suite still passes.
+    @Test("the threshold is the RESCAN gap, not the coverage bridge tolerance")
+    func theThresholdIsTheRescanConstant() {
+        let bridge = AnalysisCoverageMath.adScanBridgeableGapSec.rawValue
+        let rescan = RescanThresholdSec.adScanRescanWorthyGapSec.rawValue
+        #expect(rescan > bridge, "the rescan threshold must be the wider of the two")
+
+        let between = (bridge + rescan) / 2
+        let plans = [plan(0, 0, 100), plan(1, 100 + between, 200 + between)]
+        let walk = BackfillJobRunner.coarseCoverageWalk(
+            plans: plans,
+            windows: [window(0, 0, 100), window(1, 100 + between, 200 + between)],
+            failedWindows: [],
+            plannedSegments: [span(0, 100), span(100 + between, 200 + between)]
+        )
+        #expect(
+            walk.contiguousUpperBoundSec == PlanListSeconds(200 + between),
+            "a \(between) s gap capped the cursor — the bridge tolerance is being read as the rescan threshold"
+        )
+    }
+
+    // MARK: - Anti-vacuity
+
+    /// A caller that supplies no segments for a non-empty plan list has given
+    /// the walk no way to check, and "I cannot check" must not read as "there is
+    /// no hole".
+    ///
+    /// This is what makes the parameter's absence of a default load-bearing: a
+    /// `= []` would have restored the pre-wogi behaviour at every site that
+    /// forgot it, silently and in the unsafe direction.
+    @Test("plans with no segments to check against publish NO bound")
+    func missingSegmentEvidenceWithdrawsTheBound() {
+        let walk = BackfillJobRunner.coarseCoverageWalk(
+            plans: [plan(0, 0, 30), plan(1, 30, 60)],
+            windows: [window(0, 0, 30), window(1, 30, 60)],
+            failedWindows: [],
+            plannedSegments: []
+        )
+        #expect(walk.contiguousUpperBoundSec == nil)
+        // `fullyCovered` is a statement about the PLANS and is deliberately
+        // untouched — withholding the cursor is not the same as denying that the
+        // pass swept what it was given.
+        #expect(walk.fullyCovered)
+    }
+
+    // MARK: - `contiguousPlannedReach` itself
+
+    @Test("the reach sorts its input, spans nested and overlapping segments, and returns nil for none")
+    func reachArithmetic() {
+        let threshold = RescanThresholdSec.adScanRescanWorthyGapSec
+        func reach(_ spans: [BackfillJobRunner.PlannedSegmentSpan]) -> Double? {
+            BackfillJobRunner.contiguousPlannedReach(spans: spans, rescanThreshold: threshold)?.rawValue
+        }
+
+        #expect(reach([]) == nil)
+        #expect(reach([span(0, 30)]) == 30)
+        // A RESUME's list begins mid-episode, and the distance from zero to its
+        // first segment is `EpisodeSeconds.promoting`'s question, asked with a
+        // different tolerance. Measuring this reach from zero instead would
+        // return nil for every resume above 60 s — including 3C2FFE10's own
+        // attempt 2 — and no cursor would ever advance again.
+        #expect(reach([span(500, 600)]) == 600)
+        // Not time-monotone by `segmentIndex` — playhead-csbq measured that on 27
+        // of 30 device assets — so the reach sorts rather than trusting order.
+        #expect(reach([span(30, 60), span(0, 30)]) == 60)
+        // A nested segment cannot re-open a hole the enclosing one already spans.
+        #expect(reach([span(0, 500), span(10, 20), span(500, 510)]) == 510)
+        // The gap is measured against the running reach, not the previous end.
+        #expect(reach([span(0, 500), span(10, 20), span(560, 600)]) == 600)
+        #expect(reach([span(0, 500), span(10, 20), span(561, 600)]) == 500)
+        // Exactly at the threshold is NOT worth re-scanning (`warrantsRescan` is
+        // strict), one epsilon past it is.
+        #expect(reach([span(0, 100), span(160, 200)]) == 200)
+        #expect(reach([span(0, 100), span(160.001, 200)]) == 100)
     }
 }

@@ -377,6 +377,165 @@ struct BackfillCoverageTerminalTests {
                 "still the non-terminal cause, never the budget-spent one")
     }
 
+    // MARK: - 2c. playhead-wogi: the cursor may not stride over an interior hole
+
+    @available(iOS 26.0, *)
+    // NOTE: no ';' in this display name — see the note on
+    // `theUnderCoveredJobStaysResumableSoTheRedriveCanMint`.
+    @Test("THE 3C2FFE10 CASE — a run handed a transcript with a hole in the middle publishes the end of the CONTIGUOUS part, so the audio that lands later is still plannable")
+    func interiorHoleDoesNotBuryTheAudioThatArrivesLater() async throws {
+        let assetId = "asset-wogi-interior-hole"
+        let store = try await makeTestStore()
+        // 3C2FFE10's proportions at test scale: an 800 s episode whose scan runs
+        // ahead of its transcription, exactly as the device's did.
+        try await store.insertAsset(makeAsset(id: assetId, episodeDurationSec: 800))
+
+        // ATTEMPT 1 — only the head is transcribed. The pass sweeps it and
+        // publishes a genuine episode prefix.
+        try await store.insertTranscriptChunks([
+            makeChunk(assetId: assetId, index: 0, start: 0, end: 208, pass: "fast")
+        ])
+        let first = try await makeRunner(store: store, runtime: makeRuntime().runtime)
+            .runPendingBackfill(for: makeInputs(
+                assetId: assetId,
+                lines: [(0, 200, "Opening remarks before the first sponsor break.")],
+                transcriptVersion: "tx-wogi-1"
+            ))
+        let jobId = try #require(first.admittedJobIds.first)
+        #expect(try #require(await store.fetchBackfillJob(byId: jobId))
+            .progressCursor?.lastProcessedUpperBoundSec == 200)
+
+        // ATTEMPT 2 — the FINAL pass lands the outro. The job is now dispatched
+        // with `[0,66] ∪ [794,800]`: a 728 s hole nobody has transcribed yet.
+        // `planPassA` partitions the list it is handed, so the two sides of the
+        // hole are ADJACENT by `segmentIndex` and every plan is covered —
+        // `fullyCovered` reads true and no plan-side guard has anything to say.
+        // The shipped walk therefore published 800 on an 800 s episode.
+        try await store.insertTranscriptChunks([
+            makeChunk(assetId: assetId, index: 1, start: 794, end: 800, pass: "final")
+        ])
+        let second = try await makeRunner(store: store, runtime: makeRuntime().runtime)
+            .runPendingBackfill(for: makeInputs(
+                assetId: assetId,
+                lines: [
+                    (0, 200, "Opening remarks before the first sponsor break."),
+                    (200, 208, "A little more of the opening conversation here."),
+                    (794, 800, "Outro credits and the usual sign-off material.")
+                ],
+                transcriptVersion: "tx-wogi-2"
+            ))
+        #expect(second.admittedJobIds.first == jobId, "the same row, re-driven by M-5")
+        let afterSecond = try #require(await store.fetchBackfillJob(byId: jobId))
+        #expect(
+            afterSecond.progressCursor?.lastProcessedUpperBoundSec == 208,
+            "the cursor reads \(String(describing: afterSecond.progressCursor?.lastProcessedUpperBoundSec)) — everything above 208 is audio no plan ever held"
+        )
+
+        // ATTEMPT 3 — transcription finishes and the middle finally exists.
+        // THIS is where the defect was fatal: `narrowedForResume` is
+        // `segments.filter { $0.endTime > cursor }`, so a cursor of 800 deletes
+        // every one of these segments, `runJob`'s empty-segments guard writes a
+        // `noWork:emptySegments` sentinel, and the attempt runs no inference at
+        // all. Seventeen such rows are on the 2026-08-14 pull.
+        try await store.insertTranscriptChunks([
+            makeChunk(assetId: assetId, index: 2, start: 208, end: 794, pass: "fast")
+        ])
+        let thirdRuntime = makeRuntime()
+        let third = try await makeRunner(store: store, runtime: thirdRuntime.runtime)
+            .runPendingBackfill(for: makeInputs(
+                assetId: assetId,
+                lines: [
+                    (0, 200, "Opening remarks before the first sponsor break."),
+                    (200, 208, "A little more of the opening conversation here."),
+                    (208, 400, "The long middle stretch of the episode discussion."),
+                    (400, 794, "The second half of that same long conversation."),
+                    (794, 800, "Outro credits and the usual sign-off material.")
+                ],
+                transcriptVersion: "tx-wogi-3"
+            ))
+        #expect(third.admittedJobIds.first == jobId)
+
+        #expect(
+            await thirdRuntime.coarseCallCount > 0,
+            "the attempt ran NO inference — the cursor had already deleted the whole transcript"
+        )
+        let rows = try await store.fetchSemanticScanResults(analysisAssetId: assetId)
+        #expect(
+            rows.allSatisfy { $0.errorContext != "noWork:emptySegments" },
+            "an attempt that could not have scanned anything still held an admission ticket and a background slot"
+        )
+
+        // And the quantity the whole lane is judged on: the episode is now
+        // genuinely read, which is unreachable while 728 s of it sits below a
+        // cursor nobody earned.
+        let summary = try #require(
+            try await store.fetchCoverageSummariesByAssetIds([assetId])[assetId]
+        )
+        let fraction = try #require(summary.adScanFraction)
+        #expect(fraction >= AnalysisJobRunner.semanticBackfillSufficientAdScanFraction,
+                "measured \(fraction) — the middle of the episode was never scanned")
+    }
+
+    @available(iOS 26.0, *)
+    @Test("playhead-wogi — a hole punched by playhead-15d0's row-side narrowing is audio we HAVE read, and must not stop the cursor")
+    func screenedWindowHolesDoNotStopTheCursor() async throws {
+        let assetId = "asset-wogi-screened-hole"
+        let store = try await makeTestStore()
+        // The transcript is complete at [0,800] but the episode is declared at
+        // 1,000 s, so the ad-scan floor is unreachable and every attempt takes
+        // the under-coverage path — which is the one that publishes the walk's
+        // bound. Without that the completion cursor would answer instead and the
+        // case would pass for the wrong reason.
+        try await store.insertAsset(makeAsset(id: assetId, episodeDurationSec: 1_000))
+        try await store.insertTranscriptChunks([
+            makeChunk(assetId: assetId, index: 0, start: 0, end: 800, pass: "fast")
+        ])
+
+        // Attempt 1 is dispatched with a MIDDLE band — the shape a dispatcher
+        // that hands over part of a transcript produces, and 53FC53E3's shape
+        // one band along. Its plans begin at 200, far above the (absent) cursor,
+        // so playhead-41mu's head rule correctly publishes nothing.
+        let first = try await makeRunner(store: store, runtime: makeRuntime().runtime)
+            .runPendingBackfill(for: makeInputs(
+                assetId: assetId,
+                lines: [
+                    (200, 300, "The first band this dispatcher handed over here."),
+                    (300, 400, "The second band of that same handed-over range.")
+                ]
+            ))
+        let jobId = try #require(first.admittedJobIds.first)
+        #expect(try #require(await store.fetchBackfillJob(byId: jobId))
+            .progressCursor?.lastProcessedUpperBoundSec == nil)
+
+        // Attempt 2 gets the WHOLE transcript. `narrowedForResume` trims
+        // nothing (there is no cursor), and then playhead-15d0's row-side
+        // narrowing deletes [200,400] because attempt 1's rows already screened
+        // it — leaving a 200 s hole in the list the planner is handed.
+        //
+        // That hole means "we have READ this", the exact opposite of the hole
+        // this bead is about. Measuring the interior-hole rule over the planner's
+        // list rather than the resume's would cap the cursor at 200, and the
+        // NEXT attempt's first plan would then start at 400 — 200 s above the
+        // cursor, where the head rule refuses to promote anything at all. The
+        // cursor would never move again on an episode that is being scanned
+        // correctly.
+        let second = try await makeRunner(store: store, runtime: makeRuntime().runtime)
+            .runPendingBackfill(for: makeInputs(
+                assetId: assetId,
+                lines: (0..<8).map { index in
+                    (Double(index) * 100, Double(index + 1) * 100,
+                     "Window \(index) of the episode's own running conversation.")
+                }
+            ))
+        #expect(second.admittedJobIds.first == jobId, "the same row, re-driven by M-5")
+        let afterSecond = try #require(await store.fetchBackfillJob(byId: jobId))
+        #expect(afterSecond.status == .deferred, "0.8 of a 1,000 s episode is under the floor")
+        #expect(
+            afterSecond.progressCursor?.lastProcessedUpperBoundSec == 800,
+            "the cursor reads \(String(describing: afterSecond.progressCursor?.lastProcessedUpperBoundSec)) — a hole the row-side narrowing punched was read as unscanned audio"
+        )
+    }
+
     // MARK: - 3. The payoff: the rescue is no longer blocked
 
     @available(iOS 26.0, *)

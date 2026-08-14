@@ -2509,6 +2509,24 @@ actor BackfillJobRunner {
     /// FIRST plan, so an interior hole still publishes a cursor over audio
     /// nobody read.
     ///
+    /// **playhead-wogi CLOSED the interior half, in the walk rather than here,
+    /// and the two paragraphs below are kept as the record of why it was
+    /// deferred.** `contiguousUpperBoundSec` is now capped at
+    /// ``contiguousPlannedReach(spans:rescanThreshold:)``, so the bound this
+    /// function is handed has already stopped at the first hole wider than
+    /// ``RescanThresholdSec/adScanRescanWorthyGapSec``. It went there and not
+    /// here because this function guards ONE of the four writers of that bound;
+    /// the walk is the funnel all four pass through, which is 26od's own
+    /// argument for extracting it. What is still open is a1x0's TAIL hole — a
+    /// run whose last plan ends well below the transcript's reach publishes that
+    /// plan's end, which is honest about what was scanned and says nothing about
+    /// the audio above it.
+    ///
+    /// The cost table below was the reason for deferring, and it was computed
+    /// for the WRONG constant. Re-measured on `db-pull10` at the 60 s threshold
+    /// the rule actually shipped with, exactly one row on the device moves — see
+    /// the table in ``contiguousPlannedReach(spans:rescanThreshold:)``.
+    ///
     /// It is left that way deliberately, and both halves of the reasoning are
     /// measured on the 2026-08-03 pull rather than argued:
     ///
@@ -2645,13 +2663,21 @@ actor BackfillJobRunner {
         /// of those windows is durable.
         let fullyCovered: Bool
         /// End time of the last plan in the unbroken run of fully-covered plans
-        /// from the start of the PLAN LIST; nil when the very first plan is not
-        /// covered.
+        /// from the start of the PLAN LIST, capped at the first hole in the
+        /// run's own audio; nil when the very first plan is not covered.
         ///
         /// playhead-x0lb: the type is ``PlanListSeconds`` and the doc no longer
         /// says "from the start of the episode", which is what it said and what
         /// it never was — the plan list is `narrowedForResume`'s output and
         /// begins wherever the dispatcher's transcript began. playhead-5pyq.
+        ///
+        /// playhead-wogi: the cap is the second half of that sentence and it is
+        /// a DIFFERENT quantity from the two plan-side caps above it. Those ask
+        /// "which plans were covered"; this asks "does the audio between them
+        /// exist yet". Contiguity over a list of plans says nothing about the
+        /// timeline unless the list partitions it, and on the 2026-08-14 pull it
+        /// did not: see
+        /// ``contiguousPlannedReach(spans:rescanThreshold:)``.
         let contiguousUpperBoundSec: PlanListSeconds?
         /// Plans that produced at least one successfully screened window.
         let succeededPlanIndices: Set<Int>
@@ -2671,6 +2697,127 @@ actor BackfillJobRunner {
         }
     }
 
+    /// playhead-wogi: one segment of the list THIS RUN was handed, reduced to
+    /// the only two facts the coverage walk needs from it.
+    ///
+    /// A named pair rather than `(start: Double, end: Double)` for the reason
+    /// playhead-x0lb R5 gives in `CoverageQuantities.swift`: an untyped interval
+    /// array in a scope that holds several of them is substitutable by mistake,
+    /// and four such substitutions compiled when they were tried. This one names
+    /// the population — *the segments `planPassA` partitioned* — and nothing
+    /// else in the walk's scope has that type.
+    struct PlannedSegmentSpan: Sendable, Equatable {
+        let startTime: Double
+        let endTime: Double
+
+        init(startTime: Double, endTime: Double) {
+            self.startTime = startTime
+            self.endTime = endTime
+        }
+
+        init(_ segment: AdTranscriptSegment) {
+            self.init(startTime: segment.startTime, endTime: segment.endTime)
+        }
+    }
+
+    /// playhead-wogi / playhead-a1x0: how far the run's own audio reaches
+    /// CONTIGUOUSLY from the head of the list it was handed, stopping before the
+    /// first hole wide enough to be worth re-scanning.
+    ///
+    /// **This is the half of the cursor rule playhead-41mu left open, by name.**
+    /// `EpisodeSeconds.promoting` tests the boundary between the PRIOR cursor
+    /// and the run's FIRST segment — a necessary condition, never a sufficient
+    /// one, because `planPassA` partitions whatever list it is handed and two
+    /// segments either side of a 7,280 s untranscribed stretch are ADJACENT by
+    /// index. Everything downstream then treats the plan list as if it
+    /// partitioned the episode.
+    ///
+    /// Measured on the 2026-08-14 device pull (`db-pull10`), asset 3C2FFE10 —
+    /// a 7,999 s episode. Its second attempt was handed a transcript covering
+    /// `[0.78, 659.46]` and `[7939.14, 7998.72]` and nothing between (the fast
+    /// pass had not yet landed the middle), planned two windows over it, covered
+    /// both, and published **7,998.72**. `narrowedForResume` is
+    /// `segments.filter { $0.endTime > cursor }`, so when the 8,839 fast chunks
+    /// spanning `[150.06, 7914.12]` did land, every one of them was already
+    /// below the cursor. The row's measured `adScanFraction` is **0.0885**
+    /// against a transcript ceiling of **0.9960**, and the pull carries
+    /// seventeen `noWork:emptySegments` sentinels — attempts that held an
+    /// admission ticket, burned a slot in a granted background window, and could
+    /// not have scanned anything.
+    ///
+    /// **The threshold is ``RescanThresholdSec/adScanRescanWorthyGapSec`` (60 s,
+    /// Dan's decision of 2026-08-04), NOT
+    /// ``AnalysisCoverageMath/adScanBridgeableGapSec`` (5 s), and the difference
+    /// is measured rather than argued.** The two answer different questions —
+    /// 5 s asks "is this hole too small to have hidden an ad from a scan that
+    /// ran?", which is the COVERAGE NUMERATOR's question. Re-derived against
+    /// `db-pull10` by replaying this rule over every job row's own scanned
+    /// spans:
+    ///
+    /// | threshold | rows whose cursor is lowered |
+    /// |---|---|
+    /// | 60 s | ONE — 3C2FFE10, 7,998.72 → 659.46 |
+    /// | 5 s | THREE — 3C2FFE10 → **125.28**, 561CEF5B −92.2 s, F4A9D2BD −1,191.2 s |
+    ///
+    /// At 5 s the rule mis-fires on the two assets whose cursors are HONEST
+    /// (F4A9D2BD and 561CEF5B are scanned to their transcript ceiling, 0.9741 of
+    /// 0.9862 and 0.9766 of 0.9836), and it under-serves the one asset that is
+    /// broken: 3C2FFE10's own scan history has a 6.18 s pause at 125.28 that a
+    /// 5 s tolerance will not bridge, so the witness would be repaired to 125.28
+    /// and forfeit the 534 s it really did read. 60 s lands on 659.46, which is
+    /// exactly the end of what was scanned.
+    ///
+    /// Ascending sort is done here rather than assumed: `planPassA` orders by
+    /// `segmentIndex`, and playhead-csbq measured the atom sequence to be
+    /// non-time-monotone on 27 of 30 device assets.
+    ///
+    /// A gap is measured against the running REACH (`max` of the ends seen so
+    /// far), not against the previous segment's end, so an overlapping or nested
+    /// segment cannot re-open a hole that an earlier one already spanned. Each
+    /// span contributes `max(start, end)` for the same reason `planPassA` takes
+    /// min/max over its own segments: nothing enforces `end > start` on an
+    /// `AdTranscriptSegment`, and an inverted one must not shorten the reach.
+    ///
+    /// **It measures from the run's FIRST segment, not from zero, and that is
+    /// load-bearing rather than lax.** The gap between the prior cursor and this
+    /// run's first segment is `EpisodeSeconds.promoting`'s question and it
+    /// answers it with a different tolerance. Asking it here as well would
+    /// return `nil` for every resume that legitimately begins mid-episode —
+    /// including 3C2FFE10's own attempt 2, which starts at 584.28 — and the
+    /// cursor would then never advance on any resume at all.
+    nonisolated static func contiguousPlannedReach(
+        spans: [PlannedSegmentSpan],
+        rescanThreshold: RescanThresholdSec
+    ) -> PlanListSeconds? {
+        var reach: Double?
+        for span in spans.sorted(by: { $0.startTime < $1.startTime }) {
+            guard span.startTime.isFinite, span.endTime.isFinite else { continue }
+            let upper = max(span.startTime, span.endTime)
+            guard let current = reach else {
+                reach = upper
+                continue
+            }
+            if rescanThreshold.warrantsRescan(gapSec: span.startTime - current) { break }
+            reach = max(current, upper)
+        }
+        return reach.map { PlanListSeconds($0) }
+    }
+
+    /// - Parameter plannedSegments: the segment list `planPassA` partitioned,
+    ///   i.e. `inputs.segments` AFTER both narrowings. See
+    ///   ``contiguousPlannedReach(spans:rescanThreshold:)`` for what it buys and
+    ///   why it is a required argument rather than a defaulted one.
+    ///
+    ///   **Empty with a non-empty plan list is a CONTRADICTION and the walk
+    ///   refuses to publish a bound at all.** Plans are sliced out of the
+    ///   segments, so outcomes attributed to plans that no segment speaks for
+    ///   means the caller supplied the wrong list — and the failure this whole
+    ///   computation exists to prevent is a cursor over audio nobody read, so
+    ///   the safe answer to "I cannot check" is "no cursor". Defaulting the
+    ///   parameter to `[]` would have made the same mistake silent, and silently
+    ///   restoring the pre-wogi behaviour is precisely what a default means
+    ///   here.
+    ///
     /// - Parameter unpersistedWindows: windows the pass SCREENED but whose rows
     ///   are not in the store. Empty at end of pass, where a row write that
     ///   fails throws and no cursor is computed at all; non-empty only for the
@@ -2689,6 +2836,7 @@ actor BackfillJobRunner {
         plans: [CoarsePassWindowPlan],
         windows: [FMCoarseWindowOutput],
         failedWindows: [CoarseWindowFailure],
+        plannedSegments: [PlannedSegmentSpan],
         unpersistedWindows: [FMCoarseWindowOutput] = []
     ) -> CoarseCoverageWalk {
         // playhead-26od: each plan's line-ref set is built ONCE. The inline
@@ -2872,6 +3020,42 @@ actor BackfillJobRunner {
         if let walked = walkedUpperBound, let firstUncoveredStart {
             walkedUpperBound = min(walked, PlanListSeconds(firstUncoveredStart))
         }
+        // playhead-wogi: and never past a HOLE IN THE RUN'S OWN AUDIO.
+        //
+        // Everything above this line reasons about PLANS, and a plan speaks only
+        // for the segments it was sliced from. `planPassA` advances
+        // `lowerBound = upperBound + 1` across the list it is handed, so plans
+        // partition the SEGMENTS — they do not partition the EPISODE, and the
+        // two are the same statement only while the handed-over list has no
+        // holes. The consumer does not know about plans at all:
+        // `narrowedForResume` drops every segment with `endTime <= cursor`,
+        // against the transcript AS IT IS THEN, so a bound published across a
+        // hole deletes audio that had not been transcribed when the bound was
+        // written. That is 3C2FFE10 on the 2026-08-14 pull, and the numbers are
+        // in `contiguousPlannedReach`.
+        //
+        // The cap is applied AFTER the two plan-side caps rather than folded
+        // into the walk loop, and it is a `min` for the same reason theirs is:
+        // three independent upper bounds on one quantity, and the honest answer
+        // is the smallest. Folding it into the loop would tie it to the plan
+        // ORDER, and a hole INSIDE a single plan — which the token packer
+        // produces whenever both sides of the hole fit one prompt, i.e. whenever
+        // 3C2FFE10's two windows happen to be one — has no plan boundary to be
+        // noticed at.
+        //
+        // See the parameter doc for why an empty list with non-empty plans
+        // withdraws the bound instead of leaving it uncapped.
+        if plans.isEmpty {
+            // No plans, no bound: `walkedUpperBound` is already nil here (the
+            // loop never ran), and there is nothing for the reach to speak to.
+        } else if let reach = contiguousPlannedReach(
+            spans: plannedSegments,
+            rescanThreshold: RescanThresholdSec.adScanRescanWorthyGapSec
+        ) {
+            walkedUpperBound = walkedUpperBound.map { min($0, reach) }
+        } else {
+            walkedUpperBound = nil
+        }
         return CoarseCoverageWalk(
             fullyCovered: fullyCovered,
             contiguousUpperBoundSec: walkedUpperBound,
@@ -2893,12 +3077,14 @@ actor BackfillJobRunner {
     /// window that failed to write.
     nonisolated static func coarseCheckpointWalk(
         banked: FMCoarseBankedWindows,
-        durableWindowCount: Int
+        durableWindowCount: Int,
+        plannedSegments: [PlannedSegmentSpan]
     ) -> CoarseCoverageWalk {
         coarseCoverageWalk(
             plans: banked.plans,
             windows: Array(banked.windows.prefix(durableWindowCount)),
             failedWindows: banked.failedWindows,
+            plannedSegments: plannedSegments,
             unpersistedWindows: Array(banked.windows.dropFirst(durableWindowCount))
         )
     }
@@ -3031,6 +3217,7 @@ actor BackfillJobRunner {
         _ banked: FMCoarseBankedWindows,
         box: CoarseCheckpointBox,
         inputs: AssetInputs,
+        plannedAudioSpans: [PlannedSegmentSpan],
         jobId: String,
         jobPhase: BackfillJobPhase,
         priorCursor: BackfillProgressCursor?,
@@ -3123,7 +3310,12 @@ actor BackfillJobRunner {
         // an unpersisted tail is `coarseCheckpointWalk`'s whole job.
         let walk = Self.coarseCheckpointWalk(
             banked: banked,
-            durableWindowCount: box.durableWindowCount
+            durableWindowCount: box.durableWindowCount,
+            // playhead-wogi: the RESUME-narrowed spans its caller measured
+            // BEFORE the row-side narrowing, threaded through rather than
+            // recomputed from `inputs` — see `runJob` for why the two lists
+            // answer opposite questions about a hole.
+            plannedSegments: plannedAudioSpans
         )
         // Same guard as t1kq's: a fully-covered cursor is episode-end, which
         // `narrowedForResume` collapses to an empty resume. Unreachable while
@@ -3535,8 +3727,27 @@ actor BackfillJobRunner {
                 screenedRows = []
             }
         }
+        // playhead-wogi: the two narrowings are now NAMED separately, because the
+        // interior-hole rule has to be measured over the FIRST one and reading it
+        // off the second would freeze the cursor.
+        //
+        // `narrowedForResume`'s output is "the audio above the prior cursor that
+        // EXISTS", so every hole in it is untranscribed audio — exactly the thing
+        // the cursor must not claim. `narrowedForScreenedWindows` then deletes
+        // segments a durable row already screened, which punches holes that are
+        // the OPPOSITE fact: audio we have read. Capping at one of those would
+        // stop the cursor at the head of a covered region, and the next attempt's
+        // first plan would then sit far above it — where playhead-41mu's head
+        // rule correctly refuses to promote anything at all, and the cursor never
+        // moves again. Two hole-shaped absences meaning opposite things, which is
+        // this repo's standing defect class in its purest form.
+        let resumeNarrowed = Self.narrowedForResume(
+            rootInputs,
+            cursor: job.progressCursor?.lastProcessedUpperBoundSec
+        )
+        let plannedAudioSpans = resumeNarrowed.segments.map(PlannedSegmentSpan.init)
         let inputs = Self.narrowedForScreenedWindows(
-            Self.narrowedForResume(rootInputs, cursor: job.progressCursor?.lastProcessedUpperBoundSec),
+            resumeNarrowed,
             screenedRows: screenedRows,
             scanCohortJSON: scanCohortJSON,
             jobPhase: job.phase
@@ -3718,6 +3929,7 @@ actor BackfillJobRunner {
                 banked,
                 box: checkpointBox,
                 inputs: inputs,
+                plannedAudioSpans: plannedAudioSpans,
                 jobId: checkpointJobId,
                 jobPhase: checkpointJobPhase,
                 priorCursor: checkpointPriorCursor,
@@ -3876,7 +4088,12 @@ actor BackfillJobRunner {
             let walk = Self.coarseCoverageWalk(
                 plans: coarsePlans,
                 windows: coarse.windows,
-                failedWindows: coarse.failedWindows
+                failedWindows: coarse.failedWindows,
+                // playhead-wogi: the RESUME-narrowed list, NOT the doubly
+                // narrowed one `coarsePassA` was handed. See where the two are
+                // computed for why a hole punched by the row-side narrowing
+                // means the opposite of a hole in the transcript.
+                plannedSegments: plannedAudioSpans
             )
             coverageFullyCovered = walk.fullyCovered
             let walkedUpperBound = walk.contiguousUpperBoundSec
