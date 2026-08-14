@@ -1712,6 +1712,11 @@ FOCUSED_SUITES=(
   -only-testing:PlayheadTests/BackfillCoarseCheckpointTests
   -only-testing:PlayheadTests/CoarseCheckpointBoxTests
   -only-testing:PlayheadTests/CoarseCoverageWalkTests
+  # playhead-wogi: the interior-hole cap on that same walk (WG series). Its own
+  # suite because every fixture in `CoarseCoverageWalkTests` is CONTIGUOUS by
+  # construction — that is what makes those cases about the plan-side rules —
+  # so not one of them can observe a rule about holes.
+  -only-testing:PlayheadTests/CoarseCoverageWalkInteriorHoleTests
   # ...and the SOURCE canary that guards the lease refresh (CK13 names it as a
   # second expectation). Three grep-only XCTest cases, 0.03 s. It is here
   # because playhead-26od's own extraction is what proved a source canary can go
@@ -1840,6 +1845,11 @@ FOCUSED_SUITES=(
   # touches" is a property of a rung nothing else runs, and the interesting half
   # is the four shapes it must NOT touch.
   -only-testing:PlayheadTests/UnderCoverageRetryBudgetV50MigrationTests
+  # playhead-wogi: the V51 rung that withdraws the part of a coarse cursor no
+  # scan row supports. Same argument as V50's, and the interesting half is again
+  # the shapes it must NOT touch — an honest cursor at its transcript's reach, a
+  # cursor BELOW its own evidence, and an asset with no examined row at all.
+  -only-testing:PlayheadTests/OverclaimedCoarseCursorV51MigrationTests
   # playhead-13kf: the FM-first reorder rails (RO series). Three suites: the
   # BPS-level order/deadline/floor pins (real store + scheduler, a few
   # seconds), the pure coarse-loop gates (instant), and the budget-constant
@@ -2750,6 +2760,20 @@ T_E6D3_CONVERGE="playhead-e6d3 — an episode whose coverage climbs on EVERY att
 T_E6D3_V50="playhead-e6d3: v50 re-judges the flat-budget casualties and NOTHING else"
 T_E6D3_V50_IDEM="playhead-e6d3: v50 is idempotent — a second ladder pass does not re-open a row the new rule retired"
 T_E6D3_V50_V39="playhead-e6d3: v50 does not step over a rolled-back v39"
+
+# playhead-wogi — the coarse cursor stops at a hole in the run's own audio (the
+# WG series). Five walk tests, one end-to-end runner test, three migration tests.
+T_WOGI_WITNESS="THE 3C2FFE10 CASE — two covered plans either side of a 7,280 s hole publish the FIRST plan's end, not the second's"
+T_WOGI_INPLAN="a hole INSIDE a single covered plan stops the cursor too"
+T_WOGI_NARROW="a hole narrower than the rescan threshold does not move the cursor — 561CEF5B stays whole"
+T_WOGI_CONST="the threshold is the RESCAN gap, not the coverage bridge tolerance"
+T_WOGI_VACUITY="plans with no segments to check against publish NO bound"
+T_WOGI_REACH="the reach sorts its input, spans nested and overlapping segments, and returns nil for none"
+T_WOGI_E2E="THE 3C2FFE10 CASE — a run handed a transcript with a hole in the middle publishes the end of the CONTIGUOUS part, so the audio that lands later is still plannable"
+T_WOGI_V51="playhead-wogi: v51 lowers the ONE cursor its rows disprove and leaves the other three exactly where they are"
+T_WOGI_V51_IDEM="playhead-wogi: v51 is idempotent — a second ladder pass recomputes the same prefix and withdraws nothing further"
+T_WOGI_V51_V39="playhead-wogi: v51 does not step over a rolled-back v39"
+T_WOGI_SCREENED="playhead-wogi — a hole punched by playhead-15d0's row-side narrowing is audio we HAVE read, and must not stop the cursor"
 
 # playhead-iu0t — the CN series. What the shadow-retry drain REPLAYS.
 T_IU0T_REACH="the drain screens the whole transcript, not just the candidate-local final tail"
@@ -5150,6 +5174,98 @@ MUTATIONS=(
   "EC10|509|STORE|$T_E6D3_V50;$T_E6D3_V50_IDEM"
 
   # ---------------------------------------------------------------------------
+  # playhead-wogi — the WG series. The coarse cursor may not stride over a hole
+  # in the run's OWN audio, however cleanly every plan it was handed was covered.
+  #
+  # Every entry is its own batch. WG01, WG03, WG04 and WG07 all move the SAME
+  # six lines of the walk's cap in different directions, and WG08/WG09/WG11 all
+  # name `$T_WOGI_V51` — a shared batch would let either mask the other's kill.
+  #
+  # ON BREADTH. The walk mutants name one or two victims each, because the point
+  # of the suite is that each case sees a DIFFERENT wrong answer: WG01 is the
+  # shipped defect, WG02 is the constant confusion this repo has paid out on
+  # nineteen times, WG07 is the fix a reviewer would write from the bead text
+  # (plan boundaries) and only the one-plan fixture can see it. WG06 is the
+  # mirror nobody asks for — a rule that is too STRICT freezes every resume, and
+  # the reach's own arithmetic case is the only thing that can tell.
+  # ---------------------------------------------------------------------------
+
+  # Batch 510 — WG01. THE SHIPPED DEFECT, VERBATIM: the cap is deleted and the
+  # walk publishes the last covered plan's end again. This is the value that put
+  # 7,998.72 on a 7,999 s episode at a measured adScanFraction of 0.0885, and
+  # the seventeen `noWork:emptySegments` sentinels on the pull are its receipts.
+  "WG01|510|RUNNER|$T_WOGI_WITNESS;$T_WOGI_INPLAN;$T_WOGI_E2E"
+
+  # Batch 511 — WG02. The CONSTANT is swapped for
+  # `AnalysisCoverageMath.adScanBridgeableGapSec` — the numerator's "too small to
+  # have hidden an ad" tolerance read as the "worth paying FM wall-clock to
+  # re-scan" one. Replayed over the 2026-08-14 pull it lowers three cursors
+  # instead of one, two of them honest, and repairs the witness to 125.28.
+  "WG02|511|RUNNER|$T_WOGI_CONST;$T_WOGI_NARROW"
+
+  # Batch 512 — WG03. The cap is `max` rather than `min`, so the reach RAISES a
+  # bound the plan-side rules had already lowered. Three upper bounds on one
+  # quantity and the honest answer is the smallest; this takes the largest.
+  "WG03|512|RUNNER|$T_WOGI_WITNESS"
+
+  # Batch 513 — WG04. The anti-vacuity arm is deleted: a caller that supplied no
+  # segments gets the PRE-wogi behaviour, silently and in the unsafe direction.
+  # This is exactly what a defaulted `plannedSegments: []` parameter would have
+  # meant, which is why the parameter has no default.
+  "WG04|513|RUNNER|$T_WOGI_VACUITY"
+
+  # Batch 514 — WG05. The gap is measured against the PREVIOUS segment's end
+  # rather than the running reach, so a nested or out-of-order segment re-opens a
+  # hole an earlier one already spanned — playhead-csbq's non-time-monotone atom
+  # sequence, which is 27 of 30 device assets.
+  "WG05|514|RUNNER|$T_WOGI_REACH"
+
+  # Batch 515 — WG06. THE MIRROR: the reach is measured from ZERO instead of from
+  # the run's first segment, so every resume beginning above the threshold
+  # returns nil and NO cursor ever advances again. A rule that is too strict is
+  # not a safe rule — it is a different stall.
+  "WG06|515|RUNNER|$T_WOGI_REACH;$T_WOGI_E2E"
+
+  # Batch 516 — WG07. THE PLAN-BOUNDARY FIX — what the bead text asks for and
+  # what a reviewer would write: the gap is measured between consecutive PLANS
+  # instead of consecutive SEGMENTS. It gets the device witness right and misses
+  # the case where the token packer put both sides of the hole in ONE plan, which
+  # is a coin flip of the budget rather than a different defect.
+  "WG07|516|RUNNER|$T_WOGI_INPLAN"
+
+  # Batch 517 — WG08. The V51 repair drops the ONLY-LOWER guard, so it also
+  # RAISES a cursor that sits below its own evidence — A9F6DF05 on the pull,
+  # verbatim. Raising a cursor is not a repair, it is the defect.
+  "WG08|517|STORE|$T_WOGI_V51"
+
+  # Batch 518 — WG09. The V51 repair counts every row rather than the ones that
+  # EXAMINED their window, so the cancelled window straddling 3C2FFE10's hole
+  # supports a prefix of 7,998.72 and the repair becomes a no-op. `.cancelled` is
+  # a window the model was never allowed to answer.
+  "WG09|518|STORE|$T_WOGI_V51"
+
+  # Batch 519 — WG10. The V51 rung steps over a rolled-back V39. Every rung added
+  # after V39 owes this witness.
+  "WG10|519|STORE|$T_WOGI_V51_V39"
+
+  # Batch 520 — WG11. The V51 rung never stamps its version, so it re-fires on
+  # every launch. Unlike V50's EC10 this repair is a FIXED POINT, so the
+  # idempotency test cannot see it and is deliberately NOT named — the kill comes
+  # from the version assertion alone. Worth its own rail precisely because "EC10
+  # already covers this shape" is false here.
+  "WG11|520|STORE|$T_WOGI_V51"
+
+  # Batch 521 — WG12. The reach is measured over the list the PLANNER was handed
+  # (post playhead-15d0's row-side narrowing) instead of the resume's. Both are
+  # `inputs.segments`-shaped and the substitution type-checks; what differs is
+  # what a hole in them MEANS. A hole the row-side narrowing punched is audio we
+  # have READ, and capping there stops the cursor at the head of a covered region
+  # — after which the next attempt's first plan sits far above it, playhead-41mu's
+  # head rule refuses to promote anything, and the cursor never moves again on an
+  # episode that is being scanned correctly.
+  "WG12|521|RUNNER|$T_WOGI_SCREENED"
+
+  # ---------------------------------------------------------------------------
   # playhead-iu0t — WHAT THE SHADOW-RETRY DRAIN REPLAYS (CN01-CN04)
   #
   # One line, four ways to write it, and only one is right. The shipped defect
@@ -6787,6 +6903,18 @@ describe_mutation() {
     EC08) echo "e6d3: the V50 rung steps over a rolled-back V39 and runs on a database held at 38" ;;
     EC09) echo "e6d3: the reset is hoisted above the floor test, so a genuinely covered episode defers instead of completing" ;;
     EC10) echo "e6d3: the V50 rung never stamps its version, so it re-fires every launch — an unbounded budget refill dressed as a migration" ;;
+    WG01) echo "wogi: THE SHIPPED DEFECT — the interior-hole cap is deleted and the cursor rides to the last covered plan's end again (3C2FFE10's 7,998.72)" ;;
+    WG02) echo "wogi: the rescan threshold is swapped for the coverage BRIDGE tolerance — the numerator's question asked of a re-scan decision" ;;
+    WG03) echo "wogi: the cap takes the LARGER of the two bounds, so the reach raises a cursor the plan-side rules had already lowered" ;;
+    WG04) echo "wogi: the anti-vacuity arm is deleted, so a caller with no segment evidence silently gets the pre-wogi behaviour" ;;
+    WG05) echo "wogi: the gap is measured against the previous segment's END, not the running reach, so a nested segment re-opens a spanned hole" ;;
+    WG06) echo "wogi: THE MIRROR — the reach is measured from ZERO, so every resume above the threshold publishes nothing and the cursor freezes forever" ;;
+    WG07) echo "wogi: the gap is measured between consecutive PLANS instead of SEGMENTS, so a hole inside one packed plan is invisible" ;;
+    WG08) echo "wogi: the V51 repair drops the only-lower guard and RAISES a cursor that sits below its own evidence" ;;
+    WG09) echo "wogi: the V51 repair counts rows that never examined their window, so a CANCELLED span supports the prefix it straddles" ;;
+    WG10) echo "wogi: the V51 rung steps over a rolled-back V39 and runs on a database held at 38" ;;
+    WG11) echo "wogi: the V51 rung never stamps its version, so it re-fires on every launch" ;;
+    WG12) echo "wogi: the interior-hole reach is measured over the PLANNER's list, so a hole the row-side narrowing punched reads as unscanned audio" ;;
     CN01) echo "iu0t: THE SHIPPED DEFECT — the drain replays the final-only chunk set again, verbatim (53FC53E3's discarded 2,490 s)" ;;
     CN02) echo "iu0t: the drain replays fast-only, throwing the re-transcription away — right reach, wrong identity" ;;
     CN03) echo "iu0t: the drain replays the RAW rows, so overlapped audio is scanned twice and the version drifts from runBackfill's" ;;
@@ -12899,6 +13027,190 @@ EOF
 EOF
     snippet NEW <<'EOF'
         try setSchemaVersion(49)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # ---- playhead-wogi, the WG series -------------------------------------
+
+  # WG01 — THE SHIPPED DEFECT, VERBATIM. The interior-hole cap is removed and
+  # the walk publishes the last covered plan's end again.
+  WG01)
+    snippet OLD <<'EOF'
+        } else if let reach = contiguousPlannedReach(
+            spans: plannedSegments,
+            rescanThreshold: RescanThresholdSec.adScanRescanWorthyGapSec
+        ) {
+            walkedUpperBound = walkedUpperBound.map { min($0, reach) }
+        } else {
+            walkedUpperBound = nil
+        }
+EOF
+    snippet NEW <<'EOF'
+        } else {
+            _ = plannedSegments
+        }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # WG02 — the CONSTANT is swapped for the coverage numerator's bridge
+  # tolerance. Same mechanism, wrong question, and the two are the same type
+  # only through an explicit re-wrap — which is what makes it worth a rail.
+  WG02)
+    snippet OLD <<'EOF'
+            rescanThreshold: RescanThresholdSec.adScanRescanWorthyGapSec
+        ) {
+            walkedUpperBound = walkedUpperBound.map { min($0, reach) }
+EOF
+    snippet NEW <<'EOF'
+            rescanThreshold: RescanThresholdSec(AnalysisCoverageMath.adScanBridgeableGapSec.rawValue)
+        ) {
+            walkedUpperBound = walkedUpperBound.map { min($0, reach) }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # WG03 — the cap takes the LARGER of the two bounds. Three upper bounds on one
+  # quantity and the honest answer is the smallest.
+  WG03)
+    snippet OLD <<'EOF'
+            walkedUpperBound = walkedUpperBound.map { min($0, reach) }
+EOF
+    snippet NEW <<'EOF'
+            walkedUpperBound = walkedUpperBound.map { max($0, reach) }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # WG04 — the anti-vacuity arm is deleted. A caller that supplied no segments
+  # gets the pre-wogi behaviour, which is exactly what a defaulted parameter
+  # would have meant.
+  WG04)
+    snippet OLD <<'EOF'
+        } else {
+            walkedUpperBound = nil
+        }
+        return CoarseCoverageWalk(
+EOF
+    snippet NEW <<'EOF'
+        }
+        return CoarseCoverageWalk(
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # WG05 — the gap is measured against the PREVIOUS segment's end rather than
+  # the running reach.
+  WG05)
+    snippet OLD <<'EOF'
+            if rescanThreshold.warrantsRescan(gapSec: span.startTime - current) { break }
+            reach = max(current, upper)
+EOF
+    snippet NEW <<'EOF'
+            if rescanThreshold.warrantsRescan(gapSec: span.startTime - current) { break }
+            reach = upper
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # WG06 — THE MIRROR. The reach is measured from ZERO, so a resume whose first
+  # segment sits above the threshold publishes nothing, forever.
+  WG06)
+    snippet OLD <<'EOF'
+        var reach: Double?
+        for span in spans.sorted(by: { $0.startTime < $1.startTime }) {
+            guard span.startTime.isFinite, span.endTime.isFinite else { continue }
+            let upper = max(span.startTime, span.endTime)
+            guard let current = reach else {
+                reach = upper
+                continue
+            }
+EOF
+    snippet NEW <<'EOF'
+        var reach: Double? = spans.isEmpty ? nil : 0
+        for span in spans.sorted(by: { $0.startTime < $1.startTime }) {
+            guard span.startTime.isFinite, span.endTime.isFinite else { continue }
+            let upper = max(span.startTime, span.endTime)
+            guard let current = reach else {
+                reach = upper
+                continue
+            }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # WG07 — THE PLAN-BOUNDARY FIX. The gap is measured between consecutive PLANS
+  # rather than consecutive segments, which is what the bead text asks for and
+  # what a reviewer would write. It gets the two-plan witness right and cannot
+  # see a hole the token packer put inside ONE plan.
+  WG07)
+    snippet OLD <<'EOF'
+        } else if let reach = contiguousPlannedReach(
+            spans: plannedSegments,
+            rescanThreshold: RescanThresholdSec.adScanRescanWorthyGapSec
+        ) {
+EOF
+    snippet NEW <<'EOF'
+        } else if let reach = contiguousPlannedReach(
+            spans: plans.map { PlannedSegmentSpan(startTime: $0.startTime, endTime: $0.endTime) },
+            rescanThreshold: RescanThresholdSec.adScanRescanWorthyGapSec
+        ) {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # WG08 — the V51 repair drops the ONLY-LOWER guard.
+  WG08)
+    snippet OLD <<'EOF'
+                  let supported = supportedPrefix[assetId],
+                  claimed.rawValue > supported else { continue }
+EOF
+    snippet NEW <<'EOF'
+                  let supported = supportedPrefix[assetId],
+                  claimed.rawValue != supported else { continue }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # WG09 — the V51 repair counts every row rather than the ones that EXAMINED
+  # their window, so a cancelled span supports the prefix it straddles.
+  WG09)
+    snippet OLD <<'EOF'
+            guard SemanticScanResult.didExamineWindow(status: status, errorContext: errorContext),
+                  let start = optionalDouble(scanStmt, 1),
+EOF
+    snippet NEW <<'EOF'
+            guard status != nil, !SemanticScanResult.isNoWorkSentinel(errorContext: errorContext),
+                  let start = optionalDouble(scanStmt, 1),
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # WG10 — the V51 rung steps over a rolled-back V39.
+  WG10)
+    snippet OLD <<'EOF'
+        guard observed < 51 else { return }
+        // DO NOT STEP OVER A ROLLED-BACK V39 — same rationale as V40–V50.
+        guard observed >= 50 else { return }
+EOF
+    snippet NEW <<'EOF'
+        guard observed < 51 else { return }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # WG11 — the V51 rung never stamps its version.
+  WG11)
+    snippet OLD <<'EOF'
+        try setSchemaVersion(51)
+    }
+EOF
+    snippet NEW <<'EOF'
+    }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # WG12 — the reach is measured over the PLANNER's list rather than the
+  # resume's, so a hole punched by playhead-15d0's row-side narrowing (audio we
+  # HAVE read) is treated as unscanned audio and freezes the cursor.
+  WG12)
+    snippet OLD <<'EOF'
+                plannedSegments: plannedAudioSpans
+            )
+EOF
+    snippet NEW <<'EOF'
+                plannedSegments: inputs.segments.map(PlannedSegmentSpan.init)
+            )
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
