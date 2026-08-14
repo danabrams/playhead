@@ -5206,6 +5206,24 @@ MUTATIONS=(
   # Batch 512 — WG03. The cap is `max` rather than `min`, so the reach RAISES a
   # bound the plan-side rules had already lowered. Three upper bounds on one
   # quantity and the honest answer is the smallest; this takes the largest.
+  #
+  # ⚠️ THIS RAIL DOES NOT TERMINATE IN A REASONABLE TIME, AND THAT IS THE
+  # MUTANT, NOT THE HARNESS (measured twice, 2026-08-14: 48 min and 62 min,
+  # against ~5.5 min for every other WG rail on the same box and the same
+  # FOCUSED_SUITES, with a green baseline both times). Under `max` the
+  # `AnalysisWorkScheduler` fixtures in the focused set fail with
+  # `no shards within desired coverage` and enter their REAL exponential
+  # backoff — the session log fills with `attempt 4, backoff 960.000000s` and
+  # `abandoned after 5 attempts` for `recovery-mid-settle`, `mid-settle`,
+  # `recovery-strand`, `early-return`, `late-dispatch`. A cursor raised above
+  # what the pass covered leaves the shard planner nothing to plan, which is
+  # this bead's defect one layer down: the lane STALLS rather than reporting.
+  #
+  # So the rail is real and its property is pinned — `$T_WOGI_WITNESS` asserts
+  # the exact value 659.46 and `max` yields 7,998.72 — but the battery can only
+  # credit a verdict the suites live long enough to report. Budget an hour if
+  # you run it, or run it against a `-only-testing` scope that excludes the
+  # scheduler harness. Do NOT re-derive this by killing it twice.
   "WG03|512|RUNNER|$T_WOGI_WITNESS"
 
   # Batch 513 — WG04. The anti-vacuity arm is deleted: a caller that supplied no
