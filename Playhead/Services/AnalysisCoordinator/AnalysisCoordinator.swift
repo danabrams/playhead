@@ -861,6 +861,14 @@ actor AnalysisCoordinator {
     ///     asset, never the one in flight. Within an asset the bound is the
     ///     shipped FM machinery (rkfp's per-call deadline, e75l's defers) plus
     ///     caller cancellation.
+    ///   - A thrown `CancellationError` ends the phase (the grant was
+    ///     reclaimed); any other per-asset error is logged and the loop moves
+    ///     on, because one asset's store hiccup must not starve the rest of
+    ///     the window.
+    ///   - report: playhead-8ljj. Fired on EVERY exit and after every asset
+    ///     driven, so the last statement it made is true of the moment the
+    ///     window ended — including when the window ends inside `scanAsset`
+    ///     and this function never returns.
     ///
     /// **THE FLOOR TEST IS AGAINST AN ASSUMED GRANT, NOT THE ONE IN HAND
     /// (playhead-rbj4).** `budgetedRemaining` below is `deadline − now`, and
@@ -884,21 +892,13 @@ actor AnalysisCoordinator {
     /// pull it refuses 7, which banked 22 verdicts against 3 failures. It
     /// refuses almost nothing that was going to waste the window.
     ///
-    /// **WHAT ACTUALLY PROTECTS A SHORT GRANT IS THE LINE ABOVE, NOT THIS
-    /// ONE.** `isTaskCancelled()` observes the OS reclaim itself —
+    /// **WHAT ACTUALLY PROTECTS A SHORT GRANT IS `isTaskCancelled()`, NOT THIS
+    /// FLOOR.** That check observes the OS reclaim itself —
     /// `handleBackfillTask`'s `expirationHandler` calls `workTask.cancel()`
     /// before anything else — so it is exact, arrives at the moment the window
-    /// ends, and binds on every grant shorter than the budget. This floor only
-    /// ever binds on grants LONGER than 219 s. Reading it as the short-grant
+    /// ends, and binds on every grant shorter than the budget. This floor can
+    /// only bind on grants LONGER than 219 s. Reading it as the short-grant
     /// guard is the mis-reading `budgetedRemaining` is named to prevent.
-    ///   - A thrown `CancellationError` ends the phase (the grant was
-    ///     reclaimed); any other per-asset error is logged and the loop moves
-    ///     on, because one asset's store hiccup must not starve the rest of
-    ///     the window.
-    ///   - report: playhead-8ljj. Fired on EVERY exit and after every asset
-    ///     driven, so the last statement it made is true of the moment the
-    ///     window ended — including when the window ends inside `scanAsset`
-    ///     and this function never returns.
     static func runCoarseScanLoop(
         deadline: ContinuousClock.Instant,
         minimumWindowBudget: Duration,
