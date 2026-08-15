@@ -701,6 +701,170 @@ struct EpisodeLeaseAndWorkJournalTests {
         #expect(fetched?.generationID == originalGen.uuidString, "Generation preserved (no requeue)")
     }
 
+    // MARK: - playhead-rqgr: the row an interrupted zero-coverage run writes
+
+    /// THE WITNESS THE BEAD ASKED FOR, BUILT RATHER THAN FOUND.
+    ///
+    /// This is the exact sequence the runner produces when a listener's scrub
+    /// re-tasks the shared transcript engine and the process then dies before
+    /// `AnalysisWorkScheduler`'s `.interrupted` arm can commit: lease
+    /// acquired, one zero-coverage row from
+    /// `AnalysisJobRunner.emitTranscriptionTimeoutJournal`, nothing after it.
+    ///
+    /// Before rqgr that row was a hardcoded `.failed`, so the arm below took
+    /// `clearOrphanedLeaseNoRequeue` — leaving `state='running'` with a NULL
+    /// lease, which `fetchNextEligibleJob` (queued/paused/failed) cannot see,
+    /// `fetchJobsWithExpiredLeases` (leaseOwner NOT NULL) cannot see, and
+    /// playhead-btwk's `fetchStrandedActiveJobs` cannot see either until some
+    /// unrelated orphan happens to bump the scheduler epoch past this row's.
+    /// The job's own outcome, `.interrupted`, had just asked for the
+    /// opposite: spend no attempt, come back.
+    ///
+    /// The row is `.preempted` now, so the job requeues.
+    @Test("playhead-rqgr: an interrupted zero-coverage orphan requeues instead of being cleared")
+    func interruptedZeroCoverageOrphanRequeues() async throws {
+        let store = try await makeTestStore()
+
+        let episodeId = "ep-rqgr-interrupted"
+        let originalGen = UUID()
+        let originalEpoch = try await store.fetchSchedulerEpoch() ?? 0
+        let now: Double = 12_000_000
+        let expiredAt = now - 20
+
+        var job = makeAnalysisJob(
+            jobId: "j-rqgr-interrupted",
+            episodeId: episodeId,
+            workKey: "wk-rqgr-interrupted",
+            priority: 10,
+            // The real orphan shape: the row was mid-run when its owner died.
+            state: "running",
+            leaseOwner: "worker-dead",
+            leaseExpiresAt: expiredAt
+        )
+        job = spliceLeaseIdentity(
+            job: job,
+            generationID: originalGen.uuidString,
+            schedulerEpoch: originalEpoch
+        )
+        try await store.insertJob(job)
+
+        // The event the runner mints for this exit — read off the production
+        // derivation rather than spelled here, so a change to it moves this
+        // test instead of leaving it pinning a stale literal.
+        let disposition = AnalysisJobRunner.zeroCoverageDisposition(
+            failure: TranscriptFailureReason(
+                failureClass: .cancelled, termination: .interrupted
+            ),
+            observation: .engineReported
+        )
+        try await store.appendWorkJournalEntry(WorkJournalEntry(
+            id: UUID().uuidString,
+            episodeId: episodeId,
+            generationID: originalGen,
+            schedulerEpoch: originalEpoch,
+            timestamp: now - 30,
+            eventType: disposition.journalEvent,
+            cause: disposition.journalCause,
+            metadata: "{}",
+            artifactClass: .scratch
+        ))
+
+        let rebuilt = try await recoverOrphans(store: store, now: now, graceSeconds: 10)
+        #expect(
+            rebuilt == ["j-rqgr-interrupted"],
+            """
+            a run whose OUTCOME was .interrupted was cleared without requeue. \
+            The journal row says \(disposition.journalEvent.rawValue), which routes \
+            \(disposition.journalEvent.orphanRecoveryRouting.rawValue)
+            """
+        )
+
+        let recovered = try await store.fetchJob(byId: "j-rqgr-interrupted")
+        #expect(recovered?.state == "queued", "a requeued orphan must be dispatchable")
+        #expect(recovered?.leaseOwner == nil)
+        #expect(recovered?.generationID != originalGen.uuidString)
+        #expect((recovered?.schedulerEpoch ?? 0) > originalEpoch)
+    }
+
+    /// THE CONTROL, AND IT IS THE HALF THAT MUST NOT MOVE.
+    ///
+    /// rqgr's fix is that an INTERRUPTED run stops claiming it failed — not
+    /// that failure stops being terminal. A run that reached its own
+    /// conclusion, and one nobody reported on at all, still write `.failed`,
+    /// and `.failed` still clears the lease without requeue. Without this the
+    /// change reads "orphans always resume", which is how a job that can
+    /// never converge retries forever (playhead-se0x / playhead-e6d3).
+    @Test(
+        "playhead-rqgr control: a concluded or unreported zero-coverage orphan stays terminal",
+        arguments: [true, false]
+    )
+    func concludedZeroCoverageOrphanStaysTerminal(reported: Bool) async throws {
+        let store = try await makeTestStore()
+
+        let suffix = reported ? "concluded" : "silent"
+        let episodeId = "ep-rqgr-\(suffix)"
+        let originalGen = UUID()
+        let originalEpoch = try await store.fetchSchedulerEpoch() ?? 0
+        let now: Double = 12_500_000
+        let expiredAt = now - 20
+
+        var job = makeAnalysisJob(
+            jobId: "j-rqgr-\(suffix)",
+            episodeId: episodeId,
+            workKey: "wk-rqgr-\(suffix)",
+            priority: 10,
+            state: "running",
+            attemptCount: 3,
+            leaseOwner: "worker-dead",
+            leaseExpiresAt: expiredAt
+        )
+        job = spliceLeaseIdentity(
+            job: job,
+            generationID: originalGen.uuidString,
+            schedulerEpoch: originalEpoch
+        )
+        try await store.insertJob(job)
+
+        let disposition = AnalysisJobRunner.zeroCoverageDisposition(
+            failure: reported
+                ? TranscriptFailureReason(
+                    failureClass: .transcriptionFailed, termination: .ranToConclusion
+                )
+                : nil,
+            observation: reported ? .engineReported : .engineSilentTimeout
+        )
+        try await store.appendWorkJournalEntry(WorkJournalEntry(
+            id: UUID().uuidString,
+            episodeId: episodeId,
+            generationID: originalGen,
+            schedulerEpoch: originalEpoch,
+            timestamp: now - 30,
+            eventType: disposition.journalEvent,
+            cause: disposition.journalCause,
+            metadata: "{}",
+            artifactClass: .scratch
+        ))
+
+        let rebuilt = try await recoverOrphans(store: store, now: now, graceSeconds: 10)
+        #expect(
+            rebuilt.isEmpty,
+            """
+            a genuinely failed zero-coverage run was requeued. The terminal arm is \
+            what lets a non-converging job stop; rqgr fixes the WRITER, not this
+            """
+        )
+
+        let fetched = try await store.fetchJob(byId: "j-rqgr-\(suffix)")
+        #expect(fetched?.leaseOwner == nil, "the lease slot is still freed")
+        #expect(fetched?.attemptCount == 3, "terminal clear must not reset attemptCount")
+        #expect(fetched?.generationID == originalGen.uuidString, "no new generation")
+        // And this is what the terminal arm COSTS, stated rather than left
+        // implicit: the row keeps `state='running'` with no lease, which
+        // `fetchNextEligibleJob` does not dispatch. That is correct for a
+        // failed job and was the harm when an interrupted one landed here.
+        #expect(fetched?.state == "running")
+    }
+
     // MARK: - Acceptance 7: crash consistency
 
     @Test("Crash mid-scheduling-pass: rollback leaves DB consistent (no partial work_journal)")
@@ -1195,13 +1359,21 @@ struct EpisodeLeaseAndWorkJournalTests {
             }
             let decisionEvent = lastEvent?.eventType
 
-            switch decisionEvent {
-            case .finalized, .failed:
+            // playhead-rqgr: replay the production ROUTING rather than a
+            // second copy of its `case` list. This helper used to spell the
+            // arms out itself, so the two could drift and the test would
+            // still pass — it was pinning its own opinion. Both sides now
+            // read `EventType.orphanRecoveryRouting`, so a change to the
+            // policy shows up here.
+            let routing = decisionEvent?.orphanRecoveryRouting ?? .requeue
+
+            switch routing {
+            case .terminalNoRequeue:
                 try await store.clearOrphanedLeaseNoRequeue(
                     jobId: job.jobId,
                     now: now
                 )
-            case .checkpointed, .acquired, .preempted, .none:
+            case .requeue:
                 let newEpoch = try await store.incrementSchedulerEpoch()
                 let newGeneration = UUID().uuidString
                 let staleSeconds = max(0.0, now - (job.leaseExpiresAt ?? now))

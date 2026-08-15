@@ -1521,14 +1521,34 @@ actor AnalysisCoordinator {
     /// Cold-launch orphan recovery. Scans `analysis_jobs` for held
     /// leases whose `expiresAt` is more than the grace window in the
     /// past and, for each, inspects the last `work_journal` entry to
-    /// decide how to reconcile:
+    /// decide how to reconcile, via
+    /// ``WorkJournalEntry/EventType/orphanRecoveryRouting``:
     ///
-    /// - terminal (`finalized` / `failed`) → clear lease slot, no
-    ///   requeue.
-    /// - `checkpointed` (or `acquired` with no progress) → requeue
-    ///   with a fresh generationID, bumped epoch, attemptCount=0, and
-    ///   the lane-preserved priority. Now-lane rows stale for >60 s
-    ///   demote to Soon (priority 10).
+    /// - ``WorkJournalEntry/OrphanRecoveryRouting/terminalNoRequeue``
+    ///   (`finalized` / `failed`) → clear lease slot, no requeue.
+    /// - ``WorkJournalEntry/OrphanRecoveryRouting/requeue``
+    ///   (`checkpointed`, `preempted`, `acquired` with no progress, or no
+    ///   journal trail at all) → requeue with a fresh generationID, bumped
+    ///   epoch, attemptCount=0, and the lane-preserved priority. Now-lane
+    ///   rows stale for >60 s demote to Soon (priority 10).
+    ///
+    /// **THE JOURNAL ROW IS THE INPUT TO THIS DECISION** (playhead-rqgr) —
+    /// it is not a diagnostic byproduct, and the writer that says otherwise
+    /// is the one that has to change. This function deliberately does NOT
+    /// widen the terminal arm to rescue rows it suspects: a `.failed` row
+    /// means the work is over, and a job that can never converge must be
+    /// able to stop. The tail this bead fixed is on the WRITE side, where a
+    /// run whose own outcome was `.interrupted` was labelling itself
+    /// `.failed`.
+    ///
+    /// A CAVEAT WORTH KNOWING BEFORE YOU READ THE REQUEUE ARM AS FREE:
+    /// `requeueOrphanedLease` sets `attemptCount = 0`, so any retry budget
+    /// a row had earned from genuine failures is forgotten when it resumes.
+    /// That is this function's pre-existing contract for every requeue
+    /// shape, not something rqgr introduced — but it does mean the
+    /// crash-path recovery is more generous than the scheduler's own
+    /// in-process `.interrupted` requeue, which leaves the count alone.
+    /// Filed as playhead-z8lm.
     ///
     /// Returns the list of freshly-rebuilt leases for the caller to
     /// log / reschedule.
@@ -1580,16 +1600,31 @@ actor AnalysisCoordinator {
             }
             let decisionEvent = lastEvent?.eventType
 
+            // playhead-rqgr: route on the EVENT'S DECLARED ARM rather than
+            // on a `case` list spelled out here. Two things this buys, and
+            // neither is cosmetic. A new `EventType` can no longer join an
+            // arm by being appended to whichever list a reader edits first —
+            // `EventType.orphanRecoveryRouting` is exhaustive, so the
+            // decision is forced at the declaration. And the absent-row
+            // default is now stated once, in the open, instead of riding
+            // along inside a five-way `case`.
+            //
+            // `nil` means no journal trail for this generation at all: the
+            // legitimate first-launch-after-rollout state, and the shape a
+            // pre-5uvz.1 row has. Nothing claimed the work finished, so the
+            // safe reading is that it did not.
+            let routing = decisionEvent?.orphanRecoveryRouting ?? .requeue
+
             do {
-                switch decisionEvent {
-                case .finalized, .failed:
+                switch routing {
+                case .terminalNoRequeue:
                     // Already terminal — clear lease slot and move on.
                     try await store.clearOrphanedLeaseNoRequeue(
                         jobId: job.jobId,
                         now: now
                     )
 
-                case .checkpointed, .acquired, .preempted, .none:
+                case .requeue:
                     // Resume path: requeue with fresh identity under a
                     // freshly-bumped scheduler epoch.
                     // playhead-uhdu (5uvz.1 NIT #4): split the log by

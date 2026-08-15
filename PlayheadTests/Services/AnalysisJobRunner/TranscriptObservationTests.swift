@@ -456,11 +456,12 @@ struct TranscriptObservationTests {
         ]
     )
     func interruptionsDoNotSpendARetryAttempt(failureClass: TranscriptFailureClass) {
-        let reason = AnalysisJobRunner.zeroCoverageStopReason(
+        let reason = AnalysisJobRunner.zeroCoverageDisposition(
             failure: TranscriptFailureReason(
                 failureClass: failureClass, termination: .interrupted
-            )
-        )
+            ),
+            observation: .engineReported
+        ).stopReason
         guard case .interrupted(let code) = reason else {
             Issue.record("""
                 \(failureClass.rawValue) interrupted reported \(reason), which spends one \
@@ -490,11 +491,12 @@ struct TranscriptObservationTests {
         ]
     )
     func concludedRunsStillSpendTheirAttempt(failureClass: TranscriptFailureClass) {
-        let reason = AnalysisJobRunner.zeroCoverageStopReason(
+        let reason = AnalysisJobRunner.zeroCoverageDisposition(
             failure: TranscriptFailureReason(
                 failureClass: failureClass, termination: .ranToConclusion
-            )
-        )
+            ),
+            observation: .engineReported
+        ).stopReason
         guard case .failed = reason else {
             Issue.record("""
                 \(failureClass.rawValue) that ran to conclusion reported \(reason), which \
@@ -510,7 +512,10 @@ struct TranscriptObservationTests {
     /// interruptions. Nothing reported, so nothing excuses them.
     @Test("a run nobody reported on still spends its attempt")
     func unreportedRunsStillSpendTheirAttempt() {
-        let reason = AnalysisJobRunner.zeroCoverageStopReason(failure: nil)
+        let reason = AnalysisJobRunner.zeroCoverageDisposition(
+            failure: nil,
+            observation: .engineSilentTimeout
+        ).stopReason
         guard case .failed(let code) = reason else {
             Issue.record("an unreported zero-coverage run reported \(reason)")
             return

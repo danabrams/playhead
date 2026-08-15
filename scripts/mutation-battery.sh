@@ -1334,6 +1334,14 @@ ESUMBF="Playhead/Services/EpisodeSummaries/EpisodeSummaryBackfillCoordinator.swi
 # 2026-08-06 pull, and every one of them can be quietly restored to a value
 # nobody measured — which is precisely how `25 * 60` survived in the handler.
 GRANT="Playhead/Services/AnalysisCoordinator/BackgroundGrantBudget.swift"
+# playhead-rqgr (RQ series): the WorkJournal event vocabulary and — new in this
+# bead — the declaration of which cold-launch orphan-recovery arm each event
+# selects. It is a separate file from $ACOORD on purpose: the ROUTING TABLE and
+# the code that reads it are different defects. A table that classifies
+# `.preempted` as terminal strands every interrupted job in the fleet and is
+# invisible to a test of the coordinator; a coordinator that stops reading the
+# table re-opens the duplicated `case` list the store-level tests replay.
+LEASE="Playhead/Services/AnalysisCoordinator/EpisodeExecutionLease.swift"
 MUTABLE_FILES=(
   "$ORCH" "$STORE" "$CTRL" "$VIEW" "$TRIG" "$RSVC" "$TRUST" "$NPV" "$NPVM"
   "$BWPOL" "$KICK" "$KCOORD" "$SEAMS" "$ACT" "$ADSVC" "$PODC"
@@ -1344,7 +1352,7 @@ MUTABLE_FILES=(
   "$DETCLS" "$DETLED" "$SPLIT" "$HOTGATE" "$UGCEN" "$POLICY" "$SEGAGG"
   "$DLMGR" "$FQSCAN" "$BGFEED" "$EPPREP" "$SCHED"
   "$CLAIM" "$RECON" "$ATOM" "$AJRUN" "$ACOORD" "$ESUMBF" "$MPTRENG" "$MPTRIDX"
-  "$BGPS" "$GRANT"
+  "$BGPS" "$GRANT" "$LEASE"
 )
 # playhead-6r4z R1 review: `$MPTRIDX` was MISSING from the list above from the
 # moment playhead-mptr added the K2 series, and it is the target of NINE of the
@@ -1897,6 +1905,17 @@ FOCUSED_SUITES=(
   -only-testing:PlayheadTests/DayZeroSameSessionRetryPolicyTests
   -only-testing:PlayheadTests/DayZeroSameSessionRetryTriggerTests
   -only-testing:PlayheadTests/DayZeroSameSessionRetryStoreTests
+  # playhead-rqgr: the zero-coverage journal row as a RECOVERY INPUT (RQ
+  # series). Three suites, because the claim spans three layers and no one of
+  # them can see the others: the pure disposition + the routing table (instant,
+  # no store); the real-store orphan sweep, which is the only thing able to
+  # observe a job actually stranded at `state='running'` with a NULL lease; and
+  # a SOURCE CANARY, because the emission site is private on a runner with no
+  # protocol seam and `recoverOrphans` needs ~6 collaborators, so the two sites
+  # where this defect actually lived are unreachable from any runtime assertion.
+  -only-testing:PlayheadTests/ZeroCoverageRecoveryRoutingTests
+  -only-testing:PlayheadTests/EpisodeLeaseAndWorkJournalTests
+  -only-testing:PlayheadTests/ZeroCoverageRecoveryRoutingSourceCanaryTests
 )
 
 # Named to match the `/private/tmp/playhead-*` pattern `scripts/disk-cleanup.sh`
@@ -3036,6 +3055,48 @@ T_3OYZ_TRIGGER_BOUND="THE BOUND: a retry that times out again is NOT retried a s
 T_3OYZ_WITNESS="THE WITNESS, FIXED: a -1001 that landed nothing is retried once and the pre-roll lane lights up"
 T_3OYZ_CANCEL="CANCELLATION MID-DELAY drops the retry — after the claim, never before it"
 T_3OYZ_DROPPED="A DROPPED RETRY IS QUERYABLE: lastRetryClaimAt > lastAttemptAt with no attempt after it (fil5)"
+
+# ---- playhead-rqgr: work_journal.eventType is a recovery input (RQ series) ----
+#
+# ONE EVENT, TWO DURABLE RECORDS, AND THEY DISAGREED. A zero-coverage exit
+# reports an `AnalysisOutcome.StopReason` to the scheduler and writes a
+# `work_journal` row. `AnalysisCoordinator.recoverOrphans` routes a cold-launch
+# orphan on that row's `eventType` and never reads `lastErrorCode` at all — so
+# a run whose outcome was `.interrupted` (playhead-ngev: costs no attempt, the
+# retry comes back) and whose row said `.failed` told a cold launch the exact
+# opposite, and `clearOrphanedLeaseNoRequeue` left the job `state='running'`
+# with a NULL lease that no dispatcher, no lease sweep and no stranded sweep
+# can reach.
+#
+# The series is built so that every plausible mis-scoping is separated from its
+# MIRROR, because this bead's trap is that the obvious fix — widen the resume
+# arm to catch `.failed` — is the wrong one. Four of the eight rails move a
+# value TOWARDS resume and are killed by the controls; four move it towards
+# terminal and are killed by the fix's own rails.
+#
+# TWO SITES ARE COVERED BY SOURCE CANARIES RATHER THAN BEHAVIOUR, and the
+# reason is structural, not laziness: `emitTranscriptionTimeoutJournal` is
+# private on a runner that holds a concrete `TranscriptEngineService` with a
+# hardcoded 300 s timeout (the constraint playhead-8ysk already documents), and
+# `recoverOrphans` needs ~6 collaborators to construct, which is why the
+# store-level suite REPLAYS its policy. A replayed policy pins the replica; the
+# canary is what holds production to the same rule.
+T_RQ_TERMINAL_ARM="the terminal arm is exactly {finalized, failed}"
+T_RQ_RESUME_ARM="the resume arm is exactly {acquired, checkpointed, preempted}"
+T_RQ_INT_EVENT="an interrupted run journals .preempted"
+T_RQ_INT_RESUMES="an interrupted run's row resumes on cold launch"
+T_RQ_CONC_EVENT="control: a run that concluded on its own still journals .failed"
+T_RQ_CONC_TERMINAL="control: a run that concluded on its own stays terminal on cold launch"
+T_RQ_AGREE="the journal event and the stop reason never disagree"
+T_RQ_UNREPORTED="an exit nobody reported on is terminal on both records"
+# The two store-level rails: the only place the row, the routing and the
+# `analysis_jobs` write are observed end to end.
+T_RQ_STORE_REQUEUE="playhead-rqgr: an interrupted zero-coverage orphan requeues instead of being cleared"
+T_RQ_STORE_TERMINAL="playhead-rqgr control: a concluded or unreported zero-coverage orphan stays terminal"
+# XCTest, so \`Suite/method\`.
+T_RQ_CANARY_EVENT="ZeroCoverageRecoveryRoutingSourceCanaryTests/testTimeoutJournalTakesItsEventFromTheDisposition"
+T_RQ_CANARY_COUNTER="ZeroCoverageRecoveryRoutingSourceCanaryTests/testTimeoutJournalRoutesTheSliceCounterByTheSameDisposition"
+T_RQ_CANARY_COORD="ZeroCoverageRecoveryRoutingSourceCanaryTests/testOrphanRecoveryRoutesOnTheDeclaredArm"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -6664,6 +6725,70 @@ MUTATIONS=(
   # fully-qualified name discriminates at the TAIL, and a silent cut reads as a
   # complete identity.
   "UM13|719|UMF|$T_UM_TRUNC"
+
+  # ---- playhead-rqgr (RQ series). Eight rails, four batches. ----
+  #
+  # THE BATCHING IS BY ANCHOR, NOT BY THEME. RQ01/RQ02 both rewrite a
+  # `journalEvent:` line inside `zeroCoverageDisposition` and RQ03/RQ04 both
+  # rewrite the `switch self` in `orphanRecoveryRouting`, so within each pair
+  # whichever landed first would destroy the other's anchor.
+
+  # Batch 800 — RQ01, THE SHIPPED DEFECT VERBATIM. The interrupted arm journals
+  # `.failed` while its own `StopReason` stays `.interrupted`. That is the tree
+  # before this bead: the outcome says "spend no attempt, the retry comes back"
+  # and the row a cold launch reads says "the work is over".
+  #
+  # RQ03 is the same harm reached from the routing table, and RQ01's kill set is
+  # NOT a subset of it: only RQ01 changes the VALUE the runner writes, which is
+  # what `T_RQ_INT_EVENT` pins.
+  "RQ01|800|AJRUN|$T_RQ_INT_EVENT;$T_RQ_INT_RESUMES;$T_RQ_AGREE;$T_RQ_STORE_REQUEUE"
+  # RQ03 — `.preempted` reclassified as terminal. The reader-side version of the
+  # same strand, and strictly worse in the field: it strands every `.preempted`
+  # row in the fleet, including the ones `AnalysisWorkScheduler`'s own
+  # `.interrupted` and lane-preemption arms have been writing since ngev.
+  # Different file, so it can share a batch with RQ01.
+  "RQ03|800|LEASE|$T_RQ_RESUME_ARM;$T_RQ_INT_RESUMES;$T_RQ_AGREE;$T_RQ_STORE_REQUEUE"
+
+  # Batch 801 — RQ02, THE WRONG FIX, which is the one this bead's brief warns
+  # about by name. The terminal arm journals `.preempted` too, so every
+  # zero-coverage exit resumes. It "fixes" the strand by removing the ability of
+  # a job to stop, which is playhead-se0x's and playhead-e6d3's standing
+  # constraint.
+  "RQ02|801|AJRUN|$T_RQ_CONC_EVENT;$T_RQ_CONC_TERMINAL;$T_RQ_UNREPORTED;$T_RQ_AGREE;$T_RQ_STORE_TERMINAL"
+  # RQ04 — the same relaxation one layer down: `.failed` itself joins the resume
+  # arm. This is the mutation that would make the naive reading of this bead
+  # ("widen the resume arm to catch .failed") pass its own tests, and the reason
+  # the terminal half of the mapping is pinned separately from the resume half.
+  "RQ04|801|LEASE|$T_RQ_TERMINAL_ARM;$T_RQ_CONC_TERMINAL;$T_RQ_UNREPORTED;$T_RQ_AGREE;$T_RQ_STORE_TERMINAL"
+
+  # Batch 802 — the three CALL-SITE rails. Each is killed by exactly one canary
+  # method and by nothing else, which is the honest statement of what a source
+  # canary buys: it is the only instrument that reaches these sites at all.
+  #
+  # RQ05 — the emission site names the event itself again. The disposition is
+  # still correct; it is simply not used. This is the shape the defect actually
+  # had — a right derivation sitting beside a literal — and no runtime test on
+  # this harness can see it.
+  "RQ05|802|AJRUN|$T_RQ_CANARY_EVENT"
+  # RQ06 — the SLICE COUNTER, which is the third record of the same event and
+  # was the same literal one layer down: an unconditional `recordFailed` tallies
+  # a listener's scrub into `slicesFailed`, the one quantity that number exists
+  # not to be.
+  "RQ06|802|AJRUN|$T_RQ_CANARY_COUNTER"
+  # RQ07 — the coordinator re-spells the terminal set locally. Behaviour is
+  # identical, which is the point: the harm is a SECOND copy of a policy whose
+  # first copy is what the store-level suite replays, so the two can drift and
+  # every test stays green.
+  "RQ07|802|ACOORD|$T_RQ_CANARY_COORD"
+
+  # Batch 803 — RQ08, THE VACUITY CONTROL, and its kill set is a strict subset
+  # of RQ02's and RQ04's ON PURPOSE. `clearOrphanedLeaseNoRequeue` is made a
+  # no-op, so the terminal arm writes nothing at all. The control test asserts
+  # the lease slot IS freed, and if it stays green then that test was passing on
+  # a state nobody wrote rather than on the arm it names — which is exactly the
+  # failure mode a "nothing happened" arm invites. A subset here is evidence,
+  # not redundancy, and it is called out rather than papered over.
+  "RQ08|803|STORE|$T_RQ_STORE_TERMINAL"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -7221,6 +7346,14 @@ describe_mutation() {
     DR22) echo "e75l R7: the drain-stop EVENT is bound to a fixed kind, so a drain stopped by metadata stalls emits kvs8's throttle event — R1's defect with no literal for the hard-coding rail to see" ;;
     DR23) echo "e75l R7: the drain-stop line's consecutive= reports the drain-wide deferred.count instead of the run of back-to-back refusals" ;;
     DR24) echo "e75l R7: the per-job line's consecutive= reports job.retryCount — the quantity this bead PRESERVES, so the field can never move" ;;
+    RQ01) echo "rqgr THE SHIPPED DEFECT: an interrupted zero-coverage run journals .failed while its own outcome says .interrupted, so a cold launch clears the lease the outcome asked to keep" ;;
+    RQ02) echo "rqgr THE WRONG FIX: the terminal arm journals .preempted too, so every zero-coverage exit resumes and a job that can never converge retries forever" ;;
+    RQ03) echo "rqgr: .preempted is reclassified as terminal — every interrupted job in the fleet strands, including the rows the scheduler's own arms have written since ngev" ;;
+    RQ04) echo "rqgr: .failed joins the RESUME arm — the naive reading of this bead, and the relaxation its brief forbids by name" ;;
+    RQ05) echo "rqgr: the emission site names the journal event itself again — the disposition is still correct and simply not used, which is the shape the defect actually had" ;;
+    RQ06) echo "rqgr: the slice counter is unconditionally recordFailed — a listener's scrub is tallied into slicesFailed, the one quantity that number exists not to be" ;;
+    RQ07) echo "rqgr: recoverOrphans re-spells the terminal event set locally — behaviour identical, and a SECOND copy of the policy the store-level suite replays" ;;
+    RQ08) echo "rqgr VACUITY CONTROL: clearOrphanedLeaseNoRequeue writes nothing, so the terminal-arm test must be observing a real write rather than a state nobody set" ;;
     *)   echo "(no description)" ;;
   esac
 }
@@ -15769,6 +15902,153 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  # ---- playhead-rqgr: work_journal.eventType is a recovery input (RQ series) ----
+
+  # RQ01 — the tree before this bead, verbatim. The interrupted arm keeps its
+  # `.interrupted` StopReason (no attempt spent, the retry comes back) and
+  # journals `.failed` (the work is over, do not requeue).
+  RQ01)
+    snippet OLD <<'EOF'
+                journalEvent: .preempted,
+EOF
+    snippet NEW <<'EOF'
+                journalEvent: .failed,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # RQ02 — the mirror, and the fix this bead's brief forbids: the concluded /
+  # unreported arm resumes too. Every zero-coverage exit becomes non-terminal.
+  RQ02)
+    snippet OLD <<'EOF'
+            stopReason: .failed(code),
+            journalEvent: .failed,
+EOF
+    snippet NEW <<'EOF'
+            stopReason: .failed(code),
+            journalEvent: .preempted,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # RQ03 — the routing table classifies `.preempted` as terminal. Reaches the
+  # same strand as RQ01 from the reader's side, and reaches it for every
+  # `.preempted` writer in the app rather than just this one.
+  RQ03)
+    snippet OLD <<'EOF'
+            case .finalized, .failed:
+                return .terminalNoRequeue
+            case .acquired, .checkpointed, .preempted:
+                return .requeue
+EOF
+    snippet NEW <<'EOF'
+            case .finalized, .failed, .preempted:
+                return .terminalNoRequeue
+            case .acquired, .checkpointed:
+                return .requeue
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # RQ04 — the relaxation: `.failed` joins the resume arm. This is what "widen
+  # the resume arm to catch .failed" looks like in code, and the reason the two
+  # halves of the mapping are pinned by separate tests.
+  RQ04)
+    snippet OLD <<'EOF'
+            case .finalized, .failed:
+                return .terminalNoRequeue
+            case .acquired, .checkpointed, .preempted:
+EOF
+    snippet NEW <<'EOF'
+            case .finalized:
+                return .terminalNoRequeue
+            case .failed, .acquired, .checkpointed, .preempted:
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # RQ05 — the emission site chooses the event itself. The derivation is intact
+  # and unused: exactly the shape the shipped defect had.
+  RQ05)
+    snippet OLD <<'EOF'
+            eventType: disposition.journalEvent,
+EOF
+    snippet NEW <<'EOF'
+            eventType: .failed,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # RQ06 — the slice counter, the third record of the same event, hard-coded to
+  # the failed tally as it was before this bead.
+  RQ06)
+    snippet OLD <<'EOF'
+        let metadata: SliceMetadata
+        switch disposition.journalEvent.orphanRecoveryRouting {
+        case .requeue:
+            metadata = await SliceCompletionInstrumentation.recordPaused(
+                cause: cause,
+                deviceClass: deviceClass,
+                sliceDurationMs: elapsedMs,
+                bytesProcessed: 0,
+                shardsCompleted: 0,
+                extras: extras
+            )
+        case .terminalNoRequeue:
+            metadata = await SliceCompletionInstrumentation.recordFailed(
+                cause: cause,
+                deviceClass: deviceClass,
+                sliceDurationMs: elapsedMs,
+                bytesProcessed: 0,
+                shardsCompleted: 0,
+                extras: extras
+            )
+        }
+EOF
+    snippet NEW <<'EOF'
+        let metadata = await SliceCompletionInstrumentation.recordFailed(
+            cause: cause,
+            deviceClass: deviceClass,
+            sliceDurationMs: elapsedMs,
+            bytesProcessed: 0,
+            shardsCompleted: 0,
+            extras: extras
+        )
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # RQ07 — a second copy of the terminal-vs-resume policy inside the reader.
+  # Behaviour is identical today, which is the whole risk: the store-level suite
+  # replays the FIRST copy, so the two can drift with every test green.
+  RQ07)
+    snippet OLD <<'EOF'
+            let routing = decisionEvent?.orphanRecoveryRouting ?? .requeue
+EOF
+    snippet NEW <<'EOF'
+            let routing: WorkJournalEntry.OrphanRecoveryRouting
+            switch decisionEvent {
+            case .finalized, .failed: routing = .terminalNoRequeue
+            default: routing = .requeue
+            }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # RQ08 — THE VACUITY CONTROL. The terminal arm's only write becomes a no-op.
+  # If the control test stays green it was asserting a state nobody set.
+  RQ08)
+    snippet OLD <<'EOF'
+    func clearOrphanedLeaseNoRequeue(jobId: String, now: Double) throws {
+        let sql = """
+            UPDATE analysis_jobs
+            SET leaseOwner = NULL, leaseExpiresAt = NULL, updatedAt = ?
+            WHERE jobId = ?
+            """
+EOF
+    snippet NEW <<'EOF'
+    func clearOrphanedLeaseNoRequeue(jobId: String, now: Double) throws {
+        let sql = """
+            UPDATE analysis_jobs
+            SET updatedAt = ?
+            WHERE jobId = ? AND 0
+            """
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
   *)
     echo "mutation-battery: unknown mutation '$name'" >&2
     return 3 ;;
@@ -15844,6 +16124,7 @@ rec_file()   {
     RECON) printf '%s' "$RECON" ;;
     ATOM)  printf '%s' "$ATOM" ;;
     AJRUN) printf '%s' "$AJRUN" ;;
+    LEASE) printf '%s' "$LEASE" ;;
     *)     printf '%s' "" ;;
   esac
 }

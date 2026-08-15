@@ -90,8 +90,53 @@ struct EpisodeExecutionLease: Sendable, Equatable {
 /// they are reconstructible audit metadata, never user-facing media,
 /// and safe to evict under dual-cap pressure (per playhead-h7r).
 struct WorkJournalEntry: Sendable, Equatable {
+
+    /// What cold-launch orphan recovery does with a job whose LAST
+    /// journal row carries a given ``EventType``.
+    ///
+    /// playhead-rqgr: THIS TYPE EXISTS BECAUSE `eventType` WAS DOCUMENTED
+    /// AS INERT AND IS NOT. ``AnalysisCoordinator/recoverOrphans(now:graceSeconds:)``
+    /// reads the last row for a stranded `{episode, generation}` and routes
+    /// on it — so an event is a WRITE INTO A DECISION, not a note for an
+    /// operator. `AnalysisJobRunner.emitTranscriptionTimeoutJournal`'s doc
+    /// called the row "observability gravy" and said
+    /// `analysis_jobs.lastErrorCode` was the primary signal; on the strength
+    /// of that a run whose own outcome was `.interrupted` wrote `.failed`,
+    /// and a process death before the scheduler's requeue turned "costs no
+    /// attempt, comes back" into "cleared, never requeued".
+    ///
+    /// Naming the arm as its own type is what makes the obligation
+    /// compile-enforced: ``EventType/orphanRecoveryRouting`` switches
+    /// exhaustively with no `default`, so a new event cannot be added
+    /// without stating which arm it selects, and `recoverOrphans` switches
+    /// on this rather than on the five raw cases, so a new event can never
+    /// fall into an arm by sharing a `case` list with unrelated events.
+    enum OrphanRecoveryRouting: String, Sendable, Hashable, CaseIterable {
+        /// The work is over. `clearOrphanedLeaseNoRequeue` frees the lease
+        /// slot and the job is NOT re-dispatched.
+        ///
+        /// This is the arm a genuinely failed job must keep: a job that can
+        /// never converge has to be able to stop (playhead-se0x /
+        /// playhead-e6d3). Nothing may be moved OUT of `.failed` here to
+        /// rescue a stranded row — the fix for a row that should not have
+        /// been terminal is for its WRITER to stop claiming it failed.
+        case terminalNoRequeue
+
+        /// The work was cut short rather than finished.
+        /// `requeueOrphanedLease` mints a fresh generation, bumps the
+        /// scheduler epoch, resets `attemptCount` and re-queues under the
+        /// lane-preserved priority.
+        case requeue
+    }
+
     /// Lifecycle events a lease can emit. Stored as the `event_type`
     /// column's raw string value.
+    ///
+    /// **THIS IS A COLD-LAUNCH RECOVERY INPUT, NOT AN OBSERVABILITY FIELD.**
+    /// See ``OrphanRecoveryRouting``. Before writing one, ask what recovery
+    /// should do with a process that dies immediately afterwards, and make
+    /// the row say that — the value must agree with the outcome the same
+    /// code path reports to the scheduler.
     enum EventType: String, Sendable, Hashable, CaseIterable {
         /// Lease was acquired for this {episode, generation}. Exactly
         /// one `acquired` entry exists per generation.
@@ -116,7 +161,30 @@ struct WorkJournalEntry: Sendable, Equatable {
         /// `cause` carries the reason; attempt count is NOT
         /// auto-incremented by the journal append — callers that want
         /// retry semantics drive that separately.
+        ///
+        /// playhead-rqgr: this is the TERMINAL claim. Write it only when
+        /// the same code path is also telling the scheduler the work
+        /// failed. A run that was cut short from outside — a listener's
+        /// scrub re-tasking the shared transcript engine — is `.preempted`,
+        /// which is what its outcome already says.
         case failed
+
+        /// playhead-rqgr: which arm of
+        /// ``AnalysisCoordinator/recoverOrphans(now:graceSeconds:)`` a job
+        /// takes when this is the last row for its `{episode, generation}`.
+        ///
+        /// Exhaustive on purpose — no `default`. A new event added above
+        /// stops compiling here until somebody decides what a cold launch
+        /// does with it, which is the obligation this bead exists to
+        /// create.
+        var orphanRecoveryRouting: OrphanRecoveryRouting {
+            switch self {
+            case .finalized, .failed:
+                return .terminalNoRequeue
+            case .acquired, .checkpointed, .preempted:
+                return .requeue
+            }
+        }
     }
 
     let id: String
