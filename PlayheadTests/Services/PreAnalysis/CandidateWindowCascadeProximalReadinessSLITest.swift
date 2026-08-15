@@ -264,7 +264,7 @@ struct CandidateWindowCascadeProximalReadinessSLITest {
                 downloadId: "dl-e2vw-\(index)",
                 sourceFingerprint: "fp-e2vw-\(index)",
                 isExplicitDownload: true,
-                desiredCoverage: 90
+                feedDeclaredDurationSec: 90
             )
 
             // Step 3: seed the cascade. Real cascade actor; real

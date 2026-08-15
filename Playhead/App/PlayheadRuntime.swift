@@ -3983,7 +3983,10 @@ final class PlayheadRuntime {
             episodeId: episodeId,
             podcastId: episode.podcast?.feedURL.absoluteString,
             audioURL: enclosureURL,
-            durationSec: episode.duration,
+            // playhead-rh69: `Episode.duration` is the feed's
+            // `<itunes:duration>`, not the audio's length. Named for what it
+            // is; it asks for full coverage and the scheduler measures.
+            feedDeclaredDurationSec: episode.duration,
             podcastTitle: episode.podcast?.title,
             episodeTitle: episode.title
         )

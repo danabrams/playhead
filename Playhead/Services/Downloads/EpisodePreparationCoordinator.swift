@@ -56,7 +56,7 @@ protocol EpisodePreparationAnalysis: Sendable {
     /// completion fires) lands at the user-intent lane. Used when the
     /// audio is not yet downloaded, so no fingerprint / job exists to
     /// enqueue against yet.
-    func markUserIntent(episodeId: String, desiredCoverageSec: Double?) async
+    func markUserIntent(episodeId: String, feedDeclaredDurationSec: Double?) async
     /// Enqueue the full analysis pipeline for an already-downloaded
     /// episode at the user-intent lane. Idempotent (the scheduler dedups
     /// by work key).
@@ -64,7 +64,7 @@ protocol EpisodePreparationAnalysis: Sendable {
         episodeId: String,
         podcastId: String?,
         sourceFingerprint: String,
-        desiredCoverageSec: Double?,
+        feedDeclaredDurationSec: Double?,
         podcastTitle: String?,
         episodeTitle: String?
     ) async
@@ -82,7 +82,15 @@ struct EpisodePreparationCoordinator: Sendable {
         let episodeId: String
         let podcastId: String?
         let audioURL: URL
-        let durationSec: Double?
+        /// playhead-rh69: the publisher's `<itunes:duration>`, read off the
+        /// SwiftData `Episode`. It is a DECLARATION, not a measurement of the
+        /// file — dynamic ad insertion makes the audio longer than this — and
+        /// downstream it means only "the user asked for the WHOLE episode".
+        /// The scheduler resolves that request against a probe of the audio;
+        /// this number is the fallback for a file nobody has measured yet.
+        /// It was called `durationSec` while it was being used as a coverage
+        /// target, which is the defect playhead-rh69 closed.
+        let feedDeclaredDurationSec: Double?
         let podcastTitle: String?
         let episodeTitle: String?
 
@@ -90,14 +98,14 @@ struct EpisodePreparationCoordinator: Sendable {
             episodeId: String,
             podcastId: String?,
             audioURL: URL,
-            durationSec: Double?,
+            feedDeclaredDurationSec: Double?,
             podcastTitle: String? = nil,
             episodeTitle: String? = nil
         ) {
             self.episodeId = episodeId
             self.podcastId = podcastId
             self.audioURL = audioURL
-            self.durationSec = durationSec
+            self.feedDeclaredDurationSec = feedDeclaredDurationSec
             self.podcastTitle = podcastTitle
             self.episodeTitle = episodeTitle
         }
@@ -165,7 +173,7 @@ struct EpisodePreparationCoordinator: Sendable {
                     episodeId: request.episodeId,
                     podcastId: request.podcastId,
                     sourceFingerprint: fingerprint,
-                    desiredCoverageSec: request.durationSec,
+                    feedDeclaredDurationSec: request.feedDeclaredDurationSec,
                     podcastTitle: request.podcastTitle,
                     episodeTitle: request.episodeTitle
                 )
@@ -176,7 +184,7 @@ struct EpisodePreparationCoordinator: Sendable {
             // priority rather than blocking indefinitely here.
             await analysis.markUserIntent(
                 episodeId: request.episodeId,
-                desiredCoverageSec: request.durationSec
+                feedDeclaredDurationSec: request.feedDeclaredDurationSec
             )
             return .markedIntentOnly
         }
@@ -196,7 +204,7 @@ struct EpisodePreparationCoordinator: Sendable {
         // priority, then start the user-triggered download.
         await analysis.markUserIntent(
             episodeId: request.episodeId,
-            desiredCoverageSec: request.durationSec
+            feedDeclaredDurationSec: request.feedDeclaredDurationSec
         )
         // playhead-kkzu: the same identity that went to `enqueueUserIntent`
         // above now goes to the download half, so the analysis job the
@@ -275,10 +283,10 @@ struct DownloadManagerPreparationAdapter: EpisodePreparationDownloads {
 struct SchedulerPreparationAdapter: EpisodePreparationAnalysis {
     let scheduler: AnalysisWorkScheduler
 
-    func markUserIntent(episodeId: String, desiredCoverageSec: Double?) async {
+    func markUserIntent(episodeId: String, feedDeclaredDurationSec: Double?) async {
         await scheduler.markEpisodeUserIntent(
             episodeId: episodeId,
-            desiredCoverageSec: desiredCoverageSec
+            feedDeclaredDurationSec: feedDeclaredDurationSec
         )
     }
 
@@ -286,7 +294,7 @@ struct SchedulerPreparationAdapter: EpisodePreparationAnalysis {
         episodeId: String,
         podcastId: String?,
         sourceFingerprint: String,
-        desiredCoverageSec: Double?,
+        feedDeclaredDurationSec: Double?,
         podcastTitle: String?,
         episodeTitle: String?
     ) async {
@@ -294,7 +302,7 @@ struct SchedulerPreparationAdapter: EpisodePreparationAnalysis {
             episodeId: episodeId,
             podcastId: podcastId,
             sourceFingerprint: sourceFingerprint,
-            desiredCoverageSec: desiredCoverageSec,
+            feedDeclaredDurationSec: feedDeclaredDurationSec,
             podcastTitle: podcastTitle,
             episodeTitle: episodeTitle
         )
