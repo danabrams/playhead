@@ -47,15 +47,10 @@ struct ZeroCoverageRecoveryRoutingTests {
     /// Widening this arm is also the fix rqgr explicitly did NOT take —
     /// `.failed` must stay terminal, or a job that can never converge retries
     /// forever (playhead-se0x / playhead-e6d3).
-    @Test("the terminal arm is exactly {finalized, failed}")
+    @Test("the terminal arm: failed and finalized both stop")
     func failedAndFinalizedAreTerminal() {
         #expect(WorkJournalEntry.EventType.failed.orphanRecoveryRouting == .terminalNoRequeue)
         #expect(WorkJournalEntry.EventType.finalized.orphanRecoveryRouting == .terminalNoRequeue)
-        let terminal = Set(
-            WorkJournalEntry.EventType.allCases
-                .filter { $0.orphanRecoveryRouting == .terminalNoRequeue }
-        )
-        #expect(terminal == [.finalized, .failed], "terminal set is \(terminal.map(\.rawValue).sorted())")
     }
 
     /// THE RESUME HALF. An event that wrongly reads TERMINAL is what this bead
@@ -63,19 +58,47 @@ struct ZeroCoverageRecoveryRoutingTests {
     /// an interrupted zero-coverage run writes, and the row
     /// `AnalysisWorkScheduler`'s own `.interrupted` arm has written since
     /// playhead-ngev.
-    @Test("the resume arm is exactly {acquired, checkpointed, preempted}")
+    @Test("the resume arm: acquired, checkpointed and preempted all requeue")
     func acquiredCheckpointedAndPreemptedResume() {
         #expect(WorkJournalEntry.EventType.preempted.orphanRecoveryRouting == .requeue)
         #expect(WorkJournalEntry.EventType.checkpointed.orphanRecoveryRouting == .requeue)
         #expect(WorkJournalEntry.EventType.acquired.orphanRecoveryRouting == .requeue)
+    }
+
+    /// THE SET EQUALITIES, SPLIT OUT OF THE TWO TESTS ABOVE, AND THE SPLIT WAS
+    /// FORCED BY MEASUREMENT RATHER THAN TASTE.
+    ///
+    /// A mutation that moves ONE event between the arms breaks BOTH set
+    /// equalities at once — the terminal set gains a member and the resume set
+    /// loses one, or the reverse. So while the per-event assertions and the set
+    /// assertions lived in the same two tests, the two opposite mis-scopings
+    /// (rails RQ03 and RQ04: `.preempted` reclassified as terminal, and
+    /// `.failed` reclassified as resumable) killed an identical set of tests
+    /// and neither had a kill of its own. Measured, not predicted: RQ03 and
+    /// RQ04 were run alone and their kill sets were `{resume arm, terminal
+    /// arm, every event declares…, …}` in both cases.
+    ///
+    /// Separated, each direction has a witness. `.preempted` still requeuing
+    /// is a claim only RQ03 can falsify; `.failed` still stopping is a claim
+    /// only RQ04 can. The set equalities remain, here, as the belt that
+    /// catches an event moved into NEITHER arm or into both.
+    @Test("the two arms partition the event space, with nothing in neither")
+    func theTwoArmsPartitionTheEventSpace() {
+        let terminal = Set(
+            WorkJournalEntry.EventType.allCases
+                .filter { $0.orphanRecoveryRouting == .terminalNoRequeue }
+        )
         let resumable = Set(
             WorkJournalEntry.EventType.allCases
                 .filter { $0.orphanRecoveryRouting == .requeue }
         )
+        #expect(terminal == [.finalized, .failed], "terminal set is \(terminal.map(\.rawValue).sorted())")
         #expect(
             resumable == [.acquired, .checkpointed, .preempted],
             "resume set is \(resumable.map(\.rawValue).sorted())"
         )
+        #expect(terminal.isDisjoint(with: resumable))
+        #expect(terminal.union(resumable) == Set(WorkJournalEntry.EventType.allCases))
     }
 
     /// The belt over both halves, exhaustive over `EventType.allCases`, so a

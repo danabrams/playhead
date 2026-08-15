@@ -3081,8 +3081,11 @@ T_3OYZ_DROPPED="A DROPPED RETRY IS QUERYABLE: lastRetryClaimAt > lastAttemptAt w
 # `recoverOrphans` needs ~6 collaborators to construct, which is why the
 # store-level suite REPLAYS its policy. A replayed policy pins the replica; the
 # canary is what holds production to the same rule.
-T_RQ_TERMINAL_ARM="the terminal arm is exactly {finalized, failed}"
-T_RQ_RESUME_ARM="the resume arm is exactly {acquired, checkpointed, preempted}"
+T_RQ_TERMINAL_ARM="the terminal arm: failed and finalized both stop"
+T_RQ_RESUME_ARM="the resume arm: acquired, checkpointed and preempted all requeue"
+# The belt over both arms. Killed by BOTH mapping mutants, which is why the
+# per-event claims above had to be split out of it — see the test's own doc.
+T_RQ_PARTITION="the two arms partition the event space, with nothing in neither"
 T_RQ_INT_EVENT="an interrupted run journals .preempted"
 T_RQ_INT_RESUMES="an interrupted run's row resumes on cold launch"
 T_RQ_CONC_EVENT="control: a run that concluded on its own still journals .failed"
@@ -6747,7 +6750,7 @@ MUTATIONS=(
   # row in the fleet, including the ones `AnalysisWorkScheduler`'s own
   # `.interrupted` and lane-preemption arms have been writing since ngev.
   # Different file, so it can share a batch with RQ01.
-  "RQ03|800|LEASE|$T_RQ_RESUME_ARM;$T_RQ_INT_RESUMES;$T_RQ_AGREE;$T_RQ_STORE_REQUEUE"
+  "RQ03|800|LEASE|$T_RQ_RESUME_ARM;$T_RQ_PARTITION;$T_RQ_INT_RESUMES;$T_RQ_AGREE;$T_RQ_STORE_REQUEUE"
 
   # Batch 801 — RQ02, THE WRONG FIX, which is the one this bead's brief warns
   # about by name. The terminal arm journals `.preempted` too, so every
@@ -6759,7 +6762,7 @@ MUTATIONS=(
   # arm. This is the mutation that would make the naive reading of this bead
   # ("widen the resume arm to catch .failed") pass its own tests, and the reason
   # the terminal half of the mapping is pinned separately from the resume half.
-  "RQ04|801|LEASE|$T_RQ_TERMINAL_ARM;$T_RQ_CONC_TERMINAL;$T_RQ_UNREPORTED;$T_RQ_AGREE;$T_RQ_STORE_TERMINAL"
+  "RQ04|801|LEASE|$T_RQ_TERMINAL_ARM;$T_RQ_PARTITION;$T_RQ_CONC_TERMINAL;$T_RQ_UNREPORTED;$T_RQ_AGREE;$T_RQ_STORE_TERMINAL"
 
   # Batch 802 — the three CALL-SITE rails. Each is killed by exactly one canary
   # method and by nothing else, which is the honest statement of what a source
