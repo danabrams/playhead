@@ -1,3 +1,40 @@
+// OperationalMetricsTests.swift
+//
+// playhead-kvi1: `cacheReuseRate` was 1.0 by construction, and the rails at the
+// bottom of this file exist to keep it deleted.
+//
+// THE DEFECT. `Counters.recordFMOutput` incremented `cacheLookupCount`
+// unconditionally and `cacheReuseCount` under the PASS-level `prewarmHit` flag,
+// which `FoundationModelClassifier` writes from a compile-time constant. So the
+// two counters were equal for every pass that reached the model and the derived
+// rate was 1.0; on the arms where the flag is `false` the pass ran no FM work at
+// all, which `fmWindowCount` already reports. Measured over all 26 events on the
+// 2026-08-11 virgin-DB overnight pull: `cacheReuseCount == cacheLookupCount` in
+// every single row — 1.0 on the six with FM work, and 0.0 (the zero-denominator
+// reading) on the other twenty. Both numbers were about to be read off a device
+// pull as cache behaviour; one says "perfect", the other says "broken", and
+// neither was a measurement.
+//
+// WHY DELETED AND NOT REPAIRED. There is no warmth signal to count:
+// `LanguageModelSession.prewarm` is fire-and-forget and never awaited, and
+// nothing in the tree times it, so a prewarm that hit and one that missed are
+// indistinguishable to every column this code writes. Making the rate `Double?`
+// would have fixed the twenty zeroes and left the six 1.0s standing, which is
+// the worse half. The app's real cache — `RepeatedAdCacheService` — already
+// counts genuine hits and misses, already publishes `hitRate` as a `Double?`
+// with nil for "no samples", and already has a consumer.
+//
+// THE TWO DIRECTIONS THE RAILS COVER, because closing one leaves the other open:
+//
+//   1. THE WIRE. `payloadKeySetIsPinned` fixes the exact key set of the encoded
+//      payload, so a re-added counter fails whatever it is named, and a silently
+//      dropped field fails too. `oldV1PayloadStillDecodes` proves the events
+//      already on Dan's phone survive the removal.
+//   2. THE SOURCE. `operationalMetricsDeclaresNoCacheQuantity` is a source
+//      canary, because the direction a behavioural test cannot reach is a
+//      counter that is declared and incremented but not yet wired to anything a
+//      test decodes — exactly the shape that let this one sit unread for months.
+
 import Foundation
 import Testing
 
@@ -14,8 +51,6 @@ struct OperationalMetricsTests {
             persistedScanResultCount: 5,
             persistedEvidenceEventCount: 4,
             estimatedEnergyUnits: 42,
-            cacheLookupCount: 4,
-            cacheReuseCount: 3,
             resumeAttemptCount: 2,
             resumeSuccessCount: 1,
             cohortDriftEvaluationCount: 4,
@@ -38,7 +73,6 @@ struct OperationalMetricsTests {
 
         #expect(metrics.wallTimePerAudioHour == 180)
         #expect(metrics.energyPerEpisode == 21)
-        #expect(metrics.cacheReuseRate == 0.75)
         #expect(metrics.resumeSuccessRate == 0.5)
         #expect(metrics.perCohortDrift == 0.25)
         #expect(metrics.thermalDeferralRate == 0.4)
@@ -157,6 +191,15 @@ struct OperationalMetricsTests {
         #expect(event.sourceType == .operational)
         #expect(event.atomOrdinals == "[]")
 
+        // playhead-kvi1, the wire rail on the PRODUCTION path: whatever the type
+        // declares, what actually lands in `evidence_events` — the only thing a
+        // device pull can read — must carry no cache quantity. Lower-cased so a
+        // re-added `CacheHitRate` cannot pass on capitalisation.
+        #expect(
+            !event.evidenceJSON.lowercased().contains("cache"),
+            "The persisted operational-metrics payload names a cache again: \(event.evidenceJSON)"
+        )
+
         let metrics = try JSONDecoder().decode(
             OperationalMetrics.self,
             from: Data(event.evidenceJSON.utf8)
@@ -168,7 +211,6 @@ struct OperationalMetricsTests {
         #expect(metrics.wallTimeSeconds >= 0)
         #expect(metrics.counters.fmPassCount == 1)
         #expect(metrics.counters.persistedScanResultCount >= 1)
-        #expect(metrics.counters.cacheLookupCount == 1)
         #expect(metrics.counters.admissionDecisionCount == 1)
         #expect(metrics.counters.cohortDriftEvaluationCount == 1)
         #expect(metrics.counters.thermalDeferralCount == 0)
@@ -431,5 +473,172 @@ struct OperationalMetricsTests {
         #expect(metrics.counters.fmPassCount == 1)
         #expect(metrics.counters.fmWindowCount >= 1)
         #expect(metrics.counters.persistedScanResultCount >= 1)
+    }
+
+    // MARK: - playhead-kvi1 rails: no fabricated cache quantity, in either direction
+
+    /// The payload's key set, pinned exactly. Closed in BOTH directions on
+    /// purpose: an added key fails (whatever it is spelled, so this cannot be
+    /// out-spelled the way a `contains("cache")` filter can), and a removed key
+    /// fails too (this blob is the only thing a device pull has to read, and a
+    /// field vanishing between pulls is not something an analyst can detect).
+    ///
+    /// If you are here because you legitimately added a field: add it to the
+    /// list, and say in the commit message what would be read if the thing it
+    /// names had never happened.
+    @Test("the persisted payload's key set is pinned, so a re-added cache counter cannot slip back in")
+    func payloadKeySetIsPinned() throws {
+        let metrics = OperationalMetrics(
+            jobId: "job-keys",
+            analysisAssetId: "asset-keys",
+            jobPhase: "fullEpisodeScan",
+            scanCohortJSON: makeTestScanCohortJSON(),
+            wallTimeSeconds: 1,
+            audioDurationSeconds: 1,
+            counters: OperationalMetrics.Counters()
+        )
+
+        let object = try #require(
+            try JSONSerialization.jsonObject(with: JSONEncoder().encode(metrics)) as? [String: Any]
+        )
+        #expect(
+            Set(object.keys) == [
+                "schemaVersion",
+                "jobId",
+                "analysisAssetId",
+                "jobPhase",
+                "scanCohortIdentity",
+                "scanCohortJSON",
+                "wallTimeSeconds",
+                "audioDurationSeconds",
+                "wallTimePerAudioHour",
+                "energyPerEpisode",
+                "resumeSuccessRate",
+                "perCohortDrift",
+                "thermalDeferralRate",
+                "counters",
+            ],
+            "Top-level key set changed: \(Set(object.keys).sorted())"
+        )
+
+        let counters = try #require(object["counters"] as? [String: Any])
+        #expect(
+            Set(counters.keys) == [
+                "episodeCount",
+                "fmPassCount",
+                "fmWindowCount",
+                "persistedScanResultCount",
+                "persistedEvidenceEventCount",
+                "estimatedEnergyUnits",
+                "resumeAttemptCount",
+                "resumeSuccessCount",
+                "cohortDriftEvaluationCount",
+                "cohortDriftSignalCount",
+                "admissionDecisionCount",
+                "thermalDeferralCount",
+                "randomAuditCandidateCount",
+                "randomAuditSelectedCount",
+            ],
+            "Counters key set changed: \(Set(counters.keys).sorted())"
+        )
+
+        // The version is what tells a reader which of the two shapes they hold.
+        #expect(object["schemaVersion"] as? Int == 2)
+        #expect(OperationalMetrics.schemaVersion == 2)
+    }
+
+    /// The twenty-six events already sitting in `evidence_events` on Dan's phone
+    /// were written by schema v1 and carry the three deleted keys. Removing a
+    /// field from a `Codable` struct is only safe because Swift's synthesized
+    /// `Decodable` ignores unknown keys — which is a property of the compiler,
+    /// not of this code, so it is pinned rather than assumed. No SQL migration
+    /// was needed for the same reason: `evidenceJSON` is an opaque TEXT column.
+    @Test("a schema-v1 payload still decodes, and its cache keys are ignored")
+    func oldV1PayloadStillDecodes() throws {
+        // Byte-for-byte shape of a real v1 event, trimmed to the fields that
+        // matter. `cacheReuseRate: 1` is the reading this bead exists to remove.
+        let v1 = """
+            {"analysisAssetId":"590D6656","audioDurationSeconds":457.86,\
+            "cacheReuseRate":1,\
+            "counters":{"admissionDecisionCount":1,"cacheLookupCount":2,"cacheReuseCount":2,\
+            "cohortDriftEvaluationCount":1,"cohortDriftSignalCount":0,"episodeCount":1,\
+            "estimatedEnergyUnits":272.77,"fmPassCount":2,"fmWindowCount":7,\
+            "persistedEvidenceEventCount":0,"persistedScanResultCount":8,\
+            "randomAuditCandidateCount":0,"randomAuditSelectedCount":0,\
+            "resumeAttemptCount":1,"resumeSuccessCount":0,"thermalDeferralCount":0},\
+            "energyPerEpisode":272.77,"jobId":"fm-df75eb5558560ce2",\
+            "jobPhase":"fullEpisodeScan","perCohortDrift":0,"resumeSuccessRate":0,\
+            "scanCohortIdentity":"{}","scanCohortJSON":"{}","schemaVersion":1,\
+            "thermalDeferralRate":0,"wallTimePerAudioHour":2309.83,\
+            "wallTimeSeconds":293.77}
+            """
+
+        let decoded = try JSONDecoder().decode(OperationalMetrics.self, from: Data(v1.utf8))
+
+        #expect(decoded.schemaVersion == 1, "the stored version must survive, or a pull cannot be dated")
+        #expect(decoded.jobId == "fm-df75eb5558560ce2")
+        #expect(decoded.counters.fmPassCount == 2)
+        #expect(decoded.counters.fmWindowCount == 7)
+        #expect(decoded.resumeSuccessRate == 0)
+
+        // And re-encoding it drops the fabrication rather than carrying it forward.
+        let reencoded = String(data: try JSONEncoder().encode(decoded), encoding: .utf8) ?? ""
+        #expect(!reencoded.lowercased().contains("cache"))
+    }
+
+    /// The direction no behavioural test reaches: a counter that is declared and
+    /// incremented but not yet read by anything a test decodes. That is how the
+    /// deleted one survived — it was on the wire for months and nothing in the
+    /// app ever read it, so no assertion anywhere could have failed.
+    @Test("OperationalMetrics.swift declares no cache quantity at all")
+    func operationalMetricsDeclaresNoCacheQuantity() throws {
+        let source = try Self.appSourceRoot()
+            .appendingPathComponent("Services/AdDetection/OperationalMetrics.swift")
+        let text = try String(contentsOf: source, encoding: .utf8)
+
+        // The file's own header explains the deletion and necessarily says
+        // "cache" several times, so comments are dropped before matching. A
+        // comment is not a declaration.
+        let offenders = text
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .enumerated()
+            .filter { !$0.element.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+            .filter { $0.element.lowercased().contains("cache") }
+            .map { "OperationalMetrics.swift:\($0.offset + 1): \($0.element.trimmingCharacters(in: .whitespaces))" }
+
+        #expect(
+            offenders.isEmpty,
+            """
+            A cache quantity is back in OperationalMetrics. There is no cache on \
+            this path to measure — `prewarm` is fire-and-forget and FoundationModels \
+            exposes no hit/miss — so whatever is counted here is a proxy for \
+            something else wearing the word "cache", and a device pull will read it \
+            as cache behaviour. The real one is `RepeatedAdCacheService`, which \
+            counts actual hits and misses and reports `hitRate` as `Double?`. \
+            Offenders:
+            \(offenders.joined(separator: "\n"))
+            """
+        )
+    }
+
+    /// Resolves the `Playhead/` source root by walking up from this test file
+    /// (`#filePath` is stamped into the binary at compile time).
+    private static func appSourceRoot(file: StaticString = #filePath) throws -> URL {
+        let thisFile = URL(fileURLWithPath: String(describing: file))
+        let repoRoot = thisFile
+            .deletingLastPathComponent() // AdDetection/
+            .deletingLastPathComponent() // Services/
+            .deletingLastPathComponent() // PlayheadTests/
+            .deletingLastPathComponent() // repo root
+        let app = repoRoot.appendingPathComponent("Playhead", isDirectory: true)
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: app.path, isDirectory: &isDir), isDir.boolValue else {
+            throw NSError(
+                domain: "OperationalMetricsTests",
+                code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "App source root not found at \(app.path)"]
+            )
+        }
+        return app
     }
 }
