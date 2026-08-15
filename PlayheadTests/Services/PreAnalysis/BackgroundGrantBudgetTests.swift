@@ -2336,6 +2336,51 @@ struct CancelAimIdentityTests {
         #expect(afterB.state != "superseded", "B must still be dispatchable")
     }
 
+    @Test("the running-episode accessor names BOTH in-flight episodes",
+          .timeLimit(.minutes(2)))
+    func runningEpisodeIdsNamesEveryInFlightEpisode() async throws {
+        // playhead-mfeq: the scheduler HALF of the Activity screen's
+        // Now-vs-Up-Next split. `everyRunningEpisodeReadsAsRunning` (in
+        // ActivitySnapshotProviderTests) injects the provider closure directly,
+        // so it pins how the provider USES the answer and can say nothing about
+        // where the answer comes from — collapsing this accessor back to a
+        // single element is invisible to it. Asserted here, against the real
+        // registry, so the two tests between them cover the seam end to end.
+        //
+        // It returned `String?` off a `currentEpisodeId` slot until this bead:
+        // the episode of the most recent dispatch, answering a caller who asked
+        // which episodes are running. `nowCap` is 2, so with two jobs in flight
+        // the second was rendered under "Up Next" while it was being analysed.
+        let store = try await makeTestStore()
+        let downloads = StubDownloadProvider()
+        let scheduler = makeScheduler(store: store, downloads: downloads)
+        let t0 = Date().timeIntervalSince1970
+        try await insertNowLaneJob(store: store, downloads: downloads,
+                                   jobId: "run-a", priority: 21, createdAt: t0 - 10)
+        try await insertNowLaneJob(store: store, downloads: downloads,
+                                   jobId: "run-b", priority: 20, createdAt: t0)
+
+        #expect(await scheduler.currentlyRunningEpisodeIds().isEmpty,
+                """
+                nothing dispatched yet, so nothing is running — the empty case, which a \
+                singleton returning its last value would also have to get right
+                """)
+
+        let dispatches = try await driveTwoInFlight(scheduler: scheduler, first: "run-a", second: "run-b")
+        #expect(await scheduler.currentlyRunningEpisodeIds() == ["ep-run-a", "ep-run-b"],
+                """
+                Two jobs are inside processJob and the accessor named fewer. A \
+                singleton slot answers with whichever was admitted last, and the \
+                episode it omits is being analysed at that instant.
+                """)
+
+        let cancelled = await scheduler.cancelCurrentJob(cause: .taskExpired)
+        #expect(await scheduler.awaitJobsSettled(cancelled, within: .seconds(10)))
+        for dispatch in dispatches { _ = await dispatch.value }
+        #expect(await scheduler.currentlyRunningEpisodeIds().isEmpty,
+                "and it empties again when both jobs leave, rather than retaining a last value")
+    }
+
     @Test("cause precedence is order-independent, and it is resolved per job",
           .timeLimit(.minutes(2)))
     func cancelPrecedenceIsOrderIndependentPerJob() async throws {
