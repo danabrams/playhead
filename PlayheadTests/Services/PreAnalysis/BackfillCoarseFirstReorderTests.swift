@@ -368,6 +368,37 @@ struct CoarseScanLoopTests {
                 "below the one-window price, starting another asset converts grant tail into nothing")
     }
 
+    @Test("the floor is >=, so exactly one window's price still starts an asset")
+    func floorAdmitsAtExactlyTheFloor() async {
+        // playhead-rbj4: the mirror of the test above, and it was missing.
+        // `floorGatesTheNextAssetOnly` straddles the floor (70 s then 50 s) and
+        // kills a WEAKENING (`>=` dropped, or `>` relaxed to `>=` on the first
+        // clause); nothing landed ON the boundary, so a TIGHTENING — `>=` to
+        // `>` — survived, and it refuses an asset with exactly the measured
+        // price of one durable coarse window in hand.
+        //
+        // The boundary is unobservable at `AnalysisWorkScheduler.drainEligible`
+        // (it reads the real clock, so `remaining` is never exactly the floor —
+        // see `BackgroundGrantBudget`'s note on the deleted LX08 rail). It is
+        // observable HERE because `now` is injected, which is precisely why
+        // this loop can afford the rail that one cannot.
+        let start = ContinuousClock.now
+        let recorder = ScanRecorder()
+        let scanned = await AnalysisCoordinator.runCoarseScanLoop(
+            deadline: start + .seconds(60),
+            minimumWindowBudget: .seconds(60),
+            candidates: ["asset-a"],
+            isStopRequested: { false },
+            scanAsset: { recorder.record($0) },
+            isTaskCancelled: { false },
+            now: { start },
+            logger: Self.logger
+        )
+        #expect(scanned == 1)
+        #expect(recorder.value == ["asset-a"],
+                "at exactly the one-window price the asset can still bank an artifact, so it starts")
+    }
+
     @Test("a deadline already passed starts nothing")
     func passedDeadlineStartsNothing() async {
         let start = ContinuousClock.now

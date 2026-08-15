@@ -869,6 +869,39 @@ actor AnalysisCoordinator {
     ///     driven, so the last statement it made is true of the moment the
     ///     window ended — including when the window ends inside `scanAsset`
     ///     and this function never returns.
+    ///
+    /// **THE FLOOR TEST IS AGAINST AN ASSUMED GRANT, NOT THE ONE IN HAND
+    /// (playhead-rbj4).** `budgetedRemaining` below is `deadline − now`, and
+    /// `deadline` is `grantStart + 219 s` — a CONSTANT
+    /// (`BackgroundGrantBudget.workBudget`, 255 s design grant minus a 36 s
+    /// teardown reserve, measured over 132 and 30 device rows respectively).
+    /// It is not a reading of this window. Nothing in the process can take one:
+    /// iOS exposes an `expirationHandler` callback and no advance notice, and
+    /// `UIApplication.backgroundTimeRemaining` describes a
+    /// `beginBackgroundTask` assertion rather than a `BGProcessingTask` grant.
+    /// So the name says `budgeted`, and the two quantities must not be
+    /// conflated — measured over 53 asset-starts on the 2026-08-14 pull, what
+    /// this expression reads differs from the grant actually left by more than
+    /// a whole floor's worth on 44 of them (median −76.4 s).
+    ///
+    /// **AND MAKING IT ACCURATE WOULD COST THROUGHPUT — do not "fix" it.**
+    /// See ``BackgroundGrantBudget/workDeadline(from:)`` for the full
+    /// measurement. In short: a gate reading the true remaining window would
+    /// have refused 4 of the 43 asset-starts this gate admitted, and those 4
+    /// banked 12 durable coarse windows and zero failures; on the 2026-08-11
+    /// pull it refuses 7, which banked 22 verdicts against 3 failures. It
+    /// refuses almost nothing that was going to waste the window.
+    ///
+    /// **WHAT ACTUALLY PROTECTS A SHORT GRANT IS `isTaskCancelled()`, NOT THIS
+    /// FLOOR.** That check observes the OS reclaim itself —
+    /// `handleBackfillTask`'s `expirationHandler` calls `workTask.cancel()`
+    /// before anything else — so it is exact, arrives at the moment the window
+    /// ends, and binds on every grant shorter than the budget. This floor
+    /// cannot be reached before `grantStart + 159 s` (`workBudget` less the
+    /// floor), so it can only ever bind on a grant still open at that instant:
+    /// 64 of 122 on the 2026-08-14 pull, 22 of 43 on the 08-11 one. Reading it
+    /// as the short-grant guard is the mis-reading `budgetedRemaining` is
+    /// named to prevent.
     static func runCoarseScanLoop(
         deadline: ContinuousClock.Instant,
         minimumWindowBudget: Duration,
@@ -903,10 +936,15 @@ actor AnalysisCoordinator {
                 logger.info("runPendingCoarseScans: coordinator stop requested, exiting after \(scanned) asset(s)")
                 return scanned
             }
-            let remaining = now().duration(to: deadline)
-            guard remaining > .zero, remaining >= minimumWindowBudget else {
+            // playhead-rbj4: `budgeted`, not `remaining`. This is how much of
+            // the ASSUMED 219 s work budget is left, counted from when this
+            // grant opened — not how much of this grant is left, which nothing
+            // in the process can know. See the doc comment above before
+            // changing either the name or the test.
+            let budgetedRemaining = now().duration(to: deadline)
+            guard budgetedRemaining > .zero, budgetedRemaining >= minimumWindowBudget else {
                 publish(.floor)
-                logger.info("runPendingCoarseScans: \(remaining) left is under the \(minimumWindowBudget) window floor; handing the remainder to the drain after \(scanned) asset(s)")
+                logger.info("runPendingCoarseScans: \(budgetedRemaining) left OF THE ASSUMED GRANT BUDGET is under the \(minimumWindowBudget) window floor (the real window is unmeasurable at runtime — playhead-rbj4); handing the remainder to the drain after \(scanned) asset(s)")
                 return scanned
             }
             do {
