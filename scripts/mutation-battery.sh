@@ -1920,7 +1920,15 @@ FOCUSED_SUITES=(
   # rqgr). Targeted per-test rather than by suite: `AnalysisJobRunnerTests` is a
   # heavy real-store/real-engine suite and this is the one case in it that
   # reaches the zero-coverage journal write.
-  -only-testing:PlayheadTests/AnalysisJobRunnerTests/testInterruptedRunDoesNotFenceTheAsset
+  #
+  # THE `()` IS LOAD-BEARING AND ITS ABSENCE IS SILENT. Written without it,
+  # xcodebuild matches the SUITE and selects none of its tests: the run reports
+  # `Suite "AnalysisJobRunner" passed after 0.002 seconds` and a green overall
+  # verdict. Caught here only because the battery's own "an expectation names a
+  # test that never ran" preflight refused with rc=2 — a scoped fast-gate run
+  # with the same spelling had already reported `** TEST SUCCEEDED **` over a
+  # test that never executed.
+  "-only-testing:PlayheadTests/AnalysisJobRunnerTests/testInterruptedRunDoesNotFenceTheAsset()"
 )
 
 # Named to match the `/private/tmp/playhead-*` pattern `scripts/disk-cleanup.sh`
