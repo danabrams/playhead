@@ -224,6 +224,26 @@ enum UnclassifiedModelFailure {
     /// hostile or generated domain can do to the column.
     static let maxDomainLength = 64
 
+    /// How much of an over-long domain's HEAD survives; the rest of the budget
+    /// goes to its TAIL.
+    ///
+    /// **A plain `prefix(64)` kept the wrong half, and a test caught it.** A
+    /// fully-qualified type name discriminates at the TAIL — the module is
+    /// shared by everything in it — so truncating from the right throws away
+    /// exactly the part a reader needs. Measured: `BackfillJobRunnerTests`'
+    /// function-local `CoarseFailure` reflects to
+    /// `PlayheadTests.BackfillJobRunnerTests.(unknown context at $706420b8).CoarseFailure`,
+    /// 79 characters after collapsing, and `prefix(64)` recorded
+    /// `…unknown_context_at_$706420b` — the compiler's private context and not
+    /// one character of the type. Head-plus-tail keeps both ends of what
+    /// identifies it.
+    static let truncationHeadLength = 24
+
+    /// Written where a domain was cut, so a truncated identity cannot be read
+    /// as a complete one. That silence was the actual defect: `prefix(64)`
+    /// produced a plausible-looking name that was not the name.
+    static let truncationMarker = "~"
+
     /// What is written when an error carries no underlying chain at all.
     ///
     /// A WORD, not an empty string: the field is always present, so a reader
@@ -318,7 +338,16 @@ enum UnclassifiedModelFailure {
     ///
     /// Whitespace becomes `_` and the four characters that would end a field or
     /// a parenthetical are dropped, so a reader parsing the token cannot be
-    /// fooled by a domain that contains them. Capped at ``maxDomainLength``.
+    /// fooled by a domain that contains them. Bounded by ``maxDomainLength``,
+    /// keeping BOTH ends and marking the cut — see ``truncationHeadLength``.
+    ///
+    /// LIMIT, named rather than hidden: a domain is whatever `NSError` reports,
+    /// which for a native Swift error is `String(reflecting:)` of its type. For
+    /// a FUNCTION-LOCAL type that embeds `(unknown context at $<address>)`,
+    /// which varies per build — so such a domain groups with nothing, including
+    /// itself. No framework error has that shape (every one observed is a plain
+    /// `Module.Type`), and the alternative — stripping the context — would
+    /// silently merge two distinct local types into one identity.
     static func sanitize(_ domain: String) -> String {
         let collapsed = domain
             .split(whereSeparator: { $0.isWhitespace || $0.isNewline })
@@ -327,7 +356,11 @@ enum UnclassifiedModelFailure {
             .replacingOccurrences(of: ")", with: "")
             .replacingOccurrences(of: ",", with: "")
             .replacingOccurrences(of: "=", with: "")
-        let trimmed = String(collapsed.prefix(maxDomainLength))
-        return trimmed.isEmpty ? unknownDomainToken : trimmed
+        guard !collapsed.isEmpty else { return unknownDomainToken }
+        guard collapsed.count > maxDomainLength else { return collapsed }
+        let tailLength = maxDomainLength - truncationHeadLength - truncationMarker.count
+        return collapsed.prefix(truncationHeadLength)
+            + truncationMarker
+            + collapsed.suffix(tailLength)
     }
 }

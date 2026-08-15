@@ -2900,6 +2900,7 @@ T_UM_PHASE="the PHASE travels — two phases do not share a token"
 T_UM_FAMILY="the token joins NO existing cause family"
 T_UM_COUNT="COUNTABLE: a prefix grep over a mixed population counts exactly this cause"
 T_UM_SANITIZE="a domain cannot break the record it lives in"
+T_UM_TRUNC="TRUNCATION KEEPS THE TAIL AND SAYS SO — a fully-qualified name discriminates at the end"
 # The RUNNER-level disposition, in the e75l harness where the generic arm's
 # control already lived.
 T_UM_FAILS="playhead-59c8: the 08-14 field row FAILS the job — a ModelManagerError is not excused"
@@ -6562,6 +6563,15 @@ MUTATIONS=(
   # reddens the null reading, the deepest rule and the multiple-errors path as
   # well as the identity itself.
   "UM12|718|UMF|$T_UM_IDENTITY"
+
+  # Batch 719. UM13 restores the plain `prefix(64)` — the truncation this
+  # series' own tests found. It is not a hypothetical: measured on
+  # `BackfillJobRunnerTests`' function-local `CoarseFailure`, whose reflected
+  # domain is 79 characters, `prefix(64)` recorded the compiler's private
+  # `(unknown context at $…)` and not one character of the type name. A
+  # fully-qualified name discriminates at the TAIL, and a silent cut reads as a
+  # complete identity.
+  "UM13|719|UMF|$T_UM_TRUNC"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -7084,6 +7094,7 @@ describe_mutation() {
     UM09) echo "59c8: the token joins kvs8's rateLimited- family — the prefix an operator greps to count throttles" ;;
     UM10) echo "59c8: the token drops the phase, so a full-episode scan and a targeted audit window answer to one string" ;;
     UM11) echo "59c8: the token is a hard-coded literal in the runner — right prefix, right phase, no discriminator, and no link to the type that defines it" ;;
+    UM13) echo "59c8: a domain is truncated from the right, keeping the module and losing the type — a plausible-looking name that is not the name" ;;
     UM12) echo "59c8: the outer error's own domain and code are reported as the UNDERLYING ones — an identity that is not an identity" ;;
     DR01) echo "e75l: the drain classifies only THROTTLES again — the pre-e75l line verbatim, so a wedged tokenizer is marked failed and spends a lifetime retry" ;;
     DR02) echo "e75l: the discriminator keys on the TYPE, not the budget — every FMInferenceTimeoutError becomes a daemon refusal, including the 300s inference one" ;;
@@ -7335,6 +7346,23 @@ EOF
     snippet NEW <<'EOF'
             underlyingDomain: outer.domain,
             underlyingCode: outer.code
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # UM13 — truncate a domain from the RIGHT, keeping the module and losing the
+  # type. The record still looks like a fully-qualified name, which is what
+  # makes it worse than an obviously-cut one.
+  UM13)
+    snippet OLD <<'EOF'
+        guard collapsed.count > maxDomainLength else { return collapsed }
+        let tailLength = maxDomainLength - truncationHeadLength - truncationMarker.count
+        return collapsed.prefix(truncationHeadLength)
+            + truncationMarker
+            + collapsed.suffix(tailLength)
+EOF
+    snippet NEW <<'EOF'
+        guard collapsed.count > maxDomainLength else { return collapsed }
+        return String(collapsed.prefix(maxDomainLength))
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 

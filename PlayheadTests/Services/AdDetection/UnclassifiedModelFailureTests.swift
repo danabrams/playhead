@@ -270,6 +270,28 @@ struct UnclassifiedModelFailureTests {
         #expect(hostile.contains("Bad_Domain"))
     }
 
+    @Test("TRUNCATION KEEPS THE TAIL AND SAYS SO — a fully-qualified name discriminates at the end")
+    func truncationKeepsTheDiscriminatingEnd() {
+        // The measured case, verbatim: `BackfillJobRunnerTests`' function-local
+        // `CoarseFailure` reflects to this, and a plain `prefix(64)` recorded
+        // the compiler's private context and not one character of the type.
+        let reflected = "PlayheadTests.BackfillJobRunnerTests."
+            + "(unknown context at $706420b8).CoarseFailure"
+        let sanitized = UnclassifiedModelFailure.sanitize(reflected)
+        #expect(sanitized.count == UnclassifiedModelFailure.maxDomainLength)
+        #expect(sanitized.contains("CoarseFailure"), "the tail is what identifies it: \(sanitized)")
+        #expect(sanitized.hasPrefix("PlayheadTests."), "the module is worth keeping too")
+        // The cut is MARKED. A truncated identity that reads as a complete one
+        // is the defect, not the truncation.
+        #expect(sanitized.contains(UnclassifiedModelFailure.truncationMarker))
+        // Vacuity: the input must actually exceed the bound, or this proves
+        // nothing about truncation.
+        #expect(reflected.count > UnclassifiedModelFailure.maxDomainLength)
+        // A domain that FITS is passed through untouched — no marker, no loss.
+        let short = UnclassifiedModelFailure.sanitize(TestFMRuntimeFailure.fieldRowUnderlyingDomain)
+        #expect(!short.contains(UnclassifiedModelFailure.truncationMarker))
+    }
+
     @Test("a domain is bounded and never empty")
     func sanitizeIsBoundedAndNeverEmpty() {
         let long = String(repeating: "x", count: UnclassifiedModelFailure.maxDomainLength * 3)
