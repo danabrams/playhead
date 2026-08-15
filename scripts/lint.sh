@@ -224,4 +224,35 @@ else
   echo "lint: FAILED (exit $RC). The baseline is green, so this is in your diff." >&2
   echo "lint: rules and rationale — .swiftlint.yml" >&2
 fi
+
+# ── SHAPE 2 preflight (playhead-mfeq) ────────────────────────────────────────
+# A structural rule SwiftLint's regex `custom_rules` cannot express, because it
+# needs the ENCLOSING TYPE of a declaration: an optional stored `var` named
+# current*/pending*/last* on an `actor`. Four shipped defects, one shape — see
+# the script's docstring.
+#
+# It lives here rather than in fast-gate.sh so that it fires wherever the lint
+# gate does, costs no build, and reports beside the violations it is a sibling
+# of. It runs even when SwiftLint found something, so one invocation reports
+# everything rather than making the caller iterate.
+#
+# WHY IT IS ALWAYS WHOLE-REPO, EVEN UNDER --changed. The rule's second half is
+# that no allowlist entry has gone stale, and staleness is a property of the
+# WHOLE tree: a licensed field deleted in a file your diff does not touch is
+# exactly the case a changed-files scan cannot see. It takes well under a
+# second on ~470 files, so there is nothing to buy by scoping it.
+if [ ${#PATHS[@]} -eq 0 ] || [ "$MODE" = "changed" ]; then
+  if command -v python3 >/dev/null 2>&1; then
+    python3 "$REPO_ROOT/scripts/singleton_slot_preflight.py" || {
+      # 2 is this script's documented "violations found" code. A preflight
+      # violation is a violation; it must not be reported as 70 (a missing dev
+      # tool), which fast-gate.sh warns-and-continues on.
+      RC=2
+    }
+  else
+    echo "lint: python3 not found — SKIPPING the singleton-slot preflight" >&2
+    echo "lint: this is a REAL GAP, not a pass; see scripts/singleton_slot_preflight.py" >&2
+  fi
+fi
+
 exit "$RC"
