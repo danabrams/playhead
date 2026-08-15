@@ -2799,6 +2799,47 @@ struct AnalysisStoreAdScanCoverageTests {
         #expect(summary.adScanCeilingFraction == nil,
                 "and a ceiling over that same denominator is no more honest than the fraction")
     }
+
+    /// THE SAME CLAIM, ON THE ARM THAT ACTUALLY REACHES THE GUARD — and the test
+    /// above does not, which is why this one exists.
+    ///
+    /// Mutation M9 deleted `declaredDurationIsDisprovedByTranscriptReach` from
+    /// `adScanCeilingFraction` and SURVIVED the whole suite. The fixture above
+    /// gives a bridged ceiling of 1,310 s on a 552.9 s episode, so the FIRST
+    /// guard — the area overshooting the duration — withholds it and the reach
+    /// guard is never evaluated. Two guards, one fixture, and the parity claim
+    /// rested on the guard the fixture could not reach.
+    ///
+    /// Here the AREA is small (410 s of a declared 1,000 s, comfortably inside
+    /// the tolerance) while the transcript's REACH is 3,810 s. Only the reach
+    /// guard can withhold this, and it must withhold BOTH fractions — E8F0F867's
+    /// real shape, which is what `adScanFraction`'s own guard was written for.
+    @Test("playhead-nffz — a small AREA with a reach past the duration withholds BOTH: the guard the sibling test cannot reach")
+    func aDisprovedDenominatorWithholdsTheCeilingOnTheREACHArmToo() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "a-reach-nffz", episodeDurationSec: 1000))
+        try await store.insertTranscriptChunks([
+            makeGapChunk(assetId: "a-reach-nffz", index: 0, start: 0, end: 400),
+            makeGapChunk(assetId: "a-reach-nffz", index: 1, start: 3800, end: 3810)
+        ])
+        try await store.insertSemanticScanResult(
+            makeScan(assetId: "a-reach-nffz", index: 0, start: 0, end: 400)
+        )
+
+        let summary = try #require(
+            try await store.fetchCoverageSummariesByAssetIds(["a-reach-nffz"])["a-reach-nffz"]
+        )
+        // The area guard CANNOT be what fires: 410 s is well inside 1,000 s.
+        #expect(summary.adScanCeilingSec == 410)
+        #expect(try #require(summary.adScanCeilingSec).rawValue
+                < 1000 + AnalysisCoverageSummary.adScanDurationToleranceSec(
+                    episodeDurationSec: EpisodeSeconds(1000)
+                ),
+                "if this ever fails the fixture has drifted back onto the OTHER guard")
+        #expect(summary.adScanFraction == nil)
+        #expect(summary.adScanCeilingFraction == nil,
+                "one rule, two readers — a reach that disproves the denominator withholds the ceiling too")
+    }
 }
 
 // MARK: - playhead-csbq: the ruler itself
