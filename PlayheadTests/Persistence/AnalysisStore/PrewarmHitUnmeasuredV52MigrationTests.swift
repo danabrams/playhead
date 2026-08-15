@@ -325,13 +325,29 @@ struct PrewarmHitUnmeasuredV52MigrationTests {
             .appendingPathComponent("Services/AdDetection/BackfillJobRunner.swift")
         let text = try String(contentsOf: source, encoding: .utf8)
 
-        // Argument sites only. `coarse.prewarmHit` / `refinement.prewarmHit`
-        // are the PASS-level field feeding `OperationalMetrics`, a different
-        // quantity on a different type, and are deliberately untouched here.
+        // EXEMPT: `prewarmHit: <expr>.prewarmHit`. Those are the three
+        // `counters.recordFMOutput(...)` calls forwarding the PASS-level field
+        // off `FMCoarseScanOutput` / `FMRefinementScanOutput` into
+        // `OperationalMetrics` — a different quantity on a different type,
+        // deliberately untouched here and carried by playhead-kvi1.
+        //
+        // The exemption is safe because the COMPILER enforces it: a builder can
+        // only write `prewarmHit: x.prewarmHit` if `x` has such a member, and
+        // the window-level outputs the builders hold do not. So the only way to
+        // pass this filter from a builder is to make the value real first,
+        // which is exactly the change that would earn the right to write it.
         let offenders = text
             .split(separator: "\n", omittingEmptySubsequences: false)
             .enumerated()
             .filter { $0.element.contains("prewarmHit:") }
+            .filter { line in
+                let value = line.element
+                    .components(separatedBy: "prewarmHit:")
+                    .dropFirst()
+                    .joined(separator: "prewarmHit:")
+                    .trimmingCharacters(in: CharacterSet(charactersIn: " ,\t"))
+                return !value.hasSuffix(".prewarmHit")
+            }
             .map { "BackfillJobRunner.swift:\($0.offset + 1): \($0.element.trimmingCharacters(in: .whitespaces))" }
 
         #expect(
