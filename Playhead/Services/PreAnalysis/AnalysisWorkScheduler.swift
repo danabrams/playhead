@@ -2856,11 +2856,16 @@ actor AnalysisWorkScheduler {
         // `shouldCancelCurrentJob = true` used to guard this call under
         // `currentEpisodeId == episodeId`. It bought nothing and cost a sibling.
         //
-        //  * It bought nothing. `currentEpisodeId` is assigned immediately after
+        //  * It bought nothing. `currentEpisodeId` was assigned immediately after
         //    the registry insert and nil'd in the same `defer` that removes the
-        //    entry, so `currentEpisodeId == episodeId` implies that job is in
+        //    entry, so `currentEpisodeId == episodeId` implied that job was in
         //    `runningJobs` — and the `cancelRunningJobs` call below already
         //    reaches every registry entry for the episode, by identity.
+        //    (playhead-mfeq deleted that field: the implication ran only one
+        //    way, and the converse — a job on this episode that the slot did NOT
+        //    name, because a sibling was dispatched after it — is the aim defect
+        //    fixed in `retireDownloadAnalysis`. The registry was always the
+        //    better question, and it is now the only one available.)
         //  * It cost a sibling. `nowCap` is 2 and both dispatch drivers can be
         //    inside `processJob`, so the OTHER in-flight job may still be
         //    upstream of its cancel-race check — that check reads the global
