@@ -851,12 +851,19 @@ struct PersistedStateInvariantReporterEmissionTests {
         #expect(findings.isEmpty)
 
         let violations = try Self.lines(logger).compactMap(\.invariantViolation)
-        #expect(violations.count == 1)
-        #expect(violations.first?.code == .persistedStateInvariantReadFailed)
-        // …and NO census line, so a reader cannot mistake the failure for a
-        // clean sweep. This is the anti-vacuity control: the two silences are
+        // playhead-gyhw narrowed this from `violations.count == 1` to the codes
+        // this test is ABOUT. The reporter now also emits the always-present
+        // REPAIR census, which is a claim about what the schema ladder did
+        // before the read was attempted and is therefore correct on a launch
+        // whose read then threw — see `repairsSurviveAFailedRead`. The property
+        // the assertion exists for is unchanged and is spelled out below:
+        // exactly one read-failure line, and NOT ONE invariant census or
+        // violation line, so a reader cannot mistake the failure for a clean
+        // sweep. That is the anti-vacuity control — the two silences stay
         // distinguishable.
+        #expect(violations.filter { $0.code == .persistedStateInvariantReadFailed }.count == 1)
         #expect(!violations.contains { $0.code == .persistedStateInvariantCensus })
+        #expect(!violations.contains { $0.code == .persistedStateInvariantViolation })
     }
 
     @Test("The audio oracle is asked ONLY about registration-state assets")

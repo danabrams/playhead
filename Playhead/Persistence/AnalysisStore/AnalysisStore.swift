@@ -7200,6 +7200,67 @@ actor AnalysisStore {
         try setSchemaVersion(49)
     }
 
+    // MARK: - The repair ledger (playhead-gyhw)
+    //
+    // WHY IN MEMORY, AND WHAT THAT COSTS. A durable table would be the stronger
+    // record and it is deliberately NOT taken here: a new table is a persistence
+    // decision and Dan's call, which is the same line `playhead-dgly` drew when
+    // it put the census on the SurfaceStatus JSON Lines channel rather than in
+    // the database. The window this leaves is one function return —
+    // `runSchemaMigration` runs INSIDE `openAtLaunch`, and
+    // `PersistedStateInvariantReporter` drains this ledger in the very next
+    // awaited statement of the same bootstrap chain. A process that dies between
+    // the two loses the record; it also loses the launch, and the migration will
+    // not run again. That is the known limit, stated rather than hidden.
+    //
+    // Nothing here reads or writes SQL. The migrations append; the reporter
+    // drains once and the ledger is empty afterwards, so a second reader cannot
+    // report the same repair twice.
+
+    /// Repairs performed by the schema ladder during THIS launch, awaiting a
+    /// reader. See ``drainPersistedStateRepairRecords()``.
+    private var persistedStateRepairs: [PersistedStateRepairRecord] = []
+
+    /// Take every repair recorded so far and CLEAR the ledger.
+    ///
+    /// Draining rather than reading is what makes the record exactly-once: the
+    /// launch reporter is the only consumer, and a second call — a retry, a
+    /// second reporter, a test — returns empty rather than double-counting a
+    /// repair that happened once.
+    func drainPersistedStateRepairRecords() -> [PersistedStateRepairRecord] {
+        let drained = persistedStateRepairs
+        persistedStateRepairs = []
+        return drained
+    }
+
+    /// Append a migration's repair records, having first checked they describe
+    /// the same number of rows SQLite says were changed.
+    ///
+    /// **A record that does not match `sqlite3_changes` is worse than no
+    /// record**, because it is read as evidence. When the two disagree the
+    /// records are dropped and a `fault` is logged naming both numbers — the
+    /// reader then sees a repair census that does not account for the rows,
+    /// which is an honest "something is wrong here" rather than a confident
+    /// wrong answer.
+    private func recordPersistedStateRepairs(
+        _ records: [PersistedStateRepairRecord],
+        observedChanges: Int,
+        migration: String
+    ) {
+        guard records.count == observedChanges else {
+            logger.fault(
+                """
+                playhead-gyhw \(migration, privacy: .public): the repair record names \
+                \(records.count, privacy: .public) row(s) but SQLite changed \
+                \(observedChanges, privacy: .public) — dropping the record rather than \
+                publishing one that disagrees with the write
+                """
+            )
+            return
+        }
+        persistedStateRepairs.append(contentsOf: records)
+    }
+
     // MARK: V50 — re-judge the rows the FLAT under-coverage budget retired
     //             (playhead-e6d3)
     //
@@ -7256,25 +7317,70 @@ actor AnalysisStore {
     /// V50 migration — one fresh budget for every coverage-lane row the FLAT
     /// under-coverage rule retired. Idempotent: the version ladder guards it, and
     /// the UPDATE is a no-op on a store with no such rows.
+    ///
+    /// **playhead-gyhw: it now NAMES the rows it repaired.** Before that this
+    /// migration was a blind `UPDATE` whose only trace was a `Logger.notice`
+    /// count, and no device pull collects OSLog — so a phone could arrive with
+    /// seven retry budgets silently restored and nothing on it able to say which
+    /// seven, or from what. The rows are SELECTed through the same predicate
+    /// string the UPDATE binds (one ruler, two readers), and the counts are
+    /// cross-checked below: a record that does not match `sqlite3_changes` is a
+    /// record that is lying, which is worse than none.
     private func migrateUnderCoverageRetryBudgetV50IfNeeded() throws {
         let observed = (try schemaVersion() ?? 1)
         guard observed < 50 else { return }
         // DO NOT STEP OVER A ROLLED-BACK V39 — same rationale as V40–V49.
         guard observed >= 49 else { return }
         if try tableExists("backfill_jobs") {
+            // ONE PREDICATE, TWO READERS. Spelled once and interpolated into
+            // both statements so the rows the record NAMES cannot drift from
+            // the rows the UPDATE TOUCHES. It carries no user data — the only
+            // bound value is the retry cap.
+            let predicate = """
+                status = 'failed'
+                   AND retryCount >= ?
+                   AND deferReason LIKE 'underCoverageBudgetSpent-%'
+                """
+            var pending: [(jobId: String, retryCount: Int, deferReason: String)] = []
+            let selectStmt = try prepare(
+                "SELECT jobId, retryCount, deferReason FROM backfill_jobs WHERE \(predicate)")
+            bind(selectStmt, 1, AdmissionController.maxRetries)
+            while sqlite3_step(selectStmt) == SQLITE_ROW {
+                pending.append((
+                    jobId: text(selectStmt, 0),
+                    retryCount: optionalInt(selectStmt, 1) ?? AdmissionController.maxRetries,
+                    deferReason: optionalText(selectStmt, 2) ?? "none"
+                ))
+            }
+            sqlite3_finalize(selectStmt)
+
             let sql = """
                 UPDATE backfill_jobs
                    SET retryCount = 0,
                        updatedAt = strftime('%s', 'now')
-                 WHERE status = 'failed'
-                   AND retryCount >= ?
-                   AND deferReason LIKE 'underCoverageBudgetSpent-%'
+                 WHERE \(predicate)
                 """
             let stmt = try prepare(sql)
             defer { sqlite3_finalize(stmt) }
             bind(stmt, 1, AdmissionController.maxRetries)
             try step(stmt, expecting: SQLITE_DONE)
             let repaired = Int(sqlite3_changes(db))
+            recordPersistedStateRepairs(
+                pending.map { row in
+                    PersistedStateRepairRecord(
+                        migration: "v50",
+                        invariant: .retryBudgetSpentWithWorkRemaining,
+                        licensedBy: "playhead-e6d3",
+                        rowId: row.jobId,
+                        field: "backfill_jobs.retryCount",
+                        from: String(row.retryCount),
+                        to: "0",
+                        cause: row.deferReason
+                    )
+                },
+                observedChanges: repaired,
+                migration: "v50"
+            )
             if repaired > 0 {
                 logger.notice(
                     "playhead-e6d3 V50: re-judged \(repaired, privacy: .public) coverage-lane row(s) retired by the flat under-coverage budget"
@@ -7432,6 +7538,32 @@ actor AnalysisStore {
             bind(stmt, 1, try encodeJSONString(honest))
             bind(stmt, 2, repair.jobId)
             try step(stmt, expecting: SQLITE_DONE)
+            // playhead-gyhw: the repair DESTROYS its own evidence — after this
+            // UPDATE nothing anywhere says the cursor was ever 7,998.72, so a
+            // later pull cannot tell a repaired row from one never broken.
+            // Record the withdrawal before the value is gone.
+            recordPersistedStateRepairs(
+                [
+                    PersistedStateRepairRecord(
+                        migration: "v51",
+                        invariant: .coarseCursorBeyondScannedPrefix,
+                        licensedBy: "playhead-wogi",
+                        rowId: repair.jobId,
+                        field: "backfill_jobs.progressCursor.lastProcessedUpperBoundSec",
+                        from: repair.cursor.lastProcessedUpperBoundSec
+                            .map { PersistedStateInvariantEvaluator.format($0.rawValue) } ?? "none",
+                        to: honest.lastProcessedUpperBoundSec
+                            .map { PersistedStateInvariantEvaluator.format($0.rawValue) } ?? "none",
+                        cause: "unsupported_by_examined_passA_rows"
+                    )
+                ],
+                // Asked of SQLite rather than assumed to be one: the UPDATE is
+                // keyed on `jobId`, and a row that vanished between the SELECT
+                // above and this write changes NOTHING while the record would
+                // still claim a withdrawal.
+                observedChanges: Int(sqlite3_changes(db)),
+                migration: "v51"
+            )
         }
         if !repairs.isEmpty {
             logger.notice(

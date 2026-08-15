@@ -3656,6 +3656,14 @@ final class PlayheadRuntime {
             audioPresenceProbe: { episodeId in
                 await downloadManager.isCached(episodeId: episodeId)
             },
+            // playhead-gyhw: the schema ladder repaired rows inside
+            // `openAtLaunch`, a few statements ago, and both repairs destroy the
+            // value they replaced. This drain is the ONLY reader of that ledger
+            // — omit it and V50/V51 go back to being silent, with the census
+            // line still printing `repairs=0` because nobody asked.
+            repairRecordProvider: {
+                await analysisStore.drainPersistedStateRepairRecords()
+            },
             logger: surfaceStatusLogger
         ).report()
     }
