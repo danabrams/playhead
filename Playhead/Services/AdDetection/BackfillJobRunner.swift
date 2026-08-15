@@ -4668,7 +4668,9 @@ actor BackfillJobRunner {
             inputTokenCount: nil,
             outputTokenCount: nil,
             latencyMs: 0,
-            prewarmHit: false,
+            // playhead-exxc: `prewarmHit` is deliberately NOT passed. This
+            // sentinel describes a job that ran no FM call at all, so there is
+            // nothing whose warmth could be observed. NULL is the truth.
             scanCohortJSON: scanCohortJSON,
             transcriptVersion: inputs.transcriptVersion,
             reuseScope: jobId,
@@ -6007,7 +6009,13 @@ actor BackfillJobRunner {
             latencyMs: windowOutput.latencyMillis,
             suspendingLatencyMs: windowOutput.suspendingLatencyMillis,
             daemonPeersAtStart: windowOutput.daemonPeersAtStart,
-            prewarmHit: false,
+            // playhead-exxc: `prewarmHit` is deliberately NOT passed. The three
+            // lines above read real per-window measurements off `windowOutput`;
+            // there is no fourth. `FMCoarseWindowOutput` carries no warmth
+            // signal — `prewarmHit` lives on the PASS-level
+            // `FMCoarseScanOutput` — so any value written here would be
+            // invented. NULL is the truth, and it is what stops the next reader
+            // quoting this column as a cold-start count.
             scanCohortJSON: scanCohortJSON,
             transcriptVersion: inputs.transcriptVersion,
             reuseScope: jobId,
@@ -6117,7 +6125,9 @@ actor BackfillJobRunner {
             inputTokenCount: nil,
             outputTokenCount: nil,
             latencyMs: windowOutput.latencyMillis,
-            prewarmHit: false,
+            // playhead-exxc: `prewarmHit` is deliberately NOT passed —
+            // `FMRefinementWindowOutput` carries no warmth signal. See
+            // `makeScanResult` above.
             scanCohortJSON: scanCohortJSON,
             transcriptVersion: inputs.transcriptVersion,
             reuseScope: jobId,
@@ -6185,7 +6195,9 @@ actor BackfillJobRunner {
             latencyMs: latencyMs,
             suspendingLatencyMs: suspendingLatencyMs,
             daemonPeersAtStart: daemonPeersAtStart,
-            prewarmHit: false,
+            // playhead-exxc: `prewarmHit` is deliberately NOT passed. Same
+            // contract as the two optional readings above it, and the same
+            // reason: a failure row's caller has no warmth signal either.
             scanCohortJSON: scanCohortJSON,
             transcriptVersion: inputs.transcriptVersion,
             reuseScope: jobId,

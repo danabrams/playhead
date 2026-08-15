@@ -178,7 +178,7 @@ struct SemanticScanRunAttributionTests {
         // compute the prefix it lowers `backfill_jobs.progressCursor` to. It
         // writes nothing to this table, so every attribution column this rung
         // pins is untouched.
-        #expect(AnalysisStore.currentSchemaVersion == 51)
+        #expect(AnalysisStore.currentSchemaVersion == 52)
         for column in ["createdAt", "scenePhase", "runCorrelationId"] {
             #expect(
                 try probeColumnExists(in: dir, table: "semantic_scan_results", column: column),

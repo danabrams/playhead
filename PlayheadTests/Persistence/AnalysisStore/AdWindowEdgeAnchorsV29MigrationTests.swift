@@ -70,7 +70,7 @@ struct AdWindowEdgeAnchorsV29MigrationTests {
         // `backfill_jobs.progressCursor` to the prefix each asset's own
         // `semantic_scan_results` passA rows support, and touches no other
         // column and no other table. Nothing this rung asserts is named by it.
-        #expect(AnalysisStore.currentSchemaVersion == 51)
+        #expect(AnalysisStore.currentSchemaVersion == 52)
         #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "startEdgeAnchor"))
         #expect(try probeColumnExists(in: dir, table: "ad_windows", column: "endEdgeAnchor"))
     }
