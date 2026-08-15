@@ -240,7 +240,11 @@ struct CapOutRetryTests {
         // WITHOUT spending attempts, and all FIVE `coverageInsufficient:noProgress`
         // rows on the 2026-08-03 pull carry `attemptCount = 0`. A fixture that
         // hardcoded 5 would seed a row the device never produces.
-        attemptCount: Int = 5
+        attemptCount: Int = 5,
+        // playhead-w8db: the lane the terminated generation carried. 0 keeps
+        // every pre-existing test in this suite byte-identical; the retry's own
+        // priority is read against a non-zero predecessor below.
+        priority: Int = 0
     ) async throws {
         try await store.insertAsset(
             AnalysisAsset(
@@ -285,6 +289,7 @@ struct CapOutRetryTests {
             analysisAssetId: Self.assetId,
             workKey: Self.baseWorkKey,
             sourceFingerprint: Self.fingerprint,
+            priority: priority,
             desiredCoverageSec: desiredCoverageSec,
             state: state,
             attemptCount: attemptCount,
@@ -710,6 +715,89 @@ struct CapOutRetryTests {
         }
         #expect(minted == 1)
         #expect(try await allJobs(store).count == 2)
+    }
+
+    // MARK: - The retry's lane (playhead-w8db)
+
+    /// playhead-w8db: a cap-out retry is the next attempt at work an earlier
+    /// generation already carried, so it inherits that generation's lane. It
+    /// used to be stamped with a literal `0` while every other correlated field
+    /// on the same struct (`podcastId`, `analysisAssetId`, `downloadId`) was
+    /// read off the chain tail.
+    ///
+    /// The consequence is not queue order. `.background` is admitted only at
+    /// `.nominal`; `.now` is admitted unless work is paused outright. So a
+    /// user's download that exhausted its attempts came back in a lane that a
+    /// warm phone closes entirely.
+    ///
+    /// **THE ROW'S FINAL PRIORITY IS NOT ENOUGH, AND A MUTATION PROVED IT**
+    /// (playhead-w8db, rail W03). `repairDemotedContinuations` runs LATER IN
+    /// THE SAME `reconcile()` PASS, and a retry minted at 0 whose base sits at
+    /// 20 is exactly what it exists to raise. Re-introducing the defect leaves
+    /// the log reading
+    ///
+    ///     cap_out_retry_minted episode=ep-y8f3 ordinal=1 …
+    ///     continuation_priority_repaired job=… priority=0->20 …
+    ///
+    /// and the row at 20 either way, so `retry?.priority == 20` passed against
+    /// the pre-bead mint. The repair had made a sibling correction in the same
+    /// bead unobservable — the shipped behaviour right, the rail silent.
+    ///
+    /// `demotedContinuationsRepaired == 0` is what discriminates: a correct
+    /// mint leaves the repair NOTHING TO DO. It is worth asserting on its own
+    /// terms too — the repair is meant to drain a legacy population, never to
+    /// be load-bearing for rows minted today.
+    @Test("a cap-out retry inherits the lane of the generation it retries")
+    func capOutRetryCarriesTheChainTailsLane() async throws {
+        let store = try await makeTestStore()
+        let downloads = makeDownloads()
+        let clock = RetryClock()
+        try await seedCappedOutEpisode(
+            store,
+            priorTranscriptCoverageSec: 0,
+            supersededAt: clock.value.timeIntervalSince1970 - 86_400,
+            priority: 20
+        )
+
+        let report = try await makeReconciler(store: store, downloads: downloads, clock: clock)
+            .reconcile()
+        #expect(report.capOutRetriesMinted == 1)
+        #expect(report.demotedContinuationsRepaired == 0,
+                "the MINT must land in the right lane; a row rescued by the repair is a mint defect")
+
+        let retry = try await store.fetchJob(byWorkKey: Self.retryKey(1))
+        #expect(retry != nil)
+        #expect(retry?.priority == 20,
+                "the retry of a user-intent generation must not be demoted to the background lane")
+        #expect(retry?.schedulerLane == .now)
+    }
+
+    /// The vacuity control: the value is COPIED, never chosen. An auto-download
+    /// that caps out retries in the background lane, exactly as before — so this
+    /// correction cannot manufacture user intent. An implementation that
+    /// hardcoded 20 passes the test above and fails this one.
+    @Test("a background cap-out retry stays in the background lane")
+    func capOutRetryOfBackgroundWorkStaysBackground() async throws {
+        let store = try await makeTestStore()
+        let downloads = makeDownloads()
+        let clock = RetryClock()
+        try await seedCappedOutEpisode(
+            store,
+            priorTranscriptCoverageSec: 0,
+            supersededAt: clock.value.timeIntervalSince1970 - 86_400,
+            priority: 0
+        )
+
+        let report = try await makeReconciler(store: store, downloads: downloads, clock: clock)
+            .reconcile()
+        #expect(report.capOutRetriesMinted == 1)
+        // The mirror of the assertion above, and not redundant: it is what
+        // fails if the repair ever starts acting on genuine background work.
+        #expect(report.demotedContinuationsRepaired == 0)
+
+        let retry = try await store.fetchJob(byWorkKey: Self.retryKey(1))
+        #expect(retry?.priority == 0)
+        #expect(retry?.schedulerLane == .background)
     }
 
     // MARK: - Pure decision matrix

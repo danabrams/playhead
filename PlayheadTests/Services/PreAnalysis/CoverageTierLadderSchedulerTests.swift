@@ -120,7 +120,13 @@ struct CoverageTierLadderSchedulerTests {
     private func seedEpisode(
         _ store: AnalysisStore,
         desiredCoverageSec: Double,
-        priorTranscriptCoverageSec: Double? = nil
+        priorTranscriptCoverageSec: Double? = nil,
+        // playhead-w8db: the first generation's LANE. 10 is what an explicit
+        // download carries and is the value every pre-existing test in this
+        // suite was written against; the parameter exists so the successor's
+        // priority can be read against a predecessor that is not 0, and against
+        // one that is.
+        priority: Int = 10
     ) async throws {
         try await store.insertAsset(
             AnalysisAsset(
@@ -171,7 +177,7 @@ struct CoverageTierLadderSchedulerTests {
                     jobType: "preAnalysis"
                 ),
                 sourceFingerprint: Self.fingerprint,
-                priority: 10,
+                priority: priority,
                 desiredCoverageSec: desiredCoverageSec,
                 state: "queued"
             )
@@ -261,6 +267,87 @@ struct CoverageTierLadderSchedulerTests {
 
         // The pass read audio, it did not merely move a row.
         #expect(try await transcriptCoverage(store) >= 90)
+    }
+
+    /// playhead-w8db: THE INVERSION. The rung this arm mints is the SAME
+    /// request continued one rung deeper, so it must land in the lane the
+    /// request arrived in. It used to be stamped with a literal `0`.
+    ///
+    /// `priority` is not a cosmetic ordering here. `LaneAdmission.allows(lane:)`
+    /// admits `.background` only when `policy.allowBackgroundLane` — true at
+    /// `.nominal` alone — while `.soon` needs only `allowSoonLane`. So the
+    /// demotion put the deeper rungs of a user's download behind a thermal gate
+    /// its own first rung never had to pass. Measured on db-pull11
+    /// (2026-08-15): every `laneGate:*` rejection ever recorded on the device
+    /// is on a priority-0 row, none on a 10 or a 20.
+    @Test("the next rung runs in the lane the request arrived in, not the background")
+    func tierSuccessorCarriesTheRequestersLane() async throws {
+        let store = try await makeTestStore()
+        try await seedEpisode(store, desiredCoverageSec: 90, priority: 20)
+        let clock = TierLadderClock(start: Date(timeIntervalSince1970: 1_700_000_000))
+        let scheduler = try await makeScheduler(store: store) { clock.value }
+
+        #expect(await scheduler.processNextDispatchableJobForTesting())
+
+        let successors = try await allJobs(store).filter { $0.jobId != "job-8bp2-t0" }
+        #expect(successors.count == 1)
+        #expect(successors.first?.priority == 20,
+                "the successor of a user-intent request must stay in the user-intent lane")
+        #expect(successors.first?.schedulerLane == .now,
+                "a lane, not just a number — .background is gated on `.nominal` alone")
+    }
+
+    /// The vacuity control for the test above, and the reason this is a
+    /// CORRECTION rather than a promotion. The mint COPIES the predecessor's
+    /// value; it never chooses one. An auto-download arrives at 0 and its whole
+    /// ladder stays at 0, so nothing here can manufacture user intent for work
+    /// nobody asked for — which is exactly what the `.background` lane is for.
+    ///
+    /// An implementation that hardcoded 10 or 20 instead of 0 passes the test
+    /// above and fails this one.
+    @Test("an auto-download's ladder stays in the background lane")
+    func tierSuccessorOfBackgroundWorkStaysBackground() async throws {
+        let store = try await makeTestStore()
+        try await seedEpisode(store, desiredCoverageSec: 90, priority: 0)
+        let clock = TierLadderClock(start: Date(timeIntervalSince1970: 1_700_000_000))
+        let scheduler = try await makeScheduler(store: store) { clock.value }
+
+        #expect(await scheduler.processNextDispatchableJobForTesting())
+
+        let successors = try await allJobs(store).filter { $0.jobId != "job-8bp2-t0" }
+        #expect(successors.count == 1)
+        #expect(successors.first?.priority == 0)
+        #expect(successors.first?.schedulerLane == .background)
+    }
+
+    /// The whole ladder, not just its first rung. The device shape that
+    /// playhead-by07 measured is the LAST rung — the one whose target is the
+    /// real audio duration and which therefore carries the ad-dense tail — and
+    /// a fix that only got the first successor right would leave exactly that
+    /// rung demoted.
+    @Test("every rung of the ladder, including the last, keeps the requester's lane")
+    func everyRungKeepsTheRequestersLane() async throws {
+        let store = try await makeTestStore()
+        try await seedEpisode(store, desiredCoverageSec: 90, priority: 10)
+        let clock = TierLadderClock(start: Date(timeIntervalSince1970: 1_700_000_000))
+        let scheduler = try await makeScheduler(
+            store: store,
+            silentFrom: Self.shardSpanSec - Self.shardSeconds
+        ) { clock.value }
+
+        for _ in 0..<24 {
+            _ = await scheduler.processNextDispatchableJobForTesting()
+            clock.advance(by: 7_200)
+        }
+
+        let jobs = try await allJobs(store)
+        #expect(jobs.count == 4, "T0 + three successors")
+        #expect(jobs.allSatisfy { $0.priority == 10 },
+                "priorities: \(jobs.map { "\($0.workKey)=\($0.priority)" }.sorted())")
+        // Named explicitly, because it is the rung the bead is about.
+        let deepest = jobs.first { $0.desiredCoverageSec == Self.durationSec }
+        #expect(deepest != nil, "the duration rung must exist")
+        #expect(deepest?.priority == 10)
     }
 
     /// The reach claim, end to end: driven to quiescence, a 1,200 s episode that
