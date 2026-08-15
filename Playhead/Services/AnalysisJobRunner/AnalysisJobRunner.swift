@@ -884,14 +884,28 @@ actor AnalysisJobRunner {
                     transcriptCoverage = alreadyTranscribed
                 } else {
                     logger.warning("Transcription for asset \(assetId) finished with zero coverage — stream may have ended prematurely or timed out")
-                    // playhead-5uvz.7 (Gap-9): write a structured `failed` row to
+                    // playhead-5uvz.7 (Gap-9): write a structured row to
                     // `work_journal` so a class of episodes that systematically
                     // times out (long, refusal-prone, music-heavy) shows up in
                     // aggregate without operators having to grep `lastErrorCode`
-                    // across `analysis_jobs`. Best-effort: a failure here logs but
-                    // does NOT affect the runner's outcome — the analysis_jobs
-                    // row's `lastErrorCode = 'transcription:zeroCoverage'` remains
-                    // the primary signal; the journal row is observability gravy.
+                    // across `analysis_jobs`.
+                    //
+                    // playhead-rqgr: BOTH RECORDS OF THIS EXIT COME OUT OF ONE
+                    // VALUE, and the journal row is not the diagnostic byproduct
+                    // this comment used to call "observability gravy". The row's
+                    // `eventType` is what `AnalysisCoordinator.recoverOrphans`
+                    // routes a cold-launch orphan on, so the journal row and the
+                    // stop reason below are two statements about the same event
+                    // and both are load-bearing. Minting them together is what
+                    // stops them disagreeing.
+                    //
+                    // Still best-effort in the sense that matters: an append
+                    // failure logs and does NOT alter the outcome. What is no
+                    // longer true is that nothing reads it.
+                    let disposition = Self.zeroCoverageDisposition(
+                        failure: transcriptFailure,
+                        observation: runObservation
+                    )
                     await emitTranscriptionTimeoutJournal(
                         request: request,
                         assetId: assetId,
@@ -899,7 +913,8 @@ actor AnalysisJobRunner {
                         existingChunkCount: existingChunkCount,
                         transcriptStageStart: transcriptStageStart,
                         failure: transcriptFailure,
-                        observation: runObservation
+                        observation: runObservation,
+                        disposition: disposition
                     )
                     return makeOutcome(
                         assetId: assetId,
@@ -912,8 +927,8 @@ actor AnalysisJobRunner {
                         //
                         // playhead-ngev (review r1): and route it by TERMINATION, so a
                         // listener moving the playhead does not spend one of the job's
-                        // five permanent retry attempts. See `zeroCoverageStopReason`.
-                        stopReason: Self.zeroCoverageStopReason(failure: transcriptFailure)
+                        // five permanent retry attempts. See `zeroCoverageDisposition`.
+                        stopReason: disposition.stopReason
                     )
                 }
             }
@@ -1593,18 +1608,38 @@ actor AnalysisJobRunner {
     /// Emit a structured `work_journal` row when stage 3 produced zero
     /// coverage (timeout firing ahead of `.completed`, or a stream that
     /// ended prematurely without ever advancing the watermark). The row
-    /// carries `eventType = .failed`, `cause = .asrFailed`, and a JSON
-    /// metadata blob describing the episode shape and the engine's
-    /// progress at the moment of timeout — `episode_duration`,
-    /// `transcript_coverage_end_time`, `chunks_persisted`, and
-    /// `chunk_rate_per_sec` — so operators can spot a systematic stall
-    /// pattern (long, refusal-prone, music-heavy episodes) in aggregate
-    /// rather than grepping `lastErrorCode` across `analysis_jobs`.
+    /// carries the caller's ``ZeroCoverageDisposition`` — its `eventType`
+    /// and `cause` — plus a JSON metadata blob describing the episode shape
+    /// and the engine's progress at the moment of the exit:
+    /// `episode_duration`, `transcript_coverage_end_time`,
+    /// `chunks_persisted`, and `chunk_rate_per_sec` — so operators can spot
+    /// a systematic stall pattern (long, refusal-prone, music-heavy
+    /// episodes) in aggregate rather than grepping `lastErrorCode` across
+    /// `analysis_jobs`.
     ///
-    /// Best-effort: a fetch / append failure logs at warning level and
-    /// does NOT alter the runner's outcome. The `analysis_jobs` row's
-    /// `lastErrorCode = 'transcription:zeroCoverage'` remains the
-    /// primary signal; this row is observability gravy.
+    /// **THE `eventType` IS A RECOVERY INPUT, NOT OBSERVABILITY (playhead-rqgr).**
+    /// This doc said the row was "observability gravy" and that
+    /// `analysis_jobs.lastErrorCode = 'transcription:zeroCoverage'` was the
+    /// primary signal. That was wrong in the way that mattered:
+    /// ``AnalysisCoordinator/recoverOrphans(now:graceSeconds:)`` routes a
+    /// stranded job on the LAST journal row for its `{episode, generation}`
+    /// — `.failed` clears the lease with no requeue, everything else
+    /// resumes — and it never looks at `lastErrorCode` at all. On the
+    /// strength of the word "gravy" this method wrote a hardcoded `.failed`
+    /// for every zero-coverage exit including the interrupted ones, whose
+    /// own outcome (`.interrupted`) exists precisely so the job spends no
+    /// attempt and comes back. A process death before the scheduler's
+    /// requeue then made a cold launch do the opposite.
+    ///
+    /// The event is therefore NOT chosen here. It arrives in
+    /// `disposition`, minted by
+    /// ``zeroCoverageDisposition(failure:observation:)`` in the same
+    /// expression as the `StopReason` the caller returns, so the two
+    /// records cannot disagree. Adding a local `eventType` argument or
+    /// literal here would re-open exactly the hole this bead closed.
+    ///
+    /// Best-effort in the one sense that survives: a fetch / append failure
+    /// logs at warning level and does NOT alter the runner's outcome.
     /// playhead-8ysk: the `metadata` keys that make a zero-coverage journal
     /// row diagnostic rather than merely present.
     ///
@@ -1781,9 +1816,91 @@ actor AnalysisJobRunner {
         failure?.termination != .interrupted
     }
 
-    /// playhead-ngev (review r1): which outcome a zero-coverage transcription
-    /// reports, and therefore whether it SPENDS ONE OF THE JOB'S FIVE
-    /// PERMANENT RETRY ATTEMPTS.
+    /// playhead-rqgr: BOTH DURABLE RECORDS OF ONE ZERO-COVERAGE EXIT,
+    /// MINTED BY ONE EXPRESSION.
+    ///
+    /// A zero-coverage exit writes itself down twice: as an
+    /// ``AnalysisOutcome/StopReason`` handed to `AnalysisWorkScheduler`, and
+    /// as a `work_journal` row. Until this bead the two were computed
+    /// independently — the stop reason by ``zeroCoverageDisposition``'s
+    /// ancestor `zeroCoverageStopReason`, keyed on `termination`, and the
+    /// journal event by a hardcoded `.failed` literal at the emission site.
+    /// They disagreed for exactly the case the routing exists for.
+    ///
+    /// Bundling them removes the possibility rather than testing for its
+    /// absence: there is one `if`, it produces both fields, and
+    /// ``emitTranscriptionTimeoutJournal(request:assetId:allShards:existingChunkCount:transcriptStageStart:failure:disposition:)``
+    /// takes this value instead of choosing an event of its own.
+    struct ZeroCoverageDisposition: Sendable {
+        /// What the scheduler is told, and therefore whether this exit
+        /// spends one of the job's five permanent attempts.
+        let stopReason: AnalysisOutcome.StopReason
+
+        /// What the `work_journal` row says, and therefore which arm
+        /// `AnalysisCoordinator.recoverOrphans` takes if the process dies
+        /// before the scheduler commits the line above.
+        let journalEvent: WorkJournalEntry.EventType
+
+        /// The row's `cause`. Diagnostic only — no recovery arm reads it.
+        let journalCause: InternalMissCause
+    }
+
+    /// playhead-ngev (review r1) / playhead-rqgr: which outcome a
+    /// zero-coverage transcription reports, and therefore whether it SPENDS
+    /// ONE OF THE JOB'S FIVE PERMANENT RETRY ATTEMPTS — together with the
+    /// journal row that has to agree with it.
+    ///
+    /// **THE JOURNAL EVENT IS NOT A LABEL FOR THE ROW, IT IS THE COLD-LAUNCH
+    /// RECOVERY DECISION (playhead-rqgr).**
+    /// ``AnalysisCoordinator/recoverOrphans(now:graceSeconds:)`` reads the
+    /// last row for the stranded `{episode, generation}` and routes on
+    /// ``WorkJournalEntry/EventType/orphanRecoveryRouting``. Writing
+    /// `.failed` for an interrupted run therefore did not merely mislabel a
+    /// diagnostic: it told a cold launch the work was over, so
+    /// `clearOrphanedLeaseNoRequeue` freed the lease slot and left the row
+    /// `state='running'` with no lease — invisible to `fetchNextEligibleJob`
+    /// (which dispatches `queued`/`paused`/`failed`), invisible to
+    /// `recoverExpiredLeases` (the lease is NULL, not expired), and
+    /// invisible to playhead-btwk's stranded sweep until some unrelated
+    /// orphan happens to bump the scheduler epoch. Exactly the opposite of
+    /// what the same exit's `.interrupted` outcome had just asked for.
+    ///
+    /// The window is real but narrow: on the ordinary path the scheduler's
+    /// `.interrupted` arm commits `state='queued'` and releases the lease,
+    /// and then writes its OWN `.preempted` row — so the last row already
+    /// routed to resume and the job is no longer an orphan at all. The harm
+    /// needs the process to die between the runner's row and that commit.
+    /// It is the same event either way, and only one of the two records used
+    /// to say so.
+    ///
+    /// **The interrupted row is `.preempted`, not `.checkpointed`.** Both
+    /// route to resume, but `.checkpointed` claims durable progress and this
+    /// pass persisted nothing — that would be a second value naming one
+    /// thing and read as another. `.preempted` is what the event IS ("the
+    /// owner released because something else took the resource"), and it is
+    /// the same event the scheduler's own `.interrupted` arm writes for this
+    /// exit via `emitJournalPreempted(cause: .userPreempted)`. Two records,
+    /// one story.
+    ///
+    /// This does NOT contradict ``AnalysisOutcome/StopReason/interrupted(_:)``
+    /// being kept separate from ``AnalysisOutcome/StopReason/preempted``.
+    /// That separation is about the SCHEDULER ARM — `.preempted` requeues
+    /// immediately because a higher-lane job now holds the slot, while an
+    /// interruption is reported with playback still running and needs the
+    /// `interruptedRequeueDelaySeconds` floor to avoid a hot loop. The
+    /// journal vocabulary is coarser than the scheduler's and always has
+    /// been: `work_journal` has five events, and both of those outcomes have
+    /// mapped to the `.preempted` row since playhead-ngev shipped. What was
+    /// missing was the runner's own row agreeing with it.
+    ///
+    /// **The terminal arm is untouched.** `.ranToConclusion` and a nil
+    /// failure still produce `.failed` on BOTH records. A genuinely broken
+    /// episode must still exhaust its budget and stop.
+    ///
+    /// ---
+    ///
+    /// playhead-ngev (review r1), on why the outcome half is keyed on
+    /// `termination` and nothing else:
     ///
     /// A listener moving the playhead is not an analysis failure. But the
     /// scheduler charges every `.failed` one attempt
@@ -1797,7 +1914,7 @@ actor AnalysisJobRunner {
     /// lifetime is ordinary listening, so charging them would permanently kill
     /// analysis on the episodes a listener engages with most.
     ///
-    /// Before this bead the same attempt was still charged, just 300 s later —
+    /// Before ngev the same attempt was still charged, just 300 s later —
     /// but there WAS a rescue: a successor loop completing inside that window
     /// gave the job non-zero coverage and no attempt was spent. Reporting the
     /// interruption instantly removes the rescue, which turns an occasional
@@ -1809,12 +1926,28 @@ actor AnalysisJobRunner {
     /// and stop, or it retries forever. `.ranToConclusion` — the total-failure
     /// gate's verdict — and a nil failure — a silent timeout or a `.completed`
     /// over an empty transcript — both keep `.failed`.
-    static func zeroCoverageStopReason(
-        failure: TranscriptFailureReason?
-    ) -> AnalysisOutcome.StopReason {
+    static func zeroCoverageDisposition(
+        failure: TranscriptFailureReason?,
+        observation: TranscriptRunObservation
+    ) -> ZeroCoverageDisposition {
         let code = failure.map { "transcription:\($0.failureClass.rawValue)" }
             ?? "transcription:zeroCoverage"
-        return failure?.termination == .interrupted ? .interrupted(code) : .failed(code)
+        let cause = journalCause(failure: failure, observation: observation)
+
+        // ONE branch, BOTH records. Keyed on `termination` and nothing else,
+        // for the reason spelled out below.
+        if failure?.termination == .interrupted {
+            return ZeroCoverageDisposition(
+                stopReason: .interrupted(code),
+                journalEvent: .preempted,
+                journalCause: cause
+            )
+        }
+        return ZeroCoverageDisposition(
+            stopReason: .failed(code),
+            journalEvent: .failed,
+            journalCause: cause
+        )
     }
 
     static func failureExtras(_ failure: TranscriptFailureReason?) -> [String: String] {
@@ -2154,7 +2287,8 @@ actor AnalysisJobRunner {
         existingChunkCount: Int,
         transcriptStageStart: Date,
         failure: TranscriptFailureReason?,
-        observation: TranscriptRunObservation
+        observation: TranscriptRunObservation,
+        disposition: ZeroCoverageDisposition
     ) async {
         // Resolve the active job's `{generationID, schedulerEpoch}` so
         // the journal row joins the lease lifecycle written by 5uvz.1.
@@ -2203,16 +2337,48 @@ actor AnalysisJobRunner {
         // playhead-ngev: no longer hardcoded. A row whose class proves the
         // recognizer never ran must not be counted as an ASR failure — that
         // contradiction is what sent two dogfood cycles to the wrong stage.
-        let cause = Self.journalCause(failure: failure, observation: observation)
+        //
+        // playhead-rqgr: and no longer derived HERE either. Both the cause
+        // and the event come off the caller's `disposition`, which also
+        // produced the `StopReason` this exit reports to the scheduler.
+        let cause = disposition.journalCause
 
-        let metadata = await SliceCompletionInstrumentation.recordFailed(
-            cause: cause,
-            deviceClass: DeviceClass.detect(),
-            sliceDurationMs: elapsedMs,
-            bytesProcessed: 0,
-            shardsCompleted: 0,
-            extras: extras
-        )
+        // playhead-rqgr: THE IN-MEMORY COUNTER IS THE THIRD RECORD OF THIS
+        // EVENT, and it was the same literal one layer down. `recordFailed`
+        // and `recordPaused` build a byte-identical `SliceMetadata`; the
+        // only thing that differs is which of `SliceCounters`' two tallies
+        // they increment. A hardcoded `recordFailed` therefore counted every
+        // listener's scrub as a failed slice, which is the quantity
+        // `slicesFailed` exists NOT to be.
+        //
+        // Routed by the disposition, like everything else about this exit,
+        // and the correspondence is exact rather than a coincidence: a row
+        // that asks orphan recovery to RESUME is a paused slice, a row that
+        // asks it to STOP is a failed one. It is the same pairing the
+        // scheduler's own `.interrupted` arm already makes
+        // (`recordPaused` + `emitJournalPreempted`).
+        let deviceClass = DeviceClass.detect()
+        let metadata: SliceMetadata
+        switch disposition.journalEvent.orphanRecoveryRouting {
+        case .requeue:
+            metadata = await SliceCompletionInstrumentation.recordPaused(
+                cause: cause,
+                deviceClass: deviceClass,
+                sliceDurationMs: elapsedMs,
+                bytesProcessed: 0,
+                shardsCompleted: 0,
+                extras: extras
+            )
+        case .terminalNoRequeue:
+            metadata = await SliceCompletionInstrumentation.recordFailed(
+                cause: cause,
+                deviceClass: deviceClass,
+                sliceDurationMs: elapsedMs,
+                bytesProcessed: 0,
+                shardsCompleted: 0,
+                extras: extras
+            )
+        }
 
         let entry = WorkJournalEntry(
             id: UUID().uuidString,
@@ -2220,7 +2386,12 @@ actor AnalysisJobRunner {
             generationID: generationID,
             schedulerEpoch: schedulerEpoch,
             timestamp: now.timeIntervalSince1970,
-            eventType: .failed,
+            // playhead-rqgr: the recovery arm this exit is asking a cold
+            // launch for — NOT a literal, and not a label. See the method
+            // doc: `.failed` here for an interrupted run is what made
+            // `recoverOrphans` clear a lease the outcome had just asked to
+            // keep.
+            eventType: disposition.journalEvent,
             cause: cause,
             metadata: metadata.encodeJSON(),
             artifactClass: .scratch
