@@ -312,6 +312,14 @@ struct BackgroundGrantBudget: Sendable, Equatable {
     ///   rows against 3 failure rows**. Swept, every floor from 5 s up costs
     ///   productive starts and refuses at most ONE barren one.
     ///
+    /// Two limits on those figures, named because the join is by time interval
+    /// rather than by key: `semantic_scan_results.runCorrelationId` is an
+    /// `fm-*` id and matches no `runId`, and **37 of the 610 scan rows land
+    /// inside no recorded run at all** (6.1 %), so they are outside both
+    /// columns. And `createdAt` lags call completion, so the derived start is
+    /// an UPPER bound — which biases `into-grant` up and the true remaining
+    /// DOWN, i.e. against the conclusion drawn here.
+    ///
     /// This reproduces playhead-ejr7's finding at a coarser granularity: its
     /// per-FM-call sweep found `P(verdict | grant remaining)` flat at
     /// 90/100/83/94/100/87 % across bands from `[0,10)` to `[120,400)`, and
@@ -329,13 +337,21 @@ struct BackgroundGrantBudget: Sendable, Equatable {
     /// 115 measured transcription attempts persisted zero chunks — instead of
     /// the one that banks one at a p50 of 6.0 s.
     ///
-    /// The bead's premise — that a 13 s grant clears the floor and starts an
-    /// asset whose p95 coarse window alone is 57.5 s — has **no observed
-    /// instance**: of the 34 grants under 30 s on the 08-14 pull, **none banked
-    /// a coarse window**, and of the 46 under 60 s only 2 started an asset at
-    /// all. Those windows are the early-reclaim mode this file's header already
-    /// says a budget cannot rescue, and what actually stops work in them is the
-    /// expiration handler's `cancel()`, not this deadline.
+    /// **THE SHORT-GRANT CASE IS BOUNDED, NOT DISPROVED, AND THE DIFFERENCE
+    /// MATTERS.** Of the 34 grants under 30 s on the 08-14 pull, none banked a
+    /// coarse window, and of the 46 under 60 s only 2 started an asset at all.
+    /// That is NOT evidence the gate never admitted one: an asset admitted into
+    /// a 13 s window and reclaimed before its first window lands writes no row,
+    /// so it is invisible to this ledger by construction — the same
+    /// absence-from-the-instrumentation trap ``backfillProcessingCharged``
+    /// records one level up. What the data does bound is the HARM. Such a start
+    /// can waste at most the tail of a window that was ending regardless, and
+    /// that tail has no alternative consumer: the drain behind this phase takes
+    /// a floor of ZERO, so a refusal hands the same seconds to the phase whose
+    /// durable artifact is the unpriceable one. Those windows are the
+    /// early-reclaim mode this file's header already says a budget cannot
+    /// rescue, and what stops work in them is the expiration handler's
+    /// `cancel()`, not this deadline.
     ///
     /// **The error is measurable from the ledger as it stands** — grant
     /// start/finish live in `background_task_runs`, call start is
