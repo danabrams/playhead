@@ -3146,7 +3146,11 @@ T_RN_RESTART="a banking attempt in the middle restarts the run of barren ones"
 T_RN_PERM_CAP="a PERMANENT store error goes straight to the cap"
 T_RN_PERM_OUTRANKS="a PERMANENT store error goes to the cap even when the attempt banked audio"
 T_RN_SHARED="the RECOVERABLE half is the shared rule, not a copy of it"
-T_RN_CLASSIFY="every recoverable case takes the shared rule; every permanent one takes the cap"
+# NO SEMICOLON. The first spelling of this display name carried one, the record
+# separator split it into two fragments that match nothing, and batches 813 and
+# 814 aborted with "an expectation names a test that never ran" — the first cause
+# this script's own diagnostic lists, hit for the second time in this file.
+T_RN_CLASSIFY="every recoverable case takes the shared rule, and every permanent one takes the cap"
 # The witness. Split in two directions on purpose — a single test over both
 # would go red for either box mutation and neither would have its own witness.
 T_RN_BOX_RECORDS="playhead-ronl: the box records the cursor the store was given"

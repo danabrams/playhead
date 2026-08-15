@@ -202,7 +202,13 @@ struct StoreFailureRetryChargeRuleTests {
     /// AS TO DURABILITY — exactly like the generic arm's throw — and is charged
     /// rather than excused. `FMDaemonRefusal` preserves the count for conditions
     /// whose own API says "try again later"; no such statement exists here.
-    @Test("every recoverable case takes the shared rule; every permanent one takes the cap")
+    /// NO SEMICOLON IN THE NAME, and it is not taste. `scripts/mutation-battery.sh`
+    /// splits a rail's expected-test field on `;`, so a display name containing
+    /// one can never be matched — the run aborts with "an expectation names a
+    /// test that never ran" and the rail is not scored. Batches 813 and 814 hit
+    /// exactly that on this test's first spelling, which is the same trap the
+    /// battery's own header records a K2 test being renamed for.
+    @Test("every recoverable case takes the shared rule, and every permanent one takes the cap")
     func theProductionClassificationDecidesWhichClause() {
         let cases: [AnalysisStoreError] = [
             .openFailed(code: 1, message: "unable to open database file"),
