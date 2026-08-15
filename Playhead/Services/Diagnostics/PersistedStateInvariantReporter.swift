@@ -75,18 +75,26 @@ struct PersistedStateInvariantReporter: Sendable {
     /// registration state, which is normally an empty population.
     typealias AudioPresenceProbe = @Sendable (String) async -> Bool
 
+    /// playhead-gyhw: take the repairs the schema ladder performed during THIS
+    /// launch. DRAINING, not reading — see
+    /// ``AnalysisStore/drainPersistedStateRepairRecords()``.
+    typealias RepairRecordProvider = @Sendable () async -> [PersistedStateRepairRecord]
+
     private let snapshotProvider: SnapshotProvider
     private let audioPresenceProbe: AudioPresenceProbe
+    private let repairRecordProvider: RepairRecordProvider
     private let logger: SurfaceStatusInvariantLogger?
     private let osLogger = Logger(subsystem: "com.playhead", category: "PersistedStateInvariants")
 
     init(
         snapshotProvider: @escaping SnapshotProvider,
         audioPresenceProbe: @escaping AudioPresenceProbe,
+        repairRecordProvider: @escaping RepairRecordProvider = { [] },
         logger: SurfaceStatusInvariantLogger?
     ) {
         self.snapshotProvider = snapshotProvider
         self.audioPresenceProbe = audioPresenceProbe
+        self.repairRecordProvider = repairRecordProvider
         self.logger = logger
     }
 
@@ -100,6 +108,12 @@ struct PersistedStateInvariantReporter: Sendable {
     /// a worse defect than the ones it looks for.
     @discardableResult
     func report() async -> [PersistedStateInvariantFinding] {
+        // FIRST, and before anything that can fail. The repairs happened inside
+        // `openAtLaunch`, so they are already in the past by the time this runs;
+        // a snapshot read that throws must not also swallow the record of what
+        // the ladder just did to the rows it was about to read.
+        await reportLadderRepairs()
+
         let snapshot: PersistedStateSnapshot
         do {
             snapshot = try await snapshotProvider()
@@ -139,6 +153,49 @@ struct PersistedStateInvariantReporter: Sendable {
             }
         }
         return findings
+    }
+
+    /// playhead-gyhw: drain the schema ladder's repair ledger and record it.
+    ///
+    /// One census line ALWAYS, one line per repaired row. The census is what
+    /// makes `repairs=0` a claim instead of a silence — the same argument that
+    /// puts a census line under every invariant, applied to the other half of
+    /// the pair. Without it a launch that repaired nothing and a launch whose
+    /// ledger was never drained (a provider left at its default, a caller that
+    /// forgot to pass one) are byte-identical in the pull.
+    private func reportLadderRepairs() async {
+        let repairs = await repairRecordProvider()
+        logger?.invariantViolated(
+            code: .persistedStateRepairCensus,
+            description: Self.repairCensusDescription(for: repairs)
+        )
+        for repair in repairs {
+            logger?.invariantViolated(
+                code: .persistedStateRepairApplied,
+                description: repair.wireDescription
+            )
+            osLogger.notice(
+                """
+                persisted-state repair \(repair.migration, privacy: .public) on row \
+                \(repair.rowId, privacy: .public): \(repair.field, privacy: .public) \
+                \(repair.from, privacy: .public) -> \(repair.to, privacy: .public)
+                """
+            )
+        }
+    }
+
+    /// The repair census body: the total, then the per-rung breakdown so a
+    /// reader can attribute the rows without parsing every violation line.
+    ///
+    /// `migrations=none` rather than an empty value, because a key whose value
+    /// is absent reads as a truncated line rather than as a claim of zero.
+    static func repairCensusDescription(for repairs: [PersistedStateRepairRecord]) -> String {
+        var counts: [String: Int] = [:]
+        for repair in repairs { counts[repair.migration, default: 0] += 1 }
+        let breakdown = counts.keys.sorted()
+            .map { "\($0):\(counts[$0] ?? 0)" }
+            .joined(separator: ",")
+        return "repairs=\(repairs.count) migrations=\(breakdown.isEmpty ? "none" : breakdown)"
     }
 
     /// Ask the audio oracle for the registration-state assets only. Every other

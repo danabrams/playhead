@@ -669,6 +669,33 @@ struct InvariantViolation: Sendable, Hashable, Codable {
         /// the description.
         case persistedStateInvariantReadFailed =
             "persisted_state_invariant_read_failed"
+
+        /// playhead-gyhw: the REPAIR CENSUS for this launch — how many persisted
+        /// rows the schema ladder repaired, broken down by rung.
+        ///
+        /// Always emitted, `repairs=0` included, for the same reason
+        /// ``persistedStateInvariantCensus`` is: a launch that repaired nothing
+        /// and a launch whose repair record was never drained leave byte-
+        /// identical evidence without it. On the overwhelming majority of
+        /// launches the migrations are already past and this line reads
+        /// `repairs=0 migrations=none`, which is the positive claim.
+        case persistedStateRepairCensus = "persisted_state_repair_census"
+
+        /// playhead-gyhw: ONE repaired row, named — WHAT changed, on WHICH row,
+        /// FROM what TO what, and WHICH invariant licensed it. The body is
+        /// ``PersistedStateRepairRecord/wireDescription``.
+        ///
+        /// **The repairs destroy the evidence they act on.** V51 lowers a
+        /// coarse cursor and `BackfillProgressCursor.monotonic` makes that
+        /// permanent; V50 zeroes a retry budget. After either, the device
+        /// carries no trace of what it held before, so a pull cannot tell a
+        /// repaired row from one that was never broken — and a repair nobody
+        /// can see is indistinguishable from the bug not having happened. Both
+        /// rungs announced themselves only through `Logger.notice`, which no
+        /// device pull collects; this line is what a pull reads instead.
+        ///
+        /// Expected volume: ZERO on every launch after the ladder has run once.
+        case persistedStateRepairApplied = "persisted_state_repair_applied"
     }
 
     let code: Code

@@ -40,10 +40,25 @@
 //     empty world for four months; the shape to avoid is a check whose
 //     denominator can silently become zero without saying so.
 //
-// ----- What is NOT here -----
+// ----- What is NOT here, and what playhead-gyhw decided -----
 //
-// No repair. No reset. No migration. If you find yourself writing one, it
-// belongs in playhead-gyhw.
+// No repair. No reset. No migration. `playhead-gyhw` — the healing half — took
+// all five invariants one at a time and LICENSED NO NEW REPAIR. The reasons are
+// recorded per case on ``PersistedStateInvariant/healLicence``, which is a total
+// switch so a sixth invariant cannot be added without stating one. In summary:
+//
+//   1e86  no rule changed; the launch reaper already clears the row, and 1e86's
+//         open gap is WHERE it is called from.
+//   wogi  the rule changed and the repair SHIPPED as V51. 0 of 8 remain.
+//   e6d3  the rule changed and the repair SHIPPED as V50. The 1 row it leaves
+//         was retired by an arm whose rule did NOT change (59c8 / ronl).
+//   1216  no rule changed; the defect was in the download oracle. 0 of 0.
+//   exy0  REFUTED — `candidate` is correct for an episode nobody has played,
+//         so a repair would fabricate a delivery.
+//
+// What gyhw DID ship is the thing that makes the next repair safe: V50 and V51
+// now RECORD what they repaired, per row, from → to, on this reporter's own
+// channel. See ``PersistedStateRepairRecord``.
 
 import Foundation
 
@@ -161,6 +176,190 @@ enum PersistedStateInvariant: String, Sendable, Hashable, CaseIterable {
     /// lesson, a second expression that happens to agree is how the certainty
     /// tier and its consumers came apart.
     case eligibleAutoWindowNeverOffered = "eligible_auto_window_never_offered"
+}
+
+// MARK: - The heal licence (playhead-gyhw)
+
+/// Why one ``PersistedStateInvariant`` is, or is not, REPAIRED.
+///
+/// `playhead-gyhw` enumerated all five and licensed no new repair. That is a
+/// claim, so it is recorded where the next author must read it rather than in a
+/// commit message nobody opens: ``PersistedStateInvariant/healLicence`` is a
+/// total switch, so a sixth invariant does not COMPILE until it states one.
+///
+/// **The rule, from `playhead-e6d3`'s precedent and `playhead-59c8`'s refusal:**
+/// a repair is principled exactly when the rows were failed under a rule that no
+/// longer holds. Three corollaries this enum exists to keep straight:
+///
+///  * If the rule changed, the repair belongs WITH the forward fix, as a
+///    one-shot version-guarded migration — that is what V50 and V51 are. A
+///    SECOND, recurring healer for the same invariant can only ever fire on a
+///    REGRESSION of that forward fix, and silently repairing a regression is
+///    exactly what the reporter/healer split was built to prevent.
+///  * If no rule changed, no repair is licensed, however dead the row looks.
+///  * If the reading is not a defect, a "repair" would FABRICATE state — for
+///    ``PersistedStateInvariant/eligibleAutoWindowNeverOffered`` it would record
+///    a skip the listener was never offered.
+enum PersistedStateHealLicence: Sendable, Equatable {
+
+    /// The rule changed, and the repair SHIPPED with the forward fix as a
+    /// one-shot migration. Nothing further is licensed here; what the migration
+    /// left behind is stated so it can be challenged.
+    case shippedWithTheForwardFix(bead: String, migration: String, residue: String)
+
+    /// No rule changed, so no repair is licensed. `blockedBy` names the open
+    /// bead that owns the forward fix — until it merges, a repair here would be
+    /// a reconciler shipped ahead of its diagnosis.
+    case noRuleChanged(reason: String, blockedBy: String?)
+
+    /// The invariant fired, and the rows are not broken. Repairing them would
+    /// write a state no evidence supports.
+    case readingIsNotADefect(reason: String)
+
+    /// The bead that would have to change a rule before any repair is licensed,
+    /// when one is known.
+    var blockingBead: String? {
+        switch self {
+        case .shippedWithTheForwardFix: return nil
+        case let .noRuleChanged(_, blockedBy): return blockedBy
+        case .readingIsNotADefect: return nil
+        }
+    }
+
+    /// Whether this bead's launch path performs a repair for the invariant.
+    /// **False for every case today**, and deliberately so — see the type's doc.
+    var repairsAtLaunch: Bool { false }
+}
+
+extension PersistedStateInvariant {
+
+    /// Why this invariant is or is not repaired. Total by construction.
+    var healLicence: PersistedStateHealLicence {
+        switch self {
+        case .strandedRunningBackfillJob:
+            // playhead-1e86 is OPEN. Nothing has changed the rule that leaves a
+            // hard-killed row at `running`; the row is a corpse, not a stale
+            // verdict, and `AnalysisJobReconciler.resetStrandedBackfillJobs`
+            // already flips it back at launch, scene activation and
+            // preAnalysisRecovery. What 1e86 names is that `handleBackfillTask`
+            // runs NONE of those — a call-site gap, which is a forward fix and
+            // 1e86's to make. A second reaper bolted on here would repair the
+            // symptom on the one path that already has one.
+            return .noRuleChanged(
+                reason: "the row is a corpse rather than a stale verdict, and the launch reaper "
+                    + "already clears it; 1e86's gap is WHERE the reaper is called, not that "
+                    + "nothing repairs the row",
+                blockedBy: "playhead-1e86"
+            )
+
+        case .coarseCursorBeyondScannedPrefix:
+            // The rule changed (playhead-wogi: the cursor stops at a hole in
+            // the run's OWN audio) and V51 repaired every device row under it,
+            // measured at ONE row of nine on db-pull10. Post-V51 this invariant
+            // reads 0 of 8 on that pull, so a recurring healer would fire only
+            // on a regression of wogi's fix — and hiding that is the failure
+            // mode `playhead-dgly`'s header is written against.
+            return .shippedWithTheForwardFix(
+                bead: "playhead-wogi",
+                migration: "v51",
+                residue: "0 of 8 on db-pull10 after the ladder; a later violation is a REGRESSION "
+                    + "of wogi's forward fix and must be read, not repaired"
+            )
+
+        case .retryBudgetSpentWithWorkRemaining:
+            // The rule changed (playhead-e6d3: `retryCount` counts CONSECUTIVE
+            // attempts that did not advance the cursor) and V50 repaired
+            // exactly the rows retired under the old one — the seven rows on
+            // db-pull10 carrying `underCoverageBudgetSpent-%`. The one row it
+            // leaves, A9F6DF05, was retired by the GENERIC exception arm, whose
+            // rule playhead-59c8 examined and deliberately did not change;
+            // playhead-ronl carries whether it should. Sweeping it in would be
+            // a repair keyed on a consequence rather than on a cause.
+            return .shippedWithTheForwardFix(
+                bead: "playhead-e6d3",
+                migration: "v50",
+                residue: "1 of 1 on db-pull10 after the ladder — A9F6DF05, retired by the generic "
+                    + "exception arm whose rule has NOT changed (playhead-59c8, playhead-ronl)"
+            )
+
+        case .newAssetWithAudioAndFailedJob:
+            // playhead-1216 was a DOWNLOAD-oracle regression: the library asked
+            // `DownloadManager.isCached` and got the wrong answer. No rule
+            // about `analysis_assets.analysisState` changed, and the launch
+            // chain's `reconcilePersistedTerminalStatesIfNeeded` already
+            // rewrites that column. The population on db-pull10 is 0 of 0.
+            return .noRuleChanged(
+                reason: "1216's defect was in the download oracle, not in the persisted "
+                    + "registration state; nothing changed the rule that writes `analysisState`, "
+                    + "and the measured population is 0 of 0",
+                blockedBy: nil
+            )
+
+        case .eligibleAutoWindowNeverOffered:
+            // playhead-exy0 was REFUTED by measurement: driven through
+            // `beginEpisode`, these rows reach `.applied` and push a cue at
+            // 0.50 s. They are `candidate` because the episodes were never
+            // played — every day-0 kickoff came from `download_and_analyze_tap`
+            // with nothing playing. `candidate` is the CORRECT pre-offer state,
+            // so a repair would record a delivery that did not happen.
+            //
+            // See playhead-n4l2: this invariant's stated null reading of zero
+            // is wrong for that same reason, which is why it reads 4 of 4 on a
+            // healthy device.
+            return .readingIsNotADefect(
+                reason: "playhead-exy0 measured these rows reaching `.applied` through "
+                    + "`beginEpisode`; `candidate` is the correct state for a window on an "
+                    + "episode nobody has played, so a repair would fabricate a delivery"
+            )
+        }
+    }
+}
+
+// MARK: - The repair record (playhead-gyhw)
+
+/// One repair a MIGRATION performed on a persisted row.
+///
+/// **A repair that leaves no durable trace is indistinguishable from the bug not
+/// having happened**, and both shipped repairs were in exactly that position:
+/// V50 reset seven retry budgets and V51 withdrew a cursor by 7,339.26 s, each
+/// announcing itself only through `Logger.notice`, which no device pull
+/// collects. Worse, both repairs DESTROY the evidence they acted on — after V51
+/// nothing anywhere says 3C2FFE10's cursor was ever 7,998.72, so the next pull
+/// cannot tell a repaired row from one that was never broken.
+///
+/// Every field answers one of the four questions a pull must be able to ask:
+/// WHAT changed (``field``), on WHICH row (``rowId``), FROM what TO what, and
+/// WHICH invariant licensed it (``invariant`` / ``licensedBy``).
+struct PersistedStateRepairRecord: Sendable, Equatable {
+    /// The schema rung that performed it, e.g. `v50`.
+    let migration: String
+    /// The invariant whose violation this repair withdraws.
+    let invariant: PersistedStateInvariant
+    /// The bead whose RULE CHANGE licensed the repair.
+    let licensedBy: String
+    /// The row's identity in its own table — `backfill_jobs.jobId` for both.
+    let rowId: String
+    /// The column, spelled as a reader of the device DB would address it.
+    let field: String
+    let from: String
+    let to: String
+    /// The value of the predicate term that selected this row, so a reader can
+    /// confirm the repair was keyed on a CAUSE rather than on a symptom.
+    let cause: String
+
+    /// The wire body, space-separated `key=value`, matching the census format
+    /// so one parser reads both.
+    var wireDescription: String {
+        let sanitize = PersistedStateInvariantEvaluator.sanitize
+        return "migration=\(migration)"
+            + " invariant=\(invariant.rawValue)"
+            + " licensed_by=\(licensedBy)"
+            + " row=\(sanitize(rowId))"
+            + " field=\(field)"
+            + " from=\(sanitize(from))"
+            + " to=\(sanitize(to))"
+            + " cause=\(sanitize(cause))"
+    }
 }
 
 // MARK: - Snapshot
