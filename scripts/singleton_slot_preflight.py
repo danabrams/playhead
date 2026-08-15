@@ -53,6 +53,21 @@ is doing its job, and it silently grants amnesty to whatever inherits the name.
 This is the same rule `gate_baseline.py` applies to a baseline member that did
 not run.
 
+KNOWN LIMITS, MEASURED RATHER THAN WORRIED ABOUT
+------------------------------------------------
+This is a line-shaped matcher over noise-stripped source, not a parser, so it
+has edges. Both were measured against the tree rather than left as unease:
+
+  L-1  A property declaration split across lines is not matched. There is no
+       way to bound this one from the source (a `var` whose type annotation
+       wraps looks like any other continuation line), so it is stated and not
+       claimed to be zero.
+  L-2  A type declaration whose opening brace is not on the declaration line
+       is never pushed onto the scope stack, so its members are attributed to
+       nothing and silently skipped. Measured 2026-08-15: of **92** `actor`
+       declarations under `Playhead/`, **0** put the brace on a later line. Not
+       binding today; re-measure before relying on it.
+
 EXIT CODES
   0   no un-allowlisted violations, and every allowlist entry matched
   1   a violation, or a stale allowlist entry
