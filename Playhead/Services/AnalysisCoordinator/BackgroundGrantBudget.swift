@@ -273,6 +273,75 @@ struct BackgroundGrantBudget: Sendable, Equatable {
 
     /// The instant after which no further unit of work may be STARTED, given
     /// the instant the grant opened.
+    ///
+    /// **THIS IS AN ASSUMPTION ABOUT THE WINDOW, NOT A READING OF IT, AND THE
+    /// CONSUMERS MUST NOT SPELL THE DIFFERENCE `remaining` (playhead-rbj4).**
+    /// `now.duration(to:)` against this instant reads "seconds left in an
+    /// AVERAGE grant, counted from when this one started". Those coincide only
+    /// when the grant is average. Ask the diagnostic question: what would that
+    /// expression read if this grant were 13 s long? The same ~219 s it reads
+    /// for a 295 s one. `AnalysisCoordinator.runCoarseScanLoop` therefore names
+    /// its local `budgetedRemaining`; see that gate's own comment.
+    ///
+    /// **NOTHING IN THE PROCESS CAN DO BETTER.** iOS gives a `BGTask` an
+    /// `expirationHandler` callback and no advance notice. There is no
+    /// expiration-date property on `BGTask`, and
+    /// `UIApplication.backgroundTimeRemaining` is about a
+    /// `beginBackgroundTask` assertion — outside one it returns
+    /// `.greatestFiniteMagnitude`, and it is main-actor besides. So this is not
+    /// a placeholder awaiting a better source; it is the only number available.
+    ///
+    /// **AND A BETTER NUMBER WOULD MAKE THROUGHPUT WORSE, WHICH IS WHY THE
+    /// BEHAVIOUR IS DELIBERATELY UNCHANGED.** Measured on two device pulls at
+    /// the granularity the coarse gate acts at — one row per (grant, asset)
+    /// start, from `background_task_runs` joined to `semantic_scan_results` by
+    /// the interval containing `createdAt − latencyMs`:
+    ///
+    /// - **2026-08-14 pull, 122 measured backfill grants** (129 rows less 7
+    ///   `orphan_at_launch`): grant length p10 1.1 s, p25 24.9 s, p50 218.0 s,
+    ///   p75 295.5 s. **61 of 122 (50 %) are shorter than this 219 s budget**
+    ///   and **46 of 122 (38 %) are shorter than the 60 s floor itself**, so on
+    ///   those the floor cannot refuse anything at t=0 however it is spelled.
+    ///   Of 53 observed asset-starts the shipped gate admitted 43; a gate
+    ///   reading the true window would admit 44 and **refuse 4 of the 43** —
+    ///   and those 4 banked **12 durable coarse windows and 0 failure rows**.
+    ///   It refuses **zero** barren starts.
+    /// - **2026-08-11 pull, 43 measured grants** (playhead-ejr7's own): 25 of
+    ///   43 shorter than 219 s. A true-window gate refuses **7 of the 18**
+    ///   admitted asset-starts; 6 of those 7 banked a verdict, **22 verdict
+    ///   rows against 3 failure rows**. Swept, every floor from 5 s up costs
+    ///   productive starts and refuses at most ONE barren one.
+    ///
+    /// This reproduces playhead-ejr7's finding at a coarser granularity: its
+    /// per-FM-call sweep found `P(verdict | grant remaining)` flat at
+    /// 90/100/83/94/100/87 % across bands from `[0,10)` to `[120,400)`, and
+    /// every start-gate threshold net negative (best trade −495 s). At
+    /// per-asset granularity the same conditional is 100 % in every band above
+    /// `[10,20)` on the 08-14 pull. **A start gate cannot see the waste**,
+    /// because playhead-26od makes each coarse window durable the moment it
+    /// lands, so starting late is cheap.
+    ///
+    /// **AND REFUSING HERE DOES NOT SAVE THE WINDOW ANYWAY.** The phase behind
+    /// the coarse scan is the transcription drain, whose floor is
+    /// ``minimumDrainCheckpointBudget`` = **0** for both backfill instances
+    /// (playhead-13kf). A refusal does not idle the grant tail; it hands it to
+    /// the phase this file cannot price a durable artifact for at all — 96 of
+    /// 115 measured transcription attempts persisted zero chunks — instead of
+    /// the one that banks one at a p50 of 6.0 s.
+    ///
+    /// The bead's premise — that a 13 s grant clears the floor and starts an
+    /// asset whose p95 coarse window alone is 57.5 s — has **no observed
+    /// instance**: of the 34 grants under 30 s on the 08-14 pull, **none banked
+    /// a coarse window**, and of the 46 under 60 s only 2 started an asset at
+    /// all. Those windows are the early-reclaim mode this file's header already
+    /// says a budget cannot rescue, and what actually stops work in them is the
+    /// expiration handler's `cancel()`, not this deadline.
+    ///
+    /// **The error is measurable from the ledger as it stands** — grant
+    /// start/finish live in `background_task_runs`, call start is
+    /// `semantic_scan_results.createdAt − latencyMs` — so no field was added to
+    /// record it. On the 08-14 pull it is p50 **−76.4 s** and exceeds a whole
+    /// floor's width on 44 of 53 asset-starts.
     func workDeadline(from grantStart: ContinuousClock.Instant) -> ContinuousClock.Instant {
         grantStart + workBudget
     }
