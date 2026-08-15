@@ -42,20 +42,48 @@
 //     sharing one code, which is what makes the alignment falsifiable).
 //
 // **So 1001 is `ModelManagerError.inferenceError`, a CATEGORY WRAPPER over a
-// 25-case `ModelManagerServices.InferenceError`.** That inner enum contains
-// both provably transient members — `rateLimited`, `resourcesBusy`,
-// `networkError`, `hostFailed`, `loadFailed`, `operationCancelled` — and
-// provably durable ones — `notImplemented`, `unsupportedRequestType`,
-// `invalidClientData`, `versionNotSupported`, `conversionNotSupported`,
-// `responseEncodingFailed`, `assetVersionMismatch`. The code names the LAYER
-// the error came from. It does not name what went wrong.
+// 25-case `ModelManagerServices.InferenceError`** — enumerated from the same
+// `.tbd`, every case carrying an `InferenceError.Context`: `rateLimited`,
+// `resourcesBusy`, `networkError`, `hostFailed`, `hostError`, `loadFailed`,
+// `notLoaded`, `alreadyLoaded`, `operationCancelled`, `internalError`,
+// `inferenceFailed`, `streamNotFound`, `deviceConnectionError`, `xpcError`,
+// `unspecified`, `unspecifiedUnderlyingError`, `unrecognizedUnderlyingError`,
+// `notImplemented`, `unsupportedRequestType`, `invalidClientData`,
+// `operationNotAllowed`, `responseEncodingFailed`, `conversionNotSupported`,
+// `versionNotSupported`, `assetVersionMismatch`.
 //
-// That is this repo's standing defect class stated in Apple's numbering: a
-// value that names one thing (which subsystem answered) read as though it named
-// another (whether the condition will clear). Admitting 1001 to
-// `FMDaemonRefusal` would give "it will heal on its own, retry forever, never
-// spend the budget" to a population that demonstrably contains permanent
-// members.
+// Some of those could only ever be momentary and some could only ever be
+// permanent, and **1001 is every one of them**. The code names the LAYER the
+// error came from; it does not name what went wrong. That is this repo's
+// standing defect class stated in Apple's numbering: a value that names one
+// thing (which subsystem answered) read as though it named another (whether
+// the condition will clear).
+//
+// ===== APPLE AGREES, AND NAMES THE DISCRIMINATOR WE CANNOT REACH =====
+//
+// The bead asks, if the condition is CONDITIONAL, what distinguishes the two
+// and where that fact is available at throw time. It has an exact answer.
+// `InferenceError` carries **`retryAfterDate: Foundation.Date?`**, built from
+// `InferenceError.Context`, whose initialiser is
+//
+//     init(additionalDescription: String, domain: String, code: Int,
+//          userInfo: [String: String], fallbackAllowed: Bool,
+//          underlyingError: Error?, retryAfter: Date?)
+//
+// So "temporary, try again later" is a FIELD in this framework, populated per
+// CONDITION rather than implied by a code — and `fallbackAllowed` is a second
+// one. Grepped across the whole framework, `retryAfter` occurs on
+// `InferenceError` and `InferenceError.Context` and **nowhere else**:
+// `ModelManagerError`, the level whose code is 1001, has none. So nothing at
+// the 1001 level can answer the question, the type that can is private and not
+// ours to import, and the `NSError` the row actually carried did not bring it
+// across.
+//
+// That is why the outcome here is a NAMED, COUNTABLE RECORD rather than a
+// verdict. Admitting 1001 to `FMDaemonRefusal` would give "it will heal on its
+// own, retry forever, never spend the budget" to a population that contains
+// permanent members, on the strength of a number that Apple's own API treats as
+// insufficient to decide it.
 //
 // ===== THE OUTER `Code=-1` IS THE FRAMEWORK DECLINING TO CLASSIFY =====
 //

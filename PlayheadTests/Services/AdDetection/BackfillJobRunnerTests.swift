@@ -1873,7 +1873,23 @@ struct BackfillJobRunnerTests {
         #expect(second.admittedJobIds.isEmpty, "completed jobs must not be re-admitted")
     }
 
-    @Test("C-2: failing classifier persists deferReason on .failed status")
+    // playhead-59c8 REWROTE THIS TEST'S ASSERTION, and finding it is what the
+    // mutation battery's own baseline check bought: it was the one test in the
+    // tree pinning the behaviour `playhead-v7q6` forbids.
+    //
+    // C-2's claim is right and unchanged — a job that dies on an unclassifiable
+    // throw must leave a row a human can diagnose without a device attached.
+    // Its EVIDENCE was `deferReason.contains("synthetic classifier failure")`,
+    // i.e. that the column carries `String(describing: error)`. On the
+    // 2026-08-14 pull that is 300 characters of `NSError` prose which cannot be
+    // grouped, cannot be counted, and changes shape with the OS; identifying
+    // A9F6DF05's cause cost somebody a hand-read of all 300.
+    //
+    // The column now carries a named token plus the error's IDENTITY, so the
+    // assertion moved from the prose to the identity — and the prose's absence
+    // is asserted too, because "the token is present" would still pass if the
+    // description were appended to it.
+    @Test("C-2: failing classifier persists a NAMED, identity-carrying deferReason on .failed")
     func failedClassifierPersistsDeferReason() async throws {
         let store = try await makeTestStore()
         try await store.insertAsset(makeAsset())
@@ -1926,8 +1942,24 @@ struct BackfillJobRunnerTests {
         let jobId = try #require(result.admittedJobIds.first)
         let row = try #require(await store.fetchBackfillJob(byId: jobId))
         #expect(row.status == .failed)
-        #expect(row.deferReason != nil)
-        #expect(row.deferReason?.contains("synthetic classifier failure") == true)
+        let reason = try #require(row.deferReason)
+        // COUNTABLE: one prefix, nothing else in this runner answers to it.
+        #expect(reason.hasPrefix("\(UnclassifiedModelFailure.causePrefix)-"))
+        #expect(reason.contains(BackfillJobPhase.fullEpisodeScan.rawValue))
+        // DIAGNOSABLE: the throw's identity, which for a native Swift error is
+        // its reflected type name and its case index. This is the end-to-end
+        // half of `UnclassifiedModelFailureTests.aNativeSwiftErrorStillGetsAnIdentity`
+        // — the pure test proves the read is total, this proves the runner
+        // persists what it read.
+        #expect(reason.contains("CoarseFailure"), "the identity must name the thrown type: \(reason)")
+        #expect(reason.contains("code="))
+        // A native error carries no underlying chain, and the record says so in
+        // a word rather than by omitting the field.
+        #expect(reason.contains("under=\(UnclassifiedModelFailure.noUnderlyingToken)"))
+        // AND THE PROSE IS GONE. Without this, appending `String(describing:)`
+        // to the token would satisfy every assertion above while restoring the
+        // ungroupable column the token exists to replace.
+        #expect(!reason.contains("synthetic classifier failure"))
 
         let events = try await store.fetchEvidenceEvents(analysisAssetId: "asset-runner")
         let metricEvent = try #require(events.first { $0.eventType == OperationalMetrics.eventType })

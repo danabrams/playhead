@@ -126,6 +126,12 @@
 //     again"/"try again later" (`rateLimited` 1043, `deniedDueToSystemState`
 //     1013, `deniedDueToSpecifiedSystemState` 1013, `cancelledByPreemption`
 //     1039). The daemon has the vocabulary and did not use it here.
+//   * and the framework's OWN discriminator for this question is
+//     `InferenceError.retryAfterDate` (from `InferenceError.Context`'s
+//     `retryAfter: Date?` and `fallbackAllowed: Bool`) — a field, populated per
+//     condition. It exists two levels below the code the row carried, on a
+//     private type, and `ModelManagerError` has no `retryAfter` at all. So the
+//     value we can see is one Apple does not consider sufficient either.
 //
 // It is therefore left on the failing side, with a named token so a pull can
 // COUNT it — `unclassifiedModelError-<phase>` — rather than folded in here,
