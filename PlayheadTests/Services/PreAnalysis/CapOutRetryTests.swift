@@ -729,6 +729,24 @@ struct CapOutRetryTests {
     /// `.nominal`; `.now` is admitted unless work is paused outright. So a
     /// user's download that exhausted its attempts came back in a lane that a
     /// warm phone closes entirely.
+    ///
+    /// **THE ROW'S FINAL PRIORITY IS NOT ENOUGH, AND A MUTATION PROVED IT**
+    /// (playhead-w8db, rail W03). `repairDemotedContinuations` runs LATER IN
+    /// THE SAME `reconcile()` PASS, and a retry minted at 0 whose base sits at
+    /// 20 is exactly what it exists to raise. Re-introducing the defect leaves
+    /// the log reading
+    ///
+    ///     cap_out_retry_minted episode=ep-y8f3 ordinal=1 …
+    ///     continuation_priority_repaired job=… priority=0->20 …
+    ///
+    /// and the row at 20 either way, so `retry?.priority == 20` passed against
+    /// the pre-bead mint. The repair had made a sibling correction in the same
+    /// bead unobservable — the shipped behaviour right, the rail silent.
+    ///
+    /// `demotedContinuationsRepaired == 0` is what discriminates: a correct
+    /// mint leaves the repair NOTHING TO DO. It is worth asserting on its own
+    /// terms too — the repair is meant to drain a legacy population, never to
+    /// be load-bearing for rows minted today.
     @Test("a cap-out retry inherits the lane of the generation it retries")
     func capOutRetryCarriesTheChainTailsLane() async throws {
         let store = try await makeTestStore()
@@ -741,8 +759,11 @@ struct CapOutRetryTests {
             priority: 20
         )
 
-        #expect(try await makeReconciler(store: store, downloads: downloads, clock: clock)
-            .reconcile().capOutRetriesMinted == 1)
+        let report = try await makeReconciler(store: store, downloads: downloads, clock: clock)
+            .reconcile()
+        #expect(report.capOutRetriesMinted == 1)
+        #expect(report.demotedContinuationsRepaired == 0,
+                "the MINT must land in the right lane; a row rescued by the repair is a mint defect")
 
         let retry = try await store.fetchJob(byWorkKey: Self.retryKey(1))
         #expect(retry != nil)
@@ -767,8 +788,12 @@ struct CapOutRetryTests {
             priority: 0
         )
 
-        #expect(try await makeReconciler(store: store, downloads: downloads, clock: clock)
-            .reconcile().capOutRetriesMinted == 1)
+        let report = try await makeReconciler(store: store, downloads: downloads, clock: clock)
+            .reconcile()
+        #expect(report.capOutRetriesMinted == 1)
+        // The mirror of the assertion above, and not redundant: it is what
+        // fails if the repair ever starts acting on genuine background work.
+        #expect(report.demotedContinuationsRepaired == 0)
 
         let retry = try await store.fetchJob(byWorkKey: Self.retryKey(1))
         #expect(retry?.priority == 0)
