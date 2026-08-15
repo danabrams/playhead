@@ -901,6 +901,9 @@ struct AdScanRedriveReconcilerTests {
             strandedFinalPassJobsReset: 0,
             queuedJobEpochsRestamped: 4,
             scarcityReprioritizedJobs: 5,
+            // playhead-w8db: also an excluded counter — a repaired continuation
+            // was already queued and dispatchable; only its lane moved.
+            demotedContinuationsRepaired: 6,
             adScanRedrivesMinted: 0,
             capOutRetriesMinted: 0,
             // playhead-y8f3: also an excluded counter — a swallowed re-enqueue
@@ -929,6 +932,7 @@ struct AdScanRedriveReconcilerTests {
             strandedFinalPassJobsReset: 0,
             queuedJobEpochsRestamped: 0,
             scarcityReprioritizedJobs: 0,
+            demotedContinuationsRepaired: 0,
             adScanRedrivesMinted: 6,
             capOutRetriesMinted: 0,
             reEnqueuesSwallowed: 0,

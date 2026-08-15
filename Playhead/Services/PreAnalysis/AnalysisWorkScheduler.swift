@@ -5414,7 +5414,38 @@ actor AnalysisWorkScheduler {
                         workKey: tierWorkKey,
                         sourceFingerprint: job.sourceFingerprint,
                         downloadId: job.downloadId,
-                        priority: 0,
+                        // playhead-w8db: THE PREDECESSOR'S PRIORITY, NOT ZERO.
+                        //
+                        // This is the one field of the successor that was not
+                        // carried over from `job`, and the literal `0` asserted
+                        // something false: `priority` is the lane, and
+                        // ``LaneAdmission/allows(lane:)`` documents the lane as
+                        // "derived from priority — i.e. from who asked for the
+                        // work". A tier successor is not a new request. It is
+                        // the SAME request, continued at a deeper rung, so a 0
+                        // here claims nobody asked for work somebody did.
+                        //
+                        // Measured on db-pull11 (2026-08-15): all 15 priority-0
+                        // rows in the table descend from a first generation at
+                        // 10 or 20, and every lane-gate rejection ever recorded
+                        // on that device — `laneGate:fair` ×4,
+                        // `laneGate:serious` ×1 — is on a priority-0 row, none
+                        // on a 10 or a 20. `.background` is admitted only at
+                        // `.nominal` (`policy.allowBackgroundLane`), so the
+                        // demotion did not merely re-order the queue: it put
+                        // the tail of an episode behind a THERMAL GATE its own
+                        // head never had to pass. playhead-by07 measures that
+                        // tail at ~5x the body's ad density.
+                        //
+                        // Carrying the value forward introduces no new priority
+                        // and no new ordering. It cannot invent user intent —
+                        // an auto-download's successor still reads 0, because
+                        // its predecessor does. The two sites that deliberately
+                        // stamp 0 (`adScanRedriveJob` here and its twin in
+                        // ``AnalysisJobReconciler``) keep doing so, and say why;
+                        // that is repair work nobody is waiting on, and it is a
+                        // policy choice rather than this correction.
+                        priority: job.priority,
                         desiredCoverageSec: nextCoverage,
                         featureCoverageSec: outcome.featureCoverageSec,
                         transcriptCoverageSec: outcome.transcriptCoverageSec,
@@ -7524,6 +7555,49 @@ actor AnalysisWorkScheduler {
             jobType: job.jobType
         )
         return "\(base):\(adScanRedriveWorkKeyMarker):\(ordinal)"
+    }
+
+    /// playhead-w8db: the base `workKey` of the generation this row CONTINUES,
+    /// or `nil` when the row is not a continuation of somebody else's request.
+    ///
+    /// This is the read side of the two mint corrections in this bead. Those
+    /// sites carry the predecessor's `priority` forward at mint time; rows
+    /// already on disk were minted by the code that did not, and their lane is
+    /// a stored column (`fetchNextEligibleJob` orders on it and carves the
+    /// `.now` band out of the deferred gate in SQL), so nothing at dispatch
+    /// time can re-derive it. `AnalysisJobReconciler.repairDemotedContinuations`
+    /// uses this to look the predecessor up and write exactly what the
+    /// corrected mint would have written.
+    ///
+    /// **Three exclusions, each of which would otherwise be a false positive.**
+    ///
+    /// - An AD-SCAN RE-DRIVE is not a continuation for this purpose. Its `0` is
+    ///   deliberate and argued at both mint sites — repair work must never
+    ///   preempt what the user is waiting on — so promoting it would be a
+    ///   policy change wearing a correction's clothes. It is excluded FIRST,
+    ///   because its key descends from the same base as a tier successor's and
+    ///   nothing later in this function could tell them apart.
+    /// - The BASE ROW ITSELF continues nothing; its priority is the answer, not
+    ///   the question.
+    /// - A row at a DIFFERENT ANALYSIS VERSION does not descend from the key
+    ///   this function builds, which is always at the CURRENT version. The
+    ///   `hasPrefix` test is what makes that a `nil` rather than a lookup
+    ///   against an unrelated row that happens to occupy the same key at the
+    ///   current version. It subsumes the base-row case too: a key equal to
+    ///   `base` does not have the prefix `base:`.
+    ///
+    /// Only `preAnalysis` rows have generations at all — `playback` is hot-path
+    /// only and `backfill` lives in its own table.
+    static func continuationBaseWorkKey(for job: AnalysisJob) -> String? {
+        guard job.jobType == "preAnalysis" else { return nil }
+        guard adScanRedriveOrdinal(workKey: job.workKey) == nil else { return nil }
+        let base = AnalysisJob.computeWorkKey(
+            fingerprint: job.sourceFingerprint,
+            analysisVersion: PreAnalysisConfig.analysisVersion,
+            jobType: job.jobType
+        )
+        guard job.workKey.hasPrefix("\(base):") else { return nil }
+        return base
     }
 
     /// playhead-onn6: should a terminating episode get another ad-scan pass?

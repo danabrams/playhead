@@ -57,6 +57,18 @@ struct ReconciliationReport: Sendable {
     /// ranked as next-to-play. Zero whenever the backlog fit the window (not
     /// scarce) or no ranking provider is wired (plain FIFO preserved).
     let scarcityReprioritizedJobs: Int
+    /// playhead-w8db: queued CONTINUATION rows (a tier successor or a cap-out
+    /// retry) whose stored `priority` was below the generation they continue,
+    /// raised back to it. Zero on any device whose rows were all minted after
+    /// the two mint corrections in this bead — this counter drains a
+    /// population, it does not track a rate.
+    ///
+    /// Distinct from `scarcityReprioritizedJobs`, which is a SELECTION NUDGE
+    /// inside the background band on a scarce grant. This one restores the lane
+    /// the row was always supposed to carry, and it is bounded above by the
+    /// predecessor's own priority — it can never invent a lane nobody asked
+    /// for.
+    let demotedContinuationsRepaired: Int
     /// playhead-onn6: bounded ad-scan re-drive `analysis_jobs` rows minted for
     /// assets that still hold resumable `backfill_jobs` work but had no
     /// non-terminal analysis job to carry it. Zero once every stranded asset has
@@ -120,8 +132,9 @@ struct ReconciliationReport: Sendable {
     /// `staleVersionsSuperseded` retires rows whose replacements are already
     /// counted by `staleVersionsReenqueued`; `completedJobsGarbageCollected` and
     /// `failedJobsBackedOff` remove or delay work rather than recovering it; and
-    /// `queuedJobEpochsRestamped` / `scarcityReprioritizedJobs` act on rows that
-    /// were already queued and dispatchable — only their metadata moved.
+    /// `queuedJobEpochsRestamped` / `scarcityReprioritizedJobs` /
+    /// `demotedContinuationsRepaired` act on rows that were already queued and
+    /// dispatchable — only their metadata moved.
     /// playhead-y8f3 adds `capOutRetriesMinted` (a queued, dispatchable row that
     /// did not exist before) and keeps `reEnqueuesSwallowed` out, for the same
     /// reason `missingFilesStillBlocked` is out: it reports work that did NOT
@@ -274,6 +287,7 @@ actor AnalysisJobReconciler {
                 strandedFinalPassJobsReset: 0,
                 queuedJobEpochsRestamped: 0,
                 scarcityReprioritizedJobs: 0,
+                demotedContinuationsRepaired: 0,
                 adScanRedrivesMinted: 0,
                 capOutRetriesMinted: 0,
                 reEnqueuesSwallowed: 0,
@@ -318,6 +332,15 @@ actor AnalysisJobReconciler {
         // `running` are now resumable and must be counted) and after step 7 (an
         // episode receiving a fresh job is already excluded as active).
         let stepAdScanRedrive = await mintAdScanRedrives()
+        // playhead-w8db: BEFORE the scarcity pass, and the ordering is the
+        // point. `reprioritizeScarceBacklog` measures scarcity as "how many
+        // QUEUED `.background` rows there are against one window's drain
+        // capacity", so a demoted continuation inflates that denominator AND
+        // competes for the bumps it hands out. Repairing the lane first means
+        // dqfm ranks a backlog that is actually background work. Runs after
+        // step 7 and the two mint steps so rows created in this same pass are
+        // already correct and this step is a no-op for them.
+        let stepDemotedContinuations = await repairDemotedContinuations()
         // playhead-dqfm: LAST — runs after `discoverUnEnqueuedDownloads`
         // (step 7) so freshly-minted priority-0 background rows are part of
         // the backlog it ranks, and after the reapers (disjoint tables) so it
@@ -339,6 +362,7 @@ actor AnalysisJobReconciler {
             strandedFinalPassJobsReset: stepFinalPassReaper,
             queuedJobEpochsRestamped: stepRestamped,
             scarcityReprioritizedJobs: stepScarcity,
+            demotedContinuationsRepaired: stepDemotedContinuations,
             adScanRedrivesMinted: stepAdScanRedrive,
             capOutRetriesMinted: step7.capOutRetriesMinted,
             reEnqueuesSwallowed: step7.swallowed,
@@ -361,6 +385,7 @@ actor AnalysisJobReconciler {
         strandedFinalPassJobs=\(report.strandedFinalPassJobsReset), \
         queuedEpochsRestamped=\(report.queuedJobEpochsRestamped), \
         scarcityReprioritized=\(report.scarcityReprioritizedJobs), \
+        demotedContinuationsRepaired=\(report.demotedContinuationsRepaired), \
         adScanRedrivesMinted=\(report.adScanRedrivesMinted), \
         capOutRetriesMinted=\(report.capOutRetriesMinted), \
         reEnqueuesSwallowed=\(report.reEnqueuesSwallowed), \
@@ -1105,7 +1130,20 @@ actor AnalysisJobReconciler {
             workKey: plan.workKey,
             sourceFingerprint: fingerprint,
             downloadId: tail.downloadId,
-            priority: 0,
+            // playhead-w8db: the CHAIN TAIL's priority, not zero. Same
+            // correction as the tier successor in
+            // ``AnalysisWorkScheduler``, and the same argument: this row is
+            // the next attempt at work an earlier generation already carried,
+            // not a fresh request. `tail` is the row that swallowed the
+            // re-enqueue, and every other correlated field on this struct is
+            // already read off it (`podcastId`, `analysisAssetId`,
+            // `downloadId`) — `priority` was the one that was dropped, which
+            // silently moved a user's download into the lane
+            // `policy.allowBackgroundLane` only opens at `.nominal`.
+            //
+            // Raising is impossible: the value is copied, never chosen, so a
+            // retry for an auto-download still reads 0.
+            priority: tail.priority,
             desiredCoverageSec: plan.desiredCoverageSec,
             featureCoverageSec: 0,
             transcriptCoverageSec: 0,
@@ -1692,6 +1730,99 @@ actor AnalysisJobReconciler {
             resumableCount: resumableCount,
             ordinal: AnalysisWorkScheduler.adScanRedriveOrdinal(workKey: workKey) ?? 0
         )
+    }
+
+    // MARK: - Step: Repair demoted continuations (playhead-w8db)
+
+    /// Raise every queued CONTINUATION row that sits below the generation it
+    /// continues back to that generation's `priority`.
+    ///
+    /// **Why a repair exists at all, and why it is not a policy choice.** The
+    /// two mint sites this bead corrects — the tier successor in
+    /// ``AnalysisWorkScheduler`` and the cap-out retry above — stamped a
+    /// literal `0` over a predecessor's 10 or 20. Fixing the mints does nothing
+    /// for rows already on disk: `insertJob` is `INSERT OR IGNORE` on the
+    /// UNIQUE `workKey`, so no re-enqueue can rewrite them, and the lane is a
+    /// stored column that `fetchNextEligibleJob` reads directly. This step
+    /// writes exactly what the corrected mint would have written — the
+    /// PREDECESSOR's value, looked up, never a number chosen here — so it
+    /// backfills the correction rather than introducing a policy.
+    ///
+    /// Measured on the 2026-08-15 device pull (`db-pull11`): four queued tier
+    /// successors carrying 92–216 s of untranscribed tail apiece had been
+    /// waiting 15.0, 18.3, 22.3 and 22.3 hours at priority 0, while the
+    /// first-generation rows they continue ran at 20, 20, 20 and 10. Every
+    /// lane-gate rejection on that device is on a priority-0 row (`laneGate:fair`
+    /// ×4, `laneGate:serious` ×1) and none is on a 10 or a 20, because
+    /// `.background` is admitted only at `.nominal`.
+    ///
+    /// **Bounded in the only direction that matters.** The write is a raise —
+    /// `basePriority > job.priority` — to a value read off another row, so the
+    /// worst case is that a row ends up in the lane its own first generation
+    /// already occupied. It cannot manufacture user intent: an auto-download's
+    /// successor finds a base at 0 and is skipped.
+    ///
+    /// **Idempotent and self-draining.** A repaired row equals its base on the
+    /// next pass and is skipped, so the steady state is 0 and a duplicated or
+    /// racing sweep costs one read.
+    ///
+    /// Best-effort by contract — `async`, not `async throws` — for the same
+    /// reason as ``reprioritizeScarceBacklog()``: a re-ranking hiccup must never
+    /// fail `reconcile()` or block the drain that follows it. Leaving a row
+    /// demoted is exactly the status quo this repairs, so failing open costs
+    /// nothing that was not already being paid.
+    private func repairDemotedContinuations() async -> Int {
+        do {
+            let queued = try await store.fetchJobsByState("queued")
+            // Two queued rungs of one episode's ladder share a base, and a
+            // device with a deep backlog has many; the cache keeps this at one
+            // read per episode rather than one per row.
+            var basePriorityByKey: [String: Int] = [:]
+            var repaired = 0
+            for job in queued {
+                guard let baseKey = AnalysisWorkScheduler.continuationBaseWorkKey(for: job) else {
+                    continue
+                }
+                let basePriority: Int
+                if let cached = basePriorityByKey[baseKey] {
+                    basePriority = cached
+                } else {
+                    // No base row (the 7-day GC removed it) means no evidence
+                    // of what was asked for. Decline rather than guess.
+                    guard let base = try await store.fetchJob(byWorkKey: baseKey) else { continue }
+                    basePriority = base.priority
+                    basePriorityByKey[baseKey] = basePriority
+                }
+                guard basePriority > job.priority else { continue }
+                // Never re-rank a row a worker holds — the same refusal
+                // `promoteQueuedJobToUserIntentLane` makes, and for the same
+                // reason: re-ranking work under a live lease is a lease/epoch
+                // decision made elsewhere. `updateJobPriority` re-states
+                // `state = 'queued'` in SQL as its own compare-and-swap, so a
+                // row that starts running between this read and that write is a
+                // benign 0-row no-op.
+                guard job.leaseOwner == nil else { continue }
+                try await store.updateJobPriority(jobId: job.jobId, priority: basePriority)
+                repaired += 1
+                logger.info(
+                    """
+                    continuation_priority_repaired job=\(job.jobId, privacy: .public) \
+                    episode=\(job.episodeId, privacy: .public) \
+                    priority=\(job.priority)->\(basePriority) \
+                    want=\(job.desiredCoverageSec) (playhead-w8db)
+                    """
+                )
+            }
+            if repaired > 0 {
+                logger.info(
+                    "Repaired \(repaired) demoted continuation row(s) to their predecessor's lane (playhead-w8db)"
+                )
+            }
+            return repaired
+        } catch {
+            logger.warning("continuation priority repair skipped: \(error)")
+            return 0
+        }
     }
 
     // MARK: - Step: Scarcity-aware backfill re-prioritization (playhead-dqfm)
