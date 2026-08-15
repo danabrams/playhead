@@ -552,6 +552,10 @@ struct FMDaemonMetadataStallRunnerTests {
         #expect(row.status == .failed, "a standard-deadline timeout is not a metadata stall")
         #expect(row.retryCount == 1)
         #expect(row.deferReason != Self.expectedCause)
+        // playhead-59c8: this arm's reason is a named token now. The token
+        // records only that the app could not classify the throw — it makes no
+        // claim about whether the condition will clear.
+        #expect(row.deferReason?.hasPrefix("\(UnclassifiedModelFailure.causePrefix)-") == true)
     }
 
     @available(iOS 26.0, *)
@@ -579,6 +583,82 @@ struct FMDaemonMetadataStallRunnerTests {
         #expect(row.status == .failed, "a non-timeout prologue throw is a real failure")
         #expect(row.retryCount == 1)
         #expect(row.deferReason != Self.expectedCause)
+        // playhead-59c8: and the failing arm's own reason is a NAMED token now,
+        // not `String(describing: error)`.
+        #expect(
+            row.deferReason?.hasPrefix("\(UnclassifiedModelFailure.causePrefix)-") == true,
+            "the generic arm must write a countable cause"
+        )
+    }
+
+    @available(iOS 26.0, *)
+    @Test("playhead-59c8: the 08-14 field row FAILS the job — a ModelManagerError is not excused")
+    func modelManagerErrorStillFailsAndSpendsARetry() async throws {
+        // THE REFUSAL, end to end. `ModelManagerError 1001` is
+        // `ModelManagerError.inferenceError`, a category wrapper over a 25-case
+        // enum holding both transient members (`rateLimited`, `resourcesBusy`,
+        // `networkError`) and permanent ones (`notImplemented`,
+        // `unsupportedRequestType`, `versionNotSupported`). Admitting it here
+        // would hand a possibly-permanent condition an unbounded retry, which
+        // is playhead-ejr7's shape. See `UnclassifiedModelFailure`.
+        let store = try await makeTestStore()
+        let assetId = "asset-59c8-modelmanager"
+        try await store.insertAsset(makeAsset(id: assetId))
+        let fmRuntime = TestFMRuntime(
+            contextSize: Self.contextSize,
+            coarseSchemaTokenCount: Self.coarseSchemaTokenCount,
+            coarseSchemaTokenCountFailure: .modelManagerInferenceError,
+            tokenCountRule: windowingTokenRule()
+        )
+        let runner = makeRunner(store: store, runtime: fmRuntime.runtime)
+
+        let result = try await runner.runPendingBackfill(for: makeInputs(assetId: assetId))
+        let jobId = try #require(result.admittedJobIds.first)
+        let row = try #require(await store.fetchBackfillJob(byId: jobId))
+
+        #expect(row.status == .failed, "an unclassified model error is NOT deferred")
+        #expect(row.retryCount == 1, "the lifetime budget is charged, deliberately")
+        #expect(row.deferReason != Self.expectedCause, "it is not a metadata stall")
+    }
+
+    @available(iOS 26.0, *)
+    @Test("playhead-59c8: and it is recorded so a device pull can COUNT it")
+    func modelManagerErrorRecordsACountableCause() async throws {
+        // The defect this bead actually fixes. The field row's `deferReason`
+        // was 300 characters of `NSError` prose — un-groupable, un-countable,
+        // OS-shape-dependent — which is exactly what playhead-v7q6 forbids, and
+        // the only reason anybody learned it was a `ModelManagerError 1001` is
+        // that somebody read all 300 by hand.
+        let store = try await makeTestStore()
+        let assetId = "asset-59c8-cause"
+        try await store.insertAsset(makeAsset(id: assetId))
+        let fmRuntime = TestFMRuntime(
+            contextSize: Self.contextSize,
+            coarseSchemaTokenCount: Self.coarseSchemaTokenCount,
+            coarseSchemaTokenCountFailure: .modelManagerInferenceError,
+            tokenCountRule: windowingTokenRule()
+        )
+        let runner = makeRunner(store: store, runtime: fmRuntime.runtime)
+
+        let result = try await runner.runPendingBackfill(for: makeInputs(assetId: assetId))
+        let jobId = try #require(result.admittedJobIds.first)
+        let row = try #require(await store.fetchBackfillJob(byId: jobId))
+        let reason = try #require(row.deferReason)
+
+        #expect(reason.hasPrefix("\(UnclassifiedModelFailure.causePrefix)-"))
+        #expect(reason.contains(BackfillJobPhase.fullEpisodeScan.rawValue))
+        // THE DISCRIMINATOR, persisted rather than reconstructed by hand: the
+        // deepest `(domain, code)` is what a future bead would promote out of
+        // this bucket, and on the field row it is the only value that names a
+        // subsystem at all.
+        #expect(
+            reason.contains(
+                "under=\(TestFMRuntimeFailure.fieldRowUnderlyingDomain)"
+                    + "/\(TestFMRuntimeFailure.fieldRowUnderlyingCode)"
+            )
+        )
+        #expect(reason.contains("code=\(TestFMRuntimeFailure.fieldRowOuterCode)"))
+        #expect(!reason.contains("Error Domain="), "no raw framework prose in the column")
     }
 
     @available(iOS 26.0, *)

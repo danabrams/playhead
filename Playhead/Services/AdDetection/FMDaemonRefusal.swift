@@ -104,6 +104,32 @@
 // `FMInferenceTimeoutError.deadline` carries that value for exactly this
 // purpose — its own doc says it is there "so a log line or a test can assert
 // WHICH budget was exceeded rather than just that something was".
+//
+// AND NEITHER DOES A `ModelManagerError` (playhead-59c8). The 2026-08-14 pull
+// carried a third shape in the same column — `Error Domain=FoundationModels
+// .LanguageModelError Code=-1 "… (ModelManagerServices.ModelManagerError error
+// 1001.)"` — and it was investigated as a candidate third member of this class.
+// It is NOT one, and the measurement is in `UnclassifiedModelFailure`:
+//
+//   * `errorCode` 1001 is `ModelManagerError.inferenceError`, read out of the
+//     shipped framework's own 49-entry code table and its Swift field
+//     descriptor. It is a CATEGORY WRAPPER over a 25-case `InferenceError`
+//     holding both transient members (`rateLimited`, `resourcesBusy`,
+//     `networkError`, `loadFailed`) and permanent ones (`notImplemented`,
+//     `unsupportedRequestType`, `versionNotSupported`). The code names the
+//     LAYER, not the condition, so it cannot answer this file's question.
+//   * the cost bound that licenses "no terminal cause" does not reach it. A
+//     metadata round trip costs ≤ `FMInferenceDeadline.metadata` and precedes
+//     every window; an inference-layer error can arrive after generation has
+//     been paid for.
+//   * `ModelManagerError` has four cases whose own description text says "try
+//     again"/"try again later" (`rateLimited` 1043, `deniedDueToSystemState`
+//     1013, `deniedDueToSpecifiedSystemState` 1013, `cancelledByPreemption`
+//     1039). The daemon has the vocabulary and did not use it here.
+//
+// It is therefore left on the failing side, with a named token so a pull can
+// COUNT it — `unclassifiedModelError-<phase>` — rather than folded in here,
+// where it would inherit an unbounded retry it has not earned.
 
 import Foundation
 
@@ -135,6 +161,18 @@ enum FMDaemonRefusal: Sendable, Equatable, CaseIterable {
     /// the two are disjoint (`SemanticScanStatus.from(error:)` maps
     /// `FMInferenceTimeoutError` to `.inferenceTimeout`, never `.rateLimited`),
     /// so the order carries no meaning.
+    ///
+    /// **playhead-59c8: `nil` here is not always a decision, and the difference
+    /// matters.** `FMDaemonThrottle.isThrottle` routes through
+    /// `SemanticScanStatus.from(error:)`, whose every arm is a cast to a Swift
+    /// type. The 2026-08-14 field row was a bridged `NSError` — its persisted
+    /// text is `NSError.description`, which a Swift `LanguageModelError` value
+    /// cannot produce — so no cast could match it and the status was
+    /// `.failedTransient` BY FALLTHROUGH. That reads identically to a
+    /// deliberate "this is not a throttle". The caller must therefore not treat
+    /// `nil` as "classified, and it is a genuine failure"; it means "not one of
+    /// the two conditions this enum knows". `UnclassifiedModelFailure` is what
+    /// makes the difference visible in the durable record.
     static func classify(_ error: Error) -> FMDaemonRefusal? {
         if FMDaemonThrottle.isThrottle(error) {
             return .throttle
