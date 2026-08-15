@@ -5487,8 +5487,8 @@ final class PlayheadRuntime {
                 let snapshot = await capabilitiesService.currentSnapshot
                 return Optional(snapshot)
             },
-            runningEpisodeIdProvider: { [analysisWorkScheduler] in
-                await analysisWorkScheduler.currentlyRunningEpisodeId()
+            runningEpisodeIdsProvider: { [analysisWorkScheduler] in
+                await analysisWorkScheduler.currentlyRunningEpisodeIds()
             },
             // playhead-btoa.3: forward the live `DownloadManager`'s
             // foreground in-flight progress map so each Activity

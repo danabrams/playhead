@@ -712,11 +712,18 @@ actor AnalysisWorkScheduler {
         /// per-job copy cannot be, which is what makes the identifiers
         /// `cancelCurrentJob` returns true rather than hopeful.
         var cancelRequested = false
-        /// The cause THIS job's cancel carried.
+        /// The cause THIS job's cancel carried, and since playhead-mfeq the
+        /// ONLY cause any job path reads: the scheduler-wide slot this was
+        /// introduced beside is gone, along with the three
+        /// `?? pendingCancelCause` fallbacks that made it reachable from a job
+        /// it was never aimed at. Written by ``cancelRunningJobs(where:cause:)``
+        /// — which requires a cause, so no cancel can decline to name one —
+        /// and destroyed with the registry entry in `processJob`'s `defer`.
         ///
-        /// playhead-lmrx (review round 3): the global `pendingCancelCause` is
-        /// consumed destructively — the cancel-catch arm reads it and
-        /// immediately nils it — so with two jobs cancelled by one
+        /// playhead-lmrx (review round 3), the history: the global
+        /// `pendingCancelCause` was
+        /// consumed destructively — the cancel-catch arm read it and
+        /// immediately nil'd it — so with two jobs cancelled by one
         /// `cancelCurrentJob(.taskExpired)` the first to unwind takes the cause
         /// and the second reads `nil`, falls back to `.pipelineError`, and
         /// SPENDS AN ATTEMPT. At `attemptCount == 4` that supersedes the row
@@ -766,8 +773,6 @@ actor AnalysisWorkScheduler {
     /// long its own teardown may last, the door reopens by itself, and the worst
     /// case is a bounded pause rather than a dead scheduler.
     private var dispatchClosedUntil: ContinuousClock.Instant?
-    private var currentJobId: String?
-    private var currentEpisodeId: String?
     /// Episode id of the currently-loaded playback session, if any.
     /// Retained alongside `playbackContext` because several cancellation
     /// paths key on the episode identity rather than the coarse context.
@@ -855,9 +860,10 @@ actor AnalysisWorkScheduler {
     /// playhead-mk6z (review round): every job this scheduler is holding a
     /// lease on right now.
     ///
-    /// **`currentJobId` is NOT this set, and the difference is what the sweep
-    /// must read.** `currentJobId` names the job dispatched MOST RECENTLY;
-    /// `processJob` overwrites it on entry and nils it in its `defer`. Two
+    /// **THERE IS NO `currentJobId` TO READ INSTEAD, AND THAT IS THE POINT
+    /// (playhead-mfeq).** A `private var currentJobId: String?` stood beside
+    /// this set until this bead. It named the job dispatched MOST RECENTLY;
+    /// `processJob` overwrote it on entry and nil'd it in its `defer`. Two
     /// dispatch drivers can be inside `processJob` at the same time — the run
     /// loop and `drainEligible`, whose own header says it is "safe to run
     /// alongside the long-lived `runLoop()`" — and the lane caps admit it
@@ -875,18 +881,59 @@ actor AnalysisWorkScheduler {
     /// set is keyed by job id, so an overlapping dispatch adds rather than
     /// replaces, and each `processJob` removes only its own entry.
     ///
+    /// playhead-mk6z steered the sweep off that field and onto this set, and
+    /// playhead-lmrx R3 did the same for the two task slots — but the field
+    /// itself survived all of it as a WRITE-ONLY slot: two assignments, zero
+    /// reads in the whole repository, and four doc comments warning the next
+    /// reader not to trust it. A slot that can only be misread is worth less
+    /// than no slot at all, so it is deleted rather than documented. The
+    /// warning is kept because the interleaving it describes is still real and
+    /// is why this set is the answer.
+    ///
     /// playhead-lmrx (review round 3): DERIVED from ``runningJobs`` rather than
     /// maintained beside it. Two containers tracking one population is the same
     /// hazard one level up — they drift the day an exit path updates one and not
     /// the other — and there is nothing this set knows that the registry does
     /// not.
     private var inFlightJobIds: Set<String> { Set(runningJobs.keys) }
-    /// Cause to thread into WorkJournal when the current running job is
-    /// cancelled. Set by `cancelCurrentJob(cause:)`; consumed on the
-    /// cancellation branch of the run loop. Resets to `nil` after each
-    /// job finishes (whether cancelled or not) so a subsequent job
-    /// doesn't inherit a stale cause tag.
-    private var pendingCancelCause: InternalMissCause?
+    #if DEBUG
+    /// playhead-mfeq: **an OBSERVATION of the last broadcast cancel, and
+    /// nothing a job may read.** Compiled only in DEBUG, which is what makes
+    /// that claim enforceable rather than a convention: a production path that
+    /// reaches for this identifier fails to compile in Release.
+    ///
+    /// A scheduler-wide `pendingCancelCause` stood here and WAS read by three
+    /// job paths, as `runningJobs[jobId]?.cancelCause ?? pendingCancelCause`.
+    /// One slot for a population of jobs is this repo's standing defect class,
+    /// and `playhead-lmrx` F9 is its shipped instance: a destructive read let a
+    /// second cancelled job fall back to `.pipelineError`, take the
+    /// attempt-SPENDING arm, and supersede an episode permanently. R3 gave each
+    /// job its own ``RunningJob/cancelCause`` and named the residual out loud —
+    /// *"the cause is still a single global slot, so a cancel aimed at A while
+    /// B is in flight has no way to say which one it meant."*
+    ///
+    /// That residual was reachable, in the same direction, through the
+    /// PRECEDENCE MERGE rather than the read. `cancelCurrentJob` resolved the
+    /// incoming cause against this slot, and the slot outlived the job it was
+    /// set for whenever a sibling was still in flight (both clears are guarded
+    /// on `inFlightJobIds` being empty, for a good reason of their own). So:
+    ///
+    ///   A in flight, cancel(.userCancelled)  -> slot = .userCancelled, A marked
+    ///   B dispatches                          -> slot survives (A in flight)
+    ///   A completes                           -> slot survives (B in flight)
+    ///   backfill expiry, cancel(.taskExpired) -> resolves against .userCancelled,
+    ///                                            which OUTRANKS it, so B is
+    ///                                            marked .userCancelled
+    ///
+    /// and B — interrupted by nothing but the end of an OS window — takes the
+    /// attempt-spending arm that `.taskExpired` exists to exempt it from,
+    /// superseding permanently on its fifth expiry. A user cancel aimed at a
+    /// job that had already finished, charged to a job the user never touched.
+    /// Precedence is now resolved per job, in ``cancelRunningJobs(where:cause:)``.
+    ///
+    /// Pinned by `siblingDoesNotInheritAFinishedJobsCancelCause`.
+    private var lastBroadcastCancelCauseForTesting: InternalMissCause?
+    #endif
     /// Optional WorkJournal recorder. When non-nil the scheduler emits
     /// a `recordFailed(..., cause:, metadataJSON:)` row on the
     /// cancellation path so causes like `.taskExpired` and
@@ -1576,13 +1623,26 @@ actor AnalysisWorkScheduler {
         // verbatim. `lostOwnership` stays, un-narrowed, because it is a
         // different quantity with a different fix — see playhead-hrs5, which
         // also records that this very condition is a single-slot AIM.
-        if currentEpisodeId == episodeId {
+        //
+        // playhead-mfeq: THE AIM IS FIXED EVEN THOUGH THE FLAG IS NOT. The
+        // condition read `currentEpisodeId == episodeId`, a slot holding the
+        // episode of the MOST RECENT dispatch — so with two jobs in flight
+        // (`nowCap` is 2, and both dispatch drivers can be inside `processJob`)
+        // it answered for the wrong one half the time, in both directions: a
+        // retirement aimed at the older job's episode read `false` and skipped
+        // the flag entirely. Ask the diagnostic question of the old spelling:
+        // what would it read if the retired episode had no job running at all?
+        // The same `false` it reads when the job IS running and the slot names
+        // its sibling. The registry answers the question actually being asked —
+        // "is any job I own working on this episode" — and `lostOwnership`
+        // being a global remains playhead-hrs5's, not this bead's.
+        if runningJobs.values.contains(where: { $0.episodeId == episodeId }) {
             lostOwnership = true
         }
         // playhead-lmrx (review round 3): reach the jobs for THIS episode, not
         // whatever the single task slot happened to hold. With two dispatches in
         // flight the slot could name the other episode's job entirely.
-        cancelRunningJobs(where: { $0.episodeId == episodeId })
+        cancelRunningJobs(where: { $0.episodeId == episodeId }, cause: .pipelineError)
         do {
             let removed = try await store
                 .deleteAnalysisJobsForRemovedDownload(
@@ -2106,7 +2166,19 @@ actor AnalysisWorkScheduler {
         // now asked of every job rather than of the last one dispatched.
         if runningJobs.values.contains(where: { $0.runTask != nil }) {
             shouldCancelCurrentJob = true
-            cancelRunningJobs(where: { _ in true })
+            // playhead-mfeq: `.userPreempted`, named because `cancelRunningJobs`
+            // now requires a cause — and this call site is what made the
+            // requirement worth having. It passed none, so these jobs reached
+            // the cancel arms with an empty `cancelCause` and fell through to a
+            // scheduler-wide slot, journalling whatever the last unrelated
+            // broadcast had left there and `pipeline_error` otherwise. The user
+            // pressing play is not a pipeline error, and the log line one
+            // statement down has said "Playback preempted" all along. This is a
+            // LABEL correction and not an arm change: `cause == .taskExpired` is
+            // the only cause the cancel-catch arm branches on, and the lane
+            // preemption paths in this same file already journal
+            // `.userPreempted` for the same event.
+            cancelRunningJobs(where: { _ in true }, cause: .userPreempted)
             logger.info("Playback preempted pre-analysis while episode \(episodeId) is active")
         }
         wakeSchedulerLoop()
@@ -2784,11 +2856,16 @@ actor AnalysisWorkScheduler {
         // `shouldCancelCurrentJob = true` used to guard this call under
         // `currentEpisodeId == episodeId`. It bought nothing and cost a sibling.
         //
-        //  * It bought nothing. `currentEpisodeId` is assigned immediately after
+        //  * It bought nothing. `currentEpisodeId` was assigned immediately after
         //    the registry insert and nil'd in the same `defer` that removes the
-        //    entry, so `currentEpisodeId == episodeId` implies that job is in
+        //    entry, so `currentEpisodeId == episodeId` implied that job was in
         //    `runningJobs` — and the `cancelRunningJobs` call below already
         //    reaches every registry entry for the episode, by identity.
+        //    (playhead-mfeq deleted that field: the implication ran only one
+        //    way, and the converse — a job on this episode that the slot did NOT
+        //    name, because a sibling was dispatched after it — is the aim defect
+        //    fixed in `retireDownloadAnalysis`. The registry was always the
+        //    better question, and it is now the only one available.)
         //  * It cost a sibling. `nowCap` is 2 and both dispatch drivers can be
         //    inside `processJob`, so the OTHER in-flight job may still be
         //    upstream of its cancel-race check — that check reads the global
@@ -2808,7 +2885,13 @@ actor AnalysisWorkScheduler {
         //
         // playhead-lmrx (review round 3): as in `retireDownloadAnalysis` — the
         // cancel is aimed at the deleted episode's jobs by identity.
-        cancelRunningJobs(where: { $0.episodeId == episodeId })
+        //
+        // playhead-mfeq: and it names its cause, because `cancelRunningJobs`
+        // no longer lets a caller decline to. `.pipelineError` is the cause
+        // these jobs already received — it was the last `??` in the chain the
+        // cancel arms read — so this preserves the behaviour and removes the
+        // route by which an unrelated broadcast's cause could arrive instead.
+        cancelRunningJobs(where: { $0.episodeId == episodeId }, cause: .pipelineError)
         do {
             let states = ["queued", "paused", "running", "failed",
                           "blocked:missingFile", "blocked:modelUnavailable"]
@@ -2876,31 +2959,10 @@ actor AnalysisWorkScheduler {
     @discardableResult
     func cancelCurrentJob(cause: InternalMissCause = .pipelineError) -> Set<String> {
         shouldCancelCurrentJob = true
-        // Concurrent cancels with different causes must not stomp each
-        // other with last-writer-wins. Route through
-        // `CauseAttributionPolicy.primaryCause` so precedence (e.g.
-        // `.userCancelled` outranks `.taskExpired`) is honored regardless
-        // of arrival order. Context values are conservative defaults
-        // that keep the tier ranking of the causes the cancel path uses
-        // (`.userCancelled`, `.userPreempted`, `.taskExpired`,
-        // `.pipelineError`) stable — retryBudgetRemaining only matters
-        // for `.taskExpired`, and both tiers (environmentalTransient /
-        // resourceExhausted) still lose to `.userInitiated`.
-        let resolved: InternalMissCause
-        if let existing = pendingCancelCause, existing != cause {
-            let context = CauseAttributionContext(
-                modelAvailableNow: true,
-                retryBudgetRemaining: 0
-            )
-            resolved = CauseAttributionPolicy.primaryCause(
-                among: [existing, cause],
-                context: context
-            ) ?? cause
-        } else {
-            resolved = cause
-        }
-        pendingCancelCause = resolved
-        cancelRunningJobs(where: { _ in true }, cause: resolved)
+        #if DEBUG
+        lastBroadcastCancelCauseForTesting = cause
+        #endif
+        cancelRunningJobs(where: { _ in true }, cause: cause)
         return inFlightJobIds
     }
 
@@ -2912,13 +2974,45 @@ actor AnalysisWorkScheduler {
     /// cancel-race check is already behind the job. Doing only one of the two
     /// leaves a gap that depends on where each job happens to be, which is the
     /// non-determinism this method exists to remove.
+    ///
+    /// **`cause` IS REQUIRED, AND THAT IS THE FIX (playhead-mfeq).** It was
+    /// `InternalMissCause? = nil`, and the two episode-scoped callers took the
+    /// default — which meant their jobs arrived at the cancel arms with no
+    /// cause of their own and fell through to a scheduler-wide slot that some
+    /// unrelated cancel had written. "No cause" is not a thing a cancel can
+    /// be: every cancel has a reason, and the ones that did not say so were
+    /// silently assigned somebody else's. There is no scheduler-wide slot to
+    /// fall back to any more, so the parameter has to carry it, and the
+    /// compiler now asks every caller — present and future — to name one.
+    ///
+    /// Precedence lives here rather than at the broadcast for the same reason.
+    /// `CauseAttributionPolicy.primaryCause` resolves the incoming cause
+    /// against **this job's own** cause, so a cancel can only ever be outranked
+    /// by another cancel aimed at the same job. Resolving against a
+    /// scheduler-wide slot let a finished job's `.userCancelled` outrank a live
+    /// sibling's `.taskExpired` — see ``lastBroadcastCancelCauseForTesting``
+    /// for that trace. Context values are conservative defaults that keep the
+    /// tier ranking of the causes the cancel path uses (`.userCancelled`,
+    /// `.userPreempted`, `.taskExpired`, `.pipelineError`) stable —
+    /// `retryBudgetRemaining` only matters for `.taskExpired`, and both tiers
+    /// (environmentalTransient / resourceExhausted) still lose to
+    /// `.userInitiated`.
     private func cancelRunningJobs(
         where predicate: (RunningJob) -> Bool,
-        cause: InternalMissCause? = nil
+        cause: InternalMissCause
     ) {
+        let context = CauseAttributionContext(
+            modelAvailableNow: true,
+            retryBudgetRemaining: 0
+        )
         for (jobId, running) in runningJobs where predicate(running) {
             runningJobs[jobId]?.cancelRequested = true
-            if let cause {
+            if let existing = running.cancelCause, existing != cause {
+                runningJobs[jobId]?.cancelCause = CauseAttributionPolicy.primaryCause(
+                    among: [existing, cause],
+                    context: context
+                ) ?? cause
+            } else {
                 runningJobs[jobId]?.cancelCause = cause
             }
             running.runTask?.cancel()
@@ -3016,14 +3110,25 @@ actor AnalysisWorkScheduler {
     }
 
     #if DEBUG
-    /// Test-only accessor for the `pendingCancelCause` field so unit
-    /// tests can verify `cancelCurrentJob(cause:)` precedence without
-    /// having to run the full scheduler loop. Do not wire into
-    /// production code — the cause is consumed on the cancellation
-    /// branch of `runOneIteration` and should not be observed
-    /// externally.
-    func pendingCancelCauseForTesting() -> InternalMissCause? {
-        pendingCancelCause
+    /// Whether a broadcast ``cancelCurrentJob(cause:)`` has been raised, and
+    /// with what cause. **An observation of the CALL, not of any job's state.**
+    ///
+    /// playhead-mfeq: this used to read a scheduler-wide `pendingCancelCause`
+    /// that jobs also consumed, so a test asserting on it was asserting on
+    /// something a job could inherit. It cannot now — see the field.
+    /// A test that wants to know what a particular job will be charged must
+    /// ask ``cancelCauseForTesting(jobId:)``; this one answers only "did the
+    /// BGTask expiry tell the scheduler its grant ended, and with what",
+    /// which is the question `BackgroundGrantBudgetTests` asks and the one
+    /// that has no per-job answer when the broadcast reached no jobs at all.
+    func lastBroadcastCancelCause() -> InternalMissCause? {
+        lastBroadcastCancelCauseForTesting
+    }
+
+    /// The cause THIS job will be charged if it unwinds through a cancel arm.
+    /// `nil` once the job leaves the registry, which every exit path does.
+    func cancelCauseForTesting(jobId: String) -> InternalMissCause? {
+        runningJobs[jobId]?.cancelCause
     }
 
     func hasCurrentRunningTaskForTesting() -> Bool {
@@ -3449,7 +3554,13 @@ actor AnalysisWorkScheduler {
         for running in runningJobs.values {
             running.leaseRenewalTask?.cancel()
         }
-        cancelRunningJobs(where: { _ in true })
+        // playhead-mfeq: `.pipelineError` names what this already produced —
+        // it is the last `??` in the chain these jobs used to read — so a
+        // shutdown is journalled exactly as before. There is no `.shutdown`
+        // case in `InternalMissCause` and inventing one is a taxonomy change,
+        // not this bead's; what changes here is only that the value is written
+        // where a reader can see it rather than defaulted from a shared slot.
+        cancelRunningJobs(where: { _ in true }, cause: .pipelineError)
     }
 
     // MARK: - Scheduler Loop
@@ -3471,9 +3582,11 @@ actor AnalysisWorkScheduler {
             return
         }
         // playhead-mk6z (review round): the exclusion is read from
-        // `inFlightJobIds`, NOT from `currentJobId` — see that property for the
-        // interleaving in which `currentJobId` is `nil` while a job this very
-        // process dispatched is still running.
+        // `inFlightJobIds`, NOT from a "most recent dispatch" slot — see that
+        // property for the interleaving in which such a slot reads `nil` while
+        // a job this very process dispatched is still running. playhead-mfeq
+        // deleted the slot (`currentJobId`) so there is nothing else to reach
+        // for, but the interleaving is unchanged and is why this set exists.
         //
         // The store's parameter is a single id, which is all that is needed
         // here and is bounded by construction rather than by luck: this method
@@ -4033,13 +4146,22 @@ actor AnalysisWorkScheduler {
         laneActive[lane] ?? 0
     }
 
-    /// playhead-quh7: episode id for the job currently held by the
-    /// scheduler's run loop, if any. Read-only accessor consumed by
-    /// `LiveActivitySnapshotProvider` to drive the Now-vs-Up-Next
-    /// split for `disposition == .queued` rows. `nil` when the loop
-    /// is idle or between admissions.
-    func currentlyRunningEpisodeId() -> String? {
-        currentEpisodeId
+    /// playhead-quh7: the episodes this scheduler has jobs running on right
+    /// now. Read-only accessor consumed by `LiveActivitySnapshotProvider` to
+    /// drive the Now-vs-Up-Next split for `disposition == .queued` rows. Empty
+    /// when the loop is idle or between admissions.
+    ///
+    /// **playhead-mfeq: A SET, BECAUSE THE ANSWER CAN HAVE TWO ELEMENTS.** This
+    /// returned `String?` off a `currentEpisodeId` slot holding the episode of
+    /// the most recent dispatch. `nowCap` is 2 and a `playback` job bypasses
+    /// the cap entirely, so with two jobs in flight the Activity screen showed
+    /// one of them as running and rendered the other — analysing, right then —
+    /// under "Up Next". The slot answered "the last episode admitted" to a
+    /// caller asking "which episodes are running", which is this repo's
+    /// standing defect class rendered into the UI. Derived from the registry,
+    /// so it cannot disagree with what the scheduler is actually doing.
+    func currentlyRunningEpisodeIds() -> Set<String> {
+        Set(runningJobs.values.map(\.episodeId))
     }
 
     /// Whether `job` may be admitted under the current per-lane count. T0
@@ -4617,49 +4739,26 @@ actor AnalysisWorkScheduler {
             return
         }
 
-        // playhead-lmrx (review round): the CAUSE is reset here, alongside the
-        // flag it accompanies — but ONLY when nothing else is in flight.
+        // playhead-mfeq: THREE STATEMENTS STOOD HERE AND ALL THREE ARE GONE.
         //
-        // `cancelCurrentJob` sets both unconditionally, even when nothing is
-        // running, which is the common case at a background expiry now that
-        // `drainEligible` stops at the work deadline well before the OS
-        // reclaims. `shouldCancelCurrentJob` was already cleared below (a
-        // cancel aimed at a job that had finished must not strike the next
-        // one); the cause was not, so it survived into the next dispatched job
-        // — possibly a foreground one, launches later.
+        // `pendingCancelCause = nil` (guarded on `inFlightJobIds.isEmpty`)
+        // existed because a scheduler-wide cause could survive into the next
+        // dispatched job and exempt it from the retry ladder. A cause is now a
+        // property of the job whose cancel carried it, created with the
+        // registry entry below and destroyed with it, so there is nothing for a
+        // new dispatch to inherit and nothing to clear. The guard's own reason
+        // — that clearing could race a sibling holding an unread cause — went
+        // with it: no two jobs share a cause to race over.
         //
-        // That was cosmetic before this bead: a mislabelled journal cause. It
-        // is not cosmetic now. `.taskExpired` selects the arm that spends NO
-        // attempt, so a stale one would exempt an unrelated job from the retry
-        // ladder — silently disarming the poisoned-job escape valve for a job
-        // the OS never interrupted, the exact converse of the fix.
+        // `currentJobId = job.jobId` and `currentEpisodeId = job.episodeId`
+        // were the two singleton slots this bead removes. See ``inFlightJobIds``
+        // and ``currentlyRunningEpisodeIds()``.
         //
-        // THE GUARD IS THE POINT, and a bare clear here was wrong. `runLoop()`
-        // and `drainEligible` can both be inside `processJob` (see
-        // `inFlightJobIds`), so a sibling dispatch arriving here would clear a
-        // cause the ALREADY-CANCELLED job has not read yet — it reads it after
-        // resuming from `runTask.value` — sending a genuine expiry down the
-        // attempt-spending arm. Clearing only when nothing is in flight cannot
-        // race a consumer, because there is none.
-        //
-        // playhead-lmrx (review round 2): THE ENTRY IS ONLY HALF OF IT. A
-        // sibling ARRIVING was guarded here; a sibling LEAVING was not, and
-        // leaving is the commoner event. The same guard now sits on the `defer`
-        // and on the non-cancel completion path below, where the erasure
-        // actually happened.
-        if inFlightJobIds.isEmpty {
-            pendingCancelCause = nil
-        }
-        currentJobId = job.jobId
-        // playhead-mk6z (review round): additive, unlike `currentJobId`. See
-        // the property's own comment for the interleaving that makes the
-        // difference load-bearing for `sweepExpiredLeasesIfDue()`.
         // playhead-lmrx (review round 3): the registry entry IS the membership —
         // `inFlightJobIds` reads it — and it is created here, before the lease
         // heartbeat is armed, so no window exists in which a job is running and
         // unreachable by identity.
         runningJobs[job.jobId] = RunningJob(episodeId: job.episodeId)
-        currentEpisodeId = job.episodeId
         shouldCancelCurrentJob = false
         lostOwnership = false
 
@@ -4703,39 +4802,31 @@ actor AnalysisWorkScheduler {
             finished?.leaseRenewalTask?.cancel()
             finished?.runTask?.cancel()
             // playhead-mk6z (review round): the removal above takes only THIS
-            // job. `currentJobId = nil` is a blanket clear and is why a sibling
-            // dispatch's completion used to make a still-running job look
-            // unowned to the sweep. The registry removal runs on every exit path
-            // the `defer` covers, so the set cannot leak an entry and silence
-            // the sweep's exclusion.
-            currentJobId = nil
-            currentEpisodeId = nil
+            // job. `currentJobId = nil` and `currentEpisodeId = nil` were
+            // blanket clears standing here, and are why a sibling dispatch's
+            // COMPLETION used to make a still-running job look unowned to the
+            // sweep and idle to the Activity screen. Both slots are gone
+            // (playhead-mfeq); the registry removal runs on every exit path the
+            // `defer` covers, so the set cannot leak an entry and silence the
+            // sweep's exclusion.
             shouldCancelCurrentJob = false
-            // playhead-lmrx (review round 2): SAME GUARD, SAME REASON AS THE
-            // ENTRY CLEAR — and this site is the one that actually bites.
+            // playhead-mfeq: THE GUARDED `pendingCancelCause = nil` THAT STOOD
+            // HERE IS GONE, and so is the residual playhead-lmrx R3 named in
+            // its place — *"the cause is still a single global slot, so a
+            // cancel aimed at A while B is in flight has no way to say which
+            // one it meant."*
             //
-            // The entry guard stops a sibling ARRIVING from erasing a cause its
-            // owner has not read yet; nothing stopped a sibling LEAVING from
-            // doing it, and leaving is the commoner event. Concretely, with a
-            // job A cancelled `.taskExpired` and parked in `runTask.value`,
-            // `runLoop()`'s 5 s poll dispatches B; B finishes first and this
-            // `defer` cleared the cause; A then reads
-            // `pendingCancelCause ?? .pipelineError`, takes the ATTEMPT-SPENDING
-            // arm, and supersedes permanently on its fifth window — the exact
-            // outcome the `.taskExpired` exemption exists to remove, restored by
-            // an unrelated job completing.
-            //
-            // `remove` has already run, so an empty set means nobody else can be
-            // holding an unread cause and clearing cannot race a consumer.
-            //
-            // RESIDUAL, named rather than hidden: the cause is still a single
-            // global slot, so a cancel aimed at A while B is in flight has no
-            // way to say which one it meant. The complete fix is a cause keyed
-            // by job id; this closes the interleaving that erases one, not the
-            // one that misattributes it.
-            if inFlightJobIds.isEmpty {
-                pendingCancelCause = nil
-            }
+            // The clear existed because a job LEAVING could erase a cause a
+            // cancelled sibling had not read yet: with A cancelled
+            // `.taskExpired` and parked in `runTask.value`, `runLoop()`'s 5 s
+            // poll dispatches B, B finishes first, and A then read
+            // `pendingCancelCause ?? .pipelineError` and took the
+            // ATTEMPT-SPENDING arm — superseding permanently on its fifth
+            // window. `removeValue` above now takes this job's cause with its
+            // membership, in one statement, and reaches nothing else. A cause
+            // that only its own job can read cannot be erased by a sibling and
+            // cannot be misattributed to one, so there is no interleaving left
+            // for a guard to be right about.
         }
 
         if case .changed(let currentFingerprint) = await cachedCanonicalFingerprintStatus(
@@ -4901,9 +4992,14 @@ actor AnalysisWorkScheduler {
         // acquisition) and `shouldCancelCurrentJob` was cleared there, so this
         // is the first write since, exactly as an external `cancelCurrentJob`
         // arriving in this instant would be.
+        // playhead-mfeq: through `cancelCurrentJob`, which is what "the way a
+        // real canceller would" means. Poking `pendingCancelCause` and the flag
+        // directly left this job's own `cancelCause` unset, so the hook
+        // exercised the scheduler-wide FALLBACK rather than the path a real
+        // cancel takes — a test instrument measuring the mechanism it was
+        // supposed to be independent of.
         if let testCancelBeforeRunnerStart {
-            pendingCancelCause = testCancelBeforeRunnerStart
-            shouldCancelCurrentJob = true
+            cancelCurrentJob(cause: testCancelBeforeRunnerStart)
         }
         #endif
 
@@ -4951,12 +5047,16 @@ actor AnalysisWorkScheduler {
                 // user-cancel path; the BG-task expiration cancels
                 // mid-decode and lands in the catch arm below
                 // (which already emits via the existing recorder
-                // call). `pendingCancelCause` overrides when the
-                // racing canceller passed a more specific cause.
+                // call). This job's own cause overrides when the racing
+                // canceller passed a more specific one.
                 // playhead-lmrx (review round 3): this job's own cause first,
                 // for the reason spelled out at the cancel-catch arm below.
+                // playhead-mfeq: and `?? pendingCancelCause` no longer stands
+                // between the two. It could only ever supply a cause aimed at
+                // some OTHER job — a cancel aimed at this one writes
+                // `cancelCause` on this job's registry entry — so the
+                // fallback's whole reachable behaviour was misattribution.
                 let cancelRaceCause = runningJobs[job.jobId]?.cancelCause
-                    ?? pendingCancelCause
                     ?? .userCancelled
                 let cancelRaceMetadata = await SliceCompletionInstrumentation
                     .recordPaused(
@@ -4977,17 +5077,13 @@ actor AnalysisWorkScheduler {
                     metadataJSON: cancelRaceMetadata
                 )
                 // Clear cancel state so it doesn't leak into the next
-                // job picked up by the loop. `pendingCancelCause` was
-                // set by the racing canceller for the now-skipped job;
-                // a stale value would mis-attribute the next job's
-                // cancellation if one arrives.
+                // job picked up by the loop. The cause was set by the
+                // racing canceller for this now-skipped job; leaving it
+                // on the registry entry would mis-attribute this job's
+                // own later unwind, since the entry outlives this arm's
+                // `return` by the length of the `defer`.
                 shouldCancelCurrentJob = false
                 runningJobs[job.jobId]?.cancelCause = nil
-                // playhead-lmrx (review round 3): and the global only when no
-                // sibling could still be holding an unread copy.
-                if inFlightJobIds.subtracting([job.jobId]).isEmpty {
-                    pendingCancelCause = nil
-                }
                 return
             }
 
@@ -5053,11 +5149,12 @@ actor AnalysisWorkScheduler {
             }
 
             #if DEBUG
+            // playhead-mfeq: as at the pre-runner hook — raise it through
+            // `cancelCurrentJob`, which sets `cancelRequested`, resolves the
+            // cause onto THIS job's registry entry and cancels its `runTask`.
+            // The three lines that did those by hand are what it does.
             if let testCancelAfterRunnerStart {
-                pendingCancelCause = testCancelAfterRunnerStart
-                shouldCancelCurrentJob = true
-                runningJobs[job.jobId]?.cancelRequested = true
-                runningJobs[job.jobId]?.runTask?.cancel()
+                cancelCurrentJob(cause: testCancelAfterRunnerStart)
                 runTask.cancel()
             }
             #endif
@@ -5075,11 +5172,6 @@ actor AnalysisWorkScheduler {
                     // bleeding it into the next job.
                     logger.warning("Skipping cancel cleanup writes for job \(job.jobId): lease reclaimed by orphan recovery")
                     runningJobs[job.jobId]?.cancelCause = nil
-                    // playhead-lmrx (review round 3): guarded, same rule as the
-                    // `defer` — a sibling may not have read the cause yet.
-                    if inFlightJobIds.subtracting([job.jobId]).isEmpty {
-                        pendingCancelCause = nil
-                    }
                     return
                 }
                 // Bump `attemptCount`: repeated mid-decode cancellation
@@ -5105,17 +5197,22 @@ actor AnalysisWorkScheduler {
                 // cause without reading it, and neither guard could see this
                 // one, because this site erases it precisely by reading it.
                 //
-                // The global stays as the fallback for a cancel that named no
-                // job — `episodeDeleted`, `retireDownloadAnalysis`, playback
-                // preemption — and is cleared only when nobody else could still
-                // be holding an unread copy, the same rule as the `defer`.
+                // playhead-mfeq: AND THE GLOBAL FALLBACK IS GONE TOO. The line
+                // read `?? pendingCancelCause ?? .pipelineError`, described as
+                // "the fallback for a cancel that named no job —
+                // `episodeDeleted`, `retireDownloadAnalysis`, playback
+                // preemption". Those callers did not name no job: they named
+                // their jobs precisely, by episode, and declined to name a
+                // CAUSE, which `cancelRunningJobs` used to let them do. So the
+                // slot they fell through to held whatever the last unrelated
+                // broadcast had put there — `.userCancelled` from a job that
+                // finished two dispatches ago is enough to send an OS-reclaimed
+                // window down the attempt-spending arm. `cause:` is required at
+                // that call now, so this job's own entry always carries one and
+                // the fallback has nothing left to do.
                 let cause = runningJobs[job.jobId]?.cancelCause
-                    ?? pendingCancelCause
                     ?? .pipelineError
                 runningJobs[job.jobId]?.cancelCause = nil
-                if inFlightJobIds.subtracting([job.jobId]).isEmpty {
-                    pendingCancelCause = nil
-                }
                 let episodeId = job.episodeId
 
                 // playhead-lmrx: AN OS-RECLAIMED BACKGROUND WINDOW IS NOT AN
@@ -5329,15 +5426,14 @@ actor AnalysisWorkScheduler {
             // entry itself stays until the `defer`, because `inFlightJobIds`
             // reads it and the commit arms below still have to run.
             runningJobs[job.jobId]?.runTask = nil
-            // Non-cancel path: clear any stale cause so the next job
-            // doesn't inherit it.
-            // playhead-lmrx (review round 2): but not one a SIBLING is still
-            // waiting to read — see the `defer` above. `job.jobId` is still a
-            // member here (the `defer` has not run), so the question is whether
-            // anyone ELSE is in flight.
-            if inFlightJobIds.subtracting([job.jobId]).isEmpty {
-                pendingCancelCause = nil
-            }
+            // playhead-mfeq: the guarded `pendingCancelCause = nil` that stood
+            // here — "clear any stale cause so the next job doesn't inherit it"
+            // — has nothing to clear. The next job inherits nothing because a
+            // cause now lives on the registry entry of the job whose cancel
+            // carried it, and this job's entry goes in the `defer` a few frames
+            // from now. Note which direction this site was: a job finishing
+            // NORMALLY erasing a cause, which is why lmrx R2 had to guard it
+            // against a cancelled sibling that had not read one yet.
 
             PreAnalysisInstrumentation.endJobDuration(jobSignpost)
 

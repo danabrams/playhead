@@ -82,7 +82,14 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
 
     private let store: AnalysisStore
     private let capabilitySnapshotProvider: @Sendable () async -> CapabilitySnapshot?
-    private let runningEpisodeIdProvider: @Sendable () async -> String?
+    /// playhead-mfeq: **a SET, because the scheduler can be running two.**
+    /// This was `() async -> String?` fed by an `AnalysisWorkScheduler` slot
+    /// holding the most recently dispatched episode. `nowCap` is 2 and a
+    /// `playback` job bypasses the cap entirely, so whenever two jobs were in
+    /// flight this rendered one of them as running and the other — analysing at
+    /// that instant — under "Up Next". A value that named "the last episode
+    /// admitted", read as though it named "the episodes running".
+    private let runningEpisodeIdsProvider: @Sendable () async -> Set<String>
     /// playhead-btoa.3: per-episode foreground-download fraction map for
     /// the current refresh tick. Production wires
     /// `DownloadManager.progressSnapshot()` (an actor hop returning
@@ -113,7 +120,7 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
     init(
         store: AnalysisStore,
         capabilitySnapshotProvider: @escaping @Sendable () async -> CapabilitySnapshot?,
-        runningEpisodeIdProvider: @escaping @Sendable () async -> String?,
+        runningEpisodeIdsProvider: @escaping @Sendable () async -> Set<String>,
         downloadProgressProvider: @escaping @Sendable () async -> [String: Double],
         downloadedEpisodeIdsProvider: @escaping @Sendable (Set<String>) async -> Set<String> = { _ in [] },
         heldEpisodeCausesProvider: @escaping @Sendable () async -> [String: InternalMissCause] = { [:] },
@@ -121,7 +128,7 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
     ) {
         self.store = store
         self.capabilitySnapshotProvider = capabilitySnapshotProvider
-        self.runningEpisodeIdProvider = runningEpisodeIdProvider
+        self.runningEpisodeIdsProvider = runningEpisodeIdsProvider
         self.downloadProgressProvider = downloadProgressProvider
         self.downloadedEpisodeIdsProvider = downloadedEpisodeIdsProvider
         self.heldEpisodeCausesProvider = heldEpisodeCausesProvider
@@ -133,7 +140,7 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
         // per-episode loop below uses a consistent snapshot.
         let snapshot = await capabilitySnapshotProvider()
         let eligibility = EpisodeSurfaceStatusObserver.eligibility(from: snapshot)
-        let runningEpisodeId = await runningEpisodeIdProvider()
+        let runningEpisodeIds = await runningEpisodeIdsProvider()
         let heldEpisodeCauses = await heldEpisodeCausesProvider()
 
         // playhead-6boz: AnalysisStore is now lazily-opened — the
@@ -320,7 +327,7 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
                 readinessAnchor: episode.playbackAnchor
             )
 
-            let isRunning = (episodeId == runningEpisodeId)
+            let isRunning = runningEpisodeIds.contains(episodeId)
 
             // playhead-btoa.3 / playhead-hygc.1.2: compute the three
             // pipeline-progress fractions from the canonical
@@ -450,7 +457,7 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
     ) async -> DogfoodDiagnosticsActivitySnapshot {
         let snapshot = await capabilitySnapshotProvider()
         let eligibility = EpisodeSurfaceStatusObserver.eligibility(from: snapshot)
-        let runningEpisodeId = await runningEpisodeIdProvider()
+        let runningEpisodeIds = await runningEpisodeIdsProvider()
         // playhead-ewag: the dogfood snapshot is the surface Dan actually
         // pulls off a stalled device, so it carries the same lane-hold cause
         // the UI does. A held row must not read as an idle one here either.
@@ -543,7 +550,7 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
                 readinessAnchor: episode.playbackAnchor
             )
 
-            let isRunning = (episodeId == runningEpisodeId)
+            let isRunning = runningEpisodeIds.contains(episodeId)
             // playhead-hygc.1.2 / R3: every coverage scalar AND its
             // companion `*_source` wire token reads from the canonical
             // summary only. Earlier R0/R1/R2 drafts fell back to

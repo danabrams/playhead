@@ -1134,7 +1134,7 @@ struct BackfillExpiryDurabilityTests {
         )
         await bps.setPreAnalysisServices(scheduler: scheduler, reconciler: makeReconciler(store: store))
 
-        #expect(await scheduler.pendingCancelCauseForTesting() == nil, "nothing has expired yet")
+        #expect(await scheduler.lastBroadcastCancelCause() == nil, "nothing has expired yet")
 
         let task = StubBackgroundTask()
         let workTask = Task { await bps.handleBackfillTask(task) }
@@ -1143,7 +1143,7 @@ struct BackfillExpiryDurabilityTests {
         _ = await workTask.value
         await task.awaitCompletion()
 
-        #expect(await scheduler.pendingCancelCauseForTesting() == .taskExpired,
+        #expect(await scheduler.lastBroadcastCancelCause() == .taskExpired,
                 """
                 A backfill BGTask expiry must tell the scheduler its grant \
                 ended, with cause .taskExpired — that cause is exactly what the \
@@ -1715,8 +1715,8 @@ struct BackfillExpiryDurabilityTests {
                 catch-up — and bought it a 60 s delay for a window that had not \
                 ended.
                 """)
-        #expect(await scheduler.pendingCancelCauseForTesting() == nil,
-                "and it must not even ARM a cancel cause for the next job to inherit")
+        #expect(await scheduler.lastBroadcastCancelCause() == nil,
+                "and it must not even ARM a cancel cause: no broadcast cancel was raised at all")
         // playhead-lmrx (review round 5): and it must not shut the DOOR either.
         // The close sits inside the same `deadlineElapsed` gate as the cancel,
         // so this is the complement of the assertion in the twin above — and it
@@ -1981,6 +1981,48 @@ struct CancelAimIdentityTests {
         }
     }
 
+    /// playhead-mfeq: parks in `decode` and DOES NOT observe cancellation,
+    /// which is the opposite of the stub above and is deliberate.
+    ///
+    /// `siblingDoesNotInheritAFinishedJobsCancelCause` needs a job that is
+    /// cancelled and still in flight while the next one dispatches — with a
+    /// cancellation-observing stub that is a race between one job's unwind and
+    /// another's prologue, and a test that only sometimes reproduces a defect
+    /// reports the scheduler's luck rather than its behaviour. A checked
+    /// continuation is resumed by nothing but ``DecodeGate/open()``, so the
+    /// ordering is stated rather than hoped for. `Task.sleep` cannot do this
+    /// job: it throws the moment the runner's task is cancelled.
+    private actor DecodeGate {
+        private var waiters: [CheckedContinuation<Void, Never>] = []
+        private var isOpen = false
+
+        func wait() async {
+            if isOpen { return }
+            await withCheckedContinuation { waiters.append($0) }
+        }
+
+        func open() {
+            isOpen = true
+            let pending = waiters
+            waiters = []
+            for continuation in pending { continuation.resume() }
+        }
+    }
+
+    private final class GatedAudioStub: AnalysisAudioProviding, @unchecked Sendable {
+        private let gate: DecodeGate
+        init(gate: DecodeGate) { self.gate = gate }
+
+        func decode(
+            fileURL: LocalAudioURL,
+            episodeID: String,
+            shardDuration: TimeInterval
+        ) async throws -> [AnalysisShard] {
+            await gate.wait()
+            return []
+        }
+    }
+
     private func makeScheduler(
         store: AnalysisStore,
         downloads: StubDownloadProvider,
@@ -2183,6 +2225,199 @@ struct CancelAimIdentityTests {
                     "\(jobId): an OS-reclaimed window is evidence about the window, not about the job")
             #expect(after.lastErrorCode == AnalysisWorkScheduler.backgroundWindowExpiredErrorCode,
                     "\(jobId): the requeue must carry the expiry's own error code, not a pipeline error")
+        }
+    }
+
+    @Test("a sibling dispatched after a cancel does not inherit that cancel's cause",
+          .timeLimit(.minutes(2)))
+    func siblingDoesNotInheritAFinishedJobsCancelCause() async throws {
+        // playhead-mfeq: THE RESIDUAL playhead-lmrx R3 NAMED, DRIVEN.
+        //
+        // R3 gave each job its own `cancelCause` and wrote the leftover down:
+        // *"the cause is still a single global slot, so a cancel aimed at A
+        // while B is in flight has no way to say which one it meant."* It is
+        // reachable, and not through the destructive READ that R3 closed — the
+        // PRECEDENCE MERGE in `cancelCurrentJob` read the same slot:
+        //
+        //     let resolved = primaryCause(among: [pendingCancelCause, cause])
+        //
+        // Both clears of that slot are guarded on `inFlightJobIds` being empty
+        // (correctly — a sibling may hold an unread copy), so a cause outlives
+        // the job it was set for whenever anything else is running. Then:
+        //
+        //   A in flight, cancel(.userCancelled)  -> slot = .userCancelled
+        //   B dispatches                          -> slot survives the entry
+        //                                            guard; B is NOT marked
+        //   cancel(.taskExpired)                  -> resolves against the slot,
+        //                                            .userCancelled OUTRANKS,
+        //                                            so B is marked .userCancelled
+        //
+        // and B — which no user ever touched, interrupted by nothing but the
+        // end of an OS window — takes the ATTEMPT-SPENDING arm that
+        // `.taskExpired` exists to exempt it from. Seeded at 4, that is
+        // `maxAttemptsReached` with `nextEligibleAt: nil` on the next tick: a
+        // row that never comes back, because `workKey` is UNIQUE and
+        // `insertJob` is `INSERT OR IGNORE`. Same outcome as F9, same slot,
+        // through the other door.
+        //
+        // THE GATE IS WHY THIS IS DETERMINISTIC RATHER THAN A RACE. The
+        // interleaving needs A to still be in flight when B dispatches, and A
+        // has just been cancelled — with a decode stub that observes
+        // cancellation, A's unwind and B's dispatch race, and the test would
+        // report the defect only when it happened to lose. `GatedAudioStub`
+        // parks in a continuation nothing cancels, so A stays in flight until
+        // this test says otherwise and the ordering above is the only one.
+        let store = try await makeTestStore()
+        let downloads = StubDownloadProvider()
+        let gate = DecodeGate()
+        let scheduler = makeScheduler(store: store, downloads: downloads,
+                                      audio: GatedAudioStub(gate: gate))
+        let t0 = Date().timeIntervalSince1970
+        try await insertNowLaneJob(store: store, downloads: downloads,
+                                   jobId: "inherit-a", priority: 21, createdAt: t0 - 10, attemptCount: 4)
+        try await insertNowLaneJob(store: store, downloads: downloads,
+                                   jobId: "inherit-b", priority: 20, createdAt: t0, attemptCount: 4)
+
+        let dispatchA = Task { await scheduler.processNextDispatchableJobForTesting() }
+        var spins = 0
+        while await !scheduler.inFlightJobIdsForTesting().contains("inherit-a") {
+            spins += 1
+            try #require(spins < 1000, "inherit-a never entered processJob")
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        // The user cancels. It reaches A, and only A — B does not exist yet.
+        let aimedAtA = await scheduler.cancelCurrentJob(cause: .userCancelled)
+        #expect(aimedAtA == ["inherit-a"],
+                "precondition: the first cancel must name A alone, or the inheritance under test cannot happen")
+
+        // B dispatches into a scheduler that is still holding A. This is the
+        // window in which the old slot survived its own job.
+        let dispatchB = Task { await scheduler.processNextDispatchableJobForTesting() }
+        spins = 0
+        while await scheduler.inFlightJobIdsForTesting() != ["inherit-a", "inherit-b"] {
+            spins += 1
+            let seen = await scheduler.inFlightJobIdsForTesting()
+            try #require(spins < 1000, "the two dispatches never overlapped; in flight: \(seen.sorted())")
+            try await Task.sleep(for: .milliseconds(20))
+        }
+
+        // The OS reclaims the window.
+        await scheduler.cancelCurrentJob(cause: .taskExpired)
+
+        // THE UNIT ASSERTION, asked of each job by identity. A keeps the cause
+        // aimed at it — precedence still holds, per job, so `.userCancelled`
+        // outranks the expiry for the job the user actually cancelled — while B
+        // carries the expiry and nothing else.
+        #expect(await scheduler.cancelCauseForTesting(jobId: "inherit-a") == .userCancelled,
+                "A was cancelled by the user; the expiry must not demote its cause")
+        #expect(await scheduler.cancelCauseForTesting(jobId: "inherit-b") == .taskExpired,
+                """
+                B inherited a cause from a cancel that was aimed at A before B \
+                existed. A cause is a property of a job's cancellation, and one \
+                slot cannot hold two.
+                """)
+
+        await gate.open()
+        _ = await dispatchA.value
+        _ = await dispatchB.value
+
+        // AND THE CONSEQUENCE, because a cause is only worth asserting for what
+        // it selects. `.taskExpired` takes the arm that does NOT spend an
+        // attempt; `.userCancelled` takes the one that does.
+        let afterB = try #require(try await store.fetchJob(byId: "inherit-b"))
+        #expect(afterB.attemptCount == 4,
+                """
+                B was charged an attempt for a window the OS ended, on the \
+                strength of a user cancel aimed at another job. At 4 of 5 that \
+                is one tick from a supersede nothing can undo.
+                """)
+        #expect(afterB.lastErrorCode?.contains("maxAttemptsReached") != true,
+                "B must not reach an attempt-cap terminal")
+        #expect(afterB.state != "superseded", "B must still be dispatchable")
+    }
+
+    @Test("the running-episode accessor names BOTH in-flight episodes",
+          .timeLimit(.minutes(2)))
+    func runningEpisodeIdsNamesEveryInFlightEpisode() async throws {
+        // playhead-mfeq: the scheduler HALF of the Activity screen's
+        // Now-vs-Up-Next split. `everyRunningEpisodeReadsAsRunning` (in
+        // ActivitySnapshotProviderTests) injects the provider closure directly,
+        // so it pins how the provider USES the answer and can say nothing about
+        // where the answer comes from — collapsing this accessor back to a
+        // single element is invisible to it. Asserted here, against the real
+        // registry, so the two tests between them cover the seam end to end.
+        //
+        // It returned `String?` off a `currentEpisodeId` slot until this bead:
+        // the episode of the most recent dispatch, answering a caller who asked
+        // which episodes are running. `nowCap` is 2, so with two jobs in flight
+        // the second was rendered under "Up Next" while it was being analysed.
+        let store = try await makeTestStore()
+        let downloads = StubDownloadProvider()
+        let scheduler = makeScheduler(store: store, downloads: downloads)
+        let t0 = Date().timeIntervalSince1970
+        try await insertNowLaneJob(store: store, downloads: downloads,
+                                   jobId: "run-a", priority: 21, createdAt: t0 - 10)
+        try await insertNowLaneJob(store: store, downloads: downloads,
+                                   jobId: "run-b", priority: 20, createdAt: t0)
+
+        #expect(await scheduler.currentlyRunningEpisodeIds().isEmpty,
+                """
+                nothing dispatched yet, so nothing is running — the empty case, which a \
+                singleton returning its last value would also have to get right
+                """)
+
+        let dispatches = try await driveTwoInFlight(scheduler: scheduler, first: "run-a", second: "run-b")
+        #expect(await scheduler.currentlyRunningEpisodeIds() == ["ep-run-a", "ep-run-b"],
+                """
+                Two jobs are inside processJob and the accessor named fewer. A \
+                singleton slot answers with whichever was admitted last, and the \
+                episode it omits is being analysed at that instant.
+                """)
+
+        let cancelled = await scheduler.cancelCurrentJob(cause: .taskExpired)
+        #expect(await scheduler.awaitJobsSettled(cancelled, within: .seconds(10)))
+        for dispatch in dispatches { _ = await dispatch.value }
+        #expect(await scheduler.currentlyRunningEpisodeIds().isEmpty,
+                "and it empties again when both jobs leave, rather than retaining a last value")
+    }
+
+    @Test("cause precedence is order-independent, and it is resolved per job",
+          .timeLimit(.minutes(2)))
+    func cancelPrecedenceIsOrderIndependentPerJob() async throws {
+        // playhead-1nl6's claim, moved here from
+        // `SchedulerReconcilerRegressionTests` by playhead-mfeq — see the
+        // tombstone there for why its old home could not observe it. Two
+        // cancels with different causes must resolve by
+        // `CauseAttributionPolicy` precedence rather than last-writer-wins:
+        // `.userCancelled` is `userInitiated` and outranks `.taskExpired`'s
+        // `environmentalTransient`/`resourceExhausted` tier whichever arrives
+        // second. The ladder now runs against the JOB's own cause, so the job
+        // has to exist for the question to mean anything.
+        for (first, second) in [(InternalMissCause.taskExpired, InternalMissCause.userCancelled),
+                                (InternalMissCause.userCancelled, InternalMissCause.taskExpired)] {
+            let store = try await makeTestStore()
+            let downloads = StubDownloadProvider()
+            let gate = DecodeGate()
+            let scheduler = makeScheduler(store: store, downloads: downloads,
+                                          audio: GatedAudioStub(gate: gate))
+            try await insertNowLaneJob(store: store, downloads: downloads,
+                                       jobId: "order-job", priority: 21,
+                                       createdAt: Date().timeIntervalSince1970)
+            let dispatch = Task { await scheduler.processNextDispatchableJobForTesting() }
+            var spins = 0
+            while await !scheduler.inFlightJobIdsForTesting().contains("order-job") {
+                spins += 1
+                try #require(spins < 1000, "order-job never entered processJob")
+                try await Task.sleep(for: .milliseconds(20))
+            }
+
+            await scheduler.cancelCurrentJob(cause: first)
+            await scheduler.cancelCurrentJob(cause: second)
+            #expect(await scheduler.cancelCauseForTesting(jobId: "order-job") == .userCancelled,
+                    "\(first) then \(second): userCancelled outranks taskExpired in either order")
+
+            await gate.open()
+            _ = await dispatch.value
         }
     }
 

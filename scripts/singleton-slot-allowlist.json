@@ -1,0 +1,75 @@
+{
+  "_readme": [
+    "Licences for scripts/singleton_slot_preflight.py (playhead-mfeq, SHAPE 2).",
+    "",
+    "A `why` must say WHAT BOUNDS THE POPULATION TO ONE. 'It is fine' is not a",
+    "reason; 'the slot IS the reentry guard, and here is the line that enforces",
+    "it' is. Two of the seven entries below are not licences at all — they name",
+    "a filed bead, so the amnesty is visibly temporary rather than quietly",
+    "permanent.",
+    "",
+    "THE LIST IS CLOSED IN BOTH DIRECTIONS. A new match fails the gate, and an",
+    "entry that matches nothing ALSO fails it: a licence for a field nobody can",
+    "find was renamed or moved, and whatever inherits the name inherits the",
+    "amnesty. Same rule gate_baseline.py applies to a baseline member that did",
+    "not run.",
+    "",
+    "MEASURED BEFORE THE RULE WAS WRITTEN, per this repo's own admission rule.",
+    "On b5e04fc6, over Playhead/: 56 matches of ^(current|pending|last)[A-Z] on",
+    "an optional stored var across all type kinds, of which 11 were on actors.",
+    "Correcting the scanner to exclude function-LOCAL vars (3 false positives:",
+    "ShadowRetryObserver.lastSeen, AnalysisAudioService.lastInputBlockError, and",
+    "one struct) took the totals to 47 and 8. playhead-mfeq removed three of the",
+    "eight (AnalysisWorkScheduler.currentJobId / currentEpisodeId /",
+    "pendingCancelCause) and added one DEBUG-only observation slot, leaving the",
+    "6 pre-existing entries here plus that one. The un-allowlisted count is 0,",
+    "so the rule ships ENABLED rather than as a red tier.",
+    "",
+    "The 40 non-actor matches are NOT enforced and are NOT listed here — see the",
+    "module docstring for why, and `--report-all` for the standing count."
+  ],
+  "allow": [
+    {
+      "type": "AdDetectionService",
+      "field": "currentPodcastProfile",
+      "file": "Playhead/Services/AdDetection/AdDetectionService.swift",
+      "why": "NOT A LICENCE — a live instance, filed as playhead-2kxd (P1). The file says so itself in three places: 'that actor state may belong to the previous episode' (~11292), 'an interleaving updatePriors / recordSuccessfulObservation turn could rewrite currentPodcastProfile between the two reads' (~12876), and a public setter deleted in review because it 'could clobber an in-flight updatePriors' (~2050). Three rounds have each hardened one READ SITE and left the slot. Out of playhead-mfeq's scope, which was the three AnalysisWorkScheduler fields; allowlisted so the rule can ship green while 2kxd carries the fix."
+    },
+    {
+      "type": "AnalysisWorkScheduler",
+      "field": "lastBroadcastCancelCauseForTesting",
+      "file": "Playhead/Services/PreAnalysis/AnalysisWorkScheduler.swift",
+      "why": "Compiled only under #if DEBUG, and read by nothing but its own test accessor — so a production path that reaches for it FAILS TO COMPILE in Release, which is the guarantee rather than a convention. It records the last broadcast cancelCurrentJob(cause:), which is a fact about the CALL and has no per-job answer when the broadcast reached no jobs at all (BackgroundGrantBudgetTests asks exactly that of a BGTask expiry). The per-job cause it replaced lives on RunningJob.cancelCause. Listed rather than exempted by name because a rule that skips anything ending in ForTesting is a rule anyone can opt out of by renaming."
+    },
+    {
+      "type": "FineFeatureBandCache",
+      "field": "currentEpisodeId",
+      "file": "Playhead/Services/AdDetection/FineFeatureBandCache.swift",
+      "why": "An eviction HEURISTIC, not an identity any answer is derived from. Every lookup keys on BandKey(episodeId:bandCenterTick:), which carries the episode id in full, so a stale value here cannot return another episode's features — the worst it can do with two episodes interleaved is thrash the cache and cost hit rate. Correctness is carried by the fully-qualified key; this slot only decides when to wipe."
+    },
+    {
+      "type": "RediffRefetchService",
+      "field": "currentTaskID",
+      "file": "Playhead/Services/AdDetection/RediffRefetch/RediffRefetchService.swift",
+      "why": "THE SLOT IS WHAT BOUNDS THE POPULATION TO ONE, which is the inverse of the defect. Its own doc: 'Doubles as the reentry guard: an overlapping fire (double-fire, or a sweep outliving its window into the next grant) completes immediately instead of resetting the in-flight fire's state.' The sibling per-fire state that genuinely needs to be per-identity is already a Set (completedTaskIDs), with a comment explaining why a shared bool was wrong there."
+    },
+    {
+      "type": "FinalPassThermalRecoveryObserver",
+      "field": "lastSweepAt",
+      "file": "Playhead/Services/AdDetection/FinalPassThermalRecoveryObserver.swift",
+      "why": "A cooldown timestamp about the OBSERVER, not the identity of a member of any population — there is nothing it could name the wrong one of. One observer, one sweep cadence; the quantity is 'when did I last sweep' and a second concurrent reader would be asking the same question about the same subject."
+    },
+    {
+      "type": "SkipOrchestrator",
+      "field": "lastSeekTime",
+      "file": "Playhead/Services/SkipOrchestrator/SkipOrchestrator.swift",
+      "why": "Same shape as lastSweepAt: a scalar about the transport, feeding the post-seek skip-suppression window. Bounded to one by the product — there is exactly one playback session and one playhead. The per-episode identities this actor DOES key on (activeAssetId for windows and decisions) are already separate fields, so this is not standing in for any of them."
+    },
+    {
+      "type": "SharedSponsorLexiconClient",
+      "field": "lastKnownGood",
+      "file": "Playhead/Services/AdDetection/SharedSponsorLexicon.swift",
+      "why": "A single-artifact cache whose whole contract is last-writer-wins: there is one shared lexicon, versioned, and 'the newest verified artifact' is the value wanted. Backed by one on-disk file (shared-sponsor-lexicon-lkg.json), so the slot names the same singleton the filesystem does. Not an identity picked out of a set."
+    }
+  ]
+}
