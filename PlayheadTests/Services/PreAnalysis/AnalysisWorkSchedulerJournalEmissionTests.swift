@@ -945,9 +945,16 @@ struct AnalysisWorkSchedulerJournalEmissionTests {
             await !scheduler.hasCurrentRunningTaskForTesting(),
             "Cancel-cleanup arm must clear the current running task handle"
         )
+        // playhead-mfeq: asked of the JOB, because there is no longer a
+        // scheduler-wide slot to ask. This read `pendingCancelCauseForTesting()`
+        // — the very slot a later dispatch could inherit from — so the test's
+        // own sentence ("must not leak into later dispatches") described the
+        // mechanism rather than the property. The property that survives, and
+        // that a test can still observe, is that this job's cause left with its
+        // registry entry.
         #expect(
-            await scheduler.pendingCancelCauseForTesting() == nil,
-            "Cancel-cleanup arm must not leak its cause into later dispatches"
+            await scheduler.cancelCauseForTesting(jobId: "noop-job") == nil,
+            "Cancel-cleanup arm must not leave a cause behind on the job it cancelled"
         )
 
         // The `acquired` row IS still written: it is appended

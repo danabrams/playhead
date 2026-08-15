@@ -91,7 +91,7 @@ struct LiveActivitySnapshotProviderPerfTests {
         let provider = LiveActivitySnapshotProvider(
             store: store,
             capabilitySnapshotProvider: { nil },
-            runningEpisodeIdProvider: { nil },
+            runningEpisodeIdsProvider: { [] },
             // playhead-btoa.3: perf path doesn't care about download
             // fractions — empty stub keeps every input's
             // `downloadFraction == nil` and exercises the no-overhead
@@ -303,7 +303,7 @@ struct LiveActivitySnapshotProviderFractionTests {
         let provider = LiveActivitySnapshotProvider(
             store: fixture.store,
             capabilitySnapshotProvider: { nil },
-            runningEpisodeIdProvider: { nil },
+            runningEpisodeIdsProvider: { [] },
             downloadProgressProvider: { [:] },
             modelContainer: fixture.container
         )
@@ -313,6 +313,54 @@ struct LiveActivitySnapshotProviderFractionTests {
         #expect(inputs.count == 1)
         let input = try #require(inputs.first)
         #expect(input.transcriptFraction == 0.2)
+    }
+
+    @Test("both running episodes read as running, not just the last one dispatched")
+    func everyRunningEpisodeReadsAsRunning() async throws {
+        // playhead-mfeq: `runningEpisodeIdsProvider` was
+        // `runningEpisodeIdProvider: () async -> String?`, fed by an
+        // `AnalysisWorkScheduler` slot holding the episode of the MOST RECENT
+        // dispatch, and read here as `episodeId == runningEpisodeId`. The Now
+        // lane's cap is 2 and a `playback` job bypasses it entirely, so with
+        // two jobs in flight one episode rendered as running and the other —
+        // being analysed at that instant — rendered under "Up Next". A value
+        // naming "the last episode admitted", read as though it named "the
+        // episodes running".
+        //
+        // EVERY ONE of the 19 constructions in this file passed `{ nil }`
+        // before this bead, so the `isRunning == true` branch had no test at
+        // all: the seam could have returned a constant and nothing here would
+        // have noticed. That is why this asserts the FALSE case too — an
+        // implementation returning `true` for everything passes the interesting
+        // half on its own.
+        let fixture = try await makeFixture(assetSeeds: [
+            AssetSeed(fastTranscriptCoverageEndTime: 10, confirmedAdCoverageEndTime: nil,
+                      episodeDurationSec: 300),
+            AssetSeed(fastTranscriptCoverageEndTime: 20, confirmedAdCoverageEndTime: nil,
+                      episodeDurationSec: 300),
+            AssetSeed(fastTranscriptCoverageEndTime: 30, confirmedAdCoverageEndTime: nil,
+                      episodeDurationSec: 300)
+        ])
+        let running: Set<String> = [fixture.episodeIds[0], fixture.episodeIds[1]]
+        let provider = LiveActivitySnapshotProvider(
+            store: fixture.store,
+            capabilitySnapshotProvider: { nil },
+            runningEpisodeIdsProvider: { running },
+            downloadProgressProvider: { [:] },
+            modelContainer: fixture.container
+        )
+
+        let inputs = await provider.loadInputs()
+        #expect(inputs.count == 3)
+        for (index, episodeId) in fixture.episodeIds.enumerated() {
+            let input = try #require(inputs.first { $0.episodeId == episodeId })
+            #expect(input.isRunning == running.contains(episodeId),
+                    """
+                    episode \(index) reported isRunning=\(input.isRunning); the scheduler \
+                    holds \(running.sorted()). A second running episode shown as "Up Next" \
+                    is the singleton slot this seam replaced.
+                    """)
+        }
     }
 
     /// Dogfood regression: rows can have actual fast transcript chunks that
@@ -337,7 +385,7 @@ struct LiveActivitySnapshotProviderFractionTests {
         let provider = LiveActivitySnapshotProvider(
             store: fixture.store,
             capabilitySnapshotProvider: { nil },
-            runningEpisodeIdProvider: { nil },
+            runningEpisodeIdsProvider: { [] },
             downloadProgressProvider: { [:] },
             modelContainer: fixture.container
         )
@@ -378,7 +426,7 @@ struct LiveActivitySnapshotProviderFractionTests {
         let provider = LiveActivitySnapshotProvider(
             store: fixture.store,
             capabilitySnapshotProvider: { nil },
-            runningEpisodeIdProvider: { nil },
+            runningEpisodeIdsProvider: { [] },
             downloadProgressProvider: { [:] },
             modelContainer: fixture.container
         )
@@ -416,7 +464,7 @@ struct LiveActivitySnapshotProviderFractionTests {
         let provider = LiveActivitySnapshotProvider(
             store: fixture.store,
             capabilitySnapshotProvider: { nil },
-            runningEpisodeIdProvider: { nil },
+            runningEpisodeIdsProvider: { [] },
             downloadProgressProvider: { [:] },
             modelContainer: fixture.container
         )
@@ -455,7 +503,7 @@ struct LiveActivitySnapshotProviderFractionTests {
         let provider = LiveActivitySnapshotProvider(
             store: fixture.store,
             capabilitySnapshotProvider: { nil },
-            runningEpisodeIdProvider: { nil },
+            runningEpisodeIdsProvider: { [] },
             downloadProgressProvider: { [:] },
             modelContainer: fixture.container
         )
@@ -492,7 +540,7 @@ struct LiveActivitySnapshotProviderFractionTests {
         let provider = LiveActivitySnapshotProvider(
             store: fixture.store,
             capabilitySnapshotProvider: { nil },
-            runningEpisodeIdProvider: { nil },
+            runningEpisodeIdsProvider: { [] },
             downloadProgressProvider: { snapshot },
             modelContainer: fixture.container
         )
@@ -523,7 +571,7 @@ struct LiveActivitySnapshotProviderFractionTests {
         let provider = LiveActivitySnapshotProvider(
             store: fixture.store,
             capabilitySnapshotProvider: { nil },
-            runningEpisodeIdProvider: { nil },
+            runningEpisodeIdsProvider: { [] },
             downloadProgressProvider: { [:] },
             downloadedEpisodeIdsProvider: { eligible in
                 eligible.contains(cachedId) ? [cachedId] : []
@@ -554,7 +602,7 @@ struct LiveActivitySnapshotProviderFractionTests {
         let provider = LiveActivitySnapshotProvider(
             store: fixture.store,
             capabilitySnapshotProvider: { nil },
-            runningEpisodeIdProvider: { nil },
+            runningEpisodeIdsProvider: { [] },
             downloadProgressProvider: { [episodeId: 0.42] },
             downloadedEpisodeIdsProvider: { _ in [episodeId] },
             modelContainer: fixture.container
@@ -586,7 +634,7 @@ struct LiveActivitySnapshotProviderFractionTests {
         let provider = LiveActivitySnapshotProvider(
             store: fixture.store,
             capabilitySnapshotProvider: { nil },
-            runningEpisodeIdProvider: { nil },
+            runningEpisodeIdsProvider: { [] },
             downloadProgressProvider: { [:] },
             modelContainer: fixture.container
         )
@@ -629,7 +677,7 @@ struct LiveActivitySnapshotProviderFractionTests {
         let provider = LiveActivitySnapshotProvider(
             store: fixture.store,
             capabilitySnapshotProvider: { nil },
-            runningEpisodeIdProvider: { nil },
+            runningEpisodeIdsProvider: { [] },
             downloadProgressProvider: { [fixture.episodeIds[0]: 0.5] },
             downloadedEpisodeIdsProvider: { eligible in
                 eligible.contains(fixture.episodeIds[0]) ? [fixture.episodeIds[0]] : []
@@ -697,7 +745,7 @@ struct LiveActivitySnapshotProviderFractionTests {
         let provider = LiveActivitySnapshotProvider(
             store: fixture.store,
             capabilitySnapshotProvider: { nil },
-            runningEpisodeIdProvider: { nil },
+            runningEpisodeIdsProvider: { [] },
             downloadProgressProvider: { [:] },
             modelContainer: fixture.container
         )
@@ -736,7 +784,7 @@ struct LiveActivitySnapshotProviderFractionTests {
         let provider = LiveActivitySnapshotProvider(
             store: fixture.store,
             capabilitySnapshotProvider: { nil },
-            runningEpisodeIdProvider: { nil },
+            runningEpisodeIdsProvider: { [] },
             downloadProgressProvider: { [:] },
             modelContainer: fixture.container
         )
@@ -781,7 +829,7 @@ struct LiveActivitySnapshotProviderFractionTests {
         let provider = LiveActivitySnapshotProvider(
             store: fixture.store,
             capabilitySnapshotProvider: { nil },
-            runningEpisodeIdProvider: { nil },
+            runningEpisodeIdsProvider: { [] },
             downloadProgressProvider: { [:] },
             modelContainer: fixture.container
         )
@@ -841,7 +889,7 @@ struct LiveActivitySnapshotProviderFractionTests {
         let provider = LiveActivitySnapshotProvider(
             store: fixture.store,
             capabilitySnapshotProvider: { nil },
-            runningEpisodeIdProvider: { nil },
+            runningEpisodeIdsProvider: { [] },
             downloadProgressProvider: { [:] },
             modelContainer: fixture.container
         )
@@ -906,7 +954,7 @@ struct LiveActivitySnapshotProviderFractionTests {
         let provider = LiveActivitySnapshotProvider(
             store: fixture.store,
             capabilitySnapshotProvider: { nil },
-            runningEpisodeIdProvider: { nil },
+            runningEpisodeIdsProvider: { [] },
             downloadProgressProvider: { [:] },
             modelContainer: fixture.container
         )
@@ -951,7 +999,7 @@ struct LiveActivitySnapshotProviderFractionTests {
         let provider = LiveActivitySnapshotProvider(
             store: fixture.store,
             capabilitySnapshotProvider: { nil },
-            runningEpisodeIdProvider: { nil },
+            runningEpisodeIdsProvider: { [] },
             downloadProgressProvider: { [:] },
             modelContainer: fixture.container
         )
@@ -988,7 +1036,7 @@ struct LiveActivitySnapshotProviderFractionTests {
         let provider = LiveActivitySnapshotProvider(
             store: fixture.store,
             capabilitySnapshotProvider: { nil },
-            runningEpisodeIdProvider: { nil },
+            runningEpisodeIdsProvider: { [] },
             downloadProgressProvider: { [:] },
             modelContainer: fixture.container
         )

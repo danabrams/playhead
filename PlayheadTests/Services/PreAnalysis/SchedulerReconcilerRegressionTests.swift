@@ -217,36 +217,27 @@ struct SchedulerRegressionTests {
         #expect(fetched?.leaseExpiresAt == nil, "Lease expiry should be cleared after processing")
     }
 
-    @Test("concurrent cancelCurrentJob calls resolve cause via precedence, not last-writer-wins")
-    func testConcurrentCancelCausePrecedence() async throws {
-        // playhead-1nl6: before this fix, `cancelCurrentJob(cause:)`
-        // did `pendingCancelCause = cause` unconditionally, so two
-        // concurrent cancels with different causes resolved to whichever
-        // call landed second — stomping whatever precedence the
-        // `CauseAttributionPolicy` ladder would have chosen.
-        //
-        // Sequence the calls deterministically (taskExpired first, then
-        // userCancelled) and assert that `userCancelled` — which is in
-        // the `userInitiated` tier and outranks `taskExpired`'s
-        // `environmentalTransient` / `resourceExhausted` tier — wins the
-        // resolution regardless of arrival order.
-        let store = try await makeTestStore()
-        let scheduler = makeScheduler(store: store)
-
-        await scheduler.cancelCurrentJob(cause: .taskExpired)
-        await scheduler.cancelCurrentJob(cause: .userCancelled)
-        let forward = await scheduler.pendingCancelCauseForTesting()
-        #expect(forward == .userCancelled, "userCancelled should outrank taskExpired after taskExpired→userCancelled sequence")
-
-        // Reverse order must resolve to the same precedence winner —
-        // demonstrates the fix is order-independent, not merely
-        // last-write-wins masquerading as correct.
-        let scheduler2 = makeScheduler(store: store)
-        await scheduler2.cancelCurrentJob(cause: .userCancelled)
-        await scheduler2.cancelCurrentJob(cause: .taskExpired)
-        let reverse = await scheduler2.pendingCancelCauseForTesting()
-        #expect(reverse == .userCancelled, "userCancelled should outrank taskExpired after userCancelled→taskExpired sequence")
-    }
+    // playhead-mfeq: `testConcurrentCancelCausePrecedence` stood here and is
+    // REPLACED — by `CancelAimIdentityTests.cancelPrecedenceIsOrderIndependentPerJob`
+    // in `BackgroundGrantBudgetTests.swift`, which makes the same claim about
+    // the same ladder, in both orders, against a job that can actually read the
+    // answer. It is not deleted coverage; it is the coverage asked where the
+    // quantity lives.
+    //
+    // The claim (playhead-1nl6's: `.userCancelled` outranks `.taskExpired`
+    // whichever arrives second) was right and still holds. What it observed was
+    // not. With NO job in flight — which is how it was written — the resolution
+    // landed in a scheduler-wide `pendingCancelCause`, and `processJob`'s entry
+    // guard cleared exactly that slot on the next dispatch, precisely because
+    // nothing was in flight:
+    //
+    //     if inFlightJobIds.isEmpty { pendingCancelCause = nil }
+    //
+    // So the value asserted here was one no job could ever be charged. Ask the
+    // diagnostic question of it: what would this read if the precedence ladder
+    // were correct and reached nothing? The same `.userCancelled`. The ladder
+    // now runs in `cancelRunningJobs(where:cause:)`, per job, against that job's
+    // own cause — so a test of it has to hold a job.
 }
 
 // MARK: - Reconciler Regression Tests
