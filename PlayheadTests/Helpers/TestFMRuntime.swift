@@ -292,6 +292,35 @@ enum TestFMRuntimeFailure: Sendable {
     /// path must stay the un-parameterised default.
     case metadataTimeoutWithPeers(Int)
 
+    /// playhead-59c8: the 2026-08-14 field row (`db-pull10`, asset A9F6DF05),
+    /// reproduced as the shape it actually had.
+    ///
+    /// **A bridged `NSError`, not a Swift error value, and that is the fixture's
+    /// whole point.** The persisted `deferReason` reads
+    /// `Error Domain=FoundationModels.LanguageModelError Code=-1 "… (Model
+    /// ManagerServices.ModelManagerError error 1001.)"`, which is
+    /// `NSError.description`. A Swift `LanguageModelError` value cannot render
+    /// that — `String(describing:)` of an enum gives `rateLimited(…)` — so the
+    /// thrown value was an `NSError`, every typed cast in
+    /// `SemanticScanStatus.from(error:)` missed it, and the status was
+    /// `.failedTransient` by FALLTHROUGH rather than by classification.
+    ///
+    /// `-1` is a sentinel: `FoundationModels.LanguageModelError` has nine cases
+    /// and does not conform to `CustomNSError`, so a negative code cannot be one
+    /// of them. `1001` is `ModelManagerServices.ModelManagerError.inferenceError`
+    /// — measured from the shipped framework's own code table; see
+    /// `UnclassifiedModelFailure`.
+    case modelManagerInferenceError
+
+    /// The domain the 2026-08-14 field row's outer `NSError` carried.
+    static let fieldRowOuterDomain = "FoundationModels.LanguageModelError"
+    /// The code the 2026-08-14 field row's outer `NSError` carried.
+    static let fieldRowOuterCode = -1
+    /// The domain of the underlying error the field row's description embedded.
+    static let fieldRowUnderlyingDomain = "ModelManagerServices.ModelManagerError"
+    /// `ModelManagerError.inferenceError`'s `errorCode`.
+    static let fieldRowUnderlyingCode = 1001
+
     var error: Error {
         // playhead-8d5r: not a FoundationModels error — the deadline is ours.
         //
@@ -317,6 +346,24 @@ enum TestFMRuntimeFailure: Sendable {
                 peersAtStart: peers
             )
         }
+        // playhead-59c8: constructed BEFORE the FoundationModels block, and
+        // deliberately not inside it. The field row is an `NSError` that no
+        // FoundationModels Swift type is involved in producing, so building it
+        // under `#if canImport` / `@available` would make the fixture's
+        // availability differ from the condition's, which is not gated on
+        // anything.
+        if case .modelManagerInferenceError = self {
+            let underlying = NSError(
+                domain: Self.fieldRowUnderlyingDomain,
+                code: Self.fieldRowUnderlyingCode,
+                userInfo: [:]
+            )
+            return NSError(
+                domain: Self.fieldRowOuterDomain,
+                code: Self.fieldRowOuterCode,
+                userInfo: [NSUnderlyingErrorKey: underlying]
+            )
+        }
         #if canImport(FoundationModels)
         if #available(iOS 26.0, *) {
             let context = LanguageModelSession.GenerationError.Context(debugDescription: "test-fm-runtime")
@@ -330,7 +377,8 @@ enum TestFMRuntimeFailure: Sendable {
                 return LanguageModelSession.GenerationError.guardrailViolation(context)
             case .rateLimited:
                 return LanguageModelSession.GenerationError.rateLimited(context)
-            case .inferenceTimeout, .metadataTimeout, .metadataTimeoutWithPeers:
+            case .inferenceTimeout, .metadataTimeout, .metadataTimeoutWithPeers,
+                 .modelManagerInferenceError:
                 // Unreachable — handled by the early returns above. Kept so the
                 // switch stays exhaustive.
                 break

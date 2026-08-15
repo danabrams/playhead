@@ -1414,10 +1414,46 @@ actor BackfillJobRunner {
                     // R4-Fix7: same wrap as the typed-error arm above. A
                     // racing terminal transition must not abort the drain
                     // loop and strand the rest of the batch.
+                    //
+                    // playhead-59c8: the reason is a NAMED, COUNTABLE token —
+                    // `unclassifiedModelError-<phase>(domain=…,code=…,under=…)`
+                    // — and no longer `String(describing: error)`. This was the
+                    // one site in the runner still writing a raw framework
+                    // string into the durable column, which is exactly what
+                    // playhead-v7q6 forbids: it cannot be grouped, cannot be
+                    // counted, and changes shape with the OS. On the 2026-08-14
+                    // pull it produced 300 characters of `NSError` prose, and
+                    // the only reason anyone learned that A9F6DF05 died on a
+                    // `ModelManagerError 1001` is that somebody read all 300 by
+                    // hand.
+                    //
+                    // The DISPOSITION is unchanged and that is deliberate: this
+                    // arm still fails the row and still charges
+                    // `job.retryCount + 1`. See `UnclassifiedModelFailure` for
+                    // the measurement behind that — 1001 is
+                    // `ModelManagerError.inferenceError`, a category wrapper
+                    // over a 25-case enum spanning both transient and permanent
+                    // conditions, so it cannot be admitted to `FMDaemonRefusal`
+                    // without giving a possibly-permanent condition an "it will
+                    // heal on its own" reading and an unbounded FM bill.
+                    //
+                    // The local is `unclassifiedReason`, NOT `…Cause`, and the
+                    // field below is `token=`, NOT `cause=`. That vocabulary is
+                    // reserved: `FMDaemonRefusalSourceCanaryTests` counts every
+                    // `reason:` argument ending in `Cause` and every `cause=`
+                    // field in this file by substring, because no textual
+                    // reader can tell which type a name belongs to. A third
+                    // `…Cause` here reddens a rail about a family this
+                    // deliberately does not join. See `UnclassifiedModelFailure
+                    // .failureEvent` for the same argument on the event name.
+                    let unclassifiedReason = UnclassifiedModelFailure.deferReason(
+                        for: error,
+                        phase: job.phase
+                    )
                     do {
                         try await store.markBackfillJobFailed(
                             jobId: job.jobId,
-                            reason: String(describing: error),
+                            reason: unclassifiedReason,
                             retryCount: job.retryCount + 1
                         )
                     } catch {
@@ -1429,8 +1465,21 @@ actor BackfillJobRunner {
                     // String(describing:) over localizedDescription for on-device
                     // diagnosis. Untyped errors here are typically Swift errors
                     // bridged from FoundationModels or CancellationError.
+                    //
+                    // playhead-59c8: the raw description stays HERE, in the
+                    // ephemeral log, and only here. A log line can afford prose;
+                    // a column a device pull groups by cannot. The event NAME is
+                    // new rather than a `cause=` field on the existing line, for
+                    // the reason `FMDaemonRefusal.logEvent` gives.
                     logger.error(
-                        "FM backfill job \(job.jobId, privacy: .public) failed: case=untyped detail=\(String(describing: error), privacy: .public)"
+                        """
+                        \(UnclassifiedModelFailure.failureEvent, privacy: .public) \
+                        job=\(job.jobId, privacy: .public) \
+                        phase=\(job.phase.rawValue, privacy: .public) \
+                        token=\(unclassifiedReason, privacy: .public) \
+                        retryCount=\(job.retryCount + 1, privacy: .public) \
+                        detail=\(String(describing: error), privacy: .public)
+                        """
                     )
                     if let metricsEventId = await recordFailedOperationalMetricsEvent(
                         job: job,

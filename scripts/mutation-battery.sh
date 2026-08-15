@@ -1148,6 +1148,12 @@ THROT="Playhead/Services/AdDetection/FMDaemonThrottle.swift"
 # stall — and the per-kind tokens and log events that keep the two countable
 # apart in a device pull. Added for the DR series.
 FMREF="Playhead/Services/AdDetection/FMDaemonRefusal.swift"
+# playhead-59c8: the NAMED, COUNTABLE record for a throw the app could not
+# classify — the identity read (outer + deepest underlying) and the durable
+# token built from it. Added for the UM series. It is deliberately NOT a sibling
+# of `$FMREF`: that file answers "did the daemon decline to serve this job", and
+# 59c8's verdict is that `ModelManagerError 1001` cannot answer that either way.
+UMF="Playhead/Services/AdDetection/UnclassifiedModelFailure.swift"
 RUNNER="Playhead/Services/AdDetection/BackfillJobRunner.swift"
 FMCLS="Playhead/Services/AdDetection/FoundationModelClassifier.swift"
 PROBE="Playhead/Services/Capabilities/FoundationModelsUsabilityProbe.swift"
@@ -1331,7 +1337,7 @@ GRANT="Playhead/Services/AnalysisCoordinator/BackgroundGrantBudget.swift"
 MUTABLE_FILES=(
   "$ORCH" "$STORE" "$CTRL" "$VIEW" "$TRIG" "$RSVC" "$TRUST" "$NPV" "$NPVM"
   "$BWPOL" "$KICK" "$KCOORD" "$SEAMS" "$ACT" "$ADSVC" "$PODC"
-  "$THROT" "$FMREF" "$RUNNER" "$FMCLS" "$PROBE" "$PERMC" "$RT" "$MODEL" "$INGO" "$INVF"
+  "$THROT" "$FMREF" "$UMF" "$RUNNER" "$FMCLS" "$PROBE" "$PERMC" "$RT" "$MODEL" "$INGO" "$INVF"
   "$FMDL" "$FMCP"
   "$SWEEP" "$SCANORD" "$SCRATCH" "$SCRATCHH" "$FMSUP" "$GATE"
   "$FUSION" "$DSPAN" "$EXTENT" "$RSLOT" "$ATOMEV"
@@ -1410,6 +1416,17 @@ FOCUSED_SUITES=(
   -only-testing:PlayheadTests/CoarseLatencySplitTests
   -only-testing:PlayheadTests/SemanticScanPersistenceTests
   -only-testing:PlayheadTests/FMDaemonRefusalSourceCanaryTests
+  # playhead-59c8: the unclassified-model-failure rails (UM series). Two suites,
+  # because the claim spans two layers and neither can see the other: the pure
+  # identity read and the token it builds (instant, no store), and a SOURCE
+  # canary, because "the durable column no longer carries the framework's own
+  # prose" is a property of a CALL SITE and no runtime assertion on the value
+  # can observe it. The RUNNER-level disposition is already in scope above —
+  # `FMDaemonMetadataStallRunnerTests` is where the generic arm's control lives
+  # and where 59c8's two end-to-end tests were added, deliberately rather than
+  # duplicating that harness.
+  -only-testing:PlayheadTests/UnclassifiedModelFailureTests
+  -only-testing:PlayheadTests/UnclassifiedModelFailureSourceCanaryTests
   # playhead-cgka: the scratch-reaper rails (Z series). 13 tests, ~0.06s — it
   # costs nothing to carry in every batch and the alternative is a second
   # focused set for one series.
@@ -2855,6 +2872,43 @@ T_DR_CAUSEFIELDS="FMDaemonRefusalSourceCanaryTests/testDaemonRefusalCauseFieldsN
 # `deferredSiblings=`, R6 the cause pair's binding, and this one rode through all
 # four untouched on BOTH lines. XCTest, same reason as the two above.
 T_DR_CONSECFIELD="FMDaemonRefusalSourceCanaryTests/testConsecutiveFieldsNameTheCounterTheStopRuleReads"
+
+# --- playhead-59c8: the unclassified-model-failure rails (UM series) --------
+#
+# The bead's verdict is a REFUSAL — `ModelManagerError 1001` is
+# `ModelManagerError.inferenceError`, a category wrapper over a 25-case enum
+# holding both transient and permanent members, so it is not admitted to
+# `FMDaemonRefusal`. Every rail below therefore pins one of two things: that the
+# refusal HOLDS (the row still fails, the budget is still charged), or that the
+# RECORD is now countable (a named token carrying the identity that would let a
+# future bead promote one specific `(domain, code)` out of the bucket).
+#
+# NOTE: no ';' in any display name — the MUTATIONS record separator is ';', and
+# a test whose name contains one can never be matched, so every mutation naming
+# it reports ERROR while having killed it perfectly (the DR series learned this
+# the expensive way).
+T_UM_VERDICT="THE VERDICT: the field row is NOT a daemon refusal"
+T_UM_FALLTHROUGH="and \`nil\` here is a FALLTHROUGH, not a classification — the finding, pinned"
+T_UM_KNOWN="DISCRIMINATOR: the two conditions this enum DOES know are still refusals"
+T_UM_IDENTITY="the identity reads BOTH levels of the field row"
+T_UM_NONE="NULL READING: \`under\` is a word, not an empty string, when there is no chain"
+T_UM_DEEPEST="the DEEPEST underlying wins — the first one is the wrapper"
+T_UM_BOUNDED="the walk is BOUNDED — a pathological chain terminates and says where it stopped"
+T_UM_MULTI="\`NSMultipleUnderlyingErrorsKey\` is followed too — it is how a CustomNSError bridges"
+T_UM_CAUSE="the cause names the condition, the phase, and the discriminator"
+T_UM_PHASE="the PHASE travels — two phases do not share a token"
+T_UM_FAMILY="the token joins NO existing cause family"
+T_UM_COUNT="COUNTABLE: a prefix grep over a mixed population counts exactly this cause"
+T_UM_SANITIZE="a domain cannot break the record it lives in"
+T_UM_TRUNC="TRUNCATION KEEPS THE TAIL AND SAYS SO — a fully-qualified name discriminates at the end"
+# The RUNNER-level disposition, in the e75l harness where the generic arm's
+# control already lived.
+T_UM_FAILS="playhead-59c8: the 08-14 field row FAILS the job — a ModelManagerError is not excused"
+T_UM_RECORDS="playhead-59c8: and it is recorded so a device pull can COUNT it"
+# The two source canaries. XCTest, so \`Suite/method\`. Both are about a CALL
+# SITE, which no runtime assertion on the value can reach.
+T_UM_NOPROSE="UnclassifiedModelFailureSourceCanaryTests/testTheGenericArmNoLongerPersistsTheFrameworkDescription"
+T_UM_CONSTANTS="UnclassifiedModelFailureSourceCanaryTests/testTheCauseAndEventReachTheRecordThroughTheConstants"
 
 # ---- playhead-dl9k: the no-progress terminal is re-requested (DL series) ----
 #
@@ -6434,6 +6488,90 @@ MUTATIONS=(
   "SS04|702|TRIG|$T_3OYZ_WITNESS;$T_3OYZ_CANCEL"
   "SS06|702|RSVC|$T_3OYZ_TRIGGER_BYTES"
   "SS05|703|TRIG|$T_3OYZ_WITNESS;$T_3OYZ_CANCEL;$T_3OYZ_DROPPED"
+
+  # --- playhead-59c8: the unclassified-model-failure rails (UM series) -----
+  #
+  # Batches 710-718. The method is the one CLAUDE.md records from o89d R5:
+  # enumerate the EVENTS the change performs and ask which of them nothing
+  # would notice. There are twelve — the refusal HOLDS; the budget is charged;
+  # a named token is written; it joins no existing family; the phase travels;
+  # the outer identity travels; the underlying identity travels; it is the
+  # DEEPEST one; `under=none` when there is none; the domain is sanitized; the
+  # walk is bounded; and the raw framework prose stays OUT of the column while
+  # the constants stay IN the runner — and there is a rail for each.
+  #
+  # The series is spread THIN, and the reason is attribution rather than fit: a
+  # batch may contain no two mutations that can redden the same test, and most
+  # of these change `deferReason`'s OUTPUT, which the token tests all read. Four
+  # of the nine batches are therefore a single mutation. UM01 is THE mutant:
+  # the change this bead was filed to consider and REFUSED.
+
+  # Batch 710. UM01 admits the field row to `FMDaemonRefusal` — the outcome
+  # 59c8 weighed. It reddens the pure verdict AND the runner-level disposition,
+  # so nothing may share the batch.
+  "UM01|710|FMREF|$T_UM_VERDICT;$T_UM_FAILS"
+
+  # Batch 711. UM02 restores `String(describing: error)` in the durable column
+  # — the pre-59c8 line verbatim, and the whole defect. Alone because it
+  # reddens both the source canary and the runner's record test, which between
+  # them are most of the series' expectations.
+  "UM02|711|RUNNER|$T_UM_NOPROSE;$T_UM_RECORDS"
+
+  # Batch 712. UM07 stops charging the lifetime budget — the thing an "it will
+  # heal on its own" reading would have bought, and which 59c8 deliberately did
+  # not grant. UM04 reports the FIRST underlying rather than the deepest, i.e.
+  # the wrapper instead of the condition. Disjoint by construction: the field
+  # row's chain is one deep, so UM04 cannot move any runner-level reading, and
+  # UM07 cannot reach a pure identity read.
+  "UM07|712|RUNNER|$T_UM_FAILS"
+  "UM04|712|UMF|$T_UM_DEEPEST"
+
+  # Batch 713. UM03 drops the `under=` field — the discriminator, and the only
+  # value in the field row that names a subsystem at all. Alone: it reddens
+  # every token test.
+  "UM03|713|UMF|$T_UM_CAUSE;$T_UM_NONE"
+
+  # Batch 714. UM09 collapses the prefix onto `rateLimited`, so an operator
+  # counting throttles counts unclassified throws too — playhead-kvs8's own
+  # count, polluted. Alone for the same reason as UM03.
+  "UM09|714|UMF|$T_UM_FAMILY;$T_UM_COUNT"
+
+  # Batch 715. UM10 drops the phase from the token. UM08 stops stripping `=`
+  # from a domain, so a hostile or generated domain can forge a field in a
+  # record that is parsed as `key=value`. Disjoint: no real domain contains an
+  # `=`, so UM08 moves nothing the token tests read.
+  "UM10|715|UMF|$T_UM_PHASE"
+  "UM08|715|UMF|$T_UM_SANITIZE"
+
+  # Batch 716. UM05 removes the depth bound. It terminates on the fixture — the
+  # chain is finite by construction — and reports the bottom, which is exactly
+  # what a rail can see and what an unbounded production walk cannot be trusted
+  # to do on a chain built by frameworks we do not control. UM11 hard-codes the
+  # token in the runner, which only the constants canary can see.
+  "UM05|716|UMF|$T_UM_BOUNDED"
+  "UM11|716|RUNNER|$T_UM_CONSTANTS"
+
+  # Batch 717. UM06 makes `under=` an EMPTY STRING instead of a word — the
+  # "unrecorded is not zero" shape this repo keeps paying out on, one field
+  # over: a reader can no longer tell "there was no underlying error" from "the
+  # field was dropped". Alone, because UM12 reddens the same test.
+  "UM06|717|UMF|$T_UM_NONE"
+
+  # Batch 718. UM12 reads the OUTER error's own domain and code into the
+  # underlying fields — an identity that is not an identity, and a token whose
+  # `under=` agrees with its `domain=` on every row ever written. Alone: it
+  # reddens the null reading, the deepest rule and the multiple-errors path as
+  # well as the identity itself.
+  "UM12|718|UMF|$T_UM_IDENTITY"
+
+  # Batch 719. UM13 restores the plain `prefix(64)` — the truncation this
+  # series' own tests found. It is not a hypothetical: measured on
+  # `BackfillJobRunnerTests`' function-local `CoarseFailure`, whose reflected
+  # domain is 79 characters, `prefix(64)` recorded the compiler's private
+  # `(unknown context at $…)` and not one character of the type name. A
+  # fully-qualified name discriminates at the TAIL, and a silent cut reads as a
+  # complete identity.
+  "UM13|719|UMF|$T_UM_TRUNC"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -6945,6 +7083,19 @@ describe_mutation() {
     CN10) echo "iu0t R5: an uncanonicalized atomize call SPLIT ACROSS LINES — the site finder was a literal substring, so one line break removed the call site from the walk" ;;
     CN11) echo "iu0t R5: CN06 spelled as a NEGATION (pass != fast) — the same collapse as instance #5, which the collapse-shape pattern required == to see" ;;
     CN12) echo "iu0t R5: LAUNDERING — the site canonicalizes and then filters to final anyway, which passed because the check tested for the TOKEN canonicalize( rather than the value" ;;
+    UM01) echo "59c8: the field row is ADMITTED to FMDaemonRefusal — a wrapper code over a 25-case enum gets an it-will-heal reading and an unbounded FM bill" ;;
+    UM02) echo "59c8: the durable column carries String(describing: error) again — 300 characters of NSError prose in the one column a device pull groups by" ;;
+    UM03) echo "59c8: the token drops the under= discriminator — countable, but nothing in it names which framework condition it was" ;;
+    UM04) echo "59c8: the identity reports the FIRST underlying, not the deepest — the wrapper instead of the condition, invisible on a one-deep chain" ;;
+    UM05) echo "59c8: the underlying walk loses its depth bound, on the drain's failure path, over a chain built by frameworks we do not control" ;;
+    UM06) echo "59c8: the null reading becomes an empty string — a dropped field and 'there was no chain' stop being distinguishable" ;;
+    UM07) echo "59c8: the generic arm stops charging the lifetime budget — the half of a reclassification that changes no visible disposition" ;;
+    UM08) echo "59c8: a domain keeps its = characters, so it can forge a field in a record parsed as key=value" ;;
+    UM09) echo "59c8: the token joins kvs8's rateLimited- family — the prefix an operator greps to count throttles" ;;
+    UM10) echo "59c8: the token drops the phase, so a full-episode scan and a targeted audit window answer to one string" ;;
+    UM11) echo "59c8: the token is a hard-coded literal in the runner — right prefix, right phase, no discriminator, and no link to the type that defines it" ;;
+    UM13) echo "59c8: a domain is truncated from the right, keeping the module and losing the type — a plausible-looking name that is not the name" ;;
+    UM12) echo "59c8: the outer error's own domain and code are reported as the UNDERLYING ones — an identity that is not an identity" ;;
     DR01) echo "e75l: the drain classifies only THROTTLES again — the pre-e75l line verbatim, so a wedged tokenizer is marked failed and spends a lifetime retry" ;;
     DR02) echo "e75l: the discriminator keys on the TYPE, not the budget — every FMInferenceTimeoutError becomes a daemon refusal, including the 300s inference one" ;;
     DR03) echo "e75l: the discriminator reads the OTHER budget — a standard-deadline timeout defers and a metadata stall fails" ;;
@@ -7019,6 +7170,201 @@ snippet() { IFS= read -r -d '' "$1" || true; }
 apply_mutation() {
   local name="$1" file="$2" OLD NEW
   case "$name" in
+
+  # ---- playhead-59c8: the unclassified model failure (UM series) ----
+
+  # UM01 — THE mutant this bead was filed to consider: admit the field row to
+  # `FMDaemonRefusal`. Any bridged NSError carrying an underlying chain becomes
+  # a daemon condition, so the row DEFERS forever and never spends the budget —
+  # which is the "it will heal on its own" reading 59c8 refused, because
+  # `ModelManagerError 1001` is `inferenceError`, a wrapper over a 25-case enum
+  # holding permanent members as well as transient ones.
+  UM01)
+    snippet OLD <<'EOF'
+        if isMetadataStall(error) {
+            return .metadataStall
+        }
+        return nil
+EOF
+    snippet NEW <<'EOF'
+        if isMetadataStall(error) {
+            return .metadataStall
+        }
+        if (error as NSError).userInfo[NSUnderlyingErrorKey] != nil {
+            return .metadataStall
+        }
+        return nil
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # UM02 — the pre-59c8 line verbatim: the framework's own prose back in the one
+  # column a device pull groups by. 300 characters of `NSError` description,
+  # un-groupable and OS-shape-dependent, which is playhead-v7q6's rule broken at
+  # the one site that was still breaking it.
+  UM02)
+    snippet OLD <<'EOF'
+                            reason: unclassifiedReason,
+EOF
+    snippet NEW <<'EOF'
+                            reason: String(describing: error),
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # UM03 — drop the DISCRIMINATOR. The token still names the condition and the
+  # phase, so it still counts; what it stops carrying is the only value in the
+  # field row that names a subsystem, which is what a future bead would need to
+  # promote one specific `(domain, code)` out of this bucket.
+  UM03)
+    snippet OLD <<'EOF'
+        return "\(causePrefix)-\(phase.rawValue)"
+            + "(domain=\(sanitize(identity.domain)),code=\(identity.code),under=\(under))"
+EOF
+    snippet NEW <<'EOF'
+        _ = under
+        return "\(causePrefix)-\(phase.rawValue)"
+            + "(domain=\(sanitize(identity.domain)),code=\(identity.code))"
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # UM04 — report the FIRST underlying instead of the deepest: the wrapper
+  # instead of the condition. On the field row those are one and the same, which
+  # is exactly why a fixture with a one-deep chain cannot see this.
+  UM04)
+    snippet OLD <<'EOF'
+        while depth < maxUnderlyingDepth, let next = underlying(of: cursor) {
+            deepest = next
+            cursor = next
+            depth += 1
+        }
+EOF
+    snippet NEW <<'EOF'
+        while depth < maxUnderlyingDepth, let next = underlying(of: cursor) {
+            if deepest == nil { deepest = next }
+            cursor = next
+            depth += 1
+        }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # UM05 — remove the depth bound. The chain is built by frameworks we do not
+  # control, on the drain's FAILURE path, which is the one path that must never
+  # be the reason a batch is lost.
+  UM05)
+    snippet OLD <<'EOF'
+        while depth < maxUnderlyingDepth, let next = underlying(of: cursor) {
+EOF
+    snippet NEW <<'EOF'
+        while let next = underlying(of: cursor) {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # UM06 — the null reading becomes an EMPTY STRING. `under=` with nothing after
+  # it reads as a dropped field, not as "this error carried no chain", and the
+  # two are different claims.
+  UM06)
+    snippet OLD <<'EOF'
+    static let noUnderlyingToken = "none"
+EOF
+    snippet NEW <<'EOF'
+    static let noUnderlyingToken = ""
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # UM07 — the arm stops charging the lifetime budget. This is the HALF of a
+  # reclassification that looks harmless: the row still fails, so nothing about
+  # the disposition reads differently, and the retry cap silently stops being
+  # reachable through this arm.
+  UM07)
+    snippet OLD <<'EOF'
+                            retryCount: job.retryCount + 1
+EOF
+    snippet NEW <<'EOF'
+                            retryCount: job.retryCount
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # UM08 — stop stripping `=` from a domain. The record is parsed as
+  # `key=value`, so a domain carrying one can forge a field, and a reader
+  # counting `under=` gets an answer the writer never wrote.
+  UM08)
+    snippet OLD <<'EOF'
+            .replacingOccurrences(of: "=", with: "")
+EOF
+    snippet NEW <<'EOF'
+            .replacingOccurrences(of: "=", with: "=")
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # UM09 — the token joins playhead-kvs8's family. `grep -c 'rateLimited-'` on a
+  # device pull stops counting throttles and starts counting throttles plus
+  # every throw the app could not classify.
+  UM09)
+    snippet OLD <<'EOF'
+    static let causePrefix = "unclassifiedModelError"
+EOF
+    snippet NEW <<'EOF'
+    static let causePrefix = "rateLimited"
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # UM10 — drop the phase. Every phase's failures collapse into one token, so a
+  # pull can count the population but cannot tell a full-episode scan's failure
+  # from a targeted audit window's.
+  UM10)
+    snippet OLD <<'EOF'
+        return "\(causePrefix)-\(phase.rawValue)"
+EOF
+    snippet NEW <<'EOF'
+        return "\(causePrefix)-"
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # UM11 — the token as a hard-coded literal in the runner. It still starts with
+  # the right prefix and still carries the phase, so every runtime assertion on
+  # the VALUE passes; what it loses is the discriminator and the guarantee that
+  # the name and the type that defines it move together.
+  UM11)
+    snippet OLD <<'EOF'
+                    let unclassifiedReason = UnclassifiedModelFailure.deferReason(
+                        for: error,
+                        phase: job.phase
+                    )
+EOF
+    snippet NEW <<'EOF'
+                    let unclassifiedReason = "unclassifiedModelError-\(job.phase.rawValue)"
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # UM12 — an identity that is not an identity: the outer error's own domain and
+  # code reported as the underlying ones. Every row ever written has `under=`
+  # agreeing with `domain=`, which reads as corroboration and is a copy.
+  UM12)
+    snippet OLD <<'EOF'
+            underlyingDomain: deepest?.domain,
+            underlyingCode: deepest?.code
+EOF
+    snippet NEW <<'EOF'
+            underlyingDomain: outer.domain,
+            underlyingCode: outer.code
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # UM13 — truncate a domain from the RIGHT, keeping the module and losing the
+  # type. The record still looks like a fully-qualified name, which is what
+  # makes it worse than an obviously-cut one.
+  UM13)
+    snippet OLD <<'EOF'
+        guard collapsed.count > maxDomainLength else { return collapsed }
+        let tailLength = maxDomainLength - truncationHeadLength - truncationMarker.count
+        return collapsed.prefix(truncationHeadLength)
+            + truncationMarker
+            + collapsed.suffix(tailLength)
+EOF
+    snippet NEW <<'EOF'
+        guard collapsed.count > maxDomainLength else { return collapsed }
+        return String(collapsed.prefix(maxDomainLength))
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
 
   # ---- playhead-hx6n: scan-row run attribution (T series) ----
 
@@ -15288,6 +15634,7 @@ rec_file()   {
     MPTRENG) printf '%s' "$MPTRENG" ;;
     THROT) printf '%s' "$THROT" ;;
     FMREF) printf '%s' "$FMREF" ;;
+    UMF)   printf '%s' "$UMF" ;;
     RUNNER) printf '%s' "$RUNNER" ;;
     FMCLS) printf '%s' "$FMCLS" ;;
     PROBE) printf '%s' "$PROBE" ;;
