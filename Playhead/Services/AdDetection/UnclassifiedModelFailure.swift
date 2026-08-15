@@ -176,8 +176,9 @@ enum UnclassifiedModelFailure {
 
     /// The greppable family. Its own prefix, sharing none with
     /// `rateLimited-`, `metadataStall-`, `inferenceTimeout-`,
-    /// `expiredWithoutProgress-`, `cancelled-during-` or
-    /// `underCoverageBudgetSpent-`.
+    /// `expiredWithoutProgress-`, `cancelled-during-`,
+    /// `underCoverageBudgetSpent-` or `transcriptCeilingBelowFloor-`
+    /// (playhead-nffz).
     ///
     /// The prefix is the CONDITION, per `FMDaemonRefusal`'s R2-Fix1 rule, and
     /// the condition here is precisely "the app could not classify this". A

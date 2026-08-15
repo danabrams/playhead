@@ -635,11 +635,13 @@ struct BackfillCoverageTerminalTests {
     /// this value carries.
     private static func underCovered(
         retires: Bool,
-        retryCount: Int
+        retryCount: Int,
+        constraint: BackfillJobRunner.UnderCoverageConstraint = .scanBudget
     ) -> BackfillJobRunner.CoverageTerminalDecision {
         .underCovered(BackfillJobRunner.UnderCoverageVerdict(
             retires: retires,
-            retryCount: retryCount
+            retryCount: retryCount,
+            constraint: constraint
         ))
     }
 
@@ -647,20 +649,21 @@ struct BackfillCoverageTerminalTests {
     func decisionUsesTheSharedFloor() {
         let floor = AnalysisJobRunner.semanticBackfillSufficientAdScanFraction
         #expect(BackfillJobRunner.coverageTerminalDecision(
-            phase: .fullEpisodeScan, measurement: .measured(floor), retryCount: 0, cursorAdvanced: false
+            phase: .fullEpisodeScan, measurement: .measured(floor), ceiling: nil, retryCount: 0, cursorAdvanced: false
         ) == .complete)
         #expect(BackfillJobRunner.coverageTerminalDecision(
             phase: .fullEpisodeScan,
             measurement: .measured(ReachRatio(floor.rawValue - 0.001)),
+            ceiling: nil,
             retryCount: 0,
             cursorAdvanced: false
         ) == Self.underCovered(retires: false, retryCount: 1))
         // The two field fractions, verbatim.
         #expect(BackfillJobRunner.coverageTerminalDecision(
-            phase: .fullEpisodeScan, measurement: .measured(0.0142), retryCount: 0, cursorAdvanced: false
+            phase: .fullEpisodeScan, measurement: .measured(0.0142), ceiling: nil, retryCount: 0, cursorAdvanced: false
         ) == Self.underCovered(retires: false, retryCount: 1))
         #expect(BackfillJobRunner.coverageTerminalDecision(
-            phase: .fullEpisodeScan, measurement: .measured(0.2068), retryCount: 0, cursorAdvanced: false
+            phase: .fullEpisodeScan, measurement: .measured(0.2068), ceiling: nil, retryCount: 0, cursorAdvanced: false
         ) == Self.underCovered(retires: false, retryCount: 1))
     }
 
@@ -668,7 +671,7 @@ struct BackfillCoverageTerminalTests {
     func narrowPhasesAreNotGated() {
         for phase in BackfillJobPhase.allCases where phase != .fullEpisodeScan {
             #expect(BackfillJobRunner.coverageTerminalDecision(
-                phase: phase, measurement: .measured(0), retryCount: 0, cursorAdvanced: false
+                phase: phase, measurement: .measured(0), ceiling: nil, retryCount: 0, cursorAdvanced: false
             ) == .complete, "\(phase.rawValue) never claimed to read the episode")
         }
     }
@@ -678,11 +681,11 @@ struct BackfillCoverageTerminalTests {
         // A missing denominator is the duration-backfill sweep's bug, not this
         // one, and refusing here would strand every legacy row.
         #expect(BackfillJobRunner.coverageTerminalDecision(
-            phase: .fullEpisodeScan, measurement: .notMeasurable, retryCount: 0, cursorAdvanced: false
+            phase: .fullEpisodeScan, measurement: .notMeasurable, ceiling: nil, retryCount: 0, cursorAdvanced: false
         ) == .complete)
         // A read that THREW is not evidence the episode was read.
         #expect(BackfillJobRunner.coverageTerminalDecision(
-            phase: .fullEpisodeScan, measurement: .unreadable, retryCount: 0, cursorAdvanced: false
+            phase: .fullEpisodeScan, measurement: .unreadable, ceiling: nil, retryCount: 0, cursorAdvanced: false
         ) == Self.underCovered(retires: false, retryCount: 1))
     }
 
@@ -692,6 +695,7 @@ struct BackfillCoverageTerminalTests {
             #expect(BackfillJobRunner.coverageTerminalDecision(
                 phase: .fullEpisodeScan,
                 measurement: .measured(ReachRatio(garbage)),
+                ceiling: nil,
                 retryCount: 0,
                 cursorAdvanced: false
             ) == Self.underCovered(retires: false, retryCount: 1),
@@ -710,12 +714,14 @@ struct BackfillCoverageTerminalTests {
         #expect(BackfillJobRunner.coverageTerminalDecision(
             phase: .fullEpisodeScan,
             measurement: .measured(0),
+            ceiling: nil,
             retryCount: AdmissionController.maxRetries - 2,
             cursorAdvanced: false
         ) == Self.underCovered(retires: false, retryCount: AdmissionController.maxRetries - 1))
         #expect(BackfillJobRunner.coverageTerminalDecision(
             phase: .fullEpisodeScan,
             measurement: .measured(0),
+            ceiling: nil,
             retryCount: AdmissionController.maxRetries - 1,
             cursorAdvanced: false
         ) == Self.underCovered(retires: true, retryCount: AdmissionController.maxRetries))
@@ -732,6 +738,7 @@ struct BackfillCoverageTerminalTests {
         #expect(BackfillJobRunner.coverageTerminalDecision(
             phase: .fullEpisodeScan,
             measurement: .measured(0.2068),
+            ceiling: nil,
             retryCount: AdmissionController.maxRetries - 1,
             cursorAdvanced: true
         ) == Self.underCovered(retires: false, retryCount: 0),
@@ -742,6 +749,7 @@ struct BackfillCoverageTerminalTests {
             #expect(BackfillJobRunner.coverageTerminalDecision(
                 phase: .fullEpisodeScan,
                 measurement: .measured(0),
+                ceiling: nil,
                 retryCount: prior,
                 cursorAdvanced: true
             ) == Self.underCovered(retires: false, retryCount: 0),
@@ -756,6 +764,7 @@ struct BackfillCoverageTerminalTests {
         var retryCount = BackfillJobRunner.coverageTerminalDecision(
             phase: .fullEpisodeScan,
             measurement: .measured(0.5),
+            ceiling: nil,
             retryCount: AdmissionController.maxRetries - 1,
             cursorAdvanced: true
         )
@@ -766,6 +775,7 @@ struct BackfillCoverageTerminalTests {
             retryCount = BackfillJobRunner.coverageTerminalDecision(
                 phase: .fullEpisodeScan,
                 measurement: .measured(0.5),
+                ceiling: nil,
                 retryCount: carried,
                 cursorAdvanced: false
             )
@@ -785,6 +795,7 @@ struct BackfillCoverageTerminalTests {
             #expect(BackfillJobRunner.coverageTerminalDecision(
                 phase: .fullEpisodeScan,
                 measurement: .measured(AnalysisJobRunner.semanticBackfillSufficientAdScanFraction),
+                ceiling: nil,
                 retryCount: 0,
                 cursorAdvanced: advanced
             ) == .complete)
@@ -858,5 +869,254 @@ struct BackfillCoverageTerminalTests {
             lastCoveredUpperBoundSec: scanned,
             firstPlannedSegmentStartSec: firstPlanned
         )
+    }
+
+    // MARK: - 8. playhead-nffz: the floor's denominator is the EPISODE, and the
+    //           numerator's ceiling is the TRANSCRIPT
+
+    /// C065AD03's shape at test scale, and the ONLY difference from
+    /// ``makeHeadHoleStore(assetId:)`` is where the transcript is.
+    ///
+    /// Head-hole store: a 100 s episode transcribed end to end, dispatched with
+    /// the last 10 s. Ceiling 1.00, measured 0.10 — the floor is REACHABLE and a
+    /// better dispatch would reach it, so its budget really is what retires it.
+    ///
+    /// This store: a 100 s episode whose transcript exists only over `[56, 100]`,
+    /// dispatched with exactly that. Ceiling 0.44, measured 0.44 — every second
+    /// of transcript has been read and the floor is 0.98. No scan can retire it.
+    ///
+    /// Two fixtures, one variable, two causes. That is what makes the cause a
+    /// measurement rather than a label.
+    private func makeCeilingBoundStore(assetId: String) async throws -> AnalysisStore {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: assetId, episodeDurationSec: 100))
+        try await store.insertTranscriptChunks([
+            makeChunk(assetId: assetId, index: 0, start: 56, end: 100, pass: "fast")
+        ])
+        return store
+    }
+
+    private func ceilingBoundInputs(assetId: String) -> BackfillJobRunner.AssetInputs {
+        makeInputs(
+            assetId: assetId,
+            lines: [(56, 100, "The only stretch of this episode anything ever transcribed.")]
+        )
+    }
+
+    @available(iOS 26.0, *)
+    @Test("THE C065AD03 CASE — a job whose TRANSCRIPT cannot support the floor retires naming the transcript, not the budget")
+    func ceilingBoundJobRetiresNamingTheTranscript() async throws {
+        let assetId = "asset-nffz-ceiling"
+        let store = try await makeCeilingBoundStore(assetId: assetId)
+        let inputs = ceilingBoundInputs(assetId: assetId)
+
+        for expectedRetry in 1...(AdmissionController.maxRetries - 1) {
+            let run = try await makeRunner(store: store, runtime: makeRuntime().runtime)
+                .runPendingBackfill(for: inputs)
+            let jobId = try #require(run.admittedJobIds.first)
+            let row = try #require(await store.fetchBackfillJob(byId: jobId))
+            #expect(row.status == .deferred)
+            #expect(row.retryCount == expectedRetry,
+                    "the ceiling must not change the budget — only what the terminal CALLS it")
+        }
+
+        let final = try await makeRunner(store: store, runtime: makeRuntime().runtime)
+            .runPendingBackfill(for: inputs)
+        let jobId = try #require(final.admittedJobIds.first)
+        let row = try #require(await store.fetchBackfillJob(byId: jobId))
+        #expect(row.status == .failed)
+        #expect(row.retryCount == AdmissionController.maxRetries,
+                "same budget, same count — this bead changes the cause, not the policy")
+        #expect(row.deferReason == "transcriptCeilingBelowFloor-fullEpisodeScan",
+                """
+                THE DOES-IT-RUN DIRECTION. This is the whole diff, end to end: the store \
+                measured a ceiling, the actor read it off the SAME summary as the fraction, \
+                the pure decision compared it to the SAME floor, and the write CONSUMED the \
+                verdict's constraint. A mutant that drops any one of those four links leaves \
+                this row saying `underCoverageBudgetSpent-fullEpisodeScan`, which is the \
+                sentence playhead-se0x was filed on.
+                """)
+
+        // And the two quantities, so a reader can see the mismatch that is the bug.
+        let summary = try #require(
+            try await store.fetchCoverageSummariesByAssetIds([assetId])[assetId]
+        )
+        let fraction = try #require(summary.adScanFraction)
+        let ceiling = try #require(summary.adScanCeilingFraction)
+        #expect(abs(fraction.rawValue - 0.44) < 0.001)
+        #expect(abs(ceiling.rawValue - 0.44) < 0.001,
+                "every transcribed second was read — the scan is AT its ceiling")
+        #expect(ceiling < AnalysisJobRunner.semanticBackfillSufficientAdScanFraction,
+                "and the ceiling is under the floor, so no scan could ever have retired it")
+    }
+
+    @available(iOS 26.0, *)
+    @Test("playhead-nffz — the MIRROR: a reachable ceiling still names the budget, so the cause discriminates")
+    func reachableCeilingStillNamesTheBudget() async throws {
+        // Identical driving loop to the test above, on the head-hole store —
+        // transcribed end to end, so the ceiling is 1.0 and the budget IS what
+        // retired it. Without this the new cause could be written on every row.
+        let assetId = "asset-nffz-reachable"
+        let store = try await makeHeadHoleStore(assetId: assetId)
+        let inputs = headHoleInputs(assetId: assetId)
+
+        var lastJobId: String?
+        for _ in 1...AdmissionController.maxRetries {
+            let run = try await makeRunner(store: store, runtime: makeRuntime().runtime)
+                .runPendingBackfill(for: inputs)
+            lastJobId = run.admittedJobIds.first ?? lastJobId
+        }
+        let jobId = try #require(lastJobId)
+        let row = try #require(await store.fetchBackfillJob(byId: jobId))
+        #expect(row.status == .failed)
+        #expect(row.deferReason == "underCoverageBudgetSpent-fullEpisodeScan")
+
+        let summary = try #require(
+            try await store.fetchCoverageSummariesByAssetIds([assetId])[assetId]
+        )
+        #expect(summary.adScanCeilingFraction == 1.0,
+                "the transcript covers the whole episode; nothing about it binds")
+        #expect(try #require(summary.adScanFraction).rawValue < 0.98)
+    }
+
+    @Test("playhead-nffz — the ceiling is judged by the SAME floor, strictly")
+    func ceilingIsJudgedByTheSharedFloorStrictly() {
+        let floor = AnalysisJobRunner.semanticBackfillSufficientAdScanFraction
+        func constraint(_ ceiling: ReachRatio?) -> BackfillJobRunner.UnderCoverageConstraint? {
+            guard case let .underCovered(verdict) = BackfillJobRunner.coverageTerminalDecision(
+                phase: .fullEpisodeScan,
+                measurement: .measured(0.1),
+                ceiling: ceiling,
+                retryCount: 0,
+                cursorAdvanced: false
+            ) else { return nil }
+            return verdict.constraint
+        }
+        // AT the floor the transcript is sufficient — strict `<`, the same
+        // comparison `shouldSkipSemanticBackfill` and the library ✓ make.
+        #expect(constraint(floor) == .scanBudget)
+        #expect(constraint(ReachRatio(floor.rawValue - 0.001)) == .transcriptCeiling)
+        #expect(constraint(1.0) == .scanBudget)
+        // The five field ceilings, verbatim, measured with the shipped reader on
+        // db-pull10 (2026-08-14) and db-prewipe6 (2026-08-11).
+        for measured in [0.4436, 0.8961, 0.9341, 0.0697, 0.9274] {
+            #expect(constraint(ReachRatio(measured)) == .transcriptCeiling, "\(measured)")
+        }
+    }
+
+    @Test("playhead-nffz — an ABSENT or non-finite ceiling blames nothing")
+    func absentCeilingBlamesNothing() {
+        func constraint(_ ceiling: ReachRatio?) -> BackfillJobRunner.UnderCoverageConstraint? {
+            guard case let .underCovered(verdict) = BackfillJobRunner.coverageTerminalDecision(
+                phase: .fullEpisodeScan,
+                measurement: .unreadable,
+                ceiling: ceiling,
+                retryCount: 0,
+                cursorAdvanced: false
+            ) else { return nil }
+            return verdict.constraint
+        }
+        #expect(constraint(nil) == .scanBudget, "no evidence is not evidence of a short transcript")
+        for garbage in [Double.nan, .infinity, -.infinity] {
+            #expect(constraint(ReachRatio(garbage)) == .scanBudget,
+                    "\(garbage) is an absence wearing a quantity's clothes")
+        }
+    }
+
+    @Test("playhead-nffz — THE CEILING CHANGES THE CAUSE AND NOTHING ELSE: same retire flag, same count, everywhere")
+    func theCeilingChangesOnlyTheCause() {
+        // The failure mode of this fix is losing coverage: retiring a
+        // ceiling-bound job EARLY deletes the transcribed-but-unscanned audio it
+        // could still read (AA6CD430 has 58.62 s of it, and an ad can live
+        // there). So the retire flag and the persisted count must be BYTE-FOR-BYTE
+        // what they were before the ceiling existed, at every point of the budget
+        // and on both sides of the cursor rule.
+        let ceilings: [ReachRatio?] = [nil, 0.0, 0.4436, 0.9341, 0.98, 1.0]
+        let measurements: [BackfillJobRunner.AdScanMeasurement] = [
+            .measured(0), .measured(0.5), .unreadable
+        ]
+        for prior in 0...(AdmissionController.maxRetries + 1) {
+            for advanced in [true, false] {
+                for measurement in measurements {
+                    var seen: Set<String> = []
+                    for ceiling in ceilings {
+                        let decision = BackfillJobRunner.coverageTerminalDecision(
+                            phase: .fullEpisodeScan,
+                            measurement: measurement,
+                            ceiling: ceiling,
+                            retryCount: prior,
+                            cursorAdvanced: advanced
+                        )
+                        guard case let .underCovered(verdict) = decision else {
+                            Issue.record("expected under-covered for \(measurement)")
+                            continue
+                        }
+                        seen.insert("\(verdict.retires)/\(verdict.retryCount)")
+                    }
+                    #expect(seen.count == 1,
+                            "prior=\(prior) advanced=\(advanced): the ceiling moved the BUDGET, and it must only move the CAUSE — saw \(seen.sorted())")
+                }
+            }
+        }
+    }
+
+    @Test("playhead-nffz — the ceiling never turns a COMPLETING case into a non-completing one")
+    func theCeilingDoesNotWidenTheNonCompletingSet() {
+        // `.notMeasurable` completes by a policy this bead did not touch
+        // (playhead-w4rd owns whether it should), and a ceiling below the floor
+        // must not quietly start refusing it: that would be a COVERAGE change
+        // wearing a naming change's clothes, and it would strand every legacy
+        // duration-less row. Same for a fraction at or above the floor.
+        let floor = AnalysisJobRunner.semanticBackfillSufficientAdScanFraction
+        for ceiling in [nil, ReachRatio(0), ReachRatio(0.4436), ReachRatio(1)] as [ReachRatio?] {
+            #expect(BackfillJobRunner.coverageTerminalDecision(
+                phase: .fullEpisodeScan,
+                measurement: .notMeasurable,
+                ceiling: ceiling,
+                retryCount: 0,
+                cursorAdvanced: false
+            ) == .complete, "ceiling \(String(describing: ceiling)) must not refuse an unmeasurable row")
+            #expect(BackfillJobRunner.coverageTerminalDecision(
+                phase: .fullEpisodeScan,
+                measurement: .measured(floor),
+                ceiling: ceiling,
+                retryCount: 0,
+                cursorAdvanced: false
+            ) == .complete, "a scan AT the floor completes whatever its ceiling says")
+        }
+    }
+
+    @Test("playhead-nffz — the DEFERRAL cause is deliberately constraint-independent")
+    func theDeferralCauseIsUnchanged() {
+        // A deferred row is still resumable, so what it needs to say is "under
+        // coverage" — the constraint is a statement about why the job STOPPED,
+        // and a deferred job has not stopped. Pinned so that widening it later is
+        // a decision somebody makes rather than a side effect.
+        for phase in BackfillJobPhase.allCases {
+            #expect(BackfillJobRunner.underCoverageDeferReason(phase: phase)
+                    == "underCoverage-\(phase.rawValue)")
+        }
+    }
+
+    @Test("playhead-nffz — the two causes are distinct, greppable and phase-qualified")
+    func theTwoCausesAreDistinct() {
+        for phase in BackfillJobPhase.allCases {
+            let budget = BackfillJobRunner.underCoverageExpiryReason(
+                phase: phase, constraint: .scanBudget
+            )
+            let ceiling = BackfillJobRunner.underCoverageExpiryReason(
+                phase: phase, constraint: .transcriptCeiling
+            )
+            #expect(budget != ceiling)
+            #expect(budget == "underCoverageBudgetSpent-\(phase.rawValue)",
+                    "the budget string is PERSISTED and the V50 repair migration matches it — it must not drift")
+            #expect(ceiling == "transcriptCeilingBelowFloor-\(phase.rawValue)")
+            // Neither answers to the other's prefix grep, which is the whole
+            // point of splitting them: `underCoverageBudgetSpent-%` is what the
+            // budget-repair migration hands a fresh budget to.
+            #expect(!ceiling.hasPrefix("underCoverageBudgetSpent-"))
+            #expect(!budget.hasPrefix("transcriptCeilingBelowFloor-"))
+            #expect(!ceiling.hasPrefix(BackfillJobRunner.underCoverageDeferReason(phase: phase)))
+        }
     }
 }

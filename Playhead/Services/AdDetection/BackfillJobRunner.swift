@@ -1895,18 +1895,33 @@ actor BackfillJobRunner {
     /// "the store says this is not measurable" and "the store could not be read"
     /// have opposite safe answers at the terminal and the same one here.
     private func measuredAdScanFraction(assetId: String) async -> AdScanMeasurement {
+        await readAdScanCoverage(assetId: assetId).measurement
+    }
+
+    /// playhead-nffz: the measurement AND its own ceiling, off ONE summary row.
+    ///
+    /// The ceiling is ``AnalysisCoverageSummary/adScanCeilingFraction`` — the
+    /// bridged transcript over the same declared duration — never recomputed
+    /// here, for the same reason the fraction never is: the terminal, the
+    /// re-drive mint, the skip predicate and the library ✓ have to be dividing
+    /// the same numerators by the same denominator.
+    ///
+    /// A store failure yields `.unreadable` AND a `nil` ceiling. Both are
+    /// under-claims and they point the same way: the scan runs again, and nothing
+    /// is blamed on a transcript nobody managed to read.
+    private func readAdScanCoverage(assetId: String) async -> AdScanReading {
         do {
-            guard let fraction = try await store
-                .fetchCoverageSummariesByAssetIds([assetId])[assetId]?
-                .adScanFraction else {
-                return .notMeasurable
+            let summary = try await store.fetchCoverageSummariesByAssetIds([assetId])[assetId]
+            let ceiling = summary?.adScanCeilingFraction
+            guard let fraction = summary?.adScanFraction else {
+                return AdScanReading(measurement: .notMeasurable, ceiling: ceiling)
             }
-            return .measured(fraction)
+            return AdScanReading(measurement: .measured(fraction), ceiling: ceiling)
         } catch {
             logger.warning(
                 "playhead-41mu: ad-scan coverage read failed for asset \(assetId, privacy: .public): \(error.localizedDescription, privacy: .public); the episode is not certified as read"
             )
-            return .unreadable
+            return AdScanReading(measurement: .unreadable, ceiling: nil)
         }
     }
 
@@ -1930,9 +1945,15 @@ actor BackfillJobRunner {
         coverage: CoverageOutcome
     ) async -> CoverageTerminalDecision {
         guard job.phase == .fullEpisodeScan else { return .complete }
+        // playhead-nffz: ONE read, both quantities. Asking twice would let the
+        // decision compare a fraction taken at one instant against a bound taken
+        // at another, and a transcript that grew in between is exactly the
+        // interleaving that makes a ceiling look violated.
+        let reading = await readAdScanCoverage(assetId: job.analysisAssetId)
         return Self.coverageTerminalDecision(
             phase: job.phase,
-            measurement: await measuredAdScanFraction(assetId: job.analysisAssetId),
+            measurement: reading.measurement,
+            ceiling: reading.ceiling,
             retryCount: job.retryCount,
             cursorAdvanced: Self.cursorAdvanced(
                 from: job.progressCursor,
@@ -2000,13 +2021,34 @@ actor BackfillJobRunner {
             retryCount: attempts
         )
         if terminal {
+            // playhead-nffz: the cause is CONSUMED from the verdict, like the
+            // retire flag and the count beside it. This function does not hold
+            // the ceiling, so the only thing it could re-derive the cause from is
+            // the retry count — i.e. it would have to assume the budget was the
+            // cause, which is the false reading the constraint exists to remove.
+            let reason = Self.underCoverageExpiryReason(
+                phase: job.phase,
+                constraint: verdict.constraint
+            )
             try await store.markBackfillJobFailed(
                 jobId: job.jobId,
-                reason: Self.underCoverageExpiryReason(phase: job.phase),
+                reason: reason,
                 retryCount: attempts
             )
+            // playhead-nffz: spelled `terminalCause=`, NOT `cause=`, and the
+            // reason is a canary rather than taste.
+            // `FMDaemonRefusalSourceCanaryTests.testDaemonRefusalCauseFieldsNameTheTokenTheyDescribe`
+            // asserts this file contains EXACTLY ONE `cause=` log field, because
+            // that field is how a support-bundle grep tells which durable write
+            // each line describes — and it belongs to the daemon-refusal line.
+            // A second one makes the rule unable to say which write it is
+            // reading, which is why the canary counts rather than matches. It
+            // greps case-sensitively for `cause=\(`, so `terminalCause=` is a
+            // new field rather than a second instance of that one, exactly as
+            // `siblingCause=` already is. The merge gate caught this; no scoped
+            // run over the suites this diff touches could have.
             logger.error(
-                "FM backfill job \(job.jobId, privacy: .public) terminated: \(AdmissionController.maxRetries, privacy: .public) passes ended with the episode under the ad-scan floor"
+                "FM backfill job \(job.jobId, privacy: .public) terminated: \(AdmissionController.maxRetries, privacy: .public) passes ended with the episode under the ad-scan floor, terminalCause=\(reason, privacy: .public)"
             )
             return .failed
         }
@@ -2259,6 +2301,54 @@ actor BackfillJobRunner {
         case unreadable
     }
 
+    /// playhead-nffz: WHICH of the two constraints stopped this job reaching the
+    /// ad-scan floor.
+    ///
+    /// **The distinction is the bead.**
+    /// ``AnalysisJobRunner/semanticBackfillSufficientAdScanFraction`` is 0.98 of
+    /// the DECLARED DURATION, and ``AnalysisCoverageSummary/adScanFraction``'s
+    /// numerator is bounded by the BRIDGED TRANSCRIPT — so an episode whose
+    /// transcript covers less than 0.98 of its duration cannot clear that floor
+    /// however perfectly it is scanned. Until this existed, both outcomes wrote
+    /// `underCoverageBudgetSpent-<phase>`, which names the retry budget as the
+    /// cause when the budget had nothing to do with it.
+    ///
+    /// **That mis-blame is not cosmetic; it has already been paid for.**
+    /// `playhead-se0x` was filed as a P1 — "the retry budget kills a CONVERGING
+    /// job … terminated at 84 % scanned" — off exactly such a row: F7BB38BB on
+    /// the 2026-08-11 pull, `underCoverageBudgetSpent-fullEpisodeScan`, whose
+    /// cursor of 1620 s on a 1931 s episode is not how far the budget let it get
+    /// but how far its TRANSCRIPT reached. The bead was refuted after a night's
+    /// work. A durable cause naming the binding constraint is what a device pull
+    /// needs in order not to ask that question again.
+    enum UnderCoverageConstraint: Sendable, Equatable {
+        /// The floor is reachable on this transcript and the job stopped
+        /// converging anyway — the pre-existing case, unchanged in every respect.
+        case scanBudget
+        /// ``AnalysisCoverageSummary/adScanCeilingFraction`` is itself below the
+        /// floor, so no amount of further scanning could have retired this job.
+        case transcriptCeiling
+    }
+
+    /// playhead-nffz: everything one coverage read tells the terminal.
+    ///
+    /// Both halves come from ONE ``AnalysisCoverageSummary``, deliberately: the
+    /// measurement and its own ceiling are two properties of the same row, and
+    /// fetching them separately would let the terminal compare a fraction from
+    /// one instant against a bound from another.
+    struct AdScanReading: Sendable, Equatable {
+        let measurement: AdScanMeasurement
+        /// ``AnalysisCoverageSummary/adScanCeilingFraction``, or `nil`.
+        ///
+        /// **One `nil`, not three, and that is not the shortcut it looks like.**
+        /// ``AdScanMeasurement`` distinguishes `notMeasurable` from `unreadable`
+        /// because those two have OPPOSITE safe answers at this terminal. Every
+        /// way of failing to measure a ceiling has the SAME safe answer — do not
+        /// blame the transcript without evidence — so an enum here would be three
+        /// spellings of one behaviour.
+        let ceiling: ReachRatio?
+    }
+
     /// playhead-e6d3: the WHOLE under-coverage verdict — whether the job retires
     /// and what `retryCount` to persist — as one value.
     ///
@@ -2271,13 +2361,25 @@ actor BackfillJobRunner {
     /// for one quantity is the defect family this queue keeps paying out on.
     struct UnderCoverageVerdict: Sendable, Equatable {
         /// `true` → the row goes `failed` with
-        /// ``BackfillJobRunner/underCoverageExpiryReason(phase:)``; `false` →
-        /// `deferred`, resumable.
+        /// ``BackfillJobRunner/underCoverageExpiryReason(phase:constraint:)``;
+        /// `false` → `deferred`, resumable.
         let retires: Bool
         /// The value to PERSIST, not a delta. `0` on an attempt that advanced
         /// the covered prefix (playhead-bkhc's reset, mirrored here by
         /// playhead-e6d3/fs2h); otherwise `prior + 1`.
         let retryCount: Int
+        /// playhead-nffz: which constraint bound, and therefore which cause the
+        /// retiring write records.
+        ///
+        /// **It travels on the verdict for UC04's reason, one bead later.** The
+        /// retire flag and the count already live here because re-deriving either
+        /// at the write is how a persistence path came to apply its own private
+        /// copy of a rule the pure decision owned. The cause string is the third
+        /// thing the decision knows and the write must not re-decide: the write
+        /// does not hold the ceiling, so a re-derivation there could only guess
+        /// from the retry count — which is precisely the reading (`the budget
+        /// killed it`) this bead exists to stop making.
+        let constraint: UnderCoverageConstraint
     }
 
     /// playhead-41mu: may this job call itself `complete`?
@@ -2449,13 +2551,60 @@ actor BackfillJobRunner {
     /// at 43.26 s). That is the cursor rule's conservatism, not this budget's,
     /// and widening the predicate to "the measured fraction moved" would need a
     /// second persisted quantity — which is the trade this bead declined.
+    ///
+    /// **playhead-nffz: the decision now also says WHICH CONSTRAINT BOUND, and
+    /// nothing else about it changes.** Read the two paragraphs above again with
+    /// the denominators in mind: the floor is `0.98` of the DECLARED DURATION,
+    /// and the fraction it judges is `adScanCoveredSec ÷ episodeDurationSec`
+    /// whose numerator is INTERSECTED with the bridged transcript. So the floor's
+    /// denominator is the episode and the numerator's supremum is the transcript
+    /// — two populations, one comparison, which is this repo's standing defect
+    /// class at the most expensive level it has appeared. An episode transcribed
+    /// to 0.4436 of its duration cannot clear a 0.98 floor with a perfect scan,
+    /// and until now it retired saying `underCoverageBudgetSpent-fullEpisodeScan`.
+    ///
+    /// Measured with the shipped reader on two device pulls (2026-08-14 and
+    /// 2026-08-11), EIGHT assets are in that state: C065AD03 0.4384 against a
+    /// ceiling of 0.4436, AA6CD430 0.8600/0.8961, C0610BF9 0.9264/0.9341,
+    /// 590D6656 0.0257/0.0697, B80D3EE0 0.0691/0.9031, 60DFF7B4 0.2544/0.2575,
+    /// F7BB38BB 0.8202/0.8300 and 66D32039 0.9264/0.9274.
+    ///
+    /// **What is deliberately NOT changed, because the failure mode of this fix
+    /// is worse than the defect.** The floor is untouched (0.98 is Dan's call),
+    /// `adScanFraction` is untouched, and — the important one — the RETIRE
+    /// CONDITION is untouched. A ceiling-bound job still gets the full budget of
+    /// three consecutive barren attempts. Retiring it the moment the ceiling is
+    /// seen would delete real work: AA6CD430 has 58.62 s of transcribed audio its
+    /// scan has never read, and those seconds can hold an ad even though reading
+    /// them cannot lift the episode over the floor. This bead changes what the
+    /// row SAYS, not what the lane DOES.
+    ///
+    /// **And nothing here makes an episode look readier.** The library ✓ divides
+    /// ``AnalysisCoverageSummary/adScanFraction`` by the same floor as before, so
+    /// C065AD03 still renders NOT complete at 0.4384 — which is the honest answer
+    /// for an episode where 56 % of the audio has no transcript to scan. Why the
+    /// transcript stops at 44 % is transcription REACH and is filed, not answered
+    /// here (playhead-by07).
     nonisolated static func coverageTerminalDecision(
         phase: BackfillJobPhase,
         measurement: AdScanMeasurement,
+        ceiling: ReachRatio?,
         retryCount: Int,
         cursorAdvanced: Bool
     ) -> CoverageTerminalDecision {
         guard phase == .fullEpisodeScan else { return .complete }
+        // playhead-nffz: the ceiling is judged against the SAME floor the
+        // measurement is, because that is the only comparison that answers "could
+        // a perfect scan ever have retired this job?". A `nil` or non-finite
+        // ceiling is an ABSENCE and blames nothing — under-claim, exactly as
+        // every other reader of a missing coverage quantity does.
+        let constraint: UnderCoverageConstraint
+        if let ceiling = ceiling.finiteValue,
+           ceiling < AnalysisJobRunner.semanticBackfillSufficientAdScanFraction {
+            constraint = .transcriptCeiling
+        } else {
+            constraint = .scanBudget
+        }
         let underCovered: Bool
         switch measurement {
         case let .measured(fraction):
@@ -2483,12 +2632,17 @@ actor BackfillJobRunner {
         // land on 0, not stay at 2, because the quantity is CONSECUTIVE barren
         // attempts and one that banked audio ends the run of them.
         guard !cursorAdvanced else {
-            return .underCovered(UnderCoverageVerdict(retires: false, retryCount: 0))
+            return .underCovered(UnderCoverageVerdict(
+                retires: false,
+                retryCount: 0,
+                constraint: constraint
+            ))
         }
         let attempts = retryCount + 1
         return .underCovered(UnderCoverageVerdict(
             retires: attempts >= AdmissionController.maxRetries,
-            retryCount: attempts
+            retryCount: attempts,
+            constraint: constraint
         ))
     }
 
@@ -2665,8 +2819,34 @@ actor BackfillJobRunner {
     /// playhead-41mu: the terminal form of the above, once the attempt budget is
     /// spent. A job that lands here has genuinely stopped converging, and the row
     /// says so rather than pretending it finished.
-    nonisolated static func underCoverageExpiryReason(phase: BackfillJobPhase) -> String {
-        "underCoverageBudgetSpent-\(phase.rawValue)"
+    ///
+    /// **playhead-nffz: it now names the BINDING CONSTRAINT, and the two strings
+    /// are not two names for one event.**
+    ///
+    ///   * `underCoverageBudgetSpent-<phase>` — unchanged, byte for byte, because
+    ///     it is a persisted value with readers: the V50 repair migration matches
+    ///     `deferReason LIKE 'underCoverageBudgetSpent-%'` to hand one fresh
+    ///     budget to rows the FLAT budget rule retired, and
+    ///     ``UnclassifiedModelFailure`` classifies it. Both of those are about a
+    ///     BUDGET, and a ceiling-bound row must not be in either population — a
+    ///     fresh budget buys a job that cannot converge three more barren
+    ///     attempts.
+    ///   * `transcriptCeilingBelowFloor-<phase>` — the transcript itself cannot
+    ///     support the floor. See ``UnderCoverageConstraint`` for the P1 that was
+    ///     filed, worked and refuted because this string did not exist.
+    ///
+    /// One function rather than two so the pair cannot drift into three spellings
+    /// of two events, and so the switch is exhaustive over the constraint.
+    nonisolated static func underCoverageExpiryReason(
+        phase: BackfillJobPhase,
+        constraint: UnderCoverageConstraint
+    ) -> String {
+        switch constraint {
+        case .scanBudget:
+            "underCoverageBudgetSpent-\(phase.rawValue)"
+        case .transcriptCeiling:
+            "transcriptCeilingBelowFloor-\(phase.rawValue)"
+        }
     }
 
     /// playhead-pmp9 / playhead-bkhc / playhead-qbib, extracted verbatim by

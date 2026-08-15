@@ -292,6 +292,20 @@ struct BridgedTranscriptSeconds: CoverageQuantity {
     let rawValue: Double
     init(_ rawValue: Double) { self.rawValue = rawValue }
 
+    /// playhead-nffz: this area past the whole declared duration is proof the two
+    /// describe different audio — ``AdScanSeconds/exceeds(_:byMoreThan:)``'s
+    /// judgement, applied to the area that BOUNDS it.
+    ///
+    /// It is deliberately a second predicate rather than a protocol extension on
+    /// ``CoverageQuantity``. Rail TY22 exists because the inline `Double`
+    /// comparison it replaced accepted every area on the summary, and a generic
+    /// `exceeds` over the protocol would put that straight back: ``CoveredSeconds``,
+    /// ``AnalyzedSeconds`` and this type would all satisfy the guard protecting
+    /// the ad-scan numerator, which is exactly the substitution probe PA2 made.
+    func exceeds(_ duration: EpisodeSeconds, byMoreThan tolerance: Double) -> Bool {
+        rawValue > duration.rawValue + tolerance
+    }
+
     /// This area over the DECLARED duration, with the division written ONCE and
     /// the numerator as the receiver — so the reciprocal that probe PJ5 wrote is
     /// not an expression anybody can form. Same shape and same guards as
@@ -844,6 +858,44 @@ struct ReachRatio: CoverageQuantity {
         }
         self.init(min(1, examined.rawValue / duration.rawValue))
     }
+
+    /// playhead-nffz: the LARGEST VALUE the reach above can ever take on the
+    /// transcript that exists today — the same denominator, and the numerator
+    /// replaced by the numerator's own upper bound.
+    ///
+    /// * numerator: ``BridgedTranscriptSeconds`` — the bridged transcribed area,
+    ///   which is precisely the region ``AdScanSeconds/init(examined:within:bridging:)``
+    ///   intersects the scan windows WITH. So `adScanCoveredSec <= this`, by
+    ///   construction and not by observation.
+    /// * denominator: ``EpisodeSeconds`` — the same DECLARED duration.
+    ///
+    /// **Why this is a `ReachRatio` and not a fifth ratio type.** It is the same
+    /// quantity as ``init(examined:ofDeclaredDuration:)`` evaluated at the
+    /// supremum of its numerator, so it is measured in the same units, against
+    /// the same denominator, and — the whole point — against the SAME FLOOR. A
+    /// separate type would make the one comparison this exists for
+    /// (`ceiling < semanticBackfillSufficientAdScanFraction`) unwritable.
+    ///
+    /// **Why it is nonetheless a separate INITIALIZER, with a label that names
+    /// the bound.** This is the defect playhead-nffz was filed for, in reverse:
+    /// `AnalysisJobRunner.semanticBackfillSufficientAdScanFraction` is 0.98 of
+    /// the DECLARED DURATION while the fraction it judges cannot exceed the
+    /// TRANSCRIPT. Two populations, one comparison. Naming the ceiling makes the
+    /// second population sayable; if it shared `examined:` a
+    /// ``BridgedTranscriptSeconds`` could be published as the measured reach
+    /// itself, which would report every ceiling-bound episode as fully scanned —
+    /// this bead's own bug, upside down and far worse.
+    ///
+    /// Same guards, same clamp, same `nil` semantics as its sibling, so a caller
+    /// comparing the two is never comparing a guarded number with an unguarded
+    /// one.
+    init?(ceiling: BridgedTranscriptSeconds?, ofDeclaredDuration duration: EpisodeSeconds?) {
+        guard let ceiling, ceiling.isFinite, ceiling.rawValue >= 0,
+              let duration, duration.isFinite, duration.rawValue > 0 else {
+            return nil
+        }
+        self.init(min(1, ceiling.rawValue / duration.rawValue))
+    }
 }
 
 /// playhead-x0lb: **DENSITY** — how much of the episode carries transcript text.
@@ -1147,7 +1199,9 @@ extension EpisodeSeconds {
 //   AnalysisCoverageSummary.featureCoverageEndSec     FrontierSeconds      s   REACH: the DSP feature-extraction watermark
 //   AnalysisCoverageSummary.confirmedAdCoverageEndSec FrontierSeconds      s   REACH: MAX(endTime) of DETECTED ad windows — not coverage at all
 //   AnalysisCoverageSummary.finalPassCoverageEndSec   WatermarkSeconds     s   REACH: MAX(endTime) of final chunks, watermark fallback
+//   AnalysisCoverageSummary.adScanCeilingSec          BridgedTranscriptSeconds s AREA: the bridged transcript — the SUPREMUM of adScanCoveredSec (nffz)
 //   AnalysisCoverageSummary.adScanFraction            ReachRatio      [0,1]    adScanCoveredSec ÷ episodeDurationSec
+//   AnalysisCoverageSummary.adScanCeilingFraction     ReachRatio      [0,1]    adScanCeilingSec ÷ episodeDurationSec — the SAME ratio at its supremum (nffz)
 //   AnalysisCoverageSummary.transcriptDensity         DensityRatio    [0,1]    fastTranscriptCoveredSec ÷ episodeDurationSec
 //   BackfillProgressCursor.lastProcessedUpperBoundSec EpisodeSeconds       s   position; asserts [0, x] OF THE EPISODE is covered
 //   CoarseCoverageWalk.contiguousUpperBoundSec        PlanListSeconds      s   position; a CONTIGUOUS prefix of the handed-over list (wogi)
