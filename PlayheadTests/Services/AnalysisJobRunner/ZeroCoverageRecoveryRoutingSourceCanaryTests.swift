@@ -1,25 +1,35 @@
 // ZeroCoverageRecoveryRoutingSourceCanaryTests.swift
 // playhead-rqgr.
 //
-// TWO SITES NO RUNTIME TEST ON THIS HARNESS CAN REACH, AND BOTH ARE WHERE THE
-// DEFECT LIVED.
+// THE FIRST VERSION OF THIS HEADER SAID BOTH SITES BELOW WERE UNREACHABLE FROM
+// ANY RUNTIME TEST. THE MERGE GATE REFUTED HALF OF THAT, AND THE CORRECTION IS
+// WORTH MORE THAN THE CLAIM WAS.
 //
-//   1. `AnalysisJobRunner.emitTranscriptionTimeoutJournal` is private, and the
-//      runner holds a concrete `TranscriptEngineService` with no protocol seam
-//      and a hardcoded 300 s timeout — the same constraint
-//      `AnalysisJobRunnerSubscribeBeforeStartTests` and playhead-8ysk already
-//      document. `ZeroCoverageRecoveryRoutingTests` can prove the DISPOSITION
-//      is right; nothing at runtime can prove the emission site uses it. The
-//      shipped defect was precisely a correct derivation sitting beside a
-//      literal.
+//   1. `AnalysisJobRunner.emitTranscriptionTimeoutJournal` IS reachable, and
+//      something was already there.
+//      `AnalysisJobRunnerTests.testInterruptedRunDoesNotFenceTheAsset`
+//      (playhead-ngev) drives the REAL runner through the REAL
+//      `TranscriptEngineService` with a `CancellingRecognizer`, lands on the
+//      zero-coverage branch carrying an interrupted failure, and reads the
+//      persisted `work_journal` rows back. It reported rqgr's change as a NEW
+//      failure on the merge gate — because it asserted the row was `.failed`,
+//      which is the very contradiction this bead removes — and that is how the
+//      claim was found to be wrong. Its assertion moved to `.preempted` plus a
+//      `.failed`-is-empty check; it is the behavioural rail for this site.
 //
-//   2. `AnalysisCoordinator.recoverOrphans` needs ~6 collaborator services to
-//      construct, which is why `EpisodeLeaseAndWorkJournalTests` replays its
-//      policy against the store instead of calling it. A replayed policy pins
-//      the replica. Both sides now read
-//      `WorkJournalEntry.EventType.orphanRecoveryRouting`, so the duplication
-//      is one rule rather than two — and this canary is what holds the
-//      production side to it.
+//      What this canary still buys, narrowly: that test observes the EVENT and
+//      cannot observe which of `SliceCompletionInstrumentation`'s two in-memory
+//      tallies was incremented — a process-global actor with no per-test seam.
+//      So the counter half below has no behavioural equivalent, and the event
+//      half is belt to that test's braces.
+//
+//   2. `AnalysisCoordinator.recoverOrphans` genuinely is unreachable: it needs
+//      ~6 collaborator services to construct, which is why
+//      `EpisodeLeaseAndWorkJournalTests` REPLAYS its policy against the store
+//      instead of calling it. A replayed policy pins the replica. Both sides
+//      now read `WorkJournalEntry.EventType.orphanRecoveryRouting`, so the
+//      duplication is one rule rather than two — and this canary is the only
+//      thing holding the production side to it. Filed as playhead-bwyu.
 //
 // A SOURCE CANARY IS A WEAK INSTRUMENT AND ITS LIMIT IS NAMED HERE RATHER THAN
 // DISCOVERED LATER. It can be out-spelled: a local `let e: WorkJournalEntry

@@ -1916,6 +1916,11 @@ FOCUSED_SUITES=(
   -only-testing:PlayheadTests/ZeroCoverageRecoveryRoutingTests
   -only-testing:PlayheadTests/EpisodeLeaseAndWorkJournalTests
   -only-testing:PlayheadTests/ZeroCoverageRecoveryRoutingSourceCanaryTests
+  # The BEHAVIOURAL rail for the emission site (playhead-ngev's, adopted by
+  # rqgr). Targeted per-test rather than by suite: `AnalysisJobRunnerTests` is a
+  # heavy real-store/real-engine suite and this is the one case in it that
+  # reaches the zero-coverage journal write.
+  -only-testing:PlayheadTests/AnalysisJobRunnerTests/testInterruptedRunDoesNotFenceTheAsset
 )
 
 # Named to match the `/private/tmp/playhead-*` pattern `scripts/disk-cleanup.sh`
@@ -3096,6 +3101,12 @@ T_RQ_UNREPORTED="an exit nobody reported on is terminal on both records"
 # `analysis_jobs` write are observed end to end.
 T_RQ_STORE_REQUEUE="playhead-rqgr: an interrupted zero-coverage orphan requeues instead of being cleared"
 T_RQ_STORE_TERMINAL="playhead-rqgr control: a concluded or unreported zero-coverage orphan stays terminal"
+# The BEHAVIOURAL rail for the emission site, found by the merge gate rather
+# than by design: it drives the real runner through the real engine with a
+# cancelling recognizer and reads the persisted rows back. A first draft of the
+# canary below claimed no runtime test could reach this site; this test is the
+# refutation, and RQ05 is killed by it as well as by the canary.
+T_RQ_UNFENCED="an interrupted run leaves the shared engine unfenced"
 # XCTest, so \`Suite/method\`.
 T_RQ_CANARY_EVENT="ZeroCoverageRecoveryRoutingSourceCanaryTests/testTimeoutJournalTakesItsEventFromTheDisposition"
 T_RQ_CANARY_COUNTER="ZeroCoverageRecoveryRoutingSourceCanaryTests/testTimeoutJournalRoutesTheSliceCounterByTheSameDisposition"
@@ -6772,7 +6783,7 @@ MUTATIONS=(
   # still correct; it is simply not used. This is the shape the defect actually
   # had — a right derivation sitting beside a literal — and no runtime test on
   # this harness can see it.
-  "RQ05|802|AJRUN|$T_RQ_CANARY_EVENT"
+  "RQ05|802|AJRUN|$T_RQ_CANARY_EVENT;$T_RQ_UNFENCED"
   # RQ06 — the SLICE COUNTER, which is the third record of the same event and
   # was the same literal one layer down: an unconditional `recordFailed` tallies
   # a listener's scrub into `slicesFailed`, the one quantity that number exists

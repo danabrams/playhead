@@ -1992,12 +1992,40 @@ struct AnalysisJobRunnerTests {
 
         // And the row still names what happened, so declining to stop is not
         // also declining to report.
+        //
+        // playhead-rqgr: THE ROW IS `.preempted` NOW, AND THIS ASSERTION USED
+        // TO READ `.failed`. It was not merely a label. `work_journal.eventType`
+        // is what `AnalysisCoordinator.recoverOrphans` routes a cold-launch
+        // orphan on — `.failed` clears the lease with NO requeue — so this test
+        // was pinning a row that told a cold launch the opposite of what the
+        // `.interrupted` outcome asserted eleven lines above. Two durable
+        // records of one event, and this test was the rail holding them apart.
+        //
+        // The ZERO check is the half that matters and is deliberately kept
+        // alongside the positive one: "a `.preempted` row exists" would still
+        // pass if the runner wrote both.
         let entries = try await store.fetchWorkJournalEntries(
             episodeId: "test-ep", generationID: generationID
         )
         let failedRows = entries.filter { $0.eventType == .failed }
-        #expect(failedRows.count == 1, "expected one failed row; got \(failedRows.count)")
-        guard let row = failedRows.first else { return }
+        #expect(
+            failedRows.isEmpty,
+            """
+            an interrupted run wrote \(failedRows.count) terminal row(s). A cold launch \
+            that reads one clears the lease without requeue, which is the opposite of \
+            the .interrupted outcome this same exit reported
+            """
+        )
+        let preemptedRows = entries.filter { $0.eventType == .preempted }
+        #expect(
+            preemptedRows.count == 1,
+            "expected one preempted row; got \(preemptedRows.count)"
+        )
+        guard let row = preemptedRows.first else { return }
+        #expect(
+            row.eventType.orphanRecoveryRouting == .requeue,
+            "the row an interrupted run leaves must be one a cold launch resumes"
+        )
         #expect(
             row.cause == .pipelineError,
             "a scrub is not an ASR failure (got \(row.cause?.rawValue ?? "nil"))"
