@@ -34,6 +34,29 @@
 //      canary, because the direction a behavioural test cannot reach is a
 //      counter that is declared and incremented but not yet wired to anything a
 //      test decodes — exactly the shape that let this one sit unread for months.
+//
+// playhead-vev7: the OTHER half of the same defect, in the shared helper rather
+// than in one field. `rate()` answered a zero denominator with `return 0`, so
+// "nothing was measured" and "measured, and it was zero" were the same bytes.
+// Every derived rate is `Double?` now and an unmeasured one is an ABSENT key.
+//
+// The rails below are arranged around the one question a device pull asks and
+// the old shape could not answer — *did this happen and read zero, or did it
+// not happen?* — so they come in pairs:
+//
+//   `unmeasuredRatesAreAbsentFromTheWire`  the two payloads must DIFFER.
+//   `payloadKeySetIsPinned`                the key set with nothing measured,
+//                                          and the key set with everything
+//                                          measured, pinned separately. This is
+//                                          what kills `?? 0`: flattening nil
+//                                          back to zero puts the key BACK.
+//   `runnerRecordsOperationalMetricsEvent` the production witness — one real
+//                                          event carrying an absent
+//                                          `resumeSuccessRate` beside a present
+//                                          `thermalDeferralRate: 0`.
+//   `derivedRatesAreDeclaredOptional`      the source direction: a computed
+//                                          property is never encoded, so no wire
+//                                          rail can see one (playhead-kvi1's M7).
 
 import Foundation
 import Testing
@@ -81,6 +104,135 @@ struct OperationalMetricsTests {
         let encoded = try JSONEncoder().encode(metrics)
         let decoded = try JSONDecoder().decode(OperationalMetrics.self, from: encoded)
         #expect(decoded == metrics)
+    }
+
+    // MARK: - playhead-vev7 rails: an unmeasured rate is absent, not zero
+
+    /// THE BEAD, in one test. Two payloads that the old shape encoded
+    /// identically, and the only difference between the jobs that produced them
+    /// is whether the thing happened at all:
+    ///
+    ///   A. `resumeAttemptCount: 0`             — nothing was resumed.
+    ///   B. `resumeAttemptCount: 1, success: 0` — a resume was attempted and it
+    ///                                            failed.
+    ///
+    /// Both used to encode `"resumeSuccessRate":0`. On the 2026-08-11 overnight
+    /// pull that was one row of twenty-six reading as a failed resume that never
+    /// happened, with nothing in the payload able to say which.
+    @Test("an unmeasured rate is ABSENT from the wire, and a measured zero is present as 0")
+    func unmeasuredRatesAreAbsentFromTheWire() throws {
+        func encode(_ counters: OperationalMetrics.Counters, audio: Double) throws -> [String: Any] {
+            let metrics = OperationalMetrics(
+                jobId: "job-absent",
+                analysisAssetId: "asset-absent",
+                jobPhase: "fullEpisodeScan",
+                scanCohortJSON: makeTestScanCohortJSON(),
+                wallTimeSeconds: 10,
+                audioDurationSeconds: audio,
+                counters: counters
+            )
+            return try #require(
+                try JSONSerialization.jsonObject(with: JSONEncoder().encode(metrics)) as? [String: Any]
+            )
+        }
+
+        let nothingAttempted = try encode(
+            OperationalMetrics.Counters(resumeAttemptCount: 0, resumeSuccessCount: 0),
+            audio: 3_600
+        )
+        let attemptedAndFailed = try encode(
+            OperationalMetrics.Counters(resumeAttemptCount: 1, resumeSuccessCount: 0),
+            audio: 3_600
+        )
+
+        #expect(
+            nothingAttempted["resumeSuccessRate"] == nil,
+            "a rate with no observations must not be on the wire at all"
+        )
+        #expect(attemptedAndFailed["resumeSuccessRate"] as? Double == 0)
+
+        // The property that the old shape could not hold: these two payloads
+        // must not be the same bytes.
+        let a = try JSONSerialization.data(withJSONObject: nothingAttempted, options: [.sortedKeys])
+        let b = try JSONSerialization.data(withJSONObject: attemptedAndFailed, options: [.sortedKeys])
+        #expect(a != b, "'never attempted' and 'attempted and failed' encode identically")
+    }
+
+    /// Every zero-denominator case, at the model level, including the two that a
+    /// device pull has never yet exhibited. `perAudioHour` is here because it
+    /// carried the identical `return 0` and is NOT protected by the forced
+    /// counters — `BackfillJobRunner` really does pass `audioSegments: []` on
+    /// two paths (see `runnerRecordsOperationalMetricsForThermalDeferrals`,
+    /// which asserts it end to end).
+    @Test("every rate with a zero denominator is nil, not 0")
+    func zeroDenominatorRatesAreNil() throws {
+        let unmeasured = OperationalMetrics(
+            jobId: "job-zero",
+            analysisAssetId: "asset-zero",
+            jobPhase: "fullEpisodeScan",
+            scanCohortJSON: makeTestScanCohortJSON(),
+            wallTimeSeconds: 42,
+            audioDurationSeconds: 0,
+            counters: OperationalMetrics.Counters()
+        )
+
+        #expect(unmeasured.wallTimePerAudioHour == nil)
+        #expect(unmeasured.energyPerEpisode == nil)
+        #expect(unmeasured.resumeSuccessRate == nil)
+        #expect(unmeasured.perCohortDrift == nil)
+        #expect(unmeasured.thermalDeferralRate == nil)
+
+        // And the mirror: a real observation that read zero is still a number.
+        let measuredZero = OperationalMetrics(
+            jobId: "job-zero-measured",
+            analysisAssetId: "asset-zero-measured",
+            jobPhase: "fullEpisodeScan",
+            scanCohortJSON: makeTestScanCohortJSON(),
+            wallTimeSeconds: 0,
+            audioDurationSeconds: 3_600,
+            counters: OperationalMetrics.Counters(
+                episodeCount: 1,
+                estimatedEnergyUnits: 0,
+                resumeAttemptCount: 1,
+                resumeSuccessCount: 0,
+                cohortDriftEvaluationCount: 1,
+                cohortDriftSignalCount: 0,
+                admissionDecisionCount: 1,
+                thermalDeferralCount: 0
+            )
+        )
+
+        #expect(measuredZero.wallTimePerAudioHour == 0)
+        #expect(measuredZero.energyPerEpisode == 0)
+        #expect(measuredZero.resumeSuccessRate == 0)
+        #expect(measuredZero.perCohortDrift == 0)
+        #expect(measuredZero.thermalDeferralRate == 0)
+    }
+
+    /// A v3 payload written with nothing measured must decode back to nil rather
+    /// than throwing on the missing keys. Swift's synthesized `init(from:)` uses
+    /// `decodeIfPresent` for optionals — a property of the compiler, not of this
+    /// code, so it is pinned rather than assumed. (`oldV1PayloadStillDecodes`
+    /// pins the same claim for the unknown-key direction.)
+    @Test("a v3 payload with absent rates round-trips, and absence survives the round trip")
+    func absentRatesRoundTrip() throws {
+        let unmeasured = OperationalMetrics(
+            jobId: "job-roundtrip",
+            analysisAssetId: "asset-roundtrip",
+            jobPhase: "fullEpisodeScan",
+            scanCohortJSON: makeTestScanCohortJSON(),
+            wallTimeSeconds: 1,
+            audioDurationSeconds: 0,
+            counters: OperationalMetrics.Counters()
+        )
+
+        let encoded = try JSONEncoder().encode(unmeasured)
+        let decoded = try JSONDecoder().decode(OperationalMetrics.self, from: encoded)
+
+        #expect(decoded == unmeasured)
+        #expect(decoded.resumeSuccessRate == nil)
+        #expect(decoded.wallTimePerAudioHour == nil)
+        #expect(decoded.schemaVersion == 3)
     }
 
     @Test("scan cohort identity ignores runtime OS build")
@@ -214,6 +366,32 @@ struct OperationalMetricsTests {
         #expect(metrics.counters.admissionDecisionCount == 1)
         #expect(metrics.counters.cohortDriftEvaluationCount == 1)
         #expect(metrics.counters.thermalDeferralCount == 0)
+
+        // playhead-vev7, THE PRODUCTION WITNESS. One real event carrying both
+        // readings side by side, which is exactly the pair the old shape
+        // collapsed:
+        //
+        //   resumeSuccessRate    ABSENT  — this job was never resumed.
+        //   thermalDeferralRate  0       — admission ran once and deferred
+        //                                  nothing. A measurement.
+        //
+        // On the 2026-08-11 pull both of those were the characters `0`.
+        #expect(metrics.counters.resumeAttemptCount == 0)
+        #expect(metrics.resumeSuccessRate == nil)
+        #expect(metrics.thermalDeferralRate == 0)
+        #expect(
+            !event.evidenceJSON.contains("resumeSuccessRate"),
+            "an unmeasured rate must be absent from the PERSISTED payload, not zero: \(event.evidenceJSON)"
+        )
+        #expect(event.evidenceJSON.contains("\"thermalDeferralRate\":0"))
+
+        // The forced counters are what keep the other three denominators away
+        // from zero, and nothing outside `operationalCounters` says so. If one of
+        // these ever becomes conditional, the rate above it starts going absent
+        // and this is the line that will say why.
+        #expect(metrics.counters.episodeCount == 1)
+        #expect(metrics.energyPerEpisode != nil)
+        #expect(metrics.perCohortDrift != nil)
     }
 
     @Test("runner records operational metrics for thermal admission deferrals")
@@ -287,6 +465,18 @@ struct OperationalMetricsTests {
         #expect(decoded.allSatisfy { $0.counters.thermalDeferralCount == 1 })
         #expect(decoded.allSatisfy { $0.counters.fmPassCount == 0 })
         #expect(decoded.allSatisfy { $0.counters.persistedScanResultCount == 0 })
+
+        // playhead-vev7: the PRODUCTION path that proves `perAudioHour`'s
+        // zero-denominator guard is reachable, which is why it was fixed with
+        // `rate()` rather than left as the file's last fabrication. This branch
+        // records with `audioSegments: []` — no audio was scanned at all — and
+        // the reading used to be `wallTimePerAudioHour: 0`, i.e. "an hour of
+        // audio in no time". Unlike the other three denominators this one is not
+        // protected by `operationalCounters`' forced 1s; it simply produced no
+        // rows on the 2026-08-11 pull, where all 26 events carry real audio.
+        #expect(decoded.allSatisfy { $0.audioDurationSeconds == 0 })
+        #expect(decoded.allSatisfy { $0.wallTimePerAudioHour == nil })
+        #expect(metricEvents.allSatisfy { !$0.evidenceJSON.contains("wallTimePerAudioHour") })
     }
 
     @Test("runner reports scanned audio duration as segment sum for disjoint narrowed phases")
@@ -486,8 +676,65 @@ struct OperationalMetricsTests {
     /// If you are here because you legitimately added a field: add it to the
     /// list, and say in the commit message what would be read if the thing it
     /// names had never happened.
+    ///
+    /// playhead-vev7 made this two pins rather than one, and the FIRST is the
+    /// load-bearing half. With nothing measured, the five derived rates must be
+    /// absent — so `?? 0` anywhere on the assignment path puts a key back and
+    /// fails here. That is the "moved the fabrication rather than removed it"
+    /// direction, and it is the only rail that can see it.
     @Test("the persisted payload's key set is pinned, so a re-added cache counter cannot slip back in")
     func payloadKeySetIsPinned() throws {
+        let alwaysPresent: Set<String> = [
+            "schemaVersion",
+            "jobId",
+            "analysisAssetId",
+            "jobPhase",
+            "scanCohortIdentity",
+            "scanCohortJSON",
+            "wallTimeSeconds",
+            "audioDurationSeconds",
+            "counters",
+        ]
+        let derivedRates: Set<String> = [
+            "wallTimePerAudioHour",
+            "energyPerEpisode",
+            "resumeSuccessRate",
+            "perCohortDrift",
+            "thermalDeferralRate",
+        ]
+
+        // Nothing measured: every denominator is zero, so every rate is absent.
+        let unmeasured = OperationalMetrics(
+            jobId: "job-keys",
+            analysisAssetId: "asset-keys",
+            jobPhase: "fullEpisodeScan",
+            scanCohortJSON: makeTestScanCohortJSON(),
+            wallTimeSeconds: 1,
+            audioDurationSeconds: 0,
+            counters: OperationalMetrics.Counters()
+        )
+        let unmeasuredObject = try #require(
+            try JSONSerialization.jsonObject(with: JSONEncoder().encode(unmeasured)) as? [String: Any]
+        )
+        #expect(
+            Set(unmeasuredObject.keys) == alwaysPresent,
+            """
+            With nothing measured the payload must carry NO rate keys. \
+            A rate present here is a fabricated zero — the defect playhead-vev7 \
+            removed, most likely re-introduced as `?? 0`. \
+            Key set: \(Set(unmeasuredObject.keys).sorted())
+            """
+        )
+
+        // Everything measured: every rate is present, and the full key set is
+        // pinned exactly, so a re-added counter fails whatever it is named.
+        //
+        // EVERY counter is non-zero here, deliberately. A fixture that leaves
+        // one at zero cannot see a newly added rate that divides by it — the new
+        // key would be nil, hence absent, hence invisible to a key-set pin in
+        // both halves of this test. Measured: with `randomAuditCandidateCount`
+        // left at 0, a `randomAuditSelectionRate` added to the payload SURVIVED
+        // this rail.
         let metrics = OperationalMetrics(
             jobId: "job-keys",
             analysisAssetId: "asset-keys",
@@ -495,29 +742,29 @@ struct OperationalMetricsTests {
             scanCohortJSON: makeTestScanCohortJSON(),
             wallTimeSeconds: 1,
             audioDurationSeconds: 1,
-            counters: OperationalMetrics.Counters()
+            counters: OperationalMetrics.Counters(
+                episodeCount: 1,
+                fmPassCount: 1,
+                fmWindowCount: 1,
+                persistedScanResultCount: 1,
+                persistedEvidenceEventCount: 1,
+                estimatedEnergyUnits: 1,
+                resumeAttemptCount: 1,
+                resumeSuccessCount: 1,
+                cohortDriftEvaluationCount: 1,
+                cohortDriftSignalCount: 1,
+                admissionDecisionCount: 1,
+                thermalDeferralCount: 1,
+                randomAuditCandidateCount: 1,
+                randomAuditSelectedCount: 1
+            )
         )
 
         let object = try #require(
             try JSONSerialization.jsonObject(with: JSONEncoder().encode(metrics)) as? [String: Any]
         )
         #expect(
-            Set(object.keys) == [
-                "schemaVersion",
-                "jobId",
-                "analysisAssetId",
-                "jobPhase",
-                "scanCohortIdentity",
-                "scanCohortJSON",
-                "wallTimeSeconds",
-                "audioDurationSeconds",
-                "wallTimePerAudioHour",
-                "energyPerEpisode",
-                "resumeSuccessRate",
-                "perCohortDrift",
-                "thermalDeferralRate",
-                "counters",
-            ],
+            Set(object.keys) == alwaysPresent.union(derivedRates),
             "Top-level key set changed: \(Set(object.keys).sorted())"
         )
 
@@ -542,9 +789,11 @@ struct OperationalMetricsTests {
             "Counters key set changed: \(Set(counters.keys).sorted())"
         )
 
-        // The version is what tells a reader which of the two shapes they hold.
-        #expect(object["schemaVersion"] as? Int == 2)
-        #expect(OperationalMetrics.schemaVersion == 2)
+        // The version is what tells a reader which of the three shapes they
+        // hold — and after playhead-vev7 it is the only thing that can say
+        // whether a `0` in a pulled payload was ever a measurement.
+        #expect(object["schemaVersion"] as? Int == 3)
+        #expect(OperationalMetrics.schemaVersion == 3)
     }
 
     /// The twenty-six events already sitting in `evidence_events` on Dan's phone
@@ -579,11 +828,77 @@ struct OperationalMetricsTests {
         #expect(decoded.jobId == "fm-df75eb5558560ce2")
         #expect(decoded.counters.fmPassCount == 2)
         #expect(decoded.counters.fmWindowCount == 7)
+
+        // playhead-vev7: a v1 rate decodes to `.some(0)`, NOT to nil, and that is
+        // the honest answer rather than a shortcoming. The v1 wire could not
+        // express absence, so its `0` is ambiguous and nothing after the fact can
+        // disambiguate it — this very row has `resumeAttemptCount: 1`, so here it
+        // happens to be a real failed resume, while the sibling row on the same
+        // pull with `resumeAttemptCount: 0` carries a byte-identical `0` that
+        // means the opposite. `schemaVersion` is what tells a reader which of the
+        // two shapes they are holding; do not paper over it by inferring nil from
+        // the counters, which would invent a measurement the payload never made.
         #expect(decoded.resumeSuccessRate == 0)
+        #expect(decoded.resumeSuccessRate != nil)
+        #expect(decoded.counters.resumeAttemptCount == 1)
 
         // And re-encoding it drops the fabrication rather than carrying it forward.
         let reencoded = String(data: try JSONEncoder().encode(decoded), encoding: .utf8) ?? ""
         #expect(!reencoded.lowercased().contains("cache"))
+    }
+
+    /// The source direction, which no wire rail can reach: a COMPUTED property
+    /// is never encoded, so the key set is byte-identical whatever it fabricates
+    /// (playhead-kvi1's M7 established that blind spot on this same file). What
+    /// this pins is that every derived rate is a stored `Double?` — the type is
+    /// the guard, and a non-Optional declaration does not merely fail a test, it
+    /// fails to COMPILE, because `rate()` and `perAudioHour()` return `Double?`.
+    ///
+    /// It also pins the helpers' return types, because that is what makes the
+    /// compile-time half true: exactly one non-Optional `-> Double` function may
+    /// exist in this file, and it is the clamp, not a ratio. `finiteNonNegative`
+    /// answering 0 is a clamp on an input, not an answer to "x / 0".
+    @Test("every derived rate is declared Optional, and the only non-Optional Double helper is the clamp")
+    func derivedRatesAreDeclaredOptional() throws {
+        let source = try Self.appSourceRoot()
+            .appendingPathComponent("Services/AdDetection/OperationalMetrics.swift")
+        let text = try String(contentsOf: source, encoding: .utf8)
+        let code = text
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .filter { !$0.trimmingCharacters(in: .whitespaces).hasPrefix("//") }
+            .joined(separator: "\n")
+
+        for rate in [
+            "wallTimePerAudioHour",
+            "energyPerEpisode",
+            "resumeSuccessRate",
+            "perCohortDrift",
+            "thermalDeferralRate",
+        ] {
+            #expect(
+                code.contains("let \(rate): Double?"),
+                """
+                `\(rate)` is not declared `Double?`. An unmeasured rate must be \
+                unrepresentable as a number: nil is "the denominator was zero", \
+                0.0 is "there were observations and none fired", and the whole of \
+                playhead-vev7 is that a reader cannot tell those apart otherwise.
+                """
+            )
+        }
+
+        let nonOptionalDoubleReturns = code
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .filter { $0.contains(") -> Double {") }
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+        #expect(
+            nonOptionalDoubleReturns == ["private static func finiteNonNegative(_ value: Double) -> Double {"],
+            """
+            A non-Optional `-> Double` helper appeared in OperationalMetrics. \
+            The only one allowed is the clamp: everything that DIVIDES must be \
+            able to say "there was nothing to divide by". Offenders: \
+            \(nonOptionalDoubleReturns)
+            """
+        )
     }
 
     /// The direction no behavioural test reaches: a counter that is declared and

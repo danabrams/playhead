@@ -28,15 +28,53 @@
 // samples" and 0.0 is "samples exist, none hit" — and it is consumed, by the
 // auto-disable rung. Do not add a second, fabricated one here: on a device pull
 // the two are indistinguishable and the fabricated one reads better.
+//
+// AND EVERY DERIVED RATE IN THIS FILE IS `Double?` FOR THAT SAME REASON
+// (playhead-vev7). `rate()` used to answer a zero denominator with `return 0`,
+// so "nothing was measured" and "measured, and it was zero" came out
+// byte-identical — the manufacturing site for the reading kvi1 deleted one
+// instance of. Measured on the same 26-event pull: one job had
+// `resumeAttemptCount: 0` and therefore `resumeSuccessRate: 0`, which reads as
+// "the resume failed" and is indistinguishable from the twenty rows where a
+// resume genuinely was attempted and genuinely did fail.
+//
+// The other three `rate()` denominators read honestly on that pull only by
+// ACCIDENT: `operationalCounters` in `BackfillJobRunner` forces
+// `episodeCount`, `cohortDriftEvaluationCount` and `admissionDecisionCount` to
+// 1 on every event it writes, so their denominators are never zero. Nothing
+// declared that invariant and nothing checked it; make any of those three
+// conditional and the fabrication spreads with no diff here at all. Hence the
+// fix lives in the helper, not in the one field that happened to show it.
+//
+// `perAudioHour` carried the identical `return 0` and is fixed with it. It is
+// not protected even by accident: `BackfillJobRunner` passes
+// `audioSegments: []` on the thermal-deferral and no-anchor-sentinel paths, so
+// `audioDurationSeconds` is genuinely 0 there and `wallTimePerAudioHour` read
+// 0 — "infinitely fast". Those two paths simply produced no events on the
+// 2026-08-11 pull, where all 26 rows carry real audio.
+//
+// nil is "the denominator was zero, so there is no rate". 0.0 is "there were
+// observations and none of them fired". A reader that cannot tell those apart
+// is the whole defect, so DO NOT `?? 0` any of these — encode the absence.
 
 import Foundation
 
 struct OperationalMetrics: Sendable, Codable, Equatable {
-    /// v2 (playhead-kvi1) removed `cacheReuseRate` and its two counters. Old
-    /// v1 events survive in `evidence_events`; they decode against this type
-    /// unchanged, because Swift's synthesized `Decodable` ignores keys it does
-    /// not know. Read the version before comparing payloads across pulls.
-    static let schemaVersion = 2
+    /// v2 (playhead-kvi1) removed `cacheReuseRate` and its two counters.
+    /// v3 (playhead-vev7) made every derived rate `Double?`, so an unmeasured
+    /// rate is an ABSENT key rather than `0`.
+    ///
+    /// Old events survive in `evidence_events` and decode against this type
+    /// unchanged: Swift's synthesized `Decodable` ignores keys it does not know
+    /// (v1's three cache keys) and uses `decodeIfPresent` for optionals (v3's
+    /// absent rates). Both are properties of the compiler rather than of this
+    /// code, so both are pinned by tests rather than assumed.
+    ///
+    /// **Read the version before reading a rate.** A `0` in a v1 or v2 payload
+    /// is ambiguous by construction — that shape could not express absence — and
+    /// nothing can recover which it was after the fact. A `0` in a v3 payload is
+    /// a measurement.
+    static let schemaVersion = 3
     static let eventType = "backfillOperationalMetrics"
 
     let schemaVersion: Int
@@ -47,11 +85,21 @@ struct OperationalMetrics: Sendable, Codable, Equatable {
     let scanCohortJSON: String
     let wallTimeSeconds: Double
     let audioDurationSeconds: Double
-    let wallTimePerAudioHour: Double
-    let energyPerEpisode: Double
-    let resumeSuccessRate: Double
-    let perCohortDrift: Double
-    let thermalDeferralRate: Double
+    /// nil when `audioDurationSeconds == 0` — no audio ⇒ no rate.
+    /// (Distinct from `0.0`, which is "there was audio and no wall time".)
+    let wallTimePerAudioHour: Double?
+    /// nil when `counters.episodeCount == 0`.
+    /// (Distinct from `0.0`, which is "episodes ran and none cost anything".)
+    let energyPerEpisode: Double?
+    /// nil when `counters.resumeAttemptCount == 0` — NOTHING WAS RESUMED.
+    /// (Distinct from `0.0`, which is "a resume was attempted and it failed".)
+    let resumeSuccessRate: Double?
+    /// nil when `counters.cohortDriftEvaluationCount == 0`.
+    /// (Distinct from `0.0`, which is "drift was evaluated and none was found".)
+    let perCohortDrift: Double?
+    /// nil when `counters.admissionDecisionCount == 0`.
+    /// (Distinct from `0.0`, which is "admission ran and deferred nothing".)
+    let thermalDeferralRate: Double?
     var counters: Counters
 
     init(
@@ -217,23 +265,32 @@ struct OperationalMetrics: Sendable, Codable, Equatable {
         }
     }
 
+    /// nil when there is no audio to divide by. It returned 0 until
+    /// playhead-vev7, which is "this job scanned an hour of audio in no time at
+    /// all" — the flattering direction, and the one a health report is least
+    /// likely to question.
     private static func perAudioHour(
         wallTimeSeconds: Double,
         audioDurationSeconds: Double
-    ) -> Double {
-        guard audioDurationSeconds > 0 else { return 0 }
+    ) -> Double? {
+        guard audioDurationSeconds > 0 else { return nil }
         return wallTimeSeconds / (audioDurationSeconds / 3_600)
     }
 
-    private static func rate(numerator: Int, denominator: Int) -> Double {
+    private static func rate(numerator: Int, denominator: Int) -> Double? {
         rate(numerator: Double(max(0, numerator)), denominator: denominator)
     }
 
-    private static func rate(numerator: Double, denominator: Int) -> Double {
-        let safeNumerator = finiteNonNegative(numerator)
+    /// THE MANUFACTURING SITE (playhead-vev7). This answered a zero denominator
+    /// with `return 0`, which every derived rate on this payload inherited: a
+    /// quantity nobody observed and a quantity observed to be zero were the same
+    /// bytes on the wire, and no reader could tell which they held. nil is the
+    /// answer to "what is `x / 0`", and `Double?` is what makes the wrong answer
+    /// untypeable rather than merely discouraged.
+    private static func rate(numerator: Double, denominator: Int) -> Double? {
         let safeDenominator = max(0, denominator)
-        guard safeDenominator > 0 else { return 0 }
-        return safeNumerator / Double(safeDenominator)
+        guard safeDenominator > 0 else { return nil }
+        return finiteNonNegative(numerator) / Double(safeDenominator)
     }
 
     private static func finiteNonNegative(_ value: Double) -> Double {
