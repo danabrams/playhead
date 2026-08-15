@@ -526,6 +526,7 @@ import argparse
 import json
 import pathlib
 import re
+import subprocess
 import sys
 
 EXIT_OK = 0
@@ -561,6 +562,12 @@ _MAX_LISTED = 10
 
 FRAMEWORK_SWIFT_TESTING = "swift-testing"
 FRAMEWORK_XCTEST = "xctest"
+
+# playhead-t53a. WHERE A VERDICT CAME FROM, carried on the run and printed on
+# the result. The console and the bundle answer "did this test report?"
+# differently often enough that a census figure is meaningless without it.
+VERDICT_SOURCE_CONSOLE = "the console log"
+VERDICT_SOURCE_BUNDLE = "the .xcresult bundle"
 
 
 class CannotEvaluate(Exception):
@@ -784,6 +791,18 @@ class RunResult(object):
         self.host_restarts = 0
         self.restart_evidence = None
         self.blamed_entries = []   # `Failing tests:` lines, duplicates INTACT
+        # playhead-t53a. Where the outcomes below came from — named on the
+        # verdict, because "7 tests got NO VERDICT" means two different things
+        # depending on the answer and the reader cannot tell from the number.
+        self.verdict_source = VERDICT_SOURCE_CONSOLE
+        # Bundle keys carrying a result string this module does not recognise.
+        self.unjudged = {}
+        # key -> the `-only-testing:` argument that re-runs exactly that test.
+        self.targets = {}
+        # The bundle's own `Suite.function()` spellings — empty without one.
+        self.blamed_spellings = set()
+        # key -> the bundle's words for a host death under that test.
+        self.crashed = {}
 
     @property
     def ran(self):
@@ -955,6 +974,374 @@ def parse_run(text):
     # cannot be written against a `skipped` set that overlaps `ran`; delete it
     # only together with that guarantee.
     run.skipped -= set(failures) | run.passed
+    return run
+
+
+# ---------------------------------------------------------------------------
+# Where a VERDICT comes from: the .xcresult bundle (playhead-t53a)
+# ---------------------------------------------------------------------------
+#
+# THE CONSOLE IS NOT A RECORD OF WHAT HAPPENED, AND FOUR CORRECTIONS PROVED IT.
+#
+# Everything above reads xcodebuild's stdout, into which the app under test
+# writes its own log at the same time. The interleaving is not line-atomic, so a
+# verdict line arrives severed — and the census, whose whole job is to notice a
+# test that reported nothing, reads a severed PASS as a dead host. The record in
+# CLAUDE.md counts three corrections for this one defect (19/18, 33/15, 30/14),
+# each a new pattern for a splice shape the last one could not see. This is the
+# fourth, and it is not a fifth pattern:
+#
+#     ✔ Test "brief pause (==2s) does not emit (strict >)" passed afte<TS> …
+#     \224 Test "probability below produced floor scores 0" passed after 98.489s
+#     ◇ Test "tier validation resets invalid ascending order to defaults" started.
+#
+# The first is cut mid-WORD, the second lost the lead bytes of its ✔ to a cut
+# inside a UTF-8 codepoint, and the third has no result line in the log at all.
+# All three are from main's 06:01 run of 2026-08-15, which reported SEVEN tests
+# as "NO VERDICT (crashed host)" — with `host_restarts: 0` and not one crash
+# marker anywhere in 9.9 MiB. The instrument built to catch "a value that names
+# one thing read as though it named another" was exhibiting it.
+#
+# MEASURED over 68 preserved full-plan logs before this landed:
+#
+#   * host_restarts == 0 (27 runs): 87 lost verdicts, 80 of them (92%) a verdict
+#     still recoverable from the raw bytes. NOT ONE was a crash;
+#   * host_restarts > 0  (41 runs): 2,743 lost verdicts, 2,722 (99.2%) with no
+#     trace at all — real casualties, correctly reported.
+#
+# So the census was right about crashes and wrong about everything else, and its
+# false positives were concentrated exactly where a run was otherwise green.
+#
+# The bundle has none of this. It is written by the test infrastructure, not
+# scraped from a byte stream two writers share: no interleaving, no splicing, no
+# glyph damage. Verified against that same 06:01 run — the bundle's key set and
+# the console's `ran | skipped | started` are the SAME 12,085 names, zero
+# unmatched in either direction, and all seven "casualties" read `Passed`.
+#
+# WHAT STILL COMES FROM THE CONSOLE, and why each one genuinely is not in the
+# bundle: `host_restarts` (xcodebuild's own restart banner), the `Failing tests:`
+# block, the terminal marker that says the log is not a fragment, the SOURCE FILE
+# of a failure (the bundle's message carries no location), and — load-bearing —
+# the STARTED roster, which is what keeps this from being a way to lose a
+# casualty. See `with_xcresult_verdicts`.
+
+XCRESULT_PASSED = "Passed"
+XCRESULT_FAILED = "Failed"
+XCRESULT_SKIPPED = "Skipped"
+XCRESULT_EXPECTED_FAILURE = "Expected Failure"
+
+# A result string that means the test WAS judged. Anything else — including a
+# string a future Xcode invents — is deliberately NOT a verdict, so it lands in
+# the census and gets reported rather than being quietly counted as a pass.
+XCRESULT_VERDICTS = frozenset(
+    (XCRESULT_PASSED, XCRESULT_FAILED, XCRESULT_SKIPPED, XCRESULT_EXPECTED_FAILURE)
+)
+
+_NODE_TEST_CASE = "Test Case"
+_NODE_TEST_BUNDLE = "Unit test bundle"
+_NODE_FAILURE_MESSAGE = "Failure Message"
+
+# A DEAD HOST IS NOT A FAILING TEST, AND THE BUNDLE SAYS WHICH IS WHICH IN WORDS.
+#
+# Measured with a probe (a Swift Testing suite of five, one calling fatalError):
+# xcodebuild printed `Restarting after unexpected exit, crash, or test timeout`,
+# the restarted host ran `0 tests`, and the console lost four verdicts. The
+# bundle recorded all five — four `Failed` carrying
+#
+#     Failure Message | Test crashed with signal trap.
+#
+# and the one that had already returned as `Passed`, each with its identifier.
+#
+# Taking that at face value would make the change QUIETER rather than truthier,
+# which is the one direction forbidden here: three healthy tests would be
+# reported as NEW FAILURES, and one `--accept-baseline` would write them into
+# the file as known-broken — where a genuine future failure of those same tests
+# reads as known. So a crash-message failure is routed to the CENSUS, which is
+# the category whose remedy ("run it again") is the right one. The census stops
+# being inferred from silence and becomes something the bundle states.
+#
+# An unrecognised crash wording therefore stays a FAILURE, which is the loud
+# direction: it is reported NEW and named, rather than absorbed as a casualty.
+_XCRESULT_CRASHED = re.compile(r"^Test crashed\b", re.IGNORECASE)
+
+
+class XcresultUnreadable(Exception):
+    """The bundle was asked for and could not be read. Never a silent fallback.
+
+    Falling back to the console on a bad path would reinstate the defect this
+    whole section exists to delete, and do it invisibly — the run would look
+    exactly like a run that never asked for a bundle.
+    """
+
+
+def read_xcresult(path, runner=None):
+    """Shell out to xcresulttool and return the parsed test-results payload."""
+    if not pathlib.Path(str(path)).exists():
+        raise XcresultUnreadable("no such result bundle: %s" % path)
+    argv = [
+        "xcrun", "xcresulttool", "get", "test-results", "tests",
+        "--compact", "--path", str(path),
+    ]
+    call = runner or (lambda a: subprocess.run(
+        a, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False))
+    try:
+        proc = call(argv)
+    except OSError as exc:
+        raise XcresultUnreadable("could not run xcresulttool: %s" % exc)
+    if proc.returncode != 0:
+        stderr = (proc.stderr or b"").decode("utf-8", "replace").strip()
+        detail = stderr.splitlines()
+        hint = ""
+        # The 2026-07-16 xcode-select gotcha, one more surface. It cannot bite a
+        # real gate — this box's global developer dir is CommandLineTools, so
+        # `xcodebuild` fails there too and a run that produced a bundle had
+        # DEVELOPER_DIR set — but it bites anyone reading a PRESERVED bundle by
+        # hand, and the raw message does not say what to do about it.
+        if "unable to find utility" in stderr:
+            hint = (" — the active developer dir has no xcresulttool; set "
+                    "DEVELOPER_DIR to an Xcode.app (see CLAUDE.md)")
+        raise XcresultUnreadable(
+            "xcresulttool exited %d on %s%s%s"
+            % (proc.returncode, path, (": " + detail[-1]) if detail else "", hint)
+        )
+    try:
+        return json.loads((proc.stdout or b"").decode("utf-8", "replace"))
+    except ValueError as exc:
+        raise XcresultUnreadable("xcresulttool emitted unparseable JSON: %s" % exc)
+
+
+def _is_swift_testing(node):
+    """Which framework ran this test — decided by the URL, not by guesswork.
+
+    The bundle spells a Swift Testing test's identity with its FUNCTION
+    SIGNATURE and an XCTest's with a bare Objective-C SELECTOR:
+
+        …/BoundedContinuationTests/fallbackHookFiresAtMostOnce()      Swift Testing
+        …/RunnerTests/recognitionFailuresKeepTheASRCause(failureClass:)   ditto
+        …/ActivityViewFocusedEpisodeTests/testNilFocusReturnsIdentity  XCTest
+
+    A selector cannot contain a parenthesis and a signature always ends in one,
+    so the trailing `)` is exact rather than a heuristic. Measured on the 06:01
+    run: 11,162 / 987, and the 987 are precisely the console's 987 XCTest keys.
+
+    THE FIRST VERSION OF THIS TESTED `endswith("()")` and put the 57
+    PARAMETERISED Swift Testing tests in the XCTest bucket, because their
+    signature ends `(failureClass:)`. It showed up as 57 keys unmatched in each
+    direction — which is why the reconciliation asserts the two rosters agree
+    rather than trusting this predicate.
+    """
+    url = node.get("nodeIdentifierURL")
+    if not url:
+        raise XcresultUnreadable(
+            "a Test Case node has no nodeIdentifierURL, so its framework cannot "
+            "be determined: %r" % (node.get("nodeIdentifier") or node.get("name"))
+        )
+    return url.rsplit("/", 1)[-1].endswith(")")
+
+
+class BundleRun(object):
+    """One .xcresult's per-test verdicts, in the console's own key space."""
+
+    def __init__(self):
+        self.passed = set()
+        self.skipped = set()
+        self.failures = {}
+        # Every key the bundle mentions, whether or not it reached a verdict.
+        self.keys = set()
+        # key -> the `-only-testing:` argument that re-runs exactly this test.
+        self.targets = {}
+        # key -> the result string, for a node the bundle mentions with no
+        # recognised verdict. Named rather than counted, like everything else.
+        self.unjudged = {}
+        # key -> the bundle's own words for why the host died under this test.
+        self.crashed = {}
+        # Every test's identity in the ONE spelling xcodebuild's `Failing
+        # tests:` block uses — `Suite.function()`. The console cannot produce
+        # this for a Swift Testing test with a display name, which is the whole
+        # reason that block could only ever be a LEAD.
+        self.blamed_spellings = set()
+
+    @property
+    def judged(self):
+        return self.passed | self.skipped | set(self.failures)
+
+
+def parse_xcresult(payload):
+    """Turn `xcresulttool get test-results tests` output into a BundleRun."""
+    run = BundleRun()
+    raw = {}
+
+    def visit(node, bundle, suite):
+        kind = node.get("nodeType")
+        if kind == _NODE_TEST_BUNDLE:
+            bundle = node.get("name")
+        elif kind == "Test Suite":
+            suite = node.get("name")
+        if kind == _NODE_TEST_CASE:
+            _collect_case(node, bundle, suite, run, raw)
+            return          # Arguments children are one test, not several
+        for child in node.get("children") or []:
+            visit(child, bundle, suite)
+
+    for root in payload.get("testNodes") or []:
+        visit(root, None, None)
+
+    # The SAME collision rule the console applies, for the same reason: two
+    # same-named Swift Testing tests in different suites share a key, and a
+    # colliding pass must never erase a real failure.
+    #
+    # `run.crashed` wins over everything and is applied AFTER the loop rather
+    # than inside it, because node ORDER must not decide the answer: a passing
+    # twin encountered BEFORE its crashed namesake had already been booked into
+    # `raw`, and a rail caught it laundering the casualty in exactly one of the
+    # two orders. Resolving toward the casualty is the same direction the rest
+    # of this rule resolves — toward the worse news.
+    for key, outcomes in raw.items():
+        if key in run.failures:
+            continue
+        if XCRESULT_PASSED in outcomes or XCRESULT_EXPECTED_FAILURE in outcomes:
+            run.passed.add(key)
+        elif XCRESULT_SKIPPED in outcomes:
+            run.skipped.add(key)
+    for key in run.crashed:
+        run.passed.discard(key)
+        run.skipped.discard(key)
+        run.failures.pop(key, None)
+        run.unjudged.pop(key, None)
+    return run
+
+
+def _collect_case(node, bundle, suite, run, raw):
+    if bundle is None:
+        raise XcresultUnreadable(
+            "a Test Case node has no enclosing test bundle, so its XCTest key "
+            "cannot be spelled: %r" % (node.get("nodeIdentifier"),)
+        )
+    identifier = node.get("nodeIdentifier") or ""
+    method = identifier.rsplit("/", 1)[-1]
+    if _is_swift_testing(node):
+        key = st_key(node.get("name"))
+        target = "%s/%s" % (bundle, identifier)
+    else:
+        key = xc_key("%s.%s" % (bundle, suite), method[:-2] if method.endswith("()") else method)
+        target = "%s/%s" % (bundle, identifier[:-2] if identifier.endswith("()") else identifier)
+    run.keys.add(key)
+    run.targets.setdefault(key, target)
+    # `Suite/function()` in the bundle is `Suite.function()` in the summary
+    # block. Only the LAST separator is a dot there, so a nested suite path
+    # keeps its slashes and simply fails to match — a miss, never a false hit.
+    if "/" in identifier:
+        head, _, tail = identifier.rpartition("/")
+        run.blamed_spellings.add(head + "." + tail)
+    result = node.get("result")
+    crash = _crash_message(node)
+    if crash is not None:
+        # NOT recorded in `raw`, so the collision rule below cannot promote a
+        # crashed twin to passed or skipped. A crashed test has no outcome at
+        # all — that is the whole point of routing it here.
+        run.crashed.setdefault(key, crash)
+        run.failures.pop(key, None)
+        return
+    raw.setdefault(key, set()).add(result)
+    if key in run.crashed:
+        # Two same-named tests, one of which the host killed. The survivor's
+        # verdict is not evidence about the casualty, and resolving toward the
+        # casualty is the same direction the console's own collision rule
+        # resolves — toward the worse news.
+        return
+    if result == XCRESULT_FAILED:
+        failure = run.failures.get(key)
+        if failure is None:
+            framework = (FRAMEWORK_SWIFT_TESTING if _is_swift_testing(node)
+                         else FRAMEWORK_XCTEST)
+            name = node.get("name") if framework == FRAMEWORK_SWIFT_TESTING else key.split("::", 1)[1]
+            failure = run.failures[key] = Failure(key, framework, name)
+        seconds = node.get("durationInSeconds")
+        if seconds is not None and (failure.seconds is None or seconds > failure.seconds):
+            failure.seconds = float(seconds)
+        failure.kinds |= _bundle_kinds(node, failure.framework)
+    elif result not in XCRESULT_VERDICTS:
+        run.unjudged[key] = result
+
+
+def _crash_message(node):
+    """The bundle's own words for a host death under this test, or None."""
+    if node.get("result") != XCRESULT_FAILED:
+        return None
+    for child in node.get("children") or []:
+        if child.get("nodeType") != _NODE_FAILURE_MESSAGE:
+            continue
+        message = child.get("name") or ""
+        if _XCRESULT_CRASHED.match(message.strip()):
+            return message.strip()
+    return None
+
+
+def _bundle_kinds(node, framework):
+    """The failure KIND, from the bundle's own message text.
+
+    XCTest is pinned to ASSERTION exactly as the console pins it — XCTest never
+    reports a Swift Testing time-limit issue, and letting a slow XCTest failure
+    read as a timeout would hand it the starvation tolerance it must not have.
+    """
+    if framework == FRAMEWORK_XCTEST:
+        return {KIND_ASSERTION}
+    return {
+        _kind_of_issue(child.get("name") or "")
+        for child in node.get("children") or []
+        if child.get("nodeType") == _NODE_FAILURE_MESSAGE
+    }
+
+
+class RosterMismatch(Exception):
+    """The console and the bundle disagree about WHICH TESTS EXIST."""
+
+
+def with_xcresult_verdicts(run, bundle):
+    """Take this run's outcomes from the bundle, keeping the console's roster.
+
+    The console keeps exactly three jobs here, and each is a thing the bundle
+    does not have or does not do as well:
+
+      * WHAT STARTED. `run.started` is unioned with the bundle's keys rather
+        than replaced by it, and this is the line that makes the change unable
+        to weaken the gate. A test the host killed might be absent from the
+        bundle altogether; if its `◇ … started` line survived, the console still
+        names it and it is still a casualty. Neither source can silence the
+        other — a name has to be judged by the BUNDLE to leave the census;
+      * the SOURCE FILE of a failure, which the bundle's message does not carry;
+      * `complete`, `host_restarts` and the `Failing tests:` block, which are
+        properties of the RUN rather than of any test.
+
+    Everything a test is judged by — passed, failed, skipped, and the failure
+    KIND — comes from the bundle and nowhere else.
+    """
+    sources = {key: failure.source for key, failure in run.failures.items()
+               if failure.source}
+    console_kinds = {key: set(failure.kinds) for key, failure in run.failures.items()}
+
+    run.passed = set(bundle.passed)
+    run.skipped = set(bundle.skipped)
+    run.failures = dict(bundle.failures)
+    run.started = run.started | bundle.keys
+    run.verdict_source = VERDICT_SOURCE_BUNDLE
+    run.unjudged = dict(bundle.unjudged)
+    run.targets = dict(bundle.targets)
+    run.blamed_spellings = set(bundle.blamed_spellings)
+    run.crashed = dict(bundle.crashed)
+
+    for key, failure in run.failures.items():
+        if not failure.source:
+            failure.source = sources.get(key)
+        if not failure.kinds:
+            # The bundle recorded a FAILURE with no message of its own. Reach
+            # for the console's reading of the same failure before falling back
+            # to UNKNOWN, because an unknown kind is in the record's terms a
+            # kind nobody has ever seen, and it reports FAILS DIFFERENTLY
+            # against every entry in the file.
+            failure.kinds |= console_kinds.get(key, set())
+        if not failure.kinds:
+            failure.kinds.add(KIND_UNKNOWN)
     return run
 
 
@@ -1418,6 +1805,10 @@ class Verdict(object):
         self.blamed_entry_count = 0
         self.blamed_distinct = []
         self.blamed_unmatched = []
+        # playhead-t53a
+        self.verdict_source = VERDICT_SOURCE_CONSOLE
+        self.unjudged = {}
+        self.crashed = {}
 
     @property
     def ok(self):
@@ -1551,6 +1942,12 @@ class Verdict(object):
         else:
             out.append("gate-baseline: RED (%s)%s" % (headline, tail))
 
+        # playhead-t53a: ON EVERY RUN, not only a lossy one. A rail caught the
+        # first draft printing this inside the crash block, which meant the one
+        # reading that most needs qualifying — a census of ZERO, off the
+        # console, where a severed START line makes a test invisible in BOTH
+        # directions — was the reading that never named its instrument.
+        out.extend(self._render_verdict_source())
         out.extend(self._render_no_verdict())
 
         for key in self.new_failures:
@@ -1670,6 +2067,57 @@ class Verdict(object):
                            % (len(self.blamed_unmatched) - _MAX_LISTED))
         return out
 
+    def _render_verdict_source(self):
+        """playhead-t53a: say what instrument produced the census.
+
+        `7 tests got NO VERDICT` is two different claims depending on the
+        answer, and the number cannot carry the difference. Off the bundle it
+        means the test infrastructure has no result for them. Off the console it
+        means a REGEX found no result line — and measured over 27 crash-free
+        full-plan runs, 92% of those were verdicts the parser could not read,
+        with the whole remainder unproven either way. A census printed without
+        its source is a value that names one thing read as though it named
+        another, which is the defect class this module keeps being the site of.
+        """
+        if self.verdict_source == VERDICT_SOURCE_BUNDLE:
+            out = [
+                "  VERDICTS FROM    %s — the test infrastructure's own record, "
+                "not xcodebuild's stdout. Every name below was genuinely never "
+                "judged." % self.verdict_source
+            ]
+            # The bundle's OWN WORDS for the death, rather than this module's
+            # inference from silence. `crashed_host` used to be a guess whose
+            # evidence was an absence; here it is a quotation.
+            for key, message in sorted(self.crashed.items())[:_MAX_LISTED]:
+                out.append("  HOST DIED HERE   %s  (%s)" % (key, message))
+            if len(self.crashed) > _MAX_LISTED:
+                out.append("  HOST DIED HERE   … and %d more"
+                           % (len(self.crashed) - _MAX_LISTED))
+            if self.crashed:
+                out.append(
+                    "                   The bundle records these as FAILED with a "
+                    "crash message. They are counted as casualties, NOT failures: a "
+                    "test the host killed reported on nothing, and letting "
+                    "`--accept-baseline` write it into the known-broken file would "
+                    "absorb its next genuine failure as known."
+                )
+            for key, result in sorted(self.unjudged.items())[:_MAX_LISTED]:
+                out.append("  UNJUDGED         %s  (the bundle records it as %r, "
+                           "which is not a verdict this gate knows)" % (key, result))
+            if len(self.unjudged) > _MAX_LISTED:
+                out.append("  UNJUDGED         … and %d more"
+                           % (len(self.unjudged) - _MAX_LISTED))
+            return out
+        return [
+            "  VERDICTS FROM    %s, which is NOT a reliable census (playhead-t53a). "
+            "The app's own output is spliced into xcodebuild's mid-line — mid-word "
+            "and mid-codepoint — so a test that PASSED can read as one that said "
+            "nothing." % self.verdict_source,
+            "                   Measured over 27 crash-free full-plan runs: 80 of 87 "
+            "reported casualties were recoverable verdicts, and not one was a crash. "
+            "Pass `--xcresult <bundle>` for a census that means what it says.",
+        ]
+
     def _render_casualty_diff(self):
         """playhead-buvn: the census against its record, in both directions."""
         if self.no_verdict_recorded is None:
@@ -1753,20 +2201,31 @@ class Verdict(object):
         return out
 
 
-def _blamed_is_matched(entry, identities):
-    """Can this `Failing tests:` entry be tied to a console identity BY NAME?
+def _blamed_is_matched(entry, identities, blamed_spellings=()):
+    """Can this `Failing tests:` entry be tied to an identity BY NAME?
 
-    Only two spellings are ever comparable, and both are exact — no fuzzy
-    matching, because a false match here hides a casualty and a false miss
-    manufactures one:
+    Only two spellings are ever comparable ON THE CONSOLE, and both are exact —
+    no fuzzy matching, because a false match here hides a casualty and a false
+    miss manufactures one:
 
       * XCTest, whose console key is `Target.Suite/method`; and
       * a Swift Testing test with NO custom display name, whose console line
         prints the bare `function()`.
 
-    A Swift Testing test WITH a display name is unmatchable in principle and is
-    reported as such rather than guessed at. See the module docstring.
+    A Swift Testing test WITH a display name is unmatchable FROM THE CONSOLE in
+    principle, which is why the block could only ever be reported as a LEAD.
+
+    playhead-t53a: WITH A BUNDLE IT IS MATCHABLE EXACTLY. The bundle carries
+    every test's `nodeIdentifier` — `Suite/function()`, one separator away from
+    the summary block's own spelling — alongside its display name, so the two
+    identity models finally meet. On the 06:01 run of main this turns three
+    entries reported as "matched no console result" into three matches, which
+    is all three: they are the run's three real failures. Still exact, so a
+    genuine casualty that never emitted a console line is still unmatched and
+    still reported.
     """
+    if entry in blamed_spellings:
+        return True
     m = _BLOCK_NAME.match(entry)
     if not m:
         return False
@@ -1806,6 +2265,9 @@ def verdict(baseline, run, plan=None):
     result.no_verdict = sorted(no_verdict)
     result.host_restarts = run.host_restarts
     result.restart_evidence = run.restart_evidence
+    result.verdict_source = run.verdict_source
+    result.unjudged = dict(run.unjudged)
+    result.crashed = dict(run.crashed)
     # playhead-buvn. The DIFF against the recorded census, computed exactly the
     # way `new_failures` is: a name nobody recorded is a regression, and a
     # recorded name that came back is reported as good news but is not fatal —
@@ -1836,8 +2298,10 @@ def verdict(baseline, run, plan=None):
     result.blamed_entry_count = len(run.blamed_entries)
     result.blamed_distinct = blamed
     identities = run.ran | run.passed | run.skipped | run.started
-    result.blamed_unmatched = [name for name in blamed
-                               if not _blamed_is_matched(name, identities)]
+    result.blamed_unmatched = [
+        name for name in blamed
+        if not _blamed_is_matched(name, identities, run.blamed_spellings)
+    ]
 
     entries = baseline.get("tests", {})
 
@@ -1884,6 +2348,45 @@ def _read(path):
     return pathlib.Path(str(path)).read_text(encoding="utf-8", errors="replace")
 
 
+def _apply_bundles(run, paths, reader=None):
+    """Fold one or more .xcresult bundles into a console-parsed run.
+
+    More than one because the gate re-runs its residual casualties scoped, and
+    that second run's verdicts belong to the same observation. LATER BUNDLES
+    WIN on membership — the re-run is the newer evidence about exactly those
+    tests — but nothing is ever removed: a test the re-run did not cover keeps
+    the first bundle's verdict, and a test neither bundle judged stays a
+    casualty.
+    """
+    if not paths:
+        return run
+    # Resolved here rather than as a default argument so a test can swap the
+    # reader out by name — a default binds at def time and cannot be patched.
+    read = reader or read_xcresult
+    merged = BundleRun()
+    for path in paths:
+        part = parse_xcresult(read(path))
+        merged.keys |= part.keys
+        merged.targets.update(part.targets)
+        merged.blamed_spellings |= part.blamed_spellings
+        # A key this bundle SAW loses whatever the earlier one said, in every
+        # direction at once — otherwise a re-run that PASSES a crashed test
+        # would leave the first bundle's casualty standing beside it, and the
+        # residual re-run could never clear anything.
+        for key in part.keys:
+            merged.passed.discard(key)
+            merged.skipped.discard(key)
+            merged.failures.pop(key, None)
+            merged.unjudged.pop(key, None)
+            merged.crashed.pop(key, None)
+        merged.passed |= part.passed
+        merged.skipped |= part.skipped
+        merged.failures.update(part.failures)
+        merged.unjudged.update(part.unjudged)
+        merged.crashed.update(part.crashed)
+    return with_xcresult_verdicts(run, merged)
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(
         prog="gate_baseline.py",
@@ -1896,6 +2399,16 @@ def main(argv=None):
         p.add_argument("--log", required=True)
         p.add_argument("--baseline", required=True)
         p.add_argument("--plan", default=None)
+        # playhead-t53a. Repeatable, because the residual re-run below produces
+        # a SECOND bundle and its verdicts have to land in the same run.
+        p.add_argument("--xcresult", action="append", default=[])
+
+    # playhead-t53a. What the gate must re-run before it can claim a complete
+    # verdict set. Prints `-only-testing:` arguments, one per line, and nothing
+    # else — it is consumed by a shell.
+    p = sub.add_parser("residual")
+    p.add_argument("--log", required=True)
+    p.add_argument("--xcresult", action="append", default=[])
 
     args = parser.parse_args(argv)
     if not args.command:
@@ -1908,6 +2421,32 @@ def main(argv=None):
         return EXIT_CANNOT_EVALUATE
 
     run = parse_run(_read(log_path))
+    try:
+        run = _apply_bundles(run, args.xcresult)
+    except XcresultUnreadable as exc:
+        sys.stderr.write(
+            "gate-baseline: CANNOT EVALUATE — %s.\n"
+            "gate-baseline: a bundle was requested, so falling back to the console "
+            "would silently reinstate the census defect playhead-t53a removed.\n" % exc
+        )
+        return EXIT_CANNOT_EVALUATE
+
+    if args.command == "residual":
+        for key in sorted(run.no_verdict):
+            target = run.targets.get(key)
+            if target:
+                print("-only-testing:%s" % target)
+            else:
+                # A name the bundle never mentioned has no identifier to re-run
+                # BY. Reported on stderr so the caller's `$(...)` stays clean
+                # and the hole stays visible rather than becoming an empty line.
+                sys.stderr.write(
+                    "gate-baseline: cannot re-run %s — no bundle identifier for it. "
+                    "Its display name is all the console knows, and "
+                    "`-only-testing:` takes an identifier.\n" % key
+                )
+        return EXIT_OK
+
     baseline_path = pathlib.Path(args.baseline)
 
     if args.command == "accept":
