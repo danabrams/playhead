@@ -363,6 +363,63 @@ struct PrewarmHitUnmeasuredV52MigrationTests {
         )
     }
 
+    @Test("the fresh-install CREATE TABLE declares prewarmHit nullable — which nothing behavioural can see")
+    func createTableDeclaresPrewarmHitNullable() throws {
+        // WHY A SOURCE CANARY AND NOT AN ASSERTION ON A LIVE STORE: MEASURED.
+        //
+        // Restoring the old `prewarmHit INTEGER NOT NULL DEFAULT 0` text in
+        // `createTables()` SURVIVES this entire suite — the mutation was run and
+        // every one of the seven tests above passed. `migrate()` calls
+        // `createTables()` and THEN the whole V*IfNeeded ladder, on a fresh
+        // database exactly as on an upgrade, so the V52 rung's DROP + ADD
+        // repairs the column whatever the DDL said. `freshDbColumnIsNullable`
+        // asks what a fresh install ENDS UP with, which is the right question
+        // and is why it cannot see this.
+        //
+        // The residue is second-order but real, and it is this repo's standing
+        // shape: two expressions of one truth, only one of them load-bearing.
+        // Prune the V52 rung — as ladders eventually are pruned — and fresh
+        // installs silently revert to a NOT NULL boolean, which is precisely
+        // the constraint that forces a writer with no observation to claim a
+        // cold start. This pins the expression the behaviour cannot reach.
+        let source = try Self.appSourceRoot()
+            .appendingPathComponent("Persistence/AnalysisStore/AnalysisStore.swift")
+        let text = try String(contentsOf: source, encoding: .utf8)
+
+        guard let start = text.range(of: "CREATE TABLE IF NOT EXISTS semantic_scan_results ("),
+              let end = text.range(of: "UNIQUE(reuseKeyHash)", range: start.upperBound..<text.endIndex) else {
+            Issue.record("Could not locate the semantic_scan_results CREATE TABLE body")
+            return
+        }
+
+        // SQL comments are dropped: this file's own explanation of the column
+        // mentions it by name, and a comment is not a declaration.
+        let declarations = text[start.upperBound..<end.lowerBound]
+            .split(separator: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.hasPrefix("--") }
+
+        guard let prewarm = declarations.first(where: { $0.hasPrefix("prewarmHit") }) else {
+            Issue.record("No `prewarmHit` column declaration inside the CREATE TABLE body")
+            return
+        }
+        #expect(
+            !prewarm.uppercased().contains("NOT NULL"),
+            """
+            The fresh-install DDL declares `prewarmHit` NOT NULL again: "\(prewarm)". \
+            A NOT NULL boolean has no representation for "nobody measured this", so \
+            every writer is forced to claim `false` — which is how this column came \
+            to read {0: 95} and be quoted as ninety-five cold starts. The V52 rung \
+            currently hides this by dropping and re-adding the column on every \
+            migrate(), so no behavioural test will tell you.
+            """
+        )
+        #expect(
+            !prewarm.uppercased().contains("DEFAULT"),
+            "A DEFAULT on this column re-manufactures the same claim by another route: \"\(prewarm)\""
+        )
+    }
+
     /// Resolves the `Playhead/` source root by walking up from this test file
     /// (`#filePath` is stamped into the binary at compile time).
     private static func appSourceRoot(file: StaticString = #filePath) throws -> URL {
