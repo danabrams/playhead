@@ -739,7 +739,19 @@ struct BackfillRateLimitDeferTests {
         )
         // It is still recorded, so the denominator shows where the pass stopped.
         let unattempted = try #require(passA.first { $0.status == .failedTransient })
-        #expect(unattempted.latencyMs == 0, "a window nobody called cost nothing")
+        // playhead-kbqw: NULL, not 0. This assertion read `== 0` under "a window
+        // nobody called cost nothing", and 0 does not say that — it says an
+        // attempt was made and took no time. The distinction is not academic:
+        // `WHERE latencyMs IS NOT NULL` is how a device pull selects rows that
+        // carry a real measurement, and a literal 0 satisfies it. ejr7 found
+        // three such rows in the `cancelled` bucket of the 2026-08-10/11 pull,
+        // indistinguishable from calls that really were cut short. The
+        // constructor no longer has a parameter through which a number could
+        // reach this row at all.
+        #expect(
+            unattempted.latencyMs == nil,
+            "a window nobody called was never measured — NULL, not a measured zero"
+        )
         #expect(examinedAudioSeconds(rows) == 10)
     }
 
