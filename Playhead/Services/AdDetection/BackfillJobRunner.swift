@@ -2035,8 +2035,20 @@ actor BackfillJobRunner {
                 reason: reason,
                 retryCount: attempts
             )
+            // playhead-nffz: spelled `terminalCause=`, NOT `cause=`, and the
+            // reason is a canary rather than taste.
+            // `FMDaemonRefusalSourceCanaryTests.testDaemonRefusalCauseFieldsNameTheTokenTheyDescribe`
+            // asserts this file contains EXACTLY ONE `cause=` log field, because
+            // that field is how a support-bundle grep tells which durable write
+            // each line describes — and it belongs to the daemon-refusal line.
+            // A second one makes the rule unable to say which write it is
+            // reading, which is why the canary counts rather than matches. It
+            // greps case-sensitively for `cause=\(`, so `terminalCause=` is a
+            // new field rather than a second instance of that one, exactly as
+            // `siblingCause=` already is. The merge gate caught this; no scoped
+            // run over the suites this diff touches could have.
             logger.error(
-                "FM backfill job \(job.jobId, privacy: .public) terminated: \(AdmissionController.maxRetries, privacy: .public) passes ended with the episode under the ad-scan floor, cause=\(reason, privacy: .public)"
+                "FM backfill job \(job.jobId, privacy: .public) terminated: \(AdmissionController.maxRetries, privacy: .public) passes ended with the episode under the ad-scan floor, terminalCause=\(reason, privacy: .public)"
             )
             return .failed
         }
