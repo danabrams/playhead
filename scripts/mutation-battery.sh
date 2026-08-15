@@ -1435,6 +1435,18 @@ FOCUSED_SUITES=(
   # duplicating that harness.
   -only-testing:PlayheadTests/UnclassifiedModelFailureTests
   -only-testing:PlayheadTests/UnclassifiedModelFailureSourceCanaryTests
+  # playhead-ronl: the retry-charge rails (RN series). Four suites, because the
+  # claim spans three layers and no one of them can see the others: the two pure
+  # rules (instant, no store); the WITNESS the two write sites read, which lives
+  # on `CoarseCheckpointBox` and is only observable there; and the drain loop
+  # end to end, which is the only thing that can tell "the rule is right" from
+  # "the rule is called". `BackfillCoarseCheckpointTests` is carried whole rather
+  # than by test, because the witness is a second reader of the cursor that suite
+  # already owns — a mutation that moved the checkpoint would have to redden it.
+  -only-testing:PlayheadTests/FailedAttemptRetryChargeRuleTests
+  -only-testing:PlayheadTests/StoreFailureRetryChargeRuleTests
+  -only-testing:PlayheadTests/UnclassifiedThrowRetryChargeWireInTests
+  -only-testing:PlayheadTests/CoarseCheckpointBoxTests
   # playhead-cgka: the scratch-reaper rails (Z series). 13 tests, ~0.06s — it
   # costs nothing to carry in every batch and the alternative is a second
   # focused set for one series.
@@ -3119,6 +3131,32 @@ T_RQ_UNFENCED="an interrupted run leaves the shared engine unfenced"
 T_RQ_CANARY_EVENT="ZeroCoverageRecoveryRoutingSourceCanaryTests/testTimeoutJournalTakesItsEventFromTheDisposition"
 T_RQ_CANARY_COUNTER="ZeroCoverageRecoveryRoutingSourceCanaryTests/testTimeoutJournalRoutesTheSliceCounterByTheSameDisposition"
 T_RQ_CANARY_COORD="ZeroCoverageRecoveryRoutingSourceCanaryTests/testOrphanRecoveryRoutesOnTheDeclaredArm"
+
+# --- playhead-ronl: the retry charge on the two FLAT arms (RN series) --------
+#
+# Four pure rails on the rule, two on the witness the two arms read, and four
+# end-to-end. The split matters: the RULE is a pure function and can be pinned
+# exhaustively, while the two WRITE SITES can only be reached by making a real
+# pass throw, and only one of the two arms has a reachable trigger at all (see
+# `permanentStoreFailureStillGoesStraightToTheCap`'s doc for why).
+T_RN_BARREN_COSTS="a barren attempt costs one, at every point in the budget"
+T_RN_BANKED_FREE="an attempt that banked new audio costs NOTHING, at every point in the budget"
+T_RN_CAP="three consecutive barren attempts still reach the cap"
+T_RN_RESTART="a banking attempt in the middle restarts the run of barren ones"
+T_RN_PERM_CAP="a PERMANENT store error goes straight to the cap"
+T_RN_PERM_OUTRANKS="a PERMANENT store error goes to the cap even when the attempt banked audio"
+T_RN_SHARED="the RECOVERABLE half is the shared rule, not a copy of it"
+T_RN_CLASSIFY="every recoverable case takes the shared rule; every permanent one takes the cap"
+# The witness. Split in two directions on purpose — a single test over both
+# would go red for either box mutation and neither would have its own witness.
+T_RN_BOX_RECORDS="playhead-ronl: the box records the cursor the store was given"
+T_RN_BOX_NEVER_LOWERS="playhead-ronl: an out-of-order checkpoint never lowers the recorded cursor"
+T_RN_BOX_FEEDS="playhead-ronl: the recorded cursor is judged by the shared cursorAdvanced predicate"
+# End to end, against a real store and the real drain loop.
+T_RN_E2E_BANKED="a throw AFTER the pass banked audio spends NO retry"
+T_RN_E2E_BARREN="a throw BEFORE the pass banks anything is charged, and is still a FAILURE"
+T_RN_E2E_RETIRE="three barren attempts still retire the job"
+T_RN_E2E_PERM="a PERMANENT store failure still goes straight to the cap, end to end"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -6811,6 +6849,86 @@ MUTATIONS=(
   # failure mode a "nothing happened" arm invites. A subset here is evidence,
   # not redundancy, and it is called out rather than papered over.
   "RQ08|803|STORE|$T_RQ_STORE_TERMINAL"
+
+  # ---- playhead-ronl (RN series). Eight rails, six batches. ----
+  #
+  # THE BATCHING IS BY ANCHOR. RN02 and RN03 both rewrite the single expression
+  # in `failedAttemptRetryCount`, RN05 and RN06 both rewrite the permanence
+  # clause of `storeFailureRetryCount`, and RN07 and RN08 both rewrite the
+  # recording line in `noteCursorWritten` — so each pair is split, or whichever
+  # landed first would destroy the other's anchor.
+  #
+  # EVERY RAIL'S UNIQUE KILL IS NAMED IN ITS COMMENT. Two rails that redden the
+  # same set are one rail and a false sense of coverage; where a kill set is a
+  # strict subset of another's, that is called out rather than left to be
+  # noticed.
+
+  # Batch 810 — RN01, THE SHIPPED DEFECT VERBATIM. The generic arm writes the
+  # flat `job.retryCount + 1` again, with the correct charge computed one line
+  # above and simply not used. That is the tree before this bead: a pass that
+  # banked forty minutes of durable coarse scanning and then threw something
+  # unclassifiable is charged exactly as much as one that threw having examined
+  # nothing.
+  #
+  # UNIQUE KILL: `T_RN_E2E_BANKED`. The rule itself is untouched, so no pure
+  # test can see it — which is the whole reason the end-to-end pair exists.
+  "RN01|810|RUNNER|$T_RN_E2E_BANKED"
+
+  # Batch 811 — RN02, THE NEAR-MISS. "Do not increment" instead of RESET. The
+  # two are identical on a first attempt (prior is 0 either way), which is why
+  # the end-to-end tests cannot see this and why e6d3 needed the same rail one
+  # arm over: a job at 2 that banks audio must land on 0, or its next barren
+  # attempt retires it having forgiven nothing.
+  #
+  # UNIQUE KILL: `T_RN_RESTART`, the only test that drives the counter to 2
+  # before the productive attempt.
+  "RN02|811|RUNNER|$T_RN_BANKED_FREE;$T_RN_RESTART"
+
+  # Batch 812 — RN03, THE OTHER HALF OF A RECLASSIFICATION. The barren charge
+  # becomes a no-op, so the budget is never spent through these arms and a job
+  # that can never converge retries forever. This is what "excusing the error"
+  # would have bought without any visible change of disposition — the row still
+  # says `failed`, and the cap silently stops being reachable.
+  #
+  # UNIQUE KILLS: `T_RN_BARREN_COSTS`, `T_RN_CAP`, `T_RN_E2E_RETIRE`. RN01 and
+  # RN02 kill none of the three.
+  "RN03|812|RUNNER|$T_RN_BARREN_COSTS;$T_RN_CAP;$T_RN_E2E_BARREN;$T_RN_E2E_RETIRE"
+
+  # Batch 813 — the typed store arm's two clauses, which are different lines of
+  # one function and so can share a batch.
+  #
+  # RN04 — the recoverable half is flat again: `prior + 1` written out at the
+  # site instead of consumed from the shared rule. Two rulers for one column,
+  # restored. UNIQUE KILL: `T_RN_SHARED`, which asserts the EQUALITY with the
+  # shared rule rather than re-stating its arithmetic.
+  "RN04|813|RUNNER|$T_RN_SHARED;$T_RN_CLASSIFY"
+  # RN05 — permanence stops outranking progress: a schema validator failure is
+  # forgiven because the pass happened to bank a window first, and the row then
+  # burns the whole budget proving the validator still says no. This is the
+  # direction a naive "make it cursor-aware" edit gets wrong.
+  # UNIQUE KILL: `T_RN_PERM_OUTRANKS`.
+  "RN05|813|RUNNER|$T_RN_PERM_OUTRANKS;$T_RN_CLASSIFY"
+
+  # Batch 814 — RN06, the permanence clause stops short-circuiting to the cap
+  # and charges one instead, so a row that can never succeed spends three
+  # attempts proving it. H-R3-2 removed, and it is not this bead's to remove.
+  # UNIQUE KILLS: `T_RN_PERM_CAP` and `T_RN_E2E_PERM`. RN05's kill set is NOT a
+  # subset of this one and vice versa — RN05 keeps the cap and lets progress
+  # bypass it, RN06 keeps the ordering and lowers the value.
+  "RN06|814|RUNNER|$T_RN_PERM_CAP;$T_RN_PERM_OUTRANKS;$T_RN_CLASSIFY;$T_RN_E2E_PERM"
+  # RN07 — the box stops recording what the store was given, so the witness is
+  # always `nil` and every failing attempt reads as barren. Different function,
+  # so no anchor collision with RN06.
+  # UNIQUE KILLS: `T_RN_BOX_RECORDS`, `T_RN_BOX_FEEDS`.
+  "RN07|814|RUNNER|$T_RN_BOX_RECORDS;$T_RN_BOX_FEEDS;$T_RN_E2E_BANKED"
+
+  # Batch 815 — RN08, the box OVERWRITES instead of merging. A checkpoint
+  # arriving out of order (the box is touched from a `@Sendable` callback the
+  # classifier drives) lowers the recorded cursor, and a real advance is charged
+  # against the budget. UNIQUE KILL: `T_RN_BOX_NEVER_LOWERS`, which is exactly
+  # why that claim is a test of its own rather than a third expectation on
+  # `T_RN_BOX_RECORDS`.
+  "RN08|815|RUNNER|$T_RN_BOX_NEVER_LOWERS"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -7376,6 +7494,14 @@ describe_mutation() {
     RQ06) echo "rqgr: the slice counter is unconditionally recordFailed — a listener's scrub is tallied into slicesFailed, the one quantity that number exists not to be" ;;
     RQ07) echo "rqgr: recoverOrphans re-spells the terminal event set locally — behaviour identical, and a SECOND copy of the policy the store-level suite replays" ;;
     RQ08) echo "rqgr VACUITY CONTROL: clearOrphanedLeaseNoRequeue writes nothing, so the terminal-arm test must be observing a real write rather than a state nobody set" ;;
+    RN01) echo "ronl THE SHIPPED DEFECT: the generic arm writes the flat job.retryCount + 1 again — the correct charge is computed one line above and not used" ;;
+    RN02) echo "ronl THE NEAR-MISS: a banking attempt does not INCREMENT rather than RESETTING, so a job at 2 that converges stays at 2 and dies on its next barren attempt" ;;
+    RN03) echo "ronl: a barren attempt stops charging the budget — the half of a reclassification with no visible change of disposition, and an unbounded retry" ;;
+    RN04) echo "ronl: the typed store arm's recoverable half writes prior + 1 at the site again — two rulers for one column, restored" ;;
+    RN05) echo "ronl: banked audio bypasses H-R3-2, so a permanent store error is forgiven and then burns the whole budget proving its validator still says no" ;;
+    RN06) echo "ronl: the permanence clause charges one instead of short-circuiting to the cap — a row that can never succeed spends three attempts proving it" ;;
+    RN07) echo "ronl: the checkpoint box stops recording the cursor the store was given, so every failing attempt reads as barren" ;;
+    RN08) echo "ronl: the box OVERWRITES the recorded cursor instead of merging it, so an out-of-order checkpoint lowers it and a real advance is charged" ;;
     *)   echo "(no description)" ;;
   esac
 }
@@ -7521,9 +7647,19 @@ EOF
   # reclassification that looks harmless: the row still fails, so nothing about
   # the disposition reads differently, and the retry cap silently stops being
   # reachable through this arm.
+  #
+  # playhead-ronl RE-ANCHORED. The site used to read `retryCount: job.retryCount
+  # + 1`; it now consumes `chargedRetryCount`, so the old anchor matches nothing
+  # and this rail would have ERRORed rather than run. The MUTATION is unchanged —
+  # the arm writes the count it was handed at admission — and so is its
+  # expectation, `T_UM_FAILS`, which drives a prologue throw and therefore an
+  # attempt that banked nothing. RN01 is the sibling rail on the same anchor and
+  # is deliberately not this one: RN01 restores the FLAT charge (right on a
+  # barren attempt, wrong on a productive one) while UM07 removes the charge
+  # entirely, and their kill sets are disjoint.
   UM07)
     snippet OLD <<'EOF'
-                            retryCount: job.retryCount + 1
+                            retryCount: chargedRetryCount
 EOF
     snippet NEW <<'EOF'
                             retryCount: job.retryCount
@@ -16068,6 +16204,104 @@ EOF
             SET updatedAt = ?
             WHERE jobId = ? AND 0
             """
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # ---- playhead-ronl (RN series) -------------------------------------------
+
+  # RN01 — the generic arm writes the flat charge again. The correct value is
+  # still computed one line above; it is simply not used, which is the shape the
+  # defect actually had on the two arms that never got e6d3's rule.
+  RN01)
+    snippet OLD <<'EOF'
+                            retryCount: chargedRetryCount
+EOF
+    snippet NEW <<'EOF'
+                            retryCount: job.retryCount + 1
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # RN02 — "do not increment" instead of "reset". Identical on a first attempt,
+  # which is why only a test that drives the counter to 2 first can see it.
+  RN02)
+    snippet OLD <<'EOF'
+        bankedNewAudio ? 0 : priorRetryCount + 1
+EOF
+    snippet NEW <<'EOF'
+        bankedNewAudio ? priorRetryCount : priorRetryCount + 1
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # RN03 — a barren attempt stops charging. The disposition is unchanged (the
+  # row still says `failed`) and the cap silently stops being reachable through
+  # these arms, which is the unbounded case every bead in this family has had to
+  # defend against.
+  RN03)
+    snippet OLD <<'EOF'
+        bankedNewAudio ? 0 : priorRetryCount + 1
+EOF
+    snippet NEW <<'EOF'
+        bankedNewAudio ? 0 : priorRetryCount
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # RN04 — the recoverable half is written out at the site instead of consumed.
+  # Behaviour is identical today, which is the point: it is a SECOND copy of a
+  # rule whose first copy is what the pure tests pin, and the two can drift.
+  RN04)
+    snippet OLD <<'EOF'
+        return failedAttemptRetryCount(
+            priorRetryCount: priorRetryCount,
+            bankedNewAudio: bankedNewAudio
+        )
+EOF
+    snippet NEW <<'EOF'
+        return priorRetryCount + 1
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # RN05 — banked audio bypasses the permanence short-circuit.
+  RN05)
+    snippet OLD <<'EOF'
+        guard !isPermanent else { return AdmissionController.maxRetries }
+EOF
+    snippet NEW <<'EOF'
+        guard !isPermanent || bankedNewAudio else { return AdmissionController.maxRetries }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # RN06 — the permanence clause charges one instead of retiring the row.
+  RN06)
+    snippet OLD <<'EOF'
+        guard !isPermanent else { return AdmissionController.maxRetries }
+EOF
+    snippet NEW <<'EOF'
+        guard !isPermanent else { return priorRetryCount + 1 }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # RN07 — the box stops recording what the store was given. The witness is
+  # always `nil`, so every failing attempt reads as barren and the bead's whole
+  # forgiveness is inert.
+  RN07)
+    snippet OLD <<'EOF'
+            $0.lastDurableProgressCursor = $0.lastDurableProgressCursor
+                .map { durableCursor.monotonic(from: $0) } ?? durableCursor
+EOF
+    snippet NEW <<'EOF'
+            _ = durableCursor
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # RN08 — the box overwrites instead of merging, so a late checkpoint lowers
+  # the recorded cursor and a genuine advance is charged.
+  RN08)
+    snippet OLD <<'EOF'
+            $0.lastDurableProgressCursor = $0.lastDurableProgressCursor
+                .map { durableCursor.monotonic(from: $0) } ?? durableCursor
+EOF
+    snippet NEW <<'EOF'
+            $0.lastDurableProgressCursor = durableCursor
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
