@@ -4387,10 +4387,14 @@ actor BackfillJobRunner {
                             jobId: job.jobId,
                             jobPhase: job.phase,
                             status: blockingStatus,
-                            // Never attempted ⇒ it cost nothing. Stamping the
-                            // pass total here is how the 213.8-vs-115.9-minute
-                            // double count arose in the first place.
-                            latencyMs: 0,
+                            // playhead-kbqw: never attempted ⇒ NULL, and there
+                            // is no longer a parameter through which anything
+                            // else could be said. This used to read
+                            // `latencyMs: 0` under "it cost nothing", which
+                            // states a measured zero for a call that was never
+                            // issued — and puts an `IS NOT NULL` row in the
+                            // very bucket the cancelled-cost question is asked
+                            // of. See the constructor for the field evidence.
                             runMode: runMode
                        ) {
                 try await store.insertSemanticScanResult(await attributed(failureResult, jobId: job.jobId))
@@ -6405,13 +6409,31 @@ actor BackfillJobRunner {
         )
     }
 
+    /// The row that stands for a plan the pass NEVER REACHED.
+    ///
+    /// **playhead-kbqw: it has no `latencyMs` parameter, and the absence is the
+    /// point — same remedy playhead-ejr7 applied to the `failure:` overload one
+    /// screen down.** Its single caller used to pass the literal `0` under the
+    /// comment "Never attempted ⇒ it cost nothing". That reads as a
+    /// MEASUREMENT of zero, and it is not one: nothing was issued, so nobody
+    /// measured anything. ejr7's own rule, stated on `makeFailureScanResult`,
+    /// is that a `Double` here is what forces a caller to invent a number.
+    ///
+    /// It was not academic. ejr7 measured the 2026-08-10/11 pull and found
+    /// **three `cancelled` rows carrying the literal 0 of a never-attempted
+    /// plan**, sitting in the same status bucket as rows that really did burn
+    /// a call. That is the exact bucket this bead's check reads
+    /// (`WHERE status='cancelled' AND latencyMs IS NOT NULL`): a 0 satisfies
+    /// `IS NOT NULL`, so an un-fixed version of this function would answer
+    /// "what does a cancelled call cost?" with unattempted plans dragging the
+    /// answer toward zero. NULL is not a number and `AVG`/`SUM` skip it, which
+    /// is exactly the contribution a plan nobody attempted should make.
     private func makeCoarseFailureScanResult(
         plan: CoarsePassWindowPlan,
         inputs: AssetInputs,
         jobId: String,
         jobPhase: BackfillJobPhase,
         status: SemanticScanStatus,
-        latencyMs: Double,
         runMode: SemanticScanPhase
     ) -> SemanticScanResult? {
         let attemptedSegments = inputs.segments.filter { plan.lineRefs.contains($0.segmentIndex) }
@@ -6422,7 +6444,7 @@ actor BackfillJobRunner {
             jobId: jobId,
             jobPhase: jobPhase,
             status: status,
-            latencyMs: latencyMs,
+            latencyMs: nil,
             runMode: runMode
         )
     }
@@ -6475,11 +6497,21 @@ actor BackfillJobRunner {
     /// requires `latencyMs != nil` and `.success`, and SQL's `SUM` skips NULL —
     /// which is exactly the contribution an unmeasured attempt should make.
     ///
-    /// The un-threaded construction sites are unchanged and still nil: the qbib
-    /// safety-recovery `.cancelled` and `blocked` arms, and the over-budget
-    /// abandonment whose subdivision produced no timing. Threading them is a
-    /// measurement to be ADDED (playhead-kbqw), not a number to be invented
-    /// here.
+    /// **playhead-kbqw threaded the sites that could measure themselves, and
+    /// the ones that remain NULL now do so because nothing was attempted.**
+    /// Every qbib safety-recovery arm that ISSUES a permissive call — screened,
+    /// blocked, timed out, and both `.cancelled` arms — now carries that
+    /// attempt's own span on both clocks plus the daemon census, all read off
+    /// one `FMClockPair` taken before the call. What stays NULL is the
+    /// never-attempted population, enumerated on
+    /// `CoarseWindowFailure.latencyMillis`.
+    ///
+    /// **So `status='cancelled'` is TWO populations in this column and a SQL
+    /// reader must not average across them.** A cancelled window that burned
+    /// time before the grant died carries a number; a half of a split window
+    /// the loop never reached carries NULL. `AND latencyMs IS NOT NULL` selects
+    /// the first, which is the one that answers "what does a cancelled call
+    /// cost?" — the question ejr7's removal of the fallback left unanswerable.
     private func makeCoarseFailureScanResult(
         failure: CoarseWindowFailure,
         inputs: AssetInputs,

@@ -663,6 +663,30 @@ struct CoarseWindowFailure: Sendable, Equatable {
     /// `.inferenceTimeout` measurable at all: without it a bounded 180 s
     /// abandonment would persist stamped with its pass's total and read
     /// exactly like the unbounded call it replaced.
+    ///
+    /// **THE SPAN, stated once so no reader has to infer it (playhead-kbqw):
+    /// from the instant THIS attempt was ISSUED to the instant ITS outcome was
+    /// OBSERVED** — a screening returned, a guardrail block thrown, a deadline
+    /// fired, or a `CancellationError` caught. Never the pass, never a sibling
+    /// attempt, never a neighbouring window.
+    ///
+    /// **NIL MEANS NO ATTEMPT WAS ISSUED FOR THIS RANGE**, and after
+    /// playhead-kbqw that is the only thing it can mean on the coarse path.
+    /// The population is small and enumerable:
+    ///
+    /// 1. a plan rejected pre-flight for exceeding the token budget, whose
+    ///    subdivision produced no timing;
+    /// 2. line refs that resolved to no segment (no prompt was ever built);
+    /// 3. a permissive recovery declined before its first call — nothing
+    ///    resolvable, or the whole-pass attempt budget already spent;
+    /// 4. a half of a split window the loop never reached, because the split
+    ///    stopped on a cancellation, a timeout, or the budget.
+    ///
+    /// Case 4 is the one that surprises: it produces `status == .cancelled`
+    /// with a NIL cost, sitting beside a cancelled sibling that carries a real
+    /// one. Both are correct. A cancelled row's cost is NULL when the split
+    /// never reached it and a number when it burned time before the grant
+    /// died, and a SQL reader must not treat "cancelled" as one population.
     let latencyMillis: Double?
     /// playhead-rkfp: `latencyMillis`'s twin over the SAME span, on the
     /// suspending clock. See `FMCoarseWindowOutput.suspendingLatencyMillis`.
@@ -2441,7 +2465,6 @@ struct FoundationModelClassifier: Sendable {
                                 Self.coarseSafetyRecoveryMaxAttemptsPerWindow,
                                 recoveryAttemptsRemaining
                             ),
-                            clock: clock,
                             windowIndex: planIndex + 1,
                             totalWindows: totalWindows
                         )
@@ -2610,6 +2633,30 @@ struct FoundationModelClassifier: Sendable {
     /// shadow retry observer already re-attempts persisted failure rows on
     /// the next capability transition, and the failure rows this returns are
     /// exactly what it keys off.
+    ///
+    /// ## playhead-kbqw: WHICH SPAN EVERY NUMBER THIS FUNCTION RECORDS COVERS
+    ///
+    /// Exactly one: **from the instant a permissive attempt was ISSUED to the
+    /// instant its outcome was OBSERVED** — screening returned, guardrail
+    /// block thrown, deadline fired, or `CancellationError` caught. One
+    /// `FMClockPair` per attempt, taken before the call and read in whichever
+    /// arm the call lands in, so `latencyMillis` and its suspending twin can
+    /// never straddle different spans. Nothing here may take a number from the
+    /// pass, from a sibling attempt, or from a neighbouring window; that
+    /// substitution is what made playhead-ejr7 a P0.
+    ///
+    /// A `.cancelled` reading is NOT "how long the model took" — the model
+    /// never answered. It is how long this attempt occupied before the
+    /// cancellation was observed, which is precisely the quantity nobody could
+    /// answer from a device pull before this bead: an attempt started with the
+    /// grant already dead reads ~0 ms, and one killed at grant end reads the
+    /// work it burned. Both are true statements about cost; a NULL was
+    /// neither.
+    ///
+    /// **Two sites below deliberately record NOTHING**, because no attempt was
+    /// issued for the range they cover: line refs that resolved to no segment,
+    /// and a recovery declined before its first call. NULL there is the
+    /// measurement, not a gap in it — see `CoarseWindowFailure.latencyMillis`.
     @available(iOS 26.0, *)
     private func recoverCoarseWindowPermissively(
         plan: CoarsePassWindowPlan,
@@ -2617,7 +2664,6 @@ struct FoundationModelClassifier: Sendable {
         blockedStatus: SemanticScanStatus,
         permissive: PermissiveAdClassifier,
         attemptBudget: Int,
-        clock: ContinuousClock,
         windowIndex: Int,
         totalWindows: Int
     ) async -> CoarsePermissiveRecovery {
@@ -2647,6 +2693,13 @@ struct FoundationModelClassifier: Sendable {
             }
         }
         if !unresolvedLineRefs.isEmpty {
+            // playhead-kbqw, SITE 1 of the five: NULL cost, and it is the
+            // measurement. These line refs resolved to no segment, so no
+            // prompt was ever built for them and no attempt was ever issued —
+            // there is no span to read a clock over. What would a number here
+            // read if the thing it claims to measure had never happened? It
+            // would read the cost of somebody ELSE's attempt, which is the
+            // whole of playhead-ejr7.
             recovery.failures.append(
                 CoarseWindowFailure(
                     planWindowIndex: plan.windowIndex,
@@ -2666,6 +2719,21 @@ struct FoundationModelClassifier: Sendable {
         let resolvedStartTime = planSegments.map(\.startTime).min() ?? plan.startTime
         let resolvedEndTime = planSegments.map(\.endTime).max() ?? plan.endTime
         guard !planSegments.isEmpty, attemptBudget > 0 else {
+            // playhead-kbqw, SITE 2 of the five: NULL cost, and it is the
+            // measurement. Recovery was DECLINED before its first call —
+            // nothing resolved to attempt, or the whole-pass attempt budget
+            // was already spent — so this function issued no attempt and has
+            // no span to report.
+            //
+            // The standard `@Generable` attempt that got blocked and sent us
+            // here WAS timed, by the caller, and is deliberately not borrowed:
+            // that span belongs to a different attempt against a different
+            // model with a different guardrail configuration, and stamping it
+            // here would make a declined recovery indistinguishable from one
+            // that ran. When recovery is declined at the CALL SITE instead
+            // (no permissive classifier, or no budget left), the caller
+            // records that blocked attempt with its own reading — see the
+            // `failedWindows.append` after this call returns.
             if !resolvedLineRefs.isEmpty || unresolvedLineRefs.isEmpty {
                 recovery.failures.append(
                     CoarseWindowFailure(
@@ -2693,10 +2761,22 @@ struct FoundationModelClassifier: Sendable {
         )
 
         // Attempt 1: the whole window, permissive guardrails.
-        let wholeStart = clock.now
+        //
+        // playhead-kbqw: ONE start instant for this attempt, taken BEFORE the
+        // call, on both clocks — because by the time the `.cancelled` arm runs
+        // the enclosing task is already cancelled and a start instant cannot be
+        // reconstructed after the fact. `FMClockPair` rather than a bare
+        // `ContinuousClock.Instant` so `latencyMillis` and its suspending twin
+        // are two readings of the SAME span (playhead-rkfp), and the census so
+        // the third field of that triple is filled at the same instant rather
+        // than left NULL beside two numbers (playhead-ezmv).
+        let wholeAttemptClocks = FMClockPair.now()
+        let wholeAttemptPeers = FMDaemonCallCensus.shared.inFlight
         recovery.attemptsSpent += 1
         switch await classifyPermissively(segments: planSegments, permissive: permissive) {
         case let .screened(screening):
+            // SPAN: attempt issued -> screening returned.
+            let untilScreened = wholeAttemptClocks.elapsed()
             recovery.recovered.append(
                 FMCoarseWindowOutput(
                     windowIndex: 0,
@@ -2705,7 +2785,9 @@ struct FoundationModelClassifier: Sendable {
                     endTime: resolvedEndTime,
                     transcriptQuality: plan.transcriptQuality,
                     screening: screening,
-                    latencyMillis: Self.latencyMillis(since: wholeStart, clock: clock)
+                    latencyMillis: untilScreened.continuousMs,
+                    suspendingLatencyMillis: untilScreened.suspendingMs,
+                    daemonPeersAtStart: wholeAttemptPeers
                 )
             )
             logger.notice(
@@ -2721,6 +2803,19 @@ struct FoundationModelClassifier: Sendable {
             // BG-window expiry: nothing was judged. Record the honest status
             // (`.resumeFromCheckpoint`, not `.persistFailure`) and stop —
             // the pass loop's cancellation check escalates from here.
+            //
+            // playhead-kbqw, SITE 3 of the five, and one of the two the bead
+            // was filed for.
+            //
+            // SPAN: attempt issued -> `CancellationError` observed. NOT how
+            // long the model took (it never answered) and NOT how long the
+            // cancellation itself took to propagate through the pass. Nothing
+            // was judged, but something was SPENT, and this is that number.
+            // It was NULL from playhead-qbib until here, which is why "what
+            // does a cancelled call cost?" had no answer from a device pull:
+            // the largest per-call cost the 2026-08-10/11 pull could vouch for
+            // was 74.1 s, and that was a success.
+            let untilCancelled = wholeAttemptClocks.elapsed()
             recovery.failures.append(
                 CoarseWindowFailure(
                     planWindowIndex: plan.windowIndex,
@@ -2728,7 +2823,10 @@ struct FoundationModelClassifier: Sendable {
                     startTime: resolvedStartTime,
                     endTime: resolvedEndTime,
                     status: .cancelled,
-                    coversWholePlan: resolvedCoversWholePlan
+                    coversWholePlan: resolvedCoversWholePlan,
+                    latencyMillis: untilCancelled.continuousMs,
+                    suspendingLatencyMillis: untilCancelled.suspendingMs,
+                    daemonPeersAtStart: wholeAttemptPeers
                 )
             )
             return recovery
@@ -2738,6 +2836,11 @@ struct FoundationModelClassifier: Sendable {
             // attempts (the two halves) would each spend another full deadline
             // against a model that has just demonstrated it is not answering,
             // which is precisely the unbounded spend this bead removes.
+            //
+            // SPAN: attempt issued -> the deadline fired (playhead-kbqw; the
+            // continuous number is unchanged, the twin and the census are new
+            // and come off the same instant).
+            let untilTimedOut = wholeAttemptClocks.elapsed()
             recovery.failures.append(
                 CoarseWindowFailure(
                     planWindowIndex: plan.windowIndex,
@@ -2746,7 +2849,9 @@ struct FoundationModelClassifier: Sendable {
                     endTime: resolvedEndTime,
                     status: .inferenceTimeout,
                     coversWholePlan: resolvedCoversWholePlan,
-                    latencyMillis: Self.latencyMillis(since: wholeStart, clock: clock)
+                    latencyMillis: untilTimedOut.continuousMs,
+                    suspendingLatencyMillis: untilTimedOut.suspendingMs,
+                    daemonPeersAtStart: wholeAttemptPeers
                 )
             )
             return recovery
@@ -2754,6 +2859,8 @@ struct FoundationModelClassifier: Sendable {
             recovery.permissiveCounts.increment(reason: reason)
             let fallbackStatus = Self.permissiveStatus(for: reason)
             guard planSegments.count >= 2, attemptBudget >= 2 else {
+                // SPAN: attempt issued -> the guardrail block was thrown.
+                let untilBlocked = wholeAttemptClocks.elapsed()
                 recovery.failures.append(
                     CoarseWindowFailure(
                         planWindowIndex: plan.windowIndex,
@@ -2762,7 +2869,9 @@ struct FoundationModelClassifier: Sendable {
                         endTime: resolvedEndTime,
                         status: fallbackStatus,
                         coversWholePlan: resolvedCoversWholePlan,
-                        latencyMillis: Self.latencyMillis(since: wholeStart, clock: clock)
+                        latencyMillis: untilBlocked.continuousMs,
+                        suspendingLatencyMillis: untilBlocked.suspendingMs,
+                        daemonPeersAtStart: wholeAttemptPeers
                     )
                 )
                 logger.error(
@@ -2781,7 +2890,6 @@ struct FoundationModelClassifier: Sendable {
                 fallbackStatus: fallbackStatus,
                 permissive: permissive,
                 attemptBudget: attemptBudget,
-                clock: clock,
                 windowIndex: windowIndex,
                 into: &recovery
             )
@@ -2792,6 +2900,14 @@ struct FoundationModelClassifier: Sendable {
     /// playhead-qbib: bounded context shrink — split a blocked window into two
     /// contiguous halves and attempt each once. Every half is accounted for,
     /// whether it is recovered or left as a hole.
+    ///
+    /// playhead-kbqw: a half that was ATTEMPTED carries the span from its own
+    /// attempt being issued to that attempt's outcome being observed, on both
+    /// clocks, with the daemon census read at the same instant. A half that was
+    /// NEVER attempted carries nothing at all, on purpose — see the guard
+    /// below. The two must stay distinguishable in the persisted row, because
+    /// "the split stopped before this half" and "this half burned a deadline"
+    /// are opposite facts about where the pass's time went.
     @available(iOS 26.0, *)
     private func recoverCoarseHalves(
         plan: CoarsePassWindowPlan,
@@ -2799,7 +2915,6 @@ struct FoundationModelClassifier: Sendable {
         fallbackStatus: SemanticScanStatus,
         permissive: PermissiveAdClassifier,
         attemptBudget: Int,
-        clock: ContinuousClock,
         windowIndex: Int,
         into recovery: inout CoarsePermissiveRecovery
     ) async {
@@ -2821,6 +2936,17 @@ struct FoundationModelClassifier: Sendable {
                 // cancelled, or the model stopped answering. Either way it is a
                 // hole, carrying the status that explains WHY we could not
                 // look.
+                //
+                // playhead-kbqw, SITE 4 of the five: NULL cost, and it is the
+                // measurement. This half was never issued, so it spent
+                // nothing. Note what that makes true of the persisted column:
+                // when `stopStatus` is `.cancelled` this row IS a
+                // `status='cancelled'` row with a NULL `latencyMs`, sitting
+                // beside the SITE 5 row below that carries a real one. That is
+                // not an un-threaded site — it is the difference between the
+                // half that burned time before the grant died and the half
+                // that never started, and collapsing the two is exactly the
+                // conflation playhead-ejr7 removed.
                 recovery.failures.append(
                     CoarseWindowFailure(
                         planWindowIndex: plan.windowIndex,
@@ -2833,10 +2959,17 @@ struct FoundationModelClassifier: Sendable {
                 )
                 continue
             }
-            let halfStart = clock.now
+            // playhead-kbqw: this half's own start instant, on both clocks,
+            // taken BEFORE the call for the same reason the whole-window
+            // attempt's is — the `.cancelled` arm runs on an already-cancelled
+            // task and cannot reconstruct one afterwards.
+            let halfAttemptClocks = FMClockPair.now()
+            let halfAttemptPeers = FMDaemonCallCensus.shared.inFlight
             recovery.attemptsSpent += 1
             switch await classifyPermissively(segments: half, permissive: permissive) {
             case let .screened(screening):
+                // SPAN: this half's attempt issued -> screening returned.
+                let untilScreened = halfAttemptClocks.elapsed()
                 recovery.recovered.append(
                     FMCoarseWindowOutput(
                         windowIndex: 0,
@@ -2845,7 +2978,9 @@ struct FoundationModelClassifier: Sendable {
                         endTime: endTime,
                         transcriptQuality: plan.transcriptQuality,
                         screening: screening,
-                        latencyMillis: Self.latencyMillis(since: halfStart, clock: clock)
+                        latencyMillis: untilScreened.continuousMs,
+                        suspendingLatencyMillis: untilScreened.suspendingMs,
+                        daemonPeersAtStart: halfAttemptPeers
                     )
                 )
                 logger.notice(
@@ -2859,7 +2994,16 @@ struct FoundationModelClassifier: Sendable {
                     """
                 )
             case .cancelled:
+                // playhead-kbqw, SITE 5 of the five, and the second of the two
+                // the bead was filed for.
+                //
+                // SPAN: THIS half's attempt issued -> `CancellationError`
+                // observed. Not the whole window's recovery, not the pass, and
+                // not the sibling half — which is why the reading comes off
+                // `halfAttemptClocks` and not off the whole-window pair one
+                // frame up the stack.
                 stopStatus = .cancelled
+                let untilCancelled = halfAttemptClocks.elapsed()
                 recovery.failures.append(
                     CoarseWindowFailure(
                         planWindowIndex: plan.windowIndex,
@@ -2867,7 +3011,10 @@ struct FoundationModelClassifier: Sendable {
                         startTime: startTime,
                         endTime: endTime,
                         status: .cancelled,
-                        coversWholePlan: false
+                        coversWholePlan: false,
+                        latencyMillis: untilCancelled.continuousMs,
+                        suspendingLatencyMillis: untilCancelled.suspendingMs,
+                        daemonPeersAtStart: halfAttemptPeers
                     )
                 )
             case .timedOut:
@@ -2877,6 +3024,8 @@ struct FoundationModelClassifier: Sendable {
                 // shared `cancelled` flag) is what keeps the skipped half from
                 // claiming it was interrupted.
                 stopStatus = .inferenceTimeout
+                // SPAN: this half's attempt issued -> the deadline fired.
+                let untilTimedOut = halfAttemptClocks.elapsed()
                 recovery.failures.append(
                     CoarseWindowFailure(
                         planWindowIndex: plan.windowIndex,
@@ -2885,11 +3034,16 @@ struct FoundationModelClassifier: Sendable {
                         endTime: endTime,
                         status: .inferenceTimeout,
                         coversWholePlan: false,
-                        latencyMillis: Self.latencyMillis(since: halfStart, clock: clock)
+                        latencyMillis: untilTimedOut.continuousMs,
+                        suspendingLatencyMillis: untilTimedOut.suspendingMs,
+                        daemonPeersAtStart: halfAttemptPeers
                     )
                 )
             case let .blocked(reason):
                 recovery.permissiveCounts.increment(reason: reason)
+                // SPAN: this half's attempt issued -> the guardrail block was
+                // thrown.
+                let untilBlocked = halfAttemptClocks.elapsed()
                 recovery.failures.append(
                     CoarseWindowFailure(
                         planWindowIndex: plan.windowIndex,
@@ -2898,7 +3052,9 @@ struct FoundationModelClassifier: Sendable {
                         endTime: endTime,
                         status: Self.permissiveStatus(for: reason),
                         coversWholePlan: false,
-                        latencyMillis: Self.latencyMillis(since: halfStart, clock: clock)
+                        latencyMillis: untilBlocked.continuousMs,
+                        suspendingLatencyMillis: untilBlocked.suspendingMs,
+                        daemonPeersAtStart: halfAttemptPeers
                     )
                 )
                 logger.error(
