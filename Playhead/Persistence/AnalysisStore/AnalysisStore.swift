@@ -757,6 +757,37 @@ struct AnalysisCoverageSummary: Sendable, Equatable {
     let adScanCoveredSec: AdScanSeconds?
     let adScanCoveredSource: CoverageProvenance
 
+    /// playhead-nffz: the SUPREMUM of ``adScanCoveredSec`` on the transcript that
+    /// exists today — the bridged transcribed area, both passes.
+    ///
+    /// It is not a second estimate of coverage. It is the very region
+    /// ``adScanCoveredSec`` is intersected with (see that doc and
+    /// ``AdScanSeconds/init(examined:within:bridging:)``), so
+    /// `adScanCoveredSec <= adScanCeilingSec` holds by CONSTRUCTION rather than
+    /// by observation, and the difference between the two is the only audio a
+    /// further scan could ever add.
+    ///
+    /// **Why it had to become a published quantity.** ``adScanFraction``'s
+    /// numerator is bounded by this area and its denominator is the DECLARED
+    /// DURATION, while the floor that judges it
+    /// (``AnalysisJobRunner/semanticBackfillSufficientAdScanFraction``, 0.98) is
+    /// also stated over the duration. An episode whose transcript covers less
+    /// than 0.98 of its duration therefore cannot clear that floor **however
+    /// perfectly it is scanned** — two populations compared as one, which is this
+    /// repo's standing defect class. Measured on the 2026-08-14 device pull,
+    /// three of nine assets are in that state (C065AD03 scanned 0.4384 against a
+    /// ceiling of 0.4436; AA6CD430 0.8600 / 0.8961; C0610BF9 0.9264 / 0.9341) and
+    /// on the 2026-08-11 pull all five are (0.0257/0.0697, 0.0691/0.9031,
+    /// 0.2544/0.2575, 0.8202/0.8300, 0.9264/0.9274). Publishing the bound is what
+    /// lets the coverage terminal say WHICH of the two constraints bound —
+    /// see ``BackfillJobRunner/UnderCoverageConstraint``.
+    ///
+    /// `nil` when there is no transcript evidence of any kind (no chunk of either
+    /// pass and no fast watermark), never a synthetic 0: "nothing has been
+    /// transcribed yet" and "this episode's transcript is empty" are different
+    /// claims, and only the second may be read as a ceiling.
+    let adScanCeilingSec: BridgedTranscriptSeconds?
+
     /// playhead-pz32: ``adScanCoveredSec`` as a fraction of the episode's
     /// duration, clamped to `[0, 1]`. `nil` when the quantity is not honestly
     /// measurable — an unmeasurable episode must read as not-ready, never ready.
@@ -867,6 +898,75 @@ struct AnalysisCoverageSummary: Sendable, Equatable {
         // bead's business. Every asset on the 2026-08-03 pull that has a final
         // watermark also has final chunks, and chunks win, so this guard is
         // latent there — a rail, not a repair.
+        //
+        // playhead-nffz: the rule itself now lives in
+        // ``declaredDurationIsDisprovedByTranscriptReach(tolerance:)``, because
+        // ``adScanCeilingFraction`` has to apply the IDENTICAL guard — the two
+        // fractions are measured against the same floor, so an episode either
+        // one withholds and the other does not is an episode that falls between
+        // two rulers. Everything the paragraphs above say about it is unchanged;
+        // it is stated once instead of twice. Rails TY23 and the R4 probe PA3
+        // record still apply, at the new site.
+        guard !declaredDurationIsDisprovedByTranscriptReach(tolerance: tolerance) else { return nil }
+        return ReachRatio(examined: adScanCoveredSec, ofDeclaredDuration: episodeDurationSec)
+    }
+
+    /// playhead-nffz: ``adScanCeilingSec`` as a fraction of the same declared
+    /// duration — the largest value ``adScanFraction`` can ever report on this
+    /// transcript.
+    ///
+    /// **One ruler, two readers.** The withholding guards are the SAME guards, in
+    /// the same order, reached through the same predicate
+    /// (``declaredDurationIsDisprovedByTranscriptReach``): a ceiling published
+    /// under looser guards than the measurement it bounds would be a ceiling that
+    /// exists for episodes whose measurement does not, and the one comparison
+    /// this quantity exists for — ceiling against the ad-scan floor — would then
+    /// be made on a denominator ``adScanFraction`` has already rejected.
+    ///
+    /// **It does NOT require a coverage-lane row, and that asymmetry is the
+    /// point.** ``adScanFraction`` is `nil` until something has scanned; the
+    /// ceiling is a property of the TRANSCRIPT and is knowable before the first
+    /// window. `nil` here means the transcript is unknown or the duration is
+    /// unusable — never "no scan yet".
+    ///
+    /// **What it reads if the thing it measures never happened.** An asset with a
+    /// real duration and no transcript at all reads `nil` (see
+    /// ``adScanCeilingSec``), not 0 — so nothing downstream can read "no
+    /// transcript has landed yet" as "this episode can never be scanned".
+    var adScanCeilingFraction: ReachRatio? {
+        guard let adScanCeilingSec,
+              adScanCeilingSec.isFinite,
+              adScanCeilingSec.rawValue >= 0,
+              let episodeDurationSec,
+              episodeDurationSec.isFinite,
+              episodeDurationSec.rawValue > 0 else {
+            return nil
+        }
+        let tolerance = Self.adScanDurationToleranceSec(episodeDurationSec: episodeDurationSec)
+        // The ceiling is an AREA and the duration a DURATION, compared for the
+        // same reason `adScanFraction` compares its own numerator: an area past
+        // the whole declared duration proves the two describe different audio.
+        guard !adScanCeilingSec.exceeds(episodeDurationSec, byMoreThan: tolerance) else { return nil }
+        guard !declaredDurationIsDisprovedByTranscriptReach(tolerance: tolerance) else { return nil }
+        return ReachRatio(ceiling: adScanCeilingSec, ofDeclaredDuration: episodeDurationSec)
+    }
+
+    /// playhead-nffz: the transcript-reach guard shared by ``adScanFraction`` and
+    /// ``adScanCeilingFraction``, extracted so there is ONE expression of it.
+    ///
+    /// Two copies of this rule that happen to agree is precisely how the
+    /// certainty tier and its consumers came apart (playhead-6qvf), and the
+    /// hazard is sharper here than usual: the two fractions are compared against
+    /// the same floor, so a divergence in when each is withheld is invisible
+    /// until an episode falls into the gap between them.
+    ///
+    /// See ``adScanFraction`` for the full argument, the E8F0F867 witness and the
+    /// `.finalPassChunks`-only admission of the final term.
+    private func declaredDurationIsDisprovedByTranscriptReach(tolerance: Double) -> Bool {
+        guard let episodeDurationSec else { return false }
+        // THE FINAL TERM IS ADMITTED ONLY ON CHUNK EVIDENCE (playhead-9y9e R3
+        // review) — a stale watermark column would WITHHOLD a fraction that is
+        // fine, i.e. make an episode less ready.
         let finalReach = finalPassCoverageEndSource == .finalPassChunks
             ? finalPassCoverageEndSec
             : nil
@@ -882,16 +982,12 @@ struct AnalysisCoverageSummary: Sendable, Equatable {
             .compactMap { $0 }
             .filter { $0.isFinite }
             .max()
+        guard let transcriptReach else { return false }
         // R4 review: through ``WatermarkSeconds/reaches(past:byMoreThan:)``.
-        // The paragraph above ASSERTS that an area can never disprove a
-        // duration; written in raw values the guard did not enforce it — probe
-        // PA3 substituted `adScanCoveredSec.rawValue` for the reach here and it
-        // COMPILED. A sentence forbidding a substitution beside an expression
-        // that permits it is instance 18's own shape. Rail TY23.
-        if let transcriptReach, transcriptReach.reaches(past: episodeDurationSec, byMoreThan: tolerance) {
-            return nil
-        }
-        return ReachRatio(examined: adScanCoveredSec, ofDeclaredDuration: episodeDurationSec)
+        // Written in raw values the guard did not enforce the paragraph above —
+        // probe PA3 substituted `adScanCoveredSec.rawValue` for the reach and it
+        // COMPILED. Rail TY23.
+        return transcriptReach.reaches(past: episodeDurationSec, byMoreThan: tolerance)
     }
 
     /// playhead-x0lb: the episode's transcript DENSITY — deliberately adjacent
@@ -7297,11 +7393,19 @@ actor AnalysisStore {
     // RULE changed are re-judged:
     //
     //   * `deferReason LIKE 'underCoverageBudgetSpent-%'` is the exact string
-    //     `BackfillJobRunner.underCoverageExpiryReason(phase:)` writes and
-    //     nothing else writes. `expiredWithoutProgress-…` is deliberately NOT
-    //     matched: playhead-bkhc's branch has always reset on progress, so a row
-    //     it retired really did see three consecutive barren windows and its
-    //     retirement is not disturbed. Nor is any FM/store failure cause.
+    //     `BackfillJobRunner.underCoverageExpiryReason(phase:constraint:)` writes
+    //     for `.scanBudget` and nothing else writes. `expiredWithoutProgress-…`
+    //     is deliberately NOT matched: playhead-bkhc's branch has always reset on
+    //     progress, so a row it retired really did see three consecutive barren
+    //     windows and its retirement is not disturbed. Nor is any FM/store
+    //     failure cause.
+    //
+    //     playhead-nffz: nor is `transcriptCeilingBelowFloor-…`, and that
+    //     exclusion is the point of splitting the string. This migration exists
+    //     to give one fresh budget to a job the BUDGET RULE mis-retired; a job
+    //     whose transcript cannot support the floor was not mis-retired, and a
+    //     fresh budget buys it exactly three more attempts that plan nothing.
+    //     The predicate is unchanged and now means what it says.
     //   * `status = 'failed' AND retryCount >= maxRetries` is the exhausted set.
     //     A `failed` row already under the budget is re-drivable today and needs
     //     nothing.
@@ -12659,6 +12763,23 @@ actor AnalysisStore {
                 adScanCoveredSource = .unknown
             }
 
+            // playhead-nffz: the SUPREMUM of the area just computed, off the very
+            // region it was intersected with — so `adScanCoveredSec <=
+            // adScanCeilingSec` is arithmetic, not a hope. It is measured through
+            // ``SemanticScanClaim/bridgedTranscriptCoveredSec(region:)`` rather
+            // than by a second bridging call here, because that expression is the
+            // one the transcript's own finalize floor already divides, and two
+            // spellings of one bound is the drift this file exists to remove.
+            //
+            // NOT gated on `adScanRowSeen`: the ceiling is a property of the
+            // TRANSCRIPT and is knowable before any window is scanned. It is
+            // gated on the region being non-empty, because an empty region means
+            // no transcript evidence of any kind — "nothing yet", which must not
+            // be published as the claim "this episode can never be read".
+            let adScanCeilingSec: BridgedTranscriptSeconds? = transcribedRegion.isEmpty
+                ? nil
+                : SemanticScanClaim.bridgedTranscriptCoveredSec(region: transcribedRegion)
+
             summaries[id] = AnalysisCoverageSummary(
                 assetId: id,
                 episodeDurationSec: assetRow?.episodeDurationSec.map { EpisodeSeconds($0) },
@@ -12674,7 +12795,8 @@ actor AnalysisStore {
                 finalPassCoverageEndSource: finalEndSource,
                 analysisCoveredSec: analysisCoveredSec,
                 adScanCoveredSec: adScanCoveredSec,
-                adScanCoveredSource: adScanCoveredSource
+                adScanCoveredSource: adScanCoveredSource,
+                adScanCeilingSec: adScanCeilingSec
             )
         }
         return summaries

@@ -201,6 +201,7 @@ struct UnclassifiedModelFailureTests {
             "expiredWithoutProgress-",
             "cancelled-during-",
             "underCoverageBudgetSpent-",
+            "transcriptCeilingBelowFloor-",
             "underCoverage-"
         ]
         for family in existingFamilies {
@@ -215,7 +216,12 @@ struct UnclassifiedModelFailureTests {
             FMDaemonRefusal.metadataStall.batchSiblingCause,
             BackfillJobRunner.noProgressExpiryReason(phase: .fullEpisodeScan),
             BackfillJobRunner.underCoverageDeferReason(phase: .fullEpisodeScan),
-            BackfillJobRunner.underCoverageExpiryReason(phase: .fullEpisodeScan)
+            BackfillJobRunner.underCoverageExpiryReason(
+                phase: .fullEpisodeScan, constraint: .scanBudget
+            ),
+            BackfillJobRunner.underCoverageExpiryReason(
+                phase: .fullEpisodeScan, constraint: .transcriptCeiling
+            )
         ]
         for token in existingTokens {
             #expect(!token.hasPrefix("\(UnclassifiedModelFailure.causePrefix)-"))
@@ -229,16 +235,22 @@ struct UnclassifiedModelFailureTests {
             UnclassifiedModelFailure.deferReason(for: fieldRowError, phase: .scanLikelyAdSlots),
             FMDaemonRefusal.metadataStall.passPrologueCause,
             FMDaemonThrottle.DeferCause.passPrologue.rawValue,
-            BackfillJobRunner.underCoverageExpiryReason(phase: .fullEpisodeScan),
+            BackfillJobRunner.underCoverageExpiryReason(
+                phase: .fullEpisodeScan, constraint: .scanBudget
+            ),
+            BackfillJobRunner.underCoverageExpiryReason(
+                phase: .fullEpisodeScan, constraint: .transcriptCeiling
+            ),
             BackfillJobRunner.noProgressExpiryReason(phase: .fullEpisodeScan)
         ]
         let counted = population.filter {
             $0.hasPrefix("\(UnclassifiedModelFailure.causePrefix)-")
         }
         #expect(counted.count == 2)
-        // The denominator is non-empty and the other four are real causes, so
-        // the 2 is a measured 2-of-6, not a 2-of-2.
-        #expect(population.count == 6)
+        // The denominator is non-empty and the other five are real causes, so
+        // the 2 is a measured 2-of-7, not a 2-of-2. (playhead-nffz added the
+        // seventh: `transcriptCeilingBelowFloor-`.)
+        #expect(population.count == 7)
     }
 
     @Test("the log event is its own name — it does not widen an existing grep")

@@ -587,7 +587,11 @@ struct EpisodePreparationReadinessTests {
     /// screen shows. So a mutation that swaps the readiness predicate onto any
     /// other scalar of this same read model is caught, not just one that reverts
     /// to the raw asset watermarks.
-    private func coverage(assetId: String = assetId, adScanCoveredSec: AdScanSeconds?) -> AnalysisCoverageSummary {
+    private func coverage(
+        assetId: String = assetId,
+        adScanCoveredSec: AdScanSeconds?,
+        adScanCeilingSec: BridgedTranscriptSeconds = BridgedTranscriptSeconds(EpisodePreparationReadinessTests.episodeDuration)
+    ) -> AnalysisCoverageSummary {
         AnalysisCoverageSummary(
             assetId: assetId,
             episodeDurationSec: EpisodeSeconds(Self.episodeDuration),
@@ -603,7 +607,10 @@ struct EpisodePreparationReadinessTests {
             finalPassCoverageEndSource: .finalPassChunks,
             analysisCoveredSec: AnalyzedSeconds(Self.episodeDuration),
             adScanCoveredSec: adScanCoveredSec,
-            adScanCoveredSource: adScanCoveredSec == nil ? .unknown : .semanticScanResults
+            adScanCoveredSource: adScanCoveredSec == nil ? .unknown : .semanticScanResults,
+            // playhead-nffz: full by default, so the ceiling cannot be what
+            // withholds the ✓ in any case that does not ask for it.
+            adScanCeilingSec: adScanCeilingSec
         )
     }
 
@@ -684,6 +691,41 @@ struct EpisodePreparationReadinessTests {
                 "\(state) completeness at full coverage should be \(mayBeComplete)"
             )
         }
+    }
+
+    /// playhead-nffz — WHAT THE LISTENER SEES, and the one thing this bead was
+    /// forbidden to do.
+    ///
+    /// C065AD03's shape: 44 % of the episode transcribed, all of it scanned. Its
+    /// scan is at 98.8 % of everything it could ever read, so ANY fix that
+    /// "compares like with like" by dividing the scan by its own ceiling puts a
+    /// green ✓ on an episode where the listener will hear every ad in the other
+    /// 56 %. playhead-pz32 and playhead-gqx4 are the precedent — this repo has
+    /// already shipped `completeFull` declared at 3 % scan once.
+    ///
+    /// So the readiness ruler is `adScanFraction` and NOTHING ELSE, and this test
+    /// is what fails if the ceiling ever reaches it.
+    @Test("playhead-nffz — the ✓ ruler is the fraction, never the ceiling: a 44 %-transcribed episode stays ◐")
+    func testCeilingIsNotTheReadinessRuler() {
+        let analysis = episodePreparationAnalysisInputs(
+            asset: asset(state: .completeFull),
+            // 440 s scanned of a 1,000 s episode, and 445 s is all there is to
+            // scan — 98.9 % of the ceiling, 44.0 % of the episode.
+            coverage: coverage(
+                adScanCoveredSec: 440,
+                adScanCeilingSec: BridgedTranscriptSeconds(445)
+            )
+        )
+        #expect(analysis.adScanFraction == 0.44,
+                "the projection carries the EPISODE fraction, the quantity the ✓ is calibrated on")
+        #expect(!analysis.analysisComplete,
+                "a 44 %-scanned episode is not ready, however little else there was to read")
+        #expect(!episodePreparationAnalysisComplete(
+            status: .done, adScanFraction: analysis.adScanFraction, isDegradedTerminal: false
+        ))
+        // And the ratio that WOULD flip it, computed here so the near-miss is on
+        // the record rather than implicit.
+        #expect(440.0 / 445.0 > episodePreparationCompleteThreshold.rawValue)
     }
 
     @Test("projection with no asset row claims nothing")

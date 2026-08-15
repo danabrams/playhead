@@ -2601,6 +2601,204 @@ struct AnalysisStoreAdScanCoverageTests {
         #expect(summary.adScanCoveredSec == 10)
         #expect(summary.adScanFraction == 0.01)
     }
+
+    // MARK: - playhead-nffz: the ceiling of the ad-scan fraction
+
+    /// THE C065AD03 CASE, on the shipped reader. Its transcript covers 44 % of
+    /// the episode in seven disjoint runs, every second of it has been scanned,
+    /// and the floor the pipeline judges it by is 0.98 of the DECLARED DURATION.
+    /// So the floor's denominator is the episode and the numerator's supremum is
+    /// the transcript — two populations, one comparison.
+    ///
+    /// Both numbers on one asset, so the mismatch is visible rather than argued.
+    @Test("playhead-nffz — a 44 %-transcribed episode cannot clear a 0.98 floor however perfectly it is scanned")
+    func ceilingBelowTheFloorMakesTheFloorUnreachable() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "a-ceiling", episodeDurationSec: 1000))
+        // Four disjoint runs totalling 440 s, every gap far wider than the 5 s
+        // bridge tolerance, so the bridged area really is 440 and not 1000.
+        try await store.insertTranscriptChunks([
+            makeGapChunk(assetId: "a-ceiling", index: 0, start: 0, end: 110),
+            makeGapChunk(assetId: "a-ceiling", index: 1, start: 300, end: 410),
+            makeGapChunk(assetId: "a-ceiling", index: 2, start: 600, end: 710),
+            makeGapChunk(assetId: "a-ceiling", index: 3, start: 880, end: 990)
+        ])
+        // A scan that read EVERYTHING there is to read.
+        try await store.insertSemanticScanResult(
+            makeScan(assetId: "a-ceiling", index: 0, start: 0, end: 1000)
+        )
+
+        let summary = try #require(
+            try await store.fetchCoverageSummariesByAssetIds(["a-ceiling"])["a-ceiling"]
+        )
+        #expect(summary.adScanCeilingSec == 440)
+        #expect(summary.adScanCoveredSec == 440, "a perfect scan reads every transcribed second")
+        let fraction = try #require(summary.adScanFraction)
+        let ceiling = try #require(summary.adScanCeilingFraction)
+        #expect(fraction == 0.44)
+        #expect(ceiling == 0.44)
+        #expect(fraction == ceiling, "the scan is AT its ceiling: there is nothing left to read")
+        #expect(ceiling < AnalysisJobRunner.semanticBackfillSufficientAdScanFraction,
+                "and the ceiling is under the floor, which is the defect in one line")
+    }
+
+    /// `adScanCoveredSec <= adScanCeilingSec` is ARITHMETIC, not an observation:
+    /// the ceiling is the very region the area is intersected with. Driven on the
+    /// shape most likely to break it — one window whose bounds straddle the whole
+    /// episode over a transcript that is mostly holes.
+    @Test("playhead-nffz — the ceiling bounds the measured area, by construction")
+    func ceilingBoundsTheMeasuredArea() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "a-bound-nffz", episodeDurationSec: 3600))
+        try await store.insertTranscriptChunks([
+            makeGapChunk(assetId: "a-bound-nffz", index: 0, start: 0, end: 60),
+            makeGapChunk(assetId: "a-bound-nffz", index: 1, start: 3540, end: 3600)
+        ])
+        try await store.insertSemanticScanResult(
+            makeScan(assetId: "a-bound-nffz", index: 0, start: 0, end: 3600)
+        )
+
+        let summary = try #require(
+            try await store.fetchCoverageSummariesByAssetIds(["a-bound-nffz"])["a-bound-nffz"]
+        )
+        let covered = try #require(summary.adScanCoveredSec)
+        let ceiling = try #require(summary.adScanCeilingSec)
+        #expect(covered.rawValue <= ceiling.rawValue)
+        #expect(ceiling == 120, "the bridged transcript, not the window's bounds")
+        #expect(try #require(summary.adScanCeilingFraction).rawValue < 0.05)
+    }
+
+    /// The ceiling is a property of the TRANSCRIPT, so it exists before anything
+    /// has scanned. Reading it as `nil` there would mean the one moment the
+    /// pipeline could learn the floor is unreachable is the moment it cannot ask.
+    @Test("playhead-nffz — the ceiling does not require a coverage-lane row")
+    func ceilingIsKnowableBeforeAnyScan() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "a-noscan-nffz", episodeDurationSec: 1000))
+        try await store.insertTranscriptChunks([
+            makeGapChunk(assetId: "a-noscan-nffz", index: 0, start: 0, end: 300)
+        ])
+
+        let summary = try #require(
+            try await store.fetchCoverageSummariesByAssetIds(["a-noscan-nffz"])["a-noscan-nffz"]
+        )
+        #expect(summary.adScanCoveredSec == nil, "nothing has scanned")
+        #expect(summary.adScanCeilingSec == 300)
+        #expect(summary.adScanCeilingFraction == 0.3)
+    }
+
+    /// UNMEASURED IS NOT ZERO. An asset with a duration and NO transcript of any
+    /// kind must read `nil`, never `0` — a synthetic zero here is the claim "this
+    /// episode can never be scanned", made about an episode whose transcription
+    /// has not started.
+    @Test("playhead-nffz — no transcript evidence reads nil, not a measured zero")
+    func ceilingIsNilWithoutTranscriptEvidence() async throws {
+        let store = try await makeTestStore()
+        // Built inline rather than through `makeAsset`, whose
+        // `fastTranscriptCoverageEndTime` defaults to the DURATION — that
+        // watermark is itself transcript evidence (the store models it as one
+        // contiguous `[0, watermark]` span), so the helper cannot express "no
+        // transcript at all", which is the whole case here.
+        try await store.insertAsset(AnalysisAsset(
+            id: "a-empty-nffz",
+            episodeId: "ep-a-empty-nffz",
+            assetFingerprint: "fp-a-empty-nffz",
+            weakFingerprint: nil,
+            sourceURL: "file:///a-empty-nffz.m4a",
+            featureCoverageEndTime: nil,
+            fastTranscriptCoverageEndTime: nil,
+            confirmedAdCoverageEndTime: nil,
+            analysisState: "backfill",
+            analysisVersion: 1,
+            capabilitySnapshot: nil,
+            episodeDurationSec: 1000
+        ))
+        try await store.insertSemanticScanResult(
+            makeScan(assetId: "a-empty-nffz", index: 0, start: 0, end: 100)
+        )
+
+        let summary = try #require(
+            try await store.fetchCoverageSummariesByAssetIds(["a-empty-nffz"])["a-empty-nffz"]
+        )
+        #expect(summary.adScanCeilingSec == nil)
+        #expect(summary.adScanCeilingFraction == nil)
+        // And the measured area IS a real zero, because a coverage-lane row
+        // exists and the transcript it would be intersected with is empty.
+        #expect(summary.adScanCoveredSec == 0)
+    }
+
+    /// C0610BF9's shape, and it is why this bead's re-measurement disagrees with
+    /// the number the bead was filed on.
+    ///
+    /// That asset has ZERO `pass='fast'` chunks and a `fastTranscriptCoverageEndTime`
+    /// of 1740 s on a 1930.84 s episode, and the shipped reader models a watermark
+    /// with no chunks behind it as ONE CONTIGUOUS `[0, watermark]` span (see the
+    /// `transcriptRegion` branch in `fetchCoverageSummariesByAssetIds`, and
+    /// playhead-9y9e's monotonicity argument for why the fast term is added to the
+    /// final one rather than replaced by it). A reconstruction that bounds the scan
+    /// by the FINAL-pass chunks alone therefore reads LOWER: 0.9282 against the
+    /// shipped 0.9341 on that asset. Both are under the 0.98 floor, so the bead's
+    /// conclusion is unaffected — but the ceiling is a published quantity now, and
+    /// which of the two it is has to be a pinned property rather than a reading.
+    @Test("playhead-nffz — a fast WATERMARK with no fast chunks contributes its span to the ceiling")
+    func ceilingIncludesTheWatermarkSpanWhenNoFastChunkLanded() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(
+            id: "a-wm-nffz",
+            episodeDurationSec: 1000,
+            fastTranscriptCoverageEndTime: 600
+        ))
+        // Final pass only, with a 100 s hole the watermark span covers.
+        try await store.insertTranscriptChunks([
+            TranscriptChunk(
+                id: "a-wm-nffz-final-0", analysisAssetId: "a-wm-nffz",
+                segmentFingerprint: "a-wm-nffz-fp-0", chunkIndex: 0,
+                startTime: 0, endTime: 300, text: "t", normalizedText: "t",
+                pass: "final", modelVersion: "test-asr",
+                transcriptVersion: nil, atomOrdinal: nil
+            ),
+            TranscriptChunk(
+                id: "a-wm-nffz-final-1", analysisAssetId: "a-wm-nffz",
+                segmentFingerprint: "a-wm-nffz-fp-1", chunkIndex: 1,
+                startTime: 400, endTime: 1000, text: "t", normalizedText: "t",
+                pass: "final", modelVersion: "test-asr",
+                transcriptVersion: nil, atomOrdinal: nil
+            )
+        ])
+
+        let summary = try #require(
+            try await store.fetchCoverageSummariesByAssetIds(["a-wm-nffz"])["a-wm-nffz"]
+        )
+        // Final chunks alone bridge to 300 + 600 = 900. The watermark's [0, 600]
+        // span closes the 100 s hole, so the shipped bound is the whole episode.
+        #expect(summary.adScanCeilingSec == 1000)
+        #expect(summary.adScanCeilingFraction == 1.0)
+    }
+
+    /// ONE RULER, TWO READERS. The ceiling is compared against the same floor as
+    /// the fraction, so the two must be withheld under the same conditions — an
+    /// episode where one is present and the other is not is an episode that falls
+    /// between two rulers. Driven on E8F0F867's shape, the case
+    /// `adScanFraction`'s own guard was written for.
+    @Test("playhead-nffz — a transcript reaching past the declared duration withholds BOTH fractions")
+    func aDisprovedDenominatorWithholdsTheCeilingToo() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: "a-guard-nffz", episodeDurationSec: 552.9))
+        try await store.insertTranscriptChunks([
+            makeGapChunk(assetId: "a-guard-nffz", index: 0, start: 0, end: 500),
+            makeGapChunk(assetId: "a-guard-nffz", index: 1, start: 3000, end: 3810)
+        ])
+        try await store.insertSemanticScanResult(
+            makeScan(assetId: "a-guard-nffz", index: 0, start: 0, end: 563.8)
+        )
+
+        let summary = try #require(
+            try await store.fetchCoverageSummariesByAssetIds(["a-guard-nffz"])["a-guard-nffz"]
+        )
+        #expect(summary.adScanFraction == nil, "the transcript has disproved the denominator")
+        #expect(summary.adScanCeilingFraction == nil,
+                "and a ceiling over that same denominator is no more honest than the fraction")
+    }
 }
 
 // MARK: - playhead-csbq: the ruler itself
@@ -3385,7 +3583,10 @@ struct AnalysisStoreCoverageRulerTests {
                 finalPassCoverageEndSource: .unknown,
                 analysisCoveredSec: nil,
                 adScanCoveredSec: adScanCoveredSec,
-                adScanCoveredSource: adScanCoveredSec == nil ? .unknown : .semanticScanResults
+                adScanCoveredSource: adScanCoveredSec == nil ? .unknown : .semanticScanResults,
+                // playhead-nffz: this fixture is about the OVERSHOOT guards, so
+                // the ceiling tracks the transcript reach the case supplies.
+                adScanCeilingSec: transcriptReach.map { BridgedTranscriptSeconds($0) }
             )
         }
 
