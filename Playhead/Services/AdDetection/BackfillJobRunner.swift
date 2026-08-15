@@ -4162,26 +4162,16 @@ actor BackfillJobRunner {
             // list against a bare status list positionally, which could only
             // ever be right while every plan produced exactly one outcome —
             // and silently mis-attributed coordinates as soon as it did not.
+            // playhead-ejr7: the cost stamped on each of these rows is read off
+            // the FAILURE inside `makeCoarseFailureScanResult`. There is no
+            // `latencyMs:` argument here any more, and its ABSENCE is the fix —
+            // see that function for what the parameter was being used for.
             for failure in coarse.failedWindows {
                 if let failureResult = makeCoarseFailureScanResult(
                     failure: failure,
                     inputs: inputs,
                     jobId: job.jobId,
                     jobPhase: job.phase,
-                    // playhead-8d5r: prefer the attempt's OWN elapsed time.
-                    //
-                    // SCOPE, stated honestly: the failure sites that measure
-                    // themselves today are the timeout sites, the permissive
-                    // routing/recovery sites, the subdivision aggregate, and
-                    // the whole-window coarse attempt. Pre-existing failure
-                    // classes constructed elsewhere still pass nil and fall
-                    // back to the pass total, so the double-count described in
-                    // `CoarseWindowFailure.latencyMillis` is REDUCED here, not
-                    // yet eliminated everywhere. Reading `SUM(latencyMs)` over
-                    // failure rows is trustworthy for `inference_timeout` and
-                    // for the sites listed above; treat other failure classes
-                    // as upper bounds until they are threaded too.
-                    latencyMs: failure.latencyMillis ?? coarse.latencyMillis,
                     runMode: runMode
                 ) {
                     try await store.insertSemanticScanResult(await attributed(failureResult, jobId: job.jobId))
@@ -6148,7 +6138,12 @@ actor BackfillJobRunner {
         jobId: String,
         jobPhase: BackfillJobPhase,
         status: SemanticScanStatus,
-        latencyMs: Double,
+        // playhead-ejr7: OPTIONAL, and the optionality is the contract. A row
+        // whose attempt was never timed must persist NULL — the same rule
+        // `suspendingLatencyMs` and `daemonPeersAtStart` have followed since
+        // playhead-rkfp. Making this `Double` was what forced a caller to
+        // invent a number, and the number it invented was the pass total.
+        latencyMs: Double?,
         suspendingLatencyMs: Double? = nil,
         daemonPeersAtStart: Int? = nil,
         runMode: SemanticScanPhase,
@@ -6246,12 +6241,61 @@ actor BackfillJobRunner {
     /// playhead-qbib: persist a "we could not look here" row using the
     /// coordinates of the attempt that actually failed, not of whichever plan
     /// happened to sit at the same list position.
+    ///
+    /// **playhead-ejr7 TOOK THE `latencyMs:` PARAMETER AWAY, and the absence is
+    /// the guarantee.** The caller used to pass
+    /// `failure.latencyMillis ?? coarse.latencyMillis` — a per-WINDOW row
+    /// stamped, whenever the attempt was not timed, with the WHOLE PASS's wall
+    /// clock. That is the standing defect class (a value that names one thing
+    /// read as though it named another), and its twins in the very same call
+    /// already refused it: playhead-rkfp's rule for `suspendingLatencyMs` and
+    /// `daemonPeersAtStart` is "a failure that did not measure itself gets NULL,
+    /// not a number from a different span". `latencyMs` was the last field still
+    /// taking the number from the different span.
+    ///
+    /// With no parameter, the pass total cannot reach this row from the call
+    /// site at all — the substitution is untypeable rather than merely absent,
+    /// which is what stops the next caller re-inventing it. `coarse` is not in
+    /// scope here.
+    ///
+    /// **MEASURED, 2026-08-10/11 virgin-DB overnight pull, 95
+    /// `semantic_scan_results` rows.** Thirteen rows produced no verdict and
+    /// appeared to have cost 938.4 s — reported as 41 % of all FM compute, and
+    /// the reason playhead-ejr7 was filed as a P0. Split by what the number can
+    /// actually be:
+    ///
+    ///   * `cancelled`, 613.9 s, **65.4 % of the figure — certainly NOT
+    ///     per-call cost.** The only two constructors of a `.cancelled`
+    ///     `CoarseWindowFailure` omit `latencyMillis`, so four rows took this
+    ///     fallback and three took the literal 0 of a never-attempted plan.
+    ///   * `permissive_decoding_failure`, 296.9 s, 31.6 % — **undetermined.**
+    ///     Two of the sites that can produce that status thread their own
+    ///     timing and three do not, and no persisted column tells them apart.
+    ///   * `refusal`, 27.5 s, 2.9 % — certainly per-call cost.
+    ///
+    /// At least **319.0 s** of the 613.9 s is provably the SAME wall clock
+    /// already inside the 1,354.6 s "productive" figure: a cancelled row's
+    /// number IS its pass's elapsed time, so the pass spans exactly
+    /// `[createdAt − latencyMs, createdAt]`, and 26 same-asset success rows
+    /// were written inside those exact spans carrying their own costs. The
+    /// largest cost this pull can vouch for on ONE call is **74.1 s**.
+    ///
+    /// **NULL, not 0, and the difference is the whole point.** 0 asserts the
+    /// attempt was free; NULL says nobody measured it. The only production
+    /// reader of the column (`SemanticScanThroughputSplit.isEligible`) already
+    /// requires `latencyMs != nil` and `.success`, and SQL's `SUM` skips NULL —
+    /// which is exactly the contribution an unmeasured attempt should make.
+    ///
+    /// The un-threaded construction sites are unchanged and still nil: the qbib
+    /// safety-recovery `.cancelled` and `blocked` arms, and the over-budget
+    /// abandonment whose subdivision produced no timing. Threading them is a
+    /// measurement to be ADDED (playhead-kbqw), not a number to be invented
+    /// here.
     private func makeCoarseFailureScanResult(
         failure: CoarseWindowFailure,
         inputs: AssetInputs,
         jobId: String,
         jobPhase: BackfillJobPhase,
-        latencyMs: Double,
         runMode: SemanticScanPhase
     ) -> SemanticScanResult? {
         let attemptedLineRefs = Set(failure.lineRefs)
@@ -6263,7 +6307,9 @@ actor BackfillJobRunner {
             jobId: jobId,
             jobPhase: jobPhase,
             status: failure.status,
-            latencyMs: latencyMs,
+            // playhead-8d5r threaded this; playhead-ejr7 made it the ONLY
+            // source. The three fields below and this one now obey one rule.
+            latencyMs: failure.latencyMillis,
             // playhead-rkfp: the twins come off the FAILURE, never off the
             // pass — a failure that did not measure itself gets NULL, not a
             // number from a different span.
