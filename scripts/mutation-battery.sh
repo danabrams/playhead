@@ -1790,6 +1790,19 @@ FOCUSED_SUITES=(
   # a widened bound that stopped CLIPPING would satisfy this bead's tests while
   # breaking the intersection pz32 exists for. `CapOutRetryTests` is y8f3's.
   -only-testing:PlayheadTests/TranscriptionAlreadyCompleteTests
+  # playhead-pnb5 (PN series): the transcription stage's ADMISSION. Two suites.
+  # `TranscriptionStageAdmissionTests` owns the decision and its does-it-run
+  # rail (an ASR-attempt counter, because the stop reason, the coverage and the
+  # backfill count are equally true of a stage that ran and produced nothing).
+  # `WedgedRowEscalationTests` is the other half of the chain — pure and
+  # instant — and is what separates "the runner reported the watermark" from
+  # "the scheduler then deepened the target"; without it a mutation that broke
+  # `tierTargetSatisfied` would be invisible to a bead whose whole claim is that
+  # the successor finally gets minted. `TranscriptionAlreadyCompleteTests`
+  # above is 9y9e's and is what proves the EPISODE floor still governs the case
+  # it was written for.
+  -only-testing:PlayheadTests/TranscriptionStageAdmissionTests
+  -only-testing:PlayheadTests/WedgedRowEscalationTests
   -only-testing:PlayheadTests/AnalysisStoreCoverageRulerTests
   -only-testing:PlayheadTests/AnalysisStoreAdScanCoverageTests
   -only-testing:PlayheadTests/CapOutRetryTests
@@ -2472,6 +2485,16 @@ T_MPTR_PASS_FILTER="a final-pass chunk is not reported as fast coverage"
 T_MPTR_SQL_DEGENERATE="a degenerate chunk covers no time and is excluded"
 T_MPTR_WATERMARK_INCLUSIVE="a shard ending exactly at the watermark counts, one second past does not"
 T_MPTR_UNCOVERED_FIRST="the D9B513CD shape: the unread tail is ordered ahead of the covered prefix"
+# playhead-pnb5 (PN series): the transcription stage is not RUN when no admitted
+# shard still wants transcribing. Seven rails, one per property, because each is
+# a separate way to get the answer wrong and no two of them are observable in the
+# same direction.
+T_PNB5_SKIP_FIRES="a pass whose watermark reached its own target skips the stage, even under the 0.95 floor"
+T_PNB5_STAGE_STILL_RUNS="one admitted shard past the watermark still runs the stage"
+T_PNB5_WATERMARK_HALF="a watermark short of the shard's end still runs the stage"
+T_PNB5_ARTIFACT_HALF="a hole wider than a shard still runs the stage"
+T_PNB5_9Y9E_UNCHANGED="a half-transcribed asset still fails, and still journals the failure"
+T_PNB5_COMPLETE_REACHES_SCAN="a pass that adds nothing to a complete transcript runs ad detection"
 # playhead-6r4z — the widened artifact test, and the WIRING that carries it.
 T_6R4Z_ENGINE_WIRING="final-pass-covered shards are decoded LAST, and without them they are decoded FIRST"
 T_6R4Z_REGION_INDEX="an index built from the region classifies final-pass audio the fast-only read misses"
@@ -4327,6 +4350,75 @@ MUTATIONS=(
   # is still a real initializer (tests and migrations use it), so an empty
   # forward is one token and reads as a stub nobody finished.
   "K212|205|MPTRIDX|$T_6R4Z_REGION_INDEX"
+
+  # playhead-pnb5 — PN series, the transcription stage's ADMISSION. Seven
+  # entries, SEVEN BATCHES, one apiece.
+  #
+  # WHY NOTHING SHARES A BATCH HERE, since seven builds is the expensive answer.
+  # Every one of these mutations sits on the same short decision path, so they
+  # DOMINATE each other rather than merely overlapping. PN01 (`return nil`) and
+  # PN02 (the guard always passes) are the clean case: applied together the
+  # `return nil` wins, the skip still never fires, and PN02 would be scored
+  # SURVIVED for a mutation whose own behaviour was never reachable — a
+  # fabricated coverage hole. PN04/PN05 and PN06/PN07 are the other case: they
+  # redden the SAME tests (`$T_PNB5_SKIP_FIRES` and
+  # `$T_PNB5_COMPLETE_REACHES_SCAN` are the only place the skip's output is
+  # observable at all), so a shared batch credits each with a kill the other
+  # earned. Both failures are the header's own rule; the batch floor is blast
+  # radius, not expectation lists.
+
+  # PN01 — THE DOES-IT-RUN RAIL, and the pre-bead behaviour restored exactly:
+  # the helper never grants the skip, so the runner runs the stage over shards
+  # it has already read, produces nothing, and is refused by the EPISODE-level
+  # 0.95 floor. That is the wedge, and it is one token.
+  "PN01|720|AJRUN|$T_PNB5_SKIP_FIRES;$T_PNB5_COMPLETE_REACHES_SCAN"
+
+  # PN02 — the opposite direction, and the one that would be a silent coverage
+  # LOSS rather than a stall: the guard always passes, so a pass with real audio
+  # left to read skips its transcription stage and the watermark can never
+  # advance again. `$T_PNB5_9Y9E_UNCHANGED` is listed because the same mutation
+  # converts playhead-9y9e's half-transcribed failure into a silent success.
+  "PN02|721|AJRUN|$T_PNB5_STAGE_STILL_RUNS;$T_PNB5_WATERMARK_HALF;$T_PNB5_ARTIFACT_HALF;$T_PNB5_9Y9E_UNCHANGED"
+
+  # PN03 — the wrong half of the partition. `withNoArtifact` and `alreadyBacked`
+  # are both `[AnalysisShard]`, so the substitution type-checks, and it inverts
+  # the decision in BOTH directions at once: a fully-backed pass runs the stage
+  # and a fully-UNbacked one skips it.
+  #
+  # `$T_PNB5_ARTIFACT_HALF` is deliberately NOT expected here and the reason is
+  # the difference between this rail and PN06. Its fixture has backed AND
+  # unbacked shards, so `alreadyBacked` is non-empty either way and the mutant
+  # reaches the same answer the correct code does — green, and correctly so.
+  # Only a fixture whose admitted set is ENTIRELY one or the other can see this.
+  "PN03|722|AJRUN|$T_PNB5_SKIP_FIRES;$T_PNB5_WATERMARK_HALF;$T_PNB5_COMPLETE_REACHES_SCAN"
+
+  # PN04 — the coverage reported by a skipped stage becomes 0. The pass still
+  # reaches ad detection, so every stop-reason assertion stays green; what dies
+  # is the number `tierTargetSatisfied` compares against `desiredCoverageSec`,
+  # which is the whole mechanism by which the successor gets minted. This is the
+  # standing defect class as a one-token edit.
+  "PN04|723|AJRUN|$T_PNB5_SKIP_FIRES;$T_PNB5_COMPLETE_REACHES_SCAN"
+
+  # PN05 — the two journal rows collapse into one name. Behaviourally invisible;
+  # what it destroys is the MEASUREMENT — `transcriptionAlreadyComplete` counts
+  # passes that paid the 300 s cap to learn they had nothing to do, and folding
+  # the not-run row into it deletes the only evidence this bead worked.
+  "PN05|724|AJRUN|$T_PNB5_SKIP_FIRES;$T_PNB5_COMPLETE_REACHES_SCAN"
+
+  # PN06 — the shared partition, mutated inside `TranscriptCoverageIndex`. This
+  # is the rail that pins the one-implementation claim: the runner's admission
+  # and the engine's ORDERING now read the same function, so swapping its two
+  # arrays must redden a K2-series ordering test AND this bead's admission test
+  # together. If it killed only one of them, the two readers would have drifted.
+  "PN06|725|MPTRIDX|$T_MPTR_UNCOVERED_FIRST;$T_PNB5_SKIP_FIRES"
+
+  # PN07 — the WRONG POPULATION, which is the defect this repo keeps shipping:
+  # `allShards` for `shards`. Both are `[AnalysisShard]` in scope at the call
+  # site and the substitution is one word. It asks "is the whole episode
+  # backed?" while claiming to ask "is everything this pass admitted backed?",
+  # so every bounded rung below the episode's end stops taking the skip and the
+  # wedge comes straight back.
+  "PN07|726|AJRUN|$T_PNB5_SKIP_FIRES"
 
   # playhead-hx6n — SCAN-ROW RUN ATTRIBUTION. Fifteen entries, batches 210-216.
   #
@@ -11771,10 +11863,17 @@ EOF
       "        return next < intervals.count && intervals[next].start < end" \
       "        return next < intervals.count && intervals[next].start <= end" ;;
 
+  # playhead-pnb5 re-anchored this. `orderingUncoveredFirst` used to build the
+  # two arrays itself (`return uncovered + covered`); it is now expressed in
+  # terms of `partitioningByTranscriptArtifact`, which the runner's stage
+  # admission also reads. The mutation is the same inversion at the same
+  # concatenation, one indirection later — and it is NOT redundant with PN06,
+  # which swaps the arrays INSIDE the shared partition and so reddens the
+  # runner's admission too. This one is the ordering alone.
   K210)
     patch "$file" \
-      "        return uncovered + covered" \
-      "        return covered + uncovered" ;;
+      "        return partition.withNoArtifact + partition.alreadyBacked" \
+      "        return partition.alreadyBacked + partition.withNoArtifact" ;;
 
   # ---- playhead-6r4z: the index reads BOTH passes (K211-K212) ----
 
@@ -11804,6 +11903,78 @@ EOF
     patch "$file" \
       "        self.init(chunkRanges: transcribedRegion.transcribedSpans)" \
       "        self.init(chunkRanges: [])" ;;
+
+  # ---- playhead-pnb5: the transcription stage's admission (PN series) ----
+
+  # PN01 — the helper never grants the skip. This is the codebase as it stood
+  # before this bead, restored in one token: the stage runs over shards it has
+  # already read, produces nothing, and the EPISODE-level 0.95 floor refuses to
+  # forgive it.
+  PN01)
+    snippet OLD <<'EOF'
+        guard unbacked.isEmpty else { return nil }
+        return watermark
+EOF
+    snippet NEW <<'EOF'
+        guard unbacked.isEmpty else { return nil }
+        return nil
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # PN02 — the guard always passes, so the skip fires over audio nothing backs.
+  # `count >= 0` because it must stay a guard on the same value: a reviewer
+  # skimming for `isEmpty` sees a bound being checked.
+  PN02)
+    patch "$file" \
+      "        guard unbacked.isEmpty else { return nil }" \
+      "        guard unbacked.count >= 0 else { return nil }" ;;
+
+  # PN03 — the wrong half of the shared partition. Both members are
+  # `[AnalysisShard]`, so this type-checks, and it inverts the decision in both
+  # directions at once.
+  PN03)
+    patch "$file" \
+      "        ).withNoArtifact" \
+      "        ).alreadyBacked" ;;
+
+  # PN04 — a skipped stage reports zero coverage. The pass still reaches ad
+  # detection; what dies is the number the scheduler's tier arithmetic reads.
+  PN04)
+    patch "$file" \
+      "            transcriptCoverage = backedWatermark" \
+      "            transcriptCoverage = 0" ;;
+
+  # PN05 — the not-run row is journaled under the name of the row that means
+  # "paid the cap to learn there was nothing to do". Behaviourally invisible,
+  # and it deletes the only measurement of what this bead saved.
+  PN05)
+    patch "$file" \
+      '                "stage": "analysisJobRunner.run.transcriptionStageNotRun",' \
+      '                "stage": "analysisJobRunner.run.transcriptionAlreadyComplete",' ;;
+
+  # PN06 — the SHARED partition, swapped at the source. Must redden a K2-series
+  # ordering test and this bead's admission test together; killing only one of
+  # them would mean the engine and the runner had stopped reading one rule.
+  PN06)
+    snippet OLD <<'EOF'
+                alreadyBacked.append(shard)
+            } else {
+                withNoArtifact.append(shard)
+EOF
+    snippet NEW <<'EOF'
+                withNoArtifact.append(shard)
+            } else {
+                alreadyBacked.append(shard)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # PN07 — the WRONG POPULATION. `allShards` is the whole decoded episode;
+  # `shards` is what this request admitted. Both are in scope at the call site,
+  # both are `[AnalysisShard]`, and the substitution is one word.
+  PN07)
+    patch "$file" \
+      "            admittedShards: shards" \
+      "            admittedShards: allShards" ;;
 
   # ---- playhead-kkzu: the show a background download carries (KZ series) ----
 
