@@ -896,9 +896,12 @@ actor AnalysisCoordinator {
     /// FLOOR.** That check observes the OS reclaim itself —
     /// `handleBackfillTask`'s `expirationHandler` calls `workTask.cancel()`
     /// before anything else — so it is exact, arrives at the moment the window
-    /// ends, and binds on every grant shorter than the budget. This floor can
-    /// only bind on grants LONGER than 219 s. Reading it as the short-grant
-    /// guard is the mis-reading `budgetedRemaining` is named to prevent.
+    /// ends, and binds on every grant shorter than the budget. This floor
+    /// cannot be reached before `grantStart + 159 s` (`workBudget` less the
+    /// floor), so it can only ever bind on a grant still open at that instant:
+    /// 64 of 122 on the 2026-08-14 pull, 22 of 43 on the 08-11 one. Reading it
+    /// as the short-grant guard is the mis-reading `budgetedRemaining` is
+    /// named to prevent.
     static func runCoarseScanLoop(
         deadline: ContinuousClock.Instant,
         minimumWindowBudget: Duration,
