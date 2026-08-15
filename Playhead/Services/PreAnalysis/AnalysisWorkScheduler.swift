@@ -1064,11 +1064,21 @@ actor AnalysisWorkScheduler {
     /// a second tap, or the next enqueue once the row returns to `queued`, can
     /// still honour it.
     private var pendingUserIntentEpisodes: Set<String> = []
-    /// playhead-3xtw: requested analysis coverage (the episode duration)
-    /// for a user-intent episode, applied when the enqueue omits an
-    /// explicit `desiredCoverage`. Consumed alongside
+    /// playhead-3xtw / playhead-rh69: the PUBLISHER'S DECLARED RUNTIME
+    /// (`<itunes:duration>`) for a user-intent episode, carried from the tap
+    /// until the enqueue that serves it. Consumed alongside
     /// `pendingUserIntentEpisodes`.
-    private var pendingUserIntentCoverage: [String: Double] = [:]
+    ///
+    /// It is NOT a coverage target and must never be used as one. It is the
+    /// requester's way of saying "cover the WHOLE episode", and `enqueue`
+    /// resolves that request against a measurement of the audio — see
+    /// ``fullCoverageTargetSec(measuredAudioDurationSec:feedDeclaredDurationSec:)``.
+    /// Until playhead-rh69 this dictionary was named `pendingUserIntentCoverage`
+    /// and its value went straight into `analysis_jobs.desiredCoverageSec`,
+    /// which is the whole of the defect: a feed's declaration is SHORTER than
+    /// the file by the dynamically-inserted ad load, so the excluded tail is
+    /// disproportionately advertising.
+    private var pendingUserIntentFeedDeclaredDuration: [String: Double] = [:]
     /// Monotonic ownership epoch for enqueue work derived from a cached
     /// download. Cache removal increments the episode's value before deleting
     /// scheduler rows; an enqueue suspended in AnalysisStore must observe the
@@ -1130,13 +1140,19 @@ actor AnalysisWorkScheduler {
     /// title columns are left untouched (the `nil`-write contract on
     /// `updateAssetEpisodeTitle` / `updateProfileTitle` is a no-op, not a
     /// NULL overwrite).
+    ///
+    /// playhead-rh69: `feedDeclaredDurationSec` is the publisher's
+    /// `<itunes:duration>`, and it is a REQUEST FOR FULL COVERAGE — not a
+    /// coverage target. It is resolved against a measurement of the audio
+    /// before the row is minted; see
+    /// ``fullCoverageTargetSec(measuredAudioDurationSec:feedDeclaredDurationSec:)``.
     func enqueue(
         episodeId: String,
         podcastId: String?,
         downloadId: String,
         sourceFingerprint: String,
         isExplicitDownload: Bool,
-        desiredCoverage: Double? = nil,
+        feedDeclaredDurationSec: Double? = nil,
         podcastTitle: String? = nil,
         episodeTitle: String? = nil
     ) async {
@@ -1155,9 +1171,59 @@ actor AnalysisWorkScheduler {
         // are unchanged when no user intent is pending.
         let userInitiated = pendingUserIntentEpisodes.contains(episodeId)
         let priority = userInitiated ? 20 : (isExplicitDownload ? 10 : 0)
-        let coverage = desiredCoverage
-            ?? pendingUserIntentCoverage[episodeId]
-            ?? config.defaultT0DepthSeconds
+
+        // playhead-fzrw: the cached file is resolved ONCE and shared by the
+        // duration probe, the coverage resolution, the gyvb.2 persist below
+        // and the asset registration at the end of the method.
+        let cachedURL = await downloadManager.cachedFileURL(for: episodeId)
+
+        // playhead-gyvb.2 measure-on-download. Real-world incident
+        // (2026-04-27) — feed metadata `<itunes:duration>` was off by up to
+        // 13.8x on libsyn/flightcast feeds. Once the file is on disk,
+        // AVURLAsset reads its container header and tells us the truth. Per
+        // the bead: "Once we have the real runtime from the file that should
+        // be the source of truth."
+        //
+        // playhead-rh69 HOISTED THIS ABOVE THE MINT, because gyvb.2's own
+        // sentence was only half applied: the probed value was written to
+        // `analysis_assets.episodeDurationSec` two hundred lines below and the
+        // job row minted here kept the feed's declaration as its coverage
+        // target. The measurement was in scope at the line that discarded it.
+        let probedAudioDurationSec: Double?
+        if let cachedURL {
+            probedAudioDurationSec = await AudioFileDurationProbe.probeDuration(at: cachedURL)
+        } else {
+            probedAudioDurationSec = nil
+        }
+
+        // playhead-rh69: a full-coverage request is resolved against the AUDIO,
+        // never against the feed. `feedDeclaredDurationSec` (explicit here, or
+        // stashed by an earlier `markEpisodeUserIntent`) says "cover the whole
+        // episode"; the probe above says how long the whole episode is. With no
+        // declaration at all this is an auto-download, whose first rung is the
+        // configured T0 depth exactly as before.
+        let requestedFullCoverageDeclaredSec = feedDeclaredDurationSec
+            ?? pendingUserIntentFeedDeclaredDuration[episodeId]
+        let coverage: Double
+        if let requestedFullCoverageDeclaredSec {
+            coverage = Self.fullCoverageTargetSec(
+                measuredAudioDurationSec: probedAudioDurationSec,
+                feedDeclaredDurationSec: requestedFullCoverageDeclaredSec
+            ) ?? config.defaultT0DepthSeconds
+            if Self.usableAudioDurationSec(probedAudioDurationSec) == nil {
+                logger.warning(
+                    """
+                    full_coverage_unmeasured episode=\(episodeId, privacy: .public) \
+                    declaredSec=\(requestedFullCoverageDeclaredSec) \
+                    (playhead-rh69: no probe of the cached audio, so the coverage \
+                    target falls back to the feed's DECLARATION and any \
+                    dynamically-inserted tail is outside it)
+                    """
+                )
+            }
+        } else {
+            coverage = config.defaultT0DepthSeconds
+        }
         let workKey = AnalysisJob.computeWorkKey(
             fingerprint: sourceFingerprint,
             analysisVersion: PreAnalysisConfig.analysisVersion,
@@ -1294,7 +1360,7 @@ actor AnalysisWorkScheduler {
         // to remove; burning it twice over would just move the defect.
         if userIntentServed {
             pendingUserIntentEpisodes.remove(episodeId)
-            pendingUserIntentCoverage[episodeId] = nil
+            pendingUserIntentFeedDeclaredDuration[episodeId] = nil
         }
 
         // playhead-i9dj: write self-describing titles to the
@@ -1332,33 +1398,16 @@ actor AnalysisWorkScheduler {
             pendingEpisodeTitles[episodeId] = episodeTitle
         }
 
-        // playhead-gyvb.2: measure-on-download. Real-world incident
-        // (2026-04-27) — feed metadata `<itunes:duration>` was off by
-        // up to 13.8× on libsyn/flightcast feeds. Once the file is on
-        // disk, AVURLAsset reads its container header and tells us the
-        // truth. Per the bead: "Once we have the real runtime from the
-        // file that should be the source of truth."
-        //
-        // Best-effort:
-        //   - missing cached file (download not yet landed) → skip
-        //   - probe returns nil (non-audio, indeterminate) → skip
-        //   - probe returns a positive duration → overwrite the matching
-        //     existing asset row, OR stash for the lazy
-        //     `resolveAnalysisAssetId` path so the freshly-inserted
-        //     row carries the probed value at first insert. If a
-        //     canonical SHA job sees an older canonical asset for the
-        //     same episode with different bytes, do not mutate the old
-        //     asset; the probed duration belongs to the new SHA row.
-        //
-        // playhead-fzrw: the cached file and its canonical hash are resolved
-        // ONCE here and shared by this block and the asset registration at the
-        // end of the method. The hash used to be computed inside the `if`, so
-        // it never ran when the duration probe failed; hoisting changes only
-        // WHEN it is paid. The registration cannot be sound without it — the
-        // row it writes asserts "the bytes at this path hash to this
-        // fingerprint", and this comparison is the only thing that establishes
-        // it.
-        let cachedURL = await downloadManager.cachedFileURL(for: episodeId)
+        // playhead-fzrw: the canonical hash of the cached bytes, shared by the
+        // gyvb.2 persist just below and the asset registration at the end of
+        // the method. It used to be computed inside the probe's `if`, so it
+        // never ran when the duration probe failed. The registration cannot be
+        // sound without it — the row it writes asserts "the bytes at this path
+        // hash to this fingerprint", and this comparison is the only thing that
+        // establishes it. playhead-rh69 deliberately left it HERE rather than
+        // hoisting it with the probe: it is a synchronous full-file SHA-256 and
+        // nothing before `insertJob` needs it, so hoisting would only delay the
+        // mint.
         let sourceIsCanonicalSHA = CrossUserAnalysisShareKey
             .isCanonicalFullFileSHA(sourceFingerprint)
         var cachedAudioFingerprint: String?
@@ -1369,8 +1418,18 @@ actor AnalysisWorkScheduler {
             )
         }
 
-        if let cachedURL,
-           let probedDuration = await AudioFileDurationProbe.probeDuration(at: cachedURL) {
+        // playhead-gyvb.2: persist the measure-on-download probe taken at the
+        // top of this method. Best-effort:
+        //   - missing cached file (download not yet landed) → skip
+        //   - probe returns nil (non-audio, indeterminate) → skip
+        //   - probe returns a positive duration → overwrite the matching
+        //     existing asset row, OR stash for the lazy
+        //     `resolveAnalysisAssetId` path so the freshly-inserted
+        //     row carries the probed value at first insert. If a
+        //     canonical SHA job sees an older canonical asset for the
+        //     same episode with different bytes, do not mutate the old
+        //     asset; the probed duration belongs to the new SHA row.
+        if let probedDuration = probedAudioDurationSec {
             if sourceIsCanonicalSHA, cachedAudioFingerprint == nil {
                 logger.warning("Skipping probed duration for canonical-SHA enqueue on episode \(episodeId): cached audio could not be hashed")
             } else if let cachedAudioFingerprint,
@@ -1616,7 +1675,7 @@ actor AnalysisWorkScheduler {
 
     private func clearPendingDownloadState(episodeId: String) {
         pendingUserIntentEpisodes.remove(episodeId)
-        pendingUserIntentCoverage[episodeId] = nil
+        pendingUserIntentFeedDeclaredDuration[episodeId] = nil
         pendingEpisodeTitles[episodeId] = nil
         pendingProbedEpisodeDurations = pendingProbedEpisodeDurations
             .filter { $0.key.episodeId != episodeId }
@@ -1635,8 +1694,7 @@ actor AnalysisWorkScheduler {
     /// Record that the user has explicitly asked to prepare `episodeId`
     /// via the on-demand "Download & Analyze" control. The next
     /// `enqueue(episodeId:)` — typically fired by the download completion
-    /// — lands at the user-intent (`.now`) lane with the requested
-    /// coverage.
+    /// — lands at the user-intent (`.now`) lane, asking for FULL coverage.
     ///
     /// One-shot: the flag is consumed by the next `enqueue` **that manages to
     /// serve it** (playhead-kanf) — mint at the `.now` floor, promote an
@@ -1644,12 +1702,18 @@ actor AnalysisWorkScheduler {
     /// cannot honour it (leased / running row) leaves the flag standing.
     /// Idempotent — re-marking is a plain set insert. Wakes the loop so an
     /// already-enqueued-and-about-to-run pass re-evaluates promptly.
-    func markEpisodeUserIntent(episodeId: String, desiredCoverageSec: Double?) {
+    ///
+    /// playhead-rh69: `feedDeclaredDurationSec` is `<itunes:duration>`. It is
+    /// stashed as the DECLARATION it is, not as a coverage target — the audio
+    /// is usually not even on disk yet when this is called, so nothing has
+    /// measured it. `enqueue` does the measuring.
+    func markEpisodeUserIntent(episodeId: String, feedDeclaredDurationSec: Double?) {
         pendingUserIntentEpisodes.insert(episodeId)
-        if let desiredCoverageSec, desiredCoverageSec > 0 {
-            // Keep the deepest requested coverage if marked more than once.
-            let existing = pendingUserIntentCoverage[episodeId] ?? 0
-            pendingUserIntentCoverage[episodeId] = max(existing, desiredCoverageSec)
+        if let feedDeclaredDurationSec, feedDeclaredDurationSec > 0 {
+            // Keep the longest declaration if marked more than once.
+            let existing = pendingUserIntentFeedDeclaredDuration[episodeId] ?? 0
+            pendingUserIntentFeedDeclaredDuration[episodeId] =
+                max(existing, feedDeclaredDurationSec)
         }
         wakeSchedulerLoop()
     }
@@ -1664,25 +1728,34 @@ actor AnalysisWorkScheduler {
     /// playhead-kanf: work-key dedup no longer means the tap does *nothing*.
     /// When the auto-pipeline already queued this episode, the existing row is
     /// promoted to the `.now` lane in place; a leased/running row is left
-    /// alone. `desiredCoverageSec` (the
-    /// episode duration) requests full coverage; the backfill machinery
-    /// drives it to completion.
+    /// alone.
+    ///
+    /// playhead-rh69: `feedDeclaredDurationSec` REQUESTS FULL COVERAGE. It used
+    /// to be spelled `desiredCoverageSec` and travel straight into
+    /// `analysis_jobs.desiredCoverageSec`, which is the shard filter in
+    /// ``AnalysisJobRunner`` — so a tap on an episode whose file is longer than
+    /// its feed says (i.e. every episode carrying dynamically-inserted ads)
+    /// asked for, and got, less than the whole episode. `enqueue` now resolves
+    /// the request against a probe of the audio.
     func enqueueUserIntentAnalysis(
         episodeId: String,
         podcastId: String?,
         sourceFingerprint: String,
-        desiredCoverageSec: Double?,
+        feedDeclaredDurationSec: Double?,
         podcastTitle: String?,
         episodeTitle: String?
     ) async {
-        markEpisodeUserIntent(episodeId: episodeId, desiredCoverageSec: desiredCoverageSec)
+        markEpisodeUserIntent(
+            episodeId: episodeId,
+            feedDeclaredDurationSec: feedDeclaredDurationSec
+        )
         await enqueue(
             episodeId: episodeId,
             podcastId: podcastId,
             downloadId: episodeId,
             sourceFingerprint: sourceFingerprint,
             isExplicitDownload: true,
-            desiredCoverage: desiredCoverageSec,
+            feedDeclaredDurationSec: feedDeclaredDurationSec,
             podcastTitle: podcastTitle,
             episodeTitle: episodeTitle
         )
@@ -6374,6 +6447,63 @@ actor AnalysisWorkScheduler {
     /// episode and comfortably inside `Int`; anything non-finite or beyond it is
     /// treated as unusable, which costs only the pre-8bp2 ceiling.
     static let maximumTierLadderDurationSeconds: Double = 24 * 60 * 60
+
+    /// playhead-rh69: a duration usable as a coverage target, or `nil`.
+    ///
+    /// The same finiteness / range screen the tier ladder applies, hoisted so
+    /// the full-coverage resolution below and `coverageTierLadder` cannot
+    /// disagree about what "usable" means. A target eventually becomes a
+    /// `workKey` suffix via `Int(_:)`, which TRAPS out of range.
+    static func usableAudioDurationSec(_ seconds: Double?) -> Double? {
+        guard let seconds,
+              seconds.isFinite,
+              seconds > 0,
+              seconds <= maximumTierLadderDurationSeconds else { return nil }
+        return seconds
+    }
+
+    /// playhead-rh69: THE COVERAGE TARGET FOR A REQUEST THAT ASKED FOR THE
+    /// WHOLE EPISODE.
+    ///
+    /// Two quantities meet here and they are not the same number:
+    ///
+    ///   * `measuredAudioDurationSec` — how long THIS FILE is, read from its
+    ///     own container by ``AudioFileDurationProbe`` (or, later in the
+    ///     pipeline, summed off the decoded shards).
+    ///   * `feedDeclaredDurationSec` — what the publisher's
+    ///     `<itunes:duration>` says the episode runs for.
+    ///
+    /// Dynamic ad insertion makes the file LONGER than the declaration, so the
+    /// declaration is systematically SHORT and the shortfall is the inserted ad
+    /// load itself. `analysis_jobs.desiredCoverageSec` is the shard filter in
+    /// ``AnalysisJobRunner`` (`allShards.filter { $0.startTime < ... }`), which
+    /// bounds feature extraction, transcription AND ad detection — so a target
+    /// taken from the declaration excludes exactly the audio most likely to be
+    /// an ad. Measured over 14 device assets (playhead-by07): the excluded tail
+    /// is ~5x as ad-dense as the body, five of ten answerable tails being
+    /// 93-101 % advertising by transcribed second; and on Dan's hand-marked
+    /// F4CE7F47 the missed post-roll (1256.64-1316.34) sits 56.8 s past the
+    /// furthest point ANY scan ever reached, against a feed that declared
+    /// 1197.0 s for 1316.73 s of audio.
+    ///
+    /// So the measurement wins whenever there is one, and the declaration is a
+    /// FALLBACK for "nobody has measured this file yet" — never a preference.
+    /// It is not a `max` of the two: a `max` would silently keep the feed's
+    /// number whenever the file is genuinely shorter than advertised (a
+    /// truncated download, a trailer swapped for the episode), and asking for
+    /// coverage past the end of the audio buys nothing but a rung the ladder
+    /// can never clear.
+    ///
+    /// - Returns: the target in seconds, or `nil` when neither quantity is
+    ///   usable — the caller then falls back to the configured T0 depth, i.e.
+    ///   an ordinary first rung, rather than guessing at a length.
+    static func fullCoverageTargetSec(
+        measuredAudioDurationSec: Double?,
+        feedDeclaredDurationSec: Double?
+    ) -> Double? {
+        usableAudioDurationSec(measuredAudioDurationSec)
+            ?? usableAudioDurationSec(feedDeclaredDurationSec)
+    }
 
     /// playhead-8bp2: the coverage-depth ladder a background episode walks,
     /// ASCENDING and terminated by the episode itself.

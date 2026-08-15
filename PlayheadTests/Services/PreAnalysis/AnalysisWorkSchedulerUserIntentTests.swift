@@ -50,12 +50,17 @@ struct AnalysisWorkSchedulerUserIntentTests {
 
     // MARK: - mark + enqueue → .now lane
 
-    @Test("marked episode's next enqueue lands at priority 20 (.now lane) with requested coverage")
+    // playhead-rh69: `StubDownloadProvider()` here has NO cached file, so the
+    // enqueue's duration probe finds nothing and the full-coverage request
+    // falls back to the feed's declaration. That is why the persisted target
+    // equals the declared number below — it is the degrade path, not a
+    // measurement. `FullCoverageTargetTests` covers the measured path.
+    @Test("marked episode's next enqueue lands at priority 20 (.now lane); unmeasurable audio keeps the declared target")
     func testMarkThenEnqueueIsUserIntent() async throws {
         let store = try await makeTestStore()
         let scheduler = makeScheduler(store: store)
 
-        await scheduler.markEpisodeUserIntent(episodeId: "ep-user", desiredCoverageSec: 3600)
+        await scheduler.markEpisodeUserIntent(episodeId: "ep-user", feedDeclaredDurationSec: 3600)
         // Simulate the download-completion enqueue (auto flags:
         // isExplicitDownload=false, no explicit coverage).
         await scheduler.enqueue(
@@ -72,6 +77,8 @@ struct AnalysisWorkSchedulerUserIntentTests {
         #expect(job?.desiredCoverageSec == 3600)
     }
 
+    // Same note as above: no cached file, so 1800 below is the DECLARED
+    // fallback rather than a measured length (playhead-rh69).
     @Test("enqueueUserIntentAnalysis lands at priority 20 (.now lane)")
     func testEnqueueUserIntentAnalysis() async throws {
         let store = try await makeTestStore()
@@ -81,7 +88,7 @@ struct AnalysisWorkSchedulerUserIntentTests {
             episodeId: "ep-direct",
             podcastId: "pod",
             sourceFingerprint: "fp-direct",
-            desiredCoverageSec: 1800,
+            feedDeclaredDurationSec: 1800,
             podcastTitle: "Pod",
             episodeTitle: "Ep"
         )
@@ -129,7 +136,7 @@ struct AnalysisWorkSchedulerUserIntentTests {
         let store = try await makeTestStore()
         let scheduler = makeScheduler(store: store)
 
-        await scheduler.markEpisodeUserIntent(episodeId: "ep-A", desiredCoverageSec: nil)
+        await scheduler.markEpisodeUserIntent(episodeId: "ep-A", feedDeclaredDurationSec: nil)
         // A different episode enqueues at its normal (auto) priority.
         await scheduler.enqueue(
             episodeId: "ep-B",
@@ -164,7 +171,7 @@ struct AnalysisWorkSchedulerUserIntentTests {
             episodeId: "ep-dedup",
             podcastId: nil,
             sourceFingerprint: "fp-dedup",
-            desiredCoverageSec: 600,
+            feedDeclaredDurationSec: 600,
             podcastTitle: nil,
             episodeTitle: nil
         )
@@ -172,7 +179,7 @@ struct AnalysisWorkSchedulerUserIntentTests {
             episodeId: "ep-dedup",
             podcastId: nil,
             sourceFingerprint: "fp-dedup",
-            desiredCoverageSec: 600,
+            feedDeclaredDurationSec: 600,
             podcastTitle: nil,
             episodeTitle: nil
         )
@@ -215,7 +222,7 @@ struct AnalysisWorkSchedulerUserIntentTests {
             episodeId: "ep-starving",
             podcastId: "pod",
             sourceFingerprint: "fp-starving",
-            desiredCoverageSec: 3600,
+            feedDeclaredDurationSec: 3600,
             podcastTitle: nil,
             episodeTitle: nil
         )
@@ -247,7 +254,7 @@ struct AnalysisWorkSchedulerUserIntentTests {
             episodeId: "ep-ident",
             podcastId: nil,
             sourceFingerprint: "fp-ident",
-            desiredCoverageSec: 3600,
+            feedDeclaredDurationSec: 3600,
             podcastTitle: nil,
             episodeTitle: nil
         )
@@ -299,7 +306,7 @@ struct AnalysisWorkSchedulerUserIntentTests {
             episodeId: "ep-leased",
             podcastId: nil,
             sourceFingerprint: "fp-leased",
-            desiredCoverageSec: 3600,
+            feedDeclaredDurationSec: 3600,
             podcastTitle: nil,
             episodeTitle: nil
         )
@@ -307,7 +314,7 @@ struct AnalysisWorkSchedulerUserIntentTests {
             episodeId: "ep-free",
             podcastId: nil,
             sourceFingerprint: "fp-free",
-            desiredCoverageSec: 3600,
+            feedDeclaredDurationSec: 3600,
             podcastTitle: nil,
             episodeTitle: nil
         )
@@ -347,7 +354,7 @@ struct AnalysisWorkSchedulerUserIntentTests {
             episodeId: "ep-running",
             podcastId: nil,
             sourceFingerprint: "fp-running",
-            desiredCoverageSec: 3600,
+            feedDeclaredDurationSec: 3600,
             podcastTitle: nil,
             episodeTitle: nil
         )
@@ -381,7 +388,7 @@ struct AnalysisWorkSchedulerUserIntentTests {
             episodeId: "ep-retry",
             podcastId: nil,
             sourceFingerprint: "fp-retry",
-            desiredCoverageSec: 3600,
+            feedDeclaredDurationSec: 3600,
             podcastTitle: nil,
             episodeTitle: nil
         )
@@ -426,7 +433,7 @@ struct AnalysisWorkSchedulerUserIntentTests {
             episodeId: "ep-consume",
             podcastId: nil,
             sourceFingerprint: "fp-consume",
-            desiredCoverageSec: 3600,
+            feedDeclaredDurationSec: 3600,
             podcastTitle: nil,
             episodeTitle: nil
         )
@@ -459,7 +466,7 @@ struct AnalysisWorkSchedulerUserIntentTests {
                 episodeId: "ep-retap",
                 podcastId: nil,
                 sourceFingerprint: "fp-retap",
-                desiredCoverageSec: 3600,
+                feedDeclaredDurationSec: 3600,
                 podcastTitle: nil,
                 episodeTitle: nil
             )

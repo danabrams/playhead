@@ -57,21 +57,21 @@ struct EpisodePreparationCoordinatorTests {
     struct RecordingAnalysis: EpisodePreparationAnalysis {
         let recorder: Recorder
 
-        func markUserIntent(episodeId: String, desiredCoverageSec: Double?) async {
-            await recorder.record(.markUserIntent(episodeId: episodeId, coverage: desiredCoverageSec))
+        func markUserIntent(episodeId: String, feedDeclaredDurationSec: Double?) async {
+            await recorder.record(.markUserIntent(episodeId: episodeId, coverage: feedDeclaredDurationSec))
         }
         func enqueueUserIntent(
             episodeId: String,
             podcastId: String?,
             sourceFingerprint: String,
-            desiredCoverageSec: Double?,
+            feedDeclaredDurationSec: Double?,
             podcastTitle: String?,
             episodeTitle: String?
         ) async {
             await recorder.record(.enqueueUserIntent(
                 episodeId: episodeId,
                 fingerprint: sourceFingerprint,
-                coverage: desiredCoverageSec
+                coverage: feedDeclaredDurationSec
             ))
         }
     }
@@ -111,7 +111,7 @@ struct EpisodePreparationCoordinatorTests {
             episodeId: "ep-1",
             podcastId: "pod-1",
             audioURL: Self.audioURL,
-            durationSec: coverage,
+            feedDeclaredDurationSec: coverage,
             podcastTitle: "Pod",
             episodeTitle: "Ep 1"
         )
