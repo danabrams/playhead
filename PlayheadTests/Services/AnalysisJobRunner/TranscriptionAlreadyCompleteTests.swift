@@ -188,6 +188,17 @@ struct TranscriptionAlreadyCompleteTests {
     /// the stop reason would pass for an implementation that renames the
     /// failure — the point of the re-drive is the SCAN, and Stage 4 is where it
     /// happens.
+    ///
+    /// **playhead-pnb5 MOVED THIS FIXTURE TO A DIFFERENT BRANCH, and the
+    /// property is unchanged.** Watermark 120 s over 4 x 30 s shards means every
+    /// shard the request admits is already backed, so the runner no longer
+    /// STARTS the stage — the outcome, the coverage and the backfill call are
+    /// identical, and the journal row is `transcriptionStageNotRun` (nothing was
+    /// paid) rather than `transcriptionAlreadyComplete` (the cap was paid to
+    /// learn there was nothing to do). The two must stay distinguishable: the
+    /// difference in their `slice_duration_ms` is how a device pull counts what
+    /// pnb5 saved. 9y9e's own branch is exercised by
+    /// `chunksPastTheWatermarkStillReachAdDetection` below.
     @Test("a pass that adds nothing to a complete transcript runs ad detection")
     func completeTranscriptReachesAdDetection() async throws {
         let store = try await makeTestStore()
@@ -216,10 +227,53 @@ struct TranscriptionAlreadyCompleteTests {
         // misattribution this bead removes.
         let stages = try await journalStages(store, generationID: generationID)
         #expect(stages.contains {
-            $0.0 == .checkpointed && $0.1 == "analysisJobRunner.run.transcriptionAlreadyComplete"
+            $0.0 == .checkpointed && $0.1 == "analysisJobRunner.run.transcriptionStageNotRun"
         }, "no short-circuit trace; got \(stages)")
         #expect(!stages.contains { $0.0 == .failed },
                 "a pass that continued to ad detection must not journal a failure; got \(stages)")
+    }
+
+    /// playhead-9y9e's OWN branch, kept reachable after playhead-pnb5 narrowed
+    /// what gets as far as it.
+    ///
+    /// The transcript stops at 115 s of a 120 s episode, so the last 30 s shard
+    /// (90-120) is NOT backed — `TranscriptCoverageIndex` needs the watermark
+    /// past the shard's END — and the transcription stage runs. The engine is
+    /// silent, and it is the EPISODE-level floor that licenses the pass to
+    /// continue: 115 / 120 = 0.958, over the 0.95 the finalize floor asks for.
+    /// That is exactly the case the 0.95 floor was written for and pnb5 leaves
+    /// it untouched.
+    ///
+    /// **Why 115 and not "a watermark behind its chunks", which is the obvious
+    /// fixture.** `run()` opens with
+    /// `AnalysisStore.reconcileFastTranscriptCoverage(id:)`, which RAISES the
+    /// watermark to `MAX(endTime)` over the fast chunks. A seed that put the
+    /// watermark at 90 with chunks reaching 120 would be silently reconciled to
+    /// 120 before the admission ever read it, and the test would be measuring
+    /// the reconcile.
+    @Test("a transcript short of the last shard runs the stage and still reaches ad detection")
+    func transcriptShortOfTheLastShardStillReachesAdDetection() async throws {
+        let store = try await makeTestStore()
+        try await seedAsset(store, watermark: 115, transcribedTo: 115)
+        let jobId = UUID().uuidString
+        let generationID = try await seedLeasedJob(store, jobId: jobId)
+        let adStub = StubAdDetectionProvider()
+        let runner = try await makeRunner(
+            store: store, adStub: adStub, recognizer: MockSpeechRecognizer()
+        )
+
+        let outcome = await runner.run(try makeRequest(jobId: jobId))
+
+        if case .failed(let msg) = outcome.stopReason {
+            Issue.record("expected the pass to continue; got .failed(\(msg))")
+        }
+        #expect(adStub.backfillCallCount == 1)
+        #expect(outcome.transcriptCoverageSec == 115,
+                "the coverage carried forward is the persisted watermark")
+        let stages = try await journalStages(store, generationID: generationID)
+        #expect(stages.contains {
+            $0.0 == .checkpointed && $0.1 == "analysisJobRunner.run.transcriptionAlreadyComplete"
+        }, "the 9y9e branch must still be reachable; got \(stages)")
     }
 
     // MARK: - RT09: the floor still bites
@@ -315,10 +369,20 @@ struct TranscriptionAlreadyCompleteTests {
     ///
     /// Nothing is stranded by refusing: `.interrupted` spends none of the job's
     /// five attempts, so the retry comes back.
+    ///
+    /// **playhead-pnb5: the transcript stops at 115 s of 120 s, which leaves the
+    /// last shard unbacked and so keeps the stage RUNNING — otherwise there is
+    /// no interruption to observe at all.** A pass over an asset whose every
+    /// admitted shard is already backed never starts the engine, so the engine
+    /// can neither be re-tasked nor report `.interrupted`; see
+    /// `TranscriptionStageAdmissionTests`. The transcript is still complete by
+    /// the finalize floor's reckoning (0.958), which is what makes this the
+    /// same claim it always was: an interruption is refused the short-circuit
+    /// even where the floor would have granted it.
     @Test("an interrupted pass does not short-circuit, even on a complete transcript")
     func interruptedPassDoesNotShortCircuit() async throws {
         let store = try await makeTestStore()
-        try await seedAsset(store, watermark: Self.durationSec, transcribedTo: Self.durationSec)
+        try await seedAsset(store, watermark: 115, transcribedTo: 115)
         let jobId = UUID().uuidString
         _ = try await seedLeasedJob(store, jobId: jobId)
         let adStub = StubAdDetectionProvider()

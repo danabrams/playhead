@@ -246,6 +246,43 @@ struct TranscriptCoverageIndex: Sendable, Equatable {
         return overlaps(start: shardStart, end: shardEnd)
     }
 
+    /// playhead-pnb5: the stable partition ``orderingUncoveredFirst(_:watermark:)``
+    /// is built from — exposed so a caller can ask HOW MANY shards land in the
+    /// first group without re-deriving the rule.
+    ///
+    /// One implementation, two readers, deliberately. `AnalysisJobRunner` uses
+    /// `withNoArtifact.isEmpty` to decide whether running the transcription stage
+    /// can produce anything at all, and `TranscriptEngineService` uses the
+    /// ordering; if those two ever disagreed about what "already transcribed"
+    /// means, the runner would skip a stage the engine would have found work in
+    /// — or, worse, keep paying for a stage that has none. Expressing the
+    /// ordering in terms of this partition is what makes the disagreement
+    /// unwritable.
+    ///
+    /// - Parameter watermark: `analysis_assets.fastTranscriptCoverageEndTime`.
+    ///   `nil` puts every shard in `withNoArtifact`, which is the safe direction
+    ///   — it transcribes everything.
+    func partitioningByTranscriptArtifact(
+        _ shards: [AnalysisShard],
+        watermark: Double?
+    ) -> (withNoArtifact: [AnalysisShard], alreadyBacked: [AnalysisShard]) {
+        var withNoArtifact: [AnalysisShard] = []
+        var alreadyBacked: [AnalysisShard] = []
+        withNoArtifact.reserveCapacity(shards.count)
+        for shard in shards {
+            if isShardAlreadyTranscribed(
+                shardStart: shard.startTime,
+                shardEnd: shard.startTime + shard.duration,
+                watermark: watermark
+            ) {
+                alreadyBacked.append(shard)
+            } else {
+                withNoArtifact.append(shard)
+            }
+        }
+        return (withNoArtifact, alreadyBacked)
+    }
+
     /// Stable partition of `shards`: audio nothing backs yet comes first,
     /// audio we already hold comes after, each group keeping the playhead
     /// proximity order `prioritizeShards` gave it.
@@ -273,20 +310,7 @@ struct TranscriptCoverageIndex: Sendable, Equatable {
         _ shards: [AnalysisShard],
         watermark: Double?
     ) -> [AnalysisShard] {
-        var uncovered: [AnalysisShard] = []
-        var covered: [AnalysisShard] = []
-        uncovered.reserveCapacity(shards.count)
-        for shard in shards {
-            if isShardAlreadyTranscribed(
-                shardStart: shard.startTime,
-                shardEnd: shard.startTime + shard.duration,
-                watermark: watermark
-            ) {
-                covered.append(shard)
-            } else {
-                uncovered.append(shard)
-            }
-        }
-        return uncovered + covered
+        let partition = partitioningByTranscriptArtifact(shards, watermark: watermark)
+        return partition.withNoArtifact + partition.alreadyBacked
     }
 }
