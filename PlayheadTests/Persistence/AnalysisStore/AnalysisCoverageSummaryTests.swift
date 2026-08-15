@@ -1659,7 +1659,7 @@ struct FastTranscriptCoverageV37MigrationTests {
         // `passA` / `didExamineWindow` population this file's coverage numerator
         // is computed from, and writes only `backfill_jobs.progressCursor`. The
         // summary quantities are unaffected in both directions.
-        #expect(AnalysisStore.currentSchemaVersion == 51)
+        #expect(AnalysisStore.currentSchemaVersion == 52)
     }
 
     /// THE MIGRATION EVIDENCE. An asset already on disk — written by a

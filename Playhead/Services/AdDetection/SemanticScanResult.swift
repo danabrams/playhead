@@ -90,7 +90,28 @@ struct SemanticScanResult: Sendable, Equatable {
     /// means "not measured". A lower bound: `prewarm` and non-ad-detection FM
     /// use are not censused.
     let daemonPeersAtStart: Int?
-    let prewarmHit: Bool
+    /// playhead-exxc (schema V52): OPTIONAL, and the optionality is the whole
+    /// point — `nil` means NOT MEASURED, exactly as it does for `latencyMs`,
+    /// `suspendingLatencyMs` and `daemonPeersAtStart` above.
+    ///
+    /// **It was `Bool` until V52, and it was never a measurement.** The column
+    /// read `0` on all 95 rows of the 2026-08-11 virgin-DB overnight pull and
+    /// was quoted as "every FM call paid a cold start". It could not have read
+    /// anything else: `prewarmHit` is a field of the PASS-level
+    /// ``FMCoarseScanOutput`` / ``FMRefinementScanOutput``, while every row here
+    /// is built from a WINDOW-level ``FMCoarseWindowOutput`` /
+    /// ``FMRefinementWindowOutput``, which has no such field. So all four
+    /// builders in `BackfillJobRunner` passed the literal `false` — the only
+    /// value typeable at a site with nothing to read — and `prewarmHit: true`
+    /// has never appeared anywhere in `Playhead/` in the repository's history.
+    /// `{0: 95}` measured the instrument, not the model.
+    ///
+    /// A non-nil value therefore means a writer that ACTUALLY OBSERVED whether
+    /// the model was warm said so. Nothing in the tree can say that yet, so
+    /// every production row is `nil` and the honest reading of this column is
+    /// "unestablished" rather than "cold". Do not restore a default: a default
+    /// is what made this column claim ninety-five cold starts nobody measured.
+    let prewarmHit: Bool?
     let scanCohortJSON: String
     let transcriptVersion: String
     /// Optional stable scope included in persistence reuse hashing so
@@ -167,7 +188,7 @@ struct SemanticScanResult: Sendable, Equatable {
         latencyMs: Double?,
         suspendingLatencyMs: Double? = nil,
         daemonPeersAtStart: Int? = nil,
-        prewarmHit: Bool,
+        prewarmHit: Bool? = nil,
         scanCohortJSON: String,
         transcriptVersion: String,
         reuseScope: String? = nil,

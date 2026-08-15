@@ -1875,7 +1875,7 @@ actor AnalysisStore {
     /// assertions automatically follow the production constant — hardcoding
     /// the integer in tests has been a recurring source of stale-assertion
     /// flakes whenever the schema bumps.
-    nonisolated static let currentSchemaVersion = 51
+    nonisolated static let currentSchemaVersion = 52
 
     /// H1: minimum age (in seconds) a `backfill_jobs` / `final_pass_jobs`
     /// row stuck in `status='running'` must reach before the launch-time
@@ -2772,6 +2772,11 @@ actor AnalysisStore {
             // which is what stops a cursor going backwards and therefore what
             // makes the bad value permanent. See the block comment.
             try migrateOverclaimedCoarseCursorV51IfNeeded()
+            // playhead-exxc: `semantic_scan_results.prewarmHit` becomes
+            // NULLABLE and every stored value is discarded. Those values were a
+            // compile-time constant, never an observation — see the block
+            // comment on the migration.
+            try migrateUnmeasuredPrewarmHitV52IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -3151,6 +3156,10 @@ actor AnalysisStore {
         // repairs and the rows it computes the repair from, so a seeded fixture
         // missing either still reaches v51.
         try migrateOverclaimedCoarseCursorV51IfNeeded()
+        // playhead-exxc (v52): guarded on `tableExists` AND on the column, so a
+        // seeded fixture without `semantic_scan_results` — or one already
+        // carrying the nullable shape — still reaches v52.
+        try migrateUnmeasuredPrewarmHitV52IfNeeded()
     }
     #endif
 
@@ -7573,6 +7582,52 @@ actor AnalysisStore {
         try setSchemaVersion(51)
     }
 
+    /// V52 migration — make `semantic_scan_results.prewarmHit` NULLABLE, and
+    /// null out every value it already holds.
+    ///
+    /// **What is being destroyed, and why that is not a loss.** The column was
+    /// `INTEGER NOT NULL DEFAULT 0`. It has held `0` on every row ever written,
+    /// on every device, since it was introduced — not as a matter of observation
+    /// but of construction: `prewarmHit` is a field of the PASS-level
+    /// `FMCoarseScanOutput`, while every row is built from a WINDOW-level
+    /// `FMCoarseWindowOutput` that has no such field, so all four builders in
+    /// `BackfillJobRunner` passed the literal `false`. `git log -S "prewarmHit:
+    /// true" -- Playhead/` is empty across the whole history. Dropping a column
+    /// whose value is a compile-time constant destroys no measurement; it
+    /// destroys a number that has already been mis-read once, as "every FM call
+    /// paid a cold start" (playhead-exxc, the 2026-08-11 overnight pull).
+    ///
+    /// **Why DROP + ADD rather than an in-place relax.** SQLite cannot remove a
+    /// `NOT NULL` constraint with `ALTER TABLE`, and `NOT NULL` is precisely the
+    /// thing that forces an unmeasuring writer to claim `false`. `prewarmHit`
+    /// carries no index, no constraint and no foreign key (`UNIQUE` is on
+    /// `reuseKeyHash`), so the drop is a single statement rather than a table
+    /// rebuild. Re-adding it in the same migration keeps the fresh-install and
+    /// migrated column SETS identical; only the ordinal differs, which every
+    /// reader here is already immune to because `semanticScanResultColumns`
+    /// names its columns explicitly.
+    private func migrateUnmeasuredPrewarmHitV52IfNeeded() throws {
+        let observed = (try schemaVersion() ?? 1)
+        guard observed < 52 else { return }
+        // DO NOT STEP OVER A ROLLED-BACK V39 — same rationale as V40–V51.
+        guard observed >= 51 else { return }
+        guard try tableExists("semantic_scan_results") else {
+            try setSchemaVersion(52)
+            return
+        }
+        // Guard on the column rather than on the version alone: a store built by
+        // a binary that already carries the V52 `CREATE TABLE` has the nullable
+        // column and nothing to drop, and a blind DROP would throw there.
+        if try columnExists(table: "semantic_scan_results", column: "prewarmHit") {
+            try exec("ALTER TABLE semantic_scan_results DROP COLUMN prewarmHit")
+        }
+        try exec("ALTER TABLE semantic_scan_results ADD COLUMN prewarmHit INTEGER")
+        logger.notice(
+            "playhead-exxc V52: semantic_scan_results.prewarmHit is nullable; prior values were a compile-time constant, not a measurement"
+        )
+        try setSchemaVersion(52)
+    }
+
     /// playhead-kg8h: durably CLAIM one REQUESTED day-0 kickoff, before any of
     /// the work it stands for has run.
     ///
@@ -9994,7 +10049,11 @@ actor AnalysisStore {
                 inputTokenCount INTEGER,
                 outputTokenCount INTEGER,
                 latencyMs REAL,
-                prewarmHit INTEGER NOT NULL DEFAULT 0,
+                -- playhead-exxc (V52): NULLABLE, and it was `INTEGER NOT NULL
+                -- DEFAULT 0` until then. A NOT NULL boolean forces a writer with
+                -- no observation to claim `false`, and every writer here has no
+                -- observation: see `SemanticScanResult.prewarmHit`.
+                prewarmHit INTEGER,
                 scanCohortJSON TEXT NOT NULL,
                 transcriptVersion TEXT NOT NULL,
                 reuseKeyHash TEXT NOT NULL,
@@ -18964,6 +19023,11 @@ actor AnalysisStore {
     /// 7  transcriptQuality         16 prewarmHit           24 runCorrelationId (V42)
     /// 8  disposition
     ///
+    /// playhead-exxc (V52): index 16 is unchanged, but the column beneath it is
+    /// now NULLABLE and is physically at the TAIL of a migrated table (DROP +
+    /// ADD). Both facts are invisible here on purpose — this list is what fixes
+    /// the read index, and it names its columns, so table ordinal never matters.
+    ///
     /// playhead-hx6n: the three V42 columns are APPENDED, never interleaved.
     /// `readSemanticScanResult` binds by positional index, so inserting a column
     /// anywhere but the tail silently re-points every field after it — and the
@@ -19245,7 +19309,11 @@ actor AnalysisStore {
         bind(stmt, 14, result.inputTokenCount)
         bind(stmt, 15, result.outputTokenCount)
         bind(stmt, 16, result.latencyMs)
-        bind(stmt, 17, result.prewarmHit ? 1 : 0)
+        // playhead-exxc (V52): `map`, never `?? 0`. A nil read as 0 would say
+        // "measured, and the model was cold" for every row whose writer had no
+        // warmth signal at all — which is every production row in the tree. That
+        // conflation is the whole defect this column's V52 shape exists to end.
+        bind(stmt, 17, result.prewarmHit.map { $0 ? 1 : 0 })
         bind(stmt, 18, result.scanCohortJSON)
         bind(stmt, 19, result.transcriptVersion)
         bind(stmt, 20, reuseKeyHash)
@@ -20023,7 +20091,11 @@ actor AnalysisStore {
             // same 1970-dating defect the createdAt read below documents.
             suspendingLatencyMs: optionalDouble(stmt, 25),
             daemonPeersAtStart: optionalInt(stmt, 26),
-            prewarmHit: sqlite3_column_int(stmt, 16) != 0,
+            // playhead-exxc (V52): `optionalInt`, never the bare column read.
+            // `sqlite3_column_int` returns 0 for a NULL, which would turn every
+            // unmeasured row back into a confident "cold start" — the exact
+            // reading that produced this bead.
+            prewarmHit: optionalInt(stmt, 16).map { $0 != 0 },
             scanCohortJSON: try requireText(stmt, 17),
             transcriptVersion: try requireText(stmt, 18),
             // column 19 = reuseKeyHash (not persisted back onto the struct)
