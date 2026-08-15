@@ -1,10 +1,42 @@
 // OperationalMetrics.swift
 // Stable persistence payload for Phase 11 FM backfill health metrics.
+//
+// THERE IS NO CACHE MEASUREMENT HERE, AND THERE USED TO BE ONE THAT READ 1.0
+// (playhead-kvi1, sibling of playhead-exxc). Schema v1 carried
+// `cacheReuseRate`, `counters.cacheLookupCount` and `counters.cacheReuseCount`.
+// `recordFMOutput` incremented the denominator unconditionally and the
+// numerator under the PASS-level `prewarmHit` flag, which
+// `FoundationModelClassifier` sets from a compile-time constant
+// (`let prewarmHit = true` on the coarse path; `prewarmHit = true`
+// unconditionally after `makePrewarmedSessionBox` on the boundary and
+// refinement paths). So for every pass that reached the model the two counters
+// were equal and the ratio was 1.0 by construction, and on the arms where the
+// flag is `false` the pass had run no FM work at all — a state `fmWindowCount`
+// already reports. Measured on the 2026-08-11 virgin-DB overnight pull, all 26
+// persisted events: `cacheReuseCount == cacheLookupCount` in every row, giving
+// 1.0 on the six rows with FM work and 0.0 — the zero-denominator reading — on
+// the other twenty.
+//
+// It could not have been made real here: `LanguageModelSession.prewarm` is
+// fire-and-forget and never awaited, FoundationModels exposes no hit/miss, and
+// nothing in this tree times the prewarm, so a prewarm that hit and one that
+// missed are indistinguishable to every column this code writes.
+//
+// The app's real cache measures itself, honestly and elsewhere:
+// `RepeatedAdCacheService` counts genuine hits and misses and publishes
+// `RepeatedAdCacheHitRateSnapshot.hitRate` as a `Double?`, where nil is "no
+// samples" and 0.0 is "samples exist, none hit" — and it is consumed, by the
+// auto-disable rung. Do not add a second, fabricated one here: on a device pull
+// the two are indistinguishable and the fabricated one reads better.
 
 import Foundation
 
 struct OperationalMetrics: Sendable, Codable, Equatable {
-    static let schemaVersion = 1
+    /// v2 (playhead-kvi1) removed `cacheReuseRate` and its two counters. Old
+    /// v1 events survive in `evidence_events`; they decode against this type
+    /// unchanged, because Swift's synthesized `Decodable` ignores keys it does
+    /// not know. Read the version before comparing payloads across pulls.
+    static let schemaVersion = 2
     static let eventType = "backfillOperationalMetrics"
 
     let schemaVersion: Int
@@ -17,7 +49,6 @@ struct OperationalMetrics: Sendable, Codable, Equatable {
     let audioDurationSeconds: Double
     let wallTimePerAudioHour: Double
     let energyPerEpisode: Double
-    let cacheReuseRate: Double
     let resumeSuccessRate: Double
     let perCohortDrift: Double
     let thermalDeferralRate: Double
@@ -49,10 +80,6 @@ struct OperationalMetrics: Sendable, Codable, Equatable {
             numerator: counters.estimatedEnergyUnits,
             denominator: counters.episodeCount
         )
-        self.cacheReuseRate = Self.rate(
-            numerator: counters.cacheReuseCount,
-            denominator: counters.cacheLookupCount
-        )
         self.resumeSuccessRate = Self.rate(
             numerator: counters.resumeSuccessCount,
             denominator: counters.resumeAttemptCount
@@ -75,8 +102,6 @@ struct OperationalMetrics: Sendable, Codable, Equatable {
         var persistedScanResultCount: Int
         var persistedEvidenceEventCount: Int
         var estimatedEnergyUnits: Double
-        var cacheLookupCount: Int
-        var cacheReuseCount: Int
         var resumeAttemptCount: Int
         var resumeSuccessCount: Int
         var cohortDriftEvaluationCount: Int
@@ -93,8 +118,6 @@ struct OperationalMetrics: Sendable, Codable, Equatable {
             persistedScanResultCount: Int = 0,
             persistedEvidenceEventCount: Int = 0,
             estimatedEnergyUnits: Double = 0,
-            cacheLookupCount: Int = 0,
-            cacheReuseCount: Int = 0,
             resumeAttemptCount: Int = 0,
             resumeSuccessCount: Int = 0,
             cohortDriftEvaluationCount: Int = 0,
@@ -110,8 +133,6 @@ struct OperationalMetrics: Sendable, Codable, Equatable {
             self.persistedScanResultCount = max(0, persistedScanResultCount)
             self.persistedEvidenceEventCount = max(0, persistedEvidenceEventCount)
             self.estimatedEnergyUnits = OperationalMetrics.finiteNonNegative(estimatedEnergyUnits)
-            self.cacheLookupCount = max(0, cacheLookupCount)
-            self.cacheReuseCount = max(0, cacheReuseCount)
             self.resumeAttemptCount = max(0, resumeAttemptCount)
             self.resumeSuccessCount = max(0, resumeSuccessCount)
             self.cohortDriftEvaluationCount = max(0, cohortDriftEvaluationCount)
@@ -122,18 +143,17 @@ struct OperationalMetrics: Sendable, Codable, Equatable {
             self.randomAuditSelectedCount = max(0, randomAuditSelectedCount)
         }
 
+        /// playhead-kvi1: this used to take `prewarmHit: Bool` and drive the
+        /// two cache counters off it. The parameter is gone rather than
+        /// ignored — an unused argument at three call sites is an invitation
+        /// to wire it back to something.
         mutating func recordFMOutput(
             latencyMillis: Double,
-            prewarmHit: Bool,
             windowCount: Int
         ) {
             fmPassCount += 1
             fmWindowCount += max(0, windowCount)
             estimatedEnergyUnits += OperationalMetrics.finiteNonNegative(latencyMillis) / 1_000
-            cacheLookupCount += 1
-            if prewarmHit {
-                cacheReuseCount += 1
-            }
         }
 
         mutating func add(_ other: Counters) {
@@ -143,8 +163,6 @@ struct OperationalMetrics: Sendable, Codable, Equatable {
             persistedScanResultCount += other.persistedScanResultCount
             persistedEvidenceEventCount += other.persistedEvidenceEventCount
             estimatedEnergyUnits += other.estimatedEnergyUnits
-            cacheLookupCount += other.cacheLookupCount
-            cacheReuseCount += other.cacheReuseCount
             resumeAttemptCount += other.resumeAttemptCount
             resumeSuccessCount += other.resumeSuccessCount
             cohortDriftEvaluationCount += other.cohortDriftEvaluationCount

@@ -4201,7 +4201,6 @@ actor BackfillJobRunner {
         permissiveContextOverflowCount += coarse.permissiveFailureCounts.contextOverflow
         counters.recordFMOutput(
             latencyMillis: coarse.latencyMillis,
-            prewarmHit: coarse.prewarmHit,
             windowCount: coarse.windows.count + coarse.failedWindowStatuses.count
         )
 
@@ -4496,7 +4495,6 @@ actor BackfillJobRunner {
                 asymmetricWindowCount += refinement.asymmetricWindowCount
                 counters.recordFMOutput(
                     latencyMillis: refinement.latencyMillis,
-                    prewarmHit: refinement.prewarmHit,
                     windowCount: refinement.windows.count + refinement.failedWindowStatuses.count
                 )
 
@@ -5080,7 +5078,6 @@ actor BackfillJobRunner {
                 )
                 results.counters.recordFMOutput(
                     latencyMillis: expansionRefinement.latencyMillis,
-                    prewarmHit: expansionRefinement.prewarmHit,
                     windowCount: expansionRefinement.windows.count + expansionRefinement.failedWindowStatuses.count
                 )
 

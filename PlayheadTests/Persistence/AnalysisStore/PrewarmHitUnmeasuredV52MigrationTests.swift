@@ -319,45 +319,47 @@ struct PrewarmHitUnmeasuredV52MigrationTests {
     // See the file header: everything above passes with all four builders still
     // stamping `prewarmHit: false`. This is the rail that does not.
 
-    @Test("no SemanticScanResult built by BackfillJobRunner names prewarmHit")
+    @Test("no site in BackfillJobRunner names prewarmHit — the exemption is gone (playhead-kvi1)")
     func productionBuildersNameNoPrewarmHit() throws {
         let source = try Self.appSourceRoot()
             .appendingPathComponent("Services/AdDetection/BackfillJobRunner.swift")
         let text = try String(contentsOf: source, encoding: .utf8)
 
-        // EXEMPT: `prewarmHit: <expr>.prewarmHit`. Those are the three
-        // `counters.recordFMOutput(...)` calls forwarding the PASS-level field
-        // off `FMCoarseScanOutput` / `FMRefinementScanOutput` into
-        // `OperationalMetrics` — a different quantity on a different type,
-        // deliberately untouched here and carried by playhead-kvi1.
+        // THIS RAIL SHIPPED WITH AN EXEMPTION AND playhead-kvi1 REMOVED IT.
         //
-        // The exemption is safe because the COMPILER enforces it: a builder can
-        // only write `prewarmHit: x.prewarmHit` if `x` has such a member, and
-        // the window-level outputs the builders hold do not. So the only way to
-        // pass this filter from a builder is to make the value real first,
-        // which is exactly the change that would earn the right to write it.
+        // exxc allowed `prewarmHit: <expr>.prewarmHit` because three
+        // `counters.recordFMOutput(...)` calls forwarded the PASS-level field
+        // into `OperationalMetrics.Counters` — a different quantity on a
+        // different type, out of that bead's scope and named as kvi1's. kvi1
+        // established that the counters it fed (`cacheLookupCount` /
+        // `cacheReuseCount`, and the `cacheReuseRate` derived from them) were
+        // 1.0 by construction for the same reason the column was `false` by
+        // construction, and deleted them. The three forwarding sites went with
+        // them, so the exemption now licenses nothing — and an exemption that
+        // matches nothing is a licence waiting to be inherited by whatever
+        // reuses the spelling. The filter is absolute: ZERO occurrences of
+        // `prewarmHit:` anywhere in this file.
+        //
+        // What that buys over the exempted version: the exempted filter would
+        // have passed a NEW `prewarmHit: someOutput.prewarmHit` at any site, on
+        // the argument that the compiler proves the member exists. It does —
+        // but the member it proves exists is the PASS-level constant, which is
+        // exactly the value that must never be written down again.
         let offenders = text
             .split(separator: "\n", omittingEmptySubsequences: false)
             .enumerated()
             .filter { $0.element.contains("prewarmHit:") }
-            .filter { line in
-                let value = line.element
-                    .components(separatedBy: "prewarmHit:")
-                    .dropFirst()
-                    .joined(separator: "prewarmHit:")
-                    .trimmingCharacters(in: CharacterSet(charactersIn: " ,\t"))
-                return !value.hasSuffix(".prewarmHit")
-            }
             .map { "BackfillJobRunner.swift:\($0.offset + 1): \($0.element.trimmingCharacters(in: .whitespaces))" }
 
         #expect(
             offenders.isEmpty,
             """
-            A SemanticScanResult builder is naming `prewarmHit` again. Every one \
-            of these sites holds a WINDOW-level output, which carries no warmth \
-            signal, so whatever it passes is invented — and the column goes back \
-            to reading like a measurement. Omit the argument; nil is the truth. \
-            Offenders:
+            A site in BackfillJobRunner is naming `prewarmHit` again. Nothing in \
+            this file holds a warmth signal: the SemanticScanResult builders hold \
+            WINDOW-level outputs, which have no such field, and the PASS-level \
+            field they could reach instead is a compile-time constant. So whatever \
+            is passed here is invented, and the next device pull reads it as a \
+            measurement. Omit it. Offenders:
             \(offenders.joined(separator: "\n"))
             """
         )
