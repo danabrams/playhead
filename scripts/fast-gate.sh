@@ -59,6 +59,18 @@
 # in the commit message: the file is the record of what is known-broken, so a
 # shrinking diff is good news and a growing one needs a reason.
 #
+# THE VERDICTS COME FROM THE .xcresult BUNDLE, NOT FROM THIS LOG (playhead-t53a).
+# Everything below about the census was, until 2026-08-15, computed by parsing
+# xcodebuild's stdout — which the app under test writes into at the same time,
+# not line-atomically. A severed `passed after` line reads as a test that said
+# NOTHING, so the census counted passes as dead hosts: measured over 27
+# crash-free full-plan logs, 80 of 87 reported casualties were verdicts the
+# parser could not read, and not one was a crash. So `-resultBundlePath` is
+# passed below and handed to gate_baseline.py, which takes every outcome from it
+# and leaves the console only what the bundle genuinely lacks (the restart
+# banner, the `Failing tests:` block, the terminal marker, a failure's source
+# file, and the STARTED roster that keeps a forgotten test a casualty).
+#
 # A CRASHED TEST HOST PRODUCES NO VERDICT (playhead-tl6l / playhead-buvn). A
 # test whose host died emits no per-test line, so it used to be counted as
 # neither known nor NEW — the first line above could be printed by a run that
@@ -107,6 +119,12 @@
 #   PLAYHEAD_SIM_ID      simulator UDID for -308 recovery (else parsed from DEST id=)
 #   PLAYHEAD_SKIP_BASELINE=1  bypass the baseline verdict (raw exit code)
 #   PLAYHEAD_GATE_BASELINE    baseline file path override
+#   PLAYHEAD_RESULT_BUNDLE    where to write the .xcresult (default: a scratch
+#                             dir removed on exit). Set it to KEEP the bundle —
+#                             it is the only trustworthy record of what each
+#                             test did, and the console log is not (playhead-t53a)
+#   PLAYHEAD_RESIDUAL_MAX     how many lost verdicts are worth a scoped re-run
+#                             before the run is called broken instead (default 120)
 #   PLAYHEAD_DISK_MIN_GIB     disk-headroom threshold override (default: see
 #                             scripts/disk_preflight.py, where it is derived)
 #   PLAYHEAD_SKIP_DISK_PREFLIGHT=1  bypass the headroom refusal entirely
@@ -222,12 +240,40 @@ if [ ! -f "$SCHEME" ] || ! grep -q "${PLAN}.xctestplan" "$SCHEME" 2>/dev/null; t
   "$XCODEGEN" generate || { echo "fast-gate: xcodegen generate FAILED (is the model linked?)"; exit 70; }
 fi
 
+# playhead-t53a: WHERE THE VERDICTS COME FROM.
+#
+# xcodebuild's stdout is shared with the app under test and the interleaving is
+# not line-atomic, so a verdict line arrives severed — mid-word, and once inside
+# a UTF-8 codepoint. The census that exists to notice a test which reported
+# NOTHING read those as dead hosts: main's 06:01 run of 2026-08-15 reported
+# seven "crashed host" casualties with zero crash markers in 9.9 MiB, and the
+# bundle records all seven as PASSED. Measured over 27 crash-free full-plan
+# logs, 80 of 87 reported casualties were verdicts the parser could not read.
+#
+# So the bundle is now written to a known path and handed to gate_baseline.py,
+# which takes every outcome from it and leaves the console only the things the
+# bundle genuinely lacks. Override the location with PLAYHEAD_RESULT_BUNDLE to
+# keep it after the run — otherwise it is a scratch dir and is removed on exit.
+RESULT_BUNDLE="${PLAYHEAD_RESULT_BUNDLE:-}"
+BUNDLE_SCRATCH=""
+if [ -z "$RESULT_BUNDLE" ]; then
+  BUNDLE_SCRATCH="$(mktemp -d -t fast-gate-xcresult)"
+  RESULT_BUNDLE="$BUNDLE_SCRATCH/gate.xcresult"
+fi
+RESIDUAL_BUNDLE="${RESULT_BUNDLE%.xcresult}-residual.xcresult"
+
 run_gate () {
+  # xcodebuild REFUSES to write over an existing bundle. Clearing it here rather
+  # than once at the top is deliberate: the wedged-sim retry below re-runs the
+  # whole plan, and its bundle must REPLACE attempt 1's for the same reason
+  # gate_baseline.py's `last_attempt` cuts attempt 1's console output away.
+  rm -rf "$RESULT_BUNDLE"
   xcodebuild test \
     -scheme Playhead \
     -testPlan "$PLAN" \
     -destination "$DEST" \
     -derivedDataPath "$DERIVED" \
+    -resultBundlePath "$RESULT_BUNDLE" \
     -jobs "$JOBS" \
     "$@"
 }
@@ -255,7 +301,61 @@ fi
 # ---------------------------------------------------------------------------
 # playhead-voez: the baseline verdict.
 # ---------------------------------------------------------------------------
-finish () { rm -f "$LOG"; exit "$1"; }
+finish () {
+  rm -f "$LOG"
+  [ -n "$BUNDLE_SCRATCH" ] && rm -rf "$BUNDLE_SCRATCH"
+  exit "$1"
+}
+
+# playhead-t53a. The bundle is the verdict source, so a missing one is not a
+# detail to shrug at — gate_baseline.py refuses to evaluate rather than fall
+# back to the console it has just been proven wrong about. Only pass the flag
+# when there is something to pass, so a build that never reached the test phase
+# still gets the console-only reading (and says so on the verdict).
+BUNDLE_ARGS=()
+[ -d "$RESULT_BUNDLE" ] && BUNDLE_ARGS+=(--xcresult "$RESULT_BUNDLE")
+
+# THE RESIDUAL RE-RUN (playhead-t53a). A test whose host died was judged by
+# nobody, and the only honest remedy is to run it again — scoped, which for this
+# population is seconds. Without this the gate ends holding a hole it has to
+# reason about; with it, it ends with a verdict for every test in the plan.
+#
+# Deliberately ONE pass, never a loop: if the re-run loses verdicts too, that is
+# a finding and not something to grind against. And deliberately full-plan only
+# — a selective run's residual is somebody else's population.
+RESIDUAL_MAX="${PLAYHEAD_RESIDUAL_MAX:-120}"
+if [ "$SELECTIVE" -eq 0 ] && [ "${#BUNDLE_ARGS[@]}" -gt 0 ] \
+   && [ "${PLAYHEAD_SKIP_BASELINE:-0}" != "1" ]; then
+  RESIDUAL=()
+  while IFS= read -r line; do
+    [ -n "$line" ] && RESIDUAL+=("$line")
+  done < <(python3 scripts/gate_baseline.py residual \
+             --log "$LOG" --xcresult "$RESULT_BUNDLE" 2>/dev/null)
+  if [ "${#RESIDUAL[@]}" -gt 0 ] && [ "${#RESIDUAL[@]}" -le "$RESIDUAL_MAX" ]; then
+    echo "fast-gate: ${#RESIDUAL[@]} test(s) got NO VERDICT — re-running exactly those"
+    rm -rf "$RESIDUAL_BUNDLE"
+    xcodebuild test \
+      -scheme Playhead \
+      -testPlan "$PLAN" \
+      -destination "$DEST" \
+      -derivedDataPath "$DERIVED" \
+      -resultBundlePath "$RESIDUAL_BUNDLE" \
+      -jobs "$JOBS" \
+      "${RESIDUAL[@]}" 2>&1 | tail -20
+    if [ -d "$RESIDUAL_BUNDLE" ]; then
+      BUNDLE_ARGS+=(--xcresult "$RESIDUAL_BUNDLE")
+    else
+      echo "fast-gate: the residual re-run wrote no bundle — the census below still"
+      echo "fast-gate: names those tests, which is the honest reading."
+    fi
+  elif [ "${#RESIDUAL[@]}" -gt "$RESIDUAL_MAX" ]; then
+    # A number, not a silent skip. Hundreds of casualties is a run that lost
+    # whole families, and re-running them one by one is the wrong remedy for it.
+    echo "fast-gate: ${#RESIDUAL[@]} test(s) got NO VERDICT — too many to re-run scoped"
+    echo "fast-gate: (cap $RESIDUAL_MAX). That many lost verdicts is a broken run, not"
+    echo "fast-gate: a hole to patch: re-run the whole plan."
+  fi
+fi
 
 if [ "$ACCEPT_BASELINE" -eq 1 ]; then
   if [ "$SELECTIVE" -eq 1 ]; then
@@ -265,7 +365,8 @@ if [ "$ACCEPT_BASELINE" -eq 1 ]; then
     finish 2
   fi
   python3 scripts/gate_baseline.py accept \
-    --log "$LOG" --baseline "$BASELINE_FILE" --plan "$PLAN"
+    --log "$LOG" --baseline "$BASELINE_FILE" --plan "$PLAN" \
+    ${BUNDLE_ARGS[@]+"${BUNDLE_ARGS[@]}"}
   finish $?
 fi
 
@@ -281,7 +382,8 @@ if [ "$SELECTIVE" -eq 1 ]; then
 fi
 
 python3 scripts/gate_baseline.py check \
-  --log "$LOG" --baseline "$BASELINE_FILE" --plan "$PLAN"
+  --log "$LOG" --baseline "$BASELINE_FILE" --plan "$PLAN" \
+  ${BUNDLE_ARGS[@]+"${BUNDLE_ARGS[@]}"}
 CHECK_RC=$?
 case "$CHECK_RC" in
   0) finish 0 ;;

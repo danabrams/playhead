@@ -2671,6 +2671,433 @@ class RealCrashedRunTests(unittest.TestCase):
                 self.assertIn(key, runs[name].passed, "%s / %s" % (name, key))
 
 
+# ---------------------------------------------------------------------------
+# playhead-t53a — the verdict comes from the .xcresult, not from stdout.
+# ---------------------------------------------------------------------------
+
+def st_case(name, result="Passed", suite="SomeTests", func=None, messages=(),
+            seconds=0.5):
+    """One Swift Testing Test Case node, spelled the way the bundle spells it.
+
+    The URL ends in a FUNCTION SIGNATURE, which is the only thing that tells
+    Swift Testing from XCTest — see `_is_swift_testing`.
+    """
+    func = func or "someFunc()"
+    node = {
+        "nodeType": "Test Case",
+        "name": name,
+        "result": result,
+        "durationInSeconds": seconds,
+        "nodeIdentifier": "%s/%s" % (suite, func),
+        "nodeIdentifierURL":
+            "test://com.apple.xcode/Playhead/PlayheadTests/%s/%s" % (suite, func),
+    }
+    if messages:
+        node["children"] = [{"nodeType": "Failure Message", "name": m}
+                            for m in messages]
+    return node
+
+
+def xc_case(suite, method, result="Passed", messages=(), seconds=0.01):
+    """One XCTest Test Case node — a bare SELECTOR in the URL, no parens."""
+    node = {
+        "nodeType": "Test Case",
+        "name": "%s()" % method,
+        "result": result,
+        "durationInSeconds": seconds,
+        "nodeIdentifier": "%s/%s()" % (suite, method),
+        "nodeIdentifierURL":
+            "test://com.apple.xcode/Playhead/PlayheadTests/%s/%s" % (suite, method),
+    }
+    if messages:
+        node["children"] = [{"nodeType": "Failure Message", "name": m}
+                            for m in messages]
+    return node
+
+
+def bundle_payload(*cases, suite="SomeTests", plan="PlayheadFastTests"):
+    """A whole `xcresulttool get test-results tests` payload around some cases."""
+    return {
+        "testNodes": [{
+            "nodeType": "Test Plan",
+            "name": plan,
+            "children": [{
+                "nodeType": "Unit test bundle",
+                "name": "PlayheadTests",
+                "children": [{
+                    "nodeType": "Test Suite",
+                    "name": suite,
+                    "children": list(cases),
+                }],
+            }],
+        }],
+    }
+
+
+CRASH = "Test crashed with signal trap."
+
+
+class XcresultParseTests(unittest.TestCase):
+    """The bundle, read into the console's own key space."""
+
+    def test_a_swift_testing_case_is_keyed_by_its_DISPLAY_NAME(self):
+        run = gb.parse_xcresult(bundle_payload(
+            st_case("a mark survives its backfill", func="markSurvives()")))
+        self.assertEqual({"swift-testing::a mark survives its backfill"}, run.keys)
+        self.assertIn("swift-testing::a mark survives its backfill", run.passed)
+
+    def test_an_xctest_case_is_keyed_MODULE_SUITE_METHOD_as_the_console_spells_it(self):
+        run = gb.parse_xcresult(bundle_payload(
+            xc_case("ActivityViewTests", "testNilFocus"), suite="ActivityViewTests"))
+        self.assertEqual({"xctest::PlayheadTests.ActivityViewTests/testNilFocus"},
+                         run.keys)
+
+    def test_a_PARAMETERISED_swift_testing_test_is_not_mistaken_for_XCTest(self):
+        """The bug the first draft shipped, and how it showed up.
+
+        `endswith("()")` put the 57 parameterised tests of the 06:01 run in the
+        XCTest bucket, because their signature ends `(failureClass:)`. The
+        symptom was 57 keys unmatched in EACH direction against the console —
+        which is why identity is asserted here rather than assumed.
+        """
+        run = gb.parse_xcresult(bundle_payload(
+            st_case("a class that means recognition ran keeps the ASR cause",
+                    func="keepsTheASRCause(failureClass:)")))
+        self.assertEqual(
+            {"swift-testing::a class that means recognition ran keeps the ASR cause"},
+            run.keys)
+
+    def test_a_case_with_no_URL_REFUSES_rather_than_guessing_its_framework(self):
+        node = st_case("x")
+        del node["nodeIdentifierURL"]
+        with self.assertRaises(gb.XcresultUnreadable):
+            gb.parse_xcresult(bundle_payload(node))
+
+    def test_the_failure_KIND_comes_from_the_bundles_own_message(self):
+        run = gb.parse_xcresult(bundle_payload(
+            st_case("starved", result="Failed", func="starved()",
+                    messages=["Time limit was exceeded: 60.000 seconds"]),
+            st_case("wrong", result="Failed", func="wrong()",
+                    messages=["Expectation failed: a == b"]),
+        ))
+        self.assertEqual({gb.KIND_TIMEOUT},
+                         run.failures["swift-testing::starved"].kinds)
+        self.assertEqual({gb.KIND_ASSERTION},
+                         run.failures["swift-testing::wrong"].kinds)
+
+    def test_an_XCTEST_failure_is_pinned_to_ASSERTION_whatever_its_message_says(self):
+        """XCTest never reports a Swift Testing time limit, and must never be
+        handed the starvation tolerance that kind carries."""
+        run = gb.parse_xcresult(bundle_payload(
+            xc_case("SlowTests", "testSlow", result="Failed",
+                    messages=["Time limit was exceeded: 60.000 seconds"]),
+            suite="SlowTests"))
+        self.assertEqual(
+            {gb.KIND_ASSERTION},
+            run.failures["xctest::PlayheadTests.SlowTests/testSlow"].kinds)
+
+    def test_a_result_string_this_gate_does_not_know_is_NOT_counted_as_a_verdict(self):
+        run = gb.parse_xcresult(bundle_payload(
+            st_case("mystery", result="Inconclusive", func="mystery()")))
+        self.assertEqual({"swift-testing::mystery": "Inconclusive"}, run.unjudged)
+        self.assertNotIn("swift-testing::mystery", run.judged)
+
+
+class CrashedCaseIsACasualtyTests(unittest.TestCase):
+    """A dead host is not a failing test, and the bundle says which in words.
+
+    MEASURED with a real probe (`T53aCrashProbeTests`, five tests, one calling
+    fatalError): xcodebuild restarted the host, the restarted run executed 0
+    tests, the console lost four verdicts — and the bundle recorded all four as
+    `Failed` / `Test crashed with signal trap.` with their identifiers intact.
+    """
+
+    def _run(self, *cases):
+        run = gb.parse_run(log(*[st_silent(c["name"]) for c in cases]))
+        return gb.with_xcresult_verdicts(run, gb.parse_xcresult(bundle_payload(*cases)))
+
+    def test_a_crashed_case_is_a_CASUALTY_and_not_a_failure(self):
+        run = self._run(st_case("victim", result="Failed", func="victim()",
+                                messages=[CRASH]))
+        self.assertEqual({}, run.failures)
+        self.assertEqual({"swift-testing::victim"}, run.no_verdict)
+        self.assertEqual(CRASH, run.crashed["swift-testing::victim"])
+
+    def test_accepting_a_crashed_run_does_NOT_write_the_victim_into_the_known_broken_file(self):
+        """The direction that would make this change QUIETER instead of truthier.
+
+        Taking the bundle at face value books three healthy tests as known-broken
+        failures, and from the next run on their GENUINE failure reads as known.
+        """
+        run = self._run(st_case("victim", result="Failed", func="victim()",
+                                messages=[CRASH]),
+                        st_case("survivor", func="survivor()"))
+        merged = gb.merge(gb.empty_baseline("PlayheadFastTests"), run,
+                          plan="PlayheadFastTests")
+        self.assertNotIn("swift-testing::victim", merged["tests"])
+        self.assertIn("swift-testing::victim",
+                      merged[gb.NO_VERDICT_KEY][gb.CENSUS_TESTS_KEY])
+
+    def test_an_UNRECOGNISED_crash_wording_stays_a_FAILURE_which_is_the_loud_direction(self):
+        run = self._run(st_case("victim", result="Failed", func="victim()",
+                                messages=["The runner exploded, somehow"]))
+        self.assertIn("swift-testing::victim", run.failures)
+        self.assertEqual(set(), run.no_verdict)
+
+    def test_a_passing_twin_cannot_launder_a_crashed_one_that_shares_its_key(self):
+        """Two same-named tests in different suites share a key (0.57% of names).
+
+        Resolving toward the casualty is the same direction the console's own
+        collision rule resolves — toward the worse news.
+        """
+        for order in (0, 1):
+            cases = [
+                st_case("twin", result="Failed", func="a()", messages=[CRASH]),
+                st_case("twin", result="Passed", func="b()"),
+            ]
+            if order:
+                cases.reverse()
+            run = self._run(*cases)
+            self.assertEqual({"swift-testing::twin"}, run.no_verdict, order)
+            self.assertNotIn("swift-testing::twin", run.passed, order)
+
+
+class BundleCannotWeakenTheCensusTests(unittest.TestCase):
+    """The hard constraint: a genuinely lost verdict must still be reported."""
+
+    def test_a_console_STARTED_test_the_bundle_never_mentions_is_STILL_a_casualty(self):
+        """The line that makes the roster a UNION rather than a replacement.
+
+        If the bundle were taken as the whole roster, a test the infrastructure
+        forgot would leave the census by being forgotten — the quiet direction.
+        """
+        run = gb.parse_run(log(st_silent("forgotten"), st_pass("seen")))
+        run = gb.with_xcresult_verdicts(
+            run, gb.parse_xcresult(bundle_payload(st_case("seen", func="seen()"))))
+        self.assertEqual({"swift-testing::forgotten"}, run.no_verdict)
+
+    def test_a_bundle_key_with_no_recognised_verdict_is_a_casualty_and_is_NAMED(self):
+        run = gb.parse_run(log(st_silent("mystery")))
+        run = gb.with_xcresult_verdicts(run, gb.parse_xcresult(bundle_payload(
+            st_case("mystery", result="Inconclusive", func="mystery()"))))
+        self.assertEqual({"swift-testing::mystery"}, run.no_verdict)
+        result = gb.verdict(baseline({}, no_verdict=[]), run)
+        self.assertIn("UNJUDGED", result.render())
+        self.assertIn("Inconclusive", result.render())
+
+    def test_a_SEVERED_pass_stops_being_a_casualty_which_is_the_whole_bead(self):
+        """The 06:01 shape: `passed afte` + an app-log line, and nothing else.
+
+        Console-only this is a crashed-host casualty. Against the bundle it is
+        what it always was — a test that passed.
+        """
+        severed = (
+            '◇ Test "brief pause (==2s) does not emit (strict >)" started.\n'
+            '✔ Test "brief pause (==2s) does not emit (strict >)" passed afte'
+            "2026-08-15 06:09:35.691234-0400 Playhead[123:456] [Cap] fm.state\n"
+        )
+        console = gb.parse_run(log(severed))
+        self.assertEqual({"swift-testing::brief pause (==2s) does not emit (strict >)"},
+                         console.no_verdict)
+        run = gb.with_xcresult_verdicts(
+            gb.parse_run(log(severed)),
+            gb.parse_xcresult(bundle_payload(
+                st_case("brief pause (==2s) does not emit (strict >)",
+                        func="exactlyTwoSecondPauseFiltered()"))))
+        self.assertEqual(set(), run.no_verdict)
+
+    def test_the_verdict_NAMES_which_instrument_produced_the_census(self):
+        """`7 tests got NO VERDICT` is two different claims. The number cannot
+        carry the difference, so the source is printed beside it."""
+        console = gb.verdict(baseline({}, no_verdict=[]),
+                             gb.parse_run(log(st_silent("x"))))
+        self.assertIn("VERDICTS FROM    the console log", console.render())
+        self.assertIn("NOT a reliable census", console.render())
+
+        run = gb.with_xcresult_verdicts(
+            gb.parse_run(log(st_silent("x"))),
+            gb.parse_xcresult(bundle_payload(
+                st_case("x", result="Failed", func="x()", messages=[CRASH]))))
+        rendered = gb.verdict(baseline({}, no_verdict=[]), run).render()
+        self.assertIn("VERDICTS FROM    the .xcresult bundle", rendered)
+        self.assertIn("HOST DIED HERE", rendered)
+
+
+class BundleMergeTests(unittest.TestCase):
+    """Two bundles — the main run and the residual re-run — in one observation."""
+
+    def _apply(self, log_text, *payloads):
+        run = gb.parse_run(log_text)
+        paths = [pathlib.Path("bundle-%d" % i) for i in range(len(payloads))]
+        by_path = dict(zip((str(p) for p in paths), payloads))
+        return gb._apply_bundles(
+            run, paths,
+            reader=lambda p: by_path[str(p)],
+        ), by_path
+
+    def test_a_residual_RERUN_that_passes_CLEARS_the_casualty(self):
+        run, _ = self._apply(
+            log(st_silent("victim")),
+            bundle_payload(st_case("victim", result="Failed", func="victim()",
+                                   messages=[CRASH])),
+            bundle_payload(st_case("victim", result="Passed", func="victim()")),
+        )
+        self.assertEqual(set(), run.no_verdict)
+        self.assertIn("swift-testing::victim", run.passed)
+        self.assertEqual({}, run.crashed)
+
+    def test_a_residual_RERUN_that_crashes_AGAIN_leaves_the_casualty_standing(self):
+        """The proof the loop cannot launder a real crash. Measured against the
+        probe, whose killer test crashes deterministically."""
+        run, _ = self._apply(
+            log(st_silent("killer")),
+            bundle_payload(st_case("killer", result="Failed", func="killer()",
+                                   messages=[CRASH])),
+            bundle_payload(st_case("killer", result="Failed", func="killer()",
+                                   messages=[CRASH])),
+        )
+        self.assertEqual({"swift-testing::killer"}, run.no_verdict)
+
+    def test_a_later_bundle_recording_a_CRASH_overrides_an_earlier_PASS(self):
+        """Later evidence wins in EVERY direction, including toward bad news.
+
+        A rail caught the override keyed on what the later bundle JUDGED, which
+        silently exempts the one outcome that is not a judgement: a crash. Under
+        that version a test recorded as passing keeps its pass while the same
+        run reports the host died under it — two contradictory claims about one
+        name, and the reassuring one wins the census.
+        """
+        run, _ = self._apply(
+            log(st_pass("victim")),
+            bundle_payload(st_case("victim", func="victim()")),
+            bundle_payload(st_case("victim", result="Failed", func="victim()",
+                                   messages=[CRASH])),
+        )
+        self.assertEqual({"swift-testing::victim"}, run.no_verdict)
+        self.assertNotIn("swift-testing::victim", run.passed)
+
+    def test_a_later_bundle_that_LOST_a_verdict_overrides_an_earlier_failure(self):
+        run, _ = self._apply(
+            log(st_fail_timeout("victim")),
+            bundle_payload(st_case("victim", result="Failed", func="victim()",
+                                   messages=["Time limit was exceeded: 60.000 seconds"])),
+            bundle_payload(st_case("victim", result="Inconclusive", func="victim()")),
+        )
+        self.assertEqual({}, run.failures)
+        self.assertEqual({"swift-testing::victim"}, run.no_verdict)
+
+    def test_a_test_the_rerun_did_not_cover_keeps_its_first_verdict(self):
+        run, _ = self._apply(
+            log(st_pass("untouched"), st_silent("victim")),
+            bundle_payload(st_case("untouched", func="untouched()"),
+                           st_case("victim", result="Failed", func="victim()",
+                                   messages=[CRASH])),
+            bundle_payload(st_case("victim", result="Passed", func="victim()")),
+        )
+        self.assertIn("swift-testing::untouched", run.passed)
+        self.assertEqual(set(), run.no_verdict)
+
+    def test_a_rerun_that_PASSES_removes_the_first_bundles_FAILURE(self):
+        run, _ = self._apply(
+            log(st_fail_timeout("flaky")),
+            bundle_payload(st_case("flaky", result="Failed", func="flaky()",
+                                   messages=["Time limit was exceeded: 60.000 seconds"])),
+            bundle_payload(st_case("flaky", result="Passed", func="flaky()")),
+        )
+        self.assertEqual({}, run.failures)
+        self.assertIn("swift-testing::flaky", run.passed)
+
+    def test_a_missing_bundle_REFUSES_rather_than_falling_back_to_the_console(self):
+        run = gb.parse_run(log(st_silent("x")))
+        with self.assertRaises(gb.XcresultUnreadable):
+            gb._apply_bundles(run, [pathlib.Path("/no/such/bundle.xcresult")])
+
+
+class BlamedBlockAgainstTheBundleTests(unittest.TestCase):
+    """The `Failing tests:` block stops being a LEAD when a bundle is present."""
+
+    def test_a_display_named_swift_test_is_MATCHED_by_the_bundles_identifier(self):
+        """Console-only this is unmatchable in principle: the block spells a test
+        `Suite.function()` and the console prints its @Test display name. The
+        bundle carries BOTH, which is where the two identity models meet.
+        """
+        text = log(st_silent("a display name nobody can spell back"),
+                   failing_block("DelegateWorkJournalTests.stagingFailureReleasesOwnership()"))
+        console = gb.verdict(baseline({}, no_verdict=[]), gb.parse_run(text))
+        self.assertEqual(
+            ["DelegateWorkJournalTests.stagingFailureReleasesOwnership()"],
+            console.blamed_unmatched)
+
+        run = gb.with_xcresult_verdicts(gb.parse_run(text), gb.parse_xcresult(
+            bundle_payload(st_case("a display name nobody can spell back",
+                                   suite="DelegateWorkJournalTests",
+                                   func="stagingFailureReleasesOwnership()"),
+                           suite="DelegateWorkJournalTests")))
+        self.assertEqual([], gb.verdict(baseline({}, no_verdict=[]), run).blamed_unmatched)
+
+    def test_a_blamed_name_NO_bundle_knows_is_still_reported_unmatched(self):
+        text = log(st_pass("something else"),
+                   failing_block("GhostTests.neverRan()"))
+        run = gb.with_xcresult_verdicts(gb.parse_run(text), gb.parse_xcresult(
+            bundle_payload(st_case("something else", func="somethingElse()"))))
+        self.assertEqual(["GhostTests.neverRan()"],
+                         gb.verdict(baseline({}, no_verdict=[]), run).blamed_unmatched)
+
+
+class ResidualCommandTests(unittest.TestCase):
+    """What the gate re-runs to end with a complete verdict set."""
+
+    def _residual(self, log_text, payload):
+        import io
+        import contextlib
+        with tempfile.TemporaryDirectory() as d:
+            d = pathlib.Path(d)
+            (d / "run.log").write_text(log_text, encoding="utf-8")
+            bundle = d / "b.xcresult"
+            bundle.mkdir()
+            (bundle / "payload.json").write_text(json.dumps(payload))
+            out, err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+                rc = gb.main(["residual", "--log", str(d / "run.log"),
+                              "--xcresult", str(bundle)])
+            return rc, out.getvalue(), err.getvalue()
+
+    def setUp(self):
+        self._real = gb.read_xcresult
+        gb.read_xcresult = lambda path: json.loads(
+            (pathlib.Path(str(path)) / "payload.json").read_text())
+
+    def tearDown(self):
+        gb.read_xcresult = self._real
+
+    def test_a_casualty_is_printed_as_an_only_testing_argument(self):
+        rc, out, _ = self._residual(
+            log(st_silent("victim")),
+            bundle_payload(st_case("victim", result="Failed",
+                                   suite="ProbeTests", func="probeA()",
+                                   messages=[CRASH]), suite="ProbeTests"))
+        self.assertEqual(0, rc)
+        self.assertEqual(["-only-testing:PlayheadTests/ProbeTests/probeA()"],
+                         out.split())
+
+    def test_a_clean_run_asks_for_NOTHING(self):
+        rc, out, _ = self._residual(
+            log(st_pass("fine")),
+            bundle_payload(st_case("fine", func="fine()")))
+        self.assertEqual("", out.strip())
+
+    def test_a_casualty_with_no_bundle_identifier_goes_to_STDERR_not_stdout(self):
+        """A name the bundle never mentioned cannot be re-run BY anything —
+        `-only-testing:` takes an identifier and the console has only a display
+        name. The hole stays visible rather than becoming a blank argument."""
+        rc, out, err = self._residual(
+            log(st_silent("orphan")),
+            bundle_payload(st_case("fine", func="fine()")))
+        self.assertEqual("", out.strip())
+        self.assertIn("cannot re-run", err)
+        self.assertIn("orphan", err)
+
+
 class CommittedBaselineTests(unittest.TestCase):
     """The file the gate actually reads must stay loadable and self-consistent."""
 
@@ -2959,6 +3386,200 @@ class FastGateWiringTests(unittest.TestCase):
             })
             self.assertEqual(28, proc.returncode, proc.stdout + proc.stderr)
             self.assertNotIn("Test run with", proc.stdout)
+
+
+class FastGateBundleWiringTests(unittest.TestCase):
+    """playhead-t53a: the SHELL half — does the bundle actually reach the check?
+
+    The Python above is pure and cheap. What reaches a human is the composition:
+    fast-gate.sh must ask xcodebuild for a bundle at a known path, hand that path
+    to `gate_baseline.py check`, re-run the residual casualties, and hand the
+    SECOND bundle over too. Every one of those is a place where the change
+    quietly reverts to a console-only census and nothing says so.
+
+    Driven against a stubbed `xcodebuild` that really writes a bundle and a
+    stubbed `xcrun` that really reads it back, so the argument plumbing is
+    exercised rather than reasoned about.
+    """
+
+    def _skeleton(self, tmp, log_text, main_payload, residual_payload=None,
+                  xcodebuild_rc=65):
+        tmp = pathlib.Path(tmp)
+        (tmp / "scripts").mkdir()
+        for name in ("fast-gate.sh", "gate_baseline.py", "disk_preflight.py"):
+            (tmp / "scripts" / name).write_bytes((ROOT / "scripts" / name).read_bytes())
+        (tmp / "scripts" / "fast-gate.sh").chmod(0o755)
+        scheme = tmp / "Playhead.xcodeproj" / "xcshareddata" / "xcschemes"
+        scheme.mkdir(parents=True)
+        (scheme / "Playhead.xcscheme").write_text("PlayheadFastTests.xctestplan\n")
+        (tmp / "run.log").write_text(log_text, encoding="utf-8")
+        (tmp / "main.json").write_text(json.dumps(main_payload))
+        (tmp / "residual.json").write_text(
+            json.dumps(residual_payload if residual_payload is not None
+                       else {"testNodes": []}))
+
+        bindir = tmp / "bin"
+        bindir.mkdir()
+        # A stub that WRITES A BUNDLE at whatever -resultBundlePath it was given,
+        # and records the arguments it saw so the rails can assert on them.
+        #
+        # THE RESIDUAL INVOCATION IS TOLD APART BY ITS BUNDLE PATH, NOT BY
+        # `-only-testing:`. The first draft used the flag and made the
+        # selective-run rail VACUOUS: a selective MAIN run carries the flag too,
+        # so it was served the (empty) residual payload, which left the census
+        # with no bundle identifier to re-run by — the block was skipped for a
+        # reason that had nothing to do with the guard under test, and RB17
+        # survived. A discriminator that is true of the thing it is meant to
+        # exclude is the standing defect class, in a test fixture.
+        (bindir / "xcodebuild").write_text(
+            "#!/bin/sh\n"
+            'echo "$@" >> %(tmp)s/xcodebuild.args\n'
+            "bundle=\n"
+            "residual=0\n"
+            "prev=\n"
+            'for a in "$@"; do\n'
+            '  if [ "$prev" = -resultBundlePath ]; then\n'
+            '    bundle="$a"\n'
+            '    case "$a" in *-residual.xcresult) residual=1 ;; esac\n'
+            "  fi\n"
+            '  prev="$a"\n'
+            "done\n"
+            'if [ -n "$bundle" ]; then\n'
+            '  mkdir -p "$bundle"\n'
+            '  if [ "$residual" = 1 ]; then cp %(tmp)s/residual.json "$bundle/payload.json"\n'
+            '  else cp %(tmp)s/main.json "$bundle/payload.json"; fi\n'
+            "fi\n"
+            "cat %(tmp)s/run.log\n"
+            "exit %(rc)d\n" % {"tmp": tmp, "rc": xcodebuild_rc}
+        )
+        # `xcrun xcresulttool get test-results tests --compact --path X`
+        (bindir / "xcrun").write_text(
+            "#!/bin/sh\n"
+            "prev=\n"
+            'for a in "$@"; do\n'
+            '  [ "$prev" = --path ] && cat "$a/payload.json" && exit 0\n'
+            '  prev="$a"\n'
+            "done\n"
+            "exit 72\n"
+        )
+        for name in ("xcodebuild", "xcrun"):
+            (bindir / name).chmod(0o755)
+        return tmp, bindir
+
+    def _run(self, tmp, bindir, args=()):
+        import os
+        import subprocess
+
+        env = dict(os.environ)
+        env["PATH"] = str(bindir) + os.pathsep + env["PATH"]
+        env["PLAYHEAD_SKIP_LINT"] = "1"
+        env["PLAYHEAD_SKIP_DISK_PREFLIGHT"] = "1"
+        env.pop("PLAYHEAD_SKIP_BASELINE", None)
+        return subprocess.run(
+            ["bash", str(tmp / "scripts" / "fast-gate.sh")] + list(args),
+            cwd=str(tmp), env=env, capture_output=True, text=True,
+        )
+
+    def _baseline(self, tmp, tests, **kw):
+        gb.save_baseline(tmp / "scripts" / "gate-baseline.PlayheadFastTests.json",
+                         baseline(tests, **kw))
+
+    def test_the_gate_asks_xcodebuild_for_a_bundle_and_the_CHECK_reads_it(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp, bindir = self._skeleton(
+                d,
+                # Console-only this run reports one crashed-host casualty. The
+                # bundle says it passed — which is the whole bead.
+                log(st_silent("severed"), st_fail_timeout("known")),
+                bundle_payload(st_case("severed", func="severed()"),
+                               st_case("known", result="Failed", func="known()",
+                                       messages=["Time limit was exceeded: 60.000 seconds"])),
+            )
+            self._baseline(tmp, {"swift-testing::known": (3, ["timeout"])})
+            proc = self._run(tmp, bindir)
+            self.assertIn("-resultBundlePath",
+                          (tmp / "xcodebuild.args").read_text())
+            self.assertIn("VERDICTS FROM    the .xcresult bundle", proc.stdout)
+            self.assertNotIn("NO VERDICT", proc.stdout)
+            self.assertIn("RED (1 known / 0 new)", proc.stdout)
+            self.assertEqual(0, proc.returncode, proc.stdout + proc.stderr)
+
+    def test_a_real_casualty_triggers_a_scoped_RERUN_and_the_second_bundle_is_read(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp, bindir = self._skeleton(
+                d,
+                log(st_silent("victim")),
+                bundle_payload(st_case("victim", result="Failed", suite="ProbeTests",
+                                       func="probeA()", messages=[CRASH]),
+                               suite="ProbeTests"),
+                residual_payload=bundle_payload(
+                    st_case("victim", suite="ProbeTests", func="probeA()"),
+                    suite="ProbeTests"),
+            )
+            self._baseline(tmp, {}, no_verdict=[])
+            proc = self._run(tmp, bindir)
+            args = (tmp / "xcodebuild.args").read_text()
+            self.assertIn("-only-testing:PlayheadTests/ProbeTests/probeA()", args)
+            self.assertIn("re-running exactly those", proc.stdout)
+            # The re-run's verdict is what the gate ends on: no hole left. The
+            # assertion is on the VERDICT, not on the string — fast-gate's own
+            # progress line legitimately contains `NO VERDICT` while it works.
+            self.assertIn("gate-baseline: GREEN (0 known / 0 new)", proc.stdout)
+            self.assertNotIn("NEW CASUALTY", proc.stdout)
+
+    def test_a_casualty_the_RERUN_cannot_fix_is_still_reported(self):
+        """The direction that must not become quiet. Measured for real against
+        `T53aCrashProbeTests`, whose killer crashes deterministically: the
+        re-run crashed all four again and all four stayed casualties."""
+        payload = bundle_payload(
+            st_case("victim", result="Failed", suite="ProbeTests",
+                    func="probeA()", messages=[CRASH]), suite="ProbeTests")
+        with tempfile.TemporaryDirectory() as d:
+            tmp, bindir = self._skeleton(d, log(st_silent("victim")), payload,
+                                         residual_payload=payload)
+            self._baseline(tmp, {}, no_verdict=[])
+            proc = self._run(tmp, bindir)
+            self.assertIn("NO VERDICT", proc.stdout)
+            self.assertIn("HOST DIED HERE", proc.stdout)
+            self.assertIn("NEW CASUALTY", proc.stdout)
+            self.assertEqual(65, proc.returncode, proc.stdout + proc.stderr)
+
+    def test_a_selective_run_does_NOT_trigger_a_residual_rerun(self):
+        """A filtered run's residual is somebody else's population — the same
+        reason the baseline check itself is skipped for one."""
+        with tempfile.TemporaryDirectory() as d:
+            tmp, bindir = self._skeleton(
+                d, log(st_silent("victim")),
+                bundle_payload(st_case("victim", result="Failed", suite="ProbeTests",
+                                       func="probeA()", messages=[CRASH]),
+                               suite="ProbeTests"))
+            self._baseline(tmp, {}, no_verdict=[])
+            proc = self._run(tmp, bindir, ["-only-testing:PlayheadTests/ProbeTests"])
+            self.assertNotIn("re-running exactly those", proc.stdout)
+            self.assertIn("SKIPPED", proc.stdout)
+
+    def test_ACCEPTING_reads_the_bundle_too_and_records_the_CENSUS_not_a_failure(self):
+        with tempfile.TemporaryDirectory() as d:
+            tmp, bindir = self._skeleton(
+                d, log(st_silent("victim"), st_fail_timeout("real")),
+                bundle_payload(
+                    st_case("victim", result="Failed", suite="ProbeTests",
+                            func="probeA()", messages=[CRASH]),
+                    st_case("real", result="Failed", func="real()",
+                            messages=["Time limit was exceeded: 60.000 seconds"]),
+                    suite="ProbeTests"),
+                residual_payload=bundle_payload(
+                    st_case("victim", result="Failed", suite="ProbeTests",
+                            func="probeA()", messages=[CRASH]), suite="ProbeTests"),
+            )
+            proc = self._run(tmp, bindir, ["--accept-baseline"])
+            self.assertEqual(0, proc.returncode, proc.stdout + proc.stderr)
+            written = gb.load_baseline(
+                tmp / "scripts" / "gate-baseline.PlayheadFastTests.json")
+            self.assertIn("swift-testing::real", written["tests"])
+            self.assertNotIn("swift-testing::victim", written["tests"])
+            self.assertIn("swift-testing::victim",
+                          written[gb.NO_VERDICT_KEY][gb.CENSUS_TESTS_KEY])
 
 
 if __name__ == "__main__":

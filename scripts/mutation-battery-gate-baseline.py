@@ -72,6 +72,14 @@ RC = SUITE + ".RealCrashedRunTests."
 TR = SUITE + ".TruncatedOutcomeLineTests."
 SP = SUITE + ".CrashedHostSafetyPropertyTests."
 CM = SUITE + ".CensusMergeTests."
+# playhead-t53a — the .xcresult as the verdict source.
+XP = SUITE + ".XcresultParseTests."
+XC = SUITE + ".CrashedCaseIsACasualtyTests."
+XW = SUITE + ".BundleCannotWeakenTheCensusTests."
+XM = SUITE + ".BundleMergeTests."
+XB = SUITE + ".BlamedBlockAgainstTheBundleTests."
+XR = SUITE + ".ResidualCommandTests."
+XG = SUITE + ".FastGateBundleWiringTests."
 
 
 # name, file, description, old, new, expected-to-fail test ids
@@ -949,10 +957,17 @@ MUTATIONS = [
         "test `Suite.function()` where the console prints a display name — so "
         "every display-named test that reported perfectly well becomes a "
         "casualty (this is exactly how the bead came to be filed at 19)",
-        "    result.blamed_unmatched = [name for name in blamed\n"
-        "                               if not _blamed_is_matched(name, identities)]",
-        "    result.blamed_unmatched = [name for name in blamed\n"
-        "                               if not _blamed_is_matched(name, identities)]\n"
+        # Anchor rewritten at playhead-t53a, which threaded the bundle's own
+        # spellings into `_blamed_is_matched`. The EDIT moved; the expectation
+        # did not.
+        "    result.blamed_unmatched = [\n"
+        "        name for name in blamed\n"
+        "        if not _blamed_is_matched(name, identities, run.blamed_spellings)\n"
+        "    ]",
+        "    result.blamed_unmatched = [\n"
+        "        name for name in blamed\n"
+        "        if not _blamed_is_matched(name, identities, run.blamed_spellings)\n"
+        "    ]\n"
         "    result.new_casualties = sorted(set(result.new_casualties)\n"
         "                                   | set(result.blamed_unmatched))",
         [AC + "test_a_BLAMED_name_alone_is_a_LEAD_and_never_a_NEW_CASUALTY"],
@@ -1022,6 +1037,189 @@ MUTATIONS = [
          RC + "test_the_mn5e_branch_run",
          RC + "test_BOTH_runs_lost_THE_SAME_ELEVEN_TESTS",
          C + "test_a_real_log_cut_short_is_reported_incomplete"],
+    ),
+    # -----------------------------------------------------------------------
+    # playhead-t53a — the .xcresult is the verdict source. Every rail below is
+    # a way the change could REVERT to the console, or be read as a licence to
+    # go quiet, without anything saying so.
+    # -----------------------------------------------------------------------
+    (
+        "RB01", GB,
+        "the framework discriminator reverts to `endswith(\"()\")`, which puts "
+        "every PARAMETERISED Swift Testing test in the XCTest bucket — the bug "
+        "the first draft shipped, worth 57 keys unmatched in EACH direction",
+        'return url.rsplit("/", 1)[-1].endswith(")")',
+        'return url.rsplit("/", 1)[-1].endswith("()")',
+        [XP + "test_a_PARAMETERISED_swift_testing_test_is_not_mistaken_for_XCTest"],
+    ),
+    (
+        "RB02", GB,
+        "the bundle REPLACES the console's started roster instead of unioning "
+        "with it, so a test the infrastructure never mentioned leaves the "
+        "census by being forgotten — the quiet direction, and the one line that "
+        "makes this change unable to weaken the gate",
+        "    run.started = run.started | bundle.keys",
+        "    run.started = set(bundle.keys)",
+        [XW + "test_a_console_STARTED_test_the_bundle_never_mentions_is_STILL_a_casualty"],
+    ),
+    (
+        "RB03", GB,
+        "a crash-message failure is taken at face value as a FAILING TEST, so "
+        "the census goes quiet and one `--accept-baseline` writes three healthy "
+        "tests into the known-broken file, where their next GENUINE failure "
+        "reads as known",
+        "    crash = _crash_message(node)\n    if crash is not None:",
+        "    crash = None\n    if crash is not None:",
+        [XC + "test_a_crashed_case_is_a_CASUALTY_and_not_a_failure",
+         XC + "test_accepting_a_crashed_run_does_NOT_write_the_victim_into_the_known_broken_file"],
+    ),
+    (
+        "RB04", GB,
+        "the crash pattern matches ANY failure message, so every ordinary "
+        "assertion failure is laundered into a casualty — the mirror of RB03 "
+        "and the LOOSENING direction: a real regression stops being a failure "
+        "at all and becomes something to re-run",
+        r'_XCRESULT_CRASHED = re.compile(r"^Test crashed\b", re.IGNORECASE)',
+        '_XCRESULT_CRASHED = re.compile(r"", re.IGNORECASE)',
+        [XC + "test_an_UNRECOGNISED_crash_wording_stays_a_FAILURE_which_is_the_loud_direction"],
+    ),
+    (
+        "RB05", GB,
+        "a result string this gate has never heard of counts as a verdict, so a "
+        "future Xcode's new outcome silently empties the census instead of being "
+        "reported — an absence read as a measurement, one more time",
+        "XCRESULT_VERDICTS = frozenset(\n    (XCRESULT_PASSED, XCRESULT_FAILED, "
+        "XCRESULT_SKIPPED, XCRESULT_EXPECTED_FAILURE)\n)",
+        "XCRESULT_VERDICTS = None\n\n\nclass _Any(frozenset):\n"
+        "    def __contains__(self, item):\n        return True\n\n\n"
+        "XCRESULT_VERDICTS = _Any()",
+        [XP + "test_a_result_string_this_gate_does_not_know_is_NOT_counted_as_a_verdict",
+         XW + "test_a_bundle_key_with_no_recognised_verdict_is_a_casualty_and_is_NAMED"],
+    ),
+    (
+        "RB06", GB,
+        "a bundle that cannot be read falls back to the console SILENTLY, which "
+        "reinstates the whole defect and makes the run indistinguishable from "
+        "one that never asked for a bundle",
+        '        raise XcresultUnreadable("no such result bundle: %s" % path)',
+        "        return {}",
+        [XM + "test_a_missing_bundle_REFUSES_rather_than_falling_back_to_the_console"],
+    ),
+    (
+        "RB07", GB,
+        "an XCTest failure takes its KIND from the bundle's message, so a slow "
+        "XCTest failure whose message mentions a time limit is handed the "
+        "starvation tolerance the console has always refused it",
+        "    if framework == FRAMEWORK_XCTEST:\n        return {KIND_ASSERTION}",
+        "    if framework == FRAMEWORK_XCTEST and False:\n        return {KIND_ASSERTION}",
+        [XP + "test_an_XCTEST_failure_is_pinned_to_ASSERTION_whatever_its_message_says"],
+    ),
+    (
+        "RB08", GB,
+        "the crash resolution stops running after the collision loop, so NODE "
+        "ORDER decides whether a passing twin launders a crashed namesake — the "
+        "defect a rail caught in exactly one of the two orders",
+        "    for key in run.crashed:\n        run.passed.discard(key)",
+        "    for key in []:\n        run.passed.discard(key)",
+        [XC + "test_a_passing_twin_cannot_launder_a_crashed_one_that_shares_its_key"],
+    ),
+    (
+        "RB09", GB,
+        "the second bundle only overrides keys it JUDGED, so a residual re-run "
+        "can never clear a casualty — the whole point of running it — and the "
+        "gate ends holding the hole it just spent a run trying to fill",
+        "        for key in part.keys:\n            merged.passed.discard(key)",
+        "        for key in part.judged:\n            merged.passed.discard(key)",
+        [XM + "test_a_later_bundle_recording_a_CRASH_overrides_an_earlier_PASS",
+         XM + "test_a_later_bundle_that_LOST_a_verdict_overrides_an_earlier_failure"],
+    ),
+    (
+        "RB10", GB,
+        "the console-sourced census announces itself as RELIABLE, telling the "
+        "reader the opposite of the measurement — 80 of 87 reported casualties "
+        "over 27 crash-free runs were verdicts the parser could not read",
+        '            "  VERDICTS FROM    %s, which is NOT a reliable census '
+        '(playhead-t53a). "',
+        '            "  VERDICTS FROM    %s, which is a reliable census '
+        '(playhead-t53a). "',
+        [XW + "test_the_verdict_NAMES_which_instrument_produced_the_census"],
+    ),
+    (
+        "RB11", GB,
+        "the residual command prints the KEY rather than the bundle's "
+        "identifier, so every re-run argument is a display name `-only-testing:` "
+        "silently ignores — and a silently-ignored filter STILL REPORTS SUCCESS",
+        '                print("-only-testing:%s" % target)',
+        '                print("-only-testing:%s" % key)',
+        [XR + "test_a_casualty_is_printed_as_an_only_testing_argument"],
+    ),
+    (
+        "RB12", GB,
+        "a casualty with no bundle identifier is printed as a BLANK LINE on "
+        "stdout instead of named on stderr, so the hole becomes an empty "
+        "argument the caller passes to xcodebuild",
+        '                sys.stderr.write(\n'
+        '                    "gate-baseline: cannot re-run %s — no bundle identifier for it. "',
+        '                print("-only-testing:")\n'
+        '                sys.stderr.write(\n'
+        '                    "gate-baseline: %s\\n" % "" or (\n'
+        '                    "gate-baseline: cannot re-run %s — no bundle identifier for it. "',
+        [XR + "test_a_casualty_with_no_bundle_identifier_goes_to_STDERR_not_stdout"],
+    ),
+    (
+        "RB13", GB,
+        "every `Failing tests:` entry is matched once a bundle is present, so "
+        "the one arm that can see a test the host killed BEFORE its start line "
+        "reports nothing at all",
+        "    if entry in blamed_spellings:\n        return True",
+        "    if blamed_spellings:\n        return True",
+        [XB + "test_a_blamed_name_NO_bundle_knows_is_still_reported_unmatched"],
+    ),
+    (
+        "RB14", FG,
+        "fast-gate stops asking xcodebuild for a bundle, so every full-plan run "
+        "silently reverts to the console census this bead exists to replace",
+        '    -resultBundlePath "$RESULT_BUNDLE" \\\n',
+        "",
+        [XG + "test_the_gate_asks_xcodebuild_for_a_bundle_and_the_CHECK_reads_it"],
+    ),
+    (
+        "RB15", FG,
+        "the bundle is written but never handed to the check, which is the same "
+        "outcome as RB14 arrived at from the other end — and harder to see, "
+        "because the bundle is right there on disk",
+        'BUNDLE_ARGS=()\n[ -d "$RESULT_BUNDLE" ] && BUNDLE_ARGS+=(--xcresult "$RESULT_BUNDLE")',
+        'BUNDLE_ARGS=()',
+        [XG + "test_the_gate_asks_xcodebuild_for_a_bundle_and_the_CHECK_reads_it"],
+    ),
+    (
+        "RB16", FG,
+        "the residual re-run happens and its bundle is DISCARDED, so the gate "
+        "pays for the re-run and still reports the casualties it just resolved",
+        '      BUNDLE_ARGS+=(--xcresult "$RESIDUAL_BUNDLE")',
+        "      :",
+        [XG + "test_a_real_casualty_triggers_a_scoped_RERUN_and_the_second_bundle_is_read"],
+    ),
+    (
+        "RB17", FG,
+        "the residual re-run fires on a SELECTIVE run too, so a mutation "
+        "battery's focused invocation drags a re-run of somebody else's "
+        "population into its verdict",
+        'if [ "$SELECTIVE" -eq 0 ] && [ "${#BUNDLE_ARGS[@]}" -gt 0 ] \\\n'
+        '   && [ "${PLAYHEAD_SKIP_BASELINE:-0}" != "1" ]; then',
+        'if [ "${#BUNDLE_ARGS[@]}" -gt 0 ] \\\n'
+        '   && [ "${PLAYHEAD_SKIP_BASELINE:-0}" != "1" ]; then',
+        [XG + "test_a_selective_run_does_NOT_trigger_a_residual_rerun"],
+    ),
+    (
+        "RB18", GB,
+        "the verdict source is printed only when something was lost, so the one "
+        "reading that most needs qualifying — a census of ZERO taken off the "
+        "console — is the reading that never names its instrument",
+        "        out.extend(self._render_verdict_source())\n"
+        "        out.extend(self._render_no_verdict())",
+        "        out.extend(self._render_no_verdict())",
+        [XG + "test_the_gate_asks_xcodebuild_for_a_bundle_and_the_CHECK_reads_it"],
     ),
     (
         "R99", GB,
