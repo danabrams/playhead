@@ -3950,6 +3950,19 @@ final class PlayheadRuntime {
     /// he listened to that day. Two of them read `position = 0.0,
     /// anchor = 0.0`, which is a *completed* save of a zero, not a save
     /// that never happened.
+    ///
+    /// LIMIT, named rather than closed. The episode identity is still read
+    /// BEFORE the suspension and the playhead after it, so in principle a
+    /// whole `performPlayEpisode` could complete inside that one hop and
+    /// hand back the INCOMING episode's freshly-observed playhead under the
+    /// OUTGOING episode's id. What makes the fix sound is not the ordering
+    /// but the transport's own fact: through every part of that sequence
+    /// where the reading is not a playhead — the detach and the load — the
+    /// answer is `nil`, so the only surviving window requires the
+    /// replacement to finish (including its artwork network fetch) inside a
+    /// single actor hop. That is not closed here because closing it means a
+    /// fifth outcome for an event nobody has witnessed, and an untestable
+    /// branch is worse than a documented boundary.
     func capturePlaybackPosition() async -> PlaybackPositionCapture {
         guard let episodeId = currentEpisodeId else { return .noPublishedEpisode }
         guard let position = await playbackService.observedPlayhead() else {

@@ -151,6 +151,11 @@ final class PlaybackService: NSObject, Sendable {
     ///
     /// `tearDown` deliberately does NOT clear it: teardown preserves
     /// `currentTime`, so the last reading is still the last real playhead.
+    ///
+    /// The `false` default covers a third non-playhead value that is not a
+    /// write at all — `_state = PlaybackState()` above, whose `currentTime`
+    /// is the struct's `0` default. A transport that has never played must
+    /// report no playhead, not a listener sitting at 0:00.
     private var isCurrentTimeObservedPlayhead = false
     private var skipCues: [CMTimeRange] = []
     private var isLocalAsset: Bool = false
@@ -1457,24 +1462,20 @@ final class PlaybackService: NSObject, Sendable {
     ///
     /// playhead-s9mx: injecting a state is a test asserting "the transport
     /// is at this position", so the injected `currentTime` counts as an
-    /// observed playhead. Use `_testingClearObservedPlayhead()` to model the
-    /// detached transport instead.
+    /// observed playhead.
+    ///
+    /// There is deliberately NO test-only setter for the negative direction.
+    /// A test that wants a transport with no playhead must produce one the
+    /// way production does — `pauseAndDetachCurrentItem()` or `loadItem` —
+    /// because a seam that fakes the flag would let
+    /// `PlaybackPositionCommitTests` pass while the real detach stopped
+    /// clearing it, which is the entire defect.
     func _testingInjectState(_ state: PlaybackState) {
         _state = state
         isCurrentTimeObservedPlayhead = true
         for continuation in stateObservers.values {
             continuation.yield(_state)
         }
-    }
-
-    /// Test-only: model a transport whose `currentTime` is not a playhead.
-    func _testingClearObservedPlayhead() {
-        isCurrentTimeObservedPlayhead = false
-    }
-
-    /// Test-only: read the observed-playhead fact directly.
-    func _testingIsCurrentTimeObservedPlayhead() -> Bool {
-        isCurrentTimeObservedPlayhead
     }
 
     func _testingApplyReadyToPlayState(duration: TimeInterval) {

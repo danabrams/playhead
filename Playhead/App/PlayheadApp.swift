@@ -744,6 +744,19 @@ struct PlayheadApp: App {
         }
 
         guard abs(episode.playbackPosition - capturedPosition) >= playbackPositionMeaningfulDelta else {
+            // playhead-s9mx: the fourth exit, and the last one that was
+            // silent. It is the routine one — a sub-0.5 s tick — so it logs
+            // at `debug`, but it logs: a reader triaging "why is this row
+            // stale" has to be able to tell "we declined to write a
+            // near-identical value" from "we never got here".
+            logger.debug(
+                """
+                Playback position persistence skipped: belowMeaningfulDelta \
+                (stored \(episode.playbackPosition)s, captured \
+                \(capturedPosition)s) for episode \(episodeId), trigger \
+                \(trigger.rawValue)
+                """
+            )
             return
         }
 
