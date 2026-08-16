@@ -80,42 +80,69 @@
 //
 // ===== WHAT THE THREE COLUMNS HOLD TODAY, COUNTED RATHER THAN ASSUMED =====
 //
-// Every preserved device pull, `GROUP BY` on the column, db-pull8 → db-pull12
-// (2026-08-13 09:46 → 2026-08-15 20:09):
+// Five preserved device pulls, db-pull8 → db-pull12 (2026-08-13 09:46 →
+// 2026-08-15 20:09).
 //
-//   pull   analysis_jobs.lastErrorCode        analysis_sessions   background_task_runs
-//          (rows / non-null)                  .failureReason      .lastErrorCode
-//   ----   --------------------------------   -----------------   ---------------------
-//     8    17 / 7                             0 rows              132 / 3   orphan_at_launch ×3
-//     9    17 / 6                              1 row, NULL        132 / 3   orphan_at_launch ×3
-//    10    22 / 5                              1 row, NULL        181 / 8   orphan_at_launch ×8
-//    11    26 / 5                              1 row, NULL        235 / 13  orphan_at_launch ×13
-//    12    38 / 2                              4 rows, all NULL   268 / 17  orphan_at_launch ×17
+// **COUNT ROW IDENTITIES ACROSS THE UNION, NOT PER-PULL TOTALS SUMMED.** The
+// first draft of this paragraph added the five snapshots together and reported
+// 26 non-null job causes, 44 background ones and 9 sessions. These are five
+// photographs of three growing tables, so that arithmetic counts the same row up
+// to five times — this repo's standing defect class committed inside the
+// paragraph that measures it. The figures below are `SELECT DISTINCT` over the
+// five files:
+//
+//   analysis_jobs.lastErrorCode       38 rows in the largest snapshot. NINE
+//                                     distinct jobIds have EVER carried a
+//                                     non-null cause, over FOUR distinct
+//                                     spellings.
+//   analysis_sessions.failureReason   FOUR distinct sessions have ever existed.
+//                                     `failureReason` is NULL on every one, in
+//                                     every pull.
+//   background_task_runs.lastError…   268 rows in the largest snapshot.
+//                                     SEVENTEEN distinct runIds have ever
+//                                     carried a non-null cause, and all
+//                                     seventeen are `orphan_at_launch`.
 //
 // **NO MIGRATION IS NEEDED, AND FOR THREE DIFFERENT REASONS — say which.**
 //
-//   * `analysis_sessions.failureReason`: the population is EMPTY. Nine rows
-//     across five pulls, `failureReason` NULL on every one. Nothing to repair.
-//   * `background_task_runs.lastErrorCode`: 44 non-null values across the five
-//     pulls and every single one is `orphan_at_launch` — a named token written
-//     by `reapOrphanBackgroundTaskRuns`, from a different arm. The arm this bead
+//   * `analysis_sessions.failureReason`: the population is EMPTY. Four sessions,
+//     NULL on all four, every pull. Nothing to repair.
+//   * `background_task_runs.lastErrorCode`: seventeen rows have a cause and
+//     every one is `orphan_at_launch`, a named token written by
+//     `reapOrphanBackgroundTaskRuns` from a different arm. The arm this bead
 //     changes has produced zero rows.
-//   * `analysis_jobs.lastErrorCode`: the four distinct values ever observed are
+//   * `analysis_jobs.lastErrorCode`: the four spellings ever observed are
 //     `coverageInsufficient:noProgress`, `backgroundWindowExpired`,
 //     `transcription:cancelled` and
 //     `assetResolution: Insert failed: UNIQUE constraint failed: …`. The first
-//     three are named tokens from other arms. **The fourth IS prose, on 5 rows
-//     of db-pull8 and 4 of db-pull9** — and it is written by NEITHER of the two
-//     sites this bead fixes. It comes from the asset-resolution arm's
-//     `"assetResolution: \(error)"`, two lines the bead's own enumeration
-//     missed; filed as its own bead rather than fixed here.
+//     three are named tokens from other arms. **The fourth IS prose, and FIVE of
+//     the nine rows that ever carried a cause carried it** — and it is written
+//     by NEITHER of the two sites this bead fixes. It comes from the
+//     asset-resolution arm's `"assetResolution: \(error)"`, two lines the bead's
+//     own enumeration missed; filed as `playhead-3c4k` rather than fixed here.
+//
+// **AND A PULL IS A LOWER BOUND, NOT A CENSUS.** Traced per row across the five
+// files, every one of those five prose rows was later CLEARED OR OVERWRITTEN by
+// a named token from a different arm:
+//
+//   070B2272  p8=assetResolution  p9=assetResolution  p10=NULL   p11=NULL   p12=NULL
+//   133D75FD  p8=assetResolution  p9=NULL             p10=bgWinExpired  p11=bgWinExpired  p12=NULL
+//   26D9075B  p8=assetResolution  p9=assetResolution  p10=bgWinExpired  p11=NULL   p12=NULL
+//   2BCAB736  p8=assetResolution  p9=assetResolution  p10=NULL   p11=NULL   p12=NULL
+//   6966117E  p8=assetResolution  p9=assetResolution  p10=transcription:cancelled  p11=NULL  p12=NULL
+//
+// `lastErrorCode` is a LAST-WRITER column, not an append-only ledger: the next
+// arm to touch the row overwrites it and `requeueOrphanedLease` NULLs it
+// outright. So the number of times prose has been written here is strictly
+// greater than the number of prose rows any pull can show, and the true count is
+// unrecoverable from these files. Five is a floor.
 //
 // So the honest reading is the opposite of the reassuring one. This column is
-// not a theoretical risk that has never fired: **it is the one column of the
-// three that has demonstrably taken a Swift error's description in the field,
-// through a fifth site, and 9 of the 26 non-null values ever pulled were that
-// prose.** The two arms this bead fixes have simply not been the ones to fire
-// yet. Cheap now, expensive on the first field failure.
+// not a theoretical risk that has never fired: **it is the one of the three that
+// has demonstrably taken a Swift error's description in the field, through a
+// fifth site, on a majority of the rows that ever carried a cause.** The two
+// arms this bead fixes have simply not been the ones to fire yet. Cheap now,
+// expensive on the first field failure.
 //
 // ===== WHO READS THESE COLUMNS, ENUMERATED PER COLUMN =====
 //
@@ -147,11 +174,28 @@
 // spelling nor the new one can begin with `transcript coverage `, and the token
 // this file emits contains no space at all.
 //
-// `background_task_runs.lastErrorCode` — NOTHING switches on it. `finishRun`
-// writes it, `reapOrphanBackgroundTaskRuns` writes the literal
-// `orphan_at_launch`, and every read materialises the row for diagnostics
-// (`DiagnosticsExportService` exports it as `last_error_code`). No predicate, no
-// scheduler branch, no repair rule.
+// `analysis_sessions.failureReason` has two further reads, both harmless and
+// both worth naming so the next sweep does not have to rediscover them:
+// `DogfoodDiagnosticsAnalysisHealth` tests it for EMPTINESS to raise a
+// `.missingFailureReason` staleness flag (a token is never empty, and neither
+// was the prose), and interpolates it into a redacted, truncated `.retry`
+// recommendation note. Neither branches on its content.
+//
+// `background_task_runs.lastErrorCode` — NOTHING switches on it, and **nothing
+// exports it either**. `finishRun` writes it, `reapOrphanBackgroundTaskRuns`
+// writes the literal `orphan_at_launch`, and the only SQL that mentions it
+// besides those is `lastErrorCode = COALESCE(?, lastErrorCode)` preserving the
+// old value on a NULL bind. An earlier draft of this file claimed
+// `DiagnosticsExportService` exports it as `last_error_code`; that is FALSE and
+// an independent enumeration caught it. That JSON key belongs to
+// `DogfoodDiagnosticsAnalysisJobSnapshot`, i.e. to `analysis_jobs`; the only
+// export path that touches background runs is `RediffBackgroundRunSummary`,
+// which projects eight fields and drops this one.
+//
+// That correction makes the case for a token STRONGER rather than weaker. A
+// column that no code reads and no bundle exports has exactly one consumer left
+// — a human running `GROUP BY` on a device pull — which is precisely the reader
+// a localized sentence defeats.
 //
 // ===== TWO PROPERTIES, STATED SO THEY CAN BE CHECKED =====
 //

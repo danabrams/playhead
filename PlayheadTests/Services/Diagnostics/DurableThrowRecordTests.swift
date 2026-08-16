@@ -596,6 +596,26 @@ final class DurableThrowRecordSourceCanaryTests: XCTestCase {
         try source("Playhead/Services/AnalysisCoordinator/BackgroundProcessingService.swift")
     }
 
+    /// The `span` characters of dense code IMMEDIATELY BEFORE `marker`.
+    ///
+    /// Exists because a file-wide `contains` cannot answer a question about ONE
+    /// SITE, and this file has two sites that build the same value. Anchor on
+    /// something only the site under test carries — a log message, not a type
+    /// name — and read the window that must hold its binding. `span` is set from
+    /// the real distance (the production binding plus `logger.error(` is ~100
+    /// dense characters), wide enough to hold the whole statement and narrow
+    /// enough that a neighbouring site cannot satisfy it.
+    private func codeImmediatelyBefore(
+        _ marker: String,
+        span: Int,
+        in dense: String
+    ) throws -> String {
+        let hit = try XCTUnwrap(dense.range(of: marker), "no \(marker) in the source under test")
+        let start = dense.index(hit.lowerBound, offsetBy: -span, limitedBy: dense.startIndex)
+            ?? dense.startIndex
+        return String(dense[start..<hit.lowerBound])
+    }
+
     /// Every `label:` argument of the FIRST call spelled `marker`, at depth 1.
     private func arguments(ofCall marker: String, in dense: String) throws -> [String: String] {
         let call = try XCTUnwrap(dense.range(of: marker), "no call to \(marker)")
@@ -700,19 +720,45 @@ final class DurableThrowRecordSourceCanaryTests: XCTestCase {
             "vacuity: this reader cannot see the spelling it forbids (it survives in log lines)"
         )
 
-        // THE RULE, PART ONE: the value handed to the catch-all's write must be
-        // BOUND FROM THE RECORD. An argument-only rule is defeated by one
-        // intermediate local — `let throwRecord = String(describing: error)`
-        // leaves every `failureReason:` argument spelling a wholesome
-        // `throwRecord` while the column goes back to prose. Found by writing
-        // that mutant (DT05) before running it.
+        // THE RULE, PART ONE: the PRODUCTION catch-all's value must be BOUND
+        // FROM THE RECORD, read AT THAT SITE.
+        //
+        // TWO ROUNDS OF THIS, AND THE SECOND IS THE ONE THAT MATTERS. An
+        // argument-only rule is defeated by one intermediate local —
+        // `let throwRecord = String(describing: error)` leaves every
+        // `failureReason:` argument spelling a wholesome `throwRecord` while the
+        // column goes back to prose. That much was reasoned out while writing
+        // mutant DT05, and the fix was a file-wide
+        // `dense.contains("letthrowRecord=DurableThrowRecord.sessionFailureReason(")`.
+        //
+        // **DT05 THEN SURVIVED AGAINST IT.** This file has TWO
+        // `sessionFailureReason` sites — the production catch-all and the DEBUG
+        // seam — and DT05 only touches the first, so the seam's own binding kept
+        // the file-wide `contains` true while production wrote prose. The rule
+        // asserted a property of the FILE where the claim is about a SITE: the
+        // standing defect class, inside the check written to catch it. Predicting
+        // the mutant was not the same as running it.
+        //
+        // So the read is per-site now — anchored on the production catch-all's
+        // own log message, which no other site carries.
+        let productionCatchAll = try codeImmediatelyBefore(
+            "\"Pipelinefailedforepisode",
+            span: 200,
+            in: dense
+        )
         XCTAssertTrue(
-            dense.contains("letthrowRecord=DurableThrowRecord.sessionFailureReason("),
+            productionCatchAll.contains("DurableThrowRecord.sessionFailureReason("),
             """
             `runPipeline`'s catch-all no longer binds its durable reason from `DurableThrowRecord`. \
-            A local rebound to a description satisfies every rule stated over the ARGUMENT and \
-            puts the enum's prose straight back in the column.
+            A local rebound to a description satisfies every rule stated over the ARGUMENT — and a \
+            file-wide check is satisfied by the DEBUG seam's binding while production writes prose, \
+            which is exactly how mutation DT05 survived its first rail. Site text: \(productionCatchAll)
             """
+        )
+        XCTAssertFalse(
+            productionCatchAll.contains("String(describing:")
+                || productionCatchAll.contains("localizedDescription"),
+            "the production catch-all binds a DESCRIPTION into its durable reason: \(productionCatchAll)"
         )
 
         // THE RULE, PART TWO: and no spelling reaching `failureReason:` may be a
