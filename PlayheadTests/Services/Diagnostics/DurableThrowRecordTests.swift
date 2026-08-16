@@ -999,6 +999,45 @@ struct DurableThrowRecordDayZeroTests {
                 "the two arms share one token — the row's exit is what separates them")
     }
 
+    @Test("a later attempt CLEARS the detail, so lastExit and lastDetail can never drift")
+    func aLaterAttemptClearsTheDetail() {
+        // THE INVARIANT THE ONE-PREFIX DECISION RESTS ON, and the only test in
+        // this file that can see it fail. The token deliberately does not name
+        // which arm produced it, because `lastExit` does — and that argument is
+        // only sound while the two are written from the SAME outcome. If
+        // `advance` ever carried `lastDetail` forward the way it carries
+        // suppression history, a row would read `lastExit=marked` beside a
+        // throw's token, and a pull would attribute a fetch failure to a
+        // successful mint. Every other test here passes `record: nil`, which is
+        // exactly the shape that cannot observe a carry-forward.
+        let thrown = DurableThrowRecord.dayZeroAttemptDetail(
+            for: NSError(domain: "Earlier", code: 3)
+        )
+        let failedAttempt = DayZeroRediffAttemptPolicy.advance(
+            record: nil, assetId: "A",
+            outcome: .blocked(.fetchFailed, detail: thrown),
+            fullFetchBytes: 54_000_000, at: 1_000
+        )
+        #expect(failedAttempt.lastDetail == thrown, "vacuity: the first attempt recorded nothing")
+
+        let laterSuccess = DayZeroRediffAttemptPolicy.advance(
+            record: failedAttempt, assetId: "A",
+            outcome: RediffDayZeroMintOutcome(markCount: 2, exit: .marked),
+            fullFetchBytes: 54_000_000, at: 2_000
+        )
+        #expect(laterSuccess.lastExit == .marked)
+        #expect(laterSuccess.lastDetail == nil, """
+            `lastDetail` survived an attempt that caught no throw. The row now reads \
+            lastExit=\(laterSuccess.lastExit.rawValue) beside a token from an earlier failure, and \
+            the whole reason this token omits an arm discriminator is that `lastExit` carries it \
+            and cannot disagree.
+            """)
+        // The other half of the same claim: history that IS meant to accumulate
+        // still does, so this is not "advance forgets everything".
+        #expect(laterSuccess.totalFullFetchBytes == 108_000_000)
+        #expect(laterSuccess.attemptCount == 2)
+    }
+
     @Test("the token fits under detailCharCap at the worst REALISTIC identity")
     func theTokenFitsUnderTheDetailCap() {
         // Both domains at the sanitizer's ceiling and both codes eleven digits —
