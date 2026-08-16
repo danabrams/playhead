@@ -2133,7 +2133,13 @@ final class DurableThrowRecordSourceCanaryTests: XCTestCase {
     // arms interpolate it into `analysis_jobs.lastErrorCode` — while
     // `testTheSchedulerArmsNoLongerPersistADescription` read every
     // `lastErrorCode:` argument in the scheduler, found the identifier `reason`,
-    // and reported clean. FOR FOUR MONTHS, WITH FIELD ROWS.
+    // and reported clean — ON A SITE THAT HAD ALREADY PRODUCED FIELD ROWS.
+    //
+    // The dates, because the obvious sentence is the wrong one. The five sites
+    // landed with the runner on 2026-04-03 and this canary landed on 2026-08-16,
+    // hours before this bead. It did not decay; it was green against a live
+    // instance in its own column FROM THE DAY IT WAS WRITTEN — a rule authored
+    // from the defects in front of it, in the file in front of it.
     //
     // The rules below are stated over the CARRIER instead: every construction of
     // the enum case whose payload reaches the column, in EVERY production file.
@@ -2220,7 +2226,8 @@ final class DurableThrowRecordSourceCanaryTests: XCTestCase {
             That payload is carried into `analysis_jobs.lastErrorCode` and into `work_journal.metadata` \
             by `AnalysisWorkScheduler`'s `.failed` / `.interrupted` arms, TWO HOPS AWAY IN ANOTHER FILE — \
             which is why no rule stated over `lastErrorCode:` arguments can see this, and why five such \
-            lines shipped for four months past a green canary (playhead-q93o). Two field rows carried \
+            lines shipped past a canary that was green against them from the day it was written \
+            (playhead-q93o). Two field rows carried \
             one of them, one on the arm that permanently retires the job. \
             Offenders: \(offenders.map { "\($0.file): \($0.argument)" })
             """

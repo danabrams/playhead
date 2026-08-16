@@ -51,13 +51,13 @@ struct AnalysisOutcome: Sendable {
         /// `runner_reason` by ``AnalysisWorkScheduler``'s `.failed` / `.interrupted`
         /// arms, two hops away in another file — the runner builds it, an enum
         /// associated value carries it, a `case .failed(let reason)` unwraps it,
-        /// and an interpolation puts it in the column. For four months five of
+        /// and an interpolation puts it in the column. Since 2026-04-03 five of
         /// its producers built it by interpolating a caught `Error`, which is
         /// `String(describing:)` by another name, and the source canary written
-        /// to stop exactly that (`DurableThrowRecordSourceCanaryTests`) stayed
-        /// GREEN throughout: it filters `lastErrorCode:` ARGUMENTS in the
-        /// scheduler, and the offending argument there is the identifier
-        /// `reason`.
+        /// to stop exactly that (`DurableThrowRecordSourceCanaryTests`) was
+        /// GREEN AGAINST IT FROM THE MOMENT IT WAS WRITTEN: it filters
+        /// `lastErrorCode:` ARGUMENTS in the scheduler, and the offending
+        /// argument there is the identifier `reason`.
         ///
         /// The label costs nothing and buys the one thing a source rule needs:
         /// **the compiler now forces every construction of this case to be

@@ -440,7 +440,16 @@
 //
 // `analysis_jobs.lastErrorCode` for the third time, reached by a road neither
 // playhead-3lc3 nor playhead-3c4k could see — and it walked past 3lc3's own
-// rail, in production, for four months.
+// rail, in production.
+//
+// **THE DATES, BECAUSE THE OBVIOUS SENTENCE IS THE WRONG ONE.** The first draft
+// of this section said the rail "stayed green for four months". It did not: the
+// five sites landed with the runner itself on **2026-04-03** (`94406761`) and
+// `DurableThrowRecordSourceCanaryTests` landed on **2026-08-16** (`1d904708`),
+// hours before this bead. The rail did not decay — **it was green against a live
+// instance in its own column from the moment it was written**, which is the
+// sharper complaint and the one worth keeping. A rule authored from the defects
+// in front of it, in the file in front of it.
 //
 // FIVE producers in `AnalysisJobRunner` built a description into an
 // `AnalysisOutcome.StopReason.failed` payload:
@@ -493,8 +502,9 @@
 //       1  `maxAttemptsReached:decode: Decoding failed: Operation Interrupted` (TERMINAL arm)
 //
 // Both rows are in `/Users/dabrams/playhead/.captures/2026-04-25/…/analysis.sqlite`,
-// a real `.xcappdata` device container that carries no `rediff_day_zero_attempts`
-// table at all — which is precisely why luie's census, filtered to the databases
+// a real `.xcappdata` app-container capture — the DB carries the two live test
+// feeds, so it is a record of genuine use — that carries no
+// `rediff_day_zero_attempts` table at all — which is precisely why luie's census, filtered to the databases
 // that DO carry that table, could not see it. **A census of the databases
 // somebody happened to name, read as a census of the databases that exist**:
 // this repo's standing defect class, one level up, in the paragraph that measures
@@ -510,18 +520,19 @@
 // **THE TERMINAL ARM IS THE ONE NOTHING ELSE WITNESSES.** playhead-3c4k's census
 // found 0 of its 5 field rows on the terminal arm ("the arm with no witness, and
 // the one a rail has to carry"); here it is, in the field, on this site. And
-// `CapOutRetryTests.poisonedAssetTerminatesWithNamedCause` seeds
-// `"maxAttemptsReached:decode: Decoding failed: Operation Interrupted"` verbatim
-// — that fixture was transcribed off this very row.
+// `CapOutRetryTests.poisonedAssetTerminatesWithNamedCause` seeded
+// `"maxAttemptsReached:decode: Decoding failed: Operation Interrupted"`, which is
+// BYTE-IDENTICAL to `5C185837`. How it got there is not recorded; that it
+// matches a field row exactly is.
 //
 // FIRINGS >= 2 (a FLOOR — `lastErrorCode` is last-writer-wins and
 // `requeueOrphanedLease` NULLs it outright). HOLDINGS = 0 (EXACT — the newest
 // pull, 2026-08-16 01:04, is a complete enumeration of `analysis_jobs`: 38 rows,
-// 36 NULL and 2 `coverageInsufficient:noProgress`). **No migration**, and the
-// reason is a WIPE rather than a repair: neither jobId appears in any of the
-// twelve later databases, because the device was wiped and reinstalled between
-// the 04-25 capture and the 08-12 one. Those two rows are unreachable, not
-// repaired.
+// 36 NULL and 2 `coverageInsufficient:noProgress`). **No migration, and the
+// reason is that the rows are UNREACHABLE rather than repaired**: neither jobId
+// appears in any of the twelve later databases, which span a documented
+// wipe-and-reinstall. Say which — an absence produced by a wipe is not evidence
+// that anything was fixed.
 //
 // ===== WHAT THE PROSE ACTUALLY WAS, AND WHY IT IS WORSE THAN IT LOOKS ======
 //
