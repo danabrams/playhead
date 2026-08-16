@@ -824,6 +824,265 @@ struct DurableThrowRecordWireInTests {
     }
 }
 
+// MARK: - playhead-luie: the SIXTH site, and the first with a WITNESS ON DISK
+
+/// `rediff_day_zero_attempts.lastDetail` — the fourth durable column, reached
+/// through a struct FIELD rather than a labelled argument, which is why two
+/// schema-derived sweeps could not find it.
+///
+/// **This is the only site in the series whose retired prose survives on disk**,
+/// in `3gzp/gt.sqlite`, two rows from 2026-08-02 and 2026-08-05. The tests below
+/// reconstruct that error's SHAPE rather than quoting the strings, because the
+/// point is not what those two bytes were: it is that two constructions of one
+/// failure produce two different strings, and that no test could have been
+/// written against either of them.
+@Suite("DurableThrowRecord — the day-0 attempt detail is a named token (playhead-luie)")
+struct DurableThrowRecordDayZeroTests {
+
+    /// The shape the two field rows carried: `NSURLErrorDomain` / `-1001`, a
+    /// localized sentence, a `userInfo` with the enclosure URL in it, and a
+    /// `kCFErrorDomainCFNetwork` link underneath. Built fresh on each call so
+    /// two calls are two OBJECTS — which is the whole of the first test.
+    private static func timedOutFetchError() -> NSError {
+        let inner = NSError(
+            domain: "kCFErrorDomainCFNetwork",
+            code: -1001,
+            userInfo: ["_kCFStreamErrorCodeKey": -2102]
+        )
+        return NSError(
+            domain: NSURLErrorDomain,
+            code: -1001,
+            userInfo: [
+                NSLocalizedDescriptionKey: "The request timed out.",
+                "_kCFStreamErrorCodeKey": -2102,
+                NSUnderlyingErrorKey: inner,
+                "NSErrorFailingURLStringKey":
+                    "https://traffic.megaphone.fm/PRIVATE-EPISODE-9137.mp3",
+            ]
+        )
+    }
+
+    @Test("THE REAL DEFECT: two constructions of ONE failure describe as two different strings")
+    func theRealDefectDescriptionsDoNotGroup() {
+        let first = String(describing: Self.timedOutFetchError())
+        let second = String(describing: Self.timedOutFetchError())
+
+        // The field evidence, reproduced rather than quoted. `3gzp/gt.sqlite`
+        // holds two `lastExit=fetch_failed` rows whose 200 characters differ in
+        // exactly one place: `NSUnderlyingError=0x1502a0d20` against
+        // `0x11cc169d0`. A per-process HEAP ADDRESS was serialised into a
+        // durable column, so `GROUP BY lastDetail` over that table can never
+        // return a count above one.
+        #expect(first != second, """
+            The premise of this bead is false on this OS: String(describing:) is stable across two \
+            constructions of the same NSError. Re-measure before trusting the rest of this suite.
+            """)
+
+        // …and it is not only the pointer. `userInfo` is a dictionary, so its
+        // KEY ORDER varies too — a second, independent reason the same failure
+        // answers to more than one string.
+        #expect(first.contains("NSUnderlyingError=0x"), "the heap pointer is what the field rows carried")
+
+        // The token is the same string both times, which is the property a
+        // device pull actually needs.
+        #expect(
+            DurableThrowRecord.dayZeroAttemptDetail(for: Self.timedOutFetchError())
+                == DurableThrowRecord.dayZeroAttemptDetail(for: Self.timedOutFetchError())
+        )
+    }
+
+    @Test("THE REAL DEFECT: the description carried the enclosure URL, and the token cannot")
+    func theRealDefectTheURLIsGone() {
+        let error = Self.timedOutFetchError()
+        let described = String(describing: error)
+        // Why three exporters refuse to project this column — measured on the
+        // real shape, not assumed.
+        #expect(described.contains("traffic.megaphone.fm"))
+        #expect(described.contains("PRIVATE-EPISODE-9137"))
+
+        let token = DurableThrowRecord.dayZeroAttemptDetail(for: error)
+        #expect(!token.contains("traffic.megaphone.fm"))
+        #expect(!token.contains("PRIVATE-EPISODE-9137"))
+        #expect(!token.contains("megaphone"))
+        // The localized sentence goes with it. A device in another language
+        // wrote different bytes for this failure.
+        #expect(described.contains("The request timed out."))
+        #expect(!token.contains("timed out"))
+    }
+
+    @Test("the token names the condition and carries the identity, including the deepest link")
+    func theTokenNamesTheConditionAndTheIdentity() {
+        let token = DurableThrowRecord.dayZeroAttemptDetail(for: Self.timedOutFetchError())
+        #expect(token.hasPrefix(DurableThrowRecord.dayZeroThrewPrefix + "("))
+        #expect(token.contains("domain=NSURLErrorDomain"))
+        #expect(token.contains("code=-1001"))
+        // `identityFields` walks to the DEEPEST link, not the first — the
+        // wrapper is the framework saying it did not classify either.
+        #expect(token.contains("under=kCFErrorDomainCFNetwork/-1001"))
+        #expect(token.hasSuffix(")"))
+    }
+
+    @Test("under= is a positive claim on this token too, never an absence")
+    func underIsAPositiveClaim() {
+        enum Bare: Error { case fetchGaveUp }
+        let token = DurableThrowRecord.dayZeroAttemptDetail(for: Bare.fetchGaveUp)
+        #expect(token.contains("under=\(UnclassifiedModelFailure.noUnderlyingToken)"))
+        #expect(!token.contains("under=,"))
+        #expect(!token.contains("under=)"))
+    }
+
+    @Test("the day-0 prefix collides with none of the other four, in either direction")
+    func thePrefixCollidesWithNothing() {
+        let others = [
+            DurableThrowRecord.jobThrewPrefix,
+            DurableThrowRecord.assetResolutionThrewPrefix,
+            DurableThrowRecord.sessionPipelineThrewPrefix,
+            DurableThrowRecord.recoveryThrewPrefix,
+        ]
+        let mine = DurableThrowRecord.dayZeroThrewPrefix
+        for other in others {
+            #expect(!mine.hasPrefix(other), "\(mine) answers to a \(other) query")
+            #expect(!other.hasPrefix(mine), "\(other) answers to a \(mine) query")
+        }
+        // And the column itself: `lastDetail` has never held any other value in
+        // any of the nineteen preserved device databases, so there is no retired
+        // spelling to stay separable from — unlike `assetResolutionThrew`, whose
+        // STEM is load-bearing. Nothing greps this column for a substring.
+        #expect(mine == "dayZeroThrew")
+    }
+
+    @Test("the token's grammar is closed, even against a hostile domain")
+    func theGrammarIsClosed() {
+        let hostile = NSError(
+            domain: "Some Domain(with),spaces=and punctuation",
+            code: 7,
+            userInfo: [:]
+        )
+        let token = DurableThrowRecord.dayZeroAttemptDetail(for: hostile)
+        #expect(!token.contains(" "))
+        #expect(token.filter { $0 == "(" }.count == 1)
+        #expect(token.filter { $0 == ")" }.count == 1)
+        #expect(token.hasSuffix(")"))
+        // The sanitizer really fired, rather than the fixture being harmless.
+        #expect(!token.contains("=and"))
+    }
+
+    // MARK: The hop into the column
+
+    @Test("the token reaches lastDetail through advance() UNCUT, and the exit rides beside it")
+    func theTokenReachesTheColumnUncut() {
+        let token = DurableThrowRecord.dayZeroAttemptDetail(for: Self.timedOutFetchError())
+        let folded = DayZeroRediffAttemptPolicy.advance(
+            record: nil,
+            assetId: "A",
+            outcome: .blocked(.fetchFailed, detail: token),
+            fullFetchBytes: 54_000_000,
+            at: 1_000
+        )
+        #expect(folded.lastDetail == token, "the 200-char cap must not bite a token")
+        // THE ARM IS SPELLED BY `lastExit`, WHICH IS WHY THE TOKEN DOES NOT
+        // RESTATE IT. Both come from the same outcome in the same call, so they
+        // cannot drift — that is the argument for one prefix over two arms, and
+        // this is where it is checked rather than asserted in a comment.
+        #expect(folded.lastExit == .fetchFailed)
+
+        let persist = DayZeroRediffAttemptPolicy.advance(
+            record: nil,
+            assetId: "A",
+            outcome: RediffDayZeroMintOutcome(exit: .persistFailed, detail: token),
+            fullFetchBytes: 54_000_000,
+            at: 1_000
+        )
+        #expect(persist.lastDetail == token)
+        #expect(persist.lastExit == .persistFailed)
+        #expect(folded.lastDetail == persist.lastDetail,
+                "the two arms share one token — the row's exit is what separates them")
+    }
+
+    @Test("a later attempt CLEARS the detail, so lastExit and lastDetail can never drift")
+    func aLaterAttemptClearsTheDetail() {
+        // THE INVARIANT THE ONE-PREFIX DECISION RESTS ON, and the only test in
+        // this file that can see it fail. The token deliberately does not name
+        // which arm produced it, because `lastExit` does — and that argument is
+        // only sound while the two are written from the SAME outcome. If
+        // `advance` ever carried `lastDetail` forward the way it carries
+        // suppression history, a row would read `lastExit=marked` beside a
+        // throw's token, and a pull would attribute a fetch failure to a
+        // successful mint. Every other test here passes `record: nil`, which is
+        // exactly the shape that cannot observe a carry-forward.
+        let thrown = DurableThrowRecord.dayZeroAttemptDetail(
+            for: NSError(domain: "Earlier", code: 3)
+        )
+        let failedAttempt = DayZeroRediffAttemptPolicy.advance(
+            record: nil, assetId: "A",
+            outcome: .blocked(.fetchFailed, detail: thrown),
+            fullFetchBytes: 54_000_000, at: 1_000
+        )
+        #expect(failedAttempt.lastDetail == thrown, "vacuity: the first attempt recorded nothing")
+
+        let laterSuccess = DayZeroRediffAttemptPolicy.advance(
+            record: failedAttempt, assetId: "A",
+            outcome: RediffDayZeroMintOutcome(markCount: 2, exit: .marked),
+            fullFetchBytes: 54_000_000, at: 2_000
+        )
+        #expect(laterSuccess.lastExit == .marked)
+        #expect(laterSuccess.lastDetail == nil, """
+            `lastDetail` survived an attempt that caught no throw. The row now reads \
+            lastExit=\(laterSuccess.lastExit.rawValue) beside a token from an earlier failure, and \
+            the whole reason this token omits an arm discriminator is that `lastExit` carries it \
+            and cannot disagree.
+            """)
+        // The other half of the same claim: history that IS meant to accumulate
+        // still does, so this is not "advance forgets everything".
+        #expect(laterSuccess.totalFullFetchBytes == 108_000_000)
+        #expect(laterSuccess.attemptCount == 2)
+    }
+
+    @Test("the token fits under detailCharCap at the worst REALISTIC identity")
+    func theTokenFitsUnderTheDetailCap() {
+        // Both domains at the sanitizer's ceiling and both codes eleven digits —
+        // the widest identity any real `NSError` can present. `maxDomainLength`
+        // is read rather than restated so this measurement follows the bound.
+        let wide = String(repeating: "D", count: UnclassifiedModelFailure.maxDomainLength * 3)
+        let inner = NSError(domain: wide, code: -99_999_999_999, userInfo: [:])
+        let outer = NSError(
+            domain: wide,
+            code: -99_999_999_999,
+            userInfo: [NSUnderlyingErrorKey: inner]
+        )
+        let token = DurableThrowRecord.dayZeroAttemptDetail(for: outer)
+
+        // MEASURED, and the first prediction written here was 175. It is 187 —
+        // an eleven-digit code is twelve characters once it carries a sign, and
+        // the token carries two of them. The number is asserted exactly rather
+        // than with `<`, so a grammar change that eats the remaining thirteen
+        // characters of headroom is a red test and not a silent truncation.
+        #expect(token.count == 187, "the worst realistic token measures \(token.count), not 187")
+        #expect(token.count < DayZeroRediffAttemptPolicy.detailCharCap)
+        // ANTI-VACUITY: the cap is a real bound that a long enough string DOES
+        // hit, so the expectation above is not passing because nothing is
+        // measured. This is the direction that the retired prose took — both
+        // field rows measured exactly 200.
+        let folded = DayZeroRediffAttemptPolicy.advance(
+            record: nil, assetId: "A",
+            outcome: .blocked(.fetchFailed, detail: String(repeating: "x", count: 5_000)),
+            fullFetchBytes: 0, at: 1
+        )
+        #expect(folded.lastDetail?.count == DayZeroRediffAttemptPolicy.detailCharCap)
+    }
+
+    @Test("detail stays nil on every exit that caught no throw")
+    func detailIsNilWhereNothingThrew() {
+        // The token's meaning depends on this: a non-nil `lastDetail` is a
+        // positive claim that a throw was caught, so an exit that merely
+        // declined must not put commentary there.
+        for exit in RediffDayZeroExit.allCases {
+            #expect(RediffDayZeroMintOutcome.blocked(exit).detail == nil,
+                    "\(exit.rawValue) invents a detail")
+        }
+    }
+}
+
 // MARK: - Source canary: a token can be a perfect VALUE and a wrong ARGUMENT
 
 /// The only instrument that can see the defect class the four call sites are
@@ -1349,6 +1608,203 @@ final class DurableThrowRecordSourceCanaryTests: XCTestCase {
         XCTAssertTrue(
             background.contains("token=\\(throwRecord,privacy:.public)"),
             "the recovery log line must consume the SAME local the column was given"
+        )
+    }
+
+    // MARK: playhead-luie — the day-0 attempt detail, in TWO files and TWO shapes
+
+    private func refetchServiceSource() throws -> [FMDaemonRefusalSourceCanaryTests.SourceLine] {
+        try source("Playhead/Services/AdDetection/RediffRefetch/RediffRefetchService.swift")
+    }
+
+    private func adDetectionSource() throws -> [FMDaemonRefusalSourceCanaryTests.SourceLine] {
+        try source("Playhead/Services/AdDetection/AdDetectionService.swift")
+    }
+
+    /// ARM 1 — the k-way fetch catch, an ARGUMENT, and therefore the only one of
+    /// the two that any argument-shaped rule could ever have seen.
+    func testTheDayZeroFetchArmNoLongerPersistsADescription() throws {
+        let lines = try refetchServiceSource()
+        XCTAssertGreaterThan(lines.count, 400, "source read found only \(lines.count) code lines")
+        let dense = FMDaemonRefusalSourceCanaryTests.denseCode(lines)
+
+        // VACUITY: the arm must still exist and still be the day-0 fetch catch.
+        XCTAssertTrue(
+            dense.contains("DurableThrowRecord.dayZeroAttemptDetail(for:error)"),
+            "RediffRefetchService no longer builds the day-0 detail record; move this canary with the code."
+        )
+        XCTAssertTrue(dense.contains("dayZeroExit:.fetchFailed"), "vacuity: the fetch-failure arm is gone")
+        // And this reader must be ABLE to see what it forbids.
+        //
+        // **NOT all three spellings — this file carries exactly one, and the
+        // first draft of this rail asserted all three and went red.** The lagged
+        // sweep's `.failed(… error:)` arm one function up still writes
+        // `String(describing: error)` deliberately, because it reaches a
+        // `logger.error` and no column (59c8's split), so ONE spelling is
+        // genuinely present and its visibility is what proves the reader is not
+        // blind here. Asserting three would have been a vacuity guard that
+        // fails for a reason unrelated to the property it guards, which is worse
+        // than none.
+        XCTAssertTrue(
+            dense.contains("String(describing:"),
+            "vacuity: this reader cannot see the spelling it forbids, so an absence proves nothing"
+        )
+        // The FILTER's coverage of the other two is a property of the filter,
+        // not of this file, so it is checked against synthetic text instead.
+        for spelling in ["error.localizedDescription", "\\(error)"] {
+            XCTAssertFalse(
+                descriptionOffenders(in: ["detail:\(spelling)"]).isEmpty,
+                "the filter cannot see \(spelling)"
+            )
+        }
+
+        // THE RULE: nothing reaching `detail:` in this file may be a description.
+        let written = FMDaemonRefusalSourceCanaryTests.firstArguments(after: "detail:", in: dense)
+        XCTAssertGreaterThanOrEqual(written.count, 1, "vacuity: the durable write was not found")
+        let offenders = descriptionOffenders(in: written)
+        XCTAssertTrue(
+            offenders.isEmpty,
+            """
+            A `rediff_day_zero_attempts.lastDetail` write is persisting a Swift value's DESCRIPTION \
+            again. This arm catches a `URLSession` download, so the description is an \
+            `NSURLErrorDomain` dump carrying the ENCLOSURE URL, a LOCALIZED sentence and a HEAP \
+            POINTER — the two rows preserved in `3gzp/gt.sqlite` differ from each other only in \
+            that pointer, so the column cannot group even two instances of one failure. \
+            Offenders: \(offenders)
+            """
+        )
+    }
+
+    /// ARM 1, per SITE. The `detail:` rule above is a property of the FILE, and
+    /// 3lc3's DT05 is the record of what that is worth: one intermediate local
+    /// (`let d = String(describing: error)`) leaves every argument spelling a
+    /// wholesome name while the column goes back to prose.
+    func testTheDayZeroFetchArmBindsItsRecordAtItsOwnSite() throws {
+        let dense = FMDaemonRefusalSourceCanaryTests.denseCode(try refetchServiceSource())
+        // Anchored on the arm's own return, which no other site in the file
+        // carries. 240 dense characters holds the `recordOutcome` call and its
+        // three arguments and reaches nothing else — the nearest neighbouring
+        // `recordOutcome` is ~700 characters up.
+        let site = try codeImmediatelyBefore("dayZeroExit:.fetchFailed", span: 240, in: dense)
+        XCTAssertTrue(
+            site.contains("DurableThrowRecord.dayZeroAttemptDetail(for:error)"),
+            """
+            The day-0 FETCH arm no longer builds its durable detail from `DurableThrowRecord` at its \
+            own site. Site text: \(site)
+            """
+        )
+        XCTAssertFalse(
+            Self.descriptionSpellings.contains { site.contains($0) },
+            "the day-0 fetch arm binds a DESCRIPTION into its durable detail: \(site)"
+        )
+    }
+
+    /// ARM 2 — and this is the shape the whole bead turns on.
+    ///
+    /// `failed.detail = String(describing: error)` is an ASSIGNMENT TO A
+    /// PROPERTY, not a labelled argument. Every sweep this defect class has been
+    /// hunted with — 3c4k's pass A (curated cause labels), pass B (schema-derived
+    /// labels), pass C (any labelled argument carrying a description) — reads
+    /// ARGUMENTS, and so does `descriptionOffenders` above. None of them could
+    /// have found this line, and neither could a rule written over `detail:`.
+    /// It needs a finder of its own.
+    func testTheDayZeroPersistArmNoLongerPersistsADescription() throws {
+        let lines = try adDetectionSource()
+        XCTAssertGreaterThan(lines.count, 5_000, "source read found only \(lines.count) code lines")
+        let dense = FMDaemonRefusalSourceCanaryTests.denseCode(lines)
+
+        // VACUITY: the arm exists, and this reader can see the spelling it bans.
+        XCTAssertTrue(
+            dense.contains("outcome(.persistFailed,divergentSlotCount:"),
+            "the day-0 persist-failure arm is gone; move this canary with the code."
+        )
+        XCTAssertTrue(
+            dense.contains("String(describing:"),
+            "vacuity: this reader cannot see the spelling it forbids (it survives in log lines here)"
+        )
+
+        // THE RULE, over the ASSIGNMENT rather than over an argument: every
+        // right-hand side given to a `.detail` property in this file, read to the
+        // end of the statement.
+        let assigned = FMDaemonRefusalSourceCanaryTests.firstArguments(after: ".detail=", in: dense)
+        XCTAssertEqual(assigned.count, 1, "expected exactly one `.detail =` assignment in this file")
+        XCTAssertTrue(
+            assigned[0].hasPrefix("DurableThrowRecord.dayZeroAttemptDetail(for:error"),
+            """
+            The day-0 PERSIST arm assigns something other than the durable throw record to \
+            `RediffDayZeroMintOutcome.detail`, which is carried into \
+            `rediff_day_zero_attempts.lastDetail` one struct later. Assigned: \(assigned[0])
+            """
+        )
+        XCTAssertTrue(
+            descriptionOffenders(in: assigned).isEmpty,
+            "the day-0 persist arm assigns a DESCRIPTION to a durable field: \(assigned)"
+        )
+    }
+
+    /// The finder above must be able to FAIL, and the shape it is aimed at is
+    /// not one any other rail in this class covers.
+    ///
+    /// Stated as a test rather than as a comment for the same reason
+    /// `testTheOldTwoSpellingRuleWouldHaveMissedTheShippedLine` is: a claim that
+    /// an old rule was blind is checkable, and checking it is what stops the new
+    /// rule from being the old one with a longer name.
+    func testAnArgumentShapedRuleWouldHaveMissedThePersistArm() throws {
+        // The retired line, in the dense spelling these finders read. Built by
+        // concatenation so this file does not itself describe an error.
+        let retired = "failed.detail=String(describing:" + "error)"
+
+        // Every labelled-argument finder in this class, run over it: the line
+        // contains no `label:` at depth 0 at all, so all of them return nothing
+        // and report clean.
+        for label in ["detail:", "lastErrorCode:", "failureReason:", "deferReason:"] {
+            XCTAssertTrue(
+                FMDaemonRefusalSourceCanaryTests.firstArguments(after: label, in: retired).isEmpty,
+                "\(label) unexpectedly matched the assignment shape; the premise of this rail is wrong"
+            )
+        }
+        // The assignment finder sees it, and sees it as an offender.
+        let seen = FMDaemonRefusalSourceCanaryTests.firstArguments(after: ".detail=", in: retired)
+        XCTAssertEqual(seen.count, 1, "the assignment finder cannot see the shape it exists for")
+        XCTAssertFalse(
+            descriptionOffenders(in: seen).isEmpty,
+            "the assignment finder sees the line but does not call it an offender"
+        )
+    }
+
+    /// Neither arm may restate the exit inside the token.
+    ///
+    /// One prefix covers both arms deliberately — `lastExit` carries the
+    /// discrimination and is written from the same outcome in the same
+    /// statement. The failure this guards is the opposite of the scheduler's:
+    /// there, folding two conditions into one prefix would DELETE a
+    /// discrimination; here, splitting one condition into two prefixes would
+    /// ADD a second ruler for a quantity the row already measures, and the first
+    /// symptom would be a pull whose `lastExit` and `lastDetail` disagree.
+    func testNeitherDayZeroArmInventsASecondArmDiscriminator() throws {
+        let service = FMDaemonRefusalSourceCanaryTests.denseCode(try refetchServiceSource())
+        let detection = FMDaemonRefusalSourceCanaryTests.denseCode(try adDetectionSource())
+        for (name, dense) in [("RediffRefetchService", service), ("AdDetectionService", detection)] {
+            let calls = FMDaemonRefusalSourceCanaryTests.firstArguments(
+                after: "DurableThrowRecord.dayZeroAttemptDetail(",
+                in: dense
+            )
+            XCTAssertEqual(calls.count, 1, "\(name) must build the day-0 detail exactly once")
+            XCTAssertEqual(
+                calls[0],
+                "for:error",
+                """
+                \(name) is passing something other than the caught error to the day-0 detail record. \
+                Got: \(calls[0])
+                """
+            )
+        }
+        // And the factory takes no arm parameter, so neither site can be given
+        // one without this rail's `for:error` equality failing first.
+        XCTAssertFalse(
+            service.contains("dayZeroAttemptDetail(for:error,")
+                || detection.contains("dayZeroAttemptDetail(for:error,"),
+            "a second discriminator has been threaded into the day-0 token"
         )
     }
 }

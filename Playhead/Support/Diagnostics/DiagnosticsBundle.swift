@@ -209,8 +209,12 @@ struct DefaultBundle: Codable, Sendable, Equatable {
     /// is hashed through `EpisodeIdHasher` on the way in anyway — the same
     /// treatment `music_bed_profiles` gives show identifiers (legal checklist
     /// item a). Everything else in the shape is an integer, a timestamp, or a
-    /// closed enum rawValue. `last_detail` is the one free-text field and is
-    /// sanitized + truncated by the builder.
+    /// closed enum rawValue — with no exceptions. This sentence used to read
+    /// "`last_detail` is the one free-text field and is sanitized + truncated by
+    /// the builder", and every clause of it was false: no `last_detail` key is
+    /// ever emitted, `RediffDayZeroAttemptSummary` has no such member, and the
+    /// builder sanitizes nothing of the kind. The on-device column is excluded
+    /// outright — see `DiagnosticsBundleBuilder.projectRediff`.
     let rediffDiagnostics: RediffDiagnostics
 
     /// playhead-wvdz: whether the analysis database opened, across
@@ -574,9 +578,14 @@ struct DefaultBundle: Codable, Sendable, Equatable {
     /// this ONE episode; `suppressed_count` is how many replays were declined
     /// without spending anything.
     ///
-    /// The on-device row's `lastDetail` (an error description that can carry
-    /// the enclosure URL) is deliberately NOT projected here — see
-    /// `DiagnosticsBundleBuilder.allowlistedRediffToken`.
+    /// The on-device row's `lastDetail` is deliberately NOT projected here —
+    /// there is no member for it above and there never was. Until playhead-luie
+    /// it was an error description that could carry the enclosure URL; it is a
+    /// `DurableThrowRecord` token now, and the exclusion is kept anyway. See
+    /// `DiagnosticsBundleBuilder.projectRediff`, which is where the decision
+    /// lives. (This comment used to point at
+    /// `DiagnosticsBundleBuilder.allowlistedRediffToken`, a symbol that has never
+    /// existed in the tree — a citation nobody could follow to check the claim.)
     struct RediffDayZeroAttemptSummary: Codable, Sendable, Equatable {
         let assetIdHash: String
         let attemptCount: Int

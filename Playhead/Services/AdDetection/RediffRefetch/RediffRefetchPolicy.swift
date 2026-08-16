@@ -480,7 +480,9 @@ enum RediffRefetchPolicy {
         /// exits AND for a clean "diffed fine, nothing diverged" run, so the
         /// database could not tell them apart. `mint.exit` now names exactly
         /// which one fired and `mint`'s per-B-side counters say whether the byte
-        /// aligner even got traction. `mint.detail` carries what `error` did.
+        /// aligner even got traction. `mint.detail` carries what `error` did —
+        /// as a `DurableThrowRecord` token since playhead-luie, never a
+        /// description; the column it lands in is grouped by, not read.
         ///
         /// The poisoning fix is UNCHANGED and is now structurally enforced: the
         /// absence of an `AttemptState` on this case is what makes it impossible

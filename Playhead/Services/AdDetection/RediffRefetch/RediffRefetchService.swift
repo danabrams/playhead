@@ -694,11 +694,22 @@ actor RediffRefetchService {
             // persisted, so a THROWN fetch and a clean no-divergence run were
             // indistinguishable in the database — and neither incremented
             // `failedCount`. It now carries `.fetchFailed` explicitly.
+            //
+            // playhead-luie: the detail is a NAMED TOKEN, never a description.
+            // `detail` is carried into `rediff_day_zero_attempts.lastDetail`
+            // one struct later (`DayZeroRediffAttemptPolicy.advance`), and a
+            // `String(describing:)` there is `playhead-v7q6`'s durable-prose
+            // defect — unstable across OS versions, ungroupable, and on this
+            // path it carried the enclosure URL out of a `URLError`'s userInfo.
+            // The arm is NOT restated in the token: the row's `lastExit` says
+            // `fetch_failed`, written from this same outcome.
             let cost = RediffRefetchPolicy.BandwidthCost(precheckBytes: 0, fullFetchBytes: fullFetchBytes)
             await recorder.recordOutcome(.dayZeroUnmarked(
                 assetId: candidate.assetId,
                 cost: cost,
-                mint: .blocked(.fetchFailed, detail: String(describing: error))))
+                mint: .blocked(
+                    .fetchFailed,
+                    detail: DurableThrowRecord.dayZeroAttemptDetail(for: error))))
             // playhead-3oyz: `cost.fullFetchBytes` rides up beside the exit —
             // the trigger's same-session retry is granted on the MEASURED
             // landed bytes being zero, never on the error code alone.

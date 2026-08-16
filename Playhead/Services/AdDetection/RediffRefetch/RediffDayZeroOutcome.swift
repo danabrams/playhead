@@ -308,8 +308,25 @@ struct RediffDayZeroMintOutcome: Sendable, Equatable {
     /// first-listen mint; non-zero only on a rescue that actually improved
     /// something.
     var supersededMarkCount: Int = 0
-    /// Free-text detail (an error description). Truncated by the recorder
-    /// before it reaches the database.
+    /// The durable cause of a THROWN exit, as a
+    /// ``DurableThrowRecord/dayZeroAttemptDetail(for:)`` token —
+    /// `dayZeroThrew(domain=…,code=…,under=…)`.
+    ///
+    /// **NOT free text, and playhead-luie is the record of why.** This field is
+    /// carried into `rediff_day_zero_attempts.lastDetail` by
+    /// ``DayZeroRediffAttemptPolicy/advance(record:assetId:outcome:fullFetchBytes:at:)``
+    /// — a real column a device pull groups by — and both of its producers used
+    /// to write `String(describing: error)`, which is `playhead-v7q6`'s
+    /// durable-prose defect: prose, unstable across OS versions, unbounded per
+    /// row, and on the fetch arm it carried the enclosure URL out of a
+    /// `URLError`'s `userInfo`. The type stays `String?` because `nil` is the
+    /// honest value for every exit that did not catch a throw; what changed is
+    /// that the two producers hand it a token. `nil` on every non-throwing
+    /// exit — the field is not a slot for commentary.
+    ///
+    /// The token deliberately does NOT name which arm produced it. ``exit`` does,
+    /// it is written into the same row from this same value, and a second
+    /// spelling of one fact is a second ruler.
     var detail: String?
     /// playhead-3zxd: what THIS mint's byte diffs saw — the phantom-slot
     /// instrumentation, aggregated across the personas the gate accepted. See
@@ -891,7 +908,26 @@ enum DayZeroRediffAttemptPolicy {
         )
     }
 
-    /// Cap on the persisted `lastDetail` string. Error descriptions can carry
-    /// a whole URL + userInfo dump; the database is not a log.
+    /// Cap on the persisted `lastDetail` string.
+    ///
+    /// It was the PRIMARY bound while both producers wrote
+    /// `String(describing: error)` — an error description can carry a whole URL
+    /// plus a `userInfo` dump, and the database is not a log. Since
+    /// playhead-luie the value is a
+    /// ``DurableThrowRecord/dayZeroAttemptDetail(for:)`` token, which is bounded
+    /// by construction, so this is now defence in depth against a future
+    /// producer rather than the thing standing between the column and a URL.
+    ///
+    /// **It is deliberately NOT raised, and the arithmetic is why.** Worst
+    /// realistic token — both domains at
+    /// ``UnclassifiedModelFailure/maxDomainLength`` and both codes eleven digits
+    /// — measures **187** characters, pinned exactly by
+    /// `theTokenFitsUnderTheDetailCap`, so the headroom here is thirteen
+    /// characters and not a comfortable margin. (The first prediction written
+    /// down was 175; a signed eleven-digit code is twelve characters and the
+    /// token carries two of them.) A 20-digit code at BOTH levels would reach
+    /// 203 and be cut without a truncation marker; no `NSError` has a code of
+    /// that magnitude — a native Swift error's is its case index — so the limit
+    /// is named rather than papered over with a bigger number.
     static let detailCharCap = 200
 }

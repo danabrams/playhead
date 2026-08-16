@@ -1603,6 +1603,25 @@ FOCUSED_SUITES=(
   -only-testing:PlayheadTests/DurableThrowRecordTests
   -only-testing:PlayheadTests/DurableThrowRecordWireInTests
   -only-testing:PlayheadTests/DurableThrowRecordSourceCanaryTests
+  # playhead-luie: the SIXTH site (LU series), and the fourth column. TWO more
+  # suites, and the reason is that this site is the only one in the series with
+  # a RUNTIME WITNESS at both arms — so, unlike the four above, the source canary
+  # is not the only instrument. `DurableThrowRecordDayZeroTests` owns the value
+  # half (the token's grammar, its stability across two constructions of one
+  # error, the hop into `lastDetail` under the 200-char cap);
+  # the runtime half is driven from two OTHER suites in one file, and they are
+  # different structs: `RediffDayZeroServiceAccountabilityTests` runs the FETCH
+  # arm against a spy fetcher that throws mid-batch, and
+  # `RediffDayZeroMintExitTests` runs the PERSIST arm against a genuine
+  # `AnalysisStore` write failure produced by dropping the table. A value test
+  # cannot see which arm wrote, and neither service test can see the grammar.
+  #
+  # Naming the FILE's first suite instead of these two is exactly the mistake the
+  # "an expectation names a test that never ran" guard caught on the first run of
+  # batch 967 — a suite name that reads right and reaches nothing.
+  -only-testing:PlayheadTests/DurableThrowRecordDayZeroTests
+  -only-testing:PlayheadTests/RediffDayZeroServiceAccountabilityTests
+  -only-testing:PlayheadTests/RediffDayZeroMintExitTests
   # playhead-ronl: the retry-charge rails (RN series). Four suites, because the
   # claim spans three layers and no one of them can see the others: the two pure
   # rules (instant, no store); the WITNESS the two write sites read, which lives
@@ -3311,6 +3330,35 @@ T_AR_RETRYBARE="DurableThrowRecordSourceCanaryTests/testTheAssetResolutionRetryA
 T_AR_BINDONCE="DurableThrowRecordSourceCanaryTests/testTheAssetResolutionArmBindsTheRecordOnceAndTheLogConsumesIt"
 T_AR_OLDRULE="DurableThrowRecordSourceCanaryTests/testTheOldTwoSpellingRuleWouldHaveMissedTheShippedLine"
 
+# playhead-luie — the SIXTH site, `rediff_day_zero_attempts.lastDetail`, and the
+# only one in the series whose retired prose survives on disk (two rows in
+# `3gzp/gt.sqlite`, differing from each other in a HEAP POINTER).
+#
+# Note which of these are RUNTIME rails. Unlike the four sites above, both arms
+# here are reachable from a test — a spy fetcher that throws mid-batch, and a
+# genuine `AnalysisStore` write failure made by dropping the table — so this
+# series is scored on behaviour as well as on source text, and a mutation is
+# expected to redden both kinds where it can.
+T_LU_STABLE="THE REAL DEFECT: two constructions of ONE failure describe as two different strings"
+T_LU_URL="THE REAL DEFECT: the description carried the enclosure URL, and the token cannot"
+T_LU_CONDITION="the token names the condition and carries the identity, including the deepest link"
+T_LU_UNDER="under= is a positive claim on this token too, never an absence"
+T_LU_PREFIX="the day-0 prefix collides with none of the other four, in either direction"
+T_LU_GRAMMAR="the token's grammar is closed, even against a hostile domain"
+T_LU_UNCUT="the token reaches lastDetail through advance() UNCUT, and the exit rides beside it"
+T_LU_DRIFT="a later attempt CLEARS the detail, so lastExit and lastDetail can never drift"
+T_LU_CAP="the token fits under detailCharCap at the worst REALISTIC identity"
+T_LU_NILDETAIL="detail stays nil on every exit that caught no throw"
+# The two RUNTIME witnesses, one per arm.
+T_LU_THROWNFETCH="a THROWN fetch records .fetchFailed — distinguishable from a clean no-mark run"
+T_LU_PERSISTNAMED="REGION 1: a real write failure over a real divergence is .persistFailed, with detail"
+# The source canary, per file and per site.
+T_LU_FETCHARG="DurableThrowRecordSourceCanaryTests/testTheDayZeroFetchArmNoLongerPersistsADescription"
+T_LU_FETCHSITE="DurableThrowRecordSourceCanaryTests/testTheDayZeroFetchArmBindsItsRecordAtItsOwnSite"
+T_LU_PERSISTASSIGN="DurableThrowRecordSourceCanaryTests/testTheDayZeroPersistArmNoLongerPersistsADescription"
+T_LU_ARGBLIND="DurableThrowRecordSourceCanaryTests/testAnArgumentShapedRuleWouldHaveMissedThePersistArm"
+T_LU_ARMONCE="DurableThrowRecordSourceCanaryTests/testNeitherDayZeroArmInventsASecondArmDiscriminator"
+
 # ---- playhead-dl9k: the no-progress terminal is re-requested (DL series) ----
 #
 # THE RESCUE AND ITS BOUNDARY, which are one claim. playhead-y8f3 re-requests an
@@ -3958,6 +4006,104 @@ MUTATIONS=(
   # the bound local: two measurements of one quantity, so the column and the log
   # can disagree about the throw in front of them.
   "AR08|966|SCHED|$T_AR_BINDONCE"
+
+  # ---- playhead-luie: the day-0 attempt detail (LU series) ----
+  #
+  # Ten mutations, seven batches, across FOUR files — the two call sites, the
+  # factory, and the policy that carries the field into the column. Grouping is
+  # DT's rule (no shared patch anchor, no member able to produce another's
+  # expected failure), and the expectation sets are what the batching is derived
+  # from rather than a summary of it.
+  #
+  # FOUR ENTRIES BELOW CARRY CORRECTIONS FROM THE RUN (LU04, LU05, LU06, LU07)
+  # and one batch was SPLIT after the fact for sharing an expectation with its
+  # partner. Both are recorded in place rather than quietly fixed: an expectation
+  # set is a PREDICTION, and the whole value of writing it down is that the run
+  # can contradict it. Note also that the battery does NOT check disjointness —
+  # it was caught by re-reading the sets against the observed failures, which is
+  # the step, not the tool.
+
+  # Batch 967 — LU01, THE FIRST DEFECT VERBATIM: `String(describing: error)` back
+  # in the fetch arm's `detail:`. This is the line the bead names, and the one
+  # that actually produced field rows: two `lastExit=fetch_failed` rows in the
+  # pre-wipe snapshot, each 200 characters of `NSURLErrorDomain` dump carrying
+  # the enclosure URL, a localized sentence and a per-process heap address. It
+  # reddens the argument rule, the per-site read AND the runtime witness, so all
+  # three are listed and none is credited to another. LU05 is disjoint by
+  # construction: it touches no call site.
+  #
+  # LU05's second expectation is a CORRECTION FROM THE RUN, not a prediction:
+  # the cap rail asserts the worst-case token's length EXACTLY (187), and a
+  # four-character-shorter prefix moves it. That is the rail behaving as
+  # designed — an exact length is what makes a grammar change visible — but it
+  # has to be recorded or the next reader reads a surprise as a survivor.
+  "LU01|967|RSVC|$T_LU_FETCHARG;$T_LU_FETCHSITE;$T_LU_THROWNFETCH"
+  "LU05|967|DTR|$T_LU_PREFIX;$T_LU_CAP"
+
+  # Batch 968 — LU02, THE SECOND DEFECT VERBATIM, and the one the bead does not
+  # name: `failed.detail = String(describing: error)` in the day-0 mint's persist
+  # catch. It is an ASSIGNMENT, so no argument-shaped rule of any spelling can
+  # see it — which is why `$T_LU_FETCHARG` is deliberately ABSENT from these
+  # expectations and `$T_LU_ARGBLIND` exists to prove that absence is a property
+  # of the rule rather than an oversight. LU09 is disjoint: a different file, and
+  # a bound rather than a call.
+  "LU02|968|ADSVC|$T_LU_PERSISTASSIGN;$T_LU_PERSISTNAMED"
+  "LU09|968|POLICY|$T_LU_CAP"
+
+  # Batch 969 — LU03 is DT05's escape at this site and the reason the per-site
+  # read exists: the factory is still called, every `detail:` argument still
+  # spells a wholesome local, and the local holds prose.
+  #
+  # **`$T_LU_FETCHARG` IS DELIBERATELY ABSENT, AND THE RUN CONFIRMED IT.** Batch
+  # 969's observed failures do not include the argument rule: it stayed GREEN
+  # while the column took a description. That is the measurement this mutation
+  # exists for, and it is the reason the per-site read is a separate rail rather
+  # than a second assertion inside the argument one.
+  #
+  # ALONE. It was first written paired with LU06, and that pairing broke the
+  # series' own batching rule: LU06 also reddens `$T_LU_THROWNFETCH` (the runtime
+  # rail asserts `hasPrefix(dayZeroThrewPrefix + "(")`, and a token with no
+  # prefix at all fails it), so either member could have been credited for the
+  # other's failure. Found by re-reading the expectation sets against the run
+  # rather than by the battery, which does not check disjointness.
+  "LU03|969|RSVC|$T_LU_FETCHSITE;$T_LU_THROWNFETCH"
+
+  # Batch 973 — LU06, the ex-partner of LU03. Corrections from the run: it also
+  # reddens the closed-grammar rail (bare identity fields carry no parenthetical
+  # at all) and the cap rail (the exact length moves), on top of the two runtime
+  # rails that read the prefix.
+  "LU06|973|DTR|$T_LU_CONDITION;$T_LU_THROWNFETCH;$T_LU_PERSISTNAMED;$T_LU_GRAMMAR;$T_LU_CAP"
+
+  # Batch 970 — LU04, the WRONG ERROR. The fetch arm records a `CancellationError`
+  # instead of the throw it caught: a perfectly well-formed token naming an
+  # identity that is not the failure's, so every value test stays green and the
+  # column answers a question nobody asked. sckv's SF04/SF10 shape at this site.
+  # Alone, because it reddens three rails LU03 also reaches. The last two are
+  # corrections from the run: both the argument rule and the per-site read carry
+  # `contains("dayZeroAttemptDetail(for:error)")` as their VACUITY guard, and a
+  # different argument makes that guard false — so they fail for the right
+  # reason, but not the reason the first draft of this line predicted.
+  "LU04|970|RSVC|$T_LU_ARMONCE;$T_LU_THROWNFETCH;$T_LU_FETCHARG;$T_LU_FETCHSITE"
+
+  # Batch 971 — LU07 inlines the identity grammar in the day-0 factory: a second
+  # ruler for a quantity `UnclassifiedModelFailure` already measures. Invisible
+  # until the error carries a chain (the deepest link becomes `none`) or a
+  # hostile domain (the sanitizer is skipped, so spaces and parens leak into a
+  # key=value record) — which is why it is scored on two rails, exactly as AR09
+  # was. LU10 is disjoint: it touches the outcome's convenience factory.
+  # LU07's third expectation is a correction from the run, and the same one LU05
+  # produced: an inlined grammar changes the token's exact length.
+  "LU07|971|DTR|$T_LU_CONDITION;$T_LU_GRAMMAR;$T_LU_CAP"
+  "LU10|971|POLICY|$T_LU_NILDETAIL"
+
+  # Batch 972 — LU08 makes `advance` carry `lastDetail` forward the way it
+  # carries suppression history. THE MUTATION THE ONE-PREFIX DECISION IS SCORED
+  # ON: the token omits an arm discriminator only because `lastExit` carries one
+  # and cannot disagree with it, and this is the change that makes them disagree
+  # — a row reading `lastExit=marked` beside an earlier failure's token. Every
+  # other rail in the series passes `record: nil`, which is the exact shape that
+  # cannot observe a carry-forward. Alone: it also reddens the uncut rail.
+  "LU08|972|POLICY|$T_LU_DRIFT"
 
   # Batch 909 — JC10. Delete the confidence upgrade outright: the guard still
   # recognises the existing row and still refuses to duplicate it, so the row
@@ -8541,6 +8687,16 @@ describe_mutation() {
     AR08) echo "3c4k: the abandonment log recomputes the record instead of consuming the bound local — the column and the log can disagree about the throw" ;;
     AR09) echo "3c4k: the asset-resolution factory inlines its own identity grammar — a second ruler, invisible until the error carries an underlying chain" ;;
     DT16) echo "3lc3: the recovery token inlines its own copy of the identity grammar — a second ruler that drifts the first time the shared one is tightened" ;;
+    LU01) echo "luie: THE FIRST DEFECT VERBATIM — String(describing: error) back in the fetch arm's detail:, the line that put a heap pointer and an enclosure URL in the column" ;;
+    LU02) echo "luie: THE SECOND DEFECT VERBATIM — failed.detail = String(describing: error), an ASSIGNMENT no argument-shaped sweep could ever have found" ;;
+    LU03) echo "luie: prose LAUNDERED through a local at the fetch arm while the factory is still called — every detail: argument stays wholesome, DT05's escape at a sixth site" ;;
+    LU04) echo "luie: the fetch arm records a CancellationError instead of the throw it caught — a well-formed token naming an identity that is not the failure's" ;;
+    LU05) echo "luie: the day-0 prefix becomes jobThrew — two populations in two columns answer to one grep" ;;
+    LU06) echo "luie: the day-0 token drops its prefix and is bare identity fields — a fragment naming no family, in a column with no other value to contrast against" ;;
+    LU07) echo "luie: the day-0 factory inlines its own identity grammar — a second ruler, invisible until the error carries a chain or the domain is hostile" ;;
+    LU08) echo "luie: advance carries lastDetail FORWARD like suppression history — lastExit=marked beside an earlier failure's token, and the one-prefix design's whole premise gone" ;;
+    LU09) echo "luie: detailCharCap drops to 100, so a real token is cut mid-field with no truncation marker — the failure mode the retired prose hit on both field rows" ;;
+    LU10) echo "luie: the blocked() convenience invents a detail for every exit, so a non-null lastDetail stops meaning a throw was caught" ;;
     UM01) echo "59c8: the field row is ADMITTED to FMDaemonRefusal — a wrapper code over a 25-case enum gets an it-will-heal reading and an unbounded FM bill" ;;
     UM02) echo "59c8: the durable column carries String(describing: error) again — 300 characters of NSError prose in the one column a device pull groups by" ;;
     UM03) echo "59c8: the token drops the under= discriminator — countable, but nothing in it names which framework condition it was" ;;
@@ -9694,6 +9850,178 @@ EOF
         let bridged = error as NSError
         return "\(assetResolutionThrewPrefix)(domain=\(bridged.domain)"
             + ",code=\(bridged.code),under=\(UnclassifiedModelFailure.noUnderlyingToken))"
+    }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # ---- playhead-luie: the day-0 attempt detail (LU series) ----
+
+  # LU01 — THE FIRST DEFECT VERBATIM. The line the bead names, restored. This is
+  # the one site of the class whose retired prose SURVIVES: two rows in
+  # `3gzp/gt.sqlite`, both `lastExit=fetch_failed`, both exactly 200 characters
+  # (cut mid-word by `detailCharCap`, unmarked), differing from each other in one
+  # place — `NSUnderlyingError=0x1502a0d20` against `0x11cc169d0`. A per-process
+  # heap address in a durable column, so `GROUP BY lastDetail` over that table
+  # can never return a count above one.
+  LU01)
+    snippet OLD <<'EOF'
+                    detail: DurableThrowRecord.dayZeroAttemptDetail(for: error))))
+EOF
+    snippet NEW <<'EOF'
+                    detail: String(describing: error))))
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LU02 — THE SECOND DEFECT VERBATIM, and the one the bead's own enumeration
+  # missed. `failed.detail = …` is an ASSIGNMENT TO A PROPERTY, so 3c4k's three
+  # sweeps (curated cause labels, schema-derived labels, any labelled argument
+  # carrying a description) were all structurally unable to see it, and so is
+  # every `firstArguments(after: "label:")` rule in the canary class.
+  # `$T_LU_FETCHARG` is deliberately ABSENT from this mutation's expectations for
+  # that reason, and `$T_LU_ARGBLIND` is the rail that proves the absence is the
+  # rule's shape rather than an oversight.
+  LU02)
+    snippet OLD <<'EOF'
+            failed.detail = DurableThrowRecord.dayZeroAttemptDetail(for: error)
+EOF
+    snippet NEW <<'EOF'
+            failed.detail = String(describing: error)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LU03 — DT05's escape at a sixth site. The factory is still called (so a
+  # file-wide `contains` stays true), every `detail:` argument still spells a
+  # wholesome local, and the local holds prose. Only a read of THIS SITE can see
+  # it, which is why `$T_LU_FETCHARG` is absent from the expectations: the
+  # argument rule staying green here is a measurement, not a prediction.
+  LU03)
+    snippet OLD <<'EOF'
+            let cost = RediffRefetchPolicy.BandwidthCost(precheckBytes: 0, fullFetchBytes: fullFetchBytes)
+            await recorder.recordOutcome(.dayZeroUnmarked(
+                assetId: candidate.assetId,
+                cost: cost,
+                mint: .blocked(
+                    .fetchFailed,
+                    detail: DurableThrowRecord.dayZeroAttemptDetail(for: error))))
+EOF
+    snippet NEW <<'EOF'
+            let cost = RediffRefetchPolicy.BandwidthCost(precheckBytes: 0, fullFetchBytes: fullFetchBytes)
+            _ = DurableThrowRecord.dayZeroAttemptDetail(for: error)
+            let laundered = String(describing: error)
+            await recorder.recordOutcome(.dayZeroUnmarked(
+                assetId: candidate.assetId,
+                cost: cost,
+                mint: .blocked(
+                    .fetchFailed,
+                    detail: laundered)))
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LU04 — THE WRONG ERROR. A perfectly well-formed token recording an identity
+  # that is not the one that was thrown: every value test stays green, the
+  # grammar is intact, the prefix is right, and the column answers a question
+  # nobody asked. sckv's SF04/SF10 shape at this site, and the only rail that can
+  # see it reads the ARGUMENT.
+  LU04)
+    snippet OLD <<'EOF'
+                    detail: DurableThrowRecord.dayZeroAttemptDetail(for: error))))
+EOF
+    snippet NEW <<'EOF'
+                    detail: DurableThrowRecord.dayZeroAttemptDetail(for: CancellationError()))))
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LU05 — the day-0 family joins the JOB family. Two populations, in two
+  # different columns of two different tables, answering to one grep.
+  LU05)
+    snippet OLD <<'EOF'
+    static let dayZeroThrewPrefix = "dayZeroThrew"
+EOF
+    snippet NEW <<'EOF'
+    static let dayZeroThrewPrefix = "jobThrew"
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LU06 — the token loses its prefix and becomes bare identity fields. It stays
+  # perfectly parseable and, in THIS column, uniquely dangerous: `lastDetail` has
+  # never held any other value, so there is nothing to contrast a fragment
+  # against and no reader can tell a truncated token from a complete one.
+  LU06)
+    snippet OLD <<'EOF'
+    static func dayZeroAttemptDetail(for error: Error) -> String {
+        "\(dayZeroThrewPrefix)(\(identityFields(of: error)))"
+    }
+EOF
+    snippet NEW <<'EOF'
+    static func dayZeroAttemptDetail(for error: Error) -> String {
+        identityFields(of: error)
+    }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LU07 — AR09's shape at this factory: an inline copy of the identity grammar,
+  # bypassing `UnclassifiedModelFailure.identity` and `.sanitize`. A second ruler
+  # for a quantity one function already measures, and it drifts in two places at
+  # once — the deepest underlying link becomes `none`, and a hostile domain leaks
+  # the characters that end a field in a key=value record.
+  LU07)
+    snippet OLD <<'EOF'
+    static func dayZeroAttemptDetail(for error: Error) -> String {
+        "\(dayZeroThrewPrefix)(\(identityFields(of: error)))"
+    }
+EOF
+    snippet NEW <<'EOF'
+    static func dayZeroAttemptDetail(for error: Error) -> String {
+        let bridged = error as NSError
+        return "\(dayZeroThrewPrefix)(domain=\(bridged.domain)"
+            + ",code=\(bridged.code),under=\(UnclassifiedModelFailure.noUnderlyingToken))"
+    }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LU08 — THE MUTATION THE ONE-PREFIX DECISION IS SCORED ON. `advance` carries
+  # `lastDetail` forward the way it already carries suppression and retry-claim
+  # history, which reads as a consistent-looking change and is the opposite of
+  # what this column needs. The token omits an arm discriminator ONLY because
+  # `lastExit` carries one and is written from the same outcome in the same
+  # statement; carry the detail forward and a row reads `lastExit=marked` beside
+  # an earlier fetch failure's token.
+  LU08)
+    snippet OLD <<'EOF'
+            lastDetail: outcome.detail.map { String($0.prefix(detailCharCap)) },
+EOF
+    snippet NEW <<'EOF'
+            lastDetail: (outcome.detail ?? record?.lastDetail)
+                .map { String($0.prefix(detailCharCap)) },
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LU09 — the cap bites the token. This is the hazard named as a LIMIT rather
+  # than fixed: the cut is not self-marking, so a truncated identity reads as a
+  # complete one — which is exactly what happened to both surviving field rows,
+  # each cut mid-word at `UserIn`.
+  LU09)
+    snippet OLD <<'EOF'
+    static let detailCharCap = 200
+EOF
+    snippet NEW <<'EOF'
+    static let detailCharCap = 100
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # LU10 — a non-null `lastDetail` stops meaning "a throw was caught". The
+  # positive-claim direction: with every exit inventing a detail, the column can
+  # no longer distinguish a failure that carried a cause from a decline that
+  # carried none, and `under=none`'s whole discipline is undone one level up.
+  LU10)
+    snippet OLD <<'EOF'
+    static func blocked(_ exit: RediffDayZeroExit, detail: String? = nil) -> RediffDayZeroMintOutcome {
+        RediffDayZeroMintOutcome(exit: exit, detail: detail)
+    }
+EOF
+    snippet NEW <<'EOF'
+    static func blocked(_ exit: RediffDayZeroExit, detail: String? = nil) -> RediffDayZeroMintOutcome {
+        RediffDayZeroMintOutcome(exit: exit, detail: detail ?? "exit=\(exit.rawValue)")
     }
 EOF
     patch "$file" "$OLD" "$NEW" ;;

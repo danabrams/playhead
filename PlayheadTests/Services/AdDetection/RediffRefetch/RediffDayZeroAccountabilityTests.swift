@@ -586,7 +586,7 @@ struct RediffDayZeroServiceAccountabilityTests {
     }
 
     @Test("a THROWN fetch records .fetchFailed — distinguishable from a clean no-mark run")
-    func thrownFetchIsNamed() async {
+    func thrownFetchIsNamed() async throws {
         let fetcher = KWaySpyFullFetcher()
         fetcher.throwOnCallIndex = 1        // mid-batch network failure
         let minter = SpyDayZeroMinter()
@@ -602,7 +602,28 @@ struct RediffDayZeroServiceAccountabilityTests {
         // diverged" run used to be byte-identical in the database (both
         // `.dayZeroUnmarked`, neither incrementing any counter).
         #expect(mint.exit == .fetchFailed)
-        #expect(mint.detail != nil, "the error text is carried")
+        // playhead-luie: `!= nil` used to be the whole assertion, and prose
+        // satisfies it. This arm catches a `URLSession` download, so what it
+        // wrote into `rediff_day_zero_attempts.lastDetail` was an
+        // `NSURLErrorDomain` dump carrying the enclosure URL, a localized
+        // sentence and a heap pointer — two such rows survive in a preserved
+        // device snapshot and differ from each other only in the pointer.
+        let detail = try #require(mint.detail, "the durable cause is not carried")
+        #expect(detail.hasPrefix(DurableThrowRecord.dayZeroThrewPrefix + "("))
+        #expect(detail.hasSuffix(")"))
+        #expect(!detail.contains(" "), "a durable token must survive a key=value read: \(detail)")
+        #expect(!detail.contains("http"), "an enclosure URL is in the durable column: \(detail)")
+        // The token is a FUNCTION of the error, so the same throw twice is the
+        // same string twice — the property a `GROUP BY` needs and the one the
+        // description could not offer. The spy throws
+        // `NSError(domain: "KWaySpyFullFetcher", code: 1)`; the token is
+        // reconstructed from an EQUAL error rather than from a literal, so a
+        // change to the grammar moves both sides together and this rail keeps
+        // asserting identity rather than a copied spelling.
+        #expect(detail == DurableThrowRecord.dayZeroAttemptDetail(
+            for: NSError(domain: "KWaySpyFullFetcher", code: 1)
+        ))
+        #expect(detail.contains("domain=KWaySpyFullFetcher"), "the identity is not the spy's")
         #expect(cost.fullFetchBytes == 54_000_000, "the copy fetched before the throw is still billed")
         #expect(summary.failedCount == 1)
     }
@@ -1910,7 +1931,38 @@ struct RediffDayZeroMintExitTests {
                 "the slot was found and the windows were BUILT — only the write failed")
         #expect(outcome.markCount == 0, "markCount counts what was PERSISTED, never what was built")
         #expect(outcome.bSidesAccepted == 2)
-        #expect(outcome.detail != nil, "a persist failure without its error text is not diagnosable")
+        // playhead-luie: `!= nil` was the whole assertion here, and it is
+        // satisfied by prose — this arm wrote `String(describing: error)` into a
+        // durable column for as long as the test was green. The detail is now a
+        // named token, asserted from a REAL `AnalysisStore` throw rather than a
+        // fabricated error, which is what makes this the runtime witness the
+        // other five sites of this class never had.
+        let detail = try #require(outcome.detail,
+                                  "a persist failure without its durable cause is not diagnosable")
+        #expect(detail.hasPrefix(DurableThrowRecord.dayZeroThrewPrefix + "("))
+        #expect(detail.hasSuffix(")"))
+        #expect(!detail.contains(" "), "a durable token must survive a key=value read: \(detail)")
+        // The two spellings this bead retired, and the payload they carried.
+        // `ad_windows` is the dropped table's name and it appears verbatim in
+        // SQLite's message, so its absence is a positive check that the PROSE is
+        // gone rather than that the string merely changed shape.
+        #expect(!detail.contains("ad_windows"), "the SQLite sentence is still in the column: \(detail)")
+        #expect(!detail.contains("no such table"), "the SQLite sentence is still in the column: \(detail)")
+
+        // ANTI-VACUITY, and it is the direction that matters: the two
+        // expectations above pass trivially if the retired spelling would ALSO
+        // have been free of that payload. It would not. A real throw from this
+        // same store, over the same missing table, described the way this arm
+        // used to describe it:
+        var retired = ""
+        do {
+            try await store.execForTesting("INSERT INTO ad_windows DEFAULT VALUES")
+            Issue.record("the fault was not installed: the write did not throw")
+        } catch {
+            retired = String(describing: error)
+        }
+        #expect(retired.contains("ad_windows"),
+                "vacuity: the retired spelling carried no payload either, so this rail proves nothing")
         #expect(outcome.exit.spentBandwidth, "the fetch was already paid for by this point")
     }
 
