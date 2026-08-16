@@ -6127,6 +6127,26 @@ actor AnalysisWorkScheduler {
             // as one transaction so the increment + terminal mark +
             // lease release roll back together if any one fails.
             let attempts = job.attemptCount + 1
+            // playhead-3lc3: BOUND ONCE, ABOVE BOTH WRITES. The durable cause is
+            // now a named, countable token — `jobThrew(domain=…,code=…,under=…)`
+            // — and no longer `error.localizedDescription`, which is LOCALIZED
+            // and therefore ungroupable across devices, and which for the error
+            // types that actually reach here (neither `AnalysisStoreError` nor
+            // `AnalysisCoordinatorError` conforms to `LocalizedError`) resolves
+            // to Foundation's bridged apology plus a bare number:
+            // `The operation couldn’t be completed. (Playhead.AnalysisStoreError
+            // error 12.)`. That number is the enum's TAG, not its declaration
+            // index, so adding an ASSOCIATED VALUE to any existing case
+            // renumbers it — see `DurableThrowRecord.swift`, which measured it.
+            //
+            // Both arms and the trailing log line consume this ONE local, so the
+            // column, the terminal decision and the log cannot disagree about the
+            // throw in front of them — `playhead-sckv`'s discipline one column
+            // over. THE `maxAttemptsReachedPrefix` STAYS IN FRONT on the terminal
+            // arm: `isAttemptCapTerminal(_:)` matches on it and is read by the
+            // cap-out-retry rescue, so it is load-bearing and only the suffix
+            // changes.
+            let throwRecord = DurableThrowRecord.jobLastErrorCode(for: error)
             if attempts >= Self.maxAttemptCount {
                 await commitOutcomeArm(
                     "outerCatch.supersede",
@@ -6136,7 +6156,7 @@ actor AnalysisWorkScheduler {
                         stateUpdate: .init(
                             state: "superseded",
                             nextEligibleAt: nil,
-                            lastErrorCode: "\(Self.maxAttemptsReachedPrefix)\(error.localizedDescription)"
+                            lastErrorCode: "\(Self.maxAttemptsReachedPrefix)\(throwRecord)"
                         )
                     )
                 )
@@ -6174,7 +6194,7 @@ actor AnalysisWorkScheduler {
                         stateUpdate: .init(
                             state: "failed",
                             nextEligibleAt: nextEligible,
-                            lastErrorCode: error.localizedDescription
+                            lastErrorCode: throwRecord
                         )
                     )
                 )
@@ -6205,7 +6225,11 @@ actor AnalysisWorkScheduler {
                     metadataJSON: outerRequeueMetadata
                 )
             }
-            logger.error("Job \(job.jobId) threw: \(error)")
+            // playhead-3lc3: `token=` CONSUMES the value the row was given, and
+            // the raw description stays HERE, in the ephemeral log, and only
+            // here — 59c8's split. A log line can afford prose; a column a
+            // device pull groups by cannot.
+            logger.error("Job \(job.jobId) threw: token=\(throwRecord, privacy: .public) detail=\(error)")
         }
     }
 

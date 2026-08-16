@@ -2597,7 +2597,10 @@ actor BackgroundProcessingService {
             // ledger row can attribute "what did recovery sweep" —
             // expired leases recovered, stranded session jobs, etc.
             // A throwing reconcile() rolls into the .failed outcome
-            // with the localizedDescription as the error code.
+            // with a `recoveryThrew(…)` token as the error code.
+            // (playhead-3lc3: this comment said `localizedDescription`
+            // and the code below said `String(describing:)` — two
+            // different wrong answers for one column. Both are gone.)
             do {
                 let report = try await reconciler.reconcile()
                 // playhead-hygc.1.4 (R2 fix): mirror the backfill
@@ -2732,12 +2735,28 @@ actor BackgroundProcessingService {
                     self.logger.info("Pre-analysis recovery work task threw on cancellation; deferring to expiration handler")
                     return
                 }
+                // playhead-3lc3: BOUND ONCE, ABOVE THE WRITE. The durable cause
+                // is a named, countable token — `recoveryThrew(domain=…,code=…,
+                // under=…)` — and no longer `String(describing: error)`, which
+                // for the `CustomStringConvertible` error types that reach this
+                // catch renders the enum's PROSE rather than its case, and for
+                // an `NSError` renders 300 characters of framework sentence into
+                // the one column a device pull groups by. Its sibling arm eight
+                // lines up has written the named `reconciler_unavailable` since
+                // playhead-hygc.1.4; this arm is the one that never got one.
+                //
+                // The log line consumes the same local, and the raw description
+                // stays there and only there.
+                let throwRecord = DurableThrowRecord.backgroundTaskLastErrorCode(for: error)
+                self.logger.error(
+                    "Pre-analysis recovery failed: token=\(throwRecord, privacy: .public) detail=\(error)"
+                )
                 await startRunTask.value
                 await runLedger.finishRun(
                     runId: runId,
                     update: BackgroundTaskRunOutcomeUpdate(
                         outcome: .failed,
-                        lastErrorCode: String(describing: error)
+                        lastErrorCode: throwRecord
                     )
                 )
             }

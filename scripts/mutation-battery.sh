@@ -1202,6 +1202,13 @@ UMF="Playhead/Services/AdDetection/UnclassifiedModelFailure.swift"
 # which was still writing `String(describing:)` into the durable column three
 # days after 59c8 removed it from the generic one. Added for the SF series.
 SFR="Playhead/Services/AdDetection/StoreFailureRecord.swift"
+# playhead-3lc3: the same record again, in the three columns nobody had swept —
+# `analysis_jobs.lastErrorCode`, `analysis_sessions.failureReason` and
+# `background_task_runs.lastErrorCode`. Added for the DT series. It carries
+# 59c8's grammar rather than sckv's, because all four of its call sites catch
+# `any Error` and there is no case name to record; the call sites themselves are
+# `$SCHED`, `$ACOORD` and `$BGPS`, all three already registered below.
+DTR="Playhead/Services/Diagnostics/DurableThrowRecord.swift"
 RUNNER="Playhead/Services/AdDetection/BackfillJobRunner.swift"
 FMCLS="Playhead/Services/AdDetection/FoundationModelClassifier.swift"
 PROBE="Playhead/Services/Capabilities/FoundationModelsUsabilityProbe.swift"
@@ -1428,7 +1435,7 @@ MUTABLE_FILES=(
   "$FPRUN"
   "$ORCH" "$STORE" "$CTRL" "$VIEW" "$TRIG" "$RSVC" "$TRUST" "$NPV" "$NPVM"
   "$BWPOL" "$KICK" "$KCOORD" "$SEAMS" "$ACT" "$ADSVC" "$PODC"
-  "$THROT" "$FMREF" "$UMF" "$SFR" "$RUNNER" "$FMCLS" "$PROBE" "$PERMC" "$RT" "$MODEL" "$INGO" "$INVF"
+  "$THROT" "$FMREF" "$UMF" "$SFR" "$DTR" "$RUNNER" "$FMCLS" "$PROBE" "$PERMC" "$RT" "$MODEL" "$INGO" "$INVF"
   "$FMDL" "$FMCP"
   "$SWEEP" "$SCANORD" "$SCRATCH" "$SCRATCHH" "$FMSUP" "$GATE"
   "$FUSION" "$DSPAN" "$EXTENT" "$RSLOT" "$ATOMEV"
@@ -1578,6 +1585,24 @@ FOCUSED_SUITES=(
   -only-testing:PlayheadTests/StoreFailureRecordTests
   -only-testing:PlayheadTests/StoreFailureRecordWireInTests
   -only-testing:PlayheadTests/StoreFailureRecordSourceCanaryTests
+  # playhead-3lc3: the three-column throw record (DT series). Three suites, and
+  # the split is sckv's argument applied to a wider blast radius. The token suite
+  # is pure and instant, and it is also where the two READERS of these columns
+  # are asserted — `isAttemptCapTerminal(_:)` (the cap-out rescue) and
+  # `coverageGuardRecoveryVerdict` (the only SQL predicate over any of the
+  # three) — because a value test is exactly the right instrument for "could
+  # this token be mistaken for that one". The SOURCE canary is the only thing
+  # that can see a call site whose VALUE is a perfect token and whose ARGUMENT is
+  # wrong: a literal `resumeState: .queued` at the coordinator builds a
+  # grammatical `sessionPipelineThrew-queued(…)` for a session that died in
+  # backfill, and no runtime assertion on the value can tell. And the wire-in is
+  # its own suite because only ONE of the four sites is reachable from a test —
+  # `AnalysisJobRunner.run(_:)` is non-throwing and `AnalysisJobReconciler` is a
+  # concrete type, so the scheduler's and the recovery task's catch-alls have no
+  # seam; `DurableThrowRecordTests`' header states that rather than implying it.
+  -only-testing:PlayheadTests/DurableThrowRecordTests
+  -only-testing:PlayheadTests/DurableThrowRecordWireInTests
+  -only-testing:PlayheadTests/DurableThrowRecordSourceCanaryTests
   # playhead-ronl: the retry-charge rails (RN series). Four suites, because the
   # claim spans three layers and no one of them can see the others: the two pure
   # rules (instant, no store); the WITNESS the two write sites read, which lives
@@ -3184,6 +3209,58 @@ T_SF_NOPROSE="StoreFailureRecordSourceCanaryTests/testTheTypedStoreArmNoLongerPe
 T_SF_DECISION="StoreFailureRecordSourceCanaryTests/testTheTokenNamesTheDecisionTheRowWasRetiredUnder"
 T_SF_SITE="StoreFailureRecordSourceCanaryTests/testTheTokenNamesTheJobsOwnPhaseAndReachesTheWrite"
 
+# ---- playhead-3lc3: the durable throw record, three columns (DT series) ----
+#
+# The same defect class as UM and SF, in the three columns those two beads did
+# not reach, across FOUR call sites: `analysis_jobs.lastErrorCode` (×2, both
+# `error.localizedDescription`), `analysis_sessions.failureReason` and
+# `background_task_runs.lastErrorCode` (both `String(describing: error)`).
+#
+# TWO THINGS THIS SERIES HAS TO COVER THAT SF's DOES NOT.
+#
+#   1. THE READERS ARE REAL AND THEY SWITCH ON CONTENT. sckv found ONE
+#      production consumer of its column and proved it could not match. Here
+#      there are two that CAN: `isAttemptCapTerminal(_:)` matches
+#      `hasPrefix("maxAttemptsReached:")` on exactly the row site 1 writes and
+#      drives the cap-out-retry rescue, and `recoverCoverageGuardFailures()` is a
+#      SQL `LIKE` over `analysis_sessions.failureReason` whose verdict then
+#      PARSES A DOUBLE out of the matched string. DT02 and DT13 are those two,
+#      from the writing side and the prefix side.
+#   2. THE `resumeState` ARGUMENT IS SF04's SHAPE IN A WIDER FORM. A literal
+#      leaves a perfectly well-formed token naming a phase the session was not
+#      in, and — because the DEBUG seam is what the wire-in drives — a literal at
+#      the PRODUCTION site leaves the wire-in green as well. DT03 and DT04 are
+#      the two directions, and they are deliberately in different batches with
+#      different expectations so neither can be credited off the other's damage.
+#
+# Same ';' rule as the UM and SF blocks — no display name here contains one.
+T_DT_LOCALIZED="THE REAL DEFECT: localizedDescription wrote a LOCALIZED sentence and an enum ORDINAL"
+T_DT_SPELLINGS="THE REAL DEFECT: the exact spellings, pinned from the running program"
+T_DT_PROSE="THE REAL DEFECT: String(describing:) wrote the enum's PROSE, not its case"
+T_DT_NOPAYLOAD="THE DEFECT: no case's payload reaches any of the three durable values"
+T_DT_CONDITION="each token is prefixed by the CONDITION it records"
+T_DT_FAMILY="the three prefixes collide with nothing else these columns hold"
+T_DT_COUNT="a prefix query returns every throw of one kind and nothing else"
+T_DT_CAPREADER="the terminal arm still satisfies isAttemptCapTerminal, and the retry arm still does not"
+T_DT_SWEEP="no session token can be mistaken for a coverage-guard failure"
+T_DT_RESUMESTATE="the session token names the resumeState the write destroys"
+T_DT_GRAMMAR="the token's grammar is closed: no whitespace, one balanced parenthetical"
+T_DT_SANITIZE="and the sanitizer really fires on a domain that would break the grammar"
+T_DT_UNDER="under= is a positive claim, never an absence"
+T_DT_DEEPEST="the deepest underlying link is the one carried, not the first"
+T_DT_SHARED="the three factories share ONE identity grammar"
+T_DT_WIREIN="the pipeline's catch-all persists the token, and the coverage-guard sweep skips it"
+# The source canaries. XCTest, so \`Suite/method\`. Every one is about a CALL
+# SITE: a token that is correct as a value and wrong as an argument, or a
+# durable write that quietly went back to prose while the type stayed perfect.
+T_DT_SCHEDSITE="DurableThrowRecordSourceCanaryTests/testTheSchedulerArmsNoLongerPersistADescription"
+T_DT_CAPPREFIX="DurableThrowRecordSourceCanaryTests/testTheTerminalArmStillCarriesTheAttemptCapPrefixInFront"
+T_DT_COORDSITE="DurableThrowRecordSourceCanaryTests/testTheCoordinatorNoLongerPersistsADescription"
+T_DT_RESUMEARG="DurableThrowRecordSourceCanaryTests/testTheSessionTokenIsGivenTheStateThePipelineWasActuallyDriving"
+T_DT_SEAMARG="DurableThrowRecordSourceCanaryTests/testTheDebugSeamRecordsTheStateItStandsInFor"
+T_DT_BPSSITE="DurableThrowRecordSourceCanaryTests/testTheRecoveryTaskNoLongerPersistsADescription"
+T_DT_BINDONCE="DurableThrowRecordSourceCanaryTests/testEverySiteBindsTheRecordOnceAboveItsWrite"
+
 # ---- playhead-dl9k: the no-progress terminal is re-requested (DL series) ----
 #
 # THE RESCUE AND ITS BOUNDARY, which are one claim. playhead-y8f3 re-requests an
@@ -3694,6 +3771,87 @@ MUTATIONS=(
   # because it reddens the wire-in as well as the permanence rule and would
   # therefore launder any RUNNER partner.
   "SF09|951|SFR|$T_SF_PERMANENCE"
+
+  # ---- playhead-3lc3: the durable throw record, three columns (DT series) ----
+  #
+  # Sixteen mutations, nine batches. The two grouping rules are SF's: members
+  # must not share a PATCH ANCHOR, and — the one that decides the verdict — a
+  # member must not be able to produce ANOTHER member's expected failure. Two
+  # pairs came close and are deliberately split:
+  #
+  #   * DT03 and DT04 are the same defect at the two `sessionFailureReason` call
+  #     sites (production and DEBUG seam). Before this bead the canary asserted
+  #     BOTH in one method, which would have let either mutant be credited for
+  #     the other's damage; the method is split, and the two rails sit in
+  #     different batches.
+  #   * DT08 and DT09 both attack `under=`. DT08 DELETES the field (breaking the
+  #     grammar as well), DT09 empties its sentinel (leaving the grammar intact),
+  #     which is why they are two rails and not one — an empty value is the
+  #     silent version and is the one a reader cannot tell from a dropped field.
+
+  # Batch 952 — DT01, THE DEFECT VERBATIM on the retry arm: the localized
+  # apology back in `analysis_jobs.lastErrorCode`. Paired with a DTR mutation
+  # that cannot touch a call site, so neither can produce the other's failure.
+  "DT01|952|SCHED|$T_DT_SCHEDSITE"
+  "DT08|952|DTR|$T_DT_UNDER"
+
+  # Batch 953 — DT02 drops `maxAttemptsReached:` from in FRONT of the token on
+  # the TERMINAL arm. The column still holds a perfectly countable
+  # `jobThrew(...)`, every value test stays green, and
+  # `isAttemptCapTerminal(_:)` stops recognising capped rows — so the cap-out
+  # retry rescue silently abandons every episode that reaches the attempt cap.
+  # Only a rail reading the call site can see it.
+  "DT02|953|SCHED|$T_DT_CAPPREFIX"
+  "DT11|953|DTR|$T_DT_SANITIZE"
+
+  # Batch 954 — DT03 hard-codes `resumeState: .queued` at the PRODUCTION site
+  # while the seam keeps passing `.backfill`. THE MUTATION THIS SERIES EXISTS
+  # FOR, and the reason the wire-in is not enough: the wire-in drives the SEAM,
+  # so it stays green, every value test stays green, and every session that dies
+  # in backfill is recorded as having died in queued.
+  "DT03|954|ACOORD|$T_DT_RESUMEARG"
+  "DT12|954|DTR|$T_DT_CONDITION"
+
+  # Batch 955 — DT04 is the mirror: the SEAM drifts to `.queued` while
+  # production keeps its parameter. Alone, because it reddens the wire-in too
+  # and would launder any partner.
+  "DT04|955|ACOORD|$T_DT_SEAMARG;$T_DT_WIREIN"
+
+  # Batch 956 — DT05 restores `String(describing: error)` at the coordinator.
+  # It reddens the resume-argument rail as well, because with the production
+  # call gone that rail's "first call" becomes the seam's; both are listed, so
+  # neither is credited to something else. DT13 is disjoint: it never touches a
+  # call site.
+  "DT05|956|ACOORD|$T_DT_COORDSITE;$T_DT_RESUMEARG"
+  "DT13|956|DTR|$T_DT_SWEEP"
+
+  # Batch 957 — DT06 restores `String(describing: error)` in the recovery task.
+  # DT10 drops the `-<resumeState>` segment from the session token, which is the
+  # one discriminator the write itself destroys.
+  "DT06|957|BGPS|$T_DT_BPSSITE"
+  "DT10|957|DTR|$T_DT_RESUMESTATE;$T_DT_WIREIN"
+
+  # Batch 958 — DT07 gives two different CONDITIONS one prefix, so a device pull
+  # counting job throws also counts session throws. DT14 recomputes the record
+  # for the log line instead of consuming the bound local: two measurements of
+  # one quantity, harmless while the function is pure and exactly how the
+  # scheduler came to compute a case name BELOW the write that needed it.
+  "DT07|958|DTR|$T_DT_FAMILY"
+  "DT14|958|SCHED|$T_DT_BINDONCE"
+
+  # Batch 959 — DT09 is DT08's silent half: the field survives, its SENTINEL
+  # does not, so "there was no underlying error" and "the field was dropped"
+  # become one reading. DT16 gives `backgroundTaskLastErrorCode` its own inline
+  # copy of the identity grammar — a second ruler for a quantity one function
+  # already measures.
+  "DT09|959|DTR|$T_DT_UNDER"
+  "DT16|959|DTR|$T_DT_SHARED"
+
+  # Batch 960 — DT15 records the OUTER identity as the underlying one. On the
+  # field row 59c8 was filed from that is `-1` from a framework declining to
+  # classify, recorded as though it were the condition. Alone: it reddens the
+  # `under=` rule as well.
+  "DT15|960|DTR|$T_DT_DEEPEST"
 
   # Batch 909 — JC10. Delete the confidence upgrade outright: the guard still
   # recognises the existing row and still refuses to duplicate it, so the row
@@ -8252,6 +8410,22 @@ describe_mutation() {
     SF08) echo "sckv: the case-name sanitizer is bypassed, so a name carrying a comma or an equals could forge a field in the record" ;;
     SF09) echo "sckv: the token NEGATES the permanence — every row carries the other row's fate, and the field looks healthy" ;;
     SF10) echo "sckv: the retry charge is hard-coded recoverable while the token reports the truth — a permanent error burns the whole budget" ;;
+    DT01) echo "3lc3: the scheduler's retry arm persists error.localizedDescription again — a LOCALIZED apology plus an enum tag, in a column a device pull groups by" ;;
+    DT02) echo "3lc3: the terminal arm drops maxAttemptsReached: from in FRONT of the token — isAttemptCapTerminal stops matching and every capped episode is abandoned" ;;
+    DT03) echo "3lc3: the coordinator hard-codes the resume phase while the seam keeps the real one — a well-formed token naming a phase the session was not in" ;;
+    DT04) echo "3lc3: the DEBUG seam drifts off the phase it stands in for, so every wire-in built on it witnesses a road production never takes" ;;
+    DT05) echo "3lc3: the enum's PROSE back in failureReason, laundered through the local — the evasion that defeats any rule stated over the argument alone" ;;
+    DT06) echo "3lc3: the recovery task persists String(describing: error) again, while its sibling arm eight lines up writes a named token" ;;
+    DT07) echo "3lc3: two different CONDITIONS answer to one prefix — a pull counting job throws also counts session throws" ;;
+    DT08) echo "3lc3: the token drops under= — countable, but nothing in it names which framework condition it was" ;;
+    DT09) echo "3lc3: the under= sentinel becomes an empty string — 'no underlying chain' and 'the field was dropped' stop being distinguishable" ;;
+    DT10) echo "3lc3: the session token carries a CONSTANT phase, and the row cannot say otherwise because the write overwrites state" ;;
+    DT11) echo "3lc3: the domain sanitizer is bypassed, so a reflected type name carrying an equals can forge a field in the record" ;;
+    DT12) echo "3lc3: the recovery token joins the JOB family, so two populations become one number" ;;
+    DT13) echo "3lc3: the session token answers to the coverage-guard prefix — the one SQL predicate over these columns, feeding a parser that divides by what it matched" ;;
+    DT14) echo "3lc3: the log line recomputes the record instead of consuming the bound local — two measurements of one quantity" ;;
+    DT15) echo "3lc3: the OUTER identity is recorded as the UNDERLYING one — the framework declining to classify, read as the condition" ;;
+    DT16) echo "3lc3: the recovery token inlines its own copy of the identity grammar — a second ruler that drifts the first time the shared one is tightened" ;;
     UM01) echo "59c8: the field row is ADMITTED to FMDaemonRefusal — a wrapper code over a 25-case enum gets an it-will-heal reading and an unbounded FM bill" ;;
     UM02) echo "59c8: the durable column carries String(describing: error) again — 300 characters of NSError prose in the one column a device pull groups by" ;;
     UM03) echo "59c8: the token drops the under= discriminator — countable, but nothing in it names which framework condition it was" ;;
@@ -9037,6 +9211,233 @@ EOF
     snippet NEW <<'EOF'
                     priorRetryCount: job.retryCount,
                     isPermanent: false,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # ---- playhead-3lc3: the durable throw record, three columns (DT series) ----
+
+  # DT01 — THE DEFECT VERBATIM on the scheduler's RETRY arm: the pre-3lc3 line,
+  # `error.localizedDescription`, back in `analysis_jobs.lastErrorCode`. That
+  # value is LOCALIZED, and for the types that reach this catch it is
+  # Foundation's bridged apology plus the enum's TAG — a number that moves when
+  # an associated value is added to any case above it.
+  DT01)
+    snippet OLD <<'EOF'
+                            lastErrorCode: throwRecord
+EOF
+    snippet NEW <<'EOF'
+                            lastErrorCode: error.localizedDescription
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DT02 — the TERMINAL arm keeps the token and loses the `maxAttemptsReached:`
+  # prefix in front of it. The column still holds a perfectly countable value and
+  # every value test stays green; `AnalysisWorkScheduler.isAttemptCapTerminal(_:)`
+  # stops matching, and the cap-out-retry rescue silently abandons every episode
+  # that reaches the attempt cap. A reader, killed from the writing side.
+  DT02)
+    snippet OLD <<'EOF'
+                            lastErrorCode: "\(Self.maxAttemptsReachedPrefix)\(throwRecord)"
+EOF
+    snippet NEW <<'EOF'
+                            lastErrorCode: throwRecord
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DT03 — the PRODUCTION coordinator site hard-codes the phase while the DEBUG
+  # seam keeps `.backfill`. SF04's shape, and worse here: the wire-in drives the
+  # SEAM, so it stays green too. Every session that dies in backfill is recorded
+  # as having died in queued, in a well-formed token nothing can fault.
+  DT03)
+    snippet OLD <<'EOF'
+                for: error,
+                resumeState: resumeState
+EOF
+    snippet NEW <<'EOF'
+                for: error,
+                resumeState: .queued
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DT04 — the mirror: the DEBUG seam drifts off the path it stands in for while
+  # production keeps its parameter. A seam that persists a different phase from
+  # the production road cannot witness that road, and every wire-in built on it
+  # is asserting about something production never does.
+  DT04)
+    snippet OLD <<'EOF'
+                for: error,
+                resumeState: .backfill
+EOF
+    snippet NEW <<'EOF'
+                for: error,
+                resumeState: .queued
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DT05 — the enum's PROSE back in `analysis_sessions.failureReason`, LAUNDERED
+  # THROUGH THE LOCAL. This is the mutant that found a hole in its own canary: an
+  # argument-only rule sees a wholesome `failureReason: throwRecord` and passes,
+  # while the column takes `String(describing:)` — which for
+  # `AnalysisCoordinatorError` is the `CustomStringConvertible` prose, carrying
+  # the case's payload and naming no case. The canary now pins the BINDING too.
+  DT05)
+    snippet OLD <<'EOF'
+            let throwRecord = DurableThrowRecord.sessionFailureReason(
+                for: error,
+                resumeState: resumeState
+            )
+EOF
+    snippet NEW <<'EOF'
+            let throwRecord = String(describing: error)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DT06 — the pre-3lc3 line verbatim in the pre-analysis recovery task's failure
+  # arm. Its SIBLING eight lines up has written the named `reconciler_unavailable`
+  # since playhead-hygc.1.4; this is the arm that never got one.
+  DT06)
+    snippet OLD <<'EOF'
+                        lastErrorCode: throwRecord
+EOF
+    snippet NEW <<'EOF'
+                        lastErrorCode: String(describing: error)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DT07 — two different CONDITIONS answer to one prefix. A device pull counting
+  # job throws also counts session throws, and neither number means what it says.
+  DT07)
+    snippet OLD <<'EOF'
+    static let jobThrewPrefix = "jobThrew"
+EOF
+    snippet NEW <<'EOF'
+    static let jobThrewPrefix = "sessionPipelineThrew"
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DT08 — drop the `under=` field. The token still names the condition and the
+  # outer identity, so it still counts; what it stops carrying is the only value
+  # that says WHICH framework condition it was — and on the field row 59c8 was
+  # filed from, the outer identity is a framework declining to classify.
+  DT08)
+    snippet OLD <<'EOF'
+        return "domain=\(UnclassifiedModelFailure.sanitize(identity.domain))"
+            + ",code=\(identity.code)"
+            + ",under=\(under)"
+EOF
+    snippet NEW <<'EOF'
+        _ = under
+        return "domain=\(UnclassifiedModelFailure.sanitize(identity.domain))"
+            + ",code=\(identity.code)"
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DT09 — DT08's SILENT half. The field survives, its sentinel does not, so
+  # "the error carried no underlying chain" and "the field was dropped" become
+  # one reading. The grammar stays intact, which is exactly why this needs its
+  # own rail rather than riding on DT08's.
+  DT09)
+    snippet OLD <<'EOF'
+            under = UnclassifiedModelFailure.noUnderlyingToken
+EOF
+    snippet NEW <<'EOF'
+            under = ""
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DT10 — the session token carries a CONSTANT phase. The same collapse DT03
+  # makes from the call site, made here from the value: a throw out of `queued`
+  # and a throw out of `backfill` answer to one string, and the row cannot say
+  # otherwise because the write that carries this reason overwrites `state`.
+  DT10)
+    snippet OLD <<'EOF'
+        "\(sessionPipelineThrewPrefix)-\(resumeState.rawValue)(\(identityFields(of: error)))"
+EOF
+    snippet NEW <<'EOF'
+        "\(sessionPipelineThrewPrefix)-failed(\(identityFields(of: error)))"
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DT11 — the domain sanitizer is bypassed, so a domain carrying a comma or an
+  # equals can forge a field inside a record parsed as `key=value`. Native Swift
+  # error domains are reflected TYPE NAMES, so this is not hypothetical for a
+  # function-local or generic type.
+  DT11)
+    snippet OLD <<'EOF'
+        return "domain=\(UnclassifiedModelFailure.sanitize(identity.domain))"
+EOF
+    snippet NEW <<'EOF'
+        return "domain=\(identity.domain)"
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DT12 — the recovery task's token joins the JOB family. `background_task_runs`
+  # failures are then counted by a prefix query an operator wrote to count
+  # `analysis_jobs` failures, and the two populations become one number.
+  DT12)
+    snippet OLD <<'EOF'
+        "\(recoveryThrewPrefix)(\(identityFields(of: error)))"
+EOF
+    snippet NEW <<'EOF'
+        jobLastErrorCode(for: error)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DT13 — the session token answers to the COVERAGE-GUARD prefix. That is the
+  # only SQL predicate over any of these three columns, and the sweep behind it
+  # parses a DOUBLE out of whatever it matches and divides by it. Every failed
+  # session would be selected by a recovery it was never meant for.
+  DT13)
+    snippet OLD <<'EOF'
+    static let sessionPipelineThrewPrefix = "sessionPipelineThrew"
+EOF
+    snippet NEW <<'EOF'
+    static let sessionPipelineThrewPrefix = "transcript coverage "
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DT14 — the log line recomputes the record instead of consuming the bound
+  # local. Two measurements of one quantity: harmless while the function is pure,
+  # and exactly the shape that let `BackfillJobRunner` compute a case name TWO
+  # LINES BELOW the write that needed it and hand the column prose instead.
+  DT14)
+    snippet OLD <<'EOF'
+            logger.error("Job \(job.jobId) threw: token=\(throwRecord, privacy: .public) detail=\(error)")
+EOF
+    snippet NEW <<'EOF'
+            logger.error("Job \(job.jobId) threw: token=\(DurableThrowRecord.jobLastErrorCode(for: error), privacy: .public) detail=\(error)")
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DT15 — the OUTER identity is recorded as the UNDERLYING one. An identity that
+  # is not an identity: on 59c8's field row the outer is
+  # `FoundationModels.LanguageModelError / -1`, i.e. the framework saying it did
+  # not classify, and the condition is always further in.
+  DT15)
+    snippet OLD <<'EOF'
+            under = "\(UnclassifiedModelFailure.sanitize(underlyingDomain))/\(underlyingCode)"
+EOF
+    snippet NEW <<'EOF'
+            _ = (underlyingDomain, underlyingCode)
+            under = "\(UnclassifiedModelFailure.sanitize(identity.domain))/\(identity.code)"
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DT16 — the recovery token gets its own inline copy of the identity grammar.
+  # A second ruler for a quantity one function already measures: the two agree
+  # today and drift the first time the shared one is tightened, which is the
+  # whole reason `sanitize` is delegated rather than restated.
+  DT16)
+    snippet OLD <<'EOF'
+    static func backgroundTaskLastErrorCode(for error: Error) -> String {
+        "\(recoveryThrewPrefix)(\(identityFields(of: error)))"
+    }
+EOF
+    snippet NEW <<'EOF'
+    static func backgroundTaskLastErrorCode(for error: Error) -> String {
+        let bridged = error as NSError
+        return "\(recoveryThrewPrefix)(domain=\(bridged.domain),code=\(bridged.code))"
+    }
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -17888,6 +18289,7 @@ rec_file()   {
     FMREF) printf '%s' "$FMREF" ;;
     UMF)   printf '%s' "$UMF" ;;
     SFR)   printf '%s' "$SFR" ;;
+    DTR)   printf '%s' "$DTR" ;;
     RUNNER) printf '%s' "$RUNNER" ;;
     FMCLS) printf '%s' "$FMCLS" ;;
     PROBE) printf '%s' "$PROBE" ;;
