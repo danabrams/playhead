@@ -450,6 +450,28 @@ struct InvariantViolation: Sendable, Hashable, Codable {
         /// mid-session mint.
         case adWindowIngestCensus = "ad_window_ingest_census"
 
+        /// playhead-zxqj: one accounting of a "Dismiss ad" gesture — the
+        /// transcript veto (`SkipOrchestrator.revertByTimeRange`) — naming the
+        /// range, how many durable rows it reverted, and, when it did not
+        /// commit, WHY.
+        ///
+        /// **Healthy by design**, on the ``adWindowIngestCensus`` precedent and
+        /// for the identical reason. The gesture has roughly a dozen refusal
+        /// points and every one of them returned a bare `false` that the sheet
+        /// swallowed, so "the listener never tapped Dismiss" and "the listener
+        /// tapped Dismiss and the app refused" produced a BYTE-IDENTICAL
+        /// database and an identical screen. Dan reported exactly that on
+        /// 2026-08-15 ("i couldnt dismiss an ad"), and the 08-15 device pull
+        /// could not settle it: the two failing episodes carry zero
+        /// `manualVeto` corrections, which is equally consistent with a refusal
+        /// and with never having tried. Only a line that is always written can
+        /// tell those apart, and it is what makes the NEXT occurrence
+        /// decidable from a pull rather than from a hypothesis.
+        ///
+        /// The body is ``ManualVetoOutcomeAudit/auditDescription``. Volume is
+        /// one row per gesture — a few per episode at most.
+        case manualVetoOutcome = "manual_veto_outcome"
+
         /// playhead-cthe Invariant A (part 1): `PlaybackReadiness
         /// == .complete` but the coverage record is nil OR its
         /// `isComplete` flag is false. "complete" must be backed by a
