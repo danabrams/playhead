@@ -1609,12 +1609,19 @@ FOCUSED_SUITES=(
   # is not the only instrument. `DurableThrowRecordDayZeroTests` owns the value
   # half (the token's grammar, its stability across two constructions of one
   # error, the hop into `lastDetail` under the 200-char cap);
-  # `RediffDayZeroAccountabilityTests` is the only place either arm is driven for
-  # real — a spy fetcher that throws mid-batch, and a genuine `AnalysisStore`
-  # write failure produced by dropping the table. A value test cannot see which
-  # arm wrote, and the service test cannot see the grammar.
+  # the runtime half is driven from two OTHER suites in one file, and they are
+  # different structs: `RediffDayZeroServiceAccountabilityTests` runs the FETCH
+  # arm against a spy fetcher that throws mid-batch, and
+  # `RediffDayZeroMintExitTests` runs the PERSIST arm against a genuine
+  # `AnalysisStore` write failure produced by dropping the table. A value test
+  # cannot see which arm wrote, and neither service test can see the grammar.
+  #
+  # Naming the FILE's first suite instead of these two is exactly the mistake the
+  # "an expectation names a test that never ran" guard caught on the first run of
+  # batch 967 — a suite name that reads right and reaches nothing.
   -only-testing:PlayheadTests/DurableThrowRecordDayZeroTests
-  -only-testing:PlayheadTests/RediffDayZeroAccountabilityTests
+  -only-testing:PlayheadTests/RediffDayZeroServiceAccountabilityTests
+  -only-testing:PlayheadTests/RediffDayZeroMintExitTests
   # playhead-ronl: the retry-charge rails (RN series). Four suites, because the
   # claim spans three layers and no one of them can see the others: the two pure
   # rules (instant, no store); the WITNESS the two write sites read, which lives
