@@ -1333,10 +1333,69 @@ actor BackfillJobRunner {
                     from: job.progressCursor,
                     to: checkpointBox.lastDurableProgressCursor
                 )
+                // bd-1tl: a stable case-name token so on-device Console.app
+                // shows the actual case (e.g. `evidenceEventBodyMismatch`)
+                // instead of the useless bridged "Playhead.AnalysisStoreError
+                // error 9" string from `localizedDescription`. The case name is
+                // the single most-actionable diagnostic for triaging persistence
+                // failures from the field — without it, every device failure
+                // requires reverse-engineering the enum ordinal back to a case.
+                //
+                // playhead-sckv: BOUND ONCE, AND ABOVE THE WRITE. `caseName` was
+                // computed two lines BELOW the write that needed it and spent on
+                // a log line; `isPermanent` was computed twice, once for the
+                // charge and once for that same log line. Three calls of a pure
+                // function cannot disagree, so this is not a defect in itself —
+                // but the durable column, the only reader that survives the
+                // process, was handed prose while both values sat in scope. Now
+                // the arithmetic, the token and the log all consume these two
+                // locals, so there is one measurement of each quantity.
+                let caseName = Self.caseName(of: storeError)
+                let isPermanent = Self.isPermanent(storeError)
                 let persistedRetryCount = Self.storeFailureRetryCount(
                     priorRetryCount: job.retryCount,
-                    isPermanent: Self.isPermanent(storeError),
+                    isPermanent: isPermanent,
                     bankedNewAudio: bankedNewAudio
+                )
+                // playhead-sckv: the durable cause is a NAMED, COUNTABLE token —
+                // `storeFailure-<phase>(case=…,permanent=…)` — and no longer
+                // `String(describing: storeError)`. That was the SECOND site in
+                // this runner writing a Swift value's description into the
+                // durable column, one arm above the one playhead-59c8 fixed, and
+                // it is what playhead-v7q6 forbids.
+                //
+                // `AnalysisStoreError` conforms to `CustomStringConvertible`, so
+                // `String(describing:)` resolved to the enum's own PROSE rather
+                // than to the reflected `case(payload)` form — `.notFound`
+                // persisted as `Row not found`, which names no case at all, and
+                // `.insertFailed` as `Insert failed: <the SQLite message>`. So
+                // the column carried a per-row sentence no `GROUP BY` can count
+                // and no prefix grep can find, written for humans and therefore
+                // free to be reworded, with nothing in the type system noticing.
+                //
+                // The DISPOSITION and the ARITHMETIC are untouched: the row is
+                // still `failed`, never `deferred`; `FMDaemonRefusal` gains no
+                // case; `storeFailureRetryCount` decides the charge exactly as
+                // playhead-ronl left it. This bead changes only what the column
+                // SAYS about the row it already wrote.
+                //
+                // `permanent=` is in the token rather than left to be re-derived
+                // because it cannot be: `insertFailed` classifies both ways
+                // (permanent only for `payloadTooLarge:` and an impossible window
+                // geometry), so the case name alone cannot tell a row charged one
+                // attempt from a row short-circuited to `maxRetries` — which is
+                // the whole decision this arm made.
+                //
+                // The local is `storeFailureReason`, NOT `…Cause`, for the reason
+                // `UnclassifiedModelFailure` states at its own call site: the
+                // daemon-refusal vocabulary is RESERVED in this file, and
+                // `FMDaemonRefusalSourceCanaryTests` counts every `reason:`
+                // argument ending in `Cause` by substring. This is not a daemon
+                // refusal and must not answer to one's names.
+                let storeFailureReason = StoreFailureRecord.deferReason(
+                    caseName: caseName,
+                    isPermanent: isPermanent,
+                    phase: job.phase
                 )
                 // R4-Fix7: wrap the markBackfillJobFailed write so a
                 // racing terminal transition (e.g. another runner just
@@ -1346,7 +1405,7 @@ actor BackfillJobRunner {
                 do {
                     try await store.markBackfillJobFailed(
                         jobId: job.jobId,
-                        reason: String(describing: storeError),
+                        reason: storeFailureReason,
                         retryCount: persistedRetryCount
                     )
                 } catch {
@@ -1354,15 +1413,6 @@ actor BackfillJobRunner {
                         "Failed to mark FM job failed (likely racing terminal transition): \(job.jobId, privacy: .public) error=\(error.localizedDescription, privacy: .public)"
                     )
                 }
-                // bd-1tl: Use the enum's `description` (via String(describing:))
-                // and a stable case-name token so on-device Console.app shows
-                // the actual case (e.g. `evidenceEventBodyMismatch`) instead
-                // of the useless bridged "Playhead.AnalysisStoreError error 9"
-                // string from `localizedDescription`. The case name is the
-                // single most-actionable diagnostic for triaging persistence
-                // failures from the field — without it, every device failure
-                // requires reverse-engineering the enum ordinal back to a case.
-                let caseName = Self.caseName(of: storeError)
                 // playhead-ronl: the count and the two inputs that decided it,
                 // printed rather than left to be re-derived from the row. A
                 // support bundle that shows `retryCount=0 banked=true` says the
@@ -1370,8 +1420,13 @@ actor BackfillJobRunner {
                 // permanent=true` says it was retired because it can never
                 // succeed. Those are different events and the row alone cannot
                 // tell them apart.
+                //
+                // playhead-sckv: `token=` CONSUMES the value the row was given,
+                // and the raw description stays HERE, in the ephemeral log, and
+                // only here — 59c8's split, applied to the second arm. A log line
+                // can afford prose; a column a device pull groups by cannot.
                 logger.error(
-                    "FM backfill job \(job.jobId, privacy: .public) failed: case=\(caseName, privacy: .public) detail=\(String(describing: storeError), privacy: .public) permanent=\(Self.isPermanent(storeError), privacy: .public) banked=\(bankedNewAudio, privacy: .public) retryCount=\(persistedRetryCount, privacy: .public)"
+                    "FM backfill job \(job.jobId, privacy: .public) failed: token=\(storeFailureReason, privacy: .public) case=\(caseName, privacy: .public) detail=\(String(describing: storeError), privacy: .public) permanent=\(isPermanent, privacy: .public) banked=\(bankedNewAudio, privacy: .public) retryCount=\(persistedRetryCount, privacy: .public)"
                 )
                 if let metricsEventId = await recordFailedOperationalMetricsEvent(
                     job: job,

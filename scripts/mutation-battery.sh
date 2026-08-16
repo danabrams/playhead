@@ -1171,6 +1171,10 @@ FMREF="Playhead/Services/AdDetection/FMDaemonRefusal.swift"
 # of `$FMREF`: that file answers "did the daemon decline to serve this job", and
 # 59c8's verdict is that `ModelManagerError 1001` cannot answer that either way.
 UMF="Playhead/Services/AdDetection/UnclassifiedModelFailure.swift"
+# playhead-sckv: the same record one arm UP — the typed `AnalysisStoreError` arm,
+# which was still writing `String(describing:)` into the durable column three
+# days after 59c8 removed it from the generic one. Added for the SF series.
+SFR="Playhead/Services/AdDetection/StoreFailureRecord.swift"
 RUNNER="Playhead/Services/AdDetection/BackfillJobRunner.swift"
 FMCLS="Playhead/Services/AdDetection/FoundationModelClassifier.swift"
 PROBE="Playhead/Services/Capabilities/FoundationModelsUsabilityProbe.swift"
@@ -1397,7 +1401,7 @@ MUTABLE_FILES=(
   "$FPRUN"
   "$ORCH" "$STORE" "$CTRL" "$VIEW" "$TRIG" "$RSVC" "$TRUST" "$NPV" "$NPVM"
   "$BWPOL" "$KICK" "$KCOORD" "$SEAMS" "$ACT" "$ADSVC" "$PODC"
-  "$THROT" "$FMREF" "$UMF" "$RUNNER" "$FMCLS" "$PROBE" "$PERMC" "$RT" "$MODEL" "$INGO" "$INVF"
+  "$THROT" "$FMREF" "$UMF" "$SFR" "$RUNNER" "$FMCLS" "$PROBE" "$PERMC" "$RT" "$MODEL" "$INGO" "$INVF"
   "$FMDL" "$FMCP"
   "$SWEEP" "$SCANORD" "$SCRATCH" "$SCRATCHH" "$FMSUP" "$GATE"
   "$FUSION" "$DSPAN" "$EXTENT" "$RSLOT" "$ATOMEV"
@@ -1531,6 +1535,22 @@ FOCUSED_SUITES=(
   # duplicating that harness.
   -only-testing:PlayheadTests/UnclassifiedModelFailureTests
   -only-testing:PlayheadTests/UnclassifiedModelFailureSourceCanaryTests
+  # playhead-sckv: the typed-store-failure rails (SF series). Three suites, and
+  # the split is the same argument 59c8's makes one arm down, plus one this bead
+  # could not borrow. The token suite is pure and instant. The SOURCE canary is
+  # the only thing that can see a call site whose VALUE is perfect and whose
+  # ARGUMENTS are wrong — a hard-coded `isPermanent: true` builds a well-formed
+  # token for a row charged on the real value, and every runtime assertion stays
+  # green. And the wire-in is carried rather than folded into
+  # `FMDaemonMetadataStallRunnerTests` (where 59c8 put its end-to-end pair)
+  # because that harness reaches the GENERIC arm: its throws come out of the FM
+  # runtime, and nothing there can make the STORE throw. The malformed-cohort
+  # injection is what reaches this arm, and it is the only place the token's
+  # `permanent=true` and the row's short-circuit to `maxRetries` can be observed
+  # as one decision.
+  -only-testing:PlayheadTests/StoreFailureRecordTests
+  -only-testing:PlayheadTests/StoreFailureRecordWireInTests
+  -only-testing:PlayheadTests/StoreFailureRecordSourceCanaryTests
   # playhead-ronl: the retry-charge rails (RN series). Four suites, because the
   # claim spans three layers and no one of them can see the others: the two pure
   # rules (instant, no store); the WITNESS the two write sites read, which lives
@@ -3106,6 +3126,37 @@ T_UM_RECORDS="playhead-59c8: and it is recorded so a device pull can COUNT it"
 T_UM_NOPROSE="UnclassifiedModelFailureSourceCanaryTests/testTheGenericArmNoLongerPersistsTheFrameworkDescription"
 T_UM_CONSTANTS="UnclassifiedModelFailureSourceCanaryTests/testTheCauseAndEventReachTheRecordThroughTheConstants"
 
+# ---- playhead-sckv: the TYPED store arm's durable record (SF series) ----
+#
+# The same defect one arm UP, and it outlived its own fix by three days: the
+# `AnalysisStoreError` arm was still writing `String(describing: storeError)`
+# into `backfill_jobs.deferReason` while the generic arm below it had been
+# writing a token since 59c8. Worse than the generic case in two ways. The runner
+# ALREADY computed both halves of the honest answer — `caseName(of:)` two lines
+# BELOW the write, `isPermanent(_:)` twice — and discarded them into a log line.
+# And `AnalysisStoreError` conforms to `CustomStringConvertible`, so
+# `String(describing:)` resolved to the enum's PROSE rather than to the reflected
+# form the bead predicted: `.notFound` persisted as `Row not found`, which names
+# no case at all.
+#
+# Same ';' rule as the UM block above — no display name here contains one.
+T_SF_DEFECT="THE REAL DEFECT: the old write was the enum's PROSE, and it swallowed the case name"
+T_SF_NOPAYLOAD="THE DEFECT: no case's payload reaches the durable value"
+T_SF_PHASE="the token is prefixed by the CONDITION and names the phase"
+T_SF_FAMILY="the prefix collides with no other cause this column holds"
+T_SF_COUNT="a prefix query returns every store failure and nothing else"
+T_SF_PERMANENCE="permanence is NOT derivable from the case name: insertFailed classifies both ways"
+T_SF_STATED="both permanence values are stated, neither is an absence"
+T_SF_CASENAME="the case name is carried verbatim for every case"
+T_SF_GRAMMAR="the token's grammar is closed: no whitespace, one balanced parenthetical"
+T_SF_SANITIZE="and the sanitizer really fires on a name that would break the grammar"
+T_SF_WIREIN="a real AnalysisStoreError lands in the column as a token, and it names the fate the row was given"
+# The two source canaries. XCTest, so \`Suite/method\`. Both are about a CALL
+# SITE: a token that is correct as a value and wrong as an argument.
+T_SF_NOPROSE="StoreFailureRecordSourceCanaryTests/testTheTypedStoreArmNoLongerPersistsTheDescription"
+T_SF_DECISION="StoreFailureRecordSourceCanaryTests/testTheTokenNamesTheDecisionTheRowWasRetiredUnder"
+T_SF_SITE="StoreFailureRecordSourceCanaryTests/testTheTokenNamesTheJobsOwnPhaseAndReachesTheWrite"
+
 # ---- playhead-dl9k: the no-progress terminal is re-requested (DL series) ----
 #
 # THE RESCUE AND ITS BOUNDARY, which are one claim. playhead-y8f3 re-requests an
@@ -3555,6 +3606,67 @@ MUTATIONS=(
   # `normalizedText` would still pass — which is why `$T_GJ_REPAIR` asserts
   # `text` is unchanged as well as asserting `normalizedText` changed.
   "GJ06|945|STORE|$T_GJ_REPAIR"
+
+  # ---- playhead-sckv: the typed store arm's durable record (SF series) ----
+  #
+  # Ten mutations, six batches. Two rules decided the grouping, and the second
+  # cost a re-plan: members must not share a PATCH ANCHOR (three of them rewrite
+  # the same token line, so they can never be applied together), and — the one
+  # that matters for the verdict — a member must not be able to produce ANOTHER
+  # member's expected failure. `SF03` and `SF10` both redden the wire-in, so
+  # pairing them would have credited SF10 off SF03's damage: a rail scored KILLED
+  # by a mutation that is not its own.
+
+  # Batch 946 — SF01, THE DEFECT VERBATIM. The pre-sckv line restored: the enum's
+  # own prose back in the one column a device pull groups by. Alone, because it
+  # reddens both the source canary and the wire-in, which between them are most
+  # of this series' expectations.
+  "SF01|946|RUNNER|$T_SF_NOPROSE;$T_SF_WIREIN"
+
+  # Batch 947 — SF04 hard-codes `isPermanent: true` at the token call while the
+  # retry charge keeps reading the real value. THE MUTATION THIS SERIES EXISTS
+  # FOR: the token stays perfectly well-formed, every value test in the file
+  # stays green, the wire-in stays green (its case IS permanent), and a
+  # recoverable store error is recorded in the column as one that can never
+  # succeed. Only a rail comparing the two ARGUMENTS can see it. SF06 drops the
+  # phase from the VALUE — disjoint, because the canary reads arguments and never
+  # reads `$SFR` at all.
+  "SF04|947|RUNNER|$T_SF_DECISION"
+  "SF06|947|SFR|$T_SF_PHASE"
+
+  # Batch 948 — SF07 gives the token a CONSTANT phase, the same collapse SF06
+  # makes from the other side, and the reason the canary's phase check is a
+  # separate method from its permanence one. SF02 drops the `,permanent=` field.
+  # Disjoint: SF07 is invisible to every value test (`.fullEpisodeScan` is the
+  # constant AND the phase the wire-in runs) and SF02 is invisible to a canary
+  # that reads arguments rather than output.
+  "SF07|948|RUNNER|$T_SF_SITE"
+  "SF02|948|SFR|$T_SF_GRAMMAR"
+
+  # Batch 949 — SF10 charges the budget on a hard-coded `false` while the token
+  # reports the real permanence. The mirror of SF04 and the costlier direction: a
+  # permanent store error burns three attempts proving it is permanent, with the
+  # column reading `permanent=true` the whole way down. Only the wire-in can see
+  # it, because only the wire-in reads the token and the row's `retryCount` in
+  # one breath — which is exactly why its partner must be unable to redden the
+  # wire-in. SF08 cannot: the thirteen real case names are already clean, so
+  # bypassing the sanitizer changes nothing any real error can produce.
+  "SF10|949|RUNNER|$T_SF_WIREIN"
+  "SF08|949|SFR|$T_SF_SANITIZE"
+
+  # Batch 950 — SF05 collapses the prefix onto 59c8's `unclassifiedModelError`
+  # family, so an operator counting throws the app could NOT classify counts
+  # persistence failures it classified exactly. SF03 drops `case=`. Disjoint by
+  # construction: the prefix tests never read the parenthetical and the case-name
+  # test never reads the prefix.
+  "SF05|950|SFR|$T_SF_FAMILY;$T_SF_COUNT"
+  "SF03|950|SFR|$T_SF_CASENAME"
+
+  # Batch 951 — SF09 NEGATES the permanence in the token: the field is present,
+  # well-formed and countable, and every row carries the other row's fate. Alone,
+  # because it reddens the wire-in as well as the permanence rule and would
+  # therefore launder any RUNNER partner.
+  "SF09|951|SFR|$T_SF_PERMANENCE"
 
   # Batch 909 — JC10. Delete the confidence upgrade outright: the guard still
   # recognises the existing row and still refuses to duplicate it, so the row
@@ -8103,6 +8215,16 @@ describe_mutation() {
     CN10) echo "iu0t R5: an uncanonicalized atomize call SPLIT ACROSS LINES — the site finder was a literal substring, so one line break removed the call site from the walk" ;;
     CN11) echo "iu0t R5: CN06 spelled as a NEGATION (pass != fast) — the same collapse as instance #5, which the collapse-shape pattern required == to see" ;;
     CN12) echo "iu0t R5: LAUNDERING — the site canonicalizes and then filters to final anyway, which passed because the check tested for the TOKEN canonicalize( rather than the value" ;;
+    SF01) echo "sckv: the typed store arm persists the enum's PROSE again — notFound becomes 'Row not found', which names no case at all" ;;
+    SF02) echo "sckv: the token drops permanent= — the decision that retired the row, and the one thing case= cannot answer" ;;
+    SF03) echo "sckv: the token drops case= — countable, but naming none of the thirteen store errors it could have been" ;;
+    SF04) echo "sckv: the token's permanence is hard-coded true while the charge reads the real one — a well-formed value and a wrong argument" ;;
+    SF05) echo "sckv: the token joins 59c8's unclassifiedModelError- family — the prefix an operator greps to count UNclassified throws" ;;
+    SF06) echo "sckv: the token drops the phase, so a full-episode scan and a targeted audit window answer to one string" ;;
+    SF07) echo "sckv: the call site passes a CONSTANT phase — the same collapse as SF06, invisible to every value test" ;;
+    SF08) echo "sckv: the case-name sanitizer is bypassed, so a name carrying a comma or an equals could forge a field in the record" ;;
+    SF09) echo "sckv: the token NEGATES the permanence — every row carries the other row's fate, and the field looks healthy" ;;
+    SF10) echo "sckv: the retry charge is hard-coded recoverable while the token reports the truth — a permanent error burns the whole budget" ;;
     UM01) echo "59c8: the field row is ADMITTED to FMDaemonRefusal — a wrapper code over a 25-case enum gets an it-will-heal reading and an unbounded FM bill" ;;
     UM02) echo "59c8: the durable column carries String(describing: error) again — 300 characters of NSError prose in the one column a device pull groups by" ;;
     UM03) echo "59c8: the token drops the under= discriminator — countable, but nothing in it names which framework condition it was" ;;
@@ -8755,6 +8877,139 @@ EOF
             return .metadataStall
         }
         return nil
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # ---- playhead-sckv: the typed store arm's durable record (SF series) ----
+
+  # SF01 — THE DEFECT VERBATIM. The pre-sckv line: the enum's own prose back in
+  # the durable column. `AnalysisStoreError` is `CustomStringConvertible`, so
+  # this is not even the reflected `case(payload)` form — `.notFound` persists as
+  # `Row not found`, naming no case at all, and `.insertFailed` as
+  # `Insert failed: <the SQLite message>`, which is per-row and unbounded.
+  SF01)
+    snippet OLD <<'EOF'
+                        reason: storeFailureReason,
+EOF
+    snippet NEW <<'EOF'
+                        reason: String(describing: storeError),
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # SF02 — drop the `permanent=` field. The token still counts and still names
+  # the case; what it stops carrying is the decision that RETIRED the row, which
+  # is the one thing a reader cannot re-derive from `case=` (`insertFailed`
+  # classifies both ways).
+  SF02)
+    snippet OLD <<'EOF'
+            + "(case=\(sanitize(caseName)),permanent=\(isPermanent))"
+EOF
+    snippet NEW <<'EOF'
+            + "(case=\(sanitize(caseName)))"
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # SF03 — drop `case=`. The column then names the condition and the phase and
+  # nothing whatever about which of thirteen store errors threw, which is the
+  # half `bd-1tl` added `caseName(of:)` for in the first place.
+  SF03)
+    snippet OLD <<'EOF'
+            + "(case=\(sanitize(caseName)),permanent=\(isPermanent))"
+EOF
+    snippet NEW <<'EOF'
+            + "(permanent=\(isPermanent))"
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # SF04 — the token's permanence is a hard-coded `true` while the retry charge
+  # keeps reading the real one. THE MUTATION THIS SERIES EXISTS FOR: the value is
+  # well-formed, every pure test of the token passes, and a recoverable store
+  # error charged a single attempt is recorded in the durable column as one that
+  # can never succeed. Two functions, each individually correct.
+  SF04)
+    snippet OLD <<'EOF'
+                    caseName: caseName,
+                    isPermanent: isPermanent,
+EOF
+    snippet NEW <<'EOF'
+                    caseName: caseName,
+                    isPermanent: true,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # SF05 — join 59c8's family. `grep -c 'unclassifiedModelError-'` then counts
+  # throws the app could NOT classify together with store errors it classified
+  # exactly, which is the count that bead's own prefix exists to keep clean.
+  SF05)
+    snippet OLD <<'EOF'
+    static let causePrefix = "storeFailure"
+EOF
+    snippet NEW <<'EOF'
+    static let causePrefix = "unclassifiedModelError"
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # SF06 — drop the phase from the VALUE, keeping the greppable prefix intact so
+  # only the phase assertion can see it. A full-episode scan and a targeted audit
+  # window then answer to one string.
+  SF06)
+    snippet OLD <<'EOF'
+        "\(causePrefix)-\(phase.rawValue)"
+EOF
+    snippet NEW <<'EOF'
+        "\(causePrefix)-"
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # SF07 — the same collapse from the CALL SITE: a constant phase. Invisible to
+  # every value test, because the phase the wire-in runs is the constant.
+  SF07)
+    snippet OLD <<'EOF'
+                    isPermanent: isPermanent,
+                    phase: job.phase
+EOF
+    snippet NEW <<'EOF'
+                    isPermanent: isPermanent,
+                    phase: .fullEpisodeScan
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # SF08 — bypass the sanitizer. Unreachable from the thirteen real case names,
+  # which is exactly why it needs a rail: without the anti-vacuity control, "no
+  # case name was changed by sanitizing" is what a sanitizer that does nothing
+  # also reports.
+  SF08)
+    snippet OLD <<'EOF'
+        UnclassifiedModelFailure.sanitize(caseName)
+EOF
+    snippet NEW <<'EOF'
+        caseName
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # SF09 — NEGATE the permanence in the token. The field is present, well-formed
+  # and countable, and every row carries the other row's fate.
+  SF09)
+    snippet OLD <<'EOF'
+            + "(case=\(sanitize(caseName)),permanent=\(isPermanent))"
+EOF
+    snippet NEW <<'EOF'
+            + "(case=\(sanitize(caseName)),permanent=\(!isPermanent))"
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # SF10 — the mirror of SF04, and the direction that costs more: the ARITHMETIC
+  # is hard-coded recoverable while the token reports the real permanence, so a
+  # permanent store error burns three attempts proving it is permanent with the
+  # column saying `permanent=true` the whole way down.
+  SF10)
+    snippet OLD <<'EOF'
+                    priorRetryCount: job.retryCount,
+                    isPermanent: isPermanent,
+EOF
+    snippet NEW <<'EOF'
+                    priorRetryCount: job.retryCount,
+                    isPermanent: false,
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
