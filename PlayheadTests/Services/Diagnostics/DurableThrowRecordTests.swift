@@ -2271,6 +2271,50 @@ final class DurableThrowRecordSourceCanaryTests: XCTestCase {
         )
     }
 
+    /// **THE ARGUMENT-SHAPED RULE ABOVE HAS EXACTLY ONE HOLE AND THIS IS IT.**
+    ///
+    /// Found by running mutant Q05, not by reasoning: a SIXTH catch added to
+    /// `AnalysisJobRunner`, laundering a description through a local
+    /// (`let poison = "sixthStage: \(error)"; … .failed(code: poison)`) and
+    /// SURVIVED every rail in this class. The tree-wide rule sees the wholesome
+    /// identifier `poison`; the per-site rails below are anchored on the five
+    /// log messages that exist and never read the new site; the exact-count
+    /// rails still find their five; and the closed-world file set is unchanged
+    /// because the new site is in the same file. The whole gate returned rc=0.
+    ///
+    /// The remedy is the one `scripts/singleton-slot-allowlist.json` uses: an
+    /// inventory that is CLOSED IN BOTH DIRECTIONS. Every argument this carrier
+    /// is ever given is enumerated, so a new construction — of any spelling, in
+    /// this file or another — fails here and has to be signed for.
+    ///
+    /// Three kinds are allowed, and nothing else:
+    ///   * `throwRecord`, the local bound from `DurableThrowRecord` (five stage
+    ///     catches, each pinned to its own site below);
+    ///   * `code`, the local `zeroCoverageDisposition` builds from the closed
+    ///     `TranscriptFailureReason.failureClass` vocabulary;
+    ///   * one compile-time LITERAL, which is identical on every device and in
+    ///     every locale and therefore already groups.
+    func testTheCarrierConstructionsAreAnExactInventory() throws {
+        let payloads = try stopReasonPayloads()
+        let counted = Dictionary(grouping: payloads, by: \.argument).mapValues(\.count)
+        XCTAssertEqual(
+            counted,
+            [
+                "throwRecord": DurableThrowRecord.RunnerStage.allCases.count,
+                "code": 2,
+                "\"noshardswithindesiredcoverage\"": 1,
+            ],
+            """
+            The set of values given to `AnalysisOutcome.StopReason`'s payload has changed. This is \
+            the inventory that closes the one hole the argument-shaped rule above cannot see: a NEW \
+            construction laundering a description through a local of any other name (mutant Q05, \
+            which survived everything else in this class). If the new site is legitimate, give it a \
+            per-site rail below and then extend this expectation — do not widen it alone. Found: \
+            \(counted)
+            """
+        )
+    }
+
     /// The hop itself, pinned. The rule above is scoped to the carrier because
     /// the carrier is what feeds the column; if that stops being true the rule
     /// is guarding nothing and must be moved rather than left looking green.
