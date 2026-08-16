@@ -1055,6 +1055,16 @@ actor SkipOrchestrator {
         suggestWindows[id]
     }
 
+    /// playhead-zxqj: the managed tier's live decision for `id`.
+    ///
+    /// The companion of `_suggestWindowForTesting`, added for the same reason:
+    /// `activeWindowIDs()` cannot see this, because a reverted managed window
+    /// stays IN `windows` carrying its terminal state — so membership is the
+    /// wrong question and was going to be asked anyway.
+    func _managedDecisionStateForTesting(id: String) -> SkipDecisionState? {
+        windows[id]?.decisionState
+    }
+
     func _isSuggestResolutionProvisionalForTesting(id: String) -> Bool {
         provisionallyResolvingSuggestWindowIds.contains(id)
     }
@@ -5169,14 +5179,23 @@ actor SkipOrchestrator {
             )
 
         if sourceLifecycleIsCurrent {
+            // playhead-zxqj: the managed twin of the suggest rule below, and
+            // the same argument. A producer update landing during the store
+            // hop made this `continue`, so the live window kept a live CUE for
+            // a span whose durable row now reads `reverted` — the app would go
+            // on skipping audio the listener had just said was not an ad,
+            // which is the "a user mark outranks an inferred one in BOTH
+            // directions" rule pointed the wrong way. The revision check is
+            // retained for the ids the transaction did not cover.
             for (id, expectedManaged) in managedRevertTargets {
                 guard var managed = windows[id],
                       managed.decisionState != .reverted,
                       managed.decisionState != .suppressed,
-                      AdWindowMaterialIdentity.sameProducerRevision(
-                          managed.adWindow,
-                          expectedManaged.adWindow
-                      )
+                      revertedWindowIds.contains(id)
+                        || AdWindowMaterialIdentity.sameProducerRevision(
+                            managed.adWindow,
+                            expectedManaged.adWindow
+                        )
                 else {
                     continue
                 }

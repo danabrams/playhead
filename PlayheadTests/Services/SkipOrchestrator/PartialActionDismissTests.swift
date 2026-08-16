@@ -377,12 +377,15 @@ struct PartialActionDismissTests {
         )
     }
 
-    // 6: the instrument. A rule that never fires is indistinguishable from a
-    // codebase with no violations, so prove it fires by making it fire — in
-    // BOTH directions, because a recorder wired only to the failure path
-    // cannot tell "refused" from "not instrumented yet".
-    @Test("every dismiss records its outcome, committed or refused", .timeLimit(.minutes(1)))
-    func everyDismissRecordsItsOutcome() async throws {
+    // 6 and 7: the instrument. A rule that never fires is indistinguishable
+    // from a codebase with no violations, so prove it fires by making it fire.
+    // Split in two, one test per DIRECTION, because a recorder wired only to
+    // the failure path cannot tell "refused" from "not instrumented yet" and a
+    // single test covering both cannot say which half regressed.
+
+    /// Shared fixture: an episode with one mark-only window at [100, 160].
+    private func makeInstrumentedSession() async throws
+        -> (AnalysisStore, SkipOrchestrator) {
         let store = try await makeTestStore()
         try await store.insertAsset(
             makeSkipTestAnalysisAsset(id: "asset-1", episodeId: "ep-1")
@@ -397,12 +400,16 @@ struct PartialActionDismissTests {
             podcastId: "podcast-1",
             playbackLifecycleGeneration: 3
         )
+        return (store, orchestrator)
+    }
 
+    @Test("a COMMITTED dismiss is recorded", .timeLimit(.minutes(1)))
+    func aCommittedDismissIsRecorded() async throws {
+        let (_, orchestrator) = try await makeInstrumentedSession()
         #expect(
             await orchestrator.manualVetoOutcomeCount(.committed) == 0,
             "precondition: no gesture has been recorded yet"
         )
-
         #expect(await orchestrator.revertByTimeRange(
             start: 100,
             end: 130,
@@ -416,6 +423,11 @@ struct PartialActionDismissTests {
             await orchestrator.manualVetoOutcomeCount(.committed) == 1,
             "a committed dismiss must be recorded, not only a refused one"
         )
+    }
+
+    @Test("a REFUSED dismiss is recorded, and names which refusal", .timeLimit(.minutes(1)))
+    func aRefusedDismissIsRecorded() async throws {
+        let (_, orchestrator) = try await makeInstrumentedSession()
 
         // A sheet whose captured playback lifecycle has moved on. Benign, and
         // the one refusal here that is not a defect — but it must still be
@@ -451,8 +463,151 @@ struct PartialActionDismissTests {
             "a refusal over unclaimed audio must name itself"
         )
         #expect(
-            await orchestrator.manualVetoOutcomeCount(.committed) == 1,
+            await orchestrator.manualVetoOutcomeCount(.committed) == 0,
             "no refusal may be booked as a commit"
+        )
+    }
+
+    // 8 — THE INVARIANT, isolated. Tests 5 and 9 are races the cleanup can
+    // prevent; this is the state no cleanup can. The live session and the
+    // store are written separately and re-analysis REPLACES an asset's window
+    // rows (new ids), so a live entry the store has no row for is an ordinary
+    // consequence of the two lifetimes rather than an exotic one — and
+    // `persistRevertedAdWindowsIfCurrent` requires `fetchAdWindow` to return a
+    // row for EVERY expected target. Before this bead that one live-only
+    // window rolled the whole transaction back, so the persisted window beside
+    // it — which the gesture could always have reverted — was left alone.
+    @Test(
+        "a live window with no durable row cannot refuse the dismiss beside it",
+        .timeLimit(.minutes(1))
+    )
+    func liveOnlyWindowCannotRefuseTheDismissBesideIt() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(
+            makeSkipTestAnalysisAsset(id: "asset-1", episodeId: "ep-1")
+        )
+        // Persisted, revertible, and squarely inside the range.
+        try await store.insertAdWindow(
+            markOnlyWindow(id: "w-persisted", start: 150, end: 200)
+        )
+        let orchestrator = await makeOrchestrator(store: store)
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: "ep-1",
+            podcastId: "podcast-1",
+            playbackLifecycleGeneration: 3
+        )
+        // Delivered to the live session and NEVER written to the store.
+        // `.applied` so the tier routing keeps it in the MANAGED dictionary
+        // rather than carding it as a suggestion — the tier is incidental
+        // here; what this test is about is the missing row.
+        await orchestrator.receiveAdWindows([
+            makeSkipTestAdWindow(
+                id: "w-live-only",
+                startTime: 100,
+                endTime: 160,
+                confidence: 0.95,
+                decisionState: AdDecisionState.applied.rawValue
+            )
+        ])
+        #expect(
+            await orchestrator.activeWindowIDs().contains("w-live-only"),
+            """
+            precondition: the session must be holding the row-less window, \
+            otherwise this test proves nothing about the target set
+            """
+        )
+
+        let vetoed = await orchestrator.revertByTimeRange(
+            start: 155,
+            end: 190,
+            analysisAssetId: "asset-1",
+            podcastId: "podcast-1",
+            ifCurrentEpisodeId: "ep-1",
+            ifPlaybackLifecycleGeneration: 3,
+            correctionSpan: vetoSpan(assetId: "asset-1", start: 155, end: 190)
+        )
+        #expect(
+            vetoed,
+            "a live window the store has no row for must not refuse the gesture"
+        )
+        let after = try await store.fetchAdWindows(assetId: "asset-1")
+        #expect(
+            after.first { $0.id == "w-persisted" }?.decisionState
+                == AdDecisionState.reverted.rawValue,
+            "the persisted window the gesture covers must be reverted"
+        )
+    }
+
+    // 9: the MANAGED twin of test 5. The auto-skip tier keeps its own
+    // dictionary and its own cue; a stale entry there does not merely refuse a
+    // later dismiss, it goes on SKIPPING audio the listener said was not an ad.
+    @Test(
+        "a committed dismiss leaves no live window still claiming the ad",
+        .timeLimit(.minutes(1))
+    )
+    func committedDismissLeavesNoLiveClaim() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(
+            makeSkipTestAnalysisAsset(id: "asset-1", episodeId: "ep-1")
+        )
+        let ad = makeSkipTestAdWindow(
+            id: "w-managed",
+            startTime: 100,
+            endTime: 160,
+            confidence: 0.95,
+            decisionState: AdDecisionState.applied.rawValue
+        )
+        try await store.insertAdWindow(ad)
+        let orchestrator = await makeOrchestrator(store: store)
+        await orchestrator.beginEpisode(
+            analysisAssetId: "asset-1",
+            episodeId: "ep-1",
+            podcastId: "podcast-1",
+            playbackLifecycleGeneration: 3
+        )
+        await orchestrator.receiveAdWindows([ad])
+
+        let gate = ZxqjGate()
+        await orchestrator._setRevertPersistenceBarrierForTesting {
+            await gate.wait()
+        }
+        let gesture = Task {
+            await orchestrator.revertByTimeRange(
+                start: 110,
+                end: 130,
+                analysisAssetId: "asset-1",
+                podcastId: "podcast-1",
+                ifCurrentEpisodeId: "ep-1",
+                ifPlaybackLifecycleGeneration: 3,
+                correctionSpan: vetoSpan(
+                    assetId: "asset-1", start: 110, end: 130
+                )
+            )
+        }
+        await gate.waitUntilStarted()
+        // A refinement of the same id lands while the durable revert is parked.
+        await orchestrator.receiveAdWindows([
+            makeSkipTestAdWindow(
+                id: "w-managed",
+                startTime: 100,
+                endTime: 160,
+                confidence: 0.97,
+                decisionState: AdDecisionState.applied.rawValue
+            )
+        ])
+        await orchestrator._setRevertPersistenceBarrierForTesting(nil)
+        await gate.release()
+        #expect(await gesture.value, "precondition: the dismiss commits")
+
+        #expect(
+            await orchestrator
+                ._managedDecisionStateForTesting(id: "w-managed") == .reverted,
+            """
+            the live window must be reverted too: a live cue over a span whose \
+            durable row this same gesture just reverted goes on skipping audio \
+            the listener said was not an ad
+            """
         )
     }
 }
