@@ -1994,7 +1994,7 @@ struct CoarseCheckpointBoxTests {
     func onlyStrictAdvancesAreWorthAWrite() {
         let box = CoarseCheckpointBox()
         #expect(box.shouldAdvanceCursor(to: 90.0))
-        box.noteCursorWritten(90.0)
+        box.noteCursorWritten(90.0, durableCursor: Self.cursor(90.0))
         // Same prefix — the window that just resolved was out of episode order.
         #expect(box.shouldAdvanceCursor(to: 90.0) == false)
         // Behind the prefix — must never regress the cursor.
@@ -2036,8 +2036,83 @@ struct CoarseCheckpointBoxTests {
         #expect(box.shouldAdvanceCursor(to: 90.0))
         // ... the store threw, so nothing is noted.
         #expect(box.shouldAdvanceCursor(to: 90.0))
-        box.noteCursorWritten(90.0)
+        box.noteCursorWritten(90.0, durableCursor: Self.cursor(90.0))
         #expect(box.shouldAdvanceCursor(to: 90.0) == false)
+    }
+
+    /// playhead-ronl: the box carries the cursor the STORE was given, so a
+    /// failure arm can ask "did THIS attempt advance the covered prefix,
+    /// durably?" without re-reading the row.
+    ///
+    /// `nil` before any write is the load-bearing half: an attempt that never
+    /// checkpointed banked nothing, and a witness that guessed otherwise would
+    /// forgive a retry nobody paid for.
+    ///
+    /// Split from the never-lowers claim below on purpose. A single test over
+    /// both would go red for either mutation and neither direction would have
+    /// its own witness — the finding playhead-rqgr hit and split for.
+    @Test("playhead-ronl: the box records the cursor the store was given")
+    func theBoxRecordsTheDurableCursor() {
+        let box = CoarseCheckpointBox()
+        #expect(box.lastDurableProgressCursor == nil, "no write yet — nothing is durable")
+
+        box.noteCursorWritten(90.0, durableCursor: Self.cursor(90.0))
+        #expect(box.lastDurableProgressCursor?.lastProcessedUpperBoundSec == EpisodeSeconds(90.0))
+
+        box.noteCursorWritten(120.0, durableCursor: Self.cursor(120.0))
+        #expect(box.lastDurableProgressCursor?.lastProcessedUpperBoundSec == EpisodeSeconds(120.0))
+    }
+
+    /// The other direction: a merge, not an overwrite. The box is touched from
+    /// a `@Sendable` callback the classifier drives, so a checkpoint can arrive
+    /// after a later one; lowering the recorded value there would turn a real
+    /// advance into a charge against the budget.
+    @Test("playhead-ronl: an out-of-order checkpoint never lowers the recorded cursor")
+    func theBoxNeverLowersTheDurableCursor() {
+        let box = CoarseCheckpointBox()
+        box.noteCursorWritten(120.0, durableCursor: Self.cursor(120.0))
+        // The database holds 120. A late checkpoint carrying 30 does not
+        // un-write it.
+        box.noteCursorWritten(30.0, durableCursor: Self.cursor(30.0))
+        #expect(box.lastDurableProgressCursor?.lastProcessedUpperBoundSec == EpisodeSeconds(120.0))
+    }
+
+    /// The witness and the predicate, composed exactly as the two failure arms
+    /// compose them — so the "one ruler" claim is mechanical rather than read
+    /// off the source.
+    @Test("playhead-ronl: the recorded cursor is judged by the shared cursorAdvanced predicate")
+    func theRecordedCursorIsWhatCursorAdvancedJudges() {
+        let box = CoarseCheckpointBox()
+        // Nothing banked: an attempt that threw in its prologue.
+        #expect(
+            BackfillJobRunner.cursorAdvanced(from: nil, to: box.lastDurableProgressCursor) == false
+        )
+        box.noteCursorWritten(90.0, durableCursor: Self.cursor(90.0))
+        // Banked from nothing.
+        #expect(BackfillJobRunner.cursorAdvanced(from: nil, to: box.lastDurableProgressCursor))
+        // Banked past where the attempt started.
+        #expect(
+            BackfillJobRunner.cursorAdvanced(
+                from: Self.cursor(60.0),
+                to: box.lastDurableProgressCursor
+            )
+        )
+        // Re-wrote a cursor the row already carried: not an advance, and this is
+        // the case `monotonic(from:)` in `checkpointCoarseWindows` produces when
+        // a resume's first checkpoint is behind the prior cursor.
+        #expect(
+            BackfillJobRunner.cursorAdvanced(
+                from: Self.cursor(90.0),
+                to: box.lastDurableProgressCursor
+            ) == false
+        )
+    }
+
+    private static func cursor(_ upperBound: Double) -> BackfillProgressCursor {
+        BackfillProgressCursor(
+            processedPhaseCount: 0,
+            lastProcessedUpperBoundSec: EpisodeSeconds(upperBound)
+        )
     }
 
     /// The distinction between "offered to the store" and "actually in the

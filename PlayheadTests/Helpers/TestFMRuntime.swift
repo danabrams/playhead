@@ -52,6 +52,21 @@ actor TestFMRuntime {
     /// one queue entry is one job.
     private var coarseSchemaTokenCountFailureQueue: [TestFMRuntimeFailure?]
     private let refinementSchemaTokenCountValue: Int
+    /// playhead-ronl: make a round trip that happens AFTER the coarse pass has
+    /// banked windows fail.
+    ///
+    /// `planAdaptiveZoom` awaits `refinementSchemaTokenCount()` before it plans
+    /// anything, and `runJob` calls it only once `coarsePassA` has returned and
+    /// the digest has persisted every window. So a throw here reaches
+    /// `BackfillJobRunner`'s generic catch-all with playhead-26od's mid-flight
+    /// checkpoint already in the row — the state no other seam in this file can
+    /// produce. `coarseSchemaTokenCountFailure` is the mirror: it throws in the
+    /// PROLOGUE, before a single window is planned, so nothing is banked.
+    ///
+    /// It is the same class of call as the coarse prologue's — an XPC round trip
+    /// to the same daemon that does no generation — so the field errors that
+    /// arrive there can arrive here.
+    private let refinementSchemaTokenCountFailureValue: TestFMRuntimeFailure?
     private let boundarySchemaTokenCountValue: Int
     private let tokenCountRule: @Sendable (String) -> Int
     /// playhead-pmp9: injected backoff / inter-window pacing sleep. Defaults to
@@ -89,6 +104,7 @@ actor TestFMRuntime {
         coarseSchemaTokenCountFailure: TestFMRuntimeFailure? = nil,
         coarseSchemaTokenCountFailures: [TestFMRuntimeFailure?] = [],
         refinementSchemaTokenCount: Int = 32,
+        refinementSchemaTokenCountFailure: TestFMRuntimeFailure? = nil,
         boundarySchemaTokenCount: Int = 32,
         backoffSleep: @escaping @Sendable (UInt64) async -> Void = { _ in },
         tokenCountRule: @escaping @Sendable (String) -> Int = { prompt in
@@ -116,6 +132,7 @@ actor TestFMRuntime {
         self.coarseSchemaTokenCountFailureValue = coarseSchemaTokenCountFailure
         self.coarseSchemaTokenCountFailureQueue = coarseSchemaTokenCountFailures
         self.refinementSchemaTokenCountValue = refinementSchemaTokenCount
+        self.refinementSchemaTokenCountFailureValue = refinementSchemaTokenCountFailure
         self.boundarySchemaTokenCountValue = boundarySchemaTokenCount
         self.tokenCountRule = tokenCountRule
         self.backoffSleepClosure = backoffSleep
@@ -134,7 +151,9 @@ actor TestFMRuntime {
             coarseSchemaTokenCount: {
                 try await self.nextCoarseSchemaTokenCount()
             },
-            refinementSchemaTokenCount: { self.refinementSchemaTokenCountValue },
+            refinementSchemaTokenCount: {
+                try await self.nextRefinementSchemaTokenCount()
+            },
             boundarySchemaTokenCount: { self.boundarySchemaTokenCountValue },
             makeSession: {
                 FoundationModelClassifier.Runtime.Session(
@@ -168,6 +187,17 @@ actor TestFMRuntime {
             throw failure.error
         }
         return coarseSchemaTokenCountValue
+    }
+
+    /// playhead-ronl: the REFINEMENT prologue round trip. A constant rather than
+    /// a queue, because the one thing it has to express is "this attempt threw
+    /// after the coarse pass banked", and every attempt in a multi-attempt
+    /// fixture wants the same answer.
+    private func nextRefinementSchemaTokenCount() throws -> Int {
+        if let failure = refinementSchemaTokenCountFailureValue {
+            throw failure.error
+        }
+        return refinementSchemaTokenCountValue
     }
 
     private func nextCoarse(prompt: String) async throws -> CoarseScreeningSchema {

@@ -55,6 +55,9 @@ final class CoarseCheckpointBox: Sendable {
         /// playhead-x0lb: a ``PlanListSeconds`` — the box remembers walk
         /// bounds, which are contiguity over the plan list, not over the episode.
         var lastCheckpointedUpperBoundSec: PlanListSeconds?
+        /// playhead-ronl: the ``BackfillProgressCursor`` this attempt last got
+        /// INTO `backfill_jobs.progressCursor`. See the accessor below.
+        var lastDurableProgressCursor: BackfillProgressCursor?
         var defused = false
     }
 
@@ -120,13 +123,47 @@ final class CoarseCheckpointBox: Sendable {
         state.withLock { upperBound > ($0.lastCheckpointedUpperBoundSec ?? 0) }
     }
 
+    /// playhead-ronl: the cursor value THIS ATTEMPT last got into
+    /// `backfill_jobs.progressCursor`, or `nil` when this attempt has written
+    /// none.
+    ///
+    /// **Read it as "what this attempt made durable", never as "where the job
+    /// is".** The row can be ahead of this — an earlier attempt's checkpoint,
+    /// an earlier deferred run's salvage — which is exactly why the value is
+    /// carried separately from `lastCheckpointedUpperBoundSec` rather than
+    /// derived from it: this one answers *did this attempt advance the covered
+    /// prefix, durably?* and that question has a per-attempt denominator.
+    ///
+    /// It is an EPISODE cursor because it is the byte-identical value handed to
+    /// ``AnalysisStore/checkpointBackfillJobProgress(jobId:progressCursor:retryCount:)``,
+    /// not a re-derivation of it. `lastCheckpointedUpperBoundSec` beside it is a
+    /// ``PlanListSeconds`` and answers a different question (is another write
+    /// worth making?); the two are deliberately not one field, because
+    /// collapsing them would put a plan-list bound where an episode cursor is
+    /// read — the conflation ``UnsoundCursorPromotionSite`` exists to enumerate.
+    var lastDurableProgressCursor: BackfillProgressCursor? {
+        state.withLock { $0.lastDurableProgressCursor }
+    }
+
     /// Record a cursor that LANDED. Separate from `shouldAdvanceCursor` for the
     /// same reason `noteWrite` separates offered from durable: remembering a
     /// cursor whose write threw would suppress every later attempt to re-offer
     /// it, and the box exists to track what the database holds.
-    func noteCursorWritten(_ upperBound: PlanListSeconds) {
+    ///
+    /// playhead-ronl: ONE recording point for both quantities, so a reader that
+    /// asks "what did this attempt make durable?" and a writer that asks "is
+    /// another write worth making?" can never disagree about whether a write
+    /// happened. `durableCursor` is merged with ``BackfillProgressCursor/monotonic(from:)``
+    /// — the same merge every other cursor writer in this file uses — rather
+    /// than overwritten, so an out-of-order checkpoint cannot lower it.
+    func noteCursorWritten(
+        _ upperBound: PlanListSeconds,
+        durableCursor: BackfillProgressCursor
+    ) {
         state.withLock {
             $0.lastCheckpointedUpperBoundSec = max($0.lastCheckpointedUpperBoundSec ?? 0, upperBound)
+            $0.lastDurableProgressCursor = $0.lastDurableProgressCursor
+                .map { durableCursor.monotonic(from: $0) } ?? durableCursor
         }
     }
 }
@@ -848,6 +885,19 @@ actor BackfillJobRunner {
             // the CancellationError branch below (BG-window expiry) can
             // checkpoint durable progress before deferring. Fresh per job.
             let honestCursorBox = BackfillHonestCursorBox()
+            // playhead-ronl: the same box playhead-26od's mid-flight checkpoint
+            // writes through, hoisted out of `runJob` so the two FAILURE arms
+            // below can read what THIS attempt actually made durable.
+            //
+            // It answers the question this bead was opened on — "what
+            // cursor-advance evidence exists when the throw ESCAPED the pass?".
+            // `honestCursorBox` cannot: it is filled by the end-of-pass digest,
+            // so a throw from INSIDE `coarsePassA` (the 12-45 minutes where
+            // essentially all of the wall clock is) finds it empty. The
+            // checkpoint box is filled AS the pass banks windows, and — the part
+            // that matters for the bound — every value in it is already in the
+            // row. Fresh per job, exactly like `honestCursorBox`.
+            let checkpointBox = CoarseCheckpointBox()
             // playhead-kvs8: did THIS job end in a daemon refusal? Read below
             // to decide whether the consecutive counter advances or resets.
             //
@@ -970,7 +1020,12 @@ actor BackfillJobRunner {
                     continue
                 }
                 jobMetricsAudioSegments = jobInputs.segments
-                let (resultIds, eventIds, detectedAdLineRefs, jobWindows, jobCounters, coverage) = try await runJob(job, inputs: jobInputs, honestCursorBox: honestCursorBox)
+                let (resultIds, eventIds, detectedAdLineRefs, jobWindows, jobCounters, coverage) = try await runJob(
+                    job,
+                    inputs: jobInputs,
+                    honestCursorBox: honestCursorBox,
+                    checkpointBox: checkpointBox
+                )
                 scanResultIds.append(contentsOf: resultIds)
                 evidenceEventIds.append(contentsOf: eventIds)
                 fmRefinementWindows.append(contentsOf: jobWindows)
@@ -1263,9 +1318,26 @@ actor BackfillJobRunner {
                 // delays the failure signal reaching operators. Short-
                 // circuit `retryCount` to `maxRetries` so the C-B gate on
                 // the next run skips the row immediately.
-                let persistedRetryCount = Self.isPermanent(storeError)
-                    ? AdmissionController.maxRetries
-                    : job.retryCount + 1
+                //
+                // playhead-ronl: and the RECOVERABLE half is no longer flat.
+                // Both halves are CONSUMED from
+                // `storeFailureRetryCount(priorRetryCount:isPermanent:bankedNewAudio:)`,
+                // which holds the whole argument — including why a recoverable
+                // store error is still charged rather than deferred, and why
+                // permanence outranks progress. The witness is the cursor this
+                // attempt got into the row, not the digest's in-memory one:
+                // a claim-time store failure banked nothing and is charged,
+                // a failure at the terminal of a pass that banked forty minutes
+                // is not.
+                let bankedNewAudio = Self.cursorAdvanced(
+                    from: job.progressCursor,
+                    to: checkpointBox.lastDurableProgressCursor
+                )
+                let persistedRetryCount = Self.storeFailureRetryCount(
+                    priorRetryCount: job.retryCount,
+                    isPermanent: Self.isPermanent(storeError),
+                    bankedNewAudio: bankedNewAudio
+                )
                 // R4-Fix7: wrap the markBackfillJobFailed write so a
                 // racing terminal transition (e.g. another runner just
                 // marked the row `.complete`) cannot escape the catch
@@ -1291,8 +1363,15 @@ actor BackfillJobRunner {
                 // failures from the field — without it, every device failure
                 // requires reverse-engineering the enum ordinal back to a case.
                 let caseName = Self.caseName(of: storeError)
+                // playhead-ronl: the count and the two inputs that decided it,
+                // printed rather than left to be re-derived from the row. A
+                // support bundle that shows `retryCount=0 banked=true` says the
+                // attempt was forgiven because it banked audio; `retryCount=3
+                // permanent=true` says it was retired because it can never
+                // succeed. Those are different events and the row alone cannot
+                // tell them apart.
                 logger.error(
-                    "FM backfill job \(job.jobId, privacy: .public) failed: case=\(caseName, privacy: .public) detail=\(String(describing: storeError), privacy: .public) permanent=\(Self.isPermanent(storeError), privacy: .public)"
+                    "FM backfill job \(job.jobId, privacy: .public) failed: case=\(caseName, privacy: .public) detail=\(String(describing: storeError), privacy: .public) permanent=\(Self.isPermanent(storeError), privacy: .public) banked=\(bankedNewAudio, privacy: .public) retryCount=\(persistedRetryCount, privacy: .public)"
                 )
                 if let metricsEventId = await recordFailedOperationalMetricsEvent(
                     job: job,
@@ -1428,14 +1507,36 @@ actor BackfillJobRunner {
                     // hand.
                     //
                     // The DISPOSITION is unchanged and that is deliberate: this
-                    // arm still fails the row and still charges
-                    // `job.retryCount + 1`. See `UnclassifiedModelFailure` for
-                    // the measurement behind that — 1001 is
+                    // arm still fails the row. See `UnclassifiedModelFailure`
+                    // for the measurement behind that — 1001 is
                     // `ModelManagerError.inferenceError`, a category wrapper
                     // over a 25-case enum spanning both transient and permanent
                     // conditions, so it cannot be admitted to `FMDaemonRefusal`
                     // without giving a possibly-permanent condition an "it will
                     // heal on its own" reading and an unbounded FM bill.
+                    //
+                    // playhead-ronl: what DID change is the ARITHMETIC, and the
+                    // two are not the same claim. The charge is no longer a flat
+                    // `job.retryCount + 1`; it is CONSUMED from
+                    // `failedAttemptRetryCount(priorRetryCount:bankedNewAudio:)`,
+                    // the rule the other three arms already use, so the column
+                    // means one thing on all four. Reclassifying would say "this
+                    // error heals on its own" and would preserve the count
+                    // forever, which is what 59c8 refused; this says "this
+                    // ATTEMPT is charged for what it failed to do", which is a
+                    // statement about the attempt. The two are visibly different
+                    // here: the row is still `failed`, the token is unchanged,
+                    // and an attempt that banked nothing is charged exactly as
+                    // it was — so this same error, thrown from the pass
+                    // PROLOGUE three times, still retires the job.
+                    let bankedNewAudio = Self.cursorAdvanced(
+                        from: job.progressCursor,
+                        to: checkpointBox.lastDurableProgressCursor
+                    )
+                    let chargedRetryCount = Self.failedAttemptRetryCount(
+                        priorRetryCount: job.retryCount,
+                        bankedNewAudio: bankedNewAudio
+                    )
                     //
                     // The local is `unclassifiedReason`, NOT `…Cause`, and the
                     // field below is `token=`, NOT `cause=`. That vocabulary is
@@ -1454,7 +1555,7 @@ actor BackfillJobRunner {
                         try await store.markBackfillJobFailed(
                             jobId: job.jobId,
                             reason: unclassifiedReason,
-                            retryCount: job.retryCount + 1
+                            retryCount: chargedRetryCount
                         )
                     } catch {
                         logger.warning(
@@ -1471,13 +1572,22 @@ actor BackfillJobRunner {
                     // a column a device pull groups by cannot. The event NAME is
                     // new rather than a `cause=` field on the existing line, for
                     // the reason `FMDaemonRefusal.logEvent` gives.
+                    //
+                    // playhead-ronl: `retryCount=` CONSUMES the same value the
+                    // row was given. It used to re-derive `job.retryCount + 1`
+                    // for itself, which was harmless only while the write used
+                    // that expression too — a second ruler for one quantity, the
+                    // UC04 shape, sitting in the one place an operator reads
+                    // when the row is not in front of them. `banked=` beside it
+                    // is what makes a `retryCount=0` line self-explaining.
                     logger.error(
                         """
                         \(UnclassifiedModelFailure.failureEvent, privacy: .public) \
                         job=\(job.jobId, privacy: .public) \
                         phase=\(job.phase.rawValue, privacy: .public) \
                         token=\(unclassifiedReason, privacy: .public) \
-                        retryCount=\(job.retryCount + 1, privacy: .public) \
+                        retryCount=\(chargedRetryCount, privacy: .public) \
+                        banked=\(bankedNewAudio, privacy: .public) \
                         detail=\(String(describing: error), privacy: .public)
                         """
                     )
@@ -2270,6 +2380,128 @@ actor BackfillJobRunner {
     ) -> Bool {
         guard let nextUpper = next?.lastProcessedUpperBoundSec else { return false }
         return nextUpper > (prior?.lastProcessedUpperBoundSec ?? 0)
+    }
+
+    // MARK: - playhead-ronl: what a FAILING attempt charges the retry budget
+
+    /// playhead-ronl: the retry charge for an attempt that ended in a THROW.
+    ///
+    /// **The defect this replaces.** `AdmissionController.maxRetries` is
+    /// documented as "the number of FAILED attempts allowed", and two of the
+    /// four arms that write `backfill_jobs.retryCount` already spend it that
+    /// way: playhead-bkhc's expiry branch and — since playhead-e6d3 —
+    /// ``coverageTerminalDecision(phase:measurement:ceiling:retryCount:cursorAdvanced:)``
+    /// both reset to zero on an attempt that advanced the covered prefix. The
+    /// other two, the typed-`AnalysisStoreError` arm and the generic
+    /// unclassified-throw arm, charged a FLAT `job.retryCount + 1` with no
+    /// reference to whether the attempt advanced anything. So one column carried
+    /// two rulers: on two arms it counted CONSECUTIVE BARREN ATTEMPTS and on two
+    /// it counted ATTEMPTS, and nothing at either site said so. That is this
+    /// repo's standing defect class — a value that names one thing read as
+    /// though it named another — living in the admission model.
+    ///
+    /// It now says the same thing on all four: **the budget is spent by attempts
+    /// that did not bank new audio, not by attempts.** A reset to zero, not a
+    /// "do not increment", for the reason e6d3 states — the quantity is a run of
+    /// consecutive barren attempts and one that banked audio ENDS the run.
+    ///
+    /// **What `bankedNewAudio` must be, and what it must not be.** It is
+    /// ``cursorAdvanced(from:to:)`` — seconds of audio, the same predicate the
+    /// other two arms use, so there is one ruler — taken from the job's
+    /// admission-time cursor to the cursor THIS ATTEMPT got into the row
+    /// (``CoarseCheckpointBox/lastDurableProgressCursor``). It is deliberately
+    /// NOT the "is it under the floor" test: that quantity is a FRACTION whose
+    /// numerator is bounded by the transcript and whose denominator is the
+    /// declared duration, which playhead-nffz showed are two populations, and
+    /// reusing it here would import the mis-blame rather than the measurement.
+    ///
+    /// **A NON-CONVERGING JOB STILL TERMINATES, and the argument is bkhc's
+    /// verbatim.** A reset is only ever issued together with a strictly greater
+    /// cursor that is ALREADY IN THE ROW — this arm writes no cursor of its own,
+    /// which is why the witness has to be the durable one and not the digest's
+    /// in-memory ``BackfillHonestCursorBox``. `monotonic(from:)` keeps the row's
+    /// cursor non-decreasing and the cursor is bounded above by the episode end,
+    /// so resets are bounded by the number of coarse windows in the episode and
+    /// each is paid for with audio that is now durable. The saturating case
+    /// closes it exactly as it does for the coverage terminal: once the cursor
+    /// reaches the last segment, `narrowedForResume` empties the plan list and
+    /// `runJob`'s empty-segments short-circuit returns BEFORE any FM round trip
+    /// can throw, so the row leaves this arm entirely and retires through the
+    /// coverage terminal after three barren attempts.
+    ///
+    /// **WHAT THIS DOES NOT RESCUE, stated so the claim is not read wider than it
+    /// is.** The witness is the cursor this attempt got INTO the row, and the
+    /// mid-flight checkpoint is deliberately conservative about writing one: it
+    /// refuses on a fully-covered walk (t1kq's rule — an episode-end cursor
+    /// collapses `narrowedForResume` to an empty resume and strands pending
+    /// refinement), it freezes the durable prefix at the first window whose row
+    /// did not land, and it publishes nothing at all when the contiguous prefix
+    /// has not moved past what an earlier run already banked. So an attempt CAN
+    /// screen real audio and still be charged. That is the CURSOR rule's
+    /// conservatism, not this budget's — the same sentence
+    /// ``coverageTerminalDecision(phase:measurement:ceiling:retryCount:cursorAdvanced:)``
+    /// already carries for its own arm — and the direction is the safe one: it
+    /// charges where it cannot prove progress rather than forgiving where it
+    /// cannot prove failure. Widening it to "the measured fraction moved" would
+    /// need a second persisted quantity, which is the trade e6d3 declined and
+    /// this bead declines for the same reason.
+    ///
+    /// **This is an ARITHMETIC change, not a RECLASSIFICATION.** The disposition
+    /// at both call sites is untouched: the row is still `failed`, never
+    /// `deferred`; the cause token is unchanged; `FMDaemonRefusal` gains no case.
+    /// An attempt that banks nothing is charged exactly as before, so an error
+    /// that throws in the pass prologue three times still retires the job at
+    /// `maxRetries`. Deferring would say "this condition is temporary"; this says
+    /// "this attempt is charged for what it failed to DO", which is a claim about
+    /// the attempt and not about the error. See playhead-59c8 for why the first
+    /// claim is one nobody can make about `ModelManagerError 1001`.
+    nonisolated static func failedAttemptRetryCount(
+        priorRetryCount: Int,
+        bankedNewAudio: Bool
+    ) -> Int {
+        bankedNewAudio ? 0 : priorRetryCount + 1
+    }
+
+    /// playhead-ronl: the same rule for the typed-``AnalysisStoreError`` arm,
+    /// with H-R3-2's permanence short-circuit in front of it.
+    ///
+    /// **The two clauses answer different questions and the order is the
+    /// argument.** `isPermanent` asks *will replaying these inputs against this
+    /// schema reproduce this failure byte for byte?* — a schema validator, a
+    /// malformed cohort, an impossible window geometry, a JSON encoder that
+    /// produced undecodable bytes. When the answer is yes, no amount of banked
+    /// audio changes it, so the budget is short-circuited to `maxRetries` and the
+    /// C-B gate skips the row on the next run. Progress is irrelevant to a
+    /// question about REPRODUCIBILITY, which is why it does not get a vote here.
+    ///
+    /// **What the recoverable half actually is, since "recoverable" is easy to
+    /// read as "transient".** Measured against the enum: `openFailed`,
+    /// `migrationFailed`, `queryFailed`, a non-`payloadTooLarge` /
+    /// non-impossible-geometry `insertFailed`, `notFound`, `duplicateJobId` and
+    /// `staleAdWindowRevision`. (`invalidStateTransition` is classified
+    /// recoverable too but cannot reach here — the arm above it logs and
+    /// `continue`s.) Some of those really are moments — a busy writer, a
+    /// concurrency race — and some of them are a corrupt or unopenable database
+    /// that will fail identically forever. `isPermanent` splits *provably
+    /// reproducible* from *everything else*; it does not split transient from
+    /// durable, and nothing at this layer can. So the recoverable half is
+    /// UNCLASSIFIED AS TO DURABILITY, exactly like the generic arm's throw — and
+    /// that is why it is still CHARGED rather than deferred with the count
+    /// preserved the way a `FMDaemonRefusal` is. Preserving the count says "this
+    /// will heal on its own", which is a claim nobody has established for a
+    /// database that would not open. Charging an attempt that banked nothing is
+    /// the honest reading; charging one that banked forty minutes of durable
+    /// audio was not.
+    nonisolated static func storeFailureRetryCount(
+        priorRetryCount: Int,
+        isPermanent: Bool,
+        bankedNewAudio: Bool
+    ) -> Int {
+        guard !isPermanent else { return AdmissionController.maxRetries }
+        return failedAttemptRetryCount(
+            priorRetryCount: priorRetryCount,
+            bankedNewAudio: bankedNewAudio
+        )
     }
 
     /// playhead-bkhc: the NAMED terminal cause for a job whose background
@@ -3603,7 +3835,11 @@ actor BackfillJobRunner {
             // the promotions are: the inventory exists to be SHRUNK by
             // playhead-5pyq, and this site disappears with it.
             box.noteCursorWritten(
-                merged.lastProcessedUpperBoundSec.map { PlanListSeconds($0.rawValue) } ?? upperBound
+                merged.lastProcessedUpperBoundSec.map { PlanListSeconds($0.rawValue) } ?? upperBound,
+                // playhead-ronl: the value the STORE was given, unmodified. Not
+                // re-derived from `upperBound` — that is the plan-list bound,
+                // and `merged` is what the row now carries.
+                durableCursor: merged
             )
         } catch {
             logger.warning(
@@ -3876,7 +4112,13 @@ actor BackfillJobRunner {
     private func runJob(
         _ job: BackfillJob,
         inputs rootInputs: AssetInputs,
-        honestCursorBox: BackfillHonestCursorBox
+        honestCursorBox: BackfillHonestCursorBox,
+        /// playhead-ronl: owned by the drain loop rather than by this function,
+        /// so the failure arms can read what this attempt made durable AFTER
+        /// `runJob` has thrown. Nothing else about its use changes — it is still
+        /// defused on every exit path below, which is what bounds both observers'
+        /// lifetimes to the job's.
+        checkpointBox: CoarseCheckpointBox
     ) async throws -> (
         scanResultIds: [String],
         evidenceEventIds: [String],
@@ -4078,7 +4320,9 @@ actor BackfillJobRunner {
         // either callback after `runJob` has thrown and the drain loop has put
         // the job in a terminal state. Defusing on EVERY exit path bounds both
         // observers' lifetimes to the job's.
-        let checkpointBox = CoarseCheckpointBox()
+        // playhead-ronl: constructed by the drain loop and handed in — see the
+        // parameter. Everything below, including the defuse-on-every-exit-path
+        // contract this line states, is unchanged.
         defer { checkpointBox.defuse() }
 
         // bd-1en Phase 1: dispatch sensitive windows (pharma /
