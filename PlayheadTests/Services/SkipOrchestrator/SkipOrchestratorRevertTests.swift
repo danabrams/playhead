@@ -59,11 +59,15 @@ final class TranscriptPeekViewVetoSourceCanaryTests: XCTestCase {
             stripped.contains("recordVeto("),
             "submitNotAdChunks must not pre-write a duplicate correction; the orchestrator owns the row+correction transaction."
         )
+        // playhead-zxqj: the anchor is the GUARD, not the one-line spelling of
+        // its else-branch. It was `"…else { return }"` verbatim, which pinned
+        // the branch's BODY as a side effect of pinning its POSITION — so
+        // giving the refusal a body (telling the listener it did not land) read
+        // as breaking the ordering invariant this canary is actually about.
+        // The two orderings below are the invariant; what the branch does
+        // before returning is pinned separately, and additively, just after.
         let successGuard = try XCTUnwrap(
-            stripped.range(
-                of:
-                    "guard await revertCallback(syntheticSpan) else { return }"
-            )
+            stripped.range(of: "guard await revertCallback(syntheticSpan) else")
         )
         let selectionClear = try XCTUnwrap(
             stripped.range(of: "notAdMarkedChunkSelections = []")
@@ -86,6 +90,36 @@ final class TranscriptPeekViewVetoSourceCanaryTests: XCTestCase {
                 "defer { isSubmittingNotAdCorrection = false }"
             ),
             "Every success/failure path must release the duplicate-submit reservation."
+        )
+        // playhead-zxqj: THE REFUSAL MUST SAY SO, and it must say so from
+        // inside the else-branch — between the guard and the success work.
+        //
+        // For four months this handler ended at `else { return }`: a refused
+        // dismiss and a tap that never registered left the sheet in an
+        // identical state, which is what Dan reported on 2026-08-15 as "i
+        // couldnt dismiss an ad". The retry state staying intact (the two
+        // orderings above) is necessary and was never sufficient — a listener
+        // cannot retry an action they have no reason to believe failed.
+        let failureNotice = try XCTUnwrap(
+            stripped.range(of: "showNotAdFailure = true"),
+            """
+            submitNotAdChunks must tell the listener when the durable \
+            transaction refused. Deleting this line restores the silent \
+            no-op playhead-zxqj closed.
+            """
+        )
+        XCTAssertLessThan(
+            successGuard.lowerBound,
+            failureNotice.lowerBound,
+            "The failure notice belongs to the refusal, so it must follow the guard."
+        )
+        XCTAssertLessThan(
+            failureNotice.lowerBound,
+            selectionClear.lowerBound,
+            """
+            The failure notice must sit INSIDE the else-branch — before the \
+            success work — or a committed dismiss would raise it too.
+            """
         )
 
         let chunkRow = try XCTUnwrap(
