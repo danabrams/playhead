@@ -1911,14 +1911,39 @@ actor AnalysisCoordinator {
         } catch is CancellationError {
             logger.info("Pipeline cancelled for episode \(episodeId)")
         } catch {
-            logger.error("Pipeline failed for episode \(episodeId): \(error)")
+            // playhead-3lc3: BOUND ONCE, ABOVE THE WRITE. The durable reason is
+            // a named, countable token — `sessionPipelineThrew-<resumeState>(
+            // domain=…,code=…,under=…)` — and no longer
+            // `String(describing: error)`.
+            //
+            // What that used to write is not what the shape suggests.
+            // `AnalysisCoordinatorError` conforms to `CustomStringConvertible`,
+            // which `String(describing:)` PREFERS over reflection, so the column
+            // got the enum's PROSE and not its case: `.notFound`-style values
+            // land as sentences that name no case at all, and a `description` is
+            // written for humans and edited freely, so yesterday's rows and
+            // today's disagree about what one failure is called.
+            //
+            // `resumeState` is carried because the write itself DESTROYS it —
+            // `transition(to: .failed)` overwrites `analysis_sessions.state` —
+            // so a throw out of `queued` and a throw out of `backfill` would
+            // otherwise be one indistinguishable string. The log line consumes
+            // the same local, and the raw description stays there and only
+            // there.
+            let throwRecord = DurableThrowRecord.sessionFailureReason(
+                for: error,
+                resumeState: resumeState
+            )
+            logger.error(
+                "Pipeline failed for episode \(episodeId): token=\(throwRecord, privacy: .public) detail=\(error)"
+            )
             // Use the captured sessionId/assetId parameters, not mutable actor
             // state which may have changed if a new episode started.
             try? await transition(
                 sessionId: sessionId,
                 assetId: assetId,
                 to: .failed,
-                failureReason: String(describing: error)
+                failureReason: throwRecord
             )
         }
     }
@@ -5038,12 +5063,23 @@ actor AnalysisCoordinator {
         } catch is CancellationError {
             logger.info("resumeBackfillForTesting: cancelled for episode \(episodeId)")
         } catch {
-            logger.info("resumeBackfillForTesting: pipeline failed: \(error)")
+            // playhead-3lc3: the seam writes what PRODUCTION writes. Its whole
+            // purpose is to mirror `runPipeline(resumeState: .backfill)`, so it
+            // must reach the same token with the same `resumeState` — a seam
+            // that persists a different spelling from the path it stands in for
+            // is a seam that cannot witness the path.
+            let throwRecord = DurableThrowRecord.sessionFailureReason(
+                for: error,
+                resumeState: .backfill
+            )
+            logger.info(
+                "resumeBackfillForTesting: pipeline failed: token=\(throwRecord, privacy: .public) detail=\(error)"
+            )
             try? await transition(
                 sessionId: sessionId,
                 assetId: assetId,
                 to: .failed,
-                failureReason: String(describing: error)
+                failureReason: throwRecord
             )
         }
     }
