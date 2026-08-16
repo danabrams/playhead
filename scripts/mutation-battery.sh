@@ -6929,9 +6929,21 @@ MUTATIONS=(
   # Batch 815 — RN08, the box OVERWRITES instead of merging. A checkpoint
   # arriving out of order (the box is touched from a `@Sendable` callback the
   # classifier drives) lowers the recorded cursor, and a real advance is charged
-  # against the budget. UNIQUE KILL: `T_RN_BOX_NEVER_LOWERS`, which is exactly
-  # why that claim is a test of its own rather than a third expectation on
-  # `T_RN_BOX_RECORDS`.
+  # against the budget.
+  #
+  # NO UNIQUE KILL, AND THE CLAIM THAT IT HAD ONE WAS WRONG. Measured: RN08
+  # reddens `T_RN_BOX_NEVER_LOWERS` and nothing else, and RN07 reddens that test
+  # TOO — a box that records nothing fails a lowering assertion for the same
+  # reason it fails everything else. So RN08's kill set is a strict SUBSET of
+  # RN07's, and no test tells them apart in RN08's direction.
+  #
+  # That is inherent rather than a missing test: any mutation that DELETES the
+  # recording dominates one that merely weakens it, so the weaker mutant can
+  # only ever be distinguished from the other side — which is what
+  # `T_RN_BOX_RECORDS` does, killing RN07 and leaving RN08 alone. The pair is
+  # kept for the same reason RQ08 is: a subset is evidence about which of two
+  # properties a green result was resting on, and saying so is better than a
+  # rail that quietly claims more coverage than it has.
   "RN08|815|RUNNER|$T_RN_BOX_NEVER_LOWERS"
 )
 
