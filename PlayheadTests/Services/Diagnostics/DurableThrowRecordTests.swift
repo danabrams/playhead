@@ -1212,6 +1212,18 @@ struct DurableThrowRecordRunnerStageTests {
         // reads as evidence of an absence it can no longer see.
         #expect(Set(DurableThrowRecord.RunnerStage.allCases.map(\.rawValue))
             == ["decode", "features", "fetchChunks", "hotPath", "backfill"])
+        // AND THE RAW VALUE IS THE CASE NAME, which is a second claim and not a
+        // restatement. Mutant Q06 gave `hotPath` the raw value `hot_path`: the
+        // stem rail above caught it, and so did the per-site source rail below —
+        // but that one caught it for the WRONG REASON and said so, because it
+        // was keyed on the raw value while the SOURCE spells the case name. A
+        // value that names one thing read as though it named another, in the
+        // rail written to catch that. The source rail is keyed on the case name
+        // now, and this line is what keeps the two coupled.
+        for stage in DurableThrowRecord.RunnerStage.allCases {
+            #expect(stage.rawValue == String(describing: stage),
+                    "\(stage) persists as \(stage.rawValue); the source rail reads the CASE NAME")
+        }
         let error = AnalysisAudioError.decodingFailed("x")
         #expect(DurableThrowRecord.runnerStageLastErrorCode(for: error, stage: .backfill)
             .contains("backfill"))
@@ -2405,10 +2417,17 @@ final class DurableThrowRecordSourceCanaryTests: XCTestCase {
     /// (`playhead-sckv`'s SF03/SF10, which cost a round).
     func testEveryRunnerStageCatchRecordsITSOWNStage() throws {
         let dense = FMDaemonRefusalSourceCanaryTests.denseCode(try runnerSource())
+        // KEYED ON THE CASE NAME, not the raw value: the source spells
+        // `stage: .hotPath`, which is the case. Mutant Q06 changed a raw value
+        // and this rail reported "the hot_path catch is not recording its own
+        // stage" — a true failure with a false reason, because it was reading
+        // the greppable stem as though it were the Swift identifier. The two are
+        // pinned equal by `theStemsArePreserved`; here the case name is used.
         for (stage, anchor) in Self.stageSites {
+            let caseName = String(describing: stage)
             let site = try codeImmediatelyBefore(anchor, span: Self.stageWindow, in: dense)
             XCTAssertTrue(
-                site.contains("stage:.\(stage.rawValue))"),
+                site.contains("stage:.\(caseName))"),
                 """
                 The `\(stage.rawValue)` catch is not recording its own stage. A different case here \
                 produces a perfectly well-formed `runnerStageThrew-<other>(…)` naming a stage that did \
@@ -2418,8 +2437,8 @@ final class DurableThrowRecordSourceCanaryTests: XCTestCase {
             )
             for other in DurableThrowRecord.RunnerStage.allCases where other != stage {
                 XCTAssertFalse(
-                    site.contains("stage:.\(other.rawValue))"),
-                    "the `\(stage.rawValue)` catch also names `\(other.rawValue)`: \(site)"
+                    site.contains("stage:.\(String(describing: other)))"),
+                    "the `\(caseName)` catch also names `\(String(describing: other))`: \(site)"
                 )
             }
         }
@@ -2427,10 +2446,12 @@ final class DurableThrowRecordSourceCanaryTests: XCTestCase {
         // catches at one stage — leaving one stage unreachable and one row lying
         // — fails here rather than passing every per-site read above.
         for stage in DurableThrowRecord.RunnerStage.allCases {
+            let marker = "stage:.\(String(describing: stage)))"
             XCTAssertEqual(
-                dense.components(separatedBy: "stage:.\(stage.rawValue))").count - 1,
+                dense.components(separatedBy: marker).count - 1,
                 1,
-                "`\(stage.rawValue)` is recorded by \(dense.components(separatedBy: "stage:.\(stage.rawValue))").count - 1) sites, not one"
+                "`\(String(describing: stage))` is recorded by "
+                    + "\(dense.components(separatedBy: marker).count - 1) sites, not one"
             )
         }
     }
