@@ -400,14 +400,33 @@ actor AnalysisJobRunner {
             PreAnalysisInstrumentation.endStage(decodeSignpost)
         } catch {
             PreAnalysisInstrumentation.endStage(decodeSignpost)
-            logger.error("Decode failed for job \(request.jobId): \(error)")
-            return makeOutcome(assetId: assetId, request: request, stopReason: .failed("decode: \(error)"))
+            // playhead-q93o: BOUND ONCE, AND THE LOG CONSUMES THE SAME LOCAL.
+            // This payload is carried into `analysis_jobs.lastErrorCode` and
+            // `work_journal.metadata` by `AnalysisWorkScheduler`'s `.failed`
+            // arms, two hops away in another file, so it is a durable value and
+            // not a message. It used to be `"decode: \(error)"`, and
+            // `AnalysisAudioError` is `CustomStringConvertible`, so what reached
+            // the column was the enum's PROSE naming no case — plus, on three of
+            // its other cases, the episode's FILENAME. Two field rows carried it
+            // (see `DurableThrowRecord.swift`), one of them on the terminal arm
+            // that permanently retired the job. The raw error keeps its place in
+            // the LOG, which is 59c8's split: a log line can afford prose, a
+            // column cannot.
+            let throwRecord = DurableThrowRecord.runnerStageLastErrorCode(for: error, stage: .decode)
+            logger.error(
+                "Decode failed for job \(request.jobId): \(error) token=\(throwRecord, privacy: .public)"
+            )
+            return makeOutcome(assetId: assetId, request: request, stopReason: .failed(code: throwRecord))
         }
 
         // Filter shards to the requested coverage depth.
         let shards = allShards.filter { $0.startTime < request.desiredCoverageSec }
         guard !shards.isEmpty else {
-            return makeOutcome(assetId: assetId, request: request, stopReason: .failed("no shards within desired coverage"))
+            // NOT a durable-prose site and deliberately left alone: this is a
+            // compile-time literal, identical on every device and in every
+            // locale, so it already groups. `RunnerMaterializerRegressionTests`
+            // greps it verbatim.
+            return makeOutcome(assetId: assetId, request: request, stopReason: .failed(code: "no shards within desired coverage"))
         }
 
         // playhead-5uvz.6 (Gap-7): persist the shard-sum duration onto
@@ -537,8 +556,12 @@ actor AnalysisJobRunner {
             PreAnalysisInstrumentation.endStage(featureSignpost)
         } catch {
             PreAnalysisInstrumentation.endStage(featureSignpost)
-            logger.error("Feature extraction failed for job \(request.jobId): \(error)")
-            return makeOutcome(assetId: assetId, request: request, stopReason: .failed("features: \(error)"))
+            // playhead-q93o: see the decode catch above.
+            let throwRecord = DurableThrowRecord.runnerStageLastErrorCode(for: error, stage: .features)
+            logger.error(
+                "Feature extraction failed for job \(request.jobId): \(error) token=\(throwRecord, privacy: .public)"
+            )
+            return makeOutcome(assetId: assetId, request: request, stopReason: .failed(code: throwRecord))
         }
 
         // playhead-01t8: if the preempt signal flipped during feature
@@ -967,13 +990,17 @@ actor AnalysisJobRunner {
             chunks = try await store.fetchTranscriptChunks(assetId: assetId)
         } catch {
             PreAnalysisInstrumentation.endStage(detectionSignpost)
-            logger.error("Failed to fetch transcript chunks for job \(request.jobId): \(error)")
+            // playhead-q93o: see the decode catch above.
+            let throwRecord = DurableThrowRecord.runnerStageLastErrorCode(for: error, stage: .fetchChunks)
+            logger.error(
+                "Failed to fetch transcript chunks for job \(request.jobId): \(error) token=\(throwRecord, privacy: .public)"
+            )
             return makeOutcome(
                 assetId: assetId,
                 request: request,
                 featureCoverageSec: featureCoverage,
                 transcriptCoverageSec: transcriptCoverage,
-                stopReason: .failed("fetchChunks: \(error)")
+                stopReason: .failed(code: throwRecord)
             )
         }
         let wroteNewChunks = chunks.count > existingChunkCount
@@ -1001,13 +1028,17 @@ actor AnalysisJobRunner {
                 )
             } catch {
                 PreAnalysisInstrumentation.endStage(detectionSignpost)
-                logger.error("Hot-path detection failed for job \(request.jobId): \(error)")
+                // playhead-q93o: see the decode catch above.
+                let throwRecord = DurableThrowRecord.runnerStageLastErrorCode(for: error, stage: .hotPath)
+                logger.error(
+                    "Hot-path detection failed for job \(request.jobId): \(error) token=\(throwRecord, privacy: .public)"
+                )
                 return makeOutcome(
                     assetId: assetId,
                     request: request,
                     featureCoverageSec: featureCoverage,
                     transcriptCoverageSec: transcriptCoverage,
-                    stopReason: .failed("hotPath: \(error)")
+                    stopReason: .failed(code: throwRecord)
                 )
             }
         }
@@ -1064,13 +1095,17 @@ actor AnalysisJobRunner {
                 )
             } catch {
                 PreAnalysisInstrumentation.endStage(detectionSignpost)
-                logger.error("Backfill detection failed for job \(request.jobId): \(error)")
+                // playhead-q93o: see the decode catch above.
+                let throwRecord = DurableThrowRecord.runnerStageLastErrorCode(for: error, stage: .backfill)
+                logger.error(
+                    "Backfill detection failed for job \(request.jobId): \(error) token=\(throwRecord, privacy: .public)"
+                )
                 return makeOutcome(
                     assetId: assetId,
                     request: request,
                     featureCoverageSec: featureCoverage,
                     transcriptCoverageSec: transcriptCoverage,
-                    stopReason: .failed("backfill: \(error)")
+                    stopReason: .failed(code: throwRecord)
                 )
             }
 
@@ -1938,13 +1973,13 @@ actor AnalysisJobRunner {
         // for the reason spelled out below.
         if failure?.termination == .interrupted {
             return ZeroCoverageDisposition(
-                stopReason: .interrupted(code),
+                stopReason: .interrupted(code: code),
                 journalEvent: .preempted,
                 journalCause: cause
             )
         }
         return ZeroCoverageDisposition(
-            stopReason: .failed(code),
+            stopReason: .failed(code: code),
             journalEvent: .failed,
             journalCause: cause
         )

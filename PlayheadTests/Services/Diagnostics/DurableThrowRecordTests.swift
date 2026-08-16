@@ -1083,6 +1083,321 @@ struct DurableThrowRecordDayZeroTests {
     }
 }
 
+// MARK: - playhead-q93o: the runner's own stage catches
+
+@Suite("DurableThrowRecord — the runner's stage catches are a named token (playhead-q93o)")
+struct DurableThrowRecordRunnerStageTests {
+
+    /// Every `AnalysisAudioError` case, with a payload where one exists — the
+    /// error family the `decode` stage actually catches, and the family that
+    /// produced this site's two field rows.
+    private static let audioErrors: [AnalysisAudioError] = [
+        .fileNotFound(URL(fileURLWithPath: "/tmp/PRIVATE-EPISODE-NAME.mp3")),
+        .assetUnreadable(URL(fileURLWithPath: "/tmp/PRIVATE-EPISODE-NAME.mp3"), underlying: nil),
+        .readerSetupFailed("AVAssetReader could not start"),
+        .converterSetupFailed,
+        .decodingFailed("Operation Interrupted"),
+        .truncatedFile(
+            URL(fileURLWithPath: "/tmp/PRIVATE-EPISODE-NAME.mp3"),
+            expectedDuration: 3_600,
+            decodedDuration: 12
+        ),
+        .cancelled,
+    ]
+
+    // MARK: The defect, measured from the production type
+
+    @Test("THE REAL DEFECT: the field rows' exact spelling, pinned from the running program")
+    func theExactFieldSpelling() {
+        // `analysis_jobs` on the 2026-04-25 device capture holds
+        //   323D2A22  failed      attempts=2  decode: Decoding failed: Operation Interrupted
+        //   5C185837  superseded  attempts=6  maxAttemptsReached:decode: Decoding failed: …
+        // Reproduced here from the type rather than quoted, so the claim in
+        // `DurableThrowRecord.swift`'s header cannot become quietly false.
+        let field = AnalysisAudioError.decodingFailed("Operation Interrupted")
+        let retired = "decode: \(field)"
+        print("[q93o] retired decode payload = \(retired)")
+        #expect(retired == "decode: Decoding failed: Operation Interrupted",
+                "the field row's spelling is no longer what this arm produces: \(retired)")
+
+        // And it names NO CASE — `AnalysisAudioError` is CustomStringConvertible,
+        // so the interpolation took its PROSE. sckv's trap, a third time.
+        #expect(!retired.contains("decodingFailed"))
+
+        // The token names the domain and the code as fields a GROUP BY can split
+        // on. The code is the enum's TAG, MEASURED rather than predicted: the
+        // first draft of this line predicted 4 (declaration index of
+        // `decodingFailed` counting from zero) and the tag is 3, because the five
+        // payload cases are laid out first in declaration order and the two empty
+        // ones after them — `fileNotFound` 0, `assetUnreadable` 1,
+        // `readerSetupFailed` 2, `decodingFailed` 3, `truncatedFile` 4, then
+        // `converterSetupFailed` 5 and `cancelled` 6.
+        let bridged = field as NSError
+        print("[q93o] bridged domain=\(bridged.domain) code=\(bridged.code)")
+        #expect(bridged.domain == "Playhead.AnalysisAudioError")
+        #expect(bridged.code == 3)
+        let token = DurableThrowRecord.runnerStageLastErrorCode(for: field, stage: .decode)
+        #expect(token == "runnerStageThrew-decode(domain=Playhead.AnalysisAudioError,code=3,under=none)",
+                "token is \(token)")
+    }
+
+    @Test("THE REAL DEFECT: three sibling cases would have put the EPISODE FILENAME in the column")
+    func theRealDefectTheFilenameCases() {
+        // The case that fired in the field carried only a phrase. The three that
+        // carry a `URL` carry the user's episode FILENAME, and one of them also
+        // carries a LOCALIZED sentence underneath it — luie's enclosure-URL
+        // disclosure, in a different column, from a different producer, waiting
+        // on a decode failure of a different kind.
+        let secret = "PRIVATE-EPISODE-NAME"
+        let filenameCases: [AnalysisAudioError] = [
+            .fileNotFound(URL(fileURLWithPath: "/tmp/\(secret).mp3")),
+            .assetUnreadable(URL(fileURLWithPath: "/tmp/\(secret).mp3"), underlying: nil),
+            .truncatedFile(
+                URL(fileURLWithPath: "/tmp/\(secret).mp3"),
+                expectedDuration: 3_600,
+                decodedDuration: 12
+            ),
+        ]
+        for error in filenameCases {
+            #expect("\(error)".contains(secret),
+                    "the premise is wrong — this case does not carry the filename: \(error)")
+            let token = DurableThrowRecord.runnerStageLastErrorCode(for: error, stage: .decode)
+            #expect(!token.contains(secret), "the token carries the filename: \(token)")
+        }
+    }
+
+    @Test("no case's payload reaches the token, for any stage")
+    func noPayloadReachesTheToken() {
+        for error in Self.audioErrors {
+            for stage in DurableThrowRecord.RunnerStage.allCases {
+                let token = DurableThrowRecord.runnerStageLastErrorCode(for: error, stage: stage)
+                for leak in ["PRIVATE-EPISODE-NAME", "Operation Interrupted", "AVAssetReader"] {
+                    #expect(!token.contains(leak), "\(stage.rawValue) leaked \(leak): \(token)")
+                }
+            }
+        }
+    }
+
+    // MARK: The grammar
+
+    @Test("the stage is a FIELD of one prefix, not five prefixes")
+    func oneFamilyFiveStages() {
+        let error = AnalysisAudioError.decodingFailed("x")
+        for stage in DurableThrowRecord.RunnerStage.allCases {
+            let token = DurableThrowRecord.runnerStageLastErrorCode(for: error, stage: stage)
+            #expect(token.hasPrefix("\(DurableThrowRecord.runnerStageThrewPrefix)-\(stage.rawValue)("),
+                    "\(stage.rawValue) is outside the family: \(token)")
+            // The family query returns every stage…
+            #expect(token.hasPrefix("\(DurableThrowRecord.runnerStageThrewPrefix)-"))
+        }
+        // …and the per-stage query returns exactly one of them. Stated as a
+        // partition rather than as five separate `hasPrefix` checks, because the
+        // failure this guards is two stages that answer to one query.
+        let tokens = DurableThrowRecord.RunnerStage.allCases.map {
+            DurableThrowRecord.runnerStageLastErrorCode(for: error, stage: $0)
+        }
+        for stage in DurableThrowRecord.RunnerStage.allCases {
+            let query = "\(DurableThrowRecord.runnerStageThrewPrefix)-\(stage.rawValue)("
+            #expect(tokens.filter { $0.hasPrefix(query) }.count == 1,
+                    "`LIKE '\(query)%'` does not select exactly one stage")
+        }
+    }
+
+    @Test("the five stage raw values ARE the retired stems, which two rails grep")
+    func theStemsArePreserved() {
+        // `RunnerMaterializerRegressionTests` asserts `msg.contains("backfill")`
+        // and `msg.contains("hotPath")` on the outcome payload — the only greps
+        // of any of the five stems anywhere in the tree. A stage spelled
+        // otherwise leaves those rails GREEN while this arm fires: a check that
+        // reads as evidence of an absence it can no longer see.
+        #expect(Set(DurableThrowRecord.RunnerStage.allCases.map(\.rawValue))
+            == ["decode", "features", "fetchChunks", "hotPath", "backfill"])
+        // AND THE RAW VALUE IS THE CASE NAME, which is a second claim and not a
+        // restatement. Mutant Q06 gave `hotPath` the raw value `hot_path`: the
+        // stem rail above caught it, and so did the per-site source rail below —
+        // but that one caught it for the WRONG REASON and said so, because it
+        // was keyed on the raw value while the SOURCE spells the case name. A
+        // value that names one thing read as though it named another, in the
+        // rail written to catch that. The source rail is keyed on the case name
+        // now, and this line is what keeps the two coupled.
+        for stage in DurableThrowRecord.RunnerStage.allCases {
+            #expect(stage.rawValue == String(describing: stage),
+                    "\(stage) persists as \(stage.rawValue); the source rail reads the CASE NAME")
+        }
+        let error = AnalysisAudioError.decodingFailed("x")
+        #expect(DurableThrowRecord.runnerStageLastErrorCode(for: error, stage: .backfill)
+            .contains("backfill"))
+        #expect(DurableThrowRecord.runnerStageLastErrorCode(for: error, stage: .hotPath)
+            .contains("hotPath"))
+    }
+
+    @Test("the token separates EXACTLY from the retired prose it replaced")
+    func tokenAndProseSeparate() {
+        // So a device pull can be written without guessing. The two diverge at
+        // the character after the stem: `(` against `:`.
+        let error = AnalysisAudioError.decodingFailed("Operation Interrupted")
+        for stage in DurableThrowRecord.RunnerStage.allCases {
+            let token = DurableThrowRecord.runnerStageLastErrorCode(for: error, stage: stage)
+            let prose = "\(stage.rawValue): \(error)"
+            #expect(!token.hasPrefix("\(stage.rawValue): "), "the token answers the prose query")
+            #expect(!prose.hasPrefix(DurableThrowRecord.runnerStageThrewPrefix),
+                    "the prose answers the token query")
+        }
+    }
+
+    @Test("the sixth prefix collides with nothing else this column holds, in either direction")
+    func theSixthPrefixCollidesWithNothing() {
+        let token = DurableThrowRecord.runnerStageLastErrorCode(
+            for: AnalysisAudioError.decodingFailed("x"), stage: .decode
+        )
+        let others = [
+            AnalysisWorkScheduler.maxAttemptsReachedPrefix,
+            AnalysisWorkScheduler.noProgressTerminalErrorCode,
+            "staleFingerprint:cachedAudioMismatch",
+            "backgroundWindowExpired",
+            "cancelMidRun",
+            "transcription:",
+            "reconciler_unavailable",
+            "orphan_at_launch",
+            DurableThrowRecord.jobThrewPrefix,
+            DurableThrowRecord.assetResolutionThrewPrefix,
+            DurableThrowRecord.sessionPipelineThrewPrefix,
+            DurableThrowRecord.recoveryThrewPrefix,
+            DurableThrowRecord.dayZeroThrewPrefix,
+        ]
+        for other in others {
+            #expect(!token.hasPrefix(other), "the runner-stage token answers to \(other)")
+            #expect(!other.hasPrefix(DurableThrowRecord.runnerStageThrewPrefix),
+                    "\(other) answers to the runner-stage query")
+        }
+    }
+
+    @Test("the token's grammar is closed: no whitespace, one balanced parenthetical")
+    func grammarIsClosed() {
+        // A device pull's `GROUP BY` and every LIKE query in this file's header
+        // depend on it. The retired prose failed both — a space after the colon,
+        // and an arbitrary sentence after that.
+        for stage in DurableThrowRecord.RunnerStage.allCases {
+            let token = DurableThrowRecord.runnerStageLastErrorCode(
+                for: AnalysisAudioError.readerSetupFailed("a b c"), stage: stage
+            )
+            #expect(!token.contains(" "), "\(token) carries whitespace")
+            #expect(token.filter { $0 == "(" }.count == 1, "\(token) is not one parenthetical")
+            #expect(token.hasSuffix(")"), "\(token) is unbalanced")
+        }
+    }
+
+    @Test("under= is a positive claim on this token too, never an absence")
+    func underIsPositive() {
+        let bare = DurableThrowRecord.runnerStageLastErrorCode(
+            for: AnalysisAudioError.decodingFailed("x"), stage: .features
+        )
+        #expect(bare.contains("under=none"), "\(bare)")
+
+        let chained = NSError(
+            domain: "Outer", code: 7,
+            userInfo: [NSUnderlyingErrorKey: NSError(domain: "Inner", code: 9)]
+        )
+        let token = DurableThrowRecord.runnerStageLastErrorCode(for: chained, stage: .features)
+        #expect(token.contains("under=Inner/9"), "\(token)")
+    }
+
+    @Test("the six factories share ONE identity grammar")
+    func oneIdentityGrammar() {
+        // A second copy of `domain=…,code=…,under=…` is a second ruler. Every
+        // factory must produce the same fields for the same error, differing
+        // only in the prefix.
+        let error = NSError(domain: "D", code: 4)
+        let identity = DurableThrowRecord.identityFields(of: error)
+        #expect(DurableThrowRecord.runnerStageLastErrorCode(for: error, stage: .decode)
+            == "runnerStageThrew-decode(\(identity))")
+        #expect(DurableThrowRecord.jobLastErrorCode(for: error) == "jobThrew(\(identity))")
+        #expect(DurableThrowRecord.assetResolutionLastErrorCode(for: error)
+            == "assetResolutionThrew(\(identity))")
+    }
+
+    // MARK: The two content-switching readers, EVERY CLAUSE PINNED
+
+    /// playhead-3c4k's first test of `isNoProgressTerminal` PASSED FOR THE WRONG
+    /// REASON: the predicate is `state == "complete" && code == …` and its
+    /// fixture was `state = "failed"`, so the state clause carried the assertion
+    /// and the token under test was never consulted. Both clauses are pinned
+    /// here, in both directions, with a control that makes the predicate TRUE.
+    private func job(state: String, code: String?) -> AnalysisJob {
+        AnalysisJob(
+            jobId: "JOB-1",
+            jobType: "preAnalysis",
+            episodeId: "EP-1",
+            podcastId: nil,
+            analysisAssetId: "ASSET-1",
+            workKey: "wk-1",
+            sourceFingerprint: "fp-1",
+            downloadId: "dl-1",
+            priority: 0,
+            desiredCoverageSec: 600,
+            featureCoverageSec: 0,
+            transcriptCoverageSec: 0,
+            cueCoverageSec: 0,
+            state: state,
+            attemptCount: 5,
+            nextEligibleAt: nil,
+            leaseOwner: nil,
+            leaseExpiresAt: nil,
+            lastErrorCode: code,
+            createdAt: 0,
+            updatedAt: 0
+        )
+    }
+
+    @Test("the TERMINAL arm's row still satisfies isAttemptCapTerminal, and every clause is load-bearing")
+    func terminalArmIsStillRescuable() {
+        let token = DurableThrowRecord.runnerStageLastErrorCode(
+            for: AnalysisAudioError.decodingFailed("Operation Interrupted"), stage: .decode
+        )
+        // What the scheduler's terminal arm actually writes: the prefix IN FRONT.
+        let written = AnalysisWorkScheduler.maxAttemptsReachedPrefix + token
+        #expect(AnalysisWorkScheduler.isAttemptCapTerminal(job(state: "superseded", code: written)))
+        #expect(AnalysisWorkScheduler.isRescuableTerminal(job(state: "superseded", code: written)))
+
+        // CLAUSE 1 (state) is load-bearing: the same value on a non-superseded
+        // row must NOT match, or the predicate is really just a prefix test.
+        #expect(!AnalysisWorkScheduler.isAttemptCapTerminal(job(state: "failed", code: written)))
+        // CLAUSE 2 (prefix) is load-bearing: the RETRY arm writes the bare token
+        // onto a `failed` row and must never be read as a cap-out.
+        #expect(!AnalysisWorkScheduler.isAttemptCapTerminal(job(state: "superseded", code: token)))
+        // ANTI-VACUITY: the predicate is capable of returning true for a value
+        // that is not this token at all, so the expectations above are not
+        // passing because the function is broken.
+        #expect(AnalysisWorkScheduler.isAttemptCapTerminal(
+            job(state: "superseded", code: "maxAttemptsReached:cancelMidRun")
+        ))
+    }
+
+    @Test("no runner-stage token can be mistaken for a no-progress terminal, and every clause is pinned")
+    func noProgressTerminalIsUnreachableFromThisToken() {
+        let exact = AnalysisWorkScheduler.noProgressTerminalErrorCode
+        for stage in DurableThrowRecord.RunnerStage.allCases {
+            let token = DurableThrowRecord.runnerStageLastErrorCode(
+                for: AnalysisAudioError.decodingFailed("x"), stage: stage
+            )
+            #expect(token != exact)
+            // The reader is an EXACT match, so the fixture is put on the ONE
+            // state that satisfies its other clause. 3c4k's version used
+            // `failed` here and the state clause answered for it.
+            #expect(!AnalysisWorkScheduler.isNoProgressTerminal(job(state: "complete", code: token)))
+            #expect(!AnalysisWorkScheduler.isNoProgressTerminal(
+                job(state: "complete", code: AnalysisWorkScheduler.maxAttemptsReachedPrefix + token)
+            ))
+        }
+        // ANTI-VACUITY, both directions. The predicate DOES fire on `complete` +
+        // the exact code (so the code clause above was genuinely consulted)…
+        #expect(AnalysisWorkScheduler.isNoProgressTerminal(job(state: "complete", code: exact)))
+        // …and does NOT on any other state with the same code (so the state
+        // clause is real and the expectation above is not the state's doing).
+        #expect(!AnalysisWorkScheduler.isNoProgressTerminal(job(state: "failed", code: exact)))
+    }
+}
+
 // MARK: - Source canary: a token can be a perfect VALUE and a wrong ARGUMENT
 
 /// The only instrument that can see the defect class the four call sites are
@@ -1805,6 +2120,374 @@ final class DurableThrowRecordSourceCanaryTests: XCTestCase {
             service.contains("dayZeroAttemptDetail(for:error,")
                 || detection.contains("dayZeroAttemptDetail(for:error,"),
             "a second discriminator has been threaded into the day-0 token"
+        )
+    }
+
+    // MARK: playhead-q93o — the rule that had to stop being about a FILE
+    //
+    // Everything above this line is stated over ONE FILE: the file that writes
+    // the column, or the file that assigns the field. That is what let the
+    // seventh site ship. `AnalysisJobRunner` builds a description, an
+    // `AnalysisOutcome.StopReason` associated value CARRIES it, a
+    // `case .failed(let reason)` in `AnalysisWorkScheduler` unwraps it, and two
+    // arms interpolate it into `analysis_jobs.lastErrorCode` — while
+    // `testTheSchedulerArmsNoLongerPersistADescription` read every
+    // `lastErrorCode:` argument in the scheduler, found the identifier `reason`,
+    // and reported clean — ON A SITE THAT HAD ALREADY PRODUCED FIELD ROWS.
+    //
+    // The dates, because the obvious sentence is the wrong one. The five sites
+    // landed with the runner on 2026-04-03 and this canary landed on 2026-08-16,
+    // hours before this bead. It did not decay; it was green against a live
+    // instance in its own column FROM THE DAY IT WAS WRITTEN — a rule authored
+    // from the defects in front of it, in the file in front of it.
+    //
+    // The rules below are stated over the CARRIER instead: every construction of
+    // the enum case whose payload reaches the column, in EVERY production file.
+
+    private func runnerSource() throws -> [FMDaemonRefusalSourceCanaryTests.SourceLine] {
+        try source("Playhead/Services/AnalysisJobRunner/AnalysisJobRunner.swift")
+    }
+
+    /// Every production Swift file. The walk is the whole point — a rule that
+    /// names the files it reads can only ever cover the sites somebody already
+    /// knew about.
+    private func productionSwiftFiles() throws -> [URL] {
+        var root = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+        for _ in 0..<3 {
+            root.deleteLastPathComponent()
+        }
+        root.appendPathComponent("Playhead", isDirectory: true)
+        let walker = try XCTUnwrap(
+            FileManager.default.enumerator(at: root, includingPropertiesForKeys: nil),
+            "could not walk \(root.path)"
+        )
+        let files = walker.compactMap { $0 as? URL }.filter { $0.pathExtension == "swift" }
+        XCTAssertGreaterThan(files.count, 100, "source walk found only \(files.count) Swift files")
+        return files
+    }
+
+    /// The two markers that construct the carrier whose payload reaches
+    /// `analysis_jobs.lastErrorCode` and `work_journal.metadata`.
+    ///
+    /// **The LABELS are why this list can be short.** `AnalysisOutcome.StopReason`
+    /// declares `failed(code:)` and `interrupted(code:)`, so the compiler refuses
+    /// every other construction spelling — `.failed(x)` does not build. Before
+    /// playhead-q93o the case was `failed(String)` and a rule like this one would
+    /// have had to guess at spellings; now it enumerates from one marker per
+    /// case. The whitespace-stripped `denseCode` covers `. failed( code : x )`.
+    static let stopReasonConstructionMarkers = [".failed(code:", ".interrupted(code:"]
+
+    /// EVERY production construction of the carrier, with the file it is in.
+    private func stopReasonPayloads() throws -> [(file: String, argument: String)] {
+        var found: [(file: String, argument: String)] = []
+        for url in try productionSwiftFiles() {
+            let dense = FMDaemonRefusalSourceCanaryTests.denseCode(
+                FMDaemonRefusalSourceCanaryTests.codeLines(of: try String(contentsOf: url, encoding: .utf8))
+            )
+            for marker in Self.stopReasonConstructionMarkers {
+                for argument in FMDaemonRefusalSourceCanaryTests.firstArguments(after: marker, in: dense) {
+                    found.append((file: url.lastPathComponent, argument: argument))
+                }
+            }
+        }
+        return found
+    }
+
+    /// THE RULE THIS BEAD EXISTS FOR: no production construction of the carrier,
+    /// in any file, may build a description.
+    func testNoProductionSiteBuildsTheStopReasonPayloadFromADescription() throws {
+        let payloads = try stopReasonPayloads()
+
+        // VACUITY, THREE WAYS. The walk found the carrier at all…
+        XCTAssertGreaterThanOrEqual(
+            payloads.count, 8,
+            "the carrier's constructions were not found — \(payloads.count) sites; move this canary with the code"
+        )
+        // …it found them in the file that actually builds them…
+        XCTAssertTrue(
+            payloads.contains { $0.file == "AnalysisJobRunner.swift" },
+            "no construction found in AnalysisJobRunner.swift, so this rule is reading nothing"
+        )
+        // …and the filter it applies demonstrably fires. Checked against
+        // synthetic text rather than against the tree, because "is the filter
+        // able to see a description" is a property of the filter.
+        for spelling in ["\\(error)", "String(describing:error)", "error.localizedDescription"] {
+            XCTAssertFalse(
+                descriptionOffenders(in: ["\"decode:\(spelling)\""]).isEmpty,
+                "the filter cannot see \(spelling)"
+            )
+        }
+
+        let offenders = payloads.filter { !descriptionOffenders(in: [$0.argument]).isEmpty }
+        XCTAssertTrue(
+            offenders.isEmpty,
+            """
+            An `AnalysisOutcome.StopReason` payload is being built from a Swift value's DESCRIPTION. \
+            That payload is carried into `analysis_jobs.lastErrorCode` and into `work_journal.metadata` \
+            by `AnalysisWorkScheduler`'s `.failed` / `.interrupted` arms, TWO HOPS AWAY IN ANOTHER FILE — \
+            which is why no rule stated over `lastErrorCode:` arguments can see this, and why five such \
+            lines shipped past a canary that was green against them from the day it was written \
+            (playhead-q93o). Two field rows carried \
+            one of them, one on the arm that permanently retires the job. \
+            Offenders: \(offenders.map { "\($0.file): \($0.argument)" })
+            """
+        )
+    }
+
+    /// The premise, checked rather than asserted: 3lc3's rule, run over the
+    /// shipped lines, reports CLEAN.
+    ///
+    /// Same discipline as `testTheOldTwoSpellingRuleWouldHaveMissedTheShippedLine`
+    /// one bead over — a claim that the old rule was blind is checkable, and
+    /// checking it is what stops the new rule from being the old one relocated.
+    func testTheSchedulerArgumentRuleCannotSeeTheRunnerSitesAtAll() throws {
+        // The two scheduler arguments, in the dense spelling that finder reads.
+        // These are the REAL production spellings, and neither is a description.
+        let schedulerArguments = ["reason", "\"\\(Self.maxAttemptsReachedPrefix)\\(reason)\""]
+        XCTAssertTrue(
+            descriptionOffenders(in: schedulerArguments).isEmpty,
+            "the premise of this bead is false: 3lc3's rule DOES flag the scheduler's arms"
+        )
+        // And the value they carry, built two files away, IS one. Assembled by
+        // concatenation so this test file does not itself interpolate an error.
+        let retired = "\"decode:" + "\\(error)\""
+        XCTAssertFalse(
+            descriptionOffenders(in: [retired]).isEmpty,
+            "the description filter cannot see the line that shipped"
+        )
+        // So the rule is sound and the SCOPE was the defect: a description that
+        // never appears in the writing file is invisible to a rule about that
+        // file, no matter how many spellings the rule knows.
+        XCTAssertTrue(
+            FMDaemonRefusalSourceCanaryTests
+                .firstArguments(after: "lastErrorCode:", in: "lastErrorCode:reason,state:\"failed\"")
+                .allSatisfy { descriptionOffenders(in: [$0]).isEmpty },
+            "the argument finder is not reproducing the scheduler's shape"
+        )
+    }
+
+    /// The rule above is stated over a MARKER SET, so it is only as complete as
+    /// that set. This closes it in both directions.
+    ///
+    /// A construction the compiler accepts must spell one of the two markers —
+    /// `AnalysisOutcome.StopReason` declares its payloads with labels precisely
+    /// so. What this rail adds is the CONVERSE: if a new production file starts
+    /// building the carrier, the rule's scope has changed and a human has to
+    /// look. Same discipline as `scripts/singleton-slot-allowlist.json` — an
+    /// entry that matches nothing fails too, because a licence for a site nobody
+    /// can find has been inherited by whatever took its name.
+    func testTheCarrierIsConstructedOnlyWhereThisRailExpects() throws {
+        let files = Set(try stopReasonPayloads().map(\.file))
+        XCTAssertEqual(
+            files, ["AnalysisJobRunner.swift"],
+            """
+            The set of production files constructing `AnalysisOutcome.StopReason`'s payload has \
+            changed. That is not necessarily wrong — but this canary's per-site stage rails below are \
+            written for AnalysisJobRunner alone, so the new site is currently covered ONLY by the \
+            tree-wide description rule. Extend the per-site rails, then update this expectation. \
+            Found: \(files.sorted())
+            """
+        )
+    }
+
+    /// **THE ARGUMENT-SHAPED RULE ABOVE HAS EXACTLY ONE HOLE AND THIS IS IT.**
+    ///
+    /// Found by running mutant Q05, not by reasoning: a SIXTH catch added to
+    /// `AnalysisJobRunner`, laundering a description through a local
+    /// (`let poison = "sixthStage: \(error)"; … .failed(code: poison)`) and
+    /// SURVIVED every rail in this class. The tree-wide rule sees the wholesome
+    /// identifier `poison`; the per-site rails below are anchored on the five
+    /// log messages that exist and never read the new site; the exact-count
+    /// rails still find their five; and the closed-world file set is unchanged
+    /// because the new site is in the same file. The whole gate returned rc=0.
+    ///
+    /// The remedy is the one `scripts/singleton-slot-allowlist.json` uses: an
+    /// inventory that is CLOSED IN BOTH DIRECTIONS. Every argument this carrier
+    /// is ever given is enumerated, so a new construction — of any spelling, in
+    /// this file or another — fails here and has to be signed for.
+    ///
+    /// Three kinds are allowed, and nothing else:
+    ///   * `throwRecord`, the local bound from `DurableThrowRecord` (five stage
+    ///     catches, each pinned to its own site below);
+    ///   * `code`, the local `zeroCoverageDisposition` builds from the closed
+    ///     `TranscriptFailureReason.failureClass` vocabulary;
+    ///   * one compile-time LITERAL, which is identical on every device and in
+    ///     every locale and therefore already groups.
+    func testTheCarrierConstructionsAreAnExactInventory() throws {
+        let payloads = try stopReasonPayloads()
+        let counted = Dictionary(grouping: payloads, by: \.argument).mapValues(\.count)
+        XCTAssertEqual(
+            counted,
+            [
+                "throwRecord": DurableThrowRecord.RunnerStage.allCases.count,
+                "code": 2,
+                "\"noshardswithindesiredcoverage\"": 1,
+            ],
+            """
+            The set of values given to `AnalysisOutcome.StopReason`'s payload has changed. This is \
+            the inventory that closes the one hole the argument-shaped rule above cannot see: a NEW \
+            construction laundering a description through a local of any other name (mutant Q05, \
+            which survived everything else in this class). If the new site is legitimate, give it a \
+            per-site rail below and then extend this expectation — do not widen it alone. Found: \
+            \(counted)
+            """
+        )
+    }
+
+    /// The hop itself, pinned. The rule above is scoped to the carrier because
+    /// the carrier is what feeds the column; if that stops being true the rule
+    /// is guarding nothing and must be moved rather than left looking green.
+    func testTheColumnIsStillFedByThatCarrierAndByThoseTwoArms() throws {
+        let dense = FMDaemonRefusalSourceCanaryTests.denseCode(try schedulerSource())
+
+        // The unwrap.
+        XCTAssertTrue(dense.contains("case.failed(letreason):"), "the `.failed` arm's binding is gone")
+        XCTAssertTrue(
+            dense.contains("case.interrupted(letreason):"),
+            "the `.interrupted` arm's binding is gone"
+        )
+        // The three durable writes that value reaches, verbatim.
+        XCTAssertTrue(
+            dense.contains("lastErrorCode:\"\\(Self.maxAttemptsReachedPrefix)\\(reason)\""),
+            "the `.failed` TERMINAL arm no longer carries the payload into the column"
+        )
+        XCTAssertEqual(
+            FMDaemonRefusalSourceCanaryTests
+                .firstArguments(after: "lastErrorCode:", in: dense)
+                .filter { $0 == "reason" }
+                .count,
+            2,
+            "expected exactly two bare-`reason` durable writes (the `.failed` retry arm and `.interrupted`)"
+        )
+        // And the SECOND durable column the same value reaches, which is easy to
+        // forget because it is spelled as a dictionary value rather than as a
+        // labelled argument.
+        XCTAssertEqual(
+            dense.components(separatedBy: "\"runner_reason\":reason").count - 1,
+            3,
+            "the `runner_reason` -> work_journal.metadata writes have changed shape"
+        )
+    }
+
+    // MARK: playhead-q93o — per SITE, because a right token with a wrong STAGE
+    // is a well-formed value and no value test can see it
+
+    /// Each stage catch, anchored on its OWN log message — the one thing no
+    /// other site in the file carries. A file-wide `contains` is satisfied by
+    /// any one of the five while the other four go back to prose, which is 3lc3's
+    /// DT05 with five doors instead of two.
+    ///
+    /// Span measured, not guessed: the binding plus the `logger.error(` line is
+    /// ~210 dense characters at the widest site (`fetchChunks`), and the nearest
+    /// two sites are ~2,000 dense characters apart. 320 holds the whole statement
+    /// after a mutation inserts a laundering line and still cannot reach a
+    /// neighbour.
+    private static let stageWindow = 320
+
+    /// (stage, the log message that anchors its site).
+    private static let stageSites: [(DurableThrowRecord.RunnerStage, String)] = [
+        (.decode, "\"Decodefailedforjob"),
+        (.features, "\"Featureextractionfailedforjob"),
+        (.fetchChunks, "\"Failedtofetchtranscriptchunksforjob"),
+        (.hotPath, "\"Hot-pathdetectionfailedforjob"),
+        (.backfill, "\"Backfilldetectionfailedforjob"),
+    ]
+
+    func testEveryRunnerStageCatchBindsTheRecordAtItsOwnSite() throws {
+        let dense = FMDaemonRefusalSourceCanaryTests.denseCode(try runnerSource())
+        // Vacuity: this reader must be able to SEE a description, because all
+        // five log lines still carry the raw error deliberately (59c8's split).
+        XCTAssertTrue(
+            dense.contains("\\(error)"),
+            "vacuity: this reader cannot see the spelling it forbids, so an absence proves nothing"
+        )
+        for (stage, anchor) in Self.stageSites {
+            let site = try codeImmediatelyBefore(anchor, span: Self.stageWindow, in: dense)
+            XCTAssertTrue(
+                site.contains("DurableThrowRecord.runnerStageLastErrorCode(for:error,"),
+                """
+                The `\(stage.rawValue)` stage catch no longer builds its durable cause from \
+                `DurableThrowRecord` at its own site. Site text: \(site)
+                """
+            )
+            XCTAssertFalse(
+                Self.descriptionSpellings.contains { site.contains($0) },
+                "the `\(stage.rawValue)` catch binds a DESCRIPTION into its durable cause: \(site)"
+            )
+        }
+    }
+
+    /// Deliberately a SEPARATE method from the binding rule above, not a second
+    /// assertion inside it: "this site stopped using the record" and "this site
+    /// records the wrong stage" are different defects, and one method covering
+    /// both lets one mutant be credited for reddening the other's claim
+    /// (`playhead-sckv`'s SF03/SF10, which cost a round).
+    func testEveryRunnerStageCatchRecordsITSOWNStage() throws {
+        let dense = FMDaemonRefusalSourceCanaryTests.denseCode(try runnerSource())
+        // KEYED ON THE CASE NAME, not the raw value: the source spells
+        // `stage: .hotPath`, which is the case. Mutant Q06 changed a raw value
+        // and this rail reported "the hot_path catch is not recording its own
+        // stage" — a true failure with a false reason, because it was reading
+        // the greppable stem as though it were the Swift identifier. The two are
+        // pinned equal by `theStemsArePreserved`; here the case name is used.
+        for (stage, anchor) in Self.stageSites {
+            let caseName = String(describing: stage)
+            let site = try codeImmediatelyBefore(anchor, span: Self.stageWindow, in: dense)
+            XCTAssertTrue(
+                site.contains("stage:.\(caseName))"),
+                """
+                The `\(stage.rawValue)` catch is not recording its own stage. A different case here \
+                produces a perfectly well-formed `runnerStageThrew-<other>(…)` naming a stage that did \
+                not run — `analysis_jobs` has no stage column, so nothing else in the row can \
+                contradict it, and no value test in this file can see it. Site text: \(site)
+                """
+            )
+            for other in DurableThrowRecord.RunnerStage.allCases where other != stage {
+                XCTAssertFalse(
+                    site.contains("stage:.\(String(describing: other)))"),
+                    "the `\(caseName)` catch also names `\(String(describing: other))`: \(site)"
+                )
+            }
+        }
+        // And every stage is used exactly once, so a mutation that points two
+        // catches at one stage — leaving one stage unreachable and one row lying
+        // — fails here rather than passing every per-site read above.
+        for stage in DurableThrowRecord.RunnerStage.allCases {
+            let marker = "stage:.\(String(describing: stage)))"
+            XCTAssertEqual(
+                dense.components(separatedBy: marker).count - 1,
+                1,
+                "`\(String(describing: stage))` is recorded by "
+                    + "\(dense.components(separatedBy: marker).count - 1) sites, not one"
+            )
+        }
+    }
+
+    func testTheRunnerBindsEachRecordOnceAndTheLogConsumesIt() throws {
+        let dense = FMDaemonRefusalSourceCanaryTests.denseCode(try runnerSource())
+        // `playhead-sckv`'s discipline: the column and the log consume ONE local,
+        // so they cannot disagree about the throw in front of them.
+        XCTAssertEqual(
+            FMDaemonRefusalSourceCanaryTests
+                .firstArguments(after: "DurableThrowRecord.runnerStageLastErrorCode(", in: dense).count,
+            DurableThrowRecord.RunnerStage.allCases.count,
+            "expected exactly one record binding per stage"
+        )
+        XCTAssertEqual(
+            dense.components(separatedBy: "letthrowRecord=DurableThrowRecord.runnerStageLastErrorCode(")
+                .count - 1,
+            DurableThrowRecord.RunnerStage.allCases.count,
+            "each stage catch must bind the record to a local above its write"
+        )
+        XCTAssertEqual(
+            dense.components(separatedBy: "token=\\(throwRecord,privacy:.public)").count - 1,
+            DurableThrowRecord.RunnerStage.allCases.count,
+            "each stage's log line must consume the SAME local the outcome was given"
+        )
+        XCTAssertEqual(
+            dense.components(separatedBy: ".failed(code:throwRecord)").count - 1,
+            DurableThrowRecord.RunnerStage.allCases.count,
+            "each stage catch must hand the bound record to the outcome"
         )
     }
 }

@@ -41,8 +41,38 @@ struct AnalysisOutcome: Sendable {
         ///
         /// The payload is the same `"transcription:<class>"` string `.failed`
         /// would have carried, so nothing about the reporting is lost.
-        case interrupted(String)
-        case failed(String)
+        case interrupted(code: String)
+
+        /// playhead-q93o: **THE LABEL IS THE CONTRACT, AND IT IS THERE TO MAKE
+        /// A CROSS-FILE RULE POSSIBLE AT ALL.**
+        ///
+        /// This payload is not a message. It is carried, unmodified, into
+        /// `analysis_jobs.lastErrorCode` and into `work_journal.metadata`'s
+        /// `runner_reason` by ``AnalysisWorkScheduler``'s `.failed` / `.interrupted`
+        /// arms, two hops away in another file — the runner builds it, an enum
+        /// associated value carries it, a `case .failed(let reason)` unwraps it,
+        /// and an interpolation puts it in the column. Since 2026-04-03 five of
+        /// its producers built it by interpolating a caught `Error`, which is
+        /// `String(describing:)` by another name, and the source canary written
+        /// to stop exactly that (`DurableThrowRecordSourceCanaryTests`) was
+        /// GREEN AGAINST IT FROM THE MOMENT IT WAS WRITTEN: it filters
+        /// `lastErrorCode:` ARGUMENTS in the scheduler, and the offending
+        /// argument there is the identifier `reason`.
+        ///
+        /// The label costs nothing and buys the one thing a source rule needs:
+        /// **the compiler now forces every construction of this case to be
+        /// spelled `.failed(code:`**, so a canary can enumerate the producers
+        /// across the whole tree from one marker instead of guessing at the
+        /// spellings a future author might use. `case .failed(let reason)`
+        /// pattern matches are unaffected by a payload label, so no consumer
+        /// changed.
+        ///
+        /// What it does NOT buy, stated rather than hoped: the payload is still
+        /// a `String`, so a description can still reach it through a local or a
+        /// helper. A label bounds the SPELLINGS a rule must know; only a type
+        /// bounds the VALUES. See `DurableThrowRecord.swift`'s q93o section for
+        /// the residual limits and `playhead-qlja` for the type.
+        case failed(code: String)
     }
 
     let assetId: String
