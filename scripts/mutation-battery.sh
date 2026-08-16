@@ -1173,6 +1173,13 @@ PERMC="Playhead/Services/AdDetection/PermissiveAdClassifier.swift"
 # recovery of that identity from the episode row itself.
 RT="Playhead/App/PlayheadRuntime.swift"
 MODEL="Playhead/Models/Podcast.swift"
+# playhead-f5ao: the two surfaces that were reading `Episode.analysisSummary`,
+# a mirror with no producer. Two files because the claim spans two layers that
+# cannot see each other: the Library view owns the tooltip trigger and the ✓
+# badge (whose AGREEMENT is the property), and the batch builder owns the LIFT
+# out of the SwiftData row (whose COLUMN is the property).
+ELV="Playhead/Views/Library/EpisodeListView.swift"
+BSB="Playhead/Services/Notifications/BatchSummaryBuilder.swift"
 # playhead-s9mx: the playback-position COMMIT POINT. Two files because the
 # claim spans a boundary neither side can see alone. The transport is the only
 # thing that knows whether `_state.currentTime` came from an item's clock or
@@ -1373,6 +1380,7 @@ MUTABLE_FILES=(
   "$CLAIM" "$RECON" "$ATOM" "$AJRUN" "$ACOORD" "$ESUMBF" "$MPTRENG" "$MPTRIDX"
   "$BGPS" "$GRANT" "$LEASE"
   "$PTX"
+  "$ELV" "$BSB"
 )
 # playhead-6r4z R1 review: `$MPTRIDX` was MISSING from the list above from the
 # moment playhead-mptr added the K2 series, and it is the target of NINE of the
@@ -1398,6 +1406,16 @@ MUTABLE_FILES=(
 # half-open-interval contract.
 
 FOCUSED_SUITES=(
+  # playhead-f5ao: the write-only-at-init mirror (F5 series). Two suites,
+  # because the two halves of the claim are unobservable from each other. The
+  # readiness suite is the only thing that can compare the first-✓ tooltip's
+  # trigger against the ✓ badge's own predicate — the property that was FALSE
+  # for four months and that no test in the tree asserted. The batch-builder
+  # suite is the only thing that lifts a real SwiftData row into an
+  # `EpisodeProjection`, so it is the only thing that can see WHICH column the
+  # lift reads; a hand-built projection cannot.
+  -only-testing:PlayheadTests/EpisodeRowReadinessTests
+  -only-testing:PlayheadTests/BatchSummaryBuilderTests
   # playhead-jc42: the duplicated transcript span (JC series). Two suites,
   # because the claim spans two layers and neither can observe the other. The
   # V53 suite is the only thing that can see the SCHEMA half — the sweep's key,
@@ -2844,6 +2862,16 @@ T_ZX_COMMIT_RECORDED="a COMMITTED dismiss is recorded"
 T_ZX_REFUSAL_RECORDED="a REFUSED dismiss is recorded, and names which refusal"
 T_ZX_LIVE_ONLY="a live window with no durable row cannot refuse the dismiss beside it"
 T_ZX_NO_LIVE_CLAIM="a committed dismiss leaves no live window still claiming the ad"
+
+# playhead-f5ao: the write-only-at-init mirror (F5 series). The first three are
+# XCTest, so `Suite/method`; the last three are Swift Testing display names,
+# verbatim from `BatchSummaryBuilderTests`.
+T_F5_AGREE="EpisodeRowReadinessTests/testTriggerAgreesWithBadgeOnEveryReadiness"
+T_F5_DEFERRED="EpisodeRowReadinessTests/testTriggerIsFalseWhenEveryRowIsDeferredOnly"
+T_F5_NOT_FIRST="EpisodeRowReadinessTests/testTriggerFindsAReadyRowThatIsNotFirst"
+T_F5_ANALYZED="EpisodeProjection.analyzed is exactly coverageSummary != nil"
+T_F5_READY="makeSummary: downloaded + analyzed → ready (regardless of cause)"
+T_F5_TRIPREADY="tripReady fires when every child is downloaded AND analyzed"
 T_9Y9E_PARTIAL="a half-transcribed asset still fails, and still journals the failure"
 T_9Y9E_GAPPY="a full watermark over a gappy transcript does not license the short-circuit"
 T_9Y9E_NOCHUNKS="a watermark with no chunks behind it does not license the short-circuit"
@@ -7276,6 +7304,74 @@ MUTATIONS=(
   # outranks an inferred one in BOTH directions" pointed the wrong way.
   # UNIQUE KILL: `$T_ZX_NO_LIVE_CLAIM`.
   "ZX05|824|ORCH|$T_ZX_NO_LIVE_CLAIM"
+
+  # ------------------------------------------------------------------
+  # playhead-f5ao — F5 series. What a DELETION can and cannot be
+  # mutation-tested for, stated before the entries so nobody reads five
+  # rails as a proof of the whole change.
+  #
+  # f5ao deleted `Episode.analysisSummary` and
+  # `Episode.lastPlayedAnalysisAssetId`, two stored properties that no
+  # code has written since the schema's first commit, and re-pointed the
+  # three readers of the first at `coverageSummary`. NONE of the five
+  # entries below tests the deletion. A deleted field cannot be mutated,
+  # and the only rail on its absence is the COMPILER: any reader that
+  # survived would not build. That is a real rail and it is also the
+  # whole of what is available in that direction — say so rather than
+  # inventing an entry that cannot fail.
+  #
+  # What these five DO test is the re-point, which is the part that can
+  # be silently wrong: three surfaces now answer "does this episode have
+  # analysis?" from a different column than they used to, and each could
+  # answer it with the wrong quantity while every existing test passed —
+  # which is exactly how the original defect survived.
+  # ------------------------------------------------------------------
+
+  # Batch 830 — F501. The tooltip trigger goes back to asking "does any
+  # episode have ANALYSIS?" instead of "is any row showing a ✓?", spelled
+  # on the live column so it compiles. This is the pre-f5ao semantics
+  # exactly: `rw49` wired the trigger to the badge's gate at 16:16 on
+  # 2026-04-20, `cthe` re-gated the badge at 16:20, and the trigger kept
+  # the old question. A `.deferredOnly` row has coverage and no ✓, so the
+  # mutant fires a tooltip that says "✓ means we've found ads to skip"
+  # with no ✓ anywhere on screen.
+  # UNIQUE KILL: `$T_F5_AGREE` and `$T_F5_DEFERRED`.
+  "F501|830|ELV|$T_F5_AGREE;$T_F5_DEFERRED"
+
+  # Batch 831 — F502. The trigger consults only the FIRST row. The
+  # Library sorts newest-first and the analyzed episode is routinely not
+  # the newest, so this is a live one-word regression that leaves the
+  # tooltip permanently dark on a real library while every "does the
+  # predicate agree with the badge" assertion still passes on a
+  # single-element fixture. Its own batch because it edits the same
+  # function body as F501.
+  # UNIQUE KILL: `$T_F5_NOT_FIRST`.
+  "F502|831|ELV|$T_F5_NOT_FIRST"
+
+  # Batch 832 — F503. `EpisodeProjection.analyzed` returns `true`
+  # unconditionally: every episode reads as analyzed, so a batch closes
+  # `tripReady` on episodes nothing has looked at.
+  # UNIQUE KILL: `$T_F5_ANALYZED`.
+  "F503|832|BSB|$T_F5_ANALYZED"
+
+  # Batch 833 — F504. The mirror, and the shape that actually SHIPPED:
+  # `analyzed` returns `false` unconditionally, which is what reading a
+  # field with no producer amounted to. It is a separate batch from F503
+  # because both redden `$T_F5_ANALYZED`; the extra two expectations are
+  # what distinguish the false direction — a permanently-false `analyzed`
+  # takes `isReady` down with it, which is the observable the shipped
+  # defect had and which no test caught.
+  # UNIQUE KILL: `$T_F5_ANALYZED`, plus `$T_F5_READY` and `$T_F5_TRIPREADY`.
+  "F504|833|BSB|$T_F5_ANALYZED;$T_F5_READY;$T_F5_TRIPREADY"
+
+  # Batch 834 — F505. The LIFT rather than the definition: `init(_ episode:)`
+  # stops reading the row's column and hands the projection `nil`. This is
+  # the exact anatomy of the defect f5ao fixed — the derivation was always
+  # correct, it was the column being lifted that had no producer — and it
+  # is invisible to any test that builds an `EpisodeProjection` by hand,
+  # which is why the rail has to seed a real SwiftData row.
+  # UNIQUE KILL: `$T_F5_ANALYZED`.
+  "F505|834|BSB|$T_F5_ANALYZED"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -7741,6 +7837,11 @@ describe_mutation() {
     ZX03) echo "zxqj: a COMMITTED dismiss stops writing its audit row" ;;
     ZX04) echo "zxqj: a refusal over unclaimed audio stops writing its audit row" ;;
     ZX05) echo "zxqj: a committed revert stops being terminal for a MANAGED producer ID, leaving a live cue over vetoed audio" ;;
+    F501) echo "f5ao: the first-✓ tooltip trigger goes back to 'has ANY analysis' — it fires with no ✓ on screen" ;;
+    F502) echo "f5ao: the tooltip trigger consults only the FIRST row, so a ✓ further down the list never announces itself" ;;
+    F503) echo "f5ao: EpisodeProjection.analyzed is unconditionally true — every episode reads as analyzed" ;;
+    F504) echo "f5ao: EpisodeProjection.analyzed is unconditionally false — the shipped shape, isReady goes with it" ;;
+    F505) echo "f5ao: the lift stops reading the row's coverage column, so the projection is blind to a real record" ;;
     RT01) echo "9y9e: the short-circuit goes — a finished transcript is a transcription failure again and Stage 4 never runs" ;;
     RT02) echo "9y9e: VACUITY AUDIT — the short-circuit's floor goes, so every negative runner fixture must go red" ;;
     RT03) echo "9y9e: the gate divides the WATERMARK, not the bridged area — a gappy transcript reads as finished" ;;
@@ -8186,6 +8287,58 @@ EOF
                           managed.adWindow,
                           expectedManaged.adWindow
                       )
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # F501 — the tooltip trigger goes back to "has ANY analysis".
+  F501)
+    snippet OLD <<'EOF'
+    episodes.contains { libraryRowShouldShowReadinessCheckmark(episode: $0) }
+EOF
+    snippet NEW <<'EOF'
+    episodes.contains { $0.coverageSummary != nil }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # F502 — the tooltip trigger consults only the first row.
+  F502)
+    snippet OLD <<'EOF'
+    episodes.contains { libraryRowShouldShowReadinessCheckmark(episode: $0) }
+EOF
+    snippet NEW <<'EOF'
+    episodes.first.map { libraryRowShouldShowReadinessCheckmark(episode: $0) } ?? false
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # F503 — analyzed is unconditionally true.
+  F503)
+    snippet OLD <<'EOF'
+    var analyzed: Bool { coverageSummary != nil }
+EOF
+    snippet NEW <<'EOF'
+    var analyzed: Bool { true }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # F504 — analyzed is unconditionally false (the shipped shape).
+  F504)
+    snippet OLD <<'EOF'
+    var analyzed: Bool { coverageSummary != nil }
+EOF
+    snippet NEW <<'EOF'
+    var analyzed: Bool { false }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # F505 — the lift stops reading the row's coverage column.
+  F505)
+    snippet OLD <<'EOF'
+        self.coverageSummary = episode.coverageSummary
+        self.playbackAnchor = episode.playbackAnchor
+EOF
+    snippet NEW <<'EOF'
+        self.coverageSummary = nil
+        self.playbackAnchor = episode.playbackAnchor
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -17060,6 +17213,8 @@ rec_batch()  { printf '%s' "$1" | cut -d'|' -f2; }
 rec_file()   {
   case "$(printf '%s' "$1" | cut -d'|' -f3)" in
     ORCH)  printf '%s' "$ORCH" ;;
+    ELV)   printf '%s' "$ELV" ;;
+    BSB)   printf '%s' "$BSB" ;;
     STORE) printf '%s' "$STORE" ;;
     CTRL)  printf '%s' "$CTRL" ;;
     VIEW)  printf '%s' "$VIEW" ;;

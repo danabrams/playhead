@@ -5609,7 +5609,7 @@ final class PlayheadRuntime {
     /// on real per-episode failures (storage cap, Wi-Fi-only policy,
     /// Apple Intelligence disabled, etc). The closure resolves three
     /// inputs per child:
-    ///   1. The persisted `Episode` row (downloadState + analysisSummary
+    ///   1. The persisted `Episode` row (downloadState + coverageSummary
     ///      → isReady, plus coverage/anchor for the reducer).
     ///   2. The most-recent `InternalMissCause` from the work-journal
     ///      (drives Rules 3 / 4 of the reducer — storage and transient-

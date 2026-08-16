@@ -46,6 +46,15 @@ private func makeInMemoryContainer() throws -> ModelContainer {
 
 /// Insert an Episode row at `key` with the given download/analysis state,
 /// returning the canonical key.
+///
+/// playhead-f5ao: `analyzed` used to be seeded by writing an
+/// `AnalysisSummary(hasAnalysis: analyzed, …)` onto the row. That field
+/// was deleted — nothing in the app ever wrote it — and
+/// `EpisodeProjection.analyzed` now derives from `coverageSummary`, so
+/// the seed writes a real coverage record. `analyzed: true` therefore
+/// means "this episode has confirmed coverage", which is what the
+/// reducer's `hasAnyConfirmedAnalysis` has always meant on every other
+/// surface (`PlayerStatusLine`, `EpisodeListView`).
 @MainActor
 private func insertEpisode(
     context: ModelContext,
@@ -67,16 +76,24 @@ private func insertEpisode(
         title: "Test Episode \(feedItemGUID)",
         audioURL: URL(string: "https://example.com/\(feedItemGUID).mp3")!,
         downloadState: downloadState,
-        analysisSummary: AnalysisSummary(
-            hasAnalysis: analyzed,
-            adSegmentCount: analyzed ? 1 : 0,
-            totalAdDuration: analyzed ? 60 : 0,
-            lastAnalyzedAt: analyzed ? Date(timeIntervalSince1970: 1_700_000_000) : nil
-        )
+        coverageSummary: analyzed ? confirmedCoverage() : nil
     )
     context.insert(episode)
     try context.save()
     return episode.canonicalEpisodeKey
+}
+
+/// A minimal non-nil `CoverageSummary` — the shape that makes
+/// `EpisodeProjection.analyzed` true.
+private func confirmedCoverage() -> CoverageSummary {
+    CoverageSummary(
+        coverageRanges: [0...600],
+        isComplete: true,
+        modelVersion: "m1",
+        policyVersion: 1,
+        featureSchemaVersion: 1,
+        updatedAt: Date(timeIntervalSince1970: 1_700_000_000)
+    )
 }
 
 /// Build an `AnalysisEligibility` with all gates passing (the default
@@ -489,6 +506,59 @@ struct BatchSummaryBuilderTests {
         #expect(batch.actionRequiredNotified == false)
     }
 
+    // MARK: - EpisodeProjection.analyzed (playhead-f5ao)
+
+    /// `analyzed` used to be lifted from `Episode.analysisSummary?
+    /// .hasAnalysis`, a field with no producer anywhere in the app, so
+    /// `isReady` was `downloaded && false` on every real device. It is
+    /// now derived from `coverageSummary`, which is how
+    /// `PlayerStatusLine` and `EpisodeListView` have always answered
+    /// the same question when they build an `AnalysisState`
+    /// (`hasAnyConfirmedAnalysis: episode.coverageSummary != nil`).
+    ///
+    /// This pins the derivation in BOTH directions and off a real
+    /// SwiftData row, so the lift and the definition are covered
+    /// together — a projection built by hand cannot show that
+    /// `init(_ episode:)` reads the right column.
+    @Test("EpisodeProjection.analyzed is exactly coverageSummary != nil")
+    func analyzedDerivesFromCoverage() throws {
+        let container = try makeInMemoryContainer()
+        let context = container.mainContext
+
+        let withCoverage = try insertEpisode(
+            context: context,
+            feedItemGUID: "ep-covered",
+            downloadState: .downloaded,
+            analyzed: true
+        )
+        let withoutCoverage = try insertEpisode(
+            context: context,
+            feedItemGUID: "ep-uncovered",
+            downloadState: .downloaded,
+            analyzed: false
+        )
+
+        func projection(_ key: String) throws -> EpisodeProjection {
+            let descriptor = FetchDescriptor<Episode>(
+                predicate: #Predicate<Episode> { $0.canonicalEpisodeKey == key }
+            )
+            let row = try #require(context.fetch(descriptor).first)
+            return EpisodeProjection(row)
+        }
+
+        let covered = try projection(withCoverage)
+        #expect(covered.coverageSummary != nil)
+        #expect(covered.analyzed == true)
+        #expect(BatchSummaryBuilder.analysisState(from: covered).persistedStatus == .done)
+        #expect(BatchSummaryBuilder.analysisState(from: covered).hasAnyConfirmedAnalysis == true)
+
+        let uncovered = try projection(withoutCoverage)
+        #expect(uncovered.coverageSummary == nil)
+        #expect(uncovered.analyzed == false)
+        #expect(BatchSummaryBuilder.analysisState(from: uncovered).persistedStatus == .queued)
+        #expect(BatchSummaryBuilder.analysisState(from: uncovered).hasAnyConfirmedAnalysis == false)
+    }
+
     // MARK: - Pure projection: makeSummary boundary tests
 
     @Test("makeSummary: nil episode → cancelled / not-ready / not-fixable")
@@ -509,10 +579,11 @@ struct BatchSummaryBuilderTests {
     func makeSummaryReady() {
         let projection = EpisodeProjection(
             downloaded: true,
-            analyzed: true,
-            coverageSummary: nil,
+            coverageSummary: confirmedCoverage(),
             playbackAnchor: nil
         )
+        #expect(projection.analyzed == true,
+                "confirmed coverage is what `analyzed` means after playhead-f5ao")
         let summary = BatchSummaryBuilder.makeSummary(
             canonicalEpisodeKey: "ep-ready",
             episode: projection,
@@ -526,7 +597,6 @@ struct BatchSummaryBuilderTests {
     func makeSummaryHardwareNotFixable() {
         let projection = EpisodeProjection(
             downloaded: false,
-            analyzed: false,
             coverageSummary: nil,
             playbackAnchor: nil
         )
@@ -553,7 +623,6 @@ struct BatchSummaryBuilderTests {
     func makeSummaryAppleIntelligenceFixable() {
         let projection = EpisodeProjection(
             downloaded: false,
-            analyzed: false,
             coverageSummary: nil,
             playbackAnchor: nil
         )

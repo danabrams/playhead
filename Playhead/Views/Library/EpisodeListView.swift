@@ -151,11 +151,22 @@ struct EpisodeListView: View {
 
     // MARK: - First ✓ Tooltip
 
-    /// True iff at least one episode in the current list has a ready
-    /// checkmark badge (`analysisSummary.hasAnalysis == true`). Drives
-    /// the first-✓ tooltip trigger.
+    /// True iff at least one episode in the current list is rendering a
+    /// ✓ badge right now. Drives the first-✓ tooltip trigger.
+    ///
+    /// playhead-f5ao: this used to read `analysisSummary?.hasAnalysis`,
+    /// which WAS the badge's gate when the tooltip landed (rw49,
+    /// 2026-04-20 16:16) and stopped being it three and a half minutes
+    /// later when cthe re-gated the badge on
+    /// `derivePlaybackReadiness(coverage:anchor:)` (16:20). The trigger
+    /// was left pointing at the old definition, so a tooltip that says
+    /// "✓ means we've found ads to skip" was firing off a different
+    /// predicate from the ✓ it explains. It now calls the badge
+    /// function itself — see
+    /// `anyLibraryRowShowsReadinessCheckmark(episodes:)`, which is
+    /// pinned by `EpisodeRowReadinessTests`.
     private var anyEpisodeHasAnalysis: Bool {
-        episodes.contains { $0.analysisSummary?.hasAnalysis == true }
+        anyLibraryRowShowsReadinessCheckmark(episodes: episodes)
     }
 
     /// Shows the tooltip on list appear (and on state changes) if the
@@ -515,13 +526,15 @@ private struct EpisodeRow: View {
                         .accessibilityLabel("Analysis complete")
                 }
 
-                // Ad count — small copper numeral (not a badge)
-                if let summary = episode.analysisSummary, summary.adSegmentCount > 0 {
-                    Text("\(summary.adSegmentCount)")
-                        .font(AppTypography.mono(size: 12, weight: .semibold))
-                        .foregroundStyle(AppColors.accent)
-                        .accessibilityLabel("\(summary.adSegmentCount) ad segments detected")
-                }
+                // playhead-f5ao: the small copper ad-count numeral was
+                // REMOVED here. It read `episode.analysisSummary?
+                // .adSegmentCount`, a field nothing has ever written
+                // (0 of 1594 device rows), so it has never rendered on
+                // any device — and `CoverageSummary`, the mirror that
+                // replaced it, carries no ad count, so there was
+                // nothing to re-point it at. Restoring the numeral is a
+                // product decision plus a producer, not a re-wire; if
+                // you want it back, it needs a live count and a writer.
             }
 
             // Status line (playhead-zp5y).
@@ -738,6 +751,23 @@ func libraryRowShouldShowReadinessCheckmark(episode: Episode) -> Bool {
     case .none, .deferredOnly:
         return false
     }
+}
+
+/// `true` when at least one row in `episodes` is rendering the ✓
+/// affordance — i.e. when a first-✓ tooltip would have something to
+/// point at.
+///
+/// playhead-f5ao: the tooltip trigger is DEFINED as the badge
+/// predicate rather than merely agreeing with it, so the two cannot
+/// drift again. They already did once: rw49 wired the trigger to
+/// `analysisSummary.hasAnalysis` at 16:16 on 2026-04-20 and cthe
+/// re-gated the badge at 16:20, leaving the tooltip firing off a
+/// predicate the badge no longer used. Anything that would have
+/// caught that has to compare the two, which is why this is one
+/// function at file scope and not a `contains` closure inside a
+/// private SwiftUI view where no test can reach it.
+func anyLibraryRowShowsReadinessCheckmark(episodes: [Episode]) -> Bool {
+    episodes.contains { libraryRowShouldShowReadinessCheckmark(episode: $0) }
 }
 
 // MARK: - Library Row Status Line (playhead-zp5y)

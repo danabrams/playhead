@@ -279,4 +279,131 @@ final class EpisodeRowReadinessTests: XCTestCase {
         // through the decode + normalize pipeline to the derivation.
         XCTAssertEqual(decoded.readiness(anchor: 42.5), .deferredOnly)
     }
+
+    // MARK: - First-✓ tooltip trigger (playhead-f5ao)
+    //
+    // `FirstCheckmarkTooltipView` says "✓ means we've found ads to
+    // skip". It is therefore only ever correct to present it when a ✓
+    // is actually on screen, and the ONLY defensible definition of its
+    // trigger is the badge predicate itself.
+    //
+    // That is not how it shipped. `rw49` wired the trigger to
+    // `episodes.contains { $0.analysisSummary?.hasAnalysis == true }`
+    // at 16:16 on 2026-04-20 — the badge's gate at that moment — and
+    // `cthe` re-gated the badge on
+    // `derivePlaybackReadiness(coverage:anchor:)` at 16:20. Nothing
+    // compared the two, so for four months the tooltip's trigger and
+    // the thing it explains were different predicates over different
+    // fields. (Neither ever fired, because neither field has a
+    // producer, which is what hid it.)
+    //
+    // These tests compare them. `testTriggerAgreesWithBadgeOnEvery
+    // Readiness` is the one that would have gone red at 16:20.
+
+    /// The trigger and the badge must agree on all four readiness
+    /// states — not merely "both are false today".
+    func testTriggerAgreesWithBadgeOnEveryReadiness() throws {
+        let container = try makeContainer()
+        let context = container.mainContext
+        let podcast = makePodcast(in: context)
+
+        // (label, coverage, anchor) spanning .none / .deferredOnly /
+        // .proximal / .complete.
+        let cases: [(String, CoverageSummary?, TimeInterval?)] = [
+            ("none — no coverage at all", nil, 42.5),
+            ("none — no coverage, no anchor", nil, nil),
+            ("deferredOnly — coverage but no anchor",
+             makeCoverage(ranges: [0.0...1000.0]), nil),
+            ("deferredOnly — anchor outside coverage",
+             makeCoverage(ranges: [0.0...1000.0]), 2000.0),
+            ("proximal — anchor inside coverage",
+             makeCoverage(ranges: [0.0...1000.0]), 42.5),
+            ("complete — isComplete, no anchor",
+             makeCoverage(ranges: [0.0...3600.0], isComplete: true), nil),
+        ]
+
+        for (label, coverage, anchor) in cases {
+            let episode = makeEpisode(
+                podcast: podcast,
+                coverage: coverage,
+                anchor: anchor,
+                in: context
+            )
+            let badge = libraryRowShouldShowReadinessCheckmark(episode: episode)
+            let trigger = anyLibraryRowShowsReadinessCheckmark(episodes: [episode])
+            XCTAssertEqual(
+                trigger, badge,
+                "The first-✓ tooltip trigger must equal the ✓ badge predicate "
+                + "for a single-episode list (\(label)). A tooltip that "
+                + "explains the ✓ cannot fire off a different quantity."
+            )
+        }
+    }
+
+    /// A list whose episodes ALL have analysis somewhere but none near
+    /// the anchor renders no ✓, so the tooltip must not fire. This is
+    /// the case the pre-f5ao trigger got wrong by construction: it
+    /// asked "has any analysis?" where the badge asks "is analysis
+    /// usable from here?".
+    func testTriggerIsFalseWhenEveryRowIsDeferredOnly() throws {
+        let container = try makeContainer()
+        let context = container.mainContext
+        let podcast = makePodcast(in: context)
+
+        let episodes = (0..<3).map { index in
+            makeEpisode(
+                podcast: podcast,
+                coverage: makeCoverage(ranges: [0.0...1000.0]),
+                anchor: 2000.0 + Double(index),
+                in: context
+            )
+        }
+
+        XCTAssertFalse(
+            episodes.contains { libraryRowShouldShowReadinessCheckmark(episode: $0) },
+            "Precondition: no row in this fixture renders a ✓"
+        )
+        XCTAssertFalse(
+            anyLibraryRowShowsReadinessCheckmark(episodes: episodes),
+            "Analysis existing somewhere is not a ✓ on screen — the tooltip "
+            + "must stay hidden while every row is .deferredOnly"
+        )
+    }
+
+    /// The trigger scans the whole list, not just the head. The Library
+    /// sorts newest-first and the analyzed episode is very often not the
+    /// newest one.
+    func testTriggerFindsAReadyRowThatIsNotFirst() throws {
+        let container = try makeContainer()
+        let context = container.mainContext
+        let podcast = makePodcast(in: context)
+
+        var episodes = (0..<4).map { _ in
+            makeEpisode(podcast: podcast, coverage: nil, anchor: nil, in: context)
+        }
+        episodes.append(
+            makeEpisode(
+                podcast: podcast,
+                coverage: makeCoverage(ranges: [0.0...1000.0]),
+                anchor: 42.5,
+                in: context
+            )
+        )
+
+        XCTAssertTrue(
+            anyLibraryRowShowsReadinessCheckmark(episodes: episodes),
+            "A ✓ on the LAST row must still trigger the tooltip"
+        )
+        XCTAssertFalse(
+            anyLibraryRowShowsReadinessCheckmark(episodes: Array(episodes.dropLast())),
+            "…and removing that row must take the trigger back down"
+        )
+    }
+
+    func testTriggerIsFalseForAnEmptyList() {
+        XCTAssertFalse(
+            anyLibraryRowShowsReadinessCheckmark(episodes: []),
+            "An empty list has no ✓ to point at"
+        )
+    }
 }

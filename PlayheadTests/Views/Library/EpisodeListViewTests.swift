@@ -37,7 +37,6 @@ final class EpisodeListViewTests: XCTestCase {
         publishedAt: Date? = nil,
         duration: TimeInterval? = nil,
         isPlayed: Bool = false,
-        analysisSummary: AnalysisSummary? = nil,
         playbackPosition: TimeInterval = 0,
         in context: ModelContext
     ) -> Episode {
@@ -47,7 +46,6 @@ final class EpisodeListViewTests: XCTestCase {
             podcast: podcast,
             title: title,
             audioURL: URL(string: "https://example.com/\(guid).mp3")!,
-            analysisSummary: analysisSummary,
             duration: duration,
             publishedAt: publishedAt,
             playbackPosition: playbackPosition,
@@ -119,40 +117,27 @@ final class EpisodeListViewTests: XCTestCase {
             "Queue swipe must fire .save haptic via injected player")
     }
 
-    // MARK: - AC5 & AC6: AnalysisSummary display guards
-
-    func testAnalysisSummaryWithAnalysisAndAds() throws {
-        let summary = AnalysisSummary(
-            hasAnalysis: true,
-            adSegmentCount: 3,
-            totalAdDuration: 90
-        )
-        XCTAssertTrue(summary.hasAnalysis,
-            "hasAnalysis should gate the checkmark display")
-        XCTAssertTrue(summary.adSegmentCount > 0,
-            "adSegmentCount > 0 should gate the copper numeral")
-    }
-
-    func testAnalysisSummaryWithNoAds() throws {
-        let summary = AnalysisSummary(
-            hasAnalysis: true,
-            adSegmentCount: 0,
-            totalAdDuration: 0
-        )
-        XCTAssertTrue(summary.hasAnalysis)
-        XCTAssertFalse(summary.adSegmentCount > 0,
-            "Ad count numeral must not display when adSegmentCount == 0")
-    }
-
-    func testAnalysisSummaryNilMeansNoIndicators() throws {
-        let container = try makeContainer()
-        let context = container.mainContext
-        let podcast = makePodcast(in: context)
-        let episode = makeEpisode(podcast: podcast, analysisSummary: nil, in: context)
-
-        XCTAssertNil(episode.analysisSummary,
-            "Nil analysisSummary means neither checkmark nor ad count renders")
-    }
+    // MARK: - AC5 & AC6: AnalysisSummary display guards — REMOVED (playhead-f5ao)
+    //
+    // Three tests lived here (`testAnalysisSummaryWithAnalysisAndAds`,
+    // `…WithNoAds`, `…NilMeansNoIndicators`) and they are worth a note
+    // rather than a silent deletion, because they are the reason the
+    // defect f5ao fixed survived four months of green gates.
+    //
+    // All three constructed an `AnalysisSummary` (or read the nil
+    // default off a fresh `Episode`) and asserted things about THAT
+    // VALUE: `summary.hasAnalysis == true`, `summary.adSegmentCount > 0`,
+    // `episode.analysisSummary == nil`. Not one of them reached a view,
+    // a writer, or any production code path. They pass identically
+    // whether the app writes the field every episode or — as it did —
+    // never. Coverage of a memberwise initialiser reads exactly like
+    // coverage of the feature it initialises.
+    //
+    // The badge/tooltip behaviour they were nominally guarding is now
+    // in `EpisodeRowReadinessTests`, against
+    // `libraryRowShouldShowReadinessCheckmark(episode:)` and
+    // `anyLibraryRowShowsReadinessCheckmark(episodes:)` — functions the
+    // view actually calls.
 
     // MARK: - AC7: Empty state text
 

@@ -36,7 +36,13 @@ final class SurfaceStatusUILintTests: XCTestCase {
     ///
     ///   * `AnalysisStore` / `AnalysisSummary` — persistence-layer types
     ///     the reducer consumes through `AnalysisState`. UI must not
-    ///     reach past the reducer into the store.
+    ///     reach past the reducer into the store. `AnalysisSummary` no
+    ///     longer exists (playhead-f5ao deleted it); the token stays as
+    ///     a re-introduction guard, since a grep-based ban is one of the
+    ///     few things that can outlive the symbol it names. Note what it
+    ///     could NOT see: the two live violations f5ao removed were
+    ///     spelled `episode.analysisSummary`, and a `\bAnalysisSummary\b`
+    ///     pattern never matches a lowerCamelCase property access.
     ///   * `SurfaceAttribution` — the cause→triple struct the policy
     ///     emits. UI works with `EpisodeSurfaceStatus`, not the raw
     ///     attribution triple.
