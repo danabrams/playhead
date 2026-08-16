@@ -116,8 +116,24 @@ final class Episode {
     /// record, or ``AudioCacheLocation`` for a persisted string.
     var cachedAudioURL: URL?
     var downloadState: DownloadState
-    var lastPlayedAnalysisAssetId: UUID?
-    var analysisSummary: AnalysisSummary?
+    // playhead-f5ao: `lastPlayedAnalysisAssetId: UUID?` and
+    // `analysisSummary: AnalysisSummary?` were REMOVED here. Both were
+    // declared by the schema's first commit (168b8c24, 2026-04-02) and
+    // never written by anything but `init` in the whole history of the
+    // repo — measured on the device library, 0 of 1594 rows carried
+    // either. `analysisSummary.hasAnalysis` was the pre-playhead-cthe
+    // gate for the Library ✓; cthe replaced it with
+    // `derivePlaybackReadiness(coverage:anchor:)` and the three
+    // stragglers that kept reading the old mirror are now on
+    // `coverageSummary` below. `lastPlayedAnalysisAssetId` had zero
+    // readers anywhere; the live asset id is
+    // `PlayheadRuntime.currentAnalysisAssetId` (playback) or
+    // `AnalysisStore.fetchAssetByEpisodeId(_:)` (browse).
+    //
+    // Do NOT re-add a denormalized analysis mirror without a writer at
+    // the completion point AND a test that fails when that writer is
+    // removed — a field that can only ever answer "no" is worse than
+    // no field, because three readers believed it.
     var duration: TimeInterval?
     var publishedAt: Date?
     var playbackPosition: TimeInterval
@@ -136,15 +152,22 @@ final class Episode {
     var diagnosticsOptIn: Bool = false
 
     /// Phase 2 coverage record (playhead-cthe). JSON-encoded Codable
-    /// field following the `analysisSummary` pattern so the additive
-    /// SwiftData migration is non-destructive — existing rows decode
-    /// with the property set to `nil` and the derivation pipeline
-    /// returns `PlaybackReadiness.none` until the analysis pipeline
-    /// (playhead-zp5y / playhead-quh7) starts writing records.
+    /// field so the additive SwiftData migration is non-destructive —
+    /// existing rows decode with the property set to `nil` and the
+    /// derivation pipeline returns `PlaybackReadiness.none` until the
+    /// analysis pipeline (playhead-zp5y / playhead-quh7) starts writing
+    /// records.
     ///
     /// Readiness is NEVER persisted — always re-derive via
     /// `derivePlaybackReadiness(coverage:anchor:)` so multiple UI
     /// surfaces at different anchors cannot diverge.
+    ///
+    /// playhead-f5ao: since `analysisSummary` was removed this is the
+    /// SOLE denormalized analysis mirror on `Episode`, and every
+    /// "does this episode have analysis?" question in the tree now
+    /// derives from it. **It has no production writer either** — that
+    /// is playhead-lb26, filed rather than fixed here; f5ao's scope was
+    /// the mirror cthe superseded, not cthe's own.
     var coverageSummary: CoverageSummary?
 
     /// Phase 2 readiness anchor (playhead-cthe). The time (seconds from
@@ -184,8 +207,6 @@ final class Episode {
         audioURL: URL,
         cachedAudioURL: URL? = nil,
         downloadState: DownloadState = .notDownloaded,
-        lastPlayedAnalysisAssetId: UUID? = nil,
-        analysisSummary: AnalysisSummary? = nil,
         duration: TimeInterval? = nil,
         publishedAt: Date? = nil,
         playbackPosition: TimeInterval = 0,
@@ -205,8 +226,6 @@ final class Episode {
         self.audioURL = audioURL
         self.cachedAudioURL = cachedAudioURL
         self.downloadState = downloadState
-        self.lastPlayedAnalysisAssetId = lastPlayedAnalysisAssetId
-        self.analysisSummary = analysisSummary
         self.duration = duration
         self.publishedAt = publishedAt
         self.playbackPosition = playbackPosition
@@ -281,16 +300,6 @@ enum DownloadState: Int, Codable, Sendable {
     case downloading
     case downloaded
     case failed
-}
-
-// MARK: - AnalysisSummary
-
-/// Denormalized struct so the UI never needs to query the SQLite analysis store.
-struct AnalysisSummary: Codable, Sendable, Equatable {
-    var hasAnalysis: Bool
-    var adSegmentCount: Int
-    var totalAdDuration: TimeInterval
-    var lastAnalyzedAt: Date?
 }
 
 // MARK: - FeedDescriptionMetadata

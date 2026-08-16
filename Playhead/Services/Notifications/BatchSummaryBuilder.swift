@@ -38,7 +38,7 @@ import SwiftData
 
 // MARK: - EpisodeProjection
 
-/// Sendable snapshot of the four `Episode` fields the surface-status
+/// Sendable snapshot of the three `Episode` fields the surface-status
 /// reducer needs to evaluate a batch child. Lifted off the SwiftData
 /// `Episode` row inside whatever actor owns the `ModelContext` (the
 /// MainActor in production), then carried into the builder's actor-
@@ -51,10 +51,6 @@ struct EpisodeProjection: Sendable, Equatable {
     /// `true` when the episode's audio is fully downloaded.
     let downloaded: Bool
 
-    /// `true` when an analysis run has been confirmed (`AnalysisSummary
-    /// .hasAnalysis == true`).
-    let analyzed: Bool
-
     /// Phase 2 coverage record. `nil` until the analysis pipeline writes
     /// one; the reducer treats `nil` as `PlaybackReadiness.none`.
     let coverageSummary: CoverageSummary?
@@ -63,14 +59,32 @@ struct EpisodeProjection: Sendable, Equatable {
     /// at the play-loop commit points.
     let playbackAnchor: TimeInterval?
 
+    /// `true` when an analysis run has been confirmed for this episode.
+    ///
+    /// playhead-f5ao: this was a STORED field lifted from
+    /// `Episode.analysisSummary?.hasAnalysis`, a mirror nothing ever
+    /// wrote. It is now COMPUTED from `coverageSummary`, matching how
+    /// every other surface in the tree answers the same question —
+    /// `PlayerStatusLine.swift` and `EpisodeListView.swift` both pass
+    /// `hasAnyConfirmedAnalysis: episode.coverageSummary != nil` into
+    /// the same reducer. Computed rather than stored on purpose: a
+    /// stored `analyzed` alongside `coverageSummary` is two spellings
+    /// of one fact, and a caller could construct a projection where
+    /// they disagree.
+    ///
+    /// This is a re-point, not a repair — `coverageSummary` has no
+    /// production writer either (playhead-lb26), so the value is still
+    /// `false` on every device today. What changes is that when lb26
+    /// lands, this surface comes alive with the other five instead of
+    /// staying behind.
+    var analyzed: Bool { coverageSummary != nil }
+
     init(
         downloaded: Bool,
-        analyzed: Bool,
         coverageSummary: CoverageSummary?,
         playbackAnchor: TimeInterval?
     ) {
         self.downloaded = downloaded
-        self.analyzed = analyzed
         self.coverageSummary = coverageSummary
         self.playbackAnchor = playbackAnchor
     }
@@ -80,7 +94,6 @@ struct EpisodeProjection: Sendable, Equatable {
     /// `episode` (the MainActor in production).
     init(_ episode: Episode) {
         self.downloaded = (episode.downloadState == .downloaded)
-        self.analyzed = (episode.analysisSummary?.hasAnalysis == true)
         self.coverageSummary = episode.coverageSummary
         self.playbackAnchor = episode.playbackAnchor
     }
@@ -213,7 +226,8 @@ struct BatchSummaryBuilder: Sendable {
     /// Map an `EpisodeProjection` to the surface-status reducer's
     /// `AnalysisState` input.
     ///
-    /// The projection carries `downloaded` + `analyzed` — the minimum
+    /// The projection carries `downloaded` + `analyzed` (the latter
+    /// derived from `coverageSummary`) — the minimum
     /// the reducer needs to distinguish "nothing has analyzed yet" from
     /// "analysis is done". Force-quit / user-preempted flags are not
     /// yet plumbed onto Episode (those live in the work-journal row);

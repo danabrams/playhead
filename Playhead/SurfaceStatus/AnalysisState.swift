@@ -14,7 +14,9 @@
 //      hand-built `AnalysisState` without spinning up SQLite.
 //   3. The lint contract (see `SurfaceStatusUILintTests`) forbids any UI
 //      file from referencing `AnalysisStore` / `AnalysisSummary` /
-//      `InternalMissCause`. The reducer is the single aggregation point;
+//      `InternalMissCause`. (`AnalysisSummary` was deleted by
+//      playhead-f5ao and the token is kept as a re-introduction guard —
+//      the ban outlives the type.) The reducer is the single aggregation point;
 //      UI consumers work with `EpisodeSurfaceStatus` and never need to
 //      see the underlying store.
 //
