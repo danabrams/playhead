@@ -237,6 +237,33 @@
 #   were NOT re-run and carry the verdicts above. Recount: the array now holds
 #   170 live entries.
 #
+#   PARTIAL RE-RUN 2026-08-16 (playhead-sckv). Batches 946-951 only, added by
+#   this bead: SF01-SF10, 10 entries, 6 batches. FINAL 10 KILLED / 0 SURVIVED /
+#   0 ERROR, 12 builds (6 baselines + 6 batches), baseline GREEN every time,
+#   ~38m wall clock. Batches 1-945 were NOT re-run and carry the verdicts above.
+#
+#   TWO THINGS THAT COST TIME AND ARE WORTH KNOWING BEFORE ADDING A SERIES:
+#
+#   1. `--batch` IS NOT REPEATABLE and the header says so at line 474, but a run
+#      given three of them prints `2 mutation(s) in 1 batch(es)` and exits 0
+#      having silently run only the LAST — a green "All mutations killed" for a
+#      third of the work. It is a loop, one invocation per batch.
+#
+#   2. `rec_file`'s case table is a SECOND registration, separate from
+#      `MUTABLE_FILES`, and `$SFR` was in one and not the other. The preflight
+#      caught it before a single mutation was applied — "mutated but never
+#      restored" is exactly the failure `$MPTRIDX` shipped with in the K2 series,
+#      and the guard added after it works. Register a new file in BOTH.
+#
+#   WHAT THIS SERIES COVERS THAT A VALUE TEST CANNOT. SF04 and SF10 are the pair
+#   the source canary exists for: each hard-codes ONE of the two `isPermanent`
+#   arguments while the other keeps reading the real value. Both leave a
+#   perfectly well-formed token, both leave every pure test of
+#   `StoreFailureRecord` green, and one of them (SF04) leaves the wire-in green
+#   too, because the case the wire-in injects really is permanent. The damage is
+#   a column that names a fate the row was not given — two functions, each
+#   individually correct.
+#
 #   PARTIAL RE-RUN 2026-08-16 (playhead-f5ao). Batches 830-834 only, added by
 #   this bead: F501-F505, 5 entries, one batch each (F501/F502 edit the same
 #   function body; F503/F504/F505 all redden the same test). FINAL 5 KILLED /
