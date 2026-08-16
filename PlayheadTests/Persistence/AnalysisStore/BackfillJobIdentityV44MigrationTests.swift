@@ -71,7 +71,7 @@ struct BackfillJobIdentityV44MigrationTests {
         // and never on `jobId`, `analysisAssetId` or the identity columns this
         // rung is about. A store with no `semantic_scan_results` rows at all is
         // a no-op for it.
-        #expect(AnalysisStore.currentSchemaVersion == 53)
+        #expect(AnalysisStore.currentSchemaVersion == 54)
 
         try await store.insertAsset(makeAsset(id: "asset-fresh"))
         try await store.insertBackfillJob(
@@ -157,7 +157,7 @@ struct BackfillJobIdentityV44MigrationTests {
         // run below 49 (the deliberate don't-step-over-a-rolled-back-V39 rule),
         // so a v43 seed only reaches 50 if every rung from 44 up actually ran.
         // 50 here is therefore a real claim about the ladder, not a restatement.
-        #expect(try await store.schemaVersion() == 53)
+        #expect(try await store.schemaVersion() == 54)
         #expect(try await store.fetchBackfillJob(byId: "fm-legacy-complete") == nil,
                 "a completed row minted under the old preimage cannot be addressed again")
         #expect(try await store.fetchBackfillJob(byId: "fm-legacy-queued") == nil,

@@ -28,8 +28,15 @@ private final class CountingShardRecognizer: SpeechRecognizer, @unchecked Sendab
         var transcribeCount = 0
     }
 
-    init(speakerId: Int? = nil) {
+    /// playhead-gjxf: an explicit transcript text, so a rail can hand this
+    /// recognizer PUNCTUATED output. The default is unchanged
+    /// (`shard-<startTime>`) because several tests pin
+    /// `computeFinalPassFingerprint(text: "shard-0", ...)` against it.
+    private let overrideText: String?
+
+    init(speakerId: Int? = nil, text: String? = nil) {
         self.speakerId = speakerId
+        self.overrideText = text
     }
 
     var transcribeCount: Int {
@@ -51,7 +58,7 @@ private final class CountingShardRecognizer: SpeechRecognizer, @unchecked Sendab
     func transcribe(shard: AnalysisShard, podcastId: String?) async throws -> [TranscriptSegment] {
         guard lock.withLock({ $0.loaded }) else { throw TranscriptEngineError.modelNotLoaded }
         lock.withLock { $0.transcribeCount += 1 }
-        let text = "shard-\(Int(shard.startTime))"
+        let text = overrideText ?? "shard-\(Int(shard.startTime))"
         let word = TranscriptWord(
             text: text,
             startTime: shard.startTime,
@@ -647,6 +654,60 @@ struct FinalPassRetranscriptionRunnerTests {
         #expect(chunks[0].pass == TranscriptPassType.final_.rawValue)
         #expect(chunks[0].speakerId == 42)
         #expect(chunks[0].avgConfidence == 0.9)
+    }
+
+    /// playhead-gjxf — the runner must fill `normalizedText` with the CANONICAL
+    /// normalizer, not `.lowercased()`.
+    ///
+    /// It shipped as `segment.text.lowercased()`, which is only the first of
+    /// `TranscriptEngineService.normalizeText`'s three steps, so the column
+    /// whose name promises normalized text held RAW text on 3,825 rows of the
+    /// 2026-08-15 pull — and `LexicalScanner` reads exactly that column.
+    ///
+    /// ⚠️ THE PUNCTUATION IN THIS RECOGNIZER'S TEXT IS LOAD-BEARING. The two
+    /// implementations return the SAME STRING for any input without
+    /// punctuation, so this rail is only falsifiable on punctuated text — the
+    /// `#expect` on the two spellings differing is what proves it. That is the
+    /// trap that left playhead-jc42's JC04 rail unfalsifiable.
+    @Test("final-pass retranscription persists CANONICALLY NORMALIZED text, not raw lowercase")
+    func testFinalPassPersistsCanonicallyNormalizedText() async throws {
+        let spoken = "Go to Ketone.com, and use code DOAC."
+        // The rail can only see the defect if the two normalizers disagree here.
+        #expect(TranscriptEngineService.normalizeText(spoken) != spoken.lowercased())
+
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        try await store.insertAdWindow(
+            makeAdWindow(id: "w1", analysisAssetId: "asset-fp", startTime: 0, endTime: 30, confidence: 0.9)
+        )
+
+        let audio = StubAnalysisAudioProvider()
+        audio.shardsToReturn = [
+            AnalysisShard(id: 0, episodeID: "ep-asset-fp", startTime: 0, duration: 30, samples: [])
+        ]
+        let runner = makeRunnerWithBox(
+            store: store,
+            box: SnapshotBox(makeSnapshot()),
+            recognizer: CountingShardRecognizer(text: spoken),
+            audioProvider: audio
+        )
+
+        let result = try await runner.runFinalPassBackfill(for: makeInput())
+        #expect(result.reTranscribedWindowIds == ["w1"])
+
+        let chunks = try await store.fetchTranscriptChunks(assetId: "asset-fp")
+        #expect(chunks.count == 1)
+        // `text` is the evidence and is stored verbatim.
+        #expect(chunks[0].text == spoken)
+        // `normalizedText` is the derived quantity and must be the canonical one.
+        #expect(chunks[0].normalizedText == TranscriptEngineService.normalizeText(spoken))
+        #expect(chunks[0].normalizedText == "go to ketone com and use code doac")
+
+        // The product consequence, asserted rather than argued: the built-in
+        // urlCTA pattern `go to \w+ com` matches what was persisted. Against
+        // the pre-fix spelling it could not, because `.` is not a `\w`.
+        let hits = LexicalScanner().scanChunk(chunks[0])
+        #expect(hits.contains { $0.matchedText == "go to ketone com" })
     }
 
     @Test("final-pass duplicate segment fills missing speakerId and avgConfidence")

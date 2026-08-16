@@ -1904,8 +1904,22 @@ actor TranscriptEngineService {
     /// Exposed as `internal static` so test fixtures (e.g. real-episode
     /// benchmark fixtures) can produce `chunk.normalizedText` that matches
     /// production exactly. Any change to this function automatically
-    /// flows through to the test pipeline. Do not call from app code
-    /// outside this service — use the instance method delegating below.
+    /// flows through to the test pipeline.
+    ///
+    /// playhead-gjxf: this comment used to end "Do not call from app code
+    /// outside this service — use the instance method delegating below", and
+    /// that had not been true for a long time. `TargetedWindowNarrower`,
+    /// `SpecialistScanPlanner`, `LexicalScanner` and `AdDetectionService` all
+    /// call `TranscriptEngineService.normalizeText(_:)` directly, because they
+    /// build `TranscriptChunk`s outside the engine and the column has to hold
+    /// the same quantity whoever fills it. **THIS FUNCTION IS THE ONLY
+    /// DEFINITION OF WHAT `TranscriptChunk.normalizedText` MEANS.** Call it;
+    /// do not re-implement it. `FinalPassRetranscriptionRunner` re-implemented
+    /// it as `.lowercased()` and put raw text into that column on 3,825 rows of
+    /// the 2026-08-15 device pull — a value that names one thing and holds
+    /// another, invisible to any fixture whose text carries no punctuation.
+    /// `AnalysisStore`'s V54 migration calls it for the same reason: a second
+    /// implementation of this rule, even a correct-looking one, is the defect.
     static func normalizeText(_ text: String) -> String {
         text.lowercased()
             .components(separatedBy: CharacterSet.alphanumerics.inverted)

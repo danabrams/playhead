@@ -1971,7 +1971,7 @@ actor AnalysisStore {
     /// assertions automatically follow the production constant — hardcoding
     /// the integer in tests has been a recurring source of stale-assertion
     /// flakes whenever the schema bumps.
-    nonisolated static let currentSchemaVersion = 53
+    nonisolated static let currentSchemaVersion = 54
 
     /// H1: minimum age (in seconds) a `backfill_jobs` / `final_pass_jobs`
     /// row stuck in `status='running'` must reach before the launch-time
@@ -2902,6 +2902,12 @@ actor AnalysisStore {
             // across the gap. Deduplicates by CONTENT first, because a UNIQUE
             // index cannot be created over existing violations.
             try migrateDuplicateSpanTextChunksV53IfNeeded()
+            // playhead-gjxf: `FinalPassRetranscriptionRunner` filled
+            // `normalizedText` with `.lowercased()`, so rows it wrote hold RAW
+            // text in the column every lexical pattern is written against.
+            // Recomputes the column with the canonical normalizer, touching
+            // only rows that actually violate the invariant.
+            try migrateUnnormalizedChunkTextV54IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -3289,6 +3295,11 @@ actor AnalysisStore {
         // `tableExists` AND on the `pass` column, so a seeded fixture without
         // `transcript_chunks` — or one predating `pass` — still reaches v53.
         try migrateDuplicateSpanTextChunksV53IfNeeded()
+        // playhead-gjxf (v54): the sweep guards on `tableExists` AND on the
+        // `normalizedText` column, so a seeded fixture without
+        // `transcript_chunks` — or one predating `normalizedText` — still
+        // reaches v54.
+        try migrateUnnormalizedChunkTextV54IfNeeded()
     }
     #endif
 
@@ -7849,6 +7860,60 @@ actor AnalysisStore {
         try setSchemaVersion(53)
     }
 
+    /// playhead-gjxf — V54. Re-normalize every `transcript_chunks` row whose
+    /// `normalizedText` is not what
+    /// ``TranscriptEngineService/normalizeText(_:)`` produces from its `text`.
+    ///
+    /// See ``renormalizeTranscriptChunkNormalizedText()`` for the defect, the
+    /// measurement, and why the repair is Swift rather than SQL. The short
+    /// version: ``FinalPassRetranscriptionRunner`` filled that column with
+    /// `.lowercased()`, so 3,825 rows of the 2026-08-15 pull stored RAW text
+    /// under a name that promises normalized text, and every lexical pattern in
+    /// `LexicalScanner` is written against normalized text.
+    ///
+    /// WHY A RUNG AND NOT A LAZY REPAIR-ON-READ. The consumers are read paths
+    /// that already have the row in hand and no writer's mandate —
+    /// `LexicalScanner`, `TranscriptChunkCanonicalizer`, the FTS index. Fixing
+    /// on read would leave the FTS index permanently wrong (nothing re-indexes
+    /// on a read), leave the stored value wrong for the next reader, and put a
+    /// normalization call in the hot path of every scan. One sweep at open is
+    /// the cheaper and more honest shape.
+    ///
+    /// R2 CONTAINMENT (inherited verbatim from V39/V40/V53, and for the same
+    /// reason). This rung is DATA-DEPENDENT — it rebuilds the FTS index and
+    /// rewrites rows — and a thrown `migrate()` at launch is answered by
+    /// `PlayheadRuntime` with `removeItem(at: AnalysisStore.defaultDirectory())`
+    /// and a retry that succeeds on the now-empty directory, i.e. the user's
+    /// entire analysis database silently discarded. So it runs inside a
+    /// SAVEPOINT, rolls back on any throw, logs a fault, and **leaves
+    /// `schema_version` at 53** so the next launch retries. The cost of that
+    /// path is today's shipped state: un-normalized rows still on disk.
+    ///
+    /// Idempotent: the sweep is a no-op once every row satisfies the invariant.
+    private func migrateUnnormalizedChunkTextV54IfNeeded() throws {
+        let observed = (try schemaVersion() ?? 1)
+        guard observed < 54 else { return }
+        // DO NOT STEP OVER A ROLLED-BACK V39 — same rationale as V40–V53.
+        guard observed >= 53 else { return }
+        let savepoint = "v54_renormalize_chunk_normalized_text"
+        try exec("SAVEPOINT \(savepoint)")
+        do {
+            let repaired = try renormalizeTranscriptChunkNormalizedText()
+            try exec("RELEASE SAVEPOINT \(savepoint)")
+            if repaired > 0 {
+                logger.notice("playhead-gjxf V54: re-normalized \(repaired, privacy: .public) transcript_chunks row(s) whose normalizedText held un-normalized text")
+            }
+        } catch {
+            // `ROLLBACK TO` does not pop the savepoint; `RELEASE` must follow
+            // or the enclosing transaction is left with a stale frame.
+            try? exec("ROLLBACK TO SAVEPOINT \(savepoint)")
+            try? exec("RELEASE SAVEPOINT \(savepoint)")
+            logger.fault("playhead-gjxf V54 normalizedText repair could not complete and was rolled back; schema stays at 53 and the next launch retries. The analysis database is UNCHANGED — this is deliberately not fatal, because a thrown migrate() at launch is answered by deleting the whole store. Error: \(String(describing: error), privacy: .public)")
+            return
+        }
+        try setSchemaVersion(54)
+    }
+
     /// playhead-kg8h: durably CLAIM one REQUESTED day-0 kickoff, before any of
     /// the work it stands for has run.
     ///
@@ -8512,6 +8577,113 @@ actor AnalysisStore {
         }
         try exec("DELETE FROM transcript_chunks WHERE \(duplicateFilter)")
         return Int(sqlite3_changes(db))
+    }
+
+    /// playhead-gjxf — restore the invariant `normalizedText ==
+    /// TranscriptEngineService.normalizeText(text)` on every row that has lost
+    /// it.
+    ///
+    /// THE DEFECT, stated as the data states it. On the 2026-08-15 pull,
+    /// **3,825 of the 55,005 `transcript_chunks` rows carried RAW text in
+    /// `normalizedText`** — `"wellness, you"` where the column's contract says
+    /// `"wellness you"`. Every one of them is `pass='final'`,
+    /// `modelVersion='apple-speech-final-v1'`, i.e.
+    /// ``FinalPassRetranscriptionRunner``'s, which built the column with
+    /// `segment.text.lowercased()` instead of the canonical normalizer.
+    /// Lowercasing is the first of that function's three steps; the other two —
+    /// stripping non-alphanumerics and collapsing on single spaces — never ran.
+    /// All 30,125 `fast` rows and all 17,632 `pass='final'` rows written by
+    /// `TranscriptEngineService` satisfy the invariant exactly, which is what
+    /// makes this a single diverged writer rather than an unsettled convention.
+    ///
+    /// WHY IT IS WORTH A MIGRATION RUNG RATHER THAN LEAVING THE ROWS. Every
+    /// built-in pattern group in `LexicalScanner.scanChunk` reads
+    /// `normalizedText`, and those patterns are written FOR normalized text
+    /// (`go to \w+ com`, `\w+ com slash \w+`, `use code \w+`). A stored
+    /// `"go to ketone.com"` matches none of them; `"go to ketone com"` matches
+    /// `go to \w+ com`. And `TranscriptChunkCanonicalizer` retains the FINAL
+    /// row of a fast/final twin — so the row detection actually reads is
+    /// precisely the broken one, and the correct fast twin it dropped is the
+    /// one that could have matched. Fixing the writer alone would leave every
+    /// already-analysed episode permanently scanning the wrong string.
+    ///
+    /// WHY IT CALLS ``TranscriptEngineService/normalizeText(_:)`` AND DOES NOT
+    /// RE-IMPLEMENT IT IN SQL. This is the whole point. SQLite has no
+    /// expression for "split on the inverse of `CharacterSet.alphanumerics`",
+    /// so a SQL repair would have to approximate — and an approximation
+    /// replaces one wrong value with a DIFFERENT wrong value, which is strictly
+    /// worse than the bug because it looks repaired. A second implementation of
+    /// this rule is exactly the defect being fixed here: `.lowercased()` was
+    /// one. There is one definition, and both the writer and this repair call
+    /// it. (Measured confirmation that the rule is the right one: an
+    /// independent reimplementation of it reproduces the stored value on all
+    /// 30,125 fast rows of that pull, byte for byte.)
+    ///
+    /// ROWS THAT ARE ALREADY CORRECT ARE NOT TOUCHED, and that is a property
+    /// rather than an optimisation. The predicate is per row — recompute, and
+    /// UPDATE only on inequality — so a store with nothing wrong performs zero
+    /// writes, fires zero FTS triggers and returns 0. It also means the sweep
+    /// is indifferent to `pass` and `modelVersion`: the invariant belongs to
+    /// the COLUMN, not to whichever writer happened to fill it, so a future
+    /// writer that regresses is repaired by the same rung without an allowlist
+    /// to update. Note what this deliberately cannot see: a row whose `text`
+    /// contains no punctuation at all normalizes to its own lowercase, so a
+    /// broken writer is INVISIBLE on it. 21,055 of the 24,880 `pass='final'`
+    /// rows on that pull were "correct" for exactly that reason — which is also
+    /// why no fixture built from unpunctuated text can test any of this.
+    ///
+    /// WHY THE FTS REBUILD COMES FIRST — same reason as
+    /// ``dedupeDuplicateSpanTextChunks()``, and it applies to UPDATE for the
+    /// same mechanical reason it applies to DELETE. `transcript_chunks_fts` is
+    /// an external-content FTS5 index kept in step by the
+    /// `transcript_chunks_au` AFTER UPDATE trigger, whose first statement is a
+    /// `'delete'` command quoting `old.normalizedText`. If the index does not
+    /// already hold an entry matching that row, the delete half corrupts the
+    /// index instead of clearing it, and the scanner keeps matching a ghost.
+    /// Rebuilding first makes the index consistent with the content table
+    /// before any trigger fires. It runs only when there is at least one row to
+    /// repair, so the clean case stays free.
+    ///
+    /// The corrections are buffered in memory rather than streamed, because a
+    /// SELECT and an UPDATE against the same table cannot safely interleave.
+    /// The bound is the number of BROKEN rows (2,030 on the post-V53 shape of
+    /// that pull, 3,825 pre-V53), not the table size.
+    ///
+    /// Idempotent: a second run finds no mismatch, rebuilds nothing, writes
+    /// nothing and returns 0.
+    @discardableResult
+    func renormalizeTranscriptChunkNormalizedText() throws -> Int {
+        guard try tableExists("transcript_chunks"),
+              try columnExists(table: "transcript_chunks", column: "normalizedText")
+        else { return 0 }
+
+        var corrections: [(rowid: Int64, normalized: String)] = []
+        let sel = try prepare("SELECT rowid, text, normalizedText FROM transcript_chunks")
+        defer { sqlite3_finalize(sel) }
+        while try nextRow(sel) {
+            let rowid = sqlite3_column_int64(sel, 0)
+            let rawText = text(sel, 1)
+            let stored = text(sel, 2)
+            let expected = TranscriptEngineService.normalizeText(rawText)
+            if stored != expected {
+                corrections.append((rowid: rowid, normalized: expected))
+            }
+        }
+        guard !corrections.isEmpty else { return 0 }
+
+        if try tableExists("transcript_chunks_fts") {
+            try exec("INSERT INTO transcript_chunks_fts(transcript_chunks_fts) VALUES('rebuild')")
+        }
+        let upd = try prepare("UPDATE transcript_chunks SET normalizedText = ? WHERE rowid = ?")
+        defer { sqlite3_finalize(upd) }
+        for correction in corrections {
+            sqlite3_reset(upd)
+            sqlite3_clear_bindings(upd)
+            bind(upd, 1, correction.normalized)
+            sqlite3_bind_int64(upd, 2, correction.rowid)
+            try step(upd, expecting: SQLITE_DONE)
+        }
+        return corrections.count
     }
 
     /// Collapse `decoded_spans` to one row per

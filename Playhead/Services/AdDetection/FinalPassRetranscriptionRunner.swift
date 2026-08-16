@@ -1010,7 +1010,38 @@ actor FinalPassRetranscriptionRunner {
                     startTime: segment.startTime,
                     endTime: segment.endTime,
                     text: segment.text,
-                    normalizedText: segment.text.lowercased(),
+                    // playhead-gjxf: THE CANONICAL NORMALIZER, not `.lowercased()`.
+                    //
+                    // This line read `segment.text.lowercased()` and therefore
+                    // stored RAW text in the column whose name says normalized.
+                    // Lowercasing is only the FIRST of the three things
+                    // `TranscriptEngineService.normalizeText` does — it also
+                    // strips every non-alphanumeric scalar and collapses the
+                    // result on single spaces. Measured on the 2026-08-15 pull:
+                    // 3,825 of the 24,880 `pass='final'` rows on disk held text
+                    // this column is not supposed to hold, and all 3,825 are
+                    // this writer's (`modelVersion='apple-speech-final-v1'`).
+                    // The other 21,055 were "correct" only because their text
+                    // happened to carry no punctuation — which is also why no
+                    // fixture built from unpunctuated text can see this bug.
+                    //
+                    // It matters because `LexicalScanner.scanChunk` runs every
+                    // built-in pattern group over `normalizedText`, and those
+                    // patterns are written FOR normalized text (`go to \w+ com`,
+                    // `\w+ com slash \w+`). Against a stored `wonderfulpistachios.com`
+                    // they cannot match; against `wonderfulpistachios com` they
+                    // can. `TranscriptChunkCanonicalizer` retains the FINAL row
+                    // of a fast/final twin, so the un-normalized value is the one
+                    // detection actually reads.
+                    //
+                    // `TranscriptEngineService` — which also writes `pass='final'`
+                    // rows, 17,632 of them on that same pull — has always called
+                    // the canonical normalizer here, and every one of its rows is
+                    // correct. This is the one writer that diverged.
+                    //
+                    // Rows written before this fix are repaired by AnalysisStore
+                    // schema V54, which calls this same function.
+                    normalizedText: TranscriptEngineService.normalizeText(segment.text),
                     pass: TranscriptPassType.final_.rawValue,
                     modelVersion: modelVersion,
                     transcriptVersion: nil,
