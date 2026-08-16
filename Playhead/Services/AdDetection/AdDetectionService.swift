@@ -12325,7 +12325,14 @@ actor AdDetectionService {
         } catch {
             logger.warning("[xsdz.36.4] day-0 mint persist failed asset=\(analysisAssetId, privacy: .public): \(error.localizedDescription)")
             var failed = outcome(.persistFailed, divergentSlotCount: unioned.count)
-            failed.detail = String(describing: error)
+            // playhead-luie: the SECOND writer of this field, and the one no
+            // argument-shaped sweep could ever have found — it is an assignment
+            // to a local's property, not a labelled argument. `detail` reaches
+            // `rediff_day_zero_attempts.lastDetail` one struct later, so a
+            // description here is the same durable-prose defect as the fetch
+            // arm's. The arm is spelled by the row's `lastExit`
+            // (`persist_failed`), so the token does not restate it.
+            failed.detail = DurableThrowRecord.dayZeroAttemptDetail(for: error)
             return failed
         }
         let recoveredMarkOnlyCount = windows.count - strictMarkCount - segmentRecoveredSkipGradeMarkCount

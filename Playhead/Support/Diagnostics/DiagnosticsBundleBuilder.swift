@@ -338,14 +338,23 @@ enum DiagnosticsBundleBuilder {
     /// id goes through `EpisodeIdHasher` (legal checklist item a), exactly as
     /// the banner-tally and music-bed projections do.
     ///
-    /// The day-0 rows' `lastDetail` — the only free text in the snapshot — is
-    /// NOT projected at all rather than sanitized: it originates from
-    /// `String(describing: error)`, which on a `URLError` carries the enclosure
-    /// URL, and no allowlist is a safe bound on an arbitrary error dump. The
-    /// closed `last_exit` enum is what a support engineer needs; the free text
-    /// stays on device. `DiagnosticsBundleRediffTests.detailIsNotExported` is
-    /// the proof, and every other projected field is an integer, a timestamp,
-    /// or a closed enum `rawValue`.
+    /// The day-0 rows' `lastDetail` is NOT projected at all rather than
+    /// sanitized. It USED to originate from `String(describing: error)`, which on
+    /// a `URLError` carries the enclosure URL in `userInfo` — measured, not
+    /// feared: two rows in the pre-wipe device snapshot held a 200-character
+    /// `NSURLErrorDomain` dump complete with a heap pointer. Since playhead-luie
+    /// both of its producers write a `DurableThrowRecord` token instead, so the
+    /// value is now bounded and URL-free by construction.
+    ///
+    /// **The exclusion stays anyway, and the reason is the direction of the
+    /// risk.** What makes the column safe is a property of two call sites, not of
+    /// the column; the field is still typed `String?` and a future producer can
+    /// still put anything in it. Excluding it means a projection cannot become a
+    /// disclosure without somebody editing THIS file. The closed `last_exit` enum
+    /// is what a support engineer needs anyway.
+    /// `DiagnosticsBundleRediffTests.detailIsNotExported` is the proof, and every
+    /// other projected field is an integer, a timestamp, or a closed enum
+    /// `rawValue`.
     private static func projectRediff(
         _ snapshot: DiagnosticsRediffSnapshot,
         installID: UUID
@@ -488,12 +497,14 @@ enum DiagnosticsBundleBuilder {
     ///   * `deferReason` is a free-form column shared with other entry points,
     ///     so "forward whatever is in it" is not a bound anyone maintains.
     ///
-    /// The day-0 records' `lastDetail` is likewise NOT exported: it is
-    /// `String(describing: error)`, and a `URLError` carries the enclosure URL
-    /// — a content-identifying string that would be a stronger disclosure than
-    /// the raw `episodeId` legal checklist item (a) already forbids. The closed
-    /// `last_exit` enum is what a support engineer needs; the free text stays
-    /// on device in `rediff_day_zero_attempts`.
+    /// The day-0 records' `lastDetail` is likewise NOT exported. It was
+    /// `String(describing: error)` until playhead-luie, and a `URLError` carries
+    /// the enclosure URL — a content-identifying string that would be a stronger
+    /// disclosure than the raw `episodeId` legal checklist item (a) already
+    /// forbids. It is a `DurableThrowRecord` token now, bounded and URL-free, and
+    /// the exclusion is kept regardless: see `projectRediff` above for why a
+    /// property of two call sites is not a property of the column. The closed
+    /// `last_exit` enum is what a support engineer needs.
     private static func rediffAnnotationValue(_ raw: String?, key: String) -> Int? {
         guard let raw, raw.count <= rediffAnnotationCharCap else { return nil }
         for token in raw.split(separator: " ") {

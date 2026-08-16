@@ -298,6 +298,143 @@
 // `PersistedStateInvariantEvaluator.sanitize` truncates to 80 characters for its
 // witness line. The COLUMN holds the whole token and a device pull reads the
 // column. Do not read a truncated witness as the record.
+//
+// ===== THE SIXTH SITE (playhead-luie), AND WHY IT NEEDED NO FIFTH CONDITION ===
+//
+// A FOURTH column joins the three: `rediff_day_zero_attempts.lastDetail`. TWO
+// production writers, both `String(describing: error)`, both reaching it through
+// the SAME field one struct later:
+//
+//     RediffRefetchService.swift:701   mint: .blocked(.fetchFailed, detail: String(describing: error))
+//     AdDetectionService.swift:12328   failed.detail = String(describing: error)
+//
+// `RediffDayZeroMintOutcome.detail` → `DayZeroRediffAttemptPolicy.advance` →
+// `RediffDayZeroAttemptRecord.lastDetail` → the column. Neither is a labelled
+// argument named after the column, which is why playhead-3c4k's two schema-derived
+// sweeps could not see either: **the description is bound to a FIELD and travels,
+// and a per-call-site pattern only ever sees the first hop.** The second writer
+// is not even a labelled argument at all — it is an assignment to a `var` local's
+// property, so no argument-shaped rule of any spelling could have matched it.
+//
+// **ONE PREFIX FOR BOTH ARMS, and this is the one place in this file where that
+// is the right answer rather than the lazy one.** `jobThrew` and
+// `assetResolutionThrew` are two prefixes because `analysis_jobs` carries nothing
+// that distinguishes the arms — the column IS the discriminator. Here the row
+// carries `lastExit`, a closed `RediffDayZeroExit` rawValue, and the two arms are
+// `fetch_failed` and `persist_failed`. It cannot drift from the detail it stands
+// beside: `advance` writes `lastExit: outcome.exit` and
+// `lastDetail: outcome.detail` unconditionally, from the SAME `outcome`, in the
+// SAME initialiser call — and `noteRediffDayZeroSuppression`, the only other
+// writer of the row, touches neither on conflict. So a second prefix would be a
+// SECOND RULER for a quantity the row already measures exactly, which is the
+// thing this file's closing section forbids. Read the arm off `lastExit`:
+//
+//     lastExit='fetch_failed'   + dayZeroThrew(…)  -> the k-way B-copy fetch threw
+//     lastExit='persist_failed' + dayZeroThrew(…)  -> upsertHotPathAdWindows threw
+//
+// ===== IT HAS FIRED IN THE FIELD, AND THE TWO ROWS ARE THE ARGUMENT ==========
+//
+// **COUNT OVER EVERY PRESERVED DATABASE, NOT THE FIVE YOU WERE HANDED.** The
+// first draft of this section counted db-pull8…12 alone, found ZERO rows with a
+// non-null `lastDetail`, and concluded "the population is empty". That is this
+// repo's standing defect class one level up — a census of the databases somebody
+// happened to name, read as a census of the databases that exist. There are
+// NINETEEN preserved device databases carrying `rediff_day_zero_attempts` under
+// the session scratchpads, spanning 2026-08-02 → 2026-08-16, and db-pull8…12 are
+// five of them. Re-counted per ROW IDENTITY over the union of all nineteen:
+//
+//     21  distinct `analysisAssetId`s have ever existed in the table
+//      2  have ever carried a non-null `lastDetail` — BOTH `lastExit=fetch_failed`
+//      0  hold one in the most recent pull (2026-08-16 01:04), or in ANY pull
+//         from db-pull8 (2026-08-13 09:46) onward
+//
+// So the FIRINGS are ≥ 2 (a floor — `lastDetail` is last-writer-wins) and the
+// HOLDINGS are 0 (exact — a snapshot enumerates the table). Both prose rows live
+// in `3gzp/gt.sqlite`, a ground-truth snapshot of device state from before the
+// wipe-and-reinstall; neither asset survives into any later pull, so **there is
+// nothing to migrate**, and the reason is a wipe rather than a repair.
+//
+// **WHAT THOSE TWO ROWS ACTUALLY HELD IS THE WHOLE CASE, so it is quoted rather
+// than characterised.** Both are 200 characters — i.e. BOTH were cut by
+// `detailCharCap`, mid-word, with no marker:
+//
+//   F4CE7F47 (2026-08-05 21:02:28)
+//     Error Domain=NSURLErrorDomain Code=-1001 "The request timed out." UserInfo=
+//     {_kCFStreamErrorCodeKey=-2102, NSUnderlyingError=0x1502a0d20 {Error Domain=
+//     kCFErrorDomainCFNetwork Code=-1001 "(null)" UserIn
+//   FCDDB309 (2026-08-02 04:45:44)
+//     …identical, except NSUnderlyingError=0x11cc169d0
+//
+// Four things at once, and the third is the one no earlier site in this series
+// could demonstrate:
+//
+//   1. A LOCALIZED SENTENCE — `"The request timed out."` — so the same failure
+//      does not group across devices whose language differs.
+//   2. A `userInfo` DUMP. On this path `NSURLErrorFailingURLErrorKey` lives in
+//      there, which is why three separate exporters refuse to project the column
+//      at all (see below).
+//   3. **A HEAP POINTER.** `0x1502a0d20` against `0x11cc169d0`. These two rows
+//      are the SAME failure — same domain, same code, same underlying domain,
+//      same underlying code — and they group as TWO DISTINCT VALUES, on one
+//      device, because a per-process object address was serialised into a durable
+//      column. `GROUP BY lastDetail` over this table can never return a count
+//      above one. That is not "prose is hard to group": it is a column whose
+//      cardinality equals its row count by construction.
+//   4. The cut lands INSIDE the underlying chain, so the 200 characters do not
+//      even carry the one thing a reader wants. The token carries it in 84:
+//      `dayZeroThrew(domain=NSURLErrorDomain,code=-1001,under=<deepest>/…)`,
+//      identical for both rows.
+//
+// **AND NOTHING READS IT — enumerated per consumer kind, because "nobody reads
+// it" is a claim about a search.** Over the whole tree plus `scripts/`, `docs/`
+// and every `.md`:
+//
+//     SQL PREDICATE       0   no WHERE, no LIKE, no GROUP BY, no ORDER BY, no index
+//     EXPORT              0   the bundle, the dogfood payload and every JSON surface
+//     UI STRING           0
+//     LOG                 2   the two `.dayZeroUnmarked` recorder lines
+//     PROJECTION          4   two in the SELECT/read path, one in the bind, one the
+//                             mint→record hop that this token now feeds
+//     DELIBERATE EXCLUSION 6  four production doc sites, two test ones, plus one
+//                             documented device-pull query that omits it
+//
+// That is why this site is P2 rather than P1 — the risk is bounded by a cap and
+// a redaction rather than open — and it is exactly why the token matters. A
+// column no code reads and no bundle exports has ONE consumer left: a human
+// running `GROUP BY` on a device pull. `playhead-3oyz`'s bead body is that human,
+// transcribing this very field off a 2026-08-06 pull by hand. A heap pointer is
+// what a `String(describing:)` gives them.
+//
+// The exclusions are KEPT and were not weakened by this change. Their stated
+// justification ("it is `String(describing: error)`") is updated where it appears
+// (`DiagnosticsBundleBuilder` twice, `DiagnosticsBundle`), because a rule whose
+// reason has stopped being true is a rule the next reader deletes; the RULE
+// stands on a different footing, which those comments now give: the field is
+// still `String?`, so what makes it safe is a property of two call sites and not
+// of the column, and an exclusion is what keeps a future producer's mistake from
+// becoming a disclosure without anyone editing the exporter.
+//
+// **THE URL CANNOT REACH THE TOKEN, WHICH IS THE PROPERTY THE EXCLUSIONS WERE
+// STANDING IN FOR.** `identityFields(of:)` reads `NSError.domain` and
+// `NSError.code` and walks `NSUnderlyingErrorKey`. It never touches `userInfo`
+// otherwise, and `NSURLErrorFailingURLErrorKey` / `NSURLErrorFailingURLStringErrorKey`
+// live there. A timeout on a private enclosure used to persist as
+// `Error Domain=NSURLErrorDomain Code=-1001 … NSErrorFailingURLKey=https://…mp3`;
+// it now persists as `dayZeroThrew(domain=NSURLErrorDomain,code=-1001,under=none)`,
+// 58 characters, no URL in it by construction.
+//
+// LIMIT, measured rather than asserted: `DayZeroRediffAttemptPolicy.detailCharCap`
+// truncates at 200 and the token is NOT self-marking when cut. Worst realistic
+// case — both domains at ``UnclassifiedModelFailure/maxDomainLength`` (64) and
+// both codes eleven digits — is **187** characters, so the headroom is thirteen;
+// a 20-digit code on BOTH levels would reach 203 and lose the closing paren. No
+// `NSError` has a code of that magnitude (a native Swift error's code is its case
+// index), so this is named rather than fixed, and `theTokenFitsUnderTheDetailCap`
+// pins the 187 exactly rather than with a `<`. **The first prediction written
+// here was 175 and the test measured 187** — a signed eleven-digit code is twelve
+// characters and this token carries two of them — which is the same discipline
+// this file's `localizedDescription` section records: write the number down,
+// then run it.
 
 import Foundation
 
@@ -378,6 +515,23 @@ enum DurableThrowRecord {
     /// carries `entryPoint`, so the prefix does not restate which task it was.
     static let recoveryThrewPrefix = "recoveryThrew"
 
+    /// The greppable family for `rediff_day_zero_attempts.lastDetail`
+    /// (playhead-luie), written by BOTH of that column's producers.
+    ///
+    /// Sharing none with anything that column has ever held — which is nothing
+    /// at all: zero of the nine assets in db-pull8…12 carry a non-null
+    /// `lastDetail`, so unlike ``assetResolutionThrewPrefix`` there is no
+    /// retired spelling whose stem a rail depends on, and the name was chosen
+    /// freely rather than inherited.
+    ///
+    /// The condition is "a day-0 mint attempt threw something the day-0 path
+    /// could not classify". ONE prefix over two arms, deliberately: see this
+    /// file's header. The arm is spelled by the row's own `lastExit`
+    /// (`fetch_failed` / `persist_failed`), which is written from the same
+    /// `RediffDayZeroMintOutcome`, in the same statement, and therefore cannot
+    /// disagree with the detail beside it. A second prefix would restate it.
+    static let dayZeroThrewPrefix = "dayZeroThrew"
+
     /// The identity fields shared by all three tokens:
     /// `domain=…,code=…,under=…`.
     ///
@@ -453,5 +607,18 @@ enum DurableThrowRecord {
     /// `recoveryThrew(domain=…,code=…,under=…)`.
     static func backgroundTaskLastErrorCode(for error: Error) -> String {
         "\(recoveryThrewPrefix)(\(identityFields(of: error)))"
+    }
+
+    /// The durable cause for `rediff_day_zero_attempts.lastDetail`
+    /// (playhead-luie), written by BOTH day-0 arms that catch a throw:
+    /// `RediffRefetchService`'s k-way fetch catch (`.fetchFailed`) and
+    /// `AdDetectionService.mintByteExactDayZeroMarks`'s persist catch
+    /// (`.persistFailed`).
+    ///
+    /// `dayZeroThrew(domain=…,code=…,under=…)`. No arm discriminator — the
+    /// record's `lastExit` carries it and is written from the same outcome in
+    /// the same statement. See ``dayZeroThrewPrefix``.
+    static func dayZeroAttemptDetail(for error: Error) -> String {
+        "\(dayZeroThrewPrefix)(\(identityFields(of: error)))"
     }
 }
