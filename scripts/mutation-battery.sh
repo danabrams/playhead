@@ -17860,6 +17860,7 @@ rec_file()   {
     THROT) printf '%s' "$THROT" ;;
     FMREF) printf '%s' "$FMREF" ;;
     UMF)   printf '%s' "$UMF" ;;
+    SFR)   printf '%s' "$SFR" ;;
     RUNNER) printf '%s' "$RUNNER" ;;
     FMCLS) printf '%s' "$FMCLS" ;;
     PROBE) printf '%s' "$PROBE" ;;
