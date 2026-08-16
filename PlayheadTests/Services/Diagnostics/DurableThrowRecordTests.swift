@@ -342,7 +342,33 @@ struct DurableThrowRecordTests {
         let retried = Self.job(state: "failed", lastErrorCode: token)
         #expect(!AnalysisWorkScheduler.isAttemptCapTerminal(retried))
         #expect(!AnalysisWorkScheduler.isRescuableTerminal(retried))
-        #expect(!AnalysisWorkScheduler.isNoProgressTerminal(retried))
+
+        // THE OTHER READER, ASKED SO THE ANSWER IS ABOUT THE CODE. Asserting
+        // `!isNoProgressTerminal(retried)` alone would pass for the wrong
+        // reason: that predicate is `state == "complete" && lastErrorCode ==
+        // coverageInsufficient:noProgress`, and `retried` is `failed`, so the
+        // STATE clause carries it and the token is never consulted — a value
+        // that names one thing read as though it named another, inside the
+        // check written to rule that out. Hold the state at the one value the
+        // predicate accepts and let the code be the only variable.
+        for spelling in [token,
+                         AnalysisWorkScheduler.maxAttemptsReachedPrefix + token,
+                         Self.retiredAssetResolutionProse] {
+            #expect(!AnalysisWorkScheduler.isNoProgressTerminal(
+                Self.job(state: "complete", lastErrorCode: spelling)
+            ), "\(spelling) was read as the no-progress terminal")
+        }
+        // Anti-vacuity: at that same state the real no-progress code DOES
+        // match, so the loop above is measuring the code and not the state.
+        // Through the shared constant, not a literal — `AnalysisWorkScheduler`
+        // documents that reader and writer share it precisely so a copy cannot
+        // drift, and an anti-vacuity control spelled by hand is a copy.
+        #expect(AnalysisWorkScheduler.isNoProgressTerminal(
+            Self.job(
+                state: "complete",
+                lastErrorCode: AnalysisWorkScheduler.noProgressTerminalErrorCode
+            )
+        ))
 
         // And the RETIRED prose was rescuable on the same terms, so nothing
         // about the cap-out rescue changed shape when the suffix did.
