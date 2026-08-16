@@ -1455,6 +1455,19 @@ FOCUSED_SUITES=(
   # store-level test cannot tell "the guard saw it" from "OR IGNORE ate it").
   -only-testing:PlayheadTests/DuplicateSpanTextChunkV53MigrationTests
   -only-testing:PlayheadTests/FinalPassRetranscriptionRunnerTests
+  # playhead-gjxf: normalizedText held RAW text (GJ series). ONE suite is added
+  # here — the V54 migration suite — because the WRITE-PATH half of this bead is
+  # observed by `FinalPassRetranscriptionRunnerTests`, already listed one line
+  # up for jc42. That overlap is not an accident: gjxf and jc42 are two defects
+  # in the same two producers, so they are observed from the same two seams.
+  #
+  # The split matters for the same reason it does for jc42, and GJ01 is the
+  # proof. The migration suite CANNOT see the writer's defect: V54 runs at store
+  # OPEN, so a row the runner writes afterwards is never swept, and only a test
+  # that inspects what the writer persisted can tell `.lowercased()` from
+  # `normalizeText`. Conversely the runner suite cannot see the sweep's key, its
+  # per-row guard, or the FTS rebuild.
+  -only-testing:PlayheadTests/UnnormalizedChunkTextV54MigrationTests
   # playhead-99yt: a twin is ONE observation (NY series). One suite, because the
   # claim is about five CONSUMERS and this is the only place any of them is
   # driven with a twin on its input. It carries its own anti-vacuity fixture —
@@ -3339,6 +3352,33 @@ T_JC_TWINS="a fast row and a final row over identical span+text are TWINS — BO
 T_JC_DIFF_TEXT="same span and pass with DIFFERENT text both survive — the zero-width 3C2FFE10 pair is not a copy"
 T_JC_FTS="the dedupe delete fires the FTS AFTER DELETE trigger — no ghost rowid, index count matches the table"
 T_JC_FTS_MISSING="rows with NO FTS index entry (a pre-FTS database) are still deduped — the rebuild is required"
+
+# ---- playhead-gjxf: normalizedText held RAW text (GJ series) ----
+#
+# ONE COLUMN, TWO QUANTITIES, ONE NAME. `FinalPassRetranscriptionRunner` built
+# `TranscriptChunk.normalizedText` with `segment.text.lowercased()`.
+# Lowercasing is the FIRST of `TranscriptEngineService.normalizeText`'s three
+# steps — the other two (strip non-alphanumerics, collapse on single spaces)
+# never ran — so the column every built-in `LexicalScanner` pattern is written
+# against held the RAW string. Measured with a verbatim Swift copy of the
+# normalizer over all 55,005 stored texts of the 2026-08-15 pull: 3,825 rows
+# wrong, every one of them this writer's, and all 30,125 fast rows correct.
+#
+# ⚠️ EVERY FIXTURE IN THIS SERIES USES PUNCTUATED TEXT AND THAT IS THE WHOLE
+# GAME. `normalizeText(s) == s.lowercased()` for any `s` without punctuation,
+# so a rail seeded with unpunctuated text cannot tell the broken writer from
+# the fixed one and SURVIVES for a reason that has nothing to do with the code.
+# That is exactly how JC04 above was born dead. `$T_GJ_VACUITY` asserts the
+# precondition directly so the suite cannot be disarmed by simplifying a
+# fixture.
+T_GJ_WRITER="final-pass retranscription persists CANONICALLY NORMALIZED text, not raw lowercase"
+T_GJ_REPAIR="a runner row storing RAW text is re-normalized to the canonical spelling"
+T_GJ_EXACT="the repaired value is EXACTLY TranscriptEngineService.normalizeText, on every punctuation shape"
+T_GJ_UNTOUCHED="a row that was ALREADY correct is left byte-identical and reported as no work"
+T_GJ_MIXED="the sweep repairs the broken row and leaves the correct one alone in the SAME table"
+T_GJ_IDEMPOTENT="the rung is idempotent and a clean v53 database reaches head untouched"
+T_GJ_FTS_MISSING="rows with NO FTS index entry (a pre-FTS database) are still repaired — the rebuild is required"
+T_GJ_VACUITY="UNPUNCTUATED text cannot see this defect — the trap that killed jc42's JC04"
 T_JC_NORMALIZED="the two producers DISAGREE on normalizedText while agreeing on text — the key cannot be the normalised column"
 T_JC_FAST_NO_SUPPRESS="a FAST row over the same span does not suppress the final row — final-pass coverage keeps growing"
 T_JC_REINSERT="after V53 the UNIQUE index exists and a byte-identical re-insert is refused"
@@ -3470,6 +3510,51 @@ MUTATIONS=(
   # stays at 52 forever. Killed by the collapse rail and by the re-insert rail,
   # which is what proves the index actually got built.
   "JC09|908|STORE|$T_JC_COLLAPSE;$T_JC_REINSERT"
+
+  # ---- playhead-gjxf (GJ series) ----
+  #
+  # Batch 940 — GJ01, THE SHIPPED DEFECT VERBATIM: the runner fills
+  # `normalizedText` with `.lowercased()`. Note what does NOT kill it: the V54
+  # migration, which runs at store OPEN and therefore cannot see a row the
+  # runner writes afterwards. Only a rail that inspects what the WRITER
+  # persisted can, which is why the writer rail lives in the runner's own suite
+  # rather than in the migration suite.
+  "GJ01|940|FPRUN|$T_GJ_WRITER"
+
+  # Batch 941 — GJ02, the migration re-implements the rule instead of calling
+  # it, using the same `.lowercased()` the writer used. This is the mutant the
+  # bead's own scope statement names: "normalizeText() must be applied exactly
+  # as the fast path applies it, or you have replaced one wrong value with a
+  # different wrong value". It is the reason the repair is Swift calling one
+  # function rather than SQL approximating it.
+  "GJ02|941|STORE|$T_GJ_REPAIR;$T_GJ_EXACT"
+
+  # Batch 942 — GJ03, the per-row inequality guard is dropped, so the sweep
+  # rewrites EVERY row to the value it already holds. The column ends up
+  # correct, so no equality assertion anywhere can see it — the only witness is
+  # the COUNT the sweep returns, which is why `$T_GJ_UNTOUCHED` asserts zero
+  # rather than asserting the stored string. An UPDATE to an identical value
+  # still fires the FTS delete/insert triggers on all 55,005 rows.
+  "GJ03|942|STORE|$T_GJ_UNTOUCHED;$T_GJ_MIXED"
+
+  # Batch 943 — GJ04, the FTS `rebuild` before the UPDATE is removed. Same
+  # lesson as JC08 and V40 before it, and the same reason the expectation is
+  # the PRE-FTS fixture: with index entries present the `'delete'` half of the
+  # AFTER UPDATE trigger succeeds whether or not the rebuild ran, so only rows
+  # the index has never heard of can observe this.
+  "GJ04|943|STORE|$T_GJ_FTS_MISSING"
+
+  # Batch 944 — GJ05, the sweep reports "nothing to do" without looking. The
+  # rung then advances `schema_version` to 54 having repaired nothing, so the
+  # broken rows are permanent: no later launch will ever revisit them.
+  "GJ05|944|STORE|$T_GJ_REPAIR;$T_GJ_IDEMPOTENT"
+
+  # Batch 945 — GJ06, the repair writes the normalized value into `text`
+  # instead of `normalizedText`. It "fixes" the column under test by destroying
+  # the evidence column the whole pipeline quotes, and every assertion about
+  # `normalizedText` would still pass — which is why `$T_GJ_REPAIR` asserts
+  # `text` is unchanged as well as asserting `normalizedText` changed.
+  "GJ06|945|STORE|$T_GJ_REPAIR"
 
   # Batch 909 — JC10. Delete the confidence upgrade outright: the guard still
   # recognises the existing row and still refuses to duplicate it, so the row
@@ -7567,6 +7652,12 @@ describe_mutation() {
     JC08) echo "the FTS rebuild before the DELETE is removed — a pre-FTS row then trips SQLITE_CORRUPT and the rung rolls back" ;;
     JC09) echo "the dedupe reports 'nothing to do' without looking, so CREATE UNIQUE INDEX is handed live violations" ;;
     JC10) echo "the avgConfidence upgrade is deleted — no duplicate, no count change, just the lost measurement" ;;
+    GJ01) echo "FinalPassRetranscriptionRunner fills normalizedText with .lowercased() again (the shipped defect)" ;;
+    GJ02) echo "the V54 repair re-implements the rule as .lowercased() instead of calling normalizeText — a different wrong value" ;;
+    GJ03) echo "the V54 repair drops the per-row inequality guard and rewrites every row it reads" ;;
+    GJ04) echo "the FTS rebuild before the UPDATE is removed — a pre-FTS row then trips SQLITE_CORRUPT and the rung rolls back" ;;
+    GJ05) echo "the V54 sweep reports 'nothing to do' without looking, so schema advances to 54 having repaired nothing" ;;
+    GJ06) echo "the V54 repair writes the normalized value into text instead of normalizedText — the evidence column is destroyed" ;;
     T01) echo "SemanticScanThroughputSplit.bucket(for:): a nil scene phase becomes .foreground" ;;
     T02) echo "ScanScenePhase.attributionBucket: a recorded .unknown becomes .foreground" ;;
     T03) echo "readSemanticScanResult: a NULL scenePhase column defaults to .active on the READ" ;;
@@ -8378,7 +8469,7 @@ EOF
         return Int(sqlite3_changes(db))
     }
 
-    /// Collapse `decoded_spans` to one row per
+    /// playhead-gjxf — restore the invariant `normalizedText ==
 EOF
     snippet NEW <<'EOF'
         guard try countRows(in: "transcript_chunks", where: duplicateFilter) > 0 else { return 0 }
@@ -8387,7 +8478,7 @@ EOF
         return Int(sqlite3_changes(db))
     }
 
-    /// Collapse `decoded_spans` to one row per
+    /// playhead-gjxf — restore the invariant `normalizedText ==
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -8420,7 +8511,7 @@ EOF
         return Int(sqlite3_changes(db))
     }
 
-    /// Collapse `decoded_spans` to one row per
+    /// playhead-gjxf — restore the invariant `normalizedText ==
 EOF
     snippet NEW <<'EOF'
         guard false, try countRows(in: "transcript_chunks", where: duplicateFilter) > 0 else { return 0 }
@@ -8432,7 +8523,73 @@ EOF
         return Int(sqlite3_changes(db))
     }
 
-    /// Collapse `decoded_spans` to one row per
+    /// playhead-gjxf — restore the invariant `normalizedText ==
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # ---- playhead-gjxf: normalizedText held RAW text (GJ series) ----
+
+  GJ01)
+    snippet OLD <<'EOF'
+                    normalizedText: TranscriptEngineService.normalizeText(segment.text),
+EOF
+    snippet NEW <<'EOF'
+                    normalizedText: segment.text.lowercased(),
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  GJ02)
+    snippet OLD <<'EOF'
+            let expected = TranscriptEngineService.normalizeText(rawText)
+EOF
+    snippet NEW <<'EOF'
+            let expected = rawText.lowercased()
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  GJ03)
+    snippet OLD <<'EOF'
+            if stored != expected {
+                corrections.append((rowid: rowid, normalized: expected))
+            }
+EOF
+    snippet NEW <<'EOF'
+            _ = stored
+            corrections.append((rowid: rowid, normalized: expected))
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  GJ04)
+    snippet OLD <<'EOF'
+        guard !corrections.isEmpty else { return 0 }
+
+        if try tableExists("transcript_chunks_fts") {
+            try exec("INSERT INTO transcript_chunks_fts(transcript_chunks_fts) VALUES('rebuild')")
+        }
+        let upd = try prepare("UPDATE transcript_chunks SET normalizedText = ? WHERE rowid = ?")
+EOF
+    snippet NEW <<'EOF'
+        guard !corrections.isEmpty else { return 0 }
+
+        let upd = try prepare("UPDATE transcript_chunks SET normalizedText = ? WHERE rowid = ?")
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  GJ05)
+    snippet OLD <<'EOF'
+        guard !corrections.isEmpty else { return 0 }
+EOF
+    snippet NEW <<'EOF'
+        guard false, !corrections.isEmpty else { return 0 }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  GJ06)
+    snippet OLD <<'EOF'
+        let upd = try prepare("UPDATE transcript_chunks SET normalizedText = ? WHERE rowid = ?")
+EOF
+    snippet NEW <<'EOF'
+        let upd = try prepare("UPDATE transcript_chunks SET text = ? WHERE rowid = ?")
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 

@@ -171,7 +171,7 @@ struct PrewarmHitUnmeasuredV52MigrationTests {
         #expect(try await store.schemaVersion() == AnalysisStore.currentSchemaVersion)
         // Pinned to the LITERAL head so the next schema bump has to read this
         // rung, matching the convention of every sibling migration suite.
-        #expect(AnalysisStore.currentSchemaVersion == 53)
+        #expect(AnalysisStore.currentSchemaVersion == 54)
         #expect(try columnIsNullable(in: dir, table: "semantic_scan_results", column: "prewarmHit"))
     }
 
@@ -274,7 +274,7 @@ struct PrewarmHitUnmeasuredV52MigrationTests {
         let upgraded = try AnalysisStore(directory: dir)
         try await upgraded.migrate()
 
-        #expect(try await upgraded.schemaVersion() == 53)
+        #expect(try await upgraded.schemaVersion() == 54)
         #expect(try columnIsNullable(in: dir, table: "semantic_scan_results", column: "prewarmHit"))
         #expect(try rawPrewarmHit(in: dir, rowId: "row-legacy") ?? 99 == nil,
                 "the 95 stored zeroes were a compile-time constant; V52 must not preserve them as data")
@@ -307,7 +307,7 @@ struct PrewarmHitUnmeasuredV52MigrationTests {
         let again = try AnalysisStore(directory: dir)
         try await again.migrate()
 
-        #expect(try await again.schemaVersion() == 53)
+        #expect(try await again.schemaVersion() == 54)
         #expect(try columnIsNullable(in: dir, table: "semantic_scan_results", column: "prewarmHit"))
         // The second climb must not have dropped and re-added the column out
         // from under an existing row.
