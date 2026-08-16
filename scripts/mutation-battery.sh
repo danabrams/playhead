@@ -3237,9 +3237,9 @@ T_SF_SITE="StoreFailureRecordSourceCanaryTests/testTheTokenNamesTheJobsOwnPhaseA
 T_DT_LOCALIZED="THE REAL DEFECT: localizedDescription wrote a LOCALIZED sentence and an enum ORDINAL"
 T_DT_SPELLINGS="THE REAL DEFECT: the exact spellings, pinned from the running program"
 T_DT_PROSE="THE REAL DEFECT: String(describing:) wrote the enum's PROSE, not its case"
-T_DT_NOPAYLOAD="THE DEFECT: no case's payload reaches any of the three durable values"
+T_DT_NOPAYLOAD="THE DEFECT: no case's payload reaches any of the four durable values"
 T_DT_CONDITION="each token is prefixed by the CONDITION it records"
-T_DT_FAMILY="the three prefixes collide with nothing else these columns hold"
+T_DT_FAMILY="the four prefixes collide with nothing else these columns hold"
 T_DT_COUNT="a prefix query returns every throw of one kind and nothing else"
 T_DT_CAPREADER="the terminal arm still satisfies isAttemptCapTerminal, and the retry arm still does not"
 T_DT_SWEEP="no session token can be mistaken for a coverage-guard failure"
@@ -3248,7 +3248,7 @@ T_DT_GRAMMAR="the token's grammar is closed: no whitespace, one balanced parenth
 T_DT_SANITIZE="and the sanitizer really fires on a domain that would break the grammar"
 T_DT_UNDER="under= is a positive claim, never an absence"
 T_DT_DEEPEST="the deepest underlying link is the one carried, not the first"
-T_DT_SHARED="the three factories share ONE identity grammar"
+T_DT_SHARED="the four factories share ONE identity grammar"
 T_DT_WIREIN="the pipeline's catch-all persists the token, and the coverage-guard sweep skips it"
 # The source canaries. XCTest, so \`Suite/method\`. Every one is about a CALL
 # SITE: a token that is correct as a value and wrong as an argument, or a
@@ -3260,6 +3260,56 @@ T_DT_RESUMEARG="DurableThrowRecordSourceCanaryTests/testTheSessionTokenIsGivenTh
 T_DT_SEAMARG="DurableThrowRecordSourceCanaryTests/testTheDebugSeamRecordsTheStateItStandsInFor"
 T_DT_BPSSITE="DurableThrowRecordSourceCanaryTests/testTheRecoveryTaskNoLongerPersistsADescription"
 T_DT_BINDONCE="DurableThrowRecordSourceCanaryTests/testEverySiteBindsTheRecordOnceAboveItsWrite"
+
+# ---- playhead-3c4k: the asset-resolution arm, the ONE site with field rows (AR series) ----
+#
+# 3lc3 fixed four sites and none of them had ever produced a row. This is the
+# fifth, and it is the only one of the six that HAS fired: counted per row
+# identity over db-pull8…12, FIVE of the NINE `analysis_jobs` rows that ever
+# carried a cause carried this arm's prose.
+#
+# WHAT MAKES THIS SERIES DIFFERENT FROM DT, and it is not the column:
+#
+#   1. THE SPELLING 3lc3's OWN RULE COULD NOT SEE. The shipped line was
+#      `lastErrorCode: "assetResolution: \(error)"`. String interpolation of an
+#      `Error` IS `String(describing:)`, but the TEXT contains neither
+#      `String(describing:` nor `localizedDescription`, so
+#      `testTheSchedulerArmsNoLongerPersistADescription` — which was already
+#      reading every `lastErrorCode:` argument in this very file — walked past
+#      it. AR01 is that line restored verbatim, and it is the rail that proves
+#      the widened rule bites on real production source rather than on a
+#      hand-built string.
+#   2. TWO ARMS IN ONE FILE NOW BUILD A `DurableThrowRecord` AND WRITE
+#      `lastErrorCode:`. That is exactly the shape mutant DT05 escaped through
+#      one bead ago — a file-wide `contains` satisfied by the OTHER site. AR05
+#      is DT05's shape here, deliberately built so the ARGUMENT rule STAYS
+#      GREEN: the factory is still called (so every vacuity check passes), every
+#      `lastErrorCode:` argument is a wholesome local, and the local holds prose.
+#      Only the per-SITE read can see it, and AR05's expectation set is the
+#      proof — `$T_DT_SCHEDSITE` is deliberately NOT in it.
+#   3. THE CONDITION CAN CROSS WITHOUT THE VALUE CHANGING SHAPE. Either factory
+#      produces a perfectly well-formed token, so a row labelled with a
+#      condition it never met is invisible to every value test. AR04 and AR07
+#      are the two directions, in different batches so neither can be credited
+#      off the other's damage.
+#   4. THE TERMINAL ARM HAS NO FIELD WITNESS EITHER. Zero of the five rows
+#      carried `maxAttemptsReached:` — every one came from the retry arm — so
+#      AR02 and AR03 are the only things standing under the prefix that
+#      `isAttemptCapTerminal(_:)` reads.
+#
+# Same ';' rule as the DT block — no display name here contains one.
+T_AR_STEM="the asset-resolution token replaces the prose and keeps the greppable STEM"
+T_AR_CONDITION="the asset-resolution condition is NOT the job-run condition"
+T_AR_CAPREADER="the asset-resolution TERMINAL arm still satisfies isAttemptCapTerminal"
+T_AR_UNDERWALK="under= and the deepest-link walk hold for the asset-resolution token too"
+T_AR_INTERP="THE REAL DEFECT: interpolating an Error IS String(describing:), which is why 3lc3's rule missed it"
+T_AR_RETIRED="the RETIRED asset-resolution prose is still separable from every token"
+# The source canaries. XCTest, so `Suite/method`.
+T_AR_BINDSITE="DurableThrowRecordSourceCanaryTests/testTheAssetResolutionArmBindsItsOwnRecordAtItsOwnSite"
+T_AR_CAPPREFIX="DurableThrowRecordSourceCanaryTests/testTheAssetResolutionTerminalArmStillCarriesTheAttemptCapPrefixInFront"
+T_AR_RETRYBARE="DurableThrowRecordSourceCanaryTests/testTheAssetResolutionRetryArmWritesTheBareToken"
+T_AR_BINDONCE="DurableThrowRecordSourceCanaryTests/testTheAssetResolutionArmBindsTheRecordOnceAndTheLogConsumesIt"
+T_AR_OLDRULE="DurableThrowRecordSourceCanaryTests/testTheOldTwoSpellingRuleWouldHaveMissedTheShippedLine"
 
 # ---- playhead-dl9k: the no-progress terminal is re-requested (DL series) ----
 #
@@ -3852,6 +3902,62 @@ MUTATIONS=(
   # classify, recorded as though it were the condition. Alone: it reddens the
   # `under=` rule as well.
   "DT15|960|DTR|$T_DT_DEEPEST"
+
+  # ---- playhead-3c4k: the asset-resolution arm (AR series) ----
+  #
+  # Nine mutations, six batches. Grouping is DT's rule — no shared patch anchor,
+  # and no member able to produce another member's expected failure — and the
+  # expectation sets below are what the batching is derived from rather than a
+  # summary of it.
+
+  # Batch 961 — AR01, THE DEFECT VERBATIM: `"assetResolution: \(error)"` back in
+  # `analysis_jobs.lastErrorCode`, the line that actually shipped and actually
+  # produced field rows. It reddens the retry-arm rail too (the bare token stops
+  # being written), so both are listed and neither is credited to the other.
+  # AR06 is disjoint by construction: it touches no call site.
+  "AR01|961|SCHED|$T_DT_SCHEDSITE;$T_AR_RETRYBARE"
+  "AR06|961|DTR|$T_AR_STEM"
+
+  # Batch 962 — AR02 drops `maxAttemptsReached:` from in FRONT of the token on
+  # the TERMINAL arm; the column still holds a countable token and the cap-out
+  # rescue silently stops recognising capped rows. AR05 is DT05's shape at this
+  # site and the reason `$T_DT_SCHEDSITE` is ABSENT from its expectations: the
+  # argument rule stays GREEN while the column takes prose.
+  #
+  # AR02's second expectation is a CORRECTION FROM THE RUN, not a prediction:
+  # the retry-arm rail also counts how many arms carry the cap prefix, so
+  # removing it from the terminal arm takes that count to zero and reddens the
+  # rail AR03 is scored on. Both listed, and the two are in different batches.
+  "AR02|962|SCHED|$T_AR_CAPPREFIX;$T_AR_RETRYBARE"
+  "AR05|962|SCHED|$T_AR_BINDSITE;$T_AR_BINDONCE"
+
+  # Batch 963 — AR03 is AR02's mirror: the RETRY arm becomes a second copy of the
+  # terminal arm, so a row that never hit the cap is read as capped and rescued.
+  # AR09 gives the asset-resolution factory its own inline copy of the identity
+  # grammar — a second ruler, invisible until the error carries a chain.
+  # AR09's second expectation is likewise a correction from the run: an inlined
+  # grammar skips `UnclassifiedModelFailure.sanitize`, so a hostile domain leaks
+  # spaces and parentheses and the closed-grammar rail fires as well as the
+  # underlying-walk one. That is the second ruler drifting in TWO places at
+  # once, which is the argument for delegating rather than restating.
+  "AR03|963|SCHED|$T_AR_RETRYBARE"
+  "AR09|963|DTR|$T_AR_UNDERWALK;$T_DT_GRAMMAR"
+
+  # Batch 964 — AR04, the CONDITION CROSSING. The asset-resolution arm records
+  # `jobThrew(…)`: a perfectly well-formed token naming a condition this arm can
+  # never meet, since it fires before any runner exists. Alone, because it
+  # reddens three rails that AR05 and AR07 also reach.
+  "AR04|964|SCHED|$T_DT_SCHEDSITE;$T_AR_BINDSITE;$T_AR_BINDONCE"
+
+  # Batch 965 — AR07 is AR04's mirror, and the direction a one-sided rail would
+  # have missed: the OUTER CATCH records `assetResolutionThrew(…)`, so every
+  # unclassified job-run throw is counted as an asset-resolution failure. Alone.
+  "AR07|965|SCHED|$T_DT_SCHEDSITE;$T_DT_BINDONCE;$T_AR_BINDSITE;$T_AR_BINDONCE"
+
+  # Batch 966 — AR08 recomputes the record for the log line instead of consuming
+  # the bound local: two measurements of one quantity, so the column and the log
+  # can disagree about the throw in front of them.
+  "AR08|966|SCHED|$T_AR_BINDONCE"
 
   # Batch 909 — JC10. Delete the confidence upgrade outright: the guard still
   # recognises the existing row and still refuses to duplicate it, so the row
@@ -8425,6 +8531,15 @@ describe_mutation() {
     DT13) echo "3lc3: the session token answers to the coverage-guard prefix — the one SQL predicate over these columns, feeding a parser that divides by what it matched" ;;
     DT14) echo "3lc3: the log line recomputes the record instead of consuming the bound local — two measurements of one quantity" ;;
     DT15) echo "3lc3: the OUTER identity is recorded as the UNDERLYING one — the framework declining to classify, read as the condition" ;;
+    AR01) echo "3c4k: THE DEFECT VERBATIM — \"assetResolution: \\(error)\" back in the column, the interpolated spelling 3lc3's own rule could not see" ;;
+    AR02) echo "3c4k: the asset-resolution TERMINAL arm drops maxAttemptsReached: from in FRONT of the token — the cap-out rescue stops seeing capped rows" ;;
+    AR03) echo "3c4k: the asset-resolution RETRY arm becomes a copy of the terminal arm — a row that never hit the cap is read as capped and rescued" ;;
+    AR04) echo "3c4k: the asset-resolution arm records jobThrew(...) — a well-formed token naming a condition this arm fires one stage before" ;;
+    AR05) echo "3c4k: prose LAUNDERED through the local while the factory is still called — every lastErrorCode: argument stays wholesome, DT05's escape at a second site" ;;
+    AR06) echo "3c4k: the token loses the assetResolution STEM, so DownloadTimeAssetRegistrationTests' contains(\"assetResolution\") guard goes permanently green" ;;
+    AR07) echo "3c4k: the OUTER CATCH records assetResolutionThrew(...) — every unclassified job-run throw counted as an asset-resolution failure" ;;
+    AR08) echo "3c4k: the abandonment log recomputes the record instead of consuming the bound local — the column and the log can disagree about the throw" ;;
+    AR09) echo "3c4k: the asset-resolution factory inlines its own identity grammar — a second ruler, invisible until the error carries an underlying chain" ;;
     DT16) echo "3lc3: the recovery token inlines its own copy of the identity grammar — a second ruler that drifts the first time the shared one is tightened" ;;
     UM01) echo "59c8: the field row is ADMITTED to FMDaemonRefusal — a wrapper code over a 25-case enum gets an it-will-heal reading and an unbounded FM bill" ;;
     UM02) echo "59c8: the durable column carries String(describing: error) again — 300 characters of NSError prose in the one column a device pull groups by" ;;
@@ -9437,6 +9552,148 @@ EOF
     static func backgroundTaskLastErrorCode(for error: Error) -> String {
         let bridged = error as NSError
         return "\(recoveryThrewPrefix)(domain=\(bridged.domain),code=\(bridged.code))"
+    }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # ---- playhead-3c4k: the asset-resolution arm (AR series) ----
+
+  # AR01 — THE DEFECT VERBATIM, and the one mutant in this battery that is a
+  # copy of a line that really shipped and really produced rows. Interpolating an
+  # `Error` IS `String(describing:)`, so this puts a SQLite sentence back in a
+  # column a device pull groups by — and its whole point as a rail is that the
+  # rule 3lc3 shipped, which was already reading this exact argument, could not
+  # see it. If this survives, the widened rule is decorative.
+  AR01)
+    snippet OLD <<'EOF'
+                            lastErrorCode: assetResolutionThrowRecord
+EOF
+    snippet NEW <<'EOF'
+                            lastErrorCode: "assetResolution: \(error)"
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # AR02 — the TERMINAL arm keeps the token and loses the `maxAttemptsReached:`
+  # prefix in front of it. Every value test stays green,
+  # `isAttemptCapTerminal(_:)` stops matching, and the cap-out retry rescue
+  # abandons every asset-resolution job that reaches the attempt cap. NO FIELD
+  # ROW HAS EVER TAKEN THIS ARM, so this rail is the only witness it has.
+  AR02)
+    snippet OLD <<'EOF'
+                            lastErrorCode: "\(Self.maxAttemptsReachedPrefix)\(assetResolutionThrowRecord)"
+EOF
+    snippet NEW <<'EOF'
+                            lastErrorCode: assetResolutionThrowRecord
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # AR03 — AR02's mirror, and the likelier accident: the RETRY arm is a
+  # copy-paste of the terminal arm, so a row that spent one attempt of five
+  # carries the attempt-cap prefix. `isAttemptCapTerminal` also tests
+  # `state == "superseded"`, so the row is not rescued — it is worse than that,
+  # the prefix now means nothing, because both a capped row and a first-attempt
+  # failure answer to it.
+  AR03)
+    snippet OLD <<'EOF'
+                            lastErrorCode: assetResolutionThrowRecord
+EOF
+    snippet NEW <<'EOF'
+                            lastErrorCode: "\(Self.maxAttemptsReachedPrefix)\(assetResolutionThrowRecord)"
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # AR04 — THE CONDITION CROSSES. `jobThrew` means "the job's RUN threw"; this
+  # catch stands over `resolveAnalysisAssetId` and fires one stage BEFORE any
+  # runner exists. Either factory yields a perfectly well-formed token, so a row
+  # labelled with a condition it could never have met is invisible to every test
+  # that reads a value. sckv's SF04 shape, one argument wider.
+  AR04)
+    snippet OLD <<'EOF'
+            let assetResolutionThrowRecord = DurableThrowRecord.assetResolutionLastErrorCode(for: error)
+EOF
+    snippet NEW <<'EOF'
+            let assetResolutionThrowRecord = DurableThrowRecord.jobLastErrorCode(for: error)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # AR05 — DT05's ESCAPE, REBUILT AT THE SECOND SITE. The factory is still
+  # called, so every vacuity check that asks "does this file build the record"
+  # passes; every `lastErrorCode:` argument is a wholesome local, so the rule
+  # stated over ARGUMENTS passes; and the column takes prose. `$T_DT_SCHEDSITE`
+  # is deliberately absent from this mutation's expectations — if it appears
+  # there, the argument rule has started catching this and the per-site rails
+  # can be re-argued. Until then, only a read anchored on THIS arm can see it.
+  AR05)
+    snippet OLD <<'EOF'
+            let assetResolutionThrowRecord = DurableThrowRecord.assetResolutionLastErrorCode(for: error)
+EOF
+    snippet NEW <<'EOF'
+            _ = DurableThrowRecord.assetResolutionLastErrorCode(for: error)
+            let assetResolutionThrowRecord = "assetResolution: \(error)"
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # AR06 — the token loses the `assetResolution` STEM. Nothing in
+  # `DurableThrowRecord`'s own tests would care, and the token stays perfectly
+  # countable — but `DownloadTimeAssetRegistrationTests` guards the
+  # UNIQUE-constraint regression with `lastErrorCode?.contains("assetResolution")
+  # != true`, so this makes an existing rail permanently green while the arm it
+  # watches fires. A check that has stopped being able to see the thing whose
+  # absence it reports.
+  AR06)
+    snippet OLD <<'EOF'
+    static let assetResolutionThrewPrefix = "assetResolutionThrew"
+EOF
+    snippet NEW <<'EOF'
+    static let assetResolutionThrewPrefix = "resolveThrew"
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # AR07 — AR04's MIRROR, and the direction a one-sided rail would have missed
+  # (sckv's SF03/SF10 lesson, and o89d R5's: enumerate both directions or the
+  # untested one is the defect). The OUTER CATCH records the asset-resolution
+  # condition, so every unclassified job-RUN throw is counted as an
+  # asset-resolution failure and the two populations become one number.
+  AR07)
+    snippet OLD <<'EOF'
+            let throwRecord = DurableThrowRecord.jobLastErrorCode(for: error)
+EOF
+    snippet NEW <<'EOF'
+            let throwRecord = DurableThrowRecord.assetResolutionLastErrorCode(for: error)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # AR08 — the abandonment log recomputes the record instead of consuming the
+  # bound local. Two measurements of one quantity: harmless while the function is
+  # pure, and the exact shape that let the scheduler compute a case name BELOW
+  # the write that needed it. The point of binding once is that the column, the
+  # terminal decision and the log cannot disagree about the throw in front of
+  # them.
+  AR08)
+    snippet OLD <<'EOF'
+                logger.warning("Job \(job.jobId) abandoned after \(attempts) attempts: token=\(assetResolutionThrowRecord, privacy: .public) detail=\(error)")
+EOF
+    snippet NEW <<'EOF'
+                logger.warning("Job \(job.jobId) abandoned after \(attempts) attempts: token=\(DurableThrowRecord.assetResolutionLastErrorCode(for: error), privacy: .public) detail=\(error)")
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # AR09 — the asset-resolution factory gets its own inline copy of the identity
+  # grammar. The two agree on every error a test author writes by hand, and
+  # diverge the moment one carries an `NSUnderlyingErrorKey` chain — which is
+  # precisely the population `UnclassifiedModelFailure.identity(of:)` exists to
+  # walk. A second ruler for a quantity one function already measures.
+  AR09)
+    snippet OLD <<'EOF'
+    static func assetResolutionLastErrorCode(for error: Error) -> String {
+        "\(assetResolutionThrewPrefix)(\(identityFields(of: error)))"
+    }
+EOF
+    snippet NEW <<'EOF'
+    static func assetResolutionLastErrorCode(for error: Error) -> String {
+        let bridged = error as NSError
+        return "\(assetResolutionThrewPrefix)(domain=\(bridged.domain)"
+            + ",code=\(bridged.code),under=\(UnclassifiedModelFailure.noUnderlyingToken))"
     }
 EOF
     patch "$file" "$OLD" "$NEW" ;;

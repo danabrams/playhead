@@ -63,6 +63,42 @@
 // which is the only instrument that can see the defect class those two sites are
 // most exposed to anyway: a call whose VALUE is a perfect token and whose
 // ARGUMENT is wrong.
+//
+// ===== playhead-3c4k: THE FIFTH SITE, AND THE ONE WITH FIELD ROWS =====
+//
+//   AnalysisWorkScheduler   lastErrorCode: "\(maxAttemptsReachedPrefix)assetResolution: \(error)"
+//   AnalysisWorkScheduler   lastErrorCode: "assetResolution: \(error)"
+//
+// String INTERPOLATION of an `Error` IS `String(describing:)` — measured in
+// `interpolationIsTheSameDefectInAThirdSpelling`, not asserted — so this is the
+// same defect in a THIRD spelling, and the third spelling is exactly the one
+// 3lc3's own canary could not see: `testTheSchedulerArmsNoLongerPersistADescription`
+// filtered every `lastErrorCode:` argument for `localizedDescription` and
+// `String(describing:` and read straight past this line in the same file. That
+// blindness is now itself a test — `testTheOldTwoSpellingRuleWouldHaveMissedTheShippedLine`.
+//
+// **THIS SITE HAS A POPULATION, WHICH IS WHY IT IS A P1 AND THE OTHER FIVE WERE
+// NOT.** Per row identity over db-pull8…12: 38 distinct jobIds, 9 that ever
+// carried a cause, and 5 of those 9 carried this arm's prose. Zero carried the
+// TERMINAL arm's spelling, so the arm with the load-bearing
+// `maxAttemptsReached:` prefix is the one with no witness in the field either —
+// `theAssetResolutionTerminalArmIsStillRescuable` and
+// `testTheAssetResolutionTerminalArmStillCarriesTheAttemptCapPrefixInFront` are
+// the only things standing under it.
+//
+// AND IT HAS NO RUNTIME WITNESS EITHER, for a THIRD reason that is worth
+// stating because it is not the two above. `resolveAnalysisAssetId`'s throws all
+// come from a concrete `AnalysisStore` with no protocol seam (the same
+// conclusion as the two sites above) — but on top of that, the one production
+// failure that produced ALL FIVE field rows can no longer reach this catch at
+// all: `playhead-1216`'s `insertAssetAdoptingIdentity` turned the
+// `UNIQUE constraint failed: analysis_assets.episodeId,
+// analysis_assets.assetFingerprint` collision into an ADOPTION, and
+// `DownloadTimeAssetRegistrationTests` asserts exactly that the arm does not
+// fire. So the site is carried by the SOURCE CANARY, per site rather than per
+// file — this scheduler now has TWO arms that build a `DurableThrowRecord` and
+// write `lastErrorCode:`, which is precisely the shape that let mutant DT05
+// survive a file-wide rule one bead ago.
 
 import Foundation
 import Testing
@@ -193,11 +229,162 @@ struct DurableThrowRecordTests {
         #expect(String(describing: noAudio) == "No cached audio available for episode EP-1")
     }
 
-    @Test("THE DEFECT: no case's payload reaches any of the three durable values")
+    // MARK: playhead-3c4k — the fifth site, the only one with field rows
+
+    /// The exact prose the asset-resolution arm wrote, as it stands in five
+    /// device pulls. Quoted from `db-pull8`…`db-pull12`, not invented.
+    static let retiredAssetResolutionProse =
+        "assetResolution: Insert failed: UNIQUE constraint failed: "
+        + "analysis_assets.episodeId, analysis_assets.assetFingerprint"
+
+    @Test("THE REAL DEFECT: interpolating an Error IS String(describing:), which is why 3lc3's rule missed it")
+    func interpolationIsTheSameDefectInAThirdSpelling() throws {
+        // The shipped line was `lastErrorCode: "assetResolution: \(error)"`.
+        // Neither `localizedDescription` nor `String(describing:` appears in
+        // it, so 3lc3's source canary — which filtered every `lastErrorCode:`
+        // argument for exactly those two spellings — was blind to a third
+        // spelling of its own defect, in the same file, twelve hundred lines
+        // below the two arms it did fix.
+        //
+        // The equivalence is the point, so it is MEASURED rather than asserted
+        // in prose: interpolation and `String(describing:)` produce the same
+        // bytes for every error type that reaches this arm.
+        for error in Self.coordinatorErrors {
+            #expect("\(error)" == String(describing: error),
+                    "interpolation and String(describing:) disagree for \(error)")
+        }
+        let storeError = AnalysisStoreError.insertFailed(
+            "UNIQUE constraint failed: analysis_assets.episodeId, analysis_assets.assetFingerprint"
+        )
+        #expect("\(storeError)" == String(describing: storeError))
+
+        // And the shipped spelling reproduces the field rows exactly. This is
+        // the string five of the nine `analysis_jobs` rows that ever carried a
+        // cause actually held, rebuilt from the production error type.
+        #expect("assetResolution: \(storeError)" == Self.retiredAssetResolutionProse,
+                "the reconstruction of the field value drifted: assetResolution: \(storeError)")
+    }
+
+    @Test("the asset-resolution token replaces the prose and keeps the greppable STEM")
+    func theAssetResolutionTokenKeepsTheStem() throws {
+        let error = AnalysisStoreError.insertFailed(
+            "UNIQUE constraint failed: analysis_assets.episodeId, analysis_assets.assetFingerprint"
+        )
+        let token = DurableThrowRecord.assetResolutionLastErrorCode(for: error)
+
+        // It is a token, not prose: the SQLite sentence that produced every
+        // field row does not reach the column.
+        #expect(token != Self.retiredAssetResolutionProse)
+        #expect(!token.contains("UNIQUE constraint failed"))
+        #expect(!token.contains("analysis_assets.episodeId"))
+        #expect(!token.contains(" "))
+
+        // THE STEM IS LOAD-BEARING. `DownloadTimeAssetRegistrationTests` guards
+        // the UNIQUE-constraint regression with
+        // `lastErrorCode?.contains("assetResolution") != true`. A token spelled
+        // without the stem leaves that guard green while this arm fires.
+        #expect(token.contains("assetResolution"))
+        #expect(Self.retiredAssetResolutionProse.contains("assetResolution"))
+
+        // And the separation from the prose is EXACT rather than approximate:
+        // fifteen shared characters, then `T` against `:`.
+        let stem = "assetResolution"
+        #expect(token.hasPrefix(stem) && Self.retiredAssetResolutionProse.hasPrefix(stem))
+        #expect(String(token.dropFirst(stem.count).prefix(1)) == "T")
+        #expect(String(Self.retiredAssetResolutionProse.dropFirst(stem.count).prefix(1)) == ":")
+
+        // Which is what makes all three device-pull queries mean what the
+        // header says they mean.
+        let population = [token, Self.retiredAssetResolutionProse, "coverageInsufficient:noProgress"]
+        #expect(population.filter { $0.hasPrefix("assetResolutionThrew(") } == [token])
+        #expect(population.filter { $0.hasPrefix("assetResolution: ") }
+            == [Self.retiredAssetResolutionProse])
+        #expect(population.filter { $0.hasPrefix(stem) }.count == 2)
+    }
+
+    @Test("the asset-resolution condition is NOT the job-run condition")
+    func theTwoJobConditionsAreDistinguishable() throws {
+        // `jobThrew` stands over `runTask.value`; `assetResolutionThrew` stands
+        // over `resolveAnalysisAssetId`, one stage earlier and before any
+        // runner exists. Folding them into one prefix would delete exactly the
+        // discrimination the retired prose already gave a device pull.
+        let error = AnalysisStoreError.notFound
+        let run = DurableThrowRecord.jobLastErrorCode(for: error)
+        let resolution = DurableThrowRecord.assetResolutionLastErrorCode(for: error)
+        #expect(run != resolution)
+        #expect(!run.hasPrefix(DurableThrowRecord.assetResolutionThrewPrefix))
+        #expect(!resolution.hasPrefix(DurableThrowRecord.jobThrewPrefix))
+
+        // Both still carry the SAME identity grammar, so a pull can group the
+        // two populations separately and still compare them field for field.
+        let fields = DurableThrowRecord.identityFields(of: error)
+        #expect(run.contains(fields))
+        #expect(resolution.contains(fields))
+    }
+
+    @Test("the asset-resolution TERMINAL arm still satisfies isAttemptCapTerminal")
+    func theAssetResolutionTerminalArmIsStillRescuable() throws {
+        // NO FIELD ROW HAS EVER TAKEN THIS ARM. Counted per row identity over
+        // db-pull8…12: five rows carried the retry arm's prose and ZERO carried
+        // `maxAttemptsReached:assetResolution: …`, so the arm with the
+        // load-bearing prefix is precisely the one with no witness — which is
+        // what a rail is for.
+        let token = DurableThrowRecord.assetResolutionLastErrorCode(for: AnalysisStoreError.notFound)
+        let terminal = Self.job(
+            state: "superseded",
+            lastErrorCode: AnalysisWorkScheduler.maxAttemptsReachedPrefix + token
+        )
+        #expect(AnalysisWorkScheduler.isAttemptCapTerminal(terminal))
+        #expect(AnalysisWorkScheduler.isRescuableTerminal(terminal))
+
+        // The retry arm writes the bare token at state `failed` — the row all
+        // five field rows actually were. Neither predicate matches it.
+        let retried = Self.job(state: "failed", lastErrorCode: token)
+        #expect(!AnalysisWorkScheduler.isAttemptCapTerminal(retried))
+        #expect(!AnalysisWorkScheduler.isRescuableTerminal(retried))
+
+        // THE OTHER READER, ASKED SO THE ANSWER IS ABOUT THE CODE. Asserting
+        // `!isNoProgressTerminal(retried)` alone would pass for the wrong
+        // reason: that predicate is `state == "complete" && lastErrorCode ==
+        // coverageInsufficient:noProgress`, and `retried` is `failed`, so the
+        // STATE clause carries it and the token is never consulted — a value
+        // that names one thing read as though it named another, inside the
+        // check written to rule that out. Hold the state at the one value the
+        // predicate accepts and let the code be the only variable.
+        for spelling in [token,
+                         AnalysisWorkScheduler.maxAttemptsReachedPrefix + token,
+                         Self.retiredAssetResolutionProse] {
+            #expect(!AnalysisWorkScheduler.isNoProgressTerminal(
+                Self.job(state: "complete", lastErrorCode: spelling)
+            ), "\(spelling) was read as the no-progress terminal")
+        }
+        // Anti-vacuity: at that same state the real no-progress code DOES
+        // match, so the loop above is measuring the code and not the state.
+        // Through the shared constant, not a literal — `AnalysisWorkScheduler`
+        // documents that reader and writer share it precisely so a copy cannot
+        // drift, and an anti-vacuity control spelled by hand is a copy.
+        #expect(AnalysisWorkScheduler.isNoProgressTerminal(
+            Self.job(
+                state: "complete",
+                lastErrorCode: AnalysisWorkScheduler.noProgressTerminalErrorCode
+            )
+        ))
+
+        // And the RETIRED prose was rescuable on the same terms, so nothing
+        // about the cap-out rescue changed shape when the suffix did.
+        #expect(AnalysisWorkScheduler.isAttemptCapTerminal(Self.job(
+            state: "superseded",
+            lastErrorCode: AnalysisWorkScheduler.maxAttemptsReachedPrefix
+                + Self.retiredAssetResolutionProse
+        )))
+    }
+
+    @Test("THE DEFECT: no case's payload reaches any of the four durable values")
     func noPayloadReachesTheDurableValue() throws {
         for error in Self.coordinatorErrors {
             let tokens = [
                 DurableThrowRecord.jobLastErrorCode(for: error),
+                DurableThrowRecord.assetResolutionLastErrorCode(for: error),
                 DurableThrowRecord.sessionFailureReason(for: error, resumeState: .backfill),
                 DurableThrowRecord.backgroundTaskLastErrorCode(for: error),
             ]
@@ -217,38 +404,52 @@ struct DurableThrowRecordTests {
         let error = AnalysisStoreError.notFound
         #expect(DurableThrowRecord.jobLastErrorCode(for: error)
             .hasPrefix(DurableThrowRecord.jobThrewPrefix + "("))
+        #expect(DurableThrowRecord.assetResolutionLastErrorCode(for: error)
+            .hasPrefix(DurableThrowRecord.assetResolutionThrewPrefix + "("))
         #expect(DurableThrowRecord.sessionFailureReason(for: error, resumeState: .queued)
             .hasPrefix(DurableThrowRecord.sessionPipelineThrewPrefix + "-"))
         #expect(DurableThrowRecord.backgroundTaskLastErrorCode(for: error)
             .hasPrefix(DurableThrowRecord.recoveryThrewPrefix + "("))
     }
 
-    @Test("the three prefixes collide with nothing else these columns hold")
-    func thePrefixesAreDisjointFromEveryOtherCause() throws {
-        // Every other value observed in, or writable to, the three columns.
-        // The first four are the ONLY distinct values ever seen in a device
-        // pull (db-pull8 through db-pull12).
-        let incumbents = [
-            "coverageInsufficient:noProgress",
-            "backgroundWindowExpired",
-            "transcription:cancelled",
-            "assetResolution: Insert failed: UNIQUE constraint failed: analysis_assets.episodeId",
-            "orphan_at_launch",
-            "reconciler_unavailable",
-            "staleFingerprint:cachedAudioMismatch",
-            AnalysisWorkScheduler.maxAttemptsReachedPrefix + "cancelMidRun",
-            AnalysisWorkScheduler.maxAttemptsReachedPrefix + "coverageInsufficient",
-            AnalysisCoordinator.coverageGuardFailureReasonPrefix + "689.8/3600.0s (ratio 0.192 < 0.950)",
-            "Unknown state in DB: bogus",
-            "corrupt session state on resume: bogus",
+    /// Values a writer can produce TODAY. `assetResolution: …` is deliberately
+    /// NOT here — playhead-3c4k retired it — and is handled below as a retired
+    /// spelling, because the two claims are different: a live incumbent must be
+    /// unconfusable with a token, while a retired one only has to be
+    /// DISTINGUISHABLE from it in a pull that still holds both.
+    private static let liveIncumbents = [
+        "coverageInsufficient:noProgress",
+        "backgroundWindowExpired",
+        "transcription:cancelled",
+        "orphan_at_launch",
+        "reconciler_unavailable",
+        "staleFingerprint:cachedAudioMismatch",
+        AnalysisWorkScheduler.maxAttemptsReachedPrefix + "cancelMidRun",
+        AnalysisWorkScheduler.maxAttemptsReachedPrefix + "coverageInsufficient",
+        AnalysisCoordinator.coverageGuardFailureReasonPrefix + "689.8/3600.0s (ratio 0.192 < 0.950)",
+        "Unknown state in DB: bogus",
+        "corrupt session state on resume: bogus",
+    ]
+
+    private static func allTokens(for error: Error, resumeState: SessionState) -> [String] {
+        [
+            DurableThrowRecord.jobLastErrorCode(for: error),
+            DurableThrowRecord.assetResolutionLastErrorCode(for: error),
+            DurableThrowRecord.sessionFailureReason(for: error, resumeState: resumeState),
+            DurableThrowRecord.backgroundTaskLastErrorCode(for: error),
         ]
+    }
+
+    @Test("the four prefixes collide with nothing else these columns hold")
+    func thePrefixesAreDisjointFromEveryOtherCause() throws {
         let prefixes = [
             DurableThrowRecord.jobThrewPrefix,
+            DurableThrowRecord.assetResolutionThrewPrefix,
             DurableThrowRecord.sessionPipelineThrewPrefix,
             DurableThrowRecord.recoveryThrewPrefix,
         ]
         #expect(Set(prefixes).count == prefixes.count, "two conditions share one prefix")
-        for incumbent in incumbents {
+        for incumbent in Self.liveIncumbents {
             for prefix in prefixes {
                 #expect(!incumbent.hasPrefix(prefix),
                         "'\(incumbent)' would be counted as \(prefix)")
@@ -256,25 +457,47 @@ struct DurableThrowRecordTests {
         }
         // And the reverse direction: no token answers to an incumbent's prefix.
         let error = AnalysisStoreError.notFound
-        let tokens = [
-            DurableThrowRecord.jobLastErrorCode(for: error),
-            DurableThrowRecord.sessionFailureReason(for: error, resumeState: .spooling),
-            DurableThrowRecord.backgroundTaskLastErrorCode(for: error),
-        ]
-        for token in tokens {
-            for incumbent in incumbents {
+        for token in Self.allTokens(for: error, resumeState: .spooling) {
+            for incumbent in Self.liveIncumbents {
                 #expect(!token.hasPrefix(String(incumbent.prefix(12))),
                         "\(token) collides with \(incumbent)")
             }
         }
     }
 
+    @Test("the RETIRED asset-resolution prose is still separable from every token")
+    func theRetiredProseIsSeparable() throws {
+        // A device pull can hold both — five rows carried the prose, and the
+        // column is last-writer-wins, so a future row can carry the token while
+        // an old file still carries the sentence. The claim here is weaker than
+        // for a live incumbent (they SHARE a stem, on purpose) and it is stated
+        // exactly: the discriminating prefixes are disjoint.
+        let error = AnalysisStoreError.notFound
+        let prose = Self.retiredAssetResolutionProse
+        for token in Self.allTokens(for: error, resumeState: .spooling) {
+            #expect(token != prose)
+            #expect(!token.hasPrefix("assetResolution: "),
+                    "\(token) would be selected by a query for the retired prose")
+        }
+        #expect(!prose.hasPrefix(DurableThrowRecord.assetResolutionThrewPrefix + "("),
+                "the retired prose would be counted as a token")
+        for prefix in [DurableThrowRecord.jobThrewPrefix,
+                       DurableThrowRecord.sessionPipelineThrewPrefix,
+                       DurableThrowRecord.recoveryThrewPrefix] {
+            #expect(!prose.hasPrefix(prefix))
+        }
+    }
+
     @Test("a prefix query returns every throw of one kind and nothing else")
     func aPrefixQueryCountsThePopulation() throws {
+        let error = AnalysisStoreError.notFound
         let rows = [
-            DurableThrowRecord.jobLastErrorCode(for: AnalysisStoreError.notFound),
+            DurableThrowRecord.jobLastErrorCode(for: error),
             AnalysisWorkScheduler.maxAttemptsReachedPrefix
-                + DurableThrowRecord.jobLastErrorCode(for: AnalysisStoreError.notFound),
+                + DurableThrowRecord.jobLastErrorCode(for: error),
+            DurableThrowRecord.assetResolutionLastErrorCode(for: error),
+            AnalysisWorkScheduler.maxAttemptsReachedPrefix
+                + DurableThrowRecord.assetResolutionLastErrorCode(for: error),
             "coverageInsufficient:noProgress",
             "backgroundWindowExpired",
         ]
@@ -284,6 +507,17 @@ struct DurableThrowRecordTests {
         // throws" wants — and is exactly why the token is a SUFFIX of the
         // attempt-cap prefix rather than a competing family.
         #expect(rows.filter { $0.contains(DurableThrowRecord.jobThrewPrefix) }.count == 2)
+
+        // playhead-3c4k: the SAME two readings for the asset-resolution
+        // condition, and each counts only its own condition. `jobThrew` is not
+        // a substring of `assetResolutionThrew`, in either direction, so
+        // neither query can absorb the other's population.
+        #expect(rows.filter { $0.hasPrefix(DurableThrowRecord.assetResolutionThrewPrefix) }.count == 1)
+        #expect(rows.filter { $0.contains(DurableThrowRecord.assetResolutionThrewPrefix) }.count == 2)
+        #expect(!DurableThrowRecord.assetResolutionThrewPrefix
+            .contains(DurableThrowRecord.jobThrewPrefix))
+        #expect(!DurableThrowRecord.jobThrewPrefix
+            .contains(DurableThrowRecord.assetResolutionThrewPrefix))
     }
 
     // MARK: The readers
@@ -364,11 +598,7 @@ struct DurableThrowRecordTests {
             code: 7,
             userInfo: nil
         )
-        let tokens = [
-            DurableThrowRecord.jobLastErrorCode(for: hostile),
-            DurableThrowRecord.sessionFailureReason(for: hostile, resumeState: .hotPathReady),
-            DurableThrowRecord.backgroundTaskLastErrorCode(for: hostile),
-        ]
+        let tokens = Self.allTokens(for: hostile, resumeState: .hotPathReady)
         for token in tokens {
             #expect(!token.contains(" "), "whitespace in \(token)")
             #expect(token.filter { $0 == "(" }.count == 1, "not one parenthetical: \(token)")
@@ -425,16 +655,48 @@ struct DurableThrowRecordTests {
         #expect(!token.contains("Middle.Domain"))
     }
 
-    @Test("the three factories share ONE identity grammar")
+    @Test("the four factories share ONE identity grammar")
     func theIdentityGrammarIsShared() throws {
-        // Not three copies of `domain=…,code=…,under=…`: one, delegated to
+        // Not four copies of `domain=…,code=…,under=…`: one, delegated to
         // `UnclassifiedModelFailure`, so a future bead that tightens the domain
-        // budget cannot move two of the three columns and leave the third.
+        // budget cannot move three of the four columns and leave the fourth.
         let error = AnalysisStoreError.openFailed(code: 14, message: "unable to open database file")
         let fields = DurableThrowRecord.identityFields(of: error)
-        #expect(DurableThrowRecord.jobLastErrorCode(for: error).contains(fields))
-        #expect(DurableThrowRecord.sessionFailureReason(for: error, resumeState: .queued).contains(fields))
-        #expect(DurableThrowRecord.backgroundTaskLastErrorCode(for: error).contains(fields))
+        for token in Self.allTokens(for: error, resumeState: .queued) {
+            #expect(token.contains(fields), "\(token) does not carry the shared identity grammar")
+        }
+    }
+
+    @Test("under= and the deepest-link walk hold for the asset-resolution token too")
+    func theAssetResolutionTokenCarriesTheSameUnderlyingWalk() throws {
+        // The three older tokens each have their own rail for this; a fourth
+        // factory that forgot to delegate would still LOOK right in every test
+        // above, because a hand-rolled `domain=…,code=…` reads identically
+        // until the error carries a chain.
+        let bare = NSError(domain: "Bare.Domain", code: 3, userInfo: nil)
+        #expect(DurableThrowRecord.assetResolutionLastErrorCode(for: bare)
+            .contains("under=\(UnclassifiedModelFailure.noUnderlyingToken)"))
+
+        let deepest = NSError(domain: "Deepest.Domain", code: 42, userInfo: nil)
+        let middle = NSError(
+            domain: "Middle.Domain",
+            code: 2,
+            userInfo: [NSUnderlyingErrorKey: deepest]
+        )
+        let outer = NSError(
+            domain: "Outer.Domain",
+            code: 1,
+            userInfo: [NSUnderlyingErrorKey: middle]
+        )
+        let token = DurableThrowRecord.assetResolutionLastErrorCode(for: outer)
+        #expect(token.contains("under=Deepest.Domain/42"))
+        #expect(!token.contains("Middle.Domain"))
+
+        // And the sanitizer really fires on this factory, not just on the
+        // first one written.
+        let hostile = NSError(domain: "A B,C=D(E)", code: 1, userInfo: nil)
+        #expect(DurableThrowRecord.assetResolutionLastErrorCode(for: hostile)
+            .contains("domain=A_BCDE"))
     }
 
     // MARK: -
@@ -650,6 +912,51 @@ final class DurableThrowRecordSourceCanaryTests: XCTestCase {
 
     // MARK: The rule, per column
 
+    /// The spellings that put a Swift value's DESCRIPTION in a durable column.
+    ///
+    /// **The third entry is playhead-3c4k, and it is the reason this is a
+    /// shared constant rather than a filter written inline at each site.**
+    /// 3lc3's rule named the two spellings of the two defects in front of it,
+    /// and string INTERPOLATION of an `Error` — which is `String(describing:)`
+    /// by another name — walked straight through it, in the same file, in a
+    /// `lastErrorCode:` argument this very finder was already reading.
+    ///
+    /// `\(error` rather than `\(error)` on purpose: it also catches
+    /// `\(error.localizedDescription)` and `\(error as NSError)`. The cost is
+    /// that a future `\(errorClass)` would trip it falsely — accepted, because
+    /// a false RED is a five-second read of a named offender and a false GREEN
+    /// is this bead.
+    static let descriptionSpellings = ["localizedDescription", "String(describing:", "\\(error"]
+
+    private func descriptionOffenders(in arguments: [String]) -> [String] {
+        arguments.filter { argument in
+            Self.descriptionSpellings.contains { argument.contains($0) }
+        }
+    }
+
+    /// playhead-3c4k, stated as a test rather than as a paragraph: the rule
+    /// 3lc3 shipped could not see the line 3lc3 left behind.
+    func testTheOldTwoSpellingRuleWouldHaveMissedTheShippedLine() throws {
+        // The retired argument, in the dense spelling this finder reads. Built
+        // by concatenation so the test file does not itself interpolate an
+        // error and become its own subject.
+        let retired = "\"assetResolution:" + "\\(error)\""
+        let old = ["localizedDescription", "String(describing:"]
+
+        XCTAssertFalse(
+            old.contains { retired.contains($0) },
+            "the premise of this bead is false: 3lc3's rule DOES see \(retired)"
+        )
+        XCTAssertTrue(
+            Self.descriptionSpellings.contains { retired.contains($0) },
+            "the strengthened rule still cannot see \(retired), so it fixes nothing"
+        )
+        // And the terminal arm's spelling, which carries the prefix in front.
+        let retiredTerminal = "\"\\(Self.maxAttemptsReachedPrefix)assetResolution:" + "\\(error)\""
+        XCTAssertFalse(old.contains { retiredTerminal.contains($0) })
+        XCTAssertTrue(Self.descriptionSpellings.contains { retiredTerminal.contains($0) })
+    }
+
     func testTheSchedulerArmsNoLongerPersistADescription() throws {
         let lines = try schedulerSource()
         XCTAssertGreaterThan(lines.count, 3_000, "source read found only \(lines.count) code lines")
@@ -662,29 +969,181 @@ final class DurableThrowRecordSourceCanaryTests: XCTestCase {
         )
         XCTAssertTrue(dense.contains("\"outerCatch.supersede\""), "vacuity: the terminal arm is gone")
         XCTAssertTrue(dense.contains("\"outerCatch.requeue\""), "vacuity: the retry arm is gone")
-        // And this reader must be ABLE to see the spelling it forbids —
-        // `error.localizedDescription` survives in the journal `extras`
-        // deliberately (a different column, filed as playhead-0tss), so its
-        // presence proves the finder works.
         XCTAssertTrue(
-            dense.contains("error.localizedDescription"),
-            "vacuity: this reader cannot see the spelling it forbids, so its absence proves nothing"
+            dense.contains("DurableThrowRecord.assetResolutionLastErrorCode(for:error)"),
+            "AnalysisWorkScheduler no longer builds the asset-resolution record; move this canary."
         )
+        XCTAssertTrue(dense.contains("\"assetResolution.supersede\""), "vacuity: the terminal arm is gone")
+        XCTAssertTrue(dense.contains("\"assetResolution.requeue\""), "vacuity: the retry arm is gone")
+        // And this reader must be ABLE to see the spellings it forbids —
+        // `error.localizedDescription` and an interpolated `\(error)` both
+        // survive in log lines deliberately (that is 59c8's split: a log line
+        // can afford prose, a column cannot), so their presence proves the
+        // finder works.
+        for spelling in Self.descriptionSpellings {
+            XCTAssertTrue(
+                dense.contains(spelling),
+                "vacuity: this reader cannot see \(spelling), so its absence from an argument proves nothing"
+            )
+        }
 
-        // THE RULE: nothing reaching `lastErrorCode:` may be a description.
+        // THE RULE: nothing reaching `lastErrorCode:` may be a description —
+        // in ANY of its spellings.
         let written = FMDaemonRefusalSourceCanaryTests.firstArguments(after: "lastErrorCode:", in: dense)
         XCTAssertGreaterThanOrEqual(written.count, 10, "vacuity: the durable writes were not found")
-        let offenders = written.filter {
-            $0.contains("localizedDescription") || $0.contains("String(describing:")
-        }
+        let offenders = descriptionOffenders(in: written)
         XCTAssertTrue(
             offenders.isEmpty,
             """
             An `analysis_jobs.lastErrorCode` write is persisting a Swift value's DESCRIPTION again. \
             `localizedDescription` is LOCALIZED — the column cannot be grouped across devices — and \
             for the error types that reach these arms it is Foundation's bridged apology plus the \
-            enum's declaration index. Offending arguments: \(offenders)
+            enum's declaration index. An interpolated `\\(error)` is `String(describing:)` spelled \
+            differently, and is the spelling that actually shipped and produced field rows \
+            (playhead-3c4k). Offending arguments: \(offenders)
             """
+        )
+    }
+
+    // MARK: playhead-3c4k — per SITE, because the file has two job-cause arms
+
+    /// The dense code IMMEDIATELY BEFORE the arm label, wide enough to hold the
+    /// binding and far too narrow to reach the other arm.
+    ///
+    /// MEASURED, not guessed. The binding sits 113 dense characters before
+    /// `"assetResolution.supersede"` and 101 before `"outerCatch.supersede"`;
+    /// the two arms are ~17,000 dense characters apart. 300 is the smallest
+    /// round number that still holds the window after a mutation INSERTS a
+    /// laundering line ahead of the binding (AR05 adds ~55), and the
+    /// asset-resolution window is measured clean of every forbidden spelling
+    /// out to 420, so the margin is not bought with a false green.
+    ///
+    /// **The outer-catch window is NOT clean at this width** — a log line
+    /// `…recovery(error: \(error))` sits 60 characters before it — which is
+    /// exactly why the description rule below is asserted on the
+    /// asset-resolution window only, and the outer-catch window carries the
+    /// FACTORY-IDENTITY claim alone. A rule copied symmetrically here would be
+    /// red on untouched `main`.
+    private static let armWindow = 300
+
+    func testTheAssetResolutionArmBindsItsOwnRecordAtItsOwnSite() throws {
+        let dense = FMDaemonRefusalSourceCanaryTests.denseCode(try schedulerSource())
+
+        // THE MUTATION THIS EXISTS FOR, and it is 3lc3's DT05 one file over: a
+        // file-wide `contains` is satisfied by the OTHER arm's binding while
+        // this one goes back to prose. Both arms build a `DurableThrowRecord`
+        // and both write `lastErrorCode:`, so only a per-site read can tell
+        // which of them is which.
+        let site = try codeImmediatelyBefore(
+            "\"assetResolution.supersede\"",
+            span: Self.armWindow,
+            in: dense
+        )
+        XCTAssertTrue(
+            site.contains("DurableThrowRecord.assetResolutionLastErrorCode(for:error)"),
+            """
+            The asset-resolution TERMINAL arm no longer binds its durable cause from \
+            `DurableThrowRecord`. This is the ONE site of this defect class with field rows — five \
+            of the nine `analysis_jobs` rows that ever carried a cause carried this arm's prose. \
+            Site text: \(site)
+            """
+        )
+        XCTAssertFalse(
+            Self.descriptionSpellings.contains { site.contains($0) },
+            "the asset-resolution arm binds a DESCRIPTION into its durable cause: \(site)"
+        )
+
+        // AND THE CONDITIONS MUST NOT CROSS. `jobThrew` names "the job's run
+        // threw"; this arm fires before any runner exists. Either factory
+        // produces a perfectly well-formed token, so nothing that reads a VALUE
+        // can tell that the row is labelled with a condition it never met —
+        // the same shape as sckv's SF04/SF10, one argument over.
+        XCTAssertFalse(
+            site.contains("DurableThrowRecord.jobLastErrorCode("),
+            "the asset-resolution arm is recording the JOB-RUN condition: \(site)"
+        )
+        let outerCatch = try codeImmediatelyBefore(
+            "\"outerCatch.supersede\"",
+            span: Self.armWindow,
+            in: dense
+        )
+        XCTAssertTrue(
+            outerCatch.contains("DurableThrowRecord.jobLastErrorCode(for:error)"),
+            "the outer catch no longer binds the job-run record: \(outerCatch)"
+        )
+        XCTAssertFalse(
+            outerCatch.contains("DurableThrowRecord.assetResolutionLastErrorCode("),
+            "the outer catch is recording the ASSET-RESOLUTION condition: \(outerCatch)"
+        )
+    }
+
+    func testTheAssetResolutionTerminalArmStillCarriesTheAttemptCapPrefixInFront() throws {
+        let dense = FMDaemonRefusalSourceCanaryTests.denseCode(try schedulerSource())
+        // The mirror of `testTheTerminalArmStillCarriesTheAttemptCapPrefixInFront`
+        // for this arm. It needs its own rail rather than a second assertion in
+        // that one: two claims in one method means one mutant can be credited
+        // for reddening the other's claim (sckv's SF03/SF10).
+        //
+        // NO FIELD ROW HAS EVER TAKEN THIS ARM — zero of the five carried
+        // `maxAttemptsReached:`, all five were the retry arm — so this is
+        // exactly the direction with no witness anywhere else.
+        XCTAssertTrue(
+            dense.contains(
+                "lastErrorCode:\"\\(Self.maxAttemptsReachedPrefix)\\(assetResolutionThrowRecord)\""
+            ),
+            """
+            The asset-resolution TERMINAL arm no longer writes `maxAttemptsReached:` in front of \
+            the token. `AnalysisWorkScheduler.isAttemptCapTerminal(_:)` matches on that prefix and \
+            the cap-out-retry rescue reads it, so a capped row that loses it is abandoned \
+            permanently.
+            """
+        )
+    }
+
+    func testTheAssetResolutionRetryArmWritesTheBareToken() throws {
+        let dense = FMDaemonRefusalSourceCanaryTests.denseCode(try schedulerSource())
+        // The other direction, and the one all five field rows actually took.
+        // The likely accident is a copy-paste: the retry arm becomes a second
+        // copy of the terminal arm, and then the `maxAttemptsReached:` prefix
+        // means nothing at all, because a row that spent one attempt of five
+        // and a row that exhausted the cap answer to it alike. Every value test
+        // in this file stays green either way.
+        XCTAssertTrue(
+            dense.contains("lastErrorCode:assetResolutionThrowRecord"),
+            "the asset-resolution RETRY arm no longer writes the bare token"
+        )
+        let terminalSpelling =
+            "lastErrorCode:\"\\(Self.maxAttemptsReachedPrefix)\\(assetResolutionThrowRecord)\""
+        XCTAssertEqual(
+            dense.components(separatedBy: terminalSpelling).count - 1,
+            1,
+            """
+            The attempt-cap prefix is written by more than one asset-resolution arm. \
+            `isAttemptCapTerminal(_:)` reads that prefix, so a retry row carrying it makes the \
+            prefix stop discriminating between a job that exhausted five attempts and one that \
+            spent its first.
+            """
+        )
+    }
+
+    func testTheAssetResolutionArmBindsTheRecordOnceAndTheLogConsumesIt() throws {
+        let dense = FMDaemonRefusalSourceCanaryTests.denseCode(try schedulerSource())
+        XCTAssertEqual(
+            FMDaemonRefusalSourceCanaryTests
+                .firstArguments(after: "DurableThrowRecord.assetResolutionLastErrorCode(", in: dense)
+                .count,
+            1,
+            "the asset-resolution arms must share ONE binding of the record"
+        )
+        XCTAssertTrue(
+            dense.contains(
+                "letassetResolutionThrowRecord=DurableThrowRecord.assetResolutionLastErrorCode(for:error)"
+            ),
+            "the record must be bound to a local above both arms"
+        )
+        XCTAssertTrue(
+            dense.contains("token=\\(assetResolutionThrowRecord,privacy:.public)"),
+            "the abandonment log line must consume the SAME local the column was given"
         )
     }
 
@@ -765,9 +1224,9 @@ final class DurableThrowRecordSourceCanaryTests: XCTestCase {
         // description either.
         let written = FMDaemonRefusalSourceCanaryTests.firstArguments(after: "failureReason:", in: dense)
         XCTAssertGreaterThanOrEqual(written.count, 5, "vacuity: the durable writes were not found")
-        let offenders = written.filter {
-            $0.contains("String(describing:") || $0.contains("localizedDescription")
-        }
+        // playhead-3c4k widened this from the two spellings 3lc3 named to the
+        // three that exist, the third being the interpolation that shipped.
+        let offenders = descriptionOffenders(in: written)
         XCTAssertTrue(
             offenders.isEmpty,
             """
@@ -847,9 +1306,8 @@ final class DurableThrowRecordSourceCanaryTests: XCTestCase {
         // THE RULE.
         let written = FMDaemonRefusalSourceCanaryTests.firstArguments(after: "lastErrorCode:", in: dense)
         XCTAssertGreaterThanOrEqual(written.count, 2, "vacuity: the durable writes were not found")
-        let offenders = written.filter {
-            $0.contains("String(describing:") || $0.contains("localizedDescription")
-        }
+        // playhead-3c4k: three spellings, not two — see `descriptionSpellings`.
+        let offenders = descriptionOffenders(in: written)
         XCTAssertTrue(
             offenders.isEmpty,
             """
