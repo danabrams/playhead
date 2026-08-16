@@ -642,6 +642,12 @@ actor SkipOrchestrator {
     /// supplied the row. Per-DELIVERY attribution is the census's job.
     private var adWindowIngestOutcomeCounts: [AdWindowIngestOutcome: Int] = [:]
 
+    /// playhead-zxqj: how many "Dismiss ad" gestures have reached each terminal
+    /// disposition this PROCESS. Process-scoped rather than per-episode, like
+    /// `adWindowIngestOutcomeCounts` above, because the question it answers
+    /// ("did the listener's dismiss do anything?") spans episodes.
+    private var manualVetoOutcomeCounts: [ManualVetoOutcome: Int] = [:]
+
     /// playhead-isp5: the most recent terminal disposition of each window id,
     /// with its sub-cause where one exists. Per-EPISODE (cleared alongside
     /// every other per-episode collection) because it exists only so a door can
@@ -1047,6 +1053,16 @@ actor SkipOrchestrator {
 
     func _suggestWindowForTesting(id: String) -> AdWindow? {
         suggestWindows[id]
+    }
+
+    /// playhead-zxqj: the managed tier's live decision for `id`.
+    ///
+    /// The companion of `_suggestWindowForTesting`, added for the same reason:
+    /// `activeWindowIDs()` cannot see this, because a reverted managed window
+    /// stays IN `windows` carrying its terminal state — so membership is the
+    /// wrong question and was going to be asked anyway.
+    func _managedDecisionStateForTesting(id: String) -> SkipDecisionState? {
+        windows[id]?.decisionState
     }
 
     func _isSuggestResolutionProvisionalForTesting(id: String) -> Bool {
@@ -2198,6 +2214,47 @@ actor SkipOrchestrator {
     /// playhead-isp5: how many windows have hit `outcome` this process.
     func adWindowIngestOutcomeCount(_ outcome: AdWindowIngestOutcome) -> Int {
         adWindowIngestOutcomeCounts[outcome] ?? 0
+    }
+
+    /// playhead-zxqj: the single write site for a "Dismiss ad" audit row.
+    ///
+    /// Written on EVERY exit of `revertByTimeRange`, committed or refused, on
+    /// the `recordIngestCensus` precedent and for the identical reason: the
+    /// gesture's own side effects cannot distinguish "was refused" from "was
+    /// never made", so only a line that is always present can. The row goes to
+    /// the JSON Lines session file the diagnostics bundle ships; the `os_log`
+    /// mirror is the convenience.
+    private func noteManualVetoOutcome(
+        _ outcome: ManualVetoOutcome,
+        analysisAssetId: String,
+        start: Double,
+        end: Double,
+        revertedWindows: Int = 0,
+        liveTargets: Int = 0
+    ) {
+        manualVetoOutcomeCounts[outcome, default: 0] += 1
+        let audit = ManualVetoOutcomeAudit(
+            outcome: outcome,
+            analysisAssetId: analysisAssetId,
+            startTime: start,
+            endTime: end,
+            revertedWindows: revertedWindows,
+            liveTargets: liveTargets
+        )
+        invariantLogger.invariantViolated(
+            code: .manualVetoOutcome,
+            description: audit.auditDescription
+        )
+        logger.info(
+            "manual veto: \(audit.auditDescription, privacy: .public)"
+        )
+    }
+
+    /// playhead-zxqj: how many dismiss gestures have reached `outcome` this
+    /// process. The in-process counterpart of the audit row, for tests and for
+    /// anyone reading live state rather than a pull.
+    func manualVetoOutcomeCount(_ outcome: ManualVetoOutcome) -> Int {
+        manualVetoOutcomeCounts[outcome] ?? 0
     }
 
     /// playhead-isp5: the terminal disposition the most recent delivery
@@ -4721,18 +4778,37 @@ actor SkipOrchestrator {
         // `sourceShowId == nil`, which is the single predicate every show-keyed
         // effect in this seam already tests; it does not cancel the gesture.
         let validatedShow = exactFeedbackShowIdentity(requested: podcastId)
+        // playhead-zxqj: the argument check and the context check are separated
+        // so the audit row can say WHICH refused. They were one `guard`, and a
+        // stale sheet (benign, expected) rendered identically to a malformed
+        // range (a defect).
         guard start.isFinite,
               end.isFinite,
               start >= 0,
               end > start,
               let expectedAssetId,
-              let expectedEpisodeId,
-              activeAssetId == expectedAssetId,
+              let expectedEpisodeId
+        else {
+            noteManualVetoOutcome(
+                .refusedInvalidRequest,
+                analysisAssetId: expectedAssetId ?? activeAssetId ?? "",
+                start: start,
+                end: end
+            )
+            return false
+        }
+        guard activeAssetId == expectedAssetId,
               activeEpisodeId == expectedEpisodeId,
               expectedPlaybackGeneration == nil
                 || activePlaybackLifecycleGeneration
                     == expectedPlaybackGeneration
         else {
+            noteManualVetoOutcome(
+                .refusedStaleContext,
+                analysisAssetId: expectedAssetId,
+                start: start,
+                end: end
+            )
             return false
         }
         if let correctionSpan {
@@ -4752,6 +4828,12 @@ actor SkipOrchestrator {
                       end
                   )
             else {
+                noteManualVetoOutcome(
+                    .refusedInvalidRequest,
+                    analysisAssetId: expectedAssetId,
+                    start: start,
+                    end: end
+                )
                 return false
             }
         }
@@ -4775,11 +4857,13 @@ actor SkipOrchestrator {
         // together, with no suspension between them. A read failure degrades
         // to the live-only behaviour rather than cancelling the gesture.
         var persistedWindows: [AdWindow] = []
+        var didReadPersistedWindows = true
         do {
             persistedWindows = try await store.fetchAdWindows(
                 assetId: expectedAssetId
             )
         } catch {
+            didReadPersistedWindows = false
             logger.warning(
                 "Manual veto: persisted ad-window read failed; falling back to live session targets"
             )
@@ -4809,28 +4893,73 @@ actor SkipOrchestrator {
                 }
                 return (id, suggested)
             }
+        // playhead-zxqj: recorded on every audit row so a refusal that happened
+        // WHILE the session was holding windows over the range stays
+        // distinguishable from one that happened over untracked material.
+        let liveTargetCount =
+            managedRevertTargets.count + suggestRevertTargets.count
 
+        // playhead-zxqj: THE DURABLE TARGET SET IS WHAT THE STORE CAN ACCEPT,
+        // AND NOTHING ELSE.
+        //
+        // `persistRevertedAdWindowsIfCurrent` is ALL-OR-NOTHING: one expected
+        // row it will not take — a row that is already `reverted` or
+        // `suppressed`, a row that no longer exists, a row whose material has
+        // moved — rolls the WHOLE transaction back and the gesture returns
+        // `false`. Until this bead the live dictionaries fed that transaction
+        // directly, so ONE stale live entry made every "Dismiss ad" over any
+        // range that touched it fail, including every other window the gesture
+        // could have reverted. That is exactly the shape Dan reported: a window
+        // he had already acted on made the REST of the region undismissable.
+        //
+        // The live entry is not authoritative about durable state and never
+        // was. `suggestWindows` is not filtered by decision state at all, and a
+        // committed revert can leave an entry behind (see the cleanup below),
+        // so "the session is holding this id" says nothing about whether the
+        // row can be reverted. The store's own row does, and it is already read
+        // above. So the live dictionaries now decide only what LIVE state to
+        // retire; the transaction is built from the persisted rows.
+        //
+        // This is not a new weakening of the CAS fence. `persistRevertedAd
+        // WindowsIfCurrent` compares each expected row against the store row of
+        // the same id, and playhead-u45d ALREADY passed the store's own row as
+        // `expected` for every id the live session was not holding — the great
+        // majority of them. What changes is that the ids the session happens to
+        // hold are treated the same way as the ids it does not, rather than
+        // being the one class that can poison the gesture. The identity this
+        // gesture is fenced on is the episode/asset/lifecycle triple checked
+        // above plus the exact time range pinned by `correctionSpan`.
+        //
+        // A READ FAILURE STILL DEGRADES TO LIVE-ONLY, which is the behaviour
+        // playhead-u45d's comment promises two paragraphs up: with no persisted
+        // rows to build from, refusing would cancel a gesture that used to
+        // work.
         var exactTargetsByID: [String: AdWindow] = [:]
-        for target in managedRevertTargets {
-            exactTargetsByID[target.id] = target.managed.adWindow
-        }
-        for target in suggestRevertTargets {
-            if let existing = exactTargetsByID[target.id],
-               !AdWindowMaterialIdentity.sameProducerRevision(
-                   existing,
-                   target.window
-               ) {
-                return false
+        if !didReadPersistedWindows {
+            for target in managedRevertTargets {
+                exactTargetsByID[target.id] = target.managed.adWindow
             }
-            exactTargetsByID[target.id] = target.window
+            for target in suggestRevertTargets {
+                if let existing = exactTargetsByID[target.id],
+                   !AdWindowMaterialIdentity.sameProducerRevision(
+                       existing,
+                       target.window
+                   ) {
+                    noteManualVetoOutcome(
+                        .refusedLiveTargetConflict,
+                        analysisAssetId: expectedAssetId,
+                        start: start,
+                        end: end,
+                        liveTargets: managedRevertTargets.count
+                            + suggestRevertTargets.count
+                    )
+                    return false
+                }
+                exactTargetsByID[target.id] = target.window
+            }
         }
 
-        // playhead-u45d: fold in every persisted row the live session was not
-        // holding. Ids the session already contributed are left alone, so the
-        // previously-working path is byte-identical and this is purely
-        // additive; a live-vs-stored divergence on a shared id is still
-        // adjudicated where it always was, by
-        // `persistRevertedAdWindowsIfCurrent`'s producer-revision check.
+        // playhead-u45d: fold in every persisted row overlapping the range.
         //
         // The material pre-filter is not decoration. That store call validates
         // every expected row and returns nil — failing the WHOLE transaction —
@@ -4891,6 +5020,13 @@ actor SkipOrchestrator {
             }
         } catch {
             logger.warning("Manual veto revocation failed")
+            noteManualVetoOutcome(
+                .refusedRevocationFailed,
+                analysisAssetId: expectedAssetId,
+                start: start,
+                end: end,
+                liveTargets: liveTargetCount
+            )
             return false
         }
 
@@ -4950,6 +5086,13 @@ actor SkipOrchestrator {
                 guard overlappingSpans.contains(where: {
                     $0.startTime < end && $0.endTime > start
                 }) else {
+                    noteManualVetoOutcome(
+                        .refusedNothingToCorrect,
+                        analysisAssetId: expectedAssetId,
+                        start: start,
+                        end: end,
+                        liveTargets: liveTargetCount
+                    )
                     return false
                 }
                 guard let correction,
@@ -4961,6 +5104,13 @@ actor SkipOrchestrator {
                                 expectedPodcastId: sourceShowId
                             )
                 else {
+                    noteManualVetoOutcome(
+                        .refusedDurableWriteRejected,
+                        analysisAssetId: expectedAssetId,
+                        start: start,
+                        end: end,
+                        liveTargets: liveTargetCount
+                    )
                     return false
                 }
                 wasNewlyInserted = inserted
@@ -4973,6 +5123,14 @@ actor SkipOrchestrator {
                             correction: correction
                         )
                 else {
+                    noteManualVetoOutcome(
+                        .refusedDurableWriteRejected,
+                        analysisAssetId: expectedAssetId,
+                        start: start,
+                        end: end,
+                        revertedWindows: exactTargets.count,
+                        liveTargets: liveTargetCount
+                    )
                     return false
                 }
                 wasNewlyInserted = inserted
@@ -4985,6 +5143,13 @@ actor SkipOrchestrator {
             }
         } catch {
             logger.warning("Manual veto persistence failed")
+            noteManualVetoOutcome(
+                .refusedPersistenceFailed,
+                analysisAssetId: expectedAssetId,
+                start: start,
+                end: end,
+                liveTargets: liveTargetCount
+            )
             return false
         }
 
@@ -5014,14 +5179,23 @@ actor SkipOrchestrator {
             )
 
         if sourceLifecycleIsCurrent {
+            // playhead-zxqj: the managed twin of the suggest rule below, and
+            // the same argument. A producer update landing during the store
+            // hop made this `continue`, so the live window kept a live CUE for
+            // a span whose durable row now reads `reverted` — the app would go
+            // on skipping audio the listener had just said was not an ad,
+            // which is the "a user mark outranks an inferred one in BOTH
+            // directions" rule pointed the wrong way. The revision check is
+            // retained for the ids the transaction did not cover.
             for (id, expectedManaged) in managedRevertTargets {
                 guard var managed = windows[id],
                       managed.decisionState != .reverted,
                       managed.decisionState != .suppressed,
-                      AdWindowMaterialIdentity.sameProducerRevision(
-                          managed.adWindow,
-                          expectedManaged.adWindow
-                      )
+                      revertedWindowIds.contains(id)
+                        || AdWindowMaterialIdentity.sameProducerRevision(
+                            managed.adWindow,
+                            expectedManaged.adWindow
+                        )
                 else {
                     continue
                 }
@@ -5037,14 +5211,35 @@ actor SkipOrchestrator {
                 )
             }
 
-            // Mark-only windows use a separate UI dictionary. Remove only the
-            // exact revisions covered by the committed transaction.
+            // Mark-only windows use a separate UI dictionary.
+            //
+            // playhead-zxqj: A COMMITTED REVERT IS TERMINAL FOR THE PRODUCER
+            // ID, not merely for the revision that was on screen. This loop
+            // used to `continue` whenever the live entry no longer matched the
+            // revision the gesture captured — which is precisely what happens
+            // when a producer update lands during the store hop — and the
+            // entry then survived with its durable row already `reverted`. Two
+            // consequences, both field-visible: the listener could be offered a
+            // Yes/No card for a window they had just dismissed, and (before the
+            // target-set change above) every later dismiss touching that range
+            // was refused outright.
+            //
+            // The rule applied here is the one this actor already states for
+            // managed windows in `revertedProducerWindowIds`: "persisted
+            // `.reverted` producer rows represent an explicit user answer and
+            // therefore remain terminal for the whole producer ID, even if a
+            // stale delivery changes other material." `declineSuggestedSkip`
+            // has always worked this way. The revision check is retained for
+            // the case the transaction did NOT cover — there the gesture has
+            // established nothing about this id and must not silently drop a
+            // live suggestion.
             for (id, expectedSuggestion) in suggestRevertTargets {
                 guard let suggested = suggestWindows[id],
-                      AdWindowMaterialIdentity.sameProducerRevision(
-                          suggested,
-                          expectedSuggestion
-                      )
+                      revertedWindowIds.contains(id)
+                        || AdWindowMaterialIdentity.sameProducerRevision(
+                            suggested,
+                            expectedSuggestion
+                        )
                 else {
                     continue
                 }
@@ -5099,6 +5294,14 @@ actor SkipOrchestrator {
                 podcastId: sourceShowId
             )
         }
+        noteManualVetoOutcome(
+            .committed,
+            analysisAssetId: expectedAssetId,
+            start: start,
+            end: end,
+            revertedWindows: exactTargets.count,
+            liveTargets: liveTargetCount
+        )
         return true
     }
 

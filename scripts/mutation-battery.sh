@@ -1962,6 +1962,10 @@ FOCUSED_SUITES=(
   # `let`s the switch assigns are uninitialised on every other path), which is
   # why there is no S9M rail for it.
   -only-testing:PlayheadTests/PlaybackPositionCommitTests
+  # playhead-zxqj: the dismiss gesture (ZX series). ONE suite: the property is
+  # about the orchestrator's target set and its audit row, and both are
+  # observable from the same seam.
+  -only-testing:PlayheadTests/PartialActionDismissTests
 )
 
 # Named to match the `/private/tmp/playhead-*` pattern `scripts/disk-cleanup.sh`
@@ -2810,6 +2814,15 @@ T_FIL5_WRAP="a full window of claimable assets drains without an idle pass"
 
 # playhead-9y9e — the RT series.
 T_9Y9E_REACHES="a pass that adds nothing to a complete transcript runs ad detection"
+
+# playhead-zxqj: the dismiss gesture (ZX series). Display names verbatim from
+# `PartialActionDismissTests`.
+T_ZX_STALE_SUGGEST="a stale live suggest entry cannot refuse a later dismiss"
+T_ZX_FIELD_STACK="the 08-15 device window stack stays dismissable"
+T_ZX_COMMIT_RECORDED="a COMMITTED dismiss is recorded"
+T_ZX_REFUSAL_RECORDED="a REFUSED dismiss is recorded, and names which refusal"
+T_ZX_LIVE_ONLY="a live window with no durable row cannot refuse the dismiss beside it"
+T_ZX_NO_LIVE_CLAIM="a committed dismiss leaves no live window still claiming the ad"
 T_9Y9E_PARTIAL="a half-transcribed asset still fails, and still journals the failure"
 T_9Y9E_GAPPY="a full watermark over a gappy transcript does not license the short-circuit"
 T_9Y9E_NOCHUNKS="a watermark with no chunks behind it does not license the short-circuit"
@@ -7032,6 +7045,55 @@ MUTATIONS=(
   # answer and a producer that gives the wrong one are indistinguishable from
   # the consumer's side) and is why the silent-transport test exists.
   "S9M04|819|RT|$T_S9_CAPTURE_REFUSES_SILENT;$T_S9_CAPTURE_REFUSES_DETACH"
+
+  # ---- playhead-zxqj: a partial action must not make the rest undismissable
+  #      (ZX series) ----
+  #
+  # Four batches for four rails. All four land in `revertByTimeRange`, two of
+  # them within twenty lines of each other, so none may share a batch.
+
+  # Batch 820 — ZX01, THE shipped defect verbatim: the live dictionaries feed
+  # the durable transaction again. `persistRevertedAdWindowsIfCurrent` is
+  # all-or-nothing, so one live entry the store will not take refuses the whole
+  # gesture — including for every other window it could have reverted.
+  # UNIQUE KILL: `$T_ZX_LIVE_ONLY`, and its victim is chosen deliberately.
+  # ZX01's first cut expected `$T_ZX_STALE_SUGGEST` and SURVIVED — because the
+  # ZX02 fix already removes the stale entry, so with ZX02 in place there is
+  # nothing left for the live fold to poison. A rail whose defect is masked by
+  # its neighbour's fix is not a rail. The isolating state is one no cleanup
+  # can prevent: a live window the STORE HAS NO ROW FOR, which the detector's
+  # push produces on its own.
+  "ZX01|820|ORCH|$T_ZX_LIVE_ONLY"
+
+  # Batch 821 — ZX02, the leak that made ZX01 reachable from a user action: the
+  # revert's live cleanup goes back to skipping any suggest entry whose
+  # revision moved during the store hop, so the id survives in the actionable
+  # set with its durable row already `reverted`. Without ZX01 present this is
+  # no longer fatal to a later dismiss — which is the point of keeping both:
+  # one is the poison, the other is the antidote's own hole.
+  # UNIQUE KILL: `$T_ZX_STALE_SUGGEST`'s leftover-entry assertion.
+  "ZX02|821|ORCH|$T_ZX_STALE_SUGGEST"
+
+  # Batch 822 — ZX03, the instrument in the SUCCESS direction: the committed
+  # exit stops writing its audit row. A recorder wired only to failures cannot
+  # distinguish "refused" from "not instrumented", which is exactly the
+  # ambiguity that made Dan's report unsettleable from the 08-15 pull.
+  # UNIQUE KILL: `$T_ZX_COMMIT_RECORDED`.
+  "ZX03|822|ORCH|$T_ZX_COMMIT_RECORDED"
+
+  # Batch 823 — ZX04, the mirror: the refusal over material the app never
+  # claimed stops writing its row, so that gesture leaves no trace at all — the
+  # pre-bead state, and the one this series exists to make unreachable.
+  # UNIQUE KILL: `$T_ZX_REFUSAL_RECORDED`.
+  "ZX04|823|ORCH|$T_ZX_REFUSAL_RECORDED"
+
+  # Batch 824 — ZX05, the MANAGED twin of ZX02, and a strictly worse symptom.
+  # The auto-skip tier keeps its own dictionary and its own CUE, so a stale
+  # entry there does not merely refuse a later dismiss — it goes on skipping
+  # audio the listener has just said is not an ad, which is Dan's "a user mark
+  # outranks an inferred one in BOTH directions" pointed the wrong way.
+  # UNIQUE KILL: `$T_ZX_NO_LIVE_CLAIM`.
+  "ZX05|824|ORCH|$T_ZX_NO_LIVE_CLAIM"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -7483,6 +7545,11 @@ describe_mutation() {
     SC26) echo "fil5: the sweep's per-pass mint cap goes, emptying the window into a queue that drains 8" ;;
     SC27) echo "fil5: the candidate window widens to 64, paying a transcript read per reject" ;;
     SC28) echo "fil5: the sweep claims episodes whose analysis pass is still in flight" ;;
+    ZX01) echo "zxqj: the live dictionaries feed the durable revert again, so one stale entry refuses the whole dismiss" ;;
+    ZX02) echo "zxqj: a committed revert stops being terminal for the producer ID, leaving a live suggest entry behind" ;;
+    ZX03) echo "zxqj: a COMMITTED dismiss stops writing its audit row" ;;
+    ZX04) echo "zxqj: a refusal over unclaimed audio stops writing its audit row" ;;
+    ZX05) echo "zxqj: a committed revert stops being terminal for a MANAGED producer ID, leaving a live cue over vetoed audio" ;;
     RT01) echo "9y9e: the short-circuit goes — a finished transcript is a transcription failure again and Stage 4 never runs" ;;
     RT02) echo "9y9e: VACUITY AUDIT — the short-circuit's floor goes, so every negative runner fixture must go red" ;;
     RT03) echo "9y9e: the gate divides the WATERMARK, not the bridged area — a gappy transcript reads as finished" ;;
@@ -7659,6 +7726,93 @@ apply_mutation() {
   # which is the "it will heal on its own" reading 59c8 refused, because
   # `ModelManagerError 1001` is `inferenceError`, a wrapper over a 25-case enum
   # holding permanent members as well as transient ones.
+  # ---- playhead-zxqj: the dismiss gesture (ZX series) ----
+
+  # ZX01 — the durable target set takes live entries again.
+  ZX01)
+    snippet OLD <<'EOF'
+        var exactTargetsByID: [String: AdWindow] = [:]
+        if !didReadPersistedWindows {
+            for target in managedRevertTargets {
+EOF
+    snippet NEW <<'EOF'
+        var exactTargetsByID: [String: AdWindow] = [:]
+        if true {
+            for target in managedRevertTargets {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # ZX02 — a committed revert stops being terminal for the producer ID.
+  ZX02)
+    snippet OLD <<'EOF'
+                guard let suggested = suggestWindows[id],
+                      revertedWindowIds.contains(id)
+                        || AdWindowMaterialIdentity.sameProducerRevision(
+                            suggested,
+                            expectedSuggestion
+                        )
+EOF
+    snippet NEW <<'EOF'
+                guard let suggested = suggestWindows[id],
+                      AdWindowMaterialIdentity.sameProducerRevision(
+                          suggested,
+                          expectedSuggestion
+                      )
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # ZX05 — a committed revert stops being terminal for a managed producer ID.
+  ZX05)
+    snippet OLD <<'EOF'
+                      revertedWindowIds.contains(id)
+                        || AdWindowMaterialIdentity.sameProducerRevision(
+                            managed.adWindow,
+                            expectedManaged.adWindow
+                        )
+EOF
+    snippet NEW <<'EOF'
+                      AdWindowMaterialIdentity.sameProducerRevision(
+                          managed.adWindow,
+                          expectedManaged.adWindow
+                      )
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # ZX03 — the committed exit stops writing its audit row.
+  ZX03)
+    snippet OLD <<'EOF'
+        noteManualVetoOutcome(
+            .committed,
+            analysisAssetId: expectedAssetId,
+            start: start,
+            end: end,
+            revertedWindows: exactTargets.count,
+            liveTargets: liveTargetCount
+        )
+        return true
+EOF
+    snippet NEW <<'EOF'
+        return true
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # ZX04 — the unclaimed-audio refusal stops writing its audit row.
+  ZX04)
+    snippet OLD <<'EOF'
+                    noteManualVetoOutcome(
+                        .refusedNothingToCorrect,
+                        analysisAssetId: expectedAssetId,
+                        start: start,
+                        end: end,
+                        liveTargets: liveTargetCount
+                    )
+                    return false
+EOF
+    snippet NEW <<'EOF'
+                    return false
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
   UM01)
     snippet OLD <<'EOF'
         if isMetadataStall(error) {

@@ -65,6 +65,17 @@ struct TranscriptPeekView: View {
 
     /// Confirmation alert for submitting not-ad chunks.
     @State private var showNotAdConfirmation = false
+    /// playhead-zxqj: the dismiss did not land, and the listener is told.
+    ///
+    /// `submitNotAdChunks` used to end at `guard await revertCallback(…) else
+    /// { return }`, so a refused gesture and an untapped button looked the
+    /// same: the sheet stayed exactly as it was. It kept the selection (which
+    /// is right — the action is retryable) and said nothing (which is not).
+    /// Dan reported the symptom on 2026-08-15 as "i couldnt dismiss an ad",
+    /// and it is the direction of that silence that made it a report rather
+    /// than a bug filing — a listener who is told "not yet, try again" knows
+    /// what state they are in.
+    @State private var showNotAdFailure = false
     /// Prevents duplicate positive correction submissions and keeps their
     /// captured selections available until the durable callback succeeds.
     @State private var isSubmittingMarkAdCorrection = false
@@ -245,6 +256,19 @@ private extension TranscriptPeekView {
             }
         } message: {
             Text("\(notAdMarkedChunkSelections.count) sentence\(notAdMarkedChunkSelections.count == 1 ? "" : "s") will be marked as not an ad. Any overlapping ad detections will be dismissed.")
+        }
+        // playhead-zxqj: the refusal alert. Deliberately a separate alert
+        // rather than re-presenting the confirmation (the shape
+        // `submitUntranscribedTailMark` uses): re-presenting says "confirm
+        // this" a second time, which reads as though the first tap was never
+        // registered — the exact ambiguity this closes.
+        .alert("Couldn't dismiss that", isPresented: $showNotAdFailure) {
+            Button("Try again") {
+                submitNotAdChunks()
+            }
+            Button("Not now", role: .cancel) {}
+        } message: {
+            Text("Your selection is still here. Nothing was changed.")
         }
         .disabled(isSubmittingCorrection)
     }
@@ -769,7 +793,15 @@ private extension TranscriptPeekView {
             // The callback owns the single SQLite transaction covering both
             // the CorrectionEvent and every exact AdWindow revision. Only a
             // committed action may clear the user's retry state.
-            guard await revertCallback(syntheticSpan) else { return }
+            guard await revertCallback(syntheticSpan) else {
+                // playhead-zxqj: say so. The selection and the mode are
+                // deliberately left intact — the retry is one tap — but a
+                // refusal that changes nothing on screen is indistinguishable
+                // from a tap that never registered, and that is what got
+                // reported as "i couldnt dismiss an ad".
+                showNotAdFailure = true
+                return
+            }
             notAdMarkedChunkSelections = []
             isNotAdMarkingMode = false
         }
