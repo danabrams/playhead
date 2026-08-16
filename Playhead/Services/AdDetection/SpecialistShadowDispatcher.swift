@@ -195,7 +195,12 @@ actor LiveSpecialistShadowDispatcher: SpecialistShadowDispatcher {
         assetId: String,
         window: ShadowWindow
     ) async throws -> String {
-        let chunks = try await store.fetchTranscriptChunks(assetId: assetId)
+        // playhead-99yt: canonicalize, for the same reason as the FM
+        // dispatcher — a fast/final twin is one utterance, and joining both
+        // rows repeats it verbatim on adjacent prompt lines.
+        let chunks = TranscriptChunkCanonicalizer
+            .canonicalize(try await store.fetchTranscriptChunks(assetId: assetId))
+            .chunks
         let overlapping = chunks.filter { chunk in
             chunk.endTime > window.start && chunk.startTime < window.end
         }

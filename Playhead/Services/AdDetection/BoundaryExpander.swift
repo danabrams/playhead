@@ -336,12 +336,29 @@ struct BoundaryExpander: Sendable {
 
     // MARK: - Signal 2: Lexical Boundaries
 
+    /// **playhead-99yt: canonicalize before scanning.** This is the widening
+    /// behind the user's own "Hearing an ad" tap — `NowPlayingViewModel
+    /// .reportHearingAd` hands `expand` the raw `fetchTranscriptChunks` array,
+    /// both passes — and both of the things built below COUNT chunks as
+    /// independent evidence: `scanner.scan` applies `minHitsForCandidate` and
+    /// the weight sum, and the flat `hits` stream feeds
+    /// `BoundaryResolver.snap`, which picks a boundary from hit density. A
+    /// fast/final twin is one utterance transcribed twice, so counting it
+    /// twice moves the boundary the listener's mark is written at.
+    ///
+    /// Canonicalizing here rather than at `expand`'s entry keeps the cost off
+    /// the early-return paths (`expandFromExistingWindows` returns before any
+    /// transcript is read) and keeps it to ONE call per expansion. It is
+    /// idempotent, so the hot path — which now canonicalizes in
+    /// `AdDetectionService.hotPathCandidates` before ever building a
+    /// `BoundaryExpansionContext` — is unaffected.
     private func makeLexicalContext(
         seed: Double,
         transcriptChunks: [TranscriptChunk],
         config: ExpansionConfig
     ) -> LexicalContext? {
-        let nearbyChunks = transcriptChunks.filter { chunk in
+        let canonicalChunks = TranscriptChunkCanonicalizer.canonicalize(transcriptChunks).chunks
+        let nearbyChunks = canonicalChunks.filter { chunk in
             chunk.endTime >= seed - config.lexicalBackwardSearchRadius &&
             chunk.startTime <= seed + config.lexicalForwardSearchRadius
         }

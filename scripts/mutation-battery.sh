@@ -1363,6 +1363,15 @@ BGPS="Playhead/Services/AnalysisCoordinator/BackgroundProcessingService.swift"
 # `transcript_chunks.transcriptVersion` column rather than through a call.
 # Added for CN07.
 ESUMBF="Playhead/Services/EpisodeSummaries/EpisodeSummaryBackfillCoordinator.swift"
+# playhead-99yt (NY series): the four remaining consumers that read the raw
+# `fetchTranscriptChunks` array and COUNT chunks as independent evidence, plus
+# the canonicalizer whose containment test is what makes an exact-span twin
+# collapsible at all. Every one of these five is a place where removing one
+# call re-opens the whole defect silently.
+BEXP="Playhead/Services/AdDetection/BoundaryExpander.swift"
+SPSHD="Playhead/Services/AdDetection/SpecialistShadowDispatcher.swift"
+FMSHD="Playhead/Services/AdDetection/FoundationModelClassifierShadowDispatcher.swift"
+TCANON="Playhead/Services/AdDetection/TranscriptChunkCanonicalizer.swift"
 # playhead-lmrx: the measured description of one BGTask grant. Every number in
 # it is derived from `background_task_runs` / `semantic_scan_results` on the
 # 2026-08-06 pull, and every one of them can be quietly restored to a value
@@ -1395,6 +1404,7 @@ MUTABLE_FILES=(
   "$DETCLS" "$DETLED" "$SPLIT" "$HOTGATE" "$UGCEN" "$POLICY" "$SEGAGG"
   "$DLMGR" "$FQSCAN" "$BGFEED" "$EPPREP" "$SCHED"
   "$CLAIM" "$RECON" "$ATOM" "$AJRUN" "$ACOORD" "$ESUMBF" "$MPTRENG" "$MPTRIDX"
+  "$BEXP" "$SPSHD" "$FMSHD" "$TCANON"
   "$BGPS" "$GRANT" "$LEASE"
   "$PTX"
   "$ELV" "$BSB"
@@ -1445,6 +1455,12 @@ FOCUSED_SUITES=(
   # store-level test cannot tell "the guard saw it" from "OR IGNORE ate it").
   -only-testing:PlayheadTests/DuplicateSpanTextChunkV53MigrationTests
   -only-testing:PlayheadTests/FinalPassRetranscriptionRunnerTests
+  # playhead-99yt: a twin is ONE observation (NY series). One suite, because the
+  # claim is about five CONSUMERS and this is the only place any of them is
+  # driven with a twin on its input. It carries its own anti-vacuity fixture —
+  # `droppedFastCount == 1` plus a two-independent-hits control on every rail —
+  # which is what NY07 exists to prove is load-bearing.
+  -only-testing:PlayheadTests/FastFinalTwinEvidenceCanaryTests
   # playhead-gard: the per-detector trust rails (I series). Seven suites,
   # because the claim spans the whole chain and no one layer can observe
   # another: classification and the exemption's scope; the persisted ledger and
@@ -3334,6 +3350,31 @@ T_JC_PREFIX="the two producers digest the SAME string — the fingerprints diffe
 T_JC_FILLS="final-pass duplicate segment fills missing speakerId and avgConfidence"
 T_JC_SPEAKER="final-pass retranscription preserves recognizer speakerId in chunks"
 
+# --- playhead-99yt: a twin is ONE observation (NY series) -------------------
+#
+# jc42 established that the 3,751 fast/final twins are DESIGN-INTENDED and kept
+# them. This series pins the other half: the consumers that read those rows as
+# two independent observations. Each mutation removes exactly one
+# canonicalization and must redden exactly the consumer it belongs to — the
+# series is one-per-consumer on purpose, because "canonicalize everywhere" is
+# the kind of claim a prose survey makes and this file exists because those
+# decay (see the CN series' five-times-broken rule).
+#
+# NOTE: no ';' in any display name — the MUTATIONS record separator is ';', and
+# a test whose name contains one can never be matched, so a mutation naming it
+# reports ERROR while having killed it perfectly (the DR series learned this
+# the expensive way).
+T_NY_HOTPATH="Hot path does not promote a candidate from a fast/final twin"
+T_NY_BOUNDARY="Boundary expansion from a twin matches expansion from the final row alone"
+T_NY_SPECIALIST="Specialist shadow prompt carries each utterance once"
+T_NY_FM="FM shadow prompt carries each utterance once"
+T_NY_SUMMARY="Episode-summary hydration hands the sampler each utterance once"
+# The anti-vacuity fixture itself. It asserts `droppedFastCount == 1`, so it is
+# the only test in the suite that can see a canonicalizer that has stopped
+# collapsing an exact-span twin — the failure under which every other rail here
+# would go green for the wrong reason.
+T_NY_FIXTURE="A twin pair clears minHitsForCandidate on evidence one row provides"
+
 MUTATIONS=(
   # Batch 900 — JC01, THE SHIPPED DEFECT VERBATIM. The pre-insert guard asks
   # for the runner's own `fp-final-` fingerprint again, so an engine-written
@@ -3441,6 +3482,51 @@ MUTATIONS=(
   # ADDRESSING is a no-op there — but a missing CALL is not. Without this entry
   # that test would be pinned by nothing in the series.
   "JC10|909|FPRUN|$T_JC_FILLS;$T_JC_UPGRADE"
+
+  # ---- playhead-99yt: a twin is ONE observation (NY series) ----
+
+  # Batch 910 — NY01, THE SHIPPED DEFECT VERBATIM. `hotPathCandidates` orders
+  # the raw array by (start, end) and hands it straight to the scanner. This is
+  # the state main shipped in: `runBackfill` canonicalized and the HOT PATH,
+  # which is where the listener's first banner comes from, did not.
+  "NY01|910|ADSVC|$T_NY_HOTPATH"
+
+  # Batch 911 — NY02, THE PLAUSIBLE WRONG FIX. De-duplicate by `chunk.id`.
+  # It reads as "remove the duplicate rows" and removes nothing: `id` is a
+  # per-ROW UUID, so a twin is two distinct ids over one utterance. This is the
+  # SAME mistake `EpisodeSummarySampler.sample` already makes for real
+  # (EpisodeSummaryExtractor.swift:113) — it is not a hypothetical, it is the
+  # shipped shape of the wrong fix, which is why it earns a rail of its own.
+  "NY02|911|ADSVC|$T_NY_HOTPATH"
+
+  # Batch 912 — the four one-call consumers, one mutation each, four different
+  # files and four disjoint expectations. Each removes exactly one
+  # `canonicalize` and nothing else.
+  #
+  # NY03 — `BoundaryExpander.makeLexicalContext`. The user's own "Hearing an
+  # ad" tap: a phantom candidate here changes the boundary the mark is written
+  # at, so the assertion is on `ExpandedBoundary.source` flipping from
+  # `.fallback` to `.acousticAndLexical`.
+  "NY03|912|BEXP|$T_NY_BOUNDARY"
+  # NY04 / NY05 — the two shadow prompt builders. `canonicalTimeOrder` ranks
+  # final before fast at an identical span, so the duplicate lands on the
+  # ADJACENT line. Two entries rather than one because the two dispatchers are
+  # separate files that have already drifted apart once (the FM one's header
+  # still claimed a pass filter it does not perform).
+  "NY04|912|SPSHD|$T_NY_SPECIALIST"
+  "NY05|912|FMSHD|$T_NY_FM"
+  # NY06 — the episode-summary prompt BUDGET. The 80-slot cap counts array
+  # elements, so a twin spends two of them on one utterance and the even-stride
+  # subsample below the cap then selects different real content.
+  "NY06|912|ESUMBF|$T_NY_SUMMARY"
+
+  # Batch 913 — NY07, the canonicalizer's own containment test made STRICT.
+  # One token per comparison, and it is the mutation that re-opens all five
+  # consumers at once while every call site still reads `canonicalize(`: an
+  # exact-span twin stops being "fully covered", so nothing is ever dropped.
+  # The whole NY suite reddens; the expectation names the FIXTURE test because
+  # that is the one asserting `droppedFastCount`, i.e. the one that says WHY.
+  "NY07|913|TCANON|$T_NY_FIXTURE;$T_NY_HOTPATH"
 
   "M05|1|ORCH|$T_ANON_RACE"
   "M07|1|ORCH|$T_LISTEN_RACE"
@@ -7465,6 +7551,13 @@ MUTATIONS=(
 # One-line description per mutation, for the report.
 describe_mutation() {
   case "$1" in
+    NY01) echo "AdDetectionService.hotPathCandidates sorts the RAW array — the shipped defect: runBackfill canonicalized and the hot path did not" ;;
+    NY02) echo "the hot path 'de-duplicates' by chunk.id, a per-ROW UUID, so a fast/final twin survives it intact" ;;
+    NY03) echo "BoundaryExpander.makeLexicalContext scans the raw array — the user's 'Hearing an ad' tap gets a phantom lexical candidate" ;;
+    NY04) echo "SpecialistShadowDispatcher.buildPrompt joins the raw array — the twin repeats the utterance on the adjacent prompt line" ;;
+    NY05) echo "LiveShadowFMDispatcher.buildPrompt joins the raw array — same duplicated prompt line, other dispatcher" ;;
+    NY06) echo "EpisodeSummary hydration samples the raw array — a twin spends two of the 80 prompt slots on one utterance" ;;
+    NY07) echo "TranscriptChunkCanonicalizer.isFullyCovered goes STRICT, so an exact-span twin is never collapsed and every call site is a no-op" ;;
     JC01) echo "FinalPassRetranscriptionRunner: the pre-insert guard asks for its OWN fp-final- fingerprint again (the shipped defect)" ;;
     JC02) echo "fetchTranscriptChunkBySpanText drops the pass predicate — a FAST row answers 'already stored' and final coverage stops growing" ;;
     JC04) echo "V53 keys the sweep and the index on normalizedText — the one column the two producers compute differently" ;;
@@ -8026,6 +8119,102 @@ snippet() { IFS= read -r -d '' "$1" || true; }
 apply_mutation() {
   local name="$1" file="$2" OLD NEW
   case "$name" in
+
+  # ---- playhead-99yt: a twin is ONE observation (NY series) ----
+
+  # NY01 — THE SHIPPED DEFECT. The hot path orders the raw array and scans it.
+  NY01)
+    snippet OLD <<'EOF'
+        let orderedChunks = TranscriptChunkCanonicalizer.canonicalize(chunks).chunks
+            .sorted(by: TranscriptChunkCanonicalizer.canonicalTimeOrder)
+EOF
+    snippet NEW <<'EOF'
+        let orderedChunks = chunks.sorted { lhs, rhs in
+            if lhs.startTime != rhs.startTime {
+                return lhs.startTime < rhs.startTime
+            }
+            return lhs.endTime < rhs.endTime
+        }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # NY02 — THE PLAUSIBLE WRONG FIX. De-duplicate by `chunk.id`, which is a
+  # per-ROW UUID and therefore distinct for the two halves of a twin.
+  NY02)
+    snippet OLD <<'EOF'
+        let orderedChunks = TranscriptChunkCanonicalizer.canonicalize(chunks).chunks
+            .sorted(by: TranscriptChunkCanonicalizer.canonicalTimeOrder)
+EOF
+    snippet NEW <<'EOF'
+        var seenChunkIDs = Set<String>()
+        let orderedChunks = chunks
+            .filter { seenChunkIDs.insert($0.id).inserted }
+            .sorted(by: TranscriptChunkCanonicalizer.canonicalTimeOrder)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # NY03 — the boundary expander scans the raw array.
+  NY03)
+    snippet OLD <<'EOF'
+        let canonicalChunks = TranscriptChunkCanonicalizer.canonicalize(transcriptChunks).chunks
+        let nearbyChunks = canonicalChunks.filter { chunk in
+EOF
+    snippet NEW <<'EOF'
+        let nearbyChunks = transcriptChunks.filter { chunk in
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # NY04 — the specialist shadow prompt joins the raw array.
+  NY04)
+    snippet OLD <<'EOF'
+        let chunks = TranscriptChunkCanonicalizer
+            .canonicalize(try await store.fetchTranscriptChunks(assetId: assetId))
+            .chunks
+        let overlapping = chunks.filter { chunk in
+EOF
+    snippet NEW <<'EOF'
+        let chunks = try await store.fetchTranscriptChunks(assetId: assetId)
+        let overlapping = chunks.filter { chunk in
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # NY05 — the FM shadow prompt joins the raw array.
+  NY05)
+    snippet OLD <<'EOF'
+        let chunks = TranscriptChunkCanonicalizer
+            .canonicalize(try await store.fetchTranscriptChunks(assetId: assetId))
+            .chunks
+EOF
+    snippet NEW <<'EOF'
+        let chunks = try await store.fetchTranscriptChunks(assetId: assetId)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # NY06 — the episode-summary hydration samples the raw array.
+  NY06)
+    snippet OLD <<'EOF'
+        let chunks = TranscriptChunkCanonicalizer
+            .canonicalize(try await store.fetchTranscriptChunks(assetId: assetId))
+            .chunks
+        guard !chunks.isEmpty else { return nil }
+EOF
+    snippet NEW <<'EOF'
+        let chunks = try await store.fetchTranscriptChunks(assetId: assetId)
+        guard !chunks.isEmpty else { return nil }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # NY07 — containment goes STRICT. An exact-span twin is no longer "fully
+  # covered", so the canonicalizer collapses nothing and every call site above
+  # becomes a no-op while still reading `canonicalize(`.
+  NY07)
+    snippet OLD <<'EOF'
+        where interval.0 - boundaryEpsilon <= start && end <= interval.1 + boundaryEpsilon {
+EOF
+    snippet NEW <<'EOF'
+        where interval.0 + boundaryEpsilon < start && end < interval.1 - boundaryEpsilon {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
 
   # ---- playhead-jc42: the duplicated transcript span (JC series) ----
 
@@ -17248,6 +17437,10 @@ rec_file()   {
     ADSVC) printf '%s' "$ADSVC" ;;
     ACOORD) printf '%s' "$ACOORD" ;;
     ESUMBF) printf '%s' "$ESUMBF" ;;
+    BEXP)  printf '%s' "$BEXP" ;;
+    SPSHD) printf '%s' "$SPSHD" ;;
+    FMSHD) printf '%s' "$FMSHD" ;;
+    TCANON) printf '%s' "$TCANON" ;;
     ADSVC_ATOM) printf '%s' "$ATOMEV" ;;
     PODC)  printf '%s' "$PODC" ;;
     MPTRIDX) printf '%s' "$MPTRIDX" ;;

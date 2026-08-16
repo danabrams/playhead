@@ -10278,16 +10278,39 @@ actor AdDetectionService {
     /// Route hot-path lexical hits through the span hypothesis engine when it
     /// can produce windows; otherwise fall back to the legacy 30-second lexical
     /// merge path unchanged.
+    ///
+    /// **playhead-99yt: canonicalize, because the hot path COUNTS chunks as
+    /// evidence.** `runBackfill` has canonicalized since playhead-hc7e; this
+    /// path — which is where a listener's first banner comes from — read the
+    /// raw `fetchTranscriptChunks` array, so a fast chunk and the final chunk
+    /// that re-transcribed the same audio were scanned as two independent
+    /// observations of one utterance. `LexicalScanner.buildCandidate` requires
+    /// `promotionHitCount >= config.minHitsForCandidate` (2) — a bar whose
+    /// whole purpose is two INDEPENDENT hits — and then sums the same weights
+    /// into `rawConfidence`, so the duplication both promotes and inflates.
+    ///
+    /// Measured on the 2026-08-15 device pull (9 mixed-pass assets, 3,751
+    /// fast/final twins, every one an exact-span byte-identical pair):
+    /// **44 hot-path lexical candidates raw against 39 canonical.** All five
+    /// of the removed candidates sat at exactly `hitCount == 2` — i.e. they
+    /// cleared the two-hit bar on one utterance seen twice — and a further
+    /// 15 survivors carried inflated confidence (worst +0.170).
+    ///
+    /// One canonicalization here covers the whole hot path: `orderedChunks` is
+    /// what reaches `SpanHypothesisEngine.process` (which calls
+    /// `scanner.scanChunk` per chunk), `scanner.scan`,
+    /// `hotPathBoundaryExpansionContext` and `makeHotPathHypothesisCandidate`.
+    /// It is idempotent, and single-pass input passes through byte-identically.
     private func hotPathCandidates(
         from chunks: [TranscriptChunk],
         analysisAssetId: String
     ) async throws -> [LexicalCandidate] {
-        let orderedChunks = chunks.sorted { lhs, rhs in
-            if lhs.startTime != rhs.startTime {
-                return lhs.startTime < rhs.startTime
-            }
-            return lhs.endTime < rhs.endTime
-        }
+        // `canonicalize` returns the mixed path already time-ordered but hands
+        // a single-pass array back byte-identically — i.e. in `chunkIndex`
+        // order, which is NOT time order (playhead-r5um). Sorting is
+        // idempotent, so it is always safe to do and never safe to assume.
+        let orderedChunks = TranscriptChunkCanonicalizer.canonicalize(chunks).chunks
+            .sorted(by: TranscriptChunkCanonicalizer.canonicalTimeOrder)
         let (metadataCues, _) = await loadEpisodeMetadataSignals(
             analysisAssetId: analysisAssetId
         )

@@ -123,7 +123,23 @@ struct AnalysisStoreEpisodeSummaryBackfillCandidateProvider: EpisodeSummaryBackf
         guard let asset = try await store.fetchAsset(id: assetId) else {
             return nil
         }
-        let chunks = try await store.fetchTranscriptChunks(assetId: assetId)
+        // playhead-99yt: canonicalize at the fetch, because the summarizer
+        // input is a BUDGET and a fast/final twin spends two slots on one
+        // utterance. `EpisodeSummarySampler.sample` de-duplicates by
+        // `chunk.id` — a UUID, which is per ROW, so the twins are two
+        // different ids over identical text and timing and both survive it.
+        // Both then occupy one of `maximumChunks: 80`, and once the combined
+        // set exceeds 80 the even-stride subsample below it shifts, so the
+        // duplication also changes WHICH real content is kept.
+        //
+        // `transcriptVersion` below is unaffected either way — it goes through
+        // `SemanticScanClaim.transcriptVersion(forPersistedChunks:)`, which
+        // canonicalizes internally, and canonicalization is idempotent. It
+        // still reads `chunks` rather than `summarizerChunks`; see the comment
+        // at that line for why that distinction is load-bearing.
+        let chunks = TranscriptChunkCanonicalizer
+            .canonicalize(try await store.fetchTranscriptChunks(assetId: assetId))
+            .chunks
         guard !chunks.isEmpty else { return nil }
 
         // playhead-g4dk: drop transcript chunks that overlap a confirmed-ad
