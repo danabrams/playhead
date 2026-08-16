@@ -3274,6 +3274,9 @@ T_JC_V40_BLIND="the V40 fingerprint rule is SATISFIED by the shipped pair — th
 T_JC_TWINS="a fast row and a final row over identical span+text are TWINS — BOTH survive"
 T_JC_DIFF_TEXT="same span and pass with DIFFERENT text both survive — the zero-width 3C2FFE10 pair is not a copy"
 T_JC_FTS="the dedupe delete fires the FTS AFTER DELETE trigger — no ghost rowid, index count matches the table"
+T_JC_FTS_MISSING="rows with NO FTS index entry (a pre-FTS database) are still deduped — the rebuild is required"
+T_JC_NORMALIZED="the two producers DISAGREE on normalizedText while agreeing on text — the key cannot be the normalised column"
+T_JC_FAST_NO_SUPPRESS="a FAST row over the same span does not suppress the final row — final-pass coverage keeps growing"
 T_JC_REINSERT="after V53 the UNIQUE index exists and a byte-identical re-insert is refused"
 T_JC_IDEMPOTENT="V53 is idempotent and the ladder reaches head from a seeded v52"
 T_JC_PREFIX="the two producers digest the SAME string — the fingerprints differ by the fp-final- prefix ALONE"
@@ -3295,14 +3298,25 @@ MUTATIONS=(
   # then stops growing — a silent coverage regression wearing a fix's clothes,
   # and the reason `contentLookupIsPassScoped` exists as a rail rather than a
   # comment.
-  "JC02|901|STORE|$T_JC_LOOKUP_PASS"
+  "JC02|901|STORE|$T_JC_LOOKUP_PASS;$T_JC_FAST_NO_SUPPRESS"
 
   # Batch 902 — JC03. The guard is right; the UPGRADE is keyed on the
   # fingerprint the runner FABRICATED rather than on the row it FOUND, so both
   # `…IfMissing` updates address nothing and write zero rows. The duplicate is
   # gone and the diarization/confidence the second pass measured is silently
   # dropped — the failure mode a count-only assertion cannot see.
-  "JC03|902|FPRUN|$T_JC_ENGINE_ROW;$T_JC_FILLS"
+  #
+  # THIS ENTRY FIRST LISTED `$T_JC_FILLS` TOO AND REPORTED SURVIVED, and the
+  # reason is worth keeping because it is not a coverage hole. `T_JC_FILLS`
+  # seeds its pre-existing row with
+  # `FinalPassRetranscriptionRunner.computeFinalPassFingerprint(...)` — the
+  # RUNNER's own fingerprint — so on that fixture `chunk.segmentFingerprint`
+  # and `existing.segmentFingerprint` are the SAME STRING and the mutation is a
+  # literal no-op. The test cannot reach the mutated line by construction, not
+  # by weakness. Narrowing the expectation here is paired with JC10 below, which
+  # breaks the upgrade in a way `T_JC_FILLS` CAN see — so the test is pinned by
+  # a mutation it can observe instead of being dead weight on this one.
+  "JC03|902|FPRUN|$T_JC_ENGINE_ROW"
 
   # Batch 903 — the CONSTRAINT's three key columns, one mutation each. Each
   # names a column that looks optional and is not.
@@ -3311,7 +3325,15 @@ MUTATIONS=(
   # the series: it reads as "the same words", and it is the ONE column the two
   # producers compute differently (`normalizeText(...)` against
   # `.lowercased()`), so on the device pull it admits 3,824 of the 7,247 twins.
-  "JC04|903|STORE|$T_JC_COLLAPSE;$T_JC_REINSERT"
+  #
+  # IT SURVIVED ON THE FIRST RUN AND THE FIXTURE WAS THE REASON, which is the
+  # finding worth keeping: `seedShippedDuplicatePair`'s default text carried no
+  # punctuation, and the two normalisers agree on every such string, so a
+  # `normalizedText` key collapsed the pair exactly as a `text` key does. The
+  # text now carries punctuation and each row is seeded with the normaliser its
+  # REAL producer uses; `$T_JC_NORMALIZED` asserts that precondition directly so
+  # nobody can disarm this rail by simplifying the fixture again.
+  "JC04|903|STORE|$T_JC_COLLAPSE;$T_JC_REINSERT;$T_JC_NORMALIZED"
 
   # Batch 904 — JC05, the bead's own proposed key, `(asset, startTime,
   # endTime)`. It kills the duplicate AND the `3C2FFE10 [6450.0, 6450.0]` pair,
@@ -3338,7 +3360,16 @@ MUTATIONS=(
   # back, and the rung reports nothing but a fault line while every duplicate
   # survives. Here the rebuild also has a second job — keeping the index count
   # equal to the table's after the sweep.
-  "JC08|907|STORE|$T_JC_FTS"
+  #
+  # THE EXPECTATION IS THE PRE-FTS TEST, NOT `$T_JC_FTS`, and JC08 surviving is
+  # how that was established. Every other test in the suite seeds through SQL,
+  # so the AFTER INSERT trigger has already written an index entry for every row
+  # — and with entries present the DELETE succeeds whether or not the rebuild
+  # ran. Only a fixture whose rows have NO index entry (`'delete-all'`, the
+  # shape of a database predating the FTS table) makes the missing rebuild trip
+  # SQLite's corruption check. Same rail, same reasoning, as playhead-6av0's
+  # `dedupeSurvivesRowsMissingFromTheFTSIndex` for V40.
+  "JC08|907|STORE|$T_JC_FTS_MISSING"
 
   # Batch 908 — JC09, the early-out reports "nothing to do" without looking.
   # The sweep returns 0, the rung proceeds to `CREATE UNIQUE INDEX` over live
@@ -3346,6 +3377,16 @@ MUTATIONS=(
   # stays at 52 forever. Killed by the collapse rail and by the re-insert rail,
   # which is what proves the index actually got built.
   "JC09|908|STORE|$T_JC_COLLAPSE;$T_JC_REINSERT"
+
+  # Batch 909 — JC10, the PAIR to JC03's narrowing. Delete the confidence
+  # upgrade outright: the guard still recognises the existing row and still
+  # refuses to duplicate it, so the row count is right and every count-based
+  # assertion in the suite stays green — but the measurement the second pass
+  # actually made is dropped on the floor. This is the mutation `$T_JC_FILLS`
+  # CAN observe (its fixture seeds a row the runner itself wrote, so the
+  # addressing JC03 breaks is a no-op there, but the missing CALL is not), which
+  # is what stops that test being dead weight after JC03 stopped naming it.
+  "JC10|909|FPRUN|$T_JC_FILLS;$T_JC_ENGINE_ROW"
 
   "M05|1|ORCH|$T_ANON_RACE"
   "M07|1|ORCH|$T_LISTEN_RACE"
@@ -7302,6 +7343,16 @@ MUTATIONS=(
 # One-line description per mutation, for the report.
 describe_mutation() {
   case "$1" in
+    JC01) echo "FinalPassRetranscriptionRunner: the pre-insert guard asks for its OWN fp-final- fingerprint again (the shipped defect)" ;;
+    JC02) echo "fetchTranscriptChunkBySpanText drops the pass predicate — a FAST row answers 'already stored' and final coverage stops growing" ;;
+    JC03) echo "the metadata upgrades address the FABRICATED fingerprint instead of the row that was FOUND" ;;
+    JC04) echo "V53 keys the sweep and the index on normalizedText — the one column the two producers compute differently" ;;
+    JC05) echo "V53 keys on (asset, startTime, endTime) — the bead's own proposal, which eats two distinct texts at one span" ;;
+    JC06) echo "V53 drops pass from the key, collapsing the fast/final twin the two coverage unions read separately" ;;
+    JC07) echo "the dedupe keeps MAX(rowid) instead of the lowest row every unordered LIMIT 1 returns" ;;
+    JC08) echo "the FTS rebuild before the DELETE is removed — a pre-FTS row then trips SQLITE_CORRUPT and the rung rolls back" ;;
+    JC09) echo "the dedupe reports 'nothing to do' without looking, so CREATE UNIQUE INDEX is handed live violations" ;;
+    JC10) echo "the avgConfidence upgrade is deleted — no duplicate, no count change, just the lost measurement" ;;
     T01) echo "SemanticScanThroughputSplit.bucket(for:): a nil scene phase becomes .foreground" ;;
     T02) echo "ScanScenePhase.attributionBucket: a recorded .unknown becomes .foreground" ;;
     T03) echo "readSemanticScanResult: a NULL scenePhase column defaults to .active on the READ" ;;
@@ -8056,6 +8107,22 @@ EOF
     }
 
     /// Collapse `decoded_spans` to one row per
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # JC10 — the confidence upgrade is deleted. The guard still recognises the
+  # existing row, so nothing duplicates and every count assertion stays green;
+  # only the measurement is lost.
+  JC10)
+    snippet OLD <<'EOF'
+                    _ = try await store.updateTranscriptChunkAvgConfidenceIfMissing(
+                        analysisAssetId: input.analysisAssetId,
+                        segmentFingerprint: existing.segmentFingerprint,
+                        avgConfidence: segment.avgConfidence
+                    )
+EOF
+    snippet NEW <<'EOF'
+                    _ = existing
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 

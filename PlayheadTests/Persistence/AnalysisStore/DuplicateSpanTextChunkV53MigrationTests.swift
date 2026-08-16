@@ -158,14 +158,18 @@ struct DuplicateSpanTextChunkV53MigrationTests {
         end: Double,
         text: String,
         pass: String = "final",
-        modelVersion: String = "apple-speech-v1"
+        modelVersion: String = "apple-speech-v1",
+        normalizedText: String? = nil
     ) throws {
+        // Defaults to the RUNNER's normaliser. `seedShippedDuplicatePair` passes
+        // the engine's explicitly, because the two do not agree — see there.
+        let normalized = normalizedText ?? text.lowercased()
         try exec(db, """
             INSERT INTO transcript_chunks
             (id, analysisAssetId, segmentFingerprint, chunkIndex, startTime, endTime,
              text, normalizedText, pass, modelVersion)
             VALUES (\(quoted(id)), \(quoted(assetId)), \(quoted(fingerprint)), \(chunkIndex),
-                    \(start), \(end), \(quoted(text)), \(quoted(text.lowercased())),
+                    \(start), \(end), \(quoted(text)), \(quoted(normalized)),
                     \(quoted(pass)), \(quoted(modelVersion)))
             """)
     }
@@ -177,20 +181,47 @@ struct DuplicateSpanTextChunkV53MigrationTests {
     }
 
     /// The shipped pair, spelled exactly as the two producers spell it: one
-    /// engine row under the bare digest, one runner row under the `fp-final-`
-    /// digest, same pass, same span, same text.
+    /// engine row under the bare digest carrying
+    /// `TranscriptEngineService.normalizeText`, one runner row under the
+    /// `fp-final-` digest carrying the runner's `.lowercased()`. Same pass, same
+    /// span, same TEXT.
+    ///
+    /// THE PUNCTUATION IN THE DEFAULT TEXT IS LOAD-BEARING, and mutation rail
+    /// JC04 is what found that out. The two producers normalise differently —
+    /// `normalizeText` splits on non-alphanumerics and rejoins with single
+    /// spaces, `.lowercased()` does not — so they AGREE on any string without
+    /// punctuation and DISAGREE otherwise. This fixture's earlier default,
+    /// "With the American Express", had none, so the two columns were equal and
+    /// a sweep keyed on `normalizedText` collapsed the pair exactly as one keyed
+    /// on `text` would: JC04 swaps precisely that column and SURVIVED.
+    ///
+    /// The divergence is not hypothetical. On the 2026-08-15 pull, 3,824 of the
+    /// 7,247 twins carry byte-identical `text` and DIFFERENT `normalizedText`
+    /// (playhead-k2gv). That is why V53's key is `text`: keying on the
+    /// normalised column would have admitted more than half of the population it
+    /// exists to remove.
+    /// The shipped pair's text, span and asset, named once. `constraintRefusesReinsert`
+    /// re-states this content to prove the index rejects it, and when these were two
+    /// literals a change to one silently turned the other into a NEW row that the
+    /// constraint correctly accepted — a green-looking "the constraint does not fire".
+    /// One constant, so the two cannot drift apart.
+    static let shippedText = "With the American Express, Platinum Card."
+    static let shippedStart = 0.78
+    static let shippedEnd = 1.86
+
     private func seedShippedDuplicatePair(
         _ db: OpaquePointer,
         assetId: String = "ASSET",
-        text: String = "With the American Express",
-        start: Double = 0.78,
-        end: Double = 1.86
+        text: String = DuplicateSpanTextChunkV53MigrationTests.shippedText,
+        start: Double = DuplicateSpanTextChunkV53MigrationTests.shippedStart,
+        end: Double = DuplicateSpanTextChunkV53MigrationTests.shippedEnd
     ) throws {
         try insertChunk(
             db, id: "engine-row", assetId: assetId,
             fingerprint: TranscriptEngineFingerprintProbe.bare(text: text, startTime: start, endTime: end),
             chunkIndex: 0, start: start, end: end, text: text,
-            pass: "final", modelVersion: "apple-speech-v1"
+            pass: "final", modelVersion: "apple-speech-v1",
+            normalizedText: TranscriptEngineService.normalizeText(text)
         )
         try insertChunk(
             db, id: "runner-row", assetId: assetId,
@@ -198,7 +229,8 @@ struct DuplicateSpanTextChunkV53MigrationTests {
                 text: text, startTime: start, endTime: end
             ),
             chunkIndex: 332, start: start, end: end, text: text,
-            pass: "final", modelVersion: "apple-speech-final-v1"
+            pass: "final", modelVersion: "apple-speech-final-v1",
+            normalizedText: text.lowercased()
         )
     }
 
@@ -346,6 +378,100 @@ struct DuplicateSpanTextChunkV53MigrationTests {
             """) == 1)
     }
 
+    // MARK: - 5b. `normalizedText` is NOT the key, and cannot be
+
+    /// playhead-jc42, added because mutation rail JC04 SURVIVED without it.
+    ///
+    /// JC04 swaps `text` for `normalizedText` in BOTH the sweep's `GROUP BY` and
+    /// the UNIQUE index. That is the single most seductive edit available here —
+    /// it reads as "the same words" — and it is wrong for a reason no reasoning
+    /// about the code can supply: it is the one column the two producers compute
+    /// differently. `TranscriptEngineService.normalizeText` splits on
+    /// non-alphanumerics and rejoins; the runner writes `.lowercased()`. On the
+    /// 2026-08-15 pull that makes 3,824 of the 7,247 twins DISAGREE while their
+    /// `text` matches byte-for-byte, so a `normalizedText` key would admit more
+    /// than half the population V53 exists to remove.
+    ///
+    /// The `#expect` on the precondition is the part that matters: it fails if
+    /// anyone ever "simplifies" the fixture back to a punctuation-free string,
+    /// which is what silently disarmed JC04 the first time.
+    @Test("the two producers DISAGREE on normalizedText while agreeing on text — the key cannot be the normalised column")
+    func twinsDisagreeOnNormalizedTextButShareText() async throws {
+        let dir = try await seededV52Directory(prefix: "V53Normalized") { db in
+            try self.insertAsset(db, id: "ASSET", episodeId: "ep-1", fingerprint: "sha-asset")
+            try self.seedShippedDuplicatePair(db)
+        }
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let before = try openRaw(dir)
+        #expect(try scalarInt(before, "SELECT COUNT(DISTINCT text) FROM transcript_chunks") == 1,
+                "fixture precondition: the twins carry byte-identical text")
+        #expect(try scalarInt(before, "SELECT COUNT(DISTINCT normalizedText) FROM transcript_chunks") == 2,
+                "fixture precondition: and normalise it two different ways (playhead-k2gv)")
+        sqlite3_close_v2(before)
+
+        try await migrateAgain(dir)
+
+        let after = try openRaw(dir)
+        defer { sqlite3_close_v2(after) }
+        #expect(try scalarInt(after, "SELECT count(*) FROM transcript_chunks") == 1,
+                "keyed on text, the pair collapses despite disagreeing on normalizedText")
+        #expect(try scalarText(after, "SELECT id FROM transcript_chunks") == "engine-row")
+    }
+
+    // MARK: - 5c. The FTS rebuild is load-bearing, not decoration
+
+    /// playhead-jc42, added because mutation rail JC08 SURVIVED without it —
+    /// exactly as playhead-6av0's equivalent rail did for V40, and for the same
+    /// reason.
+    ///
+    /// `dedupeDuplicateSpanTextChunks` issues an FTS `rebuild` before its
+    /// DELETE. Every other test in this suite seeds through SQL, so the
+    /// `transcript_chunks_ai` trigger has already written an index entry for
+    /// every row — and with entries present the DELETE succeeds whether or not
+    /// the rebuild ran. Removing the rebuild left the whole suite green.
+    ///
+    /// It is not decoration. `transcript_chunks_fts` is EXTERNAL-CONTENT, so
+    /// deleting a content row whose index entry is MISSING makes the
+    /// `transcript_chunks_ad` trigger's `'delete'` command trip SQLite's
+    /// corruption check. Inside V53 that throw is caught by the savepoint: the
+    /// rung rolls back, `schema_version` stays at 52, and the device's
+    /// duplicates survive every future launch with nothing but a fault line to
+    /// show for it — the failure mode that looks exactly like success.
+    ///
+    /// Missing index entries are the shape an old database has: rows written
+    /// before `transcript_chunks_fts` existed. `'delete-all'` reproduces that
+    /// state on the real schema without hand-building one.
+    @Test("rows with NO FTS index entry (a pre-FTS database) are still deduped — the rebuild is required")
+    func dedupeSurvivesRowsMissingFromTheFTSIndex() async throws {
+        let dir = try await seededV52Directory(prefix: "V53FTSMissing") { db in
+            try self.insertAsset(db, id: "ASSET", episodeId: "ep-1", fingerprint: "sha-asset")
+            try self.seedShippedDuplicatePair(db, text: "prehistoric sponsorship")
+            // Strip the entries the AFTER INSERT trigger just wrote, so the rows
+            // look exactly like content that predates the FTS table.
+            try self.exec(db, "INSERT INTO transcript_chunks_fts(transcript_chunks_fts) VALUES('delete-all')")
+        }
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let db = try openRaw(dir)
+        #expect(try scalarInt(
+            db,
+            "SELECT count(*) FROM transcript_chunks_fts WHERE transcript_chunks_fts MATCH 'prehistoric'"
+        ) == 0, "fixture precondition: the rows carry no FTS index entry")
+        sqlite3_close_v2(db)
+
+        try await migrateAgain(dir)
+
+        let after = try openRaw(dir)
+        defer { sqlite3_close_v2(after) }
+        #expect(try scalarInt(after, "SELECT count(*) FROM transcript_chunks") == 1,
+                "without the rebuild the DELETE throws, the savepoint rolls back, and BOTH rows survive")
+        #expect(try scalarInt(after, "SELECT count(*) FROM transcript_chunks_fts") == 1)
+        #expect(try scalarText(after, "SELECT value FROM _meta WHERE key = 'schema_version'")
+                == String(AnalysisStore.currentSchemaVersion),
+                "a rolled-back rung would have left this at 52")
+    }
+
     // MARK: - 6. The constraint refuses a re-insert
 
     @Test("after V53 the UNIQUE index exists and a byte-identical re-insert is refused")
@@ -375,9 +501,13 @@ struct DuplicateSpanTextChunkV53MigrationTests {
             analysisAssetId: "ASSET",
             segmentFingerprint: "some-future-writers-scheme",
             chunkIndex: 999,
-            startTime: 0.78,
-            endTime: 1.86,
-            text: "With the American Express",
+            startTime: Self.shippedStart,
+            endTime: Self.shippedEnd,
+            text: Self.shippedText,
+            // Deliberately NOT the normalisation either producer would compute:
+            // the key is `text`, so a row disagreeing on the normalised column is
+            // still the same row. This is what makes JC04 (which swaps the two)
+            // fail here rather than pass.
             normalizedText: "totally different normalisation",
             pass: "final",
             modelVersion: "apple-speech-future-v9",

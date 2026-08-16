@@ -771,6 +771,67 @@ struct FinalPassRetranscriptionRunnerTests {
         #expect(chunks[0].avgConfidence == 0.9)
     }
 
+    /// playhead-jc42 — THE PLAUSIBLE WRONG FIX, pinned at the layer where it
+    /// does harm (mutation rail JC02's consequence half).
+    ///
+    /// Dropping `pass` from the content lookup looks like a simplification and
+    /// "removes duplicates" just as well, because a FAST row over the same span
+    /// answers "already stored". It is a silent COVERAGE regression wearing a
+    /// fix's clothes: the runner concludes it has persisted a final row it never
+    /// wrote, no `pass='final'` row is ever created for that span, and
+    /// `AnalysisStore.readFinalTranscriptRegions` — which filters `pass='final'`
+    /// — stops growing. Nothing throws and nothing is duplicated, so only a test
+    /// that asserts the final row EXISTS can see it.
+    ///
+    /// The store-level rail (`contentLookupIsPassScoped`) pins the QUERY. This
+    /// pins what the query is for.
+    @Test("a FAST row over the same span does not suppress the final row — final-pass coverage keeps growing")
+    func testFinalPassStillWritesWhenOnlyAFastRowCoversTheSpan() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        try await store.insertAdWindow(
+            makeAdWindow(id: "w1", analysisAssetId: "asset-fp", startTime: 0, endTime: 30, confidence: 0.9)
+        )
+        // The fast pass already transcribed this exact span, with the exact text
+        // the recognizer is about to produce again — the 3,751-pair shape on the
+        // 2026-08-15 pull, and the one V53 deliberately KEEPS.
+        try await store.insertTranscriptChunk(TranscriptChunk(
+            id: "fast-row",
+            analysisAssetId: "asset-fp",
+            segmentFingerprint: "fp-fast-row",
+            chunkIndex: 0,
+            startTime: 0,
+            endTime: 10,
+            text: "shard-0",
+            normalizedText: "shard-0",
+            pass: TranscriptPassType.fast.rawValue,
+            modelVersion: "apple-speech-v1",
+            transcriptVersion: nil,
+            atomOrdinal: nil,
+            speakerId: nil
+        ))
+
+        let audio = StubAnalysisAudioProvider()
+        audio.shardsToReturn = [
+            AnalysisShard(id: 0, episodeID: "ep-asset-fp", startTime: 0, duration: 10, samples: [])
+        ]
+        let runner = makeRunnerWithBox(
+            store: store,
+            box: SnapshotBox(makeSnapshot()),
+            recognizer: CountingShardRecognizer(speakerId: 42),
+            audioProvider: audio
+        )
+
+        let result = try await runner.runFinalPassBackfill(for: makeInput())
+
+        #expect(result.reTranscribedWindowIds == ["w1"])
+        let chunks = try await store.fetchTranscriptChunks(assetId: "asset-fp")
+        #expect(chunks.count == 2, "the fast row is a DIFFERENT fact — it must not stand in for the final row")
+        #expect(chunks.contains { $0.pass == TranscriptPassType.fast.rawValue && $0.id == "fast-row" })
+        #expect(chunks.contains { $0.pass == TranscriptPassType.final_.rawValue },
+                "readFinalTranscriptRegions filters pass='final'; without this row that union stops growing")
+    }
+
     /// playhead-6av0 REWRITE, for the same reason as
     /// `TranscriptEngineTests.duplicateFingerprintFillsSpeakerIdAndAvgConfidenceAcrossMatchingRows`:
     /// `transcript_chunks` is now UNIQUE on
