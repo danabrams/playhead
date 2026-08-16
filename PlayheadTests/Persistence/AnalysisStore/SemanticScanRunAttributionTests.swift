@@ -178,7 +178,11 @@ struct SemanticScanRunAttributionTests {
         // compute the prefix it lowers `backfill_jobs.progressCursor` to. It
         // writes nothing to this table, so every attribution column this rung
         // pins is untouched.
-        #expect(AnalysisStore.currentSchemaVersion == 52)
+        // 52 → 53 read for this rung (playhead-jc42): V53 deletes duplicate
+        // `transcript_chunks` rows and builds a UNIQUE index on that table. It
+        // names no `semantic_scan_results` column and back-fills nothing, so
+        // the no-backfill proof below still has something to prove.
+        #expect(AnalysisStore.currentSchemaVersion == 53)
         for column in ["createdAt", "scenePhase", "runCorrelationId"] {
             #expect(
                 try probeColumnExists(in: dir, table: "semantic_scan_results", column: column),

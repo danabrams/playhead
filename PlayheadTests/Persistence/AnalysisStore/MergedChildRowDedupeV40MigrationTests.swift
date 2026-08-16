@@ -125,7 +125,18 @@ struct MergedChildRowDedupeV40MigrationTests {
         defer { sqlite3_close_v2(db) }
         // Drop the V40 artefacts so the seed can create violations, exactly as
         // a device that stopped at v39 would have.
+        //
+        // playhead-jc42: and EVERY LATER INDEX ON THIS TABLE, for the same
+        // reason — a database at v39 has none of them. `migrate()` above climbs
+        // to head, so it also built V53's `idx_chunks_asset_pass_span_text`,
+        // whose key is `(analysisAssetId, pass, startTime, endTime, text)`.
+        // Every duplicate this suite seeds is byte-identical in content (that
+        // is what makes it a duplicate), so leaving V53's index standing made
+        // the SEED throw `UNIQUE constraint failed` — five tests failing before
+        // the rung under test ever ran. Two things that read as one and are
+        // not: "the fixture cannot be built" and "V40 did not repair it".
         try exec(db, "DROP INDEX IF EXISTS idx_chunks_asset_pass_fingerprint")
+        try exec(db, "DROP INDEX IF EXISTS idx_chunks_asset_pass_span_text")
         try seed(db)
         try exec(db, "UPDATE _meta SET value = '39' WHERE key = 'schema_version'")
         return dir
@@ -552,7 +563,18 @@ struct MergedChildRowDedupeV40MigrationTests {
         // `backfill_jobs.progressCursor` to the prefix each asset's own
         // `semantic_scan_results` passA rows support, and touches no other
         // column and no other table. Nothing this rung asserts is named by it.
-        #expect(AnalysisStore.currentSchemaVersion == 52)
+        // 52 → 53 read for this rung (playhead-jc42): V53 sweeps THE SAME TABLE
+        // this suite is about, so the reading has to be a real one. It keys on
+        // `(analysisAssetId, pass, startTime, endTime, text)` — CONTENT — where
+        // V40 keys on `segmentFingerprint`, and it exists because
+        // `segmentFingerprint` cannot see across the two hash namespaces the
+        // two `pass='final'` producers use. The two rules are independent: V40's
+        // `fastAndFinalTwinsBothSurvive` fixture puts one fast and one final row
+        // over the same span, which V53 also keeps (its key carries `pass` for
+        // the same reason V40's does), and V40's collapse fixtures share a
+        // fingerprint AND their content, so V40 removes the row first and V53
+        // finds nothing left to sweep. No assertion in this file changes.
+        #expect(AnalysisStore.currentSchemaVersion == 53)
 
         let db = try openRaw(dir)
         defer { sqlite3_close_v2(db) }
@@ -689,6 +711,9 @@ struct MergedChildRowDedupeV40MigrationTests {
 
         let db = try openRaw(dir)
         try exec(db, "DROP INDEX IF EXISTS idx_chunks_asset_pass_fingerprint")
+        // playhead-jc42: and V53's, for the same reason as `seededV39Directory`
+        // — a v39 device has neither, and this seed is content-identical.
+        try exec(db, "DROP INDEX IF EXISTS idx_chunks_asset_pass_span_text")
         try insertAsset(db, id: "SURVIVOR", episodeId: "ep-1", fingerprint: "sha-survivor")
         try insertChunk(
             db, id: "own", assetId: "SURVIVOR", fingerprint: "fp-A",

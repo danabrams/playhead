@@ -1971,7 +1971,7 @@ actor AnalysisStore {
     /// assertions automatically follow the production constant — hardcoding
     /// the integer in tests has been a recurring source of stale-assertion
     /// flakes whenever the schema bumps.
-    nonisolated static let currentSchemaVersion = 52
+    nonisolated static let currentSchemaVersion = 53
 
     /// H1: minimum age (in seconds) a `backfill_jobs` / `final_pass_jobs`
     /// row stuck in `status='running'` must reach before the launch-time
@@ -2414,7 +2414,30 @@ actor AnalysisStore {
         try exec("BEGIN IMMEDIATE")
         do {
             try createTables()
-            // Ordering: transcript_chunks Phase 1 runs before the V*IfNeeded ladder because no later migration touches `transcript_chunks` or `transcript_chunks_fts`, so its FTS rebuild cannot be undone downstream; the backfill only depends on columns `createTables()` has already (re)asserted.
+            // Ordering: transcript_chunks Phase 1 runs before the V*IfNeeded
+            // ladder; the backfill only depends on columns `createTables()` has
+            // already (re)asserted.
+            //
+            // playhead-jc42 CORRECTED THE REASON THIS LINE USED TO GIVE. It read
+            // "...because no later migration touches `transcript_chunks` or
+            // `transcript_chunks_fts`, so its FTS rebuild cannot be undone
+            // downstream". V53 touches BOTH — it DELETEs duplicate rows and
+            // rebuilds the FTS index itself — so that premise is no longer true
+            // and must not be relied on by whoever adds V54.
+            //
+            // The ordering is still correct, for a narrower reason: Phase 1
+            // MUTATES rows (`transcriptVersion`/`atomOrdinal`) through the FTS
+            // UPDATE trigger, so it needs a healthy index before it runs, and
+            // running first is how it gets one. What changed is that a later
+            // rung may now legitimately need its OWN rebuild, and V53 carries
+            // one. Do not delete a downstream rebuild on the strength of this
+            // one having happened: Phase 1's is CONDITIONAL — it fires only
+            // inside the `while` loop over assets holding `pass != 'fast'` rows
+            // with a NULL `transcriptVersion` or `atomOrdinal`, so a database
+            // whose legacy backfill has already completed gets no rebuild here
+            // at all. That is exactly the population V53's own rebuild protects,
+            // and it is why mutation rail JC08 survived until its fixture
+            // stopped seeding rows that trip this one.
             try migrateTranscriptChunksPhase1()
             try writeInitialSchemaVersionIfNeeded()
             // Cycle 1 M5: leave a fault-level forensic trail when this binary
@@ -2873,6 +2896,12 @@ actor AnalysisStore {
             // compile-time constant, never an observation — see the block
             // comment on the migration.
             try migrateUnmeasuredPrewarmHitV52IfNeeded()
+            // playhead-jc42: two producers of `pass='final'` rows hash the same
+            // audio into two disjoint `segmentFingerprint` namespaces, so
+            // neither the runner's pre-insert read nor the V40 index could see
+            // across the gap. Deduplicates by CONTENT first, because a UNIQUE
+            // index cannot be created over existing violations.
+            try migrateDuplicateSpanTextChunksV53IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -3256,6 +3285,10 @@ actor AnalysisStore {
         // seeded fixture without `semantic_scan_results` — or one already
         // carrying the nullable shape — still reaches v52.
         try migrateUnmeasuredPrewarmHitV52IfNeeded()
+        // playhead-jc42 (v53): both the dedupe and the index guard on
+        // `tableExists` AND on the `pass` column, so a seeded fixture without
+        // `transcript_chunks` — or one predating `pass` — still reaches v53.
+        try migrateDuplicateSpanTextChunksV53IfNeeded()
     }
     #endif
 
@@ -7732,6 +7765,90 @@ actor AnalysisStore {
         try setSchemaVersion(52)
     }
 
+    /// playhead-jc42 — V53. Collapse the `pass`-identical duplicate spans two
+    /// disjoint fingerprint namespaces let onto disk, then make
+    /// `transcript_chunks` structurally unable to hold another.
+    ///
+    /// THE DEFECT, stated as the data states it. On the 2026-08-15 pull, all
+    /// ten assets that had ever run a final pass carried duplicate
+    /// `(startTime, endTime)` rows — 7,248 extra rows — and the three assets
+    /// that had not carried none. Every one of the 7,248
+    /// `modelVersion='apple-speech-final-v1'` rows (the runner's) had a twin,
+    /// and 7,247 of those twins were **byte-identical in text AND timing**.
+    /// ``FinalPassRetranscriptionRunner``'s header claims that is impossible —
+    /// "Fast and final chunks have distinct `segmentFingerprint`s (computed
+    /// from text + timing, both of which differ across passes)". The premise is
+    /// false: the distinctness comes ENTIRELY from the `fp-final-` prefix, and
+    /// the final pass re-transcribing already-transcribed audio reproduces it
+    /// verbatim.
+    ///
+    /// CLEANUP FIRST, CONSTRAINT SECOND — `CREATE UNIQUE INDEX` fails outright
+    /// on an existing violation, and every device that has run a final pass is
+    /// carrying thousands. Same order, and the same reason, as V39 and V40.
+    ///
+    /// WHY THE KEY IS `(asset, pass, span, text)` AND NOT `(asset, span)`. The
+    /// bead proposed `(analysisAssetId, startTime, endTime)`. That would also
+    /// forbid the fast/final pair the whole final-pass design rests on, and
+    /// because ``insertTranscriptChunk(_:)`` is `INSERT OR IGNORE` it would
+    /// forbid it SILENTLY — a genuinely better final transcript would be
+    /// dropped on the floor with no error, and `readFinalTranscriptRegions`
+    /// would stop growing. It would also delete one of the two rows at
+    /// `3C2FFE10 [6450.0, 6450.0]`, which are two DIFFERENT fast-pass texts
+    /// ("that's" / "what.") at a zero-width span — distinct data, not a copy.
+    /// Keying on the content instead reproduces exactly the rule the runner's
+    /// own pre-insert read already intends, at the one place the fingerprint
+    /// scheme cannot reach it.
+    ///
+    /// R2 CONTAINMENT (inherited verbatim from V39/V40, and for the same
+    /// reason). This rung is DATA-DEPENDENT: it deletes rows and builds an
+    /// index that fails outright on a violation it did not manage to clear. A
+    /// thrown `migrate()` at launch is answered by `PlayheadRuntime` with
+    /// `removeItem(at: AnalysisStore.defaultDirectory())` and a retry that
+    /// succeeds on the now-empty directory — the user's entire analysis
+    /// database, silently discarded. So it runs inside a SAVEPOINT, rolls back
+    /// on any throw, logs a fault, and **leaves `schema_version` at 52** so the
+    /// next launch retries. The cost of that path is today's shipped state:
+    /// duplicates still on disk, no index.
+    ///
+    /// Idempotent: the sweep is a no-op once no group holds more than one row,
+    /// and the index is `IF NOT EXISTS`.
+    private func migrateDuplicateSpanTextChunksV53IfNeeded() throws {
+        let observed = (try schemaVersion() ?? 1)
+        guard observed < 53 else { return }
+        // DO NOT STEP OVER A ROLLED-BACK V39 — same rationale as V40–V52.
+        guard observed >= 52 else { return }
+        let savepoint = "v53_duplicate_span_text_dedupe"
+        try exec("SAVEPOINT \(savepoint)")
+        do {
+            let removed = try dedupeDuplicateSpanTextChunks()
+            // The `pass` guard MIRRORS ``dedupeDuplicateSpanTextChunks()``'s
+            // (and V40's, for the same reason): a hand-seeded fixture whose
+            // `transcript_chunks` predates the `pass` column sends the dedupe
+            // down its `columnExists` early-out and would then hand
+            // `CREATE UNIQUE INDEX` a column that is not there — a throw, a
+            // rollback, and a rung that can never complete on that database.
+            if try tableExists("transcript_chunks"),
+               try columnExists(table: "transcript_chunks", column: "pass") {
+                try exec("""
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_chunks_asset_pass_span_text
+                    ON transcript_chunks(analysisAssetId, pass, startTime, endTime, text)
+                    """)
+            }
+            try exec("RELEASE SAVEPOINT \(savepoint)")
+            if removed > 0 {
+                logger.notice("playhead-jc42 V53: removed \(removed, privacy: .public) duplicate transcript_chunks row(s) sharing (asset, pass, span, text)")
+            }
+        } catch {
+            // `ROLLBACK TO` does not pop the savepoint; `RELEASE` must follow
+            // or the enclosing transaction is left with a stale frame.
+            try? exec("ROLLBACK TO SAVEPOINT \(savepoint)")
+            try? exec("RELEASE SAVEPOINT \(savepoint)")
+            logger.fault("playhead-jc42 V53 duplicate-span dedupe could not complete and was rolled back; schema stays at 52 and the next launch retries. The analysis database is UNCHANGED — this is deliberately not fatal, because a thrown migrate() at launch is answered by deleting the whole store. Error: \(String(describing: error), privacy: .public)")
+            return
+        }
+        try setSchemaVersion(53)
+    }
+
     /// playhead-kg8h: durably CLAIM one REQUESTED day-0 kickoff, before any of
     /// the work it stands for has run.
     ///
@@ -8267,6 +8384,14 @@ actor AnalysisStore {
     /// `(asset, fingerprint)` alone would work by accident today and silently
     /// eat one of the two the moment a future writer stops prefixing.
     ///
+    /// ⚠️ AND THAT PREFIX IS WHY THIS SWEEP CANNOT SEE playhead-jc42's
+    /// duplicates — it reported ZERO violations on a device carrying 7,248 of
+    /// them. `TranscriptEngineService` writes `pass='final'` rows too, under the
+    /// UNPREFIXED scheme, so two producers hash the same audio into two
+    /// namespaces and no `segmentFingerprint`-keyed rule can compare them. This
+    /// sweep is not wrong and is kept as-is; ``dedupeDuplicateSpanTextChunks()``
+    /// is the one that keys on CONTENT and is what actually bites.
+    ///
     /// WHY THE LOWEST rowid. ``fetchTranscriptChunk(analysisAssetId:segmentFingerprint:)``
     /// is an unordered `LIMIT 1`, which the `idx_chunks_asset` search returns in
     /// rowid order — so the lowest rowid is the row `TranscriptEngineService`'s
@@ -8297,6 +8422,87 @@ actor AnalysisStore {
             rowid NOT IN (
                 SELECT MIN(rowid) FROM transcript_chunks
                 GROUP BY analysisAssetId, pass, segmentFingerprint
+            )
+            """
+        guard try countRows(in: "transcript_chunks", where: duplicateFilter) > 0 else { return 0 }
+
+        if try tableExists("transcript_chunks_fts") {
+            try exec("INSERT INTO transcript_chunks_fts(transcript_chunks_fts) VALUES('rebuild')")
+        }
+        try exec("DELETE FROM transcript_chunks WHERE \(duplicateFilter)")
+        return Int(sqlite3_changes(db))
+    }
+
+    /// playhead-jc42: collapse `transcript_chunks` to one row per
+    /// `(analysisAssetId, pass, startTime, endTime, text)`, keeping the LOWEST
+    /// rowid.
+    ///
+    /// WHY A SECOND DEDUPE EXISTS BESIDE ``dedupeMergedTranscriptChunks()``.
+    /// That one keys on `segmentFingerprint`, and its own doc-comment explains
+    /// why `pass` has to be in the key: the final-pass runner deliberately
+    /// prefixes its hash input with `fp-final-` "precisely so a final-pass row
+    /// can never be mistaken for its fast-pass twin". Measured on the
+    /// 2026-08-15 device pull, that prefix is doing something nobody signed
+    /// for. `TranscriptEngineService` ALSO writes `pass='final'` rows — 17,632
+    /// of the 24,880 on that device — under the UNPREFIXED scheme, so the two
+    /// producers hash the same audio into two disjoint namespaces and neither
+    /// the runner's pre-insert read nor the `(asset, pass, fingerprint)` index
+    /// can see across the gap. Result: **3,496 pairs of `pass='final'` rows
+    /// with byte-identical text and byte-identical timing**, which
+    /// `TranscriptChunkCanonicalizer` retains in full (it de-overlaps fast
+    /// against final, never final against final) and the transcript overlay
+    /// therefore draws twice. That is Dan's "doubled transcript spans", and
+    /// `dedupeMergedTranscriptChunks` reports zero violations on the same file.
+    ///
+    /// WHAT THIS DELIBERATELY DOES **NOT** TOUCH: the other 3,751 duplicated
+    /// spans on that pull, which are one `fast` row and one `final` row over
+    /// identical text and timing. Those are two different FACTS, not two copies
+    /// of one, and they are read as such —
+    /// ``readFastTranscriptRegions(ids:into:maxEnd:)`` and
+    /// ``readFinalTranscriptRegions(ids:into:maxEnd:)`` union them separately,
+    /// and `fetchFastTranscriptCoveredRanges(assetId:)` gates skip
+    /// authorisation on the fast one alone. Deleting either member shrinks a
+    /// real measurement, so the key keeps `pass`. The canonicalizer already
+    /// drops the fast row from every DISPLAY and DETECTION projection (it is
+    /// fully covered by an identical final interval), which is why that half of
+    /// the population is not what the user sees doubled.
+    ///
+    /// WHY THE LOWEST rowid, and WHY THAT IS SAFE HERE. Same reason as
+    /// ``dedupeMergedTranscriptChunks()``: it is the row every unordered
+    /// `LIMIT 1` read has been returning all along. Measured on the pull, the
+    /// 3,496 losers carry NOTHING the survivor lacks — zero have a `speakerId`,
+    /// an `avgConfidence` or a `weakAnchorMetadataJSON` the survivor is missing,
+    /// and all 3,496 survivors already carry an `atomOrdinal`. So no metadata
+    /// promotion step is needed, and adding one would be untested machinery.
+    ///
+    /// `atomOrdinal` and `chunkIndex` ARE LEFT ALONE, exactly as V40 leaves
+    /// them. The persisted `atomOrdinal` is a legacy Phase-1 cache
+    /// (``backfillLegacyTranscriptChunksPhase1IfNeeded()`` is its only writer);
+    /// live atom ordinals are recomputed in memory by `TranscriptAtomizer` on
+    /// every run, over the chunk set as it then stands. Those cached values were
+    /// computed over the INFLATED stream and are wrong today; removing the
+    /// duplicates is what lets the next atomization be right.
+    ///
+    /// WHY THE DELETE IS SQL AND THE FTS REBUILD COMES FIRST — see
+    /// ``dedupeMergedTranscriptChunks()``. `transcript_chunks_fts` is an
+    /// external-content FTS5 table synchronised by the `transcript_chunks_ad`
+    /// AFTER DELETE trigger; a row removed by any path that skips that trigger
+    /// stays in the index as a ghost the lexical scanner keeps matching, and
+    /// deleting a row whose index entry predates the FTS table trips SQLite's
+    /// corruption checks.
+    ///
+    /// Idempotent: returns 0 without touching anything once no group holds more
+    /// than one row.
+    @discardableResult
+    func dedupeDuplicateSpanTextChunks() throws -> Int {
+        guard try tableExists("transcript_chunks"),
+              try columnExists(table: "transcript_chunks", column: "pass")
+        else { return 0 }
+
+        let duplicateFilter = """
+            rowid NOT IN (
+                SELECT MIN(rowid) FROM transcript_chunks
+                GROUP BY analysisAssetId, pass, startTime, endTime, text
             )
             """
         guard try countRows(in: "transcript_chunks", where: duplicateFilter) > 0 else { return 0 }
@@ -11701,6 +11907,23 @@ actor AnalysisStore {
     /// loses the shard's transcript. `OR IGNORE` applies exactly the rule the
     /// pre-insert read already intends, at the one place it cannot reach.
     ///
+    /// playhead-jc42: `OR IGNORE` now also absorbs `idx_chunks_asset_pass_span_text`
+    /// — `(analysisAssetId, pass, startTime, endTime, text)` UNIQUE. That index
+    /// is the one that actually bites, because the V40 index above cannot: the
+    /// two producers of `pass='final'` rows digest the same
+    /// `"\(text)|\(start)|\(end)"` under two schemes (one of them prefixed
+    /// `fp-final-`), so their fingerprints never collide however identical the
+    /// content. 7,248 duplicate spans on the 2026-08-15 pull, with the V40
+    /// index reporting zero violations throughout.
+    ///
+    /// A SKIPPED ROW IS NOT A LOST TRANSCRIPT, and that is what makes `OR
+    /// IGNORE` the right verb rather than a swallowed error: the conflict
+    /// target is the row's entire CONTENT, so the row already on disk carries
+    /// the same text over the same span in the same pass. What a skip can cost
+    /// is the newer row's `speakerId` / `avgConfidence` / weak-anchor metadata,
+    /// which is why both writers keep an explicit pre-insert read and an
+    /// in-place metadata upgrade rather than relying on this.
+    ///
     /// - Returns: `true` when a row was actually written.
     @discardableResult
     func insertTranscriptChunk(_ chunk: TranscriptChunk) throws -> Bool {
@@ -12028,6 +12251,65 @@ actor AnalysisStore {
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, analysisAssetId)
         bind(stmt, 2, segmentFingerprint)
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return readTranscriptChunk(stmt)
+    }
+
+    /// playhead-jc42: resolve a chunk by its CONTENT — `(asset, pass, span, text)`
+    /// — rather than by a writer's private `segmentFingerprint` namespace.
+    ///
+    /// WHY THIS EXISTS, AND WHY THE FINGERPRINT LOOKUP COULD NOT DO IT.
+    /// Two producers write `pass='final'` rows and they hash the SAME input
+    /// under DIFFERENT schemes: `TranscriptEngineService.computeFingerprint`
+    /// digests `"\(text)|\(start)|\(end)"`, while
+    /// ``FinalPassRetranscriptionRunner/computeFinalPassFingerprint(text:startTime:endTime:)``
+    /// digests `"fp-final-" + ` the identical string. So a runner asking
+    /// ``fetchTranscriptChunk(analysisAssetId:segmentFingerprint:)`` "do I
+    /// already hold this segment?" can only ever find rows the RUNNER wrote;
+    /// the engine's row for the very same audio is invisible to it, and so is
+    /// the `(analysisAssetId, pass, segmentFingerprint)` UNIQUE index. On the
+    /// 2026-08-15 device pull that produced **7,248 duplicate spans across all
+    /// ten assets that had ever run a final pass**, of which **3,496 were two
+    /// `pass='final'` rows** — byte-identical text, byte-identical timing,
+    /// separated only by the `fp-final-` prefix.
+    ///
+    /// THE `pass` PREDICATE IS LOAD-BEARING AND MUST NOT BE DROPPED. A fast
+    /// row and a final row over the same span are two DIFFERENT facts, read by
+    /// two different consumers — ``readFastTranscriptRegions(ids:into:maxEnd:)``
+    /// and ``readFinalTranscriptRegions(ids:into:maxEnd:)`` build separate
+    /// interval unions, and `TranscriptChunkCanonicalizer` drops the fast row
+    /// only for the CANONICAL projection, leaving both on disk. A lookup that
+    /// ignored `pass` would tell the final-pass runner it had already stored a
+    /// span it had not, and the final union would silently stop growing.
+    ///
+    /// Ordered by `rowid` so that when duplicates DO exist (a database that has
+    /// not yet climbed to V53) this returns the same row
+    /// ``fetchTranscriptChunk(analysisAssetId:segmentFingerprint:)`` and
+    /// ``dedupeDuplicateSpanTextChunks()`` both settle on — the lowest rowid.
+    func fetchTranscriptChunkBySpanText(
+        analysisAssetId: String,
+        pass: String,
+        startTime: Double,
+        endTime: Double,
+        text: String
+    ) throws -> TranscriptChunk? {
+        let sql = """
+            SELECT * FROM transcript_chunks
+            WHERE analysisAssetId = ?
+              AND pass = ?
+              AND startTime = ?
+              AND endTime = ?
+              AND text = ?
+            ORDER BY rowid
+            LIMIT 1
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, analysisAssetId)
+        bind(stmt, 2, pass)
+        bind(stmt, 3, startTime)
+        bind(stmt, 4, endTime)
+        bind(stmt, 5, text)
         guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
         return readTranscriptChunk(stmt)
     }

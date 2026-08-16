@@ -6,6 +6,7 @@
 // the audio provider returns canned shards, and the AnalysisStore is a
 // real on-disk SQLite under a temp directory.
 
+import CryptoKit
 import Foundation
 import os
 import Testing
@@ -695,6 +696,211 @@ struct FinalPassRetranscriptionRunnerTests {
         #expect(chunks[0].id == "existing-final")
         #expect(chunks[0].speakerId == 42)
         #expect(chunks[0].avgConfidence == 0.9)
+    }
+
+    /// playhead-jc42 — THE SHIPPED DEFECT, at the write path that caused it.
+    ///
+    /// `TranscriptEngineService` writes `pass='final'` rows too (whenever
+    /// `activeModelRole == .asrFinal`), fingerprinting `"\(text)|\(start)|\(end)"`
+    /// WITHOUT the `fp-final-` prefix. So the runner's pre-insert read — which
+    /// asked for its OWN prefixed fingerprint — could only ever find rows the
+    /// runner itself had written, and appended a second `pass='final'` row for
+    /// every span the engine had already finalised. 3,496 of those on the
+    /// 2026-08-15 pull, all byte-identical in text and timing, all retained by
+    /// `TranscriptChunkCanonicalizer` (it de-overlaps fast against final, never
+    /// final against final) and therefore all drawn twice in the overlay.
+    ///
+    /// The engine row here is spelled the way the engine spells it, and the
+    /// fixture deliberately does NOT use `computeFinalPassFingerprint` — that is
+    /// the whole point. Before this fix the asset ends with two rows.
+    ///
+    /// ⚠️ THIS IS A REGRESSION ASSERTION, NOT A MUTATION RAIL, AND THE
+    /// DIFFERENCE WAS MEASURED. Defeating the guard (battery rail JC01) leaves
+    /// this test GREEN: the runner really does append the row to its batch, and
+    /// `insertTranscriptChunk`'s `INSERT OR IGNORE` then hits
+    /// `idx_chunks_asset_pass_span_text` and the row never lands. So the count
+    /// cannot be reddened from this file at all any more — V53's constraint
+    /// holds it, which is the belt working when the suspenders are cut, and is
+    /// the strongest evidence in the suite that the two layers are independent.
+    /// What the guard is still uniquely responsible for is the metadata
+    /// upgrade, and `testFinalPassUpgradesTheEngineRowItFound` is the rail for
+    /// that. Do not read this test's greenness as proof the runner is correct.
+    @Test("an ENGINE-written final row is recognised — the runner does not append a second copy of the same span")
+    func testFinalPassDoesNotDuplicateEngineWrittenFinalRow() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        try await store.insertAdWindow(
+            makeAdWindow(id: "w1", analysisAssetId: "asset-fp", startTime: 0, endTime: 30, confidence: 0.9)
+        )
+        // `TranscriptEngineService.computeFingerprint`: SHA-256 of the bare
+        // `"\(text)|\(start)|\(end)"`, no prefix.
+        let engineFingerprint = SHA256.hash(data: Data("shard-0|0.0|10.0".utf8))
+            .prefix(16)
+            .map { String(format: "%02x", $0) }
+            .joined()
+        #expect(engineFingerprint != FinalPassRetranscriptionRunner.computeFinalPassFingerprint(
+            text: "shard-0", startTime: 0, endTime: 10
+        ), "the two producers cannot collide — that is the defect, not a coincidence")
+
+        try await store.insertTranscriptChunk(TranscriptChunk(
+            id: "engine-final",
+            analysisAssetId: "asset-fp",
+            segmentFingerprint: engineFingerprint,
+            chunkIndex: 0,
+            startTime: 0,
+            endTime: 10,
+            text: "shard-0",
+            normalizedText: "shard-0",
+            pass: TranscriptPassType.final_.rawValue,
+            modelVersion: "apple-speech-v1",
+            transcriptVersion: nil,
+            atomOrdinal: nil,
+            speakerId: nil
+        ))
+
+        let audio = StubAnalysisAudioProvider()
+        audio.shardsToReturn = [
+            AnalysisShard(id: 0, episodeID: "ep-asset-fp", startTime: 0, duration: 10, samples: [])
+        ]
+        let runner = makeRunnerWithBox(
+            store: store,
+            box: SnapshotBox(makeSnapshot()),
+            recognizer: CountingShardRecognizer(speakerId: 42),
+            audioProvider: audio
+        )
+
+        let result = try await runner.runFinalPassBackfill(for: makeInput())
+
+        #expect(result.reTranscribedWindowIds == ["w1"])
+        let chunks = try await store.fetchTranscriptChunks(assetId: "asset-fp")
+        #expect(chunks.count == 1, "the engine's row IS this span — appending beside it is the duplication")
+        #expect(chunks[0].id == "engine-final")
+    }
+
+    /// playhead-jc42 — the SECOND half of the same seam, split into its own test
+    /// so two different mutations stop being indistinguishable.
+    ///
+    /// The count assertion above and the metadata assertions below were one
+    /// test, and the battery reported JC01 and JC03 with IDENTICAL kill sets as
+    /// a result — the same failure name for two different defects, which is the
+    /// thing the RQ01/RQ03 entry warns about ("RQ01's kill set is NOT a subset
+    /// of it"). Two mutations you cannot tell apart prove less than they look
+    /// like they do.
+    ///
+    /// Split, the witnesses separate: **JC01** breaks the GUARD, so the row is
+    /// duplicated and the test above fails; **JC03** leaves the guard correct
+    /// (count 1, right id) and breaks only the ADDRESSING, which only this test
+    /// can see. `chunk.segmentFingerprint` names a row that does not exist when
+    /// the engine wrote the original, so both `…IfMissing` updates match zero
+    /// rows and the diarization/confidence this pass measured is dropped with
+    /// nothing to show for it.
+    @Test("the metadata upgrade addresses the row it FOUND, not the fingerprint it fabricated")
+    func testFinalPassUpgradesTheEngineRowItFound() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        try await store.insertAdWindow(
+            makeAdWindow(id: "w1", analysisAssetId: "asset-fp", startTime: 0, endTime: 30, confidence: 0.9)
+        )
+        let engineFingerprint = SHA256.hash(data: Data("shard-0|0.0|10.0".utf8))
+            .prefix(16)
+            .map { String(format: "%02x", $0) }
+            .joined()
+        try await store.insertTranscriptChunk(TranscriptChunk(
+            id: "engine-final",
+            analysisAssetId: "asset-fp",
+            segmentFingerprint: engineFingerprint,
+            chunkIndex: 0,
+            startTime: 0,
+            endTime: 10,
+            text: "shard-0",
+            normalizedText: "shard-0",
+            pass: TranscriptPassType.final_.rawValue,
+            modelVersion: "apple-speech-v1",
+            transcriptVersion: nil,
+            atomOrdinal: nil,
+            speakerId: nil
+        ))
+
+        let audio = StubAnalysisAudioProvider()
+        audio.shardsToReturn = [
+            AnalysisShard(id: 0, episodeID: "ep-asset-fp", startTime: 0, duration: 10, samples: [])
+        ]
+        let runner = makeRunnerWithBox(
+            store: store,
+            box: SnapshotBox(makeSnapshot()),
+            recognizer: CountingShardRecognizer(speakerId: 42),
+            audioProvider: audio
+        )
+
+        _ = try await runner.runFinalPassBackfill(for: makeInput())
+
+        let chunks = try await store.fetchTranscriptChunks(assetId: "asset-fp")
+        #expect(chunks.count == 1)
+        #expect(chunks[0].speakerId == 42,
+                "the speaker the second pass measured must land on the row that exists")
+        #expect(chunks[0].avgConfidence == 0.9,
+                "and so must the confidence — JC10 deletes exactly this call")
+    }
+
+    /// playhead-jc42 — THE PLAUSIBLE WRONG FIX, pinned at the layer where it
+    /// does harm (mutation rail JC02's consequence half).
+    ///
+    /// Dropping `pass` from the content lookup looks like a simplification and
+    /// "removes duplicates" just as well, because a FAST row over the same span
+    /// answers "already stored". It is a silent COVERAGE regression wearing a
+    /// fix's clothes: the runner concludes it has persisted a final row it never
+    /// wrote, no `pass='final'` row is ever created for that span, and
+    /// `AnalysisStore.readFinalTranscriptRegions` — which filters `pass='final'`
+    /// — stops growing. Nothing throws and nothing is duplicated, so only a test
+    /// that asserts the final row EXISTS can see it.
+    ///
+    /// The store-level rail (`contentLookupIsPassScoped`) pins the QUERY. This
+    /// pins what the query is for.
+    @Test("a FAST row over the same span does not suppress the final row — final-pass coverage keeps growing")
+    func testFinalPassStillWritesWhenOnlyAFastRowCoversTheSpan() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        try await store.insertAdWindow(
+            makeAdWindow(id: "w1", analysisAssetId: "asset-fp", startTime: 0, endTime: 30, confidence: 0.9)
+        )
+        // The fast pass already transcribed this exact span, with the exact text
+        // the recognizer is about to produce again — the 3,751-pair shape on the
+        // 2026-08-15 pull, and the one V53 deliberately KEEPS.
+        try await store.insertTranscriptChunk(TranscriptChunk(
+            id: "fast-row",
+            analysisAssetId: "asset-fp",
+            segmentFingerprint: "fp-fast-row",
+            chunkIndex: 0,
+            startTime: 0,
+            endTime: 10,
+            text: "shard-0",
+            normalizedText: "shard-0",
+            pass: TranscriptPassType.fast.rawValue,
+            modelVersion: "apple-speech-v1",
+            transcriptVersion: nil,
+            atomOrdinal: nil,
+            speakerId: nil
+        ))
+
+        let audio = StubAnalysisAudioProvider()
+        audio.shardsToReturn = [
+            AnalysisShard(id: 0, episodeID: "ep-asset-fp", startTime: 0, duration: 10, samples: [])
+        ]
+        let runner = makeRunnerWithBox(
+            store: store,
+            box: SnapshotBox(makeSnapshot()),
+            recognizer: CountingShardRecognizer(speakerId: 42),
+            audioProvider: audio
+        )
+
+        let result = try await runner.runFinalPassBackfill(for: makeInput())
+
+        #expect(result.reTranscribedWindowIds == ["w1"])
+        let chunks = try await store.fetchTranscriptChunks(assetId: "asset-fp")
+        #expect(chunks.count == 2, "the fast row is a DIFFERENT fact — it must not stand in for the final row")
+        #expect(chunks.contains { $0.pass == TranscriptPassType.fast.rawValue && $0.id == "fast-row" })
+        #expect(chunks.contains { $0.pass == TranscriptPassType.final_.rawValue },
+                "readFinalTranscriptRegions filters pass='final'; without this row that union stops growing")
     }
 
     /// playhead-6av0 REWRITE, for the same reason as

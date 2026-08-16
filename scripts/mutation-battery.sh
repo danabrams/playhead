@@ -1352,7 +1352,16 @@ GRANT="Playhead/Services/AnalysisCoordinator/BackgroundGrantBudget.swift"
 # invisible to a test of the coordinator; a coordinator that stops reading the
 # table re-opens the duplicated `case` list the store-level tests replay.
 LEASE="Playhead/Services/AnalysisCoordinator/EpisodeExecutionLease.swift"
+# playhead-jc42 (JC series): the FINAL-PASS re-transcription runner — the
+# SECOND producer of `pass='final'` transcript rows. It is a different file
+# from `$MPTRENG` (`TranscriptEngineService`, the first producer) on purpose:
+# the whole defect is that the two hash the SAME `"\(text)|\(start)|\(end)"`
+# into two disjoint `segmentFingerprint` namespaces, so no rule expressed over
+# one file can see it. `$RUNNER` is the coverage-lane `BackfillJobRunner` and
+# `$AJRUN` is the pipeline runner; this is neither.
+FPRUN="Playhead/Services/AdDetection/FinalPassRetranscriptionRunner.swift"
 MUTABLE_FILES=(
+  "$FPRUN"
   "$ORCH" "$STORE" "$CTRL" "$VIEW" "$TRIG" "$RSVC" "$TRUST" "$NPV" "$NPVM"
   "$BWPOL" "$KICK" "$KCOORD" "$SEAMS" "$ACT" "$ADSVC" "$PODC"
   "$THROT" "$FMREF" "$UMF" "$RUNNER" "$FMCLS" "$PROBE" "$PERMC" "$RT" "$MODEL" "$INGO" "$INVF"
@@ -1389,6 +1398,18 @@ MUTABLE_FILES=(
 # half-open-interval contract.
 
 FOCUSED_SUITES=(
+  # playhead-jc42: the duplicated transcript span (JC series). Two suites,
+  # because the claim spans two layers and neither can observe the other. The
+  # V53 suite is the only thing that can see the SCHEMA half — the sweep's key,
+  # the index's key, the FTS rebuild, the rowid choice — and it drives the real
+  # migration ladder from a seeded v52 rather than a hand-built schema. The
+  # runner suite is the only thing that can see the WRITE-PATH half: it runs the
+  # real runner against a real store with an engine-written final row already
+  # present, which is the exact shape that shipped and the one no schema test
+  # can reach (the constraint would silently absorb the second insert, so a
+  # store-level test cannot tell "the guard saw it" from "OR IGNORE ate it").
+  -only-testing:PlayheadTests/DuplicateSpanTextChunkV53MigrationTests
+  -only-testing:PlayheadTests/FinalPassRetranscriptionRunnerTests
   # playhead-gard: the per-detector trust rails (I series). Seven suites,
   # because the claim spans the whole chain and no one layer can observe
   # another: classification and the exemption's scope; the persisted ledger and
@@ -3214,7 +3235,168 @@ T_S9_CAPTURE_REFUSES_DETACH="The zero a replacement detach leaves is never captu
 T_S9_CAPTURE_KEEPS_STOP="The position a stop detach preserves is still captured"
 T_S9_CAPTURE_REFUSES_SILENT="A published episode on a silent transport is not captured at 0.0"
 
+# ---- playhead-jc42: the duplicated transcript span (JC series) ----
+#
+# TWO PRODUCERS OF `pass='final'` ROWS, TWO HASH NAMESPACES, ONE AUDIO.
+# `TranscriptEngineService.computeFingerprint` digests `"\(text)|\(start)|\(end)"`.
+# `FinalPassRetranscriptionRunner.computeFinalPassFingerprint` digests
+# `"fp-final-" + ` the identical string. Both write `pass='final'`. So the
+# runner's pre-insert read — which asked for its OWN prefixed value — could
+# only ever find rows the runner itself had written, and the V40 UNIQUE index
+# `(analysisAssetId, pass, segmentFingerprint)` could not compare them either:
+# it reported ZERO violations on a device carrying 7,248 duplicated spans.
+#
+# The series is built so that every plausible mis-scoping is separated from
+# its correct neighbour, because three of them LOOK like the fix:
+#   JC01 — the shipped defect verbatim (lookup by the runner's own prefix).
+#   JC02 — the lookup drops `pass`, which "removes a duplicate" by refusing to
+#          write the final row at all: a silent COVERAGE regression, not a fix.
+#          (There is no JC03. It keyed the metadata upgrade on the fabricated
+#          fingerprint rather than the found row's — a real defect, but with
+#          `idx_chunks_asset_pass_span_text` in place its observable effect is
+#          identical to JC01's, so it was one rail wearing two names. See JC01.)
+#   JC04 — the constraint keys on `normalizedText`, which is exactly the column
+#          the two producers normalise DIFFERENTLY (`normalizeText(...)` vs
+#          `.lowercased()`), so it admits 3,824 of the 7,247 twins.
+#   JC05 — the constraint drops `text`, i.e. the bead's originally proposed
+#          `(asset, span)` key, which eats genuinely distinct data.
+#   JC06 — the constraint drops `pass`, collapsing the fast/final twin that
+#          `readFastTranscriptRegions` and `readFinalTranscriptRegions` read
+#          separately.
+#   JC07 — the migration keeps the HIGHEST rowid instead of the lowest.
+#   JC08 — the FTS `rebuild` before the DELETE is removed (the V40 lesson,
+#          re-applied to the new sweep).
+#   JC09 — the dedupe's early-out reports success without sweeping, so the
+#          index build is handed live violations.
+T_JC_ENGINE_ROW="an ENGINE-written final row is recognised — the runner does not append a second copy of the same span"
+T_JC_UPGRADE="the metadata upgrade addresses the row it FOUND, not the fingerprint it fabricated"
+T_JC_LOOKUP_SEES="fetchTranscriptChunkBySpanText finds an ENGINE-written final row the prefixed fingerprint cannot address"
+T_JC_LOOKUP_PASS="fetchTranscriptChunkBySpanText is scoped to ONE pass — a fast row over the same span is not a final row"
+T_JC_COLLAPSE="two pass='final' rows with identical span+text and different fingerprints collapse to the LOWEST rowid"
+T_JC_V40_BLIND="the V40 fingerprint rule is SATISFIED by the shipped pair — the gap is real, not an unrun rung"
+T_JC_TWINS="a fast row and a final row over identical span+text are TWINS — BOTH survive"
+T_JC_DIFF_TEXT="same span and pass with DIFFERENT text both survive — the zero-width 3C2FFE10 pair is not a copy"
+T_JC_FTS="the dedupe delete fires the FTS AFTER DELETE trigger — no ghost rowid, index count matches the table"
+T_JC_FTS_MISSING="rows with NO FTS index entry (a pre-FTS database) are still deduped — the rebuild is required"
+T_JC_NORMALIZED="the two producers DISAGREE on normalizedText while agreeing on text — the key cannot be the normalised column"
+T_JC_FAST_NO_SUPPRESS="a FAST row over the same span does not suppress the final row — final-pass coverage keeps growing"
+T_JC_REINSERT="after V53 the UNIQUE index exists and a byte-identical re-insert is refused"
+T_JC_IDEMPOTENT="V53 is idempotent and the ladder reaches head from a seeded v52"
+T_JC_PREFIX="the two producers digest the SAME string — the fingerprints differ by the fp-final- prefix ALONE"
+# The two rails that survive the guard being right for the wrong reason: the
+# metadata upgrade has to address the row that was FOUND, not the one that was
+# fabricated, and these are the only tests that read those two columns back.
+T_JC_FILLS="final-pass duplicate segment fills missing speakerId and avgConfidence"
+T_JC_SPEAKER="final-pass retranscription preserves recognizer speakerId in chunks"
+
 MUTATIONS=(
+  # Batch 900 — JC01, THE SHIPPED DEFECT VERBATIM. The pre-insert guard asks
+  # for the runner's own `fp-final-` fingerprint again, so an engine-written
+  # final row for the same span is invisible and gets a second copy appended.
+  # THE CONSTRAINT ABSORBS THE DUPLICATE, AND THAT IS WHY THIS ENTRY EXPECTS
+  # ONLY THE UPGRADE. Measured, not reasoned: with JC01 applied the guard is
+  # defeated and the runner really does append the row to its batch — and
+  # `insertTranscriptChunk`'s `INSERT OR IGNORE` then hits
+  # `idx_chunks_asset_pass_span_text` and the row never lands. The count stays
+  # 1, `$T_JC_ENGINE_ROW` stays GREEN, and the only observable damage is the
+  # lost `speakerId`/`avgConfidence`. That is defense-in-depth working: the belt
+  # holds when the suspenders are cut.
+  #
+  # It also means the count assertion can no longer be reddened from the runner
+  # side at all, by any mutation of this file — see the note on
+  # `testFinalPassDoesNotDuplicateEngineWrittenFinalRow`, which is a regression
+  # assertion rather than a rail for that reason.
+  #
+  # AND IT IS WHY JC03 IS GONE. JC03 broke the upgrade's ADDRESSING while
+  # leaving the guard correct; post-constraint its observable effect is
+  # identical to this one — one row, no upgrade — so the two were the same rail
+  # wearing two names, which is exactly what the RQ01/RQ03 entry warns against.
+  # Two rounds of narrowing could not separate them because the difference is
+  # unreachable, not merely unasserted. One entry, with the shipped defect's
+  # spelling, is the honest count.
+  "JC01|900|FPRUN|$T_JC_UPGRADE"
+
+  # Batch 901 — JC02, THE PLAUSIBLE WRONG FIX. Dropping `pass` from the lookup
+  # "removes duplicates" by matching the FAST row, so the runner concludes it
+  # has already stored a final row it never wrote. `readFinalTranscriptRegions`
+  # then stops growing — a silent coverage regression wearing a fix's clothes,
+  # and the reason `contentLookupIsPassScoped` exists as a rail rather than a
+  # comment.
+  "JC02|901|STORE|$T_JC_LOOKUP_PASS;$T_JC_FAST_NO_SUPPRESS"
+
+
+  # Batch 903 — the CONSTRAINT's three key columns, one mutation each. Each
+  # names a column that looks optional and is not.
+  #
+  # JC04 — key on `normalizedText`. This is the single most seductive edit in
+  # the series: it reads as "the same words", and it is the ONE column the two
+  # producers compute differently (`normalizeText(...)` against
+  # `.lowercased()`), so on the device pull it admits 3,824 of the 7,247 twins.
+  #
+  # IT SURVIVED ON THE FIRST RUN AND THE FIXTURE WAS THE REASON, which is the
+  # finding worth keeping: `seedShippedDuplicatePair`'s default text carried no
+  # punctuation, and the two normalisers agree on every such string, so a
+  # `normalizedText` key collapsed the pair exactly as a `text` key does. The
+  # text now carries punctuation and each row is seeded with the normaliser its
+  # REAL producer uses; `$T_JC_NORMALIZED` asserts that precondition directly so
+  # nobody can disarm this rail by simplifying the fixture again.
+  "JC04|903|STORE|$T_JC_COLLAPSE;$T_JC_REINSERT;$T_JC_NORMALIZED"
+
+  # Batch 904 — JC05, the bead's own proposed key, `(asset, startTime,
+  # endTime)`. It kills the duplicate AND the `3C2FFE10 [6450.0, 6450.0]` pair,
+  # which holds two DIFFERENT fast-pass texts. Under `INSERT OR IGNORE` that
+  # loss is silent.
+  "JC05|904|STORE|$T_JC_DIFF_TEXT"
+
+  # Batch 905 — JC06, `pass` dropped from the key. Collapses the fast/final
+  # twin the final-pass design rests on and that the two region readers union
+  # separately.
+  "JC06|905|STORE|$T_JC_TWINS"
+
+  # Batch 906 — the MIGRATION's own three properties.
+  #
+  # JC07 — keep MAX(rowid). Every unordered `LIMIT 1` in the store returns the
+  # LOWEST rowid, so this hands every consumer a different row than the one
+  # they have been reading, and on the pull it would also discard the survivor
+  # that carries `atomOrdinal` in 3,471 of 3,496 groups.
+  "JC07|906|STORE|$T_JC_COLLAPSE"
+
+  # Batch 907 — JC08, the FTS `rebuild` removed. V40 learned this the hard way:
+  # `transcript_chunks_fts` is EXTERNAL-CONTENT, so deleting a content row whose
+  # index entry is missing trips SQLite's corruption check, the savepoint rolls
+  # back, and the rung reports nothing but a fault line while every duplicate
+  # survives. Here the rebuild also has a second job — keeping the index count
+  # equal to the table's after the sweep.
+  #
+  # THE EXPECTATION IS THE PRE-FTS TEST, NOT `$T_JC_FTS`, and JC08 surviving is
+  # how that was established. Every other test in the suite seeds through SQL,
+  # so the AFTER INSERT trigger has already written an index entry for every row
+  # — and with entries present the DELETE succeeds whether or not the rebuild
+  # ran. Only a fixture whose rows have NO index entry (`'delete-all'`, the
+  # shape of a database predating the FTS table) makes the missing rebuild trip
+  # SQLite's corruption check. Same rail, same reasoning, as playhead-6av0's
+  # `dedupeSurvivesRowsMissingFromTheFTSIndex` for V40.
+  "JC08|907|STORE|$T_JC_FTS_MISSING"
+
+  # Batch 908 — JC09, the early-out reports "nothing to do" without looking.
+  # The sweep returns 0, the rung proceeds to `CREATE UNIQUE INDEX` over live
+  # violations, that throws, the savepoint rolls back and `schema_version`
+  # stays at 52 forever. Killed by the collapse rail and by the re-insert rail,
+  # which is what proves the index actually got built.
+  "JC09|908|STORE|$T_JC_COLLAPSE;$T_JC_REINSERT"
+
+  # Batch 909 — JC10. Delete the confidence upgrade outright: the guard still
+  # recognises the existing row and still refuses to duplicate it, so the row
+  # count is right and every count-based assertion in the suite stays green —
+  # but the measurement the second pass actually made is dropped on the floor.
+  #
+  # It is the one mutation `$T_JC_FILLS` can observe. That fixture seeds a row
+  # the RUNNER itself wrote, so its `chunk.segmentFingerprint` and
+  # `existing.segmentFingerprint` are the same string and any mutation of the
+  # ADDRESSING is a no-op there — but a missing CALL is not. Without this entry
+  # that test would be pinned by nothing in the series.
+  "JC10|909|FPRUN|$T_JC_FILLS;$T_JC_UPGRADE"
+
   "M05|1|ORCH|$T_ANON_RACE"
   "M07|1|ORCH|$T_LISTEN_RACE"
   "M11|1|ORCH|$T_LISTEN_FP"
@@ -7170,6 +7352,15 @@ MUTATIONS=(
 # One-line description per mutation, for the report.
 describe_mutation() {
   case "$1" in
+    JC01) echo "FinalPassRetranscriptionRunner: the pre-insert guard asks for its OWN fp-final- fingerprint again (the shipped defect)" ;;
+    JC02) echo "fetchTranscriptChunkBySpanText drops the pass predicate — a FAST row answers 'already stored' and final coverage stops growing" ;;
+    JC04) echo "V53 keys the sweep and the index on normalizedText — the one column the two producers compute differently" ;;
+    JC05) echo "V53 keys on (asset, startTime, endTime) — the bead's own proposal, which eats two distinct texts at one span" ;;
+    JC06) echo "V53 drops pass from the key, collapsing the fast/final twin the two coverage unions read separately" ;;
+    JC07) echo "the dedupe keeps MAX(rowid) instead of the lowest row every unordered LIMIT 1 returns" ;;
+    JC08) echo "the FTS rebuild before the DELETE is removed — a pre-FTS row then trips SQLITE_CORRUPT and the rung rolls back" ;;
+    JC09) echo "the dedupe reports 'nothing to do' without looking, so CREATE UNIQUE INDEX is handed live violations" ;;
+    JC10) echo "the avgConfidence upgrade is deleted — no duplicate, no count change, just the lost measurement" ;;
     T01) echo "SemanticScanThroughputSplit.bucket(for:): a nil scene phase becomes .foreground" ;;
     T02) echo "ScanScenePhase.attributionBucket: a recorded .unknown becomes .foreground" ;;
     T03) echo "readSemanticScanResult: a NULL scenePhase column defaults to .active on the READ" ;;
@@ -7717,6 +7908,226 @@ snippet() { IFS= read -r -d '' "$1" || true; }
 apply_mutation() {
   local name="$1" file="$2" OLD NEW
   case "$name" in
+
+  # ---- playhead-jc42: the duplicated transcript span (JC series) ----
+
+  # JC01 — THE SHIPPED DEFECT. The pre-insert guard asks for the runner's own
+  # `fp-final-` fingerprint, which no engine-written row can ever carry.
+  JC01)
+    snippet OLD <<'EOF'
+                let existingFinalChunk = try? await store.fetchTranscriptChunkBySpanText(
+                    analysisAssetId: input.analysisAssetId,
+                    pass: TranscriptPassType.final_.rawValue,
+                    startTime: segment.startTime,
+                    endTime: segment.endTime,
+                    text: segment.text
+                )
+                if let existing = existingFinalChunk {
+EOF
+    snippet NEW <<'EOF'
+                let existingFinalChunk = try? await store.fetchTranscriptChunk(
+                    analysisAssetId: input.analysisAssetId,
+                    segmentFingerprint: chunk.segmentFingerprint
+                )
+                if let existing = existingFinalChunk {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # JC02 — the lookup stops scoping to one pass. A FAST row over the same span
+  # now answers "already stored", so the final row is never written.
+  JC02)
+    snippet OLD <<'EOF'
+            WHERE analysisAssetId = ?
+              AND pass = ?
+              AND startTime = ?
+              AND endTime = ?
+              AND text = ?
+            ORDER BY rowid
+            LIMIT 1
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, analysisAssetId)
+        bind(stmt, 2, pass)
+        bind(stmt, 3, startTime)
+        bind(stmt, 4, endTime)
+        bind(stmt, 5, text)
+EOF
+    snippet NEW <<'EOF'
+            WHERE analysisAssetId = ?
+              AND startTime = ?
+              AND endTime = ?
+              AND text = ?
+            ORDER BY rowid
+            LIMIT 1
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, analysisAssetId)
+        bind(stmt, 2, startTime)
+        bind(stmt, 3, endTime)
+        bind(stmt, 4, text)
+        _ = pass
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # JC04 — key the sweep AND the index on `normalizedText`, the one column the
+  # two producers compute differently.
+  JC04)
+    snippet OLD <<'EOF'
+                GROUP BY analysisAssetId, pass, startTime, endTime, text
+            )
+            """
+        guard try countRows(in: "transcript_chunks", where: duplicateFilter) > 0 else { return 0 }
+EOF
+    snippet NEW <<'EOF'
+                GROUP BY analysisAssetId, pass, startTime, endTime, normalizedText
+            )
+            """
+        guard try countRows(in: "transcript_chunks", where: duplicateFilter) > 0 else { return 0 }
+EOF
+    patch "$file" "$OLD" "$NEW"
+    snippet OLD <<'EOF'
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_chunks_asset_pass_span_text
+                    ON transcript_chunks(analysisAssetId, pass, startTime, endTime, text)
+EOF
+    snippet NEW <<'EOF'
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_chunks_asset_pass_span_text
+                    ON transcript_chunks(analysisAssetId, pass, startTime, endTime, normalizedText)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # JC05 — the bead's proposed `(asset, span)` key. Eats distinct data.
+  JC05)
+    snippet OLD <<'EOF'
+                GROUP BY analysisAssetId, pass, startTime, endTime, text
+            )
+            """
+        guard try countRows(in: "transcript_chunks", where: duplicateFilter) > 0 else { return 0 }
+EOF
+    snippet NEW <<'EOF'
+                GROUP BY analysisAssetId, startTime, endTime
+            )
+            """
+        guard try countRows(in: "transcript_chunks", where: duplicateFilter) > 0 else { return 0 }
+EOF
+    patch "$file" "$OLD" "$NEW"
+    snippet OLD <<'EOF'
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_chunks_asset_pass_span_text
+                    ON transcript_chunks(analysisAssetId, pass, startTime, endTime, text)
+EOF
+    snippet NEW <<'EOF'
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_chunks_asset_pass_span_text
+                    ON transcript_chunks(analysisAssetId, startTime, endTime)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # JC06 — `pass` dropped, collapsing the fast/final twin.
+  JC06)
+    snippet OLD <<'EOF'
+                GROUP BY analysisAssetId, pass, startTime, endTime, text
+            )
+            """
+        guard try countRows(in: "transcript_chunks", where: duplicateFilter) > 0 else { return 0 }
+EOF
+    snippet NEW <<'EOF'
+                GROUP BY analysisAssetId, startTime, endTime, text
+            )
+            """
+        guard try countRows(in: "transcript_chunks", where: duplicateFilter) > 0 else { return 0 }
+EOF
+    patch "$file" "$OLD" "$NEW"
+    snippet OLD <<'EOF'
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_chunks_asset_pass_span_text
+                    ON transcript_chunks(analysisAssetId, pass, startTime, endTime, text)
+EOF
+    snippet NEW <<'EOF'
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_chunks_asset_pass_span_text
+                    ON transcript_chunks(analysisAssetId, startTime, endTime, text)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # JC07 — keep the HIGHEST rowid, not the lowest.
+  JC07)
+    snippet OLD <<'EOF'
+                SELECT MIN(rowid) FROM transcript_chunks
+                GROUP BY analysisAssetId, pass, startTime, endTime, text
+EOF
+    snippet NEW <<'EOF'
+                SELECT MAX(rowid) FROM transcript_chunks
+                GROUP BY analysisAssetId, pass, startTime, endTime, text
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # JC08 — the FTS rebuild before the DELETE is removed.
+  JC08)
+    snippet OLD <<'EOF'
+        guard try countRows(in: "transcript_chunks", where: duplicateFilter) > 0 else { return 0 }
+
+        if try tableExists("transcript_chunks_fts") {
+            try exec("INSERT INTO transcript_chunks_fts(transcript_chunks_fts) VALUES('rebuild')")
+        }
+        try exec("DELETE FROM transcript_chunks WHERE \(duplicateFilter)")
+        return Int(sqlite3_changes(db))
+    }
+
+    /// Collapse `decoded_spans` to one row per
+EOF
+    snippet NEW <<'EOF'
+        guard try countRows(in: "transcript_chunks", where: duplicateFilter) > 0 else { return 0 }
+
+        try exec("DELETE FROM transcript_chunks WHERE \(duplicateFilter)")
+        return Int(sqlite3_changes(db))
+    }
+
+    /// Collapse `decoded_spans` to one row per
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # JC10 — the confidence upgrade is deleted. The guard still recognises the
+  # existing row, so nothing duplicates and every count assertion stays green;
+  # only the measurement is lost.
+  JC10)
+    snippet OLD <<'EOF'
+                    _ = try await store.updateTranscriptChunkAvgConfidenceIfMissing(
+                        analysisAssetId: input.analysisAssetId,
+                        segmentFingerprint: existing.segmentFingerprint,
+                        avgConfidence: segment.avgConfidence
+                    )
+EOF
+    snippet NEW <<'EOF'
+                    _ = existing
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # JC09 — the sweep reports "nothing to do" without looking, so the index is
+  # built over live violations, throws, and the rung rolls back forever.
+  JC09)
+    snippet OLD <<'EOF'
+        guard try countRows(in: "transcript_chunks", where: duplicateFilter) > 0 else { return 0 }
+
+        if try tableExists("transcript_chunks_fts") {
+            try exec("INSERT INTO transcript_chunks_fts(transcript_chunks_fts) VALUES('rebuild')")
+        }
+        try exec("DELETE FROM transcript_chunks WHERE \(duplicateFilter)")
+        return Int(sqlite3_changes(db))
+    }
+
+    /// Collapse `decoded_spans` to one row per
+EOF
+    snippet NEW <<'EOF'
+        guard false, try countRows(in: "transcript_chunks", where: duplicateFilter) > 0 else { return 0 }
+
+        if try tableExists("transcript_chunks_fts") {
+            try exec("INSERT INTO transcript_chunks_fts(transcript_chunks_fts) VALUES('rebuild')")
+        }
+        try exec("DELETE FROM transcript_chunks WHERE \(duplicateFilter)")
+        return Int(sqlite3_changes(db))
+    }
+
+    /// Collapse `decoded_spans` to one row per
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
 
   # ---- playhead-59c8: the unclassified model failure (UM series) ----
 
@@ -16711,6 +17122,7 @@ rec_file()   {
     ATOM)  printf '%s' "$ATOM" ;;
     AJRUN) printf '%s' "$AJRUN" ;;
     LEASE) printf '%s' "$LEASE" ;;
+    FPRUN) printf '%s' "$FPRUN" ;;
     PTX)   printf '%s' "$PTX" ;;
     *)     printf '%s' "" ;;
   esac

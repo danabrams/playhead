@@ -1461,22 +1461,42 @@ struct TranscriptChunkMigrationTests {
         )
         try await store.insertAsset(asset)
 
+        // playhead-jc42: the three rows carry DISTINCT SPANS. `makeChunk`
+        // defaults every chunk to `[0, 5]` / "hello world" / `pass: "final"`, so
+        // before this change all three differed only by `id`, `chunkIndex` and
+        // the value under test — and `idx_chunks_asset_pass_span_text` now makes
+        // that combination one row, not three. `insertTranscriptChunk` is
+        // `INSERT OR IGNORE`, so rows 2 and 3 were silently refused and the
+        // round-trip read back `[0.0]`.
+        //
+        // The constraint is right and the fixture was not: three rows with the
+        // same span AND the same text in the same pass are duplicates by any
+        // definition — they are precisely the population V53 removes. Clamping
+        // is a per-row property, so giving each row its own second of audio
+        // tests exactly what it always did. `fetchTranscriptChunks` orders by
+        // `chunkIndex`, so the expected order is unchanged.
         try await store.insertTranscriptChunk(makeChunk(
             id: "chunk-negative-confidence",
             assetId: "asset-confidence",
             chunkIndex: 0,
+            startTime: 0,
+            endTime: 5,
             avgConfidence: -0.4
         ))
         try await store.insertTranscriptChunk(makeChunk(
             id: "chunk-high-confidence",
             assetId: "asset-confidence",
             chunkIndex: 1,
+            startTime: 5,
+            endTime: 10,
             avgConfidence: 1.4
         ))
         try await store.insertTranscriptChunk(makeChunk(
             id: "chunk-nan-confidence",
             assetId: "asset-confidence",
             chunkIndex: 2,
+            startTime: 10,
+            endTime: 15,
             avgConfidence: .nan
         ))
 
