@@ -713,6 +713,18 @@ struct FinalPassRetranscriptionRunnerTests {
     /// The engine row here is spelled the way the engine spells it, and the
     /// fixture deliberately does NOT use `computeFinalPassFingerprint` — that is
     /// the whole point. Before this fix the asset ends with two rows.
+    ///
+    /// ⚠️ THIS IS A REGRESSION ASSERTION, NOT A MUTATION RAIL, AND THE
+    /// DIFFERENCE WAS MEASURED. Defeating the guard (battery rail JC01) leaves
+    /// this test GREEN: the runner really does append the row to its batch, and
+    /// `insertTranscriptChunk`'s `INSERT OR IGNORE` then hits
+    /// `idx_chunks_asset_pass_span_text` and the row never lands. So the count
+    /// cannot be reddened from this file at all any more — V53's constraint
+    /// holds it, which is the belt working when the suspenders are cut, and is
+    /// the strongest evidence in the suite that the two layers are independent.
+    /// What the guard is still uniquely responsible for is the metadata
+    /// upgrade, and `testFinalPassUpgradesTheEngineRowItFound` is the rail for
+    /// that. Do not read this test's greenness as proof the runner is correct.
     @Test("an ENGINE-written final row is recognised — the runner does not append a second copy of the same span")
     func testFinalPassDoesNotDuplicateEngineWrittenFinalRow() async throws {
         let store = try await makeTestStore()

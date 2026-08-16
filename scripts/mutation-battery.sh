@@ -3251,8 +3251,10 @@ T_S9_CAPTURE_REFUSES_SILENT="A published episode on a silent transport is not ca
 #   JC01 — the shipped defect verbatim (lookup by the runner's own prefix).
 #   JC02 — the lookup drops `pass`, which "removes a duplicate" by refusing to
 #          write the final row at all: a silent COVERAGE regression, not a fix.
-#   JC03 — the metadata upgrade keys on the fabricated fingerprint rather than
-#          the found row's, so the guard holds and the upgrade writes nothing.
+#          (There is no JC03. It keyed the metadata upgrade on the fabricated
+#          fingerprint rather than the found row's — a real defect, but with
+#          `idx_chunks_asset_pass_span_text` in place its observable effect is
+#          identical to JC01's, so it was one rail wearing two names. See JC01.)
 #   JC04 — the constraint keys on `normalizedText`, which is exactly the column
 #          the two producers normalise DIFFERENTLY (`normalizeText(...)` vs
 #          `.lowercased()`), so it admits 3,824 of the 7,247 twins.
@@ -3291,9 +3293,28 @@ MUTATIONS=(
   # Batch 900 — JC01, THE SHIPPED DEFECT VERBATIM. The pre-insert guard asks
   # for the runner's own `fp-final-` fingerprint again, so an engine-written
   # final row for the same span is invisible and gets a second copy appended.
-  # Kills BOTH halves of the seam: the guard is gone, so the row duplicates AND
-  # the upgrade never runs. That superset is what distinguishes it from JC03.
-  "JC01|900|FPRUN|$T_JC_ENGINE_ROW;$T_JC_UPGRADE"
+  # THE CONSTRAINT ABSORBS THE DUPLICATE, AND THAT IS WHY THIS ENTRY EXPECTS
+  # ONLY THE UPGRADE. Measured, not reasoned: with JC01 applied the guard is
+  # defeated and the runner really does append the row to its batch — and
+  # `insertTranscriptChunk`'s `INSERT OR IGNORE` then hits
+  # `idx_chunks_asset_pass_span_text` and the row never lands. The count stays
+  # 1, `$T_JC_ENGINE_ROW` stays GREEN, and the only observable damage is the
+  # lost `speakerId`/`avgConfidence`. That is defense-in-depth working: the belt
+  # holds when the suspenders are cut.
+  #
+  # It also means the count assertion can no longer be reddened from the runner
+  # side at all, by any mutation of this file — see the note on
+  # `testFinalPassDoesNotDuplicateEngineWrittenFinalRow`, which is a regression
+  # assertion rather than a rail for that reason.
+  #
+  # AND IT IS WHY JC03 IS GONE. JC03 broke the upgrade's ADDRESSING while
+  # leaving the guard correct; post-constraint its observable effect is
+  # identical to this one — one row, no upgrade — so the two were the same rail
+  # wearing two names, which is exactly what the RQ01/RQ03 entry warns against.
+  # Two rounds of narrowing could not separate them because the difference is
+  # unreachable, not merely unasserted. One entry, with the shipped defect's
+  # spelling, is the honest count.
+  "JC01|900|FPRUN|$T_JC_UPGRADE"
 
   # Batch 901 — JC02, THE PLAUSIBLE WRONG FIX. Dropping `pass` from the lookup
   # "removes duplicates" by matching the FAST row, so the runner concludes it
@@ -3303,33 +3324,6 @@ MUTATIONS=(
   # comment.
   "JC02|901|STORE|$T_JC_LOOKUP_PASS;$T_JC_FAST_NO_SUPPRESS"
 
-  # Batch 902 — JC03. The guard is right; the UPGRADE is keyed on the
-  # fingerprint the runner FABRICATED rather than on the row it FOUND, so both
-  # `…IfMissing` updates address nothing and write zero rows. The duplicate is
-  # gone and the diarization/confidence the second pass measured is silently
-  # dropped — the failure mode a count-only assertion cannot see.
-  #
-  # THIS ENTRY FIRST LISTED `$T_JC_FILLS` TOO AND REPORTED SURVIVED, and the
-  # reason is worth keeping because it is not a coverage hole. `T_JC_FILLS`
-  # seeds its pre-existing row with
-  # `FinalPassRetranscriptionRunner.computeFinalPassFingerprint(...)` — the
-  # RUNNER's own fingerprint — so on that fixture `chunk.segmentFingerprint`
-  # and `existing.segmentFingerprint` are the SAME STRING and the mutation is a
-  # literal no-op. The test cannot reach the mutated line by construction, not
-  # by weakness. Narrowing the expectation here is paired with JC10 below, which
-  # breaks the upgrade in a way `T_JC_FILLS` CAN see — so the test is pinned by
-  # a mutation it can observe instead of being dead weight on this one.
-  #
-  # AND THE FIRST FIX WAS STILL NOT ENOUGH. With the expectation narrowed to
-  # `$T_JC_ENGINE_ROW`, JC01 and JC03 came back with IDENTICAL kill sets — one
-  # test name standing for two different defects, which is precisely what the
-  # RQ01/RQ03 entry warns against. That test asserted the row COUNT and the
-  # METADATA together, and only the count separates the two mutations. Split
-  # into `testFinalPassUpgradesTheEngineRowItFound`, JC01 kills both halves and
-  # JC03 kills only the upgrade. A strict subset is the honest structural
-  # relationship here — JC03 IS the weaker mutation — and it is now VISIBLE in
-  # the battery output instead of hidden behind one shared name.
-  "JC03|902|FPRUN|$T_JC_UPGRADE"
 
   # Batch 903 — the CONSTRAINT's three key columns, one mutation each. Each
   # names a column that looks optional and is not.
@@ -3391,14 +3385,16 @@ MUTATIONS=(
   # which is what proves the index actually got built.
   "JC09|908|STORE|$T_JC_COLLAPSE;$T_JC_REINSERT"
 
-  # Batch 909 — JC10, the PAIR to JC03's narrowing. Delete the confidence
-  # upgrade outright: the guard still recognises the existing row and still
-  # refuses to duplicate it, so the row count is right and every count-based
-  # assertion in the suite stays green — but the measurement the second pass
-  # actually made is dropped on the floor. This is the mutation `$T_JC_FILLS`
-  # CAN observe (its fixture seeds a row the runner itself wrote, so the
-  # addressing JC03 breaks is a no-op there, but the missing CALL is not), which
-  # is what stops that test being dead weight after JC03 stopped naming it.
+  # Batch 909 — JC10. Delete the confidence upgrade outright: the guard still
+  # recognises the existing row and still refuses to duplicate it, so the row
+  # count is right and every count-based assertion in the suite stays green —
+  # but the measurement the second pass actually made is dropped on the floor.
+  #
+  # It is the one mutation `$T_JC_FILLS` can observe. That fixture seeds a row
+  # the RUNNER itself wrote, so its `chunk.segmentFingerprint` and
+  # `existing.segmentFingerprint` are the same string and any mutation of the
+  # ADDRESSING is a no-op there — but a missing CALL is not. Without this entry
+  # that test would be pinned by nothing in the series.
   "JC10|909|FPRUN|$T_JC_FILLS;$T_JC_UPGRADE"
 
   "M05|1|ORCH|$T_ANON_RACE"
@@ -7358,7 +7354,6 @@ describe_mutation() {
   case "$1" in
     JC01) echo "FinalPassRetranscriptionRunner: the pre-insert guard asks for its OWN fp-final- fingerprint again (the shipped defect)" ;;
     JC02) echo "fetchTranscriptChunkBySpanText drops the pass predicate — a FAST row answers 'already stored' and final coverage stops growing" ;;
-    JC03) echo "the metadata upgrades address the FABRICATED fingerprint instead of the row that was FOUND" ;;
     JC04) echo "V53 keys the sweep and the index on normalizedText — the one column the two producers compute differently" ;;
     JC05) echo "V53 keys on (asset, startTime, endTime) — the bead's own proposal, which eats two distinct texts at one span" ;;
     JC06) echo "V53 drops pass from the key, collapsing the fast/final twin the two coverage unions read separately" ;;
@@ -7973,40 +7968,6 @@ EOF
         bind(stmt, 3, endTime)
         bind(stmt, 4, text)
         _ = pass
-EOF
-    patch "$file" "$OLD" "$NEW" ;;
-
-  # JC03 — the guard holds, but both metadata upgrades address the fabricated
-  # fingerprint instead of the found row's, so they update zero rows.
-  JC03)
-    snippet OLD <<'EOF'
-                    if let speakerId = segment.speakerId {
-                        _ = try await store.updateTranscriptChunkSpeakerIdIfMissing(
-                            analysisAssetId: input.analysisAssetId,
-                            segmentFingerprint: existing.segmentFingerprint,
-                            speakerId: speakerId
-                        )
-                    }
-                    _ = try await store.updateTranscriptChunkAvgConfidenceIfMissing(
-                        analysisAssetId: input.analysisAssetId,
-                        segmentFingerprint: existing.segmentFingerprint,
-                        avgConfidence: segment.avgConfidence
-                    )
-EOF
-    snippet NEW <<'EOF'
-                    _ = existing
-                    if let speakerId = segment.speakerId {
-                        _ = try await store.updateTranscriptChunkSpeakerIdIfMissing(
-                            analysisAssetId: input.analysisAssetId,
-                            segmentFingerprint: chunk.segmentFingerprint,
-                            speakerId: speakerId
-                        )
-                    }
-                    _ = try await store.updateTranscriptChunkAvgConfidenceIfMissing(
-                        analysisAssetId: input.analysisAssetId,
-                        segmentFingerprint: chunk.segmentFingerprint,
-                        avgConfidence: segment.avgConfidence
-                    )
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
