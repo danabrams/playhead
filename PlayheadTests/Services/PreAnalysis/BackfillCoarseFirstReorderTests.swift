@@ -354,6 +354,7 @@ struct CoarseScanLoopTests {
             deadline: start + .seconds(70),
             minimumWindowBudget: .seconds(60),
             candidates: ["asset-a", "asset-b"],
+            reaped: nil,
             isStopRequested: { false },
             scanAsset: { id in
                 recorder.record(id)
@@ -388,6 +389,7 @@ struct CoarseScanLoopTests {
             deadline: start + .seconds(60),
             minimumWindowBudget: .seconds(60),
             candidates: ["asset-a"],
+            reaped: nil,
             isStopRequested: { false },
             scanAsset: { recorder.record($0) },
             isTaskCancelled: { false },
@@ -407,6 +409,7 @@ struct CoarseScanLoopTests {
             deadline: start,
             minimumWindowBudget: .zero,
             candidates: ["asset-a"],
+            reaped: nil,
             isStopRequested: { false },
             scanAsset: { recorder.record($0) },
             isTaskCancelled: { false },
@@ -428,6 +431,7 @@ struct CoarseScanLoopTests {
             deadline: start + .seconds(600),
             minimumWindowBudget: .zero,
             candidates: ["asset-a", "asset-b"],
+            reaped: nil,
             isStopRequested: { !stopAfterFirst.value.isEmpty },
             scanAsset: { id in
                 recorder.record(id)
@@ -449,6 +453,7 @@ struct CoarseScanLoopTests {
             deadline: start + .seconds(600),
             minimumWindowBudget: .zero,
             candidates: ["asset-a", "asset-b"],
+            reaped: nil,
             isStopRequested: { false },
             scanAsset: { id in
                 recorder.record(id)
@@ -471,6 +476,7 @@ struct CoarseScanLoopTests {
             deadline: start + .seconds(600),
             minimumWindowBudget: .zero,
             candidates: ["asset-a", "asset-b"],
+            reaped: nil,
             isStopRequested: { false },
             scanAsset: { id in
                 recorder.record(id)
@@ -531,6 +537,7 @@ struct CoarseScanLoopTests {
         _ = await AnalysisCoordinator.runCoarseScanLoop(
             deadline: start + .seconds(600), minimumWindowBudget: .zero,
             candidates: ["a", "b"],
+            reaped: nil,
             isStopRequested: { false }, scanAsset: { _ in },
             isTaskCancelled: { false }, now: { start },
             report: { drove.note($0) }, logger: Self.logger
@@ -545,6 +552,7 @@ struct CoarseScanLoopTests {
         _ = await AnalysisCoordinator.runCoarseScanLoop(
             deadline: start + .seconds(600), minimumWindowBudget: .zero,
             candidates: ["a", "b"],
+            reaped: nil,
             isStopRequested: { false }, scanAsset: { _ in throw StoreHiccup() },
             isTaskCancelled: { false }, now: { start },
             report: { refused.note($0) }, logger: Self.logger
@@ -558,6 +566,7 @@ struct CoarseScanLoopTests {
         _ = await AnalysisCoordinator.runCoarseScanLoop(
             deadline: start + .seconds(70), minimumWindowBudget: .seconds(60),
             candidates: ["a", "b"],
+            reaped: nil,
             isStopRequested: { false },
             scanAsset: { _ in clock.advance(by: .seconds(20)) },
             isTaskCancelled: { false }, now: { clock.now },
@@ -570,6 +579,7 @@ struct CoarseScanLoopTests {
         _ = await AnalysisCoordinator.runCoarseScanLoop(
             deadline: start + .seconds(600), minimumWindowBudget: .zero,
             candidates: ["a", "b"],
+            reaped: nil,
             isStopRequested: { false }, scanAsset: { _ in throw CancellationError() },
             isTaskCancelled: { false }, now: { start },
             report: { cancelled.note($0) }, logger: Self.logger
@@ -581,6 +591,7 @@ struct CoarseScanLoopTests {
         _ = await AnalysisCoordinator.runCoarseScanLoop(
             deadline: start + .seconds(600), minimumWindowBudget: .zero,
             candidates: ["a", "b"],
+            reaped: nil,
             isStopRequested: { true }, scanAsset: { _ in },
             isTaskCancelled: { false }, now: { start },
             report: { stopped.note($0) }, logger: Self.logger
@@ -604,6 +615,7 @@ struct CoarseScanLoopTests {
         _ = await AnalysisCoordinator.runCoarseScanLoop(
             deadline: start + .seconds(600), minimumWindowBudget: .zero,
             candidates: ["a", "b", "c"],
+            reaped: nil,
             isStopRequested: { false },
             scanAsset: { id in
                 if id == "c" { throw CancellationError() }
@@ -629,13 +641,14 @@ struct CoarseScanLoopTests {
             deadline: start + .seconds(600), minimumWindowBudget: .zero,
             candidates: ["a"],
             unreadable: .missingCoverageLaneRows,
+            reaped: nil,
             isStopRequested: { false }, scanAsset: { _ in },
             isTaskCancelled: { false }, now: { start },
             report: { log.note($0) }, logger: Self.logger
         )
         #expect(!log.value.isEmpty)
         #expect(log.value.allSatisfy { $0.unreadable == .missingCoverageLaneRows })
-        #expect(log.last?.ledgerReason == "coarse=drove(1/1) banked=? unread=missingRows",
+        #expect(log.last?.ledgerReason == "coarse=drove(1/1) banked=? reaped=? unread=missingRows",
                 "the banked count is not this layer's to know — it stays unmeasured here")
     }
 
@@ -644,21 +657,21 @@ struct CoarseScanLoopTests {
     @Test("the ledger reason renders as greppable key=value pairs")
     func ledgerReasonShape() {
         #expect(CoarseScanPhaseReport(verdict: .empty, scanned: 0, candidates: 0, bankedRows: 0)
-                    .ledgerReason == "coarse=empty(0/0) banked=0")
+                    .ledgerReason == "coarse=empty(0/0) banked=0 reaped=?")
         #expect(CoarseScanPhaseReport(verdict: .drove, scanned: 3, candidates: 4, bankedRows: 12)
-                    .ledgerReason == "coarse=drove(3/4) banked=12")
+                    .ledgerReason == "coarse=drove(3/4) banked=12 reaped=?")
         // Not measured is not zero.
         #expect(CoarseScanPhaseReport(verdict: .empty, scanned: 0, candidates: 0, bankedRows: nil)
-                    .ledgerReason == "coarse=empty(0/0) banked=?")
+                    .ledgerReason == "coarse=empty(0/0) banked=? reaped=?")
         #expect(CoarseScanPhaseReport(verdict: .empty, scanned: 0, candidates: 0,
                                       unreadable: .missingCoverageLaneRows, bankedRows: 0)
-                    .ledgerReason == "coarse=empty(0/0) banked=0 unread=missingRows")
+                    .ledgerReason == "coarse=empty(0/0) banked=0 reaped=? unread=missingRows")
         // A read failure with candidates still found: the modifier is
         // independent of the verdict, because a half-readable population is
         // neither an absence nor a full census.
         #expect(CoarseScanPhaseReport(verdict: .drove, scanned: 1, candidates: 1,
                                       unreadable: .resumable, bankedRows: 5)
-                    .ledgerReason == "coarse=drove(1/1) banked=5 unread=resumable")
+                    .ledgerReason == "coarse=drove(1/1) banked=5 reaped=? unread=resumable")
     }
 }
 

@@ -231,6 +231,22 @@ struct CoarseScanPhaseReport: Sendable, Equatable {
     /// threw, or the window ended before teardown), which is not zero and must
     /// never be rendered as zero.
     var bankedRows: Int?
+    /// **playhead-1e86.** How many `backfill_jobs` rows this phase's own reaper
+    /// flipped from a stranded `running` back to `queued` BEFORE it asked the
+    /// candidate queries — i.e. how many assets were made visible to this
+    /// grant that would otherwise have been absent from it.
+    ///
+    /// `nil` means the sweep could not be TAKEN (it threw), which is not zero,
+    /// for exactly the reason ``bankedRows`` distinguishes the two.
+    ///
+    /// **It is rendered on EVERY report, including `reaped=0`.** That is the
+    /// anti-vacuity contract `PersistedStateInvariants` states in full: only a
+    /// value that is ALWAYS present can distinguish "the sweep ran and found
+    /// nothing" from "the sweep never ran". A grant whose `deferReason` carries
+    /// no `reaped=` at all is a grant from a build that did not sweep — which
+    /// is every build before this bead, and is why the 933 grants preserved on
+    /// this box cannot say how often the defect fired.
+    var reaped: Int?
 
     /// The `deferReason` string. Space-separated `key=value` pairs, matching
     /// the convention `RediffRefetchService` already rides this column with
@@ -242,10 +258,12 @@ struct CoarseScanPhaseReport: Sendable, Equatable {
     /// `banked=?` rather than `banked=0` when the count is `nil`, for the same
     /// reason `BackgroundGrantCounters` preserves `nil`: "not measured" and
     /// "measured zero" are different findings and this bead exists because a
-    /// ledger collapsed two such findings into one.
+    /// ledger collapsed two such findings into one. ``reaped`` follows the same
+    /// rule and the same spelling.
     var ledgerReason: String {
         var out = "coarse=\(verdict.rawValue)(\(scanned)/\(candidates))"
         out += " banked=\(bankedRows.map(String.init) ?? "?")"
+        out += " reaped=\(reaped.map(String.init) ?? "?")"
         if let label = unreadable.label { out += " unread=\(label)" }
         return out
     }

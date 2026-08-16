@@ -743,6 +743,60 @@ actor AnalysisCoordinator {
         // then a harmless second write.
         stopRequested = false
 
+        // playhead-1e86: REAP STRANDED `running` ROWS BEFORE ASKING WHO THE
+        // CANDIDATES ARE. Both queries below exclude a row left at
+        // `status='running'` by a process iOS hard-killed —
+        // `fetchAssetIdsWithResumableBackfillJobs` binds `status <> 'running'`
+        // and `fetchAssetIdsMissingCoverageLaneJobs` requires `NOT EXISTS` any
+        // row at all — so such an asset is absent from this grant in BOTH
+        // directions, and nothing in `handleBackfillTask` ran the reaper. Until
+        // this bead the only things that did were app launch
+        // (`PlayheadRuntime`), the pre-analysis recovery handler
+        // (`BackgroundProcessingService`) and scene activation (`PlayheadApp`).
+        //
+        // MEASURED, over the 933 preserved `background_task_runs` rows spanning
+        // 2026-07-31 → 2026-08-15 (21 device captures, 13 distinct states):
+        // 385 of 655 consecutive backfill-grant pairs — 58.8 % — have no
+        // recovery grant, no launch marker and no `analysis_sessions` row
+        // between them, and 183 of those 385 are separated by more than the
+        // reaper's own 600 s freshness floor. So the separation the bead left
+        // "NOT ESTABLISHED" is the common case, not the exception.
+        //
+        // WHY HERE AND NOT IN THE HANDLER. Two reasons, both defect classes
+        // this repo has already paid for:
+        //   1. Adjacency. The reaper and the two predicates that exclude what
+        //      it repairs are now in one function, so they cannot drift apart.
+        //      Every caller of this phase gets it, including future ones.
+        //   2. `store` is NON-OPTIONAL here. The handler's route would be
+        //      `analysisJobReconciler`, which is injected late and is `nil` on a
+        //      cold BGTask wake with no scene — the sceneless-launch class that
+        //      has already shipped five times, where a `guard let` drops the
+        //      work silently and the grant reports success.
+        //
+        // WHY IT IS SAFE IN-PROCESS. The reaper's predicate is
+        // `updatedAt < now - strandedJobFreshnessSeconds` (600 s), and since
+        // playhead-qk44 the runner touches the lease once per RESOLVED coarse
+        // window (p95 57.5 s), so a live job's row cannot go stale under it.
+        // This is not a new hazard class either way: the pre-analysis recovery
+        // handler already runs this same reaper via `reconcile()`, in this same
+        // process, concurrently with backfill grants — 206 times in the window
+        // measured above, repeatedly starting in the same second as one.
+        //
+        // A THROWING SWEEP IS RECORDED AS UNMEASURED, NEVER AS ZERO — same rule
+        // the candidate queries below follow, and the same reason: a sweep that
+        // could not run must not be indistinguishable from one that found
+        // nothing stranded. `nil` renders `reaped=?` in the durable ledger row.
+        var reaped: Int?
+        do {
+            let count = try await store.resetStrandedBackfillJobs()
+            reaped = count
+            if count > 0 {
+                logger.info("runPendingCoarseScans: reaped \(count) stranded `running` backfill row(s) back to `queued` before the candidate queries")
+            }
+        } catch {
+            logger.warning("runPendingCoarseScans: stranded-backfill sweep FAILED (recorded as unmeasured, not as zero): \(String(describing: error))")
+        }
+
         // A failed candidate query is treated as EMPTY FOR THIS GRANT (the
         // phase cannot proceed on candidates it cannot read, and the drain
         // behind it must still get the window) — but it is logged as the
@@ -788,7 +842,8 @@ actor AnalysisCoordinator {
                 verdict: candidates.isEmpty ? .empty : .inflight,
                 scanned: 0,
                 candidates: candidates.count,
-                unreadable: unreadable
+                unreadable: unreadable,
+                reaped: reaped
             )
         )
         guard !candidates.isEmpty else {
@@ -801,6 +856,7 @@ actor AnalysisCoordinator {
             minimumWindowBudget: minimumWindowBudget,
             candidates: candidates,
             unreadable: unreadable,
+            reaped: reaped,
             isStopRequested: { [weak self] in
                 guard let self else { return true }
                 return await self.stopRequested
@@ -869,6 +925,14 @@ actor AnalysisCoordinator {
     ///     driven, so the last statement it made is true of the moment the
     ///     window ended — including when the window ends inside `scanAsset`
     ///     and this function never returns.
+    ///   - reaped: playhead-1e86, and it has NO DEFAULT ON PURPOSE. It rides
+    ///     every report this loop publishes, so a caller that could omit it
+    ///     would silently publish `reaped=?` — "the sweep did not report" — for
+    ///     a phase that swept perfectly well. The whole defect this bead fixes
+    ///     is a reaper nobody called being indistinguishable from a reaper that
+    ///     found nothing, so the obligation to say which is enforced by the
+    ///     compiler rather than by a comment. `nil` is a legitimate value and
+    ///     means the sweep threw; it is not a stand-in for "not applicable".
     ///
     /// **THE FLOOR TEST IS AGAINST AN ASSUMED GRANT, NOT THE ONE IN HAND
     /// (playhead-rbj4).** `budgetedRemaining` below is `deadline − now`, and
@@ -907,6 +971,7 @@ actor AnalysisCoordinator {
         minimumWindowBudget: Duration,
         candidates: [String],
         unreadable: CoarseScanCandidateReadFailures = [],
+        reaped: Int?,
         isStopRequested: @Sendable () async -> Bool,
         scanAsset: @Sendable (String) async throws -> Void,
         isTaskCancelled: @Sendable () -> Bool = { Task.isCancelled },
@@ -921,7 +986,8 @@ actor AnalysisCoordinator {
                     verdict: verdict,
                     scanned: scanned,
                     candidates: candidates.count,
-                    unreadable: unreadable
+                    unreadable: unreadable,
+                    reaped: reaped
                 )
             )
         }
