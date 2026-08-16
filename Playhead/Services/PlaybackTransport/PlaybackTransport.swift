@@ -121,6 +121,37 @@ final class PlaybackService: NSObject, Sendable {
     // MARK: - State
 
     private var _state = PlaybackState()
+    /// playhead-s9mx: whether `_state.currentTime` is a reading of a real
+    /// playhead, as opposed to a value the transport itself wrote for a
+    /// reason that has nothing to do with where the listener is.
+    ///
+    /// `_state.currentTime` is a plain `TimeInterval` with a `0` default, so
+    /// "the listener is at the start" and "no item is installed and this
+    /// field means nothing" are the same bytes. Every consumer that only
+    /// *displays* the value can live with that. The one consumer that
+    /// **commits** it — `PlayheadApp.persistPlaybackPosition`, the sole
+    /// writer of `Episode.playbackPosition` — cannot: it wrote `0.0` over a
+    /// real position for two of Dan's four episodes on 2026-08-15, and the
+    /// row it landed in is indistinguishable from one that was never played.
+    ///
+    /// Set `true` by the four sites that write a genuine position
+    /// (`seek`'s itemless seam, `seek`'s real seek, the skip-transition
+    /// completion, and the periodic time observer). Set `false` by the two
+    /// events after which the field describes nothing:
+    ///
+    /// - `pauseAndDetachCurrentItem(preservingPosition: false)`, which
+    ///   deliberately zeroes it. Note the asymmetry that makes a Bool the
+    ///   right shape rather than an `playerItem != nil` check: the
+    ///   `preservingPosition: true` call from `performStopPlayback` also
+    ///   leaves `playerItem == nil`, and there the value IS the true final
+    ///   playhead — Stop persists it on purpose.
+    /// - `loadPlayerItem`, because a freshly installed item has not yet
+    ///   produced a clock sample and the resume seek runs on
+    ///   `AVPlayerItem` directly, without touching `_state`.
+    ///
+    /// `tearDown` deliberately does NOT clear it: teardown preserves
+    /// `currentTime`, so the last reading is still the last real playhead.
+    private var isCurrentTimeObservedPlayhead = false
     private var skipCues: [CMTimeRange] = []
     private var isLocalAsset: Bool = false
     /// Identity and cue range that own the active duck/seek/release
@@ -475,6 +506,12 @@ final class PlaybackService: NSObject, Sendable {
         playerItemGeneration &+= 1
         userSeekOperationGeneration &+= 1
         isNowPlayingPublicationSuppressed = false
+        // playhead-s9mx: a newly installed item has produced no clock sample
+        // yet, and the resume seek that follows in `load`/`loadItem` runs on
+        // `AVPlayerItem` directly without touching `_state`. Until the
+        // periodic observer ticks, `_state.currentTime` belongs to whatever
+        // was playing before — or is the zero the detach left behind.
+        isCurrentTimeObservedPlayhead = false
         playerItem = item
 
         itemStatusObservation?.invalidate()
@@ -608,6 +645,13 @@ final class PlaybackService: NSObject, Sendable {
             player.removeTimeObserver(token)
             timeObserverToken = nil
         }
+        if !preservingPosition {
+            // playhead-s9mx: the zeroing below is a transport bookkeeping
+            // write, not a playhead. Mark it as such BEFORE `updateState`
+            // publishes, so no observer can read the zero and the stale
+            // `true` in the same snapshot.
+            isCurrentTimeObservedPlayhead = false
+        }
         updateState {
             $0.status = .paused
             $0.rate = 0
@@ -618,6 +662,17 @@ final class PlaybackService: NSObject, Sendable {
         }
         nowPlayingInfo.setNowPlayingInfo(nil)
         return playerItemGeneration
+    }
+
+    /// playhead-s9mx: the transport's `currentTime` **only when it is a real
+    /// playhead**, and `nil` when the field is carrying a value no listener
+    /// ever produced.
+    ///
+    /// This is the reading a commit point must use. `snapshot()` keeps
+    /// returning the raw state for every display consumer.
+    func observedPlayhead() -> TimeInterval? {
+        guard isCurrentTimeObservedPlayhead else { return nil }
+        return _state.currentTime
     }
 
     func togglePlayPause() {
@@ -692,6 +747,7 @@ final class PlaybackService: NSObject, Sendable {
         // media; there is no item identity that can become stale in this path.
         guard player.currentItem != nil else {
             userSeekOperationGeneration &+= 1
+            isCurrentTimeObservedPlayhead = true
             updateState { $0.currentTime = seconds }
             updateNowPlayingInfo()
             return true
@@ -740,6 +796,7 @@ final class PlaybackService: NSObject, Sendable {
               playerItem === item else {
             return false
         }
+        isCurrentTimeObservedPlayhead = true
         updateState { $0.currentTime = seconds }
         updateNowPlayingInfo()
         return true
@@ -1111,6 +1168,7 @@ final class PlaybackService: NSObject, Sendable {
         player.volume = originalVolume
         activeSkipTransitionOriginalVolume = nil
 
+        isCurrentTimeObservedPlayhead = true
         updateState { $0.currentTime = seconds }
         updateNowPlayingInfo()
     }
@@ -1196,6 +1254,7 @@ final class PlaybackService: NSObject, Sendable {
         }
         let seconds = CMTimeGetSeconds(time)
         guard seconds.isFinite else { return }
+        isCurrentTimeObservedPlayhead = true
         updateState { $0.currentTime = seconds }
         checkSkipCues(currentTime: time)
     }
@@ -1395,11 +1454,27 @@ final class PlaybackService: NSObject, Sendable {
 
 #if DEBUG
     /// Test-only hook for setting transport state without loading media.
+    ///
+    /// playhead-s9mx: injecting a state is a test asserting "the transport
+    /// is at this position", so the injected `currentTime` counts as an
+    /// observed playhead. Use `_testingClearObservedPlayhead()` to model the
+    /// detached transport instead.
     func _testingInjectState(_ state: PlaybackState) {
         _state = state
+        isCurrentTimeObservedPlayhead = true
         for continuation in stateObservers.values {
             continuation.yield(_state)
         }
+    }
+
+    /// Test-only: model a transport whose `currentTime` is not a playhead.
+    func _testingClearObservedPlayhead() {
+        isCurrentTimeObservedPlayhead = false
+    }
+
+    /// Test-only: read the observed-playhead fact directly.
+    func _testingIsCurrentTimeObservedPlayhead() -> Bool {
+        isCurrentTimeObservedPlayhead
     }
 
     func _testingApplyReadyToPlayState(duration: TimeInterval) {

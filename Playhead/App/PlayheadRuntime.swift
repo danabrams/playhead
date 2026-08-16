@@ -17,6 +17,48 @@ enum PlaybackPositionPersistenceTrigger: String, Sendable {
     case background
 }
 
+/// playhead-s9mx: the result of asking the runtime where the listener is.
+///
+/// This used to be `(episodeId:position:)?`, and the `nil` was consumed by a
+/// bare `else { return }` at `PlayheadApp.persistPlaybackPosition` that
+/// logged nothing at all. Two different events — "nothing is loaded" and
+/// "something is loaded but the transport is not reporting a playhead" —
+/// arrived at the commit point as the same absence, and the second is the
+/// one that matters: it is the window in which a `0.0` used to be committed
+/// over a real position. They are now separate cases with separate log
+/// lines, so the next occurrence is decidable from the log.
+enum PlaybackPositionCapture: Sendable, Equatable {
+    /// A real playhead for a published episode.
+    case captured(episodeId: String, position: TimeInterval)
+    /// Nothing is loaded for playback. Routine — every `.background`
+    /// transition with no episode playing lands here.
+    case noPublishedEpisode
+    /// An episode identity IS published, but the transport's `currentTime`
+    /// is not a reading of any installed item's clock — the transport was
+    /// detached for a replacement, or a freshly installed item has not yet
+    /// produced a sample. Committing here writes a number that names the
+    /// transport's bookkeeping, not the listener's position.
+    case playheadNotObserved(episodeId: String)
+
+    /// Stable, greppable name for the log line.
+    var outcomeName: String {
+        switch self {
+        case .captured: return "captured"
+        case .noPublishedEpisode: return "noPublishedEpisode"
+        case .playheadNotObserved: return "playheadNotObserved"
+        }
+    }
+
+    /// The episode the capture was about, when there was one.
+    var episodeId: String? {
+        switch self {
+        case let .captured(episodeId, _): return episodeId
+        case .noPublishedEpisode: return nil
+        case let .playheadNotObserved(episodeId): return episodeId
+        }
+    }
+}
+
 /// Cancellation-safe FIFO mutex for cross-service playback lifecycle
 /// transactions. Swift actors are reentrant, so merely putting the runtime on
 /// MainActor does not keep `playEpisode` / `stopPlayback` mutations ordered
@@ -3884,12 +3926,37 @@ final class PlayheadRuntime {
 
     /// Capture and expose the current playback position for persistence.
     /// Called from playback and scene handlers to save state opportunistically.
-    /// Returns the position in seconds, or nil if nothing is playing.
-    func capturePlaybackPosition() async -> (episodeId: String, position: TimeInterval)? {
-        guard let episodeId = currentEpisodeId else { return nil }
-        let snapshot = await playbackService.snapshot()
-        logger.info("Captured playback position: \(snapshot.currentTime)s")
-        return (episodeId, snapshot.currentTime)
+    ///
+    /// playhead-s9mx: reads `observedPlayhead()` rather than
+    /// `snapshot().currentTime`. The two differ in exactly the windows this
+    /// bead exists for.
+    ///
+    /// `performPlayEpisode` detaches the outgoing item with
+    /// `preservingPosition: false`, which zeroes the transport's
+    /// `currentTime` — and `detachPriorPlaybackBeforeReplacement`
+    /// deliberately keeps the OUTGOING episode's identity published across
+    /// that detach, so transport observers attribute the terminal edge to
+    /// the episode that produced the audio. `currentEpisodeId` is read here
+    /// synchronously and the transport is read after an `await`, so those
+    /// are two different instants on a reentrant MainActor: this function
+    /// could pair an episode that has a real playhead with a transport
+    /// reading of `0`, and the commit point had no way to tell that from a
+    /// listener sitting at 0:00.
+    ///
+    /// It is not hypothetical. Measured from Dan's device on 2026-08-15:
+    /// `Episode.playbackAnchor` is nil-defaulted and written on the same
+    /// line-pair as `playbackPosition` by the single commit point, and
+    /// exactly 4 of 1,594 rows carry a non-nil anchor — the four episodes
+    /// he listened to that day. Two of them read `position = 0.0,
+    /// anchor = 0.0`, which is a *completed* save of a zero, not a save
+    /// that never happened.
+    func capturePlaybackPosition() async -> PlaybackPositionCapture {
+        guard let episodeId = currentEpisodeId else { return .noPublishedEpisode }
+        guard let position = await playbackService.observedPlayhead() else {
+            return .playheadNotObserved(episodeId: episodeId)
+        }
+        logger.info("Captured playback position: \(position)s")
+        return .captured(episodeId: episodeId, position: position)
     }
 
     /// playhead-vhha: notify the candidate-window cascade of a committed

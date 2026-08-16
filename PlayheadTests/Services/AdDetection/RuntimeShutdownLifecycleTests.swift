@@ -1079,8 +1079,9 @@ struct RuntimeShutdownLifecycleTests {
                 await gate.holdFirstInvocation()
                 if !Task.isCancelled,
                    let runtime,
-                   let captured = await runtime.capturePlaybackPosition() {
-                    await persistence.append(captured.position)
+                   case let .captured(_, position) =
+                       await runtime.capturePlaybackPosition() {
+                    await persistence.append(position)
                 }
                 await persistence.noteInvocationFinished()
             }
