@@ -2429,6 +2429,23 @@ actor BackfillJobRunner {
     /// can throw, so the row leaves this arm entirely and retires through the
     /// coverage terminal after three barren attempts.
     ///
+    /// **WHAT THIS DOES NOT RESCUE, stated so the claim is not read wider than it
+    /// is.** The witness is the cursor this attempt got INTO the row, and the
+    /// mid-flight checkpoint is deliberately conservative about writing one: it
+    /// refuses on a fully-covered walk (t1kq's rule — an episode-end cursor
+    /// collapses `narrowedForResume` to an empty resume and strands pending
+    /// refinement), it freezes the durable prefix at the first window whose row
+    /// did not land, and it publishes nothing at all when the contiguous prefix
+    /// has not moved past what an earlier run already banked. So an attempt CAN
+    /// screen real audio and still be charged. That is the CURSOR rule's
+    /// conservatism, not this budget's — the same sentence
+    /// ``coverageTerminalDecision(phase:measurement:ceiling:retryCount:cursorAdvanced:)``
+    /// already carries for its own arm — and the direction is the safe one: it
+    /// charges where it cannot prove progress rather than forgiving where it
+    /// cannot prove failure. Widening it to "the measured fraction moved" would
+    /// need a second persisted quantity, which is the trade e6d3 declined and
+    /// this bead declines for the same reason.
+    ///
     /// **This is an ARITHMETIC change, not a RECLASSIFICATION.** The disposition
     /// at both call sites is untouched: the row is still `failed`, never
     /// `deferred`; the cause token is unchanged; `FMDaemonRefusal` gains no case.
