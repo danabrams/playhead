@@ -4009,11 +4009,19 @@ MUTATIONS=(
 
   # ---- playhead-luie: the day-0 attempt detail (LU series) ----
   #
-  # Ten mutations, six batches, across FOUR files — the two call sites, the
+  # Ten mutations, seven batches, across FOUR files — the two call sites, the
   # factory, and the policy that carries the field into the column. Grouping is
   # DT's rule (no shared patch anchor, no member able to produce another's
   # expected failure), and the expectation sets are what the batching is derived
   # from rather than a summary of it.
+  #
+  # FOUR ENTRIES BELOW CARRY CORRECTIONS FROM THE RUN (LU04, LU05, LU06, LU07)
+  # and one batch was SPLIT after the fact for sharing an expectation with its
+  # partner. Both are recorded in place rather than quietly fixed: an expectation
+  # set is a PREDICTION, and the whole value of writing it down is that the run
+  # can contradict it. Note also that the battery does NOT check disjointness —
+  # it was caught by re-reading the sets against the observed failures, which is
+  # the step, not the tool.
 
   # Batch 967 — LU01, THE FIRST DEFECT VERBATIM: `String(describing: error)` back
   # in the fetch arm's `detail:`. This is the line the bead names, and the one
@@ -4023,8 +4031,14 @@ MUTATIONS=(
   # reddens the argument rule, the per-site read AND the runtime witness, so all
   # three are listed and none is credited to another. LU05 is disjoint by
   # construction: it touches no call site.
+  #
+  # LU05's second expectation is a CORRECTION FROM THE RUN, not a prediction:
+  # the cap rail asserts the worst-case token's length EXACTLY (187), and a
+  # four-character-shorter prefix moves it. That is the rail behaving as
+  # designed — an exact length is what makes a grammar change visible — but it
+  # has to be recorded or the next reader reads a surprise as a survivor.
   "LU01|967|RSVC|$T_LU_FETCHARG;$T_LU_FETCHSITE;$T_LU_THROWNFETCH"
-  "LU05|967|DTR|$T_LU_PREFIX"
+  "LU05|967|DTR|$T_LU_PREFIX;$T_LU_CAP"
 
   # Batch 968 — LU02, THE SECOND DEFECT VERBATIM, and the one the bead does not
   # name: `failed.detail = String(describing: error)` in the day-0 mint's persist
@@ -4038,19 +4052,38 @@ MUTATIONS=(
 
   # Batch 969 — LU03 is DT05's escape at this site and the reason the per-site
   # read exists: the factory is still called, every `detail:` argument still
-  # spells a wholesome local, and the local holds prose. `$T_LU_FETCHARG` is
-  # deliberately ABSENT — the argument rule stays GREEN while the column takes a
-  # description, measured rather than predicted. LU06 is disjoint: it touches the
-  # factory's return, not a call site.
+  # spells a wholesome local, and the local holds prose.
+  #
+  # **`$T_LU_FETCHARG` IS DELIBERATELY ABSENT, AND THE RUN CONFIRMED IT.** Batch
+  # 969's observed failures do not include the argument rule: it stayed GREEN
+  # while the column took a description. That is the measurement this mutation
+  # exists for, and it is the reason the per-site read is a separate rail rather
+  # than a second assertion inside the argument one.
+  #
+  # ALONE. It was first written paired with LU06, and that pairing broke the
+  # series' own batching rule: LU06 also reddens `$T_LU_THROWNFETCH` (the runtime
+  # rail asserts `hasPrefix(dayZeroThrewPrefix + "(")`, and a token with no
+  # prefix at all fails it), so either member could have been credited for the
+  # other's failure. Found by re-reading the expectation sets against the run
+  # rather than by the battery, which does not check disjointness.
   "LU03|969|RSVC|$T_LU_FETCHSITE;$T_LU_THROWNFETCH"
-  "LU06|969|DTR|$T_LU_CONDITION;$T_LU_THROWNFETCH;$T_LU_PERSISTNAMED"
+
+  # Batch 973 — LU06, the ex-partner of LU03. Corrections from the run: it also
+  # reddens the closed-grammar rail (bare identity fields carry no parenthetical
+  # at all) and the cap rail (the exact length moves), on top of the two runtime
+  # rails that read the prefix.
+  "LU06|973|DTR|$T_LU_CONDITION;$T_LU_THROWNFETCH;$T_LU_PERSISTNAMED;$T_LU_GRAMMAR;$T_LU_CAP"
 
   # Batch 970 — LU04, the WRONG ERROR. The fetch arm records a `CancellationError`
   # instead of the throw it caught: a perfectly well-formed token naming an
   # identity that is not the failure's, so every value test stays green and the
   # column answers a question nobody asked. sckv's SF04/SF10 shape at this site.
-  # Alone, because it reddens the runtime rail LU03 also reaches.
-  "LU04|970|RSVC|$T_LU_ARMONCE;$T_LU_THROWNFETCH"
+  # Alone, because it reddens three rails LU03 also reaches. The last two are
+  # corrections from the run: both the argument rule and the per-site read carry
+  # `contains("dayZeroAttemptDetail(for:error)")` as their VACUITY guard, and a
+  # different argument makes that guard false — so they fail for the right
+  # reason, but not the reason the first draft of this line predicted.
+  "LU04|970|RSVC|$T_LU_ARMONCE;$T_LU_THROWNFETCH;$T_LU_FETCHARG;$T_LU_FETCHSITE"
 
   # Batch 971 — LU07 inlines the identity grammar in the day-0 factory: a second
   # ruler for a quantity `UnclassifiedModelFailure` already measures. Invisible
@@ -4058,7 +4091,9 @@ MUTATIONS=(
   # hostile domain (the sanitizer is skipped, so spaces and parens leak into a
   # key=value record) — which is why it is scored on two rails, exactly as AR09
   # was. LU10 is disjoint: it touches the outcome's convenience factory.
-  "LU07|971|DTR|$T_LU_CONDITION;$T_LU_GRAMMAR"
+  # LU07's third expectation is a correction from the run, and the same one LU05
+  # produced: an inlined grammar changes the token's exact length.
+  "LU07|971|DTR|$T_LU_CONDITION;$T_LU_GRAMMAR;$T_LU_CAP"
   "LU10|971|POLICY|$T_LU_NILDETAIL"
 
   # Batch 972 — LU08 makes `advance` carry `lastDetail` forward the way it
