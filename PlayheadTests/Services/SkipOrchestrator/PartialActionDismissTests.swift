@@ -7,7 +7,8 @@
 // "Dismiss ad". It ends in `SkipOrchestrator.revertByTimeRange`, which answers
 // a `Bool` that the sheet swallowed. Nothing happened, and nothing said so.
 //
-// WHAT THIS SUITE PINS, and why the last test is the one that failed:
+// THE PROPERTY THIS SUITE EXISTS FOR: a target the durable transaction cannot
+// accept must never refuse the gesture for the targets it can.
 //
 //   `persistRevertedAdWindowsIfCurrent` is ALL-OR-NOTHING. One expected row it
 //   will not take — already `reverted` or `suppressed`, missing, or moved —
@@ -18,19 +19,31 @@
 //   OTHER window the gesture could have reverted.
 //
 //   The entry gets stale by the listener's own earlier action: the revert's
-//   live cleanup skipped any suggest entry whose revision had changed while
-//   the durable transaction was in flight, so the id survived in the
-//   actionable set with its durable row already `reverted`.
+//   live cleanup skipped any entry whose revision had changed while the
+//   durable transaction was in flight, so the id survived in the actionable
+//   set with its durable row already `reverted`. That is a partial user action
+//   making the remaining part unreachable — the thing this bead forbids.
 //
-//   That is a partial user action making the remaining part unreachable —
-//   which is the property this bead exists to forbid.
+// HOW THE NINE READ, because the order is not the order they were written:
 //
-// The first four tests are the shapes that turned out to be FINE. They are
-// kept deliberately: each one was a plausible reading of the report, each was
-// checked against the device pull's own window stacks, and each passed before
-// the fix as well as after. A suite that only contains the shape that broke
-// cannot tell a later reader which readings were already excluded.
-
+//   1-4  The shapes that turned out to be FINE. Each was a plausible reading
+//        of the report, each was checked against the 08-15 pull's own window
+//        stacks, and each passed BEFORE the fix as well as after. Kept so a
+//        later reader can see which readings were already excluded rather
+//        than re-deriving them.
+//   5    The one that FAILED, all three assertions: the suggest-tier stale
+//        entry, reached by a producer update landing during the store hop.
+//   6-7  The instrument, one test per direction. A recorder wired only to
+//        failures cannot tell "refused" from "not instrumented yet".
+//   8    The invariant ISOLATED, and the reason it exists is a mutation
+//        result rather than an argument: the rail for the target-set fix
+//        SURVIVED against test 5, because the cleanup fix already removes
+//        that entry. Test 8 uses the state no cleanup can prevent — a live
+//        window the STORE HAS NO ROW FOR.
+//   9    The MANAGED twin of 5, and a worse symptom: that tier owns a live
+//        CUE, so a stale entry there goes on skipping audio the listener has
+//        just said is not an ad.
+//
 import Foundation
 import Testing
 
