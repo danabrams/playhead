@@ -763,12 +763,71 @@ struct FinalPassRetranscriptionRunnerTests {
         let chunks = try await store.fetchTranscriptChunks(assetId: "asset-fp")
         #expect(chunks.count == 1, "the engine's row IS this span — appending beside it is the duplication")
         #expect(chunks[0].id == "engine-final")
-        // The metadata upgrade still runs, and it is keyed on the row we FOUND
-        // rather than on `chunk.segmentFingerprint`, which addresses nothing
-        // here. Reading `chunk.segmentFingerprint` would update zero rows and
-        // leave both fields nil.
-        #expect(chunks[0].speakerId == 42)
-        #expect(chunks[0].avgConfidence == 0.9)
+    }
+
+    /// playhead-jc42 — the SECOND half of the same seam, split into its own test
+    /// so two different mutations stop being indistinguishable.
+    ///
+    /// The count assertion above and the metadata assertions below were one
+    /// test, and the battery reported JC01 and JC03 with IDENTICAL kill sets as
+    /// a result — the same failure name for two different defects, which is the
+    /// thing the RQ01/RQ03 entry warns about ("RQ01's kill set is NOT a subset
+    /// of it"). Two mutations you cannot tell apart prove less than they look
+    /// like they do.
+    ///
+    /// Split, the witnesses separate: **JC01** breaks the GUARD, so the row is
+    /// duplicated and the test above fails; **JC03** leaves the guard correct
+    /// (count 1, right id) and breaks only the ADDRESSING, which only this test
+    /// can see. `chunk.segmentFingerprint` names a row that does not exist when
+    /// the engine wrote the original, so both `…IfMissing` updates match zero
+    /// rows and the diarization/confidence this pass measured is dropped with
+    /// nothing to show for it.
+    @Test("the metadata upgrade addresses the row it FOUND, not the fingerprint it fabricated")
+    func testFinalPassUpgradesTheEngineRowItFound() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        try await store.insertAdWindow(
+            makeAdWindow(id: "w1", analysisAssetId: "asset-fp", startTime: 0, endTime: 30, confidence: 0.9)
+        )
+        let engineFingerprint = SHA256.hash(data: Data("shard-0|0.0|10.0".utf8))
+            .prefix(16)
+            .map { String(format: "%02x", $0) }
+            .joined()
+        try await store.insertTranscriptChunk(TranscriptChunk(
+            id: "engine-final",
+            analysisAssetId: "asset-fp",
+            segmentFingerprint: engineFingerprint,
+            chunkIndex: 0,
+            startTime: 0,
+            endTime: 10,
+            text: "shard-0",
+            normalizedText: "shard-0",
+            pass: TranscriptPassType.final_.rawValue,
+            modelVersion: "apple-speech-v1",
+            transcriptVersion: nil,
+            atomOrdinal: nil,
+            speakerId: nil
+        ))
+
+        let audio = StubAnalysisAudioProvider()
+        audio.shardsToReturn = [
+            AnalysisShard(id: 0, episodeID: "ep-asset-fp", startTime: 0, duration: 10, samples: [])
+        ]
+        let runner = makeRunnerWithBox(
+            store: store,
+            box: SnapshotBox(makeSnapshot()),
+            recognizer: CountingShardRecognizer(speakerId: 42),
+            audioProvider: audio
+        )
+
+        _ = try await runner.runFinalPassBackfill(for: makeInput())
+
+        let chunks = try await store.fetchTranscriptChunks(assetId: "asset-fp")
+        #expect(chunks.count == 1)
+        #expect(chunks[0].speakerId == 42,
+                "the speaker the second pass measured must land on the row that exists")
+        #expect(chunks[0].avgConfidence == 0.9,
+                "and so must the confidence — JC10 deletes exactly this call")
     }
 
     /// playhead-jc42 — THE PLAUSIBLE WRONG FIX, pinned at the layer where it

@@ -2414,7 +2414,30 @@ actor AnalysisStore {
         try exec("BEGIN IMMEDIATE")
         do {
             try createTables()
-            // Ordering: transcript_chunks Phase 1 runs before the V*IfNeeded ladder because no later migration touches `transcript_chunks` or `transcript_chunks_fts`, so its FTS rebuild cannot be undone downstream; the backfill only depends on columns `createTables()` has already (re)asserted.
+            // Ordering: transcript_chunks Phase 1 runs before the V*IfNeeded
+            // ladder; the backfill only depends on columns `createTables()` has
+            // already (re)asserted.
+            //
+            // playhead-jc42 CORRECTED THE REASON THIS LINE USED TO GIVE. It read
+            // "...because no later migration touches `transcript_chunks` or
+            // `transcript_chunks_fts`, so its FTS rebuild cannot be undone
+            // downstream". V53 touches BOTH — it DELETEs duplicate rows and
+            // rebuilds the FTS index itself — so that premise is no longer true
+            // and must not be relied on by whoever adds V54.
+            //
+            // The ordering is still correct, for a narrower reason: Phase 1
+            // MUTATES rows (`transcriptVersion`/`atomOrdinal`) through the FTS
+            // UPDATE trigger, so it needs a healthy index before it runs, and
+            // running first is how it gets one. What changed is that a later
+            // rung may now legitimately need its OWN rebuild, and V53 carries
+            // one. Do not delete a downstream rebuild on the strength of this
+            // one having happened: Phase 1's is CONDITIONAL — it fires only
+            // inside the `while` loop over assets holding `pass != 'fast'` rows
+            // with a NULL `transcriptVersion` or `atomOrdinal`, so a database
+            // whose legacy backfill has already completed gets no rebuild here
+            // at all. That is exactly the population V53's own rebuild protects,
+            // and it is why mutation rail JC08 survived until its fixture
+            // stopped seeding rows that trip this one.
             try migrateTranscriptChunksPhase1()
             try writeInitialSchemaVersionIfNeeded()
             // Cycle 1 M5: leave a fault-level forensic trail when this binary

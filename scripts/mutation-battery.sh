@@ -3267,6 +3267,7 @@ T_S9_CAPTURE_REFUSES_SILENT="A published episode on a silent transport is not ca
 #   JC09 — the dedupe's early-out reports success without sweeping, so the
 #          index build is handed live violations.
 T_JC_ENGINE_ROW="an ENGINE-written final row is recognised — the runner does not append a second copy of the same span"
+T_JC_UPGRADE="the metadata upgrade addresses the row it FOUND, not the fingerprint it fabricated"
 T_JC_LOOKUP_SEES="fetchTranscriptChunkBySpanText finds an ENGINE-written final row the prefixed fingerprint cannot address"
 T_JC_LOOKUP_PASS="fetchTranscriptChunkBySpanText is scoped to ONE pass — a fast row over the same span is not a final row"
 T_JC_COLLAPSE="two pass='final' rows with identical span+text and different fingerprints collapse to the LOWEST rowid"
@@ -3290,7 +3291,9 @@ MUTATIONS=(
   # Batch 900 — JC01, THE SHIPPED DEFECT VERBATIM. The pre-insert guard asks
   # for the runner's own `fp-final-` fingerprint again, so an engine-written
   # final row for the same span is invisible and gets a second copy appended.
-  "JC01|900|FPRUN|$T_JC_ENGINE_ROW"
+  # Kills BOTH halves of the seam: the guard is gone, so the row duplicates AND
+  # the upgrade never runs. That superset is what distinguishes it from JC03.
+  "JC01|900|FPRUN|$T_JC_ENGINE_ROW;$T_JC_UPGRADE"
 
   # Batch 901 — JC02, THE PLAUSIBLE WRONG FIX. Dropping `pass` from the lookup
   # "removes duplicates" by matching the FAST row, so the runner concludes it
@@ -3316,7 +3319,17 @@ MUTATIONS=(
   # by weakness. Narrowing the expectation here is paired with JC10 below, which
   # breaks the upgrade in a way `T_JC_FILLS` CAN see — so the test is pinned by
   # a mutation it can observe instead of being dead weight on this one.
-  "JC03|902|FPRUN|$T_JC_ENGINE_ROW"
+  #
+  # AND THE FIRST FIX WAS STILL NOT ENOUGH. With the expectation narrowed to
+  # `$T_JC_ENGINE_ROW`, JC01 and JC03 came back with IDENTICAL kill sets — one
+  # test name standing for two different defects, which is precisely what the
+  # RQ01/RQ03 entry warns against. That test asserted the row COUNT and the
+  # METADATA together, and only the count separates the two mutations. Split
+  # into `testFinalPassUpgradesTheEngineRowItFound`, JC01 kills both halves and
+  # JC03 kills only the upgrade. A strict subset is the honest structural
+  # relationship here — JC03 IS the weaker mutation — and it is now VISIBLE in
+  # the battery output instead of hidden behind one shared name.
+  "JC03|902|FPRUN|$T_JC_UPGRADE"
 
   # Batch 903 — the CONSTRAINT's three key columns, one mutation each. Each
   # names a column that looks optional and is not.
@@ -3386,7 +3399,7 @@ MUTATIONS=(
   # CAN observe (its fixture seeds a row the runner itself wrote, so the
   # addressing JC03 breaks is a no-op there, but the missing CALL is not), which
   # is what stops that test being dead weight after JC03 stopped naming it.
-  "JC10|909|FPRUN|$T_JC_FILLS;$T_JC_ENGINE_ROW"
+  "JC10|909|FPRUN|$T_JC_FILLS;$T_JC_UPGRADE"
 
   "M05|1|ORCH|$T_ANON_RACE"
   "M07|1|ORCH|$T_LISTEN_RACE"

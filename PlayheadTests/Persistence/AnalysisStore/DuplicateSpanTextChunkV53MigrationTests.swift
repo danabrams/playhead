@@ -159,18 +159,25 @@ struct DuplicateSpanTextChunkV53MigrationTests {
         text: String,
         pass: String = "final",
         modelVersion: String = "apple-speech-v1",
-        normalizedText: String? = nil
+        normalizedText: String? = nil,
+        transcriptVersion: String? = nil,
+        atomOrdinal: Int? = nil
     ) throws {
         // Defaults to the RUNNER's normaliser. `seedShippedDuplicatePair` passes
         // the engine's explicitly, because the two do not agree — see there.
         let normalized = normalizedText ?? text.lowercased()
+        // `transcriptVersion`/`atomOrdinal` default to NULL, which is the shape a
+        // real pre-Phase-1 row has. Pass them to seed a row Phase 1 will NOT
+        // touch — see `dedupeSurvivesRowsMissingFromTheFTSIndex`.
+        let version = transcriptVersion.map { quoted($0) } ?? "NULL"
+        let ordinal = atomOrdinal.map { String($0) } ?? "NULL"
         try exec(db, """
             INSERT INTO transcript_chunks
             (id, analysisAssetId, segmentFingerprint, chunkIndex, startTime, endTime,
-             text, normalizedText, pass, modelVersion)
+             text, normalizedText, pass, modelVersion, transcriptVersion, atomOrdinal)
             VALUES (\(quoted(id)), \(quoted(assetId)), \(quoted(fingerprint)), \(chunkIndex),
                     \(start), \(end), \(quoted(text)), \(quoted(normalized)),
-                    \(quoted(pass)), \(quoted(modelVersion)))
+                    \(quoted(pass)), \(quoted(modelVersion)), \(version), \(ordinal))
             """)
     }
 
@@ -214,14 +221,20 @@ struct DuplicateSpanTextChunkV53MigrationTests {
         assetId: String = "ASSET",
         text: String = DuplicateSpanTextChunkV53MigrationTests.shippedText,
         start: Double = DuplicateSpanTextChunkV53MigrationTests.shippedStart,
-        end: Double = DuplicateSpanTextChunkV53MigrationTests.shippedEnd
+        end: Double = DuplicateSpanTextChunkV53MigrationTests.shippedEnd,
+        phase1Backfilled: Bool = false
     ) throws {
+        // See `dedupeSurvivesRowsMissingFromTheFTSIndex`: filling these makes
+        // `migrateTranscriptChunksPhase1`'s SELECT skip the asset, so it issues
+        // no FTS rebuild of its own and V53's becomes observable.
+        let version: String? = phase1Backfilled ? "legacy-transcript-version" : nil
         try insertChunk(
             db, id: "engine-row", assetId: assetId,
             fingerprint: TranscriptEngineFingerprintProbe.bare(text: text, startTime: start, endTime: end),
             chunkIndex: 0, start: start, end: end, text: text,
             pass: "final", modelVersion: "apple-speech-v1",
-            normalizedText: TranscriptEngineService.normalizeText(text)
+            normalizedText: TranscriptEngineService.normalizeText(text),
+            transcriptVersion: version, atomOrdinal: phase1Backfilled ? 0 : nil
         )
         try insertChunk(
             db, id: "runner-row", assetId: assetId,
@@ -230,7 +243,8 @@ struct DuplicateSpanTextChunkV53MigrationTests {
             ),
             chunkIndex: 332, start: start, end: end, text: text,
             pass: "final", modelVersion: "apple-speech-final-v1",
-            normalizedText: text.lowercased()
+            normalizedText: text.lowercased(),
+            transcriptVersion: version, atomOrdinal: phase1Backfilled ? 1 : nil
         )
     }
 
@@ -442,11 +456,24 @@ struct DuplicateSpanTextChunkV53MigrationTests {
     /// Missing index entries are the shape an old database has: rows written
     /// before `transcript_chunks_fts` existed. `'delete-all'` reproduces that
     /// state on the real schema without hand-building one.
+    /// ⚠️ THE SEEDED ROWS CARRY `transcriptVersion` AND `atomOrdinal`, AND THAT
+    /// IS THE WHOLE FIXTURE. `migrateTranscriptChunksPhase1` runs BEFORE the
+    /// V\*IfNeeded ladder and issues its own FTS `rebuild` — but only from
+    /// inside its `while` loop over assets holding `pass != 'fast'` rows with a
+    /// NULL `transcriptVersion` or `atomOrdinal`. Seed those NULLs and Phase 1
+    /// heals the index before V53 is reached, V53's rebuild becomes redundant,
+    /// and removing it changes nothing: JC08 survived twice for exactly that
+    /// reason. Filling both columns makes Phase 1's SELECT return no rows, so
+    /// this test reaches V53 with the index still gappy — which is the real
+    /// population V53's rebuild exists for, a device whose legacy backfill has
+    /// already completed.
     @Test("rows with NO FTS index entry (a pre-FTS database) are still deduped — the rebuild is required")
     func dedupeSurvivesRowsMissingFromTheFTSIndex() async throws {
         let dir = try await seededV52Directory(prefix: "V53FTSMissing") { db in
             try self.insertAsset(db, id: "ASSET", episodeId: "ep-1", fingerprint: "sha-asset")
-            try self.seedShippedDuplicatePair(db, text: "prehistoric sponsorship")
+            try self.seedShippedDuplicatePair(
+                db, text: "prehistoric sponsorship", phase1Backfilled: true
+            )
             // Strip the entries the AFTER INSERT trigger just wrote, so the rows
             // look exactly like content that predates the FTS table.
             try self.exec(db, "INSERT INTO transcript_chunks_fts(transcript_chunks_fts) VALUES('delete-all')")
