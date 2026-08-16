@@ -237,6 +237,23 @@
 #   were NOT re-run and carry the verdicts above. Recount: the array now holds
 #   170 live entries.
 #
+#   PARTIAL RE-RUN 2026-08-16 (playhead-f5ao). Batches 830-834 only, added by
+#   this bead: F501-F505, 5 entries, one batch each (F501/F502 edit the same
+#   function body; F503/F504/F505 all redden the same test). FINAL 5 KILLED /
+#   0 SURVIVED / 0 ERROR, 6 builds (1 baseline + 5 batches), baseline GREEN
+#   first try. Batches 1-824 were NOT re-run and carry the verdicts above.
+#
+#   WHAT THIS SERIES DOES NOT COVER, stated here because the bead was a
+#   DELETION and five green rails could be misread as covering it. f5ao removed
+#   two stored properties that nothing wrote; a deleted field cannot be mutated
+#   and its only rail is the COMPILER. The five entries test the RE-POINT — the
+#   three surfaces that now answer "does this episode have analysis?" from a
+#   different column — which is the half that could be silently wrong. One
+#   further hole is named rather than papered over: the wiring from
+#   `EpisodeListView`'s private `anyEpisodeHasAnalysis` to the file-scope
+#   helper is untested, because `episodes` is a `@Query` and is empty outside a
+#   live view hierarchy.
+#
 #   PARTIAL RE-RUN 2026-08-02 (playhead-6qvf). Batches 160-169 (G01-G10, 10 new
 #   entries, one batch each) plus batch 158 — F08, whose EDIT this bead re-cut
 #   when it unified the host-read floor onto `carriesRediffByteExactWidth`.
