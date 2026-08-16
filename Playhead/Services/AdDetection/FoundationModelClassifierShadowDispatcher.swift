@@ -174,7 +174,16 @@ actor LiveShadowFMDispatcher: ShadowFMDispatcher {
         assetId: String,
         window: ShadowWindow
     ) async throws -> String {
-        let chunks = try await store.fetchTranscriptChunks(assetId: assetId)
+        // playhead-99yt: canonicalize. `fetchTranscriptChunks` returns BOTH
+        // passes, and a fast chunk plus the final chunk that re-transcribed
+        // the same audio carry byte-identical text over an identical span
+        // (3,751 such pairs on the 2026-08-15 device pull). `canonicalTimeOrder`
+        // ranks final before fast at an identical span, so without this the
+        // model was handed the same sentence twice, ADJACENT — the position in
+        // which a repetition reads as emphasis rather than as noise.
+        let chunks = TranscriptChunkCanonicalizer
+            .canonicalize(try await store.fetchTranscriptChunks(assetId: assetId))
+            .chunks
         // Filter to chunks that overlap the window. "Overlap" rather than
         // "strict inside" because transcript chunks don't align to the
         // shadow window grid — a chunk that starts inside the window but

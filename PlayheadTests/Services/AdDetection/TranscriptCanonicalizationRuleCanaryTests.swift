@@ -198,16 +198,23 @@ final class TranscriptCanonicalizationRuleCanaryTests: XCTestCase {
             `AdDetectionService.runBackfill`, which passes `canonicalChunks`.
             """,
 
-        // (2) A consumer that mints nothing: a human-readable text dump. Its
-        // catalog is rendered into the export and discarded; no row, no job id,
-        // no persisted `transcriptVersion`. It also stamps a deliberately
-        // distinct `normalizationHash` of "debug-export".
-        "DebugEpisodeExportService.swift|formatExport|chunks": """
-            mints nothing — the catalog is rendered into a text export and \
-            thrown away. No backfill_jobs row, no semantic_scan_results row, no \
-            persisted transcriptVersion, so a drifted version cannot orphan \
-            anything.
-            """,
+        // playhead-99yt REMOVED the one entry of kind (2) this list ever had,
+        // `DebugEpisodeExportService.swift|formatExport|chunks`, and the
+        // removal is worth a sentence because the entry was TRUE and the site
+        // was still wrong. "Mints nothing" is a claim about `transcriptVersion`
+        // — no `backfill_jobs` row, no `semantic_scan_results` row, nothing
+        // persisted — and it correctly said a drifted version could orphan
+        // nothing. What it did not say, because this rule does not ask, is that
+        // the ATOMS were wrong too: the export atomized the raw chunk array, so
+        // a fast/final twin became two atoms over one utterance and the printed
+        // EVIDENCE CATALOG was one no production consumer could ever compute.
+        // That site canonicalizes now, so the key resolves to nothing and the
+        // entry is gone rather than left to rot.
+        //
+        // The general lesson, since this list is the place it will be needed:
+        // kind (2) licenses a drifted VERSION, not a drifted TRANSCRIPT. If a
+        // consumer's OUTPUT is read by anyone — a human included — "mints
+        // nothing" is not the question to be asking.
     ]
 
     /// Files exempt from the walk, with reasons.

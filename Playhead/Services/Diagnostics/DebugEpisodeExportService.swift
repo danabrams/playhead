@@ -233,9 +233,22 @@ enum DebugEpisodeExportService {
             }
         }
 
-        // Evidence catalog (computed from transcript atoms)
+        // Evidence catalog (computed from transcript atoms).
+        //
+        // playhead-99yt: canonicalize. The TRANSCRIPT section above prints the
+        // raw rows on purpose — it labels each line with its `pass`, so a human
+        // debugging the pipeline can see both — but this section is read as
+        // "what the detector sees", and the detector sees the canonical set
+        // (`AnalysisCoordinator.pushEvidenceCatalog` canonicalizes for exactly
+        // this reason). Un-canonicalized, a fast/final twin produced two atoms
+        // over one utterance, shifted every later `atomOrdinal`, and printed a
+        // catalog that no production consumer could ever compute. This site was
+        // allow-listed in `TranscriptCanonicalizationRuleCanaryTests` on the
+        // grounds that it MINTS nothing, which is still true and is why the
+        // drifted version was harmless; the catalog being wrong is not about
+        // minting.
         let (atoms, version) = TranscriptAtomizer.atomize(
-            chunks: chunks,
+            chunks: TranscriptChunkCanonicalizer.canonicalize(chunks).chunks,
             analysisAssetId: analysisAssetId,
             normalizationHash: "debug-export",
             sourceHash: "debug-export"
