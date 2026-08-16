@@ -4920,6 +4920,30 @@ actor AnalysisWorkScheduler {
                     ]
                 )
                 .encodeJSON()
+            // playhead-3c4k: BOUND ONCE, ABOVE BOTH ARMS. The durable cause is
+            // now `assetResolutionThrew(domain=…,code=…,under=…)` and no longer
+            // `"assetResolution: \(error)"`.
+            //
+            // THIS IS THE ONE SITE OF THE CLASS THAT HAD FIELD ROWS. Counted per
+            // row identity over db-pull8…12, FIVE of the NINE `analysis_jobs`
+            // rows that ever carried a cause carried this arm's prose — all five
+            // of them the same SQLite sentence, `Insert failed: UNIQUE
+            // constraint failed: analysis_assets.episodeId,
+            // analysis_assets.assetFingerprint`. The four sites `playhead-3lc3`
+            // fixed had produced none.
+            //
+            // AND STRING INTERPOLATION OF AN `Error` IS `String(describing:)`,
+            // which is why 3lc3's own canary — filtering every `lastErrorCode:`
+            // argument for `localizedDescription` and `String(describing:` —
+            // could not see this line twelve hundred lines below the two it did
+            // see. The rail bans the interpolated spelling now.
+            //
+            // The prefix is the CONDITION and this condition is NOT
+            // `jobThrew`'s: this catch stands over `resolveAnalysisAssetId`, one
+            // stage before any runner exists. THE `maxAttemptsReachedPrefix`
+            // STAYS IN FRONT on the terminal arm — `isAttemptCapTerminal(_:)`
+            // matches on it and the cap-out-retry rescue reads it.
+            let assetResolutionThrowRecord = DurableThrowRecord.assetResolutionLastErrorCode(for: error)
             if attempts >= Self.maxAttemptCount {
                 await commitOutcomeArm(
                     "assetResolution.supersede",
@@ -4929,7 +4953,7 @@ actor AnalysisWorkScheduler {
                         stateUpdate: .init(
                             state: "superseded",
                             nextEligibleAt: nil,
-                            lastErrorCode: "\(Self.maxAttemptsReachedPrefix)assetResolution: \(error)"
+                            lastErrorCode: "\(Self.maxAttemptsReachedPrefix)\(assetResolutionThrowRecord)"
                         )
                     )
                 )
@@ -4938,7 +4962,10 @@ actor AnalysisWorkScheduler {
                     cause: .pipelineError,
                     metadataJSON: assetResolutionMetadata
                 )
-                logger.warning("Job \(job.jobId) abandoned after \(attempts) attempts: assetResolution: \(error)")
+                // playhead-3c4k: `token=` CONSUMES the value the row was given,
+                // so the column and the log cannot disagree about the throw in
+                // front of them; the raw description stays HERE and only here.
+                logger.warning("Job \(job.jobId) abandoned after \(attempts) attempts: token=\(assetResolutionThrowRecord, privacy: .public) detail=\(error)")
             } else {
                 let backoff = Self.exponentialBackoffSeconds(attempt: attempts)
                 await commitOutcomeArm(
@@ -4949,7 +4976,7 @@ actor AnalysisWorkScheduler {
                         stateUpdate: .init(
                             state: "failed",
                             nextEligibleAt: clock().timeIntervalSince1970 + backoff,
-                            lastErrorCode: "assetResolution: \(error)"
+                            lastErrorCode: assetResolutionThrowRecord
                         )
                     )
                 )

@@ -119,7 +119,8 @@
 //     the nine rows that ever carried a cause carried it** — and it is written
 //     by NEITHER of the two sites this bead fixes. It comes from the
 //     asset-resolution arm's `"assetResolution: \(error)"`, two lines the bead's
-//     own enumeration missed; filed as `playhead-3c4k` rather than fixed here.
+//     own enumeration missed; filed as `playhead-3c4k` and FIXED THERE — see the
+//     next section, which is that bead's record.
 //
 // **AND A PULL IS A LOWER BOUND, NOT A CENSUS.** Traced per row across the five
 // files, every one of those five prose rows was later CLEARED OR OVERWRITTEN by
@@ -144,6 +145,84 @@
 // arms this bead fixes have simply not been the ones to fire yet. Cheap now,
 // expensive on the first field failure.
 //
+// ===== THE FIFTH SITE (playhead-3c4k), AND WHY IT NEEDED A FOURTH TOKEN =====
+//
+// The line above is the whole of `playhead-3c4k`'s reason to exist: this is the
+// ONE site of the class with FIELD ROWS. The other five had produced nothing.
+//
+//     lastErrorCode: "\(Self.maxAttemptsReachedPrefix)assetResolution: \(error)"
+//     lastErrorCode: "assetResolution: \(error)"
+//
+// **STRING INTERPOLATION OF AN `Error` IS `String(describing:)`, AND THAT IS WHY
+// 3lc3's OWN SOURCE CANARY COULD NOT SEE IT.** `testTheSchedulerArmsNoLonger…`
+// filtered every `lastErrorCode:` argument for the two SPELLINGS it had just
+// removed — `localizedDescription` and `String(describing:` — and this argument
+// contains neither. A rule written from the two defects in front of it was blind
+// to the third spelling of the same defect, in the same file, twelve hundred
+// lines up. The rail now bans an interpolated `\(error)` as well, which is the
+// spelling that actually shipped, and the test asserts that a rule stated over
+// only the first two would MISS it.
+//
+// ===== WHY A FOURTH PREFIX RATHER THAN REUSING `jobThrew` =====
+//
+// `jobThrewPrefix` records the condition "the job's RUN threw something this
+// scheduler did not classify" — the outer catch, standing over `runTask.value`.
+// This arm stands over `resolveAnalysisAssetId(for:localAudioURL:)` and fires
+// BEFORE any runner exists. They are two conditions and, per ``FMDaemonRefusal``'s
+// R2-Fix1 rule, two prefixes. Folding them into one would delete exactly the
+// discrimination the prose already provided — the `assetResolution:` prefix is
+// why this site was greppable at all, and why 3lc3's enumeration could name it.
+//
+// **THE STEM `assetResolution` IS DELIBERATELY PRESERVED, AND A RAIL DEPENDS ON
+// IT.** `DownloadTimeAssetRegistrationTests` asserts
+// `job.lastErrorCode?.contains("assetResolution") != true` and calls that "the
+// precise signature of the defect" — it is the regression guard for the UNIQUE
+// constraint failure that produced all five field rows. A token spelled without
+// the stem would leave that rail GREEN while this arm fired: a check that reads
+// as evidence of an absence it can no longer see. So the token is
+// `assetResolutionThrew(…)` and the retired prose was `assetResolution: …`; they
+// share fifteen characters and diverge at the sixteenth, `T` against `:`.
+// Consequences, stated so a device pull can be written without guessing:
+//
+//     LIKE 'assetResolutionThrew(%'  -> the token, and only the token
+//     LIKE 'assetResolution: %'      -> the retired prose, and only that
+//     LIKE 'assetResolution%'        -> both, which is the UNION query and is
+//                                       the one an operator asking "how often
+//                                       has asset resolution ever failed?"
+//                                       actually wants
+//
+// ===== NO MIGRATION, AND THE REASON IS A CENSUS RATHER THAN AN ABSENCE =====
+//
+// The other three columns needed no migration because their populations were
+// empty. This one's is not, so the argument has to be different in kind.
+// Re-counted per ROW IDENTITY over the union of the same five pulls:
+//
+//     38 distinct jobIds have ever existed across the five files
+//      9 ever carried a non-null `lastErrorCode`
+//      5 of those 9 ever carried the `assetResolution: ` prose  (56 %)
+//      0 ever carried the TERMINAL spelling — every field row came from the
+//        RETRY arm, so the attempt cap has never been reached here
+//      0 hold it in db-pull12, the most recent pull
+//
+// The last line is the migration argument and it is a CENSUS, not a sample:
+// db-pull12 is the whole `analysis_jobs` table at 2026-08-15 20:09 — 38 rows, of
+// which exactly 2 carry any cause at all and both read
+// `coverageInsufficient:noProgress`. There is nothing to migrate because
+// last-writer-wins already did it: traced per row, every one of the five was
+// NULLed or overwritten by a named token from a different arm within one or two
+// pulls, and all five ended at `state=complete`. They are rows that failed
+// transiently and then SUCCEEDED — `playhead-e6d3`'s question ("were those rows
+// failed under a rule that no longer holds?") does not even arise, because they
+// are not failed rows.
+//
+// **DO NOT READ THE FIVE AS A COUNT OF ANYTHING.** `lastErrorCode` is a
+// LAST-WRITER column, so the number of times this arm has fired is strictly
+// greater than the number of rows any pull can show and is unrecoverable from
+// these files. Five is a floor on the FIRINGS. Zero, by contrast, is exact on
+// the HOLDINGS, because a snapshot of a table is a complete enumeration of that
+// table — the two numbers are different quantities and only one of them is a
+// bound.
+//
 // ===== WHO READS THESE COLUMNS, ENUMERATED PER COLUMN =====
 //
 // `analysis_jobs.lastErrorCode` — ONE production consumer switches on content,
@@ -153,7 +232,9 @@
 // ``AnalysisWorkScheduler/isRescuableTerminal(_:)``. **Site 1 writes exactly the
 // row that predicate matches**, so the `maxAttemptsReached:` prefix is
 // load-bearing and is preserved verbatim; only the SUFFIX changes, from a
-// localized apology to a token. `isNoProgressTerminal(_:)` compares the whole
+// localized apology to a token. The same holds for playhead-3c4k's terminal
+// asset-resolution arm, which is the third writer of that prefix here.
+// `isNoProgressTerminal(_:)` compares the whole
 // string to `coverageInsufficient:noProgress` and cannot match either spelling.
 // `PersistedStateInvariantEvaluator` tests PRESENCE (`!= nil`) and then
 // sanitizes for a witness line; `ActivitySnapshotProvider` and
@@ -235,9 +316,10 @@ enum DurableThrowRecord {
     /// The greppable family for `analysis_jobs.lastErrorCode`.
     ///
     /// Its own prefix, sharing none with the other causes that column holds:
-    /// `maxAttemptsReached:`, `staleFingerprint:`, `assetResolution:`,
+    /// `maxAttemptsReached:`, `staleFingerprint:`, `assetResolutionThrew(`,
     /// `backgroundWindowExpired`, `coverageInsufficient:`, `cancelMidRun`,
-    /// `transcription:` or `reconciler_unavailable`.
+    /// `transcription:` or `reconciler_unavailable` — nor with the RETIRED
+    /// `assetResolution: ` prose ``assetResolutionThrewPrefix`` replaced.
     ///
     /// The prefix is the CONDITION, per ``FMDaemonRefusal``'s R2-Fix1 rule, and
     /// the condition is "the job's run threw something this scheduler did not
@@ -248,6 +330,32 @@ enum DurableThrowRecord {
     /// `jobThrew(…)`. One prefix per condition; the arm is spelled by the
     /// existing prefix and by `state`.
     static let jobThrewPrefix = "jobThrew"
+
+    /// The SECOND greppable family for `analysis_jobs.lastErrorCode`
+    /// (playhead-3c4k), and the only one of the four that has ever fired in the
+    /// field.
+    ///
+    /// A separate condition from ``jobThrewPrefix``, therefore a separate
+    /// prefix: this one is "resolving the analysis asset for this job threw",
+    /// raised by ``AnalysisWorkScheduler``'s pre-runner
+    /// `resolveAnalysisAssetId(for:localAudioURL:)` catch, which fires BEFORE
+    /// any runner exists. `jobThrew` is "the job's run threw". A pull that
+    /// cannot tell those apart has lost the discrimination the retired prose
+    /// already gave it, which is why this is not folded into `jobThrew`.
+    ///
+    /// The stem is the retired spelling's, deliberately — see this file's
+    /// header, and `DownloadTimeAssetRegistrationTests`, whose regression guard
+    /// for the UNIQUE-constraint defect is `contains("assetResolution")` and
+    /// would go blind against a token spelled any other way. `Threw(` is what
+    /// separates the token from the prose, and the separation is exact: the
+    /// prose's sixteenth character is `:` and the token's is `T`.
+    ///
+    /// Like ``jobThrewPrefix``, the TERMINAL arm still carries
+    /// ``AnalysisWorkScheduler/maxAttemptsReachedPrefix`` IN FRONT of this
+    /// token — `isAttemptCapTerminal(_:)` matches on that and drives the
+    /// cap-out rescue. No field row has ever taken that arm (0 of 5), so it is
+    /// the arm with no witness and the one a rail has to carry.
+    static let assetResolutionThrewPrefix = "assetResolutionThrew"
 
     /// The greppable family for `analysis_sessions.failureReason`.
     ///
@@ -306,6 +414,19 @@ enum DurableThrowRecord {
     /// front. The retry arm writes this value alone.
     static func jobLastErrorCode(for error: Error) -> String {
         "\(jobThrewPrefix)(\(identityFields(of: error)))"
+    }
+
+    /// The durable cause for `analysis_jobs.lastErrorCode`, written by
+    /// ``AnalysisWorkScheduler``'s pre-runner asset-resolution catch
+    /// (playhead-3c4k).
+    ///
+    /// `assetResolutionThrew(domain=…,code=…,under=…)`. The TERMINAL arm
+    /// prepends ``AnalysisWorkScheduler/maxAttemptsReachedPrefix``; the retry
+    /// arm writes this value alone. Identical treatment to
+    /// ``jobLastErrorCode(for:)`` and deliberately so — the two arms differ in
+    /// the CONDITION they record, not in the grammar they record it with.
+    static func assetResolutionLastErrorCode(for error: Error) -> String {
+        "\(assetResolutionThrewPrefix)(\(identityFields(of: error)))"
     }
 
     /// The durable cause for `analysis_sessions.failureReason`, written by

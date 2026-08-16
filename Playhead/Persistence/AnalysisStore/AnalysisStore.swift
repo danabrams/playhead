@@ -10872,6 +10872,14 @@ actor AnalysisStore {
     /// to the incumbent row's `assetFingerprint`. So it was never a second
     /// stitch of the same episode — it was the SAME identity, minted twice.
     ///
+    /// **THAT SPELLING IS RETIRED — do not grep a fresh pull for it**
+    /// (playhead-3c4k). It was a Swift error's description interpolated into a
+    /// durable column; the arm now writes
+    /// ``DurableThrowRecord/assetResolutionThrewPrefix``, i.e.
+    /// `assetResolutionThrew(domain=…,code=…,under=…)`. `LIKE
+    /// 'assetResolution%'` still selects both, which is what makes the sentence
+    /// above and a row written today countable together.
+    ///
     /// ``AnalysisWorkScheduler/resolveAnalysisAssetId(for:localAudioURL:)``
     /// asks `fetchAssetByEpisodeId(_:assetFingerprint:)` whether that identity
     /// already exists, and then makes three `await` hops (a capability read, a

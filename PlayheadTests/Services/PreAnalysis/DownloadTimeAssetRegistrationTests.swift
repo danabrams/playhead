@@ -1109,8 +1109,18 @@ struct DownloadTimeAssetRegistrationTests {
         //     and `dispatchPromotesTheRegisteredRowOffTheRestingToken` assert
         //     nothing about it either, because a synthetic 4-second CAF through
         //     a stub recogniser has no meaningful analysis outcome. The
-        //     `assetResolution:` prefix is written by exactly one arm and is
+        //     `assetResolution` STEM is written by exactly one arm and is
         //     therefore the precise signature of the defect.
+        //
+        //     playhead-3c4k retired the prose that arm used to write — the
+        //     column now holds `assetResolutionThrew(domain=…,code=…,under=…)`
+        //     rather than `assetResolution: <Swift error description>` — and
+        //     kept the STEM precisely so this line keeps meaning what it says.
+        //     A token spelled any other way would leave this guard permanently
+        //     green while the arm fired, which is a check that has stopped
+        //     being able to see the thing it reports the absence of. The
+        //     `contains` below therefore matches BOTH spellings deliberately;
+        //     it is not loose, it is the union of the arm's whole history.
         let job = try #require(try await store.fetchJob(byId: "job-1216"))
         #expect(
             job.lastErrorCode?.contains("assetResolution") != true,
