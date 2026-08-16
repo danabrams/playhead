@@ -386,6 +386,44 @@ struct UnnormalizedChunkTextV54MigrationTests {
         try exec(db, "INSERT INTO transcript_chunks_fts(transcript_chunks_fts, rank) VALUES('integrity-check', 0)")
     }
 
+    @Test("rows with NO FTS index entry (a pre-FTS database) are still repaired — the rebuild is required")
+    func repairSurvivesRowsMissingFromTheFTSIndex() async throws {
+        // WHY THIS TEST EXISTS AND `repairLeavesNoFTSGhost` IS NOT ENOUGH —
+        // the same lesson playhead-jc42's JC08 records for V40's sweep. Every
+        // other fixture here seeds through SQL, so the `transcript_chunks_ai`
+        // AFTER INSERT trigger has already written an index entry for each row,
+        // and with entries present the UPDATE's `'delete'` half succeeds
+        // whether or not the rebuild ran. Only a fixture whose rows have NO
+        // index entry — the shape of a database predating the FTS table —
+        // makes a missing rebuild trip SQLite's corruption check, roll the
+        // savepoint back, and leave `schema_version` at 53 forever.
+        let dir = try await seededV53Directory(prefix: "V54NoFTS") { db in
+            try self.insertAsset(db, id: "ASSET", episodeId: "ep-1", fingerprint: "sha-asset")
+            try self.insertChunk(
+                db, id: "broken", assetId: "ASSET", fingerprint: "fp-final-broken",
+                chunkIndex: 0, start: 0, end: 3, text: Self.brokenText
+            )
+            // Strip the index entries the INSERT trigger just wrote, leaving
+            // content rows the FTS index has never heard of.
+            try self.exec(db, "INSERT INTO transcript_chunks_fts(transcript_chunks_fts) VALUES('delete-all')")
+        }
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        try await migrateAgain(dir)
+
+        let db = try openRaw(dir)
+        defer { sqlite3_close_v2(db) }
+        #expect(
+            try scalarText(db, "SELECT normalizedText FROM transcript_chunks WHERE id = 'broken'")
+                == Self.brokenTextNormalized
+        )
+        // The rung completed rather than rolling back.
+        #expect(
+            try scalarText(db, "SELECT value FROM _meta WHERE key = 'schema_version'")
+                == String(AnalysisStore.currentSchemaVersion)
+        )
+    }
+
     // MARK: - The product effect
 
     @Test("LexicalScanner recovers a urlCTA hit the raw spelling could not produce")
