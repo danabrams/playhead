@@ -692,11 +692,46 @@ struct PlayheadApp: App {
         trigger: PlaybackPositionPersistenceTrigger
     ) async {
         guard !Task.isCancelled else { return }
-        guard let captured = await runtime.capturePlaybackPosition() else { return }
+        // playhead-s9mx: this used to be `guard let captured = … else
+        // { return }` and logged NOTHING. Three different events left the
+        // function here, indistinguishable from each other and from a
+        // successful no-op write, and one of them — a transport that is not
+        // reporting a playhead — is the window in which a real position got
+        // replaced by 0.0. Each outcome now names itself.
+        let capture = await runtime.capturePlaybackPosition()
+        let episodeId: String
+        let capturedPosition: TimeInterval
+        switch capture {
+        case let .captured(id, position):
+            episodeId = id
+            capturedPosition = position
+        case .noPublishedEpisode:
+            // Routine: every `.background` transition with nothing loaded.
+            // `debug`, not `warning` — a level that fires on the happy path
+            // is a level nobody reads.
+            logger.debug(
+                "Playback position persistence skipped: \(capture.outcomeName) for trigger \(trigger.rawValue)"
+            )
+            return
+        case let .playheadNotObserved(id):
+            // NOT routine. An episode is published and we declined to write
+            // a number that would have named the transport's bookkeeping
+            // rather than the listener. Before this bead the same condition
+            // committed `0.0` over a real position, silently.
+            logger.warning(
+                """
+                Playback position persistence skipped: \(capture.outcomeName) \
+                for episode \(id), trigger \(trigger.rawValue) — the transport \
+                has no observed playhead (detached for replacement, or a fresh \
+                item with no clock sample yet). The stored position is left as \
+                the last real commit.
+                """
+            )
+            return
+        }
         guard !Task.isCancelled else { return }
 
         let context = modelContainer.mainContext
-        let episodeId = captured.episodeId
         let descriptor = FetchDescriptor<Episode>(
             predicate: #Predicate { $0.canonicalEpisodeKey == episodeId }
         )
@@ -708,28 +743,49 @@ struct PlayheadApp: App {
             return
         }
 
-        guard abs(episode.playbackPosition - captured.position) >= playbackPositionMeaningfulDelta else {
+        guard abs(episode.playbackPosition - capturedPosition) >= playbackPositionMeaningfulDelta else {
+            // playhead-s9mx: the fourth exit, and the last one that was
+            // silent. It is the routine one — a sub-0.5 s tick — so it logs
+            // at `debug`, but it logs: a reader triaging "why is this row
+            // stale" has to be able to tell "we declined to write a
+            // near-identical value" from "we never got here".
+            logger.debug(
+                """
+                Playback position persistence skipped: belowMeaningfulDelta \
+                (stored \(episode.playbackPosition)s, captured \
+                \(capturedPosition)s) for episode \(episodeId), trigger \
+                \(trigger.rawValue)
+                """
+            )
             return
         }
 
         guard !Task.isCancelled else { return }
-        episode.playbackPosition = captured.position
+        episode.playbackPosition = capturedPosition
         // playhead-cthe: the readiness anchor tracks the play-loop commit
         // point 1:1. Updating it here means a force-quit mid-playback
         // preserves the last persisted commit as the readiness anchor
         // (per the bead spec's "last persisted commit wins" rule), and
         // the Library cell's ✓ derivation reflects real playback
         // progress without any separate subscription.
-        episode.playbackAnchor = captured.position
+        //
+        // playhead-s9mx: this pairing is also the ONLY thing that
+        // distinguishes "played and committed at 0.0" from "never played".
+        // `playbackAnchor` is nil-defaulted and written nowhere else in
+        // production, so `anchor == nil` means no commit point has ever
+        // run for this episode while `anchor == 0.0` means one did and
+        // reported zero. That is what made this bead decidable from a
+        // device pull rather than from a log nobody had.
+        episode.playbackAnchor = capturedPosition
         let episodeDuration = episode.duration
         do {
             try context.save()
             logger.info(
-                "Saved position \(captured.position)s for episode \(episodeId), trigger=\(trigger.rawValue)"
+                "Saved position \(capturedPosition)s for episode \(episodeId), trigger=\(trigger.rawValue)"
             )
         } catch {
             logger.error(
-                "Failed to save position \(captured.position)s for episode \(episodeId), trigger=\(trigger.rawValue): \(error)"
+                "Failed to save position \(capturedPosition)s for episode \(episodeId), trigger=\(trigger.rawValue): \(error)"
             )
         }
 
@@ -742,7 +798,7 @@ struct PlayheadApp: App {
         // represents the user's intended playhead.
         await runtime.noteCommittedPlayhead(
             episodeId: episodeId,
-            position: captured.position,
+            position: capturedPosition,
             episodeDuration: episodeDuration
         )
     }

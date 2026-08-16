@@ -1173,6 +1173,16 @@ PERMC="Playhead/Services/AdDetection/PermissiveAdClassifier.swift"
 # recovery of that identity from the episode row itself.
 RT="Playhead/App/PlayheadRuntime.swift"
 MODEL="Playhead/Models/Podcast.swift"
+# playhead-s9mx: the playback-position COMMIT POINT. Two files because the
+# claim spans a boundary neither side can see alone. The transport is the only
+# thing that knows whether `_state.currentTime` came from an item's clock or
+# from its own bookkeeping (it is zeroed by `pauseAndDetachCurrentItem` when
+# the replacement path detaches); the runtime is the only thing that knows
+# which episode that reading is about. Pairing an episode with a transport
+# reading is exactly where the field defect lived — a `0` that named a detach
+# got committed as a listener position over `Episode.playbackPosition`, twice,
+# on 2026-08-15.
+PTX="Playhead/Services/PlaybackTransport/PlaybackTransport.swift"
 # playhead-isp5: the ingest-outcome TAXONOMY. Its own file because two of the
 # W rails are about the audit row's own arithmetic — a drop counted as a
 # delivery, a reason that never renders — and those live in the value type, not
@@ -1353,6 +1363,7 @@ MUTABLE_FILES=(
   "$DLMGR" "$FQSCAN" "$BGFEED" "$EPPREP" "$SCHED"
   "$CLAIM" "$RECON" "$ATOM" "$AJRUN" "$ACOORD" "$ESUMBF" "$MPTRENG" "$MPTRIDX"
   "$BGPS" "$GRANT" "$LEASE"
+  "$PTX"
 )
 # playhead-6r4z R1 review: `$MPTRIDX` was MISSING from the list above from the
 # moment playhead-mptr added the K2 series, and it is the target of NINE of the
@@ -1941,6 +1952,16 @@ FOCUSED_SUITES=(
   # with the same spelling had already reported `** TEST SUCCEEDED **` over a
   # test that never executed.
   "-only-testing:PlayheadTests/AnalysisJobRunnerTests/testInterruptedRunDoesNotFenceTheAsset()"
+  # playhead-s9mx: the playback-position commit point (S9M series). ONE suite,
+  # because it deliberately spans both layers itself — half its tests drive
+  # `PlaybackService` directly and half drive `PlayheadRuntime
+  # .capturePlaybackPosition`, which is the pairing the defect lived in. The
+  # App-layer consumer (`PlayheadApp.persistPlaybackPosition`) is a private
+  # static on a SwiftUI `App` struct and is unreachable from any test; its
+  # `return` on the refusal path is held by the COMPILER instead (the two
+  # `let`s the switch assigns are uninitialised on every other path), which is
+  # why there is no S9M rail for it.
+  -only-testing:PlayheadTests/PlaybackPositionCommitTests
 )
 
 # Named to match the `/private/tmp/playhead-*` pattern `scripts/disk-cleanup.sh`
@@ -3161,6 +3182,24 @@ T_RN_E2E_BANKED="a throw AFTER the pass banked audio spends NO retry"
 T_RN_E2E_BARREN="a throw BEFORE the pass banks anything is charged, and is still a FAILURE"
 T_RN_E2E_RETIRE="three barren attempts still retire the job"
 T_RN_E2E_PERM="a PERMANENT store failure still goes straight to the cap, end to end"
+
+# --- playhead-s9mx: a detached transport is not a playhead (S9M series) ------
+#
+# Four rails on one boundary, split so that no two of them can be told apart by
+# the same failure. The two directions are equally load-bearing and the
+# obvious "fix" gets one of them wrong: a REPLACEMENT detach must revoke the
+# reading (that is the shipped defect) and a STOP detach must preserve it (that
+# is how the two episodes that DID work got their end-of-episode positions,
+# since `performStopPlayback` persists on the line after its detach).
+#
+# NO SEMICOLONS in any of these display names — the record separator, and the
+# cause this script's own header lists twice.
+T_S9_REPLACEMENT_REVOKES="A REPLACEMENT detach revokes the playhead it zeroed"
+T_S9_STOP_PRESERVES="A STOP detach preserves the playhead, because Stop persists it"
+T_S9_LOAD_REVOKES="Installing a new item revokes the previous item's playhead"
+T_S9_CAPTURE_REFUSES_DETACH="The zero a replacement detach leaves is never captured as a position"
+T_S9_CAPTURE_KEEPS_STOP="The position a stop detach preserves is still captured"
+T_S9_CAPTURE_REFUSES_SILENT="A published episode on a silent transport is not captured at 0.0"
 
 MUTATIONS=(
   "M05|1|ORCH|$T_ANON_RACE"
@@ -6945,6 +6984,54 @@ MUTATIONS=(
   # properties a green result was resting on, and saying so is better than a
   # rail that quietly claims more coverage than it has.
   "RN08|815|RUNNER|$T_RN_BOX_NEVER_LOWERS"
+
+  # ---- playhead-s9mx: a detached transport is not a playhead (S9M series) ----
+  #
+  # Four batches for four rails, because all four edits land in the same file
+  # and two of them in the same function — the "two edits whose blast radius
+  # overlaps get separate batches even when their expected tests differ" rule.
+
+  # Batch 816 — S9M01, THE shipped defect, verbatim: the replacement detach
+  # zeroes `_state.currentTime` and stops saying so, so the zero it wrote for
+  # its own bookkeeping is offered to the commit point as a listener position.
+  # This is what put `playbackPosition = 0.0, playbackAnchor = 0.0` on two of
+  # Dan's four episodes of 2026-08-15 — a COMPLETED save of a zero, which the
+  # non-nil anchor proves, not a save that was skipped.
+  # UNIQUE KILL: `T_S9_REPLACEMENT_REVOKES`, the transport-level assertion. No
+  # other rail here reddens it.
+  "S9M01|816|PTX|$T_S9_REPLACEMENT_REVOKES;$T_S9_CAPTURE_REFUSES_DETACH"
+
+  # Batch 817 — S9M02, the OVER-correction, and the reason the fix is a fact
+  # about the value rather than an `playerItem != nil` check. Revoke on every
+  # detach, not only the zeroing one. `performStopPlayback` detaches with
+  # `preservingPosition: true` and persists on the very next line, so this
+  # deletes the end-of-episode commit that was working — the 1517.68 and
+  # 6873.14 rows in the same device pull.
+  # UNIQUE KILLS: `T_S9_STOP_PRESERVES`, `T_S9_CAPTURE_KEEPS_STOP`.
+  "S9M02|817|PTX|$T_S9_STOP_PRESERVES;$T_S9_CAPTURE_KEEPS_STOP"
+
+  # Batch 818 — S9M03, the second window, which is not a detach at all: a
+  # freshly installed item inherits the previous episode's `currentTime`
+  # because `loadPlayerItem` never touches `_state` and `load`'s resume seek
+  # runs on `AVPlayerItem` directly. Without the revoke, the INCOMING episode
+  # can be committed at the OUTGOING one's position.
+  # UNIQUE KILL: `T_S9_LOAD_REVOKES`.
+  "S9M03|818|PTX|$T_S9_LOAD_REVOKES"
+
+  # Batch 819 — S9M04, the runtime side: `capturePlaybackPosition` goes back to
+  # reading `snapshot().currentTime` unconditionally. The transport still knows
+  # the truth and the commit point still has its typed outcomes; nobody asks.
+  # This is the rail that proves the two halves are actually WIRED, which
+  # S9M01-03 cannot — they each break the transport's answer rather than the
+  # question.
+  # UNIQUE KILL: `T_S9_CAPTURE_REFUSES_SILENT`. That test never detaches and
+  # never loads, so no transport-side mutation can reach it; it fails only when
+  # the raw `0` default is read as a position. Note the other half of its kill
+  # set, `T_S9_CAPTURE_REFUSES_DETACH`, is shared with S9M01 — S9M04's kill set
+  # is otherwise a subset, which is inherent (a consumer that ignores the
+  # answer and a producer that gives the wrong one are indistinguishable from
+  # the consumer's side) and is why the silent-transport test exists.
+  "S9M04|819|RT|$T_S9_CAPTURE_REFUSES_SILENT;$T_S9_CAPTURE_REFUSES_DETACH"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -7518,6 +7605,10 @@ describe_mutation() {
     RN06) echo "ronl: the permanence clause charges one instead of short-circuiting to the cap — a row that can never succeed spends three attempts proving it" ;;
     RN07) echo "ronl: the checkpoint box stops recording the cursor the store was given, so every failing attempt reads as barren" ;;
     RN08) echo "ronl: the box OVERWRITES the recorded cursor instead of merging it, so an out-of-order checkpoint lowers it and a real advance is charged" ;;
+    S9M01) echo "s9mx THE SHIPPED DEFECT: the replacement detach zeroes currentTime and stops saying so, so its own bookkeeping zero is offered to the commit point as a listener position" ;;
+    S9M02) echo "s9mx THE OVER-CORRECTION: every detach revokes the reading, including Stop's — which deletes the end-of-episode commit that was working" ;;
+    S9M03) echo "s9mx: a freshly installed item stops revoking, so the incoming episode can be committed at the outgoing one's position" ;;
+    S9M04) echo "s9mx: capturePlaybackPosition reads snapshot().currentTime again — the transport still knows the truth and nobody asks" ;;
     *)   echo "(no description)" ;;
   esac
 }
@@ -16321,6 +16412,75 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  # ---- playhead-s9mx: a detached transport is not a playhead (S9M series) ----
+
+  # S9M01 — the shipped defect. The replacement detach still zeroes
+  # `currentTime`; it just stops recording that the zero is bookkeeping. The
+  # commit point then reads it as where the listener is.
+  S9M01)
+    snippet OLD <<'EOF'
+        if !preservingPosition {
+            // playhead-s9mx: the zeroing below is a transport bookkeeping
+            // write, not a playhead. Mark it as such BEFORE `updateState`
+            // publishes, so no observer can read the zero and the stale
+            // `true` in the same snapshot.
+            isCurrentTimeObservedPlayhead = false
+        }
+EOF
+    snippet NEW <<'EOF'
+        if !preservingPosition {
+            _ = preservingPosition
+        }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # S9M02 — the over-correction: revoke on EVERY detach, so Stop's preserved
+  # end-of-episode position stops being committable.
+  S9M02)
+    snippet OLD <<'EOF'
+        if !preservingPosition {
+            // playhead-s9mx: the zeroing below is a transport bookkeeping
+            // write, not a playhead. Mark it as such BEFORE `updateState`
+            // publishes, so no observer can read the zero and the stale
+            // `true` in the same snapshot.
+            isCurrentTimeObservedPlayhead = false
+        }
+EOF
+    snippet NEW <<'EOF'
+        isCurrentTimeObservedPlayhead = false
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # S9M03 — installing a new item stops revoking, so the incoming episode
+  # inherits the outgoing one's reading until the first clock sample lands.
+  S9M03)
+    snippet OLD <<'EOF'
+        // playhead-s9mx: a newly installed item has produced no clock sample
+        // yet, and the resume seek that follows in `load`/`loadItem` runs on
+        // `AVPlayerItem` directly without touching `_state`. Until the
+        // periodic observer ticks, `_state.currentTime` belongs to whatever
+        // was playing before — or is the zero the detach left behind.
+        isCurrentTimeObservedPlayhead = false
+        playerItem = item
+EOF
+    snippet NEW <<'EOF'
+        playerItem = item
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # S9M04 — the consumer stops asking: `capturePlaybackPosition` reads the raw
+  # snapshot again, so the transport's answer is correct and unused.
+  S9M04)
+    snippet OLD <<'EOF'
+        guard let position = await playbackService.observedPlayhead() else {
+            return .playheadNotObserved(episodeId: episodeId)
+        }
+EOF
+    snippet NEW <<'EOF'
+        let position = await playbackService.snapshot().currentTime
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
   *)
     echo "mutation-battery: unknown mutation '$name'" >&2
     return 3 ;;
@@ -16397,6 +16557,7 @@ rec_file()   {
     ATOM)  printf '%s' "$ATOM" ;;
     AJRUN) printf '%s' "$AJRUN" ;;
     LEASE) printf '%s' "$LEASE" ;;
+    PTX)   printf '%s' "$PTX" ;;
     *)     printf '%s' "" ;;
   esac
 }
