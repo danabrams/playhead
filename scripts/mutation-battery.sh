@@ -1455,6 +1455,19 @@ FOCUSED_SUITES=(
   # store-level test cannot tell "the guard saw it" from "OR IGNORE ate it").
   -only-testing:PlayheadTests/DuplicateSpanTextChunkV53MigrationTests
   -only-testing:PlayheadTests/FinalPassRetranscriptionRunnerTests
+  # playhead-gjxf: normalizedText held RAW text (GJ series). ONE suite is added
+  # here — the V54 migration suite — because the WRITE-PATH half of this bead is
+  # observed by `FinalPassRetranscriptionRunnerTests`, already listed one line
+  # up for jc42. That overlap is not an accident: gjxf and jc42 are two defects
+  # in the same two producers, so they are observed from the same two seams.
+  #
+  # The split matters for the same reason it does for jc42, and GJ01 is the
+  # proof. The migration suite CANNOT see the writer's defect: V54 runs at store
+  # OPEN, so a row the runner writes afterwards is never swept, and only a test
+  # that inspects what the writer persisted can tell `.lowercased()` from
+  # `normalizeText`. Conversely the runner suite cannot see the sweep's key, its
+  # per-row guard, or the FTS rebuild.
+  -only-testing:PlayheadTests/UnnormalizedChunkTextV54MigrationTests
   # playhead-99yt: a twin is ONE observation (NY series). One suite, because the
   # claim is about five CONSUMERS and this is the only place any of them is
   # driven with a twin on its input. It carries its own anti-vacuity fixture —
