@@ -6,6 +6,7 @@
 // the audio provider returns canned shards, and the AnalysisStore is a
 // real on-disk SQLite under a temp directory.
 
+import CryptoKit
 import Foundation
 import os
 import Testing
@@ -693,6 +694,79 @@ struct FinalPassRetranscriptionRunnerTests {
         let chunks = try await store.fetchTranscriptChunks(assetId: "asset-fp")
         #expect(chunks.count == 1)
         #expect(chunks[0].id == "existing-final")
+        #expect(chunks[0].speakerId == 42)
+        #expect(chunks[0].avgConfidence == 0.9)
+    }
+
+    /// playhead-jc42 — THE SHIPPED DEFECT, at the write path that caused it.
+    ///
+    /// `TranscriptEngineService` writes `pass='final'` rows too (whenever
+    /// `activeModelRole == .asrFinal`), fingerprinting `"\(text)|\(start)|\(end)"`
+    /// WITHOUT the `fp-final-` prefix. So the runner's pre-insert read — which
+    /// asked for its OWN prefixed fingerprint — could only ever find rows the
+    /// runner itself had written, and appended a second `pass='final'` row for
+    /// every span the engine had already finalised. 3,496 of those on the
+    /// 2026-08-15 pull, all byte-identical in text and timing, all retained by
+    /// `TranscriptChunkCanonicalizer` (it de-overlaps fast against final, never
+    /// final against final) and therefore all drawn twice in the overlay.
+    ///
+    /// The engine row here is spelled the way the engine spells it, and the
+    /// fixture deliberately does NOT use `computeFinalPassFingerprint` — that is
+    /// the whole point. Before this fix the asset ends with two rows.
+    @Test("an ENGINE-written final row is recognised — the runner does not append a second copy of the same span")
+    func testFinalPassDoesNotDuplicateEngineWrittenFinalRow() async throws {
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset())
+        try await store.insertAdWindow(
+            makeAdWindow(id: "w1", analysisAssetId: "asset-fp", startTime: 0, endTime: 30, confidence: 0.9)
+        )
+        // `TranscriptEngineService.computeFingerprint`: SHA-256 of the bare
+        // `"\(text)|\(start)|\(end)"`, no prefix.
+        let engineFingerprint = SHA256.hash(data: Data("shard-0|0.0|10.0".utf8))
+            .prefix(16)
+            .map { String(format: "%02x", $0) }
+            .joined()
+        #expect(engineFingerprint != FinalPassRetranscriptionRunner.computeFinalPassFingerprint(
+            text: "shard-0", startTime: 0, endTime: 10
+        ), "the two producers cannot collide — that is the defect, not a coincidence")
+
+        try await store.insertTranscriptChunk(TranscriptChunk(
+            id: "engine-final",
+            analysisAssetId: "asset-fp",
+            segmentFingerprint: engineFingerprint,
+            chunkIndex: 0,
+            startTime: 0,
+            endTime: 10,
+            text: "shard-0",
+            normalizedText: "shard-0",
+            pass: TranscriptPassType.final_.rawValue,
+            modelVersion: "apple-speech-v1",
+            transcriptVersion: nil,
+            atomOrdinal: nil,
+            speakerId: nil
+        ))
+
+        let audio = StubAnalysisAudioProvider()
+        audio.shardsToReturn = [
+            AnalysisShard(id: 0, episodeID: "ep-asset-fp", startTime: 0, duration: 10, samples: [])
+        ]
+        let runner = makeRunnerWithBox(
+            store: store,
+            box: SnapshotBox(makeSnapshot()),
+            recognizer: CountingShardRecognizer(speakerId: 42),
+            audioProvider: audio
+        )
+
+        let result = try await runner.runFinalPassBackfill(for: makeInput())
+
+        #expect(result.reTranscribedWindowIds == ["w1"])
+        let chunks = try await store.fetchTranscriptChunks(assetId: "asset-fp")
+        #expect(chunks.count == 1, "the engine's row IS this span — appending beside it is the duplication")
+        #expect(chunks[0].id == "engine-final")
+        // The metadata upgrade still runs, and it is keyed on the row we FOUND
+        // rather than on `chunk.segmentFingerprint`, which addresses nothing
+        // here. Reading `chunk.segmentFingerprint` would update zero rows and
+        // leave both fields nil.
         #expect(chunks[0].speakerId == 42)
         #expect(chunks[0].avgConfidence == 0.9)
     }

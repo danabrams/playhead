@@ -106,7 +106,11 @@ struct RediffRefetchStateV28MigrationTests {
         // `backfill_jobs.progressCursor` to the prefix each asset's own
         // `semantic_scan_results` passA rows support, and touches no other
         // column and no other table. Nothing this rung asserts is named by it.
-        #expect(AnalysisStore.currentSchemaVersion == 52)
+        // 52 → 53 read for this rung (playhead-jc42): V53 deletes duplicate
+        // `transcript_chunks` rows and builds a UNIQUE index on that table. It
+        // names neither the V28 `rediff_refetch_state` tables probed below nor
+        // the bandwidth-totals table, so nothing this rung asserts moves.
+        #expect(AnalysisStore.currentSchemaVersion == 53)
         // Probe by using the API — both tables must be queryable.
         #expect(try await store.fetchRediffRefetchStates().isEmpty)
         #expect(try await store.fetchRediffBandwidthTotals() == RediffBandwidthTotals())

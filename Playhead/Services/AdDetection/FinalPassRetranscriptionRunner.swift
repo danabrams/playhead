@@ -15,13 +15,36 @@
 // without re-reading the bead prompt):
 //
 //  • Persistence — APPEND `pass='final'` rows; do NOT replace `pass='fast'`
-//    rows. Fast and final chunks have distinct `segmentFingerprint`s
-//    (computed from text + timing, both of which differ across passes) and
-//    distinct `transcriptVersion`s (the version is what `BackfillJobRunner`
-//    keys its dedupe on, so collapsing them would corrupt FM job
-//    deduplication). Existing FTS, search, and shadow-replay consumers
-//    keep working unchanged on the fast rows; new consumers can opt in to
-//    the higher-quality final rows by filtering on `pass='final'`.
+//    rows. Existing FTS, search, and shadow-replay consumers keep working
+//    unchanged on the fast rows; new consumers can opt in to the
+//    higher-quality final rows by filtering on `pass='final'`, and
+//    `TranscriptChunkCanonicalizer` is what merges the two for the display
+//    and detection projections.
+//
+//    ⚠️ THE REASON THIS USED TO GIVE FOR WHY IT IS SAFE IS FALSE, and it
+//    cost 7,248 duplicate rows (playhead-jc42). It read: "Fast and final
+//    chunks have distinct `segmentFingerprint`s (computed from text +
+//    timing, both of which differ across passes)". Measured on the
+//    2026-08-15 device pull, text and timing DO NOT differ across passes —
+//    7,247 of the 7,248 twins are byte-identical in both. The final pass
+//    re-transcribing audio the fast pass already covered reproduces it
+//    verbatim, and the fingerprints differ for one reason only: the
+//    `fp-final-` prefix `computeFinalPassFingerprint` adds. So the prefix
+//    was not observing a distinction, it was MANUFACTURING one, and it
+//    manufactured it against `TranscriptEngineService` too — which also
+//    emits `pass='final'` rows (17,632 of the 24,880 on that device),
+//    unprefixed. Two producers, one pass, two hash namespaces: the
+//    pre-insert read below could not see across the gap and neither could
+//    the `(asset, pass, segmentFingerprint)` UNIQUE index, so 3,496 spans
+//    ended up as two `pass='final'` rows that the canonicalizer retains in
+//    full (it de-overlaps fast against final, never final against final)
+//    and the overlay draws twice.
+//
+//    Identity here is CONTENT — `(asset, pass, startTime, endTime, text)` —
+//    enforced by `idx_chunks_asset_pass_span_text` (AnalysisStore V53) and
+//    read by `fetchTranscriptChunkBySpanText`. `segmentFingerprint` stays
+//    what it always was: a stable per-writer row id, no longer load-bearing
+//    for deduplication.
 //
 //  • State tracking — the `analysis_assets.finalPassCoverageEndTime`
 //    column (added in this bead) carries the maximum `endTime` of any
@@ -996,23 +1019,68 @@ actor FinalPassRetranscriptionRunner {
                     speakerId: segment.speakerId,
                     avgConfidence: segment.avgConfidence
                 )
-                // Skip insert if a row with the same fingerprint exists
-                // (idempotent re-run guard), but still let a later ASR
-                // result fill diarization/confidence that an earlier run lacked.
-                if (try? await store.fetchTranscriptChunk(
+                // Skip insert if this asset already holds this SPAN AND TEXT in
+                // the final pass (idempotent re-run guard), but still let a
+                // later ASR result fill diarization/confidence an earlier run
+                // lacked.
+                //
+                // playhead-jc42: this used to ask
+                // `fetchTranscriptChunk(analysisAssetId:segmentFingerprint:)`
+                // with `chunk.segmentFingerprint`, and that question could only
+                // ever find rows THIS RUNNER wrote. `TranscriptEngineService`
+                // also emits `pass='final'` rows, digesting the identical
+                // `"\(text)|\(start)|\(end)"` WITHOUT the `fp-final-` prefix, so
+                // its row for the very same audio was invisible here — as it was
+                // to the `(asset, pass, segmentFingerprint)` UNIQUE index. Every
+                // span the engine had already finalised got appended a second
+                // time, and `TranscriptChunkCanonicalizer` keeps both (it
+                // de-overlaps fast against final, never final against final), so
+                // the overlay drew each one twice. Measured on the 2026-08-15
+                // pull: 7,248 duplicated spans across all ten assets that had
+                // ever run a final pass, 7,247 of them byte-identical in text
+                // and timing; 3,496 were two `pass='final'` rows.
+                //
+                // The lookup is scoped to THIS pass on purpose. A fast row over
+                // the same span is a different fact, read by a different
+                // consumer (`readFastTranscriptRegions` vs
+                // `readFinalTranscriptRegions`); matching it would make the
+                // runner believe it had already stored a final row it had not,
+                // and final-pass coverage would silently stop growing.
+                //
+                // The metadata upgrades are keyed on the EXISTING row's
+                // fingerprint, not on `chunk.segmentFingerprint` — the whole
+                // point is that the row we found may have been written by the
+                // other producer under the other scheme, in which case
+                // `chunk.segmentFingerprint` addresses nothing and both
+                // upgrades silently update zero rows.
+                //
+                // One widening this carries, deliberately: the two update
+                // helpers key on `(asset, segmentFingerprint)` WITHOUT `pass`,
+                // so when the row we found was engine-written its fast twin
+                // shares that fingerprint and is filled too. Both are
+                // `…IfMissing` — they only ever write over a NULL, with a value
+                // measured from the same text over the same span — so that is
+                // the right answer for the fast row as well. Under the old
+                // prefixed lookup it could not arise because only runner rows
+                // could ever match.
+                let existingFinalChunk = try? await store.fetchTranscriptChunkBySpanText(
                     analysisAssetId: input.analysisAssetId,
-                    segmentFingerprint: chunk.segmentFingerprint
-                )) != nil {
+                    pass: TranscriptPassType.final_.rawValue,
+                    startTime: segment.startTime,
+                    endTime: segment.endTime,
+                    text: segment.text
+                )
+                if let existing = existingFinalChunk {
                     if let speakerId = segment.speakerId {
                         _ = try await store.updateTranscriptChunkSpeakerIdIfMissing(
                             analysisAssetId: input.analysisAssetId,
-                            segmentFingerprint: chunk.segmentFingerprint,
+                            segmentFingerprint: existing.segmentFingerprint,
                             speakerId: speakerId
                         )
                     }
                     _ = try await store.updateTranscriptChunkAvgConfidenceIfMissing(
                         analysisAssetId: input.analysisAssetId,
-                        segmentFingerprint: chunk.segmentFingerprint,
+                        segmentFingerprint: existing.segmentFingerprint,
                         avgConfidence: segment.avgConfidence
                     )
                 } else {
@@ -1046,10 +1114,27 @@ actor FinalPassRetranscriptionRunner {
     /// process launches** (Swift's `Hasher` re-seeds per process and
     /// would silently break the cross-launch idempotency guard). The
     /// prefix `fp-final-` cannot collide with `TranscriptEngineService`'s
-    /// fast-pass scheme (which uses `text|start|end` without a prefix).
-    /// Two chunks with identical text and timing but different passes
-    /// therefore hash to different fingerprints — both rows persist,
-    /// neither is confused for a duplicate of the other.
+    /// scheme (which uses `text|start|end` without a prefix).
+    ///
+    /// ⚠️ playhead-jc42 — READ THE NON-COLLISION AS A HAZARD, NOT A FEATURE.
+    /// This comment used to end "Two chunks with identical text and timing but
+    /// different passes therefore hash to different fingerprints — both rows
+    /// persist, neither is confused for a duplicate of the other", and the
+    /// premise it rests on ("but different passes") is not something the
+    /// prefix can check. `TranscriptEngineService` writes `pass='final'` rows
+    /// too, whenever `activeModelRole == .asrFinal`. So the guarantee actually
+    /// delivered was that a runner row can never be recognised as a duplicate
+    /// of an ENGINE row IN THE SAME PASS — which is how 3,496 doubled
+    /// `pass='final'` spans reached the 2026-08-15 device pull while the
+    /// `(asset, pass, segmentFingerprint)` UNIQUE index reported zero
+    /// violations.
+    ///
+    /// The prefix is KEPT because cross-launch stability is a real requirement
+    /// and rehashing every persisted row to drop it would buy nothing:
+    /// deduplication no longer runs through this value at all. Identity is
+    /// `(asset, pass, startTime, endTime, text)` —
+    /// `AnalysisStore.fetchTranscriptChunkBySpanText` and
+    /// `idx_chunks_asset_pass_span_text`. This is a row id now.
     static func computeFinalPassFingerprint(
         text: String,
         startTime: Double,

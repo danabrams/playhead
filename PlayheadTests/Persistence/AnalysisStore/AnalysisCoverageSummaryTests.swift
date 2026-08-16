@@ -1659,7 +1659,23 @@ struct FastTranscriptCoverageV37MigrationTests {
         // `passA` / `didExamineWindow` population this file's coverage numerator
         // is computed from, and writes only `backfill_jobs.progressCursor`. The
         // summary quantities are unaffected in both directions.
-        #expect(AnalysisStore.currentSchemaVersion == 52)
+        // 52 → 53 read for this rung (playhead-jc42): THIS IS THE FIRST RUNG IN
+        // A WHILE THAT WRITES `transcript_chunks`, which is exactly the table
+        // this file's `fastTranscriptCoverageEndTime` derives from — so the
+        // "names a different table" argument above does not apply and the claim
+        // has to be made on the DELETE's own shape.
+        //
+        // V53 removes a row only when a row with the SAME
+        // `(analysisAssetId, pass, startTime, endTime, text)` survives. So every
+        // interval it removes is still present, byte-for-byte, on the survivor:
+        // no `MAX(endTime)` can move (the maximum is attained by the survivor
+        // too), and no interval union can shrink (the union is idempotent under
+        // duplication — `AnalysisCoverageMath.unionedSeconds` and the
+        // `FastTranscriptRegion` / `FinalTranscriptRegion` readers all merge
+        // before measuring). The deletion is coverage-preserving by
+        // construction, in BOTH directions, which is stronger than "it happens
+        // not to fire on these fixtures".
+        #expect(AnalysisStore.currentSchemaVersion == 53)
     }
 
     /// THE MIGRATION EVIDENCE. An asset already on disk — written by a
