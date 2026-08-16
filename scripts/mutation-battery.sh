@@ -3923,15 +3923,25 @@ MUTATIONS=(
   # rescue silently stops recognising capped rows. AR05 is DT05's shape at this
   # site and the reason `$T_DT_SCHEDSITE` is ABSENT from its expectations: the
   # argument rule stays GREEN while the column takes prose.
-  "AR02|962|SCHED|$T_AR_CAPPREFIX"
+  #
+  # AR02's second expectation is a CORRECTION FROM THE RUN, not a prediction:
+  # the retry-arm rail also counts how many arms carry the cap prefix, so
+  # removing it from the terminal arm takes that count to zero and reddens the
+  # rail AR03 is scored on. Both listed, and the two are in different batches.
+  "AR02|962|SCHED|$T_AR_CAPPREFIX;$T_AR_RETRYBARE"
   "AR05|962|SCHED|$T_AR_BINDSITE;$T_AR_BINDONCE"
 
   # Batch 963 — AR03 is AR02's mirror: the RETRY arm becomes a second copy of the
   # terminal arm, so a row that never hit the cap is read as capped and rescued.
   # AR09 gives the asset-resolution factory its own inline copy of the identity
   # grammar — a second ruler, invisible until the error carries a chain.
+  # AR09's second expectation is likewise a correction from the run: an inlined
+  # grammar skips `UnclassifiedModelFailure.sanitize`, so a hostile domain leaks
+  # spaces and parentheses and the closed-grammar rail fires as well as the
+  # underlying-walk one. That is the second ruler drifting in TWO places at
+  # once, which is the argument for delegating rather than restating.
   "AR03|963|SCHED|$T_AR_RETRYBARE"
-  "AR09|963|DTR|$T_AR_UNDERWALK"
+  "AR09|963|DTR|$T_AR_UNDERWALK;$T_DT_GRAMMAR"
 
   # Batch 964 — AR04, the CONDITION CROSSING. The asset-resolution arm records
   # `jobThrew(…)`: a perfectly well-formed token naming a condition this arm can
