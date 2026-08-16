@@ -436,6 +436,163 @@
 // this file's `localizedDescription` section records: write the number down,
 // then run it.
 
+// ===== THE SEVENTH SITE (playhead-q93o): THE SAME COLUMN, A THIRD PATH ======
+//
+// `analysis_jobs.lastErrorCode` for the third time, reached by a road neither
+// playhead-3lc3 nor playhead-3c4k could see — and it walked past 3lc3's own
+// rail, in production, for four months.
+//
+// FIVE producers in `AnalysisJobRunner` built a description into an
+// `AnalysisOutcome.StopReason.failed` payload:
+//
+//     404   .failed("decode: \(error)")
+//     541   .failed("features: \(error)")
+//     976   .failed("fetchChunks: \(error)")
+//     1010  .failed("hotPath: \(error)")
+//     1073  .failed("backfill: \(error)")
+//
+// TWO consumers in `AnalysisWorkScheduler` put that payload in the column
+// (`lastErrorCode: "\(maxAttemptsReachedPrefix)\(reason)"` terminal,
+// `lastErrorCode: reason` retry), and a THIRD puts it in a second durable
+// column (`"runner_reason": reason` -> `work_journal.metadata`).
+//
+// ===== WHY THE RAIL WAS GREEN, WHICH IS THE POINT OF THIS SITE =============
+//
+// `DurableThrowRecordSourceCanaryTests.testTheSchedulerArmsNoLongerPersistA…`
+// filters every `lastErrorCode:` ARGUMENT in the scheduler for three spellings.
+// The two arms above spell `reason` and `"\(Self.maxAttemptsReachedPrefix)\(reason)"`.
+// Neither contains any of the three, so the check was green while the column
+// took prose.
+//
+// That is mutation DT05's escape — "prose laundered through a local while every
+// argument stays wholesome" — SHIPPED, at the exact site the rail was written to
+// guard, surviving because the laundering happens in a DIFFERENT FILE two hops
+// away. 3lc3's per-SITE fix for DT05 reads the binding of `throwRecord`; `reason`
+// is not bound at that site at all, it arrives as a `case .failed(let reason)`
+// pattern binding whose value was built by another module-mate entirely.
+//
+// **NO ARGUMENT-SHAPED RULE AT EITHER END CAN SEE BOTH HALVES.** At the writing
+// end the argument is an identifier; at the building end there is no durable
+// column in sight. The rail that replaces it is stated over the CARRIER — every
+// construction of `StopReason.failed(code:)` / `.interrupted(code:)` in the whole
+// production tree — and the payload LABEL exists so the compiler forces one
+// spelling for it to enumerate. See `AnalysisOutcome.swift`.
+//
+// ===== IT HAS FIRED, TWICE, AND THE BEAD SAID IT HAD NOT =================
+//
+// The bead body reported "ZERO rows carry this bead's prose today … read that as
+// 'not yet', not as 'safe'", counted over the nineteen databases
+// `playhead-luie` had walked. Re-counted per ROW IDENTITY over the union of
+// **every** preserved database on this box — 21 sqlite files, **13 distinct by
+// content hash**, 2026-04-25 -> 2026-08-16 — this arm has produced field rows,
+// and one of them is on the arm that has no witness anywhere else in this file:
+//
+//     107  distinct jobIds have ever existed
+//      29  ever carried a non-null `lastErrorCode`
+//       1  `decode: Decoding failed: Operation Interrupted`                  (RETRY arm)
+//       1  `maxAttemptsReached:decode: Decoding failed: Operation Interrupted` (TERMINAL arm)
+//
+// Both rows are in `/Users/dabrams/playhead/.captures/2026-04-25/…/analysis.sqlite`,
+// a real `.xcappdata` device container that carries no `rediff_day_zero_attempts`
+// table at all — which is precisely why luie's census, filtered to the databases
+// that DO carry that table, could not see it. **A census of the databases
+// somebody happened to name, read as a census of the databases that exist**:
+// this repo's standing defect class, one level up, in the paragraph that measures
+// it — the same correction luie's own header records having made.
+//
+//   * `323D2A22` — `state='failed'`, `attemptCount=2`, retry arm.
+//   * `5C185837` — `state='superseded'`, `attemptCount=6`, `nextEligibleAt=NULL`,
+//     TERMINAL arm. That row is PERMANENTLY DEAD: `workKey` is UNIQUE and
+//     `insertJob` is `INSERT OR IGNORE` over a key stable across launches, so
+//     every later enqueue for that episode is a silent no-op. An episode was
+//     killed by this arm and the durable record of why is a sentence.
+//
+// **THE TERMINAL ARM IS THE ONE NOTHING ELSE WITNESSES.** playhead-3c4k's census
+// found 0 of its 5 field rows on the terminal arm ("the arm with no witness, and
+// the one a rail has to carry"); here it is, in the field, on this site. And
+// `CapOutRetryTests.poisonedAssetTerminatesWithNamedCause` seeds
+// `"maxAttemptsReached:decode: Decoding failed: Operation Interrupted"` verbatim
+// — that fixture was transcribed off this very row.
+//
+// FIRINGS >= 2 (a FLOOR — `lastErrorCode` is last-writer-wins and
+// `requeueOrphanedLease` NULLs it outright). HOLDINGS = 0 (EXACT — the newest
+// pull, 2026-08-16 01:04, is a complete enumeration of `analysis_jobs`: 38 rows,
+// 36 NULL and 2 `coverageInsufficient:noProgress`). **No migration**, and the
+// reason is a WIPE rather than a repair: neither jobId appears in any of the
+// twelve later databases, because the device was wiped and reinstalled between
+// the 04-25 capture and the 08-12 one. Those two rows are unreachable, not
+// repaired.
+//
+// ===== WHAT THE PROSE ACTUALLY WAS, AND WHY IT IS WORSE THAN IT LOOKS ======
+//
+// `AnalysisAudioError` is `CustomStringConvertible`, so the interpolation took
+// its `description` and NOT its case — sckv's trap, a third time. What landed was
+// `Decoding failed: Operation Interrupted`, which names no case, and the three
+// sibling cases nobody has been unlucky enough to hit yet are worse:
+//
+//     .fileNotFound(url)              -> "Analysis file not found: <FILENAME>"
+//     .assetUnreadable(url, err)      -> "Cannot read asset <FILENAME>: <LOCALIZED SENTENCE>"
+//     .truncatedFile(url, …)          -> "Truncated file <FILENAME>: expected …s, decoded …s"
+//
+// A user's episode FILENAME in a durable column, plus a localized sentence
+// underneath it — luie's enclosure-URL disclosure in a different column, from a
+// different producer, waiting on a decode failure of a different kind. The token
+// cannot carry either: ``identityFields(of:)`` reads only `domain`, `code` and
+// the `NSUnderlyingErrorKey` walk, and never touches `userInfo` or a payload.
+//
+// ===== A SIXTH PREFIX, AND THE STAGE IS A FIELD RATHER THAN FIVE PREFIXES ==
+//
+// **A SIXTH CONDITION, NOT A SIXTH SPELLING OF `jobThrew`.** `jobThrewPrefix` is
+// "the job's RUN threw something this scheduler did not classify" — it is written
+// from the scheduler's OUTER CATCH, which stands over the dispatch, the store
+// writes and `runTask.value`, and fires when an error ESCAPED the runner
+// entirely. These five fire when the runner's own body CAUGHT a throw, handled
+// it, and RETURNED an outcome reporting it. Two conditions reached by two code
+// paths that cannot both run for one throw, so per ``FMDaemonRefusal``'s R2-Fix1
+// rule, two prefixes.
+//
+// **ONE PREFIX FOR THE FIVE, WITH THE STAGE AS A DISCRIMINATOR**, which is
+// `sessionPipelineThrew-<resumeState>`'s grammar and for the same reason: the
+// five are one condition differing in WHICH STAGE, and `analysis_jobs` carries no
+// stage column, so the value the write destroys is the only place the stage can
+// live. Five prefixes would make "did the runner's body throw?" a five-clause
+// query for a question the row asks once.
+//
+//     LIKE 'runnerStageThrew-%'          -> every stage throw, and only those
+//     LIKE 'runnerStageThrew-hotPath(%'  -> one stage, and only that stage
+//     LIKE '%Threw%'                     -> the whole family, all six conditions
+//
+// **THE STEMS ARE LOAD-BEARING AND ARE PRESERVED AS THE STAGE RAW VALUES**, the
+// same call `playhead-3c4k` made for `assetResolution`. Enumerated rather than
+// assumed: `RunnerMaterializerRegressionTests` asserts
+// `msg.contains("backfill")` and `msg.contains("hotPath")` on the outcome
+// payload, and those are the only two greps of any of the five stems anywhere in
+// the tree. `runnerStageThrew-backfill(…)` and `runnerStageThrew-hotPath(…)`
+// satisfy both; a stage spelled any other way would leave them GREEN while the
+// arm fired.
+//
+// The retired prose and the token separate exactly, so a device pull can be
+// written without guessing:
+//
+//     LIKE 'decode: %'                   -> the retired prose, and only that
+//     LIKE 'runnerStageThrew-decode(%'   -> the token, and only that
+//
+// ===== THE TWO CONTENT-SWITCHING READERS, RE-VERIFIED ======================
+//
+// `isAttemptCapTerminal(_:)` is `state == "superseded" && lastErrorCode.hasPrefix(
+// "maxAttemptsReached:")`. The terminal arm is UNCHANGED — it still writes the
+// prefix in front — so a capped row reads `maxAttemptsReached:runnerStageThrew-decode(…)`
+// and stays rescuable. Field row `5C185837` is exactly that row with the old
+// suffix.
+//
+// `isNoProgressTerminal(_:)` is `state == "complete" && lastErrorCode ==
+// "coverageInsufficient:noProgress"` — an EXACT match, and the token contains a
+// `-`, a `(` and three `=` and can never equal it. **3c4k's first test of this
+// reader passed for the wrong reason** (its fixture was `state='failed'`, so the
+// state clause carried the assertion and the token was never consulted), so this
+// bead's version pins every clause independently and carries an anti-vacuity
+// control that makes the predicate return TRUE.
+
 import Foundation
 
 /// The durable, countable record of a throw that reached one of three
@@ -532,6 +689,58 @@ enum DurableThrowRecord {
     /// disagree with the detail beside it. A second prefix would restate it.
     static let dayZeroThrewPrefix = "dayZeroThrew"
 
+    /// The stage of ``AnalysisJobRunner``'s own body that caught the throw
+    /// (playhead-q93o).
+    ///
+    /// A CLOSED enum rather than five string literals, because the stage is the
+    /// discriminator the row can never answer for itself and a misspelling of it
+    /// is a perfectly well-formed token naming a stage that did not run — the
+    /// `sckv` SF04/SF10 shape, which no value test can see.
+    ///
+    /// **The raw values are the RETIRED PROSE'S STEMS, deliberately.** They are
+    /// what `RunnerMaterializerRegressionTests` greps (`msg.contains("backfill")`,
+    /// `msg.contains("hotPath")`) — the only greps of any of the five anywhere in
+    /// the tree — so a stage spelled otherwise would leave those rails green
+    /// while the arm fired. Same call playhead-3c4k made for `assetResolution`.
+    enum RunnerStage: String, CaseIterable, Sendable {
+        /// `audioProvider.decode(fileURL:episodeID:shardDuration:)` threw. The
+        /// one stage with FIELD ROWS — both of this site's, on both arms.
+        case decode
+        /// `featureService.extractAndPersist(…)` threw.
+        case features
+        /// `store.fetchTranscriptChunks(assetId:)` threw before ad detection.
+        case fetchChunks
+        /// `adDetection.runHotPath(…)` threw.
+        case hotPath
+        /// `adDetection.runBackfill(…)` threw.
+        case backfill
+    }
+
+    /// The SIXTH greppable family for `analysis_jobs.lastErrorCode`
+    /// (playhead-q93o), and the second of the six to have fired in the field.
+    ///
+    /// A separate condition from ``jobThrewPrefix``, and the distinction is
+    /// which side of the runner boundary the throw was caught on: `jobThrew` is
+    /// written by ``AnalysisWorkScheduler``'s OUTER CATCH, standing over the
+    /// dispatch, the store writes and `runTask.value`, when an error ESCAPED the
+    /// runner; this one is written when the runner's own body CAUGHT a throw,
+    /// handled it, and RETURNED an outcome reporting it. One throw can only ever
+    /// take one of those paths, and a pull that cannot tell them apart has lost
+    /// the discrimination the retired prose already gave it.
+    ///
+    /// Sharing no prefix with anything else the column holds:
+    /// `maxAttemptsReached:`, `staleFingerprint:`, `jobThrew(`,
+    /// `assetResolutionThrew(`, `backgroundWindowExpired`,
+    /// `coverageInsufficient:`, `cancelMidRun`, `transcription:`,
+    /// `reconciler_unavailable` — nor with the RETIRED stems it replaced, which
+    /// separate at the character after the stage name (`(` against `:`).
+    ///
+    /// Like the two above, the TERMINAL arm carries
+    /// ``AnalysisWorkScheduler/maxAttemptsReachedPrefix`` IN FRONT of this token
+    /// and the retry arm writes it bare. **Unlike them, BOTH arms have a field
+    /// witness** — see this file's q93o section.
+    static let runnerStageThrewPrefix = "runnerStageThrew"
+
     /// The identity fields shared by all three tokens:
     /// `domain=…,code=…,under=…`.
     ///
@@ -620,5 +829,26 @@ enum DurableThrowRecord {
     /// the same statement. See ``dayZeroThrewPrefix``.
     static func dayZeroAttemptDetail(for error: Error) -> String {
         "\(dayZeroThrewPrefix)(\(identityFields(of: error)))"
+    }
+
+    /// The durable cause for `analysis_jobs.lastErrorCode` when
+    /// ``AnalysisJobRunner``'s own body caught a throw at a named stage and
+    /// reported it as an outcome (playhead-q93o).
+    ///
+    /// `runnerStageThrew-<stage>(domain=…,code=…,under=…)`.
+    ///
+    /// - Parameter stage: which of the runner's five catches this was. The one
+    ///   field the row itself can never answer — `analysis_jobs` has no stage
+    ///   column, and the write that carries this value overwrites nothing that
+    ///   would imply one. This is the analogue of
+    ///   ``sessionFailureReason(for:resumeState:)``'s `<resumeState>`, and the
+    ///   reason the five sites share ONE prefix instead of minting five.
+    ///
+    /// The value travels as an `AnalysisOutcome.StopReason` associated value
+    /// into another file before it reaches the column; see
+    /// ``AnalysisOutcome/StopReason/failed(code:)`` for why that payload carries
+    /// a label.
+    static func runnerStageLastErrorCode(for error: Error, stage: RunnerStage) -> String {
+        "\(runnerStageThrewPrefix)-\(stage.rawValue)(\(identityFields(of: error)))"
     }
 }

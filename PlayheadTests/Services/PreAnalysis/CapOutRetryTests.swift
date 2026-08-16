@@ -413,7 +413,26 @@ struct CapOutRetryTests {
             store,
             priorTranscriptCoverageSec: 0,
             supersededAt: clock.value.timeIntervalSince1970 - 86_400,
-            lastErrorCode: "maxAttemptsReached:decode: Decoding failed: Operation Interrupted"
+            // playhead-q93o: THIS FIXTURE IS A FIELD ROW, and it is the one row
+            // that proved the seventh durable-prose site had fired. It was
+            // transcribed verbatim off `analysis_jobs` in the 2026-04-25 device
+            // capture — jobId `5C185837`, `state='superseded'`, `attemptCount=6`,
+            // `nextEligibleAt=NULL`. The suffix was the DESCRIPTION of an
+            // `AnalysisAudioError` carried out of `AnalysisJobRunner`'s decode
+            // catch as a `StopReason.failed` payload; it now reads
+            // `maxAttemptsReached:runnerStageThrew-decode(domain=…,code=…,under=…)`.
+            //
+            // The fixture is updated to what production writes TODAY, because
+            // what this test needs from it is the `maxAttemptsReached:` prefix —
+            // that is what `isAttemptCapTerminal` matches and what the cap-out
+            // rescue reads — and a fixture spelled in a retired grammar quietly
+            // stops standing for the row it was taken from. The retired spelling
+            // is preserved above rather than in the code.
+            lastErrorCode: AnalysisWorkScheduler.maxAttemptsReachedPrefix
+                + DurableThrowRecord.runnerStageLastErrorCode(
+                    for: AnalysisAudioError.decodingFailed("Operation Interrupted"),
+                    stage: .decode
+                )
         )
         let reconciler = makeReconciler(store: store, downloads: downloads, clock: clock)
         let scheduler = try await makeScheduler(
