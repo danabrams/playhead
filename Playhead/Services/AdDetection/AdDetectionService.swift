@@ -7342,10 +7342,25 @@ actor AdDetectionService {
         return order.map { ($0, bestConfidenceByEntity[$0] ?? 0.5) }
     }
 
-    /// Extract the distinct NORMALIZED sponsor entities whose catalog coverage
-    /// window OVERLAPS `span` (the per-span READ set). Same `.brandSpan` source
-    /// and normalization as the write set; deterministically ordered by first
-    /// appearance. Pure / static for direct unit testing.
+    /// Extract the distinct NORMALIZED sponsor entities THIS span can hear (the
+    /// per-span READ set). Same `.brandSpan` source and normalization as the
+    /// write set; deterministically ordered by first appearance. Pure / static
+    /// for direct unit testing.
+    ///
+    /// playhead-0u3e. This used to select on
+    /// `coverageStartTime`/`coverageEndTime`, the HULL between a deduplicated
+    /// entry's earliest and latest mention, so a brand read twice was in the
+    /// read set of every span between its two reads and could earn that span a
+    /// capped `.crossShowSyndication` ledger boost from a sponsor it never
+    /// mentioned. The channel is OFF by default
+    /// (``AdDetectionConfig/crossShowSyndicationEnabled``), so this was latent
+    /// rather than live — it is fixed in the same change as
+    /// ``buildCatalogLedgerEntries(span:entries:fusionConfig:)`` precisely so
+    /// the flag cannot later be turned on onto the old reading.
+    ///
+    /// Same primitive, same reason: one window, at most one claim per
+    /// `evidenceRef`. The set is deduplicated by entity anyway, so the choice
+    /// shows up as WHICH spans see an entity, not how many times.
     static func crossShowSponsorEntities(
         from entries: [EvidenceEntry],
         overlapping span: DecodedSpan
@@ -7353,9 +7368,12 @@ actor AdDetectionService {
         var seen: Set<String> = []
         var out: [String] = []
         for entry in entries where entry.category == .brandSpan {
-            // Time-window overlap against the refined span bounds (half-open).
-            guard entry.coverageStartTime < span.endTime,
-                  entry.coverageEndTime > span.startTime else { continue }
+            // Which MENTION this span can hear — not the hull between the first
+            // and the last.
+            guard entry.locatedInTimeWindow(
+                start: span.startTime,
+                end: span.endTime
+            ) != nil else { continue }
             let entity = entry.normalizedText.trimmingCharacters(in: .whitespacesAndNewlines)
             guard entity.count >= CrossShowSyndicationStore.minEntityLength else { continue }
             if seen.insert(entity).inserted { out.append(entity) }
@@ -8763,22 +8781,60 @@ actor AdDetectionService {
         )
     }
 
-    /// Build catalog ledger entries from EvidenceEntry items overlapping the span.
+    /// Fraction of ``FusionWeightConfig/catalogCap`` each selected catalog entry
+    /// contributes, before the cap. Twenty entries saturate the cap.
+    ///
+    /// playhead-0u3e named it so the corpus lane's control arm multiplies by the
+    /// SAME constant the site does, rather than by a `0.05` typed twice. A
+    /// literal restated in a control arm is a measurement of the restatement.
+    static let catalogLedgerWeightPerEntry: Double = 0.05
+
+    /// Build catalog ledger entries from the catalog evidence THIS span can hear.
+    ///
+    /// playhead-0u3e. This used to select on
+    /// `coverageStartTime`/`coverageEndTime` — `firstTime`/`lastTime`, the HULL
+    /// of a deduplicated entry — and its own comment named the widening as
+    /// intended ("repeated evidence expands its coverage window across the
+    /// earliest and latest occurrence"). It is not: a sponsor read in the
+    /// pre-roll and again in the post-roll has a "coverage" span covering the
+    /// episode, so it counted toward the catalog weight of every span in
+    /// between, and the inflation grew with how many repeats the episode had.
+    /// The weight is `min(count * 0.05 * catalogCap, catalogCap)` over the
+    /// COUNT of selected entries, and the entry's mere PRESENCE is a `.catalog`
+    /// kind in three quorum gates (`metadataCorroborationGate`,
+    /// `quorumGateForFMConsensus`, `quorumGateForFMAcoustic`) — so a hull
+    /// selection buys a span both score and corroboration from evidence it
+    /// never heard, and the result reaches `ad_windows`.
+    ///
+    /// ``EvidenceEntry/locatedInTimeWindow(start:end:)`` is the shared answer to
+    /// "which mention applies here", extracted by playhead-rty3 from
+    /// playhead-ad9n's `PromptEvidenceEntry.forWindow`. It is the right member
+    /// of the pair here — rather than ``EvidenceEntry/locatedInWindow(seeing:)``
+    /// used directly, or the per-occurrence fan-out `SpecialistScanPlanner`
+    /// needs — because this loop runs INSIDE one window and must yield AT MOST
+    /// ONE entry per `evidenceRef`: `overlapping.count` is a count of distinct
+    /// evidence, and a fan-out would let one repeated sponsor vote twice on the
+    /// span that does contain both of its mentions.
+    ///
+    /// Note the boundary convention changes with the primitive: the deleted
+    /// expression was half-open (`<`, `>`) and `locatedInTimeWindow` is CLOSED
+    /// on both ends, deliberately (rty3), so a mention whose interval merely
+    /// TOUCHES a span edge now surfaces. That is the one direction in which
+    /// this change can ADD evidence, and it is measured rather than assumed —
+    /// see `CatalogLedgerHullCorpusEvalTests`, which reports every such entry
+    /// with a witness (`BOUNDARY …`) instead of asserting there are none.
     func buildCatalogLedgerEntries(
         span: DecodedSpan,
         entries: [EvidenceEntry],
         fusionConfig: FusionWeightConfig
     ) -> [EvidenceLedgerEntry] {
-        let overlapping = entries.filter { entry in
-            // Repeated evidence expands its coverage window across the earliest
-            // and latest occurrence, while startTime/endTime remain the
-            // representative local hit used for display/fallback anchoring.
-            entry.coverageStartTime < span.endTime && entry.coverageEndTime > span.startTime
+        let overlapping = entries.compactMap { entry in
+            entry.locatedInTimeWindow(start: span.startTime, end: span.endTime)
         }
         guard !overlapping.isEmpty else { return [] }
 
         let weight = min(
-            Double(overlapping.count) * 0.05 * fusionConfig.catalogCap,
+            Double(overlapping.count) * Self.catalogLedgerWeightPerEntry * fusionConfig.catalogCap,
             fusionConfig.catalogCap
         )
         return [EvidenceLedgerEntry(

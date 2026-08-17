@@ -290,4 +290,83 @@ struct CrossShowSyndicationExtractionTests {
         let read = AdDetectionService.crossShowSponsorEntities(from: entries, overlapping: span)
         #expect(read == ["betterhelp", "squarespace"])
     }
+
+    /// playhead-0u3e. The read set used to select on
+    /// `coverageStartTime`/`coverageEndTime`, so a brand read in the pre-roll
+    /// and again in the post-roll was in the read set of every span between —
+    /// and could earn one of them a capped `.crossShowSyndication` boost from a
+    /// sponsor it never mentioned. The channel is OFF by default, so this was
+    /// latent; the rail exists so the flag cannot be turned on onto the old
+    /// reading.
+    @Test("Read set: a repeat's HULL does not put it in the read set of the spans between")
+    func readSetIgnoresTheCoverageHull() {
+        func span(_ start: Double, _ end: Double) -> DecodedSpan {
+            DecodedSpan(
+                id: "s-\(start)", assetId: "asset-0u3e",
+                firstAtomOrdinal: 0, lastAtomOrdinal: 9,
+                startTime: start, endTime: end, anchorProvenance: []
+            )
+        }
+        let repeated = EvidenceEntry(
+            evidenceRef: 0,
+            category: .brandSpan,
+            matchedText: "betterhelp",
+            normalizedText: "betterhelp",
+            atomOrdinal: 3,
+            startTime: 30.0,
+            endTime: 32.0,
+            count: 2,
+            firstTime: 30.0,
+            lastTime: 3_002.0,
+            occurrences: [
+                EvidenceOccurrence(atomOrdinal: 3, startTime: 30.0, endTime: 32.0),
+                EvidenceOccurrence(atomOrdinal: 800, startTime: 3_000.0, endTime: 3_002.0)
+            ]
+        )
+        // The hull [30, 3002] overlaps the middle span; no mention does.
+        #expect(repeated.coverageStartTime < 1_530)
+        #expect(repeated.coverageEndTime > 1_500)
+        #expect(AdDetectionService.crossShowSponsorEntities(
+            from: [repeated], overlapping: span(1_500, 1_530)
+        ).isEmpty)
+        // Both spans that DO hear a mention keep it — the fix is not "read less".
+        #expect(AdDetectionService.crossShowSponsorEntities(
+            from: [repeated], overlapping: span(25, 40)
+        ) == ["betterhelp"])
+        #expect(AdDetectionService.crossShowSponsorEntities(
+            from: [repeated], overlapping: span(2_995, 3_010)
+        ) == ["betterhelp"])
+    }
+
+    /// The set is deduplicated by entity, so a span hearing both mentions of one
+    /// brand must still yield ONE entity — the property that makes
+    /// `locatedInTimeWindow` (one result per entry) the right primitive here
+    /// rather than a per-occurrence fan-out.
+    @Test("Read set: a brand heard twice inside one span yields ONE entity")
+    func readSetDedupesAcrossOccurrences() {
+        let span = DecodedSpan(
+            id: "s1", assetId: "asset-0u3e",
+            firstAtomOrdinal: 0, lastAtomOrdinal: 9,
+            startTime: 10.0, endTime: 200.0, anchorProvenance: []
+        )
+        let repeated = EvidenceEntry(
+            evidenceRef: 0,
+            category: .brandSpan,
+            matchedText: "squarespace",
+            normalizedText: "squarespace",
+            atomOrdinal: 3,
+            startTime: 30.0,
+            endTime: 32.0,
+            count: 2,
+            firstTime: 30.0,
+            lastTime: 182.0,
+            occurrences: [
+                EvidenceOccurrence(atomOrdinal: 3, startTime: 30.0, endTime: 32.0),
+                EvidenceOccurrence(atomOrdinal: 60, startTime: 180.0, endTime: 182.0)
+            ]
+        )
+        #expect(AdDetectionService.crossShowSponsorEntities(
+            from: [repeated], overlapping: span
+        ) == ["squarespace"])
+    }
 }

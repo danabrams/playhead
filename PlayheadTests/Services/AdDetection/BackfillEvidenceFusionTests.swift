@@ -280,8 +280,23 @@ struct BackfillEvidenceFusionTests {
         #expect(ledger.filter { $0.source == .acoustic }.count == 1)
     }
 
-    @Test("Catalog overlap uses repeated evidence coverage window, not representative occurrence only")
-    func catalogOverlapUsesRepeatedCoverageWindow() async throws {
+    /// playhead-0u3e. This test used to assert the OPPOSITE — that an entry
+    /// whose only recorded mention is at 10–12 s still earns a catalog ledger
+    /// entry on a span at 595–605 s, because its `lastTime` hull reaches there.
+    /// That is the defect, pinned as a contract. The entry below is the exact
+    /// fixture it used: a repeat whose SECOND place was never recorded
+    /// (`occurrences: nil`, the pre-playhead-04rx shape), so the only place the
+    /// catalog can name is the representative — and 595–605 s cannot hear it.
+    ///
+    /// This is the direction that matters for `occurrences: nil`: the entry
+    /// claims a second mention it cannot locate, and the honest answer is to
+    /// score the span that CAN hear a recorded mention rather than every span
+    /// between two, one of which is unknown. `EvidenceCatalogBuilder.build`
+    /// records occurrences for every entry it produces, and the ledger is built
+    /// from a freshly-built catalog on every backfill, so the unrecorded shape
+    /// does not arise on the production path at all.
+    @Test("A repeat whose far mention this span cannot hear earns NO catalog ledger entry")
+    func catalogOverlapIgnoresTheCoverageHull() async throws {
         let store = try AnalysisStore(path: ":memory:")
         let service = AdDetectionService(
             store: store,
@@ -309,9 +324,157 @@ struct BackfillEvidenceFusionTests {
             fusionConfig: defaultConfig()
         )
 
+        // The hull [10, 602] overlaps [595, 605]; the only mention does not.
+        #expect(repeatedEntry.coverageStartTime < 605.0)
+        #expect(repeatedEntry.coverageEndTime > 595.0)
+        #expect(ledger.isEmpty)
+    }
+
+    /// The other half of the same claim, and the reason the fix is not simply
+    /// "score less": the span that DOES contain the second mention still gets
+    /// its entry. A rail that only asserts the removal would be satisfied by
+    /// deleting the channel.
+    @Test("The span containing a repeat's SECOND mention still earns its catalog entry")
+    func catalogOverlapKeepsTheSpanThatHearsTheLaterMention() async throws {
+        let store = try AnalysisStore(path: ":memory:")
+        let service = AdDetectionService(
+            store: store,
+            classifier: RuleBasedClassifier(),
+            metadataExtractor: FallbackExtractor(),
+            config: .default
+        )
+        let entry = EvidenceEntry(
+            evidenceRef: 0,
+            category: .url,
+            matchedText: "acme.com",
+            normalizedText: "acme.com",
+            atomOrdinal: 10,
+            startTime: 10.0,
+            endTime: 12.0,
+            count: 2,
+            firstTime: 10.0,
+            lastTime: 602.0,
+            occurrences: [
+                EvidenceOccurrence(atomOrdinal: 10, startTime: 10.0, endTime: 12.0),
+                EvidenceOccurrence(atomOrdinal: 940, startTime: 600.0, endTime: 602.0)
+            ]
+        )
+        let config = defaultConfig()
+
+        // The span over the SECOND mention hears it.
+        let late = await service.buildCatalogLedgerEntries(
+            span: makeSpan(startTime: 595.0, endTime: 605.0),
+            entries: [entry],
+            fusionConfig: config
+        )
+        #expect(late.count == 1)
+        // The span over the FIRST mention hears it.
+        let early = await service.buildCatalogLedgerEntries(
+            span: makeSpan(startTime: 5.0, endTime: 20.0),
+            entries: [entry],
+            fusionConfig: config
+        )
+        #expect(early.count == 1)
+        // The span BETWEEN them — inside the hull, hearing neither — does not.
+        let between = await service.buildCatalogLedgerEntries(
+            span: makeSpan(startTime: 300.0, endTime: 330.0),
+            entries: [entry],
+            fusionConfig: config
+        )
+        #expect(between.isEmpty)
+    }
+
+    /// A repeat is ONE piece of evidence, not two, even for the span that hears
+    /// both of its mentions. `overlapping.count` is a count of distinct
+    /// evidence, and `locatedInTimeWindow` yields at most one entry per
+    /// `evidenceRef` — which is exactly why the fix reuses it rather than
+    /// fanning out over `anchorableOccurrences` the way `SpecialistScanPlanner`
+    /// must. Without this the weight would DOUBLE for the repeat's own span.
+    @Test("A repeat heard twice inside one span still counts ONCE toward catalog weight")
+    func catalogWeightCountsEvidenceNotMentions() async throws {
+        let store = try AnalysisStore(path: ":memory:")
+        let service = AdDetectionService(
+            store: store,
+            classifier: RuleBasedClassifier(),
+            metadataExtractor: FallbackExtractor(),
+            config: .default
+        )
+        let entry = EvidenceEntry(
+            evidenceRef: 0,
+            category: .url,
+            matchedText: "acme.com",
+            normalizedText: "acme.com",
+            atomOrdinal: 10,
+            startTime: 12.0,
+            endTime: 14.0,
+            count: 2,
+            firstTime: 12.0,
+            lastTime: 33.0,
+            occurrences: [
+                EvidenceOccurrence(atomOrdinal: 10, startTime: 12.0, endTime: 14.0),
+                EvidenceOccurrence(atomOrdinal: 24, startTime: 31.0, endTime: 33.0)
+            ]
+        )
+        let config = defaultConfig()
+
+        let ledger = await service.buildCatalogLedgerEntries(
+            span: makeSpan(startTime: 10.0, endTime: 40.0),
+            entries: [entry],
+            fusionConfig: config
+        )
+
         #expect(ledger.count == 1)
         if case .catalog(let entryCount) = try #require(ledger.first).detail {
             #expect(entryCount == 1)
+        } else {
+            Issue.record("Expected catalog ledger detail")
+        }
+        #expect(
+            abs(try #require(ledger.first).weight
+                - AdDetectionService.catalogLedgerWeightPerEntry * config.catalogCap) < 1e-12
+        )
+    }
+
+    /// The weight formula, exercised across the cap. This exists so a rail
+    /// covers the ARITHMETIC as well as the selection: a fix that selected the
+    /// right entries and then divided the weight differently would pass every
+    /// test above.
+    @Test("Catalog weight is entries × per-entry fraction × cap, clamped at the cap")
+    func catalogWeightScalesWithEntryCountAndClampsAtCap() async throws {
+        let store = try AnalysisStore(path: ":memory:")
+        let service = AdDetectionService(
+            store: store,
+            classifier: RuleBasedClassifier(),
+            metadataExtractor: FallbackExtractor(),
+            config: .default
+        )
+        let config = defaultConfig()
+        func entries(_ n: Int) -> [EvidenceEntry] {
+            (0..<n).map { index in
+                EvidenceEntry(
+                    evidenceRef: index,
+                    category: .url,
+                    matchedText: "brand\(index).com",
+                    normalizedText: "brand\(index).com",
+                    atomOrdinal: 10 + index,
+                    startTime: 20.0,
+                    endTime: 21.0
+                )
+            }
+        }
+        let span = makeSpan(startTime: 10.0, endTime: 40.0)
+        let three = try #require(await service.buildCatalogLedgerEntries(
+            span: span, entries: entries(3), fusionConfig: config
+        ).first)
+        #expect(abs(three.weight - 3 * AdDetectionService.catalogLedgerWeightPerEntry * config.catalogCap) < 1e-12)
+        // 1 / catalogLedgerWeightPerEntry entries reach the cap; more cannot exceed it.
+        let saturating = Int((1.0 / AdDetectionService.catalogLedgerWeightPerEntry).rounded()) + 5
+        let many = try #require(await service.buildCatalogLedgerEntries(
+            span: span, entries: entries(saturating), fusionConfig: config
+        ).first)
+        #expect(abs(many.weight - config.catalogCap) < 1e-12)
+        if case .catalog(let entryCount) = many.detail {
+            #expect(entryCount == saturating)
         } else {
             Issue.record("Expected catalog ledger detail")
         }
