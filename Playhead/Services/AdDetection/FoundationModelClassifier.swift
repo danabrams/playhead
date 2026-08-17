@@ -740,11 +740,20 @@ struct CoarseWindowFailure: Sendable, Equatable {
     /// attempt began. See `FMCoarseWindowOutput.daemonPeersAtStart`.
     let daemonPeersAtStart: Int?
     /// playhead-hzpa: the estimator's token count for the prompt THIS attempt
-    /// was rejected for, or nil when the attempt did not fail on size.
+    /// was rejected for PRE-FLIGHT, or nil when no size comparison was made.
     ///
-    /// NIL IS NOT ZERO. Only the oversize-abandonment path can supply this;
-    /// every other failure class leaves it nil because no size comparison was
-    /// what ended the attempt. Do not read a nil as "the prompt was small".
+    /// **THE PREDICATE IS "WAS IT REJECTED FOR SIZE", NOT "WHICH STATUS DID IT
+    /// END UP WITH", and the two really do come apart.** The over-budget branch
+    /// persists `.inferenceTimeout` rather than `.exceededContextWindow` when
+    /// subdivision ran and its chunks timed out (playhead-8d5r). Such a row
+    /// still carries this pair, and that is correct — the window WAS over
+    /// budget, which is the only reason it was subdivided at all. So a reader
+    /// selecting `status = 'exceededContextWindow'` will MISS rows that carry a
+    /// token count. Filter on the column, not on the status.
+    ///
+    /// NIL IS NOT ZERO. Every failure class that reached the model with a
+    /// prompt that FIT leaves this nil, because nothing compared a size.
+    /// Do not read a nil as "the prompt was small".
     let promptTokenCount: Int?
     /// playhead-hzpa: the per-window budget `promptTokenCount` was compared
     /// against, in the same units. Carried BESIDE the count rather than

@@ -3816,6 +3816,7 @@ T_HZ_STRUCT_ZERO="errorContext omits the budget clause rather than inventing a z
 T_HZ_STRUCT_SPELLING="every abandonment cause has a distinct durable spelling"
 T_HZ_ROW_CARRIES="an over-budget abandonment persists its token count, its budget and its cause"
 T_HZ_ROW_NULL="a failure that made no size comparison still persists NULL in both columns"
+T_HZ_ROW_SENTINEL="an oversize row is not a no-work sentinel and does not leave the coverage denominator"
 
 MUTATIONS=(
   # Batch 900 — JC01, THE SHIPPED DEFECT VERBATIM. The pre-insert guard asks
@@ -8531,6 +8532,15 @@ MUTATIONS=(
   # proves the two suites are not redundant.
   "HZ06|999|RUNNER|$T_HZ_ROW_CARRIES"
 
+  # HZ07 — THE COUPLING THIS BEAD CREATES, and the only mutation that makes
+  # coverage move. `errorContext` carried exactly one vocabulary before this
+  # change (`noWork:`, the sentinel marker `didExamineWindow` subtracts from the
+  # coverage denominator). Spelling the oversize prefix so it collides makes an
+  # oversize row read as a sentinel — the episode then scores BETTER because a
+  # window FAILED, which is the worst available direction for this bead's own
+  # subject. Nothing in the tree caught this before the rail below.
+  "HZ07|1001|FMCLS|$T_HZ_ROW_SENTINEL"
+
   # HZ99 — VACUITY CONTROL, and it MUST SURVIVE. The abandonment log line's
   # wording changes and nothing else: it proves the anchor still matches, the
   # batch still builds and both suites still run, while changing no behaviour.
@@ -8639,6 +8649,7 @@ describe_mutation() {
     HZ04) echo "leadingAtomOverBudget reports segmentHasSingleAtom — a cause that names ANOTHER cause, the standing defect class injected deliberately" ;;
     HZ05) echo "oversizeErrorContext writes budget=0 when the budget is absent — not-measured collapsed into measured-zero" ;;
     HZ06) echo "the runner goes back to errorContext: nil, inputTokenCount: nil — the classifier still builds the pair and the persistence seam drops it" ;;
+    HZ07) echo "the oversize errorContext prefix collides with the noWork: sentinel marker — a failed window leaves the coverage denominator and the episode scores BETTER for failing" ;;
     HZ99) echo "VACUITY CONTROL — the abandonment log's wording changes and nothing else. MUST SURVIVE" ;;
     NY01) echo "AdDetectionService.hotPathCandidates sorts the RAW array — the shipped defect: runBackfill canonicalized and the hot path did not" ;;
     NY02) echo "the hot path 'de-duplicates' by chunk.id, a per-ROW UUID, so a fast/final twin survives it intact" ;;
@@ -9349,6 +9360,17 @@ EOF
   # matches inside the 24-space line, so the anchor applied twice and the run
   # correctly refused. Measured, not reasoned — the first spelling of this
   # control failed exactly that way.
+  HZ07)
+    snippet OLD <<'EOF'
+        guard let budgetTokens else { return "oversize:\(oversizeAbandonment.rawValue)" }
+        return "oversize:\(oversizeAbandonment.rawValue) budget=\(budgetTokens)"
+EOF
+    snippet NEW <<'EOF'
+        guard let budgetTokens else { return "noWork:oversize:\(oversizeAbandonment.rawValue)" }
+        return "noWork:oversize:\(oversizeAbandonment.rawValue) budget=\(budgetTokens)"
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
   HZ99)
     snippet OLD <<'EOF'
                     abandonment=\(abandonment.rawValue, privacy: .public) \

@@ -197,7 +197,68 @@ struct CoarseOversizeRowMeasurementTests {
         }
     }
 
-    // MARK: - 2. The mirror, so the fix cannot be "write a number always"
+    // MARK: - 2. The coupling this change creates, pinned before it can bite
+    //
+    // `errorContext` was, before this bead, a NO-WORK SENTINEL MARKER and
+    // nothing else — every non-null value in the field database is
+    // `noWork:emptySegments`. `SemanticScanResult.isNoWorkSentinel` keys on the
+    // `noWork:` prefix and `didExamineWindow` subtracts those rows from
+    // coverage. Writing a SECOND vocabulary into that column is therefore a
+    // real regression risk in one specific direction: if an oversize row were
+    // ever read as a sentinel, these windows would silently leave the coverage
+    // DENOMINATOR — an episode would look better scanned precisely because a
+    // window failed, which is the worst possible direction for this bead's own
+    // subject matter.
+    //
+    // Measured today the prefixes are disjoint and coverage is unchanged. This
+    // pins that, because nothing else in the tree does.
+    @Test("an oversize row is not a no-work sentinel and does not leave the coverage denominator")
+    func oversizeRowIsNotMistakenForANoWorkSentinel() {
+        let failure = CoarseWindowFailure(
+            planWindowIndex: 0,
+            lineRefs: [1],
+            startTime: 0,
+            endTime: 42.9,
+            status: .exceededContextWindow,
+            promptTokenCount: 512,
+            budgetTokens: 456,
+            oversizeAbandonment: .segmentHasSingleAtom
+        )
+        let context = try? #require(failure.oversizeErrorContext)
+
+        #expect(
+            SemanticScanResult.isNoWorkSentinel(errorContext: context) == false,
+            """
+            an oversize abandonment reads as a no-work sentinel, so these windows would \
+            be subtracted from the coverage denominator — an episode would score BETTER \
+            because a window failed.
+            """
+        )
+        // The sentinel prefix and the oversize prefix must stay disjoint. A
+        // future rename of either that made one a prefix of the other would
+        // reintroduce exactly the collapse above.
+        #expect(
+            context?.hasPrefix(SemanticScanResult.noWorkSentinelErrorContextPrefix) == false
+        )
+        // And the verdict the store actually computes is unchanged: an oversize
+        // row did not examine its window, for the STATUS reason it always had,
+        // not because of anything written into errorContext.
+        #expect(
+            SemanticScanResult.didExamineWindow(
+                status: .exceededContextWindow,
+                errorContext: context
+            ) == false
+        )
+        // The control on that assertion: the same errorContext must not be able
+        // to flip an EXAMINING status to non-examining either. If it could, the
+        // column would be steering coverage rather than describing a failure.
+        #expect(
+            SemanticScanResult.didExamineWindow(status: .success, errorContext: context) == true,
+            "writing an oversize context must not remove a successful window from coverage"
+        )
+    }
+
+    // MARK: - 3. The mirror, so the fix cannot be "write a number always"
 
     @Test("a failure that made no size comparison still persists NULL in both columns")
     func nonOversizeRowPersistsNoMeasurement() async throws {
