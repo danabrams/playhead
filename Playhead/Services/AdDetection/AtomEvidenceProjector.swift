@@ -214,9 +214,28 @@ actor AtomEvidenceProjector {
         }
 
         // Which atom ordinals have evidence catalog hits?
+        //
+        // playhead-04rx: EVERY occurrence, not just the entry's representative.
+        // `EvidenceCatalogBuilder.deduplicate` collapses a repeated sponsor read
+        // into one entry — correctly, because `evidenceRef` is an identity FM
+        // prompts point at — and this loop used to key on `entry.atomOrdinal`,
+        // the EARLIEST mention. So a show that reads the same domain in a
+        // pre-roll and again in a post-roll anchored the pre-roll and left the
+        // post-roll lexically silent: the repeat was counted (`count`,
+        // `lastTime`) and never anchored. On DE0784D8 the canonical annotation
+        // has a post-roll ad at 5462.57–5522.65 containing "netsuite.ai" at
+        // 5514.5, deduped against the 51.9 s pre-roll mention.
+        //
+        // Each atom gets the entry as seen FROM ITS OWN OCCURRENCE, so the
+        // provenance attached to the post-roll atom does not claim the evidence
+        // sits at 51.9 s. For a non-repeated entry that view is byte-identical
+        // to the entry, which is what keeps persisted provenance stable.
         var evidenceByOrdinal: [Int: [EvidenceEntry]] = [:]
         for entry in anchoringEntries {
-            evidenceByOrdinal[entry.atomOrdinal, default: []].append(entry)
+            for occurrence in entry.anchorableOccurrences {
+                evidenceByOrdinal[occurrence.atomOrdinal, default: []]
+                    .append(entry.viewOfOccurrence(occurrence))
+            }
         }
 
         // MARK: Produce AtomEvidence for each atom

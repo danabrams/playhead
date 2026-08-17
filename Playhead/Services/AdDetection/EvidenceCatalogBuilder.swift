@@ -22,6 +22,23 @@ enum EvidenceCategory: String, Sendable, CaseIterable, Codable {
     case brandSpan        // Brand-like proper noun spans in commercial context
 }
 
+/// One place in the transcript where a catalog entry's text was actually said.
+///
+/// playhead-04rx. Deduplication collapses every mention of a sponsor domain into
+/// ONE `EvidenceEntry` — that is deliberate and stays, because `evidenceRef` is
+/// an identity FM prompts point at and multiplying entries would multiply refs.
+/// What it must not also do is collapse WHERE those mentions are. A repeated
+/// sponsor read is a second ad BREAK, minutes away from the first, and an entry
+/// that remembers only its earliest atom cannot anchor it.
+struct EvidenceOccurrence: Sendable, Equatable, Codable {
+    /// Which atom this mention came from (atomKey.atomOrdinal).
+    let atomOrdinal: Int
+    /// Interpolated time of THIS mention — not the entry's earliest.
+    let startTime: Double
+    /// Interpolated time of THIS mention — not the entry's earliest.
+    let endTime: Double
+}
+
 /// A single evidence entry in the catalog.
 struct EvidenceEntry: Sendable, Equatable {
     /// Stable integer ref for FM prompts: [E0], [E1], ...
@@ -33,21 +50,85 @@ struct EvidenceEntry: Sendable, Equatable {
     /// Lowercased/trimmed form used for deduplication.
     let normalizedText: String
     /// Which atom this came from (atomKey.atomOrdinal).
+    ///
+    /// This is the REPRESENTATIVE — the earliest occurrence. It is what
+    /// `renderForPrompt` prints and what every FM-side consumer keys on, so it
+    /// is deliberately unchanged by playhead-04rx. Anything that wants to reach
+    /// the LATER mentions of a repeated sponsor must read
+    /// ``anchorableOccurrences`` instead; reading this field and treating it as
+    /// "where the evidence is" is exactly the defect 04rx fixed in the
+    /// projector.
     let atomOrdinal: Int
     /// Time position of the representative occurrence kept after dedup.
     let startTime: Double
     /// Time position of the representative occurrence kept after dedup.
     let endTime: Double
     /// How many times this (category, normalizedText) pair appeared.
+    ///
+    /// NOTE this counts MATCHES, and ``anchorableOccurrences`` counts ATOMS, so
+    /// the two differ whenever one atom carries the same text twice ("that's
+    /// acme.com, acme.com"). `count` is the density signal the FM prompt
+    /// renders; the occurrence list is the set of places to anchor.
     let count: Int
     /// Time of the earliest occurrence in episode audio.
     let firstTime: Double
     /// Time of the latest occurrence in episode audio.
     let lastTime: Double
+    /// Every atom this entry's text was said in, earliest first (playhead-04rx).
+    ///
+    /// `nil` means "nobody recorded the population" — a value persisted before
+    /// 04rx, or an entry built by a caller that supplied no list. It does NOT
+    /// mean "there is one place", and the difference is why this property is
+    /// not the one to read: ``anchorableOccurrences`` is, and it deliberately
+    /// resolves BOTH the unrecorded case and the empty-array case to the
+    /// representative. Not because they mean the same thing, but because the
+    /// only other answer — anchor nowhere — silently deletes the provenance a
+    /// persisted span already has, which is a worse failure than under-reading
+    /// an unrecorded population.
+    let occurrences: [EvidenceOccurrence]?
 
     /// Full coverage window for overlap/scoring consumers.
     var coverageStartTime: Double { firstTime }
     var coverageEndTime: Double { lastTime }
+
+    /// Every place this entry may anchor, earliest first.
+    ///
+    /// An entry with no recorded occurrence list falls back to its
+    /// representative, which is exactly the pre-04rx behaviour — so a persisted
+    /// span decoded from an older row still resolves to one anchor rather than
+    /// none.
+    var anchorableOccurrences: [EvidenceOccurrence] {
+        if let occurrences, !occurrences.isEmpty { return occurrences }
+        return [EvidenceOccurrence(atomOrdinal: atomOrdinal, startTime: startTime, endTime: endTime)]
+    }
+
+    /// This entry as seen from ONE of its occurrences.
+    ///
+    /// The projector anchors atoms with these rather than with `self`, because a
+    /// provenance record attached to the post-roll atom that says the evidence
+    /// sits at 51.9 s is a value naming one thing and read as another. Identity
+    /// (`evidenceRef`), text and density (`count`, `firstTime`, `lastTime`) are
+    /// carried through untouched; position is the occurrence's own. The result
+    /// carries NO occurrence list, because it names a single mention.
+    ///
+    /// For the representative occurrence this returns a value byte-identical to
+    /// the pre-04rx entry, which is what keeps persisted `decoded_spans`
+    /// provenance stable for everything that is not a repeat.
+    func viewOfOccurrence(_ occurrence: EvidenceOccurrence) -> EvidenceEntry {
+        EvidenceEntry(
+            evidenceRef: evidenceRef,
+            category: category,
+            matchedText: matchedText,
+            normalizedText: normalizedText,
+            atomOrdinal: occurrence.atomOrdinal,
+            startTime: occurrence.startTime,
+            endTime: occurrence.endTime,
+            count: count,
+            firstTime: firstTime,
+            lastTime: lastTime,
+            occurrences: nil
+        )
+    }
 
     init(
         evidenceRef: Int,
@@ -59,7 +140,8 @@ struct EvidenceEntry: Sendable, Equatable {
         endTime: Double,
         count: Int = 1,
         firstTime: Double? = nil,
-        lastTime: Double? = nil
+        lastTime: Double? = nil,
+        occurrences: [EvidenceOccurrence]? = nil
     ) {
         self.evidenceRef = evidenceRef
         self.category = category
@@ -71,6 +153,7 @@ struct EvidenceEntry: Sendable, Equatable {
         self.count = count
         self.firstTime = firstTime ?? startTime
         self.lastTime = lastTime ?? endTime
+        self.occurrences = occurrences
     }
 }
 
@@ -196,6 +279,8 @@ enum EvidenceCatalogBuilder {
         let firstTime: Double
         let lastTime: Double
         let matchOffset: Int
+        /// Every atom the collapsed occurrences came from (playhead-04rx).
+        let occurrences: [EvidenceOccurrence]
     }
 
     // MARK: - Pattern extraction
@@ -647,6 +732,12 @@ enum EvidenceCatalogBuilder {
             var firstTime: Double
             var lastTime: Double
             var matchOffset: Int
+            /// playhead-04rx: where each collapsed mention was, in encounter
+            /// order (the input is pre-sorted by atomOrdinal then offset, so
+            /// that is ascending). At most ONE per atom — a second match in the
+            /// same atom raises `count` but adds no new place to anchor.
+            var occurrences: [EvidenceOccurrence]
+            var seenOrdinals: Set<Int>
         }
 
         var aggregatedByKey: [String: AggregatedMatch] = [:]
@@ -657,6 +748,13 @@ enum EvidenceCatalogBuilder {
                 aggregate.count += 1
                 aggregate.firstTime = min(aggregate.firstTime, match.startTime)
                 aggregate.lastTime = max(aggregate.lastTime, match.endTime)
+                if aggregate.seenOrdinals.insert(match.atomOrdinal).inserted {
+                    aggregate.occurrences.append(EvidenceOccurrence(
+                        atomOrdinal: match.atomOrdinal,
+                        startTime: match.startTime,
+                        endTime: match.endTime
+                    ))
+                }
                 aggregatedByKey[key] = aggregate
             } else {
                 aggregatedByKey[key] = AggregatedMatch(
@@ -669,7 +767,13 @@ enum EvidenceCatalogBuilder {
                     count: 1,
                     firstTime: match.startTime,
                     lastTime: match.endTime,
-                    matchOffset: match.matchOffset
+                    matchOffset: match.matchOffset,
+                    occurrences: [EvidenceOccurrence(
+                        atomOrdinal: match.atomOrdinal,
+                        startTime: match.startTime,
+                        endTime: match.endTime
+                    )],
+                    seenOrdinals: [match.atomOrdinal]
                 )
                 orderedKeys.append(key)
             }
@@ -690,7 +794,8 @@ enum EvidenceCatalogBuilder {
                     count: match.count,
                     firstTime: match.firstTime,
                     lastTime: match.lastTime,
-                    matchOffset: match.matchOffset
+                    matchOffset: match.matchOffset,
+                    occurrences: match.occurrences.sorted { $0.atomOrdinal < $1.atomOrdinal }
                 )
             )
         }
@@ -726,7 +831,8 @@ enum EvidenceCatalogBuilder {
                 endTime: match.endTime,
                 count: match.count,
                 firstTime: match.firstTime,
-                lastTime: match.lastTime
+                lastTime: match.lastTime,
+                occurrences: match.occurrences
             )
         }
     }
