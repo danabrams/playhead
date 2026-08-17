@@ -8639,12 +8639,50 @@ MUTATIONS=(
   # code had rather than adding any.
   "AD07|1008|FMCLS|$T_AD_LEGACY_PROMPT"
 
-  # AD08 — THE SHIPPED DEFECT, VERBATIM, on the narrowing side. The seed set is
-  # built from representatives, so a repeated sponsor's later reads nominate no
-  # scan window and the targeted phase never looks at the second ad break. This
-  # is the more consequential of the two sites: the prompt half changes what the
-  # model is told about a window it was already going to read, and this one
-  # decides whether the window exists.
+  # AD08 — THE SHIPPED DEFECT, VERBATIM, on the narrowing side: BOTH halves of
+  # `evidenceLineRefs` revert to the representative, which is what actually
+  # shipped. This is the more consequential of the two sites — the prompt half
+  # changes what the model is told about a window it was already going to read,
+  # and this one decides whether the window exists at all.
+  #
+  # IT WAS ONE PATCH AND IT SURVIVED, WHICH IS THE MOST USEFUL THING THIS SERIES
+  # PRODUCED. The first version reverted only `catalogRefs` (the seed) and left
+  # the lookback per-occurrence, and the whole focused set stayed GREEN
+  # (`ad-1009.log`, 07:28 run, zero observed failures). Two things were wrong,
+  # and only the second is about the rail:
+  #
+  #   1. IT WAS NOT THE SHIPPED DEFECT. The shipped state was seed-per-entry AND
+  #      lookback-per-entry. An entry labelled "VERBATIM" that reverts half of a
+  #      two-site defect is a value naming one thing read as though it named
+  #      another — this repo's standing defect class, committed inside the
+  #      instrument built to catch it.
+  #   2. THE SEED HALF IS UNOBSERVABLE ON ITS OWN under the shipped config, and
+  #      that is a fact about the CODE rather than a gap in the test.
+  #      `evidenceLineRefs` returns `catalogRefs ∪ preAnchorRefs`. The seed
+  #      contributes the segment holding occurrence atom N; the lookback
+  #      contributes the segments holding atoms N−20…N−1; a segment holds many
+  #      atoms and `perAnchorPaddingSegments` is 5, so the padded lookback
+  #      already covers N's segment. MEASURED on the corpus rather than argued:
+  #      `seedPerOccurrence \ (seedPerEntry ∪ lookbackPerOccurrence)` is EMPTY on
+  #      all 31 assets, so the two input sets are equal and `narrow()` is
+  #      byte-identical. The seed-only mutant is an EQUIVALENT MUTANT, not a
+  #      coverage hole.
+  #
+  # So the entry is not deleted and the expectation is not relaxed — it is
+  # CORRECTED to the defect it always claimed to be, which the rail does kill.
+  # A separate seed-only entry is deliberately NOT added: the battery's own JC03
+  # precedent is that when the difference between two mutations is UNREACHABLE
+  # rather than merely unasserted, they are one rail wearing two names. Writing
+  # a `perAnchorPaddingSegments: 0` rail to make the seed observable would pin a
+  # configuration production never uses, which is the same "green for a reason
+  # other than the one its name claims" trap in mirror image.
+  #
+  # WHAT THIS MEANS FOR THE BEAD'S OWN NUMBERS: the +738 measured scan-seconds
+  # are bought by the LOOKBACK expansion, not by the seed expansion. The seed
+  # change stays because it is the correct expression of intent and the only
+  # thing standing between `catalogRefs` and the representative if the padding
+  # or the lookback ever changes — but it is not what earned the coverage, and
+  # the PR says so.
   "AD08|1009|TWNARR|$T_AD_NARROW_SECOND"
 
   # AD09 — HALF A FIX, and the half nobody would notice. The seed follows every
@@ -8775,7 +8813,7 @@ describe_mutation() {
     AD05) echo "the selector never re-locates — the line points at the post-roll and the entry reports the pre-roll's second (the standing defect class)" ;;
     AD06) echo "the window-membership test goes away — an entry with no mention in the window earns a line anyway" ;;
     AD07) echo "the selector reads occurrences directly, so a pre-04rx persisted entry earns no prompt line at all" ;;
-    AD08) echo "the narrowing seed is built from representatives again (the shipped defect) — the second ad break is nominated by no phase" ;;
+    AD08) echo "BOTH halves of evidenceLineRefs revert to the representative (the shipped defect verbatim) — the second ad break is nominated by no phase" ;;
     AD09) echo "the seed follows every occurrence and the 20-atom lookback still follows only the first — the second break arrives with no ad body in front of it" ;;
     AD10) echo "the narrowing seed reads occurrences directly, so a pre-04rx persisted entry seeds nothing and a scanned window silently stops being scanned" ;;
     AD99) echo "VACUITY CONTROL — the loop variable in the prompt selector is renamed and nothing else. MUST SURVIVE" ;;
@@ -9618,6 +9656,8 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  # AD08 has TWO sites because the shipped defect had two. See the entry in
+  # MUTATIONS for what the one-site version proved instead.
   AD08)
     snippet OLD <<'EOF'
             inputs.evidenceCatalog.entries.flatMap { entry in
@@ -9629,6 +9669,25 @@ EOF
     snippet NEW <<'EOF'
             inputs.evidenceCatalog.entries.compactMap { entry in
                 lineRefByAtomOrdinal[entry.atomOrdinal]
+            }
+EOF
+    patch "$file" "$OLD" "$NEW" || return $?
+    snippet OLD <<'EOF'
+            for occurrence in entry.anchorableOccurrences {
+                let lookbackStart = max(0, occurrence.atomOrdinal - lookbackAtoms)
+                for ordinal in lookbackStart..<occurrence.atomOrdinal {
+                    if let ref = lineRefByAtomOrdinal[ordinal] {
+                        preAnchorRefs.insert(ref)
+                    }
+                }
+            }
+EOF
+    snippet NEW <<'EOF'
+            let lookbackStart = max(0, entry.atomOrdinal - lookbackAtoms)
+            for ordinal in lookbackStart..<entry.atomOrdinal {
+                if let ref = lineRefByAtomOrdinal[ordinal] {
+                    preAnchorRefs.insert(ref)
+                }
             }
 EOF
     patch "$file" "$OLD" "$NEW" ;;

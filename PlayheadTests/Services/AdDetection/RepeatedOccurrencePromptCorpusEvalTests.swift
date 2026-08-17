@@ -45,11 +45,18 @@ final class RepeatedOccurrencePromptCorpusEvalTests: XCTestCase {
     /// The refinement path's per-call prompt budget on a 4,096-token on-device
     /// window, computed by the production formula rather than restated.
     ///
-    /// This is NOT the ~468 the coarse path gets: `promptEvidenceEntries` is
-    /// only ever called from `planAdaptiveZoom` / `refineExpandedWindow` /
-    /// `planBoundaryExtractionWindows`, all of which divide by
-    /// `refinementBudgetDivisor` (2) rather than the coarse ÷8. Quoting the
-    /// coarse budget here would understate the headroom by ~3×.
+    /// This is NOT the ~468 the coarse path gets. `promptEvidenceEntries` has
+    /// exactly two callers — `planAdaptiveZoom` and `refineExpandedWindow` —
+    /// and both divide by `refinementBudgetDivisor` (2) rather than the coarse
+    /// ÷8, so quoting the coarse budget here would understate the headroom by
+    /// ~3×.
+    ///
+    /// `planBoundaryExtractionWindows` is deliberately NOT in that list: it
+    /// selects evidence with `entry.coverageEndTime > span.startTime &&
+    /// entry.coverageStartTime < span.endTime` and renders through
+    /// `buildBoundaryExtractionPrompt`, so it never reaches this selector. That
+    /// distinction matters rather than being pedantry — reading the coverage
+    /// HULL is the mirror defect, filed as playhead-rty3.
     static let refinementPromptBudgetTokens = FoundationModelClassifier
         .maximumEstimatedPromptTokensSafeFor(
             contextSize: 4_096,
@@ -154,6 +161,39 @@ final class RepeatedOccurrencePromptCorpusEvalTests: XCTestCase {
         let addedSegments: [AddedSegmentRow]
     }
 
+    /// Which HALF of the narrowing change bought the coverage.
+    ///
+    /// playhead-ad9n mutation AD08 reverted only the SEED half of
+    /// `evidenceLineRefs` and SURVIVED the whole focused set. That is not a
+    /// coverage hole, it is a fact about the code, and this row is the
+    /// measurement that establishes it rather than arguing it.
+    ///
+    /// `evidenceLineRefs` returns `catalogRefs ∪ preAnchorRefs`. Both halves are
+    /// pure functions of the same two inputs, so the two arms can be computed
+    /// directly and compared as SETS — and if the sets are equal, `narrow()` is
+    /// byte-identical by construction, with no need to re-implement the padding,
+    /// merge, acoustic snap or cluster snap that follow.
+    ///
+    /// `seedOnlyContribution` is the count this bead's honesty rests on: line
+    /// refs the per-occurrence SEED contributes that the per-entry seed plus the
+    /// per-occurrence LOOKBACK do not already contain. Zero means the seed half
+    /// is redundant under the shipped config and the measured gain belongs to
+    /// the lookback.
+    struct HalvesRow: Encodable {
+        let assetId: String
+        let seedPerEntry: Int
+        let seedPerOccurrence: Int
+        let lookbackPerEntry: Int
+        let lookbackPerOccurrence: Int
+        /// `seedPerOccurrence \ (seedPerEntry ∪ lookbackPerOccurrence)`
+        let seedOnlyContribution: Int
+        /// `lookbackPerOccurrence \ (seedPerOccurrence ∪ lookbackPerEntry)`
+        let lookbackOnlyContribution: Int
+        /// The two arms' full union — equal iff the seed half is redundant.
+        let unionShipped: Int
+        let unionSeedReverted: Int
+    }
+
     struct AssetReport: Encodable {
         let assetId: String
         let title: String?
@@ -171,6 +211,7 @@ final class RepeatedOccurrencePromptCorpusEvalTests: XCTestCase {
         let windows: [WindowRow]
         let narrowing: [NarrowingRow]
         let union: UnionRow
+        let halves: HalvesRow
     }
 
     struct Report: Encodable {
@@ -361,6 +402,15 @@ final class RepeatedOccurrencePromptCorpusEvalTests: XCTestCase {
                 }
             }
         }
+        let seedOnly = perAsset.reduce(0) { $0 + $1.halves.seedOnlyContribution }
+        let lookOnly = perAsset.reduce(0) { $0 + $1.halves.lookbackOnlyContribution }
+        let sameUnion = perAsset.allSatisfy { $0.halves.unionShipped == $0.halves.unionSeedReverted }
+        print("[ad9n] WHICH HALF: seed-only contribution=\(seedOnly) lookback-only contribution=\(lookOnly) unions equal on every asset=\(sameUnion)")
+        print("[ad9n]   (seed-only 0 + unions equal ⇒ reverting the SEED alone leaves narrow() byte-identical; the coverage is bought by the LOOKBACK)")
+        for asset in perAsset where asset.halves.seedOnlyContribution > 0 {
+            print("[ad9n]   SEED MATTERS \(asset.assetId.prefix(8)) +\(asset.halves.seedOnlyContribution) refs")
+        }
+
         let unionBase = perAsset.reduce(0) { $0 + $1.union.baselineLineRefs }
         let unionTreat = perAsset.reduce(0) { $0 + $1.union.treatmentLineRefs }
         print("[ad9n] targeted UNION across all phases: \(unionBase)->\(unionTreat) line refs (+\(unionTreat - unionBase))")
@@ -636,6 +686,54 @@ final class RepeatedOccurrencePromptCorpusEvalTests: XCTestCase {
             }
         )
 
+        // Which half of the narrowing change bought the coverage. Transcribed
+        // from `evidenceLineRefs`'s two halves rather than driven through it,
+        // because the function exposes only their union — and because a set
+        // comparison is exact: equal inputs to `narrowedResult` make `narrow()`
+        // byte-identical without re-implementing anything downstream of it.
+        let lookbackAtoms = 20
+        func seedRefs(perOccurrence: Bool) -> Set<Int> {
+            var refs = Set<Int>()
+            for entry in catalog.entries {
+                let ordinals = perOccurrence
+                    ? entry.anchorableOccurrences.map(\.atomOrdinal)
+                    : [entry.atomOrdinal]
+                for ordinal in ordinals {
+                    if let ref = lineRefByAtomOrdinal[ordinal] { refs.insert(ref) }
+                }
+            }
+            return refs
+        }
+        func lookbackRefs(perOccurrence: Bool) -> Set<Int> {
+            var refs = Set<Int>()
+            for entry in catalog.entries {
+                let anchors = perOccurrence
+                    ? entry.anchorableOccurrences.map(\.atomOrdinal)
+                    : [entry.atomOrdinal]
+                for anchor in anchors {
+                    for ordinal in max(0, anchor - lookbackAtoms) ..< anchor {
+                        if let ref = lineRefByAtomOrdinal[ordinal] { refs.insert(ref) }
+                    }
+                }
+            }
+            return refs
+        }
+        let seedOcc = seedRefs(perOccurrence: true)
+        let seedEnt = seedRefs(perOccurrence: false)
+        let lookOcc = lookbackRefs(perOccurrence: true)
+        let lookEnt = lookbackRefs(perOccurrence: false)
+        let halvesRow = HalvesRow(
+            assetId: asset.assetId,
+            seedPerEntry: seedEnt.count,
+            seedPerOccurrence: seedOcc.count,
+            lookbackPerEntry: lookEnt.count,
+            lookbackPerOccurrence: lookOcc.count,
+            seedOnlyContribution: seedOcc.subtracting(seedEnt.union(lookOcc)).count,
+            lookbackOnlyContribution: lookOcc.subtracting(seedOcc.union(lookEnt)).count,
+            unionShipped: seedOcc.union(lookOcc).count,
+            unionSeedReverted: seedEnt.union(lookOcc).count
+        )
+
         return AssetReport(
             assetId: asset.assetId,
             title: asset.title,
@@ -652,7 +750,8 @@ final class RepeatedOccurrencePromptCorpusEvalTests: XCTestCase {
             treatmentTotalPromptTokens: treatmentTokens,
             windows: windowRows,
             narrowing: narrowingRows,
-            union: unionRow
+            union: unionRow,
+            halves: halvesRow
         )
     }
 
