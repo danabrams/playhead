@@ -308,6 +308,8 @@ struct LossyAnchorRef: Decodable {
 extension EvidenceEntry: Codable {
     private enum CodingKeys: String, CodingKey {
         case evidenceRef, category, matchedText, normalizedText, atomOrdinal, count, firstTime, lastTime, startTime, endTime
+        // playhead-04rx.
+        case occurrences
     }
 
     init(from decoder: Decoder) throws {
@@ -329,7 +331,13 @@ extension EvidenceEntry: Codable {
             endTime: endTime,
             count: count,
             firstTime: firstTime,
-            lastTime: lastTime
+            lastTime: lastTime,
+            // playhead-04rx: ABSENT decodes to `nil`, and `nil` means "nobody
+            // recorded the population", which `anchorableOccurrences` resolves
+            // to the representative — i.e. the pre-04rx reading. Decoding it as
+            // an empty array instead would make an old row anchor NOTHING, which
+            // is a span silently losing its only provenance.
+            occurrences: try c.decodeIfPresent([EvidenceOccurrence].self, forKey: .occurrences)
         )
     }
 
@@ -346,5 +354,11 @@ extension EvidenceEntry: Codable {
         // Emit legacy startTime/endTime so older builds can still decode persisted spans.
         try c.encode(startTime, forKey: .startTime)
         try c.encode(endTime, forKey: .endTime)
+        // playhead-04rx: omitted when nil, so provenance written by the
+        // projector — which always pins each ref to ONE occurrence — is
+        // byte-identical to what shipped before. An older build reading a row
+        // that does carry the key ignores it, which is the safe direction: it
+        // sees the representative and anchors once.
+        try c.encodeIfPresent(occurrences, forKey: .occurrences)
     }
 }
