@@ -849,6 +849,28 @@ extension DogfoodDiagnosticsAnalysisHealth {
     /// not a disagreement), or a `terminalReason` this parser cannot find a
     /// number in. All three under-claim, matching every other reader of a
     /// missing coverage quantity in this codebase.
+    ///
+    /// **TWO EVENTS HERE PRINT NOTHING, AND BOTH WERE MEASURED BEFORE BEING
+    /// LEFT SILENT.** Enumerating what this function can do and asking which
+    /// outcome says nothing is the method that closed `playhead-q93o`'s fifth
+    /// round, and it finds two states that are NOT "the row is consistent":
+    ///
+    ///   * a `completeAdScanPartial` row whose `terminalReason` carries no
+    ///     ad-scan term at all — a reason written by something other than
+    ///     `AdScanCoverage.diagnostic`, i.e. "I could not ask";
+    ///   * a row that RECORDED a number and now has no measurement — the
+    ///     coverage-lane rows the terminal was taken from are gone
+    ///     (`playhead-wvdz`'s chunk deletion outliving the asset row).
+    ///
+    /// Across all **13 distinct captures** on this box (enumerated by SQLite
+    /// magic bytes, deduplicated by content hash, 2026-04-25 → 2026-08-16),
+    /// there are 13 `completeAdScanPartial` rows and **zero** in either state.
+    /// So both are structurally implausible rather than merely unobserved, and
+    /// naming them with their own flag kinds would add two vocabulary entries
+    /// that have never described anything. They are documented instead —
+    /// `playhead-1e86`'s rule: say which quantity is measured and which is
+    /// inferred, and do not ship a rail for a population of zero without
+    /// saying so.
     private struct StaleAdScanTerminalReason {
         let detail: String
     }
