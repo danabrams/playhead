@@ -15,8 +15,10 @@
 //
 // The gate is the UNION of two FREE, already-trusted anchor sources the FM
 // targeted phases also use:
-//   * evidence-catalog anchors (`EvidenceCatalog.entries` — sponsor / promo /
-//     URL / disclosure spans), and
+//   * evidence-catalog anchors — one per MENTION
+//     (`EvidenceCatalog.entries` × `EvidenceEntry.anchorableOccurrences`:
+//     sponsor / promo / URL / disclosure spans, at the places they were said,
+//     not the hull between the first and the last — playhead-x7rk), and
 //   * lexical-candidate spans (`LexicalScanner` over the segment text).
 // Anchors are padded, merged into candidate regions, and tiled into fixed
 // ~25s windows. Windows are ranked densest-cue-first and capped at `budget`
@@ -106,13 +108,41 @@ struct SpecialistScanPlanner: Sendable {
         var anchors: [(start: Double, end: Double)] = []
 
         // Evidence-catalog anchors (free — same anchors the FM harvester phase
-        // trusts). Each entry contributes its coverage span.
+        // trusts). Each entry contributes ONE ANCHOR PER MENTION.
+        //
+        // playhead-x7rk. This read `entry.coverageStartTime`/`coverageEndTime`
+        // until 2026-08-17, which are `firstTime`/`lastTime` — the HULL from a
+        // deduplicated entry's earliest mention to its latest. A sponsor read
+        // once in the pre-roll and once in the post-roll therefore contributed a
+        // single anchor spanning the whole episode, and step 2 below MERGES
+        // padded anchors: one episode-wide anchor absorbs every other anchor in
+        // the episode into one region, which is the opposite of what a targeted
+        // specialist scan is for. `AdLikelihoodScanOrder.seeds` had reasoned
+        // from the outside that a wide anchor "contributes uniformly and is
+        // harmless" because this site scores DENSITY; that is true of the score
+        // and false of the merge, and the merge runs first.
+        //
+        // ``EvidenceEntry/anchorableOccurrences`` is the shared answer to "where
+        // was this said" — the same property ``EvidenceEntry/locatedInWindow``
+        // (banner, playhead-rty3), `TargetedWindowNarrower` and
+        // `AtomEvidenceProjector` (playhead-04rx) read. It is NOT
+        // `locatedInWindow` itself: that selects the ONE mention a given window
+        // can see, and this loop is upstream of any window — it is enumerating
+        // the places, not choosing among them.
+        //
+        // For an entry with a single mention this is byte-identical to the old
+        // expression (`firstTime == startTime` and `lastTime == endTime` when
+        // `count == 1`), so the change is strictly confined to repeats: more
+        // anchors, each narrower, none of them spanning silence nobody said
+        // anything in.
         for entry in evidenceCatalog.entries {
-            let lo = min(entry.coverageStartTime, entry.coverageEndTime)
-            let hi = max(entry.coverageStartTime, entry.coverageEndTime)
-            let clampedLo = min(max(lo, episodeStart), episodeEnd)
-            let clampedHi = min(max(hi, episodeStart), episodeEnd)
-            anchors.append((clampedLo, clampedHi))
+            for occurrence in entry.anchorableOccurrences {
+                let lo = min(occurrence.startTime, occurrence.endTime)
+                let hi = max(occurrence.startTime, occurrence.endTime)
+                let clampedLo = min(max(lo, episodeStart), episodeEnd)
+                let clampedHi = min(max(hi, episodeStart), episodeEnd)
+                anchors.append((clampedLo, clampedHi))
+            }
         }
 
         // Lexical-candidate anchors (free — the same LexicalScanner pass the

@@ -1427,6 +1427,9 @@ ESUMBF="Playhead/Services/EpisodeSummaries/EpisodeSummaryBackfillCoordinator.swi
 # call re-opens the whole defect silently.
 BEXP="Playhead/Services/AdDetection/BoundaryExpander.swift"
 SPSHD="Playhead/Services/AdDetection/SpecialistShadowDispatcher.swift"
+# playhead-x7rk: the specialist scan planner — where a background grant's FM
+# compute is aimed. The XR series mutates its evidence-anchor derivation.
+SPLAN="Playhead/Services/AdDetection/SpecialistScanPlanner.swift"
 FMSHD="Playhead/Services/AdDetection/FoundationModelClassifierShadowDispatcher.swift"
 TCANON="Playhead/Services/AdDetection/TranscriptChunkCanonicalizer.swift"
 # playhead-lmrx: the measured description of one BGTask grant. Every number in
@@ -1462,7 +1465,7 @@ MUTABLE_FILES=(
   "$DETCLS" "$DETLED" "$SPLIT" "$HOTGATE" "$UGCEN" "$POLICY" "$SEGAGG"
   "$DLMGR" "$FQSCAN" "$BGFEED" "$EPPREP" "$SCHED"
   "$CLAIM" "$RECON" "$ATOM" "$AJRUN" "$ACOORD" "$ESUMBF" "$MPTRENG" "$MPTRIDX"
-  "$BEXP" "$SPSHD" "$FMSHD" "$TCANON"
+  "$BEXP" "$SPSHD" "$FMSHD" "$TCANON" "$SPLAN"
   "$BGPS" "$GRANT" "$LEASE"
   "$PTX"
   "$ELV" "$BSB"
@@ -2203,6 +2206,13 @@ FOCUSED_SUITES=(
   # well as the FM rail that named them.
   -only-testing:PlayheadTests/EvidenceEntryWindowSelectionTests
   -only-testing:PlayheadTests/BannerEvidenceOccurrenceWindowTests
+  # playhead-x7rk: the specialist scan PLANNER (XR series). One suite, because
+  # the planner is a pure function — segments plus a catalog in, candidate
+  # windows out — so there is no second layer that could be right while it is
+  # wrong. The corpus lane `SpecialistScanPlanCorpusEvalTests` is deliberately
+  # NOT listed: it SKIPS without a device export, and a suite that cannot fail
+  # is a vacuity hazard in a list whose whole job is to fail.
+  -only-testing:PlayheadTests/SpecialistScanPlannerTests
   # playhead-uazf: the ad-scan axis on the dogfood wire (UZ series). TWO suites,
   # and neither can observe the other. The provider suite is the only thing that
   # lifts a real `AnalysisCoverageSummary` off a real store into the wire struct,
@@ -3886,6 +3896,26 @@ T_RY_SHARED="The FM prompt selector and the banner selector are the same answer"
 T_RY_SUGGEST_LOCAL="SUGGEST card: a mid-roll does not name a sponsor read an hour away"
 T_RY_SUGGEST_LOCATED="SUGGEST card: the window that DID hear the repeat carries it, located there"
 T_RY_AUTO_LOCAL="AUTO-SKIP card: a mid-roll does not name a sponsor read an hour away"
+
+# ---- playhead-x7rk: the SPECIALIST SCAN PLANNER half (XR series) ----
+#
+# ONE suite, and one is the right number here because the planner is a pure
+# function: segments plus a catalog in, candidate windows out. There is no
+# second layer that could be right while this one is wrong, which is why the RY
+# series needed two suites and this one does not.
+#
+# SEVEN rails rather than three, because "both reads are scanned and the gap is
+# not" is three claims and one test asserting all three reports anchoring-only-
+# the-first, anchoring-only-the-last and anchoring-the-hull identically. Split,
+# each of those defects has a rail that only it reddens.
+T_XR_FIRST="a sponsor read twice is scanned at the FIRST read"
+T_XR_SECOND="a sponsor read twice is scanned at the SECOND read"
+T_XR_GAP="the audio BETWEEN two reads of one sponsor is not scanned"
+T_XR_MERGE="a repeated sponsor's hull does not swallow a distant unrelated cue into one region"
+T_XR_DENSITY="a hull that ENDS is not a uniform vote: density must not lift a lone cue over a real pair"
+T_XR_HALF="a repeated entry's FIRST anchor ends at its own mention, not at the last one"
+T_XR_ONCE="an entry said ONCE plans exactly what it did before playhead-x7rk"
+T_XR_LEGACY="an entry with NO recorded occurrence list anchors at its representative, not its hull"
 
 MUTATIONS=(
   # Batch 900 — JC01, THE SHIPPED DEFECT VERBATIM. The pre-insert guard asks
@@ -8813,6 +8843,61 @@ MUTATIONS=(
   # so a control that cannot fail proves nothing.
   "RY99|1019|ORCH|$T_RY_SUGGEST_LOCAL;$T_RY_AUTO_LOCAL;$T_RY_BETWEEN"
 
+  # ---- playhead-x7rk (XR series): the SPECIALIST SCAN PLANNER half ----
+  #
+  # THE HULL IS NOT A PLACE, AND HERE IT IS NOT EVEN ONE VOTE — IT IS A REGION.
+  # `SpecialistScanPlanner` pads its anchors and MERGES the padded spans into
+  # candidate regions before tiling, so one anchor spanning `firstTime`..
+  # `lastTime` absorbs every other anchor in the episode into a single region.
+  # Measured on the 2026-08-02 pull, 31 assets: the pre-fix planner covered
+  # >=96 % of the EPISODE on 9 of them — the full-episode fallback its own header
+  # calls forbidden — and 998 of the 1,133 windows a grant would actually have
+  # paid for had no mention inside them and no lexical cue either.
+  #
+  # ONE FILE, unlike the RY and AD series: the choice of anchor and the use of
+  # it are the same twelve lines.
+
+  # XR01 — THE SHIPPED DEFECT, VERBATIM: one anchor per entry, spanning the
+  # coverage hull. Reddens the gap rail, the merge rail, the density rail and
+  # the legacy rail, and leaves the two "this read is scanned" rails green —
+  # which is the point of splitting them, because a hull scans both reads.
+  "XR01|1020|SPLAN|$T_XR_GAP;$T_XR_MERGE;$T_XR_DENSITY;$T_XR_LEGACY"
+
+  # XR02 — THE PLAUSIBLE WRONG FIX: anchor the REPRESENTATIVE only. Every gap
+  # rail goes green — this is strictly narrower than correct — and the second
+  # read of a repeated sponsor silently stops being scanned. The direction
+  # playhead-04rx's "strictly additive" claim forbids, and the one a reviewer
+  # reading only the gap rails would sign off.
+  "XR02|1021|SPLAN|$T_XR_SECOND;$T_XR_MERGE"
+
+  # XR03 — the mirror: anchor the LAST occurrence only. Killed by the FIRST-read
+  # rail alone. Together with XR02 this is what a single "both reads" rail could
+  # not have told anyone.
+  "XR03|1022|SPLAN|$T_XR_FIRST;$T_XR_MERGE"
+
+  # XR04 — the loop reads `occurrences` directly instead of
+  # `anchorableOccurrences`, so an entry persisted before playhead-04rx (or built
+  # by any caller that supplied no list) anchors NOWHERE and a window that used
+  # to be scanned silently stops being scanned. The narrowing twin of XR01, and
+  # invisible on freshly built catalogs — which is every catalog this site sees
+  # today, so only a rail can hold it.
+  "XR04|1023|SPLAN|$T_XR_ONCE;$T_XR_LEGACY"
+
+  # XR05 — HALF A FIX, and the shape that reads correct. The loop walks every
+  # occurrence, so the source says "per mention"; the REPRESENTATIVE's anchor
+  # still runs to `lastTime`. Both reads are scanned, so XR02's and XR03's rails
+  # stay green, and the plan is still the defect. Separated from XR01 by
+  # $T_XR_HALF and by nothing else — which is why that rail exists.
+  "XR05|1024|SPLAN|$T_XR_GAP;$T_XR_MERGE;$T_XR_HALF;$T_XR_LEGACY"
+
+  # XR99 — VACUITY CONTROL, and it MUST SURVIVE. The loop variable is renamed
+  # and nothing else changes: it proves the anchor still matches, the batch still
+  # builds and the suite still runs, while changing no behaviour. Non-empty
+  # expectation on purpose (playhead-ngsm) — an entry with an empty expectation
+  # iterates zero times and is credited KILLED, so a control that cannot fail
+  # proves nothing.
+  "XR99|1025|SPLAN|$T_XR_FIRST;$T_XR_SECOND;$T_XR_GAP"
+
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -8930,6 +9015,12 @@ describe_mutation() {
     RY06) echo "HALF A FIX: the auto-skip card is fixed and the SUGGEST card reverts to the hull — the half whose answer is banked" ;;
     RY07) echo "the mirror of RY06 — the suggest card is fixed and the AUTO-SKIP card reverts to the hull" ;;
     RY99) echo "VACUITY CONTROL — the closure parameter in catalogEntries is renamed and nothing else. MUST SURVIVE" ;;
+    XR01) echo "SpecialistScanPlanner goes back to ONE anchor per entry spanning the coverage HULL (the shipped defect) — the merge turns an episode into one candidate region" ;;
+    XR02) echo "the planner anchors the REPRESENTATIVE only — the second read of a repeated sponsor silently stops being scanned" ;;
+    XR03) echo "the mirror of XR02 — the planner anchors the LAST occurrence only and the first read stops being scanned" ;;
+    XR04) echo "the planner reads occurrences directly instead of anchorableOccurrences — a pre-04rx entry anchors NOWHERE" ;;
+    XR05) echo "HALF A FIX: the loop walks every occurrence but the REPRESENTATIVE's anchor still runs to lastTime — reads per-mention, plans the hull" ;;
+    XR99) echo "VACUITY CONTROL — the planner's occurrence loop variable is renamed and nothing else. MUST SURVIVE" ;;
     NY01) echo "AdDetectionService.hotPathCandidates sorts the RAW array — the shipped defect: runBackfill canonicalized and the hot path did not" ;;
     NY02) echo "the hot path 'de-duplicates' by chunk.id, a per-ROW UUID, so a fast/final twin survives it intact" ;;
     NY03) echo "BoundaryExpander.makeLexicalContext scans the raw array — the user's 'Hearing an ad' tap gets a phantom lexical candidate" ;;
@@ -9949,6 +10040,82 @@ EOF
         return catalog.entries.compactMap { candidate in
             candidate.locatedInTimeWindow(start: start, end: end)
         }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # ---- playhead-x7rk: the specialist scan planner anchors each MENTION (XR series) ----
+
+  XR01)
+    snippet OLD <<'EOF'
+        for entry in evidenceCatalog.entries {
+            for occurrence in entry.anchorableOccurrences {
+                let lo = min(occurrence.startTime, occurrence.endTime)
+                let hi = max(occurrence.startTime, occurrence.endTime)
+                let clampedLo = min(max(lo, episodeStart), episodeEnd)
+                let clampedHi = min(max(hi, episodeStart), episodeEnd)
+                anchors.append((clampedLo, clampedHi))
+            }
+        }
+EOF
+    snippet NEW <<'EOF'
+        for entry in evidenceCatalog.entries {
+            let lo = min(entry.coverageStartTime, entry.coverageEndTime)
+            let hi = max(entry.coverageStartTime, entry.coverageEndTime)
+            let clampedLo = min(max(lo, episodeStart), episodeEnd)
+            let clampedHi = min(max(hi, episodeStart), episodeEnd)
+            anchors.append((clampedLo, clampedHi))
+        }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  XR02)
+    snippet OLD <<'EOF'
+            for occurrence in entry.anchorableOccurrences {
+EOF
+    snippet NEW <<'EOF'
+            for occurrence in entry.anchorableOccurrences.prefix(1) {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  XR03)
+    snippet OLD <<'EOF'
+            for occurrence in entry.anchorableOccurrences {
+EOF
+    snippet NEW <<'EOF'
+            for occurrence in entry.anchorableOccurrences.suffix(1) {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  XR04)
+    snippet OLD <<'EOF'
+            for occurrence in entry.anchorableOccurrences {
+EOF
+    snippet NEW <<'EOF'
+            for occurrence in entry.occurrences ?? [] {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  XR05)
+    snippet OLD <<'EOF'
+                let hi = max(occurrence.startTime, occurrence.endTime)
+EOF
+    snippet NEW <<'EOF'
+                let hi = occurrence.atomOrdinal == entry.atomOrdinal
+                    ? max(entry.firstTime, entry.lastTime)
+                    : max(occurrence.startTime, occurrence.endTime)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  XR99)
+    snippet OLD <<'EOF'
+            for occurrence in entry.anchorableOccurrences {
+                let lo = min(occurrence.startTime, occurrence.endTime)
+                let hi = max(occurrence.startTime, occurrence.endTime)
+EOF
+    snippet NEW <<'EOF'
+            for mention in entry.anchorableOccurrences {
+                let lo = min(mention.startTime, mention.endTime)
+                let hi = max(mention.startTime, mention.endTime)
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -20465,6 +20632,7 @@ rec_file()   {
     ESUMBF) printf '%s' "$ESUMBF" ;;
     BEXP)  printf '%s' "$BEXP" ;;
     SPSHD) printf '%s' "$SPSHD" ;;
+    SPLAN) printf '%s' "$SPLAN" ;;
     FMSHD) printf '%s' "$FMSHD" ;;
     TCANON) printf '%s' "$TCANON" ;;
     ADSVC_ATOM) printf '%s' "$ATOMEV" ;;
