@@ -231,6 +231,35 @@ struct CoarseScanPhaseReport: Sendable, Equatable {
     /// threw, or the window ended before teardown), which is not zero and must
     /// never be rendered as zero.
     var bankedRows: Int?
+    /// **playhead-1e86.** How many `backfill_jobs` ROWS this phase's own reaper
+    /// flipped from a stranded `running` back to `queued` BEFORE it asked the
+    /// candidate queries.
+    ///
+    /// **ROWS, NOT ASSETS, AND NOT "ASSETS THIS GRANT GAINED".** Four ways the
+    /// two come apart, each of which would make the obvious reading wrong: an
+    /// asset can own more than one coverage-lane row, so `reaped` can exceed
+    /// the number of assets unhidden; the reaper is table-wide rather than
+    /// scoped to this phase's candidate window, so a row it repairs may belong
+    /// to an asset the `LIMIT` never reaches; a row reaped at or above
+    /// `AdmissionController.maxRetries` is repaired and still excluded by
+    /// ``AnalysisStore/fetchAssetIdsWithResumableBackfillJobs(limit:)``'s own
+    /// `retryCount <` bind; and when the plain and charged backfill identifiers
+    /// dispatch together — which the ledger shows they repeatedly do, in the
+    /// same second — the first grant to sweep takes the rows and the second
+    /// honestly reports `reaped=0`. Read it as "what this sweep repaired", and
+    /// read ``candidates`` for what the grant then saw.
+    ///
+    /// `nil` means the sweep could not be TAKEN (it threw), which is not zero,
+    /// for exactly the reason ``bankedRows`` distinguishes the two.
+    ///
+    /// **It is rendered on EVERY report, including `reaped=0`.** That is the
+    /// anti-vacuity contract `PersistedStateInvariants` states in full: only a
+    /// value that is ALWAYS present can distinguish "the sweep ran and found
+    /// nothing" from "the sweep never ran". A grant whose `deferReason` carries
+    /// no `reaped=` at all is a grant from a build that did not sweep — which
+    /// is every build before this bead, and is why the 933 grants preserved on
+    /// this box cannot say how often the defect fired.
+    var reaped: Int?
 
     /// The `deferReason` string. Space-separated `key=value` pairs, matching
     /// the convention `RediffRefetchService` already rides this column with
@@ -242,10 +271,12 @@ struct CoarseScanPhaseReport: Sendable, Equatable {
     /// `banked=?` rather than `banked=0` when the count is `nil`, for the same
     /// reason `BackgroundGrantCounters` preserves `nil`: "not measured" and
     /// "measured zero" are different findings and this bead exists because a
-    /// ledger collapsed two such findings into one.
+    /// ledger collapsed two such findings into one. ``reaped`` follows the same
+    /// rule and the same spelling.
     var ledgerReason: String {
         var out = "coarse=\(verdict.rawValue)(\(scanned)/\(candidates))"
         out += " banked=\(bankedRows.map(String.init) ?? "?")"
+        out += " reaped=\(reaped.map(String.init) ?? "?")"
         if let label = unreadable.label { out += " unread=\(label)" }
         return out
     }

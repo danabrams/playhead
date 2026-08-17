@@ -384,7 +384,7 @@ struct CoarseScanShowIdentityWireInTests {
         )
 
         #expect(scanned == 0)
-        #expect(log.value == [CoarseScanPhaseReport(verdict: .empty, scanned: 0, candidates: 0)],
+        #expect(log.value == [CoarseScanPhaseReport(verdict: .empty, scanned: 0, candidates: 0, reaped: 0)],
                 """
                 Exactly one report, and it must say `empty` with an EMPTY \
                 read-failure set — both queries answered, so this is a measured \
@@ -408,7 +408,7 @@ struct CoarseScanShowIdentityWireInTests {
             report: { log.note($0) }
         )
 
-        #expect(log.value.first == CoarseScanPhaseReport(verdict: .inflight, scanned: 0, candidates: 1),
+        #expect(log.value.first == CoarseScanPhaseReport(verdict: .inflight, scanned: 0, candidates: 1, reaped: 0),
                 "the census must land before the phase can be cut short by a reclaim")
         #expect(log.value.count > 1, "and the loop must go on to publish a terminal verdict")
     }
@@ -448,20 +448,20 @@ struct CoarseScanShowIdentityWireInTests {
         // The control: no injection, empty store — a MEASURED absence.
         let measured = try #require(await run(nil))
         #expect(measured.unreadable == [])
-        #expect(measured.ledgerReason == "coarse=empty(0/0) banked=?")
+        #expect(measured.ledgerReason == "coarse=empty(0/0) banked=? reaped=0")
 
         let resumableFailed = try #require(await run(.resumable))
         #expect(resumableFailed.unreadable == .resumable)
-        #expect(resumableFailed.ledgerReason == "coarse=empty(0/0) banked=? unread=resumable")
+        #expect(resumableFailed.ledgerReason == "coarse=empty(0/0) banked=? reaped=0 unread=resumable")
 
         let zeroRowFailed = try #require(await run(.missingCoverageLaneRows))
         #expect(zeroRowFailed.unreadable == .missingCoverageLaneRows)
-        #expect(zeroRowFailed.ledgerReason == "coarse=empty(0/0) banked=? unread=missingRows")
+        #expect(zeroRowFailed.ledgerReason == "coarse=empty(0/0) banked=? reaped=0 unread=missingRows")
 
         let bothFailed = try #require(await run([.resumable, .missingCoverageLaneRows]))
         #expect(bothFailed.unreadable == [.resumable, .missingCoverageLaneRows])
         #expect(bothFailed.ledgerReason
-                == "coarse=empty(0/0) banked=? unread=resumable+missingRows")
+                == "coarse=empty(0/0) banked=? reaped=0 unread=resumable+missingRows")
 
         // …and the four are genuinely four, not one string written four times.
         let reasons = [measured, resumableFailed, zeroRowFailed, bothFailed].map(\.ledgerReason)

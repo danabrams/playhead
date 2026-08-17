@@ -250,8 +250,8 @@ struct BackgroundProcessingServiceLedgerTests {
         #expect(productive.expiration == barren.expiration)
 
         // And the row now distinguishes them anyway.
-        #expect(productive.deferReason == "coarse=drove(4/4) banked=37")
-        #expect(barren.deferReason == "coarse=drove(4/4) banked=0")
+        #expect(productive.deferReason == "coarse=drove(4/4) banked=37 reaped=?")
+        #expect(barren.deferReason == "coarse=drove(4/4) banked=0 reaped=?")
         #expect(productive.deferReason != barren.deferReason,
                 """
                 A window that banked 37 durable scan rows and a window that \
@@ -299,7 +299,7 @@ struct BackgroundProcessingServiceLedgerTests {
 
         let latest = try #require(await ledger.fetchLatestRun(for: .backfill))
         #expect(latest.outcome == .expired)
-        #expect(latest.deferReason == "coarse=inflight(0/4) banked=0",
+        #expect(latest.deferReason == "coarse=inflight(0/4) banked=0 reaped=?",
                 """
                 The expiration handler must persist the coarse phase's account \
                 too. Before this bead every `expired` row carried \
@@ -331,11 +331,11 @@ struct BackgroundProcessingServiceLedgerTests {
             return await ledger.fetchLatestRun(for: .backfill)?.deferReason
         }
 
-        #expect(try await run(unreadable: []) == "coarse=empty(0/0) banked=0")
+        #expect(try await run(unreadable: []) == "coarse=empty(0/0) banked=0 reaped=?")
         #expect(try await run(unreadable: .resumable)
-                == "coarse=empty(0/0) banked=0 unread=resumable")
+                == "coarse=empty(0/0) banked=0 reaped=? unread=resumable")
         #expect(try await run(unreadable: [.resumable, .missingCoverageLaneRows])
-                == "coarse=empty(0/0) banked=0 unread=resumable+missingRows")
+                == "coarse=empty(0/0) banked=0 reaped=? unread=resumable+missingRows")
     }
 
     /// A count that could not be TAKEN is not a count of zero. Same rule
@@ -359,7 +359,7 @@ struct BackgroundProcessingServiceLedgerTests {
         await task.awaitCompletion()
 
         #expect(await ledger.fetchLatestRun(for: .backfill)?.deferReason
-                == "coarse=empty(0/0) banked=?")
+                == "coarse=empty(0/0) banked=? reaped=?")
     }
 
     /// The count must be scoped to THIS grant. A count over the whole table

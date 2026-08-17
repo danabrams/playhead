@@ -2142,6 +2142,17 @@ FOCUSED_SUITES=(
   # about the orchestrator's target set and its audit row, and both are
   # observable from the same seam.
   -only-testing:PlayheadTests/PartialActionDismissTests
+  # playhead-1e86: the stranded-`running` sweep (SW series). Two suites, and
+  # the split is the usual one — neither half can see the other. The sweep
+  # suite is the only thing that drives the REAL coordinator against a REAL
+  # store holding a row stranded past the 600 s floor, so it is the only thing
+  # that can observe the ORDERING (a sweep moved after the candidate queries
+  # still reports `reaped=1`, with `candidates=0` beside it) and the only thing
+  # that can enter the sweep's `catch` arm. The ledger suite is the only thing
+  # that can see the rendered string reach `background_task_runs.deferReason`
+  # through a real handler, which is where a reader finds it on a pull.
+  -only-testing:PlayheadTests/CoarseScanStrandedSweepTests
+  -only-testing:PlayheadTests/BackgroundProcessingServiceLedgerTests
 )
 
 # Named to match the `/private/tmp/playhead-*` pattern `scripts/disk-cleanup.sh`
@@ -3667,6 +3678,36 @@ T_NY_SUMMARY="Episode-summary hydration hands the sampler each utterance once"
 # collapsing an exact-span twin — the failure under which every other rail here
 # would go green for the wrong reason.
 T_NY_FIXTURE="A twin pair clears minHitsForCandidate on evidence one row provides"
+
+# --- playhead-1e86: the stranded-`running` sweep (SW series) ----------------
+#
+# A `backfill_jobs` row hard-killed at `status='running'` is excluded by BOTH
+# candidate queries, and `handleBackfillTask` ran no reaper. The fix sweeps
+# inside `runPendingCoarseScans`, BEFORE it asks who the candidates are.
+#
+# The series is built by enumerating the EVENTS the new block can perform and
+# asking which of them a test can see: it sweeps and finds rows; it sweeps and
+# finds none; it throws. The third is reachable only through a fault-injection
+# seam, which is why one was added — a `catch` nothing can enter is a `catch`
+# no test can reach.
+#
+# NOTE: no ';' in any display name — the MUTATIONS record separator is ';'.
+# SINGLE-QUOTED, and that is load-bearing: these display names contain
+# BACKTICKS, which inside a double-quoted bash string are command substitution.
+# Double-quoted, `T_SW_ORDER` evaluated to the name with the backticked word
+# EATEN and printed `running: command not found` — an expectation that can
+# never match, which this script correctly reported as "expected test never
+# ran" rather than as a survivor.
+T_SW_ORDER='a `running` row stranded past the floor is reaped, and the SAME grant sees it'
+T_SW_FRESH='a FRESH `running` row is left alone, and stays invisible'
+T_SW_THREW="a throwing sweep is recorded as UNMEASURED, never as zero"
+T_SW_ZERO="the same fixture without the injection reads a measured zero"
+T_SW_EVERY="the reaped count rides every report the phase publishes"
+T_SW_RENDER="the ledger reason always names the sweep, and the three readings differ"
+# The ledger-wiring rail: the rendered string has to survive the handler and
+# land in the durable column. A report that renders perfectly and never reaches
+# `deferReason` is the shape playhead-8ljj exists to prevent.
+T_SW_LEDGER="An expired window carries the coarse phase's last true statement"
 
 MUTATIONS=(
   # Batch 900 — JC01, THE SHIPPED DEFECT VERBATIM. The pre-insert guard asks
@@ -8109,6 +8150,82 @@ MUTATIONS=(
   # which is why the rail has to seed a real SwiftData row.
   # UNIQUE KILL: `$T_F5_ANALYZED`.
   "F505|834|BSB|$T_F5_ANALYZED"
+  # ===== playhead-1e86 — the stranded-`running` sweep (SW series) =====
+
+  # Batch 960 — SW01, THE SHIPPED DEFECT VERBATIM: no sweep at all, which is
+  # every build before this bead. The row stays `running`, both candidate
+  # queries exclude it, and the grant reports a perfectly healthy empty census.
+  "SW01|960|ACOORD|$T_SW_ORDER;$T_SW_EVERY"
+
+  # Batch 961 — SW02, THE ORDERING, and the one mutation a naive test cannot
+  # see. The sweep still runs and still reports `reaped=1` — it really did
+  # repair the row — but it runs AFTER the two candidate queries, so THIS grant
+  # still misses the asset and only the NEXT one benefits. A rail asserting
+  # only `reaped == 1` is green here; the rail has to assert `reaped` and
+  # `candidates` in the SAME report.
+  "SW02|961|ACOORD|$T_SW_ORDER"
+
+  # Batch 962 — SW03, the catch arm books a measured zero. "The sweep could not
+  # run" becomes "the sweep found nothing stranded" — the exact collapse of
+  # not-measured into measured-zero that this whole family of beads exists to
+  # undo, one column further along.
+  "SW03|962|ACOORD|$T_SW_THREW"
+
+  # Batch 963 — SW04, the count is discarded and the report always says zero.
+  # The sweep still repairs rows, so every behavioural assertion about
+  # candidates stays green and only the durable evidence is destroyed — which
+  # is the half of this bead that lets the NEXT device pull answer the question
+  # this one could not.
+  "SW04|963|ACOORD|$T_SW_ORDER"
+
+  # Batch 964 — SW05, the loop's own reports drop the count. The census still
+  # carries it, so a test that reads only `log.value.first` is green. Most
+  # granted windows end by an OS reclaim mid-phase, so the report a reader
+  # actually finds on a pull is the LAST one, not the census.
+  "SW05|964|ACOORD|$T_SW_EVERY"
+
+  # Batch 965 — SW06, the 600 s freshness floor is dropped from the reaper, so
+  # the sweep rewinds a row whose owning runner is still holding it. This is
+  # the destructive direction, and it is why the floor is scheduling policy
+  # rather than a tunable — `AnalysisJobReconciler` states the argument in full.
+  "SW06|965|STORE|$T_SW_FRESH"
+
+  # Batch 966 — SW07, `reaped=` is removed from the rendered ledger reason. The
+  # sweep works perfectly and leaves no durable trace, so a pull cannot tell a
+  # build that swept from one that did not — which is precisely the state that
+  # made this bead's own firing count unobtainable.
+  "SW07|966|BGPS|$T_SW_RENDER;$T_SW_LEDGER"
+
+  # Batch 967 — SW08, an unmeasured sweep renders as `reaped=0`. Same collapse
+  # as SW03 but at the RENDERING layer rather than the catch arm, and the two
+  # are genuinely different sites: SW03 is green if only the string is checked,
+  # SW08 is green if only the optional is checked.
+  "SW08|967|BGPS|$T_SW_RENDER;$T_SW_THREW"
+
+  # SW99, THE VACUITY CONTROL, IS DELIBERATELY NOT AN ENTRY IN THIS ARRAY, AND
+  # THE REASON IS A HOLE IN THIS SCRIPT (filed, not fixed here — playhead-ngsm).
+  # The verdict loop iterates the expected-test list and reports KILLED when
+  # nothing is `missing`. An entry with an EMPTY expectation therefore iterates
+  # zero times, finds nothing missing, and is credited **KILLED** — a mutation
+  # that changed nothing observable would be scored as a working rail. That is
+  # the same "control not run and still exit 0" shape CLAUDE.md records the R
+  # engine closing, still open in the shell engine.
+  #
+  # So the control is run BY HAND, one scoped invocation, and its verdict is
+  # recorded in this bead's commit message rather than by this script:
+  #   the `logger.info` wording in the sweep block is changed, the two SW suites
+  #   are run, and every test MUST STAY GREEN. A battery in which every mutation
+  #   dies is a battery whose suites are red for an unrelated reason.
+  # MEASURED 2026-08-16 on 285e7354+corrections: the `logger.info` wording in
+  # the sweep block was replaced, the two SW suites were run scoped, and all
+  # 16 tests PASSED — the control SURVIVED, which is the pass. ACOORD was then
+  # restored from a pinned copy and re-verified byte-exact
+  # (sha256 ec8ca909496b8f146b855e64ab13d239698508706e8f4cc29347aa7756a07f0d).
+  #
+  # SW SERIES FINAL: 8 KILLED / 0 SURVIVED / 0 ERROR, 8 invocations, baseline
+  # green on every one, ~4m50s each. The control surviving is what makes those
+  # eight kills attributable to the mutations rather than to a red harness.
+
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -8207,6 +8324,14 @@ describe_mutation() {
     GJ04) echo "the FTS rebuild before the UPDATE is removed — a pre-FTS row then trips SQLITE_CORRUPT and the rung rolls back" ;;
     GJ05) echo "the V54 sweep reports 'nothing to do' without looking, so schema advances to 54 having repaired nothing" ;;
     GJ06) echo "the V54 repair writes the normalized value into text instead of normalizedText — the evidence column is destroyed" ;;
+    SW01) echo '1e86 SHIPPED DEFECT: runPendingCoarseScans does not sweep stranded running rows at all' ;;
+    SW02) echo '1e86 ORDERING: the sweep runs AFTER the two candidate queries, so only the NEXT grant benefits' ;;
+    SW03) echo '1e86: the catch arm books reaped=0, collapsing not-measured into measured-zero' ;;
+    SW04) echo '1e86: the reaped count is discarded and always reported as zero — behaviour intact, evidence destroyed' ;;
+    SW05) echo '1e86: runCoarseScanLoop own reports drop the count, so only the census carries it' ;;
+    SW06) echo '1e86: resetStrandedBackfillJobs drops the 600 s freshness floor and rewinds a LIVE runner row' ;;
+    SW07) echo '1e86: reaped= is removed from the rendered ledger reason — the sweep leaves no durable trace' ;;
+    SW08) echo '1e86: an unmeasured sweep renders as reaped=0 rather than reaped=? at the RENDERING layer' ;;
     T01) echo "SemanticScanThroughputSplit.bucket(for:): a nil scene phase becomes .foreground" ;;
     T02) echo "ScanScenePhase.attributionBucket: a recorded .unknown becomes .foreground" ;;
     T03) echo "readSemanticScanResult: a NULL scenePhase column defaults to .active on the READ" ;;
@@ -9184,6 +9309,179 @@ EOF
 EOF
     snippet NEW <<'EOF'
         let upd = try prepare("UPDATE transcript_chunks SET text = ? WHERE rowid = ?")
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # ---- playhead-1e86: the stranded-`running` sweep (SW series) ----
+
+  # SW01 — the shipped defect verbatim: no sweep. `reaped` is declared and never
+  # assigned, so every report renders `reaped=?` and the stranded asset stays
+  # invisible to this grant and to every grant until something unrelated runs
+  # the reaper.
+  SW01)
+    snippet OLD <<'EOF'
+        var reaped: Int?
+        do {
+            let count = try await store.resetStrandedBackfillJobs()
+            reaped = count
+EOF
+    snippet NEW <<'EOF'
+        var reaped: Int?
+        do {
+            let count = 0
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # SW02 — THE ORDERING. The sweep is moved below both candidate queries. It
+  # still runs, still returns the true count, still logs; the ONLY observable
+  # difference is that this grant's census was taken before the repair landed.
+  # `reaped=1` beside `candidates=0` is the signature.
+  SW02)
+    snippet OLD <<'EOF'
+        var reaped: Int?
+        do {
+            let count = try await store.resetStrandedBackfillJobs()
+            reaped = count
+            if count > 0 {
+                logger.info("runPendingCoarseScans: reaped \(count) stranded `running` backfill row(s) back to `queued` before the candidate queries")
+            }
+        } catch {
+            logger.warning("runPendingCoarseScans: stranded-backfill sweep FAILED (recorded as unmeasured, not as zero): \(String(describing: error))")
+        }
+
+        // A failed candidate query is treated as EMPTY FOR THIS GRANT (the
+EOF
+    snippet NEW <<'EOF'
+        var reaped: Int?
+
+        // A failed candidate query is treated as EMPTY FOR THIS GRANT (the
+EOF
+    patch "$file" "$OLD" "$NEW" || return $?
+    snippet OLD <<'EOF'
+        let candidates = Self.coarseScanCandidates(
+            resumable: resumable,
+            missingRows: missingRows
+        )
+EOF
+    snippet NEW <<'EOF'
+        let candidates = Self.coarseScanCandidates(
+            resumable: resumable,
+            missingRows: missingRows
+        )
+        do { reaped = try await store.resetStrandedBackfillJobs() } catch { }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # SW03 — the catch arm claims a measurement nobody took.
+  SW03)
+    snippet OLD <<'EOF'
+        } catch {
+            logger.warning("runPendingCoarseScans: stranded-backfill sweep FAILED (recorded as unmeasured, not as zero): \(String(describing: error))")
+        }
+EOF
+    snippet NEW <<'EOF'
+        } catch {
+            reaped = 0
+            logger.warning("runPendingCoarseScans: stranded-backfill sweep FAILED (recorded as unmeasured, not as zero): \(String(describing: error))")
+        }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # SW04 — the repair still happens; only the durable count is falsified.
+  SW04)
+    snippet OLD <<'EOF'
+            let count = try await store.resetStrandedBackfillJobs()
+            reaped = count
+EOF
+    snippet NEW <<'EOF'
+            let count = try await store.resetStrandedBackfillJobs()
+            reaped = 0
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # SW05 — the census keeps the count and the loop's own reports lose it. A
+  # reclaimed window — the majority — writes the loop's last report, not the
+  # census, so this is the report a reader actually finds on a pull.
+  SW05)
+    snippet OLD <<'EOF'
+                    unreadable: unreadable,
+                    reaped: reaped
+                )
+            )
+        }
+        for assetId in candidates {
+EOF
+    snippet NEW <<'EOF'
+                    unreadable: unreadable,
+                    reaped: nil
+                )
+            )
+        }
+        for assetId in candidates {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # SW06 — the reaper loses its freshness floor and rewinds a live runner's row.
+  # The anchor carries the FUNCTION NAME because the final-pass sibling reaper
+  # (`resetStrandedFinalPassJobs`) is byte-identical from the WHERE clause down
+  # — the narrower anchor matched twice, which the tool refused. Two reapers,
+  # one predicate, and only one of them is this bead's.
+  SW06)
+    snippet OLD <<'EOF'
+    func resetStrandedBackfillJobs() throws -> Int {
+EOF
+    snippet NEW <<'EOF'
+    func resetStrandedBackfillJobs() throws -> Int {
+        _ = Self.strandedJobFreshnessSeconds
+EOF
+    patch "$file" "$OLD" "$NEW" || return $?
+    snippet OLD <<'EOF'
+        _ = Self.strandedJobFreshnessSeconds
+        #if DEBUG
+        if strandedBackfillSweepFaultInjection {
+            throw AnalysisStoreError.queryFailed("injected: stranded-backfill sweep")
+        }
+        #endif
+        let sql = """
+            UPDATE backfill_jobs
+            SET status = 'queued',
+                updatedAt = strftime('%s', 'now')
+            WHERE status = 'running'
+              AND updatedAt < strftime('%s', 'now') - ?
+            """
+EOF
+    snippet NEW <<'EOF'
+        #if DEBUG
+        if strandedBackfillSweepFaultInjection {
+            throw AnalysisStoreError.queryFailed("injected: stranded-backfill sweep")
+        }
+        #endif
+        let sql = """
+            UPDATE backfill_jobs
+            SET status = 'queued',
+                updatedAt = strftime('%s', 'now')
+            WHERE status = 'running'
+              AND updatedAt < strftime('%s', 'now') + ?
+            """
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # SW07 — the sweep works and leaves no trace a device pull can read.
+  SW07)
+    snippet OLD <<'EOF'
+        out += " reaped=\(reaped.map(String.init) ?? "?")"
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # SW08 — the same collapse as SW03, one layer along, at the renderer.
+  SW08)
+    snippet OLD <<'EOF'
+        out += " reaped=\(reaped.map(String.init) ?? "?")"
+EOF
+    snippet NEW <<'EOF'
+        out += " reaped=\(reaped ?? 0)"
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 

@@ -2058,6 +2058,15 @@ actor AnalysisStore {
 
     private var coarseScanCandidateQueryFaultInjection: CoarseScanCandidateQueryFaultInjection?
 
+    /// playhead-1e86: make ``resetStrandedBackfillJobs()`` throw.
+    ///
+    /// Deliberately NOT a third case of the OptionSet above: that type is named
+    /// for the candidate QUERIES and the reaper is not one of them — it is a
+    /// write that runs before them. Folding it in would make the type's name
+    /// stop describing its members, which is the spelling half of this repo's
+    /// standing defect class.
+    private var strandedBackfillSweepFaultInjection = false
+
     /// playhead-5uvz.3 (Gap-3): test-only fault-injection points for the
     /// `AnalysisWorkScheduler.processJob` outcome arms. The arms now run
     /// inside a single `runSchedulingPass` transaction so progress, the
@@ -18821,6 +18830,11 @@ actor AnalysisStore {
     /// a structured log trail.
     @discardableResult
     func resetStrandedBackfillJobs() throws -> Int {
+        #if DEBUG
+        if strandedBackfillSweepFaultInjection {
+            throw AnalysisStoreError.queryFailed("injected: stranded-backfill sweep")
+        }
+        #endif
         let sql = """
             UPDATE backfill_jobs
             SET status = 'queued',
@@ -19415,6 +19429,16 @@ actor AnalysisStore {
         _ injection: CoarseScanCandidateQueryFaultInjection?
     ) {
         coarseScanCandidateQueryFaultInjection = injection
+    }
+
+    /// playhead-1e86: make ``resetStrandedBackfillJobs()`` throw, for exactly
+    /// the reason the seam above exists — the distinction between a sweep that
+    /// found nothing (`reaped=0`) and a sweep that could not run at all
+    /// (`reaped=?`) lives entirely inside one `catch` arm, and a `catch`
+    /// nothing can enter is a `catch` no test can reach. Production code MUST
+    /// NOT call this.
+    func setStrandedBackfillSweepFaultInjectionForTesting(_ enabled: Bool) {
+        strandedBackfillSweepFaultInjection = enabled
     }
     #endif
 
