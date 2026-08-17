@@ -3132,6 +3132,18 @@ private extension DogfoodDiagnosticsAnalysisHealthTests {
         // first number it can find.
         #expect(parse("partial transcript 900.0/1000.0s (ratio 0.900 < 0.950)") == nil)
         #expect(parse(nil) == nil)
+        // A MALFORMED NUMERAL yields nothing, not zero. Added because mutation
+        // UZ08 SURVIVED without it, and the survivor is the interesting part:
+        // `"ad scan unmeasured"` returns nil at the digits-are-empty guard,
+        // several lines ABOVE the `Double(digits)` conversion UZ08 mutates, so
+        // the test that pins the `unmeasured` case could never reach the line it
+        // was assumed to cover. These two inputs are the only way in — digits
+        // collected, not a number — and without them "an unparseable numeral is
+        // read as 0" is a defect the suite accepts silently. Reachable if the
+        // `terminalReason` format ever drifts, which is the whole reason this
+        // parser reads prose in the first place.
+        #expect(parse("ad scan .. (drifted)") == nil)
+        #expect(parse("ad scan 1.2.3 < 0.980 (drifted)") == nil)
     }
 
     func makePipeline(

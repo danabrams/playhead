@@ -3877,10 +3877,19 @@ MUTATIONS=(
   # exists to catch, one layer down.
   "UZ07|946|UZHLTH|$T_UZ_PARSER;$T_UZ_STALE"
 
-  # Batch 947 — UZ08, `"ad scan unmeasured (neverRan)"` is read as the number 0.
-  # An absence wearing a quantity's clothes: the row would then be reported as
-  # drifting by the whole measured fraction, and the one population that has NO
-  # ad-scan number at all becomes the loudest thing in the flag list.
+  # Batch 947 — UZ08, an unparseable numeral read as the number 0. An absence
+  # wearing a quantity's clothes: the row is then reported as drifting by the
+  # whole measured fraction.
+  #
+  # THIS ENTRY SURVIVED ON ITS FIRST RUN AND THE REASON IS THE FINDING. Its
+  # description then said "`ad scan unmeasured (neverRan)` is read as 0", and
+  # that string never reaches the mutated line at all: the loop returns nil at
+  # the digits-are-empty guard several lines above the `Double(digits)`
+  # conversion. So the `unmeasured` test — which looks like this rail's cover —
+  # exercises a different branch entirely, and the conversion had no test on it.
+  # The EDIT was left alone and the coverage added (`"ad scan .."`,
+  # `"ad scan 1.2.3"`), which is the only way into that line: digits collected,
+  # not a number.
   "UZ08|947|UZHLTH|$T_UZ_UNMEASURED"
 
   "JC01|900|FPRUN|$T_JC_UPGRADE"
@@ -8555,7 +8564,7 @@ describe_mutation() {
     UZ05) echo "the staleness check compares the recorded ad scan against the 0.98 FLOOR instead of against the measurement" ;;
     UZ06) echo "the staleness flag fires on the state alone, so every completeAdScanPartial row is reported stale" ;;
     UZ07) echo "the reason parser takes the LAST number after 'ad scan ' — the feature ratio — instead of the first" ;;
-    UZ08) echo "'ad scan unmeasured (neverRan)' is parsed as the number 0 — an absence wearing a quantity's clothes" ;;
+    UZ08) echo "an unparseable numeral after 'ad scan ' is read as the number 0 — an absence wearing a quantity's clothes" ;;
     JC01) echo "FinalPassRetranscriptionRunner: the pre-insert guard asks for its OWN fp-final- fingerprint again (the shipped defect)" ;;
     JC02) echo "fetchTranscriptChunkBySpanText drops the pass predicate — a FAST row answers 'already stored' and final coverage stops growing" ;;
     JC04) echo "V53 keys the sweep and the index on normalizedText — the one column the two producers compute differently" ;;
