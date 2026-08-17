@@ -562,12 +562,54 @@ struct SemanticScanAttemptHistoryV55MigrationTests {
 
     // MARK: - Encoding
 
+    @Test("a row whose observedStatuses column is NULL still contributes its status")
+    func nullSetColumnStillContributesTheRowsStatus() async throws {
+        let dir = try freshTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        AnalysisStore.resetMigratedPathsForTesting()
+        let store = try AnalysisStore(directory: dir)
+        try await store.migrate()
+        try await store.insertAsset(makeAsset(id: "asset-nl"))
+        try await store.insertSemanticScanResult(
+            attempt(id: "scan-nl", assetId: "asset-nl", status: .decodingFailure, createdAt: 10)
+        )
+        // A V55-SHAPED row whose set column is NULL. Not hypothetical: the V55
+        // rung is `guard observed >= 54`, exactly like every rung after V39, so
+        // a database whose V39 rolled back gets the three columns from
+        // `createTables()`'s `addColumnIfNeeded` and NEVER runs the seed. On such
+        // a device every row is in this state, and the union has nothing but the
+        // existing row's own `status` to fold in.
+        try await store.execForTesting(
+            "UPDATE semantic_scan_results SET observedStatuses = NULL WHERE id = 'scan-nl'"
+        )
+
+        try await store.insertSemanticScanResult(
+            attempt(id: "scan-nl", assetId: "asset-nl", status: .exceededContextWindow, createdAt: 20)
+        )
+        let raw = try #require(try rawRow(in: dir, rowId: "scan-nl"))
+        #expect(raw.observedStatuses == "decodingFailure,exceededContextWindow",
+                "the status ON THE ROW is evidence even when the set column is not")
+    }
+
     @Test("the encoder round-trips, and an unknown raw value is DROPPED rather than throwing")
     func encodingRoundTripsAndDecodesLeniently() {
         let set: Set<SemanticScanStatus> = [.exceededContextWindow, .decodingFailure, .noAds]
         let encoded = SemanticScanResult.encodeObservedStatuses(set)
         #expect(encoded == "decodingFailure,exceededContextWindow,no_ads")
         #expect(SemanticScanResult.decodeObservedStatuses(encoded) == set)
+
+        // SORTEDNESS, asserted over ALL cases rather than over three. `Set`
+        // iteration is deterministic within a process for a given element set,
+        // so a three-element assertion would agree with an unsorted encoder
+        // whenever the hash seed happened to order them correctly — a rail whose
+        // verdict depends on the seed. With 20 cases that coincidence is 1/20!.
+        let all = Set(SemanticScanStatus.allCases)
+        #expect(
+            SemanticScanResult.encodeObservedStatuses(all)
+                == SemanticScanStatus.allCases.map(\.rawValue).sorted().joined(separator: ","),
+            "an unsorted encoding makes two pulls that saw the same statuses compare unequal"
+        )
 
         // Forward-compat: a status a newer binary invented must not abort the
         // read of a whole row. Dropping is the UNDER-claiming direction — it can
