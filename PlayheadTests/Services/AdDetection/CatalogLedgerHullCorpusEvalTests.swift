@@ -83,9 +83,11 @@ final class CatalogLedgerHullCorpusEvalTests: XCTestCase {
     /// `Decodable` is how they come to disagree about a field.
     typealias Corpus = RepeatedOccurrenceAnchoringCorpusEvalTests.Corpus
 
-    /// The detector version `buildFusionAdWindow` stamps. Rows carrying anything
-    /// else were composed by a path that never builds a catalog ledger entry.
-    static let fusionDetectorVersion = "detection-v1"
+    /// The detector version `buildFusionAdWindow` stamps, READ from the shipped
+    /// config rather than restated as `"detection-v1"`. A filter that names its
+    /// population by a literal is a filter that can silently stop selecting the
+    /// population it means — this lane's whole denominator hangs on it.
+    static let fusionDetectorVersion = AdDetectionConfig.default.detectorVersion
 
     // MARK: - Report shape
 
@@ -351,8 +353,11 @@ final class CatalogLedgerHullCorpusEvalTests: XCTestCase {
             let delta = hullWeight - occurrenceWeight
             // `proposalConfidence = min(1, Σw) × m`, so the drop is `Δw × m`
             // bounded by the duration prior's own floor and peak. The prior is a
-            // per-show resolution this export does not carry; the BAND is a
-            // property of `DurationPrior` and holds for every resolution of it.
+            // per-show resolution this export does not carry, and the BAND is
+            // exact rather than conservative: production's ONLY construction is
+            // `DurationPrior(resolvedPriors:)`, which forwards `typicalAdDuration`
+            // and takes the default multipliers, so every resolved prior shares
+            // these two bounds and only the shape between them moves.
             let band = [
                 delta * DurationPrior.standard.floorMultiplier,
                 delta * DurationPrior.standard.peakMultiplier
