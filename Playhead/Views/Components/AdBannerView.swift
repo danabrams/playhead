@@ -92,10 +92,31 @@ struct AdSkipBannerItem: Identifiable, Equatable {
     /// orchestrator so an older card cannot acknowledge, accept, or decline
     /// the newer revision. Auto-skipped banners do not use this field.
     var suggestionRevisionToken: String? = nil
-    /// Evidence catalog entries associated with this ad window.
-    /// Used by Phase 7's UserCorrectionStore to infer correction scopes
-    /// (e.g. phraseOnShow) when the user taps "Listen" to revert a skip.
-    /// Empty when no catalog data is available — callers must handle [] gracefully.
+    /// Evidence catalog entries for this ad window — the mentions THIS window's
+    /// own span can hear, each located there (playhead-rty3).
+    ///
+    /// DISPLAY ONLY, and the previous version of this comment said otherwise.
+    /// It claimed the entries are "used by Phase 7's UserCorrectionStore to
+    /// infer correction scopes (e.g. phraseOnShow) when the user taps Listen".
+    /// Traced at playhead-rty3, and the field has exactly three production
+    /// mentions: the two orchestrator sites that build it and ONE read,
+    /// `AdBannerView.bannerCard`, which turns it into at most
+    /// `evidenceLineLimit` strings for the expanded detail, the accessibility
+    /// label and the disclosure chevron. `UserCorrectionStore.recordVeto` does
+    /// build a `sponsorOnShow` scope, but from the PERSISTED
+    /// `decoded_spans.anchorProvenance` that `revertByTimeRange` fetches; and
+    /// "always skip this sponsor" reads `item.advertiser`. Neither has ever
+    /// seen a banner item's entries.
+    ///
+    /// The correction is worth its length because it changes what a WRONG entry
+    /// costs, in BOTH directions. Nothing here is banked, so a wrong entry
+    /// cannot corrupt a store directly — but on a `.suggest` card these lines
+    /// are the stated reason the listener is answering about, and the ANSWER is
+    /// banked per-class in trust scoring. The harm runs through the human,
+    /// which is slower to appear and harder to undo than a bad row.
+    ///
+    /// Empty when no catalog data is available — callers must handle []
+    /// gracefully.
     let evidenceCatalogEntries: [EvidenceEntry]
     /// playhead-gtt9.23: skip-worthiness tier this banner is rendered as.
     /// Defaults to `.autoSkipped` to preserve every existing call site

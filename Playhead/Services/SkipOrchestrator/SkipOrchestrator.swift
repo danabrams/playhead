@@ -1717,14 +1717,29 @@ actor SkipOrchestrator {
     /// the HULL, `firstTime`/`lastTime`, which brackets the first and last
     /// mention of a deduped (category, text) pair. A sponsor URL read twice in
     /// an episode therefore had a "coverage" span covering most of it and
-    /// overlapped EVERY window: measured on the 2026-08-02 device pull, ten of
-    /// twenty-seven repeated anchoring entries spanned more than 300 s and the
-    /// widest was 7,268 s of a ~7,300 s episode. Both callers put the result
-    /// on a card the listener reads (`AdSkipBannerItem.evidenceCatalogEntries`
-    /// → `AdBannerView.evidenceLines`), so a mid-roll card could name a
-    /// distant advertiser's URL as the reason — and on the SUGGEST card that
-    /// is the question whose answer is banked, so a wrong card does not merely
+    /// overlapped EVERY window. Both callers put the result on a card the
+    /// listener reads (`AdSkipBannerItem.evidenceCatalogEntries` →
+    /// `AdBannerView.evidenceLines`), so a mid-roll card could name a distant
+    /// advertiser's URL as the reason — and on the SUGGEST card that is the
+    /// question whose answer is banked, so a wrong card does not merely
     /// misinform, it teaches.
+    ///
+    /// MEASURED over the population this function actually serves —
+    /// `BannerEvidenceWindowCorpusEvalTests` on the 2026-08-02 device pull, 31
+    /// assets, 115 persisted `ad_windows` rows, 244 catalog entries of which 57
+    /// are repeats. **28 of the 115 windows carried at least one entry no
+    /// mention of which was inside the window, and 27 of those 28 rendered it
+    /// as the card's FIRST line.** The nearest mention of a removed entry lies
+    /// 7 s to 3,140 s outside its window (median 542 s), so it is not an edge
+    /// effect; the widest hull in the corpus is 7,268 s of a 7,326 s episode.
+    /// Twenty of the 28 cards had NO other evidence — their whole "why" was
+    /// someone else's sponsor — and seven more were being CROWDED OUT, because
+    /// `evidenceLines` caps at three and the wrong entry took a slot.
+    ///
+    /// (The bead's own figure, "ten of twenty-seven repeated ANCHORING entries
+    /// span more than 300 s", names a different population: the four anchoring
+    /// categories the projector uses. The banner renders all five, so it is the
+    /// number above that bounds this function.)
     ///
     /// `revertNegativeAttribution` below has carried this argument in a comment
     /// since playhead-1mq1 and acted on it alone; ``EvidenceEntry/locatedInTimeWindow(start:end:)``
