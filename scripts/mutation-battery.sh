@@ -3791,6 +3791,20 @@ T_OC_NO_KEY="an entry with no occurrence list writes no occurrences key at all"
 T_OC_PROMPT="the FM prompt rendering is identical with and without occurrence lists"
 T_OC_REFS="a repeat produces one evidenceRef, and refs stay a gapless zero-based run"
 
+# ---- playhead-hzpa: an oversize abandonment records the size it was about ----
+#
+# Two suites, deliberately. The STRUCT suite proves the classifier built the
+# pair; the ROW suite proves it survives the persistence seam that was
+# hardcoding `errorContext: nil, inputTokenCount: nil`. A rail that only kills
+# in the struct suite has not shown the column changes.
+T_HZ_STRUCT_SINGLE="a single-atom oversized window persists its token count, its budget and its cause"
+T_HZ_STRUCT_LEADING="a leading atom over budget is distinguishable from a single-atom segment"
+T_HZ_STRUCT_NULL="a failure that is not an oversize abandonment carries no token count, no budget and no cause"
+T_HZ_STRUCT_ZERO="errorContext omits the budget clause rather than inventing a zero"
+T_HZ_STRUCT_SPELLING="every abandonment cause has a distinct durable spelling"
+T_HZ_ROW_CARRIES="an over-budget abandonment persists its token count, its budget and its cause"
+T_HZ_ROW_NULL="a failure that made no size comparison still persists NULL in both columns"
+
 MUTATIONS=(
   # Batch 900 — JC01, THE SHIPPED DEFECT VERBATIM. The pre-insert guard asks
   # for the runner's own `fp-final-` fingerprint again, so an engine-written
@@ -8467,6 +8481,56 @@ MUTATIONS=(
   # The expectation is non-empty on purpose, so this entry can genuinely fail.
   "OC99|993|PROJ|$T_OC_ANCHORS_ALL"
 
+  # ---- playhead-hzpa (HZ series) ----
+  #
+  # HZ01/HZ02 are the SHIPPED STATE VERBATIM, one column each: the row that
+  # says `exceededContextWindow` records neither the prompt size nor the
+  # budget. Measured on the 2026-08-16 pull, that is 0 of 961 rows carrying an
+  # `inputTokenCount`. They are separate rails because they are separate
+  # columns with separate readers, and a fix that restored one and not the
+  # other would leave the pair unusable — `tokens > budget` is the invariant
+  # that makes either number mean anything.
+  "HZ01|994|FMCLS|$T_HZ_STRUCT_SINGLE;$T_HZ_STRUCT_LEADING;$T_HZ_ROW_CARRIES"
+  "HZ02|995|FMCLS|$T_HZ_STRUCT_SINGLE;$T_HZ_STRUCT_LEADING;$T_HZ_ROW_CARRIES"
+
+  # HZ03 — the `.segmentHasSingleAtom` bail stops naming itself, i.e. goes back
+  # to being one of the five silent `return outcome`s. The window is still
+  # abandoned and still persists `exceededContextWindow`, so every behavioural
+  # assertion about the SCAN stays green; only the durable cause is destroyed.
+  "HZ03|996|FMCLS|$T_HZ_STRUCT_SINGLE"
+
+  # HZ04 — the standing defect class, injected on purpose: a cause that names
+  # ANOTHER cause. `.leadingAtomOverBudget` reports `.segmentHasSingleAtom`, so
+  # a 3-atom segment is booked as a 1-atom one. Every row still carries A
+  # cause, a token count and a budget, and the `tokens > budget` invariant
+  # still holds — this is invisible to every rail except the one that asserts
+  # the two causes are DISTINGUISHABLE.
+  "HZ04|997|FMCLS|$T_HZ_STRUCT_LEADING"
+
+  # HZ05 — `oversizeErrorContext` invents `budget=0` when the budget is absent.
+  # Not-measured collapses into measured-zero, the same shape SW03/SW08 cover
+  # one bead over, in the column a SQL reader would filter on.
+  "HZ05|998|FMCLS|$T_HZ_STRUCT_ZERO"
+
+  # HZ06 — the PERSISTENCE SEAM, and the only rail that can see it. The runner
+  # goes back to `errorContext: nil, inputTokenCount: nil`. The classifier
+  # still builds the whole measurement perfectly, so ALL FIVE struct-suite
+  # tests stay green and only the row suite reddens. This is the rail that
+  # proves the two suites are not redundant.
+  "HZ06|999|RUNNER|$T_HZ_ROW_CARRIES"
+
+  # HZ99 — VACUITY CONTROL, and it MUST SURVIVE. The abandonment log line's
+  # wording changes and nothing else: it proves the anchor still matches, the
+  # batch still builds and both suites still run, while changing no behaviour.
+  #
+  # IT IS AN ARRAY ENTRY WITH A NON-EMPTY EXPECTATION ON PURPOSE (playhead-ngsm).
+  # The verdict loop iterates the expected-test list and reports KILLED when
+  # nothing is missing, so an entry with an EMPTY expectation iterates zero
+  # times and is credited KILLED — a control that cannot fail proves nothing.
+  # Naming a real test is what lets this entry genuinely fail, which is what
+  # makes SURVIVED a result rather than a default. Same construction as OC99.
+  "HZ99|1000|FMCLS|$T_HZ_STRUCT_SINGLE;$T_HZ_ROW_CARRIES"
+
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -8557,6 +8621,13 @@ describe_mutation() {
     OC12) echo "a user veto stops de-anchoring, on a path the repeat widening has just made load-bearing" ;;
     OC13) echo "renderForPrompt starts printing the occurrence list — the FM-side text this change exists to leave alone" ;;
     OC99) echo "VACUITY CONTROL — the loop variable in the anchoring loop is renamed and nothing else changes. MUST SURVIVE" ;;
+    HZ01) echo "the oversize abandonment stops carrying promptTokenCount (the shipped state) — the row names a size problem and records no size" ;;
+    HZ02) echo "the oversize abandonment stops carrying budgetTokens — the number the size was compared against is unrecoverable from a later pull" ;;
+    HZ03) echo "the single-atom subdivision bail stops naming itself, returning to one of the five silent no-verdict returns" ;;
+    HZ04) echo "leadingAtomOverBudget reports segmentHasSingleAtom — a cause that names ANOTHER cause, the standing defect class injected deliberately" ;;
+    HZ05) echo "oversizeErrorContext writes budget=0 when the budget is absent — not-measured collapsed into measured-zero" ;;
+    HZ06) echo "the runner goes back to errorContext: nil, inputTokenCount: nil — the classifier still builds the pair and the persistence seam drops it" ;;
+    HZ99) echo "VACUITY CONTROL — the abandonment log's wording changes and nothing else. MUST SURVIVE" ;;
     NY01) echo "AdDetectionService.hotPathCandidates sorts the RAW array — the shipped defect: runBackfill canonicalized and the hot path did not" ;;
     NY02) echo "the hot path 'de-duplicates' by chunk.id, a per-ROW UUID, so a fast/final twin survives it intact" ;;
     NY03) echo "BoundaryExpander.makeLexicalContext scans the raw array — the user's 'Hearing an ad' tap gets a phantom lexical candidate" ;;
@@ -9192,6 +9263,88 @@ snippet() { IFS= read -r -d '' "$1" || true; }
 apply_mutation() {
   local name="$1" file="$2" OLD NEW
   case "$name" in
+
+  # ---- playhead-hzpa: an oversize abandonment records its size (HZ series) ----
+
+  HZ01)
+    snippet OLD <<'EOF'
+                        promptTokenCount: plan.promptTokenCount,
+                        budgetTokens: budget,
+EOF
+    snippet NEW <<'EOF'
+                        promptTokenCount: nil,
+                        budgetTokens: budget,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  HZ02)
+    snippet OLD <<'EOF'
+                        promptTokenCount: plan.promptTokenCount,
+                        budgetTokens: budget,
+EOF
+    snippet NEW <<'EOF'
+                        promptTokenCount: plan.promptTokenCount,
+                        budgetTokens: nil,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  HZ03)
+    snippet OLD <<'EOF'
+        guard segment.atoms.count > 1 else {
+            outcome.abandonment = .segmentHasSingleAtom
+            return outcome
+        }
+EOF
+    snippet NEW <<'EOF'
+        guard segment.atoms.count > 1 else {
+            return outcome
+        }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  HZ04)
+    snippet OLD <<'EOF'
+                outcome.abandonment = .leadingAtomOverBudget
+EOF
+    snippet NEW <<'EOF'
+                outcome.abandonment = .segmentHasSingleAtom
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  HZ05)
+    snippet OLD <<'EOF'
+        guard let budgetTokens else { return "oversize:\(oversizeAbandonment.rawValue)" }
+EOF
+    snippet NEW <<'EOF'
+        guard let budgetTokens else { return "oversize:\(oversizeAbandonment.rawValue) budget=0" }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  HZ06)
+    snippet OLD <<'EOF'
+            inputTokenCount: failure.promptTokenCount,
+            errorContext: failure.oversizeErrorContext,
+EOF
+    snippet NEW <<'EOF'
+            inputTokenCount: nil,
+            errorContext: nil,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # The anchor is the `abandonment=` field, not the `coarse_pass_window_abandoned`
+  # head: that head appears TWICE in this file (the coarse abandon site at 20
+  # spaces of indent and a second site at 24), and a 20-space pattern also
+  # matches inside the 24-space line, so the anchor applied twice and the run
+  # correctly refused. Measured, not reasoned — the first spelling of this
+  # control failed exactly that way.
+  HZ99)
+    snippet OLD <<'EOF'
+                    abandonment=\(abandonment.rawValue, privacy: .public) \
+EOF
+    snippet NEW <<'EOF'
+                    abandonmentCause=\(abandonment.rawValue, privacy: .public) \
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
 
   # ---- playhead-04rx: a repeated sponsor URL anchors EVERY mention (OC series) ----
 
