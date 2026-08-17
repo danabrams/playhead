@@ -218,6 +218,184 @@ struct SpecialistScanPlannerTests {
         #expect(withMB.contains { $0.startTime < 305 && $0.endTime > 300 })
     }
 
+    // MARK: - Repeated sponsors anchor per MENTION, not across the hull (playhead-x7rk)
+
+    /// A catalog entry that was said in several places: one deduplicated entry
+    /// whose `firstTime`/`lastTime` hull spans them all and whose
+    /// `anchorableOccurrences` names each one.
+    ///
+    /// This is the shape `EvidenceCatalogBuilder.build` produces for a repeated
+    /// sponsor — `count` counts MATCHES, the occurrence list counts ATOMS — and
+    /// building it by hand here is what lets these rails be pure.
+    private func repeatedEntry(
+        ref: Int,
+        at times: [(Double, Double)],
+        text: String = "acme.com"
+    ) -> EvidenceEntry {
+        precondition(!times.isEmpty)
+        return EvidenceEntry(
+            evidenceRef: ref,
+            category: .url,
+            matchedText: text,
+            normalizedText: text,
+            atomOrdinal: Int(times[0].0 / 10.0),
+            startTime: times[0].0,
+            endTime: times[0].1,
+            count: times.count,
+            firstTime: times.map(\.0).min(),
+            lastTime: times.map(\.1).max(),
+            occurrences: times.map { time in
+                EvidenceOccurrence(
+                    atomOrdinal: Int(time.0 / 10.0),
+                    startTime: time.0,
+                    endTime: time.1
+                )
+            }
+        )
+    }
+
+    private func catalog(entries: [EvidenceEntry]) -> EvidenceCatalog {
+        EvidenceCatalog(analysisAssetId: assetId, transcriptVersion: "tx-planner", entries: entries)
+    }
+
+    @Test("a sponsor read twice anchors at BOTH reads and nowhere between them")
+    func repeatedSponsorAnchorsEveryMentionAndNotTheGap() {
+        // One entry, two mentions 400s apart on a 600s episode. Its hull is
+        // [100, 505] — 405 s, two thirds of the episode.
+        let windows = SpecialistScanPlanner().selectWindows(
+            segments: neutralSegments(),
+            evidenceCatalog: catalog(entries: [repeatedEntry(ref: 0, at: [(100, 105), (500, 505)])]),
+            featureWindows: []
+        )
+
+        #expect(covers(windows, time: 102), "the first read must be scanned")
+        #expect(covers(windows, time: 502), "the second read must be scanned")
+        // The 395 s between the two reads is not evidence of anything. Under the
+        // hull it was one candidate region and every window in it was planned.
+        #expect(!covers(windows, time: 300), "the gap between two mentions must not be scanned")
+        for window in windows {
+            let nearFirst = window.startTime >= 95 - 0.001 && window.endTime <= 110 + 0.001
+            let nearSecond = window.startTime >= 495 - 0.001 && window.endTime <= 510 + 0.001
+            #expect(nearFirst || nearSecond,
+                    "window \(window.startTime)..\(window.endTime) is between the mentions, not at one")
+        }
+    }
+
+    @Test("a repeated sponsor's hull does not swallow a distant unrelated cue into one region")
+    func repeatedSponsorDoesNotMergeAwayOtherAnchors() {
+        // The hull [100, 500] straddles an unrelated promo code at 300. Under
+        // the hull all three merge into ONE region spanning 95..505 — 17 tiles,
+        // every one of them scoring the hull anchor as a cue. Per mention there
+        // are three regions and the gaps between them are not planned.
+        let windows = SpecialistScanPlanner().selectWindows(
+            segments: neutralSegments(),
+            evidenceCatalog: catalog(entries: [
+                repeatedEntry(ref: 0, at: [(100, 102), (500, 502)]),
+                EvidenceEntry(
+                    evidenceRef: 1, category: .promoCode, matchedText: "SAVE10",
+                    normalizedText: "save10", atomOrdinal: 30, startTime: 300, endTime: 302
+                ),
+            ]),
+            featureWindows: []
+        )
+
+        #expect(covers(windows, time: 101))
+        #expect(covers(windows, time: 301))
+        #expect(covers(windows, time: 501))
+        // Three separate reads, three separate regions: the halfway points
+        // between them carry no cue at all.
+        #expect(!covers(windows, time: 200), "the 100->300 gap must not be planned")
+        #expect(!covers(windows, time: 400), "the 300->500 gap must not be planned")
+        // Three regions of one tile each (the padded spans are 12 s wide, under
+        // the 25 s tile), so the whole plan is three windows.
+        #expect(windows.count == 3, "expected one tile per read, got \(windows.count)")
+    }
+
+    @Test("the density metric counts mentions IN the window, not a hull spanning it")
+    func densityIsNotInflatedByASpanningHull() {
+        // A repeated sponsor whose hull covers the whole 0..600 episode, plus a
+        // genuine three-cue cluster at 300. With budget 1 the single window kept
+        // must be the real cluster. Under the hull EVERY tile scored +1 from the
+        // spanning anchor, and the earliest tile — at t=0, where nothing was
+        // said — tied at density 1 and won on the earliest-start tiebreak.
+        let windows = SpecialistScanPlanner().selectWindows(
+            segments: neutralSegments(),
+            evidenceCatalog: catalog(entries: [
+                repeatedEntry(ref: 0, at: [(1, 3), (595, 597)]),
+                EvidenceEntry(
+                    evidenceRef: 1, category: .promoCode, matchedText: "SAVE10",
+                    normalizedText: "save10", atomOrdinal: 30, startTime: 300, endTime: 302
+                ),
+                EvidenceEntry(
+                    evidenceRef: 2, category: .ctaPhrase, matchedText: "go to",
+                    normalizedText: "go to", atomOrdinal: 30, startTime: 303, endTime: 305
+                ),
+                EvidenceEntry(
+                    evidenceRef: 3, category: .disclosurePhrase, matchedText: "sponsored by",
+                    normalizedText: "sponsored by", atomOrdinal: 30, startTime: 306, endTime: 308
+                ),
+            ]),
+            featureWindows: [],
+            budget: 1
+        )
+        #expect(windows.count == 1)
+        #expect(covers(windows, time: 304),
+                "the densest window must be the real 3-cue cluster, not a tile a hull spans")
+    }
+
+    @Test("an entry said ONCE plans exactly what it did before playhead-x7rk")
+    func singleMentionEntryIsUnchanged() {
+        // The confinement claim. For `count == 1`, `firstTime`/`lastTime` are
+        // the representative's own times, so the hull expression and the
+        // per-occurrence expression are the same anchor. Driven both ways: an
+        // entry with an explicit one-element occurrence list, and one with none
+        // at all (the `EvidenceEntry` convenience init the other tests use).
+        let segments = neutralSegments()
+        let planner = SpecialistScanPlanner()
+        let withList = planner.selectWindows(
+            segments: segments,
+            evidenceCatalog: catalog(entries: [repeatedEntry(ref: 0, at: [(100, 105)], text: "acme.com")]),
+            featureWindows: []
+        )
+        let withoutList = planner.selectWindows(
+            segments: segments,
+            evidenceCatalog: catalog(entries: [
+                EvidenceEntry(
+                    evidenceRef: 0, category: .url, matchedText: "acme.com",
+                    normalizedText: "acme.com", atomOrdinal: 10, startTime: 100, endTime: 105
+                ),
+            ]),
+            featureWindows: []
+        )
+        #expect(!withList.isEmpty)
+        #expect(withList.map(\.startTime) == withoutList.map(\.startTime))
+        #expect(withList.map(\.endTime) == withoutList.map(\.endTime))
+    }
+
+    @Test("an entry with NO recorded occurrence list anchors at its representative, not its hull")
+    func unrecordedOccurrenceListAnchorsTheRepresentative() {
+        // `occurrences: nil` means "nobody recorded the population" — a value
+        // persisted before playhead-04rx. `anchorableOccurrences` resolves it to
+        // the representative, which is the pre-04rx behaviour and NOT the hull.
+        // The distinction is invisible unless the two disagree, so this entry is
+        // built with a wide `firstTime`/`lastTime` and no list.
+        let windows = SpecialistScanPlanner().selectWindows(
+            segments: neutralSegments(),
+            evidenceCatalog: catalog(entries: [
+                EvidenceEntry(
+                    evidenceRef: 0, category: .url, matchedText: "acme.com",
+                    normalizedText: "acme.com", atomOrdinal: 10,
+                    startTime: 100, endTime: 105,
+                    count: 2, firstTime: 100, lastTime: 500, occurrences: nil
+                ),
+            ]),
+            featureWindows: []
+        )
+        #expect(covers(windows, time: 102), "the representative must still anchor")
+        #expect(!covers(windows, time: 300), "an unrecorded population is not a licence to scan the hull")
+        #expect(!covers(windows, time: 498), "an unrecorded population is not a licence to scan the hull")
+    }
+
     @Test("a low music-bed-change feature window is ignored (below the gate)")
     func lowMusicBedScoreIgnored() {
         let lowMB = FeatureWindow(

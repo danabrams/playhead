@@ -316,9 +316,25 @@ enum AdLikelihoodScanOrder {
     ///   `coverageStartTime`/`coverageEndTime`. The coverage span runs from the
     ///   first to the last occurrence of a brand and is routinely episode-wide;
     ///   as a POINTER that is useless, and `maxSeedWidthSeconds` would drop it
-    ///   anyway. `SpecialistScanPlanner` uses the coverage span because it
-    ///   scores anchor DENSITY, where a wide anchor contributes uniformly and
-    ///   is harmless; here a wide anchor would name the whole episode.
+    ///   anyway.
+    ///
+    ///   This note used to add that `SpecialistScanPlanner` reads the coverage
+    ///   span legitimately, "because it scores anchor DENSITY, where a wide
+    ///   anchor contributes uniformly and is harmless". **That was wrong and it
+    ///   is why playhead-x7rk exists.** The claim holds for the score and not
+    ///   for the MERGE that runs before it: there, one episode-wide anchor is
+    ///   not one uniform vote, it is one region swallowing every other anchor.
+    ///   That site now anchors one mention at a time via
+    ///   ``EvidenceEntry/anchorableOccurrences``. Do NOT read that as "no
+    ///   consumer reads the hull any more" — playhead-rty3's grep found five
+    ///   production readers and three are still open: playhead-0u3e (the fusion
+    ///   ledger's weight), playhead-1prw (the dormant B9 planner) and
+    ///   playhead-4grq (a 3+ repeat read as two endpoints).
+    ///
+    ///   Seeds here still use only the REPRESENTATIVE occurrence, so a repeat's
+    ///   later mentions seed nothing. That UNDER-reads a repeat rather than
+    ///   over-reading it, which is the safe direction for a pointer, and it is
+    ///   deliberately outside playhead-x7rk's scope.
     static func seeds(
         acousticBreaks: [AcousticBreak],
         evidenceCatalog: EvidenceCatalog?,
