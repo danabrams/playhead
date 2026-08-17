@@ -8287,75 +8287,75 @@ MUTATIONS=(
   # OC01 — THE SHIPPED DEFECT, VERBATIM. The anchoring loop keys on the entry's
   # representative, so every later mention of a repeated sponsor is counted and
   # never anchored.
-  "OC01|950|PROJ|$T_OC_ANCHORS_ALL"
+  "OC01|980|PROJ|$T_OC_ANCHORS_ALL"
 
   # OC02 — THE PLAUSIBLE WRONG FIX. Anchor every occurrence, but attach the
   # ENTRY rather than the entry seen from that occurrence. Both atoms anchor, so
   # RO01's rail goes green again — and the provenance on the post-roll atom
   # claims the evidence sits back in the pre-roll, and the decoder's
   # (evidenceRef, atomOrdinal) dedup collapses the two anchors into one.
-  "OC02|951|PROJ|$T_OC_NAMES_OCC;$T_OC_TWO_REFS"
+  "OC02|981|PROJ|$T_OC_NAMES_OCC;$T_OC_TWO_REFS"
 
   # OC03 — the builder stops accumulating: every entry offers one place, so the
   # projector is correct and has nothing to work with. This is the shape a
   # refactor reaches for when it "simplifies" the aggregate.
-  "OC03|952|EVCAT|$T_OC_BOTH_PLACES;$T_OC_ORDERED"
+  "OC03|982|EVCAT|$T_OC_BOTH_PLACES;$T_OC_ORDERED"
 
   # OC04 — the accessor stops resolving an ABSENT list, so a row persisted
   # before this change anchors nothing at all. Silent, and it DELETES provenance
   # rather than adding any.
-  "OC04|953|EVCAT|$T_OC_ABSENT;$T_OC_LEGACY"
+  "OC04|983|EVCAT|$T_OC_ABSENT;$T_OC_LEGACY"
 
   # OC05 — the accessor accepts an EMPTY list as a population of zero. Same
   # direction as OC04 and a different door: "unrecorded is not zero" and neither
   # is an empty array a caller happened to pass.
-  "OC05|954|EVCAT|$T_OC_EMPTY"
+  "OC05|984|EVCAT|$T_OC_EMPTY"
 
   # OC06 — the per-atom dedupe goes away, so "that's acme.com, acme.com" in one
   # chunk books two places to anchor. Harmless here and not harmless as a
   # precedent: it makes the occurrence list a count of MATCHES, which is what
   # `count` already is.
-  "OC06|955|EVCAT|$T_OC_ONE_ATOM"
+  "OC06|985|EVCAT|$T_OC_ONE_ATOM"
 
   # OC07 — the per-occurrence view moves the ordinal and keeps the ENTRY's
   # times. Half a fix: the ref points at the right atom and reports the wrong
   # second, which is the standing defect class in miniature.
-  "OC07|956|EVCAT|$T_OC_VIEW_MOVES"
+  "OC07|986|EVCAT|$T_OC_VIEW_MOVES"
 
   # OC08 — the view carries the whole occurrence list, so a value that names ONE
   # mention also claims to name all of them, and every persisted provenance
   # record grows the list.
-  "OC08|957|EVCAT|$T_OC_VIEW_REP"
+  "OC08|987|EVCAT|$T_OC_VIEW_REP"
 
   # OC09 — the encoder drops the occurrence list, so a catalog that round-trips
   # through the store comes back one-place. Invisible to every in-memory test.
-  "OC09|958|DSPAN|$T_OC_ROUNDTRIP"
+  "OC09|988|DSPAN|$T_OC_ROUNDTRIP"
 
   # OC10 — the decoder reads an ABSENT list as an EMPTY one, which is the same
   # confusion OC05 makes one layer up: it converts "nobody recorded this" into
   # a positive claim of zero.
-  "OC10|959|DSPAN|$T_OC_LEGACY"
+  "OC10|989|DSPAN|$T_OC_LEGACY"
 
   # OC11 — brandSpan joins the anchoring set. Widening WHERE an entry may anchor
   # must not widen WHICH entries may: the two are independent and this is the
   # over-correction that conflates them.
-  "OC11|960|PROJ|$T_OC_BRAND"
+  "OC11|990|PROJ|$T_OC_BRAND"
 
   # OC12 — a user veto stops de-anchoring. The repeat widening puts anchors in
   # places the user has already rejected, so the veto path is load-bearing in a
   # way it was not before.
-  "OC12|961|PROJ|$T_OC_VETO"
+  "OC12|991|PROJ|$T_OC_VETO"
 
   # OC13 — `renderForPrompt` starts printing the occurrence list. The whole
   # reason for keeping ONE entry per (category, text) is that the FM-side text
   # does not move; this is the edit that would move it.
-  "OC13|962|EVCAT|$T_OC_PROMPT"
+  "OC13|992|EVCAT|$T_OC_PROMPT"
 
   # OC99 — VACUITY CONTROL, and it MUST SURVIVE. A pure rename of the loop
   # variable in the line OC01 mutates: it proves the anchor still matches, the
   # batch still builds and the suites still run, while changing no behaviour.
   # The expectation is non-empty on purpose, so this entry can genuinely fail.
-  "OC99|963|PROJ|$T_OC_ANCHORS_ALL"
+  "OC99|993|PROJ|$T_OC_ANCHORS_ALL"
 
 )
 
