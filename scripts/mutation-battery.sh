@@ -2188,6 +2188,21 @@ FOCUSED_SUITES=(
   # the edit; `preAd9nSelectorIsTheDegenerateCase` proves the corpus lane's
   # frozen baseline really is the deleted selector).
   -only-testing:PlayheadTests/RepeatedOccurrencePromptTests
+  # playhead-rty3: the BANNER half of the same blindness (RY series). TWO
+  # suites, and neither can observe the other. The selector suite is the only
+  # place the CHOICE is driven directly — relocation, the representative branch,
+  # the closed interval, the legacy fallback — and the only place the negative
+  # claim can sit next to a positive control proving the hull did cover the
+  # window. The banner suite is the only place both CALLERS are driven through
+  # the real orchestrator, which is the difference RY06 and RY07 exist to
+  # separate: a selector that is right and a card that does not use it are the
+  # same green result everywhere else.
+  #
+  # These two are also what makes the AD series' relocation to `$EVCAT` visible:
+  # AD04 and AD05 now sit at the shared site, so they redden a banner rail as
+  # well as the FM rail that named them.
+  -only-testing:PlayheadTests/EvidenceEntryWindowSelectionTests
+  -only-testing:PlayheadTests/BannerEvidenceOccurrenceWindowTests
   # playhead-uazf: the ad-scan axis on the dogfood wire (UZ series). TWO suites,
   # and neither can observe the other. The provider suite is the only thing that
   # lifts a real `AnalysisCoverageSummary` off a real store into the wire struct,
@@ -3851,6 +3866,26 @@ T_AD_PLAN_CARRIES="planAdaptiveZoom puts the repeat's evidence ref in the plan t
 T_AD_NARROW_SECOND="the targeted phase nominates the SECOND ad break, which it previously never saw"
 T_AD_NARROW_LOOKBACK="the 20-atom lookback follows every occurrence, not only the first"
 T_AD_NARROW_LEGACY="a legacy entry with no recorded occurrence list is still seeded"
+
+# ---- playhead-rty3: the BANNER half of the same blindness (RY series) ----
+#
+# TWO suites, and neither can observe the other. The selector suite is the only
+# place the choice itself is driven — relocation, the representative branch, the
+# closed interval, the legacy fallback — and it is the only place that can state
+# the negative claim ("this window sees NEITHER mention") next to the positive
+# control that proves the hull did cover it. The banner suite is the only place
+# the two CALLERS are driven through the real orchestrator, so it is the only
+# thing that can tell "the selector is right" from "the card uses it", which is
+# exactly what RY06 and RY07 exist to separate.
+T_RY_BETWEEN="A window BETWEEN two mentions sees neither — the hull is not a place"
+T_RY_LOCATED="A window on the LATER mention gets the entry located THERE, not at the first"
+T_RY_REP_SELF="A window on the REPRESENTATIVE returns the entry itself, occurrence list intact"
+T_RY_CLOSED="The interval stays CLOSED on both ends"
+T_RY_LEGACY="An entry with NO recorded occurrence list falls back to its representative"
+T_RY_SHARED="The FM prompt selector and the banner selector are the same answer"
+T_RY_SUGGEST_LOCAL="SUGGEST card: a mid-roll does not name a sponsor read an hour away"
+T_RY_SUGGEST_LOCATED="SUGGEST card: the window that DID hear the repeat carries it, located there"
+T_RY_AUTO_LOCAL="AUTO-SKIP card: a mid-roll does not name a sponsor read an hour away"
 
 MUTATIONS=(
   # Batch 900 — JC01, THE SHIPPED DEFECT VERBATIM. The pre-insert guard asks
@@ -8599,7 +8634,7 @@ MUTATIONS=(
   # representative, so an entry whose earliest mention is a pre-roll is dropped
   # from every later window and the model refining a post-roll gets no evidence
   # ref for a sponsor URL the same prompt carries in its own transcript lines.
-  "AD01|1002|FMCLS|$T_AD_LATER_LINE;$T_AD_PLAN_CARRIES"
+  "AD01|1002|FMCLS|$T_AD_LATER_LINE;$T_AD_PLAN_CARRIES;$T_RY_SHARED"
 
   # AD02 — THE PLAUSIBLE WRONG FIX, and the one the bead explicitly warned
   # about. Emit one line PER OCCURRENCE instead of per entry. Every rail about
@@ -8614,19 +8649,21 @@ MUTATIONS=(
   # visible, and every entry whose representative is in the window now renders
   # at a different line — a change to what the model is told about ~2,800
   # windows in service of the 19 that carry a repeat.
-  "AD03|1004|FMCLS|$T_AD_REP_LINE"
+  # playhead-rty3 moved the loop into `EvidenceEntry.locatedInWindow`, so this
+  # mutant now lives in `$EVCAT` — the file field, not the mutant, changed.
+  "AD03|1004|EVCAT|$T_AD_REP_LINE"
 
   # AD04 — the selector always re-locates through `viewOfOccurrence`, including
   # for the representative. The line ref is exactly right and the occurrence
   # list is silently dropped from every entry the prompt carries, so what
   # `ResolvedEvidenceAnchor` receives changes for the whole corpus rather than
   # for repeats. A byte-identical claim that is not byte-identical.
-  "AD04|1005|FMCLS|$T_AD_REP_IDENTICAL"
+  "AD04|1005|EVCAT|$T_AD_REP_IDENTICAL;$T_RY_REP_SELF"
 
   # AD05 — the mirror of AD04, and OC02's shape one layer up: never re-locate,
   # so the prompt line points at line 412 while the entry it carries reports the
   # pre-roll's 51.9 s. The standing defect class, injected deliberately.
-  "AD05|1006|FMCLS|$T_AD_OWN_TIME"
+  "AD05|1006|EVCAT|$T_AD_OWN_TIME;$T_RY_LOCATED"
 
   # AD06 — the window membership test goes away, so an entry with NO mention in
   # the window earns a line pointing at a line the prompt does not contain.
@@ -8637,7 +8674,7 @@ MUTATIONS=(
   # `anchorableOccurrences`, so an entry persisted before playhead-04rx (list
   # absent) earns no line at all. Silent, and it DELETES context the pre-ad9n
   # code had rather than adding any.
-  "AD07|1008|FMCLS|$T_AD_LEGACY_PROMPT"
+  "AD07|1008|EVCAT|$T_AD_LEGACY_PROMPT"
 
   # AD08 — THE SHIPPED DEFECT, VERBATIM, on the narrowing side: BOTH halves of
   # `evidenceLineRefs` revert to the representative, which is what actually
@@ -8707,6 +8744,74 @@ MUTATIONS=(
   # an empty expectation iterates zero times and is credited KILLED, so a
   # control that cannot fail proves nothing.
   "AD99|1012|FMCLS|$T_AD_LATER_LINE;$T_AD_NARROW_SECOND"
+
+  # ---- playhead-rty3 (RY series): the BANNER half of first-occurrence dedup ----
+  #
+  # THE HULL IS NOT A PLACE. `coverageStartTime`/`coverageEndTime` are
+  # `firstTime`/`lastTime`, so a deduped entry for a sponsor read twice has a
+  # "coverage" span reaching from the first read to the last and overlaps EVERY
+  # window between them. Measured on the 2026-08-02 pull, 28 of 115 persisted
+  # `ad_windows` rows carried at least one entry no mention of which was inside
+  # the window, and all 28 rendered a line the listener would have read.
+  #
+  # TWO FILES, for the same reason the AD series has two: `$EVCAT` decides WHICH
+  # mention a window sees, and `$ORCH` decides whether the card asks. A rail on
+  # either alone leaves the other free to revert.
+
+  # RY01 — THE SHIPPED DEFECT, VERBATIM: `catalogEntries(overlapping:end:)` back
+  # to the hull filter, both callers at once. Kills at both cards, which is what
+  # makes RY06/RY07 below meaningful rather than redundant.
+  "RY01|1013|ORCH|$T_RY_SUGGEST_LOCAL;$T_RY_AUTO_LOCAL"
+
+  # RY02 — THE PLAUSIBLE WRONG FIX, and the one this repo keeps shipping: ask
+  # the occurrences for MEMBERSHIP and then hand back the un-relocated entry. Every
+  # "does this card name the right advertiser" rail goes green, and the entry on
+  # the post-roll card reports the pre-roll's timestamp — a value naming one
+  # thing read as though it named another, one layer below the fix. Killed only
+  # by the rail that reads the located entry's position.
+  "RY02|1014|ORCH|$T_RY_SUGGEST_LOCATED"
+
+  # RY03 — the interval opens. The shipped selector is CLOSED on both ends
+  # deliberately, because a zero-duration disclosure phrase that lands exactly on
+  # a snapped boundary is typical rather than exotic; a strict comparison deletes
+  # it silently and the card simply says less. A property that moved with the
+  # code must still be pinned after it moves.
+  "RY03|1015|EVCAT|$T_RY_CLOSED"
+
+  # RY05 — the legacy fallback becomes the hull. `anchorableOccurrences` resolves
+  # an UNRECORDED occurrence list to the representative; making it resolve to
+  # `firstTime…lastTime` instead re-opens this bead's whole defect for every row
+  # persisted before playhead-04rx, while every entry the current builder
+  # produces stays correct. The direction that is invisible on fresh data.
+  "RY05|1015|EVCAT|$T_RY_LEGACY"
+
+  # RY04 — the predicate stops reading its own argument and re-tests the hull, so
+  # the code READS as per-occurrence and BEHAVES as the defect. The most
+  # dangerous shape in the series: `locatedInWindow` is still called, the
+  # relocation still happens, and every mention is admitted whenever the hull
+  # overlaps — so the first one is selected and the card is wrong again.
+  "RY04|1016|EVCAT|$T_RY_BETWEEN;$T_RY_SUGGEST_LOCAL"
+
+  # RY06 — HALF A FIX, on the half that poisons state. The auto-skip card is
+  # fixed and the SUGGEST card reverts to the hull. The suggest card is the one
+  # that asks the listener whether the assessment was right and banks the answer
+  # per-class in trust scoring, so a wrong card there does not merely misinform,
+  # it teaches. Killed by the suggest rail and by nothing else — which is the
+  # proof that the two banner rails are not one rail written twice.
+  "RY06|1017|ORCH|$T_RY_SUGGEST_LOCAL"
+
+  # RY07 — the mirror: the suggest card is fixed and the AUTO-SKIP card reverts.
+  # Killed by the auto rail alone. Together with RY06 this is what a single
+  # "the banner is right" rail could not have told anyone.
+  "RY07|1018|ORCH|$T_RY_AUTO_LOCAL"
+
+  # RY99 — VACUITY CONTROL, and it MUST SURVIVE. The closure parameter in
+  # `catalogEntries` is renamed and nothing else changes: it proves the anchor
+  # still matches, the batch still builds and both suites still run, while
+  # changing no behaviour. Non-empty expectation on purpose (playhead-ngsm) — an
+  # entry with an empty expectation iterates zero times and is credited KILLED,
+  # so a control that cannot fail proves nothing.
+  "RY99|1019|ORCH|$T_RY_SUGGEST_LOCAL;$T_RY_AUTO_LOCAL;$T_RY_BETWEEN"
 
 )
 
@@ -8808,15 +8913,23 @@ describe_mutation() {
     HZ99) echo "VACUITY CONTROL — the abandonment log's wording changes and nothing else. MUST SURVIVE" ;;
     AD01) echo "the prompt selector reads the entry's REPRESENTATIVE again (the shipped defect) — a repeat sponsor read is invisible to the model reading it" ;;
     AD02) echo "the evidence block emits one line PER OCCURRENCE — evidenceRef stops being an identity and the prompt grows per repeat" ;;
-    AD03) echo "the LAST in-window mention wins instead of the first — every non-repeat entry moves line" ;;
-    AD04) echo "the selector always re-locates through viewOfOccurrence, dropping the occurrence list from every entry the prompt carries" ;;
-    AD05) echo "the selector never re-locates — the line points at the post-roll and the entry reports the pre-roll's second (the standing defect class)" ;;
+    AD03) echo "the LAST visible mention wins instead of the first, at the SHARED selector — every non-repeat entry moves line" ;;
+    AD04) echo "the SHARED selector always re-locates through viewOfOccurrence, dropping the occurrence list from every entry a prompt OR a card carries" ;;
+    AD05) echo "the SHARED selector never re-locates — the line points at the post-roll and the entry reports the pre-roll's second (the standing defect class)" ;;
     AD06) echo "the window-membership test goes away — an entry with no mention in the window earns a line anyway" ;;
-    AD07) echo "the selector reads occurrences directly, so a pre-04rx persisted entry earns no prompt line at all" ;;
+    AD07) echo "the SHARED selector reads occurrences directly, so a pre-04rx persisted entry earns neither a prompt line nor a card line" ;;
     AD08) echo "BOTH halves of evidenceLineRefs revert to the representative (the shipped defect verbatim) — the second ad break is nominated by no phase" ;;
     AD09) echo "the seed follows every occurrence and the 20-atom lookback still follows only the first — the second break arrives with no ad body in front of it" ;;
     AD10) echo "the narrowing seed reads occurrences directly, so a pre-04rx persisted entry seeds nothing and a scanned window silently stops being scanned" ;;
-    AD99) echo "VACUITY CONTROL — the loop variable in the prompt selector is renamed and nothing else. MUST SURVIVE" ;;
+    AD99) echo "VACUITY CONTROL — the closure parameter in the prompt selector is renamed and nothing else. MUST SURVIVE" ;;
+    RY01) echo "SkipOrchestrator.catalogEntries goes back to the coverage HULL (the shipped defect) — a mid-roll card names a sponsor read an hour away" ;;
+    RY02) echo "the banner selector asks the occurrences for MEMBERSHIP and hands back the un-relocated entry — right advertiser, wrong second" ;;
+    RY03) echo "the banner selector's interval opens, so a zero-duration disclosure phrase on a snapped boundary vanishes from the card" ;;
+    RY04) echo "the per-occurrence predicate stops reading its argument and re-tests the hull — READS per-occurrence, BEHAVES as the defect" ;;
+    RY05) echo "anchorableOccurrences resolves an UNRECORDED list to the HULL instead of the representative — every pre-04rx row re-opens the defect" ;;
+    RY06) echo "HALF A FIX: the auto-skip card is fixed and the SUGGEST card reverts to the hull — the half whose answer is banked" ;;
+    RY07) echo "the mirror of RY06 — the suggest card is fixed and the AUTO-SKIP card reverts to the hull" ;;
+    RY99) echo "VACUITY CONTROL — the closure parameter in catalogEntries is renamed and nothing else. MUST SURVIVE" ;;
     NY01) echo "AdDetectionService.hotPathCandidates sorts the RAW array — the shipped defect: runBackfill canonicalized and the hot path did not" ;;
     NY02) echo "the hot path 'de-duplicates' by chunk.id, a per-ROW UUID, so a fast/final twin survives it intact" ;;
     NY03) echo "BoundaryExpander.makeLexicalContext scans the raw array — the user's 'Hearing an ad' tap gets a phantom lexical candidate" ;;
@@ -9548,24 +9661,31 @@ EOF
 
   # ---- playhead-ad9n: the FM half of first-occurrence dedup (AD series) ----
 
+  # playhead-rty3 moved the SELECTION out of `forWindow` and into
+  # `EvidenceEntry.locatedInWindow(seeing:)`, so the FM caller could stop being
+  # the only place that asks which mention a window can see. Every AD mutant
+  # below still injects the defect it always named; four of them now do it at
+  # the shared site (`$EVCAT`) rather than at the caller, and their `rec_file`
+  # field says so. That is a strengthening rather than a relocation: a mutant at
+  # the shared site is now also visible to the BANNER rails, while its
+  # expectation stays the FM test that named it.
   AD01)
     snippet OLD <<'EOF'
-        for occurrence in entry.anchorableOccurrences {
-            guard let lineRef = lineRefByAtomOrdinal[occurrence.atomOrdinal],
-                  allowedLineRefs.contains(lineRef) else {
-                continue
-            }
+        guard let located = entry.locatedInWindow(seeing: { occurrence in
+            guard let lineRef = lineRefByAtomOrdinal[occurrence.atomOrdinal] else { return false }
+            return allowedLineRefs.contains(lineRef)
+        }), let lineRef = lineRefByAtomOrdinal[located.atomOrdinal] else {
+            return nil
+        }
 EOF
     snippet NEW <<'EOF'
-        for occurrence in [EvidenceOccurrence(
-            atomOrdinal: entry.atomOrdinal,
-            startTime: entry.startTime,
-            endTime: entry.endTime
-        )] {
-            guard let lineRef = lineRefByAtomOrdinal[occurrence.atomOrdinal],
-                  allowedLineRefs.contains(lineRef) else {
-                continue
-            }
+        guard let located = entry.locatedInWindow(seeing: { occurrence in
+            guard occurrence.atomOrdinal == entry.atomOrdinal,
+                  let lineRef = lineRefByAtomOrdinal[occurrence.atomOrdinal] else { return false }
+            return allowedLineRefs.contains(lineRef)
+        }), let lineRef = lineRefByAtomOrdinal[located.atomOrdinal] else {
+            return nil
+        }
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -9600,59 +9720,48 @@ EOF
 
   AD03)
     snippet OLD <<'EOF'
-        for occurrence in entry.anchorableOccurrences {
-            guard let lineRef = lineRefByAtomOrdinal[occurrence.atomOrdinal],
+        for occurrence in anchorableOccurrences where isVisible(occurrence) {
 EOF
     snippet NEW <<'EOF'
-        for occurrence in entry.anchorableOccurrences.reversed() {
-            guard let lineRef = lineRefByAtomOrdinal[occurrence.atomOrdinal],
+        for occurrence in anchorableOccurrences.reversed() where isVisible(occurrence) {
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
   AD04)
     snippet OLD <<'EOF'
-            let located = occurrence.atomOrdinal == entry.atomOrdinal
-                ? entry
-                : entry.viewOfOccurrence(occurrence)
+            return occurrence.atomOrdinal == atomOrdinal ? self : viewOfOccurrence(occurrence)
 EOF
     snippet NEW <<'EOF'
-            let located = entry.viewOfOccurrence(occurrence)
+            return viewOfOccurrence(occurrence)
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
   AD05)
     snippet OLD <<'EOF'
-            let located = occurrence.atomOrdinal == entry.atomOrdinal
-                ? entry
-                : entry.viewOfOccurrence(occurrence)
+            return occurrence.atomOrdinal == atomOrdinal ? self : viewOfOccurrence(occurrence)
 EOF
     snippet NEW <<'EOF'
-            let located = entry
+            return self
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
   AD06)
     snippet OLD <<'EOF'
-            guard let lineRef = lineRefByAtomOrdinal[occurrence.atomOrdinal],
-                  allowedLineRefs.contains(lineRef) else {
-                continue
-            }
+            guard let lineRef = lineRefByAtomOrdinal[occurrence.atomOrdinal] else { return false }
+            return allowedLineRefs.contains(lineRef)
 EOF
     snippet NEW <<'EOF'
-            guard let lineRef = lineRefByAtomOrdinal[occurrence.atomOrdinal] else {
-                continue
-            }
+            guard lineRefByAtomOrdinal[occurrence.atomOrdinal] != nil else { return false }
+            return true
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
   AD07)
     snippet OLD <<'EOF'
-        for occurrence in entry.anchorableOccurrences {
-            guard let lineRef = lineRefByAtomOrdinal[occurrence.atomOrdinal],
+        for occurrence in anchorableOccurrences where isVisible(occurrence) {
 EOF
     snippet NEW <<'EOF'
-        for occurrence in entry.occurrences ?? [] {
-            guard let lineRef = lineRefByAtomOrdinal[occurrence.atomOrdinal],
+        for occurrence in occurrences ?? [] where isVisible(occurrence) {
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -9726,27 +9835,119 @@ EOF
 
   AD99)
     snippet OLD <<'EOF'
-        for occurrence in entry.anchorableOccurrences {
-            guard let lineRef = lineRefByAtomOrdinal[occurrence.atomOrdinal],
-                  allowedLineRefs.contains(lineRef) else {
-                continue
-            }
-            let located = occurrence.atomOrdinal == entry.atomOrdinal
-                ? entry
-                : entry.viewOfOccurrence(occurrence)
-            return PromptEvidenceEntry(entry: located, lineRef: lineRef)
+        guard let located = entry.locatedInWindow(seeing: { occurrence in
+            guard let lineRef = lineRefByAtomOrdinal[occurrence.atomOrdinal] else { return false }
+            return allowedLineRefs.contains(lineRef)
+        }), let lineRef = lineRefByAtomOrdinal[located.atomOrdinal] else {
+            return nil
         }
 EOF
     snippet NEW <<'EOF'
-        for mention in entry.anchorableOccurrences {
-            guard let lineRef = lineRefByAtomOrdinal[mention.atomOrdinal],
-                  allowedLineRefs.contains(lineRef) else {
-                continue
+        guard let located = entry.locatedInWindow(seeing: { mention in
+            guard let ref = lineRefByAtomOrdinal[mention.atomOrdinal] else { return false }
+            return allowedLineRefs.contains(ref)
+        }), let lineRef = lineRefByAtomOrdinal[located.atomOrdinal] else {
+            return nil
+        }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # ---- playhead-rty3: a card's evidence is the mention its window heard (RY series) ----
+
+  RY01)
+    snippet OLD <<'EOF'
+        return catalog.entries.compactMap { entry in
+            entry.locatedInTimeWindow(start: start, end: end)
+        }
+EOF
+    snippet NEW <<'EOF'
+        return catalog.entries.filter { entry in
+            entry.coverageStartTime <= end && entry.coverageEndTime >= start
+        }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  RY02)
+    snippet OLD <<'EOF'
+        return catalog.entries.compactMap { entry in
+            entry.locatedInTimeWindow(start: start, end: end)
+        }
+EOF
+    snippet NEW <<'EOF'
+        return catalog.entries.filter { entry in
+            entry.anchorableOccurrences.contains { occurrence in
+                occurrence.startTime <= end && occurrence.endTime >= start
             }
-            let located = mention.atomOrdinal == entry.atomOrdinal
-                ? entry
-                : entry.viewOfOccurrence(mention)
-            return PromptEvidenceEntry(entry: located, lineRef: lineRef)
+        }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  RY03)
+    snippet OLD <<'EOF'
+            occurrence.startTime <= end && occurrence.endTime >= start
+EOF
+    snippet NEW <<'EOF'
+            occurrence.startTime < end && occurrence.endTime > start
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  RY04)
+    snippet OLD <<'EOF'
+        locatedInWindow { occurrence in
+            occurrence.startTime <= end && occurrence.endTime >= start
+        }
+EOF
+    snippet NEW <<'EOF'
+        locatedInWindow { _ in
+            coverageStartTime <= end && coverageEndTime >= start
+        }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  RY05)
+    snippet OLD <<'EOF'
+        if let occurrences, !occurrences.isEmpty { return occurrences }
+        return [EvidenceOccurrence(atomOrdinal: atomOrdinal, startTime: startTime, endTime: endTime)]
+EOF
+    snippet NEW <<'EOF'
+        if let occurrences, !occurrences.isEmpty { return occurrences }
+        return [EvidenceOccurrence(atomOrdinal: atomOrdinal, startTime: firstTime, endTime: lastTime)]
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  RY06)
+    snippet OLD <<'EOF'
+        let entries = catalogEntries(overlapping: adWindow.startTime, end: adWindow.endTime)
+EOF
+    snippet NEW <<'EOF'
+        let entries = (activeEvidenceCatalog?.entries ?? []).filter { entry in
+            entry.coverageStartTime <= adWindow.endTime
+                && entry.coverageEndTime >= adWindow.startTime
+        }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  RY07)
+    snippet OLD <<'EOF'
+        let entries = catalogEntries(overlapping: managed.snappedStart, end: managed.snappedEnd)
+EOF
+    snippet NEW <<'EOF'
+        let entries = (activeEvidenceCatalog?.entries ?? []).filter { entry in
+            entry.coverageStartTime <= managed.snappedEnd
+                && entry.coverageEndTime >= managed.snappedStart
+        }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  RY99)
+    snippet OLD <<'EOF'
+        return catalog.entries.compactMap { entry in
+            entry.locatedInTimeWindow(start: start, end: end)
+        }
+EOF
+    snippet NEW <<'EOF'
+        return catalog.entries.compactMap { candidate in
+            candidate.locatedInTimeWindow(start: start, end: end)
         }
 EOF
     patch "$file" "$OLD" "$NEW" ;;
