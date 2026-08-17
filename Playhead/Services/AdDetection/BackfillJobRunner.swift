@@ -6636,6 +6636,12 @@ actor BackfillJobRunner {
         latencyMs: Double?,
         suspendingLatencyMs: Double? = nil,
         daemonPeersAtStart: Int? = nil,
+        // playhead-hzpa: the size a size-failure was about, and why it was
+        // abandoned. Both OPTIONAL and both default nil, on the same contract
+        // as `latencyMs` above: a failure that made no size comparison must
+        // persist NULL rather than inherit a number from a different question.
+        inputTokenCount: Int? = nil,
+        errorContext: String? = nil,
         runMode: SemanticScanPhase,
         windowKey: String? = nil
     ) -> SemanticScanResult? {
@@ -6669,8 +6675,8 @@ actor BackfillJobRunner {
             spansJSON: "[]",
             status: status,
             attemptCount: 1,
-            errorContext: nil,
-            inputTokenCount: nil,
+            errorContext: errorContext,
+            inputTokenCount: inputTokenCount,
             outputTokenCount: nil,
             latencyMs: latencyMs,
             suspendingLatencyMs: suspendingLatencyMs,
@@ -6835,6 +6841,14 @@ actor BackfillJobRunner {
             // number from a different span.
             suspendingLatencyMs: failure.suspendingLatencyMillis,
             daemonPeersAtStart: failure.daemonPeersAtStart,
+            // playhead-hzpa: the same rule one more time. `exceededContextWindow`
+            // is the one status whose entire meaning is a comparison of two
+            // numbers, and it persisted neither of them — measured, 0 of 961
+            // rows on the 2026-08-16 device pull carried an `inputTokenCount`,
+            // and `errorContext` was non-null only on the 25 no-work sentinels.
+            // A failure that was not a size failure still gets NULL.
+            inputTokenCount: failure.promptTokenCount,
+            errorContext: failure.oversizeErrorContext,
             runMode: runMode
         )
     }

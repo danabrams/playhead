@@ -6958,3 +6958,202 @@ struct CoarsePassDiagnosticTaskScopingTests {
         )
     }
 }
+
+// MARK: - playhead-hzpa: an oversize abandonment records the size it was about
+//
+// FIELD EVIDENCE. On the 2026-08-16 device pull (sha256 b3ec720d…), asset
+// AA6CD430's head window `[0.0, 42.9]` is `exceededContextWindow` and 43.3 s of
+// a pre-roll Dan confirmed twice was never read by any scan. The row could not
+// say why: `inputTokenCount` was NULL on all 961 `semantic_scan_results` rows
+// in that database, and `errorContext` was non-null only on the 25 no-work
+// sentinels, all of which read `noWork:emptySegments`.
+//
+// The numbers existed. `coarse_pass_window_abandoned` logged `tokenCount` and
+// `budget` at the moment of abandonment, into an os_log that is gone by the
+// time anyone pulls the file. So the ONE status whose entire meaning is a
+// comparison of two numbers persisted neither, and six structurally different
+// causes — including "every chunk REFUSED", which is not a size problem at all
+// — collapsed onto one indistinguishable row.
+//
+// These rails pin the two directions that matter: an oversize abandonment
+// CARRIES the pair and names its cause, and every other failure class still
+// persists NULL rather than inheriting a number from a different question.
+@Suite("Oversize abandonment carries its measurement (playhead-hzpa)", .serialized)
+struct CoarseOversizeAbandonmentMeasurementTests {
+
+    private static let fixtureContextSize = 3_688
+    private static let fixtureSchemaTokens = 16
+    private static let fixtureSafetyMargin = 8
+    private static let fixtureMaxResponse = 16
+
+    /// The budget the fixtures below are built against, computed by the SAME
+    /// production function the classifier uses rather than restated as a
+    /// literal — a hand-copied budget is exactly the second reading of one
+    /// quantity that this bead exists to remove.
+    private static var fixtureBudget: Int {
+        FoundationModelClassifier.maximumEstimatedPromptTokensSafeFor(
+            contextSize: fixtureContextSize,
+            schemaTokens: fixtureSchemaTokens,
+            maximumResponseTokens: fixtureMaxResponse,
+            safetyMarginTokens: fixtureSafetyMargin,
+            divisor: FoundationModelClassifier.effectiveCoarseBudgetDivisor(
+                contextSize: fixtureContextSize
+            )
+        )
+    }
+
+    private static func makeClassifier(
+        tokenCountRule: @escaping @Sendable (String) -> Int
+    ) -> FoundationModelClassifier {
+        let recorder = RuntimeRecorder(
+            contextSize: fixtureContextSize,
+            coarseSchemaTokens: fixtureSchemaTokens,
+            refinementSchemaTokens: 32,
+            tokenCountRule: tokenCountRule
+        )
+        return FoundationModelClassifier(
+            runtime: recorder.runtime,
+            config: .init(
+                safetyMarginTokens: fixtureSafetyMargin,
+                maximumResponseTokens: fixtureMaxResponse
+            )
+        )
+    }
+
+    /// A one-atom segment whose own prompt is over budget. Subdivision cannot
+    /// descend below one atom, so this is `.segmentHasSingleAtom` — the case
+    /// that IS a genuine size problem.
+    @Test("a single-atom oversized window persists its token count, its budget and its cause")
+    func singleAtomOversizeCarriesMeasurement() async throws {
+        let oversizeTokens = Self.fixtureBudget + 1
+        let segments = [
+            makeSegment(
+                index: 52,
+                startTime: 0,
+                endTime: 42.9,
+                text: String(repeating: "Oversized transcript segment. ", count: 40)
+            )
+        ]
+        let classifier = Self.makeClassifier { prompt in
+            prompt.contains("L52>") ? oversizeTokens : 4
+        }
+
+        let output = try await classifier.coarsePassA(segments: segments)
+
+        let failure = try #require(output.failedWindows.first)
+        #expect(output.failedWindows.count == 1)
+        #expect(failure.status == .exceededContextWindow)
+        #expect(
+            failure.promptTokenCount == oversizeTokens,
+            "the row must carry the size it was rejected for, not nil"
+        )
+        #expect(
+            failure.budgetTokens == Self.fixtureBudget,
+            "the budget is a function of the live contextSize and divisor; it is not recoverable later"
+        )
+        #expect(failure.oversizeAbandonment == .segmentHasSingleAtom)
+        #expect(
+            failure.oversizeErrorContext == "oversize:segmentHasSingleAtom budget=\(Self.fixtureBudget)",
+            "errorContext must follow the existing `<kind>:<case> key=value` vocabulary"
+        )
+    }
+
+    /// A multi-atom segment whose FIRST atom alone is over budget. Structurally
+    /// distinct from the case above and, before this bead, byte-identical in
+    /// the database.
+    @Test("a leading atom over budget is distinguishable from a single-atom segment")
+    func leadingAtomOverBudgetIsItsOwnCause() async throws {
+        let segments = [
+            makeMultiAtomSegment(
+                index: 7,
+                atomTexts: ["alphaTOKENaaa", "betaTOKENbbb", "gammaTOKENccc"],
+                startTime: 0,
+                endTime: 42.9
+            )
+        ]
+        // EVERY prompt mentioning any atom is over budget, so the very first
+        // candidate chunk cannot be formed.
+        let classifier = Self.makeClassifier { prompt in
+            let mentionsAtom = prompt.contains("alphaTOKENaaa")
+                || prompt.contains("betaTOKENbbb")
+                || prompt.contains("gammaTOKENccc")
+            return mentionsAtom ? Self.fixtureBudget + 100 : 4
+        }
+
+        let output = try await classifier.coarsePassA(segments: segments)
+
+        let failure = try #require(output.failedWindows.first)
+        #expect(failure.status == .exceededContextWindow)
+        #expect(failure.oversizeAbandonment == .leadingAtomOverBudget)
+        #expect(
+            failure.oversizeAbandonment != .segmentHasSingleAtom,
+            "a 3-atom segment must not report the one-atom cause"
+        )
+        #expect(failure.promptTokenCount == Self.fixtureBudget + 100)
+        #expect(failure.budgetTokens == Self.fixtureBudget)
+    }
+
+    /// The direction that keeps the column honest: a failure that made no size
+    /// comparison must persist NULL. A number here would be a value that names
+    /// one thing read as though it named another — the exact defect the pair
+    /// was added to remove.
+    @Test("a failure that is not an oversize abandonment carries no token count, no budget and no cause")
+    func nonOversizeFailureCarriesNoMeasurement() {
+        let plan = CoarsePassWindowPlan(
+            windowIndex: 0,
+            lineRefs: [3],
+            prompt: "L3> \"anything\"",
+            promptTokenCount: 12,
+            startTime: 0,
+            endTime: 42.9,
+            transcriptQuality: .good
+        )
+
+        let failure = CoarseWindowFailure(plan: plan, status: .refusal, latencyMillis: 91.0)
+
+        #expect(failure.promptTokenCount == nil)
+        #expect(failure.budgetTokens == nil)
+        #expect(failure.oversizeAbandonment == nil)
+        #expect(
+            failure.oversizeErrorContext == nil,
+            "a refusal must not be spelled as an oversize in errorContext"
+        )
+    }
+
+    /// `oversizeErrorContext` degrades rather than fabricating: with a cause but
+    /// no budget it still names the cause. A `budget=0` here would read as a
+    /// measured zero.
+    @Test("errorContext omits the budget clause rather than inventing a zero")
+    func errorContextOmitsAbsentBudget() {
+        let failure = CoarseWindowFailure(
+            planWindowIndex: 0,
+            lineRefs: [1],
+            startTime: 0,
+            endTime: 1,
+            status: .exceededContextWindow,
+            oversizeAbandonment: .chunksUnexamined
+        )
+
+        #expect(failure.oversizeErrorContext == "oversize:chunksUnexamined")
+        #expect(
+            failure.oversizeErrorContext?.contains("budget=") == false,
+            "an absent budget must be absent, not zero"
+        )
+    }
+
+    /// Every enumerated cause must render to a distinct, non-empty token —
+    /// otherwise two causes collapse in the database exactly as they did before
+    /// this bead, and the enum's existence would prove nothing.
+    @Test("every abandonment cause has a distinct durable spelling")
+    func everyCauseIsDistinctlySpelled() {
+        let spellings = CoarseOversizeAbandonment.allCases.map(\.rawValue)
+
+        #expect(spellings.count == 7, "a new cause must be given a spelling and a rail")
+        #expect(Set(spellings).count == spellings.count, "two causes share a spelling")
+        #expect(spellings.allSatisfy { !$0.isEmpty })
+        #expect(
+            spellings.allSatisfy { !$0.contains(" ") },
+            "a space would break the `<kind>:<case> key=value` errorContext grammar"
+        )
+    }
+}
