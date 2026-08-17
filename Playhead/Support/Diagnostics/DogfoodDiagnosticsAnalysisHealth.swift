@@ -369,6 +369,22 @@ extension DogfoodDiagnosticsAnalysisHealth {
             /// Terminal failure recorded but no canonical
             /// failure_reason captured (we lost the why).
             case missingFailureReason = "missing_failure_reason"
+            /// playhead-uazf: `analysis_state` is `completeAdScanPartial` — a
+            /// terminal whose whole content is a claim ABOUT THE AD SCAN — and
+            /// the ad-scan number frozen into `terminal_reason` disagrees with
+            /// the measurement taken from the same database today.
+            ///
+            /// **Why this is a separate kind from
+            /// ``terminalStateContradictsCoverage``.** That one asks whether the
+            /// transcript and feature axes still support the terminal, and for
+            /// `completeAdScanPartial` it checked exactly those two — never the
+            /// axis the state is NAMED for. So a row could record `ad scan 0.894
+            /// < 0.980` while measuring 0.971, with transcript 1.000 and feature
+            /// 0.999, and every self-check in the app reported it consistent.
+            /// The remedy also differs: the other flag says the row's coverage
+            /// contract is broken; this one says the row's own STATED NUMBER is
+            /// out of date, which is a reporting fault and not a pipeline one.
+            case terminalAdScanReasonIsStale = "terminal_ad_scan_reason_is_stale"
         }
     }
 }
@@ -633,6 +649,19 @@ extension DogfoodDiagnosticsAnalysisHealth {
             ))
         }
 
+        // playhead-uazf: the ad-scan axis of a `completeAdScanPartial` row.
+        // Deliberately its own call and its own flag rather than another arm of
+        // the switch above — see `staleAdScanTerminalReason(for:)` for why the
+        // two questions are different, and `Kind.terminalAdScanReasonIsStale`
+        // for why the remedies are.
+        if let stale = staleAdScanTerminalReason(for: row) {
+            flags.append(StalenessFlag(
+                episodeIdHash: row.episodeIdHash,
+                kind: .terminalAdScanReasonIsStale,
+                detail: redactedTruncated(stale.detail)
+            ))
+        }
+
         // Stale fast-transcript watermark — playhead-3bv.2 hazard.
         if let covered = pipeline.transcriptCoveredSec,
            let watermark = pipeline.fastTranscriptWatermarkSec,
@@ -781,6 +810,115 @@ extension DogfoodDiagnosticsAnalysisHealth {
             break
         }
         return nil
+    }
+
+    /// playhead-uazf: a `completeAdScanPartial` row whose FROZEN ad-scan number
+    /// disagrees with the one measured from the same database today.
+    ///
+    /// **The defect this exists to make visible.**
+    /// `analysis_assets.terminalReason` is written once, by
+    /// `AnalysisCoordinator.classifyBackfillTerminal`, at the instant the
+    /// terminal is minted. Nothing re-measures it:
+    /// `reconcilePersistedTerminalAssetVerdict` is the only sweep that ever
+    /// rewrites a persisted terminal, it is a ONE-SHOT migration behind the
+    /// `terminalStateReconcileV1` meta key, and for `.completeAdScanPartial` it
+    /// tests `transcriptShort || featureShort || reasonClaimsImpossibleRatio` —
+    /// never the ad scan. So the string is a measurement presented as a fact,
+    /// and until playhead-uazf put `ad_scan_fraction` on the wire there was no
+    /// live quantity anywhere in a device pull that could contradict it.
+    ///
+    /// **Measured, on two real pulls, both provable from the bytes alone.**
+    /// 48E903D7 (2026-08-11) records `ad scan 0.038` — exactly the width of the
+    /// single scan window that existed when the terminal was taken — and four
+    /// further windows landed on 2026-08-10, taking the same database's own
+    /// measurement to **0.150**. C065AD03 (2026-08-16) records `ad scan 0.894 <
+    /// 0.980 (interrupted)` and measures **0.971**. Both were read as current in
+    /// a P1 diagnosis; neither was.
+    ///
+    /// **The comparison is against the RECORDED number, not against the floor,**
+    /// and that is the whole design. A predicate like "flag when the live
+    /// fraction now clears 0.98" sounds stronger and is weaker: it fires on
+    /// nothing today (measured across all thirteen distinct captures on this
+    /// box: **zero** rows), because the assets that go stale are the ones stuck
+    /// under the floor for other reasons. Staleness is not a threshold crossing;
+    /// it is two numbers that should be the same number and are not.
+    ///
+    /// `nil` — no flag — in every case where the question cannot be asked
+    /// honestly: a state other than `completeAdScanPartial` (nothing else
+    /// records an ad-scan number), an unmeasured live fraction (an absence is
+    /// not a disagreement), or a `terminalReason` this parser cannot find a
+    /// number in. All three under-claim, matching every other reader of a
+    /// missing coverage quantity in this codebase.
+    private struct StaleAdScanTerminalReason {
+        let detail: String
+    }
+
+    /// The tolerance at which the recorded and measured fractions are the same
+    /// number. `terminalReason` is formatted `%.3f`, so anything at or below
+    /// half a unit in the last printed place is round-tripping, not drift.
+    static let adScanReasonStalenessTolerance: Double = 0.0005
+
+    private static func staleAdScanTerminalReason(
+        for row: DogfoodDiagnosticsActivityRow
+    ) -> StaleAdScanTerminalReason? {
+        guard row.analysisAsset.analysisState == "completeAdScanPartial" else { return nil }
+        guard let recorded = parseAdScanRatioInTerminalReason(row.analysisAsset.terminalReason) else {
+            return nil
+        }
+        guard let measured = row.pipeline.adScanFraction, measured.isFinite else { return nil }
+        guard abs(measured - recorded) > adScanReasonStalenessTolerance else { return nil }
+        // The ceiling is included because it is what tells a reader whether the
+        // measured value is short of the floor for a SCAN reason or a TRANSCRIPT
+        // one — playhead-nffz's distinction, and the one C065AD03 was triaged
+        // against the wrong way.
+        let ceiling = row.pipeline.adScanCeilingFraction.map { String(format: "%.3f", $0) } ?? "unknown"
+        return StaleAdScanTerminalReason(
+            detail: "state=completeAdScanPartial "
+                + "recorded_ad_scan=\(String(format: "%.3f", recorded)) "
+                + "measured_ad_scan=\(String(format: "%.3f", measured)) "
+                + "ad_scan_ceiling=\(ceiling) "
+                + "ad_scan_source=\(row.pipeline.adScanSource)"
+        )
+    }
+
+    /// playhead-uazf: the ad-scan ratio written into a `completeAdScanPartial`
+    /// row's `terminalReason` by `AdScanCoverage.diagnostic`, e.g.
+    /// `"ad scan 0.894 < 0.980 (interrupted) (transcript 1.000, feature 0.999)"`
+    /// → `0.894`.
+    ///
+    /// **A separate parser from
+    /// `AnalysisCoordinator.parseHighestRatioInTerminalReason`, on purpose.**
+    /// That one scans for the HIGHEST ratio anywhere in the string and feeds a
+    /// repair that fires above 1.05; teaching it the `ad scan` term would change
+    /// which rows that sweep repairs, which is a behaviour change wearing a
+    /// refactor's clothes. This one is anchored on the literal prefix and
+    /// returns the FIRST number after it, so `(transcript 1.000, feature 0.999)`
+    /// — which follows on the same line and is larger — can never be returned in
+    /// its place. That substitution is exactly the failure this whole flag
+    /// exists to catch, one layer down.
+    ///
+    /// Returns `nil` for a reason that carries no `ad scan` term at all
+    /// (`neverRan` writes `"ad scan unmeasured (neverRan)"`, which states an
+    /// ABSENCE and must not be read as the number zero).
+    static func parseAdScanRatioInTerminalReason(_ reason: String?) -> Double? {
+        guard let reason else { return nil }
+        guard let range = reason.range(of: "ad scan ") else { return nil }
+        var digits = ""
+        for character in reason[range.upperBound...] {
+            if character.isNumber || character == "." {
+                digits.append(character)
+            } else if digits.isEmpty {
+                // Skip a leading sign or space; a word here (`unmeasured`) ends
+                // the search rather than continuing it, because a number found
+                // further along belongs to a different term.
+                if character == " " || character == "+" { continue }
+                return nil
+            } else {
+                break
+            }
+        }
+        guard let value = Double(digits), value.isFinite else { return nil }
+        return value
     }
 
     private static func buildGlobalSummary(

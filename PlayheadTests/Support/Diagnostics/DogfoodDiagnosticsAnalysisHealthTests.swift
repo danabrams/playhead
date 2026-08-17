@@ -2238,7 +2238,9 @@ struct DogfoodDiagnosticsAnalysisHealthTests {
         #expect(DogfoodDiagnosticsAnalysisHealth.StalenessFlag.Kind.unknownProgressWithoutPause.rawValue == "unknown_progress_without_pause")
         #expect(DogfoodDiagnosticsAnalysisHealth.StalenessFlag.Kind.staleJobLease.rawValue == "stale_job_lease")
         #expect(DogfoodDiagnosticsAnalysisHealth.StalenessFlag.Kind.missingFailureReason.rawValue == "missing_failure_reason")
-        #expect(DogfoodDiagnosticsAnalysisHealth.StalenessFlag.Kind.allCases.count == 5)
+        // playhead-uazf.
+        #expect(DogfoodDiagnosticsAnalysisHealth.StalenessFlag.Kind.terminalAdScanReasonIsStale.rawValue == "terminal_ad_scan_reason_is_stale")
+        #expect(DogfoodDiagnosticsAnalysisHealth.StalenessFlag.Kind.allCases.count == 6)
     }
 
     // MARK: - v1 wire-format byte identity
@@ -2919,6 +2921,219 @@ private extension DogfoodDiagnosticsAnalysisHealthTests {
         )
     }
 
+    // MARK: - playhead-uazf: the ad-scan axis of a degraded terminal
+
+    /// The FIRING case, and it is taken verbatim from the 2026-08-16 device
+    /// pull. C065AD03 is stamped `completeAdScanPartial` with
+    /// `"ad scan 0.894 < 0.980 (interrupted) …"`, and the same database's own
+    /// `semantic_scan_results` rows measure **0.971** against a transcript
+    /// ceiling of 0.976 — i.e. the scan read 99.5 % of everything readable and
+    /// the row says it was interrupted at 89 %. Nothing in the app could see
+    /// that: the row's transcript (1.000) and feature (0.999) axes both clear
+    /// their threshold, so `terminalCompletionContradiction` returns nil.
+    @Test("playhead-uazf: a completeAdScanPartial row whose recorded ad scan disagrees with the measurement is flagged")
+    func staleAdScanTerminalReasonIsFlagged() throws {
+        let snapshot = DogfoodDiagnosticsActivitySnapshot(
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            rows: [makeActivityRow(
+                hash: "h-c065ad03",
+                analysisState: "completeAdScanPartial",
+                terminalReason: "ad scan 0.894 < 0.980 (interrupted) (transcript 1.000, feature 0.999)",
+                pipeline: makePipeline(
+                    episodeDurationSec: 1518.7,
+                    transcriptCoveredSec: 1518.0,
+                    fastTranscriptWatermarkSec: 1518.0,
+                    featureCoverageEndSec: 1518.0,
+                    adScanCoveredSec: 1474.5,
+                    adScanFraction: 0.971,
+                    adScanCeilingFraction: 0.976,
+                    adScanSource: "semantic_scan_results"
+                )
+            )]
+        )
+
+        let health = DogfoodDiagnosticsAnalysisHealth.build(
+            from: snapshot,
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_001)
+        )
+        let flag = try #require(
+            health.stalenessFlags.first { $0.kind == .terminalAdScanReasonIsStale }
+        )
+        // BOTH numbers, because a flag carrying only one of them cannot be
+        // acted on — the whole defect is that the reader had one number and
+        // believed it was the other.
+        #expect(flag.detail.contains("recorded_ad_scan=0.894"))
+        #expect(flag.detail.contains("measured_ad_scan=0.971"))
+        // The ceiling, because it is what separates "the scan stopped early"
+        // from "the transcript tops out here" (playhead-nffz). C065AD03 is the
+        // second and was triaged as the first.
+        #expect(flag.detail.contains("ad_scan_ceiling=0.976"))
+        // And the OTHER check must stay quiet: this row's transcript and
+        // feature axes are healthy, which is precisely why the ad-scan lie was
+        // invisible. If this expectation ever fails, the two flags have merged
+        // and the new one is no longer proving anything.
+        #expect(!health.stalenessFlags.contains { $0.kind == .terminalStateContradictsCoverage })
+    }
+
+    /// The vacuity control. Same row, same state, same shape — the recorded and
+    /// measured numbers AGREE. A predicate that flags on state alone, or that
+    /// always flags a `completeAdScanPartial` row, passes the test above and
+    /// fails this one.
+    @Test("playhead-uazf: an ad-scan reason that agrees with the measurement is not flagged")
+    func agreeingAdScanTerminalReasonIsNotFlagged() {
+        let snapshot = DogfoodDiagnosticsActivitySnapshot(
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            rows: [makeActivityRow(
+                hash: "h-agrees",
+                analysisState: "completeAdScanPartial",
+                terminalReason: "ad scan 0.953 < 0.980 (decodeFailure) (transcript 1.000, feature 0.999)",
+                pipeline: makePipeline(
+                    episodeDurationSec: 1625.9,
+                    transcriptCoveredSec: 1625.0,
+                    fastTranscriptWatermarkSec: 1625.0,
+                    featureCoverageEndSec: 1625.0,
+                    adScanCoveredSec: 1549.8,
+                    adScanFraction: 0.953,
+                    adScanCeilingFraction: 0.989,
+                    adScanSource: "semantic_scan_results"
+                )
+            )]
+        )
+
+        let health = DogfoodDiagnosticsAnalysisHealth.build(
+            from: snapshot,
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_001)
+        )
+        #expect(!health.stalenessFlags.contains { $0.kind == .terminalAdScanReasonIsStale })
+    }
+
+    /// `neverRan` writes `"ad scan unmeasured (neverRan)"`. That states an
+    /// ABSENCE, and an absence is not a disagreement — reading the `0` out of
+    /// nowhere and flagging a 0.5-point drift would be this repo's standing
+    /// defect class inside the instrument built to catch it.
+    @Test("playhead-uazf: an `unmeasured` ad-scan reason yields no number and no flag")
+    func unmeasuredAdScanTerminalReasonIsNotFlagged() {
+        #expect(
+            DogfoodDiagnosticsAnalysisHealth
+                .parseAdScanRatioInTerminalReason("ad scan unmeasured (neverRan) (transcript 1.000, feature 1.000)")
+                == nil
+        )
+        let snapshot = DogfoodDiagnosticsActivitySnapshot(
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            rows: [makeActivityRow(
+                hash: "h-neverran",
+                analysisState: "completeAdScanPartial",
+                terminalReason: "ad scan unmeasured (neverRan) (transcript 1.000, feature 1.000)",
+                pipeline: makePipeline(
+                    episodeDurationSec: 2086,
+                    transcriptCoveredSec: 2085,
+                    fastTranscriptWatermarkSec: 2085,
+                    featureCoverageEndSec: 2085,
+                    adScanCoveredSec: 1000,
+                    adScanFraction: 0.479,
+                    adScanCeilingFraction: 1.0,
+                    adScanSource: "semantic_scan_results"
+                )
+            )]
+        )
+        let health = DogfoodDiagnosticsAnalysisHealth.build(
+            from: snapshot,
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_001)
+        )
+        #expect(!health.stalenessFlags.contains { $0.kind == .terminalAdScanReasonIsStale })
+    }
+
+    /// An absent MEASUREMENT is the mirror of the absent recorded number, and
+    /// it under-claims in the same direction. This is the `neverRan` population
+    /// on the wire: `ad_scan_source == "unknown"` and a nil fraction, which is
+    /// NOT the same fact as a measured `0.0` and must not be flagged as drift
+    /// away from a recorded 0.038.
+    @Test("playhead-uazf: an unmeasured ad-scan fraction is not a disagreement")
+    func absentAdScanMeasurementIsNotFlagged() {
+        let snapshot = DogfoodDiagnosticsActivitySnapshot(
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            rows: [makeActivityRow(
+                hash: "h-nomeasure",
+                analysisState: "completeAdScanPartial",
+                terminalReason: "ad scan 0.038 < 0.980 (stoppedShort) (transcript 1.000, feature 0.999)",
+                pipeline: makePipeline(
+                    episodeDurationSec: 2113.1,
+                    transcriptCoveredSec: 2112.9,
+                    fastTranscriptWatermarkSec: 2112.9,
+                    featureCoverageEndSec: 2112.0,
+                    adScanCoveredSec: nil,
+                    adScanFraction: nil,
+                    adScanCeilingFraction: 1.0,
+                    adScanSource: "unknown"
+                )
+            )]
+        )
+        let health = DogfoodDiagnosticsAnalysisHealth.build(
+            from: snapshot,
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_001)
+        )
+        #expect(!health.stalenessFlags.contains { $0.kind == .terminalAdScanReasonIsStale })
+    }
+
+    /// Scoped to the one terminal that records an ad-scan number. A
+    /// `completeFull` row's reason ends `", ad scan 0.995"` — a different
+    /// grammar with a different meaning — and re-litigating it here would put
+    /// this flag on rows whose contract the OTHER check already owns.
+    @Test("playhead-uazf: the ad-scan staleness flag is scoped to completeAdScanPartial")
+    func adScanStalenessIsScopedToTheDegradedTerminal() {
+        let snapshot = DogfoodDiagnosticsActivitySnapshot(
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            rows: [makeActivityRow(
+                hash: "h-full",
+                analysisState: "completeFull",
+                terminalReason: "full coverage: transcript 1.000, feature 0.999, ad scan 0.995",
+                pipeline: makePipeline(
+                    episodeDurationSec: 1000,
+                    transcriptCoveredSec: 999,
+                    fastTranscriptWatermarkSec: 999,
+                    featureCoverageEndSec: 999,
+                    adScanCoveredSec: 500,
+                    adScanFraction: 0.500,
+                    adScanCeilingFraction: 1.0,
+                    adScanSource: "semantic_scan_results"
+                )
+            )]
+        )
+        let health = DogfoodDiagnosticsAnalysisHealth.build(
+            from: snapshot,
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_001)
+        )
+        #expect(!health.stalenessFlags.contains { $0.kind == .terminalAdScanReasonIsStale })
+    }
+
+    /// THE SUBSTITUTION RAIL. The reason string carries three ratios and the
+    /// ad-scan one is the SMALLEST: `"ad scan 0.038 < 0.980 (stoppedShort)
+    /// (transcript 1.000, feature 0.999)"`. A parser that returns the highest
+    /// ratio (which is what `AnalysisCoordinator.parseHighestRatioInTerminalReason`
+    /// does, and is why this is a second parser rather than a reuse) returns
+    /// 1.000 and would compare the TRANSCRIPT against the AD SCAN — this repo's
+    /// standing defect class, inside the check written to catch it.
+    ///
+    /// The 0.980 immediately after it is the FLOOR, not a measurement, and is
+    /// the nearer trap: a parser anchored on "ad scan" but reading past the
+    /// first number returns the constant and can never report drift at all.
+    @Test("playhead-uazf: the parser takes the ad-scan term, not the floor beside it or the transcript after it")
+    func adScanReasonParserTakesTheAdScanTerm() throws {
+        let parse = DogfoodDiagnosticsAnalysisHealth.parseAdScanRatioInTerminalReason
+        #expect(
+            try #require(parse("ad scan 0.038 < 0.980 (stoppedShort) (transcript 1.000, feature 0.999)"))
+                == 0.038
+        )
+        #expect(
+            try #require(parse("ad scan 0.894 < 0.980 (interrupted) (transcript 1.000, feature 0.999)"))
+                == 0.894
+        )
+        // A reason with no ad-scan term at all yields nothing rather than the
+        // first number it can find.
+        #expect(parse("partial transcript 900.0/1000.0s (ratio 0.900 < 0.950)") == nil)
+        #expect(parse(nil) == nil)
+    }
+
     func makePipeline(
         downloadFraction: Double? = 1.0,
         downloadPercent: String = "100%",
@@ -2936,7 +3151,15 @@ private extension DogfoodDiagnosticsAnalysisHealthTests {
         analysisWatermarkSec: Double? = nil,
         featureCoverageEndSec: Double? = nil,
         confirmedAdCoverageEndSec: Double? = nil,
-        finalPassCoverageEndSec: Double? = nil
+        finalPassCoverageEndSec: Double? = nil,
+        // playhead-uazf: the ad-scan axis. Defaulted `nil`/"unknown" HERE (a
+        // fixture builder) and deliberately NOT on the production initialiser —
+        // a test that does not care about the ad scan says so by omission, while
+        // a snapshot builder that forgets it cannot compile.
+        adScanCoveredSec: Double? = nil,
+        adScanFraction: Double? = nil,
+        adScanCeilingFraction: Double? = nil,
+        adScanSource: String = "unknown"
     ) -> DogfoodDiagnosticsPipelineSnapshot {
         DogfoodDiagnosticsPipelineSnapshot(
             downloadFraction: downloadFraction,
@@ -2955,7 +3178,11 @@ private extension DogfoodDiagnosticsAnalysisHealthTests {
             analysisWatermarkSec: analysisWatermarkSec,
             featureCoverageEndSec: featureCoverageEndSec,
             confirmedAdCoverageEndSec: confirmedAdCoverageEndSec,
-            finalPassCoverageEndSec: finalPassCoverageEndSec
+            finalPassCoverageEndSec: finalPassCoverageEndSec,
+            adScanCoveredSec: adScanCoveredSec,
+            adScanFraction: adScanFraction,
+            adScanCeilingFraction: adScanCeilingFraction,
+            adScanSource: adScanSource
         )
     }
 

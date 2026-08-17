@@ -767,6 +767,166 @@ struct LiveActivitySnapshotProviderFractionTests {
         #expect(row.pipeline.finalPassCoverageEndSec == nil)
     }
 
+    // MARK: - playhead-uazf: the ad-scan axis on the dogfood wire
+
+    /// **The omission this bead exists to close.** Every other axis of
+    /// `DogfoodDiagnosticsPipelineSnapshot` shipped a live quantity — transcript,
+    /// feature, confirmed-ad, final-pass — and the AD SCAN shipped none. The only
+    /// ad-scan number in a device pull lived in the PROSE of
+    /// `analysis_assets.terminalReason`, a snapshot frozen when the terminal was
+    /// minted that nothing re-measures. playhead-uazf was filed as a P1 off four
+    /// such strings, two of which the same database had already superseded.
+    ///
+    /// This test is the one a `nil`-passing mutant has to get past: it proves the
+    /// four fields are POPULATED FROM THE SUMMARY rather than merely declared.
+    @Test("dogfood diagnostics: the wire carries the MEASURED ad-scan area, not just the frozen terminal reason (playhead-uazf)")
+    func dogfoodDiagnosticsCarriesMeasuredAdScanCoverage() async throws {
+        let fixture = try await makeFixture(assetSeeds: [
+            AssetSeed(
+                featureCoverageEndTime: 1000,
+                fastTranscriptCoverageEndTime: 1000,
+                confirmedAdCoverageEndTime: nil,
+                episodeDurationSec: 1000,
+                analysisState: "completeAdScanPartial"
+            )
+        ])
+        let assetId = fixture.assetIds[0]
+        try await fixture.store.insertTranscriptChunks([
+            transcriptChunk(assetId: assetId, index: 0, start: 0, end: 1000)
+        ])
+        // 400 s of 1000 s examined. The transcript covers the whole episode, so
+        // the CEILING is 1.0 and the shortfall is the scan's, not the
+        // transcript's — the distinction playhead-nffz added and the one a
+        // reader cannot make from `ad_scan_fraction` alone.
+        try await fixture.store.insertSemanticScanResult(
+            adScanRow(assetId: assetId, index: 0, start: 0, end: 400)
+        )
+        let provider = LiveActivitySnapshotProvider(
+            store: fixture.store,
+            capabilitySnapshotProvider: { nil },
+            runningEpisodeIdsProvider: { [] },
+            downloadProgressProvider: { [:] },
+            modelContainer: fixture.container
+        )
+
+        let snapshot = await provider.loadDogfoodDiagnosticsSnapshot(
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            episodeHashProvider: { _ in "hashed-episode" }
+        )
+        let row = try #require(snapshot.rows.first)
+
+        #expect(row.pipeline.adScanCoveredSec == 400)
+        #expect(row.pipeline.adScanFraction == 0.4)
+        #expect(row.pipeline.adScanCeilingFraction == 1.0)
+        #expect(row.pipeline.adScanSource == "semantic_scan_results")
+
+        // AN IS NOT THE AD SCAN, and the two are adjacent on the wire. This row
+        // has a full feature frontier over a fully transcribed episode, so
+        // `analysis_fraction` reads 1.0 while `ad_scan_fraction` reads 0.4 —
+        // playhead-sd71's analysed AREA advances on a DSP sweep that never
+        // looked for an ad. A provider that fed `analysisFraction` into the new
+        // field would pass every expectation above except this one.
+        #expect(row.pipeline.analysisFraction == 1.0)
+        #expect(row.pipeline.adScanFraction != row.pipeline.analysisFraction)
+    }
+
+    /// The `neverRan` population, which is the one a synthetic zero would erase.
+    /// Thirteen of the twenty-four complete-transcript assets on the 2026-08-11
+    /// pull had no coverage-lane row of any kind; zero of the thirteen on
+    /// 2026-08-16 do. "No scan has ever run" and "a scan ran and examined
+    /// nothing" are different facts with different remedies, so the wire reports
+    /// a nil fraction with `ad_scan_source == "unknown"` rather than `0.0`.
+    @Test("dogfood diagnostics: no coverage-lane row -> unknown ad-scan source and a nil fraction, never a synthetic 0 (playhead-uazf)")
+    func dogfoodDiagnosticsLeavesAdScanUnknownWhenNoScanRowExists() async throws {
+        let fixture = try await makeFixture(assetSeeds: [
+            AssetSeed(
+                featureCoverageEndTime: 1000,
+                fastTranscriptCoverageEndTime: 1000,
+                confirmedAdCoverageEndTime: nil,
+                episodeDurationSec: 1000,
+                analysisState: "completeAdScanPartial"
+            )
+        ])
+        try await fixture.store.insertTranscriptChunks([
+            transcriptChunk(assetId: fixture.assetIds[0], index: 0, start: 0, end: 1000)
+        ])
+        let provider = LiveActivitySnapshotProvider(
+            store: fixture.store,
+            capabilitySnapshotProvider: { nil },
+            runningEpisodeIdsProvider: { [] },
+            downloadProgressProvider: { [:] },
+            modelContainer: fixture.container
+        )
+
+        let snapshot = await provider.loadDogfoodDiagnosticsSnapshot(
+            generatedAt: Date(timeIntervalSince1970: 1_700_000_000),
+            episodeHashProvider: { _ in "hashed-episode" }
+        )
+        let row = try #require(snapshot.rows.first)
+
+        #expect(row.pipeline.adScanCoveredSec == nil)
+        #expect(row.pipeline.adScanFraction == nil)
+        #expect(row.pipeline.adScanSource == "unknown")
+        // The CEILING is a property of the transcript and is knowable before the
+        // first window, so it is published here and must NOT be withheld with
+        // the measurement — that asymmetry is playhead-nffz's, and it is what
+        // lets a reader tell "nothing has scanned yet" from "nothing can".
+        #expect(row.pipeline.adScanCeilingFraction == 1.0)
+    }
+
+    /// playhead-uazf: a decodable `ScanCohort`. `insertSemanticScanResult`
+    /// validates the column, so `"{}"` is rejected at the store boundary.
+    private static let adScanCohortJSON: String = {
+        let cohort = ScanCohort(
+            promptLabel: "uazf-test",
+            promptHash: "prompt-v1",
+            schemaHash: "schema-v1",
+            scanPlanHash: "plan-v1",
+            normalizationHash: "norm-v1",
+            osBuild: "26A123",
+            locale: "en_US",
+            appBuild: "1"
+        )
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        let data = (try? encoder.encode(cohort)) ?? Data()
+        return String(decoding: data, as: UTF8.self)
+    }()
+
+    /// playhead-uazf: a coverage-lane row for this fixture. `passA` is
+    /// `SemanticScanCoverage.coverageScanPass`, which is the only pass
+    /// `readScannedRegions` counts.
+    private func adScanRow(
+        assetId: String,
+        index: Int,
+        start: Double,
+        end: Double,
+        status: SemanticScanStatus = .success
+    ) -> SemanticScanResult {
+        SemanticScanResult(
+            id: "\(assetId)-adscan-\(index)",
+            analysisAssetId: assetId,
+            windowFirstAtomOrdinal: index * 10,
+            windowLastAtomOrdinal: index * 10 + 9,
+            windowStartTime: start,
+            windowEndTime: end,
+            scanPass: SemanticScanCoverage.coverageScanPass,
+            transcriptQuality: .good,
+            disposition: .noAds,
+            spansJSON: "[]",
+            status: status,
+            attemptCount: 1,
+            errorContext: nil,
+            inputTokenCount: nil,
+            outputTokenCount: nil,
+            latencyMs: nil,
+            prewarmHit: false,
+            scanCohortJSON: Self.adScanCohortJSON,
+            transcriptVersion: "tx-v1",
+            reuseScope: "\(assetId)-adscan-\(index)"
+        )
+    }
+
     /// Bead playhead-hygc.1.2: when no transcript-coverage signal exists
     /// at all (no chunks AND no asset watermark), the diagnostics row
     /// must report `unknown` provenance and a NIL fraction — never a

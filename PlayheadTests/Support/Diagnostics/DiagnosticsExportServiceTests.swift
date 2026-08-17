@@ -193,7 +193,11 @@ struct DiagnosticsExportServiceTests {
                         analysisWatermarkSec: 100,
                         featureCoverageEndSec: 100,
                         confirmedAdCoverageEndSec: nil,
-                        finalPassCoverageEndSec: nil
+                        finalPassCoverageEndSec: nil,
+                        adScanCoveredSec: nil,
+                        adScanFraction: nil,
+                        adScanCeilingFraction: nil,
+                        adScanSource: "unknown"
                     ),
                     analysisAsset: DogfoodDiagnosticsAnalysisAssetSnapshot(
                         analysisState: "queued",
