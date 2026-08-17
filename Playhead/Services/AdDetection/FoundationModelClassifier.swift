@@ -617,6 +617,51 @@ struct FMCoarseWindowOutput: Sendable, Equatable {
     }
 }
 
+/// playhead-hzpa: WHY a window whose prompt exceeded the token budget was
+/// abandoned, when subdivision did not rescue it.
+///
+/// **The row that names a size problem did not record a size.** A
+/// `semantic_scan_results` row with `status = exceededContextWindow` means
+/// literally "the prompt was larger than the budget", and until this type
+/// existed it persisted neither quantity — `inputTokenCount` was written NULL
+/// on every failure row (measured: 0 of 961 rows on the 2026-08-16 device
+/// pull carried one) and `errorContext` was only ever populated for the
+/// no-work sentinels. Both numbers exist at the moment of abandonment and
+/// were written to an os_log line that is gone long before anyone pulls the
+/// database, so the durable record could not distinguish a genuinely
+/// oversized atom from a window whose chunks all REFUSED.
+///
+/// The cases are the enumeration of every way `subdividedCoarseOutput` can
+/// return without a verdict. Five of the six were silent — they share one
+/// `return outcome` shape and the caller stamped the same
+/// `.exceededContextWindow` on all of them.
+///
+/// This is a REASON, not a status: it never changes which
+/// `SemanticScanRetryPolicy` applies. Whether `chunksUnexamined` should stop
+/// being spelled as a size failure at all is qbib/9q10's open question (see
+/// the comment at the abandon site) and deliberately still open — naming the
+/// case is what makes it measurable enough to answer.
+enum CoarseOversizeAbandonment: String, Sendable, Equatable, CaseIterable {
+    /// The plan carried more than one segment, so the single-segment
+    /// subdivision path did not apply. Smart-shrink owns this shape.
+    case subdivisionNotApplicable
+    /// The plan's single line ref resolved to no segment, so no prompt could
+    /// be rebuilt and subdivision was never entered.
+    case segmentUnavailable
+    /// The segment is ONE atom. There is nothing below one atom to split.
+    case segmentHasSingleAtom
+    /// The very first atom's own prompt already exceeds budget.
+    case leadingAtomOverBudget
+    /// A later atom's own prompt exceeds budget once it starts a fresh chunk.
+    case atomOverBudget
+    /// Chunking produced fewer than two chunks, so subdividing buys nothing.
+    case fewerThanTwoChunks
+    /// Subdivision RAN and the chunks produced no usable window verdict —
+    /// a refusal, guardrail block, decode failure, rate limit or cancellation.
+    /// This one is NOT a size problem; see the type's doc comment.
+    case chunksUnexamined
+}
+
 /// playhead-qbib: one attempted coarse window that produced NO usable
 /// verdict, carrying its own time coordinates.
 ///
@@ -694,6 +739,22 @@ struct CoarseWindowFailure: Sendable, Equatable {
     /// playhead-ezmv: other in-process FM daemon calls in flight when this
     /// attempt began. See `FMCoarseWindowOutput.daemonPeersAtStart`.
     let daemonPeersAtStart: Int?
+    /// playhead-hzpa: the estimator's token count for the prompt THIS attempt
+    /// was rejected for, or nil when the attempt did not fail on size.
+    ///
+    /// NIL IS NOT ZERO. Only the oversize-abandonment path can supply this;
+    /// every other failure class leaves it nil because no size comparison was
+    /// what ended the attempt. Do not read a nil as "the prompt was small".
+    let promptTokenCount: Int?
+    /// playhead-hzpa: the per-window budget `promptTokenCount` was compared
+    /// against, in the same units. Carried BESIDE the count rather than
+    /// derived later, because the budget is a function of the live
+    /// `contextSize` and the divisor regime, and neither is recoverable from
+    /// a row read days afterwards.
+    let budgetTokens: Int?
+    /// playhead-hzpa: which of the enumerated abandonment causes ended this
+    /// attempt. Nil for every failure that is not an oversize abandonment.
+    let oversizeAbandonment: CoarseOversizeAbandonment?
 
     init(
         planWindowIndex: Int,
@@ -704,7 +765,10 @@ struct CoarseWindowFailure: Sendable, Equatable {
         coversWholePlan: Bool = true,
         latencyMillis: Double? = nil,
         suspendingLatencyMillis: Double? = nil,
-        daemonPeersAtStart: Int? = nil
+        daemonPeersAtStart: Int? = nil,
+        promptTokenCount: Int? = nil,
+        budgetTokens: Int? = nil,
+        oversizeAbandonment: CoarseOversizeAbandonment? = nil
     ) {
         self.planWindowIndex = planWindowIndex
         self.lineRefs = lineRefs
@@ -715,6 +779,9 @@ struct CoarseWindowFailure: Sendable, Equatable {
         self.latencyMillis = latencyMillis
         self.suspendingLatencyMillis = suspendingLatencyMillis
         self.daemonPeersAtStart = daemonPeersAtStart
+        self.promptTokenCount = promptTokenCount
+        self.budgetTokens = budgetTokens
+        self.oversizeAbandonment = oversizeAbandonment
     }
 
     /// Whole-plan failure: the plan was attempted as planned and produced
@@ -724,7 +791,10 @@ struct CoarseWindowFailure: Sendable, Equatable {
         status: SemanticScanStatus,
         latencyMillis: Double? = nil,
         suspendingLatencyMillis: Double? = nil,
-        daemonPeersAtStart: Int? = nil
+        daemonPeersAtStart: Int? = nil,
+        promptTokenCount: Int? = nil,
+        budgetTokens: Int? = nil,
+        oversizeAbandonment: CoarseOversizeAbandonment? = nil
     ) {
         self.init(
             planWindowIndex: plan.windowIndex,
@@ -735,8 +805,25 @@ struct CoarseWindowFailure: Sendable, Equatable {
             coversWholePlan: true,
             latencyMillis: latencyMillis,
             suspendingLatencyMillis: suspendingLatencyMillis,
-            daemonPeersAtStart: daemonPeersAtStart
+            daemonPeersAtStart: daemonPeersAtStart,
+            promptTokenCount: promptTokenCount,
+            budgetTokens: budgetTokens,
+            oversizeAbandonment: oversizeAbandonment
         )
+    }
+
+    /// playhead-hzpa: the durable `errorContext` string for an oversize
+    /// abandonment, or nil when this failure is not one.
+    ///
+    /// Shaped like the existing `noWork:emptySegments` sentinel so one column
+    /// carries one vocabulary: a `<kind>:<case>` head, then `key=value` pairs.
+    /// The token count is NOT repeated here — it has its own column
+    /// (`inputTokenCount`); duplicating it is how two readings of one quantity
+    /// start to disagree.
+    var oversizeErrorContext: String? {
+        guard let oversizeAbandonment else { return nil }
+        guard let budgetTokens else { return "oversize:\(oversizeAbandonment.rawValue)" }
+        return "oversize:\(oversizeAbandonment.rawValue) budget=\(budgetTokens)"
     }
 
 }
@@ -1147,6 +1234,10 @@ struct FoundationModelClassifier: Sendable {
         var unexaminedStatus: SemanticScanStatus?
         /// Wall-clock the chunk calls actually cost, in milliseconds.
         var latencyMillis: Double?
+        /// playhead-hzpa: which structural bail or chunk outcome left `output`
+        /// nil. Set on EVERY path that returns without a verdict, so the
+        /// caller never has to infer a cause from an absence.
+        var abandonment: CoarseOversizeAbandonment?
     }
 
     /// playhead-9q10: what one atom chunk of a subdivided window produced.
@@ -2096,6 +2187,12 @@ struct FoundationModelClassifier: Sendable {
                 // > noAds — "more permissive" matches coarse's recall role.
                 var subdivisionStatus: SemanticScanStatus?
                 var subdivisionLatencyMillis: Double?
+                // playhead-hzpa: the cause is decided on EVERY branch, including
+                // the two that skip subdivision entirely. Before this, a plan
+                // that never entered subdivision and a plan whose every chunk
+                // refused persisted the identical row.
+                var abandonment: CoarseOversizeAbandonment =
+                    plan.lineRefs.count == 1 ? .segmentUnavailable : .subdivisionNotApplicable
                 if plan.lineRefs.count == 1,
                    let segment = segmentByIndex[plan.lineRefs[0]] {
                     let subdivision = await subdividedCoarseOutput(
@@ -2118,6 +2215,13 @@ struct FoundationModelClassifier: Sendable {
                     )
                     recoveryAttemptsRemaining -= subdivision.attemptsSpent
                     permissiveCounts = permissiveCounts + subdivision.permissiveCounts
+                    // playhead-hzpa: subdivision names its own cause on every
+                    // no-verdict return. Falling back to `.chunksUnexamined`
+                    // would LIE about a structural bail, so an unset value
+                    // keeps the pre-subdivision cause instead.
+                    if let reported = subdivision.abandonment {
+                        abandonment = reported
+                    }
                     if let recovered = subdivision.output {
                         windows.append(
                             FMCoarseWindowOutput(
@@ -2163,7 +2267,13 @@ struct FoundationModelClassifier: Sendable {
                     CoarseWindowFailure(
                         plan: plan,
                         status: abandonedStatus,
-                        latencyMillis: subdivisionLatencyMillis
+                        latencyMillis: subdivisionLatencyMillis,
+                        // playhead-hzpa: the two numbers this status is ABOUT,
+                        // carried onto the durable row rather than only into
+                        // the log line below.
+                        promptTokenCount: plan.promptTokenCount,
+                        budgetTokens: budget,
+                        oversizeAbandonment: abandonment
                     )
                 )
                 logger.error(
@@ -2175,6 +2285,7 @@ struct FoundationModelClassifier: Sendable {
                     lastSegmentIndex=\(plan.lineRefs.last ?? -1, privacy: .public) \
                     segmentCount=\(plan.lineRefs.count, privacy: .public) \
                     status=\(abandonedStatus.rawValue, privacy: .public) \
+                    abandonment=\(abandonment.rawValue, privacy: .public) \
                     tokenCount=\(plan.promptTokenCount, privacy: .public) \
                     budget=\(budget, privacy: .public)
                     """
@@ -5440,7 +5551,10 @@ struct FoundationModelClassifier: Sendable {
         totalWindows: Int
     ) async -> CoarseSubdivisionOutcome {
         var outcome = CoarseSubdivisionOutcome()
-        guard segment.atoms.count > 1 else { return outcome }
+        guard segment.atoms.count > 1 else {
+            outcome.abandonment = .segmentHasSingleAtom
+            return outcome
+        }
 
         let windowStart = clock.now
         let validLineRefs: Set<Int> = [segment.segmentIndex]
@@ -5468,6 +5582,7 @@ struct FoundationModelClassifier: Sendable {
             if current.isEmpty {
                 // A single atom alone already exceeds budget — subdivision
                 // can't descend below one atom, so give up.
+                outcome.abandonment = .leadingAtomOverBudget
                 return outcome
             }
             chunks.append(current)
@@ -5476,13 +5591,17 @@ struct FoundationModelClassifier: Sendable {
                 Self.buildPrompt(for: [subSegment(from: current)], redactor: redactor)
             )) ?? Int.max
             if aloneTokens > budget {
+                outcome.abandonment = .atomOverBudget
                 return outcome
             }
         }
         if !current.isEmpty {
             chunks.append(current)
         }
-        guard chunks.count >= 2 else { return outcome }
+        guard chunks.count >= 2 else {
+            outcome.abandonment = .fewerThanTwoChunks
+            return outcome
+        }
 
         var anyContainsAd = false
         var anyUncertain = false
@@ -5558,6 +5677,7 @@ struct FoundationModelClassifier: Sendable {
             // stamp the whole pass's latency.
             outcome.unexaminedStatus = Self.aggregateGracefulFailureStatus(unexaminedStatuses)
             outcome.latencyMillis = Self.latencyMillis(since: windowStart, clock: clock)
+            outcome.abandonment = .chunksUnexamined
             return outcome
         }
 
@@ -5575,6 +5695,7 @@ struct FoundationModelClassifier: Sendable {
         if disposition != .containsAd, !unexaminedStatuses.isEmpty {
             outcome.unexaminedStatus = Self.aggregateGracefulFailureStatus(unexaminedStatuses)
             outcome.latencyMillis = Self.latencyMillis(since: windowStart, clock: clock)
+            outcome.abandonment = .chunksUnexamined
             logger.error(
                 """
                 fm.classifier.coarse_pass_window_subdivided_unexamined \
