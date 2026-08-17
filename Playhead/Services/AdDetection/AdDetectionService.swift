@@ -8799,8 +8799,11 @@ actor AdDetectionService {
     /// pre-roll and again in the post-roll has a "coverage" span covering the
     /// episode, so it counted toward the catalog weight of every span in
     /// between, and the inflation grew with how many repeats the episode had.
-    /// The weight is `min(count * 0.05 * catalogCap, catalogCap)` over the
-    /// COUNT of selected entries, and the entry's mere PRESENCE is a `.catalog`
+    /// The weight is `min(count * catalogLedgerWeightPerEntry * catalogCap,
+    /// catalogCap)` over the COUNT of selected entries — spelled with the
+    /// constant, because restating `0.05` in the prose beside the constant that
+    /// exists to stop it being restated is the same defect one layer down — and
+    /// the entry's mere PRESENCE is a `.catalog`
     /// kind in three quorum gates (`metadataCorroborationGate`,
     /// `quorumGateForFMConsensus`, `quorumGateForFMAcoustic`) — so a hull
     /// selection buys a span both score and corroboration from evidence it
