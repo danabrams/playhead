@@ -144,9 +144,24 @@ final class SpecialistScanPlanCorpusEvalTests: XCTestCase {
         let occurrenceScanSecondsCapped: Double
         let hullBudgetSaturated: Bool
         let occurrenceBudgetSaturated: Bool
-        /// Jaccard of the two capped plans by window bounds — how much of the
-        /// grant's actual spend moves.
-        let cappedPlanJaccard: Double
+        /// Intersection-over-union of the two capped plans ON THE TIME AXIS —
+        /// how much of the grant's actual spend moves.
+        ///
+        /// Deliberately NOT a Jaccard over window bounds. Tiling is anchored at
+        /// each candidate region's start, so two plans covering the same audio
+        /// with differently-aligned tiles share no bound at all and would score
+        /// 0 — a number naming tile alignment, read as though it named audio.
+        let cappedPlanCoverageIoU: Double
+        /// Seconds of audio the UNCAPPED occurrence plan scans that the
+        /// UNCAPPED hull plan does not.
+        ///
+        /// Structurally this must be 0: every occurrence lies inside its own
+        /// entry's hull, padding and merging are monotone, and a tile covering
+        /// no transcript is dropped in both arms — so occurrence coverage is a
+        /// SUBSET of hull coverage and the fix can only ever remove scanned
+        /// audio, never add it. Measured rather than asserted, because that is
+        /// the property the whole budget argument rests on.
+        let occurrenceOnlyCoverageSeconds: Double
 
         // The defect, counted
         let hullNominatedWindowsUncapped: Int
@@ -279,6 +294,23 @@ final class SpecialistScanPlanCorpusEvalTests: XCTestCase {
         print("[x7rk]   scan seconds: hull=\(fmt(sum(\.hullScanSecondsCapped)))  occurrence=\(fmt(sum(\.occurrenceScanSecondsCapped)))")
         print("[x7rk]   assets saturating the cap: hull=\(reports.filter(\.hullBudgetSaturated).count)/\(reports.count)  occurrence=\(reports.filter(\.occurrenceBudgetSaturated).count)/\(reports.count)")
 
+        print("[x7rk] --- FULL-EPISODE DEGENERATION (the planner's header calls this FORBIDDEN) ---")
+        for threshold in [0.96, 0.50] {
+            let hullHits = reports.filter {
+                $0.episodeSpanSeconds > 0 && $0.hullScanSecondsUncapped / $0.episodeSpanSeconds >= threshold
+            }.count
+            let occurrenceHits = reports.filter {
+                $0.episodeSpanSeconds > 0 && $0.occurrenceScanSecondsUncapped / $0.episodeSpanSeconds >= threshold
+            }.count
+            print("[x7rk]   uncapped plan covers >=\(Int(threshold * 100))% of the episode: hull=\(hullHits)/\(reports.count)  occurrence=\(occurrenceHits)/\(reports.count)")
+        }
+        let worstOccurrenceFraction = reports
+            .filter { $0.episodeSpanSeconds > 0 }
+            .map { $0.occurrenceScanSecondsUncapped / $0.episodeSpanSeconds }
+            .max() ?? 0
+        print("[x7rk]   widest occurrence-plan coverage of any one episode: \(String(format: "%.1f", worstOccurrenceFraction * 100))%")
+        print("[x7rk]   audio the occurrence plan scans and the hull plan does NOT (must be 0): \(fmt(sum(\.occurrenceOnlyCoverageSeconds))) s")
+
         print("[x7rk] --- THE DEFECT, NUMERATOR OVER DENOMINATOR ---")
         print("[x7rk]   HULL-NOMINATED = a planned window with NO mention inside it and no lexical window overlapping it")
         print("[x7rk]   uncapped: \(sum(\.hullNominatedWindowsUncapped)) of \(sum(\.hullWindowsUncapped)) windows, \(fmt(sum(\.hullNominatedSecondsUncapped))) of \(fmt(sum(\.hullScanSecondsUncapped))) scan seconds")
@@ -299,7 +331,7 @@ final class SpecialistScanPlanCorpusEvalTests: XCTestCase {
                 + " win \(report.hullWindowsUncapped)->\(report.occurrenceWindowsUncapped)"
                 + " scan \(fmt(report.hullScanSecondsUncapped))->\(fmt(report.occurrenceScanSecondsUncapped))s"
                 + " hullNominated=\(report.hullNominatedWindowsUncapped)(\(fmt(report.hullNominatedSecondsUncapped))s)"
-                + " capJaccard=\(String(format: "%.3f", report.cappedPlanJaccard))"
+                + " capIoU=\(String(format: "%.3f", report.cappedPlanCoverageIoU))"
                 + " adRows \(report.hullCoveredAdWindows)/\(report.occurrenceCoveredAdWindows) of \(report.deviceAdWindows)")
         }
 
@@ -364,8 +396,10 @@ final class SpecialistScanPlanCorpusEvalTests: XCTestCase {
             let produced = collapsed.anchorableOccurrences
             XCTAssertEqual(produced.count, 1,
                            "hull-collapsed entry must anchor in exactly one place")
-            XCTAssertEqual(produced.first?.startTime, expected.start, accuracy: 1e-9)
-            XCTAssertEqual(produced.first?.endTime, expected.end, accuracy: 1e-9)
+            if let anchor = produced.first {
+                XCTAssertEqual(anchor.startTime, expected.start, accuracy: 1e-9)
+                XCTAssertEqual(anchor.endTime, expected.end, accuracy: 1e-9)
+            }
             checked += 1
         }
 
@@ -452,7 +486,9 @@ final class SpecialistScanPlanCorpusEvalTests: XCTestCase {
             occurrenceScanSecondsCapped: Self.scanSeconds(occurrenceCapped),
             hullBudgetSaturated: hullPlan.count > budget,
             occurrenceBudgetSaturated: occurrencePlan.count > budget,
-            cappedPlanJaccard: Self.jaccard(hullCapped, occurrenceCapped),
+            cappedPlanCoverageIoU: Self.coverageIoU(hullCapped, occurrenceCapped),
+            occurrenceOnlyCoverageSeconds: Self.subtractedSeconds(
+                Self.coverage(occurrencePlan), Self.coverage(hullPlan)),
             hullNominatedWindowsUncapped: hullRows.filter(\.hullNominated).count,
             hullNominatedSecondsUncapped: hullRows.filter(\.hullNominated)
                 .reduce(0) { $0 + ($1.endTime - $1.startTime) },
@@ -496,13 +532,53 @@ final class SpecialistScanPlanCorpusEvalTests: XCTestCase {
         return runs
     }
 
-    static func jaccard(_ lhs: [SpecialistScanWindow], _ rhs: [SpecialistScanWindow]) -> Double {
-        func key(_ window: SpecialistScanWindow) -> String {
-            String(format: "%.3f-%.3f", window.startTime, window.endTime)
+    /// Union of a plan's windows as disjoint time spans.
+    static func coverage(_ plan: [SpecialistScanWindow]) -> [(start: Double, end: Double)] {
+        let sorted = plan
+            .map { (min($0.startTime, $0.endTime), max($0.startTime, $0.endTime)) }
+            .filter { $0.1 > $0.0 }
+            .sorted { $0.0 < $1.0 }
+        var merged: [(Double, Double)] = []
+        for span in sorted {
+            if let last = merged.last, span.0 <= last.1 {
+                merged[merged.count - 1] = (last.0, max(last.1, span.1))
+            } else {
+                merged.append(span)
+            }
         }
-        let a = Set(lhs.map(key)), b = Set(rhs.map(key))
-        guard !a.isEmpty || !b.isEmpty else { return 1 }
-        return Double(a.intersection(b).count) / Double(a.union(b).count)
+        return merged
+    }
+
+    static func totalSeconds(_ spans: [(start: Double, end: Double)]) -> Double {
+        spans.reduce(0) { $0 + ($1.end - $1.start) }
+    }
+
+    /// Seconds present in `lhs` and absent from `rhs`.
+    static func subtractedSeconds(
+        _ lhs: [(start: Double, end: Double)],
+        _ rhs: [(start: Double, end: Double)]
+    ) -> Double {
+        lhs.reduce(0) { total, span in
+            var covered = 0.0
+            var cursor = span.start
+            for other in rhs where other.end > span.start && other.start < span.end {
+                if other.start > cursor { covered += other.start - cursor }
+                cursor = max(cursor, min(other.end, span.end))
+            }
+            if span.end > cursor { covered += span.end - cursor }
+            return total + covered
+        }
+    }
+
+    /// Intersection-over-union of two plans' COVERAGE, in seconds.
+    static func coverageIoU(_ lhs: [SpecialistScanWindow], _ rhs: [SpecialistScanWindow]) -> Double {
+        let a = coverage(lhs), b = coverage(rhs)
+        let sa = totalSeconds(a), sb = totalSeconds(b)
+        guard sa > 0 || sb > 0 else { return 1 }
+        let onlyA = subtractedSeconds(a, b)
+        let intersection = sa - onlyA
+        let union = sa + sb - intersection
+        return union > 0 ? intersection / union : 1
     }
 
     static func touchedRows(
