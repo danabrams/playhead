@@ -800,8 +800,16 @@ struct SemanticScanRunAttributionTests {
         // the V42 contract and is correct. The rows that DO read NULL are the
         // pre-V42 ones the migration deliberately left alone, so the fixture
         // reproduces that state directly.
+        //
+        // playhead-bg2n: `lastAttemptAt` is NULLed too, and that is not a
+        // convenience — it is what a real pre-V42 row looks like AFTER V55. The
+        // V55 backfill is `SET lastAttemptAt = createdAt WHERE createdAt IS NOT
+        // NULL`, so a row with no `createdAt` gains no `lastAttemptAt` either;
+        // an unattributable row stays unattributable in both columns. Nulling
+        // only `createdAt` would have reproduced half of that state and made
+        // this rail assert about a row the schema cannot produce.
         try await store.execForTesting(
-            "UPDATE semantic_scan_results SET createdAt = NULL WHERE id = 's-null'"
+            "UPDATE semantic_scan_results SET createdAt = NULL, lastAttemptAt = NULL WHERE id = 's-null'"
         )
 
         #expect(try await store.countSemanticScanResults(lastAttemptAtOrAfter: grantOpened) == 2,

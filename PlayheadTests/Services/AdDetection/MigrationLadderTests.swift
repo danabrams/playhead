@@ -89,6 +89,21 @@ struct MigrationLadderTests {
         #expect(try probeIndexExists(in: dir, indexName: "idx_semantic_scan_results_createdAt"))
         #expect(try probeIndexExists(in: dir, indexName: "idx_semantic_scan_results_correlation"))
 
+        // playhead-bg2n (V55): the attempt-history columns, on an UPGRADED
+        // database. This is the direction the fresh-install rails cannot cover —
+        // `createTables()` builds the head shape unconditionally, so a V55 rung
+        // that never ran leaves them absent only here. `countSemanticScanResults`
+        // reads `lastAttemptAt`, so a missing column is a throwing query on
+        // every background grant, not a cosmetic gap.
+        for column in ["firstAttemptAt", "lastAttemptAt", "observedStatuses"] {
+            #expect(try probeColumnExists(
+                in: dir,
+                table: "semantic_scan_results",
+                column: column
+            ))
+        }
+        #expect(try probeIndexExists(in: dir, indexName: "idx_semantic_scan_results_lastAttemptAt"))
+
         // V7 sponsor knowledge tables (Phase 8).
         #expect(try probeTableExists(in: dir, table: "sponsor_knowledge_entries"))
         #expect(try probeTableExists(in: dir, table: "knowledge_candidate_events"))
