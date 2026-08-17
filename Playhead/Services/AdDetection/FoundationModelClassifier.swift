@@ -1004,6 +1004,56 @@ struct PromptEvidenceEntry: Sendable {
     let entry: EvidenceEntry
     let lineRef: Int
 
+    /// The prompt line this catalog entry earns in a window that shows
+    /// `allowedLineRefs`, or `nil` when none of its mentions is in the window.
+    ///
+    /// playhead-ad9n. The pre-ad9n selector read `entry.atomOrdinal` — the
+    /// REPRESENTATIVE, i.e. the earliest mention — so an entry whose first
+    /// mention sat in a pre-roll was dropped from every later window, and the
+    /// model refining a post-roll got no evidence ref for a sponsor URL that
+    /// the same prompt carried in its transcript lines. playhead-04rx fixed
+    /// the mirror of this in the projector and deliberately left the FM side
+    /// alone; this is that side.
+    ///
+    /// Three properties, each load-bearing:
+    ///
+    /// * **At most ONE line per entry.** `evidenceRef` is an identity the FM
+    ///   points back at, and the prompt is charged per line against a budget
+    ///   this small (1,344 tokens on the refinement path). Emitting one line
+    ///   per occurrence would multiply refs and grow the prompt without
+    ///   telling the model anything it cannot read off the transcript.
+    /// * **The EARLIEST in-window occurrence wins.** `anchorableOccurrences`
+    ///   is ascending by `atomOrdinal` and the representative is its minimum,
+    ///   so an entry whose representative IS in the window selects the
+    ///   representative and this function is byte-identical to its
+    ///   predecessor. Only an entry that would have been DROPPED changes.
+    /// * **The entry is re-located onto the occurrence** via
+    ///   ``EvidenceEntry/viewOfOccurrence(_:)`` when the chosen mention is not
+    ///   the representative, because `PromptEvidenceEntry.entry` flows into
+    ///   `ResolvedEvidenceAnchor.entry` (see `CommercialEvidenceResolver`).
+    ///   A record that names line 412 while carrying the pre-roll's 51.9 s is
+    ///   a value naming one thing and read as another. Identity, text and
+    ///   density (`evidenceRef`, `matchedText`, `count`, `firstTime`,
+    ///   `lastTime`) are carried through untouched, so the RENDERED line is
+    ///   identical either way — only the position moves.
+    static func forWindow(
+        entry: EvidenceEntry,
+        allowedLineRefs: Set<Int>,
+        lineRefByAtomOrdinal: [Int: Int]
+    ) -> PromptEvidenceEntry? {
+        for occurrence in entry.anchorableOccurrences {
+            guard let lineRef = lineRefByAtomOrdinal[occurrence.atomOrdinal],
+                  allowedLineRefs.contains(lineRef) else {
+                continue
+            }
+            let located = occurrence.atomOrdinal == entry.atomOrdinal
+                ? entry
+                : entry.viewOfOccurrence(occurrence)
+            return PromptEvidenceEntry(entry: located, lineRef: lineRef)
+        }
+        return nil
+    }
+
     /// Cycle 2 C3: render the entry into the rendered refinement
     /// prompt body, optionally piping `entry.matchedText` through the
     /// PromptRedactor first. The default-argument noop preserves
@@ -6947,11 +6997,16 @@ struct FoundationModelClassifier: Sendable {
         let allowedLineRefs = Set(lineRefs)
         return evidenceCatalog.entries
             .compactMap { entry in
-                guard let lineRef = lineRefByAtomOrdinal[entry.atomOrdinal],
-                      allowedLineRefs.contains(lineRef) else {
-                    return nil
-                }
-                return PromptEvidenceEntry(entry: entry, lineRef: lineRef)
+                // playhead-ad9n: ask which of this entry's MENTIONS the window
+                // can see, not where its earliest mention was. See
+                // `PromptEvidenceEntry.forWindow` for why this emits at most
+                // one line per entry and why a representative-in-window entry
+                // comes out byte-identical.
+                PromptEvidenceEntry.forWindow(
+                    entry: entry,
+                    allowedLineRefs: allowedLineRefs,
+                    lineRefByAtomOrdinal: lineRefByAtomOrdinal
+                )
             }
             .sorted {
                 if $0.lineRef == $1.lineRef {
