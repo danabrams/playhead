@@ -1318,6 +1318,12 @@ ATOMEV="Playhead/Services/AdDetection/AtomEvidence.swift"
 # the projector noticing.
 EVCAT="Playhead/Services/AdDetection/EvidenceCatalogBuilder.swift"
 PROJ="Playhead/Services/AdDetection/AtomEvidenceProjector.swift"
+# playhead-ad9n: the FM half of first-occurrence evidence dedup. This file is
+# the one that decides WHICH WINDOWS ARE SCANNED AT ALL, which is why it is a
+# separate mutable file from `$FMCLS` (the prompt half) rather than folded into
+# it: the two sites fail independently and a rail expressed over one cannot see
+# the other.
+TWNARR="Playhead/Services/AdDetection/TargetedWindowNarrower.swift"
 # playhead-gard: PER-DETECTOR TRUST (I series). Four files because the claim is
 # a chain and each link fails silently on its own. DETCLS is the pure
 # classifier — "which detector drew this span, and does the show's history
@@ -1452,7 +1458,7 @@ MUTABLE_FILES=(
   "$FMDL" "$FMCP"
   "$SWEEP" "$SCANORD" "$SCRATCH" "$SCRATCHH" "$FMSUP" "$GATE"
   "$FUSION" "$DSPAN" "$EXTENT" "$RSLOT" "$ATOMEV"
-  "$EVCAT" "$PROJ"
+  "$EVCAT" "$PROJ" "$TWNARR"
   "$DETCLS" "$DETLED" "$SPLIT" "$HOTGATE" "$UGCEN" "$POLICY" "$SEGAGG"
   "$DLMGR" "$FQSCAN" "$BGFEED" "$EPPREP" "$SCHED"
   "$CLAIM" "$RECON" "$ATOM" "$AJRUN" "$ACOORD" "$ESUMBF" "$MPTRENG" "$MPTRIDX"
@@ -2173,6 +2179,15 @@ FOCUSED_SUITES=(
   # and persistence suites are the two places a widening could regress something
   # that predates it.
   -only-testing:PlayheadTests/RepeatedOccurrenceAnchoringTests
+  # playhead-ad9n: the FM half of the same blindness (AD series). ONE suite,
+  # because the claim is about two sites that must agree — what the prompt shows
+  # a window, and whether the window is scanned at all — and this is the only
+  # place both are driven against one fixture. The 04rx suite one line up cannot
+  # see either: it stops at the projector. The suite carries its own controls
+  # (`noRepeatsIsUnchanged` proves the delta comes from repeats rather than from
+  # the edit; `preAd9nSelectorIsTheDegenerateCase` proves the corpus lane's
+  # frozen baseline really is the deleted selector).
+  -only-testing:PlayheadTests/RepeatedOccurrencePromptTests
   # playhead-uazf: the ad-scan axis on the dogfood wire (UZ series). TWO suites,
   # and neither can observe the other. The provider suite is the only thing that
   # lifts a real `AnalysisCoverageSummary` off a real store into the wire struct,
@@ -3817,6 +3832,25 @@ T_HZ_STRUCT_SPELLING="every abandonment cause has a distinct durable spelling"
 T_HZ_ROW_CARRIES="an over-budget abandonment persists its token count, its budget and its cause"
 T_HZ_ROW_NULL="a failure that made no size comparison still persists NULL in both columns"
 T_HZ_ROW_SENTINEL="an oversize row is not a no-work sentinel and does not leave the coverage denominator"
+
+# ---- playhead-ad9n: the FM half of first-occurrence evidence dedup ----
+#
+# ONE suite, because the claim is about two sites that must agree and the suite
+# is the only place both are driven against the same fixture. It carries its own
+# controls: `noRepeatsIsUnchanged` proves the delta comes from REPEATS rather
+# than from the edit, and `preAd9nSelectorIsTheDegenerateCase` proves the corpus
+# lane's frozen baseline really is the deleted selector.
+T_AD_LATER_LINE="a window over the SECOND read gets an evidence line for it"
+T_AD_OWN_TIME="the re-located entry carries the OCCURRENCE's position, not the representative's"
+T_AD_REP_LINE="an entry whose representative is in the window keeps the representative's line ref"
+T_AD_REP_IDENTICAL="an entry whose representative is in the window is BYTE-IDENTICAL to pre-ad9n"
+T_AD_ONE_LINE="an entry earns at most ONE prompt line even when several of its mentions are in the window"
+T_AD_ABSENT="an entry with no mention in the window earns no line"
+T_AD_LEGACY_PROMPT="an entry with no recorded occurrence list still resolves to its representative"
+T_AD_PLAN_CARRIES="planAdaptiveZoom puts the repeat's evidence ref in the plan the model is sent"
+T_AD_NARROW_SECOND="the targeted phase nominates the SECOND ad break, which it previously never saw"
+T_AD_NARROW_LOOKBACK="the 20-atom lookback follows every occurrence, not only the first"
+T_AD_NARROW_LEGACY="a legacy entry with no recorded occurrence list is still seeded"
 
 MUTATIONS=(
   # Batch 900 — JC01, THE SHIPPED DEFECT VERBATIM. The pre-insert guard asks
@@ -8553,6 +8587,127 @@ MUTATIONS=(
   # makes SURVIVED a result rather than a default. Same construction as OC99.
   "HZ99|1000|FMCLS|$T_HZ_STRUCT_SINGLE;$T_HZ_ROW_CARRIES"
 
+  # ---- playhead-ad9n (AD series): the FM half of first-occurrence dedup ----
+  #
+  # TWO FILES, and that is the point. `$FMCLS` decides what the model READS
+  # about a window; `$TWNARR` decides whether the window is looked at AT ALL.
+  # playhead-04rx fixed the same blindness in the projector and left both of
+  # these, so a rail that only covers one of them would ship the bead half done
+  # in exactly the way 04rx did deliberately and this one must not.
+
+  # AD01 — THE SHIPPED DEFECT, VERBATIM. The selector reads the entry's
+  # representative, so an entry whose earliest mention is a pre-roll is dropped
+  # from every later window and the model refining a post-roll gets no evidence
+  # ref for a sponsor URL the same prompt carries in its own transcript lines.
+  "AD01|1002|FMCLS|$T_AD_LATER_LINE;$T_AD_PLAN_CARRIES"
+
+  # AD02 — THE PLAUSIBLE WRONG FIX, and the one the bead explicitly warned
+  # about. Emit one line PER OCCURRENCE instead of per entry. Every rail about
+  # visibility goes green — and `evidenceRef`, an identity the model points back
+  # at, is now ambiguous, and the prompt grows by a line per repeat inside a
+  # budget of 1,344 tokens. Killed only from the plan, because a per-call
+  # selector that returns one line still multiplies refs when its caller
+  # flatMaps.
+  "AD02|1003|FMCLS|$T_AD_ONE_LINE"
+
+  # AD03 — the LAST in-window mention wins instead of the first. Repeats stay
+  # visible, and every entry whose representative is in the window now renders
+  # at a different line — a change to what the model is told about ~2,800
+  # windows in service of the 19 that carry a repeat.
+  "AD03|1004|FMCLS|$T_AD_REP_LINE"
+
+  # AD04 — the selector always re-locates through `viewOfOccurrence`, including
+  # for the representative. The line ref is exactly right and the occurrence
+  # list is silently dropped from every entry the prompt carries, so what
+  # `ResolvedEvidenceAnchor` receives changes for the whole corpus rather than
+  # for repeats. A byte-identical claim that is not byte-identical.
+  "AD04|1005|FMCLS|$T_AD_REP_IDENTICAL"
+
+  # AD05 — the mirror of AD04, and OC02's shape one layer up: never re-locate,
+  # so the prompt line points at line 412 while the entry it carries reports the
+  # pre-roll's 51.9 s. The standing defect class, injected deliberately.
+  "AD05|1006|FMCLS|$T_AD_OWN_TIME"
+
+  # AD06 — the window membership test goes away, so an entry with NO mention in
+  # the window earns a line pointing at a line the prompt does not contain.
+  # Widening WHERE an entry may be seen must not widen WHETHER it is.
+  "AD06|1007|FMCLS|$T_AD_ABSENT"
+
+  # AD07 — the selector reads `occurrences` directly instead of
+  # `anchorableOccurrences`, so an entry persisted before playhead-04rx (list
+  # absent) earns no line at all. Silent, and it DELETES context the pre-ad9n
+  # code had rather than adding any.
+  "AD07|1008|FMCLS|$T_AD_LEGACY_PROMPT"
+
+  # AD08 — THE SHIPPED DEFECT, VERBATIM, on the narrowing side: BOTH halves of
+  # `evidenceLineRefs` revert to the representative, which is what actually
+  # shipped. This is the more consequential of the two sites — the prompt half
+  # changes what the model is told about a window it was already going to read,
+  # and this one decides whether the window exists at all.
+  #
+  # IT WAS ONE PATCH AND IT SURVIVED, WHICH IS THE MOST USEFUL THING THIS SERIES
+  # PRODUCED. The first version reverted only `catalogRefs` (the seed) and left
+  # the lookback per-occurrence, and the whole focused set stayed GREEN
+  # (`ad-1009.log`, 07:28 run, zero observed failures). Two things were wrong,
+  # and only the second is about the rail:
+  #
+  #   1. IT WAS NOT THE SHIPPED DEFECT. The shipped state was seed-per-entry AND
+  #      lookback-per-entry. An entry labelled "VERBATIM" that reverts half of a
+  #      two-site defect is a value naming one thing read as though it named
+  #      another — this repo's standing defect class, committed inside the
+  #      instrument built to catch it.
+  #   2. THE SEED HALF IS UNOBSERVABLE ON ITS OWN under the shipped config, and
+  #      that is a fact about the CODE rather than a gap in the test.
+  #      `evidenceLineRefs` returns `catalogRefs ∪ preAnchorRefs`. The seed
+  #      contributes the segment holding occurrence atom N; the lookback
+  #      contributes the segments holding atoms N−20…N−1; a segment holds many
+  #      atoms and `perAnchorPaddingSegments` is 5, so the padded lookback
+  #      already covers N's segment. MEASURED on the corpus rather than argued:
+  #      `seedPerOccurrence \ (seedPerEntry ∪ lookbackPerOccurrence)` is EMPTY on
+  #      all 31 assets, so the two input sets are equal and `narrow()` is
+  #      byte-identical. The seed-only mutant is an EQUIVALENT MUTANT, not a
+  #      coverage hole.
+  #
+  # So the entry is not deleted and the expectation is not relaxed — it is
+  # CORRECTED to the defect it always claimed to be, which the rail does kill.
+  # A separate seed-only entry is deliberately NOT added: the battery's own JC03
+  # precedent is that when the difference between two mutations is UNREACHABLE
+  # rather than merely unasserted, they are one rail wearing two names. Writing
+  # a `perAnchorPaddingSegments: 0` rail to make the seed observable would pin a
+  # configuration production never uses, which is the same "green for a reason
+  # other than the one its name claims" trap in mirror image.
+  #
+  # WHAT THIS MEANS FOR THE BEAD'S OWN NUMBERS: the +738 measured scan-seconds
+  # are bought by the LOOKBACK expansion, not by the seed expansion. The seed
+  # change stays because it is the correct expression of intent and the only
+  # thing standing between `catalogRefs` and the representative if the padding
+  # or the lookback ever changes — but it is not what earned the coverage, and
+  # the PR says so.
+  "AD08|1009|TWNARR|$T_AD_NARROW_SECOND"
+
+  # AD09 — HALF A FIX, and the half nobody would notice. The seed follows every
+  # occurrence and the 20-atom LOOKBACK still follows only the representative,
+  # so the second break is nominated with no ad body in front of it — which is
+  # the exact coverage the lookback exists to buy (the pre-CTA product pitch
+  # carries no regex-matchable token). Invisible under the default config,
+  # because the xsdz.2 cluster snap trims the window back to the ad-dense core
+  # either way; the rail turns the snap off to see it.
+  "AD09|1010|TWNARR|$T_AD_NARROW_LOOKBACK"
+
+  # AD10 — the seed reads `occurrences` directly, so a pre-04rx persisted entry
+  # seeds NOTHING and a window that used to be scanned silently stops being
+  # scanned. The one direction the "strictly additive" claim forbids, and the
+  # narrowing twin of AD07.
+  "AD10|1011|TWNARR|$T_AD_NARROW_LEGACY"
+
+  # AD99 — VACUITY CONTROL, and it MUST SURVIVE. The loop variable in the
+  # selector is renamed and nothing else changes: it proves the anchor still
+  # matches, the batch still builds and the suite still runs, while changing no
+  # behaviour. Non-empty expectation on purpose (playhead-ngsm) — an entry with
+  # an empty expectation iterates zero times and is credited KILLED, so a
+  # control that cannot fail proves nothing.
+  "AD99|1012|FMCLS|$T_AD_LATER_LINE;$T_AD_NARROW_SECOND"
+
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -8651,6 +8806,17 @@ describe_mutation() {
     HZ06) echo "the runner goes back to errorContext: nil, inputTokenCount: nil — the classifier still builds the pair and the persistence seam drops it" ;;
     HZ07) echo "the oversize errorContext prefix collides with the noWork: sentinel marker — a failed window leaves the coverage denominator and the episode scores BETTER for failing" ;;
     HZ99) echo "VACUITY CONTROL — the abandonment log's wording changes and nothing else. MUST SURVIVE" ;;
+    AD01) echo "the prompt selector reads the entry's REPRESENTATIVE again (the shipped defect) — a repeat sponsor read is invisible to the model reading it" ;;
+    AD02) echo "the evidence block emits one line PER OCCURRENCE — evidenceRef stops being an identity and the prompt grows per repeat" ;;
+    AD03) echo "the LAST in-window mention wins instead of the first — every non-repeat entry moves line" ;;
+    AD04) echo "the selector always re-locates through viewOfOccurrence, dropping the occurrence list from every entry the prompt carries" ;;
+    AD05) echo "the selector never re-locates — the line points at the post-roll and the entry reports the pre-roll's second (the standing defect class)" ;;
+    AD06) echo "the window-membership test goes away — an entry with no mention in the window earns a line anyway" ;;
+    AD07) echo "the selector reads occurrences directly, so a pre-04rx persisted entry earns no prompt line at all" ;;
+    AD08) echo "BOTH halves of evidenceLineRefs revert to the representative (the shipped defect verbatim) — the second ad break is nominated by no phase" ;;
+    AD09) echo "the seed follows every occurrence and the 20-atom lookback still follows only the first — the second break arrives with no ad body in front of it" ;;
+    AD10) echo "the narrowing seed reads occurrences directly, so a pre-04rx persisted entry seeds nothing and a scanned window silently stops being scanned" ;;
+    AD99) echo "VACUITY CONTROL — the loop variable in the prompt selector is renamed and nothing else. MUST SURVIVE" ;;
     NY01) echo "AdDetectionService.hotPathCandidates sorts the RAW array — the shipped defect: runBackfill canonicalized and the hot path did not" ;;
     NY02) echo "the hot path 'de-duplicates' by chunk.id, a per-ROW UUID, so a fast/final twin survives it intact" ;;
     NY03) echo "BoundaryExpander.makeLexicalContext scans the raw array — the user's 'Hearing an ad' tap gets a phantom lexical candidate" ;;
@@ -9377,6 +9543,211 @@ EOF
 EOF
     snippet NEW <<'EOF'
                     abandonmentCause=\(abandonment.rawValue, privacy: .public) \
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # ---- playhead-ad9n: the FM half of first-occurrence dedup (AD series) ----
+
+  AD01)
+    snippet OLD <<'EOF'
+        for occurrence in entry.anchorableOccurrences {
+            guard let lineRef = lineRefByAtomOrdinal[occurrence.atomOrdinal],
+                  allowedLineRefs.contains(lineRef) else {
+                continue
+            }
+EOF
+    snippet NEW <<'EOF'
+        for occurrence in [EvidenceOccurrence(
+            atomOrdinal: entry.atomOrdinal,
+            startTime: entry.startTime,
+            endTime: entry.endTime
+        )] {
+            guard let lineRef = lineRefByAtomOrdinal[occurrence.atomOrdinal],
+                  allowedLineRefs.contains(lineRef) else {
+                continue
+            }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  AD02)
+    snippet OLD <<'EOF'
+            .compactMap { entry in
+                // playhead-ad9n: ask which of this entry's MENTIONS the window
+                // can see, not where its earliest mention was. See
+                // `PromptEvidenceEntry.forWindow` for why this emits at most
+                // one line per entry and why a representative-in-window entry
+                // comes out byte-identical.
+                PromptEvidenceEntry.forWindow(
+                    entry: entry,
+                    allowedLineRefs: allowedLineRefs,
+                    lineRefByAtomOrdinal: lineRefByAtomOrdinal
+                )
+            }
+EOF
+    snippet NEW <<'EOF'
+            .flatMap { entry in
+                entry.anchorableOccurrences.compactMap { occurrence -> PromptEvidenceEntry? in
+                    guard let lineRef = lineRefByAtomOrdinal[occurrence.atomOrdinal],
+                          allowedLineRefs.contains(lineRef) else { return nil }
+                    return PromptEvidenceEntry(
+                        entry: entry.viewOfOccurrence(occurrence),
+                        lineRef: lineRef
+                    )
+                }
+            }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  AD03)
+    snippet OLD <<'EOF'
+        for occurrence in entry.anchorableOccurrences {
+            guard let lineRef = lineRefByAtomOrdinal[occurrence.atomOrdinal],
+EOF
+    snippet NEW <<'EOF'
+        for occurrence in entry.anchorableOccurrences.reversed() {
+            guard let lineRef = lineRefByAtomOrdinal[occurrence.atomOrdinal],
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  AD04)
+    snippet OLD <<'EOF'
+            let located = occurrence.atomOrdinal == entry.atomOrdinal
+                ? entry
+                : entry.viewOfOccurrence(occurrence)
+EOF
+    snippet NEW <<'EOF'
+            let located = entry.viewOfOccurrence(occurrence)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  AD05)
+    snippet OLD <<'EOF'
+            let located = occurrence.atomOrdinal == entry.atomOrdinal
+                ? entry
+                : entry.viewOfOccurrence(occurrence)
+EOF
+    snippet NEW <<'EOF'
+            let located = entry
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  AD06)
+    snippet OLD <<'EOF'
+            guard let lineRef = lineRefByAtomOrdinal[occurrence.atomOrdinal],
+                  allowedLineRefs.contains(lineRef) else {
+                continue
+            }
+EOF
+    snippet NEW <<'EOF'
+            guard let lineRef = lineRefByAtomOrdinal[occurrence.atomOrdinal] else {
+                continue
+            }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  AD07)
+    snippet OLD <<'EOF'
+        for occurrence in entry.anchorableOccurrences {
+            guard let lineRef = lineRefByAtomOrdinal[occurrence.atomOrdinal],
+EOF
+    snippet NEW <<'EOF'
+        for occurrence in entry.occurrences ?? [] {
+            guard let lineRef = lineRefByAtomOrdinal[occurrence.atomOrdinal],
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # AD08 has TWO sites because the shipped defect had two. See the entry in
+  # MUTATIONS for what the one-site version proved instead.
+  AD08)
+    snippet OLD <<'EOF'
+            inputs.evidenceCatalog.entries.flatMap { entry in
+                entry.anchorableOccurrences.compactMap { occurrence in
+                    lineRefByAtomOrdinal[occurrence.atomOrdinal]
+                }
+            }
+EOF
+    snippet NEW <<'EOF'
+            inputs.evidenceCatalog.entries.compactMap { entry in
+                lineRefByAtomOrdinal[entry.atomOrdinal]
+            }
+EOF
+    patch "$file" "$OLD" "$NEW" || return $?
+    snippet OLD <<'EOF'
+            for occurrence in entry.anchorableOccurrences {
+                let lookbackStart = max(0, occurrence.atomOrdinal - lookbackAtoms)
+                for ordinal in lookbackStart..<occurrence.atomOrdinal {
+                    if let ref = lineRefByAtomOrdinal[ordinal] {
+                        preAnchorRefs.insert(ref)
+                    }
+                }
+            }
+EOF
+    snippet NEW <<'EOF'
+            let lookbackStart = max(0, entry.atomOrdinal - lookbackAtoms)
+            for ordinal in lookbackStart..<entry.atomOrdinal {
+                if let ref = lineRefByAtomOrdinal[ordinal] {
+                    preAnchorRefs.insert(ref)
+                }
+            }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  AD09)
+    snippet OLD <<'EOF'
+            for occurrence in entry.anchorableOccurrences {
+                let lookbackStart = max(0, occurrence.atomOrdinal - lookbackAtoms)
+                for ordinal in lookbackStart..<occurrence.atomOrdinal {
+                    if let ref = lineRefByAtomOrdinal[ordinal] {
+                        preAnchorRefs.insert(ref)
+                    }
+                }
+            }
+EOF
+    snippet NEW <<'EOF'
+            let lookbackStart = max(0, entry.atomOrdinal - lookbackAtoms)
+            for ordinal in lookbackStart..<entry.atomOrdinal {
+                if let ref = lineRefByAtomOrdinal[ordinal] {
+                    preAnchorRefs.insert(ref)
+                }
+            }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  AD10)
+    snippet OLD <<'EOF'
+            inputs.evidenceCatalog.entries.flatMap { entry in
+                entry.anchorableOccurrences.compactMap { occurrence in
+EOF
+    snippet NEW <<'EOF'
+            inputs.evidenceCatalog.entries.flatMap { entry in
+                (entry.occurrences ?? []).compactMap { occurrence in
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  AD99)
+    snippet OLD <<'EOF'
+        for occurrence in entry.anchorableOccurrences {
+            guard let lineRef = lineRefByAtomOrdinal[occurrence.atomOrdinal],
+                  allowedLineRefs.contains(lineRef) else {
+                continue
+            }
+            let located = occurrence.atomOrdinal == entry.atomOrdinal
+                ? entry
+                : entry.viewOfOccurrence(occurrence)
+            return PromptEvidenceEntry(entry: located, lineRef: lineRef)
+        }
+EOF
+    snippet NEW <<'EOF'
+        for mention in entry.anchorableOccurrences {
+            guard let lineRef = lineRefByAtomOrdinal[mention.atomOrdinal],
+                  allowedLineRefs.contains(lineRef) else {
+                continue
+            }
+            let located = mention.atomOrdinal == entry.atomOrdinal
+                ? entry
+                : entry.viewOfOccurrence(mention)
+            return PromptEvidenceEntry(entry: located, lineRef: lineRef)
+        }
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -19898,6 +20269,7 @@ rec_file()   {
     ADSVC_ATOM) printf '%s' "$ATOMEV" ;;
     EVCAT) printf '%s' "$EVCAT" ;;
     PROJ)  printf '%s' "$PROJ" ;;
+    TWNARR) printf '%s' "$TWNARR" ;;
     PODC)  printf '%s' "$PODC" ;;
     MPTRIDX) printf '%s' "$MPTRIDX" ;;
     MPTRENG) printf '%s' "$MPTRENG" ;;

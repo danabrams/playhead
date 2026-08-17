@@ -379,9 +379,25 @@ enum TargetedWindowNarrower {
                 lineRefByAtomOrdinal[ordinal] = segment.segmentIndex
             }
         }
+        // playhead-ad9n: seed from every MENTION, not from the earliest one.
+        // `entry.atomOrdinal` is the representative that deduplication kept, so
+        // a sponsor read twice — a pre-roll and a post-roll for the same
+        // advertiser — used to seed exactly one window and the second ad break
+        // was never nominated for a targeted scan. The comment below says the
+        // expansion is per-entry "so every ad in a multi-ad episode gets its
+        // own lookback, not just the first one"; that was true per ENTRY and
+        // false per AD, and this is what makes it true per AD.
+        //
+        // Strictly additive: `anchorableOccurrences` always contains the
+        // representative (it falls back to it when no occurrence list was
+        // recorded), so the seeded set is a superset of the pre-ad9n one and no
+        // window that used to be scanned stops being scanned. The per-phase cap
+        // in `narrowedResult` still governs the total.
         let catalogRefs = Set(
-            inputs.evidenceCatalog.entries.compactMap { entry in
-                lineRefByAtomOrdinal[entry.atomOrdinal]
+            inputs.evidenceCatalog.entries.flatMap { entry in
+                entry.anchorableOccurrences.compactMap { occurrence in
+                    lineRefByAtomOrdinal[occurrence.atomOrdinal]
+                }
             }
         )
 
@@ -391,8 +407,9 @@ enum TargetedWindowNarrower {
         // of an ad. Without expansion, FM receives only the final 5–10s CTA slice and misses
         // the preceding 20–30s product pitch entirely.
         //
-        // Expansion is per-entry (not per-episode-minimum) so every ad in a multi-ad
-        // episode gets its own lookback, not just the first one.
+        // Expansion is per-OCCURRENCE (playhead-ad9n; per-entry before that, and
+        // not per-episode-minimum before that) so every ad in a multi-ad episode
+        // gets its own lookback, not just the first one.
         // 20 atoms ≈ 40s at ~2s/atom — covers 30s ads fully and 60s ads partially.
         // FM's own boundary detection corrects for any non-ad content included here.
         guard !catalogRefs.isEmpty else { return catalogRefs }
@@ -400,10 +417,12 @@ enum TargetedWindowNarrower {
         let lookbackAtoms = 20
         var preAnchorRefs = Set<Int>()
         for entry in inputs.evidenceCatalog.entries {
-            let lookbackStart = max(0, entry.atomOrdinal - lookbackAtoms)
-            for ordinal in lookbackStart..<entry.atomOrdinal {
-                if let ref = lineRefByAtomOrdinal[ordinal] {
-                    preAnchorRefs.insert(ref)
+            for occurrence in entry.anchorableOccurrences {
+                let lookbackStart = max(0, occurrence.atomOrdinal - lookbackAtoms)
+                for ordinal in lookbackStart..<occurrence.atomOrdinal {
+                    if let ref = lineRefByAtomOrdinal[ordinal] {
+                        preAnchorRefs.insert(ref)
+                    }
                 }
             }
         }
