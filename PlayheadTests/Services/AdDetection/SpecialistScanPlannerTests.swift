@@ -258,20 +258,39 @@ struct SpecialistScanPlannerTests {
         EvidenceCatalog(analysisAssetId: assetId, transcriptVersion: "tx-planner", entries: entries)
     }
 
-    @Test("a sponsor read twice anchors at BOTH reads and nowhere between them")
-    func repeatedSponsorAnchorsEveryMentionAndNotTheGap() {
-        // One entry, two mentions 400s apart on a 600s episode. Its hull is
-        // [100, 505] — 405 s, two thirds of the episode.
-        let windows = SpecialistScanPlanner().selectWindows(
+    /// One entry, two mentions 400 s apart on a 600 s episode. Its hull is
+    /// [100, 505] — 405 s, two thirds of the episode.
+    ///
+    /// Three separate `@Test`s read this one plan, deliberately. "Both reads are
+    /// scanned and the gap is not" is three claims, and a single test asserting
+    /// all three cannot say WHICH one a regression broke: anchoring only the
+    /// first mention, anchoring only the last, and anchoring the hull between
+    /// them are three different defects that one rail reports identically.
+    private func twoReadsPlan() -> [SpecialistScanWindow] {
+        SpecialistScanPlanner().selectWindows(
             segments: neutralSegments(),
             evidenceCatalog: catalog(entries: [repeatedEntry(ref: 0, at: [(100, 105), (500, 505)])]),
             featureWindows: []
         )
+    }
 
-        #expect(covers(windows, time: 102), "the first read must be scanned")
-        #expect(covers(windows, time: 502), "the second read must be scanned")
+    @Test("a sponsor read twice is scanned at the FIRST read")
+    func repeatedSponsorAnchorsTheFirstRead() {
+        #expect(covers(twoReadsPlan(), time: 102))
+    }
+
+    @Test("a sponsor read twice is scanned at the SECOND read")
+    func repeatedSponsorAnchorsTheSecondRead() {
+        // The mention playhead-04rx's dedup used to forget entirely, and the one
+        // a "just use the representative" fix silently drops.
+        #expect(covers(twoReadsPlan(), time: 502))
+    }
+
+    @Test("the audio BETWEEN two reads of one sponsor is not scanned")
+    func repeatedSponsorDoesNotScanTheGap() {
         // The 395 s between the two reads is not evidence of anything. Under the
-        // hull it was one candidate region and every window in it was planned.
+        // hull it was one candidate region and every tile in it was planned.
+        let windows = twoReadsPlan()
         #expect(!covers(windows, time: 300), "the gap between two mentions must not be scanned")
         for window in windows {
             let nearFirst = window.startTime >= 95 - 0.001 && window.endTime <= 110 + 0.001
@@ -311,36 +330,70 @@ struct SpecialistScanPlannerTests {
         #expect(windows.count == 3, "expected one tile per read, got \(windows.count)")
     }
 
-    @Test("the density metric counts mentions IN the window, not a hull spanning it")
+    /// A plain, unrepeated cue at `time`.
+    private func cue(_ ref: Int, _ start: Double, _ end: Double) -> EvidenceEntry {
+        EvidenceEntry(
+            evidenceRef: ref, category: .promoCode, matchedText: "CUE\(ref)",
+            normalizedText: "cue\(ref)", atomOrdinal: Int(start / 10.0),
+            startTime: start, endTime: end
+        )
+    }
+
+    @Test("a hull that ENDS is not a uniform vote: density must not lift a lone cue over a real pair")
     func densityIsNotInflatedByASpanningHull() {
-        // A repeated sponsor whose hull covers the whole 0..600 episode, plus a
-        // genuine three-cue cluster at 300. With budget 1 the single window kept
-        // must be the real cluster. Under the hull EVERY tile scored +1 from the
-        // spanning anchor, and the earliest tile — at t=0, where nothing was
-        // said — tied at density 1 and won on the earliest-start tiebreak.
+        // `AdLikelihoodScanOrder.seeds` licensed this site with "a wide anchor
+        // contributes uniformly and is harmless". Uniform WITHIN the hull, yes —
+        // and that is the half of the claim that is true, which is why a naive
+        // test of it passes under the defect. But a hull ENDS: a tile inside it
+        // is lifted by one vote and a tile outside it is not, so the hull
+        // decides ties across its own boundary.
+        //
+        // One cue at 250 INSIDE a [100, 402] hull, two real cues at 500/503
+        // OUTSIDE it, budget 1. Per mention the pair wins 2–1. Under the hull
+        // the lone cue is lifted to 2, ties, and takes the window on the
+        // earliest-start tiebreak — the grant is spent where one thing was said
+        // instead of where two were.
         let windows = SpecialistScanPlanner().selectWindows(
             segments: neutralSegments(),
             evidenceCatalog: catalog(entries: [
-                repeatedEntry(ref: 0, at: [(1, 3), (595, 597)]),
-                EvidenceEntry(
-                    evidenceRef: 1, category: .promoCode, matchedText: "SAVE10",
-                    normalizedText: "save10", atomOrdinal: 30, startTime: 300, endTime: 302
-                ),
-                EvidenceEntry(
-                    evidenceRef: 2, category: .ctaPhrase, matchedText: "go to",
-                    normalizedText: "go to", atomOrdinal: 30, startTime: 303, endTime: 305
-                ),
-                EvidenceEntry(
-                    evidenceRef: 3, category: .disclosurePhrase, matchedText: "sponsored by",
-                    normalizedText: "sponsored by", atomOrdinal: 30, startTime: 306, endTime: 308
-                ),
+                repeatedEntry(ref: 0, at: [(100, 102), (400, 402)]),
+                cue(1, 250, 252),
+                cue(2, 500, 502),
+                cue(3, 503, 505),
             ]),
             featureWindows: [],
             budget: 1
         )
         #expect(windows.count == 1)
-        #expect(covers(windows, time: 304),
-                "the densest window must be the real 3-cue cluster, not a tile a hull spans")
+        #expect(covers(windows, time: 502),
+                "the one window must go to the two-cue cluster, not to a lone cue a hull lifts")
+        #expect(!covers(windows, time: 251))
+    }
+
+    @Test("a repeated entry's FIRST anchor ends at its own mention, not at the last one")
+    func representativeAnchorIsNotWidenedToTheLastMention() {
+        // The HALF-FIX direction, and the only rail that separates it from a
+        // full revert: anchor every occurrence, but let the representative's
+        // anchor still run to `lastTime`. Every "both reads are scanned" rail
+        // stays green and the plan is still wrong.
+        //
+        // Entry at 100 and 400, a two-cue cluster at 500, budget 1. Correctly,
+        // the cluster wins 2–1. If the representative's anchor reaches 402 it
+        // overlaps the 400 mention's own tile, which then ties the cluster at 2
+        // and wins on the earliest-start tiebreak.
+        let windows = SpecialistScanPlanner().selectWindows(
+            segments: neutralSegments(),
+            evidenceCatalog: catalog(entries: [
+                repeatedEntry(ref: 0, at: [(100, 102), (400, 402)]),
+                cue(1, 500, 502),
+                cue(2, 503, 505),
+            ]),
+            featureWindows: [],
+            budget: 1
+        )
+        #expect(windows.count == 1)
+        #expect(covers(windows, time: 502),
+                "the one window must go to the two-cue cluster, not to a mention a widened anchor doubles")
     }
 
     @Test("an entry said ONCE plans exactly what it did before playhead-x7rk")
