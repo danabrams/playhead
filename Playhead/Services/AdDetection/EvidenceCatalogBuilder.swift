@@ -76,10 +76,15 @@ struct EvidenceEntry: Sendable, Equatable {
     let lastTime: Double
     /// Every atom this entry's text was said in, earliest first (playhead-04rx).
     ///
-    /// `nil` means "nobody recorded the population", not "there is one" — a
-    /// value persisted before 04rx, or an entry built by a caller that supplied
-    /// no list. ``anchorableOccurrences`` is the accessor that resolves the
-    /// three-way distinction; do not read this property directly.
+    /// `nil` means "nobody recorded the population" — a value persisted before
+    /// 04rx, or an entry built by a caller that supplied no list. It does NOT
+    /// mean "there is one place", and the difference is why this property is
+    /// not the one to read: ``anchorableOccurrences`` is, and it deliberately
+    /// resolves BOTH the unrecorded case and the empty-array case to the
+    /// representative. Not because they mean the same thing, but because the
+    /// only other answer — anchor nowhere — silently deletes the provenance a
+    /// persisted span already has, which is a worse failure than under-reading
+    /// an unrecorded population.
     let occurrences: [EvidenceOccurrence]?
 
     /// Full coverage window for overlap/scoring consumers.
