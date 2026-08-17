@@ -2184,6 +2184,18 @@ FOCUSED_SUITES=(
   # carries three.
   -only-testing:PlayheadTests/LiveActivitySnapshotProviderFractionTests
   -only-testing:PlayheadTests/DogfoodDiagnosticsAnalysisHealthTests
+  # playhead-hzpa: the oversize-abandonment measurement (HZ series). TWO suites,
+  # and the split is load-bearing rather than tidy. The ABANDONMENT suite builds
+  # a classifier directly and is the only thing that can see WHICH of the six
+  # enumerated causes a given bail reports — five of them shared one silent
+  # `return outcome` and were indistinguishable in the database. The ROW suite
+  # drives a real runner against a real store and is the only thing that can see
+  # whether the pair survives the persistence seam that was hardcoding
+  # `errorContext: nil, inputTokenCount: nil`; HZ06 reddens it while leaving
+  # every test in the other suite green, which is the measurement that the two
+  # are not redundant.
+  -only-testing:PlayheadTests/CoarseOversizeAbandonmentMeasurementTests
+  -only-testing:PlayheadTests/CoarseOversizeRowMeasurementTests
 )
 
 # Named to match the `/private/tmp/playhead-*` pattern `scripts/disk-cleanup.sh`
