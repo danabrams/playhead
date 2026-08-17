@@ -264,6 +264,11 @@ struct RepeatedOccurrenceAnchoringTests {
             entries: catalog.entries.filter { $0.category == .brandSpan }
         )
         #expect(!brandOnly.entries.isEmpty, "the fixture must actually produce a brand span")
+        // The suite name says REPEATED, so measure it rather than assume it —
+        // a brand span occurring once would pass this test for a reason that
+        // has nothing to do with the widening.
+        #expect(brandOnly.entries.contains { $0.anchorableOccurrences.count > 1 },
+                "the fixture must produce a brand span in more than one atom")
         let evidence = await Self.project(brandOnly, atoms)
         #expect(evidence.allSatisfy { !$0.isAnchored },
                 "brandSpan is too noisy to anchor — widening occurrences must not widen trust")
