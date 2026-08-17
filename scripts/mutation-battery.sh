@@ -1597,6 +1597,7 @@ FOCUSED_SUITES=(
   # new binary, where `firstAttemptAt` is known by construction. Only a suite
   # that rewinds to the V54 SHAPE and climbs back can observe a rung that
   # manufactures provenance it cannot have.
+  -only-testing:PlayheadTests/SemanticScanAttemptHistoryV55MigrationTests
   # playhead-59c8: the unclassified-model-failure rails (UM series). Two suites,
   # because the claim spans two layers and neither can see the other: the pure
   # identity read and the token it builds (instant, no store), and a SOURCE
