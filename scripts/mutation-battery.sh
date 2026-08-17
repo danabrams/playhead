@@ -3890,7 +3890,14 @@ MUTATIONS=(
   # The EDIT was left alone and the coverage added (`"ad scan .."`,
   # `"ad scan 1.2.3"`), which is the only way into that line: digits collected,
   # not a number.
-  "UZ08|947|UZHLTH|$T_UZ_UNMEASURED"
+  #
+  # THE EXPECTATION IS `$T_UZ_PARSER`, NOT `$T_UZ_UNMEASURED`, and that swap is
+  # the second half of the same finding. Adding the coverage made the mutant
+  # bite, and the run reported SURVIVED anyway — because the entry still named
+  # the `unmeasured` test, which stays green under this edit for exactly the
+  # reason above. Naming the test that CAN observe the defect is not relaxing an
+  # expectation; the original named one that provably cannot.
+  "UZ08|947|UZHLTH|$T_UZ_PARSER"
 
   "JC01|900|FPRUN|$T_JC_UPGRADE"
 
