@@ -130,6 +130,64 @@ struct EvidenceEntry: Sendable, Equatable {
         )
     }
 
+    /// This entry as seen from the earliest mention `isVisible` admits, or `nil`
+    /// when the caller's window can see none of them.
+    ///
+    /// **This is the ONE answer to "which mention of this entry applies here".**
+    /// playhead-04rx gave an entry its occurrence list, playhead-ad9n taught the
+    /// FM prompt to ask which mention a window can SEE rather than where the
+    /// earliest one was, and playhead-rty3 extracted that selection out of
+    /// ``PromptEvidenceEntry/forWindow(entry:allowedLineRefs:lineRefByAtomOrdinal:)``
+    /// so the banner path could ask the same question instead of a second one.
+    /// Two answers to this question is how the defect came to have two homes.
+    ///
+    /// Three properties, each load-bearing and each inherited from ad9n:
+    ///
+    /// * **At most ONE result per entry.** `evidenceRef` is an identity FM
+    ///   prompts point at and a banner line the listener reads; one entry is one
+    ///   claim, whatever the domain of `isVisible`.
+    /// * **The EARLIEST visible occurrence wins.** ``anchorableOccurrences`` is
+    ///   ascending by `atomOrdinal`, so an entry whose representative is visible
+    ///   selects the representative and the result is `self`.
+    /// * **`self`, not a rebuilt copy, when the representative wins.**
+    ///   ``viewOfOccurrence(_:)`` deliberately drops the occurrence list, so
+    ///   `viewOfOccurrence(representative)` is NOT equal to `self` for an entry
+    ///   that has one. Returning `self` is what keeps an unrepeated entry —
+    ///   and every persisted `decoded_spans` provenance built from one — byte
+    ///   identical to its pre-04rx value.
+    func locatedInWindow(
+        seeing isVisible: (EvidenceOccurrence) -> Bool
+    ) -> EvidenceEntry? {
+        for occurrence in anchorableOccurrences where isVisible(occurrence) {
+            return occurrence.atomOrdinal == atomOrdinal ? self : viewOfOccurrence(occurrence)
+        }
+        return nil
+    }
+
+    /// This entry as the closed time window `[start, end]` sees it, or `nil`
+    /// when no mention of it lies in that window.
+    ///
+    /// playhead-rty3. The time-domain sibling of
+    /// ``PromptEvidenceEntry/forWindow(entry:allowedLineRefs:lineRefByAtomOrdinal:)``
+    /// and the selector `SkipOrchestrator.catalogEntries(overlapping:end:)`
+    /// slices a banner's evidence with. It deliberately does NOT read
+    /// ``coverageStartTime``/``coverageEndTime``: those bracket the FIRST and
+    /// LAST mention of a deduped (category, text) pair, so a sponsor URL read
+    /// twice has a "coverage" span covering most of the episode and overlaps
+    /// every window in it. `SkipOrchestrator.revertNegativeAttribution` has
+    /// carried that argument in a comment since playhead-1mq1; this is the
+    /// same argument, available to every caller.
+    ///
+    /// CLOSED on both ends, deliberately: a zero-duration mention that falls
+    /// exactly on a snapped window boundary still surfaces, which is typical of
+    /// the short FM-bounded windows where the disclosure phrase straddles the
+    /// snap edge.
+    func locatedInTimeWindow(start: Double, end: Double) -> EvidenceEntry? {
+        locatedInWindow { occurrence in
+            occurrence.startTime <= end && occurrence.endTime >= start
+        }
+    }
+
     init(
         evidenceRef: Int,
         category: EvidenceCategory,

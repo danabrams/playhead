@@ -1708,18 +1708,36 @@ actor SkipOrchestrator {
         suggestBanneredWindowIds.insert(windowId)
     }
 
-    /// Slice catalog entries whose coverage span overlaps the skipped window.
-    /// Returns an empty array when no catalog is available or none overlap.
+    /// The catalog entries a banner for `[start, end]` may carry as evidence,
+    /// each located on the mention that window can actually hear.
+    /// Returns an empty array when no catalog is available or none are in range.
+    ///
+    /// playhead-rty3. This used to filter on
+    /// `entry.coverageStartTime <= end && entry.coverageEndTime >= start` —
+    /// the HULL, `firstTime`/`lastTime`, which brackets the first and last
+    /// mention of a deduped (category, text) pair. A sponsor URL read twice in
+    /// an episode therefore had a "coverage" span covering most of it and
+    /// overlapped EVERY window: measured on the 2026-08-02 device pull, ten of
+    /// twenty-seven repeated anchoring entries spanned more than 300 s and the
+    /// widest was 7,268 s of a ~7,300 s episode. Both callers put the result
+    /// on a card the listener reads (`AdSkipBannerItem.evidenceCatalogEntries`
+    /// → `AdBannerView.evidenceLines`), so a mid-roll card could name a
+    /// distant advertiser's URL as the reason — and on the SUGGEST card that
+    /// is the question whose answer is banked, so a wrong card does not merely
+    /// misinform, it teaches.
+    ///
+    /// `revertNegativeAttribution` below has carried this argument in a comment
+    /// since playhead-1mq1 and acted on it alone; ``EvidenceEntry/locatedInTimeWindow(start:end:)``
+    /// is now where it lives, shared with the FM prompt selector playhead-ad9n
+    /// built. The closed-interval property is unchanged and moved with it.
+    ///
+    /// Unrepeated entries are unaffected in both membership and content: with a
+    /// single occurrence the hull IS that occurrence, and the selector returns
+    /// `self` rather than a rebuilt copy.
     private func catalogEntries(overlapping start: Double, end: Double) -> [EvidenceEntry] {
         guard let catalog = activeEvidenceCatalog else { return [] }
-        // Closed-interval overlap: an entry overlaps the window iff its
-        // coverage span shares ANY point with [start, end], including the
-        // boundaries themselves. We deliberately use `<=` on both sides so
-        // zero-duration entries that fall exactly on a snapped boundary
-        // still surface — typical for short FM-bounded ad windows where the
-        // disclosure phrase straddles the snap edge.
-        return catalog.entries.filter { entry in
-            entry.coverageStartTime <= end && entry.coverageEndTime >= start
+        return catalog.entries.compactMap { entry in
+            entry.locatedInTimeWindow(start: start, end: end)
         }
     }
 

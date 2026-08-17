@@ -1015,18 +1015,21 @@ struct PromptEvidenceEntry: Sendable {
     /// the mirror of this in the projector and deliberately left the FM side
     /// alone; this is that side.
     ///
-    /// Three properties, each load-bearing:
+    /// Three properties, each load-bearing — and all three now live in
+    /// ``EvidenceEntry/locatedInWindow(seeing:)``, which playhead-rty3
+    /// extracted from this function so the BANNER path could ask the same
+    /// question rather than a second one. Read them there; what stays here is
+    /// only the line-ref domain this call site supplies:
     ///
     /// * **At most ONE line per entry.** `evidenceRef` is an identity the FM
     ///   points back at, and the prompt is charged per line against a budget
     ///   this small (1,344 tokens on the refinement path). Emitting one line
     ///   per occurrence would multiply refs and grow the prompt without
     ///   telling the model anything it cannot read off the transcript.
-    /// * **The EARLIEST in-window occurrence wins.** `anchorableOccurrences`
-    ///   is ascending by `atomOrdinal` and the representative is its minimum,
-    ///   so an entry whose representative IS in the window selects the
-    ///   representative and this function is byte-identical to its
-    ///   predecessor. Only an entry that would have been DROPPED changes.
+    /// * **The EARLIEST in-window occurrence wins**, so an entry whose
+    ///   representative IS in the window selects the representative and this
+    ///   function is byte-identical to its pre-ad9n predecessor. Only an entry
+    ///   that would have been DROPPED changes.
     /// * **The entry is re-located onto the occurrence** via
     ///   ``EvidenceEntry/viewOfOccurrence(_:)`` when the chosen mention is not
     ///   the representative, because `PromptEvidenceEntry.entry` flows into
@@ -1036,22 +1039,22 @@ struct PromptEvidenceEntry: Sendable {
     ///   density (`evidenceRef`, `matchedText`, `count`, `firstTime`,
     ///   `lastTime`) are carried through untouched, so the RENDERED line is
     ///   identical either way — only the position moves.
+    ///
+    /// The `lineRef` is re-derived from the RESULT's `atomOrdinal` rather than
+    /// remembered from the loop: `locatedInWindow` returns the entry located on
+    /// the occurrence it chose, so the two cannot name different mentions.
     static func forWindow(
         entry: EvidenceEntry,
         allowedLineRefs: Set<Int>,
         lineRefByAtomOrdinal: [Int: Int]
     ) -> PromptEvidenceEntry? {
-        for occurrence in entry.anchorableOccurrences {
-            guard let lineRef = lineRefByAtomOrdinal[occurrence.atomOrdinal],
-                  allowedLineRefs.contains(lineRef) else {
-                continue
-            }
-            let located = occurrence.atomOrdinal == entry.atomOrdinal
-                ? entry
-                : entry.viewOfOccurrence(occurrence)
-            return PromptEvidenceEntry(entry: located, lineRef: lineRef)
+        guard let located = entry.locatedInWindow(seeing: { occurrence in
+            guard let lineRef = lineRefByAtomOrdinal[occurrence.atomOrdinal] else { return false }
+            return allowedLineRefs.contains(lineRef)
+        }), let lineRef = lineRefByAtomOrdinal[located.atomOrdinal] else {
+            return nil
         }
-        return nil
+        return PromptEvidenceEntry(entry: located, lineRef: lineRef)
     }
 
     /// Cycle 2 C3: render the entry into the rendered refinement
