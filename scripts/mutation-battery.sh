@@ -2236,6 +2236,15 @@ FOCUSED_SUITES=(
   # are not redundant.
   -only-testing:PlayheadTests/CoarseOversizeAbandonmentMeasurementTests
   -only-testing:PlayheadTests/CoarseOversizeRowMeasurementTests
+  # playhead-0u3e: the fusion-ledger half of the hull blindness (CL series). ONE
+  # suite is ADDED here — `BackfillEvidenceFusionTests` is already listed above
+  # for playhead-sik9 and carries the six ledger rails — because the cross-show
+  # read set is behind an OFF-by-default flag and NOTHING in the fusion suite can
+  # reach it. CL07 (the read set reverts to the hull) leaves every fusion rail
+  # green by construction, so without this suite the site the bead fixed "so the
+  # flag cannot be turned on later onto the old reading" would have no rail at
+  # all — which is the same shape as shipping the fix half done.
+  -only-testing:PlayheadTests/CrossShowSyndicationExtractionTests
 )
 
 # Named to match the `/private/tmp/playhead-*` pattern `scripts/disk-cleanup.sh`
@@ -3916,6 +3925,30 @@ T_XR_DENSITY="a hull that ENDS is not a uniform vote: density must not lift a lo
 T_XR_HALF="a repeated entry's FIRST anchor ends at its own mention, not at the last one"
 T_XR_ONCE="an entry said ONCE plans exactly what it did before playhead-x7rk"
 T_XR_LEGACY="an entry with NO recorded occurrence list anchors at its representative, not its hull"
+
+# ---- playhead-0u3e: the FUSION LEDGER half (CL series) ----
+#
+# TWO suites, and they are two because the two sites are two. The fusion suite
+# drives `buildCatalogLedgerEntries`, whose output is a WEIGHT and a KIND that
+# reach `ad_windows`; the cross-show extraction suite drives
+# `crossShowSponsorEntities`, a flag-gated read set that no fusion test can see
+# at all because the channel is off by default.
+#
+# EIGHT rails rather than three, because "the hull is not a place" is not the
+# whole claim at this site. The site also has a DENOMINATOR (which entries the
+# count is over), an ARITHMETIC (per-entry fraction, cap) and a CARDINALITY (one
+# claim per entry, which is why `locatedInTimeWindow` is the right primitive and
+# a per-occurrence fan-out is not). One test asserting all four reports the hull
+# revert, the plausible fan-out, the representative-only narrowing and a
+# whole-catalog denominator identically.
+T_CL_HULL="A repeat whose far mention this span cannot hear earns NO catalog ledger entry"
+T_CL_KEEP="The span containing a repeat's SECOND mention still earns its catalog entry"
+T_CL_ONCE="A repeat heard twice inside one span still counts ONCE toward catalog weight"
+T_CL_WEIGHT_SELECTED="Catalog WEIGHT counts the entries this span heard, not the catalog"
+T_CL_DETAIL_SELECTED="Catalog DETAIL reports the entries this span heard, not the catalog"
+T_CL_ARITH="Catalog weight is entryCount x perEntryFraction x cap, clamped at the cap"
+T_CL_XSHOW_HULL="Read set: a repeat's HULL does not put it in the read set of the spans between"
+T_CL_XSHOW_ONE="Read set: a brand heard twice inside one span yields ONE entity"
 
 MUTATIONS=(
   # Batch 900 — JC01, THE SHIPPED DEFECT VERBATIM. The pre-insert guard asks
@@ -8813,7 +8846,13 @@ MUTATIONS=(
   # `firstTime…lastTime` instead re-opens this bead's whole defect for every row
   # persisted before playhead-04rx, while every entry the current builder
   # produces stays correct. The direction that is invisible on fresh data.
-  "RY05|1015|EVCAT|$T_RY_LEGACY"
+  #
+  # playhead-0u3e added `$T_CL_HULL` to the expectation. That rail's fixture is
+  # the UNRECORDED shape (`occurrences: nil`, hull 10…602, span 595…605), so
+  # this mutant reddens it and no other CL mutant does — which is what makes the
+  # rail's choice of fixture load-bearing rather than incidental, and what gives
+  # the fusion ledger a rail on the fallback it shares with the banner.
+  "RY05|1015|EVCAT|$T_RY_LEGACY;$T_CL_HULL"
 
   # RY04 — the predicate stops reading its own argument and re-tests the hull, so
   # the code READS as per-occurrence and BEHAVES as the defect. The most
@@ -8897,6 +8936,85 @@ MUTATIONS=(
   # iterates zero times and is credited KILLED, so a control that cannot fail
   # proves nothing.
   "XR99|1025|SPLAN|$T_XR_FIRST;$T_XR_SECOND;$T_XR_GAP"
+
+  # ---- playhead-0u3e (CL series): the FUSION LEDGER half ----
+  #
+  # THE HULL IS NOT A PLACE, AND HERE IT BUYS TWO THINGS AT ONCE. The count of
+  # selected entries becomes the `.catalog` ledger WEIGHT, and the entry's mere
+  # PRESENCE is a corroborating KIND in three quorum gates — so a hull selection
+  # earns a span both score and corroboration from evidence it never heard, and
+  # the result is persisted on `ad_windows`. Measured on the 2026-08-02 corpus:
+  # 17 of 74 `detection-v1` rows lose catalog weight and 11 of them lose the
+  # `.catalog` kind outright.
+  #
+  # ONE FILE, because both sites live in `AdDetectionService`; TWO suites,
+  # because the cross-show read set is flag-gated OFF and nothing in the fusion
+  # suite can reach it.
+
+  # CL01 — THE SHIPPED DEFECT, VERBATIM: the ledger selector goes back to the
+  # half-open hull filter. Reddens the negative rail and the between-span arm of
+  # the keep rail; leaves the arithmetic rails green, because a hull that covers
+  # the span computes exactly the same weight over the entries it wrongly chose.
+  "CL01|1026|ADSVC|$T_CL_HULL;$T_CL_KEEP"
+
+  # CL02 — THE PLAUSIBLE WRONG FIX, and the one x7rk's caveat names: fan out over
+  # `anchorableOccurrences` instead of asking which mention this span can hear.
+  # Every "the hull is not a place" rail goes GREEN — the between-span still
+  # selects nothing — and the span that hears BOTH mentions of one sponsor now
+  # counts it twice, doubling the weight of exactly the span the evidence is
+  # strongest on. `overlapping.count` counts distinct EVIDENCE; this makes it
+  # count mentions.
+  "CL02|1027|ADSVC|$T_CL_ONCE"
+
+  # CL03 — the NARROWING twin, and the one a reviewer reading only the negative
+  # rail would sign off: select on the entry's REPRESENTATIVE
+  # (`startTime`/`endTime`) instead of its occurrences. Strictly narrower than
+  # correct, so CL01's rail stays green, and the span over a repeat's SECOND read
+  # silently loses its catalog evidence. The direction playhead-04rx forbids.
+  "CL03|1028|ADSVC|$T_CL_KEEP"
+
+  # CL04 — the DENOMINATOR, in the weight: sum over the whole catalog instead of
+  # the selection. The selector is untouched and correct, so every rail about
+  # WHICH entries are heard stays green; the number is the hull's answer again in
+  # a different disguise, and worse — it is the whole episode's.
+  "CL04|1029|ADSVC|$T_CL_WEIGHT_SELECTED"
+
+  # CL05 — the same denominator in the persisted TELEMETRY only:
+  # `.catalog(entryCount:)` names the whole catalog while the weight names the
+  # selection. Nothing about the decision changes; the replay record (playhead-epfk
+  # reads it back) says the span heard evidence it did not. A value naming one
+  # thing read as though it named another, with a correct score in front of it.
+  "CL05|1030|ADSVC|$T_CL_DETAIL_SELECTED"
+
+  # CL06 — the CAP clamp is removed. Twenty entries saturate `catalogCap` by
+  # design (`catalogLedgerWeightPerEntry` is 0.05); without the clamp a
+  # sponsor-dense ad break contributes unbounded mass to a sum whose whole
+  # premise is that each family is budgeted. Killed only by the saturating arm,
+  # which is why that arm exists.
+  "CL06|1031|ADSVC|$T_CL_ARITH"
+
+  # CL07 — the CROSS-SHOW read set reverts to the hull. The channel is OFF by
+  # default, so this mutant is invisible to every fusion rail and to the corpus
+  # lane alike — a rail is the only thing that can hold it, and holding it is the
+  # reason the site was fixed in the same change rather than left for the day the
+  # flag turns on.
+  "CL07|1032|ADSVC|$T_CL_XSHOW_HULL"
+
+  # CL08 — CL02's shape one site over: the read set fans out per occurrence and
+  # drops its dedupe, so a brand heard twice in one span is two entities. The
+  # consumer keeps only the strongest boost, so the CURRENT downstream effect is
+  # nil — the rail pins the primitive choice rather than a live symptom, and says
+  # so, because "one claim per entry" is the property that makes
+  # `locatedInTimeWindow` the right member of the pair at both sites.
+  "CL08|1033|ADSVC|$T_CL_XSHOW_ONE"
+
+  # CL99 — VACUITY CONTROL, and it MUST SURVIVE. The closure parameter in
+  # `buildCatalogLedgerEntries` is renamed and nothing else changes: it proves
+  # the anchor still matches, the batch still builds and both suites still run,
+  # while changing no behaviour. Non-empty expectation on purpose
+  # (playhead-ngsm) — an entry with an empty expectation iterates zero times and
+  # is credited KILLED, so a control that cannot fail proves nothing.
+  "CL99|1034|ADSVC|$T_CL_HULL;$T_CL_KEEP;$T_CL_ONCE"
 
 )
 
@@ -9021,6 +9139,15 @@ describe_mutation() {
     XR04) echo "the planner reads occurrences directly instead of anchorableOccurrences — a pre-04rx entry anchors NOWHERE" ;;
     XR05) echo "HALF A FIX: the loop walks every occurrence but the REPRESENTATIVE's anchor still runs to lastTime — reads per-mention, plans the hull" ;;
     XR99) echo "VACUITY CONTROL — the planner's occurrence loop variable is renamed and nothing else. MUST SURVIVE" ;;
+    CL01) echo "buildCatalogLedgerEntries goes back to the coverage-HULL filter (the shipped defect) — a span is weighed by evidence it never heard" ;;
+    CL02) echo "the ledger selector fans out over anchorableOccurrences — a repeat heard twice in one span counts TWICE toward catalog weight" ;;
+    CL03) echo "the ledger selector reads the entry's REPRESENTATIVE only — the span over a repeat's SECOND read loses its catalog evidence" ;;
+    CL04) echo "the catalog WEIGHT sums the whole catalog instead of the selection — the hull's answer in a different disguise" ;;
+    CL05) echo "the persisted .catalog(entryCount:) names the whole catalog while the weight names the selection" ;;
+    CL06) echo "the catalogCap clamp is removed, so a sponsor-dense break contributes unbounded mass to a budgeted sum" ;;
+    CL07) echo "crossShowSponsorEntities reverts to the coverage HULL — latent behind an OFF flag, so only a rail can hold it" ;;
+    CL08) echo "the cross-show read set fans out per occurrence and drops its dedupe — one brand becomes two entities" ;;
+    CL99) echo "VACUITY CONTROL — the closure parameter in buildCatalogLedgerEntries is renamed and nothing else. MUST SURVIVE" ;;
     NY01) echo "AdDetectionService.hotPathCandidates sorts the RAW array — the shipped defect: runBackfill canonicalized and the hot path did not" ;;
     NY02) echo "the hot path 'de-duplicates' by chunk.id, a per-ROW UUID, so a fast/final twin survives it intact" ;;
     NY03) echo "BoundaryExpander.makeLexicalContext scans the raw array — the user's 'Hearing an ad' tap gets a phantom lexical candidate" ;;
@@ -10116,6 +10243,128 @@ EOF
             for mention in entry.anchorableOccurrences {
                 let lo = min(mention.startTime, mention.endTime)
                 let hi = max(mention.startTime, mention.endTime)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # ---- playhead-0u3e: the fusion ledger weighs mentions, not the hull (CL series) ----
+
+  CL01)
+    snippet OLD <<'EOF'
+        let overlapping = entries.compactMap { entry in
+            entry.locatedInTimeWindow(start: span.startTime, end: span.endTime)
+        }
+EOF
+    snippet NEW <<'EOF'
+        let overlapping = entries.filter { entry in
+            entry.coverageStartTime < span.endTime && entry.coverageEndTime > span.startTime
+        }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  CL02)
+    snippet OLD <<'EOF'
+        let overlapping = entries.compactMap { entry in
+            entry.locatedInTimeWindow(start: span.startTime, end: span.endTime)
+        }
+EOF
+    snippet NEW <<'EOF'
+        let overlapping = entries.flatMap { entry in
+            entry.anchorableOccurrences
+                .filter { $0.startTime <= span.endTime && $0.endTime >= span.startTime }
+                .map { entry.viewOfOccurrence($0) }
+        }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  CL03)
+    snippet OLD <<'EOF'
+        let overlapping = entries.compactMap { entry in
+            entry.locatedInTimeWindow(start: span.startTime, end: span.endTime)
+        }
+EOF
+    snippet NEW <<'EOF'
+        let overlapping = entries.filter { entry in
+            entry.startTime <= span.endTime && entry.endTime >= span.startTime
+        }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  CL04)
+    snippet OLD <<'EOF'
+            Double(overlapping.count) * Self.catalogLedgerWeightPerEntry * fusionConfig.catalogCap,
+EOF
+    snippet NEW <<'EOF'
+            Double(entries.count) * Self.catalogLedgerWeightPerEntry * fusionConfig.catalogCap,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  CL05)
+    snippet OLD <<'EOF'
+            detail: .catalog(entryCount: overlapping.count),
+EOF
+    snippet NEW <<'EOF'
+            detail: .catalog(entryCount: entries.count),
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  CL06)
+    snippet OLD <<'EOF'
+        let weight = min(
+            Double(overlapping.count) * Self.catalogLedgerWeightPerEntry * fusionConfig.catalogCap,
+            fusionConfig.catalogCap
+        )
+EOF
+    snippet NEW <<'EOF'
+        let weight =
+            Double(overlapping.count) * Self.catalogLedgerWeightPerEntry * fusionConfig.catalogCap
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  CL07)
+    snippet OLD <<'EOF'
+            guard entry.locatedInTimeWindow(
+                start: span.startTime,
+                end: span.endTime
+            ) != nil else { continue }
+EOF
+    snippet NEW <<'EOF'
+            guard entry.coverageStartTime < span.endTime,
+                  entry.coverageEndTime > span.startTime else { continue }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  CL08)
+    snippet OLD <<'EOF'
+            guard entry.locatedInTimeWindow(
+                start: span.startTime,
+                end: span.endTime
+            ) != nil else { continue }
+            let entity = entry.normalizedText.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard entity.count >= CrossShowSyndicationStore.minEntityLength else { continue }
+            if seen.insert(entity).inserted { out.append(entity) }
+EOF
+    snippet NEW <<'EOF'
+            let heard = entry.anchorableOccurrences.filter {
+                $0.startTime <= span.endTime && $0.endTime >= span.startTime
+            }
+            guard !heard.isEmpty else { continue }
+            let entity = entry.normalizedText.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard entity.count >= CrossShowSyndicationStore.minEntityLength else { continue }
+            seen.insert(entity)
+            for _ in heard { out.append(entity) }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  CL99)
+    snippet OLD <<'EOF'
+        let overlapping = entries.compactMap { entry in
+            entry.locatedInTimeWindow(start: span.startTime, end: span.endTime)
+        }
+EOF
+    snippet NEW <<'EOF'
+        let overlapping = entries.compactMap { candidate in
+            candidate.locatedInTimeWindow(start: span.startTime, end: span.endTime)
+        }
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 

@@ -8821,8 +8821,13 @@ actor AdDetectionService {
     /// on both ends, deliberately (rty3), so a mention whose interval merely
     /// TOUCHES a span edge now surfaces. That is the one direction in which
     /// this change can ADD evidence, and it is measured rather than assumed —
-    /// see `CatalogLedgerHullCorpusEvalTests`, which reports every such entry
-    /// with a witness (`BOUNDARY …`) instead of asserting there are none.
+    /// `CatalogLedgerHullCorpusEvalTests` reports every such entry with a
+    /// witness instead of asserting there are none. On the 2026-08-02 corpus
+    /// there is exactly ONE across 74 rows, and it is not float noise: the CTA
+    /// phrase "head to" spans 4408.1646–4408.4400 and the span begins at
+    /// 4408.4400, i.e. the sentence that introduces the ad ends exactly where
+    /// the ad's own span was snapped to begin. Admitting it is the rty3 rule
+    /// working, not a leak.
     func buildCatalogLedgerEntries(
         span: DecodedSpan,
         entries: [EvidenceEntry],

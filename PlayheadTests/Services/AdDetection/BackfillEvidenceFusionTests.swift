@@ -435,11 +435,82 @@ struct BackfillEvidenceFusionTests {
         )
     }
 
+    /// The DENOMINATOR, in the weight. Every fixture above has all its entries
+    /// inside the span, so `overlapping.count` and `entries.count` are equal in
+    /// all of them and a site that summed the whole catalog would pass every
+    /// one. This is the only test with an entry outside the window.
+    @Test("Catalog WEIGHT counts the entries this span heard, not the catalog")
+    func catalogWeightCountsOnlySelectedEntries() async throws {
+        let store = try AnalysisStore(path: ":memory:")
+        let service = AdDetectionService(
+            store: store,
+            classifier: RuleBasedClassifier(),
+            metadataExtractor: FallbackExtractor(),
+            config: .default
+        )
+        let config = defaultConfig()
+        let ledger = try #require(await service.buildCatalogLedgerEntries(
+            span: makeSpan(startTime: 10.0, endTime: 40.0),
+            entries: Self.oneInsideTwoOutside,
+            fusionConfig: config
+        ).first)
+        #expect(
+            abs(ledger.weight
+                - AdDetectionService.catalogLedgerWeightPerEntry * config.catalogCap) < 1e-12
+        )
+    }
+
+    /// The same denominator, in the persisted telemetry. `.catalog(entryCount:)`
+    /// is what NARL replay reads back (playhead-epfk), so a count naming the
+    /// whole catalog while the weight names the selection is the standing defect
+    /// class with a correct score in front of it.
+    @Test("Catalog DETAIL reports the entries this span heard, not the catalog")
+    func catalogDetailCountsOnlySelectedEntries() async throws {
+        let store = try AnalysisStore(path: ":memory:")
+        let service = AdDetectionService(
+            store: store,
+            classifier: RuleBasedClassifier(),
+            metadataExtractor: FallbackExtractor(),
+            config: .default
+        )
+        let ledger = try #require(await service.buildCatalogLedgerEntries(
+            span: makeSpan(startTime: 10.0, endTime: 40.0),
+            entries: Self.oneInsideTwoOutside,
+            fusionConfig: defaultConfig()
+        ).first)
+        if case .catalog(let entryCount) = ledger.detail {
+            #expect(entryCount == 1)
+        } else {
+            Issue.record("Expected catalog ledger detail")
+        }
+    }
+
+    /// Three entries; exactly one of them is inside `makeSpan(10, 40)`. Shared
+    /// by the two tests above so they cannot drift into measuring different
+    /// populations.
+    private static let oneInsideTwoOutside: [EvidenceEntry] = [
+        EvidenceEntry(
+            evidenceRef: 0, category: .url,
+            matchedText: "inside.com", normalizedText: "inside.com",
+            atomOrdinal: 12, startTime: 20.0, endTime: 21.0
+        ),
+        EvidenceEntry(
+            evidenceRef: 1, category: .url,
+            matchedText: "before.com", normalizedText: "before.com",
+            atomOrdinal: 2, startTime: 1.0, endTime: 2.0
+        ),
+        EvidenceEntry(
+            evidenceRef: 2, category: .url,
+            matchedText: "after.com", normalizedText: "after.com",
+            atomOrdinal: 90, startTime: 900.0, endTime: 901.0
+        )
+    ]
+
     /// The weight formula, exercised across the cap. This exists so a rail
     /// covers the ARITHMETIC as well as the selection: a fix that selected the
     /// right entries and then divided the weight differently would pass every
     /// test above.
-    @Test("Catalog weight is entries × per-entry fraction × cap, clamped at the cap")
+    @Test("Catalog weight is entryCount x perEntryFraction x cap, clamped at the cap")
     func catalogWeightScalesWithEntryCountAndClampsAtCap() async throws {
         let store = try AnalysisStore(path: ":memory:")
         let service = AdDetectionService(
