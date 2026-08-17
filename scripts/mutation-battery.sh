@@ -9073,15 +9073,29 @@ MUTATIONS=(
   # kill it: the round-trip suite, where every write is a FIRST write and the
   # restamp is a no-op. Only a rail that upserts the SAME reuse key twice can
   # see it.
-  "BG01|1040|STORE|$T_BG_FROZEN;$T_BG_AGE;$T_BG_PARTIAL"
+  #
+  # `$T_BG_AGE` was named here in the first cut and the battery reported
+  # SURVIVED on a working rail. It is not a coverage hole and the expectation was
+  # not relaxed to hide one — AGE reads `attemptSpanSeconds`, which is
+  # `lastAttemptAt - firstAttemptAt` and names neither of BG01's columns, so it
+  # CANNOT observe this mutant by construction. It is BG02's rail. The measured
+  # failure set was {FROZEN, PARTIAL, COUNT, SUCCESS}; the two named are the two
+  # that assert the freeze deliberately rather than in passing.
+  "BG01|1040|STORE|$T_BG_FROZEN;$T_BG_PARTIAL"
 
   # Batch 1041 — BG02, `firstAttemptAt` is stamped fresh on a replace instead of
   # carried. Every pre-V55 row then GAINS a first-attempt time on its next
   # attempt, so `historyIsComplete` starts answering `true` for a row whose
   # earlier attempts are gone — the licence rots into exactly the confident
-  # provenance this bead exists to withhold. Killed only from the upgrade side:
-  # a first write under the new binary legitimately knows its own first attempt.
-  "BG02|1041|STORE|$T_BG_UPGRADE;$T_BG_PARTIAL"
+  # provenance this bead exists to withhold.
+  #
+  # `$T_BG_UPGRADE` was named here in the first cut and stayed green, for a
+  # reason worth keeping: it seeds, rewinds, migrates and then READS — it never
+  # upserts after the migration, and this mutant only fires on a replace. The
+  # rail that catches it is PARTIAL, which is the same fixture plus a twelfth
+  # attempt. Measured failure set: {PARTIAL, AGE, FROZEN}, all three named,
+  # because all three read a preserved `firstAttemptAt` from a different angle.
+  "BG02|1041|STORE|$T_BG_PARTIAL;$T_BG_AGE;$T_BG_FROZEN"
 
   # Batch 1042 — BG03, `observedStatuses` is OVERWRITTEN with the incoming
   # status rather than unioned. This is the bead's own acceptance criterion
