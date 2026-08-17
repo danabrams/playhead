@@ -756,11 +756,17 @@ actor AnalysisCoordinator {
         //
         // MEASURED, over the 933 preserved `background_task_runs` rows spanning
         // 2026-07-31 → 2026-08-15 (21 device captures, 13 distinct states):
-        // 385 of 655 consecutive backfill-grant pairs — 58.8 % — have no
-        // recovery grant, no launch marker and no `analysis_sessions` row
-        // between them, and 183 of those 385 are separated by more than the
-        // reaper's own 600 s freshness floor. So the separation the bead left
-        // "NOT ESTABLISHED" is the common case, not the exception.
+        // 390 of 655 consecutive backfill-grant pairs — 59.5 % — have no
+        // recovery grant and no launch marker between them, and 188 of those
+        // 390 are separated by more than the reaper's own 600 s freshness
+        // floor. So the separation the bead left "NOT ESTABLISHED" is the
+        // common case, not the exception.
+        //
+        // (A first pass read 385/183, having also excluded pairs straddling an
+        // `analysis_sessions` row on the belief that it marked a launch. It
+        // does not — that table is a PER-ASSET analysis session. The mistake
+        // was conservative and it was still the standing defect class, in the
+        // instrument built to measure the standing defect class.)
         //
         // WHY HERE AND NOT IN THE HANDLER. Two reasons, both defect classes
         // this repo has already paid for:

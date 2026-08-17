@@ -32,12 +32,18 @@
 //
 //   * 656 backfill grants, 276 pre-analysis-recovery grants, 22 launch markers
 //     (`lastErrorCode='orphan_at_launch'`, whose `finishedAt` IS a launch).
-//   * 385 of 655 consecutive backfill-grant pairs — 58.8 % — have NO recovery
-//     grant, NO launch marker and NO `analysis_sessions` row between them.
-//   * 183 of those 385 are separated by more than the reaper's own 600 s
+//   * 390 of 655 consecutive backfill-grant pairs — 59.5 % — have NO recovery
+//     grant and NO launch marker between them.
+//   * 188 of those 390 are separated by more than the reaper's own 600 s
 //     freshness floor, which is the window in which a stranded row is both past
 //     the floor AND still `running` when the next grant asks who the candidates
 //     are.
+//   * A first pass read 385/183: it ALSO excluded pairs straddling an
+//     `analysis_sessions` row, on the belief that one marked an app launch.
+//     That table is a PER-ASSET analysis session (id, analysisAssetId, state,
+//     startedAt, …), so the exclusion was a value that names one thing read as
+//     though it named another — this bead's own subject, in its own census.
+//     Conservative, and still wrong. Use 390/188.
 //
 // Three distinct jobIds have been observed AT `status='running'` in a preserved
 // capture — `fm-9330e821aeb36a0d`, `fm-a7cb7d748c9d58c1`, `fm-df75eb5558560ce2`
@@ -49,11 +55,17 @@
 // Zero of the three has a grant recorded AFTER it went stale: in every capture
 // the row's `updatedAt` is within ~50 s of the database's own last recorded
 // activity. That is a property of snapshots, not of the defect — a pull ends
-// the timeline exactly where the evidence would be. So 385 is an OPPORTUNITY
+// the timeline exactly where the evidence would be. So 390 is an OPPORTUNITY
 // count, an UPPER bound on firings, not a firing count; a firing additionally
 // requires that the first grant of the pair really left a row stranded, and
 // nothing durable recorded that. `reaped=` exists so the next pull can answer
 // it.
+//
+// And 390 is an upper bound for a second reason that cannot be measured away:
+// SCENE ACTIVATION runs the reaper (`PlayheadApp`) and leaves no
+// `background_task_runs` row, because a BGTask grant is by construction the
+// only thing that writes one — all 932 rows carry `scenePhase='background'`.
+// A foregrounded moment between two grants is invisible here.
 //
 // ----- The fix, and where it lives -----
 //

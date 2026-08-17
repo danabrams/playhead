@@ -231,10 +231,23 @@ struct CoarseScanPhaseReport: Sendable, Equatable {
     /// threw, or the window ended before teardown), which is not zero and must
     /// never be rendered as zero.
     var bankedRows: Int?
-    /// **playhead-1e86.** How many `backfill_jobs` rows this phase's own reaper
+    /// **playhead-1e86.** How many `backfill_jobs` ROWS this phase's own reaper
     /// flipped from a stranded `running` back to `queued` BEFORE it asked the
-    /// candidate queries — i.e. how many assets were made visible to this
-    /// grant that would otherwise have been absent from it.
+    /// candidate queries.
+    ///
+    /// **ROWS, NOT ASSETS, AND NOT "ASSETS THIS GRANT GAINED".** Four ways the
+    /// two come apart, each of which would make the obvious reading wrong: an
+    /// asset can own more than one coverage-lane row, so `reaped` can exceed
+    /// the number of assets unhidden; the reaper is table-wide rather than
+    /// scoped to this phase's candidate window, so a row it repairs may belong
+    /// to an asset the `LIMIT` never reaches; a row reaped at or above
+    /// `AdmissionController.maxRetries` is repaired and still excluded by
+    /// ``AnalysisStore/fetchAssetIdsWithResumableBackfillJobs(limit:)``'s own
+    /// `retryCount <` bind; and when the plain and charged backfill identifiers
+    /// dispatch together — which the ledger shows they repeatedly do, in the
+    /// same second — the first grant to sweep takes the rows and the second
+    /// honestly reports `reaped=0`. Read it as "what this sweep repaired", and
+    /// read ``candidates`` for what the grant then saw.
     ///
     /// `nil` means the sweep could not be TAKEN (it threw), which is not zero,
     /// for exactly the reason ``bankedRows`` distinguishes the two.
