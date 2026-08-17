@@ -8986,11 +8986,23 @@ MUTATIONS=(
   # thing read as though it named another, with a correct score in front of it.
   "CL05|1030|ADSVC|$T_CL_DETAIL_SELECTED"
 
-  # CL06 — the CAP clamp is removed. Twenty entries saturate `catalogCap` by
-  # design (`catalogLedgerWeightPerEntry` is 0.05); without the clamp a
-  # sponsor-dense ad break contributes unbounded mass to a sum whose whole
-  # premise is that each family is budgeted. Killed only by the saturating arm,
-  # which is why that arm exists.
+  # CL06 — the local CAP clamp is removed. Twenty entries saturate `catalogCap`
+  # by design (`catalogLedgerWeightPerEntry` is 0.05); without the clamp a
+  # sponsor-dense ad break emits unbounded mass into a sum whose whole premise is
+  # that each family is budgeted. Killed only by the saturating arm, which is why
+  # that arm exists.
+  #
+  # SAY WHAT THIS RAIL IS AND IS NOT, because a green result here is easy to
+  # over-read. `buildEvidenceLedger` returns `fusion.buildLedger()`, and that
+  # method re-caps every catalog entry at `config.catalogCap` — so at the SYSTEM
+  # level this mutant is EQUIVALENT and no fusion decision moves. The rail pins
+  # the function's OWN contract, which is exactly the claim
+  # `FusionWeightConfig.init`'s precondition comment rests on ("producers of
+  # every other source kind compute their emitted weight as a fraction of — or
+  # strictly bounded by — the corresponding cap … none can structurally exceed
+  # its cap"). CL06 falsifies that sentence for this producer while leaving the
+  # behaviour intact, which is the only kind of defect a defence-in-depth cap can
+  # hide. Kept for that reason, and NOT credited with a production consequence.
   "CL06|1031|ADSVC|$T_CL_ARITH"
 
   # CL07 — the CROSS-SHOW read set reverts to the hull. The channel is OFF by
