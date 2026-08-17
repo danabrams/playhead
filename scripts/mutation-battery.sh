@@ -1305,6 +1305,15 @@ RSLOT="Playhead/Services/AdDetection/RediffSlotOwnership.swift"
 # series defends. Named ADSVC_ATOM rather than ATOM because the key is read out
 # of a `|`-delimited record and a two-letter key invites collisions.
 ATOMEV="Playhead/Services/AdDetection/AtomEvidence.swift"
+# playhead-04rx: a repeated sponsor URL anchors EVERY mention (OC series).
+# Three files because the claim is a chain and each link fails silently on its
+# own. EVCAT is where the occurrence list is BUILT and where the entry resolves
+# an absent one; PROJ is the anchoring loop, the one line the bead is about; and
+# DSPAN carries the persistence, where an old row resolving to zero anchors
+# would delete a shipped span's provenance without any test of the builder or
+# the projector noticing.
+EVCAT="Playhead/Services/AdDetection/EvidenceCatalogBuilder.swift"
+PROJ="Playhead/Services/AdDetection/AtomEvidenceProjector.swift"
 # playhead-gard: PER-DETECTOR TRUST (I series). Four files because the claim is
 # a chain and each link fails silently on its own. DETCLS is the pure
 # classifier — "which detector drew this span, and does the show's history
@@ -1439,6 +1448,7 @@ MUTABLE_FILES=(
   "$FMDL" "$FMCP"
   "$SWEEP" "$SCANORD" "$SCRATCH" "$SCRATCHH" "$FMSUP" "$GATE"
   "$FUSION" "$DSPAN" "$EXTENT" "$RSLOT" "$ATOMEV"
+  "$EVCAT" "$PROJ"
   "$DETCLS" "$DETLED" "$SPLIT" "$HOTGATE" "$UGCEN" "$POLICY" "$SEGAGG"
   "$DLMGR" "$FQSCAN" "$BGFEED" "$EPPREP" "$SCHED"
   "$CLAIM" "$RECON" "$ATOM" "$AJRUN" "$ACOORD" "$ESUMBF" "$MPTRENG" "$MPTRIDX"
@@ -2153,6 +2163,11 @@ FOCUSED_SUITES=(
   # through a real handler, which is where a reader finds it on a pull.
   -only-testing:PlayheadTests/CoarseScanStrandedSweepTests
   -only-testing:PlayheadTests/BackgroundProcessingServiceLedgerTests
+  # playhead-04rx: the repeated-occurrence anchoring rails (OC series). Its own
+  # suite is the only thing that can see the builder/entry half; the projector
+  # and persistence suites are the two places a widening could regress something
+  # that predates it.
+  -only-testing:PlayheadTests/RepeatedOccurrenceAnchoringTests
 )
 
 # Named to match the `/private/tmp/playhead-*` pattern `scripts/disk-cleanup.sh`
@@ -3708,6 +3723,46 @@ T_SW_RENDER="the ledger reason always names the sweep, and the three readings di
 # land in the durable column. A report that renders perfectly and never reaches
 # `deferReason` is the shape playhead-8ljj exists to prevent.
 T_SW_LEDGER="An expired window carries the coarse phase's last true statement"
+
+# ---- playhead-04rx: a repeated sponsor URL anchors EVERY mention (OC series) ----
+#
+# WHY THESE FOURTEEN. The change is small and its failure modes are all SILENT:
+# every one of them leaves a green build, a well-formed catalog, and a decoder
+# that emits spans. What differs is WHICH spans, and the only place that shows
+# is a corpus the battery cannot run. So each rail names one EVENT the change
+# performs and one test that would go quiet if the event stopped happening.
+#
+# ONE MUTATION PER BATCH throughout, because OC01/OC02 both live in the
+# projector's anchoring loop, OC03/OC06 both live in the builder's aggregation,
+# OC04/OC05 are the two halves of one accessor, OC07/OC08 are two edits to
+# `viewOfOccurrence`, and OC09/OC10 are the encode and decode sides of one
+# extension. Sharing a batch would let each be credited with the other's kills.
+#
+# OC99 IS THE VACUITY CONTROL AND IT MUST SURVIVE. It is a real edit to the very
+# line OC01 mutates — the loop variable is renamed — so it proves the anchor
+# still matches and the batch machinery still applies and runs. Its expectation
+# is deliberately NON-EMPTY (playhead-ngsm: an entry with an empty expectation
+# is scored KILLED, which makes a control expressed that way worthless); it
+# names the rail OC01 kills, so a KILLED verdict here would mean a rename can
+# change behaviour and something is very wrong.
+T_OC_BOTH_PLACES="a domain read twice in one episode keeps ONE entry and BOTH places"
+T_OC_ORDERED="occurrences come out earliest first, and count them by ATOM"
+T_OC_ONE_ATOM="the same text twice in ONE atom raises count but adds no second place"
+T_OC_OWN_TIME="a later occurrence carries its OWN time, not the entry's earliest"
+T_OC_ABSENT="an entry with no recorded occurrence list still offers its representative"
+T_OC_EMPTY="an EMPTY occurrence list resolves to the representative, never to nothing"
+T_OC_VIEW_MOVES="the per-occurrence view keeps identity and density, and moves position"
+T_OC_VIEW_REP="the view of the representative is the pre-04rx entry, unchanged"
+T_OC_ANCHORS_ALL="the projector anchors the post-roll mention as well as the pre-roll one"
+T_OC_NAMES_OCC="the anchor on the post-roll atom names the POST-ROLL mention"
+T_OC_BRAND="a repeated brand span still anchors nothing, in either place"
+T_OC_VETO="a user veto on the post-roll atom still de-anchors it"
+T_OC_TWO_REFS="two mentions of one sponsor inside one span survive as two provenance refs"
+T_OC_ROUNDTRIP="the occurrence list survives a persistence round trip"
+T_OC_LEGACY="a row persisted before playhead-04rx decodes to ONE anchor, never to zero"
+T_OC_NO_KEY="an entry with no occurrence list writes no occurrences key at all"
+T_OC_PROMPT="the FM prompt rendering is identical with and without occurrence lists"
+T_OC_REFS="a repeat produces one evidenceRef, and refs stay a gapless zero-based run"
 
 MUTATIONS=(
   # Batch 900 — JC01, THE SHIPPED DEFECT VERBATIM. The pre-insert guard asks
@@ -8226,6 +8281,82 @@ MUTATIONS=(
   # green on every one, ~4m50s each. The control surviving is what makes those
   # eight kills attributable to the mutations rather than to a red harness.
 
+
+  # ---- playhead-04rx (OC series) ----
+
+  # OC01 — THE SHIPPED DEFECT, VERBATIM. The anchoring loop keys on the entry's
+  # representative, so every later mention of a repeated sponsor is counted and
+  # never anchored.
+  "OC01|950|PROJ|$T_OC_ANCHORS_ALL"
+
+  # OC02 — THE PLAUSIBLE WRONG FIX. Anchor every occurrence, but attach the
+  # ENTRY rather than the entry seen from that occurrence. Both atoms anchor, so
+  # RO01's rail goes green again — and the provenance on the post-roll atom
+  # claims the evidence sits back in the pre-roll, and the decoder's
+  # (evidenceRef, atomOrdinal) dedup collapses the two anchors into one.
+  "OC02|951|PROJ|$T_OC_NAMES_OCC;$T_OC_TWO_REFS"
+
+  # OC03 — the builder stops accumulating: every entry offers one place, so the
+  # projector is correct and has nothing to work with. This is the shape a
+  # refactor reaches for when it "simplifies" the aggregate.
+  "OC03|952|EVCAT|$T_OC_BOTH_PLACES;$T_OC_ORDERED"
+
+  # OC04 — the accessor stops resolving an ABSENT list, so a row persisted
+  # before this change anchors nothing at all. Silent, and it DELETES provenance
+  # rather than adding any.
+  "OC04|953|EVCAT|$T_OC_ABSENT;$T_OC_LEGACY"
+
+  # OC05 — the accessor accepts an EMPTY list as a population of zero. Same
+  # direction as OC04 and a different door: "unrecorded is not zero" and neither
+  # is an empty array a caller happened to pass.
+  "OC05|954|EVCAT|$T_OC_EMPTY"
+
+  # OC06 — the per-atom dedupe goes away, so "that's acme.com, acme.com" in one
+  # chunk books two places to anchor. Harmless here and not harmless as a
+  # precedent: it makes the occurrence list a count of MATCHES, which is what
+  # `count` already is.
+  "OC06|955|EVCAT|$T_OC_ONE_ATOM"
+
+  # OC07 — the per-occurrence view moves the ordinal and keeps the ENTRY's
+  # times. Half a fix: the ref points at the right atom and reports the wrong
+  # second, which is the standing defect class in miniature.
+  "OC07|956|EVCAT|$T_OC_VIEW_MOVES"
+
+  # OC08 — the view carries the whole occurrence list, so a value that names ONE
+  # mention also claims to name all of them, and every persisted provenance
+  # record grows the list.
+  "OC08|957|EVCAT|$T_OC_VIEW_REP"
+
+  # OC09 — the encoder drops the occurrence list, so a catalog that round-trips
+  # through the store comes back one-place. Invisible to every in-memory test.
+  "OC09|958|DSPAN|$T_OC_ROUNDTRIP"
+
+  # OC10 — the decoder reads an ABSENT list as an EMPTY one, which is the same
+  # confusion OC05 makes one layer up: it converts "nobody recorded this" into
+  # a positive claim of zero.
+  "OC10|959|DSPAN|$T_OC_LEGACY"
+
+  # OC11 — brandSpan joins the anchoring set. Widening WHERE an entry may anchor
+  # must not widen WHICH entries may: the two are independent and this is the
+  # over-correction that conflates them.
+  "OC11|960|PROJ|$T_OC_BRAND"
+
+  # OC12 — a user veto stops de-anchoring. The repeat widening puts anchors in
+  # places the user has already rejected, so the veto path is load-bearing in a
+  # way it was not before.
+  "OC12|961|PROJ|$T_OC_VETO"
+
+  # OC13 — `renderForPrompt` starts printing the occurrence list. The whole
+  # reason for keeping ONE entry per (category, text) is that the FM-side text
+  # does not move; this is the edit that would move it.
+  "OC13|962|EVCAT|$T_OC_PROMPT"
+
+  # OC99 — VACUITY CONTROL, and it MUST SURVIVE. A pure rename of the loop
+  # variable in the line OC01 mutates: it proves the anchor still matches, the
+  # batch still builds and the suites still run, while changing no behaviour.
+  # The expectation is non-empty on purpose, so this entry can genuinely fail.
+  "OC99|963|PROJ|$T_OC_ANCHORS_ALL"
+
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -8302,6 +8433,20 @@ MUTATIONS=(
 # One-line description per mutation, for the report.
 describe_mutation() {
   case "$1" in
+    OC01) echo "AtomEvidenceProjector keys evidenceByOrdinal on entry.atomOrdinal alone (the shipped defect) — every later mention is counted, never anchored" ;;
+    OC02) echo "the projector anchors every occurrence but attaches the ENTRY, so post-roll provenance claims the pre-roll's time and the decoder collapses two anchors into one" ;;
+    OC03) echo "EvidenceCatalogBuilder stops accumulating occurrences — one place per entry, exactly as before" ;;
+    OC04) echo "anchorableOccurrences stops resolving an ABSENT list, so a pre-04rx persisted row anchors nothing" ;;
+    OC05) echo "anchorableOccurrences accepts an EMPTY list as a population of zero" ;;
+    OC06) echo "the builder drops its per-atom dedupe, so one chunk saying a domain twice books two places to anchor" ;;
+    OC07) echo "viewOfOccurrence moves the ordinal and keeps the ENTRY's times — the right atom reported at the wrong second" ;;
+    OC08) echo "viewOfOccurrence carries the whole occurrence list, so a value naming ONE mention also claims to name all of them" ;;
+    OC09) echo "the encoder drops the occurrence list, so a catalog that round-trips through the store comes back one-place" ;;
+    OC10) echo "the decoder reads an ABSENT occurrence list as an EMPTY one — 'nobody recorded this' becomes a positive claim of zero" ;;
+    OC11) echo "brandSpan joins the projector's anchoring set — widening WHERE an entry anchors is confused with widening WHICH entries may" ;;
+    OC12) echo "a user veto stops de-anchoring, on a path the repeat widening has just made load-bearing" ;;
+    OC13) echo "renderForPrompt starts printing the occurrence list — the FM-side text this change exists to leave alone" ;;
+    OC99) echo "VACUITY CONTROL — the loop variable in the anchoring loop is renamed and nothing else changes. MUST SURVIVE" ;;
     NY01) echo "AdDetectionService.hotPathCandidates sorts the RAW array — the shipped defect: runBackfill canonicalized and the hot path did not" ;;
     NY02) echo "the hot path 'de-duplicates' by chunk.id, a per-ROW UUID, so a fast/final twin survives it intact" ;;
     NY03) echo "BoundaryExpander.makeLexicalContext scans the raw array — the user's 'Hearing an ad' tap gets a phantom lexical candidate" ;;
@@ -8929,6 +9074,180 @@ snippet() { IFS= read -r -d '' "$1" || true; }
 apply_mutation() {
   local name="$1" file="$2" OLD NEW
   case "$name" in
+
+  # ---- playhead-04rx: a repeated sponsor URL anchors EVERY mention (OC series) ----
+
+  OC01)
+    snippet OLD <<'EOF'
+        for entry in anchoringEntries {
+            for occurrence in entry.anchorableOccurrences {
+                evidenceByOrdinal[occurrence.atomOrdinal, default: []]
+                    .append(entry.viewOfOccurrence(occurrence))
+            }
+        }
+EOF
+    snippet NEW <<'EOF'
+        for entry in anchoringEntries {
+            evidenceByOrdinal[entry.atomOrdinal, default: []].append(entry)
+        }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  OC02)
+    snippet OLD <<'EOF'
+                evidenceByOrdinal[occurrence.atomOrdinal, default: []]
+                    .append(entry.viewOfOccurrence(occurrence))
+EOF
+    snippet NEW <<'EOF'
+                evidenceByOrdinal[occurrence.atomOrdinal, default: []]
+                    .append(entry)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  OC03)
+    snippet OLD <<'EOF'
+                    occurrences: match.occurrences.sorted { $0.atomOrdinal < $1.atomOrdinal }
+EOF
+    snippet NEW <<'EOF'
+                    occurrences: Array(match.occurrences.sorted { $0.atomOrdinal < $1.atomOrdinal }.prefix(1))
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  OC04)
+    snippet OLD <<'EOF'
+        if let occurrences, !occurrences.isEmpty { return occurrences }
+        return [EvidenceOccurrence(atomOrdinal: atomOrdinal, startTime: startTime, endTime: endTime)]
+EOF
+    snippet NEW <<'EOF'
+        return occurrences ?? []
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  OC05)
+    snippet OLD <<'EOF'
+        if let occurrences, !occurrences.isEmpty { return occurrences }
+EOF
+    snippet NEW <<'EOF'
+        if let occurrences { return occurrences }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  OC06)
+    snippet OLD <<'EOF'
+                if aggregate.seenOrdinals.insert(match.atomOrdinal).inserted {
+                    aggregate.occurrences.append(EvidenceOccurrence(
+                        atomOrdinal: match.atomOrdinal,
+                        startTime: match.startTime,
+                        endTime: match.endTime
+                    ))
+                }
+EOF
+    snippet NEW <<'EOF'
+                aggregate.occurrences.append(EvidenceOccurrence(
+                    atomOrdinal: match.atomOrdinal,
+                    startTime: match.startTime,
+                    endTime: match.endTime
+                ))
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  OC07)
+    snippet OLD <<'EOF'
+            atomOrdinal: occurrence.atomOrdinal,
+            startTime: occurrence.startTime,
+            endTime: occurrence.endTime,
+EOF
+    snippet NEW <<'EOF'
+            atomOrdinal: occurrence.atomOrdinal,
+            startTime: startTime,
+            endTime: endTime,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  OC08)
+    snippet OLD <<'EOF'
+            lastTime: lastTime,
+            occurrences: nil
+        )
+    }
+EOF
+    snippet NEW <<'EOF'
+            lastTime: lastTime,
+            occurrences: occurrences
+        )
+    }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  OC09)
+    snippet OLD <<'EOF'
+        try c.encodeIfPresent(occurrences, forKey: .occurrences)
+EOF
+    snippet NEW <<'EOF'
+        // mutation OC09: the occurrence list is not written.
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  OC10)
+    snippet OLD <<'EOF'
+            occurrences: try c.decodeIfPresent([EvidenceOccurrence].self, forKey: .occurrences)
+EOF
+    snippet NEW <<'EOF'
+            occurrences: try c.decodeIfPresent([EvidenceOccurrence].self, forKey: .occurrences) ?? []
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  OC11)
+    snippet OLD <<'EOF'
+    private static let anchoringCategories: Set<EvidenceCategory> = [
+        .url, .promoCode, .disclosurePhrase, .ctaPhrase
+    ]
+EOF
+    snippet NEW <<'EOF'
+    private static let anchoringCategories: Set<EvidenceCategory> = [
+        .url, .promoCode, .disclosurePhrase, .ctaPhrase, .brandSpan
+    ]
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  OC12)
+    snippet OLD <<'EOF'
+            case .userVetoed:
+                isAnchored = false
+EOF
+    snippet NEW <<'EOF'
+            case .userVetoed:
+                isAnchored = !anchorProvenance.isEmpty
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  OC13)
+    snippet OLD <<'EOF'
+            "[E\(entry.evidenceRef)] \"\(entry.matchedText)\" " +
+                entry.renderPromptMetadata(locationLabel: "atom", locationValue: entry.atomOrdinal)
+EOF
+    snippet NEW <<'EOF'
+            "[E\(entry.evidenceRef)] \"\(entry.matchedText)\" " +
+                entry.renderPromptMetadata(locationLabel: "atom", locationValue: entry.atomOrdinal) +
+                " occurrences=\(entry.anchorableOccurrences.count)"
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # VACUITY CONTROL — a rename, nothing else. MUST SURVIVE.
+  OC99)
+    snippet OLD <<'EOF'
+            for occurrence in entry.anchorableOccurrences {
+                evidenceByOrdinal[occurrence.atomOrdinal, default: []]
+                    .append(entry.viewOfOccurrence(occurrence))
+            }
+EOF
+    snippet NEW <<'EOF'
+            for mention in entry.anchorableOccurrences {
+                evidenceByOrdinal[mention.atomOrdinal, default: []]
+                    .append(entry.viewOfOccurrence(mention))
+            }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
 
   # ---- playhead-99yt: a twin is ONE observation (NY series) ----
 
@@ -18613,7 +18932,7 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
-  # RO02 — restore the pre-13kf ORDER: the coarse phase still runs, with the
+  # OC02 — restore the pre-13kf ORDER: the coarse phase still runs, with the
   # right deadline and floor, but AFTER the drain and the wake. Two sites (see
   # the two-site rule above patch()); the coarse call keeps its position
   # before the poll so the stub-level call-order journal stays ["coarse",
@@ -18642,7 +18961,7 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
-  # RO03 — hand the drain the coarse-window price again. One token, and it
+  # OC03 — hand the drain the coarse-window price again. One token, and it
   # reads like fixing a typo between two near-identical field names.
   RO03)
     snippet OLD <<'EOF'
@@ -18663,7 +18982,7 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
-  # RO04 — each phase opens a fresh clock. The lmrx bounds test cannot see
+  # OC04 — each phase opens a fresh clock. The lmrx bounds test cannot see
   # this (both its inequalities still hold); only the shared-instant equality
   # can, and it exists because "derived from what is actually left" is a
   # property of the instant being shared.
@@ -18676,7 +18995,7 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
-  # RO05 — the coarse loop's floor gate weakens to a bare deadline check,
+  # OC05 — the coarse loop's floor gate weakens to a bare deadline check,
   # admitting an asset whose one durable window cannot fit before the close.
   # LX04's defect, one phase earlier.
   RO05)
@@ -18688,7 +19007,7 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
-  # RO06 — the fil5 population falls out of the candidate merge. An asset
+  # OC06 — the fil5 population falls out of the candidate merge. An asset
   # with zero coverage-lane rows is invisible to the resumable query BY
   # CONSTRUCTION, so this silently recreates the fil5 blind spot while every
   # resumable-population test stays green.
@@ -18704,7 +19023,7 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
-  # RO07 — the F6 revert one layer down, in the constant itself, where it
+  # OC07 — the F6 revert one layer down, in the constant itself, where it
   # reads as making the struct uniform.
   RO07)
     snippet OLD <<'EOF'
@@ -18721,7 +19040,7 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
-  # RO08 — recovery's drain floor relaxes too: this bead's derivation spent
+  # OC08 — recovery's drain floor relaxes too: this bead's derivation spent
   # on the handler the reorder never touched.
   RO08)
     snippet OLD <<'EOF'
@@ -19165,6 +19484,8 @@ rec_file()   {
     FMSHD) printf '%s' "$FMSHD" ;;
     TCANON) printf '%s' "$TCANON" ;;
     ADSVC_ATOM) printf '%s' "$ATOMEV" ;;
+    EVCAT) printf '%s' "$EVCAT" ;;
+    PROJ)  printf '%s' "$PROJ" ;;
     PODC)  printf '%s' "$PODC" ;;
     MPTRIDX) printf '%s' "$MPTRIDX" ;;
     MPTRENG) printf '%s' "$MPTRENG" ;;
