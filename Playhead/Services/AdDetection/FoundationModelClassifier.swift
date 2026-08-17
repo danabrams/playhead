@@ -643,7 +643,20 @@ struct FMCoarseWindowOutput: Sendable, Equatable {
 /// case is what makes it measurable enough to answer.
 enum CoarseOversizeAbandonment: String, Sendable, Equatable, CaseIterable {
     /// The plan carried more than one segment, so the single-segment
-    /// subdivision path did not apply. Smart-shrink owns this shape.
+    /// subdivision path did not apply. Smart-shrink owns that shape.
+    ///
+    /// **UNREACHABLE FROM `coarsePassA` TODAY, AND SAYING SO IS THE POINT.**
+    /// `planPassA` computes the budget once, is handed that same budget by the
+    /// caller, and emits an over-budget plan ONLY for a single segment (the
+    /// escape at its `bestTokens > budget` guard); every multi-segment plan it
+    /// returns was accepted by `tokenCount <= budget`. So the negative arm of
+    /// the `lineRefs.count == 1` branch cannot currently be entered with an
+    /// over-budget plan. This case is the honest LABEL for that arm rather
+    /// than an observed cause: if a future planner ever does emit a
+    /// multi-segment plan over budget, the row will say which branch dropped
+    /// it instead of borrowing one of the subdivision causes and reading as a
+    /// size problem at atom granularity. Do not treat a zero count for it in
+    /// the field as evidence about anything.
     case subdivisionNotApplicable
     /// The plan's single line ref resolved to no segment, so no prompt could
     /// be rebuilt and subdivision was never entered.
