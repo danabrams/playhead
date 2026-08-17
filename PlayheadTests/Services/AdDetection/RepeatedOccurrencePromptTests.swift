@@ -149,8 +149,8 @@ struct RepeatedOccurrencePromptTests {
             .replacingOccurrences(of: "line 41", with: "line 1"))
     }
 
-    @Test("an entry whose representative IS in the window is byte-identical to pre-ad9n")
-    func representativeInWindowIsUnchanged() throws {
+    @Test("an entry whose representative is in the window keeps the representative's line ref")
+    func representativeInWindowKeepsItsLineRef() throws {
         let atoms = Self.atoms()
         let catalog = Self.catalog(atoms)
         let map = Self.lineRefByAtomOrdinal(Self.segments(atoms))
@@ -159,42 +159,91 @@ struct RepeatedOccurrencePromptTests {
             guard let representativeLine = map[entry.atomOrdinal] else { continue }
             let selected = try #require(PromptEvidenceEntry.forWindow(
                 entry: entry,
-                // A window spanning the whole episode: every occurrence is in.
+                // A window spanning the whole episode: every occurrence is in,
+                // so the EARLIEST-wins rule is what decides, and the earliest is
+                // the representative.
                 allowedLineRefs: Set(0 ..< 60),
                 lineRefByAtomOrdinal: map
             ))
             #expect(selected.lineRef == representativeLine)
-            // Byte-identical, INCLUDING the occurrence list — the selector must
-            // not quietly swap in a `viewOfOccurrence` (which drops it) for the
-            // representative case.
+        }
+    }
+
+    @Test("an entry whose representative is in the window is BYTE-IDENTICAL to pre-ad9n")
+    func representativeInWindowIsByteIdentical() throws {
+        // Separate from the line-ref pin above because they fail to different
+        // edits. A selector that always re-locates through `viewOfOccurrence`
+        // keeps the line ref exactly right and silently drops the occurrence
+        // list from every entry the prompt carries — which is a change to what
+        // `ResolvedEvidenceAnchor` receives for every window in the corpus, not
+        // only for repeats.
+        let atoms = Self.atoms()
+        let catalog = Self.catalog(atoms)
+        let map = Self.lineRefByAtomOrdinal(Self.segments(atoms))
+
+        for entry in catalog.entries where map[entry.atomOrdinal] != nil {
+            let selected = try #require(PromptEvidenceEntry.forWindow(
+                entry: entry,
+                allowedLineRefs: Set(0 ..< 60),
+                lineRefByAtomOrdinal: map
+            ))
             #expect(selected.entry == entry)
         }
     }
 
-    @Test("an entry earns at most ONE line even when several of its mentions are in the window")
-    func atMostOneLinePerEntry() throws {
-        // Both reads inside one window: the prompt must not gain a second
-        // `[E0]`, because `evidenceRef` is an identity the model points back at.
+    @Test("an entry earns at most ONE prompt line even when several of its mentions are in the window")
+    func atMostOneLinePerEntry() async throws {
+        // Driven through `planAdaptiveZoom` rather than through `forWindow`,
+        // because the property is about what the WHOLE evidence block does. A
+        // selector that returns one line per call still multiplies refs if its
+        // caller flatMaps over occurrences, and that is the plausible wrong fix
+        // the bead warned about: it multiplies `evidenceRef`, which is an
+        // identity the model points back at, and grows the prompt.
         let atoms = Self.atoms(repeatOrdinal: 3, atomCount: 10)
         let catalog = Self.catalog(atoms)
-        let map = Self.lineRefByAtomOrdinal(Self.segments(atoms))
+        let segments = Self.segments(atoms)
         let entry = try Self.urlEntry(catalog)
 
-        let allowed = Set(0 ..< 10)
-        let selected = try #require(PromptEvidenceEntry.forWindow(
-            entry: entry, allowedLineRefs: allowed, lineRefByAtomOrdinal: map
-        ))
-        // The earliest in-window occurrence wins, which for a window containing
-        // the representative IS the representative.
-        #expect(selected.lineRef == 1)
+        let recorder = TestFMRuntime(
+            contextSize: 4_096,
+            coarseSchemaTokenCount: 128,
+            refinementSchemaTokenCount: 256,
+            tokenCountRule: { FoundationModelClassifier.fallbackTokenEstimate(for: $0) }
+        )
+        let classifier = FoundationModelClassifier(runtime: recorder.runtime, config: .default)
+        let coarse = FMCoarseScanOutput(
+            status: .success,
+            windows: [
+                FMCoarseWindowOutput(
+                    windowIndex: 0,
+                    lineRefs: Array(0 ..< 10),
+                    startTime: 0,
+                    endTime: 99,
+                    transcriptQuality: .good,
+                    screening: CoarseScreeningSchema(
+                        disposition: .containsAd,
+                        support: CoarseSupportSchema(supportLineRefs: [1, 3], certainty: .moderate)
+                    ),
+                    latencyMillis: 10
+                )
+            ],
+            latencyMillis: 25,
+            prewarmHit: false
+        )
+        let plan = try #require(try await classifier.planAdaptiveZoom(
+            coarse: coarse,
+            segments: segments,
+            evidenceCatalog: catalog
+        ).first)
 
-        // And the whole catalog renders one line per entry, not one per mention.
-        let all = catalog.entries.compactMap {
-            PromptEvidenceEntry.forWindow(
-                entry: $0, allowedLineRefs: allowed, lineRefByAtomOrdinal: map
-            )
-        }
-        #expect(Set(all.map(\.entry.evidenceRef)).count == all.count)
+        // Both reads are inside this window — the fixture is only meaningful if
+        // they are, so assert it rather than assume it.
+        #expect(Set(plan.lineRefs).isSuperset(of: [1, 3]))
+        let refs = plan.promptEvidence.map(\.entry.evidenceRef)
+        #expect(Set(refs).count == refs.count)
+        #expect(refs.filter { $0 == entry.evidenceRef }.count == 1)
+        // And the rendered prompt carries the ref exactly once.
+        #expect(plan.prompt.components(separatedBy: "[E\(entry.evidenceRef)]").count == 2)
     }
 
     @Test("an entry with no mention in the window earns no line")
@@ -403,6 +452,88 @@ struct RepeatedOccurrencePromptTests {
             #expect(baseline.isSubset(of: treatment), "\(phase) lost segments")
             #expect(treatment.count > baseline.count, "\(phase) gained nothing — fixture is inert")
         }
+    }
+
+    @Test("the 20-atom lookback follows every occurrence, not only the first")
+    func narrowingLookbackFollowsEveryOccurrence() throws {
+        // The xsdz.2 lexical-cluster snap pulls a merged window back toward the
+        // ad-dense core, which in the default config hides the seed expansion
+        // behind the ±5 per-anchor padding. Turning the snap off is how the
+        // LOOKBACK is observed on its own — otherwise a mutant that seeds every
+        // occurrence and expands only the first is indistinguishable from the
+        // fix.
+        let atoms = Self.atoms()
+        let catalog = Self.catalog(atoms)
+        let segments = Self.segments(atoms)
+        let config = NarrowingConfig(
+            perAnchorPaddingSegments: 5,
+            maxNarrowedSegmentsPerPhase: 200,
+            lexicalClusterSnapEnabled: false
+        )
+        let result = TargetedWindowNarrower.narrow(
+            phase: .scanHarvesterProposals,
+            inputs: TargetedWindowNarrower.Inputs(
+                analysisAssetId: "ad9n",
+                podcastId: "ad9n",
+                transcriptVersion: "ad9n-v1",
+                segments: segments,
+                evidenceCatalog: catalog,
+                auditWindowSampleRate: 0.1
+            ),
+            config: config
+        )
+        let nominated = Set((result.narrowedSegments ?? []).map(\.segmentIndex))
+        // Segment 25 is inside the post-roll's 20-atom lookback (21...40) and
+        // well outside its ±5 padding (36...46), so only a per-OCCURRENCE
+        // lookback puts it here.
+        #expect(nominated.contains(25))
+        #expect(nominated.contains(41))
+    }
+
+    @Test("a legacy entry with no recorded occurrence list is still seeded")
+    func narrowingStillSeedsALegacyEntry() throws {
+        // `anchorableOccurrences` resolves an ABSENT list to the
+        // representative. Reading `occurrences` directly would make every
+        // pre-04rx persisted entry seed NOTHING — a window that used to be
+        // scanned silently stops being scanned, which is the one direction the
+        // "strictly additive" claim forbids.
+        let atoms = Self.atoms(repeatOrdinal: 41)
+        let segments = Self.segments(atoms)
+        let built = Self.catalog(atoms)
+        let legacy = EvidenceCatalog(
+            analysisAssetId: built.analysisAssetId,
+            transcriptVersion: built.transcriptVersion,
+            entries: built.entries.map { entry in
+                EvidenceEntry(
+                    evidenceRef: entry.evidenceRef,
+                    category: entry.category,
+                    matchedText: entry.matchedText,
+                    normalizedText: entry.normalizedText,
+                    atomOrdinal: entry.atomOrdinal,
+                    startTime: entry.startTime,
+                    endTime: entry.endTime,
+                    count: entry.count,
+                    firstTime: entry.firstTime,
+                    lastTime: entry.lastTime,
+                    occurrences: nil
+                )
+            }
+        )
+        #expect(legacy.entries.allSatisfy { $0.occurrences == nil })
+        let result = TargetedWindowNarrower.narrow(
+            phase: .scanHarvesterProposals,
+            inputs: TargetedWindowNarrower.Inputs(
+                analysisAssetId: "ad9n",
+                podcastId: "ad9n",
+                transcriptVersion: "ad9n-v1",
+                segments: segments,
+                evidenceCatalog: legacy,
+                auditWindowSampleRate: 0.1
+            )
+        )
+        #expect(result.wasEmpty == false)
+        let nominated = Set((result.narrowedSegments ?? []).map(\.segmentIndex))
+        #expect(nominated.contains(1))
     }
 
     @Test("a catalog with no repeats narrows byte-identically")
