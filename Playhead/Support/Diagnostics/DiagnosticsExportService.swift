@@ -649,6 +649,57 @@ struct DogfoodDiagnosticsPipelineSnapshot: Codable, Sendable, Equatable {
     /// appearing in dogfood provenance" acceptance criterion.
     let finalPassCoverageEndSource: String
 
+    /// playhead-uazf: the MEASURED semantic ad-scan area (playhead-pz32's
+    /// ``AnalysisCoverageSummary/adScanCoveredSec``), in seconds.
+    ///
+    /// **Why this had to go on the wire.** Every other axis of the pipeline
+    /// ships a live quantity here — transcript, feature, confirmed-ad,
+    /// final-pass — and the ad scan shipped none. The only place a device pull
+    /// carried an ad-scan number was the PROSE of
+    /// `analysis_assets.terminalReason`, which is a snapshot frozen at the
+    /// instant the terminal was minted and which nothing ever re-measures.
+    ///
+    /// That is not a hypothetical. `playhead-uazf` was filed as a P1 off four
+    /// such strings, and two of the four were already superseded by the same
+    /// database's own rows: 48E903D7 recorded `ad scan 0.038` (exactly the ONE
+    /// scan window that existed at write time; four more landed three days
+    /// later) and measures **0.150**; C065AD03 recorded `ad scan 0.894 < 0.980
+    /// (interrupted)` and measures **0.971**, against a transcript CEILING of
+    /// 0.976 — i.e. 99.5 % of everything a perfect scan could ever read. The
+    /// bead's diagnosis ("the scan is not running") was drawn from numbers the
+    /// app had already replaced and had no way to notice it had replaced.
+    ///
+    /// `analysisFraction` is NOT this quantity and must not be read as it: it
+    /// is playhead-sd71's analyzed AREA (the transcript union clipped to the
+    /// feature/confirmed-ad frontier), which advances on a DSP sweep that never
+    /// looked for an ad.
+    let adScanCoveredSec: Double?
+    /// playhead-uazf: ``AnalysisCoverageSummary/adScanFraction`` — the same
+    /// numerator over the DECLARED duration, i.e. the exact ratio the library ✓
+    /// and the coverage-lane terminal are both judged by
+    /// (``AnalysisJobRunner/semanticBackfillSufficientAdScanFraction``, 0.98).
+    /// `nil` means UNMEASURED — no coverage-lane row, or a denominator the
+    /// numerators have disproved — never "zero was scanned".
+    let adScanFraction: Double?
+    /// playhead-uazf: ``AnalysisCoverageSummary/adScanCeilingFraction`` — the
+    /// largest value `adScanFraction` could ever reach on this transcript.
+    ///
+    /// It is on the wire beside the measurement for playhead-nffz's reason: the
+    /// floor's denominator is the EPISODE and the numerator's supremum is the
+    /// TRANSCRIPT, so a reader who sees only `ad_scan_fraction = 0.971` cannot
+    /// tell "the scan stopped early" from "the scan read everything there was
+    /// and the transcript tops out at 0.976". C065AD03 is the second case and
+    /// was triaged as the first.
+    let adScanCeilingFraction: Double?
+    /// playhead-uazf: provenance for `adScanCoveredSec`
+    /// (`semantic_scan_results` when any coverage-lane row exists, `unknown`
+    /// when none does). The two are NOT interchangeable with a zero: `unknown`
+    /// is the `neverRan` population — thirteen of the twenty-four
+    /// complete-transcript assets on the 2026-08-11 pull, and zero of the
+    /// thirteen on 2026-08-16 — and collapsing it into `0.0` is what made that
+    /// population invisible.
+    let adScanSource: String
+
     enum CodingKeys: String, CodingKey {
         case downloadFraction = "download_fraction"
         case downloadPercent = "download_percent"
@@ -669,6 +720,10 @@ struct DogfoodDiagnosticsPipelineSnapshot: Codable, Sendable, Equatable {
         case finalPassCoverageEndSec = "final_pass_coverage_end_sec"
         case fastTranscriptCoverageEndSource = "fast_transcript_coverage_end_source"
         case finalPassCoverageEndSource = "final_pass_coverage_end_source"
+        case adScanCoveredSec = "ad_scan_covered_sec"
+        case adScanFraction = "ad_scan_fraction"
+        case adScanCeilingFraction = "ad_scan_ceiling_fraction"
+        case adScanSource = "ad_scan_source"
     }
 
     init(
@@ -694,7 +749,21 @@ struct DogfoodDiagnosticsPipelineSnapshot: Codable, Sendable, Equatable {
         // pre-hygc.1.2 keep compiling. Production wires the real
         // provenance from `AnalysisCoverageSummary`.
         fastTranscriptCoverageEndSource: String = "unknown",
-        finalPassCoverageEndSource: String = "unknown"
+        finalPassCoverageEndSource: String = "unknown",
+        // playhead-uazf: DELIBERATELY NOT DEFAULTED, unlike the two above.
+        // The precedent is `AnalysisCoordinator.classifyBackfillTerminal`'s
+        // `adScan` parameter — "there is no default: every call site must state
+        // what it knows, so a new caller cannot acquire a clean verdict by
+        // omission" — and it applies with more force here, because the omission
+        // this bead is fixing IS the whole defect: the ad-scan axis was simply
+        // absent from the wire for the entire life of this struct, and an
+        // absence that costs nothing to write is an absence nobody notices.
+        // A default of `nil`/"unknown" would let the next snapshot builder
+        // reintroduce it silently.
+        adScanCoveredSec: Double?,
+        adScanFraction: Double?,
+        adScanCeilingFraction: Double?,
+        adScanSource: String
     ) {
         self.downloadFraction = downloadFraction
         self.downloadPercent = downloadPercent
@@ -715,6 +784,10 @@ struct DogfoodDiagnosticsPipelineSnapshot: Codable, Sendable, Equatable {
         self.finalPassCoverageEndSec = finalPassCoverageEndSec
         self.fastTranscriptCoverageEndSource = fastTranscriptCoverageEndSource
         self.finalPassCoverageEndSource = finalPassCoverageEndSource
+        self.adScanCoveredSec = adScanCoveredSec
+        self.adScanFraction = adScanFraction
+        self.adScanCeilingFraction = adScanCeilingFraction
+        self.adScanSource = adScanSource
     }
 }
 

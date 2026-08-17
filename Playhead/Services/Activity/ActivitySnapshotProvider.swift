@@ -644,7 +644,18 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
                         confirmedAdCoverageEndSec: confirmedAdCoverageEndSec,
                         finalPassCoverageEndSec: finalPassCoverageEndSec,
                         fastTranscriptCoverageEndSource: dogfoodFastTranscriptEndSource(summary: summary),
-                        finalPassCoverageEndSource: dogfoodFinalPassEndSource(summary: summary)
+                        finalPassCoverageEndSource: dogfoodFinalPassEndSource(summary: summary),
+                        // playhead-uazf: the ad-scan axis, which shipped no live
+                        // quantity here at all until now. Taken straight off the
+                        // summary — the SAME `adScanCoveredSec` / `adScanFraction`
+                        // the library ✓ and the coverage-lane terminal divide, never
+                        // recomputed, for playhead-pz32's reason: a second expression
+                        // of a quantity that happens to agree is how the certainty
+                        // tier and its consumers came apart.
+                        adScanCoveredSec: summary?.adScanCoveredSec?.rawValue,
+                        adScanFraction: summary?.adScanFraction?.rawValue,
+                        adScanCeilingFraction: summary?.adScanCeilingFraction?.rawValue,
+                        adScanSource: dogfoodAdScanSource(summary: summary)
                     ),
                     analysisAsset: analysisAssetSnapshot(asset),
                     latestSession: session.map(analysisSessionSnapshot),
@@ -909,6 +920,18 @@ final class LiveActivitySnapshotProvider: ActivitySnapshotProviding {
     /// appear in dogfood provenance.
     private func dogfoodFinalPassEndSource(summary: AnalysisCoverageSummary?) -> String {
         provenanceWireString(summary?.finalPassCoverageEndSource)
+    }
+
+    /// playhead-uazf: provenance for the MEASURED ad-scan area.
+    ///
+    /// `semantic_scan_results` means a coverage-lane row exists for the asset,
+    /// so `ad_scan_covered_sec` is a MEASUREMENT — including a measured `0.0`,
+    /// which is a scan that ran and examined nothing. `unknown` means no row of
+    /// any kind exists, which is the `neverRan` population and is a different
+    /// fact entirely; it is why this string ships beside the number rather than
+    /// the number being allowed to stand alone.
+    private func dogfoodAdScanSource(summary: AnalysisCoverageSummary?) -> String {
+        provenanceWireString(summary?.adScanCoveredSource)
     }
 
     private func provenanceWireString(

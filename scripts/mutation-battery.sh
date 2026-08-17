@@ -1235,6 +1235,10 @@ MODEL="Playhead/Models/Podcast.swift"
 # out of the SwiftData row (whose COLUMN is the property).
 ELV="Playhead/Views/Library/EpisodeListView.swift"
 BSB="Playhead/Services/Notifications/BatchSummaryBuilder.swift"
+# playhead-uazf (UZ series): the ad-scan axis on the dogfood wire.
+UZWIRE="Playhead/Support/Diagnostics/DiagnosticsExportService.swift"
+UZPROV="Playhead/Services/Activity/ActivitySnapshotProvider.swift"
+UZHLTH="Playhead/Support/Diagnostics/DogfoodDiagnosticsAnalysisHealth.swift"
 # playhead-s9mx: the playback-position COMMIT POINT. Two files because the
 # claim spans a boundary neither side can see alone. The transport is the only
 # thing that knows whether `_state.currentTime` came from an item's clock or
@@ -1456,6 +1460,7 @@ MUTABLE_FILES=(
   "$BGPS" "$GRANT" "$LEASE"
   "$PTX"
   "$ELV" "$BSB"
+  "$UZWIRE" "$UZPROV" "$UZHLTH"
 )
 # playhead-6r4z R1 review: `$MPTRIDX` was MISSING from the list above from the
 # moment playhead-mptr added the K2 series, and it is the target of NINE of the
@@ -2168,6 +2173,17 @@ FOCUSED_SUITES=(
   # and persistence suites are the two places a widening could regress something
   # that predates it.
   -only-testing:PlayheadTests/RepeatedOccurrenceAnchoringTests
+  # playhead-uazf: the ad-scan axis on the dogfood wire (UZ series). TWO suites,
+  # and neither can observe the other. The provider suite is the only thing that
+  # lifts a real `AnalysisCoverageSummary` off a real store into the wire struct,
+  # so it is the only thing that can see WHETHER the four new fields are
+  # populated at all — the defect this bead fixed was an OMISSION, and a
+  # hand-built snapshot cannot have one. The health suite is the only thing that
+  # can see the READ: whether the frozen `terminalReason` is compared against
+  # the live measurement, and which number the parser takes out of a string that
+  # carries three.
+  -only-testing:PlayheadTests/LiveActivitySnapshotProviderFractionTests
+  -only-testing:PlayheadTests/DogfoodDiagnosticsAnalysisHealthTests
 )
 
 # Named to match the `/private/tmp/playhead-*` pattern `scripts/disk-cleanup.sh`
@@ -3623,6 +3639,17 @@ T_S9_CAPTURE_REFUSES_SILENT="A published episode on a silent transport is not ca
 #          index build is handed live violations.
 T_JC_ENGINE_ROW="an ENGINE-written final row is recognised — the runner does not append a second copy of the same span"
 T_JC_UPGRADE="the metadata upgrade addresses the row it FOUND, not the fingerprint it fabricated"
+
+# playhead-uazf (UZ series). Verbatim `@Test` display names — the field is split
+# on ';', so none of these may contain one.
+T_UZ_WIRE="dogfood diagnostics: the wire carries the MEASURED ad-scan area, not just the frozen terminal reason (playhead-uazf)"
+T_UZ_UNKNOWN="dogfood diagnostics: no coverage-lane row -> unknown ad-scan source and a nil fraction, never a synthetic 0 (playhead-uazf)"
+T_UZ_STALE="playhead-uazf: a completeAdScanPartial row whose recorded ad scan disagrees with the measurement is flagged"
+T_UZ_AGREE="playhead-uazf: an ad-scan reason that agrees with the measurement is not flagged"
+T_UZ_UNMEASURED='playhead-uazf: an `unmeasured` ad-scan reason yields no number and no flag'
+T_UZ_ABSENT="playhead-uazf: an unmeasured ad-scan fraction is not a disagreement"
+T_UZ_SCOPE="playhead-uazf: the ad-scan staleness flag is scoped to completeAdScanPartial"
+T_UZ_PARSER="playhead-uazf: the parser takes the ad-scan term, not the floor beside it or the transcript after it"
 T_JC_LOOKUP_SEES="fetchTranscriptChunkBySpanText finds an ENGINE-written final row the prefixed fingerprint cannot address"
 T_JC_LOOKUP_PASS="fetchTranscriptChunkBySpanText is scoped to ONE pass — a fast row over the same span is not a final row"
 T_JC_COLLAPSE="two pass='final' rows with identical span+text and different fingerprints collapse to the LOWEST rowid"
@@ -3789,6 +3816,89 @@ MUTATIONS=(
   # Two rounds of narrowing could not separate them because the difference is
   # unreachable, not merely unasserted. One entry, with the shipped defect's
   # spelling, is the honest count.
+  # ---- playhead-uazf, the UZ series: the ad-scan axis on the dogfood wire ----
+  #
+  # THE DEFECT THIS SERIES GUARDS IS AN OMISSION, which is why UZ01 is first and
+  # why it is the whole point. `DogfoodDiagnosticsPipelineSnapshot` shipped a
+  # live quantity for transcript, feature, confirmed-ad and final-pass, and NONE
+  # for the ad scan — so the only ad-scan number in a device pull was the prose
+  # of `analysis_assets.terminalReason`, frozen when the terminal was minted and
+  # re-measured by nothing. playhead-uazf was filed as a P1 off four such
+  # strings and two were already stale against the same database's own rows.
+  #
+  # Batch 940 — UZ01, THE OMISSION VERBATIM. The provider passes `nil`/"unknown"
+  # for the four new fields instead of reading the summary. Every declaration
+  # still compiles, the JSON still carries all four keys, and the numbers are
+  # gone — which is exactly how this survived for the life of the struct.
+  "UZ01|940|UZPROV|$T_UZ_WIRE"
+
+  # Batch 941 — UZ02, THE SUBSTITUTION. `analysisFraction` is fed into
+  # `adScanFraction`. It is the nearest quantity on the wire, it is a ReachRatio
+  # in [0,1] over the same denominator, and it is NOT the ad scan: playhead-sd71's
+  # analysed AREA advances on a DSP sweep that never looked for an ad. This is
+  # this repo's standing defect class aimed at the field built to end it, and
+  # nothing but a fixture where the two DIFFER can see it.
+  "UZ02|941|UZPROV|$T_UZ_WIRE"
+
+  # Batch 942 — UZ03, the ABSENCE collapsed into a zero. `adScanCoveredSource`
+  # is hard-wired to "semantic_scan_results", so an asset with no coverage-lane
+  # row of any kind reports the same provenance as one that scanned. That is the
+  # `neverRan` population — 13 of the 24 complete-transcript assets on the
+  # 2026-08-11 pull, 0 of 13 on 2026-08-16 — and collapsing it is what made the
+  # population invisible in the first place.
+  "UZ03|942|UZPROV|$T_UZ_UNKNOWN"
+
+  # Batch 943 — UZ04, the CEILING withheld with the measurement. `nffz` publishes
+  # the ceiling without requiring a scan row, because it is a property of the
+  # TRANSCRIPT and is knowable before the first window. Gating it on the
+  # measurement makes "nothing has scanned yet" and "nothing ever can"
+  # indistinguishable — which is the reading that sent C065AD03's triage the
+  # wrong way.
+  "UZ04|943|UZPROV|$T_UZ_UNKNOWN"
+
+  # Batch 944 — UZ05, the staleness check compares the recorded number against
+  # the FLOOR instead of against the measurement. It reads as a stronger test
+  # ("flag when the scan now clears 0.98") and is strictly weaker: measured
+  # across all thirteen distinct captures on this box it fires on ZERO rows,
+  # because the assets that go stale are the ones stuck under the floor for
+  # other reasons.
+  "UZ05|944|UZHLTH|$T_UZ_STALE"
+
+  # Batch 945 — UZ06, the flag fires on the STATE alone. Every
+  # `completeAdScanPartial` row is reported stale, so the flag stops carrying
+  # information the moment it is added. Killed by the agreeing-row control, not
+  # by the firing case — which is why that control is a test and not a comment.
+  "UZ06|945|UZHLTH|$T_UZ_AGREE"
+
+  # Batch 946 — UZ07, the parser anchored one term too far. It lands on the
+  # FLOOR in `"ad scan 0.038 < 0.980 (stoppedShort) …"` rather than on the
+  # measurement beside it: two ratios in one clause, both in [0,1], one a
+  # constant and one a measurement — the exact substitution this whole flag
+  # exists to catch, one layer down.
+  "UZ07|946|UZHLTH|$T_UZ_PARSER;$T_UZ_STALE"
+
+  # Batch 947 — UZ08, an unparseable numeral read as the number 0. An absence
+  # wearing a quantity's clothes: the row is then reported as drifting by the
+  # whole measured fraction.
+  #
+  # THIS ENTRY SURVIVED ON ITS FIRST RUN AND THE REASON IS THE FINDING. Its
+  # description then said "`ad scan unmeasured (neverRan)` is read as 0", and
+  # that string never reaches the mutated line at all: the loop returns nil at
+  # the digits-are-empty guard several lines above the `Double(digits)`
+  # conversion. So the `unmeasured` test — which looks like this rail's cover —
+  # exercises a different branch entirely, and the conversion had no test on it.
+  # The EDIT was left alone and the coverage added (`"ad scan .."`,
+  # `"ad scan 1.2.3"`), which is the only way into that line: digits collected,
+  # not a number.
+  #
+  # THE EXPECTATION IS `$T_UZ_PARSER`, NOT `$T_UZ_UNMEASURED`, and that swap is
+  # the second half of the same finding. Adding the coverage made the mutant
+  # bite, and the run reported SURVIVED anyway — because the entry still named
+  # the `unmeasured` test, which stays green under this edit for exactly the
+  # reason above. Naming the test that CAN observe the defect is not relaxing an
+  # expectation; the original named one that provably cannot.
+  "UZ08|947|UZHLTH|$T_UZ_PARSER"
+
   "JC01|900|FPRUN|$T_JC_UPGRADE"
 
   # Batch 901 — JC02, THE PLAUSIBLE WRONG FIX. Dropping `pass` from the lookup
@@ -8454,6 +8564,14 @@ describe_mutation() {
     NY05) echo "LiveShadowFMDispatcher.buildPrompt joins the raw array — same duplicated prompt line, other dispatcher" ;;
     NY06) echo "EpisodeSummary hydration samples the raw array — a twin spends two of the 80 prompt slots on one utterance" ;;
     NY07) echo "TranscriptChunkCanonicalizer.isFullyCovered goes STRICT, so an exact-span twin is never collapsed and every call site is a no-op" ;;
+    UZ01) echo "the provider passes nil/unknown for the four ad-scan wire fields instead of reading the summary (the omission verbatim)" ;;
+    UZ02) echo "analysisFraction is fed into ad_scan_fraction — sd71's analysed AREA read as the ad scan" ;;
+    UZ03) echo "ad_scan_source is hard-wired to semantic_scan_results, so the neverRan population reports as scanned" ;;
+    UZ04) echo "the ad-scan CEILING is withheld unless a scan row exists — 'nothing scanned yet' becomes 'nothing ever can'" ;;
+    UZ05) echo "the staleness check compares the recorded ad scan against the 0.98 FLOOR instead of against the measurement" ;;
+    UZ06) echo "the staleness flag fires on the state alone, so every completeAdScanPartial row is reported stale" ;;
+    UZ07) echo "the reason parser takes the LAST number after 'ad scan ' — the feature ratio — instead of the first" ;;
+    UZ08) echo "an unparseable numeral after 'ad scan ' is read as the number 0 — an absence wearing a quantity's clothes" ;;
     JC01) echo "FinalPassRetranscriptionRunner: the pre-insert guard asks for its OWN fp-final- fingerprint again (the shipped defect)" ;;
     JC02) echo "fetchTranscriptChunkBySpanText drops the pass predicate — a FAST row answers 'already stored' and final coverage stops growing" ;;
     JC04) echo "V53 keys the sweep and the index on normalizedText — the one column the two producers compute differently" ;;
@@ -9349,6 +9467,110 @@ EOF
 
   # JC01 — THE SHIPPED DEFECT. The pre-insert guard asks for the runner's own
   # `fp-final-` fingerprint, which no engine-written row can ever carry.
+  # ---- playhead-uazf, the UZ series ----
+
+  # UZ01 — THE OMISSION VERBATIM. Everything still compiles and all four keys
+  # still appear in the JSON; only the numbers are gone.
+  UZ01)
+    snippet OLD <<'EOF'
+                        adScanCoveredSec: summary?.adScanCoveredSec?.rawValue,
+                        adScanFraction: summary?.adScanFraction?.rawValue,
+                        adScanCeilingFraction: summary?.adScanCeilingFraction?.rawValue,
+                        adScanSource: dogfoodAdScanSource(summary: summary)
+EOF
+    snippet NEW <<'EOF'
+                        adScanCoveredSec: nil,
+                        adScanFraction: nil,
+                        adScanCeilingFraction: nil,
+                        adScanSource: "unknown"
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # UZ02 — sd71's analysed AREA read as the ad scan.
+  UZ02)
+    snippet OLD <<'EOF'
+                        adScanFraction: summary?.adScanFraction?.rawValue,
+EOF
+    snippet NEW <<'EOF'
+                        adScanFraction: analysisFraction,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # UZ03 — the ABSENCE collapsed into a measurement.
+  UZ03)
+    snippet OLD <<'EOF'
+    private func dogfoodAdScanSource(summary: AnalysisCoverageSummary?) -> String {
+        provenanceWireString(summary?.adScanCoveredSource)
+    }
+EOF
+    snippet NEW <<'EOF'
+    private func dogfoodAdScanSource(summary: AnalysisCoverageSummary?) -> String {
+        _ = summary
+        return "semantic_scan_results"
+    }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # UZ04 — the ceiling gated on the measurement it bounds.
+  UZ04)
+    snippet OLD <<'EOF'
+                        adScanCeilingFraction: summary?.adScanCeilingFraction?.rawValue,
+EOF
+    snippet NEW <<'EOF'
+                        adScanCeilingFraction: summary?.adScanCoveredSec == nil
+                            ? nil
+                            : summary?.adScanCeilingFraction?.rawValue,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # UZ05 — the comparison is against the FLOOR rather than the measurement.
+  UZ05)
+    snippet OLD <<'EOF'
+        guard abs(measured - recorded) > adScanReasonStalenessTolerance else { return nil }
+EOF
+    snippet NEW <<'EOF'
+        guard measured >= AnalysisJobRunner.semanticBackfillSufficientAdScanFraction.rawValue else {
+            return nil
+        }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # UZ06 — the flag fires on the state alone.
+  UZ06)
+    snippet OLD <<'EOF'
+        guard abs(measured - recorded) > adScanReasonStalenessTolerance else { return nil }
+EOF
+    snippet NEW <<'EOF'
+        _ = adScanReasonStalenessTolerance
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # UZ07 — anchored one term too far: the parser lands on the FLOOR (`< 0.980`)
+  # instead of the measurement beside it. Both numbers are ratios, both are in
+  # [0,1], both sit in the same clause, and only one of them is a measurement —
+  # so the check would compare a constant against the live fraction and report
+  # drift on every row whose scan is not exactly at the floor.
+  UZ07)
+    snippet OLD <<'EOF'
+        guard let range = reason.range(of: "ad scan ") else { return nil }
+EOF
+    snippet NEW <<'EOF'
+        guard let range = reason.range(of: " < ") else { return nil }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # UZ08 — an absence read as the number zero.
+  UZ08)
+    snippet OLD <<'EOF'
+        guard let value = Double(digits), value.isFinite else { return nil }
+        return value
+EOF
+    snippet NEW <<'EOF'
+        guard let value = Double(digits), value.isFinite else { return 0 }
+        return value
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
   JC01)
     snippet OLD <<'EOF'
                 let existingFinalChunk = try? await store.fetchTranscriptChunkBySpanText(
@@ -19463,6 +19685,9 @@ rec_file()   {
     ORCH)  printf '%s' "$ORCH" ;;
     ELV)   printf '%s' "$ELV" ;;
     BSB)   printf '%s' "$BSB" ;;
+    UZWIRE) printf '%s' "$UZWIRE" ;;
+    UZPROV) printf '%s' "$UZPROV" ;;
+    UZHLTH) printf '%s' "$UZHLTH" ;;
     STORE) printf '%s' "$STORE" ;;
     CTRL)  printf '%s' "$CTRL" ;;
     VIEW)  printf '%s' "$VIEW" ;;
