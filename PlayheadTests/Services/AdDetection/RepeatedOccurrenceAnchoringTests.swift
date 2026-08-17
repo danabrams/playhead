@@ -55,13 +55,41 @@ struct RepeatedOccurrenceAnchoringTests {
 
     /// A pre-roll read of one sponsor, unrelated show talk, then a post-roll
     /// read of the SAME sponsor. This is the shape the bead is about.
+    ///
+    /// THE POST-ROLL ATOM CARRIES THE REPEATED URL AND NOTHING ELSE, and that
+    /// is load-bearing rather than tidy. It first read "this episode was
+    /// brought to you by acmewidgets.com slash offer", which also matches the
+    /// `disclosurePhrase` lexicon — a SEPARATE catalog entry whose own
+    /// representative is that atom. So the post-roll anchored either way, and
+    /// mutation OC01 (the shipped defect reinstated) SURVIVED: the rail was
+    /// passing on a second entry rather than on the repeat. The mutant found
+    /// it; no amount of reading would have.
     private static func preRollAndPostRoll() -> [TranscriptAtom] {
         [
             atom(0, "go to acmewidgets.com slash offer for a free trial"),
             atom(1, "so anyway the thing about deep sea trenches is the pressure"),
             atom(2, "and that is why the mantis shrimp punches so hard"),
-            atom(3, "this episode was brought to you by acmewidgets.com slash offer")
+            atom(3, "one more time acmewidgets.com slash offer")
         ]
+    }
+
+    /// The fixture's own anti-vacuity check: the post-roll atom must be
+    /// anchorable through the REPEAT and through nothing else. Without this,
+    /// any future edit that puts a second anchoring category into atom 3
+    /// silently re-opens the hole OC01 exposed.
+    @Test("the fixture's post-roll atom carries exactly one anchoring entry, the repeat")
+    func fixturePostRollIsAnchorableOnlyThroughTheRepeat() {
+        let catalog = Self.build(Self.preRollAndPostRoll())
+        let anchoring: Set<EvidenceCategory> = [.url, .promoCode, .disclosurePhrase, .ctaPhrase]
+        let reachingAtomThree = catalog.entries.filter { entry in
+            anchoring.contains(entry.category)
+                && entry.anchorableOccurrences.contains { $0.atomOrdinal == 3 }
+        }
+        #expect(reachingAtomThree.count == 1,
+                "a second anchoring entry on atom 3 would let the projector rail pass without the repeat")
+        #expect(reachingAtomThree.first?.category == .url)
+        #expect(reachingAtomThree.first?.atomOrdinal == 0,
+                "and its representative must be the PRE-ROLL, or there is no repeat to test")
     }
 
     private static func build(_ atoms: [TranscriptAtom]) -> EvidenceCatalog {
