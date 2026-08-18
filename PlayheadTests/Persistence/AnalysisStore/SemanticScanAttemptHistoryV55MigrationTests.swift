@@ -382,7 +382,11 @@ struct SemanticScanAttemptHistoryV55MigrationTests {
         AnalysisStore.resetMigratedPathsForTesting()
         let upgraded = try AnalysisStore(directory: dir)
         try await upgraded.migrate()
-        #expect(try await upgraded.schemaVersion() == 55)
+        // playhead-6gcy: a store rewound to V54 climbs to HEAD, not to 55 —
+        // the V56 rung runs in the same `migrate()`. What this test pins is
+        // the V55 rung's EFFECTS, asserted on the raw columns below; the
+        // stamp only has to prove the ladder ran to completion.
+        #expect(try await upgraded.schemaVersion() == AnalysisStore.currentSchemaVersion)
 
         let raw = try #require(try rawRow(in: dir, rowId: "scan-up"))
         // A RENAME, not a claim: every stored `createdAt` IS the last write.
@@ -467,14 +471,15 @@ struct SemanticScanAttemptHistoryV55MigrationTests {
         try await second.migrate()
         let afterSecond = try #require(try rawRow(in: dir, rowId: "scan-idem"))
 
-        #expect(try await second.schemaVersion() == 55)
+        // playhead-6gcy: HEAD, not 55 — see `upgradeClaimsOnlyWhatItCanProve`.
+        #expect(try await second.schemaVersion() == AnalysisStore.currentSchemaVersion)
         #expect(afterFirst.createdAt == afterSecond.createdAt)
         #expect(afterFirst.lastAttemptAt == afterSecond.lastAttemptAt)
         #expect(afterFirst.observedStatuses == afterSecond.observedStatuses)
         #expect(afterSecond.firstAttemptAt == nil)
     }
 
-    @Test("fresh DB: the three columns exist at head, and head is 55")
+    @Test("fresh DB: the three columns exist at head, and head is 56")
     func freshDatabaseCarriesTheColumns() async throws {
         let dir = try freshTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
@@ -486,7 +491,7 @@ struct SemanticScanAttemptHistoryV55MigrationTests {
         #expect(try await store.schemaVersion() == AnalysisStore.currentSchemaVersion)
         // Pinned to the LITERAL head so the next schema bump has to read this
         // rung, matching the convention of every sibling migration suite.
-        #expect(AnalysisStore.currentSchemaVersion == 55)
+        #expect(AnalysisStore.currentSchemaVersion == 56)
 
         let columns = try withReadOnlyHandle(in: dir) { db -> Set<String> in
             var stmt: OpaquePointer?

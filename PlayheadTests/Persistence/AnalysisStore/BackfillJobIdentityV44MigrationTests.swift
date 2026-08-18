@@ -71,7 +71,7 @@ struct BackfillJobIdentityV44MigrationTests {
         // and never on `jobId`, `analysisAssetId` or the identity columns this
         // rung is about. A store with no `semantic_scan_results` rows at all is
         // a no-op for it.
-        #expect(AnalysisStore.currentSchemaVersion == 55)
+        #expect(AnalysisStore.currentSchemaVersion == 56)
 
         try await store.insertAsset(makeAsset(id: "asset-fresh"))
         try await store.insertBackfillJob(
@@ -152,12 +152,20 @@ struct BackfillJobIdentityV44MigrationTests {
         // This one is NOT the same assertion as the drift guard: it reads the
         // version off the DATABASE, not off the constant, so it is the only pin
         // in the suite that would still fail if a new rung were added to the
-        // constant but never reached from an old seed. That is exactly the risk
-        // V50 carries — `migrateUnderCoverageRetryBudgetV50IfNeeded` refuses to
-        // run below 49 (the deliberate don't-step-over-a-rolled-back-V39 rule),
-        // so a v43 seed only reaches 50 if every rung from 44 up actually ran.
-        // 50 here is therefore a real claim about the ladder, not a restatement.
-        #expect(try await store.schemaVersion() == 55)
+        // constant but never reached from an old seed. Every rung from V50 on
+        // carries that risk — each refuses to run below its predecessor (the
+        // deliberate don't-step-over-a-rolled-back-V39 rule), so a v43 seed
+        // reaches HEAD only if every rung from 44 up actually ran. The literal
+        // here is therefore a real claim about the ladder, not a restatement.
+        //
+        // playhead-6gcy: the prose named V50 while the literal read 55 — a
+        // previous bump moved the number and left the sentence, so the comment
+        // was describing a rung three behind the one being asserted. Named
+        // rather than silently corrected because it is the reason this pin is
+        // worth keeping: the literal is what caught the V56 bump (this test was
+        // RED on the 6gcy branch until this line moved), and the prose is what
+        // stopped saying why.
+        #expect(try await store.schemaVersion() == 56)
         #expect(try await store.fetchBackfillJob(byId: "fm-legacy-complete") == nil,
                 "a completed row minted under the old preimage cannot be addressed again")
         #expect(try await store.fetchBackfillJob(byId: "fm-legacy-queued") == nil,

@@ -53,6 +53,74 @@ enum ScanScenePhase: String, Sendable, Hashable, CaseIterable {
     case unknown
 }
 
+/// playhead-6gcy (schema V56): the three `semantic_scan_results` columns that
+/// hold a row's LATENCY history, and the ONE place an attempt is folded into it.
+///
+/// This is a value type rather than three lines inside
+/// ``AnalysisStore/insertSemanticScanResult(_:now:)`` because the folding rule
+/// has a case that is easy to get wrong and impossible to see from a device
+/// pull afterwards — see ``folding(attemptLatencyMs:isIdempotentRewrite:)``.
+/// A pure function can be driven directly by a test; a branch buried in a
+/// 60-line upsert can only be driven through SQLite.
+struct SemanticScanLatencyHistory: Sendable, Equatable {
+    /// Sum of every MEASURED attempt's `latencyMs`. See
+    /// ``SemanticScanResult/latencyMsTotal``.
+    let total: Double?
+    /// Largest single measured attempt. See ``SemanticScanResult/latencyMsMax``.
+    let max: Double?
+    /// How many attempts contributed. See
+    /// ``SemanticScanResult/latencySampleCount``.
+    let sampleCount: Int?
+
+    /// No claim in any direction — a pre-V56 row, or a row none of whose
+    /// attempts ever measured itself.
+    static let unrecorded = SemanticScanLatencyHistory(total: nil, max: nil, sampleCount: nil)
+
+    /// The history of a row being written for the FIRST time.
+    ///
+    /// A nil cost yields ``unrecorded`` rather than a zero total: 0 asserts the
+    /// attempt was free, nil says nobody measured it, and that distinction is
+    /// the one playhead-ejr7 spent a bead establishing for `latencyMs` itself.
+    static func first(attemptLatencyMs: Double?) -> Self {
+        guard let attemptLatencyMs else { return .unrecorded }
+        return Self(total: attemptLatencyMs, max: attemptLatencyMs, sampleCount: 1)
+    }
+
+    /// Fold ONE further write of this row into the history.
+    ///
+    /// **`isIdempotentRewrite` is the case that matters, and it is not a
+    /// micro-optimisation.** `BackfillJobRunner.checkpointCoarseProgress` writes
+    /// each successfully screened window at the checkpoint AND again in the
+    /// end-of-pass digest, carrying the SAME `latencyMs` both times. That is one
+    /// attempt written twice, not two attempts — playhead-bg2n established it
+    /// for `attemptCount`, and a SUM feels it harder: accumulating
+    /// unconditionally would DOUBLE the recorded cost of every checkpointed
+    /// success and make `latencySampleCount` say two attempts were timed when
+    /// one was. The resulting row is structurally valid and its inflation is
+    /// invisible from a pull, which is why the rule lives here with a name
+    /// rather than inline with a comment.
+    ///
+    /// An UNMEASURED attempt (`attemptLatencyMs == nil`) carries the history
+    /// forward untouched — exactly the contribution SQL's `SUM` gives a NULL,
+    /// and the reason ``SemanticScanResult/latencySampleCount`` can legitimately
+    /// trail `attemptCount`.
+    func folding(attemptLatencyMs: Double?, isIdempotentRewrite: Bool) -> Self {
+        if isIdempotentRewrite {
+            // Not a new attempt, so not a new sample. Seed only if nothing is
+            // recorded yet, so a pre-V56 row whose only further writes are
+            // digests still gains a TRUE one-sample record instead of staying
+            // silent forever.
+            return sampleCount == nil ? Self.first(attemptLatencyMs: attemptLatencyMs) : self
+        }
+        guard let attemptLatencyMs else { return self }
+        return Self(
+            total: (total ?? 0) + attemptLatencyMs,
+            max: Swift.max(max ?? attemptLatencyMs, attemptLatencyMs),
+            sampleCount: (sampleCount ?? 0) + 1
+        )
+    }
+}
+
 struct SemanticScanResult: Sendable, Equatable {
     let id: String
     let analysisAssetId: String
@@ -66,6 +134,43 @@ struct SemanticScanResult: Sendable, Equatable {
     let spansJSON: String
     let status: SemanticScanStatus
     let attemptCount: Int
+    /// playhead-6gcy: LAST-WRITE-WINS, deliberately, and this is the record of
+    /// the measurement that decided to leave it that way.
+    ///
+    /// playhead-bg2n filed `latencyMs` and this column together, and its design
+    /// note argued this was the WORSE of the two: "unbounded strings; a set is
+    /// not available … where bg2n's rejected per-attempt journal would actually
+    /// earn its cost". Measured over every preserved capture — 25 SQLite files
+    /// carrying `semantic_scan_results`, collapsing to 7 distinct table states —
+    /// all three clauses of that are wrong:
+    ///
+    ///   * **The strings are short and enumerable.** Every non-NULL value in the
+    ///     whole preserved record is the single 20-byte literal
+    ///     `noWork:emptySegments`. `min = max = 20` in all seven states. The
+    ///     only other vocabulary any writer can produce is
+    ///     ``CoarseWindowFailure/oversizeErrorContext``'s
+    ///     `oversize:<case> budget=<N>`, whose longest spelling is ~48 bytes.
+    ///     The 1 MB cap in `insertSemanticScanResult` bounds the TYPE, not the
+    ///     practice.
+    ///   * **Zero overwrites have ever been observed.** 18 rows carry a
+    ///     non-NULL value in two or more states and not one of them CHANGES.
+    ///   * **The cost playhead-hzpa paid was never an overwrite.** Its finding
+    ///     was that the failing prompt is unrecoverable — and the reason is that
+    ///     nothing ever WROTE this column for a failure. Zero rows with
+    ///     `decodingFailure` / `exceededContextWindow` / `inferenceTimeout` /
+    ///     `failedTransient` / `cancelled` carry an errorContext at all;
+    ///     `inputTokenCount` is NULL on all 961 rows of the 2026-08-15 pull.
+    ///     hzpa fixed the WRITER, and its `oversize:` values post-date every
+    ///     capture on disk.
+    ///
+    /// **So "0 of 18 rows changed" is not evidence that overwrites are
+    /// harmless — it is evidence that the only value ever written cannot
+    /// change,** because one writer emits one constant. The population that
+    /// COULD vary has zero rows anywhere. A container designed now would be
+    /// designed for a population with no observations, which is the mistake this
+    /// file spends most of its comments recording. The next device pull is the
+    /// first that can produce one; **playhead-vj89** carries the re-measure and
+    /// its trigger.
     let errorContext: String?
     let inputTokenCount: Int?
     let outputTokenCount: Int?
@@ -214,6 +319,51 @@ struct SemanticScanResult: Sendable, Equatable {
     /// observed) and grows from there, so it is a lower bound on a row whose
     /// earlier attempts are gone.
     let observedStatusesCSV: String?
+    /// playhead-6gcy (schema V56): the SUM of every MEASURED attempt's
+    /// ``latencyMs`` on this row.
+    ///
+    /// **``latencyMs`` is ONE attempt's cost and was read as the row's.** Under
+    /// `INSERT OR REPLACE` every retry overwrites it, so a window that burned
+    /// eleven attempts reports whichever one happened to be last. Measured
+    /// across the preserved capture generations, `scan-24f9deacdb0e3ab6` read
+    /// 6,747.4 → 19,413.8 → 8,213.7 ms on one 42.9 s window — a **2.88×** spread
+    /// of which only the last survives a pull.
+    ///
+    /// **THE UNIT IS THE ONE ``latencyMs`` HAS, AND THE SUM INHERITS ITS
+    /// CAVEAT.** Each addend is one FM window attempt's `ContinuousClock` span,
+    /// taken from an ``FMClockPair`` before the call — NOT the pass's wall clock
+    /// (playhead-ejr7 removed the parameter through which the pass total could
+    /// reach a row), and NOT this row's lifetime. Device sleep is INSIDE it, as
+    /// it is inside every addend, so this is summed wall clock and not compute.
+    /// There is deliberately no `suspendingLatencyMsTotal` beside it, so the
+    /// device-asleep share is not recoverable across attempts — a stated limit.
+    ///
+    /// `nil` means NOT RECORDED (the row predates V56, or no attempt of it has
+    /// ever measured itself). It is never 0 for "no attempts": SQL's `SUM` skips
+    /// NULL and so does this, which is the contribution an unmeasured attempt
+    /// should make.
+    let latencyMsTotal: Double?
+    /// playhead-6gcy (schema V56): the LARGEST single measured attempt's
+    /// ``latencyMs`` on this row. Same span, same caveat, same `nil` meaning as
+    /// ``latencyMsTotal``.
+    ///
+    /// Compare it against ``latencyMsMean`` to see whether the attempts cost the
+    /// same. There is deliberately **no boolean** for that comparison: telling
+    /// "equal" from "nearly equal" over `Double`s needs a tolerance, and a
+    /// tolerance chosen here would be a threshold nobody measured.
+    let latencyMsMax: Double?
+    /// playhead-6gcy (schema V56): HOW MANY attempts contributed to
+    /// ``latencyMsTotal`` and ``latencyMsMax`` — the denominator, and half the
+    /// licence that says the pair is exhaustive.
+    ///
+    /// It is NOT ``attemptCount``. An attempt that measured nothing writes NULL
+    /// and contributes to neither, which is why the two can differ and why the
+    /// gap is the interesting quantity: `attemptCount - latencySampleCount` is
+    /// how many of this row's attempts left no cost behind.
+    ///
+    /// See ``latencyHistoryIsComplete`` before reading the pair as the row's
+    /// whole cost.
+    let latencySampleCount: Int?
 
     init(
         id: String,
@@ -248,7 +398,10 @@ struct SemanticScanResult: Sendable, Equatable {
         runCorrelationId: String? = nil,
         firstAttemptAt: Double? = nil,
         lastAttemptAt: Double? = nil,
-        observedStatusesCSV: String? = nil
+        observedStatusesCSV: String? = nil,
+        latencyMsTotal: Double? = nil,
+        latencyMsMax: Double? = nil,
+        latencySampleCount: Int? = nil
     ) {
         self.id = id
         self.analysisAssetId = analysisAssetId
@@ -283,6 +436,9 @@ struct SemanticScanResult: Sendable, Equatable {
         self.firstAttemptAt = firstAttemptAt
         self.lastAttemptAt = lastAttemptAt
         self.observedStatusesCSV = observedStatusesCSV
+        self.latencyMsTotal = latencyMsTotal
+        self.latencyMsMax = latencyMsMax
+        self.latencySampleCount = latencySampleCount
     }
 
     // MARK: - playhead-bg2n: reading a row's ATTEMPT HISTORY
@@ -376,6 +532,59 @@ struct SemanticScanResult: Sendable, Equatable {
         return lastAttemptAt - firstAttemptAt
     }
 
+    // MARK: - playhead-6gcy: reading a row's LATENCY history
+
+    /// The mean cost of this row's MEASURED attempts — `nil` when none were.
+    ///
+    /// The denominator is ``latencySampleCount``, never ``attemptCount``: an
+    /// attempt that wrote no latency is not in the numerator either, and
+    /// dividing by the larger number would report a cheap-looking mean for a
+    /// window most of whose attempts were never timed.
+    var latencyMsMean: Double? {
+        guard let latencyMsTotal, let latencySampleCount, latencySampleCount > 0 else { return nil }
+        return latencyMsTotal / Double(latencySampleCount)
+    }
+
+    /// Do ``latencyMsTotal`` / ``latencyMsMax`` account for EVERY attempt this
+    /// row has ever had? THREE-VALUED, for the same reason
+    /// ``attemptsDiffered`` is: "not established" is a distinct answer from "no".
+    ///
+    /// * `true`  — the record reaches the first attempt AND every recorded
+    ///             attempt contributed a cost. The total IS the row's whole cost.
+    /// * `false` — one of those two fails: attempts before the record began are
+    ///             missing, or some recorded attempt measured nothing. The total
+    ///             is a LOWER BOUND.
+    /// * `nil`   — nothing was recorded at all (a pre-V56 row), so no claim is
+    ///             made in either direction.
+    ///
+    /// Both clauses are needed and neither implies the other.
+    /// ``historyIsComplete`` (playhead-bg2n's `firstAttemptAt` licence) says the
+    /// record reaches attempt 1; it says nothing about whether those attempts
+    /// were timed. ``latencySampleCount`` says every recorded attempt was timed;
+    /// it says nothing about attempts that predate the record. A reader who
+    /// checks one and not the other reads a lower bound as a total, which is
+    /// this bead one level up.
+    ///
+    /// The count comparison is `==` rather than `>=` deliberately: more samples
+    /// than attempts would mean a writer double-counted, and answering `false`
+    /// under-claims rather than vouching for a total nobody can explain.
+    var latencyHistoryIsComplete: Bool? {
+        guard let latencySampleCount else { return nil }
+        guard historyIsComplete else { return false }
+        return latencySampleCount == attemptCount
+    }
+
+    /// How many of this row's attempts left NO cost behind — `nil` when the
+    /// latency record does not exist.
+    ///
+    /// This is the quantity that makes a `nil` ``latencyHistoryIsComplete``
+    /// actionable: it says how much of the row is missing, not merely that some
+    /// of it is.
+    var unmeasuredAttemptCount: Int? {
+        guard let latencySampleCount else { return nil }
+        return Swift.max(0, attemptCount - latencySampleCount)
+    }
+
     /// playhead-hx6n: the ONE seam that stamps run attribution onto a scan row.
     ///
     /// Every `SemanticScanResult` factory in `BackfillJobRunner` already had the
@@ -435,7 +644,15 @@ struct SemanticScanResult: Sendable, Equatable {
             // it has not read.
             firstAttemptAt: firstAttemptAt,
             lastAttemptAt: lastAttemptAt,
-            observedStatusesCSV: observedStatusesCSV
+            observedStatusesCSV: observedStatusesCSV,
+            // playhead-6gcy: the three latency-history fields are carried
+            // through UNCHANGED for bg2n's reason one line up — they are
+            // decided by the STORE, which is the only place that can see what
+            // the row on disk already accumulated. A producer stamping a total
+            // here would be asserting a history it has not read.
+            latencyMsTotal: latencyMsTotal,
+            latencyMsMax: latencyMsMax,
+            latencySampleCount: latencySampleCount
         )
     }
 

@@ -1971,7 +1971,7 @@ actor AnalysisStore {
     /// assertions automatically follow the production constant — hardcoding
     /// the integer in tests has been a recurring source of stale-assertion
     /// flakes whenever the schema bumps.
-    nonisolated static let currentSchemaVersion = 55
+    nonisolated static let currentSchemaVersion = 56
 
     /// H1: minimum age (in seconds) a `backfill_jobs` / `final_pass_jobs`
     /// row stuck in `status='running'` must reach before the launch-time
@@ -2922,6 +2922,11 @@ actor AnalysisStore {
             // three nullable columns; `firstAttemptAt` is deliberately NOT
             // backfilled — see the block comment on the migration.
             try migrateSemanticScanAttemptHistoryV55IfNeeded()
+            // playhead-6gcy: `semantic_scan_results` learns WHAT ITS ATTEMPTS
+            // COST. Additive-only, three nullable columns; the backfill seeds
+            // ONE sample per row and deliberately claims no more — see the
+            // block comment on the migration.
+            try migrateSemanticScanLatencyHistoryV56IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -3319,6 +3324,11 @@ actor AnalysisStore {
         // `semantic_scan_results` — or one already carrying the V55 shape —
         // still reaches v55.
         try migrateSemanticScanAttemptHistoryV55IfNeeded()
+        // playhead-6gcy (v56): guarded on `tableExists`, and every column add is
+        // `addColumnIfNeeded`, so a seeded fixture without
+        // `semantic_scan_results` — or one already carrying the V56 shape —
+        // still reaches v56.
+        try migrateSemanticScanLatencyHistoryV56IfNeeded()
     }
     #endif
 
@@ -8052,6 +8062,126 @@ actor AnalysisStore {
         try setSchemaVersion(55)
     }
 
+    /// playhead-6gcy — V56. `semantic_scan_results` learns WHAT ITS ATTEMPTS
+    /// COST, not just what the last one cost.
+    ///
+    /// THE OTHER HALF OF V55. playhead-bg2n fixed the attempt-IDENTITY columns
+    /// and named this one in its own filing: `status` AND `latencyMs` describe
+    /// ONE attempt and are read as describing all of them. `observedStatuses`
+    /// closed the first; `latencyMs` was still last-write-wins.
+    ///
+    /// THE WITNESS, re-measured for this bead over the preserved captures.
+    /// `scan-24f9deacdb0e3ab6` — asset `AA6CD430`, head window `[0.0, 42.9]` —
+    /// read `latencyMs` 6,747.4 → 6,747.4 → 19,413.8 → 8,213.7 ms across four
+    /// capture generations, a **2.88×** spread on one window of which a pull
+    /// sees only the last.
+    ///
+    /// AND THE HONEST DENOMINATOR, because "one row in 961" is the wrong
+    /// reading of that and would refute this migration. Only **6 rows** are
+    /// provably re-attempted BETWEEN two preserved capture states — that is the
+    /// entire population in which an overwrite could be observed at all — and
+    /// **all six** had `latencyMs` overwritten. Five of the six are `noWork:`
+    /// sentinels whose cost is a structural `0.0`, so they overwrote 0 with 0;
+    /// of the ONE remaining, ONE shows the 2.88× spread. On the 2026-08-15 pull
+    /// itself the forward-looking population is larger and sharper: **26 rows
+    /// carry 79 attempts beyond their first, every one of them non-`success`,
+    /// and 22 of those 26 report a cost of exactly `0.0` today** — with no way
+    /// on disk to tell "every attempt was free" from "the last of twelve was".
+    ///
+    /// WHAT THE THREE COLUMNS CLAIM.
+    ///
+    ///   * `latencyMsTotal` — the SUM of the row's measured attempts. This is
+    ///     the quantity "how expensive is this stuck window" actually asks for,
+    ///     and it is the one no single-value column can carry.
+    ///   * `latencyMsMax` — the worst single attempt. `latencyMs` is still the
+    ///     LAST one, so last/mean/max together say whether the cost is stable
+    ///     without any threshold being chosen here.
+    ///   * `latencySampleCount` — the denominator, and half the licence.
+    ///
+    /// WHY NOT `min`. Measured rather than argued: 22 of the 26 multi-attempt
+    /// rows on the pull currently read `latencyMs = 0.0`, so a `min` column
+    /// would be 0 on most of the population that has one and would carry
+    /// nothing. `total` cannot be reconstructed from anything; `min` nearly can.
+    ///
+    /// THE LICENCE IS COMPOSITE AND BOTH HALVES ARE NEEDED —
+    /// ``SemanticScanResult/latencyHistoryIsComplete``. bg2n's `firstAttemptAt`
+    /// says the record reaches attempt 1 but nothing about whether those
+    /// attempts were TIMED; `latencySampleCount == attemptCount` says every
+    /// recorded attempt was timed but nothing about attempts that predate the
+    /// record. Neither implies the other, and a total read without both is a
+    /// lower bound read as a total.
+    ///
+    /// THE BACKFILL IS LOSSLESS AND CLAIMS ONLY WHAT IT CAN SEE. Seeding
+    /// `total = max = latencyMs, sampleCount = 1` is a TRUE statement about
+    /// every row that has one — ONE sample, this one — in the way
+    /// `lastAttemptAt = createdAt` was a rename rather than a claim. It does not
+    /// manufacture exhaustiveness: on the 26 rows with `attemptCount > 1` the
+    /// seeded `sampleCount` of 1 is visibly short of the count, and on every
+    /// pre-V55 row `firstAttemptAt` is NULL, so the first clause of the licence
+    /// fails regardless. **History starts now for the SPREAD** (the destroyed
+    /// per-attempt costs are not reconstructible from anything on disk) and the
+    /// repair is exact for the one sample that survived.
+    ///
+    /// GROWTH, measured by really altering a copy of the 2026-08-15 pull and
+    /// VACUUMing, against a VACUUM-only control that moved 0 bytes: **+32,768 B
+    /// across all 961 rows, +34.1 B/row, +0.067 % of the 48.6 MB store**. A
+    /// per-attempt journal seeded at one row each measured +98,304 B on the same
+    /// store and is UNBOUNDED thereafter — on a phone, growing fastest on
+    /// exactly the windows that keep failing, which is bg2n's objection and it
+    /// still holds. What these three cannot carry is the per-attempt SEQUENCE
+    /// and each attempt's individual cost; that is a stated limit.
+    ///
+    /// `errorContext` IS DELIBERATELY NOT TOUCHED — see
+    /// ``SemanticScanResult/errorContext`` for the measurement that decided it.
+    ///
+    /// ADDITIVE AND IDEMPOTENT, so it needs no SAVEPOINT: `addColumnIfNeeded` is
+    /// a no-op on a store already carrying the V56 `CREATE TABLE`, and the
+    /// UPDATE is guarded on `IS NULL` so a second run touches nothing.
+    private func migrateSemanticScanLatencyHistoryV56IfNeeded() throws {
+        let observed = (try schemaVersion() ?? 1)
+        guard observed < 56 else { return }
+        // DO NOT STEP OVER A ROLLED-BACK V39 — same rationale as V40–V55.
+        guard observed >= 55 else { return }
+        guard try tableExists("semantic_scan_results") else {
+            try setSchemaVersion(56)
+            return
+        }
+        try addColumnIfNeeded(
+            table: "semantic_scan_results",
+            column: "latencyMsTotal",
+            definition: "REAL"
+        )
+        try addColumnIfNeeded(
+            table: "semantic_scan_results",
+            column: "latencyMsMax",
+            definition: "REAL"
+        )
+        try addColumnIfNeeded(
+            table: "semantic_scan_results",
+            column: "latencySampleCount",
+            definition: "INTEGER"
+        )
+        // The true statement, and the whole backfill. `latencyMs IS NOT NULL`
+        // because a row that never measured itself must not gain a total of 0:
+        // that is the "unmeasured read as free" conflation playhead-ejr7 removed
+        // from the writer, and re-introducing it here would undo that bead from
+        // the migration side. Guarded on `latencySampleCount IS NULL` so a row
+        // this binary has already accumulated is never reset to one sample.
+        try exec(
+            """
+            UPDATE semantic_scan_results
+            SET latencyMsTotal = latencyMs,
+                latencyMsMax = latencyMs,
+                latencySampleCount = 1
+            WHERE latencySampleCount IS NULL AND latencyMs IS NOT NULL
+            """
+        )
+        logger.notice(
+            "playhead-6gcy V56: semantic_scan_results carries latencyMsTotal/latencyMsMax/latencySampleCount; latencyMs stops being the only cost a retried row remembers. Every pre-V56 row is seeded at ONE sample — the per-attempt costs before this migration were destroyed by the upserts and are not reconstructible, so the SPREAD starts now while the surviving sample is repaired exactly."
+        )
+        try setSchemaVersion(56)
+    }
+
     /// playhead-kg8h: durably CLAIM one REQUESTED day-0 kickoff, before any of
     /// the work it stands for has run.
     ///
@@ -10691,6 +10821,15 @@ actor AnalysisStore {
                 firstAttemptAt REAL,
                 lastAttemptAt REAL,
                 observedStatuses TEXT,
+                -- playhead-6gcy (V56): the row's LATENCY history. `latencyMs`
+                -- above is ONE attempt's cost; these three are the population
+                -- it is one of. NULLABLE WITH NO DEFAULT for the V42/V55
+                -- reason: a `DEFAULT 0` total would say "this window cost
+                -- nothing" for every pre-V56 row, and a `DEFAULT 0` sample
+                -- count would licence that zero as exhaustive.
+                latencyMsTotal REAL,
+                latencyMsMax REAL,
+                latencySampleCount INTEGER,
                 UNIQUE(reuseKeyHash)
             )
             """)
@@ -10756,6 +10895,24 @@ actor AnalysisStore {
             table: "semantic_scan_results",
             column: "observedStatuses",
             definition: "TEXT"
+        )
+        // playhead-6gcy (V56): declared here as well as in
+        // `migrateSemanticScanLatencyHistoryV56IfNeeded` so a fresh install and
+        // an upgrade converge on the same shape; both helpers are idempotent.
+        try addColumnIfNeeded(
+            table: "semantic_scan_results",
+            column: "latencyMsTotal",
+            definition: "REAL"
+        )
+        try addColumnIfNeeded(
+            table: "semantic_scan_results",
+            column: "latencyMsMax",
+            definition: "REAL"
+        )
+        try addColumnIfNeeded(
+            table: "semantic_scan_results",
+            column: "latencySampleCount",
+            definition: "INTEGER"
         )
         try exec("CREATE INDEX IF NOT EXISTS idx_semantic_scan_results_asset_pass ON semantic_scan_results(analysisAssetId, scanPass)")
         try exec("CREATE INDEX IF NOT EXISTS idx_semantic_scan_results_createdAt ON semantic_scan_results(createdAt DESC)")
@@ -19796,6 +19953,10 @@ actor AnalysisStore {
     /// ADD). Both facts are invisible here on purpose — this list is what fixes
     /// the read index, and it names its columns, so table ordinal never matters.
     ///
+    /// playhead-bg2n appended 27–29 (firstAttemptAt, lastAttemptAt,
+    /// observedStatuses) and playhead-6gcy appended 30–32 (latencyMsTotal,
+    /// latencyMsMax, latencySampleCount), both at the TAIL for the reason below.
+    ///
     /// playhead-hx6n: the three V42 columns are APPENDED, never interleaved.
     /// `readSemanticScanResult` binds by positional index, so inserting a column
     /// anywhere but the tail silently re-points every field after it — and the
@@ -19810,7 +19971,8 @@ actor AnalysisStore {
         scanCohortJSON, transcriptVersion, reuseKeyHash, runMode, jobPhase,
         createdAt, scenePhase, runCorrelationId,
         suspendingLatencyMs, daemonPeersAtStart,
-        firstAttemptAt, lastAttemptAt, observedStatuses
+        firstAttemptAt, lastAttemptAt, observedStatuses,
+        latencyMsTotal, latencyMsMax, latencySampleCount
         """
 
     /// H-1: canonicalize a `scanCohortJSON` before hashing so two
@@ -20060,10 +20222,15 @@ actor AnalysisStore {
         var effectiveCreatedAt = result.createdAt ?? now
         var effectiveFirstAttemptAt: Double? = result.createdAt ?? now
         var observedStatuses: Set<SemanticScanStatus> = [result.status]
+        // playhead-6gcy (V56): `latencyMs` is bound below exactly as before — it
+        // is still THIS attempt's cost — and the history it is one sample of is
+        // accumulated here, in the same probe that already reads the row.
+        var latencyHistory = SemanticScanLatencyHistory.first(attemptLatencyMs: result.latencyMs)
         do {
             let probe = try prepare(
                 """
-                SELECT status, attemptCount, createdAt, firstAttemptAt, observedStatuses
+                SELECT status, attemptCount, createdAt, firstAttemptAt, observedStatuses,
+                       latencyMsTotal, latencyMsMax, latencySampleCount
                 FROM semantic_scan_results WHERE reuseKeyHash = ? LIMIT 1
                 """
             )
@@ -20138,6 +20305,21 @@ actor AnalysisStore {
                 if let existing = SemanticScanStatus(rawValue: existingStatus) {
                     observedStatuses.insert(existing)
                 }
+                // playhead-6gcy: fold THIS write into the accumulated history,
+                // reusing `isIdempotentSuccessRewrite` rather than recomputing
+                // it. The end-of-pass digest re-persists an already-banked
+                // success with the same `latencyMs`; counting it would double
+                // the total and claim a second timed attempt. `folding` carries
+                // the rule and its reasoning.
+                latencyHistory = SemanticScanLatencyHistory(
+                    total: optionalDouble(probe, 5),
+                    max: optionalDouble(probe, 6),
+                    sampleCount: optionalInt(probe, 7)
+                )
+                .folding(
+                    attemptLatencyMs: result.latencyMs,
+                    isIdempotentRewrite: isIdempotentSuccessRewrite
+                )
             }
         }
 
@@ -20150,8 +20332,9 @@ actor AnalysisStore {
              scanCohortJSON, transcriptVersion, reuseKeyHash, runMode, jobPhase,
              createdAt, scenePhase, runCorrelationId,
              suspendingLatencyMs, daemonPeersAtStart,
-             firstAttemptAt, lastAttemptAt, observedStatuses)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             firstAttemptAt, lastAttemptAt, observedStatuses,
+             latencyMsTotal, latencyMsMax, latencySampleCount)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -20211,6 +20394,15 @@ actor AnalysisStore {
         bind(stmt, 28, effectiveFirstAttemptAt)
         bind(stmt, 29, result.createdAt ?? now)
         bind(stmt, 30, SemanticScanResult.encodeObservedStatuses(observedStatuses))
+        // playhead-6gcy (V56). Note what these are NOT:
+        //   * not `result.latencyMs` — that is column 16 and is still THIS
+        //     attempt's cost. These three are the population it belongs to.
+        //   * not derived from `attemptCount` — an attempt that measured
+        //     nothing is in that count and in none of these, which is precisely
+        //     what `latencySampleCount` exists to expose.
+        bind(stmt, 31, latencyHistory.total)
+        bind(stmt, 32, latencyHistory.max)
+        bind(stmt, 33, latencyHistory.sampleCount)
         try step(stmt, expecting: SQLITE_DONE)
     }
 
@@ -21014,7 +21206,15 @@ actor AnalysisStore {
             // read as "" would claim a row that has never had a status.
             firstAttemptAt: optionalDouble(stmt, 27),
             lastAttemptAt: optionalDouble(stmt, 28),
-            observedStatusesCSV: optionalText(stmt, 29)
+            observedStatusesCSV: optionalText(stmt, 29),
+            // playhead-6gcy (V56): columns 30–32, `optionalDouble`/`optionalInt`
+            // for the same reason as every nullable above. A NULL total read as
+            // 0.0 would say this window cost nothing, and a NULL sample count
+            // read as 0 would then divide by it — the unmeasured row reporting
+            // as the cheapest one in the store.
+            latencyMsTotal: optionalDouble(stmt, 30),
+            latencyMsMax: optionalDouble(stmt, 31),
+            latencySampleCount: optionalInt(stmt, 32)
         )
     }
 
