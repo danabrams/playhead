@@ -10653,12 +10653,17 @@ EOF
     patch "$file" "$OLD" "$NEW" ;;
 
   BG10)
+    # RE-EXPRESSED at review round 2. Its original anchor named
+    # `observedStatuses.count`, which R2's own fix replaced with `distinct.count`
+    # — so the mutant stopped APPLYING and the battery reported ERROR, not a
+    # pass. A rail that cannot apply is a LOST rail; re-express it against the
+    # moved text rather than letting the ERROR stand.
     snippet OLD <<'EOF'
-        if observedStatuses.count > 1 { return true }
+        if distinct.count > 1 { return true }
         return historyIsComplete ? false : nil
 EOF
     snippet NEW <<'EOF'
-        if observedStatuses.count > 1 { return true }
+        if distinct.count > 1 { return true }
         return false
 EOF
     patch "$file" "$OLD" "$NEW" ;;
