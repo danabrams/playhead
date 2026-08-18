@@ -3780,6 +3780,7 @@ T_BG_SUCCESS="a SUCCESS replacing a failure keeps the attempt count and records 
 T_BG_H1="H-1 still holds: a later failure cannot demote a cached success"
 T_BG_ENCODE="the encoder round-trips, and an unknown raw value is DROPPED rather than throwing"
 T_BG_FALLBACK="observedStatuses always contains the row's own status, even with no column"
+T_BG_UNKNOWNTOK="an UNRECOGNISED status still proves the attempts differed — a dropped token is not a missing attempt"
 T_BG_SEEDNULL="a row whose observedStatuses column is NULL still contributes its status"
 T_BG_ROUNDTRIP="refusal scan results round-trip with failure metadata intact"
 T_JC_NORMALIZED="the two producers DISAGREE on normalizedText while agreeing on text — the key cannot be the normalised column"
@@ -9157,6 +9158,14 @@ MUTATIONS=(
   # out right, so every history rail stays green and only the COUNT is wrong.
   "BG12|1051|STORE|$T_BG_SUCCESS"
 
+  # Batch 1053 — BG13, `attemptsDiffered` counts the TYPED set instead of the raw
+  # tokens. Found at review round 2, in the API written to prevent hzpa's
+  # sentence: the decoder drops a status a newer binary invented, and on a
+  # COMPLETE row that takes the count from 2 to 1 and answers `false` — "these
+  # attempts were all alike". The leniency itself is right and stays; what was
+  # wrong was asking the lenient set a question about COUNT.
+  "BG13|1053|SSR|$T_BG_UNKNOWNTOK"
+
   # BG99 — VACUITY CONTROL, and it MUST SURVIVE. The local holding the union is
   # renamed and nothing else changes: it proves the anchor still matches, the
   # batch still builds and both suites still run, while changing no behaviour.
@@ -9309,6 +9318,7 @@ describe_mutation() {
     BG10) echo "bg2n: attemptsDiffered answers false instead of nil on a partial record — hzpa's sentence, in one line" ;;
     BG11) echo "bg2n: the observedStatuses encoder drops .sorted(), so the column stops being a SET on disk" ;;
     BG12) echo "bg2n: the attempt count is not merged on the success path — statuses and timestamps right, COUNT wrong" ;;
+    BG13) echo "bg2n: attemptsDiffered counts the TYPED set, so a status a newer binary invented becomes a confident 'they were all alike'" ;;
     BG99) echo "VACUITY CONTROL — the local holding the status union is renamed and nothing else changes. MUST SURVIVE" ;;
     NY01) echo "AdDetectionService.hotPathCandidates sorts the RAW array — the shipped defect: runBackfill canonicalized and the hot path did not" ;;
     NY02) echo "the hot path 'de-duplicates' by chunk.id, a per-ROW UUID, so a fast/final twin survives it intact" ;;
@@ -10668,6 +10678,15 @@ EOF
 EOF
     snippet NEW <<'EOF'
                 effectiveAttemptCount = result.attemptCount
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BG13)
+    snippet OLD <<'EOF'
+        let distinct = Self.rawObservedStatusTokens(observedStatusesCSV).union([status.rawValue])
+EOF
+    snippet NEW <<'EOF'
+        let distinct = observedStatuses
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 

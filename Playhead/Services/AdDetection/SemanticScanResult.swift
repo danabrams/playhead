@@ -297,16 +297,32 @@ struct SemanticScanResult: Sendable, Equatable {
         statuses.map(\.rawValue).sorted().joined(separator: ",")
     }
 
-    /// Decode ``observedStatusesCSV``. Unrecognised raw values are DROPPED
-    /// rather than throwing, matching `fetchSemanticScanStatuses`'s leniency: a
-    /// status a newer binary invented must not abort a read of the whole row.
+    /// Decode ``observedStatusesCSV`` into TYPED cases. Unrecognised raw values
+    /// are DROPPED rather than throwing, matching `fetchSemanticScanStatuses`'s
+    /// leniency: a status a newer binary invented must not abort a read of the
+    /// whole row.
     ///
-    /// Dropping is the under-claiming direction — it can only make the set look
-    /// smaller, i.e. make ``attemptsDiffered`` answer `nil`/`false` where the
-    /// truth is `true`. It can never manufacture a difference.
+    /// **Do not count this set to decide whether the attempts differed.** Use
+    /// ``rawObservedStatusTokens``. Dropping is not the harmless direction it
+    /// looks like: on a row whose history is COMPLETE, dropping one of two
+    /// tokens takes the count from 2 to 1 and turns ``attemptsDiffered`` from
+    /// `true` into a confident `false` — "these attempts were all alike", which
+    /// is playhead-hzpa's sentence, manufactured by a decoder. Found at review
+    /// round 2 of playhead-bg2n, in the API written to prevent that sentence.
     static func decodeObservedStatuses(_ csv: String?) -> Set<SemanticScanStatus> {
         guard let csv, !csv.isEmpty else { return [] }
         return Set(csv.split(separator: ",").compactMap { SemanticScanStatus(rawValue: String($0)) })
+    }
+
+    /// The RAW tokens of ``observedStatusesCSV``, decoded by nobody.
+    ///
+    /// An unrecognised token is still a status this row was written with — it is
+    /// evidence about the COUNT even when it is not evidence about the KIND — so
+    /// every "did the attempts differ" question is asked here rather than of the
+    /// typed set.
+    static func rawObservedStatusTokens(_ csv: String?) -> Set<String> {
+        guard let csv, !csv.isEmpty else { return [] }
+        return Set(csv.split(separator: ",").map(String.init))
     }
 
     /// Every status this row has been written with, as far as the record reaches.
@@ -339,7 +355,12 @@ struct SemanticScanResult: Sendable, Equatable {
     /// `nil` is the answer playhead-hzpa needed and could not get. Reading it as
     /// `false` reproduces this bead exactly.
     var attemptsDiffered: Bool? {
-        if observedStatuses.count > 1 { return true }
+        // RAW tokens, not `observedStatuses`. The typed set drops a status a
+        // newer binary invented, and on a COMPLETE row that takes the count from
+        // 2 to 1 and answers `false` — "the attempts were all alike" — for a row
+        // that demonstrably had two. See ``decodeObservedStatuses``.
+        let distinct = Self.rawObservedStatusTokens(observedStatusesCSV).union([status.rawValue])
+        if distinct.count > 1 { return true }
         return historyIsComplete ? false : nil
     }
 

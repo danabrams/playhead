@@ -660,6 +660,42 @@ struct SemanticScanAttemptHistoryV55MigrationTests {
         #expect(SemanticScanResult.decodeObservedStatuses("").isEmpty)
     }
 
+    /// Review round 2. The lenient decoder is the right call for the TYPED set —
+    /// a status a newer binary invented must not abort a whole-row read — but
+    /// counting that set to answer "did the attempts differ" turns a dropped
+    /// token into a confident `false` on a COMPLETE row. That is
+    /// playhead-hzpa's sentence, manufactured by a decoder, inside the API
+    /// written to prevent it.
+    @Test("an UNRECOGNISED status still proves the attempts differed — a dropped token is not a missing attempt")
+    func unknownStatusTokenStillCountsTowardsDifference() async throws {
+        let dir = try freshTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        AnalysisStore.resetMigratedPathsForTesting()
+        let store = try AnalysisStore(directory: dir)
+        try await store.migrate()
+        try await store.insertAsset(makeAsset(id: "asset-fw"))
+        try await store.insertSemanticScanResult(
+            attempt(id: "scan-fw", assetId: "asset-fw", status: .decodingFailure, createdAt: 10)
+        )
+        // A row a NEWER binary wrote: two statuses on the record, one of which
+        // this build cannot name. `firstAttemptAt` is left intact, so the row
+        // claims a COMPLETE history — which is exactly the state in which a
+        // wrong `false` is most convincing.
+        try await store.execForTesting(
+            "UPDATE semantic_scan_results SET observedStatuses = 'decodingFailure,quantumRefusal' WHERE id = 'scan-fw'"
+        )
+
+        let row = try #require(try await store.fetchSemanticScanResults(analysisAssetId: "asset-fw").first)
+        #expect(row.historyIsComplete)
+        // The TYPED set legitimately holds one case — that is the leniency, and
+        // it stays.
+        #expect(row.observedStatuses == [.decodingFailure])
+        // The ANSWER must still be yes. Counting the typed set here reads
+        // `false`: "these attempts were all alike".
+        #expect(row.attemptsDiffered == true)
+    }
+
     @Test("observedStatuses always contains the row's own status, even with no column")
     func observedStatusesFallsBackToTheRowsOwnStatus() {
         let row = attempt(id: "x", assetId: "a", status: .cancelled)
