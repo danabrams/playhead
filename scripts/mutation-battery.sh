@@ -10607,15 +10607,18 @@ EOF
     patch "$file" "$OLD" "$NEW" ;;
 
   BG05)
+    # RE-EXPRESSED at review round 3, which rewrote the line this anchored on.
+    # The re-expression is also TRUER to the shipped shape: gating the whole
+    # merge (count, the createdAt freeze, firstAttemptAt, the status set) rather
+    # than the counter alone is what `!= .success` used to do.
     snippet OLD <<'EOF'
-                let existingAttempt = Int(sqlite3_column_int(probe, 1))
-                effectiveAttemptCount = max(existingAttempt + 1, result.attemptCount)
+            if sqlite3_step(probe) == SQLITE_ROW,
+               let existingStatus = optionalText(probe, 0) {
 EOF
     snippet NEW <<'EOF'
-                let existingAttempt = Int(sqlite3_column_int(probe, 1))
-                if result.status != .success {
-                    effectiveAttemptCount = max(existingAttempt + 1, result.attemptCount)
-                }
+            if sqlite3_step(probe) == SQLITE_ROW,
+               result.status != .success,
+               let existingStatus = optionalText(probe, 0) {
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -10699,11 +10702,19 @@ EOF
     patch "$file" "$OLD" "$NEW" ;;
 
   BG12)
+    # RE-EXPRESSED at review round 3, same reason as BG05, and kept DISTINCT from
+    # it: BG05 exempts the whole merge, this exempts the COUNT alone, so the
+    # statuses and both timestamps come out right and only the number is wrong.
     snippet OLD <<'EOF'
-                effectiveAttemptCount = max(existingAttempt + 1, result.attemptCount)
+                effectiveAttemptCount = isIdempotentSuccessRewrite
+                    ? max(existingAttempt, result.attemptCount)
+                    : max(existingAttempt + 1, result.attemptCount)
 EOF
     snippet NEW <<'EOF'
-                effectiveAttemptCount = result.attemptCount
+                _ = isIdempotentSuccessRewrite
+                effectiveAttemptCount = result.status == .success
+                    ? result.attemptCount
+                    : max(existingAttempt + 1, result.attemptCount)
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
