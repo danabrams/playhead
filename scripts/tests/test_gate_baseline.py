@@ -2396,19 +2396,40 @@ class SpliceSpanningSeveralLinesTests(unittest.TestCase):
             + 'tim" passed after 1.0 seconds.\n'))
         self.assertEqual({gb.st_key("victim")}, set(run.no_verdict))
 
-    def test_the_lookahead_is_BOUNDED_rather_than_running_to_the_next_match(self):
+    def test_a_line_whose_timestamp_is_NOT_at_COLUMN_ZERO_is_not_stepped_over(self):
+        # The step-over licence is "this line IS app output", which is a claim
+        # about column 0. A line that merely CONTAINS a timestamp is a line that
+        # has itself been spliced, and stepping over it would weld a head to a
+        # tail with another record's wreckage in between.
         run = gb.parse_run(log(
             '◇ Test "victim" started.\n'
             + '✔ Test "vic' + APP_A
-            + APP_B * (gb._MAX_SPLICE_SPAN + 1)
+            + "some prefix " + APP_B
             + 'tim" passed after 1.0 seconds.\n'))
         self.assertEqual({gb.st_key("victim")}, set(run.no_verdict))
-        # …and one line inside the bound still welds, so the rail above is about
-        # the bound and not about the mechanism being broken.
+
+    def test_a_head_at_the_very_END_of_a_truncated_log_is_left_alone(self):
+        # A log cut off mid-splice has no tail to weld to, and the scan must
+        # notice that rather than walking off the end of the list.
+        lines = ('✔ Test "vic' + APP_A + APP_B).rstrip("\n").split("\n")
+        self.assertEqual(lines, gb.rejoin_spliced_lines(lines))
+
+    def test_the_lookahead_is_BOUNDED_rather_than_running_to_the_next_match(self):
+        # THE COUNTS BELOW ARE LITERALS, DELIBERATELY. Written as
+        # `gb._MAX_SPLICE_SPAN + 1` this rail reads the constant it exists to
+        # pin, so raising the bound to 10,000 raises the fixture with it and the
+        # rail reports OK — measured: mutant RS02 survived exactly that way.
+        self.assertEqual(8, gb._MAX_SPLICE_SPAN)
         run = gb.parse_run(log(
             '◇ Test "victim" started.\n'
-            + '✔ Test "vic' + APP_A
-            + APP_B * (gb._MAX_SPLICE_SPAN - 1)
+            + '✔ Test "vic' + APP_A + APP_B * 9
+            + 'tim" passed after 1.0 seconds.\n'))
+        self.assertEqual({gb.st_key("victim")}, set(run.no_verdict))
+        # …and at the bound it still welds, so the rail above is about the bound
+        # and not about the mechanism being broken.
+        run = gb.parse_run(log(
+            '◇ Test "victim" started.\n'
+            + '✔ Test "vic' + APP_A + APP_B * 7
             + 'tim" passed after 1.0 seconds.\n',
             terminal=TERMINAL_PASSED))
         self.assertIn(gb.st_key("victim"), run.passed)
@@ -2534,13 +2555,17 @@ class SeveredMarkerGlyphTests(unittest.TestCase):
         self.assertEqual(set(), run.started)
 
     def test_a_severed_glyph_and_a_severed_NAME_compose(self):
-        # Both defects on one record: the glyph lost its lead bytes AND the name
-        # was cut, two app-log lines apart. `\342\234` + `\224 Test "…` is the
-        # glyph reassembled out of its own two halves.
+        # Both defects on one record. The glyph is escaped whole — real, from
+        # the 1e86 merge gate — AND the name is cut two app-log lines from its
+        # tail, so NEITHER half reads as a record and only the weld can recover
+        # it. Written with the tail intact this rail is VACUOUS: `\224 Test "x"
+        # passed after …` parses on its own, so it never exercises the head at
+        # all. Measured — mutant RS12, which drops the shard from
+        # `_REPAIRABLE_HEAD`, survived the vacuous version.
         run = gb.parse_run(log(
             '◇ Test "victim" started.\n'
-            + '\\342\\234' + APP_A + APP_B
-            + '\\224 Test "victim" passed after 1.0 seconds.\n',
+            + '\\342\\234\\224 Test "vic' + APP_A + APP_B
+            + 'tim" passed after 1.0 seconds.\n',
             terminal=TERMINAL_PASSED))
         self.assertIn(gb.st_key("victim"), run.passed)
         self.assertEqual(set(), run.no_verdict)

@@ -70,6 +70,10 @@ CH = SUITE + ".CrashedHostVerdictTests."
 AC = SUITE + ".ArmedCensusTests."
 RC = SUITE + ".RealCrashedRunTests."
 TR = SUITE + ".TruncatedOutcomeLineTests."
+# playhead-phn3 — the fifth correction: a weld that reaches past line N+1,
+# and a marker glyph severed mid-codepoint.
+SS = SUITE + ".SpliceSpanningSeveralLinesTests."
+SG = SUITE + ".SeveredMarkerGlyphTests."
 SP = SUITE + ".CrashedHostSafetyPropertyTests."
 CM = SUITE + ".CensusMergeTests."
 # playhead-t53a — the .xcresult as the verdict source.
@@ -396,8 +400,14 @@ MUTATIONS = [
         "the repair swallows a line that is already a whole record, gluing two "
         "severed lines for one test into a phantom named "
         "`victim\" recorded an iss<glyph> Test \"victim`",
-        "                    and not _parses_as_a_test_line(following)\n",
-        "",
+        # RE-ANCHORED at playhead-phn3. The condition moved into
+        # `_displaced_tail_span` when the weld learned to reach past line
+        # N+1; the EDIT moved, the defect and the expectation did not. An
+        # anchor that no longer applies is a LOST rail, not a passing one.
+        "        if _parses_as_a_test_line(following):\n"
+        "            return None\n",
+        "        if False:\n"
+        "            return None\n",
         [TR + "test_a_truncated_FAIL_line_is_still_a_FAILURE"],
     ),
     (
@@ -405,8 +415,11 @@ MUTATIONS = [
         "an INTACT verdict line is rewritten anyway, so it absorbs the next "
         "line — a pass followed by the restart banner is claimed by the restart "
         "handler and the test that passed becomes a casualty",
-        "                    and not _parses_as_a_test_line(head)\n",
-        "",
+        # RE-ANCHORED at playhead-phn3: the condition now ends the `if`
+        # rather than leading into a third clause, so the old text is gone
+        # from the file. Same defect, same expectation.
+        "                    and not _parses_as_a_test_line(head)):\n",
+        "                    and True):\n",
         [TR + "test_an_INTACT_verdict_followed_by_app_output_is_NOT_rewritten"],
     ),
     (
@@ -1220,6 +1233,168 @@ MUTATIONS = [
         "        out.extend(self._render_no_verdict())",
         "        out.extend(self._render_no_verdict())",
         [XG + "test_the_gate_asks_xcodebuild_for_a_bundle_and_the_CHECK_reads_it"],
+    ),
+    # -----------------------------------------------------------------------
+    # playhead-phn3 — the weld that reaches past line N+1, and the severed glyph.
+    # -----------------------------------------------------------------------
+    (
+        "RS01", GB,
+        "the weld reaches only line N+1 again — the shipped behaviour, which "
+        "recovered 90.2% of 2,563 measured welds and left 251 records reading "
+        "as silence, four of them on an otherwise-green merge gate",
+        "    for span in range(1, _MAX_SPLICE_SPAN + 1):",
+        "    for span in range(1, 2):",
+        [SS + "test_the_xul6_Corrupted_specimen_is_a_PASS",
+         SS + "test_the_xul6_bracketRefined_specimen_is_a_PASS",
+         SS + "test_the_xul6_Podcast_specimen_survives_FOUR_intervening_lines"],
+    ),
+    (
+        "RS02", GB,
+        "the lookahead is unbounded, so a head can walk an arbitrary run of app "
+        "output looking for something that completes it — the fabrication "
+        "direction the bound is a backstop against",
+        "_MAX_SPLICE_SPAN = 8",
+        "_MAX_SPLICE_SPAN = 10000",
+        [SS + "test_the_lookahead_is_BOUNDED_rather_than_running_to_the_next_match"],
+    ),
+    (
+        "RS03", GB,
+        "the scan steps over ANY line rather than only over app output, so "
+        "unattributable text between the halves is treated as evidence they "
+        "belong together",
+        "        if not _APP_LOG_INTRUSION.match(following):\n"
+        "            return None",
+        "        if False:\n"
+        "            return None",
+        [SS + "test_the_weld_STOPS_at_a_line_that_is_not_app_output"],
+    ),
+    (
+        "RS04", GB,
+        "the step-over test becomes `search`, so a line that merely CONTAINS a "
+        "timestamp — i.e. a line that has itself been spliced — is stepped over "
+        "and its wreckage ends up between a head and a stranger's tail",
+        "        if not _APP_LOG_INTRUSION.match(following):",
+        "        if not _APP_LOG_INTRUSION.search(following):",
+        [SS + "test_a_line_whose_timestamp_is_NOT_at_COLUMN_ZERO_is_not_stepped_over"],
+    ),
+    (
+        "RS05", GB,
+        "the end-of-list guard goes, so a log truncated mid-splice walks off "
+        "the end of its own line list",
+        "        if index + span >= len(lines):\n"
+        "            return None",
+        "        if False:\n"
+        "            return None",
+        [SS + "test_a_head_at_the_very_END_of_a_truncated_log_is_left_alone"],
+    ),
+    (
+        "RS06", GB,
+        "the tail is taken from line N+1 whatever span the scan found, so the "
+        "reconstruction is head + the first intruder — garbage under a name "
+        "nobody can reconcile",
+        "                following = lines[index + span]",
+        "                following = lines[index + 1]",
+        [SS + "test_the_xul6_Corrupted_specimen_is_a_PASS",
+         SS + "test_the_xul6_Podcast_specimen_survives_FOUR_intervening_lines"],
+    ),
+    (
+        "RS07", GB,
+        "the intervening app-log lines are dropped rather than re-emitted, so "
+        "everything the intrusion carried between the halves is lost with them",
+        "                out.extend(lines[index + 1:index + span])",
+        "                pass",
+        [SS + "test_the_INTERVENING_lines_are_re_emitted_VERBATIM_and_none_is_lost"],
+    ),
+    (
+        "RS08", GB,
+        "the cursor advances by a fixed two lines rather than by the span "
+        "consumed, so the lines between the halves are emitted twice",
+        "                index += span + 1",
+        "                index += 2",
+        [SS + "test_the_INTERVENING_lines_are_re_emitted_VERBATIM_and_none_is_lost"],
+    ),
+    (
+        "RS09", GB,
+        "the marker anchor becomes OPTIONAL — `Test \"x\" passed after` matches "
+        "anywhere, so an app-log line that merely quotes a verdict invents a "
+        "test no verdict can ever answer for (CLAUDE.md's fifth splice shape, "
+        "a permanent phantom casualty)",
+        '    return re.compile("(?:" + glyph + "|" + _GLYPH_SHARD + ") " + rest)',
+        '    return re.compile("(?:" + glyph + "|" + _GLYPH_SHARD + ")? ?" + rest)',
+        [SG + "test_app_output_that_merely_QUOTES_a_verdict_does_not_FABRICATE_one"],
+    ),
+    (
+        # NOT the obvious mutant. Dropping the `+` from `_GLYPH_SHARD` is a
+        # PROVEN EQUIVALENT and survived when it was tried: every pattern here
+        # SEARCHES, so `(X)+ Test "` and `X Test "` accept exactly the same
+        # lines — a `+` match ends with one X immediately before ` Test "`, which
+        # the single form finds at that same position, and n=1 gives the
+        # converse. The `+` stays because it describes the shape; it is not
+        # load-bearing and there is nothing here for a rail to hold.
+        "RS10", GB,
+        "the shard covers only a raw byte, so the octal escaping xcodebuild "
+        "ACTUALLY DOES goes unread — 92 measured lines over 138 logs are octal "
+        "and not one is a raw byte",
+        '_GLYPH_SHARD = r"(?:\\\\[0-3][0-7][0-7]|\ufffd)+"',
+        '_GLYPH_SHARD = r"(?:\ufffd)+"',
+        [SG + "test_the_xul6_empty_chunks_specimen_is_a_PASS",
+         SG + "test_the_TWO_ESCAPE_spelling_is_read_too",
+         SG + "test_the_WHOLE_GLYPH_escaped_is_read_too"],
+    ),
+    (
+        "RS11", GB,
+        "the shard covers only the octal escaping xcodebuild happens to do "
+        "today, so a genuinely raw continuation byte — which `_read` hands over "
+        "as U+FFFD — goes back to reading as silence",
+        '_GLYPH_SHARD = r"(?:\\\\[0-3][0-7][0-7]|\ufffd)+"',
+        '_GLYPH_SHARD = r"(?:\\\\[0-3][0-7][0-7])+"',
+        [SG + "test_a_RAW_replacement_character_is_read_too"],
+    ),
+    (
+        "RS12", GB,
+        "the shard is dropped from `_REPAIRABLE_HEAD`, so a record whose glyph "
+        "AND whose name were both severed has no repairable head and stays a "
+        "casualty — the two defects this bead fixes compose, and the rail that "
+        "sees the composition is not either of the ones that sees them apart",
+        '_REPAIRABLE_HEAD = re.compile(r"[◇✔✘➜]|" + _GLYPH_SHARD + r"|Test Case \'-\\[")',
+        '_REPAIRABLE_HEAD = re.compile(r"[◇✔✘➜]|Test Case \'-\\[")',
+        [SG + "test_a_severed_glyph_and_a_severed_NAME_compose"],
+    ),
+    (
+        "RS13", GB,
+        "the pass pattern stops requiring the word `Test`, so `\\224 Suite "
+        "\"DownloadManager \u2013 Setup\" passed after 105.532 seconds.` — real, "
+        "from the se0x merge gate — enters the run as a test that never existed",
+        """_ST_PASS_NAMED = _marked('\u2714', r'Test "(.+?)" (?:with \\d+ test cases? )?passed after')""",
+        """_ST_PASS_NAMED = _marked('\u2714', r'\\w+ "(.+?)" (?:with \\d+ test cases? )?passed after')""",
+        [SG + "test_a_SUITE_line_with_a_severed_glyph_is_NOT_a_test"],
+    ),
+    (
+        "RS14", GB,
+        "only the PASS pattern learns the damaged glyph, so a severed FAIL "
+        "stays invisible — the lost-failure direction, which has never been "
+        "observed only because passes outnumber failures 124 to 1",
+        """_ST_FAIL_NAMED = _marked('\u2718', r'Test "(.+?)" (?:with \\d+ test cases? )?failed after(?: ([\\d.]+) seconds)?')""",
+        """_ST_FAIL_NAMED = re.compile(r'\u2718 Test "(.+?)" (?:with \\d+ test cases? )?failed after(?: ([\\d.]+) seconds)?')""",
+        [SG + "test_a_severed_glyph_FAIL_is_still_a_FAILURE"],
+    ),
+    (
+        "RS15", GB,
+        "the SKIP pattern loses the damaged glyph, so a deliberate skip reads "
+        "as silence — and a skip read as silence is a crashed-host casualty, "
+        "the one category whose remedy is to re-run the whole plan",
+        """_ST_SKIP_NAMED = _marked('\u279c', r'Test "(.+?)" skipped')""",
+        """_ST_SKIP_NAMED = re.compile(r'\u279c Test "(.+?)" skipped')""",
+        [SG + "test_a_severed_glyph_SKIP_is_an_OUTCOME"],
+    ),
+    (
+        "RS16", GB,
+        "the START pattern loses the damaged glyph, so a test whose start line "
+        "was severed is in NO set at all — invisible in both directions, which "
+        "is the one blind spot the console roster exists to close",
+        """_ST_START_NAMED = _marked('\u25c7', r'Test "(.+?)" started')""",
+        """_ST_START_NAMED = re.compile(r'\u25c7 Test "(.+?)" started')""",
+        [SG + "test_a_severed_glyph_START_keeps_the_test_ON_the_roster"],
     ),
     (
         "R99", GB,

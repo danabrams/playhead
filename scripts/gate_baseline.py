@@ -621,6 +621,9 @@ class CannotEvaluate(Exception):
 # merely contains `Test "x" passed after` would then invent a test, which is the
 # fifth splice shape CLAUDE.md records as a permanent phantom casualty. So the
 # anchor is still required — only its damaged spellings were added.
+# The `+` is descriptive rather than load-bearing: every pattern below
+# SEARCHES, so one escape immediately before ` Test "` is found whether or
+# not its neighbours are consumed too. Do not write a rail against it.
 _GLYPH_SHARD = r"(?:\\[0-3][0-7][0-7]|�)+"
 
 
