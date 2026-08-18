@@ -157,14 +157,18 @@ extension SemanticScanResult {
     /// The value a whole-struct round-trip assertion should compare against
     /// after a FIRST write.
     ///
-    /// Three fields are decided by ``AnalysisStore``, not by the producer —
-    /// `firstAttemptAt`, `lastAttemptAt` and `observedStatusesCSV` — because
-    /// only the store can see the row already on disk. So `fetched == handedIn`
+    /// Six fields are decided by ``AnalysisStore``, not by the producer —
+    /// `firstAttemptAt`, `lastAttemptAt` and `observedStatusesCSV`
+    /// (playhead-bg2n), plus `latencyMsTotal`, `latencyMsMax` and
+    /// `latencySampleCount` (playhead-6gcy) — because only the store can see
+    /// the row already on disk. So `fetched == handedIn`
     /// compares a persisted row against a value that never existed on disk, and
     /// it started failing the moment the store learned to record attempt
     /// history. Using this helper is not a weakening: it PINS the first-write
-    /// contract (both timestamps equal the row's own `createdAt`, and the set
-    /// holds exactly the row's status), which nothing asserted before.
+    /// contract (both timestamps equal the row's own `createdAt`, the set holds
+    /// exactly the row's status, and the latency record is ONE sample of the
+    /// row's own `latencyMs` — or nothing at all when that is nil), which
+    /// nothing asserted before.
     ///
     /// Deliberately FIRST-WRITE only. There is no `asStoredOnReplace` because a
     /// replace's history depends on what was already there, which is the thing
@@ -205,7 +209,14 @@ extension SemanticScanResult {
             runCorrelationId: runCorrelationId,
             firstAttemptAt: stamped,
             lastAttemptAt: stamped,
-            observedStatusesCSV: SemanticScanResult.encodeObservedStatuses([status])
+            observedStatusesCSV: SemanticScanResult.encodeObservedStatuses([status]),
+            // playhead-6gcy: a first write is ONE sample. `latencyMs == nil`
+            // yields all three nil rather than a zero total — the store must
+            // not turn "nobody measured this" into "it was free", so neither
+            // may the value this assertion compares against.
+            latencyMsTotal: latencyMs,
+            latencyMsMax: latencyMs,
+            latencySampleCount: latencyMs == nil ? nil : 1
         )
     }
 }

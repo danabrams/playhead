@@ -574,7 +574,7 @@ struct MergedChildRowDedupeV40MigrationTests {
         // the same reason V40's does), and V40's collapse fixtures share a
         // fingerprint AND their content, so V40 removes the row first and V53
         // finds nothing left to sweep. No assertion in this file changes.
-        #expect(AnalysisStore.currentSchemaVersion == 55)
+        #expect(AnalysisStore.currentSchemaVersion == 56)
 
         let db = try openRaw(dir)
         defer { sqlite3_close_v2(db) }
