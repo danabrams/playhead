@@ -533,6 +533,46 @@ struct SemanticScanAttemptHistoryV55MigrationTests {
         #expect(raw.lastAttemptAt == 200)
     }
 
+    /// Found by enumerating the EVENTS the write path can perform and asking
+    /// which of them nothing observes (the playhead-o89d R5 method). There are
+    /// six — new row, replace-with-failure, replace-with-success, H-1 SKIP, a
+    /// validation throw, and this one: SUCCESS OVER SUCCESS, which the C5
+    /// contract has always let fall through to REPLACE and which no rail
+    /// touched. Its behaviour CHANGED here: the probe used to be gated on
+    /// `!= .success`, so a second success reset `attemptCount` to the caller's
+    /// value; it is now merged like every other replace. That is correct — a
+    /// second success on one reuse key is a second attempt — but an unpinned
+    /// behaviour change is how the next reader learns the wrong contract.
+    @Test("a SUCCESS replacing a SUCCESS is a second attempt, not a first one")
+    func successOverSuccessIsStillCounted() async throws {
+        let dir = try freshTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        AnalysisStore.resetMigratedPathsForTesting()
+        let store = try AnalysisStore(directory: dir)
+        try await store.migrate()
+        try await store.insertAsset(makeAsset(id: "asset-ss"))
+
+        try await store.insertSemanticScanResult(
+            attempt(id: "scan-ss", assetId: "asset-ss", status: .success, latencyMs: 10, createdAt: 100)
+        )
+        try await store.insertSemanticScanResult(
+            attempt(id: "scan-ss", assetId: "asset-ss", status: .success, latencyMs: 20, createdAt: 300)
+        )
+
+        let raw = try #require(try rawRow(in: dir, rowId: "scan-ss"))
+        #expect(raw.attemptCount == 2, "the C5 contract lets same-rank collisions REPLACE; both writes happened")
+        #expect(raw.createdAt == 100)
+        #expect(raw.lastAttemptAt == 300)
+        #expect(raw.firstAttemptAt == 100)
+        // One status, and the history is COMPLETE, so this is the `false` arm of
+        // `attemptsDiffered` rather than its `nil` arm: two attempts genuinely
+        // alike, which is a different claim from "we cannot say".
+        #expect(raw.observedStatuses == "success")
+        let row = try #require(try await store.fetchSemanticScanResults(analysisAssetId: "asset-ss").first)
+        #expect(row.attemptsDiffered == false)
+    }
+
     @Test("H-1 still holds: a later failure cannot demote a cached success")
     func cachedSuccessIsStillProtected() async throws {
         let dir = try freshTempDir()
