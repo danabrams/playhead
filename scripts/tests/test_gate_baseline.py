@@ -2571,6 +2571,83 @@ class SeveredMarkerGlyphTests(unittest.TestCase):
         self.assertEqual(set(), run.no_verdict)
 
 
+class GreenRunWithPhantomCasualtiesTests(unittest.TestCase):
+    """The whole run, not the four lines — playhead-phn3.
+
+    Everything above feeds the parser fragments. This feeds it playhead-xul6's
+    merge gate, distilled by `scripts/tests/make_crashed_run_fixture.py` the same
+    way the crashed-run fixtures are: 6.4 MB and 51,729 lines become 52 KB and
+    497, with every failure, issue, skip, casualty and SPLICED line kept
+    byte-exact and every uninteresting start/pass PAIR dropped whole, so the
+    parser's quantities come out identical.
+
+    It is here because in-situ is a different claim from in-vitro. A fragment
+    rail proves the fix recovers what it was aimed at; only a whole log can show
+    that reaching past line N+1 and admitting a damaged glyph did not also
+    invent something out of the other 51,000 lines. Measured on this fixture:
+    the shipped parser reports FOUR casualties and this one reports NONE, with
+    the same 44 skips, the same zero failures and the same terminal marker.
+
+    A MISSING FIXTURE IS A FAILURE, NOT A SKIP, for the reason the class above
+    gives at length.
+    """
+
+    FIXTURE = "green-run-xul6-phantom-casualties.log"
+
+    #: The four the census reported, all of which passed.
+    PHANTOMS = (
+        "Corrupted / absurdly-low value falls back to default",
+        "Podcast profile upsert and fetch",
+        "empty chunks with unknown duration still request a restart",
+        "full bracket with trust + scores above floors yields bracketRefined "
+        "adjustments",
+    )
+
+    def _text(self):
+        path = FIXTURES / self.FIXTURE
+        self.assertTrue(
+            path.exists(),
+            "the distilled green-run fixture is missing: %s\n"
+            "It is COMMITTED — regenerate with "
+            "scripts/tests/make_crashed_run_fixture.py <full.log> %s from "
+            "playhead-gate-artifacts/xul6/run1-green.log.gz." % (path, path),
+        )
+        return path.read_text(encoding="utf-8")
+
+    def test_the_INLINE_specimens_are_in_the_fixture_BYTE_FOR_BYTE(self):
+        """What ties the constants above to the log they were lifted from.
+
+        Without this the four specimens are four strings somebody typed, and a
+        typo in one of them turns its rail into a test of the typo. Here they
+        are matched against a committed distillation of the real bytes.
+        """
+        text = self._text()
+        for specimen in (XUL6_CORRUPTED, XUL6_BRACKET, XUL6_PODCAST,
+                         XUL6_EMPTY_CHUNKS):
+            self.assertIn(specimen, text)
+
+    def test_the_run_reports_NO_CASUALTIES_and_the_four_PASSED(self):
+        run = gb.parse_run(self._text())
+        self.assertTrue(run.complete)
+        self.assertEqual(0, run.host_restarts)
+        self.assertEqual({}, run.failures)
+        self.assertEqual(44, len(run.skipped))
+        self.assertEqual(set(), run.no_verdict)
+        for name in self.PHANTOMS:
+            self.assertIn(gb.st_key(name), run.passed, name)
+
+    def test_a_run_with_nothing_wrong_with_it_can_reach_GREEN(self):
+        # The consequence, which is the reason a phantom casualty is not just
+        # noise: GREEN is unreachable while the count is non-zero, so four
+        # healthy tests kept a clean merge gate from ever saying so.
+        run = gb.parse_run(self._text())
+        v = gb.verdict(gb.empty_baseline("PlayheadFastTests"), run,
+                       plan="PlayheadFastTests")
+        self.assertFalse(v.crashed_host)
+        self.assertIn("GREEN", v.render())
+        self.assertEqual(gb.EXIT_OK, v.exit_code)
+
+
 class CrashedHostSafetyPropertyTests(unittest.TestCase):
     """The properties tl6l's exit-code decision RESTS on (R1 review).
 

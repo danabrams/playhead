@@ -74,6 +74,7 @@ TR = SUITE + ".TruncatedOutcomeLineTests."
 # and a marker glyph severed mid-codepoint.
 SS = SUITE + ".SpliceSpanningSeveralLinesTests."
 SG = SUITE + ".SeveredMarkerGlyphTests."
+GR = SUITE + ".GreenRunWithPhantomCasualtiesTests."
 SP = SUITE + ".CrashedHostSafetyPropertyTests."
 CM = SUITE + ".CensusMergeTests."
 # playhead-t53a — the .xcresult as the verdict source.
@@ -1049,7 +1050,10 @@ MUTATIONS = [
         [RC + "test_the_main_control_run",
          RC + "test_the_mn5e_branch_run",
          RC + "test_BOTH_runs_lost_THE_SAME_ELEVEN_TESTS",
-         C + "test_a_real_log_cut_short_is_reported_incomplete"],
+         C + "test_a_real_log_cut_short_is_reported_incomplete",
+         # playhead-phn3's green-run fixture is under the same rule.
+         GR + "test_the_run_reports_NO_CASUALTIES_and_the_four_PASSED",
+         GR + "test_the_INLINE_specimens_are_in_the_fixture_BYTE_FOR_BYTE"],
     ),
     # -----------------------------------------------------------------------
     # playhead-t53a — the .xcresult is the verdict source. Every rail below is
@@ -1395,6 +1399,15 @@ MUTATIONS = [
         """_ST_START_NAMED = _marked('\u25c7', r'Test "(.+?)" started')""",
         """_ST_START_NAMED = re.compile(r'\u25c7 Test "(.+?)" started')""",
         [SG + "test_a_severed_glyph_START_keeps_the_test_ON_the_roster"],
+    ),
+    (
+        "RS17", TF,
+        "an inline specimen is retyped by one character, so its rail becomes a "
+        "test of the typo rather than of the log — the four specimens are only "
+        "worth having while they are the real bytes",
+        "'ed / absurdly-low value falls back to default\" passed after 118.958 seconds.\\n'",
+        "'ed / absurdly-low value falls back to defau1t\" passed after 118.958 seconds.\\n'",
+        [GR + "test_the_INLINE_specimens_are_in_the_fixture_BYTE_FOR_BYTE"],
     ),
     (
         "R99", GB,
