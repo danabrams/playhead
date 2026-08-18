@@ -1598,6 +1598,15 @@ FOCUSED_SUITES=(
   # that rewinds to the V54 SHAPE and climbs back can observe a rung that
   # manufactures provenance it cannot have.
   -only-testing:PlayheadTests/SemanticScanAttemptHistoryV55MigrationTests
+  # playhead-6gcy: the V56 latency-history rails (GC series). One suite, and it
+  # carries BOTH layers on purpose — the pure `SemanticScanLatencyHistory.folding`
+  # rails and the store/migration rails live together because they are claims
+  # about ONE rule seen from two distances, and splitting them would let a
+  # reviewer read a green fold suite as evidence about the wiring. It is the same
+  # split BG07/BG08 argue for one bead up, resolved the other way for the same
+  # reason: there the two layers were two BEADS' worth of claims; here the fold
+  # rails exist precisely to say which HALF of one claim a mutant broke.
+  -only-testing:PlayheadTests/SemanticScanLatencyHistoryV56MigrationTests
   # playhead-59c8: the unclassified-model-failure rails (UM series). Two suites,
   # because the claim spans two layers and neither can see the other: the pure
   # identity read and the token it builds (instant, no store), and a SOURCE
@@ -3785,6 +3794,30 @@ T_BG_FALLBACK="observedStatuses always contains the row's own status, even with 
 T_BG_UNKNOWNTOK="an UNRECOGNISED status still proves the attempts differed — a dropped token is not a missing attempt"
 T_BG_SEEDNULL="a row whose observedStatuses column is NULL still contributes its status"
 T_BG_ROUNDTRIP="refusal scan results round-trip with failure metadata intact"
+
+# playhead-6gcy — the V56 latency-history rails (GC series). Two layers, and the
+# split is deliberate: the FOLD is a pure function so a mutant in the rule lands
+# on a named rail in milliseconds, while the STORE and MIGRATION claims can only
+# be observed through SQLite. A mutant that survives every fold rail and dies on
+# a store rail is telling you the rule is right and the wiring is not.
+T_GC_WITNESS="the witness shape: three differing costs accumulate, and latencyMs stays the LAST"
+T_GC_MEAN="the spread is legible through the read API, and the mean is over SAMPLES"
+T_GC_DIGEST="success re-persisted by the end-of-pass digest does NOT double the cost"
+T_GC_RANK="a RANK CHANGE is a real attempt: success replacing a failure accumulates"
+T_GC_NILFIRST="a nil cost leaves all three NULL rather than claiming a free attempt"
+T_GC_NILRETRY="an unmeasured RETRY carries the history forward untouched"
+T_GC_LICENCE="the licence is COMPOSITE: both halves are required and neither implies the other"
+T_GC_PREV55="a pre-V55 row cannot claim a complete cost however many samples it has"
+T_GC_UNRECORDED="a row with no latency record at all answers nil, never false"
+T_GC_SEED="V56 seeds a TRUE one-sample record from the surviving latencyMs"
+T_GC_NULLMIG="V56 does NOT give an unmeasured row a total of zero"
+T_GC_MIGIDEM="the migration is idempotent and never resets an accumulated row"
+T_GC_FOLDACC="folding: a real retry accumulates total, max and count"
+T_GC_FOLDIDEM="folding: an idempotent rewrite changes nothing"
+T_GC_FOLDNIL="folding: an unmeasured retry is inert in both directions"
+T_GC_FOLDMAX="folding: max never falls, whatever order the attempts arrive in"
+T_GC_FOLDFIRSTNIL="folding: an unmeasured first attempt records nothing"
+T_GC_FOLDSEED="folding: an idempotent rewrite SEEDS a row that has no record yet"
 T_JC_NORMALIZED="the two producers DISAGREE on normalizedText while agreeing on text — the key cannot be the normalised column"
 T_JC_FAST_NO_SUPPRESS="a FAST row over the same span does not suppress the final row — final-pass coverage keeps growing"
 T_JC_REINSERT="after V53 the UNIQUE index exists and a byte-identical re-insert is refused"
@@ -9193,6 +9226,124 @@ MUTATIONS=(
   # cannot fail proves nothing.
   "BG99|1052|STORE|$T_BG_UNION;$T_BG_FROZEN;$T_BG_ROUNDTRIP"
 
+  # ---- playhead-6gcy: a row records WHAT ITS ATTEMPTS COST (GC series) ----
+  #
+  # Enumerated the way o89d R5 asks for: list the EVENTS the change performs and
+  # find the one nothing would notice. The events are — accumulate on a real
+  # retry; DON'T on the digest; DON'T on an unmeasured attempt; seed one sample
+  # at migration; refuse to seed an unmeasured row; refuse to reset an
+  # accumulated one; and answer three-valued about its own completeness. Each
+  # gets a mutant BOTH WAYS where a direction exists, because every one of these
+  # has a mirror that makes the record LOOSER rather than absent.
+
+  # Batch 1090 — GC01, `latencyMsTotal` is bound to THIS attempt's cost instead
+  # of the accumulated total. The defect this bead was filed for, restored in one
+  # line: the column exists, is populated, and every value is a real measurement
+  # — of whichever attempt happened to be last.
+  "GC01|1090|STORE|$T_GC_WITNESS;$T_GC_MEAN"
+
+  # Batch 1091 — GC02, the fold accumulates on an IDEMPOTENT REWRITE. THE case,
+  # and the one no device pull could ever reveal: `checkpointCoarseProgress`
+  # writes each screened window at the checkpoint and again in the end-of-pass
+  # digest with the same `latencyMs`, so every checkpointed success comes out at
+  # twice its true cost over two samples. Structurally valid, arithmetically
+  # consistent, and wrong. bg2n found this shape by reading a doc block rather
+  # than by any test; here it is a rail.
+  "GC02|1091|STORE|$T_GC_DIGEST"
+
+  # Batch 1092 — GC03, THE MIRROR: nothing ever accumulates, because every write
+  # is treated as an idempotent rewrite. This is the direction that looks safe —
+  # no inflation, no double count — and it silently restores the original defect
+  # for every retried window while leaving the digest case perfect.
+  "GC03|1092|STORE|$T_GC_WITNESS;$T_GC_RANK"
+
+  # Batch 1093 — GC04, an UNMEASURED attempt contributes a zero and a sample.
+  # playhead-ejr7 removed exactly this conflation from the writer ("0 asserts the
+  # attempt was free; NULL says nobody measured it"); this puts it back one
+  # column over, where it is worse: the zero enters a SUM and drags the mean of
+  # every stuck window toward nothing.
+  # (The FIRST-write path is GC13, at the other entry point: a fix to one
+  # does not reach the other, which is why they are two rails.)
+  "GC04|1093|STORE|$T_GC_NILRETRY"
+
+  # Batch 1094 — GC05, `max` takes the incoming cost unconditionally instead of
+  # the larger. The worst attempt is then whichever one was last, which is the
+  # same reading `latencyMs` already gives — the column stops being a second
+  # observation and becomes a copy of the first.
+  "GC05|1094|SSR|$T_GC_WITNESS;$T_GC_FOLDMAX"
+
+  # Batch 1095 — GC06, the probe reads `latencySampleCount` off the MAX column:
+  # one positional index wrong in a three-column read. Named because the whole
+  # canonical-column-order comment block exists for this shape — a positional
+  # misread produces a structurally valid row and nothing throws — and because
+  # the count is the denominator of the mean and half the licence, so being
+  # wrong here is wrong in three places at once.
+  "GC06|1095|STORE|$T_GC_WITNESS;$T_GC_MEAN"
+
+  # Batch 1096 — GC07, the migration backfills `latencySampleCount = attemptCount`.
+  # THE TEMPTING MUTANT, and BG07's twin one column over: the count now agrees
+  # with the attempts, `latencyHistoryIsComplete` answers `true`, and every value
+  # on disk is a real number — vouching for ten attempt costs that were destroyed
+  # before this binary existed.
+  "GC07|1096|STORE|$T_GC_SEED"
+
+  # Batch 1097 — GC08, the migration drops its `latencyMs IS NOT NULL` guard.
+  # Every row that never measured itself arrives at V56 claiming it cost exactly
+  # nothing — ejr7 undone from the migration side, which is the side no writer
+  # test can see.
+  "GC08|1097|STORE|$T_GC_NULLMIG"
+
+  # Batch 1098 — GC09, the migration drops its `latencySampleCount IS NULL`
+  # guard. A re-entered rung then overwrites an ACCUMULATED row with its last
+  # cost and resets the count to one, so a device that has been retrying for days
+  # loses its record to a migration that reports success.
+  "GC09|1098|STORE|$T_GC_MIGIDEM"
+
+  # Batch 1099 — GC10, `latencyHistoryIsComplete` drops the `historyIsComplete`
+  # clause. Half a composite licence, and the half that matters most on real
+  # data: bg2n established that a pre-V55 `attemptCount` of 1 is not proof of one
+  # write, so the count comparison ALONE vouches for nothing — and 906 of the 961
+  # device rows are exactly that shape.
+  "GC10|1099|SSR|$T_GC_PREV55"
+
+  # Batch 1100 — GC11, `latencyHistoryIsComplete` answers `false` instead of
+  # `nil` when nothing is recorded. BG10's shape one column over: "not
+  # established" collapses into "no", so a row with no total at all reports that
+  # its total is a lower bound — a claim about a quantity that does not exist.
+  "GC11|1100|SSR|$T_GC_UNRECORDED"
+
+  # Batch 1101 — GC12, `latencyMsMean` divides by `attemptCount`. The standing
+  # defect class in one operator: the numerator is over MEASURED attempts and the
+  # denominator over ALL of them, so a window whose two timed attempts averaged
+  # 13,080 ms reports 2,378 ms — and reports it most wrongly for the windows with
+  # the most unmeasured attempts, which are the ones being studied.
+  "GC12|1101|SSR|$T_GC_MEAN"
+
+  # Batch 1102 — GC13, `first(attemptLatencyMs:)` seeds a zero record instead of
+  # `.unrecorded` for a nil cost. GC04's mirror at the OTHER entry point, and it
+  # has to be separate: GC04 is about a retry, this is about the row's first
+  # write, and a fix to one does not reach the other.
+  "GC13|1102|SSR|$T_GC_FOLDFIRSTNIL;$T_GC_NILFIRST"
+
+  # Batch 1103 — GC14, the reader takes `latencyMsTotal` off the bare column read
+  # instead of `optionalDouble`. `sqlite3_column_double` returns 0.0 for a NULL,
+  # so every pre-V56 and never-measured row reads as the cheapest window in the
+  # store — the same 1970-dating shape the `createdAt` read documents, in a unit
+  # where zero is a plausible answer and therefore harder to notice.
+  "GC14|1103|STORE|$T_GC_NILFIRST"
+
+  # Batch 1104 — GC15, `unmeasuredAttemptCount` swaps its operands, so the clamp
+  # returns 0 on every real row. "Nothing is missing" on a row that is missing
+  # ten attempts — the quantity that makes a `false` completeness answer
+  # actionable, silently answering that there is nothing to act on.
+  "GC15|1104|SSR|$T_GC_MEAN;$T_GC_SEED"
+
+  # GC99 — VACUITY CONTROL, and it MUST SURVIVE. The fold's parameter is renamed
+  # at its declaration and its two uses; nothing else changes. It proves the
+  # anchor still matches, the batch still builds and the suite still runs, while
+  # changing no behaviour. Non-empty expectation on purpose (playhead-ngsm).
+  "GC99|1105|SSR|$T_GC_FOLDACC;$T_GC_FOLDIDEM;$T_GC_FOLDNIL"
+
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -9341,6 +9492,22 @@ describe_mutation() {
     BG14) echo "bg2n: EVERY replace is a new attempt, so the checkpoint/digest double-write makes one screened window read as two" ;;
     BG15) echo "bg2n: a SUCCESS never increments, which restores the reset this bead was filed for" ;;
     BG99) echo "VACUITY CONTROL — the local holding the status union is renamed and nothing else changes. MUST SURVIVE" ;;
+    GC01) echo "6gcy: latencyMsTotal binds THIS attempt's cost — the defect restored in one line, with a real measurement in the column" ;;
+    GC02) echo "6gcy: the checkpoint/digest double-write accumulates, so every checkpointed success reads at twice its cost over two samples" ;;
+    GC03) echo "6gcy: nothing ever accumulates — the safe-looking direction, which restores the original defect for every retried window" ;;
+    GC04) echo "6gcy: an unmeasured RETRY contributes 0 and a sample — ejr7's 'unmeasured read as free', now inside a SUM" ;;
+    GC05) echo "6gcy: max takes the incoming cost unconditionally, so the worst attempt is just the last one again" ;;
+    GC06) echo "6gcy: the probe reads latencySampleCount off the MAX column — one positional index wrong, three readings broken" ;;
+    GC07) echo "6gcy: the migration backfills sampleCount = attemptCount, vouching for attempt costs destroyed before this binary existed" ;;
+    GC08) echo "6gcy: the migration drops its latencyMs IS NOT NULL guard, so a never-measured row claims it cost exactly nothing" ;;
+    GC09) echo "6gcy: the migration drops its IS NULL guard, so a re-entered rung resets an accumulated row to its last cost" ;;
+    GC10) echo "6gcy: latencyHistoryIsComplete drops the firstAttemptAt clause — the count comparison alone vouches for nothing" ;;
+    GC11) echo "6gcy: latencyHistoryIsComplete answers false where it has no record — 'not established' collapsing into 'no'" ;;
+    GC12) echo "6gcy: the mean divides by attemptCount — numerator over measured attempts, denominator over all of them" ;;
+    GC13) echo "6gcy: a FIRST write with no cost seeds a zero record instead of nothing — GC04's mirror at the other entry point" ;;
+    GC14) echo "6gcy: the reader takes latencyMsTotal off the bare column read, so every NULL total reads as the cheapest window in the store" ;;
+    GC15) echo "6gcy: unmeasuredAttemptCount swaps its operands and clamps to 0 — 'nothing is missing' on a row missing ten attempts" ;;
+    GC99) echo "VACUITY CONTROL — the fold's internal parameter name changes and nothing else does. MUST SURVIVE" ;;
     NY01) echo "AdDetectionService.hotPathCandidates sorts the RAW array — the shipped defect: runBackfill canonicalized and the hot path did not" ;;
     NY02) echo "the hot path 'de-duplicates' by chunk.id, a per-ROW UUID, so a fast/final twin survives it intact" ;;
     NY03) echo "BoundaryExpander.makeLexicalContext scans the raw array — the user's 'Hearing an ad' tap gets a phantom lexical candidate" ;;
@@ -10765,6 +10932,205 @@ EOF
                 if let alreadyRecorded = SemanticScanStatus(rawValue: existingStatus) {
                     observedStatuses.insert(alreadyRecorded)
                 }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # ---- playhead-6gcy: a row records WHAT ITS ATTEMPTS COST (GC series) ----
+
+  GC01)
+    snippet OLD <<'EOF'
+        bind(stmt, 31, latencyHistory.total)
+EOF
+    snippet NEW <<'EOF'
+        bind(stmt, 31, result.latencyMs)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  GC02)
+    snippet OLD <<'EOF'
+                .folding(
+                    attemptLatencyMs: result.latencyMs,
+                    isIdempotentRewrite: isIdempotentSuccessRewrite
+                )
+EOF
+    snippet NEW <<'EOF'
+                .folding(
+                    attemptLatencyMs: result.latencyMs,
+                    isIdempotentRewrite: false
+                )
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  GC03)
+    snippet OLD <<'EOF'
+                .folding(
+                    attemptLatencyMs: result.latencyMs,
+                    isIdempotentRewrite: isIdempotentSuccessRewrite
+                )
+EOF
+    snippet NEW <<'EOF'
+                .folding(
+                    attemptLatencyMs: result.latencyMs,
+                    isIdempotentRewrite: true
+                )
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  GC04)
+    snippet OLD <<'EOF'
+                .folding(
+                    attemptLatencyMs: result.latencyMs,
+                    isIdempotentRewrite: isIdempotentSuccessRewrite
+                )
+EOF
+    snippet NEW <<'EOF'
+                .folding(
+                    attemptLatencyMs: result.latencyMs ?? 0,
+                    isIdempotentRewrite: isIdempotentSuccessRewrite
+                )
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  GC05)
+    snippet OLD <<'EOF'
+            max: Swift.max(max ?? attemptLatencyMs, attemptLatencyMs),
+EOF
+    snippet NEW <<'EOF'
+            max: attemptLatencyMs,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  GC06)
+    snippet OLD <<'EOF'
+                    sampleCount: optionalInt(probe, 7)
+EOF
+    snippet NEW <<'EOF'
+                    sampleCount: optionalInt(probe, 6)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  GC07)
+    snippet OLD <<'EOF'
+                latencySampleCount = 1
+            WHERE latencySampleCount IS NULL AND latencyMs IS NOT NULL
+EOF
+    snippet NEW <<'EOF'
+                latencySampleCount = attemptCount
+            WHERE latencySampleCount IS NULL AND latencyMs IS NOT NULL
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  GC08)
+    snippet OLD <<'EOF'
+            WHERE latencySampleCount IS NULL AND latencyMs IS NOT NULL
+EOF
+    snippet NEW <<'EOF'
+            WHERE latencySampleCount IS NULL
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  GC09)
+    snippet OLD <<'EOF'
+            WHERE latencySampleCount IS NULL AND latencyMs IS NOT NULL
+EOF
+    snippet NEW <<'EOF'
+            WHERE latencyMs IS NOT NULL
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  GC10)
+    snippet OLD <<'EOF'
+        guard historyIsComplete else { return false }
+        return latencySampleCount == attemptCount
+EOF
+    snippet NEW <<'EOF'
+        return latencySampleCount == attemptCount
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  GC11)
+    snippet OLD <<'EOF'
+        guard let latencySampleCount else { return nil }
+        guard historyIsComplete else { return false }
+EOF
+    snippet NEW <<'EOF'
+        guard let latencySampleCount else { return false }
+        guard historyIsComplete else { return false }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  GC12)
+    snippet OLD <<'EOF'
+        return latencyMsTotal / Double(latencySampleCount)
+EOF
+    snippet NEW <<'EOF'
+        return latencyMsTotal / Double(attemptCount)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  GC13)
+    snippet OLD <<'EOF'
+        guard let attemptLatencyMs else { return .unrecorded }
+        return Self(total: attemptLatencyMs, max: attemptLatencyMs, sampleCount: 1)
+EOF
+    snippet NEW <<'EOF'
+        let measured = attemptLatencyMs ?? 0
+        return Self(total: measured, max: measured, sampleCount: 1)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  GC14)
+    snippet OLD <<'EOF'
+            latencyMsTotal: optionalDouble(stmt, 30),
+EOF
+    snippet NEW <<'EOF'
+            latencyMsTotal: Optional(sqlite3_column_double(stmt, 30)),
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  GC15)
+    snippet OLD <<'EOF'
+        return Swift.max(0, attemptCount - latencySampleCount)
+EOF
+    snippet NEW <<'EOF'
+        return Swift.max(0, latencySampleCount - attemptCount)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  GC99)
+    snippet OLD <<'EOF'
+    func folding(attemptLatencyMs: Double?, isIdempotentRewrite: Bool) -> Self {
+        if isIdempotentRewrite {
+            // Not a new attempt, so not a new sample. Seed only if nothing is
+            // recorded yet, so a pre-V56 row whose only further writes are
+            // digests still gains a TRUE one-sample record instead of staying
+            // silent forever.
+            return sampleCount == nil ? Self.first(attemptLatencyMs: attemptLatencyMs) : self
+        }
+        guard let attemptLatencyMs else { return self }
+        return Self(
+            total: (total ?? 0) + attemptLatencyMs,
+            max: Swift.max(max ?? attemptLatencyMs, attemptLatencyMs),
+            sampleCount: (sampleCount ?? 0) + 1
+        )
+    }
+EOF
+    snippet NEW <<'EOF'
+    func folding(attemptLatencyMs incoming: Double?, isIdempotentRewrite: Bool) -> Self {
+        if isIdempotentRewrite {
+            // Not a new attempt, so not a new sample. Seed only if nothing is
+            // recorded yet, so a pre-V56 row whose only further writes are
+            // digests still gains a TRUE one-sample record instead of staying
+            // silent forever.
+            return sampleCount == nil ? Self.first(attemptLatencyMs: incoming) : self
+        }
+        guard let incoming else { return self }
+        return Self(
+            total: (total ?? 0) + incoming,
+            max: Swift.max(max ?? incoming, incoming),
+            sampleCount: (sampleCount ?? 0) + 1
+        )
+    }
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 

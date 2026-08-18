@@ -360,6 +360,18 @@ struct SemanticScanLatencyHistoryV56MigrationTests {
         #expect(raw.total == nil)
         #expect(raw.max == nil)
         #expect(raw.sampleCount == nil)
+
+        // …and the READER must agree with the disk. `sqlite3_column_double`
+        // returns 0.0 for a NULL, so a bare column read here would make every
+        // never-measured row the cheapest window in the store — a plausible
+        // number in this unit, which is what makes it hard to notice.
+        let row = try #require(
+            try await store.fetchSemanticScanResults(analysisAssetId: "asset-n").first
+        )
+        #expect(row.latencyMsTotal == nil)
+        #expect(row.latencyMsMax == nil)
+        #expect(row.latencySampleCount == nil)
+        #expect(row.latencyMsMean == nil)
     }
 
     @Test("an unmeasured RETRY carries the history forward untouched")
