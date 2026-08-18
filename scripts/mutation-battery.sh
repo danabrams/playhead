@@ -1188,6 +1188,7 @@ MPTRENG="Playhead/Services/TranscriptEngine/TranscriptEngineService.swift"
 # the terminal `failed`; FMCLS the permissive status/counter mapping; PROBE the
 # readiness cache guard.
 THROT="Playhead/Services/AdDetection/FMDaemonThrottle.swift"
+SSR="Playhead/Services/AdDetection/SemanticScanResult.swift"
 # playhead-e75l: the daemon-refusal CLASS — kvs8's throttle plus the metadata
 # stall — and the per-kind tokens and log events that keep the two countable
 # apart in a device pull. Added for the DR series.
@@ -1470,6 +1471,7 @@ MUTABLE_FILES=(
   "$PTX"
   "$ELV" "$BSB"
   "$UZWIRE" "$UZPROV" "$UZHLTH"
+  "$SSR"
 )
 # playhead-6r4z R1 review: `$MPTRIDX` was MISSING from the list above from the
 # moment playhead-mptr added the K2 series, and it is the target of NINE of the
@@ -1582,6 +1584,20 @@ FOCUSED_SUITES=(
   -only-testing:PlayheadTests/CoarseLatencySplitTests
   -only-testing:PlayheadTests/SemanticScanPersistenceTests
   -only-testing:PlayheadTests/FMDaemonRefusalSourceCanaryTests
+  # playhead-bg2n: a row can say THAT THERE WERE OTHER ATTEMPTS AND THEY
+  # DIFFERED (BG series). ONE suite is added — the V55 migration suite — because
+  # the WRITE-PATH half is observed by `SemanticScanPersistenceTests`, already
+  # listed two lines up for rkfp/ezmv. That overlap is not an accident: both
+  # beads are defects in the same upsert, so they are observed from the same
+  # seam.
+  #
+  # The split matters, and BG07/BG08 are the proof. The persistence suite CANNOT
+  # see the MIGRATION's two claims — what an upgraded row is allowed to assert
+  # about its own past — because every row it writes is a FIRST write under the
+  # new binary, where `firstAttemptAt` is known by construction. Only a suite
+  # that rewinds to the V54 SHAPE and climbs back can observe a rung that
+  # manufactures provenance it cannot have.
+  -only-testing:PlayheadTests/SemanticScanAttemptHistoryV55MigrationTests
   # playhead-59c8: the unclassified-model-failure rails (UM series). Two suites,
   # because the claim spans two layers and neither can see the other: the pure
   # identity read and the token it builds (instant, no store), and a SOURCE
@@ -3746,6 +3762,29 @@ T_GJ_MIXED="the sweep repairs the broken row and leaves the correct one alone in
 T_GJ_IDEMPOTENT="the rung is idempotent and a clean v53 database reaches head untouched"
 T_GJ_FTS_MISSING="rows with NO FTS index entry (a pre-FTS database) are still repaired — the rebuild is required"
 T_GJ_VACUITY="UNPUNCTUATED text cannot see this defect — the trap that killed jc42's JC04"
+
+# ---- playhead-bg2n: a row records only its LAST attempt (BG series) ----
+#
+# Display names, verbatim, from
+# `SemanticScanAttemptHistoryV55MigrationTests` and
+# `SemanticScanPersistenceTests`.
+T_BG_FROZEN="the witness shape: createdAt is FROZEN across three differing attempts"
+T_BG_AGE="a stuck window reports its true AGE, not the age of its newest attempt"
+T_BG_UNION="a row upserted twice with different statuses does not read as two of the second"
+T_BG_SORTED="the set is SORTED on disk, so two pulls that saw the same statuses compare equal"
+T_BG_NODUP="a repeat of the SAME status does not grow the set"
+T_BG_COUNT="countSemanticScanResults counts WRITES, so a re-attempt in this grant is banked"
+T_BG_UPGRADE="V55 upgrade: lastAttemptAt is COPIED, observedStatuses is SEEDED, firstAttemptAt stays NULL"
+T_BG_PARTIAL="a pre-V55 row's incompleteness SURVIVES later attempts"
+T_BG_SUCCESS="a SUCCESS replacing a failure keeps the attempt count and records both statuses"
+T_BG_REWRITE="a SUCCESS re-written over a SUCCESS is the SAME attempt — the checkpoint/digest double-write"
+T_BG_RANK="a SUCCESS over a FAILURE still increments — a rank change is not an idempotent re-write"
+T_BG_H1="H-1 still holds: a later failure cannot demote a cached success"
+T_BG_ENCODE="the encoder round-trips, and an unknown raw value is DROPPED rather than throwing"
+T_BG_FALLBACK="observedStatuses always contains the row's own status, even with no column"
+T_BG_UNKNOWNTOK="an UNRECOGNISED status still proves the attempts differed — a dropped token is not a missing attempt"
+T_BG_SEEDNULL="a row whose observedStatuses column is NULL still contributes its status"
+T_BG_ROUNDTRIP="refusal scan results round-trip with failure metadata intact"
 T_JC_NORMALIZED="the two producers DISAGREE on normalizedText while agreeing on text — the key cannot be the normalised column"
 T_JC_FAST_NO_SUPPRESS="a FAST row over the same span does not suppress the final row — final-pass coverage keeps growing"
 T_JC_REINSERT="after V53 the UNIQUE index exists and a byte-identical re-insert is refused"
@@ -9028,6 +9067,132 @@ MUTATIONS=(
   # is credited KILLED, so a control that cannot fail proves nothing.
   "CL99|1034|ADSVC|$T_CL_HULL;$T_CL_KEEP;$T_CL_ONCE"
 
+  # ---- playhead-bg2n: a row records only its LAST attempt (BG series) ----
+  #
+  # Batch 1040 — BG01, THE SHIPPED DEFECT VERBATIM: `createdAt` is restamped on
+  # every upsert. This is the state the device is in — `scan-24f9deacdb0e3ab6`
+  # was created once and its `createdAt` moved three times, and across four
+  # capture generations six rows moved by up to 35 h 20 m. Note what does NOT
+  # kill it: the round-trip suite, where every write is a FIRST write and the
+  # restamp is a no-op. Only a rail that upserts the SAME reuse key twice can
+  # see it.
+  #
+  # `$T_BG_AGE` was named here in the first cut and the battery reported
+  # SURVIVED on a working rail. It is not a coverage hole and the expectation was
+  # not relaxed to hide one — AGE reads `attemptSpanSeconds`, which is
+  # `lastAttemptAt - firstAttemptAt` and names neither of BG01's columns, so it
+  # CANNOT observe this mutant by construction. It is BG02's rail. The measured
+  # failure set was {FROZEN, PARTIAL, COUNT, SUCCESS}; the two named are the two
+  # that assert the freeze deliberately rather than in passing.
+  "BG01|1040|STORE|$T_BG_FROZEN;$T_BG_PARTIAL"
+
+  # Batch 1041 — BG02, `firstAttemptAt` is stamped fresh on a replace instead of
+  # carried. Every pre-V55 row then GAINS a first-attempt time on its next
+  # attempt, so `historyIsComplete` starts answering `true` for a row whose
+  # earlier attempts are gone — the licence rots into exactly the confident
+  # provenance this bead exists to withhold.
+  #
+  # `$T_BG_UPGRADE` was named here in the first cut and stayed green, for a
+  # reason worth keeping: it seeds, rewinds, migrates and then READS — it never
+  # upserts after the migration, and this mutant only fires on a replace. The
+  # rail that catches it is PARTIAL, which is the same fixture plus a twelfth
+  # attempt. Measured failure set: {PARTIAL, AGE, FROZEN}, all three named,
+  # because all three read a preserved `firstAttemptAt` from a different angle.
+  "BG02|1041|STORE|$T_BG_PARTIAL;$T_BG_AGE;$T_BG_FROZEN"
+
+  # Batch 1042 — BG03, `observedStatuses` is OVERWRITTEN with the incoming
+  # status rather than unioned. This is the bead's own acceptance criterion
+  # stated as a mutant: "a row upserted twice with different statuses must not
+  # read as two of the second one".
+  "BG03|1042|STORE|$T_BG_UNION;$T_BG_PARTIAL;$T_BG_SUCCESS"
+
+  # Batch 1043 — BG04, the EXISTING ROW'S OWN `status` is no longer folded into
+  # the union; only its recorded set is. Reachable on a real device: the V55
+  # rung is `guard observed >= 54`, so a database whose V39 rolled back takes the
+  # three columns from `createTables()` and never runs the seed, leaving every
+  # row's set NULL with a perfectly good `status` beside it.
+  "BG04|1043|STORE|$T_BG_SEEDNULL"
+
+  # Batch 1044 — BG05, the probe is re-gated on `result.status != .success`, the
+  # shape that shipped. A `.success` replacing ten failures then writes
+  # `attemptCount = 1` with no trace of them — the most extreme form of this
+  # defect, one branch away from the one that was filed.
+  "BG05|1044|STORE|$T_BG_SUCCESS"
+
+  # Batch 1045 — BG06, `lastAttemptAt` is bound to the FROZEN value instead of
+  # this write's clock, so it freezes with `createdAt`. The grant ledger then
+  # reports `banked=0` for every re-attempted window: the split exists precisely
+  # so one column can stop moving while the other keeps up.
+  "BG06|1045|STORE|$T_BG_COUNT;$T_BG_FROZEN"
+
+  # Batch 1046 — BG07, the migration BACKFILLS `firstAttemptAt = createdAt`,
+  # manufacturing the provenance the upserts destroyed. It is the tempting
+  # mutant: the column looks populated, `historyIsComplete` answers `true`, and
+  # every value is a real timestamp — of the LAST pre-migration attempt.
+  "BG07|1046|STORE|$T_BG_UPGRADE"
+
+  # Batch 1047 — BG08, the migration's `lastAttemptAt` copy is dropped. Every
+  # row on every upgraded device then reads NULL, `countSemanticScanResults`
+  # matches none of them, and the grant ledger reports `banked=0` forever —
+  # while a fresh install stays perfectly green. The copy is what makes the
+  # reader's repoint a rename rather than a behaviour change.
+  "BG08|1047|STORE|$T_BG_UPGRADE"
+
+  # Batch 1048 — BG09, `countSemanticScanResults` reads `createdAt` again. With
+  # `createdAt` now frozen this is the silent under-count the repoint exists to
+  # prevent, and it is invisible on any row that has only ever been written once.
+  "BG09|1048|STORE|$T_BG_COUNT"
+
+  # Batch 1049 — BG10, `attemptsDiffered` answers `false` instead of `nil` for a
+  # partial record. THE MISREADING, in one line: "one surviving status" becomes
+  # "the attempts were all alike", which is the sentence playhead-hzpa wrote.
+  "BG10|1049|SSR|$T_BG_UPGRADE;$T_BG_FALLBACK"
+
+  # Batch 1050 — BG11, the encoder drops its `.sorted()`. Two pulls that saw the
+  # same statuses then compare unequal and a diff reports churn that did not
+  # happen — the column stops being a SET on disk. Asserted over all 20 cases
+  # rather than three, because `Set` iteration is deterministic within a process
+  # and a small sample can agree with an unsorted encoder by luck.
+  "BG11|1050|SSR|$T_BG_ENCODE"
+
+  # Batch 1051 — BG12, the probe runs on the success path but the attempt count
+  # is not merged there. Subtler than BG05: the statuses and both timestamps come
+  # out right, so every history rail stays green and only the COUNT is wrong.
+  "BG12|1051|STORE|$T_BG_SUCCESS"
+
+  # Batch 1053 — BG13, `attemptsDiffered` counts the TYPED set instead of the raw
+  # tokens. Found at review round 2, in the API written to prevent hzpa's
+  # sentence: the decoder drops a status a newer binary invented, and on a
+  # COMPLETE row that takes the count from 2 to 1 and answers `false` — "these
+  # attempts were all alike". The leniency itself is right and stays; what was
+  # wrong was asking the lenient set a question about COUNT.
+  "BG13|1053|SSR|$T_BG_UNKNOWNTOK"
+
+  # Batch 1054 — BG14, EVERY replace is a new attempt. This is what the first cut
+  # of this bead shipped, and review round 3 found it by reading a doc block the
+  # change had falsified rather than by any test.
+  # `BackfillJobRunner.checkpointCoarseProgress` writes each screened window at
+  # the checkpoint AND again in the end-of-pass digest, and its own header states
+  # the constraint the store has to honour: "writing a success row here and again
+  # at end of pass leaves the counter at 1 both times". Incrementing
+  # unconditionally applies the FAILURE-row inflation to every checkpointed
+  # success on every completed pass — one screened window reading as two.
+  "BG14|1054|STORE|$T_BG_REWRITE"
+
+  # Batch 1055 — BG15, the MIRROR, and the reason BG14's fix is a RANK test
+  # rather than a "did anything change" test. Over-applying it into "a success
+  # never increments" restores the reset this whole bead was filed for: a success
+  # landing after ten failures reads as one attempt again.
+  "BG15|1055|STORE|$T_BG_RANK;$T_BG_SUCCESS"
+
+  # BG99 — VACUITY CONTROL, and it MUST SURVIVE. The local holding the union is
+  # renamed and nothing else changes: it proves the anchor still matches, the
+  # batch still builds and both suites still run, while changing no behaviour.
+  # Non-empty expectation on purpose (playhead-ngsm) — an entry with an empty
+  # expectation iterates zero times and is credited KILLED, so a control that
+  # cannot fail proves nothing.
+  "BG99|1052|STORE|$T_BG_UNION;$T_BG_FROZEN;$T_BG_ROUNDTRIP"
+
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -9160,6 +9325,22 @@ describe_mutation() {
     CL07) echo "crossShowSponsorEntities reverts to the coverage HULL — latent behind an OFF flag, so only a rail can hold it" ;;
     CL08) echo "the cross-show read set fans out per occurrence and drops its dedupe — one brand becomes two entities" ;;
     CL99) echo "VACUITY CONTROL — the closure parameter in buildCatalogLedgerEntries is renamed and nothing else. MUST SURVIVE" ;;
+    BG01) echo "bg2n: THE SHIPPED DEFECT — createdAt is restamped on every upsert, so a row created once moves three times" ;;
+    BG02) echo "bg2n: firstAttemptAt is stamped fresh on a replace, so a pre-V55 row GAINS a provenance it cannot have" ;;
+    BG03) echo "bg2n: observedStatuses is OVERWRITTEN rather than unioned — eleven differing attempts read as eleven of the last" ;;
+    BG04) echo "bg2n: the existing row's own status is not folded into the union (the rolled-back-V39 shape, where the set column is NULL)" ;;
+    BG05) echo "bg2n: the probe is re-gated on '!= .success', so a success replacing ten failures writes attemptCount=1" ;;
+    BG06) echo "bg2n: lastAttemptAt is bound to the FROZEN createdAt, so the grant ledger reports banked=0 for re-attempted windows" ;;
+    BG07) echo "bg2n: the V55 migration backfills firstAttemptAt = createdAt — manufactured provenance that looks perfect" ;;
+    BG08) echo "bg2n: the V55 migration's lastAttemptAt copy is dropped, so every upgraded device counts zero banked windows forever" ;;
+    BG09) echo "bg2n: countSemanticScanResults reads createdAt again — a silent under-count invisible on single-write rows" ;;
+    BG10) echo "bg2n: attemptsDiffered answers false instead of nil on a partial record — hzpa's sentence, in one line" ;;
+    BG11) echo "bg2n: the observedStatuses encoder drops .sorted(), so the column stops being a SET on disk" ;;
+    BG12) echo "bg2n: the attempt count is not merged on the success path — statuses and timestamps right, COUNT wrong" ;;
+    BG13) echo "bg2n: attemptsDiffered counts the TYPED set, so a status a newer binary invented becomes a confident 'they were all alike'" ;;
+    BG14) echo "bg2n: EVERY replace is a new attempt, so the checkpoint/digest double-write makes one screened window read as two" ;;
+    BG15) echo "bg2n: a SUCCESS never increments, which restores the reset this bead was filed for" ;;
+    BG99) echo "VACUITY CONTROL — the local holding the status union is renamed and nothing else changes. MUST SURVIVE" ;;
     NY01) echo "AdDetectionService.hotPathCandidates sorts the RAW array — the shipped defect: runBackfill canonicalized and the hot path did not" ;;
     NY02) echo "the hot path 'de-duplicates' by chunk.id, a per-ROW UUID, so a fast/final twin survives it intact" ;;
     NY03) echo "BoundaryExpander.makeLexicalContext scans the raw array — the user's 'Hearing an ad' tap gets a phantom lexical candidate" ;;
@@ -10377,6 +10558,213 @@ EOF
         let overlapping = entries.compactMap { candidate in
             candidate.locatedInTimeWindow(start: span.startTime, end: span.endTime)
         }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # ---- playhead-bg2n: a row records only its LAST attempt (BG series) ----
+
+  BG01)
+    snippet OLD <<'EOF'
+        bind(stmt, 23, effectiveCreatedAt)
+EOF
+    snippet NEW <<'EOF'
+        bind(stmt, 23, result.createdAt ?? now)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BG02)
+    snippet OLD <<'EOF'
+                effectiveFirstAttemptAt = optionalDouble(probe, 3)
+EOF
+    snippet NEW <<'EOF'
+                effectiveFirstAttemptAt = result.createdAt ?? now
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BG03)
+    snippet OLD <<'EOF'
+                observedStatuses.formUnion(
+                    SemanticScanResult.decodeObservedStatuses(optionalText(probe, 4))
+                )
+                if let existing = SemanticScanStatus(rawValue: existingStatus) {
+                    observedStatuses.insert(existing)
+                }
+EOF
+    snippet NEW <<'EOF'
+                observedStatuses = [result.status]
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BG04)
+    snippet OLD <<'EOF'
+                if let existing = SemanticScanStatus(rawValue: existingStatus) {
+                    observedStatuses.insert(existing)
+                }
+EOF
+    snippet NEW <<'EOF'
+                _ = existingStatus
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BG05)
+    # RE-EXPRESSED at review round 3, which rewrote the line this anchored on.
+    # The re-expression is also TRUER to the shipped shape: gating the whole
+    # merge (count, the createdAt freeze, firstAttemptAt, the status set) rather
+    # than the counter alone is what `!= .success` used to do.
+    snippet OLD <<'EOF'
+            if sqlite3_step(probe) == SQLITE_ROW,
+               let existingStatus = optionalText(probe, 0) {
+EOF
+    snippet NEW <<'EOF'
+            if sqlite3_step(probe) == SQLITE_ROW,
+               result.status != .success,
+               let existingStatus = optionalText(probe, 0) {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BG06)
+    snippet OLD <<'EOF'
+        bind(stmt, 29, result.createdAt ?? now)
+EOF
+    snippet NEW <<'EOF'
+        bind(stmt, 29, effectiveCreatedAt)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BG07)
+    snippet OLD <<'EOF'
+        try exec(
+            """
+            UPDATE semantic_scan_results
+            SET lastAttemptAt = createdAt
+            WHERE lastAttemptAt IS NULL AND createdAt IS NOT NULL
+            """
+        )
+EOF
+    snippet NEW <<'EOF'
+        try exec(
+            """
+            UPDATE semantic_scan_results
+            SET lastAttemptAt = createdAt, firstAttemptAt = createdAt
+            WHERE lastAttemptAt IS NULL AND createdAt IS NOT NULL
+            """
+        )
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BG08)
+    snippet OLD <<'EOF'
+        try exec(
+            """
+            UPDATE semantic_scan_results
+            SET lastAttemptAt = createdAt
+            WHERE lastAttemptAt IS NULL AND createdAt IS NOT NULL
+            """
+        )
+EOF
+    snippet NEW <<'EOF'
+        try exec("SELECT 1")
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BG09)
+    snippet OLD <<'EOF'
+            "SELECT COUNT(*) FROM semantic_scan_results WHERE lastAttemptAt >= ?"
+EOF
+    snippet NEW <<'EOF'
+            "SELECT COUNT(*) FROM semantic_scan_results WHERE createdAt >= ?"
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BG10)
+    # RE-EXPRESSED at review round 2. Its original anchor named
+    # `observedStatuses.count`, which R2's own fix replaced with `distinct.count`
+    # — so the mutant stopped APPLYING and the battery reported ERROR, not a
+    # pass. A rail that cannot apply is a LOST rail; re-express it against the
+    # moved text rather than letting the ERROR stand.
+    snippet OLD <<'EOF'
+        if distinct.count > 1 { return true }
+        return historyIsComplete ? false : nil
+EOF
+    snippet NEW <<'EOF'
+        if distinct.count > 1 { return true }
+        return false
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BG11)
+    snippet OLD <<'EOF'
+        statuses.map(\.rawValue).sorted().joined(separator: ",")
+EOF
+    snippet NEW <<'EOF'
+        statuses.map(\.rawValue).joined(separator: ",")
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BG12)
+    # RE-EXPRESSED at review round 3, same reason as BG05, and kept DISTINCT from
+    # it: BG05 exempts the whole merge, this exempts the COUNT alone, so the
+    # statuses and both timestamps come out right and only the number is wrong.
+    snippet OLD <<'EOF'
+                effectiveAttemptCount = isIdempotentSuccessRewrite
+                    ? max(existingAttempt, result.attemptCount)
+                    : max(existingAttempt + 1, result.attemptCount)
+EOF
+    snippet NEW <<'EOF'
+                _ = isIdempotentSuccessRewrite
+                effectiveAttemptCount = result.status == .success
+                    ? result.attemptCount
+                    : max(existingAttempt + 1, result.attemptCount)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BG13)
+    snippet OLD <<'EOF'
+        let distinct = Self.rawObservedStatusTokens(observedStatusesCSV).union([status.rawValue])
+EOF
+    snippet NEW <<'EOF'
+        let distinct = observedStatuses
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BG14)
+    snippet OLD <<'EOF'
+                effectiveAttemptCount = isIdempotentSuccessRewrite
+                    ? max(existingAttempt, result.attemptCount)
+                    : max(existingAttempt + 1, result.attemptCount)
+EOF
+    snippet NEW <<'EOF'
+                _ = isIdempotentSuccessRewrite
+                effectiveAttemptCount = max(existingAttempt + 1, result.attemptCount)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BG15)
+    snippet OLD <<'EOF'
+                let isIdempotentSuccessRewrite =
+                    result.status == .success && existingStatus == SemanticScanStatus.success.rawValue
+EOF
+    snippet NEW <<'EOF'
+                let isIdempotentSuccessRewrite = result.status == .success
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BG99)
+    snippet OLD <<'EOF'
+                observedStatuses.formUnion(
+                    SemanticScanResult.decodeObservedStatuses(optionalText(probe, 4))
+                )
+                if let existing = SemanticScanStatus(rawValue: existingStatus) {
+                    observedStatuses.insert(existing)
+                }
+EOF
+    snippet NEW <<'EOF'
+                observedStatuses.formUnion(
+                    SemanticScanResult.decodeObservedStatuses(optionalText(probe, 4))
+                )
+                if let alreadyRecorded = SemanticScanStatus(rawValue: existingStatus) {
+                    observedStatuses.insert(alreadyRecorded)
+                }
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -20949,6 +21337,7 @@ rec_file()   {
     LEASE) printf '%s' "$LEASE" ;;
     FPRUN) printf '%s' "$FPRUN" ;;
     PTX)   printf '%s' "$PTX" ;;
+    SSR)   printf '%s' "$SSR" ;;
     *)     printf '%s' "" ;;
   esac
 }

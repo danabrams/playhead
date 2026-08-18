@@ -1971,7 +1971,7 @@ actor AnalysisStore {
     /// assertions automatically follow the production constant — hardcoding
     /// the integer in tests has been a recurring source of stale-assertion
     /// flakes whenever the schema bumps.
-    nonisolated static let currentSchemaVersion = 54
+    nonisolated static let currentSchemaVersion = 55
 
     /// H1: minimum age (in seconds) a `backfill_jobs` / `final_pass_jobs`
     /// row stuck in `status='running'` must reach before the launch-time
@@ -2917,6 +2917,11 @@ actor AnalysisStore {
             // Recomputes the column with the canonical normalizer, touching
             // only rows that actually violate the invariant.
             try migrateUnnormalizedChunkTextV54IfNeeded()
+            // playhead-bg2n: `semantic_scan_results` learns that a row can have
+            // had more than one attempt AND THAT THEY DIFFERED. Additive-only,
+            // three nullable columns; `firstAttemptAt` is deliberately NOT
+            // backfilled — see the block comment on the migration.
+            try migrateSemanticScanAttemptHistoryV55IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -3309,6 +3314,11 @@ actor AnalysisStore {
         // `transcript_chunks` — or one predating `normalizedText` — still
         // reaches v54.
         try migrateUnnormalizedChunkTextV54IfNeeded()
+        // playhead-bg2n (v55): guarded on `tableExists`, and every column add is
+        // `addColumnIfNeeded`, so a seeded fixture without
+        // `semantic_scan_results` — or one already carrying the V55 shape —
+        // still reaches v55.
+        try migrateSemanticScanAttemptHistoryV55IfNeeded()
     }
     #endif
 
@@ -6840,7 +6850,11 @@ actor AnalysisStore {
     // themselves were undateable.
     //
     // THREE COLUMNS, ALL NULLABLE, NO BACKFILL.
-    //   * `createdAt`        REAL — UNIX seconds at the write.
+    //   * `createdAt`        REAL — UNIX seconds at the write. (playhead-bg2n,
+    //                               V55: at the FIRST write. It was restamped on
+    //                               every upsert until then, which made a column
+    //                               named for creation hold the last attempt;
+    //                               `lastAttemptAt` carries that quantity now.)
     //   * `scenePhase`       TEXT — `BGTaskTelemetryScenePhase`'s vocabulary,
     //                               verbatim: active / inactive / background /
     //                               unknown. Same strings `background_task_runs`
@@ -7921,6 +7935,121 @@ actor AnalysisStore {
             return
         }
         try setSchemaVersion(54)
+    }
+
+    /// playhead-bg2n — V55. `semantic_scan_results` learns that a row can have
+    /// had MORE THAN ONE ATTEMPT AND THAT THEY DIFFERED.
+    ///
+    /// THE DEFECT, stated as the bytes state it. Under `INSERT OR REPLACE`,
+    /// `status` / `latencyMs` / `createdAt` are last-write-wins, so one row
+    /// records only its most recent attempt while presenting a column named
+    /// `createdAt` that looks like provenance. Measured across four capture
+    /// generations of one device (2026-08-14 → 2026-08-15, 961 rows in the
+    /// last), the witness is `scan-24f9deacdb0e3ab6` — asset `AA6CD430`, head
+    /// window `[0.0, 42.9]`, id stable in every capture:
+    ///
+    ///     status=decodingFailure       attempts=5   createdAt=08-14 04:57:50
+    ///     status=decodingFailure       attempts=9   createdAt=08-15 04:47:13
+    ///     status=exceededContextWindow attempts=11  createdAt=08-15 06:17:14
+    ///
+    /// `createdAt` moved three times for a row created once, and playhead-hzpa
+    /// was filed on the last of those states stating "eleven attempts, every one
+    /// `exceededContextWindow`" — a P1 whose premise the schema made wrong.
+    /// SIX rows have a provably-moved `createdAt` across those captures and the
+    /// largest forward jump is **35 h 20 m** (`scan-ac77470bc55f3fae`,
+    /// attempts 3 → 12): the longer a window has been stuck, the newer it looks.
+    ///
+    /// WHAT THIS MIGRATION CLAIMS, AND WHAT IT REFUSES TO CLAIM. Three columns,
+    /// three different truth values, and the refusals are the load-bearing part:
+    ///
+    ///   * `lastAttemptAt = createdAt` — a **rename, not a claim**. Every stored
+    ///     `createdAt` on disk IS the time of the last write; copying it is
+    ///     lossless, and it is what makes the repoint of
+    ///     ``countSemanticScanResults(lastAttemptAtOrAfter:)`` a no-op on
+    ///     existing data instead of a silent behaviour change.
+    ///   * `observedStatuses = status` — a **true statement**: that status was
+    ///     observed on this row. It is a LOWER BOUND, not the history, and
+    ///     `firstAttemptAt IS NULL` is what says so.
+    ///   * `firstAttemptAt` — left **NULL on every existing row**. HISTORY
+    ///     STARTS NOW. The value it would hold was destroyed by the upserts this
+    ///     bead is about, and no proxy is honest: `attemptCount <= 1` is NOT
+    ///     evidence of a single write, because until this same change a
+    ///     `.success` replacing a failure reset the counter to the caller's
+    ///     value (typically 1). 906 of the 961 device rows are `.success` with
+    ///     `attemptCount = 1`, and nothing on disk distinguishes "succeeded
+    ///     first try" from "succeeded after ten failures" among them.
+    ///
+    /// So a non-NULL `firstAttemptAt` is the ONE licence that says `createdAt`
+    /// is really a creation time and `observedStatuses` is really exhaustive —
+    /// see ``SemanticScanResult/historyIsComplete``. One marker for both claims,
+    /// deliberately: two independent nullables can disagree, and a reader who
+    /// checks one and not the other is how this defect class propagates.
+    ///
+    /// WHY NOT A PER-ATTEMPT JOURNAL. Measured on the 2026-08-15 pull: 961 rows
+    /// carry 1,040 attempts, and only 26 rows have `attemptCount > 1`. A journal
+    /// would therefore cost only +8 % of rows TODAY — the objection is not
+    /// today's size but that it is UNBOUNDED: a window that keeps failing accrues
+    /// one row per attempt forever, on a phone, and the rows that keep failing
+    /// are exactly the population hzpa was studying. `observedStatuses` is
+    /// bounded by `SemanticScanStatus.allCases.count` no matter how many times a
+    /// window is retried, and the three columns together cost ~20 KB across all
+    /// 961 rows (0.03 % of that 53.5 MB store). What the bounded design cannot
+    /// carry is the per-attempt SEQUENCE and the individual timings; that is a
+    /// stated limit, not an oversight — see `SemanticScanResult`.
+    ///
+    /// ADDITIVE AND IDEMPOTENT, so it needs no SAVEPOINT: `addColumnIfNeeded` is
+    /// a no-op on a store built by a binary that already carries the V55
+    /// `CREATE TABLE`, and both UPDATEs are guarded on `IS NULL` so a second run
+    /// touches nothing. Nothing is deleted and no existing value is rewritten.
+    private func migrateSemanticScanAttemptHistoryV55IfNeeded() throws {
+        let observed = (try schemaVersion() ?? 1)
+        guard observed < 55 else { return }
+        // DO NOT STEP OVER A ROLLED-BACK V39 — same rationale as V40–V54.
+        guard observed >= 54 else { return }
+        guard try tableExists("semantic_scan_results") else {
+            try setSchemaVersion(55)
+            return
+        }
+        try addColumnIfNeeded(
+            table: "semantic_scan_results",
+            column: "firstAttemptAt",
+            definition: "REAL"
+        )
+        try addColumnIfNeeded(
+            table: "semantic_scan_results",
+            column: "lastAttemptAt",
+            definition: "REAL"
+        )
+        try addColumnIfNeeded(
+            table: "semantic_scan_results",
+            column: "observedStatuses",
+            definition: "TEXT"
+        )
+        // The rename. `createdAt IS NOT NULL` because a pre-V42 row has no
+        // timestamp at all and must not gain one here — copying a NULL is
+        // harmless, but the guard states the intent, and it keeps the two
+        // unattributed populations (pre-V42, pre-V55) from merging.
+        try exec(
+            """
+            UPDATE semantic_scan_results
+            SET lastAttemptAt = createdAt
+            WHERE lastAttemptAt IS NULL AND createdAt IS NOT NULL
+            """
+        )
+        // The true statement. Seeded from the row's own `status`, which is one
+        // status this row has certainly been written with.
+        try exec(
+            """
+            UPDATE semantic_scan_results
+            SET observedStatuses = status
+            WHERE observedStatuses IS NULL
+            """
+        )
+        try exec("CREATE INDEX IF NOT EXISTS idx_semantic_scan_results_lastAttemptAt ON semantic_scan_results(lastAttemptAt DESC)")
+        logger.notice(
+            "playhead-bg2n V55: semantic_scan_results carries firstAttemptAt/lastAttemptAt/observedStatuses; createdAt stops moving on upsert. firstAttemptAt is NULL on every pre-V55 row — the first-attempt time was destroyed by the upserts and is not reconstructible, so attempt history starts now."
+        )
+        try setSchemaVersion(55)
     }
 
     /// playhead-kg8h: durably CLAIM one REQUESTED day-0 kickoff, before any of
@@ -10555,6 +10684,13 @@ actor AnalysisStore {
                 runCorrelationId TEXT,
                 suspendingLatencyMs REAL,
                 daemonPeersAtStart INTEGER,
+                -- playhead-bg2n (V55): the row's ATTEMPT HISTORY. All three are
+                -- NULLABLE WITH NO DEFAULT, for the V42 reason one line of
+                -- comment cannot repeat often enough: a default would make every
+                -- pre-V55 row assert a history nobody recorded.
+                firstAttemptAt REAL,
+                lastAttemptAt REAL,
+                observedStatuses TEXT,
                 UNIQUE(reuseKeyHash)
             )
             """)
@@ -10602,8 +10738,32 @@ actor AnalysisStore {
             column: "runCorrelationId",
             definition: "TEXT"
         )
+        // playhead-bg2n (V55): declared here as well as in
+        // `migrateSemanticScanAttemptHistoryV55IfNeeded` so a fresh install and
+        // an upgrade converge on the same shape; both helpers are idempotent.
+        // Same reason V42's three columns are declared twice, one block up.
+        try addColumnIfNeeded(
+            table: "semantic_scan_results",
+            column: "firstAttemptAt",
+            definition: "REAL"
+        )
+        try addColumnIfNeeded(
+            table: "semantic_scan_results",
+            column: "lastAttemptAt",
+            definition: "REAL"
+        )
+        try addColumnIfNeeded(
+            table: "semantic_scan_results",
+            column: "observedStatuses",
+            definition: "TEXT"
+        )
         try exec("CREATE INDEX IF NOT EXISTS idx_semantic_scan_results_asset_pass ON semantic_scan_results(analysisAssetId, scanPass)")
         try exec("CREATE INDEX IF NOT EXISTS idx_semantic_scan_results_createdAt ON semantic_scan_results(createdAt DESC)")
+        // playhead-bg2n: `countSemanticScanResults(lastAttemptAtOrAfter:)` moved
+        // off `createdAt`, so the index that served it has to move too — a
+        // reader repointed at an unindexed column is a full scan on every
+        // background grant.
+        try exec("CREATE INDEX IF NOT EXISTS idx_semantic_scan_results_lastAttemptAt ON semantic_scan_results(lastAttemptAt DESC)")
         try exec("CREATE INDEX IF NOT EXISTS idx_semantic_scan_results_correlation ON semantic_scan_results(runCorrelationId)")
         try exec("CREATE INDEX IF NOT EXISTS idx_semantic_scan_results_asset_runMode ON semantic_scan_results(analysisAssetId, runMode)")
         try exec("CREATE INDEX IF NOT EXISTS idx_semantic_scan_results_asset_jobPhase ON semantic_scan_results(analysisAssetId, jobPhase)")
@@ -19649,7 +19809,8 @@ actor AnalysisStore {
         inputTokenCount, outputTokenCount, latencyMs, prewarmHit,
         scanCohortJSON, transcriptVersion, reuseKeyHash, runMode, jobPhase,
         createdAt, scenePhase, runCorrelationId,
-        suspendingLatencyMs, daemonPeersAtStart
+        suspendingLatencyMs, daemonPeersAtStart,
+        firstAttemptAt, lastAttemptAt, observedStatuses
         """
 
     /// H-1: canonicalize a `scanCohortJSON` before hashing so two
@@ -19801,11 +19962,20 @@ actor AnalysisStore {
     ///   indistinguishable on disk, and the corpus would quietly stop being
     ///   attributable again.
     ///
-    ///   Note that `INSERT OR REPLACE` means a replaced row takes the REPLACING
-    ///   write's timestamp, not the original insert's. That is the intended
-    ///   reading: the row on disk is the one that was written last, and the H-1
-    ///   guard above already prevents the only replacement that would lose a
-    ///   measurement (a refusal overwriting a cached success).
+    ///   **playhead-bg2n: THIS PARAGRAPH USED TO SAY THE OPPOSITE, and it was
+    ///   the defect.** It read: "a replaced row takes the REPLACING write's
+    ///   timestamp, not the original insert's. That is the intended reading."
+    ///   Under `INSERT OR REPLACE` that made `createdAt` a LAST-WRITTEN
+    ///   timestamp wearing a name that says creation — measured on the device,
+    ///   `scan-24f9deacdb0e3ab6` was created once and its `createdAt` moved
+    ///   three times, and across four capture generations six rows moved by up
+    ///   to 35 h 20 m. Any reader computing "how long has this window been
+    ///   failing" got the age of the most recent attempt: the longer a window
+    ///   had been stuck, the newer it looked.
+    ///
+    ///   `createdAt` now COALESCEs the existing value and does not move. The
+    ///   quantity the old reading actually wanted lives in `lastAttemptAt`, and
+    ///   the two readers that wanted it were moved there in the same change.
     func insertSemanticScanResult(
         _ result: SemanticScanResult,
         now: Double = Date().timeIntervalSince1970
@@ -19871,20 +20041,103 @@ actor AnalysisStore {
         // reuseKeyHash, the count restarts from the caller-provided
         // value because the probe finds nothing. This is the intended
         // semantics: a deletion is treated as cohort wipe, not retry.
+        // playhead-bg2n: THE PROBE IS UNCONDITIONAL NOW, and the `!= .success`
+        // guard shrank to the one thing it is actually about — the H-1 early
+        // return. It used to gate the attempt accounting as well, which meant a
+        // `.success` arriving after ten failures replaced the row with
+        // `attemptCount = 1` and no trace that anything had gone before: the
+        // most extreme form of the defect this bead exists to fix, in the same
+        // twelve lines. Reachable in production — a same-window retry hashes to
+        // the same `reuseKeyHash` — though NOT observed on any preserved capture
+        // (four capture generations, zero failure→success transitions), so it is
+        // closed on the code path rather than on a witness.
+        //
+        // The cost is one extra indexed lookup on the success path (906 of the
+        // 961 rows on the 2026-08-15 pull), against the UNIQUE(reuseKeyHash)
+        // index. `recordSemanticScanResult` already runs its own probe inside
+        // BEGIN IMMEDIATE, so this is not a new class of read.
         var effectiveAttemptCount = result.attemptCount
-        if result.status != .success {
-            let probe = try prepare("SELECT status, attemptCount FROM semantic_scan_results WHERE reuseKeyHash = ? LIMIT 1")
+        var effectiveCreatedAt = result.createdAt ?? now
+        var effectiveFirstAttemptAt: Double? = result.createdAt ?? now
+        var observedStatuses: Set<SemanticScanStatus> = [result.status]
+        do {
+            let probe = try prepare(
+                """
+                SELECT status, attemptCount, createdAt, firstAttemptAt, observedStatuses
+                FROM semantic_scan_results WHERE reuseKeyHash = ? LIMIT 1
+                """
+            )
             defer { sqlite3_finalize(probe) }
             bind(probe, 1, reuseKeyHash)
             if sqlite3_step(probe) == SQLITE_ROW,
                let existingStatus = optionalText(probe, 0) {
-                if existingStatus == SemanticScanStatus.success.rawValue {
+                if result.status != .success,
+                   existingStatus == SemanticScanStatus.success.rawValue {
                     // Silently skip: the cached success is the canonical
                     // answer and a later refusal must not destroy it.
                     return
                 }
                 let existingAttempt = Int(sqlite3_column_int(probe, 1))
-                effectiveAttemptCount = max(existingAttempt + 1, result.attemptCount)
+                // playhead-bg2n R3: SUCCESS-OVER-SUCCESS DOES NOT INCREMENT, and
+                // the first cut of this bead got it wrong.
+                //
+                // Making the probe unconditional was right — a `.success`
+                // replacing a FAILURE must not reset the counter to the caller's
+                // 1 — but "every replace is a new attempt" is false for one real
+                // production path. `BackfillJobRunner.checkpointCoarseProgress`
+                // writes each successfully screened window at the checkpoint AND
+                // again in the end-of-pass digest, and its own header says so:
+                // "writing a success row here and again at end of pass leaves the
+                // counter at 1 both times, while writing a FAILURE row twice
+                // would silently inflate it and make a single failed window read
+                // as two". Incrementing unconditionally applies that inflation to
+                // every checkpointed success — one screened window reading as
+                // two attempts, on every completed pass.
+                //
+                // Success-over-success is genuinely AMBIGUOUS on disk: an
+                // idempotent re-write of one banked window and a real second
+                // successful attempt are the same two rows. It is resolved in
+                // favour of the writer that exists, and `max` rather than a bare
+                // keep so a caller that HAS counted its own attempts still wins.
+                // A rank CHANGE is unambiguous — a success replacing a non-success
+                // is a new attempt — and still increments.
+                let isIdempotentSuccessRewrite =
+                    result.status == .success && existingStatus == SemanticScanStatus.success.rawValue
+                effectiveAttemptCount = isIdempotentSuccessRewrite
+                    ? max(existingAttempt, result.attemptCount)
+                    : max(existingAttempt + 1, result.attemptCount)
+                // playhead-bg2n: `createdAt` STOPS MOVING. It moved three times
+                // for the witness row `scan-24f9deacdb0e3ab6`, which was created
+                // once — so a reader asking "how long has this window been
+                // failing" got the age of the most recent attempt, and the
+                // longer a window had been stuck the newer it looked. Measured
+                // across four capture generations of the same device, six rows
+                // had a provably-moved `createdAt` and the largest single
+                // forward jump was 35 h 20 m.
+                //
+                // COALESCE rather than "keep whatever is there": a pre-V42 row
+                // has a NULL `createdAt`, and preserving the NULL forever would
+                // deny a timestamp to a row the current binary IS attributing.
+                // The V42 contract is about what NULL MEANS on disk, not about
+                // refusing to ever write one.
+                effectiveCreatedAt = optionalDouble(probe, 2) ?? effectiveCreatedAt
+                // …and `firstAttemptAt` is preserved EXACTLY, nil included. A nil
+                // here says the record does not reach the first attempt, which
+                // is the licence `historyIsComplete` reads. Substituting a value
+                // would manufacture the very provenance this column exists to
+                // withhold.
+                effectiveFirstAttemptAt = optionalDouble(probe, 3)
+                // The set is a UNION and therefore monotone: a status once
+                // observed on this row is never un-observed. Seeded with the
+                // existing row's OWN status as well as its recorded set, because
+                // a pre-V55 row has no set and its `status` is still a true
+                // observation.
+                observedStatuses.formUnion(
+                    SemanticScanResult.decodeObservedStatuses(optionalText(probe, 4))
+                )
+                if let existing = SemanticScanStatus(rawValue: existingStatus) {
+                    observedStatuses.insert(existing)
+                }
             }
         }
 
@@ -19896,8 +20149,9 @@ actor AnalysisStore {
              inputTokenCount, outputTokenCount, latencyMs, prewarmHit,
              scanCohortJSON, transcriptVersion, reuseKeyHash, runMode, jobPhase,
              createdAt, scenePhase, runCorrelationId,
-             suspendingLatencyMs, daemonPeersAtStart)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             suspendingLatencyMs, daemonPeersAtStart,
+             firstAttemptAt, lastAttemptAt, observedStatuses)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -19933,7 +20187,11 @@ actor AnalysisStore {
         // that guessed would be manufacturing the attribution rather than
         // recording it. A caller with nothing to say writes NULL, which is the
         // truth.
-        bind(stmt, 23, result.createdAt ?? now)
+        // playhead-bg2n: `effectiveCreatedAt`, not `result.createdAt ?? now`.
+        // The store's clock is still the backstop for a writer that supplies
+        // none (the hx6n contract above), but an EXISTING value now wins over
+        // both — that is the whole of "createdAt stops moving".
+        bind(stmt, 23, effectiveCreatedAt)
         bind(stmt, 24, result.scenePhase?.rawValue)
         bind(stmt, 25, result.runCorrelationId)
         // playhead-rkfp/ezmv (V45). Neither falls back to anything: a NULL
@@ -19942,6 +20200,17 @@ actor AnalysisStore {
         // the exact conflation these columns exist to end.
         bind(stmt, 26, result.suspendingLatencyMs)
         bind(stmt, 27, result.daemonPeersAtStart)
+        // playhead-bg2n (V55). Note what each of the three is NOT:
+        //   * `firstAttemptAt` is not `now` on a replace — it is whatever the
+        //     existing row carried, nil included.
+        //   * `lastAttemptAt` is not `createdAt` — it is THIS write's clock, and
+        //     it is the quantity `createdAt` used to carry by accident. Readers
+        //     that want "when was this row last touched" were moved onto it.
+        //   * `observedStatuses` is not `result.status` — it is the union with
+        //     everything the row has already been written with.
+        bind(stmt, 28, effectiveFirstAttemptAt)
+        bind(stmt, 29, result.createdAt ?? now)
+        bind(stmt, 30, SemanticScanResult.encodeObservedStatuses(observedStatuses))
         try step(stmt, expecting: SQLITE_DONE)
     }
 
@@ -20030,14 +20299,21 @@ actor AnalysisStore {
     /// success-only count would report a window that examined the whole episode
     /// and found no ads as barren, which is the opposite of the truth.
     ///
-    /// **`createdAt` is nullable and a NULL row is NOT counted.** Rows written
-    /// before the V42 attribution migration carry NULL, and `NULL >= ?` is NULL
-    /// — never true — so SQLite already excludes them. That is the behaviour we
-    /// want and it is stated here rather than inherited: an unattributable row
-    /// cannot be evidence about any particular window, and counting it into the
-    /// newest one would be exactly the misattribution this bead exists to stop.
+    /// **`lastAttemptAt` is nullable and a NULL row is NOT counted.** Rows
+    /// written before the V42 attribution migration carry NULL, and `NULL >= ?`
+    /// is NULL — never true — so SQLite already excludes them. That is the
+    /// behaviour we want and it is stated here rather than inherited: an
+    /// unattributable row cannot be evidence about any particular window, and
+    /// counting it into the newest one would be exactly the misattribution this
+    /// bead exists to stop.
     ///
-    /// Hits `idx_semantic_scan_results_createdAt`.
+    /// playhead-bg2n: this read `createdAt` until V55, and V55's backfill is
+    /// `SET lastAttemptAt = createdAt WHERE createdAt IS NOT NULL` — so the
+    /// pre-V42 population is excluded by BOTH columns and the sentence above
+    /// survives the repoint unchanged. See the doc on the function itself for
+    /// why the column moved.
+    ///
+    /// Hits `idx_semantic_scan_results_lastAttemptAt`.
     /// playhead-dgly: one read of everything the persisted-state invariant
     /// REPORTER judges, taken before this process has repaired anything.
     ///
@@ -20246,9 +20522,25 @@ actor AnalysisStore {
         )
     }
 
-    func countSemanticScanResults(createdAtOrAfter wallClock: Double) throws -> Int {
+    /// playhead-bg2n: counted over `lastAttemptAt`, NOT `createdAt`.
+    ///
+    /// The caller (`AnalysisCoordinator.semanticScanRowsRecorded(since:)`) asks
+    /// how many windows a background grant BANKED, which is a question about
+    /// WRITES. It worked before this bead only because `createdAt` was silently
+    /// a last-written timestamp; freezing `createdAt` without moving this query
+    /// would have made a grant that re-attempted an existing window report
+    /// `banked=0` for work it really did — a silent under-count in the ledger
+    /// that playhead-8ljj added precisely so a grant could not lie about its
+    /// output.
+    ///
+    /// The V55 migration copies `createdAt` into `lastAttemptAt` for every
+    /// existing row, so on today's data this repoint is a NO-OP — it returns the
+    /// identical number. That is what makes it a rename rather than a change.
+    ///
+    /// Hits `idx_semantic_scan_results_lastAttemptAt`.
+    func countSemanticScanResults(lastAttemptAtOrAfter wallClock: Double) throws -> Int {
         let stmt = try prepare(
-            "SELECT COUNT(*) FROM semantic_scan_results WHERE createdAt >= ?"
+            "SELECT COUNT(*) FROM semantic_scan_results WHERE lastAttemptAt >= ?"
         )
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, wallClock)
@@ -20715,7 +21007,14 @@ actor AnalysisStore {
             // oldest thing in the database.
             createdAt: optionalDouble(stmt, 22),
             scenePhase: scenePhase,
-            runCorrelationId: optionalText(stmt, 24)
+            runCorrelationId: optionalText(stmt, 24),
+            // playhead-bg2n (V55): columns 27–29. `optionalDouble` /
+            // `optionalText` for the same reason as every nullable above — a
+            // NULL read as 0.0 would claim a first attempt in 1970, and a NULL
+            // read as "" would claim a row that has never had a status.
+            firstAttemptAt: optionalDouble(stmt, 27),
+            lastAttemptAt: optionalDouble(stmt, 28),
+            observedStatusesCSV: optionalText(stmt, 29)
         )
     }
 

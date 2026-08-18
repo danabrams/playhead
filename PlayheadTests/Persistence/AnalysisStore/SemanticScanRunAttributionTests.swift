@@ -182,7 +182,7 @@ struct SemanticScanRunAttributionTests {
         // `transcript_chunks` rows and builds a UNIQUE index on that table. It
         // names no `semantic_scan_results` column and back-fills nothing, so
         // the no-backfill proof below still has something to prove.
-        #expect(AnalysisStore.currentSchemaVersion == 54)
+        #expect(AnalysisStore.currentSchemaVersion == 55)
         for column in ["createdAt", "scenePhase", "runCorrelationId"] {
             #expect(
                 try probeColumnExists(in: dir, table: "semantic_scan_results", column: column),
@@ -800,14 +800,22 @@ struct SemanticScanRunAttributionTests {
         // the V42 contract and is correct. The rows that DO read NULL are the
         // pre-V42 ones the migration deliberately left alone, so the fixture
         // reproduces that state directly.
+        //
+        // playhead-bg2n: `lastAttemptAt` is NULLed too, and that is not a
+        // convenience — it is what a real pre-V42 row looks like AFTER V55. The
+        // V55 backfill is `SET lastAttemptAt = createdAt WHERE createdAt IS NOT
+        // NULL`, so a row with no `createdAt` gains no `lastAttemptAt` either;
+        // an unattributable row stays unattributable in both columns. Nulling
+        // only `createdAt` would have reproduced half of that state and made
+        // this rail assert about a row the schema cannot produce.
         try await store.execForTesting(
-            "UPDATE semantic_scan_results SET createdAt = NULL WHERE id = 's-null'"
+            "UPDATE semantic_scan_results SET createdAt = NULL, lastAttemptAt = NULL WHERE id = 's-null'"
         )
 
-        #expect(try await store.countSemanticScanResults(createdAtOrAfter: grantOpened) == 2,
+        #expect(try await store.countSemanticScanResults(lastAttemptAtOrAfter: grantOpened) == 2,
                 "inclusive at the boundary, and the earlier row is a DIFFERENT window's output")
-        #expect(try await store.countSemanticScanResults(createdAtOrAfter: grantOpened + 1) == 1)
-        #expect(try await store.countSemanticScanResults(createdAtOrAfter: grantOpened + 1_000) == 0,
+        #expect(try await store.countSemanticScanResults(lastAttemptAtOrAfter: grantOpened + 1) == 1)
+        #expect(try await store.countSemanticScanResults(lastAttemptAtOrAfter: grantOpened + 1_000) == 0,
                 "a window that banked nothing must read zero, not the table's size")
         // The NULL row is in the table and reachable by every other reader; it
         // is simply not evidence about any window.
@@ -832,6 +840,6 @@ struct SemanticScanRunAttributionTests {
             now: grantOpened
         )
 
-        #expect(try await store.countSemanticScanResults(createdAtOrAfter: grantOpened) == 1)
+        #expect(try await store.countSemanticScanResults(lastAttemptAtOrAfter: grantOpened) == 1)
     }
 }

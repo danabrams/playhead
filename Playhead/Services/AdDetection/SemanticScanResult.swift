@@ -168,6 +168,52 @@ struct SemanticScanResult: Sendable, Equatable {
     /// hand. A non-nil value that matches no job joins to nothing, which reads
     /// as "no run" rather than as a wrong run.
     let runCorrelationId: String?
+    /// playhead-bg2n (schema V55): the wall clock of this row's FIRST write, and
+    /// the LICENCE that says ``createdAt`` and ``observedStatuses`` are complete.
+    ///
+    /// `nil` means the record does not reach back to the first attempt — either
+    /// the row predates V55, or it predates V42 and has no timestamps at all.
+    /// **It is never backfilled**, because nothing on disk can recover it: the
+    /// value it would hold was overwritten by the upsert this bead is about, and
+    /// `attemptCount` cannot stand in for it (a `.success` write replacing a
+    /// failure resets the counter to the caller's value, so `attemptCount == 1`
+    /// is not proof of one write). See ``AnalysisStore/migrateSemanticScanAttemptHistoryV55IfNeeded()``.
+    let firstAttemptAt: Double?
+    /// playhead-bg2n (schema V55): the wall clock of this row's MOST RECENT
+    /// write — the quantity `createdAt` was silently carrying.
+    ///
+    /// Under `INSERT OR REPLACE` every upsert restamped `createdAt`, so a column
+    /// whose name says creation held the last attempt's time. The V55 migration
+    /// COPIES `createdAt` into this column, which is lossless precisely because
+    /// that is what every stored value already was, and `createdAt` stops moving.
+    ///
+    /// Read THIS, not `createdAt`, for "when was this row last touched" —
+    /// `AnalysisCoordinator.semanticScanRowsRecorded(since:)` counts windows a
+    /// grant banked and was moved onto it in the same change.
+    let lastAttemptAt: Double?
+    /// playhead-bg2n (schema V55): every distinct ``SemanticScanStatus`` this row
+    /// has been written with, as far as the record reaches — sorted raw values,
+    /// comma-joined.
+    ///
+    /// **This is the column that makes `status` readable.** `status` describes ONE
+    /// attempt and was read as describing all of them: playhead-hzpa was filed
+    /// stating "eleven attempts on one 42.9 s window, every one
+    /// `exceededContextWindow`", and the same row's 5th and 9th attempts ended in
+    /// `decodingFailure` — a different status with a different `retryPolicy`
+    /// (`.simplifySchemaAndRetryOnce` vs `.shrinkWindowAndRetryOnce`). With this
+    /// column that sentence is untypeable.
+    ///
+    /// It is a SET, not a sequence, and that is deliberate: a set cannot be
+    /// misread as an ordering. No bounded column can carry the per-attempt
+    /// sequence, and this one is bounded by `SemanticScanStatus.allCases.count`
+    /// however many times a window is retried — which is why it was preferred to
+    /// a per-attempt journal whose growth a phone pays forever.
+    ///
+    /// COMPLETE only when ``firstAttemptAt`` is non-nil. A pre-V55 row's set is
+    /// seeded from its stored `status` (a true statement — that status WAS
+    /// observed) and grows from there, so it is a lower bound on a row whose
+    /// earlier attempts are gone.
+    let observedStatusesCSV: String?
 
     init(
         id: String,
@@ -199,7 +245,10 @@ struct SemanticScanResult: Sendable, Equatable {
         permissiveFallbackReason: String? = nil,
         createdAt: Double? = nil,
         scenePhase: ScanScenePhase? = nil,
-        runCorrelationId: String? = nil
+        runCorrelationId: String? = nil,
+        firstAttemptAt: Double? = nil,
+        lastAttemptAt: Double? = nil,
+        observedStatusesCSV: String? = nil
     ) {
         self.id = id
         self.analysisAssetId = analysisAssetId
@@ -231,6 +280,100 @@ struct SemanticScanResult: Sendable, Equatable {
         self.createdAt = createdAt
         self.scenePhase = scenePhase
         self.runCorrelationId = runCorrelationId
+        self.firstAttemptAt = firstAttemptAt
+        self.lastAttemptAt = lastAttemptAt
+        self.observedStatusesCSV = observedStatusesCSV
+    }
+
+    // MARK: - playhead-bg2n: reading a row's ATTEMPT HISTORY
+
+    /// The canonical encoding of ``observedStatusesCSV``: sorted raw values,
+    /// comma-joined, duplicates collapsed.
+    ///
+    /// Sorted so the column is a SET on disk as well as in meaning — two rows
+    /// that have seen the same statuses in different orders must compare equal,
+    /// or a diff over two device pulls reports churn that did not happen.
+    static func encodeObservedStatuses(_ statuses: Set<SemanticScanStatus>) -> String {
+        statuses.map(\.rawValue).sorted().joined(separator: ",")
+    }
+
+    /// Decode ``observedStatusesCSV`` into TYPED cases. Unrecognised raw values
+    /// are DROPPED rather than throwing, matching `fetchSemanticScanStatuses`'s
+    /// leniency: a status a newer binary invented must not abort a read of the
+    /// whole row.
+    ///
+    /// **Do not count this set to decide whether the attempts differed.** Use
+    /// ``rawObservedStatusTokens``. Dropping is not the harmless direction it
+    /// looks like: on a row whose history is COMPLETE, dropping one of two
+    /// tokens takes the count from 2 to 1 and turns ``attemptsDiffered`` from
+    /// `true` into a confident `false` — "these attempts were all alike", which
+    /// is playhead-hzpa's sentence, manufactured by a decoder. Found at review
+    /// round 2 of playhead-bg2n, in the API written to prevent that sentence.
+    static func decodeObservedStatuses(_ csv: String?) -> Set<SemanticScanStatus> {
+        guard let csv, !csv.isEmpty else { return [] }
+        return Set(csv.split(separator: ",").compactMap { SemanticScanStatus(rawValue: String($0)) })
+    }
+
+    /// The RAW tokens of ``observedStatusesCSV``, decoded by nobody.
+    ///
+    /// An unrecognised token is still a status this row was written with — it is
+    /// evidence about the COUNT even when it is not evidence about the KIND — so
+    /// every "did the attempts differ" question is asked here rather than of the
+    /// typed set.
+    static func rawObservedStatusTokens(_ csv: String?) -> Set<String> {
+        guard let csv, !csv.isEmpty else { return [] }
+        return Set(csv.split(separator: ",").map(String.init))
+    }
+
+    /// Every status this row has been written with, as far as the record reaches.
+    ///
+    /// Falls back to `[status]` when the column is absent, so a caller never has
+    /// to special-case a pre-V55 row — but see ``historyIsComplete`` before
+    /// reading the result as exhaustive.
+    var observedStatuses: Set<SemanticScanStatus> {
+        let decoded = Self.decodeObservedStatuses(observedStatusesCSV)
+        return decoded.isEmpty ? [status] : decoded.union([status])
+    }
+
+    /// True when this row's attempt history is known from its FIRST attempt —
+    /// i.e. when ``observedStatuses`` is exhaustive and ``createdAt`` really is
+    /// the creation time.
+    ///
+    /// The single licence, deliberately: one marker guarding both claims is
+    /// harder to read past than two independent nullables that can disagree.
+    var historyIsComplete: Bool { firstAttemptAt != nil }
+
+    /// Did this row's attempts differ from one another? THREE-VALUED, because
+    /// "not established" is a distinct answer from "no".
+    ///
+    /// * `true`  — two or more distinct statuses are on the record. Whatever
+    ///             else is unknown, the attempts were NOT all alike.
+    /// * `false` — the history is complete and holds exactly one status.
+    /// * `nil`   — the history is partial and only one status survives, so the
+    ///             attempts before the record began cannot be spoken for.
+    ///
+    /// `nil` is the answer playhead-hzpa needed and could not get. Reading it as
+    /// `false` reproduces this bead exactly.
+    var attemptsDiffered: Bool? {
+        // RAW tokens, not `observedStatuses`. The typed set drops a status a
+        // newer binary invented, and on a COMPLETE row that takes the count from
+        // 2 to 1 and answers `false` — "the attempts were all alike" — for a row
+        // that demonstrably had two. See ``decodeObservedStatuses``.
+        let distinct = Self.rawObservedStatusTokens(observedStatusesCSV).union([status.rawValue])
+        if distinct.count > 1 { return true }
+        return historyIsComplete ? false : nil
+    }
+
+    /// How long this row has been being attempted, in seconds — `nil` unless
+    /// BOTH endpoints are known.
+    ///
+    /// Deliberately not `lastAttemptAt − createdAt`: on a pre-V55 row
+    /// `createdAt` is frozen at the last pre-migration attempt, so that
+    /// subtraction reads a stuck window as young — the exact inversion this bead
+    /// exists to end ("the longer a window has been stuck, the newer it looks").
+    var attemptSpanSeconds: Double? {
+        guard let firstAttemptAt, let lastAttemptAt else { return nil }
+        return lastAttemptAt - firstAttemptAt
     }
 
     /// playhead-hx6n: the ONE seam that stamps run attribution onto a scan row.
@@ -284,7 +427,15 @@ struct SemanticScanResult: Sendable, Equatable {
             permissiveFallbackReason: permissiveFallbackReason,
             createdAt: createdAt,
             scenePhase: scenePhase,
-            runCorrelationId: runCorrelationId
+            runCorrelationId: runCorrelationId,
+            // playhead-bg2n: the three history fields are carried through
+            // UNCHANGED, exactly like geometry and status. They are decided by
+            // the STORE, which is the only place that can see the row already on
+            // disk; a producer stamping them here would be asserting a history
+            // it has not read.
+            firstAttemptAt: firstAttemptAt,
+            lastAttemptAt: lastAttemptAt,
+            observedStatusesCSV: observedStatusesCSV
         )
     }
 

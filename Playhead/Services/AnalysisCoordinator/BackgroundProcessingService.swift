@@ -475,7 +475,12 @@ protocol AnalysisCoordinating: Sendable {
     ) async -> Int
 
     /// playhead-8ljj: how many `semantic_scan_results` rows exist with
-    /// `createdAt >= since` (wall-clock seconds since 1970).
+    /// `lastAttemptAt >= since` (wall-clock seconds since 1970).
+    ///
+    /// playhead-bg2n: `createdAt` until V55. The question is "how many windows
+    /// did this grant WRITE", which is the last-attempt clock; `createdAt` now
+    /// names the FIRST write and would book a re-attempted window to whichever
+    /// grant first touched it.
     ///
     /// The NUMERATOR the bead counts, asked of the table that owns it, so the
     /// ledger row can say what the window produced without a reader having to

@@ -295,7 +295,9 @@ struct BackgroundGrantBudget: Sendable, Equatable {
     /// BEHAVIOUR IS DELIBERATELY UNCHANGED.** Measured on two device pulls at
     /// the granularity the coarse gate acts at — one row per (grant, asset)
     /// start, from `background_task_runs` joined to `semantic_scan_results` by
-    /// the interval containing `createdAt − latencyMs`:
+    /// the interval containing `createdAt − latencyMs` (playhead-bg2n: on a
+    /// post-V55 pull that join key is `lastAttemptAt − latencyMs`; `latencyMs`
+    /// describes the LAST attempt, and after V55 `createdAt` no longer does):
     ///
     /// - **2026-08-14 pull, 122 measured backfill grants** (129 rows less 7
     ///   `orphan_at_launch`): grant length p10 1.1 s, p25 24.9 s, p50 218.0 s,
@@ -355,9 +357,21 @@ struct BackgroundGrantBudget: Sendable, Equatable {
     ///
     /// **The error is measurable from the ledger as it stands** — grant
     /// start/finish live in `background_task_runs`, call start is
-    /// `semantic_scan_results.createdAt − latencyMs` — so no field was added to
-    /// record it. On the 08-14 pull it is p50 **−76.4 s** and exceeds a whole
+    /// `semantic_scan_results.lastAttemptAt − latencyMs` — so no field was added
+    /// to record it. On the 08-14 pull it is p50 **−76.4 s** and exceeds a whole
     /// floor's width on 44 of 53 asset-starts.
+    ///
+    /// **playhead-bg2n: that read `createdAt` when the 08-14 numbers were taken,
+    /// and the two were the same column's value then. On a post-V55 pull they
+    /// are not, and NEITHER is universally the right partner for `latencyMs` —
+    /// pair the latency with the write that PRODUCED it.** A row written once,
+    /// either works. A RETRIED failure: `latencyMs` is the last attempt's, so
+    /// `lastAttemptAt` is right and `createdAt` (now the FIRST attempt) is
+    /// wrong. A success re-persisted unchanged by the end-of-pass digest:
+    /// `latencyMs` still describes the screen, so `createdAt` is right and
+    /// `lastAttemptAt` is the digest instant. Read `attemptCount = 1 AND
+    /// firstAttemptAt IS NOT NULL AND status = 'success'` as the digest shape
+    /// and use `createdAt` there; use `lastAttemptAt` otherwise.
     func workDeadline(from grantStart: ContinuousClock.Instant) -> ContinuousClock.Instant {
         grantStart + workBudget
     }

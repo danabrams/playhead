@@ -150,3 +150,62 @@ func makeBackfillJob(
         attemptTranscriptVersion: attemptTranscriptVersion
     )
 }
+
+// MARK: - playhead-bg2n: the row as the STORE writes it
+
+extension SemanticScanResult {
+    /// The value a whole-struct round-trip assertion should compare against
+    /// after a FIRST write.
+    ///
+    /// Three fields are decided by ``AnalysisStore``, not by the producer —
+    /// `firstAttemptAt`, `lastAttemptAt` and `observedStatusesCSV` — because
+    /// only the store can see the row already on disk. So `fetched == handedIn`
+    /// compares a persisted row against a value that never existed on disk, and
+    /// it started failing the moment the store learned to record attempt
+    /// history. Using this helper is not a weakening: it PINS the first-write
+    /// contract (both timestamps equal the row's own `createdAt`, and the set
+    /// holds exactly the row's status), which nothing asserted before.
+    ///
+    /// Deliberately FIRST-WRITE only. There is no `asStoredOnReplace` because a
+    /// replace's history depends on what was already there, which is the thing
+    /// `SemanticScanAttemptHistoryV55MigrationTests` exists to test directly
+    /// rather than to encode in a helper both sides could get wrong together.
+    func asStoredOnFirstWrite(storeClock: Double? = nil) -> SemanticScanResult {
+        let stamped = createdAt ?? storeClock
+        return SemanticScanResult(
+            id: id,
+            analysisAssetId: analysisAssetId,
+            windowFirstAtomOrdinal: windowFirstAtomOrdinal,
+            windowLastAtomOrdinal: windowLastAtomOrdinal,
+            windowStartTime: windowStartTime,
+            windowEndTime: windowEndTime,
+            scanPass: scanPass,
+            transcriptQuality: transcriptQuality,
+            disposition: disposition,
+            spansJSON: spansJSON,
+            status: status,
+            attemptCount: attemptCount,
+            errorContext: errorContext,
+            inputTokenCount: inputTokenCount,
+            outputTokenCount: outputTokenCount,
+            latencyMs: latencyMs,
+            suspendingLatencyMs: suspendingLatencyMs,
+            daemonPeersAtStart: daemonPeersAtStart,
+            prewarmHit: prewarmHit,
+            scanCohortJSON: scanCohortJSON,
+            transcriptVersion: transcriptVersion,
+            reuseScope: reuseScope,
+            runMode: runMode,
+            jobPhase: jobPhase,
+            refusalExplanation: refusalExplanation,
+            usedPermissiveFallback: usedPermissiveFallback,
+            permissiveFallbackReason: permissiveFallbackReason,
+            createdAt: stamped,
+            scenePhase: scenePhase,
+            runCorrelationId: runCorrelationId,
+            firstAttemptAt: stamped,
+            lastAttemptAt: stamped,
+            observedStatusesCSV: SemanticScanResult.encodeObservedStatuses([status])
+        )
+    }
+}

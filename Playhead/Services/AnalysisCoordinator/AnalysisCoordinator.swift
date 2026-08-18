@@ -722,8 +722,9 @@ actor AnalysisCoordinator {
     ///     `AnalysisWorkScheduler.drainEligible`.
     /// - Returns: how many assets the phase DROVE to a non-throwing Stage-4
     ///   return. Not windows banked — those are counted where they are
-    ///   durable, in `semantic_scan_results` (each row carries `createdAt` and
-    ///   a run correlation id).
+    ///   durable, in `semantic_scan_results` (each row carries `lastAttemptAt`
+    ///   and a run correlation id — playhead-bg2n: `createdAt` until V55, when
+    ///   it stopped moving on upsert and stopped being the write clock).
     ///   - report: playhead-8ljj. Called with this phase's own account of
     ///     itself: once the moment the candidate census is known, once per
     ///     asset driven, and once on every exit. It exists because the return
@@ -877,15 +878,21 @@ actor AnalysisCoordinator {
     }
 
     /// playhead-8ljj: how many `semantic_scan_results` rows carry
-    /// `createdAt >= wallClock`.
+    /// `lastAttemptAt >= wallClock`.
     ///
     /// `nil` on a store failure, and the distinction is the whole point: a
     /// window whose count could not be TAKEN has not been shown to have banked
     /// nothing, and `BackgroundGrantCoarsePhase` renders it `banked=?` rather
     /// than `banked=0`.
+    ///
+    /// playhead-bg2n: this read `createdAt` until V55, when `createdAt` stopped
+    /// moving on upsert. The question here is "how many windows did this grant
+    /// WRITE", which is the last-attempt clock — a re-attempted window is work
+    /// this grant did, and counting it by creation date would book it to
+    /// whichever grant first touched it, possibly days earlier.
     func semanticScanRowsRecorded(since wallClock: Double) async -> Int? {
         do {
-            return try await store.countSemanticScanResults(createdAtOrAfter: wallClock)
+            return try await store.countSemanticScanResults(lastAttemptAtOrAfter: wallClock)
         } catch {
             logger.warning("semanticScanRowsRecorded: count FAILED (reported as unmeasured, not as zero): \(String(describing: error))")
             return nil

@@ -101,8 +101,8 @@ struct SemanticScanPersistenceTests {
         let fetched = try await store.fetchSemanticScanResult(id: result.id)
         let byAsset = try await store.fetchSemanticScanResults(analysisAssetId: "asset-1")
 
-        #expect(fetched == result)
-        #expect(byAsset == [result])
+        #expect(fetched == result.asStoredOnFirstWrite())
+        #expect(byAsset == [result.asStoredOnFirstWrite()])
     }
 
     @Test("playhead-rkfp/ezmv (V45): the wait-vs-infer split round-trips, and NULL stays NULL")
@@ -144,7 +144,7 @@ struct SemanticScanPersistenceTests {
         let fetchedMeasured = try await store.fetchSemanticScanResult(id: measured.id)
         #expect(fetchedMeasured?.suspendingLatencyMs == 451_600)
         #expect(fetchedMeasured?.daemonPeersAtStart == 1)
-        #expect(fetchedMeasured == measured)
+        #expect(fetchedMeasured == measured.asStoredOnFirstWrite())
 
         // And the absence side: a row written WITHOUT the measurement must
         // come back NULL, never 0 — "unmeasured" and "no sleep, no peers" are
@@ -220,7 +220,7 @@ struct SemanticScanPersistenceTests {
         try await store.insertSemanticScanResult(result)
 
         let fetched = try await store.fetchSemanticScanResult(id: result.id)
-        #expect(fetched == result)
+        #expect(fetched == result.asStoredOnFirstWrite())
         #expect(fetched?.spansJSON == trickySpansJSON)
     }
 
@@ -262,11 +262,16 @@ struct SemanticScanPersistenceTests {
         let fetched = try await store.fetchSemanticScanResult(id: result.id)
         let byAsset = try await store.fetchSemanticScanResults(analysisAssetId: "asset-1")
 
-        #expect(fetched == result)
+        #expect(fetched == result.asStoredOnFirstWrite())
         #expect(fetched?.status == .refusal)
         #expect(fetched?.status.retryPolicy == .persistFailure)
         #expect(fetched?.errorContext == #"{"reason":"safety refusal","lineRefs":[31,32,33]}"#)
-        #expect(byAsset == [result])
+        #expect(byAsset == [result.asStoredOnFirstWrite()])
+        // playhead-bg2n: a refusal is a FIRST write here, so its history is
+        // complete and holds exactly one status. `attemptsDiffered == false` is
+        // a real "no", distinct from the `nil` a pre-V55 row answers.
+        #expect(fetched?.historyIsComplete == true)
+        #expect(fetched?.attemptsDiffered == false)
     }
 
     @Test("semantic scan reuse invalidates on scan cohort or transcript version but not decision cohort")
@@ -413,8 +418,8 @@ struct SemanticScanPersistenceTests {
             transcriptVersion: "tx-v1"
         )
 
-        #expect(fetchedOriginal == original)
-        #expect(fetchedNewer == newer)
+        #expect(fetchedOriginal == original.asStoredOnFirstWrite())
+        #expect(fetchedNewer == newer.asStoredOnFirstWrite())
     }
 
     @Test("EvidenceEvent is append-only and duplicate IDs do not overwrite earlier evidence")
