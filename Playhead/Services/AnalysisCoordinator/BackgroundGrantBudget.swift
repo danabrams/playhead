@@ -359,10 +359,19 @@ struct BackgroundGrantBudget: Sendable, Equatable {
     /// start/finish live in `background_task_runs`, call start is
     /// `semantic_scan_results.lastAttemptAt − latencyMs` — so no field was added
     /// to record it. On the 08-14 pull it is p50 **−76.4 s** and exceeds a whole
-    /// floor's width on 44 of 53 asset-starts. (playhead-bg2n: that read
-    /// `createdAt` when the 08-14 numbers were taken, and the two were the same
-    /// column's value then. On a post-V55 pull only `lastAttemptAt` pairs with
-    /// `latencyMs`, which describes the LAST attempt.)
+    /// floor's width on 44 of 53 asset-starts.
+    ///
+    /// **playhead-bg2n: that read `createdAt` when the 08-14 numbers were taken,
+    /// and the two were the same column's value then. On a post-V55 pull they
+    /// are not, and NEITHER is universally the right partner for `latencyMs` —
+    /// pair the latency with the write that PRODUCED it.** A row written once,
+    /// either works. A RETRIED failure: `latencyMs` is the last attempt's, so
+    /// `lastAttemptAt` is right and `createdAt` (now the FIRST attempt) is
+    /// wrong. A success re-persisted unchanged by the end-of-pass digest:
+    /// `latencyMs` still describes the screen, so `createdAt` is right and
+    /// `lastAttemptAt` is the digest instant. Read `attemptCount = 1 AND
+    /// firstAttemptAt IS NOT NULL AND status = 'success'` as the digest shape
+    /// and use `createdAt` there; use `lastAttemptAt` otherwise.
     func workDeadline(from grantStart: ContinuousClock.Instant) -> ContinuousClock.Instant {
         grantStart + workBudget
     }
