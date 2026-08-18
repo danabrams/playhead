@@ -8537,6 +8537,30 @@ actor AdDetectionService {
             // 0.5·fmCap where the proxy gave it 0.75·fmCap — and on the pull
             // this bead was filed from the population is EMPTY: zero of the 66
             // `containsAd` rows carry an empty support payload.
+            //
+            // TWO OPEN LIMITS, NAMED RATHER THAN ABSORBED. Neither is fixed
+            // here; both are filed.
+            //
+            //   * playhead-e15r (P1, OPEN) can LAUNDER a fabricated band past
+            //     the gate above. `BackfillJobRunner.unionSpan` copies
+            //     `certainty` from whichever input ranks higher while ANDing
+            //     `ownershipInferenceWasSuppressed`, so a permissive `.strong`
+            //     unioned with a genuine `.moderate` persists as a `.strong`
+            //     with the flag CLEARED — byte-indistinguishable at rest from a
+            //     model grade. That path is LIVE (Dan's 2026-08-11 triage
+            //     corrected the bead's own "latent" premise). So this read is
+            //     honest for every row `unionSpan` did not touch, and e15r is
+            //     what makes it honest for the rest.
+            //
+            //   * playhead-dslt (P1) is THIS defect in the SUPPRESSION lane.
+            //     `FMSuppressionWindow.votingWindows` still fabricates a band
+            //     out of `transcriptQuality`, and `FMSuppressionGuard` spends
+            //     it on two of its five strict guards. It CANNOT be fixed by
+            //     copying this line: a `noAds` row carries no band at rest at
+            //     all — 51 of 51 on the same pull persist `spansJSON == "[]"`,
+            //     because `CoarseSupportSchema.support` is a positive-only
+            //     notion. Reading honestly there disables FM suppression
+            //     outright, which is a reach decision and not a cleanup.
             let band = SemanticSweepMarkComposer.certaintyBand(of: result) ?? .weak
 
             // Weight proportional to band.
