@@ -538,13 +538,24 @@ struct SemanticScanAttemptHistoryV55MigrationTests {
     /// six — new row, replace-with-failure, replace-with-success, H-1 SKIP, a
     /// validation throw, and this one: SUCCESS OVER SUCCESS, which the C5
     /// contract has always let fall through to REPLACE and which no rail
-    /// touched. Its behaviour CHANGED here: the probe used to be gated on
-    /// `!= .success`, so a second success reset `attemptCount` to the caller's
-    /// value; it is now merged like every other replace. That is correct — a
-    /// second success on one reuse key is a second attempt — but an unpinned
-    /// behaviour change is how the next reader learns the wrong contract.
-    @Test("a SUCCESS replacing a SUCCESS is a second attempt, not a first one")
-    func successOverSuccessIsStillCounted() async throws {
+    /// touched.
+    ///
+    /// **The first version of this rail asserted `attemptCount == 2` and was
+    /// wrong, and the bug it was blessing was mine.** Making the probe
+    /// unconditional fixed a `.success` replacing a FAILURE (which used to reset
+    /// the counter to 1) and broke `BackfillJobRunner.checkpointCoarseProgress`,
+    /// which writes each screened window at the checkpoint AND again in the
+    /// end-of-pass digest. Its own header states the constraint: "writing a
+    /// success row here and again at end of pass leaves the counter at 1 both
+    /// times, while writing a FAILURE row twice would silently inflate it and
+    /// make a single failed window read as two." Incrementing unconditionally
+    /// applied that inflation to every checkpointed success on every completed
+    /// pass — one screened window reading as two attempts.
+    ///
+    /// So the ambiguity (an idempotent re-write and a real second success are the
+    /// same two rows on disk) is resolved in favour of the writer that exists.
+    @Test("a SUCCESS re-written over a SUCCESS is the SAME attempt — the checkpoint/digest double-write")
+    func successOverSuccessDoesNotInflateTheCount() async throws {
         let dir = try freshTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
 
@@ -553,6 +564,8 @@ struct SemanticScanAttemptHistoryV55MigrationTests {
         try await store.migrate()
         try await store.insertAsset(makeAsset(id: "asset-ss"))
 
+        // The checkpoint write, then the end-of-pass digest write, of ONE
+        // screened window — the shape `checkpointCoarseProgress` produces.
         try await store.insertSemanticScanResult(
             attempt(id: "scan-ss", assetId: "asset-ss", status: .success, latencyMs: 10, createdAt: 100)
         )
@@ -561,16 +574,51 @@ struct SemanticScanAttemptHistoryV55MigrationTests {
         )
 
         let raw = try #require(try rawRow(in: dir, rowId: "scan-ss"))
-        #expect(raw.attemptCount == 2, "the C5 contract lets same-rank collisions REPLACE; both writes happened")
+        #expect(raw.attemptCount == 1, "one screened window must not read as two attempts")
+        // …and the digest no longer drags `createdAt` forward to its own instant,
+        // which is the loss `checkpointCoarseProgress`'s header records as
+        // unavoidable ("a killed pass leaves the earlier, truer timestamp, and a
+        // completed one does not"). Both keep it now.
         #expect(raw.createdAt == 100)
-        #expect(raw.lastAttemptAt == 300)
         #expect(raw.firstAttemptAt == 100)
-        // One status, and the history is COMPLETE, so this is the `false` arm of
-        // `attemptsDiffered` rather than its `nil` arm: two attempts genuinely
-        // alike, which is a different claim from "we cannot say".
+        // `lastAttemptAt` DOES move, and must: the digest is a write.
+        #expect(raw.lastAttemptAt == 300)
         #expect(raw.observedStatuses == "success")
         let row = try #require(try await store.fetchSemanticScanResults(analysisAssetId: "asset-ss").first)
         #expect(row.attemptsDiffered == false)
+    }
+
+    /// The other half of the same branch, and the reason it is a RANK test rather
+    /// than a "did anything change" test: a success replacing a FAILURE is
+    /// unambiguously a new attempt and must still increment. Without this, the
+    /// R3 fix could be over-applied into "a success never increments", which is
+    /// the reset playhead-bg2n set out to close.
+    @Test("a SUCCESS over a FAILURE still increments — a rank change is not an idempotent re-write")
+    func successOverFailureStillIncrements() async throws {
+        let dir = try freshTempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        AnalysisStore.resetMigratedPathsForTesting()
+        let store = try AnalysisStore(directory: dir)
+        try await store.migrate()
+        try await store.insertAsset(makeAsset(id: "asset-sf"))
+
+        try await store.insertSemanticScanResult(
+            attempt(id: "scan-sf", assetId: "asset-sf", status: .decodingFailure, attemptCount: 2, createdAt: 100)
+        )
+        try await store.insertSemanticScanResult(
+            attempt(id: "scan-sf", assetId: "asset-sf", status: .success, attemptCount: 1, createdAt: 200)
+        )
+        // …and the digest re-write of that very success must NOT add a fourth.
+        try await store.insertSemanticScanResult(
+            attempt(id: "scan-sf", assetId: "asset-sf", status: .success, attemptCount: 1, createdAt: 250)
+        )
+
+        let raw = try #require(try rawRow(in: dir, rowId: "scan-sf"))
+        #expect(raw.attemptCount == 3, "two failures then a success is three attempts; the digest re-write is not a fourth")
+        #expect(raw.observedStatuses == "decodingFailure,success")
+        #expect(raw.createdAt == 100)
+        #expect(raw.lastAttemptAt == 250)
     }
 
     @Test("H-1 still holds: a later failure cannot demote a cached success")

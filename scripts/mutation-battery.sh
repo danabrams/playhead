@@ -3777,6 +3777,8 @@ T_BG_COUNT="countSemanticScanResults counts WRITES, so a re-attempt in this gran
 T_BG_UPGRADE="V55 upgrade: lastAttemptAt is COPIED, observedStatuses is SEEDED, firstAttemptAt stays NULL"
 T_BG_PARTIAL="a pre-V55 row's incompleteness SURVIVES later attempts"
 T_BG_SUCCESS="a SUCCESS replacing a failure keeps the attempt count and records both statuses"
+T_BG_REWRITE="a SUCCESS re-written over a SUCCESS is the SAME attempt — the checkpoint/digest double-write"
+T_BG_RANK="a SUCCESS over a FAILURE still increments — a rank change is not an idempotent re-write"
 T_BG_H1="H-1 still holds: a later failure cannot demote a cached success"
 T_BG_ENCODE="the encoder round-trips, and an unknown raw value is DROPPED rather than throwing"
 T_BG_FALLBACK="observedStatuses always contains the row's own status, even with no column"
@@ -9166,6 +9168,23 @@ MUTATIONS=(
   # wrong was asking the lenient set a question about COUNT.
   "BG13|1053|SSR|$T_BG_UNKNOWNTOK"
 
+  # Batch 1054 — BG14, EVERY replace is a new attempt. This is what the first cut
+  # of this bead shipped, and review round 3 found it by reading a doc block the
+  # change had falsified rather than by any test.
+  # `BackfillJobRunner.checkpointCoarseProgress` writes each screened window at
+  # the checkpoint AND again in the end-of-pass digest, and its own header states
+  # the constraint the store has to honour: "writing a success row here and again
+  # at end of pass leaves the counter at 1 both times". Incrementing
+  # unconditionally applies the FAILURE-row inflation to every checkpointed
+  # success on every completed pass — one screened window reading as two.
+  "BG14|1054|STORE|$T_BG_REWRITE"
+
+  # Batch 1055 — BG15, the MIRROR, and the reason BG14's fix is a RANK test
+  # rather than a "did anything change" test. Over-applying it into "a success
+  # never increments" restores the reset this whole bead was filed for: a success
+  # landing after ten failures reads as one attempt again.
+  "BG15|1055|STORE|$T_BG_RANK;$T_BG_SUCCESS"
+
   # BG99 — VACUITY CONTROL, and it MUST SURVIVE. The local holding the union is
   # renamed and nothing else changes: it proves the anchor still matches, the
   # batch still builds and both suites still run, while changing no behaviour.
@@ -9319,6 +9338,8 @@ describe_mutation() {
     BG11) echo "bg2n: the observedStatuses encoder drops .sorted(), so the column stops being a SET on disk" ;;
     BG12) echo "bg2n: the attempt count is not merged on the success path — statuses and timestamps right, COUNT wrong" ;;
     BG13) echo "bg2n: attemptsDiffered counts the TYPED set, so a status a newer binary invented becomes a confident 'they were all alike'" ;;
+    BG14) echo "bg2n: EVERY replace is a new attempt, so the checkpoint/digest double-write makes one screened window read as two" ;;
+    BG15) echo "bg2n: a SUCCESS never increments, which restores the reset this bead was filed for" ;;
     BG99) echo "VACUITY CONTROL — the local holding the status union is renamed and nothing else changes. MUST SURVIVE" ;;
     NY01) echo "AdDetectionService.hotPathCandidates sorts the RAW array — the shipped defect: runBackfill canonicalized and the hot path did not" ;;
     NY02) echo "the hot path 'de-duplicates' by chunk.id, a per-ROW UUID, so a fast/final twin survives it intact" ;;
@@ -10692,6 +10713,28 @@ EOF
 EOF
     snippet NEW <<'EOF'
         let distinct = observedStatuses
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BG14)
+    snippet OLD <<'EOF'
+                effectiveAttemptCount = isIdempotentSuccessRewrite
+                    ? max(existingAttempt, result.attemptCount)
+                    : max(existingAttempt + 1, result.attemptCount)
+EOF
+    snippet NEW <<'EOF'
+                _ = isIdempotentSuccessRewrite
+                effectiveAttemptCount = max(existingAttempt + 1, result.attemptCount)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BG15)
+    snippet OLD <<'EOF'
+                let isIdempotentSuccessRewrite =
+                    result.status == .success && existingStatus == SemanticScanStatus.success.rawValue
+EOF
+    snippet NEW <<'EOF'
+                let isIdempotentSuccessRewrite = result.status == .success
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 

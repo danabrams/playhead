@@ -6850,7 +6850,11 @@ actor AnalysisStore {
     // themselves were undateable.
     //
     // THREE COLUMNS, ALL NULLABLE, NO BACKFILL.
-    //   * `createdAt`        REAL — UNIX seconds at the write.
+    //   * `createdAt`        REAL — UNIX seconds at the write. (playhead-bg2n,
+    //                               V55: at the FIRST write. It was restamped on
+    //                               every upsert until then, which made a column
+    //                               named for creation hold the last attempt;
+    //                               `lastAttemptAt` carries that quantity now.)
     //   * `scenePhase`       TEXT — `BGTaskTelemetryScenePhase`'s vocabulary,
     //                               verbatim: active / inactive / background /
     //                               unknown. Same strings `background_task_runs`
@@ -20074,7 +20078,34 @@ actor AnalysisStore {
                     return
                 }
                 let existingAttempt = Int(sqlite3_column_int(probe, 1))
-                effectiveAttemptCount = max(existingAttempt + 1, result.attemptCount)
+                // playhead-bg2n R3: SUCCESS-OVER-SUCCESS DOES NOT INCREMENT, and
+                // the first cut of this bead got it wrong.
+                //
+                // Making the probe unconditional was right — a `.success`
+                // replacing a FAILURE must not reset the counter to the caller's
+                // 1 — but "every replace is a new attempt" is false for one real
+                // production path. `BackfillJobRunner.checkpointCoarseProgress`
+                // writes each successfully screened window at the checkpoint AND
+                // again in the end-of-pass digest, and its own header says so:
+                // "writing a success row here and again at end of pass leaves the
+                // counter at 1 both times, while writing a FAILURE row twice
+                // would silently inflate it and make a single failed window read
+                // as two". Incrementing unconditionally applies that inflation to
+                // every checkpointed success — one screened window reading as
+                // two attempts, on every completed pass.
+                //
+                // Success-over-success is genuinely AMBIGUOUS on disk: an
+                // idempotent re-write of one banked window and a real second
+                // successful attempt are the same two rows. It is resolved in
+                // favour of the writer that exists, and `max` rather than a bare
+                // keep so a caller that HAS counted its own attempts still wins.
+                // A rank CHANGE is unambiguous — a success replacing a non-success
+                // is a new attempt — and still increments.
+                let isIdempotentSuccessRewrite =
+                    result.status == .success && existingStatus == SemanticScanStatus.success.rawValue
+                effectiveAttemptCount = isIdempotentSuccessRewrite
+                    ? max(existingAttempt, result.attemptCount)
+                    : max(existingAttempt + 1, result.attemptCount)
                 // playhead-bg2n: `createdAt` STOPS MOVING. It moved three times
                 // for the witness row `scan-24f9deacdb0e3ab6`, which was created
                 // once — so a reader asking "how long has this window been
@@ -20268,14 +20299,21 @@ actor AnalysisStore {
     /// success-only count would report a window that examined the whole episode
     /// and found no ads as barren, which is the opposite of the truth.
     ///
-    /// **`createdAt` is nullable and a NULL row is NOT counted.** Rows written
-    /// before the V42 attribution migration carry NULL, and `NULL >= ?` is NULL
-    /// — never true — so SQLite already excludes them. That is the behaviour we
-    /// want and it is stated here rather than inherited: an unattributable row
-    /// cannot be evidence about any particular window, and counting it into the
-    /// newest one would be exactly the misattribution this bead exists to stop.
+    /// **`lastAttemptAt` is nullable and a NULL row is NOT counted.** Rows
+    /// written before the V42 attribution migration carry NULL, and `NULL >= ?`
+    /// is NULL — never true — so SQLite already excludes them. That is the
+    /// behaviour we want and it is stated here rather than inherited: an
+    /// unattributable row cannot be evidence about any particular window, and
+    /// counting it into the newest one would be exactly the misattribution this
+    /// bead exists to stop.
     ///
-    /// Hits `idx_semantic_scan_results_createdAt`.
+    /// playhead-bg2n: this read `createdAt` until V55, and V55's backfill is
+    /// `SET lastAttemptAt = createdAt WHERE createdAt IS NOT NULL` — so the
+    /// pre-V42 population is excluded by BOTH columns and the sentence above
+    /// survives the repoint unchanged. See the doc on the function itself for
+    /// why the column moved.
+    ///
+    /// Hits `idx_semantic_scan_results_lastAttemptAt`.
     /// playhead-dgly: one read of everything the persisted-state invariant
     /// REPORTER judges, taken before this process has repaired anything.
     ///

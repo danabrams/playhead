@@ -3670,25 +3670,33 @@ actor BackfillJobRunner {
     ///    promotes ad-likely windows to the front of the ATTEMPT order) costs no
     ///    `backfill_jobs` write at all.
     ///
-    /// **Why successes only.** `insertSemanticScanResult` probes the existing row
-    /// and sets `attemptCount = max(existing + 1, incoming)` only when the
-    /// INCOMING row is non-success; for a `.success` row it skips the probe and
-    /// binds the caller's value, which `makeScanResult` always sets to 1. So
-    /// writing a success row here and again at end of pass leaves the counter at
-    /// 1 both times, while writing a FAILURE row twice would silently inflate it
-    /// and make a single failed window read as two.
+    /// **Why successes only.** Writing a success row here and again at end of
+    /// pass leaves `attemptCount` at 1 both times, while writing a FAILURE row
+    /// twice would inflate it and make a single failed window read as two.
     ///
-    /// R5 corrected two overstatements here, because the mechanism matters more
-    /// than the conclusion. The store does not "leave `attemptCount` alone" for a
-    /// success — it OVERWRITES with the caller's 1, which is the same thing only
-    /// while every success-row constructor passes 1. And the second write is not
-    /// an "exact `INSERT OR REPLACE`, the database unchanged": `attributed`
-    /// stamps `createdAt` and `scenePhase` at every write, both bound
-    /// unconditionally, so the digest moves the row's `createdAt` from the
-    /// instant the window was screened to the instant of the digest. That is
-    /// pre-26od behaviour (there used to be exactly one write, at digest time) so
-    /// nothing regressed — but a killed pass leaves the earlier, truer timestamp,
-    /// and a completed one does not.
+    /// **playhead-bg2n (V55) re-derived that guarantee rather than inheriting
+    /// it, and the mechanism changed underneath this paragraph.** It used to
+    /// hold by accident: `insertSemanticScanResult` skipped its probe entirely
+    /// for a `.success` row and bound the caller's value, which `makeScanResult`
+    /// always sets to 1 — the same reason a success replacing ten FAILURES also
+    /// came out as 1, which is the defect bg2n was filed for. The probe is
+    /// unconditional now, and the double-write is protected explicitly: a
+    /// success replacing a SUCCESS is treated as an idempotent re-write and does
+    /// not increment, while a success replacing a NON-success is a rank change
+    /// and does. So this paragraph's guarantee is now a stated contract with a
+    /// rail behind it (`successOverSuccessDoesNotInflateTheCount`) instead of a
+    /// side effect of a branch that was there for another reason.
+    ///
+    /// R5 corrected two overstatements here; bg2n retires the second of them.
+    /// The store does not "leave `attemptCount` alone" for a success — see
+    /// above. And the second write was not an "exact `INSERT OR REPLACE`, the
+    /// database unchanged": `attributed` stamps `createdAt` at every write, so
+    /// the digest USED TO drag the row's `createdAt` from the instant the window
+    /// was screened to the instant of the digest, and R5 recorded the cost — "a
+    /// killed pass leaves the earlier, truer timestamp, and a completed one does
+    /// not". **Both keep it now.** `createdAt` COALESCEs the existing value
+    /// under V55; the digest's own clock lands in `lastAttemptAt`, where a
+    /// re-write is supposed to show.
     ///
     /// Failure rows stay where they are, at end of pass. Nothing is lost by that
     /// FOR THE CURSOR — the covered prefix stops at the first plan that is not a
@@ -3701,6 +3709,15 @@ actor BackfillJobRunner {
     /// `SUM(latencyMs)` read cleaner than the run really was. Filed rather than
     /// fixed: writing failure rows here needs an idempotent attempt-count path in
     /// the store, which is a store API change this bead's non-goals exclude.
+    ///
+    /// **playhead-bg2n changed what that would cost, without changing this
+    /// code.** The store now has the idempotence this paragraph says is missing
+    /// — for successes. It is deliberately NOT extended to failures: a failure
+    /// re-written here and at end of pass is ambiguous in the direction that
+    /// matters (a genuinely repeated failure is the signal, and collapsing it is
+    /// how eleven attempts read as one), so the caller-side fix this paragraph
+    /// asks for is still the right one. Read this as the cost being smaller than
+    /// it was, not as the block being lifted.
     ///
     /// **Best effort, and deliberately so.** A store error here is logged and
     /// stepped over rather than retried or rethrown. This callback runs inside
