@@ -594,17 +594,56 @@ class CannotEvaluate(Exception):
 # because the exposure is proportional to line count, not to kind — 88 fail lines
 # against 10,910 pass lines is why only the passes were hit here, and a LOST
 # FAILURE is the far worse direction.
-_ST_FAIL_NAMED = re.compile(r'✘ Test "(.+?)" (?:with \d+ test cases? )?failed after(?: ([\d.]+) seconds)?')
-_ST_FAIL_FUNC = re.compile(r'✘ Test ([A-Za-z_][A-Za-z0-9_]*\(\)) (?:with \d+ test cases? )?failed after(?: ([\d.]+) seconds)?')
+# THE MARKER GLYPH ITSELF GETS SEVERED, AND WHAT SURVIVES IS AN OCTAL ESCAPE
+# (playhead-phn3).
+#
+# Every glyph here is three bytes — ✔ e2 9c 94, ✘ e2 9c 98, ◇ e2 97 87,
+# ➜ e2 9e 9c — and the interleaving cuts a write chunk at an arbitrary BYTE, not
+# at a character. xcodebuild octal-escapes what it cannot decode as UTF-8, per
+# damaged token, so a ✔ cut between its second and third byte reaches this file
+# as the literal ASCII text `\342\234` ending one line and `\224` beginning the
+# next:
+#
+#     \342\2342026-08-13 21:38:12.193073-0400 Playhead[…] [SkipOrchestrator] …
+#     \224 Test "empty chunks with unknown duration still request a restart" …
+#
+# MEASURED over 138 preserved logs: 92 such lines, in three spellings — `\224`
+# (one byte lost), `\234\224` (two) and `\342\234\224` / `\342\227\207` (the
+# whole glyph escaped though intact) — and ZERO raw continuation bytes. The bead
+# expected a bare 0x94 and there is no such byte anywhere on this box; the raw
+# form is covered anyway, as U+FFFD, because that is what `_read`'s
+# `errors="replace"` would hand us if one ever arrived.
+#
+# THE GLYPH IS DECORATION AND THE VERB IS THE RECORD. `passed` / `failed` /
+# `skipped` / `started` already say which outcome a line carries, so admitting
+# the glyph's wreckage as an alternative anchor costs nothing that the glyph was
+# buying. What it must NOT become is no anchor at all: an app-log line that
+# merely contains `Test "x" passed after` would then invent a test, which is the
+# fifth splice shape CLAUDE.md records as a permanent phantom casualty. So the
+# anchor is still required — only its damaged spellings were added.
+_GLYPH_SHARD = r"(?:\\[0-3][0-7][0-7]|�)+"
+
+
+def _marked(glyph, rest):
+    """One Swift Testing console pattern, tolerant of a severed marker glyph.
+
+    Non-capturing throughout, so every group number below is the one the reader
+    of `parse_run` expects.
+    """
+    return re.compile("(?:" + glyph + "|" + _GLYPH_SHARD + ") " + rest)
+
+
+_ST_FAIL_NAMED = _marked('✘', r'Test "(.+?)" (?:with \d+ test cases? )?failed after(?: ([\d.]+) seconds)?')
+_ST_FAIL_FUNC = _marked('✘', r'Test ([A-Za-z_][A-Za-z0-9_]*\(\)) (?:with \d+ test cases? )?failed after(?: ([\d.]+) seconds)?')
 # Greedy `.*` before ` at <file>.swift:` so parameterised runs — which splice
 # "with 2 arguments depth → 8, mix → preAnalysis" in between — resolve to the
 # LAST such marker, which is the source location rather than an argument value.
-_ST_ISSUE_NAMED = re.compile(r'✘ Test "(.+?)" recorded an issue(?P<mid>.*?)(?: at ([A-Za-z0-9_+]+\.swift):(\d+):(\d+))?: (.*)$')
-_ST_ISSUE_FUNC = re.compile(r'✘ Test ([A-Za-z_][A-Za-z0-9_]*\(\)) recorded an issue(?P<mid>.*?)(?: at ([A-Za-z0-9_+]+\.swift):(\d+):(\d+))?: (.*)$')
-_ST_PASS_NAMED = re.compile(r'✔ Test "(.+?)" (?:with \d+ test cases? )?passed after')
-_ST_PASS_FUNC = re.compile(r'✔ Test ([A-Za-z_][A-Za-z0-9_]*\(\)) (?:with \d+ test cases? )?passed after')
-_ST_START_NAMED = re.compile(r'◇ Test "(.+?)" started')
-_ST_START_FUNC = re.compile(r'◇ Test ([A-Za-z_][A-Za-z0-9_]*\(\)) started')
+_ST_ISSUE_NAMED = _marked('✘', r'Test "(.+?)" recorded an issue(?P<mid>.*?)(?: at ([A-Za-z0-9_+]+\.swift):(\d+):(\d+))?: (.*)$')
+_ST_ISSUE_FUNC = _marked('✘', r'Test ([A-Za-z_][A-Za-z0-9_]*\(\)) recorded an issue(?P<mid>.*?)(?: at ([A-Za-z0-9_+]+\.swift):(\d+):(\d+))?: (.*)$')
+_ST_PASS_NAMED = _marked('✔', r'Test "(.+?)" (?:with \d+ test cases? )?passed after')
+_ST_PASS_FUNC = _marked('✔', r'Test ([A-Za-z_][A-Za-z0-9_]*\(\)) (?:with \d+ test cases? )?passed after')
+_ST_START_NAMED = _marked('◇', r'Test "(.+?)" started')
+_ST_START_FUNC = _marked('◇', r'Test ([A-Za-z_][A-Za-z0-9_]*\(\)) started')
 # A DELIBERATE skip is a third outcome, not silence. The 30 XCTest PerfGate skips
 # are what the census actually depends on subtracting — without them it reads 44
 # on mn5e and 60 on main where the truth is 14 and 30. These two ➜ patterns are
@@ -613,8 +652,8 @@ _ST_START_FUNC = re.compile(r'◇ Test ([A-Za-z_][A-Za-z0-9_]*\(\)) started')
 # trait-disabled test never emits `◇ Test "x" started`, so it cannot be in
 # `started - ran` to begin with. Kept because a skip spelled at runtime (a thrown
 # skip after the start line) would be, and that is one Swift-Testing release away.
-_ST_SKIP_NAMED = re.compile(r'➜ Test "(.+?)" skipped')
-_ST_SKIP_FUNC = re.compile(r'➜ Test ([A-Za-z_][A-Za-z0-9_]*\(\)) skipped')
+_ST_SKIP_NAMED = _marked('➜', r'Test "(.+?)" skipped')
+_ST_SKIP_FUNC = _marked('➜', r'Test ([A-Za-z_][A-Za-z0-9_]*\(\)) skipped')
 
 _XC_RESULT = re.compile(
     r"Test Case '-\[([A-Za-z0-9_.]+) ([A-Za-z0-9_:]+)\]' (failed|passed|skipped)"
@@ -663,9 +702,28 @@ _APP_LOG_INTRUSION = re.compile(
     r"\d{4}-\d\d-\d\d \d\d:\d\d:\d\d\.\d{6}[-+]\d{4} \w+\[\d+:"
 )
 # Cheap pre-filter: a head worth trying to repair carries a Swift Testing marker
-# glyph or the start of XCTest's own line. Anything else is app output that
-# merely happens to contain a timestamp, and must be left exactly as it is.
-_REPAIRABLE_HEAD = re.compile(r"[◇✔✘➜]|Test Case '-\[")
+# glyph — intact or in the octal wreckage `_GLYPH_SHARD` describes — or the start
+# of XCTest's own line. Anything else is app output that merely happens to
+# contain a timestamp, and must be left exactly as it is.
+_REPAIRABLE_HEAD = re.compile(r"[◇✔✘➜]|" + _GLYPH_SHARD + r"|Test Case '-\[")
+
+# HOW FAR THE DISPLACED TAIL CAN LAND (playhead-phn3).
+#
+# The shipped repair welded line N to line N+1 and nothing else, on the premise
+# that the intrusion is one line. It is not: the runner keeps writing while the
+# app does, so the tail arrives after however many app-log lines got in first.
+#
+# MEASURED over 136 preserved full-plan logs, 2,563 welds:
+#
+#     span 1: 2312   span 2: 203   span 3: 33   span 4: 9   span 5: 4   span 6: 2
+#
+# So the shipped bound recovered 90.2% and lost 251 records — 4 of them on the
+# otherwise-green run this bead was filed from. Nothing was seen past 6; 8 is
+# that plus a margin, stated rather than assumed. The bound is a backstop, not
+# the safety property: the scan may only step over lines that ARE app output
+# (timestamp and process at column 0) and stops dead at anything else, so a
+# burst of unattributable output can never carry a head to a stranger's tail.
+_MAX_SPLICE_SPAN = 8
 
 
 def _parses_as_a_test_line(text):
@@ -680,39 +738,66 @@ def _parses_as_a_test_line(text):
     )
 
 
+def _displaced_tail_span(lines, index, head):
+    """How many lines past `index` the head's displaced tail landed, or None.
+
+    Walks forward while — and only while — the lines in between are themselves
+    app output, which is the whole licence for stepping over them. Three ways to
+    give up, and each is a REPORTED casualty rather than an invented verdict:
+
+      * a line that reads as a test record ON ITS OWN. It is somebody else's and
+        is never swallowed. This is the condition a rail caught the shipped
+        repair fabricating without: two consecutive severed lines for one test
+        glued into `✘ Test "victim" recorded an iss✘ Test "victim" failed
+        after 0.03 secon…`, read with the name `victim" recorded an iss✘ Test
+        "victim` — one real failure turned into one phantom nobody can
+        reconcile. It also forces the match to SPAN the join rather than live
+        wholly in the tail, which is what makes a reconstruction a
+        reconstruction;
+      * a line that is neither a record nor app output. Unattributable text
+        between the halves is not evidence that they belong together;
+      * `_MAX_SPLICE_SPAN` lines without a match.
+    """
+    for span in range(1, _MAX_SPLICE_SPAN + 1):
+        if index + span >= len(lines):
+            return None
+        following = lines[index + span]
+        if _parses_as_a_test_line(following):
+            return None
+        if _parses_as_a_test_line(head + following):
+            return span
+        if not _APP_LOG_INTRUSION.match(following):
+            return None
+    return None
+
+
 def rejoin_spliced_lines(lines):
     """Undo the app-log intrusion described above. Returns the repaired lines.
 
-    Conservative by construction — three conditions must all hold, and the
-    middle one is what makes the repair unable to invent a verdict:
+    Conservative by construction — four conditions must all hold, and the last
+    two are what make the repair unable to invent a verdict:
 
       1. the line carries an app-log timestamp at a position that is NOT the
          start of the line (a line that merely IS app output is untouched);
       2. the head — the bytes before that timestamp — carries a test marker and
          does NOT already read as a test line. A verdict that survived intact is
          never rewritten;
-      3. the NEXT line does NOT read as a test line on its own. A record that
-         stands up by itself is never swallowed into somebody else's;
-      4. head + that next line does read as a test line.
+      3. some line within `_MAX_SPLICE_SPAN`, reached over app output only,
+         does NOT read as a test line on its own;
+      4. head + that line does read as a test line.
 
-    Only then are the two lines replaced by the reconstruction plus the
-    displaced app output, so nothing is dropped and nothing is counted twice.
+    Only then are those lines replaced by the reconstruction, the displaced app
+    output, and the app-log lines that got in between — same count out as in, so
+    nothing is dropped and nothing is counted twice. The reconstruction takes the
+    head's place, which keeps the record where the runner emitted it.
 
-    CONDITION 3 IS NOT DECORATION — it was added because a rail caught the
-    repair without it fabricating a test. Two consecutive severed lines for the
-    same test glued into `✘ Test "victim" recorded an iss✘ Test "victim" failed
-    after 0.03 secon…`, which the fail pattern reads with the name
-    `victim" recorded an iss✘ Test "victim`: one real failure turned into one
-    phantom under a name nobody can ever reconcile. Together with condition 2 it
-    also forces the match to SPAN the join — it cannot live wholly in either
-    half — which is what makes a reconstruction a reconstruction.
-
-    WHAT IT CANNOT SEE, named rather than glossed: a line cut twice (the tail
-    displaced past the following line); a cut whose tail is the very last line
-    of a truncated log; a cut landing inside the app-log timestamp itself; and,
-    by condition 3, a cut whose tail happens to be a whole verdict on its own.
-    All four leave a head that stays unparseable, so the failure direction is a
-    casualty that is REPORTED — never a verdict invented.
+    WHAT IT STILL CANNOT SEE, named rather than glossed: a head cut twice (each
+    half unparseable on its own); a tail that is the very last line of a
+    truncated log; a cut landing inside the app-log timestamp itself; a tail
+    separated from its head by output with no os_log prefix; and, by condition 3,
+    a cut whose tail happens to be a whole verdict on its own. All five leave a
+    head that stays unparseable, so the failure direction is a casualty that is
+    REPORTED — never a verdict invented.
     """
     out = []
     index = 0
@@ -721,14 +806,16 @@ def rejoin_spliced_lines(lines):
         match = _APP_LOG_INTRUSION.search(line)
         if match and match.start() > 0 and index + 1 < len(lines):
             head = line[:match.start()]
-            following = lines[index + 1]
+            span = None
             if (_REPAIRABLE_HEAD.search(head)
-                    and not _parses_as_a_test_line(head)
-                    and not _parses_as_a_test_line(following)
-                    and _parses_as_a_test_line(head + following)):
+                    and not _parses_as_a_test_line(head)):
+                span = _displaced_tail_span(lines, index, head)
+            if span is not None:
+                following = lines[index + span]
                 out.append(head + following)
                 out.append(line[match.start():])
-                index += 2
+                out.extend(lines[index + 1:index + span])
+                index += span + 1
                 continue
         out.append(line)
         index += 1

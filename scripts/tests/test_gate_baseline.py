@@ -2341,19 +2341,32 @@ class SpliceSpanningSeveralLinesTests(unittest.TestCase):
         self.assertIn(gb.xc_key("PlayheadTests.S", "testFoo"), run.failures)
         self.assertEqual(set(), run.no_verdict)
 
-    def test_the_DISPLACED_lines_are_all_KEPT_and_still_scanned(self):
-        # The repair rewrites N+1 lines into N+1 lines. Dropping the intervening
-        # app output would discard whatever landed in it — here xcodebuild's own
-        # restart banner, the crash's most direct witness.
+    def test_the_HEADS_OWN_displaced_tail_is_kept_across_a_wider_span(self):
+        # Reaching to line N+2 must not lose what the intrusion carried on line
+        # N — here xcodebuild's restart banner, the crash's most direct witness,
+        # which lands after the app log on the SAME physical line.
         run = gb.parse_run(log(
             '◇ Test "victim" started.\n'
-            + '✔ Test "vic' + APP_A
-            + "Restarting after unexpected exit, crash, or test timeout; "
-              "summary will include totals from previous launches.\n"
+            + '✔ Test "vic' + APP_A.rstrip("\n")
+            + " Restarting after unexpected exit, crash, or test timeout\n"
+            + APP_B
             + 'tim" passed after 1.0 seconds.\n',
             terminal=TERMINAL_PASSED))
         self.assertIn(gb.st_key("victim"), run.passed)
         self.assertEqual(1, run.host_restarts)
+
+    def test_the_INTERVENING_lines_are_re_emitted_VERBATIM_and_none_is_lost(self):
+        # Structural rather than behavioural, because "nothing was dropped" is a
+        # property of the rewrite and not of any one thing that might have been
+        # in the dropped bytes. Same count out as in, every intervening line
+        # present unchanged.
+        lines = ('✔ Test "vic' + APP_A + APP_B + APP_B
+                 + 'tim" passed after 1.0 seconds.').split("\n")
+        rejoined = gb.rejoin_spliced_lines(lines)
+        self.assertEqual(len(lines), len(rejoined))
+        self.assertIn('✔ Test "victim" passed after 1.0 seconds.', rejoined)
+        for original in lines[1:-1]:
+            self.assertIn(original, rejoined)
 
     def test_a_record_that_STANDS_ALONE_is_never_swallowed_into_the_weld(self):
         # The fabrication direction. Reaching past line N+1 must not let a head
