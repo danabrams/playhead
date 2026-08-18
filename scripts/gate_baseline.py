@@ -1087,6 +1087,14 @@ def parse_run(text):
 #
 # The first is cut mid-WORD, the second lost the lead bytes of its ✔ to a cut
 # inside a UTF-8 codepoint, and the third has no result line in the log at all.
+#
+# TWO OF THOSE THREE ARE READ BY THE CONSOLE NOW (playhead-phn3), which does
+# NOT make the bundle optional — the 68-log table below still stands and the
+# bundle is still where a VERDICT comes from. It matters because the console
+# keeps the STARTED roster and the two sources are UNIONED, so a shape the
+# console cannot read is a test the bundle alone can silence. `\224` is also
+# not what it looks like: it is four ASCII characters, not a bare 0x94. See
+# `_GLYPH_SHARD` and `_displaced_tail_span` above.
 # All three are from main's 06:01 run of 2026-08-15, which reported SEVEN tests
 # as "NO VERDICT (crashed host)" — with `host_restarts: 0` and not one crash
 # marker anywhere in 9.9 MiB. The instrument built to catch "a value that names
