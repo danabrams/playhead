@@ -2168,6 +2168,486 @@ class TruncatedOutcomeLineTests(unittest.TestCase):
                                                        "testFoo")].seconds)
 
 
+# ---------------------------------------------------------------------------
+# playhead-phn3 — the FIFTH correction to this parser, and two shapes at once.
+# ---------------------------------------------------------------------------
+#
+# THE SPECIMENS BELOW ARE REAL BYTES, NOT A RENDERING OF THEM.
+#
+# They are lifted verbatim out of playhead-xul6's merge gate — the run preserved
+# at `playhead-gate-artifacts/xul6/run1-green.log.gz`, sha256 of the
+# decompressed log
+#
+#     5047f782ad6a13844364b165cd8249469fec6db036e2f7e4a9aa4d77f7e4c2f6
+#
+# That run was `** TEST SUCCEEDED **` with `Test run with 11011 tests in 1359
+# suites passed`, zero failures and `host_restarts: 0`, and the census still
+# reported FOUR tests with NO VERDICT (crashed host). All four passed; their
+# verdict lines are in the log, severed.
+#
+# THE BEAD ITSELF MISREAD ONE OF THEM, WHICH IS THE STANDING DEFECT CLASS AGAIN.
+# It says the fourth specimen's surviving line "starts with a bare continuation
+# byte 0x94". It does not. The bytes on disk are `5c 32 32 34` — the four ASCII
+# characters `\`, `2`, `2`, `4`. xcodebuild octal-escapes a write chunk it cannot
+# decode as UTF-8, so a `✔` (e2 9c 94) severed between its second and third byte
+# arrives as the literal text `\342\234` on one line and `\224` on the next. The
+# em dash three tokens earlier on the same line is a raw `e2 80 94`, which is how
+# one can tell the escaping is per-damaged-token rather than per-file. Swept over
+# 138 preserved logs there are 92 such lines and NOT ONE raw continuation byte,
+# so the escape is the spelling to defend against; U+FFFD is covered too, because
+# that is what `_read`'s `errors="replace"` would produce if a raw one ever came.
+FIRST = "playhead-gate-artifacts/xul6/run1-green.log.gz"
+
+# Specimen 1 — cut inside the NAME (`Corrupt` | `ed / absurdly-low …`), with TWO
+# intervening physical lines. The tail follows the SECOND intruder's own newline,
+# so a rejoiner that only welds line N to line N+1 cannot reach it. Log lines
+# 28767-28769.
+XUL6_CORRUPTED = (
+    '✔ Test "Corrupt2026-08-13 21:38:01.914533-0400 Playhead[68204:56459461] '
+    '[SkipOrchestrator] beginEpisode: skip mode is shadow because '
+    'trustServiceUnavailable — this is NOT a deliberate shadow\n'
+    '2026-08-13 21:38:01.913454-0400 Playhead[68204:56455856] '
+    '[DownloadBatchEvictor] evicted 1 closed DownloadBatch row(s)\n'
+    'ed / absurdly-low value falls back to default" passed after 118.958 seconds.\n'
+)
+
+# Specimen 2 — same shape, `full bracket with tr` | `ust + scores …`. Log lines
+# 37139-37141.
+XUL6_BRACKET = (
+    '✔ Test "full bracket with tr2026-08-13 21:38:10.564540-0400 '
+    'Playhead[68204:56460397] [SkipOrchestrator] Decision: reverted '
+    'window=ad-sponsor-revert [60.0s-120.0s] reason=User tapped Listen\n'
+    '2026-08-13 21:38:10.566050-0400 Playhead[68204:56455856] '
+    '[BatchNotificationService] emit tripReady '
+    'batch=2F5A3C84-D2D9-40B5-BE23-7C6F3F396BEE\n'
+    'ust + scores above floors yields bracketRefined adjustments" passed after '
+    '125.740 seconds.\n'
+)
+
+# Specimen 3 — the worst observed: FOUR intervening lines between `Podcast
+# profile upse` and `rt and fetch`. Log lines 36872-36876.
+XUL6_PODCAST = (
+    '✔ Test "Podcast profile upse2026-08-13 21:38:10.498803-0400 '
+    'Playhead[68204:56460237] [TrustScoring] False signal for '
+    'o4qr-trust-write-barrier: trust=0.80 falseSignals=1\n'
+    '2026-08-13 21:38:10.500724-0400 Playhead[68204:56460235] '
+    '[FoundationModelClassifier] fm.coarse.run_budget contextSize=4096 '
+    'coarseBudget=482 coarseWindows=1\n'
+    '2026-08-13 21:38:10.500766-0400 Playhead[68204:56460403] '
+    '[FoundationModelClassifier] fm.coarse.run_budget contextSize=4096 '
+    'coarseBudget=482 coarseWindows=1\n'
+    '2026-08-13 21:38:10.500832-0400 Playhead[68204:56460236] '
+    '[FoundationModelClassifier] fm.coarse.run_budget contextSize=4096 '
+    'coarseBudget=482 coarseWindows=1\n'
+    'rt and fetch" passed after 125.685 seconds.\n'
+)
+
+# Specimen 4 — the SEVERED GLYPH. `\342\234` ends the first line and `\224`
+# begins the third; the second is the whole app-log line the intrusion carried.
+# Log lines 39009-39010 (the head line is 39009 and carries the intruder).
+XUL6_EMPTY_CHUNKS = (
+    '\\342\\2342026-08-13 21:38:12.193073-0400 Playhead[68204:56456753] '
+    '[SkipOrchestrator] beginEpisode: skip mode is shadow because '
+    'unresolvedShowIdentity — this is NOT a deliberate shadow\n'
+    '\\224 Test "empty chunks with unknown duration still request a restart" '
+    'passed after 127.156 seconds.\n'
+)
+
+# The two app-log lines specimen 1 carried, reused to build the FAIL and SKIP
+# fixtures. Real bytes there too, because a synthetic intruder is a fixture built
+# to match the parser.
+APP_A = ('2026-08-13 21:38:01.914533-0400 Playhead[68204:56459461] '
+         '[SkipOrchestrator] beginEpisode: skip mode is shadow because '
+         'trustServiceUnavailable — this is NOT a deliberate shadow\n')
+APP_B = ('2026-08-13 21:38:01.913454-0400 Playhead[68204:56455856] '
+         '[DownloadBatchEvictor] evicted 1 closed DownloadBatch row(s)\n')
+
+
+class SpliceSpanningSeveralLinesTests(unittest.TestCase):
+    """A severed record whose halves are NOT ADJACENT (playhead-phn3).
+
+    The intrusion carries its own newline AND can be followed by more app-log
+    lines before the runner's next write lands, so the displaced tail arrives
+    two, three or five physical lines later. The repair as shipped looked only
+    at line N+1, so all three of these read as silence and became crashed-host
+    casualties on a run where nothing whatsoever went wrong.
+    """
+
+    def test_the_xul6_Corrupted_specimen_is_a_PASS(self):
+        run = gb.parse_run(log('◇ Test "Corrupted / absurdly-low value falls '
+                               'back to default" started.\n' + XUL6_CORRUPTED,
+                               terminal=TERMINAL_PASSED))
+        key = gb.st_key("Corrupted / absurdly-low value falls back to default")
+        self.assertIn(key, run.passed)
+        self.assertEqual(set(), run.no_verdict)
+
+    def test_the_xul6_bracketRefined_specimen_is_a_PASS(self):
+        run = gb.parse_run(log('◇ Test "full bracket with trust + scores above '
+                               'floors yields bracketRefined adjustments" '
+                               'started.\n' + XUL6_BRACKET,
+                               terminal=TERMINAL_PASSED))
+        key = gb.st_key("full bracket with trust + scores above floors yields "
+                        "bracketRefined adjustments")
+        self.assertIn(key, run.passed)
+        self.assertEqual(set(), run.no_verdict)
+
+    def test_the_xul6_Podcast_specimen_survives_FOUR_intervening_lines(self):
+        run = gb.parse_run(log('◇ Test "Podcast profile upsert and fetch" '
+                               'started.\n' + XUL6_PODCAST,
+                               terminal=TERMINAL_PASSED))
+        key = gb.st_key("Podcast profile upsert and fetch")
+        self.assertIn(key, run.passed)
+        self.assertEqual(set(), run.no_verdict)
+
+    def test_a_severed_FAIL_is_recovered_and_that_is_the_DANGEROUS_direction(self):
+        # The bead's own reason for existing: a severed FAIL is a LOST FAILURE,
+        # and it has never been observed only because 88 fail lines sit against
+        # 10,910 pass lines. The `failed after` line is the ONLY evidence here —
+        # with an intact issue line the rail would be vacuous, because `recorded
+        # an issue` alone puts the key in `failures`.
+        run = gb.parse_run(log(
+            '◇ Test "victim" started.\n'
+            + '✘ Test "vic' + APP_A + APP_B
+            + 'tim" failed after 0.03 seconds with 1 issue.\n'))
+        self.assertIn(gb.st_key("victim"), run.failures)
+        self.assertEqual(set(), run.no_verdict)
+
+    def test_a_severed_ISSUE_line_still_carries_its_KIND_and_its_SOURCE(self):
+        # The kind is what the baseline's tolerance is keyed on, so recovering
+        # the failure without its kind widens the tolerance silently.
+        run = gb.parse_run(log(
+            '◇ Test "victim" started.\n'
+            + '✘ Test "vic' + APP_A + APP_B
+            + 'tim" recorded an issue at FooTests.swift:42:6: '
+              'Time limit was exceeded: 60.000 seconds\n'))
+        failure = run.failures[gb.st_key("victim")]
+        self.assertEqual({gb.KIND_TIMEOUT}, failure.kinds)
+        self.assertEqual("FooTests.swift", failure.source)
+
+    def test_a_severed_SKIP_is_an_OUTCOME_not_silence(self):
+        run = gb.parse_run(log(
+            '◇ Test "victim" started.\n'
+            + '➜ Test "vic' + APP_A + APP_B
+            + 'tim" skipped: "perf pass only — see playhead-zx0l"\n',
+            terminal=TERMINAL_PASSED))
+        self.assertIn(gb.st_key("victim"), run.skipped)
+        self.assertEqual(set(), run.no_verdict)
+
+    def test_a_severed_XCTest_result_spanning_lines_is_recovered(self):
+        run = gb.parse_run(log(
+            "Test Case '-[PlayheadTests.S testFoo]' started.\n"
+            + "Test Case '-[PlayheadTests.S testF" + APP_A + APP_B
+            + "oo]' failed (0.02 seconds).\n"))
+        self.assertIn(gb.xc_key("PlayheadTests.S", "testFoo"), run.failures)
+        self.assertEqual(set(), run.no_verdict)
+
+    def test_the_HEADS_OWN_displaced_tail_is_kept_across_a_wider_span(self):
+        # Reaching to line N+2 must not lose what the intrusion carried on line
+        # N — here xcodebuild's restart banner, the crash's most direct witness,
+        # which lands after the app log on the SAME physical line.
+        run = gb.parse_run(log(
+            '◇ Test "victim" started.\n'
+            + '✔ Test "vic' + APP_A.rstrip("\n")
+            + " Restarting after unexpected exit, crash, or test timeout\n"
+            + APP_B
+            + 'tim" passed after 1.0 seconds.\n',
+            terminal=TERMINAL_PASSED))
+        self.assertIn(gb.st_key("victim"), run.passed)
+        self.assertEqual(1, run.host_restarts)
+
+    def test_the_INTERVENING_lines_are_re_emitted_VERBATIM_and_none_is_lost(self):
+        # Structural rather than behavioural, because "nothing was dropped" is a
+        # property of the rewrite and not of any one thing that might have been
+        # in the dropped bytes. Same count out as in, every intervening line
+        # present unchanged.
+        lines = ('✔ Test "vic' + APP_A + APP_B + APP_B
+                 + 'tim" passed after 1.0 seconds.').split("\n")
+        rejoined = gb.rejoin_spliced_lines(lines)
+        self.assertEqual(len(lines), len(rejoined))
+        self.assertIn('✔ Test "victim" passed after 1.0 seconds.', rejoined)
+        for original in lines[1:-1]:
+            self.assertIn(original, rejoined)
+
+    def test_a_record_that_STANDS_ALONE_is_never_swallowed_into_the_weld(self):
+        # The fabrication direction. Reaching past line N+1 must not let a head
+        # eat a verdict that is a whole record on its own: that loses one real
+        # outcome and invents a name nobody can reconcile.
+        run = gb.parse_run(log(
+            '◇ Test "victim" started.\n'
+            '◇ Test "bystander" started.\n'
+            + '✔ Test "vic' + APP_A
+            + '✔ Test "bystander" passed after 2.0 seconds.\n'
+            + 'tim" passed after 1.0 seconds.\n'))
+        self.assertIn(gb.st_key("bystander"), run.passed)
+        self.assertNotIn(gb.st_key("victim"), run.passed)
+        # Reported, never invented: the head stays unparseable and its test is a
+        # casualty, which is the direction that asks for a re-run.
+        self.assertEqual({gb.st_key("victim")}, set(run.no_verdict))
+
+    def test_the_weld_STOPS_at_a_line_that_is_not_app_output(self):
+        # Only lines that ARE app output — timestamp and process at column 0 —
+        # may be stepped over. Anything else and the scan gives up, because a
+        # line of unknown provenance between the halves is not evidence they
+        # belong together.
+        run = gb.parse_run(log(
+            '◇ Test "victim" started.\n'
+            + '✔ Test "vic' + APP_A
+            + "some other output nobody can attribute\n"
+            + 'tim" passed after 1.0 seconds.\n'))
+        self.assertEqual({gb.st_key("victim")}, set(run.no_verdict))
+
+    def test_a_line_whose_timestamp_is_NOT_at_COLUMN_ZERO_is_not_stepped_over(self):
+        # The step-over licence is "this line IS app output", which is a claim
+        # about column 0. A line that merely CONTAINS a timestamp is a line that
+        # has itself been spliced, and stepping over it would weld a head to a
+        # tail with another record's wreckage in between.
+        run = gb.parse_run(log(
+            '◇ Test "victim" started.\n'
+            + '✔ Test "vic' + APP_A
+            + "some prefix " + APP_B
+            + 'tim" passed after 1.0 seconds.\n'))
+        self.assertEqual({gb.st_key("victim")}, set(run.no_verdict))
+
+    def test_a_head_at_the_very_END_of_a_truncated_log_is_left_alone(self):
+        # A log cut off mid-splice has no tail to weld to, and the scan must
+        # notice that rather than walking off the end of the list.
+        lines = ('✔ Test "vic' + APP_A + APP_B).rstrip("\n").split("\n")
+        self.assertEqual(lines, gb.rejoin_spliced_lines(lines))
+
+    def test_the_lookahead_is_BOUNDED_rather_than_running_to_the_next_match(self):
+        # THE COUNTS BELOW ARE LITERALS, DELIBERATELY. Written as
+        # `gb._MAX_SPLICE_SPAN + 1` this rail reads the constant it exists to
+        # pin, so raising the bound to 10,000 raises the fixture with it and the
+        # rail reports OK — measured: mutant RS02 survived exactly that way.
+        self.assertEqual(8, gb._MAX_SPLICE_SPAN)
+        run = gb.parse_run(log(
+            '◇ Test "victim" started.\n'
+            + '✔ Test "vic' + APP_A + APP_B * 9
+            + 'tim" passed after 1.0 seconds.\n'))
+        self.assertEqual({gb.st_key("victim")}, set(run.no_verdict))
+        # …and at the bound it still welds, so the rail above is about the bound
+        # and not about the mechanism being broken.
+        run = gb.parse_run(log(
+            '◇ Test "victim" started.\n'
+            + '✔ Test "vic' + APP_A + APP_B * 7
+            + 'tim" passed after 1.0 seconds.\n',
+            terminal=TERMINAL_PASSED))
+        self.assertIn(gb.st_key("victim"), run.passed)
+
+
+class SeveredMarkerGlyphTests(unittest.TestCase):
+    """The marker glyph itself severed mid-codepoint (playhead-phn3).
+
+    `✔` is `e2 9c 94`, `✘` is `e2 9c 98`, `◇` is `e2 97 87`, `➜` is `e2 9e 9c`.
+    Cut a write chunk inside one of those and xcodebuild octal-escapes what it
+    cannot decode, so the verdict arrives spelled `\\224 Test "…"` or
+    `\\234\\224 Test "…"` or `\\342\\227\\207 Test "…"`. No pattern anchored on
+    the glyph can ever see it.
+
+    THE GLYPH IS DECORATION AND THE VERB IS THE RECORD — that is why this is
+    fixed by admitting the wreckage as an alternative anchor rather than by
+    dropping the anchor. `passed`/`failed`/`skipped`/`started` already say which
+    outcome it is; the glyph only repeats them.
+    """
+
+    def test_the_xul6_empty_chunks_specimen_is_a_PASS(self):
+        run = gb.parse_run(log('◇ Test "empty chunks with unknown duration '
+                               'still request a restart" started.\n'
+                               + XUL6_EMPTY_CHUNKS, terminal=TERMINAL_PASSED))
+        key = gb.st_key("empty chunks with unknown duration still request a restart")
+        self.assertIn(key, run.passed)
+        self.assertEqual(set(), run.no_verdict)
+
+    def test_a_severed_glyph_FAIL_is_still_a_FAILURE(self):
+        # ✘ is e2 9c 98; cut after the second byte and `\230` is what survives.
+        # The direction that has never been observed, and the reason it has not
+        # is arithmetic rather than luck: 92 severed-glyph lines over 138
+        # preserved logs, every one of them a pass, against a corpus where
+        # passes outnumber failures 124 to 1.
+        run = gb.parse_run(log(
+            '◇ Test "victim" started.\n'
+            '\\230 Test "victim" failed after 0.03 seconds with 1 issue.\n'))
+        self.assertIn(gb.st_key("victim"), run.failures)
+        self.assertEqual(set(), run.no_verdict)
+
+    def test_a_severed_glyph_ISSUE_keeps_its_KIND(self):
+        run = gb.parse_run(log(
+            '◇ Test "victim" started.\n'
+            '\\230 Test "victim" recorded an issue at FooTests.swift:42:6: '
+            'Expectation failed: a == b\n'))
+        self.assertEqual({gb.KIND_ASSERTION},
+                         run.failures[gb.st_key("victim")].kinds)
+
+    def test_a_severed_glyph_SKIP_is_an_OUTCOME(self):
+        # ➜ is e2 9e 9c, so the surviving tail is `\234`.
+        run = gb.parse_run(log(
+            '◇ Test "victim" started.\n'
+            '\\234 Test "victim" skipped: "perf pass only"\n',
+            terminal=TERMINAL_PASSED))
+        self.assertIn(gb.st_key("victim"), run.skipped)
+        self.assertEqual(set(), run.no_verdict)
+
+    def test_a_severed_glyph_START_keeps_the_test_ON_the_roster(self):
+        # The console keeps the STARTED roster even now that verdicts come from
+        # the bundle, so a severed start makes a test invisible in BOTH
+        # directions — the one blind spot CLAUDE.md names by hand. Real spelling:
+        # `\342\227\207 Test "…" started.` appears in 17 of the preserved logs.
+        run = gb.parse_run(log(
+            '\\342\\227\\207 Test "victim" started.\n'))
+        self.assertIn(gb.st_key("victim"), run.started)
+        self.assertEqual({gb.st_key("victim")}, set(run.no_verdict))
+
+    def test_the_TWO_ESCAPE_spelling_is_read_too(self):
+        # `\234\224` — the cut landed one byte earlier. Real: 30 of the 92.
+        run = gb.parse_run(log(
+            '◇ Test "victim" started.\n'
+            '\\234\\224 Test "victim" passed after 1.0 seconds.\n',
+            terminal=TERMINAL_PASSED))
+        self.assertIn(gb.st_key("victim"), run.passed)
+
+    def test_the_WHOLE_GLYPH_escaped_is_read_too(self):
+        # `\342\234\224` — all three bytes escaped. Real (1e86, exxc).
+        run = gb.parse_run(log(
+            '◇ Test "victim" started.\n'
+            '\\342\\234\\224 Test "victim" passed after 1.0 seconds.\n',
+            terminal=TERMINAL_PASSED))
+        self.assertIn(gb.st_key("victim"), run.passed)
+
+    def test_the_BARE_FUNC_form_survives_a_severed_glyph(self):
+        # Real, from the 3c4k merge gate:
+        # `\224 Test boundaryAdjustmentReusedFromCache() passed after 95.380 s`.
+        run = gb.parse_run(log(
+            '◇ Test boundaryAdjustmentReusedFromCache() started.\n'
+            '\\224 Test boundaryAdjustmentReusedFromCache() passed after '
+            '95.380 seconds.\n', terminal=TERMINAL_PASSED))
+        self.assertIn(gb.st_key("boundaryAdjustmentReusedFromCache()"), run.passed)
+
+    def test_a_RAW_replacement_character_is_read_too(self):
+        # `_read` decodes with errors="replace", so a genuinely raw continuation
+        # byte — which no log on this box has, but which the bead expected —
+        # reaches the parser as U+FFFD rather than as itself.
+        run = gb.parse_run(log(
+            '◇ Test "victim" started.\n'
+            '� Test "victim" passed after 1.0 seconds.\n',
+            terminal=TERMINAL_PASSED))
+        self.assertIn(gb.st_key("victim"), run.passed)
+
+    def test_a_SUITE_line_with_a_severed_glyph_is_NOT_a_test(self):
+        # `\224 Suite "DownloadManager – Setup" passed after 105.532 seconds.`
+        # is real (se0x). Suites are not tests and must not enter any set.
+        run = gb.parse_run(log(
+            '\\224 Suite "DownloadManager – Setup" passed after 105.532 seconds.\n',
+            terminal=TERMINAL_PASSED))
+        self.assertEqual(set(), run.passed)
+        self.assertEqual({}, run.failures)
+        self.assertEqual(set(), run.started)
+
+    def test_app_output_that_merely_QUOTES_a_verdict_does_not_FABRICATE_one(self):
+        # The over-match direction the bead warns about: "match anywhere in the
+        # rejoined text" would read this line as a verdict and invent a test.
+        # The anchor is still required — it is only its DAMAGED spellings that
+        # were admitted.
+        run = gb.parse_run(log(
+            '2026-08-13 21:38:12.193073-0400 Playhead[68204:56456753] '
+            '[SkipOrchestrator] Test "phantom" passed after 1.0 seconds.\n',
+            terminal=TERMINAL_PASSED))
+        self.assertEqual(set(), run.passed)
+        self.assertEqual(set(), run.started)
+
+    def test_a_severed_glyph_and_a_severed_NAME_compose(self):
+        # Both defects on one record. The glyph is escaped whole — real, from
+        # the 1e86 merge gate — AND the name is cut two app-log lines from its
+        # tail, so NEITHER half reads as a record and only the weld can recover
+        # it. Written with the tail intact this rail is VACUOUS: `\224 Test "x"
+        # passed after …` parses on its own, so it never exercises the head at
+        # all. Measured — mutant RS12, which drops the shard from
+        # `_REPAIRABLE_HEAD`, survived the vacuous version.
+        run = gb.parse_run(log(
+            '◇ Test "victim" started.\n'
+            + '\\342\\234\\224 Test "vic' + APP_A + APP_B
+            + 'tim" passed after 1.0 seconds.\n',
+            terminal=TERMINAL_PASSED))
+        self.assertIn(gb.st_key("victim"), run.passed)
+        self.assertEqual(set(), run.no_verdict)
+
+
+class GreenRunWithPhantomCasualtiesTests(unittest.TestCase):
+    """The whole run, not the four lines — playhead-phn3.
+
+    Everything above feeds the parser fragments. This feeds it playhead-xul6's
+    merge gate, distilled by `scripts/tests/make_crashed_run_fixture.py` the same
+    way the crashed-run fixtures are: 6.4 MB and 51,729 lines become 52 KB and
+    497, with every failure, issue, skip, casualty and SPLICED line kept
+    byte-exact and every uninteresting start/pass PAIR dropped whole, so the
+    parser's quantities come out identical.
+
+    It is here because in-situ is a different claim from in-vitro. A fragment
+    rail proves the fix recovers what it was aimed at; only a whole log can show
+    that reaching past line N+1 and admitting a damaged glyph did not also
+    invent something out of the other 51,000 lines. Measured on this fixture:
+    the shipped parser reports FOUR casualties and this one reports NONE, with
+    the same 44 skips, the same zero failures and the same terminal marker.
+
+    A MISSING FIXTURE IS A FAILURE, NOT A SKIP, for the reason the class above
+    gives at length.
+    """
+
+    FIXTURE = "green-run-xul6-phantom-casualties.log"
+
+    #: The four the census reported, all of which passed.
+    PHANTOMS = (
+        "Corrupted / absurdly-low value falls back to default",
+        "Podcast profile upsert and fetch",
+        "empty chunks with unknown duration still request a restart",
+        "full bracket with trust + scores above floors yields bracketRefined "
+        "adjustments",
+    )
+
+    def _text(self):
+        path = FIXTURES / self.FIXTURE
+        self.assertTrue(
+            path.exists(),
+            "the distilled green-run fixture is missing: %s\n"
+            "It is COMMITTED — regenerate with "
+            "scripts/tests/make_crashed_run_fixture.py <full.log> %s from "
+            "playhead-gate-artifacts/xul6/run1-green.log.gz." % (path, path),
+        )
+        return path.read_text(encoding="utf-8")
+
+    def test_the_INLINE_specimens_are_in_the_fixture_BYTE_FOR_BYTE(self):
+        """What ties the constants above to the log they were lifted from.
+
+        Without this the four specimens are four strings somebody typed, and a
+        typo in one of them turns its rail into a test of the typo. Here they
+        are matched against a committed distillation of the real bytes.
+        """
+        text = self._text()
+        for specimen in (XUL6_CORRUPTED, XUL6_BRACKET, XUL6_PODCAST,
+                         XUL6_EMPTY_CHUNKS):
+            self.assertIn(specimen, text)
+
+    def test_the_run_reports_NO_CASUALTIES_and_the_four_PASSED(self):
+        run = gb.parse_run(self._text())
+        self.assertTrue(run.complete)
+        self.assertEqual(0, run.host_restarts)
+        self.assertEqual({}, run.failures)
+        self.assertEqual(44, len(run.skipped))
+        self.assertEqual(set(), run.no_verdict)
+        for name in self.PHANTOMS:
+            self.assertIn(gb.st_key(name), run.passed, name)
+
+    def test_a_run_with_nothing_wrong_with_it_can_reach_GREEN(self):
+        # The consequence, which is the reason a phantom casualty is not just
+        # noise: GREEN is unreachable while the count is non-zero, so four
+        # healthy tests kept a clean merge gate from ever saying so.
+        run = gb.parse_run(self._text())
+        v = gb.verdict(gb.empty_baseline("PlayheadFastTests"), run,
+                       plan="PlayheadFastTests")
+        self.assertFalse(v.crashed_host)
+        self.assertIn("GREEN", v.render())
+        self.assertEqual(gb.EXIT_OK, v.exit_code)
+
+
 class CrashedHostSafetyPropertyTests(unittest.TestCase):
     """The properties tl6l's exit-code decision RESTS on (R1 review).
 

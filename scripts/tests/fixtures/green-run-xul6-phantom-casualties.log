@@ -1,0 +1,497 @@
+Test Case '-[PlayheadTests.AdPodContinuationDeviceLaneTests testPodContinuationOnDeviceDatabaseNeverEngulfsAUserMark]' started.
+Test Case '-[PlayheadTests.AdPodContinuationDeviceLaneTests testPodContinuationOnDeviceDatabaseNeverEngulfsAUserMark]' skipped (0.040 seconds).
+Test Case '-[PlayheadTests.AudioForensicsTemporalRegLiveABTests testAudioForensicsABAcrossDogfoodCorpus]' started.
+Test Case '-[PlayheadTests.AudioForensicsTemporalRegLiveABTests testAudioForensicsABAcrossDogfoodCorpus]' skipped (0.027 seconds).
+Test Case '-[PlayheadTests.AudioForensicsTemporalRegLiveABTests testMultiRunAggregateAcrossDogfoodCorpus]' started.
+Test Case '-[PlayheadTests.AudioForensicsTemporalRegLiveABTests testMultiRunAggregateAcrossDogfoodCorpus]' skipped (0.001 seconds).
+Test Case '-[PlayheadTests.AudioForensicsTemporalRegLiveABTests testTemporalRegularizationABAcrossDogfoodCorpus]' started.
+Test Case '-[PlayheadTests.AudioForensicsTemporalRegLiveABTests testTemporalRegularizationABAcrossDogfoodCorpus]' skipped (0.103 seconds).
+Test Case '-[PlayheadTests.BrandAppearanceLiveABTests testBothBrandSignalsABAcrossDogfoodCorpus]' started.
+Test Case '-[PlayheadTests.BrandAppearanceLiveABTests testBothBrandSignalsABAcrossDogfoodCorpus]' skipped (0.003 seconds).
+Test Case '-[PlayheadTests.BrandAppearanceLiveABTests testCrossShowSyndicationABAcrossDogfoodCorpus]' started.
+Test Case '-[PlayheadTests.BrandAppearanceLiveABTests testCrossShowSyndicationABAcrossDogfoodCorpus]' skipped (0.001 seconds).
+Test Case '-[PlayheadTests.BrandAppearanceLiveABTests testMultiRunAggregateAcrossDogfoodCorpus]' started.
+Test Case '-[PlayheadTests.BrandAppearanceLiveABTests testMultiRunAggregateAcrossDogfoodCorpus]' skipped (0.001 seconds).
+Test Case '-[PlayheadTests.BrandAppearanceLiveABTests testRhetoricalGrammarABAcrossDogfoodCorpus]' started.
+Test Case '-[PlayheadTests.BrandAppearanceLiveABTests testRhetoricalGrammarABAcrossDogfoodCorpus]' skipped (0.003 seconds).
+Test Case '-[PlayheadTests.ChapterFusionLiftABTests testChapterFusionLiftAcrossDogfoodCorpus]' started.
+Test Case '-[PlayheadTests.ChapterFusionLiftABTests testChapterFusionLiftAcrossDogfoodCorpus]' skipped (0.004 seconds).
+Test Case '-[PlayheadTests.ChapterLabelingDiagnosticTests testDiagnoseLabelingAcrossDogfoodCorpus]' started.
+Test Case '-[PlayheadTests.ChapterLabelingDiagnosticTests testDiagnoseLabelingAcrossDogfoodCorpus]' skipped (0.003 seconds).
+Test Case '-[PlayheadTests.ChapterPlanPipelineSnapshotCaptureTests testCaptureAllDogfoodSnapshots]' started.
+Test Case '-[PlayheadTests.ChapterPlanPipelineSnapshotCaptureTests testCaptureAllDogfoodSnapshots]' skipped (0.001 seconds).
+Test Case '-[PlayheadTests.CrossEpisodeMemoryPerShowThresholdLiveABTests testCrossEpisodeMemoryABAcrossDogfoodCorpus]' started.
+Test Case '-[PlayheadTests.CrossEpisodeMemoryPerShowThresholdLiveABTests testCrossEpisodeMemoryABAcrossDogfoodCorpus]' skipped (0.004 seconds).
+Test Case '-[PlayheadTests.CrossEpisodeMemoryPerShowThresholdLiveABTests testMultiRunAggregateAcrossDogfoodCorpus]' started.
+Test Case '-[PlayheadTests.CrossEpisodeMemoryPerShowThresholdLiveABTests testMultiRunAggregateAcrossDogfoodCorpus]' skipped (0.001 seconds).
+Test Case '-[PlayheadTests.CrossEpisodeMemoryPerShowThresholdLiveABTests testPerShowThresholdABAcrossDogfoodCorpus]' started.
+Test Case '-[PlayheadTests.CrossEpisodeMemoryPerShowThresholdLiveABTests testPerShowThresholdABAcrossDogfoodCorpus]' skipped (0.001 seconds).
+Test Case '-[PlayheadTests.FragilityGateLiveABTests testFragilityDiagnosticAndSweepAcrossDogfoodCorpus]' started.
+Test Case '-[PlayheadTests.FragilityGateLiveABTests testFragilityDiagnosticAndSweepAcrossDogfoodCorpus]' skipped (0.031 seconds).
+Test Case '-[PlayheadTests.FragilityGateLiveABTests testMultiRunAggregateAcrossDogfoodCorpus]' started.
+Test Case '-[PlayheadTests.FragilityGateLiveABTests testMultiRunAggregateAcrossDogfoodCorpus]' skipped (0.001 seconds).
+Test Case '-[PlayheadTests.LexicalScorerLiveABTests testLexicalScorerPerFeatureSweepAcrossDogfoodCorpus]' started.
+Test Case '-[PlayheadTests.LexicalScorerLiveABTests testLexicalScorerPerFeatureSweepAcrossDogfoodCorpus]' skipped (0.001 seconds).
+Test Case '-[PlayheadTests.LexicalScorerLiveABTests testMultiRunAggregateAcrossDogfoodCorpus]' started.
+Test Case '-[PlayheadTests.LexicalScorerLiveABTests testMultiRunAggregateAcrossDogfoodCorpus]' skipped (0.001 seconds).
+Test Case '-[PlayheadTests.PipelineDumpLiveTests testPhysicalDeviceBaselinePreflight]' started.
+Test Case '-[PlayheadTests.PipelineDumpLiveTests testPhysicalDeviceBaselinePreflight]' skipped (0.002 seconds).
+Test Case '-[PlayheadTests.PipelineDumpLiveTests testProductionPipelineDumpOnNewEpisodes]' started.
+Test Case '-[PlayheadTests.PipelineDumpLiveTests testProductionPipelineDumpOnNewEpisodes]' skipped (0.011 seconds).
+2026-08-13 21:35:33.436709-0400 Playhead[68204:56459556] [BackgroundProcessing] Test Case '-[PlayheadTests.PipelineDumpLiveTests testRediffTreatmentPipelineDumpOnNewEpisodes]' started.
+Test Case '-[PlayheadTests.PipelineDumpLiveTests testRediffTreatmentPipelineDumpOnNewEpisodes]' skipped (0.003 seconds).
+Test Case '-[PlayheadTests.PlayheadFMSmokeTests testConanBoundaryExpansionLiftsRecallToAtLeastThree]' started.
+Test Case '-[PlayheadTests.PlayheadFMSmokeTests testConanBoundaryExpansionLiftsRecallToAtLeastThree]' skipped (0.001 seconds).
+Test Case '-[PlayheadTests.PlayheadFMSmokeTests testNoBoundarySyntheticControlKeepsExpansionSilent]' started.
+Test Case '-[PlayheadTests.PlayheadFMSmokeTests testNoBoundarySyntheticControlKeepsExpansionSilent]' skipped (0.001 seconds).
+Test Case '-[PlayheadTests.PlayheadFMSmokeTests testPathologicalSyntheticTruncationLogsExpansionTruncatedOnce]' started.
+Test Case '-[PlayheadTests.PlayheadFMSmokeTests testPathologicalSyntheticTruncationLogsExpansionTruncatedOnce]' skipped (0.001 seconds).
+Test Case '-[PlayheadTests.PlayheadFMSmokeTests testPermissiveAdClassifierEndToEnd]' started.
+Test Case '-[PlayheadTests.PlayheadFMSmokeTests testPermissiveAdClassifierEndToEnd]' skipped (0.002 seconds).
+Test Case '-[PlayheadTests.PlayheadFMSmokeTests testPermissiveTransformationProbeMatrix]' started.
+Test Case '-[PlayheadTests.PlayheadFMSmokeTests testPermissiveTransformationProbeMatrix]' skipped (0.002 seconds).
+Test Case '-[PlayheadTests.PlayheadFMSmokeTests testRefinementPassSafetyClassifierProbeMatrix]' started.
+Test Case '-[PlayheadTests.PlayheadFMSmokeTests testRefinementPassSafetyClassifierProbeMatrix]' skipped (0.002 seconds).
+Test Case '-[PlayheadTests.PlayheadFMSmokeTests testSafetyClassifierProbeMatrix]' started.
+Test Case '-[PlayheadTests.PlayheadFMSmokeTests testSafetyClassifierProbeMatrix]' skipped (0.002 seconds).
+Test Case '-[PlayheadTests.PlayheadRuntimeLaunchPerfTests testInitFitsLaunchBudget]' started.
+Test Case '-[PlayheadTests.PlayheadRuntimeLaunchPerfTests testInitFitsLaunchBudget]' skipped (0.002 seconds).
+Test Case '-[PlayheadTests.PlayheadRuntimeMainActorFreedomTests testMainActorIsNotHeldDuringRuntimeInit]' started.
+Test Case '-[PlayheadTests.PlayheadRuntimeMainActorFreedomTests testMainActorIsNotHeldDuringRuntimeInit]' skipped (0.002 seconds).
+◇ Test "parent task cancellation: runBackfill propagates cancellation; phase tears down cleanly" started.
+➜ Test "Build FrozenTrace fixtures from .xcappdata bundle" skipped.
+◇ Test "AdDetectionService.runBackfill emits one DecisionLogEntry per fusion window" started.
+◇ Test "laneACandidates with zero lookahead returns no windows" started.
+◇ Test "confidence is low (0.1–0.3 range) with lexical signal" started.
+◇ Test "Route change notification handled on actor without crash" started.
+◇ Test "Interruption notification handled on actor without crash" started.
+◇ Test "A time-range revert whose episode is replaced mid-loop calibrates the captured show and leaves the replacement alone" started.
+◇ Test "A banner No whose episode is replaced mid-flight calibrates the captured show" started.
+◇ Test "scheduleNextRefetch submits a BGProcessingTask requiring network + external power" started.
+◇ Test "Non-rotator (same-bytes sample) → NO full fetch, outcome unchanged" started.
+◇ Test "The legacy ad-window label is untouched by the claim gate" started.
+◇ Test "Corrupted / absurdly-low value falls back to default" started.
+◇ Test "Clamp path logs without crashing and returns default" started.
+​➜ Test "an abandoned coarse pass leaves its screened windows in the database" skipped: "shrinks the FM no-progress bound — perf pass only (playhead-zx0l)"
+◇ Test "playhead-fzpj: columns that CONTRADICT the stored scope are refused and counted, not reconciled into a half-repaired identity" started.
+◇ Test "playhead-fzpj: a colon-carrying podcastId with no columns to fall back on is REFUSED, not keyed on a fabricated identity" started.
+◇ Test "playhead-fzpj: an EMPTY podcastId column is absence, and the value column still resolves the split on its own" started.
+◇ Test "flag ON + no stamp → revalidation NOT triggered (pre-zx6i asset takes full path)" started.
+◇ Test "Expiration mid-refresh completes task exactly once and reports success=false" started.
+◇ Test "Invariant 5a: a drain over eligible work strictly decreases pending" started.
+◇ Test "Invariant 1: eligible queued work + free capacity drains within bounded passes" started.
+◇ Test "THE AD5F3A0A CASE — when the run DID start at the head, the under-coverage defer publishes the honest cursor so the resume scans only the remainder" started.
+◇ Test "the floor is the pipeline's floor, and the comparison is strict at the boundary" started.
+◇ Test "every (SurfaceReason, ResolutionHint) pair produces a non-empty pausedSubcopy" started.
+◇ Test "the poll loop is handed a deadline inside the measured grant, not 25 minutes" started.
+◇ Test "the charged sibling's handler spends its own budget" started.
+◇ Test "the playback lane takes no re-drives" started.
+◇ Test "awaitJobsSettled waits for a running job and times out rather than lying" started.
+◇ Test "five expired windows in a row still leave the job alive" started.
+◇ Test "A transfer backgroundDownload created but could not resume is abandoned by backgroundDownload itself" started.
+◇ Test "spansTouchBoundary returns false for spans fully inside the window" started.
+◇ Test "Errors thrown from fetchFirst propagate" started.
+◇ Test "parses valid chapters JSON" started.
+◇ Test "common regions below minRunBytes yield no runs (gate falls back)" started.
+​➜ Test "Swift aligner reproduces the python reference on the staged smartless A/B pair" skipped.
+➜ Test "fresh B-side provider decodes a staged .fresh.mp3 to non-empty 16 kHz PCM" skipped.
+◇ Test "Identity prior is a no-op: multiplier == 1.0 for all durations" started.
+◇ Test "Floor penalty is strictly milder than zero — prior never vetoes" started.
+◇ Test "A cancelled waiter does not release a permit it never held" started.
+◇ Test "A waiter cancelled while queued unblocks with CancellationError" started.
+➜ Test "playhead-eu1: @Generable refusal + permissive retry (on-device only — see comment)" skipped: "Requires live Foundation Models; run on a real device via PlayheadFMSmokeTests"
+◇ Test "A cancel racing the permit hand-off leaves the gate usable either way" started.
+◇ Test "Cancelling one waiter leaves the rest of the queue intact" started.
+◇ Test "each signal owns the correct varying field name" started.
+​➜ Test "the deadline returns promptly even when the call ignores cancellation" skipped: "perf pass only — see playhead-zx0l"
+◇ Test "Episode-bound seek rejects a stale same-episode lifecycle token" started.
+◇ Test "suggest Yes persists episode A feedback across direct replacement" started.
+◇ Test "stale Auto-Yes cannot commit after durable material changes mid-suspension" started.
+◇ Test "stale suggest completion cannot clear replacement provisional ownership" started.
+◇ Test "applyAdjustment never undercuts the always-on minimum budget" started.
+◇ Test "with NO prior record the trigger fires — a first listen is never suppressed" started.
+◇ Test "playhead-8d5r: the unattempted-plan row does not claim a timeout that never happened" started.
+◇ Test "Nil override falls back to the global setting" started.
+​◇ Test "Scan completes over a 10-blob cache and reports every blob" started.
+➜ Test "Scan completes within the 2-second SLA specified by the bead" skipped: "perf pass only — see playhead-zx0l"
+◇ Test "Phase 4→5 integration: ad-second coverage >= 14% on Conan fixture (Use A seconds-based snap)" started.
+◇ Test "The backfill handler still completes when the scheduler query times out" started.
+◇ Test "The expiration handler is armed before the handler awaits anything" started.
+◇ Test "A transcript veto whose episode is replaced mid-flight still names the captured show" started.
+◇ Test "standalone acoustic break with no overlapping lexical hit creates its own 1-atom region" started.
+◇ Test "high-confidence classifier result seeds a proposed region with .classifier origin" started.
+◇ Test "containment (one falseNegative range fully inside another) dedupes to a single replay row; first inserted wins" started.
+◇ Test "Parses basic Atom feed" started.
+◇ Test "scheduleBackfillIfNeeded emits a `submit` row with success=true" started.
+◇ Test "backfill expirationHandler emits an `expire` row" started.
+◇ Test "scheduleBackfillIfNeeded emits a `submit` row with success=false on throw" started.
+◇ Test "missing recognizer speakerId remains nil in chunks and events" started.
+◇ Test "recognizer speakerIds persist into chunks, events, and trait signals" started.
+◇ Test "a second row for one (asset, pass, fingerprint) is refused, and the survivor still takes the speakerId upgrade" started.
+◇ Test "duplicate fingerprint can upgrade missing speakerId and avgConfidence and re-emit chunk" started.
+◇ Test "handleBackfillTask emits matching `start` and `complete` rows" started.
+◇ Test "each signal owns the correct varying field name" started.
+◇ Test "configured SpeechTranscriber preset requests alternatives and confidence attributes" started.
+◇ Test "Model loading is outside the permit, so a cold asset install cannot spend the budget" started.
+◇ Test cancellationIsReportedInsteadOfReturningInSilence() started.
+◇ Test dedupOnlyRerunWithOneBadShardStillCompletes() started.
+◇ Test perRunCountersDoNotLeakIntoTheNextSession() started.
+◇ Test anOverlappingPredecessorDoesNotCreditTheSuccessor() started.
+◇ Test appendedShardFailuresAreAccumulatedToo() started.
+◇ Test aStoppedRunReportsStoppedThroughItsOwnGate() started.
+◇ Test aCancelledRunStillReportsWhatItsShardsFailedWith() started.
+◇ Test "the runtime's coordinator recovers a show through the runtime's own resolver" started.
+◇ Test "an overlapping clear cannot strand re-enable intent" started.
+◇ Test "overlapping explicit clears keep writers fenced until both finish" started.
+◇ Test "Ambiguous legacy extension siblings are withheld through background serving" started.
+◇ Test "Incomplete pinned file does not block background retry admission" started.
+◇ Test "Invariant 4 (RECOVERY visibility): preanalysis_recovery records jobsSeen == actual eligible count" started.
+◇ Test "Invariant 1 (DRAIN): eligible queue + free capacity fully drains — any depth, any job type" started.
+◇ Test "Invariant 3 (BACKGROUND): both BGTask entry points DISPATCH — queued set shrinks + progress outcome, never expired/0-done" started.
+◇ Test "Stop during stalled transcribe: no chunks persisted, no coverage advance, no .completed" started.
+◇ Test "Reconnect headphones + user tap play resumes from same position" started.
+◇ Test "Headphone disconnect (oldDeviceUnavailable) pauses immediately" started.
+◇ Test "Headphone disconnect preserves currentTime" started.
+◇ Test "cosineSimilarity: anti-correlated vectors clamped to 0.0" started.
+◇ Test "TranscriptSignature Equatable" started.
+◇ Test "A never-finishing holder does not wedge a subsequent acquire" started.
+◇ Test "A holder that never returns is abandoned instead of holding forever" started.
+◇ Test "An abandoned call is cancelled, so it stops competing for the recognizer" started.
+◇ Test "Cancellation reaches the recognizer call and the permit is not freed until it unwinds" started.
+◇ Test "The watchdog does not fire for a call that merely takes a while" started.
+◇ Test "Triggered timeout resumes all parked waiters and reports the count" started.
+◇ Test "Late injection arriving after timeout is a no-op for the timed-out waiter" started.
+◇ Test "Handler fired before injection completes success once injection lands" started.
+◇ Test "Handler fired with no injection times out and completes failure" started.
+◇ Test "Multiple concurrent waiters all wake on injection" started.
+◇ Test "PlaybackService deallocates after tearDown (no retain cycles)" started.
+◇ Test "didFinishLaunching triggers scanForSuspendedTransfers on the registered manager" started.
+◇ Test "delegate staging failure releases ownership and permits retry" started.
+◇ Test "didCompleteWithError(URLError.timedOut) emits failed with taskExpired" started.
+◇ Test "didCompleteWithError(URLError.notConnectedToInternet) emits noNetwork" started.
+◇ Test "Override OFF mid-episode forces immediate re-fetch" started.
+◇ Test "Episode-bound seek rejects a stale same-episode lifecycle token" started.
+◇ Test "Per-show override true ⇒ never engages even with valid plan" started.
+◇ Test "Episode begin ⇒ ends any prior compression and refreshes plan" started.
+◇ Test "notePlayhead inside a music plan ⇒ engages with varispeed/high rate" started.
+◇ Test "recordUserSpeedChange resets planner so next tick re-engages" started.
+◇ Test "beginEpisode cancels prior asset's in-flight lookahead refresh" started.
+◇ Test "Throwing fetchWindows preserves prior plan (no disengage)" started.
+◇ Test "updateKeepFullMusicOverride(true) mid-flight disengages immediately" started.
+◇ Test "Asset-id change cancels in-flight refresh and resets state" started.
+◇ Test "didCompleteWithError harvests NSURLSessionDownloadTaskResumeData and writes it to resumeDataDirectory" started.
+◇ Test "didCompleteWithError skips harvest when NSURLSessionDownloadTaskResumeData is absent" started.
+◇ Test "regionUnsupported stays at .none (NOT user-fixable)" started.
+◇ Test "blockedAnalysisUnavailable fires for languageUnsupported (user-fixable)" started.
+◇ Test refreshUsesEvaluatorVerdict() started.
+◇ Test "makeSummary: hardwareUnsupported → analysisUnavailable / NOT user-fixable" started.
+◇ Test "Siri dismissal with shouldResume restores playback" started.
+◇ Test "Full interruption cycle: playing → paused → playing" started.
+◇ Test "Siri activation interruption pauses playback" started.
+◇ Test "Phone call ends with shouldResume → playback resumes" started.
+◇ Test "Phone call interruption pauses playback" started.
+◇ Test "wrj8: a resume whose server validator still matches splices the blob" started.
+◇ Test "resumeSuspendedTransfer consumes the persisted blob on success" started.
+◇ Test "mixed pass produces no duplicate lexical evidence in the overlap" started.
+◇ Test "Cycle 2 H3: applyFocusAndCap is a no-op when maximumSpans is unset" started.
+◇ Test "parses UNCERTAIN as .uncertain" started.
+◇ Test "refinement parser: clamps spans that overflow the window" started.
+◇ Test "Podcast profile upsert and fetch" started.
+◇ Test "makeAnalyzerBuffer passes Float32 16 kHz audio through when source matches target" started.
+◇ Test "Invariant 6: pre-analysis recovery records jobsSeen >= #eligible queued" started.
+◇ Test "Invariant 5: the backfill BGTask window drains eligible work (pending strictly decreases)" started.
+➜ Test "fetchReusableSemanticScanResult is fast under cohort variation" skipped: "load-sensitive 50ms wall-clock budget — perf pass only (playhead-zx0l)"
+◇ Test "malformed scanCohortJSON throws at the persistence boundary" started.
+◇ Test "full bracket with trust + scores above floors yields bracketRefined adjustments" started.
+◇ Test "Nil override falls back to the global setting" started.
+◇ Test "defaultAction sentinel is still logOnly" started.
+◇ Test "child tables are enumerated from the LIVE schema, not a hand-written list" started.
+◇ Test "Tiny episode where pre + post > duration: pre-roll wins" started.
+◇ Test "A suggest-tier-only revertByTimeRange records no controller sample" started.
+◇ Test "the cancel reaches every job it names" started.
+◇ Test "each cancelled job keeps its own cause, so neither spends an attempt" started.
+◇ Test "cache deletion while background analysis enqueue is blocked leaves no resurrected artifacts" started.
+◇ Test "V42: a scan row joins to its backfill job and to the BGTask run that contained it" started.
+◇ Test "Invariant 3 — analysisUnavailableReason set on .paused IS flagged" started.
+◇ Test "(i) an .exactSpan veto on a slot-owned span still resolves after the ordinal recompute" started.
+◇ Test "Backfill expiration cancels work" started.
+◇ Test "Backfill completes successfully" started.
+◇ Test "Overlapping BG handlers each complete their own task independently" started.
+◇ Test "Backfill skipped on thermal throttle via capabilitiesService" started.
+◇ Test "Concurrent callers cannot overspend the budget" started.
+◇ Test "Start fresh is gated on awaitingUserDecision and behind a confirmation" started.
+◇ Test "Maintenance identifier is stable" started.
+◇ Test "AdDetectionConfig.default keeps the fragility gate OFF with documented defaults" started.
+◇ Test "Recovery copy carries no implementation jargon" started.
+◇ Test observeICloudSyncStatusFlipsOnSignOut() started.
+◇ Test "Backfill handler invokes real work method, not startCapabilityObserver" started.
+​➜ Test "enqueue of 1000 jobs completes quickly" skipped: "load-sensitive 100ms wall-clock budget — perf pass only (playhead-zx0l)"
+◇ Test "Posted willResignActive notification drives a real BG task submission end-to-end" started.
+◇ Test "the work-deadline return MEASURES its completions too, and writes them" started.
+◇ Test "an expired run records what the window achieved, not only that it ended" started.
+​➜ Test "the expiration wait spends the post-reclaim grace, not the teardown reserve" skipped: "perf pass only — see playhead-zx0l"
+◇ Test "an expired run's completion count is measured, not a literal zero" started.
+◇ Test "expiry tells the SCHEDULER the grant is over, so the in-flight job requeues" started.
+◇ Test "A completion delivered to a NEW manager instance still carries the show" started.
+◇ Test "A force-quit resume re-queues the fresh download against the recovered show" started.
+◇ Test "Clearing the cache takes the attribution with it" started.
+◇ Test "Queueing writes the attribution and a terminal completion reaps it" started.
+◇ Test "Cancelling a download reaps its attribution" started.
+◇ Test "Dropping the resume blob leaves the attribution for the resume path" started.
+◇ Test "A background download enqueues analysis against the show it was queued with" started.
+​➜ Test "benchmark gate: 3 episodes finish under the orchestration budget" skipped: "perf pass only — see playhead-zx0l"
+◇ Test "False positive only: coverage recall nil, precision = 0" started.
+◇ Test "a zero-cost PREFETCH BLOCK does not retry — zero bytes alone is not the grant" started.
+◇ Test "CANCELLATION MID-DELAY drops the retry — after the claim, never before it" started.
+◇ Test "Backfill expiration after work-task completion is idempotent (work-task wins)" started.
+◇ Test "Backfill happy path writes a terminal ledger row (noEligibleWork on fresh queue)" started.
+◇ Test "Pre-analysis recovery with no reconciler writes failed/reconciler_unavailable" started.
+◇ Test "Backfill expirationHandler writes expired outcome before markComplete" started.
+◇ Test "partial coverage on resume requests a restart" started.
+◇ Test "empty chunks with unknown duration still request a restart" started.
+◇ Test "both phases and the poll spend ONE deadline, anchored at the grant's start" started.
+◇ Test "the coarse phase observes the queue BEFORE the drain has dispatched anything" started.
+➜ Test "60-minute episode: decode + fingerprint under 60 s" skipped: "perf pass only — see playhead-zx0l"
+✔ Test "AdD2026-08-13 21:37:58.369736-0400 Playhead[68204:56460236] [AdDetectionService] scan_claim_minted asset=asset-int-cancel gate=fm_mode_off job=fm-bba148aedb9578ae
+etectionService.runBackfill emits one DecisionLogEntry per fusion window" passed after 115.524 seconds.
+✔ Test "laneACandidates with zero lookahead returns no windows" passed after 115.490 seconds.
+✔ Test "confidence is low (0.1–0.3 range) with lexical sign2026-08-13 21:37:59.091192-0400 Playhead[68204:56460431] [SpeechEngine] Transcribing shard 0 [start=0.00s, end=30.00s, duration=30.00s, samples=480000, episode=test-ep]
+al" passed after 116.185 seconds.
+✔ Test "scheduleNextRefetch submits a BGProcessingTask requiring network + external power" passed after 2026-08-13 21:38:01.901944-0400 Playhead[68204:56458823] [BackgroundSessionIO] URLSession(background:) for com.playhead.episode-downloads: refusesCallsLabelled(URLSession(background:) for ) test seam — reporting the daemon as unavailable
+118.965 seconds.
+✔ Test "Non-rotator (same-bytes sample) → NO full fetch, outcome unchanged" passed after 118.965 seconds.
+✔ Test "The legacy ad-window la2026-08-13 21:38:01.902693-0400 Playhead[68204:56455856] [DownloadBatchEvictor] evicted 1 closed DownloadBatch row(s)
+bel is untouched by the claim gate" passed after 118.966 seconds.
+✔ Test "Corrupt2026-08-13 21:38:01.914533-0400 Playhead[68204:56459461] [SkipOrchestrator] beginEpisode: skip mode is shadow because trustServiceUnavailable — this is NOT a deliberate shadow
+2026-08-13 21:38:01.913454-0400 Playhead[68204:56455856] [DownloadBatchEvictor] evicted 1 closed DownloadBatch row(s)
+ed / absurdly-low value falls back to default" passed after 118.958 seconds.
+✔ Test "Clamp path logs without crashing and returns default" passed after 118.962 seconds.
+✔ Test "playhead-fzpj: columns that CONTRADICT the stored scope are refused and counted, not reconciled into a half-repaired id2026-08-13 21:38:01.952307-0400 Playhead[68204:56460237] [FoundationModelClassifier] fm.coarse.run_budget contextSize=4096 coarseBudget=482 coarseWindows=14
+entity" passed after 118.900 seconds.
+✔ Test "playhead-fzpj: a colon-carrying podcastId with no columns to fall back on is REFUSED, not keyed on a fabricated identity" passed after 118.904 seconds.
+✔ Test "flag ON + no stamp → revalidation NOT triggered (pre-zx6i asset takes full path)" passe2026-08-13 21:38:01.955568-0400 Playhead[68204:56460431] [FoundationModelClassifier] fm.coarse.run_budget contextSize=4096 coarseBudget=482 coarseWindows=14
+d after 118.912 seconds.
+✔ Test "playhead-fzpj: an EMPTY podcastId column is absence, and the value column still resolves the split on its own" passed after 118.901 seconds.
+✔ Test "every (SurfaceReason, ResolutionHint) pair produces a non-2026-08-13 21:38:02.243538-0400 Playhead[68204:56460235] [SkipOrchestrator] Begin episode: asset=asset-1
+empty pausedSubcopy" passed after 118.773 seconds.
+✔ Test "the floor is the pipeline's floor, and the comparison is strict at the boundary" passed after 118.844 seconds.
+✔ Test "the playb2026-08-13 21:38:02.261068-0400 Playhead[68204:56465316] [] (Fig) FigAtomStreamInitWithByteStreamWithSizeAndReporter signalled err=-12893 (kFigAtomStream_OffsetOutsideOfParent) (Offset 0 exceeds stream length 0) at FigAtomStream.c:436
+ack lane takes no re-drives" passed after 118.751 seconds.
+✔ Test "spansTouchBoundary returns false for2026-08-13 21:38:02.955846-0400 Playhead[68204:56455856] [CoreMLSequenceClassifier] Layer 2 sequence model not bundled — using RuleBasedClassifier fallback for all classifications.
+ spans fully inside the window" passed after 119.214 seconds.
+✔ Test "Errors thrown from fetchFirst propagate" passed after 119.213 seconds.
+✔ Test "common regions below minRunBy2026-08-13 21:38:02.970645-0400 Playhead[68204:56460397] [SkipOrchestrator] beginEpisode: skip mode is shadow because trustServiceUnavailable — this is NOT a deliberate shadow
+tes yield no runs (gate falls back)" passed after 119.210 seconds.
+✔ Test "parses valid chapters JSON" passed after 119.216 seconds.
+✔ Test "Identity prior is a no-op: multiplier == 1.0 for all duration2026-08-13 21:38:03.026389-0400 Playhead[68204:56460235] [SkipOrchestrator] ad window ingest: door=mid_session_ingest asset=asset-1 forwarded=2 delivered=1 ingest_armed_suggest=1 ingest_dropped_blocked_gate=1 ingest_armed_suggest:unanchored_extent_start+end=1 ingest_dropped_blocked_gate:blockedByPolicy=1
+s" passed after 119.230 seconds.
+✔ Test "Floor penalty is strictly milder than zero — prior never vetoes" passed after 119.230 seconds.
+✔ Test "each signal owns the correct varying field name" passed after 119.285 seconds.
+✔ Test "Episode-bound seek rejects a stale same-episode lifecycle token" passed after 119.321 seconds.
+✔ Test "applyAdjustmen2026-08-13 21:38:03.605452-0400 Playhead[68204:56455856] [CoreMLSequenceClassifier] Layer 2 sequence model not bundled — using RuleBasedClassifier fallback for all classifications.
+t never undercuts the always-on minimum budget" passed after 119.593 seconds.
+✔ Test "with NO prior record the trigger fires — a first listen is never suppressed" passed after 119.595 seconds.
+✔ Test "Nil override falls back to the global setting" passed after 120.021 seconds.
+✔ T2026-08-13 21:38:04.335245-0400 Playhead[68204:56460394] [SkipOrchestrator] beginEpisode: skip mode is shadow because trustServiceUnavailable — this is NOT a deliberate shadow
+est "Phase 4→5 integration: ad-second coverage >= 14% on Conan fixture (Use A seconds-based snap)" passed after 119.941 seconds.
+✔ Test "standalone acoustic break with 2026-08-13 21:38:05.413420-0400 Playhead[68204:56459461] [EvidenceCatalogBuilder] Built evidence catalog: 8 entries from 11 atoms
+no overlapping lexical hit creates its own 1-atom region" passed after 120.978 seconds.
+✔ Test "high-confidence classifier result seeds a proposed region with .classifier origin" passed after 120.981 seconds.
+✔ Test "containment (one falseNegative range fully inside another) dedupes to a single replay row; first inserted wins" passed after 121.228 seconds.2026-08-13 21:38:05.690914-0400 Playhead[68204:56460236] [EvidenceCatalogBuilder] Built evidence catalog: 8 entries from 11 atoms
+
+✔ Test "Parses basic Atom feed" passed after 121.229 seconds.
+✔ 2026-08-13 21:38:06.355188-0400 Playhead[68204:56455856] [ShareSheet] Only support loading options for CKShare and SWY types.
+Test "each signal owns the correct varying field name" passed after 121.837 seconds.
+✔ Test "configured SpeechTranscriber preset requests alternatives and confidence attributes" passed after 121.840 seconds.
+✔ Test "cosineSimilarity: anti-correlated 2026-08-13 21:38:08.190877-0400 Playhead[68204:56456753] [Capabilities] Capability snapshot captured: foundationModels=true, foundationModelsUsable=false, appleIntelligence=true, localeSupported=true, contextSize=0, thermal=nominal, lowPower=false, charging=false, bgProcessing=true, diskSpace=21275MB
+vectors clamped to 0.0" passed after 123.507 seconds.
+✔ Test "TranscriptSignature Equatable" passed after 123.510 seconds.
+✔ Test "mixed pass produces no duplicate lexical evidence in the overlap" passed afte2026-08-13 21:38:10.462353-0400 Playhead[68204:56456753] [FoundationModelClassifier] fm.coarse.run_budget contextSize=4096 coarseBudget=482 coarseWindows=40
+r 125.651 seconds.
+✔ Test "Cycle 2 H3: applyFocusAndCap is a no-op when maximumSpans is unset" passed after 125.653 seconds.
+✔ Test "parses 2026-08-13 21:38:10.470140-0400 Playhead[68204:56460236] [FoundationModelClassifier] fm.coarse.run_budget contextSize=4096 coarseBudget=482 coarseWindows=40
+UNCERTAIN as .uncertain" passed after 125.657 seconds.
+✔ Test "refinement parser: clamps spans that overflow the window" passed after 125.657 seconds.
+✔ Test "Podcast profile upse2026-08-13 21:38:10.498803-0400 Playhead[68204:56460237] [TrustScoring] False signal for o4qr-trust-write-barrier: trust=0.80 falseSignals=1
+2026-08-13 21:38:10.500724-0400 Playhead[68204:56460235] [FoundationModelClassifier] fm.coarse.run_budget contextSize=4096 coarseBudget=482 coarseWindows=1
+2026-08-13 21:38:10.500766-0400 Playhead[68204:56460403] [FoundationModelClassifier] fm.coarse.run_budget contextSize=4096 coarseBudget=482 coarseWindows=1
+2026-08-13 21:38:10.500832-0400 Playhead[68204:56460236] [FoundationModelClassifier] fm.coarse.run_budget contextSize=4096 coarseBudget=482 coarseWindows=1
+rt and fetch" passed after 125.685 seconds.
+✔ Test "makeAnalyzerBuffer passes Float32 16 kHz audio through when source matches target" passed after 125.688 seconds.
+✔ Test "full bracket with tr2026-08-13 21:38:10.564540-0400 Playhead[68204:56460397] [SkipOrchestrator] Decision: reverted window=ad-sponsor-revert [60.0s-120.0s] reason=User tapped Listen
+2026-08-13 21:38:10.566050-0400 Playhead[68204:56455856] [BatchNotificationService] emit tripReady batch=2F5A3C84-D2D9-40B5-BE23-7C6F3F396BEE
+ust + scores above floors yields bracketRefined adjustments" passed after 125.740 seconds.
+✔ Test "malformed scanCohortJSON throws at the persistence boundary" passed after 125.744 seconds.
+✔ Tes2026-08-13 21:38:10.568357-0400 Playhead[68204:56455856] [BatchNotificationService] emit tripReady batch=45EB32E4-53F4-4AB6-8C54-9886F79CC1B3
+t "Nil override falls back to the global setting" passed after 125.743 seconds.
+✔ Test "defaultAction sentinel is still logOnly" passed after 125.742 seconds.
+✔ Test "child tables are enumerated from the LIVE schema, not a hand-written list2026-08-13 21:38:10.638855-0400 Playhead[68204:56460394] [FoundationModelClassifier] fm.coarse.run_budget contextSize=4096 coarseBudget=482 coarseWindows=1
+" passed after 125.796 seconds.
+✔ Test "Tiny episode where pre + post > duration: pre-roll wins" passed after 125.797 seconds.
+✔ Test "Invariant 3 — analysisUnavailableReason set on .paused IS flagged" passed after 125.882026-08-13 21:38:10.778521-0400 Playhead[68204:56455856] [CoreMLSequenceClassifier] Layer 2 sequence model not bundled — using RuleBasedClassifier fallback for all classifications.
+4 seconds.
+✔ Test "V42: a scan row joins to its backfill job and to the BGTask run that contained it" passed after 125.910 seconds.
+✔ Test "(i) an .exactSpa2026-08-13 21:38:10.787836-0400 Playhead[68204:56455856] [CoreMLSequenceClassifier] Layer 2 sequence model not bundled — using RuleBasedClassifier fallback for all classifications.
+n veto on a slot-owned span still resolves after the ordinal recompute" passed after 125.895 seconds.
+✔ 2026-08-13 21:38:10.808439-0400 Playhead[68204:56455856] [CoreMLSequenceClassifier] Layer 2 sequence model not bundled — using RuleBasedClassifier fallback for all classifications.
+Test "Maintenance identifier is stable" passed after 125.899 seconds.
+✔ Test "Start fresh is gated on awaitingUserDecision and behind a confirmation" passed after 125.901 seconds.
+✔ Test "A2026-08-13 21:38:10.810597-0400 Playhead[68204:56455856] [CoreMLSequenceClassifier] Layer 2 sequence model not bundled — using RuleBasedClassifier fallback for all classifications.
+dDetectionConfig.default keeps the fragility gate OFF with documented defaults" passed after 125.901 seconds.
+✔ Test "Recovery copy carries no implementation jargon" passed after 125.903 seconds.
+✔ Test2026-08-13 21:38:11.628261-0400 Playhead[68204:56456753] [Capabilities] Capability snapshot captured: foundationModels=true, foundationModelsUsable=false, appleIntelligence=true, localeSupported=true, contextSize=0, thermal=nominal, lowPower=false, charging=false, bgProcessing=true, diskSpace=21253MB
+ "False positive only: coverage recall nil, precision = 0" passed after 126.649 seconds.
+\342\2342026-08-13 21:38:12.193073-0400 Playhead[68204:56456753] [SkipOrchestrator] beginEpisode: skip mode is shadow because unresolvedShowIdentity — this is NOT a deliberate shadow
+\224 Test "empty chunks with unknown duration still request a restart" passed after 127.156 seconds.
+✔ Test "partial coverage on resume requests a restart" passed after 127.156 seconds.
+✔ Suite "UserPreferences SwiftData persistence (playhead-j2u)" passed after 132.951 2026-08-13 21:38:15.385913-0400 Playhead[68204:56460237] [SkipOrchestrator] Begin episode: asset=asset-2
+seconds.
+✔ Test "didCompleteWithError(URLError.timedOut) emits failed with taskExpired" passed after 131.182 seconds.
+✔ Test "didCompleteWithError(URLError.notConnectedToInternet) emits noNetwork" passed after 131.181 seconds.
+✔ Test "A suggest-tier-only revertByTimeRange records no controller sample" passed 2026-08-13 21:38:16.028309-0400 Playhead[68204:56460235] [TranscriptEngineService] Transcription failed for shard 2 [start=60.00s, duration=30.00s, samples=480000, episode=ep-ngev-concluded]: Voice activity detection failed: shard 2
+after 131.186 seconds.
+✔ Test "CANCELLATION MID-DELAY drops th2026-08-13 21:38:16.097732-0400 Playhead[68204:56460394] [WorkScheduler] No cached audio for episode ep-pending-a, blocking job pending-a
+e retry — after the claim, never before it" passed after 131.116 seconds.
+✔ Test "a zero-cost PREFETCH BLOCK does not retry — zero bytes alone is not the grant" passed after 131.117 seconds.
+✔ Test "regionUnsupported stays at .none (NOT user-fixable)" passed after 2026-08-13 21:38:16.506378-0400 Playhead[68204:56455856] [BatchNotificationService] emit blockedWifiPolicy batch=EE391F7D-8305-403E-921F-8BA069ACCEB1
+131.712 seconds.
+✔ Test "blockedAnalysisUnavailable fires for languageUnsupported (user-fixable)" passed after 131.712 seconds.
+✔ Test "makeSummary: hardwareUn2026-08-13 21:38:16.512357-0400 Playhead[68204:56460397] [WorkScheduler] Job bg-admit-job failed: no shards within desired coverage, attempt 1, backoff 120.000000s
+supported → analysisUnavailable / NOT user-fixable" passed after 131.718 seconds.
+✔ Test refreshUsesEvaluatorVerdict() passed after 131.720 seconds.
+◇ Test "Entry activationConfig snapshot matches MetadataActivationConfig.resolved() at emit time" started.
+✔ Test "A transfer backgroundDownload created but could not resume is abandoned by backgroundDownload itself" passed after 133.431 seconds.
+✔ Test "Scan completes over a 10-blob cache and reports every blob" passed after 132.891 seconds.
+✔ Test "Ambiguous legacy extension siblings are withheld through background serving" passed after 133.592 seconds.
+✔ Test "Incomplete pinned file does not block background retry admission" passed after 133.597 seconds.
+✔ Test "wrj8: a resume whose server validator still matches splices the blob" passed after 133.516 seconds.
+✔ Test "resumeSuspendedTransfer consumes the persisted blob on success" passed after 133.516 seconds.
+✔ Test "A force-quit resume re-queues the fresh download against the recovered show" passed after 133.507 seconds.
+✔ Test "Dropping the resume blob leaves the attribution for the resume path" passed after 133.506 seconds.
+✔ Test "Entry activationConfi2026-08-13 21:38:18.519160-0400 Playhead[68204:56460397] [BackfillJobRunner] FM backfill job fm-41bb3a5dd64f4282 terminated: 3 passes ended with the episode under the ad-scan floor
+g snapshot matches MetadataActivationConfig.resolved() at emit time" passed after 1.533 seconds.
+◇ Test "a fresh session is minted to drive the asset forward after corruption" started.
+✔ Test "missing recognizer speakerId remains nil in chunks and events" passed after 134.091 seconds.
+✔ Test "recognizer speakerIds persist into chunks, events, and trait signals" passed after 134.091 seconds.
+✔ Test "scheduleBackfillIfNeeded emits a `submit` row with success=true" passed after 134.140 seconds.
+✔ Test "scheduleBackfillIfNeeded emits a `submit` row with success=false on throw" passed after 134.140 seconds.
+✔ Test "Episode begin ⇒ ends any prior compression and refreshes plan" passed after 134.122 seconds.
+✔ Test "Per-show override true ⇒ never engages even with valid plan" passed after 134.122 seconds.
+✔ Test "Queueing writes the attribution and a terminal completion reaps it" passed after 134.112 seconds.
+✔ Test "A completion delivered to a NEW manager instance still carries the show" passed after 134.113 seconds.
+✔ Test "Expiration mid-refresh completes task exactly once and reports success=false" passed after 136.035 seconds.
+✔ Test "the poll loop is handed a deadline inside the measured grant, not 25 minutes" passed after 135.601 seconds.
+✔ Test "the charged sibling's handler spends its own budget" passed after 135.588 seconds.
+✔ Test "The expiration handler is armed before the handler awaits anything" passed after 134.688 seconds.
+✔ Test "duplicate fingerprint can upgrade missing speakerId and avgConfidence and re-emit chunk" passed after 134.625 seconds.
+✔ Test "a second row for one (asset, pass, fingerprint) is refused, and the survivor still takes the speakerId upgrade" passed after 134.625 seconds.
+✔ Test aStoppedRunReportsStoppedThroughItsOwnGate() passed after 134.581 seconds.
+✔ Test dedupOnlyRerunWithOneBadShardStillCompletes() passed after 134.583 seconds.
+✔ Test appendedShardFailuresAreAccumulatedToo() passed after 134.582 seconds.
+✔ Test perRunCountersDoNotLeakIntoTheNextSession() passed after 134.583 seconds.
+✔ Test "Triggered timeout resumes all parked waiters and reports the count" passed after 134.409 seconds.
+✔ Test "Handler fired with no injection times out and completes failure" passed after 134.410 seconds.
+✔ Test "Backfill completes successfully" passed after 134.239 seconds.
+✔ Test "Backfill skipped on thermal throttle via capabilitiesService" passed after 134.236 seconds.
+✔ Test "Backfill handler invokes real work method, not startCapabilityObserver" passed after 134.239 seconds.
+✔ Test "Posted willResignActive notification drives a real BG task submission end-to-end" passed after 134.207 seconds.
+✔ Test "Clearing the cache takes the attribution with it" passed after 134.204 seconds.
+✔ Test "Cancelling a download reaps its attribution" passed after 134.215 seconds.
+✔ Test "Backfill happy path writes a terminal ledger row (noEligibleWork on fresh queue)" passed after 134.188 seconds.
+✔ Test "parent task cancellation: runBackfill propagates cancellation; phase tears do2026-08-13 21:38:19.170462-0400 Playhead[68204:56465790] [] (Fig) FigAtomStreamInitWithByteStreamWithSizeAndReporter signalled err=-12893 (kFigAtomStream_OffsetOutsideOfParent) (Offset 0 exceeds stream length 0) at FigAtomStream.c:436
+wn cleanly" passed after 136.411 seconds.
+✔ Test "suggest Yes persists episode A feedback across direct replacement" passed after 135.247 seconds.
+✔ Test cancellationIsReportedInsteadOfReturningInSilence() passed after 134.700 seconds.
+✔ Test aCancelledRunStillReportsWhatItsShardsFailedWith() passed after 134.699 seconds.
+✔ Test "both phases and the poll spend ONE deadline, anchored at the grant's start" passed after 134.194 seconds.
+✔ Test "Backfill expiration cancels work" passed after 134.391 seconds.
+✔ Test "Concurrent callers cannot overspend the budget" passed after 134.388 seconds.
+✔ Test "the work-deadline return MEASURES its completions too, and writes them" passed after 134.353 seconds.
+✔ Test "expiry tells the SCHEDULER the grant is over, so the in-flight job requeues" passed after 134.354 seconds.
+✔ Test "Backfill expirationHandler writes expired outcome before markComplete" passed after 134.319 seconds.
+✔ Test "Pre-analysis recovery with no reconciler writes failed/reconciler_unavailable" passed after 134.320 seconds.
+✔ Test "The backfill handler still completes when the scheduler query times out" passed after 134.907 seconds.
+◇ Test "The EXEMPT 2026-08-13 21:38:19.323180-0400 Playhead[68204:56465790] [] (Fig) FigAtomStreamInitWithByteStreamWithSizeAndReporter signalled err=-12893 (kFigAtomStream_OffsetOutsideOfParent) (Offset 0 exceeds stream length 0) at FigAtomStream.c:436
+class is exempt from the show's history, not from its own" started.
+◇ Test "A session override governs EVERY detector, exemption included" started.
+✔ Test "notePlayhead inside a music plan ⇒ engages with varispeed/high rate" passed after 134.545 seconds.
+✔ Test "Override OFF mid-episode forces immediate re-fetch" passed after 134.545 seconds.
+✔ Test "Asset-id change cancels in-flight refresh and resets state" passed after 134.546 seconds.
+✔ Test "delegate staging failure releases ownership and permits retry" passed after 134.589 seconds.
+✔ Test "didCompleteWithError skips harvest when NSURLSessionDownloadTaskResumeData is absent" passed after 134.553 seconds.
+✔ Test "a fresh session is minted to drive the asset forward after corruption" passed after 0.829 seconds.
+✔ Test "backfill expirationHandler emits an `expire` row" passed after 134.976 seconds.
+✔ Test "Episode-bound seek rejects a stale same-episode lifecycle token" passed after 134.915 seconds.
+✔ Test observeICloudSyncStatusFlipsOnSignOut() passed after 134.901 seconds.
+✔ Test "Backfill expiration after work-task completion is idempotent (work-task wins)" passed after 134.890 seconds.
+✔ Test "A background download enqueues analysis against the show it was queued with" passed after 134.966 seconds.
+✔ Test "stale suggest completion cannot clear replacement provisional ownership" passed after 135.979 seconds.
+✔ Test "an overlapping clear cannot strand re-enable intent" passed after 135.413 seconds.
+✔ Test "overlapping explicit clears keep writers fenced until both finish" passed after 135.413 seconds.
+✔ Test "The EXEMPT class is exempt from the show's history, not from its own" passed after 0.653 seconds.
+✔ Test anOverlappingPredecessorDoesNotCreditTheSuccessor() passed after 135.452 seconds.
+✔ Test "Late injection arriving after timeout is a no-op for the timed-out waiter" passed after 135.290 seconds.
+✔ Test "Handler fired before injection completes success once injection lands" passed after 135.290 seconds.
+✔ Test "beginEpisode cancels prior asset's in-flight lookahead refresh" passed after 135.210 seconds.
+✔ Test "A session override governs EVERY detector, exemption included" passed after 0.677 seconds.
+✔ Test "A holder that never returns is abandoned instead of holding forever" passed after 135.337 seconds.
+✔ Test "An abandoned call is cancelled, so it stops competing for the recognizer" passed after 135.337 seconds.
+✔ Test "A time-range revert whose episode is replaced mid-loop calibrates the captured show and leaves the replacement alone" passed after 137.199 seconds.
+✔ Test "THE AD5F3A0A CASE — when the run DID start at the head, the under-coverage defer publishes the honest cursor so the resume scans only the remain2026-08-13 21:38:20.117297-0400 Playhead[68204:56459461] [BackfillJobRunner] fm.backfill.coarse_coverage job=fm-753d1dc68f7f99c5 examinedSeconds=20.000000 unexaminedSeconds=10.000000 examinedFraction=0.666667 holes=1 transcriptEnd=30.000000
+der" passed after 136.758 seconds.
+✔ Test "playhead-8d5r: the unattempted-plan row does not claim a timeout that never happened" passed after 136.101 seconds.
+✔ Test "handleBackfillTask emits matching `start` and `complete` rows" passed after 135.644 seconds.
+✔ Test "A transcript veto whose episode is replaced mid-flight still names the captured show" passed after 135.718 seconds.
+✔ Test "updateKeepFullMusicOverride(true) mid-flight disengages immediately" passed after 135.373 seconds.
+✔ Test "recordUserSpeedChange resets planner so next tick re-engages" passed after 135.374 seconds.
+✔ Test "Overlapping BG handlers each complete their own task independently" passed after 135.261 seconds.
+✔ Test "an expired run records what the window achieved, not only that it ended" passed after 135.217 seconds.
+✔ Test "an expired run's completion count is measured, not a literal zero" passed after 135.217 seconds.
+✔ Test "stale Auto-Yes cannot commit after durable material changes mid-suspension" passed after 136.238 seconds.
+✔ Test "didCompleteWithError harvests NSURLSessionDownloadTaskResumeData and writes it to resumeDataDirectory" passed after 135.418 seconds.
+✔ Test "The watchdog does not fire for a call that merely takes a while" passed after 135.511 seconds.
+✔ Test "cache deletion while background analysis enqueue is blocked leaves no resurrected artifacts" passed after 135.351 seconds.
+✔ Test "Stop during stalled transcribe: no chunks persisted, no coverage advance, no .completed" passed after 135.594 seconds.
+✔ Test "A banner No whose episode is replaced mid-flight calibrates the captured show" passed after 137.337 seconds.
+✔ Test "Throwing fetchWindows preserves prior plan (no disengage)" passed after 135.491 seconds.
+✔ Test "A waiter cancelled while queued unblocks with CancellationError" passed after 136.612 seconds.
+✔ Test "A cancel racing the permit hand-off leaves the gate usable either way" passed after 137.192 seconds.
+✔ Test "Cancellation reaches the recognizer call and the permit is not freed until it unwinds" passed after 136.358 seconds.
+✔ Test "Multiple concurrent waiters all wake on injection" passed after 136.534 seconds.
+✔ Test "A never-finishing holder does not wedge a subsequent acquire" passed after 136.705 seconds.
+✔ Test "A cancelled waiter does not release a permit it never held" passed after 137.834 seconds.
+✔ Test "didFinishLaunching triggers scanForSuspendedTransfers on the registered manager" passed after 137.098 seconds.
+✔ Test "Cancelling one waiter leaves the rest of the queue intact" passed after 138.763 seconds.
+✔ Test "awaitJobsSettled waits for a running job and times out rather than lying" passed after 140.340 seconds.
+✔ Test "the coarse phase observes the queue BEFORE the drain has dispatched anything" passed after 138.981 seconds.
+✔ Test "the cancel reaches every job it names" passed after 139.290 seconds.
+✔ Test "each cancelled job keeps its own cause, so neither spends an attempt" passed after 139.289 seconds.
+✔ Test "Invariant 5a: a drain over eligible work strictly decreases pending" passed after 141.092 seconds.
+​➜ Test "Performance: decode 15,000 atoms with ~50 anchors + ~100 acoustic hints in < 200ms" skipped: "perf pass only — see playhead-zx0l"
+✔ Test "Invariant 1: eligible queued work + free capacity drains within bounded passes" passed after 141.218 seconds.
+✔ Test "Invariant 6: pre-analysis recovery records jobsSeen >= #eligible queued" passed after 139.843 seconds.
+✔ Test "five expired windows in a row still leave the job alive" passed after 141.175 seconds.
+✔ Test "Invariant 5: the backfill BGTask window drains eligible work (pending strictly decreases)" passed after 139.964 seconds.
+✔ Test "Invariant 3 (BACKGROUND): both BGTask entry points DISPATCH — queued set shrinks + progress outcome, never expired/0-done" with 6 test cases passed after 140.453 seconds.
+✔ Test "Invariant 4 (RECOVERY visibility): preanalysis_recovery records jobsSeen == actual eligible count" with 4 test cases passed after 140.532 seconds.
+​​✔ Test "Invariant 1 (DRAIN): eligible queue + free capacity fully drains — any depth, any job type" with 12 test cases passed after 140.630 seconds.
+✔ Test "Route change notification handled on actor without crash" passed after 142.695 seconds.
+✔ Test "Interruption notification handled on actor without crash" passed after 142.696 seconds.
+✔ Test "Headphone disconnect (oldDeviceUnavailable) pauses immediately" passed after 140.978 seconds.
+✔ Test "Siri activation interruption pauses playback" passed after 140.813 seconds.
+✔ Test "Phone call interruption pauses playback" passed after 140.815 seconds.
+✔ Test "Headphone disconnect preserves currentTime" passed after 141.030 seconds.
+✔ Test "Siri dismissal with shouldResume restores playback" passed after 140.867 seconds.
+✔ Test "Phone call ends with shouldResume → playback resumes" passed after 140.868 seconds.
+✔ Test "the runtime's coordinator recovers a show through the runtime's own resolver" passed after 141.160 seconds.
+✔ Test "Model loading is outside the permit, so a cold asset install cannot spend the budget" passed after 141.224 seconds.
+✔ Test "Full interruption cycle: playing → paused → playing" passed after 140.951 seconds.
+✔ Test "Reconnect headphones + user tap play resumes from same position" passed after 141.465 seconds.
+​➜ Test "Skip transition completes within the 500 ms production budget" skipped: "perf pass only — see playhead-zx0l"
+◇ Test "the terminal re-score runs against the RE-PROBED duration, not the pre-probe row" started.
+✔ Test "PlaybackService deallocates after tearDown (no retain cycles)" passed after 142.344 seconds.
+◇ Test "bd-1en taxonomy variant rewrites the refinement preamble too" started.
+✔ Test "the terminal re-score runs against the RE-PROBED duration, not the pre-probe row" passed after 02026-08-13 21:38:27.166097-0400 Playhead[68204:56460235] [SpeechEngine] Transcribing shard 39 [start=1170.00s, end=1200.00s, duration=30.00s, samples=480000, episode=ep-y8f3]
+.076 seconds.
+✔ Test "bd-1en taxonomy variant rewrites the refinement preamble too" passed after 0.007 seconds.
+** TEST SUCCEEDED **

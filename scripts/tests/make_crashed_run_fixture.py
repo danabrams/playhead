@@ -81,13 +81,26 @@ def distil(text, baseline_keys=()):
     # that lands after ` after` leaves a head that still parses, and those are
     # the four R1 review found. Both classes are the point of these fixtures, so
     # both are kept byte-exact whether or not the current parser needs help.
+    #
+    # THE TAIL IS NOT ALWAYS ON LINE N+1 (playhead-phn3). This loop assumed it
+    # was, which is the same premise the repair itself carried and the same one
+    # that cost an otherwise-green merge gate four phantom casualties. Keeping
+    # only N and N+1 drops the tail of a wider splice, and the distillation then
+    # grows a casualty the source run did not have — caught by this script's own
+    # refusal rather than shipped, but a refusal with no explanation is a bad
+    # afternoon. The span comes from the parser's own walk so the two cannot
+    # drift; when it finds nothing, N+1 is kept exactly as before.
     spliced = set()
+    tails = {}
     for number, line in enumerate(raw):
         match = gb._APP_LOG_INTRUSION.search(line)
         if match and match.start() > 0 and gb._REPAIRABLE_HEAD.search(line[:match.start()]):
-            spliced.add(number)
-            if number + 1 < len(raw):
-                spliced.add(number + 1)
+            head = line[:match.start()]
+            span = gb._displaced_tail_span(raw, number, head) or 1
+            tails[number] = span
+            for offset in range(0, span + 1):
+                if number + offset < len(raw):
+                    spliced.add(number + offset)
 
     # A KEPT SPLICED LINE DRAGS ITS TEST IN WITH IT. Found by this script's own
     # refusal on the third real log (playhead-tl6l R4): the splice landed in two
@@ -105,10 +118,11 @@ def distil(text, baseline_keys=()):
     for number in sorted(spliced):
         forms = [raw[number]]
         match = gb._APP_LOG_INTRUSION.search(raw[number])
-        if number + 1 < len(raw):
-            forms.append(raw[number + 1])
+        span = tails.get(number, 1)
+        if number + span < len(raw):
+            forms.append(raw[number + span])
             if match:
-                forms.append(raw[number][:match.start()] + raw[number + 1])
+                forms.append(raw[number][:match.start()] + raw[number + span])
         for form in forms:
             key = _identity(form)
             if key is not None:
