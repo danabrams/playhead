@@ -1497,6 +1497,18 @@ MUTABLE_FILES=(
 # half-open-interval contract.
 
 FOCUSED_SUITES=(
+  # playhead-yx0f: the FABRICATED CertaintyBand (YX series). Two suites,
+  # because the claim spans a pure DECODER and the FUSION WEIGHT it buys, and
+  # neither can observe the other. `PersistedCertaintyBandTests` is the only
+  # thing that can see the band itself — both payload shapes, the weakest span
+  # governing an array, a runner-hardcoded permissive `strong` read as ungraded,
+  # and the equality `certaintyFactor(of:) == certaintyFactor(certaintyBand(of:))`
+  # that keeps the sweep lane byte-identical across the refactor. The ledger
+  # suite is the only thing that can see WHICH BRANCH of the weight ladder a
+  # band reaches, and it is the only place `.strong` (the rung the proxy could
+  # never produce) is observable at all.
+  -only-testing:PlayheadTests/PersistedCertaintyBandTests
+  -only-testing:PlayheadTests/FMLedgerCertaintyBandTests
   # playhead-f5ao: the write-only-at-init mirror (F5 series). Two suites,
   # because the two halves of the claim are unobservable from each other. The
   # readiness suite is the only thing that can compare the first-✓ tooltip's
@@ -3905,6 +3917,36 @@ T_SW_LEDGER="An expired window carries the coarse phase's last true statement"
 # is scored KILLED, which makes a control expressed that way worthless); it
 # names the rail OC01 kills, so a KILLED verdict here would mean a rename can
 # change behaviour and something is very wrong.
+# ── playhead-yx0f: buildFMLedgerEntries FABRICATED a CertaintyBand ───────────
+#
+# The shipped defect was one line — `result.transcriptQuality == .good
+# ? .moderate : .weak` — under a comment that stated its own false premise
+# ("the coarse scan carries transcript quality; use it as a band proxy").
+# Every `containsAd` row persists the model's OWN band in `spansJSON`; 66 of 66
+# rows on the 2026-08-10 pull carry one and ZERO carry an empty payload.
+#
+# The series is built around the three consequences rather than around the
+# lines, because the lines are few and the consequences are what a future
+# reader has to keep true:
+#   * `.strong` was UNREACHABLE, so the `fmCap` rung was dead code here;
+#   * a `moderate` and a `strong` verdict on one transcript weighed the same;
+#   * the quantity read was not the quantity reported.
+# YX02/YX03 exist because the FALLBACK is the half a fix usually gets wrong:
+# reinstating the proxy on the no-band path would leave the defect alive
+# exactly where nobody looks.
+T_YX0F_STRONG_REACHES="a model \`strong\` reaches the fmCap rung — the branch the proxy could not reach"
+T_YX0F_SEPARATE="moderate and strong on the SAME good transcript no longer weigh the same"
+T_YX0F_INDEPENDENT="the band is independent of transcriptQuality"
+T_YX0F_DEMOTED="a model \`weak\` on a good transcript is DEMOTED, not promoted"
+T_YX0F_FALLBACK="a payload with NO band reads .weak, never the old transcript-quality proxy"
+T_YX0F_DETAIL="the ledger DETAIL carries the read band, not the proxy"
+T_YX0F_PERMISSIVE_WEIGHT="a permissive-bypass \`strong\` is weighed as UNGRADED, at the floor"
+T_YX0F_ADMISSION="only overlapping containsAd rows in a contributing mode produce entries"
+T_YX0F_PERMISSIVE_BAND="a RUNNER-hardcoded permissive \`strong\` is not a band"
+T_YX0F_WEAKEST="a passB array is decoded and the WEAKEST span governs"
+T_YX0F_UNGRADED_WINS="an ungraded span in an array wins the weakest-governs order"
+T_YX0F_ONE_DECODER="certaintyFactor(of:) is exactly certaintyFactor(certaintyBand(of:))"
+
 T_OC_BOTH_PLACES="a domain read twice in one episode keeps ONE entry and BOTH places"
 T_OC_ORDERED="occurrences come out earliest first, and count them by ATOM"
 T_OC_ONE_ATOM="the same text twice in ONE atom raises count but adds no second place"
@@ -9355,6 +9397,65 @@ MUTATIONS=(
   # actionable, silently answering that there is nothing to act on.
   "GC15|1104|SSR|$T_GC_MEAN;$T_GC_SEED"
 
+  # ── playhead-yx0f (YX series) — see the constants above for the framing ────
+  #
+  # YX01 restores the shipped defect VERBATIM. It is the only mutant here that
+  # can redden every consequence at once, which is what makes the rest of the
+  # series worth having: a fix could pass YX01 and still be wrong on the
+  # fallback, on the array, or on the telemetry.
+  "YX01|1106|ADSVC|$T_YX0F_STRONG_REACHES;$T_YX0F_SEPARATE;$T_YX0F_INDEPENDENT;$T_YX0F_DEMOTED;$T_YX0F_FALLBACK;$T_YX0F_DETAIL;$T_YX0F_PERMISSIVE_WEIGHT"
+
+  # YX02 is the defect surviving in the ONLY place a fix normally forgets: the
+  # no-band path falls back to the proxy. On the 2026-08-10 pull that
+  # population is empty, so nothing in the field would ever have shown it —
+  # which is exactly why it needs a rail rather than a measurement. Its own
+  # batch: it rewrites the line YX01 rewrites.
+  "YX02|1107|ADSVC|$T_YX0F_FALLBACK;$T_YX0F_DETAIL"
+
+  # YX03 is the same path pointed the other way — an ABSENCE of evidence
+  # reading as the CEILING. `?? .strong` is a one-token edit and it inverts the
+  # floor rule the whole file is built on. Own batch, same line again.
+  "YX03|1108|ADSVC|$T_YX0F_FALLBACK;$T_YX0F_DETAIL"
+
+  # YX04 drops the permissive gate, so `PermissiveAdClassifier`'s hardcoded
+  # `strong` is read as the model's grade — this bead's own bug on the
+  # population where it bites hardest (9 of the pull's 11 refined spans).
+  # YX05 inverts the weakest-governs order in the array reduce, so one graded
+  # span speaks for the rest. Batched: different functions, disjoint rails,
+  # neither edit makes the other's anchor unreachable. YX09 joins them from the
+  # OTHER FILE for the same reason.
+  "YX04|1109|SWEEP|$T_YX0F_PERMISSIVE_BAND;$T_YX0F_PERMISSIVE_WEIGHT"
+  "YX05|1109|SWEEP|$T_YX0F_WEAKEST;$T_YX0F_UNGRADED_WINS"
+
+  # YX06 moves `nil` from the BOTTOM of the band order to the top, so an
+  # ungraded span can never win the reduce. The factors are untouched (`nil`
+  # and `.weak` both read 0.5), which is the point: this is a defect no
+  # arithmetic check can see, only a reader of the band. Own batch — its
+  # victims overlap both YX04's and YX05's.
+  "YX06|1110|SWEEP|$T_YX0F_UNGRADED_WINS;$T_YX0F_PERMISSIVE_BAND;$T_YX0F_PERMISSIVE_WEIGHT"
+
+  # YX07 re-inlines the decode into `certaintyFactor(of:)` and lets it DRIFT
+  # (`.max()` for `.min()`), i.e. it rebuilds the two-readers-of-one-column
+  # shape this whole bead is about, one layer down. It is the only mutant that
+  # can kill the one-decoder rail, and without it that rail is a tautology
+  # under delegation.
+  "YX07|1111|SWEEP|$T_YX0F_ONE_DECODER"
+
+  # YX09 gets the WEIGHT right and leaves the DETAIL carrying the proxy.
+  # `DecisionLogger` is the live reader of the detail's band, so this is the
+  # split where the fusion is correct and the telemetry is unreconcilable with
+  # the row it came from. Own batch: `band(of:)` in the test helper reads the
+  # detail, so its victims overlap YX04's and YX06's.
+  "YX09|1112|ADSVC|$T_YX0F_DETAIL;$T_YX0F_PERMISSIVE_WEIGHT"
+
+  # YX99 — VACUITY CONTROL, and it MUST SURVIVE. The band is bound through a
+  # renamed intermediate on the very line YX01 rewrites; nothing else changes.
+  # It proves the anchor still matches, the batch still builds and both suites
+  # still run.
+  # Non-empty expectation on purpose (playhead-ngsm) — it names the rail YX01
+  # kills, so a KILLED verdict would mean a rename can change behaviour.
+  "YX99|1113|ADSVC|$T_YX0F_STRONG_REACHES;$T_YX0F_ADMISSION"
+
   # GC99 — VACUITY CONTROL, and it MUST SURVIVE. The fold's parameter is renamed
   # at its declaration and its two uses; nothing else changes. It proves the
   # anchor still matches, the batch still builds and the suite still runs, while
@@ -9525,6 +9626,15 @@ describe_mutation() {
     GC14) echo "6gcy: the reader takes latencyMsTotal off the bare column read, so every NULL total reads as the cheapest window in the store" ;;
     GC15) echo "6gcy: unmeasuredAttemptCount swaps its operands and clamps to 0 — 'nothing is missing' on a row missing ten attempts" ;;
     GC99) echo "VACUITY CONTROL — the fold's internal parameter name changes and nothing else does. MUST SURVIVE" ;;
+    YX01) echo "yx0f: buildFMLedgerEntries goes back to FABRICATING the band out of transcriptQuality (the shipped defect verbatim) — .strong becomes unreachable and the fmCap rung dead code" ;;
+    YX02) echo "yx0f: the NO-BAND path falls back to the old transcript-quality proxy — the defect surviving exactly where the field population is empty and nobody would ever see it" ;;
+    YX03) echo "yx0f: a payload with no band reads .strong — an ABSENCE of evidence promoted to the ceiling, the floor rule inverted in one token" ;;
+    YX04) echo "yx0f: attributableBand drops the ownershipInferenceWasSuppressed gate, so PermissiveAdClassifier's HARDCODED strong is read as the model's grade" ;;
+    YX05) echo "yx0f: the array reduce takes the STRONGEST span instead of the weakest — one graded span speaks for every span under the extent" ;;
+    YX06) echo "yx0f: nil moves from the BOTTOM of the band order to the top, so an ungraded span never wins — invisible to every factor, visible only to a reader of the band" ;;
+    YX07) echo "yx0f: certaintyFactor(of:) re-inlines its own decode and DRIFTS (.max for .min) — two readers of one column, this bead's shape one layer down" ;;
+    YX09) echo "yx0f: the ledger DETAIL keeps the proxy while the WEIGHT is correct — DecisionLogger records a band that cannot be reconciled with the row" ;;
+    YX99) echo "VACUITY CONTROL — the band in buildFMLedgerEntries is bound through a renamed intermediate on the line YX01 rewrites; nothing else changes. MUST SURVIVE" ;;
     NY01) echo "AdDetectionService.hotPathCandidates sorts the RAW array — the shipped defect: runBackfill canonicalized and the hot path did not" ;;
     NY02) echo "the hot path 'de-duplicates' by chunk.id, a per-ROW UUID, so a fast/final twin survives it intact" ;;
     NY03) echo "BoundaryExpander.makeLexicalContext scans the raw array — the user's 'Hearing an ad' tap gets a phantom lexical candidate" ;;
@@ -11111,6 +11221,106 @@ EOF
 EOF
     snippet NEW <<'EOF'
         return Swift.max(0, latencySampleCount - attemptCount)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  YX01)
+    snippet OLD <<'EOF'
+            let band = SemanticSweepMarkComposer.certaintyBand(of: result) ?? .weak
+EOF
+    snippet NEW <<'EOF'
+            let band: CertaintyBand = result.transcriptQuality == .good ? .moderate : .weak
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  YX02)
+    snippet OLD <<'EOF'
+            let band = SemanticSweepMarkComposer.certaintyBand(of: result) ?? .weak
+EOF
+    snippet NEW <<'EOF'
+            let band = SemanticSweepMarkComposer.certaintyBand(of: result)
+                ?? (result.transcriptQuality == .good ? .moderate : .weak)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  YX03)
+    snippet OLD <<'EOF'
+            let band = SemanticSweepMarkComposer.certaintyBand(of: result) ?? .weak
+EOF
+    snippet NEW <<'EOF'
+            let band = SemanticSweepMarkComposer.certaintyBand(of: result) ?? .strong
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  YX04)
+    snippet OLD <<'EOF'
+            ownershipInferenceWasSuppressed == true ? nil : certainty
+EOF
+    snippet NEW <<'EOF'
+            certainty
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  YX05)
+    snippet OLD <<'EOF'
+            bandRank(span.attributableBand) < bandRank(weakest)
+EOF
+    snippet NEW <<'EOF'
+            bandRank(span.attributableBand) > bandRank(weakest)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  YX06)
+    snippet OLD <<'EOF'
+        case nil: 0
+EOF
+    snippet NEW <<'EOF'
+        case nil: 4
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  YX07)
+    snippet OLD <<'EOF'
+    static func certaintyFactor(of row: SemanticScanResult) -> Double {
+        certaintyFactor(certaintyBand(of: row))
+    }
+EOF
+    snippet NEW <<'EOF'
+    static func certaintyFactor(of row: SemanticScanResult) -> Double {
+        guard let data = row.spansJSON.data(using: .utf8) else {
+            return certaintyFactor(nil)
+        }
+        let decoder = JSONDecoder()
+        if let support = try? decoder.decode(PersistedCertainty.self, from: data) {
+            return certaintyFactor(support.attributableBand)
+        }
+        guard let spans = try? decoder.decode([PersistedCertainty].self, from: data),
+              !spans.isEmpty else {
+            return certaintyFactor(nil)
+        }
+        return spans
+            .map { certaintyFactor($0.attributableBand) }
+            .max() ?? certaintyFactor(nil)
+    }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  YX09)
+    snippet OLD <<'EOF'
+                    band: band,
+EOF
+    snippet NEW <<'EOF'
+                    band: result.transcriptQuality == .good ? .moderate : .weak,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  YX99)
+    snippet OLD <<'EOF'
+            let band = SemanticSweepMarkComposer.certaintyBand(of: result) ?? .weak
+EOF
+    snippet NEW <<'EOF'
+            let modelBand = SemanticSweepMarkComposer.certaintyBand(of: result) ?? .weak
+            let band = modelBand
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
