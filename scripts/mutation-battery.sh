@@ -9228,6 +9228,23 @@ MUTATIONS=(
 
   # ---- playhead-6gcy: a row records WHAT ITS ATTEMPTS COST (GC series) ----
   #
+  # RUN RECORD, 2026-08-17 on 44731d80: 15 KILLED / 0 SURVIVED, GC99 SURVIVED.
+  # Driven one rail at a time — `--only` takes a single exact NAME here, so a
+  # comma list returns "nothing selected" with exit 2 and a loop that greps the
+  # prose reads that as success. GC01 carried the baseline; the rest ran under
+  # PLAYHEAD_MB_SKIP_BASELINE=1 on the same commit. PLAYHEAD_BUILD_JOBS=2, after
+  # the default 4 was OOM-killed (`** BUILD INTERRUPTED **`) alongside another
+  # session's device build — and the run was STOOD DOWN once for that build
+  # rather than racing it, because an OOM picks its victim at random and the
+  # other agent's was the one that could not be re-run.
+  #
+  # THE BASELINE CHECK EARNED ITS KEEP ON THE FIRST TRY. The focused suites were
+  # RED before any mutation, on `v44DropsLegacyRows` — a schema-version pin
+  # spelled `store.schemaVersion() == 55` rather than `currentSchemaVersion ==
+  # 55`, which the V56 sweep had missed because it grepped for the constant. Six
+  # rails name that suite's siblings; every one of them would have been credited
+  # KILLED for a reason that had nothing to do with the mutation.
+  #
   # Enumerated the way o89d R5 asks for: list the EVENTS the change performs and
   # find the one nothing would notice. The events are — accumulate on a real
   # retry; DON'T on the digest; DON'T on an unmeasured attempt; seed one sample
