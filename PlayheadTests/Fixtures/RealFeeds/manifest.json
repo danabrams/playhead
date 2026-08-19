@@ -1,0 +1,34 @@
+{
+  "_readme": [
+    "playhead-e8mg. Verbatim channel heads of the two feeds this device is",
+    "actually subscribed to, fetched 2026-08-19. A hand-written fixture proves",
+    "you parse what you EXPECTED; only publisher bytes prove you parse what",
+    "publishers emit — and these two carry the exact shapes a hand-written",
+    "fixture would have missed. Conan puts <image><link> BEFORE the channel",
+    "<link> and both hold siriusxm.com (the distributor, not teamcoco.com);",
+    "The Diary Of A CEO has NO channel <link> at all, only <image><link>, and",
+    "it holds the feed's own URL.",
+    "",
+    "Capture recipe, so anyone can redo it:",
+    "  curl -sSL '<feedURL>' | python3 -c \"import sys;s=sys.stdin.read();i=s.index('<item');sys.stdout.write(s[:i].rstrip()+chr(10)+'  </channel>'+chr(10)+'</rss>'+chr(10))\"",
+    "Nothing inside the channel head is altered. Only the two closing tags are",
+    "appended, so the excerpt is a well-formed document with zero items."
+  ],
+  "captured": "2026-08-19",
+  "feeds": [
+    {
+      "feedURL": "https://feeds.simplecast.com/dHoohVNH",
+      "title": "Conan O’Brien Needs A Friend",
+      "file": "conan-channel-head.xml",
+      "bytes": 3548,
+      "sha256": "e6a38dd3113ca338c3e1d9b48f15d1cec5b28a96e4c83a8d906b9b4138538df6"
+    },
+    {
+      "feedURL": "https://rss2.flightcast.com/xmsftuzjjykcmqwolaqn6mdn",
+      "title": "The Diary Of A CEO with Steven Bartlett",
+      "file": "doac-channel-head.xml",
+      "bytes": 6151,
+      "sha256": "30ae57d054d1a9fcd3bc0fdfe3824ad7b4e7428c9df1ed9e826ec2e7aa4c0268"
+    }
+  ]
+}

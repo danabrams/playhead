@@ -13,6 +13,23 @@ struct ParsedFeed: Sendable, Equatable {
     var artworkURL: URL?
     var language: String?
     var categories: [String]
+    /// The channel-level `<link>` — RSS 2.0's "URL of the website
+    /// corresponding to the channel" (Atom: the feed-level `rel="alternate"`
+    /// link). playhead-e8mg: captured because `OwnershipGraph` documents it as
+    /// a structural ownership source and nothing was ever feeding it.
+    ///
+    /// READ THIS BEFORE TREATING IT AS "THE SHOW'S SITE". Measured over 918
+    /// real feeds (2026-08-19): 859 carry one, **175 of them point at the
+    /// feed's own host** and 57 % land on a domain shared by two or more
+    /// different shows — iheart.com, art19.com, spotify.com, siriusxm.com,
+    /// wondery.com, libsyn.com. It says where the show is PUBLISHED, which is
+    /// often the network or the hosting platform. `OwnershipGraph` is what
+    /// decides whether it may be believed, not this field.
+    var siteURL: URL? = nil
+    /// The `<itunes:owner><itunes:email>` address, verbatim. Not a domain —
+    /// the eTLD+1 extraction belongs to `DomainNormalizer`, and keeping the
+    /// address means a later consumer that wants the local part still can.
+    var ownerEmail: String? = nil
     var episodes: [ParsedEpisode]
 }
 
@@ -92,7 +109,8 @@ final class FeedParser: NSObject, XMLParserDelegate {
     private var feed = ParsedFeed(
         title: "", author: "", description: "",
         artworkURL: nil, language: nil,
-        categories: [], episodes: []
+        categories: [], siteURL: nil, ownerEmail: nil,
+        episodes: []
     )
 
     private var currentEpisode: ParsedEpisode?
@@ -101,6 +119,18 @@ final class FeedParser: NSObject, XMLParserDelegate {
     private var insideChannel = false
     private var insideItem = false
     private var insideAtomEntry = false
+    /// Depth inside an RSS `<image>` block. It has its own `<link>`, and that
+    /// link is NOT the channel link (playhead-e8mg). Measured on the real
+    /// Diary of a CEO feed, whose only `<link>` element anywhere in the
+    /// channel is `<image><link>` — and it holds the feed's own URL, so a
+    /// parser that misses this distinction hands the ownership graph
+    /// `flightcast.com`, the hosting platform, as the show's website. A
+    /// counter rather than a Bool because `<itunes:image>` can nest.
+    private var imageDepth = 0
+    /// True between `<itunes:owner>` and `</itunes:owner>`. The email element
+    /// is `<itunes:email>` either way, and only the one INSIDE `<itunes:owner>`
+    /// is the owner's.
+    private var insideITunesOwner = false
     private var isAtomFeed = false
     private var seenGUIDs: Set<String> = []
     private var parseError: Error?
@@ -198,6 +228,24 @@ final class FeedParser: NSObject, XMLParserDelegate {
             return
         }
 
+        // RSS `<image>` (and `<itunes:image>`) open a scope that has its OWN
+        // `<link>`. Counted unconditionally so the decrement in
+        // `didEndElement` is unconditionally symmetric — a self-closing
+        // `<itunes:image href="…"/>` reports both a start and an end.
+        if local == "image" {
+            imageDepth += 1
+            // fall through: the iTunes-artwork branch below still runs
+        }
+
+        // `<itunes:owner>` scope. Its `<itunes:email>` is the owner's; an
+        // `<itunes:email>` anywhere else is not (measured 2026-08-19: zero of
+        // 918 real feeds carry one outside `<itunes:owner>`, so requiring the
+        // wrapper costs nothing and cannot mistake a different address for it).
+        if local == "owner" && ns == Self.itunesNS {
+            insideITunesOwner = true
+            return
+        }
+
         // Atom link with enclosure rel
         if local == "link" && isAtomFeed && insideItem {
             if attributes["rel"] == "enclosure",
@@ -211,11 +259,21 @@ final class FeedParser: NSObject, XMLParserDelegate {
             return
         }
 
-        // Atom link for feed-level artwork
+        // Atom link at feed level: artwork, or the site link.
         if local == "link" && isAtomFeed && !insideItem {
-            if attributes["rel"] == "icon" || attributes["rel"] == "logo",
-               let href = attributes["href"] {
+            let rel = attributes["rel"]
+            if rel == "icon" || rel == "logo", let href = attributes["href"] {
                 feed.artworkURL = resolveURL(href)
+                return
+            }
+            // playhead-e8mg: Atom's site link is `rel="alternate"`, and the
+            // attribute is OPTIONAL — RFC 4287 says a missing `rel` means
+            // `alternate`. `self` (the feed's own address) and `hub`
+            // (WebSub) are explicitly NOT it. First one wins, matching the
+            // RSS branch below.
+            if rel == nil || rel == "alternate", imageDepth == 0,
+               feed.siteURL == nil, let href = attributes["href"] {
+                feed.siteURL = resolveURL(href)
             }
             return
         }
@@ -303,6 +361,16 @@ final class FeedParser: NSObject, XMLParserDelegate {
 
         if local == "channel" { insideChannel = false; return }
 
+        // Mirror of the two scope counters opened in `didStartElement`.
+        if local == "image" {
+            imageDepth = max(0, imageDepth - 1)
+            return
+        }
+        if local == "owner" && ns == Self.itunesNS {
+            insideITunesOwner = false
+            return
+        }
+
         // Inline chapter end
         if local == "chapter" && ns == Self.podcastNS && insideItem {
             if let ch = currentChapter {
@@ -357,6 +425,21 @@ final class FeedParser: NSObject, XMLParserDelegate {
             if feed.author.isEmpty { feed.author = text }
         case ("language", ""):
             feed.language = text
+        case ("link", ""):
+            // playhead-e8mg. Two guards, and each is a measured defect class:
+            //  * `imageDepth == 0` — `<image><link>` is the artwork's link,
+            //    not the channel's. On the real Diary of a CEO feed that is
+            //    the ONLY `<link>` in the whole channel and it holds the feed
+            //    URL, so without this the show's "website" is flightcast.com.
+            //  * first-one-wins — RSS orders `<link>` before `<image>`, and
+            //    the same rule already governs `title` and `author` here.
+            if feed.siteURL == nil, imageDepth == 0 {
+                feed.siteURL = resolveURL(text)
+            }
+        case ("email", Self.itunesNS):
+            if insideITunesOwner, feed.ownerEmail == nil {
+                feed.ownerEmail = text
+            }
         default:
             break
         }

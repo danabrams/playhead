@@ -286,13 +286,26 @@ struct PlayheadApp: App {
                             }
                             let podcastId = episode.podcast?.feedURL.absoluteString ?? episodeId
                             // playhead-kmw4: ONE graph build produces both
-                            // populations. `showOwned` is structural only (the
-                            // feed URL's eTLD+1); `ownershipUndetermined` is
-                            // the recurring-in-show-notes set that used to be
+                            // populations. `showOwned` is structural only;
+                            // `ownershipUndetermined` is the
+                            // recurring-in-show-notes set that used to be
                             // promoted to show-owned by count alone and is now
                             // silent in both directions.
+                            //
+                            // playhead-e8mg: the structural half is the channel
+                            // `<link>` and the `<itunes:owner>` email, which
+                            // `PodcastFeedParser` now captures and `Podcast`
+                            // persists. `feedURL` is passed as the EXCLUSION —
+                            // its host is the one domain those two may not
+                            // claim — and is no longer a source of its own.
+                            // This is the only place in the product where a
+                            // real graph is built, so a dropped argument here
+                            // is visible to no unit test; the source canary in
+                            // `MetadataActivationTests` is what sees it.
                             let ownership = EpisodeMetadataSnapshot.domainOwnership(
                                 feedURL: episode.podcast?.feedURL,
+                                siteURL: episode.podcast?.siteURL,
+                                ownerEmail: episode.podcast?.ownerEmail,
                                 recentMetadata: recentMetadata,
                                 podcastId: podcastId
                             )

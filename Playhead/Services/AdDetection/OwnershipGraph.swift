@@ -3,7 +3,8 @@
 // Persistent per-show structure mapping domains -> AdOwnership labels.
 //
 // Sources:
-//   - RSS <link>, <itunes:owner>, feed URL domain patterns
+//   - RSS <link> and <itunes:owner>, MINUS the feed's own host (playhead-e8mg
+//     — see `feedHostDomain`; the feed URL is no longer a source at all)
 //   - High-frequency show-notes domains (frequency = RECURRENCE, NOT ownership
 //     — see `recordShowNotesDomain` and playhead-kmw4)
 //   - Explicit sponsor domain registrations
@@ -53,8 +54,6 @@ enum DomainOwnershipSource: String, Sendable, Codable, Hashable, CaseIterable {
     case rssLink
     /// RSS <itunes:owner> or <itunes:author> domain.
     case itunesOwner
-    /// RSS feed URL domain itself.
-    case feedURL
     /// High-frequency domain in show notes across episodes. Provenance only:
     /// since playhead-kmw4 this source can never carry a `.showOwned` label.
     case showNotesFrequency
@@ -107,6 +106,28 @@ struct OwnershipGraph: Sendable, Equatable {
     /// The podcast this graph belongs to.
     let podcastId: String
 
+    /// eTLD+1 of the feed's own URL — the ONE domain no structural signal may
+    /// claim for this show (playhead-e8mg). Nil means "unknown", which admits
+    /// everything; it is not a licence, it is an absence.
+    ///
+    /// WHY A FEED HOST IS NEVER EVIDENCE OF OWNERSHIP, measured 2026-08-19
+    /// over 918 real podcast feeds sampled from the iTunes search API:
+    /// **884 of them (96.3 %) sit on a feed host shared by at least two
+    /// different shows in that sample alone**, across just 67 distinct
+    /// domains — megaphone.fm carries 235 shows, simplecast.com 96,
+    /// omnycontent.com 77, anchor.fm 61. A domain thousands of shows publish
+    /// through says nothing about who owns THIS one, and `.showOwned` is
+    /// NEGATIVE lexical evidence, so a wrong entry here argues that hearing
+    /// the domain makes a segment LESS likely to be an ad.
+    ///
+    /// It bites the other two routes as well, which is why the exclusion
+    /// lives here rather than at the one deleted call site: **175 of the 918
+    /// carry a channel `<link>` that resolves to their own feed host**, and
+    /// 95 carry an `<itunes:owner>` address there. The Diary Of A CEO is a
+    /// live instance — the only `<link>` element anywhere in its channel is
+    /// `<image><link>`, holding the feed URL itself.
+    let feedHostDomain: String?
+
     /// Domain -> ownership entry mappings, keyed by eTLD+1 domain.
     private(set) var entries: [String: DomainOwnershipEntry] = [:]
 
@@ -115,9 +136,11 @@ struct OwnershipGraph: Sendable, Equatable {
 
     init(
         podcastId: String,
+        feedHostDomain: String? = nil,
         config: OwnershipGraphConfig = .default
     ) {
         self.podcastId = podcastId
+        self.feedHostDomain = feedHostDomain
         self.config = config
     }
 
@@ -168,9 +191,9 @@ struct OwnershipGraph: Sendable, Equatable {
     /// measurement before either can ship.
     ///
     /// Entries whose source is anything other than `.showNotesFrequency`
-    /// (RSS link, feed URL, iTunes owner, sponsor registration, user
-    /// override) are excluded: those carry a real classification and keep it,
-    /// however often they also appear in the notes.
+    /// (RSS link, iTunes owner, sponsor registration, user override) are
+    /// excluded: those carry a real classification and keep it, however often
+    /// they also appear in the notes.
     var recurringShowNotesDomains: [String] {
         entries.values
             .filter {
@@ -183,26 +206,30 @@ struct OwnershipGraph: Sendable, Equatable {
 
     // MARK: - Ingest: RSS Signals
 
-    /// Ingest the RSS <link> element domain as show-owned.
+    /// Ingest the RSS `<link>` element domain as show-owned.
+    ///
+    /// Refuses the feed's own host — see `feedHostDomain`.
     mutating func ingestRSSLink(_ url: String) {
-        guard let domain = DomainNormalizer.etld1(from: url) else { return }
+        guard let domain = structuralDomain(from: url) else { return }
         setEntry(domain: domain, label: .showOwned, source: .rssLink)
     }
 
-    /// Ingest the RSS feed URL domain. The feed host is typically the
-    /// hosting platform or the show itself.
-    mutating func ingestFeedURL(_ url: String) {
-        guard let domain = DomainNormalizer.etld1(from: url) else { return }
-        setEntry(domain: domain, label: .showOwned, source: .feedURL)
+    /// Ingest `<itunes:owner><itunes:email>`'s domain as show-owned.
+    ///
+    /// Refuses the feed's own host — see `feedHostDomain`.
+    mutating func ingestITunesOwner(email: String) {
+        guard let domainPart = Self.domain(ofEmail: email) else { return }
+        guard let domain = structuralDomain(from: domainPart) else { return }
+        setEntry(domain: domain, label: .showOwned, source: .itunesOwner)
     }
 
-    /// Ingest <itunes:owner> email domain as show-owned.
-    mutating func ingestITunesOwner(email: String) {
-        // Extract domain from email
-        guard let atIndex = email.firstIndex(of: "@") else { return }
-        let domainPart = String(email[email.index(after: atIndex)...])
-        guard let domain = DomainNormalizer.etld1(from: domainPart) else { return }
-        setEntry(domain: domain, label: .showOwned, source: .itunesOwner)
+    /// Normalize a structural signal's raw domain/URL and REFUSE the feed's
+    /// own host. One function so both routes are governed by one rule: a
+    /// second copy of this guard is a second place for it to go missing.
+    private func structuralDomain(from raw: String) -> String? {
+        guard let domain = DomainNormalizer.etld1(from: raw) else { return nil }
+        guard domain != feedHostDomain else { return nil }
+        return domain
     }
 
     // MARK: - Ingest: Show Notes Domains
@@ -214,7 +241,7 @@ struct OwnershipGraph: Sendable, Equatable {
     /// is "it appears in a lot of this show's notes" stays `.unknown` at every
     /// count; crossing `showNotesRecurrenceThreshold` puts it in
     /// `recurringShowNotesDomains` and nothing else. An entry that already
-    /// carries a real classification (RSS, feed URL, iTunes owner, sponsor
+    /// carries a real classification (RSS link, iTunes owner, sponsor
     /// registration, user override) keeps its label and just accrues the count.
     mutating func recordShowNotesDomain(_ rawDomain: String, episodeCount: Int = 0) {
         guard let domain = DomainNormalizer.etld1(from: rawDomain) else { return }
@@ -222,7 +249,7 @@ struct OwnershipGraph: Sendable, Equatable {
         let existing = entries[domain]
         let newFrequency = (existing?.frequency ?? 0) + 1
 
-        // If already explicitly classified (RSS, sponsor, override), just bump frequency
+        // If already explicitly classified (RSS, sponsor, override), just bump frequency.
         if let existing = existing,
            existing.source != .showNotesFrequency {
             entries[domain] = DomainOwnershipEntry(
@@ -314,15 +341,75 @@ struct OwnershipGraph: Sendable, Equatable {
 
     // MARK: - Bulk Ingest
 
-    /// Ingest all signals from an RSS feed in one call.
+    /// Ingest every structural signal an RSS feed carries, in one call.
+    ///
+    /// **This is the entry point production uses, and the two `ingest…`
+    /// methods above are its primitives.** It is not a convenience wrapper:
+    /// it is the only place that holds both declarations at once, which is
+    /// what the precedence rule below needs. Calling the primitives directly
+    /// bypasses that rule — `MetadataOwnershipWiringSourceCanaryTests` is what
+    /// stops production drifting back to doing so.
+    ///
+    /// The feed URL is deliberately NOT a parameter (playhead-e8mg). It used
+    /// to be, and it promoted the hosting platform to `.showOwned` on 96 % of
+    /// real feeds; what it is good for now is `feedHostDomain`, i.e. saying
+    /// which domain the other two routes may not claim.
+    ///
+    /// ## THE `<link>` IS REFUSED WHEN `<itunes:owner>` NAMES A DIFFERENT PARTY
+    ///
+    /// Two structural declarations that name different registrable domains
+    /// cannot both be the show. When they disagree, the owner address wins and
+    /// the `<link>` is dropped — not relabelled, DROPPED, so the domain falls
+    /// through to whatever the show-notes population already says about it
+    /// (usually `ownershipUndetermined`, i.e. "say nothing in either
+    /// direction" — playhead-kmw4's disposition for exactly this situation).
+    ///
+    /// Which one wins is not a coin toss. `<itunes:owner>` is the address
+    /// Apple uses to verify who is entitled to the feed; `<link>` is "the URL
+    /// of the website corresponding to the channel", which for a distributed
+    /// show is the distributor's site. Measured over 918 real feeds
+    /// (2026-08-19, `scripts/e8mg-feed-structure-survey.py`): 776 carry both
+    /// and **they disagree on 511 of them (65.9 %)**, and the `<link>`
+    /// domains that recur across shows are networks
+    /// and platforms — iheart.com (41 shows), art19.com (38), spotify.com
+    /// (23), siriusxm.com (22), wondery.com (17), libsyn.com (17),
+    /// acast.com (14), simplecast.com (14).
+    ///
+    /// Measured on the device pull rather than argued (2026-08-18-t3, 15
+    /// analysed assets / 154 decoded spans): Conan's `<link>` is
+    /// `https://www.siriusxm.com` while its owner address is
+    /// `conaf@teamcoco.com`. Admitting the `<link>` puts `siriusxm.com` —
+    /// which appears in **724 of 724** episode descriptions, in the line
+    /// "Subscribe to SiriusXM Podcasts+ … visiting siriusxm.com/podcastsplus",
+    /// i.e. a paid-subscription READ — into the scanner as NEGATIVE evidence.
+    /// That is a HARD suppressor of `.lexicalAutoAd`: it takes the spans
+    /// carrying a negative hit from **1 of 154 to 18 of 154, and all 18 carry
+    /// a promotion hit**. Seventeen of those eighteen are bought by the
+    /// `<link>` alone, in exchange for one domain that is not the show's.
+    ///
+    /// When there is no owner address the `<link>` is admitted: it is then the
+    /// only structural declaration and nothing contradicts it — **83 of the
+    /// 918 are in that position**, and 26 of those 83 name the feed's own
+    /// host, which the exclusion refuses anyway.
     mutating func ingestRSSFeed(
-        feedURL: String?,
         linkURL: String?,
         itunesOwnerEmail: String?
     ) {
-        if let url = feedURL { ingestFeedURL(url) }
-        if let url = linkURL { ingestRSSLink(url) }
+        let ownerDomain = itunesOwnerEmail.flatMap(Self.domain(ofEmail:))
+            .flatMap { DomainNormalizer.etld1(from: $0) }
         if let email = itunesOwnerEmail { ingestITunesOwner(email: email) }
+
+        guard let url = linkURL else { return }
+        if let ownerDomain, DomainNormalizer.etld1(from: url) != ownerDomain {
+            return
+        }
+        ingestRSSLink(url)
+    }
+
+    /// The domain half of an email address, or nil if there is no `@`.
+    private static func domain(ofEmail email: String) -> String? {
+        guard let atIndex = email.firstIndex(of: "@") else { return nil }
+        return String(email[email.index(after: atIndex)...])
     }
 
     /// Batch-record show-notes domains from a single episode.
@@ -360,6 +447,10 @@ struct OwnershipGraph: Sendable, Equatable {
 
     /// Config is intentionally excluded: it is a construction-time tuning knob, not graph state.
     /// Two graphs with the same podcastId and entries represent the same ownership knowledge.
+    ///
+    /// `feedHostDomain` is excluded for the same reason and one more: it is a
+    /// FILTER on what may enter, so two graphs that admitted the same entries
+    /// hold the same knowledge however they were filtered.
     static func == (lhs: OwnershipGraph, rhs: OwnershipGraph) -> Bool {
         lhs.podcastId == rhs.podcastId && lhs.entries == rhs.entries
     }

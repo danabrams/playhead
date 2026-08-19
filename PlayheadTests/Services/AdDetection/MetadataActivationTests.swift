@@ -205,10 +205,15 @@ struct MetadataActivationConfigTests {
     }
 
     /// playhead-kmw4: the recurring show-notes domain is no longer
-    /// show-owned. It moves to `ownershipUndetermined`, and the ONLY
-    /// structural signal — the feed URL's own eTLD+1 — is what stays in
-    /// `showOwned`. The sponsor domain below the recurrence threshold is in
-    /// neither set, so its existing external-domain treatment is untouched.
+    /// show-owned. It moves to `ownershipUndetermined`, and the structural
+    /// signals are what stay in `showOwned`. The sponsor domain below the
+    /// recurrence threshold is in neither set, so its existing
+    /// external-domain treatment is untouched.
+    ///
+    /// playhead-e8mg: "structural" is now the channel `<link>` and the
+    /// `<itunes:owner>` address. The feed URL is the EXCLUSION — note that
+    /// `example.com` is both the feed host and the site link here, and it
+    /// does NOT come out show-owned.
     @Test("Recurring show-notes domains are ownership-undetermined, not show-owned")
     func ownershipSnapshotSeparatesStructuralFromRecurring() throws {
         let recentMetadata = [
@@ -234,24 +239,54 @@ struct MetadataActivationConfigTests {
             ),
         ]
 
+        let feedURL = try #require(URL(string: "https://feeds.example.com/rss"))
         let ownership = EpisodeMetadataSnapshot.domainOwnership(
-            feedURL: try #require(URL(string: "https://feeds.example.com/rss")),
+            feedURL: feedURL,
+            siteURL: try #require(URL(string: "https://www.example.com/shows/mine")),
+            ownerEmail: "hello@myshow.fm",
             recentMetadata: recentMetadata,
             podcastId: "podcast-ownership-test"
         )
 
-        #expect(ownership.showOwned == ["example.com"])
+        // `myshow.fm` from the owner address; `example.com` REFUSED even
+        // though the site link names it, because it is the feed's own host.
+        #expect(ownership.showOwned == ["myshow.fm"])
         #expect(ownership.ownershipUndetermined == ["mypodcast.com"])
         #expect(!ownership.ownershipUndetermined.contains("betterhelp.com"))
 
         // The convenience accessor must agree with the pair it delegates to —
         // two readers of one graph is how the answers drift.
         let showOwned = EpisodeMetadataSnapshot.showOwnedDomains(
-            feedURL: try #require(URL(string: "https://feeds.example.com/rss")),
+            feedURL: feedURL,
+            siteURL: try #require(URL(string: "https://www.example.com/shows/mine")),
+            ownerEmail: "hello@myshow.fm",
             recentMetadata: recentMetadata,
             podcastId: "podcast-ownership-test"
         )
         #expect(showOwned == ownership.showOwned)
+    }
+
+    /// playhead-e8mg: the feed-host exclusion, isolated at the SEAM.
+    ///
+    /// Every other seam-level rail has a `<link>` and an owner that DISAGREE,
+    /// so the precedence rule refuses the link before the exclusion is ever
+    /// consulted — measured, that masked mutant E813 (`feedHostDomain: nil` at
+    /// the seam) completely. The case that isolates it is the one where both
+    /// structural signals AGREE and both name the feed's own host, which is
+    /// the 95-of-918 population `scripts/e8mg-feed-structure-survey.py`
+    /// measured for the owner route.
+    @Test("The feed host is refused at the seam even when both signals name it")
+    func seamRefusesTheFeedHostWhenBothStructuralSignalsNameIt() throws {
+        let ownership = EpisodeMetadataSnapshot.domainOwnership(
+            feedURL: try #require(URL(string: "https://feeds.megaphone.fm/theshow")),
+            siteURL: try #require(URL(string: "https://megaphone.fm/theshow")),
+            ownerEmail: "shows@megaphone.fm",
+            recentMetadata: [],
+            podcastId: "podcast-feed-host-at-seam"
+        )
+
+        #expect(ownership.showOwned.isEmpty)
+        #expect(ownership.ownershipUndetermined.isEmpty)
     }
 
     /// End-to-end at the seam this bead exists for: a recurring sponsor
@@ -273,6 +308,8 @@ struct MetadataActivationConfigTests {
 
         let ownership = EpisodeMetadataSnapshot.domainOwnership(
             feedURL: try #require(URL(string: "https://rss2.flightcast.com/abc")),
+            siteURL: nil,
+            ownerEmail: nil,
             recentMetadata: recentMetadata,
             podcastId: "podcast-injects-nothing"
         )
@@ -1285,5 +1322,88 @@ struct MetadataOwnershipWiringSourceCanaryTests {
             restores the pre-kmw4 behaviour with every unit test still green
             """
         )
+    }
+
+    // MARK: - playhead-e8mg
+
+    /// The structural half of the same seam, pinned for the same reason and
+    /// one more: these two arguments are the ONLY production route by which
+    /// `ingestRSSLink` and `ingestITunesOwner` are ever called. Drop them and
+    /// `showOwned` is empty on every real show — which is not a red test
+    /// anywhere, it is a signal that silently stops existing. That is exactly
+    /// the state playhead-e8mg was filed to end.
+    @Test("PlayheadApp feeds the persisted <link> and <itunes:owner> into the graph")
+    func playheadAppCarriesStructuralOwnershipSignals() throws {
+        let text = try Self.source("Playhead/App/PlayheadApp.swift")
+        #expect(
+            text.contains("siteURL: episode.podcast?.siteURL"),
+            """
+            the production graph must receive the persisted channel <link>; without it \
+            OwnershipGraph.ingestRSSLink has no production caller again
+            """
+        )
+        #expect(
+            text.contains("ownerEmail: episode.podcast?.ownerEmail"),
+            """
+            the production graph must receive the persisted <itunes:owner> address; it is \
+            the route that recovers teamcoco.com, and nothing else recovers it
+            """
+        )
+        #expect(
+            text.contains("feedURL: episode.podcast?.feedURL"),
+            """
+            the feed URL must still be passed — as the EXCLUSION that stops <link> and \
+            <itunes:owner> claiming the hosting platform. Dropping it re-opens the hole \
+            that removing ingestFeedURL closed, from the other side
+            """
+        )
+    }
+
+    /// `ingestRSSFeed` is not a convenience wrapper: it is the only place that
+    /// holds the `<link>` and the `<itunes:owner>` address at once, which is
+    /// what the precedence rule needs. A production caller that reaches past
+    /// it into `ingestRSSLink` admits siriusxm.com on Conan and takes the
+    /// spans carrying a negative hit from 1 of 154 to 18 of 154, with every
+    /// graph rail still green.
+    @Test("production reaches the graph through ingestRSSFeed, not the primitives")
+    func productionUsesTheComposedStructuralEntryPoint() throws {
+        let text = try Self.source("Playhead/Services/AdDetection/EpisodeMetadataProvider.swift")
+        #expect(
+            text.contains("graph.ingestRSSFeed("),
+            "the snapshot builder must compose both structural signals in one call"
+        )
+        for primitive in ["graph.ingestRSSLink(", "graph.ingestITunesOwner("] {
+            #expect(
+                !text.contains(primitive),
+                """
+                \(primitive) bypasses the <link>-vs-<itunes:owner> precedence rule in \
+                ingestRSSFeed — see OwnershipGraph.ingestRSSFeed for what that costs
+                """
+            )
+        }
+    }
+
+    /// The graph's structural doors are two, and a caller that reaches past
+    /// `ingestRSSFeed` into one of them is not the failure this pins. The
+    /// failure is a THIRD door growing back: `ingestFeedURL` returning to
+    /// production and promoting the hosting platform to `.showOwned` again.
+    @Test("no production caller promotes the feed URL itself")
+    func productionDoesNotIngestTheFeedURL() throws {
+        for path in [
+            "Playhead/App/PlayheadApp.swift",
+            "Playhead/Services/AdDetection/EpisodeMetadataProvider.swift",
+            "Playhead/Services/AdDetection/OwnershipGraph.swift",
+            "Playhead/Services/AdDetection/AdDetectionService.swift",
+        ] {
+            let text = try Self.source(path)
+            #expect(
+                !text.contains("ingestFeedURL"),
+                """
+                \(path) names ingestFeedURL. Measured over 918 real feeds, 96.3% sit on a \
+                feed host shared by other shows, and `.showOwned` is NEGATIVE evidence — \
+                see OwnershipGraph.feedHostDomain
+                """
+            )
+        }
     }
 }
