@@ -574,7 +574,12 @@ struct MergedChildRowDedupeV40MigrationTests {
         // the same reason V40's does), and V40's collapse fixtures share a
         // fingerprint AND their content, so V40 removes the row first and V53
         // finds nothing left to sweep. No assertion in this file changes.
-        #expect(AnalysisStore.currentSchemaVersion == 56)
+        // 56 → 57 read for this rung (playhead-g7ln): V57 resets
+        // `podcast_profiles.traitProfileJSON`'s `episodesObserved` key — the
+        // same table V49 wrote to and the same table this fixture never
+        // populates, so it changes nothing here either. Read rather than
+        // assumed, which is the whole point of restating this per rung.
+        #expect(AnalysisStore.currentSchemaVersion == 57)
 
         let db = try openRaw(dir)
         defer { sqlite3_close_v2(db) }

@@ -114,6 +114,44 @@ struct ShowTraitProfile: Sendable, Codable, Equatable {
     let transcriptReliability: Float
 
     /// Number of episodes that have contributed to this profile.
+    ///
+    /// **This counted BACKFILLS until playhead-g7ln, and the sentence above was
+    /// the defect rather than a description of it.** `updated(from:)` adds one
+    /// on every call, and its only production caller ran once per
+    /// `runBackfill` — hot path, final pass, re-drives, transcript-version
+    /// bumps, playhead-15d0's resume. Measured on the 2026-08-18 t3 device
+    /// pull: **104 and 56** against **8 and 7** distinct episodes, i.e. 13.0x
+    /// and 8.0x. Both readers below are named for episodes and were being
+    /// handed backfills, so both saturated inside the FIRST episode.
+    ///
+    /// It counts episodes now because `AdDetectionService.updatePriors` calls
+    /// `updated(from:)` only when the backfill took this asset's
+    /// `trust_episode_observations` claim — the same fact, and the same claim
+    /// row, that `podcast_profiles.observationCount` counts since
+    /// playhead-2qz6 / playhead-fh5v. V57 reset every value written in the old
+    /// unit; see `migrateTraitProfileEpisodeCountV57IfNeeded`.
+    ///
+    /// **THE COMPLETE READER SET, which is what a unit change owes** — pinned
+    /// mechanically by `ShowTraitProfileEpisodeCountReaderCanaryTests` so a
+    /// third reader cannot be added without this list moving:
+    ///
+    ///   * ``isReliable`` (>= 3) — the ON/OFF gate for level 2 of
+    ///     `PriorHierarchyResolver.resolve`, its only reader.
+    ///   * `PriorHierarchyResolver.traitBlendWeight(episodesObserved:)` — 0.4
+    ///     at 3 ramping to 0.6 at 7+, clamped; read only inside that same gate.
+    ///   * ``debugArchetypeLabel`` (>= 1) — has NO production reader at all;
+    ///     tests only.
+    ///   * ``updated(from:)`` itself, for `+ 1` and for the `== 0` sentinel
+    ///     branch that replaces instead of blending.
+    ///   * the DEBUG no-regression assert in `AdDetectionService.updatePriors`.
+    ///
+    /// Nothing else reads it: not `EpisodeTraitSnapshotBuilder` (it reads
+    /// `normalizedAdSlotPriors` and `sponsorLexicon`, never the trait profile),
+    /// not SQL (no query names the JSON key), and not
+    /// `NetworkPriors.decayedWeight(episodesObserved:)`, whose identically
+    /// named parameter is fed `PodcastProfile.observationCount` — a different
+    /// quantity in the same unit, which is exactly the confusion to keep
+    /// straight here.
     let episodesObserved: Int
 
     // MARK: Init
@@ -166,6 +204,12 @@ struct ShowTraitProfile: Sendable, Codable, Equatable {
 
     /// EMA smoothing factor. 0.3 weights recent episodes ~30%, giving a
     /// responsive-but-stable profile that converges after ~5-7 episodes.
+    ///
+    /// playhead-g7ln: that sentence is true only now. Applied ~13 times per
+    /// episode (the pre-g7ln unit), `0.7^13 = 0.0097` — 99 % of everything
+    /// that came before was overwritten inside ONE episode, so the profile
+    /// converged after ~5-7 BACKFILLS, onto a single episode, while
+    /// ``episodesObserved`` reported that it had seen thirteen.
     static let emaAlpha: Float = 0.3
 
     /// Returns a new profile incorporating measurements from `episode`.

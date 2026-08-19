@@ -6847,7 +6847,13 @@ actor AdDetectionService {
             // writers of `observationCount` (the other is the banner Yes), and
             // both claim the same episode row so the column counts EPISODES
             // rather than backfills or taps (playhead-2qz6 / playhead-fh5v).
-            await recordConfirmedWindowObservation(
+            //
+            // playhead-g7ln: the RESULT is now load-bearing rather than
+            // discarded. It is the `trust_episode_observations` claim, and
+            // `updatePriors` gates the ShowTraitProfile EMA on it so
+            // `episodesObserved` counts episodes for the same reason and by
+            // the same fact that `observationCount` does.
+            let countedEpisodeObservation = await recordConfirmedWindowObservation(
                 podcastId: podcastId,
                 analysisAssetId: analysisAssetId,
                 confirmedWindows: nonSuppressedWindows
@@ -6857,7 +6863,8 @@ actor AdDetectionService {
                 nonSuppressedWindows: nonSuppressedWindows,
                 episodeDuration: episodeDuration,
                 featureWindows: featureWindows,
-                chunks: canonicalChunks
+                chunks: canonicalChunks,
+                countsAsEpisodeObservation: countedEpisodeObservation
             )
         }
 
@@ -13103,19 +13110,29 @@ actor AdDetectionService {
     /// banner Yes) — and playhead-fh5v put BOTH behind the same
     /// `trust_episode_observations` claim, so they cannot double-count one
     /// episode between them.
+    ///
+    /// playhead-g7ln: `countsAsEpisodeObservation` has NO default, for the same
+    /// reason `featureWindows`/`chunks` have none (cycle-1 L3). A default of
+    /// `true` would let a future caller silently restore the per-backfill unit
+    /// this bead removed, and a default of `false` would make every trait test
+    /// quietly assert nothing. The production call site passes the
+    /// `trust_episode_observations` claim result; a test states which case it
+    /// is testing.
     func updatePriorsForTesting(
         podcastId: String,
         nonSuppressedWindows: [AdWindow],
         episodeDuration: Double,
         featureWindows: [FeatureWindow],
-        chunks: [TranscriptChunk]
+        chunks: [TranscriptChunk],
+        countsAsEpisodeObservation: Bool
     ) async throws {
         try await updatePriors(
             podcastId: podcastId,
             nonSuppressedWindows: nonSuppressedWindows,
             episodeDuration: episodeDuration,
             featureWindows: featureWindows,
-            chunks: chunks
+            chunks: chunks,
+            countsAsEpisodeObservation: countsAsEpisodeObservation
         )
     }
     #endif
@@ -13331,12 +13348,46 @@ actor AdDetectionService {
     /// a column whose consumers all read it as episodes. When no trust service
     /// is installed nothing is counted and no claim is taken, so the episode
     /// stays claimable and the next backfill counts it properly.
+    ///
+    /// playhead-g7ln: **the TRAIT profile is now behind the same claim.**
+    /// `ShowTraitProfile.episodesObserved` is documented "number of episodes
+    /// that have contributed to this profile" and was incremented by
+    /// `ShowTraitProfile.updated(from:)` on every call of this method — i.e.
+    /// once per BACKFILL, the identical unit defect playhead-2qz6 fixed one
+    /// column over. Measured on the 2026-08-18 t3 device pull: `episodesObserved`
+    /// read **104 and 56** against **8 and 7** distinct episodes, 13.0x and 8.0x.
+    /// `isReliable` (>= 3) and `PriorHierarchyResolver.traitBlendWeight` (0.4 at
+    /// 3 ramping to 0.6 at 7+) therefore both saturated INSIDE the first episode.
+    ///
+    /// `countsAsEpisodeObservation` is the claim result threaded down from
+    /// `recordConfirmedWindowObservation`, which is the fact rather than a proxy
+    /// for it. When it is `false` the persisted `traitProfileJSON` is carried
+    /// forward VERBATIM — no EMA application, no increment — because a
+    /// re-backfill of an already-counted asset is not a new episode and ~9
+    /// near-identical snapshots of one episode are not an average over nine.
+    ///
+    /// TWO CONSEQUENCES, stated rather than hidden:
+    ///
+    ///   * The snapshot that lands is the FIRST pass that confirmed a window,
+    ///     not the most complete one. Under the old behaviour the EMA converged
+    ///     on the LAST pass (alpha 0.3 over ~13 applications retains ~1 % of
+    ///     what preceded it), so the traits recorded for an episode can now
+    ///     carry less transcript/feature coverage than they used to. Filed as
+    ///     playhead-4wgv; not fixable from here, because nothing in
+    ///     `runBackfill` knows which pass is the last one.
+    ///   * A banner "Yes" (`TrustScoringService.recordCorrectObservation`)
+    ///     shares this claim and can take it FIRST (playhead-fh5v). That
+    ///     episode's trait snapshot is then never merged, so `episodesObserved`
+    ///     can trail `observationCount` by the number of such episodes. It is
+    ///     the conservative direction and it is bounded: the tap requires a
+    ///     window this pipeline already persisted.
     private func updatePriors(
         podcastId: String,
         nonSuppressedWindows: [AdWindow],
         episodeDuration: Double,
         featureWindows: [FeatureWindow],
-        chunks: [TranscriptChunk]
+        chunks: [TranscriptChunk],
+        countsAsEpisodeObservation: Bool
     ) async throws {
         guard !nonSuppressedWindows.isEmpty, episodeDuration > 0 else { return }
 
@@ -13410,12 +13461,24 @@ actor AdDetectionService {
                     // observation in hand. The first-episode merge below
                     // mirrors `ShowTraitProfile.updated(from:)` for the
                     // sentinel case (replace, don't blend).
-                    let initialTraitProfileJSON = Self.initialTraitProfileJSON(
-                        featureWindows: featureWindows,
-                        chunks: chunks,
-                        confirmedAdWindows: nonSuppressedWindows,
-                        episodeDuration: episodeDuration
-                    )
+                    //
+                    // playhead-g7ln: NIL when no episode observation was
+                    // claimed, for exactly the reason `observationCount` is 0
+                    // three lines down — this create path is reached only when
+                    // the trust path did NOT create the profile, so a seed at
+                    // `episodesObserved == 1` would credit an episode nothing
+                    // witnessed. The next backfill that DOES claim takes the
+                    // update path, where a NULL column decodes as `.unknown`
+                    // and `updated(from:)` replaces rather than blends — the
+                    // same first-episode semantics, one pass later.
+                    let initialTraitProfileJSON = countsAsEpisodeObservation
+                        ? Self.initialTraitProfileJSON(
+                            featureWindows: featureWindows,
+                            chunks: chunks,
+                            confirmedAdWindows: nonSuppressedWindows,
+                            episodeDuration: episodeDuration
+                        )
+                        : nil
 
                     // Bug 4a default: brand-new profile gets trust=0.5
                     // (matches `setUserOverride`'s new-profile default).
@@ -13524,14 +13587,31 @@ actor AdDetectionService {
                     // mention `<ident>.traitProfileJSON` somewhere in its
                     // body, which the `?? existing.traitProfileJSON`
                     // fallback satisfies on both branches.
-                    let mergedTraitProfileJSON = Self.mergedTraitProfileJSON(
-                        existing: existing,
-                        featureWindows: featureWindows,
-                        chunks: chunks,
-                        confirmedAdWindows: nonSuppressedWindows,
-                        episodeDuration: episodeDuration
-                    )
-                    let resolvedTraitProfileJSON = mergedTraitProfileJSON ?? existing.traitProfileJSON
+                    //
+                    // playhead-g7ln: the merge runs ONLY when this backfill
+                    // claimed the episode. The two `nil` results are kept
+                    // DISTINGUISHABLE rather than folded into one
+                    // nil-coalescing chain: "no episode to count" and "the
+                    // encoder failed" have the same effect on the column and
+                    // opposite meanings, and `mergedTraitProfileJSON` logs a
+                    // fault for the second. Both branches mention
+                    // `existing.traitProfileJSON`, which is what the cycle-22
+                    // L-5 whole-file canary requires.
+                    let resolvedTraitProfileJSON: String?
+                    let mergedTraitProfileJSON: String?
+                    if countsAsEpisodeObservation {
+                        mergedTraitProfileJSON = Self.mergedTraitProfileJSON(
+                            existing: existing,
+                            featureWindows: featureWindows,
+                            chunks: chunks,
+                            confirmedAdWindows: nonSuppressedWindows,
+                            episodeDuration: episodeDuration
+                        )
+                        resolvedTraitProfileJSON = mergedTraitProfileJSON ?? existing.traitProfileJSON
+                    } else {
+                        mergedTraitProfileJSON = nil
+                        resolvedTraitProfileJSON = existing.traitProfileJSON
+                    }
 
                     // cycle-2 M2: in DEBUG, assert that a successful merge
                     // never regresses `episodesObserved`. The EMA path

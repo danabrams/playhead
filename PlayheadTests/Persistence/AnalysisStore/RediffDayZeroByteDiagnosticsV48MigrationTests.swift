@@ -118,7 +118,7 @@ struct RediffDayZeroByteDiagnosticsV48MigrationTests {
         // `backfill_jobs.progressCursor` to the prefix each asset's own
         // `semantic_scan_results` passA rows support, and touches no other
         // column and no other table. Nothing this rung asserts is named by it.
-        #expect(AnalysisStore.currentSchemaVersion == 56)
+        #expect(AnalysisStore.currentSchemaVersion == 57)
         #expect(try columnsPresent(in: dir))
     }
 

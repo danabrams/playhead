@@ -2416,7 +2416,14 @@ struct PriorHierarchyWireUpTests {
                 // `updatePriorsActivatesTraitDerivedTierWithRealSignal`
                 // exercises the producer math with non-empty inputs.
                 featureWindows: [],
-                chunks: []
+                chunks: [],
+                // playhead-g7ln: each iteration stands for a DISTINCT
+                // episode, which is exactly what the claim means, so the
+                // loop passes `true` three times. Passing `true`
+                // unconditionally from a re-backfill is the defect this
+                // parameter exists to stop; `TraitProfileEpisodeCountTests`
+                // owns the `false` direction.
+                countsAsEpisodeObservation: true
             )
         }
 
@@ -2498,7 +2505,10 @@ struct PriorHierarchyWireUpTests {
                 nonSuppressedWindows: [window],
                 episodeDuration: 600,
                 featureWindows: highMusicWindows,
-                chunks: chunks
+                chunks: chunks,
+                // playhead-g7ln: three distinct episodes — see the sibling
+                // test above.
+                countsAsEpisodeObservation: true
             )
         }
 
@@ -2552,7 +2562,12 @@ struct PriorHierarchyWireUpTests {
             nonSuppressedWindows: [window],
             episodeDuration: 600,
             featureWindows: [],
-            chunks: []
+            chunks: [],
+            // playhead-g7ln: the create branch seeds a one-episode profile
+            // ONLY when the episode was claimed. The `false` mirror — a
+            // create that must seed nothing — is in
+            // `TraitProfileEpisodeCountTests`.
+            countsAsEpisodeObservation: true
         )
 
         let after = try #require(await store.fetchProfile(podcastId: podcastId))
@@ -2616,7 +2631,12 @@ struct PriorHierarchyWireUpTests {
             // intentionally empty so the duration aggregate isn't
             // entangled with the trait merge.
             featureWindows: [],
-            chunks: []
+            chunks: [],
+            // playhead-g7ln: `true` keeps this test's path byte-identical to
+            // what it asserted before the claim gate existed. That the
+            // duration aggregate accumulates on a NON-counting backfill too
+            // is a separate claim, asserted in `TraitProfileEpisodeCountTests`.
+            countsAsEpisodeObservation: true
         )
 
         // The persisted profile should now reflect a 6-sample aggregate with
