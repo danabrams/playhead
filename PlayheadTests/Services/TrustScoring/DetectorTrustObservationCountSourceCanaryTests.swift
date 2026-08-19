@@ -35,16 +35,37 @@
 //      second rail below and is what makes the count rails a closed statement
 //      rather than a sample.
 //
-// WHAT THE SWEEP FOUND, on the tree this bead landed on: 38 occurrences of
-// `observationCount` in the app target, of which SIX touch a `DetectorTrustEntry`
-// and the rest are `PodcastProfile.observationCount` (the show scalar V49 fixed),
+// WHAT THE SWEEP FOUND, on the tree this bead landed on: **40 lines** in the app
+// target carry the identifier, of which **eleven** touch a `DetectorTrustEntry`.
+// The other 29 are `PodcastProfile.observationCount` (the show scalar V49 fixed),
 // `CrossShowSyndicationStore`'s unrelated field of the same name, or
 // `SourceTrustProfile.observationCount`, a computed `Double` on a different type.
-// Of the six, TWO are policy reads and both are the same call:
+// The eleven, by what they do:
+//
+//   * ONE declaration (`DetectorTrustEntry.observationCount`).
+//   * FIVE that READ an existing entry's count — four spelled
+//     `entry.observationCount` in `TrustScoringService` (`setUserOverride` and
+//     `applyFalseSkipSignal` carry it forward unchanged; `applySuccessfulObservation`
+//     and `applyCorrectObservation` add one), and one key path in V58, which reads
+//     it only to decide whether the row needs repairing at all.
+//   * FIVE that WRITE one — `seed`'s two branches, the two `+ 1` writes, and V58's
+//     literal 0.
+//
+// **Exactly TWO of the five reads reach policy**, and both are the same call:
 // `evaluatePromotion(…observations:falseSkipWeight:)`, whose only use of the
-// argument is the `.shadow -> .manual` clause. The other four are carry-forwards
-// and writes. That is the whole reader set, and it is why V58 changes no tier on
-// the day it runs.
+// argument is the `.shadow -> .manual` clause (the `.manual` rung is closed by
+// playhead-lqcp and `.auto` is terminal). That is why V58 changes no tier on the
+// day it runs, and it is a measured claim rather than a hopeful one.
+//
+// THE LIMIT, stated rather than found later. The file-level rail bounds where a
+// `DetectorTrustEntry` can be OBTAINED, and an unlicensed file that received one
+// as a parameter would still have to NAME the type in its own signature, so it is
+// caught. What would not be caught is a fully type-INFERRED route — a closure
+// literal written in a licensed file and executed by a generic helper elsewhere,
+// where no unlicensed source line ever spells either the type or the property.
+// No such route exists today; the reason it is a limit and not a hole is that
+// closing it needs type resolution, which is parsing rather than scanning — the
+// same line `SwiftSourceCallGraph`'s L-6/L-7 draw.
 //
 // XCTest rather than Swift Testing, matching every other source canary here:
 // `xctestplan` can only filter XCTest classes (see the CLAUDE.md note on the
@@ -205,7 +226,7 @@ final class DetectorTrustObservationCountSourceCanaryTests: XCTestCase {
             + unlicensed.sorted().joined(separator: "\n")
             + "\n\nA new site is not forbidden — but `DetectorTrustEntry.observationCount` counts "
             + "EPISODES since V58, it is NOT deduped through `trust_episode_observations` (that is "
-            + "playhead-p1w3), and the value the gate reads is the STORED entry rather than the "
+            + "playhead-jh4y), and the value the gate reads is the STORED entry rather than the "
             + "seed. Add the file here with its reason AND to the enumeration in this file's "
             + "header, so the next unit change has a list to work from."
         )

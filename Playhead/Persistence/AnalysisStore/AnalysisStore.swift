@@ -8397,16 +8397,40 @@ actor AnalysisStore {
     // and this one has none. Sixteen against eight is the whole bead in two
     // numbers.
     //
-    // WHY ZERO. V57 had a faithful-looking reconstruction available (the episode
-    // ledger) and declined it; here there is not even that. A per-class counter is
-    // advanced once per GESTURE by `applyCorrectObservation` and once per named
-    // detector per CALL by `applySuccessfulObservation`, and NEITHER is gated on
-    // the `trust_episode_observations` claim — deliberately, and playhead-p1w3
-    // owns changing it. So the number on disk counts WRITES. Nothing in the row
-    // records how many episodes they came from, and the one reader
+    // WHY ZERO, AND WHY THE NUMBER IS A SUM OF TWO UNITS. Two writers advance a
+    // per-class entry and they disagree about what one increment means:
+    //
+    //   * `applySuccessfulObservation` — once per CLAIMED episode. Its only
+    //     production caller, `AdDetectionService.recordConfirmedWindowObservation`,
+    //     takes the `trust_episode_observations` claim FIRST and returns early
+    //     without it, so this half is already in the right unit, and it credits
+    //     only the classes that drew that episode's confirmed windows.
+    //   * `applyCorrectObservation` — once per banner-Yes GESTURE, deliberately
+    //     NOT claim-gated. Read that method's own comment: gating it on the same
+    //     claim would FREEZE an entry the backfill materialized early, closing
+    //     the only escape a class has from `shadow`. Changing it needs a
+    //     per-detector claim axis and is **playhead-jh4y**, not this rung.
+    //     (That comment names `playhead-p1w3`, which was closed as jh4y's
+    //     duplicate; jh4y is the live bead.)
+    //
+    // So a stored count is `episodes + gestures`, and NOTHING in the row can
+    // separate the two — which is why V57's option of reconstructing from a
+    // ledger is not even available here. The one policy reader
     // (`evaluatePromotion`'s `observations` argument) is asking about episodes.
     // Zero says "we do not know", which is true, and it is the same answer V49
     // and V57 gave for the same reason.
+    //
+    // The device bears the sum out: simplecast's `fusion` reads 16 against a show
+    // scalar of 8, so at LEAST 8 of the 16 are gestures — the episode half cannot
+    // exceed the claim count. `correction_events` on the same pull carries 30
+    // `falseNegative` rows for that show and 12 for flightcast, which is the
+    // surface a banner Yes goes through, so there is no shortage of candidates.
+    //
+    // NOTE WHAT THAT MEANS FOR THE REPAIR'S SHELF LIFE, stated rather than
+    // discovered later: this rung corrects the values on disk ONCE. Until jh4y
+    // lands the gesture half keeps accruing and the mirror drifts out of the
+    // episode unit again. That is an argument for jh4y, not against V58 — the
+    // alternative is leaving today's 16 in place as well.
     //
     // WHAT IS DELIBERATELY NOT TOUCHED, because the repair is one key:
     //

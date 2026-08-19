@@ -182,9 +182,9 @@ struct DetectorTrustObservationCountV58MigrationTests {
                 #expect(
                     entry.observationCount == 0,
                     """
-                    \(id)/\(cls): 16 and 10 are counts of WRITES — one per gesture, one per \
-                    named detector per call — and neither is claim-gated. They cannot be \
-                    carried into a unit that means episodes. Got \(entry.observationCount)
+                    \(id)/\(cls): 16 and 10 are `episodes + gestures` — the backfill half is \
+                    claim-gated and honest, the banner-Yes half is per-gesture (playhead-jh4y), \
+                    and nothing in the row separates them. Got \(entry.observationCount)
                     """
                 )
             }
