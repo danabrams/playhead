@@ -31,8 +31,11 @@
 //      column, or rounded a Float, would pass a count-only assertion.
 //   3. EVERY OTHER COLUMN SURVIVES — mode, trust, observationCount, the veto
 //      counter, the learned priors. V49's contract, restated for this rung.
-//   4. IDEMPOTENT, and idempotent for the RIGHT reason: the per-row predicate
-//      is `episodesObserved != 0`, so a re-entered rung finds nothing.
+//   4. IDEMPOTENT ACROSS LAUNCHES, which is the property a device has — the
+//      version ladder is the guard. The per-row `episodesObserved != 0`
+//      predicate is a COST guard, not an already-migrated marker, and the
+//      difference is asserted: a deliberate stamp rewind DOES reset a real
+//      count, because no predicate can tell 4 episodes from 4 backfills.
 //   5. THE POPULATION IS THE READABLE ONE. A blob the decoder rejects is
 //      already read as `.unknown`, so it claims nothing and is left alone
 //      rather than being destroyed by a repair it does not need.
@@ -230,8 +233,8 @@ struct TraitProfileEpisodeCountV57MigrationTests {
 
     // MARK: - 4. Idempotent, for the right reason
 
-    @Test("a re-entered V57 rung finds nothing to repair")
-    func migrationIsIdempotent() async throws {
+    @Test("a second launch does not reset an episode counted under the NEW unit")
+    func migrationIsIdempotentAcrossLaunches() async throws {
         let dir = try makeTempDir(prefix: "TraitEpisodeCountV57Idem")
         defer { try? FileManager.default.removeItem(at: dir) }
 
@@ -246,10 +249,9 @@ struct TraitProfileEpisodeCountV57MigrationTests {
         let first = try AnalysisStore(directory: dir)
         try await first.migrate()
         let afterFirst = try #require(try rawTraitJSON(in: dir, podcastId: "show-a"))
+        #expect(try decode(afterFirst).episodesObserved == 0)
 
-        // Now let a claimed episode accrue, as it would in the field, and
-        // re-enter the rung. A repair that ran again would throw that episode
-        // away — the shape V56's `latencySampleCount IS NULL` guard exists for.
+        // Now let a real, claimed episode accrue, as it would in the field.
         let advanced = try decode(afterFirst).updated(
             from: EpisodeTraitSnapshot(
                 musicDensity: 0.2,
@@ -268,8 +270,9 @@ struct TraitProfileEpisodeCountV57MigrationTests {
                 traitProfileJSON: String(decoding: try JSONEncoder().encode(advanced), as: UTF8.self)
             )
         )
-        try await rewindToV56(first)
 
+        // The next launch. No stamp rewind — a device that has reached 57 stays
+        // there, so the ladder is what makes this a no-op.
         AnalysisStore.resetMigratedPathsForTesting()
         let second = try AnalysisStore(directory: dir)
         try await second.migrate()
@@ -277,7 +280,57 @@ struct TraitProfileEpisodeCountV57MigrationTests {
         let afterSecond = try decode(try #require(try rawTraitJSON(in: dir, podcastId: "show-a")))
         #expect(
             afterSecond.episodesObserved == 1,
-            "a re-run must not reset an episode counted under the NEW unit back to 0"
+            "a later launch must not throw away an episode counted under the new unit"
+        )
+    }
+
+    /// THE LIMIT, stated rather than discovered later. Unlike V56's
+    /// `latencySampleCount IS NULL`, V57 has NO per-row predicate that can tell
+    /// a legitimately-counted 1 from an inflated 1 — the two are the same
+    /// integer, and the fact that separates them (which unit wrote it) is
+    /// exactly what was never recorded. So a deliberate stamp rewind to 56
+    /// after this rung has run DOES reset a real count, and that is asserted
+    /// here rather than left as a surprise.
+    ///
+    /// It is not a field state: nothing rewinds `schema_version`, and the two
+    /// production entry points both climb monotonically. V49's reset has the
+    /// identical property for the identical reason. The `episodesObserved != 0`
+    /// predicate is a cost guard — it stops the rung rewriting rows it has
+    /// nothing to say about — and is deliberately NOT dressed up as an
+    /// already-migrated marker.
+    @Test("a deliberate stamp rewind DOES reset a real count — the stated limit")
+    func aStampRewindResetsARealCount() async throws {
+        let dir = try makeTempDir(prefix: "TraitEpisodeCountV57Rewind")
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        AnalysisStore.resetMigratedPathsForTesting()
+        let store = try AnalysisStore(directory: dir)
+        try await store.migrate()
+        let honest = ShowTraitProfile(
+            musicDensity: 0.2,
+            speakerTurnRate: 1,
+            singleSpeakerDominance: 0.4,
+            structureRegularity: 0.6,
+            sponsorRecurrence: 0.1,
+            insertionVolatility: 0.4,
+            transcriptReliability: 0.8,
+            episodesObserved: 4
+        )
+        try await store.upsertProfile(
+            makeProfile(
+                podcastId: "show-a",
+                traitProfileJSON: String(decoding: try JSONEncoder().encode(honest), as: UTF8.self)
+            )
+        )
+        try await rewindToV56(store)
+
+        AnalysisStore.resetMigratedPathsForTesting()
+        let reopened = try AnalysisStore(directory: dir)
+        try await reopened.migrate()
+
+        #expect(
+            try decode(try #require(try rawTraitJSON(in: dir, podcastId: "show-a"))).episodesObserved == 0,
+            "the rung cannot tell 4 episodes from 4 backfills, and does not pretend to"
         )
     }
 
@@ -373,8 +426,8 @@ struct TraitProfileEpisodeCountV57MigrationTests {
         #expect(try await reopened.schemaVersion() == AnalysisStore.currentSchemaVersion)
     }
 
-    @Test("V57 does NOT step over a store left below 56")
-    func migrationDoesNotStepOverAnEarlierRung() async throws {
+    @Test("V57 does NOT step over a rolled-back V39")
+    func migrationDoesNotStepOverARolledBackRung() async throws {
         let dir = try makeTempDir(prefix: "TraitEpisodeCountV57NoStepOver")
         defer { try? FileManager.default.removeItem(at: dir) }
 
@@ -384,19 +437,42 @@ struct TraitProfileEpisodeCountV57MigrationTests {
         try await store.upsertProfile(
             makeProfile(podcastId: "show-a", traitProfileJSON: Self.devicePullTraitJSON)
         )
-        // A store stamped at 38 is the shape a rolled-back V39 leaves. Every
-        // rung from V40 up refuses to run below its predecessor, so V57 must
-        // not repair a store the ladder cannot legally climb.
+
+        // The state a device is in when V39 rolled back, reproduced exactly as
+        // `MergedChildRowDedupeV40MigrationTests` does: no unique asset-identity
+        // index, a colliding pair V39 must delete, a trigger that makes the
+        // delete ABORT, and `schema_version` at 38. Stamping 38 alone proves
+        // nothing — V39 would simply succeed and the whole ladder would climb.
+        try await store.execForTesting("DROP INDEX IF EXISTS idx_assets_episode_fingerprint")
+        try await store.execForTesting("DROP INDEX IF EXISTS idx_chunks_asset_pass_fingerprint")
+        try await store.execForTesting("""
+            INSERT INTO analysis_assets (id, episodeId, assetFingerprint, sourceURL, analysisState, createdAt)
+            VALUES ('dupe-old', 'ep-collide', 'ffee', 'file:///tmp/x.mp3', 'pending', 1.0)
+            """)
+        try await store.execForTesting("""
+            INSERT INTO analysis_assets (id, episodeId, assetFingerprint, sourceURL, analysisState, createdAt)
+            VALUES ('dupe-new', 'ep-collide', 'ffee', 'file:///tmp/x.mp3', 'pending', 2.0)
+            """)
+        try await store.execForTesting("""
+            CREATE TRIGGER g7ln_v39_guard BEFORE DELETE ON analysis_assets
+            BEGIN SELECT RAISE(ABORT, 'v57 step-over fixture'); END
+            """)
         try await store.setMetaValue(forKey: "schema_version", value: "38")
 
-        AnalysisStore.resetMigratedPathsForTesting()
-        let reopened = try AnalysisStore(directory: dir)
-        try? await reopened.migrate()
+        try await store.migrateOnlyForTesting()
 
-        let raw = try #require(try rawTraitJSON(in: dir, podcastId: "show-a"))
+        #expect(try await store.schemaVersion() == 38, "the ladder must stay where V39 left it")
         #expect(
-            try decode(raw).episodesObserved == 104,
-            "V57 must not run on a store that never legally reached 56"
+            try decode(try #require(try rawTraitJSON(in: dir, podcastId: "show-a"))).episodesObserved == 104,
+            "V57 must not repair a store the ladder cannot legally climb"
+        )
+
+        // And the retry a later launch performs completes BOTH rungs.
+        try await store.execForTesting("DROP TRIGGER g7ln_v39_guard")
+        try await store.migrateOnlyForTesting()
+        #expect(try await store.schemaVersion() == AnalysisStore.currentSchemaVersion)
+        #expect(
+            try decode(try #require(try rawTraitJSON(in: dir, podcastId: "show-a"))).episodesObserved == 0
         )
     }
 }
