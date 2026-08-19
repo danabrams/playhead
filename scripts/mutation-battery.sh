@@ -9527,7 +9527,13 @@ MUTATIONS=(
   # G702, THE MIRROR, and the direction a "just gate it" fix breaks:
   # nothing ever merges, so the trait tier is dead and `episodesObserved` never
   # leaves 0. A rail set that only proves re-backfills do not count would pass.
-  "G702|1115|ADSVC|$T_G7_THREE;$T_G7_RESOLVER;$T_G7_CREATE_TRUE"
+  # Its expectation named `$T_G7_CREATE_TRUE` on the first run and G702 SURVIVED
+  # against it — the edit is in the UPDATE branch's condition and cannot reach
+  # the CREATE branch at all, so that was an expectation naming a test the
+  # mutation cannot REACH (the I08/I18 class in this file's header), not a
+  # coverage hole. Re-pointed rather than relaxed: the create branch has its own
+  # rail in G706, and G702 still dies twice over on the two rails it does reach.
+  "G702|1115|ADSVC|$T_G7_THREE;$T_G7_RESOLVER"
 
   # G703, THE CALL SITE, and the reason the source canary exists:
   # `runBackfill` passes a literal `true`. Every service-level rail in
