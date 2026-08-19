@@ -4,7 +4,8 @@
 //
 // Sources:
 //   - RSS <link>, <itunes:owner>, feed URL domain patterns
-//   - High-frequency show-notes domains (frequency = showOwned signal)
+//   - High-frequency show-notes domains (frequency = RECURRENCE, NOT ownership
+//     — see `recordShowNotesDomain` and playhead-kmw4)
 //   - Explicit sponsor domain registrations
 //
 // Integration:
@@ -54,7 +55,8 @@ enum DomainOwnershipSource: String, Sendable, Codable, Hashable, CaseIterable {
     case itunesOwner
     /// RSS feed URL domain itself.
     case feedURL
-    /// High-frequency domain in show notes across episodes.
+    /// High-frequency domain in show notes across episodes. Provenance only:
+    /// since playhead-kmw4 this source can never carry a `.showOwned` label.
     case showNotesFrequency
     /// Explicit sponsor domain registration (from SponsorKnowledgeStore).
     case sponsorRegistration
@@ -66,12 +68,29 @@ enum DomainOwnershipSource: String, Sendable, Codable, Hashable, CaseIterable {
 
 /// Tuning knobs for domain ownership classification.
 struct OwnershipGraphConfig: Sendable {
-    /// Minimum show-notes appearances for a domain to qualify as showOwned
-    /// via frequency signal alone.
-    let showOwnedFrequencyThreshold: Int
+    /// Minimum show-notes appearances at which a domain counts as RECURRING
+    /// in this show's notes.
+    ///
+    /// playhead-kmw4: this used to be `showOwnedFrequencyThreshold` and it
+    /// PROMOTED a domain to `.showOwned` — "seen in >= N show-note blocks,
+    /// therefore the show owns it". It does not follow, and the counterexample
+    /// is the common case: a recurring SPONSOR is precisely the thing that
+    /// recurs in show notes. Measured on the 2026-08-18 device pull,
+    /// `linkedin.com` (69 episodes), `shopify.com` (40) and `ketone.com` (44)
+    /// — all three Diary of a CEO sponsors — cleared this bar and were then
+    /// injected into the lexical scanner as NEGATIVE evidence, i.e. hearing
+    /// the sponsor's own domain in the transcript argued the segment was LESS
+    /// likely to be an ad. Frequency cannot separate sponsor from owner at ANY
+    /// threshold or window size, so the promotion is gone.
+    ///
+    /// What the threshold means now: crossing it marks the domain
+    /// `ownership-undetermined` (`recurringShowNotesDomains`), which
+    /// downstream cue extraction treats as "say nothing in either direction".
+    /// The VALUE is unchanged (3) — only the conclusion drawn from it is.
+    let showNotesRecurrenceThreshold: Int
 
     static let `default` = OwnershipGraphConfig(
-        showOwnedFrequencyThreshold: 3
+        showNotesRecurrenceThreshold: 3
     )
 }
 
@@ -135,6 +154,33 @@ struct OwnershipGraph: Sendable, Equatable {
         domains(withLabel: .sponsorOwned)
     }
 
+    /// Domains that RECUR in this show's notes and that no structural or
+    /// explicit signal has classified — ownership undetermined.
+    ///
+    /// playhead-kmw4: this is the population that used to be promoted to
+    /// `.showOwned` by frequency alone. Recurrence is real (it is measured);
+    /// what it does not license is a conclusion about ownership, because a
+    /// recurring sponsor and a show-owned domain are indistinguishable by
+    /// count. Callers use this to make such a domain contribute NOTHING —
+    /// neither the negative "the show owns it" evidence it used to produce,
+    /// nor the positive "an external domain in the notes is a sponsor" it
+    /// would otherwise fall through to. Both directions need corpus
+    /// measurement before either can ship.
+    ///
+    /// Entries whose source is anything other than `.showNotesFrequency`
+    /// (RSS link, feed URL, iTunes owner, sponsor registration, user
+    /// override) are excluded: those carry a real classification and keep it,
+    /// however often they also appear in the notes.
+    var recurringShowNotesDomains: [String] {
+        entries.values
+            .filter {
+                $0.source == .showNotesFrequency
+                    && $0.label == .unknown
+                    && $0.frequency >= config.showNotesRecurrenceThreshold
+            }
+            .map(\.domain)
+    }
+
     // MARK: - Ingest: RSS Signals
 
     /// Ingest the RSS <link> element domain as show-owned.
@@ -162,8 +208,14 @@ struct OwnershipGraph: Sendable, Equatable {
     // MARK: - Ingest: Show Notes Domains
 
     /// Record a domain appearance from show notes. Call once per domain
-    /// per episode. When frequency crosses the threshold, the domain
-    /// becomes show-owned.
+    /// per episode.
+    ///
+    /// playhead-kmw4: frequency NEVER classifies. A domain whose only signal
+    /// is "it appears in a lot of this show's notes" stays `.unknown` at every
+    /// count; crossing `showNotesRecurrenceThreshold` puts it in
+    /// `recurringShowNotesDomains` and nothing else. An entry that already
+    /// carries a real classification (RSS, feed URL, iTunes owner, sponsor
+    /// registration, user override) keeps its label and just accrues the count.
     mutating func recordShowNotesDomain(_ rawDomain: String, episodeCount: Int = 0) {
         guard let domain = DomainNormalizer.etld1(from: rawDomain) else { return }
 
@@ -183,17 +235,14 @@ struct OwnershipGraph: Sendable, Equatable {
             return
         }
 
-        // Frequency-based classification
-        let label: DomainOwnershipLabel
-        if newFrequency >= config.showOwnedFrequencyThreshold {
-            label = .showOwned
-        } else {
-            label = existing?.label ?? .unknown
-        }
-
+        // Frequency records, it does not classify (playhead-kmw4). Every
+        // entry reaching this point either does not exist yet or already has
+        // source `.showNotesFrequency`, and such an entry can only ever be
+        // `.unknown` — the branch above returns for every other source. So
+        // `.unknown` is a statement of what is known, not a fallback.
         entries[domain] = DomainOwnershipEntry(
             domain: domain,
-            label: label,
+            label: .unknown,
             source: .showNotesFrequency,
             frequency: newFrequency,
             canonicalSponsorId: nil

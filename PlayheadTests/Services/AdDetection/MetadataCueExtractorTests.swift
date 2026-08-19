@@ -366,6 +366,63 @@ struct DomainClassificationTests {
         #expect(networkDomains[0].normalizedValue == "earwolf.com")
     }
 
+    /// playhead-kmw4: an ownership-undetermined domain produces NO cue at
+    /// all. Both alternatives make a claim the evidence cannot support, and
+    /// the negative one is the shipped defect this bead removes.
+    @Test("Ownership-undetermined domains produce no cue at all")
+    func ownershipUndeterminedDomainsProduceNoCue() {
+        let extractor = MetadataCueExtractor(
+            showOwnedDomains: ["flightcast.com"],
+            networkOwnedDomains: ["earwolf.com"],
+            ownershipUndeterminedDomains: ["linkedin.com"]
+        )
+        let cues = extractor.extractCues(
+            description: "Sign up at linkedin.com/doac and squarespace.com/offer.",
+            summary: nil
+        )
+
+        #expect(!cues.contains { $0.normalizedValue == "linkedin.com" })
+        // Not merely "not show-owned": not ANY cue type. A domain that came
+        // back as `.externalDomain` would be the declined positive flip.
+        #expect(!cues.contains { $0.cueType == .externalDomain && $0.normalizedValue == "linkedin.com" })
+        // The unclassified domain beside it is untouched, so the suppression
+        // is targeted rather than a blanket disabling of domain cues.
+        let external = cues.filter { $0.cueType == .externalDomain }
+        #expect(external.map(\.normalizedValue) == ["squarespace.com"])
+    }
+
+    /// Precedence: a domain in BOTH the show-owned and the undetermined set
+    /// is show-owned. The structural signal is the one that knows something.
+    @Test("A structural show-owned domain outranks the undetermined set")
+    func showOwnedOutranksUndetermined() {
+        let extractor = MetadataCueExtractor(
+            showOwnedDomains: ["teamcoco.com"],
+            networkOwnedDomains: [],
+            ownershipUndeterminedDomains: ["teamcoco.com"]
+        )
+        let cues = extractor.extractCues(
+            description: "Visit teamcoco.com for full episodes.",
+            summary: nil
+        )
+        #expect(cues.filter { $0.cueType == .showOwnedDomain }.count == 1)
+    }
+
+    /// The default is unchanged behaviour: with no undetermined set supplied,
+    /// every unrecognised domain is still an external-domain cue.
+    @Test("Omitting the undetermined set leaves external classification intact")
+    func omittingUndeterminedSetIsUnchanged() {
+        let extractor = MetadataCueExtractor(
+            showOwnedDomains: ["teamcoco.com"],
+            networkOwnedDomains: ["earwolf.com"]
+        )
+        let cues = extractor.extractCues(
+            description: "Sign up at linkedin.com/doac.",
+            summary: nil
+        )
+        let external = cues.filter { $0.cueType == .externalDomain }
+        #expect(external.map(\.normalizedValue) == ["linkedin.com"])
+    }
+
     @Test("Deduplicates domains within same source")
     func deduplicatesDomains() {
         let extractor = MetadataCueExtractor()

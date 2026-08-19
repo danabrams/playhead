@@ -19,15 +19,22 @@ struct EpisodeMetadataSnapshot: Sendable {
     let feedMetadata: FeedDescriptionMetadata
     let showOwnedDomains: Set<String>
     let networkOwnedDomains: Set<String>
+    /// Domains that recur in this show's notes with no structural ownership
+    /// signal behind them (playhead-kmw4). Cue extraction emits NO cue for
+    /// these, so they contribute nothing in either direction — see
+    /// `OwnershipGraph.recurringShowNotesDomains`.
+    let ownershipUndeterminedDomains: Set<String>
 
     init(
         feedMetadata: FeedDescriptionMetadata,
         showOwnedDomains: Set<String> = [],
-        networkOwnedDomains: Set<String> = []
+        networkOwnedDomains: Set<String> = [],
+        ownershipUndeterminedDomains: Set<String> = []
     ) {
         self.feedMetadata = feedMetadata
         self.showOwnedDomains = Self.normalizedDomains(showOwnedDomains)
         self.networkOwnedDomains = Self.normalizedDomains(networkOwnedDomains)
+        self.ownershipUndeterminedDomains = Self.normalizedDomains(ownershipUndeterminedDomains)
     }
 
     static func normalizedDomain(from url: URL?) -> String? {
@@ -35,11 +42,27 @@ struct EpisodeMetadataSnapshot: Sendable {
         return MetadataCueExtractor.normalizeDomain(from: url.absoluteString)
     }
 
-    static func showOwnedDomains(
+    /// The two domain populations a show's feed + notes can produce.
+    ///
+    /// Returned together because they come from ONE `OwnershipGraph` build
+    /// over the same episode corpus: computing them separately would walk
+    /// every episode's notes twice and let the two answers drift.
+    struct ShowDomainOwnership: Sendable, Equatable {
+        /// Domains a STRUCTURAL signal says the show owns. In production
+        /// today that is the feed URL's eTLD+1 and nothing else — RSS
+        /// `<link>` and `<itunes:owner>` are not persisted by the feed
+        /// parser, so `OwnershipGraph.ingestRSSLink` / `ingestITunesOwner`
+        /// have no production caller (playhead-kmw4).
+        let showOwned: Set<String>
+        /// Domains that recur in the notes with no ownership signal at all.
+        let ownershipUndetermined: Set<String>
+    }
+
+    static func domainOwnership(
         feedURL: URL?,
         recentMetadata: [FeedDescriptionMetadata],
         podcastId: String
-    ) -> Set<String> {
+    ) -> ShowDomainOwnership {
         var graph = OwnershipGraph(podcastId: podcastId)
         if let feedURL {
             graph.ingestFeedURL(feedURL.absoluteString)
@@ -55,7 +78,22 @@ struct EpisodeMetadataSnapshot: Sendable {
             }
         }
 
-        return Set(graph.showOwnedDomains)
+        return ShowDomainOwnership(
+            showOwned: Set(graph.showOwnedDomains),
+            ownershipUndetermined: Set(graph.recurringShowNotesDomains)
+        )
+    }
+
+    static func showOwnedDomains(
+        feedURL: URL?,
+        recentMetadata: [FeedDescriptionMetadata],
+        podcastId: String
+    ) -> Set<String> {
+        domainOwnership(
+            feedURL: feedURL,
+            recentMetadata: recentMetadata,
+            podcastId: podcastId
+        ).showOwned
     }
 
     private static func normalizedDomains(_ domains: Set<String>) -> Set<String> {
