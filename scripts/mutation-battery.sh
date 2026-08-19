@@ -3996,9 +3996,19 @@ T_KM_WIRE_APP="PlayheadApp builds the snapshot from one graph and carries both s
 #
 # The parser rails come in two kinds and both are load-bearing: SYNTHETIC ones
 # isolate a single shape, and the REAL-BYTES ones are the two subscribed feeds'
-# verbatim channel heads. E801 and E805 are killed by both; that redundancy is
-# the point, because a synthetic fixture proves the parser parses what its
-# author expected and only publisher bytes prove it parses what publishers emit.
+# verbatim channel heads.
+#
+# WHICH MUTANT EACH KIND CAN SEE IS A MEASUREMENT, AND THE FIRST RUN OF THIS
+# SERIES GOT IT WRONG SIX TIMES. E801, E802 and E803 change what the parser
+# reports for a real feed, so the publisher bytes redden and the pairing is
+# real. E805, E806 and E807 do not: neither subscribed feed carries a stray
+# `<itunes:email>`, an address after `</itunes:owner>`, or an Atom `rel="self"`
+# at all, so a real-bytes rail listed against them can only ever stay green —
+# and this engine calls a mutant SURVIVED when ANY listed rail stays green,
+# which is how six registration errors were reported as coverage holes. The
+# code was covered the whole time; the LIST claimed observers it had not
+# measured. Every expectation below is now the set the mutant was OBSERVED to
+# redden, and a rail that cannot see a mutant belongs to a different one.
 #
 # XCTest rails are written Suite/method; the Swift Testing ones are verbatim
 # `@Test(...)` display names and may not contain a ';'.
@@ -4026,6 +4036,7 @@ T_E8_LINK_NO_OWNER="OwnershipGraphRSSTests/testLinkIsAdmittedWhenThereIsNoOwnerA
 T_E8_LINK_BAD_EMAIL="OwnershipGraphRSSTests/testOwnerAddressWithoutAnAtSignDoesNotRefuseTheLink"
 T_E8_E2E="OwnershipGraphEndToEndTests/testRealWorldShowSetup"
 T_E8_SNAPSHOT="Recurring show-notes domains are ownership-undetermined, not show-owned"
+T_E8_SEAM_HOST="The feed host is refused at the seam even when both signals name it"
 T_E8_WIRE_APP="PlayheadApp feeds the persisted <link> and <itunes:owner> into the graph"
 T_E8_WIRE_COMPOSED="production reaches the graph through ingestRSSFeed, not the primitives"
 T_E8_NO_FEEDURL="no production caller promotes the feed URL itself"
@@ -9970,25 +9981,25 @@ MUTATIONS=(
 
   # E804 drops first-one-wins on <link>, so a later element overwrites the
   # channel's. Invisible on any feed carrying exactly one.
-  "E804|1148|FPARSE|$T_E8_FIRST_WINS;$T_E8_IMAGE_FIRST"
+  "E804|1148|FPARSE|$T_E8_FIRST_WINS"
 
   # E805 stops requiring the <itunes:owner> wrapper, so ANY <itunes:email> in
   # the channel is read as the owner's. Killed by a synthetic rail and by the
   # real Conan bytes, whose owner address is the thing being impersonated.
-  "E805|1149|FPARSE|$T_E8_BARE_EMAIL;$T_E8_REAL_CONAN"
+  "E805|1149|FPARSE|$T_E8_BARE_EMAIL;$T_E8_EMAIL_AFTER"
 
   # E806, its mirror: the owner scope never closes.
-  "E806|1150|FPARSE|$T_E8_EMAIL_AFTER;$T_E8_REAL_CONAN"
+  "E806|1150|FPARSE|$T_E8_EMAIL_AFTER"
 
   # E807 admits `rel="self"` as the Atom site link — the feed's own address,
   # i.e. the hosting platform, arriving by the one route that has no <image>
   # block to hide behind.
-  "E807|1151|FPARSE|$T_E8_ATOM_ALT;$T_E8_ATOM_SELF"
+  "E807|1151|FPARSE|$T_E8_ATOM_ALT"
 
   # E808 deletes the feed-host refusal. `ingestFeedURL` is gone, but the
   # surviving routes reach the same domain on 175 of 918 real feeds, so this
   # is the deleted method restored through the door that replaced it.
-  "E808|1152|OWNG|$T_E8_HOST_REFUSED;$T_E8_E2E"
+  "E808|1152|OWNG|$T_E8_HOST_REFUSED;$T_E8_HOST_UNDET"
 
   # E809 compares the RAW string rather than the registrable domain, so
   # `rss2.flightcast.com` is not `flightcast.com` and the platform is admitted.
@@ -9998,20 +10009,24 @@ MUTATIONS=(
   # E810 INVERTS the <link>-vs-owner precedence: the link is kept exactly when
   # the owner address contradicts it. On the device that admits siriusxm.com
   # and takes the spans carrying a negative hit from 1 of 154 to 18 of 154.
-  "E810|1154|OWNG|$T_E8_LINK_REFUSED;$T_E8_LINK_AGREES"
+  "E810|1154|OWNG|$T_E8_LINK_REFUSED;$T_E8_REAL_GRAPH;$T_E8_LINK_AGREES"
 
   # E811 removes the precedence guard altogether — the shipped-first-commit
   # behaviour, and the reason the second commit exists.
   "E811|1155|OWNG|$T_E8_LINK_REFUSED;$T_E8_REAL_GRAPH"
 
   # E812, the OTHER direction on the same guard: a feed with NO owner address
-  # loses its <link> too. Nothing is mislabelled; a signal 111 of 918 feeds
+  # loses its <link> too. Nothing is mislabelled; a signal 83 of 918 feeds
   # depend on simply stops existing.
   "E812|1156|OWNG|$T_E8_LINK_NO_OWNER;$T_E8_LINK_BAD_EMAIL"
 
   # E813 stops the seam passing a feed host, so the exclusion is correct and
-  # unarmed. Every graph rail builds its own graph and stays green.
-  "E813|1157|EMPRO|$T_E8_SNAPSHOT;$T_E8_HOST_UNDET"
+  # unarmed. Every graph rail builds its own graph and stays green — and so, it
+  # turned out, did every seam rail, because they all have a <link> and an
+  # owner that DISAGREE and the precedence rule refuses the link first. The one
+  # rail that can see this is the case where both signals AGREE on the feed's
+  # own host, which is why that test exists.
+  "E813|1157|EMPRO|$T_E8_SEAM_HOST"
 
   # E814 reaches past `ingestRSSFeed` into the primitives at the seam. The
   # graph is right, the parser is right, and the precedence rule is bypassed.

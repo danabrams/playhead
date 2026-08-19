@@ -139,6 +139,14 @@ final class OwnershipGraphRSSTests: XCTestCase {
     }
 
     /// Agreement admits both — the same domain by two routes is one entry.
+    ///
+    /// The SOURCE assertion is what makes this test able to fail. Without it
+    /// the domain set is satisfied by the owner route alone, so a `<link>`
+    /// that was silently refused reads identical to one that was admitted —
+    /// measured, mutant E810 (the precedence guard inverted) left this test
+    /// green until the source was checked. `ingestRSSFeed` ingests the owner
+    /// first and the link second, so `.rssLink` can only be there if the link
+    /// was admitted.
     func testLinkIsAdmittedWhenItAgreesWithTheOwnerAddress() {
         var graph = OwnershipGraph(podcastId: "pod1", feedHostDomain: "simplecast.com")
         graph.ingestRSSFeed(
@@ -147,11 +155,12 @@ final class OwnershipGraphRSSTests: XCTestCase {
         )
 
         XCTAssertEqual(Set(graph.showOwnedDomains), Set(["myshow.com"]))
+        XCTAssertEqual(graph.entries["myshow.com"]?.source, .rssLink)
     }
 
     /// With no owner address the `<link>` is the only structural declaration
-    /// and nothing contradicts it, so it is admitted. 111 of 918 real feeds
-    /// are in exactly this position.
+    /// and nothing contradicts it, so it is admitted. 83 of 918 real feeds are
+    /// in exactly this position.
     func testLinkIsAdmittedWhenThereIsNoOwnerAddress() {
         var graph = OwnershipGraph(podcastId: "pod1", feedHostDomain: "simplecast.com")
         graph.ingestRSSFeed(linkURL: "https://www.myshow.com", itunesOwnerEmail: nil)

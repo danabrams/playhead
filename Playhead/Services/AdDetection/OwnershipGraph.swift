@@ -368,8 +368,9 @@ struct OwnershipGraph: Sendable, Equatable {
     /// Apple uses to verify who is entitled to the feed; `<link>` is "the URL
     /// of the website corresponding to the channel", which for a distributed
     /// show is the distributor's site. Measured over 918 real feeds
-    /// (2026-08-19): 757 carry both and **they disagree on 492 of them
-    /// (65 %)**, and the `<link>` domains that recur across shows are networks
+    /// (2026-08-19, `scripts/e8mg-feed-structure-survey.py`): 776 carry both
+    /// and **they disagree on 511 of them (65.9 %)**, and the `<link>`
+    /// domains that recur across shows are networks
     /// and platforms — iheart.com (41 shows), art19.com (38), spotify.com
     /// (23), siriusxm.com (22), wondery.com (17), libsyn.com (17),
     /// acast.com (14), simplecast.com (14).
@@ -387,8 +388,9 @@ struct OwnershipGraph: Sendable, Equatable {
     /// `<link>` alone, in exchange for one domain that is not the show's.
     ///
     /// When there is no owner address the `<link>` is admitted: it is then the
-    /// only structural declaration and nothing contradicts it (111 of the 918
-    /// are in that position). The feed-host exclusion still applies to it.
+    /// only structural declaration and nothing contradicts it — **83 of the
+    /// 918 are in that position**, and 26 of those 83 name the feed's own
+    /// host, which the exclusion refuses anyway.
     mutating func ingestRSSFeed(
         linkURL: String?,
         itunesOwnerEmail: String?

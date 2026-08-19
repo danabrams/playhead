@@ -266,6 +266,29 @@ struct MetadataActivationConfigTests {
         #expect(showOwned == ownership.showOwned)
     }
 
+    /// playhead-e8mg: the feed-host exclusion, isolated at the SEAM.
+    ///
+    /// Every other seam-level rail has a `<link>` and an owner that DISAGREE,
+    /// so the precedence rule refuses the link before the exclusion is ever
+    /// consulted — measured, that masked mutant E813 (`feedHostDomain: nil` at
+    /// the seam) completely. The case that isolates it is the one where both
+    /// structural signals AGREE and both name the feed's own host, which is
+    /// the 95-of-918 population `scripts/e8mg-feed-structure-survey.py`
+    /// measured for the owner route.
+    @Test("The feed host is refused at the seam even when both signals name it")
+    func seamRefusesTheFeedHostWhenBothStructuralSignalsNameIt() throws {
+        let ownership = EpisodeMetadataSnapshot.domainOwnership(
+            feedURL: try #require(URL(string: "https://feeds.megaphone.fm/theshow")),
+            siteURL: try #require(URL(string: "https://megaphone.fm/theshow")),
+            ownerEmail: "shows@megaphone.fm",
+            recentMetadata: [],
+            podcastId: "podcast-feed-host-at-seam"
+        )
+
+        #expect(ownership.showOwned.isEmpty)
+        #expect(ownership.ownershipUndetermined.isEmpty)
+    }
+
     /// End-to-end at the seam this bead exists for: a recurring sponsor
     /// domain must produce NO lexicon entry — not a negative one (which is
     /// what shipped) and not a positive one (which Dan declined pending a
