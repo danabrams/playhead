@@ -4005,10 +4005,17 @@ T_KM_WIRE_APP="PlayheadApp builds the snapshot from one graph and carries both s
 # `<itunes:email>`, an address after `</itunes:owner>`, or an Atom `rel="self"`
 # at all, so a real-bytes rail listed against them can only ever stay green —
 # and this engine calls a mutant SURVIVED when ANY listed rail stays green,
-# which is how six registration errors were reported as coverage holes. The
-# code was covered the whole time; the LIST claimed observers it had not
+# which is how SEVEN registration errors were reported as coverage holes (six
+# on the first run, and E818 on the second, where the refresh rail cannot see
+# an insert-path mutant because the refresh repairs what the insert skipped).
+# The code was covered the whole time; the LIST claimed observers it had not
 # measured. Every expectation below is now the set the mutant was OBSERVED to
 # redden, and a rail that cannot see a mutant belongs to a different one.
+#
+# E813 is the opposite case and the only genuine hole the series found: every
+# seam rail masked it, because they all have a <link> and an owner that
+# DISAGREE and the precedence rule refuses the link before the feed-host
+# exclusion is consulted. That one needed a new test, not a corrected list.
 #
 # XCTest rails are written Suite/method; the Swift Testing ones are verbatim
 # `@Test(...)` display names and may not contain a ';'.
@@ -10048,8 +10055,10 @@ MUTATIONS=(
   "E817|1161|PDISC|$T_E8_PERSIST_REFRESH"
 
   # E818 drops it on INSERT, so the field is nil for every podcast added after
-  # this ships and the whole bead is a no-op on a fresh install.
-  "E818|1162|PDISC|$T_E8_PERSIST_INSERT;$T_E8_PERSIST_REFRESH"
+  # this ships and the whole bead is a no-op on a fresh install. The refresh
+  # rail cannot see it — the refresh path still writes the field, so the second
+  # persist repairs what the first one skipped.
+  "E818|1162|PDISC|$T_E8_PERSIST_INSERT"
 
   # E899 — VACUITY CONTROL, and it MUST SURVIVE. The local holding the owner's
   # domain in `ingestRSSFeed` is renamed at its declaration and at both uses;
