@@ -338,6 +338,25 @@ enum SemanticSweepMarkComposer {
         }
     }
 
+    /// Where a band sits on the "the WEAKEST claim governs" order.
+    ///
+    /// `nil` — the model did not grade this, or the grade on the payload was
+    /// the RUNNER'S — sorts BELOW `.weak`, so a payload mixing an ungraded span
+    /// with a graded `.weak` one reports the ABSENCE rather than a grade nobody
+    /// gave. ``certaintyFactor(_:)`` reads the two alike (both 0.5), so this
+    /// last rung is invisible to the confidence product and load-bearing only
+    /// for a reader of the band itself — which is what keeps
+    /// ``certaintyFactor(of:)`` byte-identical across the refactor that
+    /// introduced ``certaintyBand(of:)``.
+    private static func bandRank(_ band: CertaintyBand?) -> Int {
+        switch band {
+        case nil: 0
+        case .weak: 1
+        case .moderate: 2
+        case .strong: 3
+        }
+    }
+
     /// How much the transcript the verdict was formed ON discounts it.
     ///
     /// ALSO BORROWED from `buildFMLedgerEntries`, which proxies a missing band
@@ -486,20 +505,44 @@ enum SemanticSweepMarkComposer {
     /// so a permissive coarse row is byte-identical to a genuine one. Filed as
     /// its own bead; it needs a schema change, not a read.
     static func certaintyFactor(of row: SemanticScanResult) -> Double {
+        certaintyFactor(certaintyBand(of: row))
+    }
+
+    /// THE MODEL'S OWN ``CertaintyBand`` for this row's presence claim, or
+    /// `nil` when it expressed none.
+    ///
+    /// This is the decode ``certaintyFactor(of:)`` has always performed;
+    /// playhead-yx0f lifted it out so a SECOND consumer —
+    /// `AdDetectionService.buildFMLedgerEntries`, which FABRICATED a band out
+    /// of `transcriptQuality` — could read the same persisted value through the
+    /// same decoder instead of growing a second one that would have to
+    /// re-derive the `ownershipInferenceWasSuppressed` rule below on its own.
+    /// The band, not the factor, is the shared quantity: the two lanes anchor
+    /// their ladders at different ceilings (`maximumMarkConfidence` here,
+    /// `FusionWeightConfig.fmCap` there).
+    ///
+    /// See ``certaintyFactor(of:)``'s documentation for the two payload shapes,
+    /// why the weakest span governs an array, and why a runner-hardcoded
+    /// permissive `.strong` is read as ungraded.
+    static func certaintyBand(of row: SemanticScanResult) -> CertaintyBand? {
         guard let data = row.spansJSON.data(using: .utf8) else {
-            return certaintyFactor(nil)
+            return nil
         }
         let decoder = JSONDecoder()
         if let support = try? decoder.decode(PersistedCertainty.self, from: data) {
-            return certaintyFactor(support.attributableBand)
+            return support.attributableBand
         }
         guard let spans = try? decoder.decode([PersistedCertainty].self, from: data),
               !spans.isEmpty else {
-            return certaintyFactor(nil)
+            return nil
         }
-        return spans
-            .map { certaintyFactor($0.attributableBand) }
-            .min() ?? certaintyFactor(nil)
+        // Seeded at the TOP of the order, so a non-empty array always returns
+        // one of its own members' bands.
+        return spans.reduce(CertaintyBand?.some(.strong)) { weakest, span in
+            bandRank(span.attributableBand) < bandRank(weakest)
+                ? span.attributableBand
+                : weakest
+        }
     }
 
     /// Count the PRESENCE-pass rows that examined this extent and say whether

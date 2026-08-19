@@ -8441,8 +8441,6 @@ actor AdDetectionService {
         return overlapping.map(\.adProbability).max() ?? 0.0
     }
 
-    /// Build FM ledger entries from SemanticScanResults overlapping the span.
-    /// Applies the Positive-Only Rule: only containsAd dispositions contribute.
     /// ef2.4.5: Minimal decode struct for extracting (commercialIntent, ownership)
     /// from `SemanticScanResult.spansJSON`. Mirrors the encoding in
     /// `BackfillJobRunner.EncodedRefinedSpan` but decodes only the two fields
@@ -8470,7 +8468,16 @@ actor AdDetectionService {
         }.max() ?? 1.0
     }
 
-    private func buildFMLedgerEntries(
+    /// Build FM ledger entries from `SemanticScanResult`s overlapping the span.
+    /// Applies the Positive-Only Rule: only `containsAd` dispositions
+    /// contribute.
+    ///
+    /// playhead-yx0f made this `internal` rather than `private`, for the same
+    /// reason `buildAcousticLedgerEntries` above it is: the band→weight ladder
+    /// is the whole behaviour of this function and there is no other seam from
+    /// which to observe it. `FMLedgerCertaintyBandTests` replays real persisted
+    /// `spansJSON` payloads through it.
+    func buildFMLedgerEntries(
         span: DecodedSpan,
         scanResults: [SemanticScanResult],
         mode: FMBackfillMode,
@@ -8487,10 +8494,74 @@ actor AdDetectionService {
             let overlapEnd = min(span.endTime, result.windowEndTime)
             guard overlapEnd > overlapStart else { return nil }
 
-            // Map scan result to a certainty band. The coarse scan
-            // carries transcript quality; use it as a band proxy.
-            // Strong quality → .moderate, degraded → .weak.
-            let band: CertaintyBand = result.transcriptQuality == .good ? .moderate : .weak
+            // playhead-yx0f: THE MODEL'S OWN BAND, read from the row this loop
+            // is already holding.
+            //
+            // It used to be FABRICATED out of `transcriptQuality` — "the coarse
+            // scan carries transcript quality; use it as a band proxy" — and
+            // the premise was false: every `containsAd` row persists the
+            // model's own `CertaintyBand` in `spansJSON`
+            // (`CoarseSupportSchema.certainty` on a `passA` object, each
+            // refined span's own band in a `passB` array). 55 of 55 coarse and
+            // 11 of 11 refined rows on the 2026-08-10 device pull carry one,
+            // split 40 `strong` / 15 `moderate`. Three consequences, all in one
+            // direction: the proxy could never return `.strong`, so the `fmCap`
+            // rung of the ladder below was DEAD CODE at this call site; a
+            // `moderate` verdict and a `strong` verdict on the same clean
+            // transcript weighed the same; and the quantity being read was not
+            // the one being reported — `transcriptQuality` is a deterministic
+            // on-device estimate of ASR cleanliness
+            // (`TranscriptQualityEstimator`), the band is the model's
+            // confidence in ITS OWN verdict, and `FoundationModelClassifier`
+            // keeps quality OUT of the `@Generable` schema for exactly that
+            // reason.
+            //
+            // ONE DECODER, shared with the sweep lane. Both payload shapes,
+            // the weakest span governing an array, and — the part a second
+            // decoder written here would have got wrong — a runner-HARDCODED
+            // permissive-bypass `.strong` read as UNGRADED
+            // (`ownershipInferenceWasSuppressed`, playhead-92im review).
+            //
+            // NO BAND ⇒ `.weak`, DELIBERATELY, AND NOT THE OLD PROXY. Three
+            // options were available and only one of them is honest. Falling
+            // back to `transcriptQuality` would reinstate this bead's defect
+            // for whatever population takes the fallback — the failure mode
+            // where a fix survives only on the rows nobody checks. Dropping the
+            // entry would silently delete FM evidence for a verdict the model
+            // did make, which is a reach change nobody asked for. `.weak` is
+            // the FLOOR of the ladder, and an absence of evidence must never
+            // read like the presence of evidence; it is also exactly what the
+            // sibling lane's `certaintyFactor(nil)` already returns, so the two
+            // lanes read one FM verdict the same way. It is the conservative
+            // direction — an ungraded row on a `good` transcript now weighs
+            // 0.5·fmCap where the proxy gave it 0.75·fmCap — and on the pull
+            // this bead was filed from the population is EMPTY: zero of the 66
+            // `containsAd` rows carry an empty support payload.
+            //
+            // TWO OPEN LIMITS, NAMED RATHER THAN ABSORBED. Neither is fixed
+            // here; both are filed.
+            //
+            //   * playhead-e15r (P1, OPEN) can LAUNDER a fabricated band past
+            //     the gate above. `BackfillJobRunner.unionSpan` copies
+            //     `certainty` from whichever input ranks higher while ANDing
+            //     `ownershipInferenceWasSuppressed`, so a permissive `.strong`
+            //     unioned with a genuine `.moderate` persists as a `.strong`
+            //     with the flag CLEARED — byte-indistinguishable at rest from a
+            //     model grade. That path is LIVE (Dan's 2026-08-11 triage
+            //     corrected the bead's own "latent" premise). So this read is
+            //     honest for every row `unionSpan` did not touch, and e15r is
+            //     what makes it honest for the rest.
+            //
+            //   * playhead-dslt (P1) is THIS defect in the SUPPRESSION lane.
+            //     `FMSuppressionWindow.votingWindows` still fabricates a band
+            //     out of `transcriptQuality`, and `FMSuppressionGuard` spends
+            //     it on two of its five strict guards. It CANNOT be fixed by
+            //     copying this line: a `noAds` row carries no band at rest at
+            //     all — 51 of 51 on the same pull persist `spansJSON == "[]"`,
+            //     because `CoarseSupportSchema.support` is a positive-only
+            //     notion. Reading honestly there disables FM suppression
+            //     outright, which is a reach decision and not a cleanup.
+            let band = SemanticSweepMarkComposer.certaintyBand(of: result) ?? .weak
 
             // Weight proportional to band.
             let weight: Double
