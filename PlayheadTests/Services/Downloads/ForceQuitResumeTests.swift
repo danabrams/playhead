@@ -598,9 +598,17 @@ struct EpisodeDownloadDelegateResumeHarvestTests {
         defer { try? FileManager.default.removeItem(at: dir) }
 
         let recorder = HyhtRecorder()
+        // playhead-7wia: the retry probe at the end of this test used to run
+        // against the process-wide `BackgroundSessionIO.shared` queue. See
+        // `daemonSilentSessionIO` for the measurement; the short version is
+        // that the probe's `downloadTask(with:)` never got a thread and the
+        // test read the resulting REFUSAL as a stuck retry guard.
+        let violations = RecordedInvariantViolations()
         let manager = DownloadManager(
             cacheDirectory: dir,
-            workJournalRecorder: recorder
+            workJournalRecorder: recorder,
+            sessionIO: daemonSilentSessionIO(),
+            invariantRecorder: violations.recorder
         )
         try await manager.bootstrap()
 
@@ -649,21 +657,12 @@ struct EpisodeDownloadDelegateResumeHarvestTests {
         let ids = await manager.persistedResumeDataEpisodeIds()
         #expect(ids.contains("ep-g2wq-harvest"))
 
-        let admissions =
-            await manager._backgroundDownloadAdmissionCountForTesting()
-        await manager.backgroundDownload(
+        await expectRetryReachesTheDaemon(
+            manager,
             episodeId: "ep-g2wq-harvest",
-            from: URL(string: "https://example.invalid/retry.mp3")!,
-            context: .unattributed(
-                reason: .testHarness, isExplicitDownload: false
-            )
-        )
-        #expect(
-            await manager._backgroundDownloadAdmissionCountForTesting()
-                == admissions + 1,
+            violations: violations,
             "a terminal resumable failure must release the retry guard"
         )
-        await manager.cancelDownload(episodeId: "ep-g2wq-harvest")
     }
 
     @Test("didCompleteWithError skips harvest when NSURLSessionDownloadTaskResumeData is absent")
@@ -672,9 +671,16 @@ struct EpisodeDownloadDelegateResumeHarvestTests {
         defer { try? FileManager.default.removeItem(at: dir) }
 
         let recorder = HyhtRecorder()
+        // playhead-7wia: see the sibling test above, and
+        // `daemonSilentSessionIO` for the measurement. This episode is the one
+        // whose `downloadTask(with:)` was FIRST onto the shared queue and held
+        // it for the other three.
+        let violations = RecordedInvariantViolations()
         let manager = DownloadManager(
             cacheDirectory: dir,
-            workJournalRecorder: recorder
+            workJournalRecorder: recorder,
+            sessionIO: daemonSilentSessionIO(),
+            invariantRecorder: violations.recorder
         )
         try await manager.bootstrap()
 
@@ -717,21 +723,12 @@ struct EpisodeDownloadDelegateResumeHarvestTests {
         let loaded = try await manager.loadResumeData(episodeId: "ep-g2wq-no-blob")
         #expect(loaded == nil)
 
-        let admissions =
-            await manager._backgroundDownloadAdmissionCountForTesting()
-        await manager.backgroundDownload(
+        await expectRetryReachesTheDaemon(
+            manager,
             episodeId: "ep-g2wq-no-blob",
-            from: URL(string: "https://example.invalid/retry.mp3")!,
-            context: .unattributed(
-                reason: .testHarness, isExplicitDownload: false
-            )
-        )
-        #expect(
-            await manager._backgroundDownloadAdmissionCountForTesting()
-                == admissions + 1,
+            violations: violations,
             "a terminal non-resumable failure must release the retry guard"
         )
-        await manager.cancelDownload(episodeId: "ep-g2wq-no-blob")
     }
 }
 

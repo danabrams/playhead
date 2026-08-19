@@ -890,37 +890,6 @@
       "seen_runs": 8,
       "source": "TranscriptEngineFailureEventTests.swift"
     },
-    "swift-testing::delegate staging failure releases ownership and permits retry": {
-      "failed_runs": 5,
-      "framework": "swift-testing",
-      "kinds": [
-        "assertion"
-      ],
-      "name": "delegate staging failure releases ownership and permits retry",
-      "seen_runs": 8,
-      "source": "BackgroundURLSessionTests.swift"
-    },
-    "swift-testing::didCompleteWithError harvests NSURLSessionDownloadTaskResumeData and writes it to resumeDataDirectory": {
-      "failed_runs": 5,
-      "framework": "swift-testing",
-      "kinds": [
-        "assertion",
-        "timeout"
-      ],
-      "name": "didCompleteWithError harvests NSURLSessionDownloadTaskResumeData and writes it to resumeDataDirectory",
-      "seen_runs": 8,
-      "source": "ForceQuitResumeTests.swift"
-    },
-    "swift-testing::didCompleteWithError skips harvest when NSURLSessionDownloadTaskResumeData is absent": {
-      "failed_runs": 2,
-      "framework": "swift-testing",
-      "kinds": [
-        "assertion"
-      ],
-      "name": "didCompleteWithError skips harvest when NSURLSessionDownloadTaskResumeData is absent",
-      "seen_runs": 2,
-      "source": "ForceQuitResumeTests.swift"
-    },
     "swift-testing::didCompleteWithError(URLError.notConnectedToInternet) emits noNetwork": {
       "failed_runs": 2,
       "framework": "swift-testing",

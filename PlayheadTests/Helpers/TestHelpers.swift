@@ -4,6 +4,8 @@
 import Darwin
 import Foundation
 import SQLite3
+import Testing
+import os
 @testable import Playhead
 
 /// Vestigial compatibility shim. Originally tracked temp dirs for cleanup in
@@ -952,5 +954,176 @@ func makeShard(
         startTime: startTime,
         duration: duration,
         samples: [Float](repeating: 0, count: 16000 * Int(duration))
+    )
+}
+
+// MARK: - Background download retry probe (playhead-7wia)
+
+/// A `DownloadManager.sessionIO` double with **no bound to trip**, for a test
+/// whose subject is the download BOOKKEEPING rather than the daemon.
+///
+/// `.neverAnswers` is answered by a synchronous `return nil` at the top of
+/// `BackgroundSessionIO.perform` — before the work queue is touched and before
+/// the deadline is armed. So a manager built with this one makes no XPC call,
+/// waits on no timer, and shares no queue with anything.
+///
+/// ─────────────────────────────────────────────────────────────────────────
+/// WHY, MEASURED — and the number was never the mechanism
+/// ─────────────────────────────────────────────────────────────────────────
+/// The default `BackgroundSessionIO.shared` is a process-wide SINGLETON with
+/// ONE serial queue, and every `DownloadManager` that does not inject submits
+/// `downloadTask(with:)`, `resume()` and the abandon-path `cancel()` onto it.
+/// Four tests in the fast plan reach that queue, and in every preserved
+/// full-plan log they fail together, always the same four:
+///
+///     downloadTask(with:) for ep-g2wq-no-blob   … did not answer within 10s
+///     downloadTask(with:) for ep-g2wq-harvest   … did not answer within 10s
+///     downloadTask(with:) for ep-stage-failure  … did not answer within 10s
+///     downloadTask(with:) for kkzu-unattributed … did not answer within 10s
+///
+/// and then, 50–63 SECONDS LATER, three of the four arrive on one thread
+/// microseconds apart, in submission order:
+///
+///     downloadTask(with:) for ep-stage-failure:  reached the daemon queue
+///         after its caller had already given up — not started
+///
+/// That last line is the whole diagnosis. Their bodies NEVER RAN. They were
+/// queued behind the first one, whose `session.downloadTask(with:)` parked
+/// inside `nsurlsessiond` for the better part of a minute while every
+/// concurrent download test in the plan hammered the same background session
+/// identifier. WIDENING THE BOUND WOULD NOT HAVE HELPED and would have made it
+/// worse: at 60 s these calls are still queued, and the one test in the family
+/// that carries `.timeLimit(.minutes(1))` would have traded an assertion
+/// failure for a timeout. The fix is to stop being on that queue at all.
+///
+/// The PRODUCTION bound is not the thing to touch (playhead-nsjn /
+/// playhead-gpdb / playhead-ola7): attaching to `nsurlsessiond` from the
+/// cooperative pool is a process-wide deadlock with no timeout, no spinner and
+/// no crash report. This is the DOUBLE. `timeout` is stated as the production
+/// default rather than some large number precisely so that nobody reads this
+/// helper as a widened bound — `.neverAnswers` never arms it.
+func daemonSilentSessionIO(
+    labelledFor test: String = #function
+) -> BackgroundSessionIO {
+    BackgroundSessionIO(
+        behavior: .neverAnswers,
+        timeout: BackgroundSessionIO.defaultTimeout,
+        queueLabel: "7wia.test.\(test).\(UUID().uuidString)"
+    )
+}
+
+/// Collects what a `DownloadManager` wrote to the surface-status invariant
+/// stream. In production that closure is
+/// `SurfaceStatusInvariantLogger.invariantViolated`.
+final class RecordedInvariantViolations: @unchecked Sendable {
+    private let entries = OSAllocatedUnfairLock<
+        [(code: InvariantViolation.Code, description: String)]
+    >(initialState: [])
+
+    var recorder: @Sendable (InvariantViolation.Code, String) -> Void {
+        { [entries] code, description in
+            entries.withLock { $0.append((code, description)) }
+        }
+    }
+
+    /// Descriptions of every recorded background-session refusal.
+    var sessionRefusals: [String] {
+        entries.withLock { list in
+            list.filter { $0.code == .backgroundSessionCreationRefused }
+                .map(\.description)
+        }
+    }
+
+    /// Refusals raised by one request site — the sites are
+    /// `DownloadManager.BackgroundSessionRequestSite` raw values, e.g.
+    /// `background_download`.
+    func sessionRefusals(from site: String) -> [String] {
+        sessionRefusals.filter { $0.contains("site=\(site)") }
+    }
+}
+
+/// The retry probe three download terminal-failure tests share: after a
+/// transfer has failed terminally, a fresh `backgroundDownload` for the same
+/// episode must get PAST the in-flight guard.
+///
+/// ─────────────────────────────────────────────────────────────────────────
+/// WHAT IT ASSERTS, AND WHY IT NO LONGER ASSERTS A COUNTER (playhead-7wia)
+/// ─────────────────────────────────────────────────────────────────────────
+/// All three tests used to read `_backgroundDownloadAdmissionCountForTesting`
+/// going up as "the call did its job". It is not the same claim.
+/// `backgroundDownload` increments that counter only AFTER two guarded early
+/// returns, and both of them are the product working as designed: an
+/// unanswered daemon is a documented, deliberate REFUSAL — the reservation is
+/// released, the attribution sidecar is dropped, and the episode stays
+/// retryable. So the old assertion could not tell "the retry guard is stuck"
+/// from "the daemon refused", and on a loaded box it reported the second as
+/// the first, on every merge gate, for long enough to be written into
+/// `scripts/gate-baseline.PlayheadFastTests.json` as three permanent entries.
+///
+/// The OUTCOME these tests actually want is one step earlier and is
+/// daemon-free: did the call REACH the daemon crossing? With a
+/// `daemonSilentSessionIO` manager the crossing is refused synchronously and
+/// `backgroundSession(for:requestedBy:)` RECORDS the refusal on the
+/// surface-status invariant stream, tagged with the request site. So:
+///
+///   * one new `site=background_download` refusal → the guard released and
+///     the retry ran (what the test wants to prove);
+///   * none, and the episode still holds its in-flight slot → the guard is
+///     stuck, which is the regression these tests exist for;
+///   * none, and it does not → the call returned at one of the earlier guards
+///     (already cached, foreground stream active).
+///
+/// The admission count is kept as a VACUITY CONTROL rather than as the
+/// verdict: `.neverAnswers` cannot admit anything, so a count that moved means
+/// the manager was built without the double and the test has quietly gone back
+/// to racing the real `nsurlsessiond`.
+func expectRetryReachesTheDaemon(
+    _ manager: DownloadManager,
+    episodeId: String,
+    violations: RecordedInvariantViolations,
+    _ because: String,
+    sourceLocation: SourceLocation = #_sourceLocation
+) async {
+    let admissionsBefore =
+        await manager._backgroundDownloadAdmissionCountForTesting()
+    let refusalsBefore =
+        violations.sessionRefusals(from: "background_download").count
+
+    await manager.backgroundDownload(
+        episodeId: episodeId,
+        from: URL(string: "https://example.invalid/retry.mp3")!,
+        context: .unattributed(reason: .testHarness, isExplicitDownload: false)
+    )
+
+    let refusals = violations.sessionRefusals(from: "background_download")
+    let stillHeld = await manager._isBackgroundDownloadInFlightForTesting(
+        episodeId: episodeId
+    )
+    let admissionsAfter =
+        await manager._backgroundDownloadAdmissionCountForTesting()
+
+    #expect(
+        refusals.count == refusalsBefore + 1,
+        """
+        \(because) — the retry for \(episodeId) never reached the daemon \
+        crossing. \(refusals.count - refusalsBefore) refusals were recorded \
+        for site=background_download, expected 1; the episode \
+        \(stillHeld ? "STILL HOLDS" : "does not hold") its in-flight slot. \
+        Still holding it means the guard was not released, which is the \
+        regression this test exists for; not holding it means the call \
+        returned at an earlier guard.
+        """,
+        sourceLocation: sourceLocation
+    )
+    #expect(
+        admissionsAfter == admissionsBefore,
+        """
+        VACUITY CONTROL: this manager is built with `daemonSilentSessionIO`, \
+        which refuses every crossing synchronously, so nothing can ever be \
+        admitted. An admission count that moved from \(admissionsBefore) to \
+        \(admissionsAfter) means the double is not installed and this test is \
+        racing the real background transfer daemon again.
+        """,
+        sourceLocation: sourceLocation
     )
 }

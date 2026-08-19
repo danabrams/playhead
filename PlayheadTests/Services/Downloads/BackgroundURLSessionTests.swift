@@ -406,9 +406,16 @@ struct DelegateWorkJournalTests {
         let dir = try makeTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
         let recorder = RecordingWorkJournal()
+        // playhead-7wia: the retry probe below used to run against the
+        // process-wide `BackgroundSessionIO.shared` queue and read the
+        // resulting REFUSAL as a stuck ownership release. See
+        // `daemonSilentSessionIO` for the measurement.
+        let violations = RecordedInvariantViolations()
         let manager = DownloadManager(
             cacheDirectory: dir,
-            workJournalRecorder: recorder
+            workJournalRecorder: recorder,
+            sessionIO: daemonSilentSessionIO(),
+            invariantRecorder: violations.recorder
         )
         try await manager.bootstrap()
         let delegate = await manager.sessionDelegateForTesting()
@@ -443,20 +450,12 @@ struct DelegateWorkJournalTests {
         )
         #expect(await recorder.finalized.isEmpty)
 
-        let admissions =
-            await manager._backgroundDownloadAdmissionCountForTesting()
-        await manager.backgroundDownload(
+        await expectRetryReachesTheDaemon(
+            manager,
             episodeId: episodeId,
-            from: URL(string: "https://example.invalid/retry.mp3")!,
-            context: .unattributed(
-                reason: .testHarness, isExplicitDownload: false
-            )
+            violations: violations,
+            "a staging failure must release ownership so a retry is admitted"
         )
-        #expect(
-            await manager._backgroundDownloadAdmissionCountForTesting()
-                == admissions + 1
-        )
-        await manager.cancelDownload(episodeId: episodeId)
     }
 
     @Test("urlSessionDidFinishEvents invokes the pending completion handler")
