@@ -579,7 +579,12 @@ struct MergedChildRowDedupeV40MigrationTests {
         // same table V49 wrote to and the same table this fixture never
         // populates, so it changes nothing here either. Read rather than
         // assumed, which is the whole point of restating this per rung.
-        #expect(AnalysisStore.currentSchemaVersion == 57)
+        // 57 → 58 read for this rung (playhead-scc6): V58 resets the PER-CLASS
+        // `observationCount` inside `podcast_profiles.detectorTrustJSON` — the
+        // mirror V49 reset the show scalar without reaching. Third rung in a row
+        // on `podcast_profiles`, and the third time it is irrelevant here for the
+        // same reason: this fixture never writes that table.
+        #expect(AnalysisStore.currentSchemaVersion == 58)
 
         let db = try openRaw(dir)
         defer { sqlite3_close_v2(db) }

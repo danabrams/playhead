@@ -71,7 +71,7 @@ struct BackfillJobIdentityV44MigrationTests {
         // and never on `jobId`, `analysisAssetId` or the identity columns this
         // rung is about. A store with no `semantic_scan_results` rows at all is
         // a no-op for it.
-        #expect(AnalysisStore.currentSchemaVersion == 57)
+        #expect(AnalysisStore.currentSchemaVersion == 58)
 
         try await store.insertAsset(makeAsset(id: "asset-fresh"))
         try await store.insertBackfillJob(
@@ -168,7 +168,14 @@ struct BackfillJobIdentityV44MigrationTests {
         //
         // playhead-g7ln: V57 (the trait-profile episode-count reset). Same
         // move, same reason the pin is kept.
-        #expect(try await store.schemaVersion() == 57)
+        //
+        // playhead-scc6: V58 (the per-class `observationCount` inside
+        // `detectorTrustJSON`). Same move again — and note that this is the pin
+        // that reads the version OFF THE DATABASE rather than off the constant,
+        // so a sweep that greps only for `currentSchemaVersion` misses it. That
+        // is the trap g7ln hit; it is recorded here because this line is where
+        // it lands.
+        #expect(try await store.schemaVersion() == 58)
         #expect(try await store.fetchBackfillJob(byId: "fm-legacy-complete") == nil,
                 "a completed row minted under the old preimage cannot be addressed again")
         #expect(try await store.fetchBackfillJob(byId: "fm-legacy-queued") == nil,

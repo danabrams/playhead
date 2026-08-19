@@ -1971,7 +1971,7 @@ actor AnalysisStore {
     /// assertions automatically follow the production constant — hardcoding
     /// the integer in tests has been a recurring source of stale-assertion
     /// flakes whenever the schema bumps.
-    nonisolated static let currentSchemaVersion = 57
+    nonisolated static let currentSchemaVersion = 58
 
     /// H1: minimum age (in seconds) a `backfill_jobs` / `final_pass_jobs`
     /// row stuck in `status='running'` must reach before the launch-time
@@ -2931,6 +2931,11 @@ actor AnalysisStore {
             // `episodesObserved` counted in BACKFILLS. Repairs the JSON in
             // place, resetting only that one key — see the block comment.
             try migrateTraitProfileEpisodeCountV57IfNeeded()
+            // playhead-scc6: `podcast_profiles.detectorTrustJSON` carries a
+            // PER-CLASS `observationCount` that V49 reset the show scalar
+            // without ever reaching. Repairs the JSON in place, resetting only
+            // that one key on every entry — see the block comment.
+            try migrateDetectorTrustObservationCountV58IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -3338,6 +3343,12 @@ actor AnalysisStore {
         // fixture without `podcast_profiles` — or one whose profiles were
         // written by this binary — still reaches v57.
         try migrateTraitProfileEpisodeCountV57IfNeeded()
+        // playhead-scc6 (v58): guarded on `tableExists`, and every row-level
+        // repair is guarded on the column being non-NULL, DECODABLE and
+        // carrying a non-zero per-class count, so a seeded fixture without
+        // `podcast_profiles` — or one whose profiles have never forked a
+        // ledger — still reaches v58.
+        try migrateDetectorTrustObservationCountV58IfNeeded()
     }
     #endif
 
@@ -8353,6 +8364,161 @@ actor AnalysisStore {
             )
         }
         try setSchemaVersion(57)
+    }
+
+    // MARK: V58 — the PER-CLASS mirror of the count V49 reset (playhead-scc6)
+    //
+    // WHY THERE IS A MIGRATION AT ALL. playhead-2qz6's V49 corrected
+    // `podcast_profiles.observationCount` from a per-backfill unit to a
+    // per-episode one with a single statement —
+    // `UPDATE podcast_profiles SET observationCount = 0` — and that statement
+    // reaches ONE of the two places the quantity lives. The other is
+    // `podcast_profiles.detectorTrustJSON`, where `DetectorTrustLedger` stores a
+    // PER-CLASS `observationCount` for every materialized entry, in a different
+    // column of the same table.
+    //
+    // The mirror is the copy that decides things. `TrustScoringService
+    // .resolveDetectorModes` returns the STORED entry in preference to the seed,
+    // and `SkipOrchestrator.skipMode(for:)` reads the PER-CLASS verdict rather
+    // than `profile.mode`. So a device whose ledger has forked runs its skip gate
+    // off numbers V49 never corrected.
+    //
+    // THE FIELD STATE MOVED WHILE THIS SAT OPEN, and that is the reason it is
+    // being done now rather than deferred again. The bead was filed against the
+    // 2026-08-12 pull, on which `detectorTrustJSON` was NULL on both shows — a
+    // defect with zero instances. On all four pulls of 2026-08-18 the column is
+    // NON-NULL on both shows, four entries each, and the per-class counts read:
+    //
+    //   simplecast  fusion 16 · segmentAggregated 1 · userAsserted 0 · rediff 0
+    //   flightcast  fusion 10 · segmentAggregated 5 · userAsserted 5 · rediff 0
+    //
+    // against `trust_episode_observations` row counts of **8 and 7** — which is
+    // exactly what the show scalar reads, because V49 gave that column a ledger
+    // and this one has none. Sixteen against eight is the whole bead in two
+    // numbers.
+    //
+    // WHY ZERO. V57 had a faithful-looking reconstruction available (the episode
+    // ledger) and declined it; here there is not even that. A per-class counter is
+    // advanced once per GESTURE by `applyCorrectObservation` and once per named
+    // detector per CALL by `applySuccessfulObservation`, and NEITHER is gated on
+    // the `trust_episode_observations` claim — deliberately, and playhead-p1w3
+    // owns changing it. So the number on disk counts WRITES. Nothing in the row
+    // records how many episodes they came from, and the one reader
+    // (`evaluatePromotion`'s `observations` argument) is asking about episodes.
+    // Zero says "we do not know", which is true, and it is the same answer V49
+    // and V57 gave for the same reason.
+    //
+    // WHAT IS DELIBERATELY NOT TOUCHED, because the repair is one key:
+    //
+    //   * `mode` — moving it would be a promotion or a demotion nobody chose.
+    //     V49's contract, restated. Consequently this rung changes NO tier and
+    //     flips NO `skipMode(for:)` verdict on the day it runs; what it changes
+    //     is what the NEXT observation is allowed to buy.
+    //   * `trustScore` and `falseSkipWeight` — the second is a record of the
+    //     listener's own vetoes and resetting it would relitigate their decision.
+    //   * every other column, and every other profile row.
+    //
+    // A KEY THIS BINARY DOES NOT RECOGNISE IS REPAIRED AND KEPT. The repair walks
+    // the decoded DICTIONARY rather than `SkipDetectorClass.allCases`, because a
+    // class added by a newer build stores its count in the same unit and
+    // `DetectorTrustLedger`'s whole storage argument is that an unknown key
+    // survives a round trip.
+    //
+    // THE POPULATION IS THE READABLE ONE, exactly as in V57: a column this decoder
+    // rejects is ALREADY read as an EMPTY ledger by
+    // `PodcastProfile.detectorTrustLedger`, under which every class falls back to
+    // its seed — so no inflated per-class count survives to be read, and there is
+    // nothing to repair. Destroying the blob would be a repair inventing work.
+    //
+    // THE LIMIT, stated rather than discovered later: like V49 and V57, no
+    // per-row predicate can tell a legitimately-earned 3 from a gesture-inflated
+    // 3, because the fact that separates them — which unit wrote it — was never
+    // recorded. A deliberate stamp rewind therefore resets a real count. It is
+    // not a field state: nothing rewinds `schema_version` and both production
+    // entry points climb monotonically. The `!= 0` predicate below is a COST
+    // guard, not an already-migrated marker.
+
+    /// V58 migration — reset the PER-CLASS `observationCount` inside every
+    /// readable `podcast_profiles.detectorTrustJSON`, the mirror V49 did not
+    /// reach. Idempotent: the version ladder is the guard.
+    private func migrateDetectorTrustObservationCountV58IfNeeded() throws {
+        let observed = (try schemaVersion() ?? 1)
+        guard observed < 58 else { return }
+        // DO NOT STEP OVER A ROLLED-BACK V39 — same rationale as V40–V57.
+        guard observed >= 57 else { return }
+        guard try tableExists("podcast_profiles") else {
+            try setSchemaVersion(58)
+            return
+        }
+
+        // Read every profile that carries a ledger, then repair outside the read
+        // loop — a statement stepping over `podcast_profiles` while an UPDATE
+        // rewrites the same table is undefined in SQLite. V57's rule, same table.
+        struct PendingLedgerReset {
+            let podcastId: String
+            let was: [Int]
+            let repaired: String
+        }
+        var pending: [PendingLedgerReset] = []
+        let readStmt = try prepare(
+            "SELECT podcastId, detectorTrustJSON FROM podcast_profiles WHERE detectorTrustJSON IS NOT NULL"
+        )
+        while sqlite3_step(readStmt) == SQLITE_ROW {
+            let podcastId = text(readStmt, 0)
+            // `try?`, not `try`: see "THE POPULATION IS THE READABLE ONE" above.
+            let decoded = (try? decodeJSON(DetectorTrustLedger.self, from: optionalText(readStmt, 1))) ?? nil
+            guard let ledger = decoded else { continue }
+            let inflated = ledger.entries.values.map(\.observationCount).filter { $0 != 0 }
+            guard !inflated.isEmpty else { continue }
+            // Every field but the count is carried through verbatim, and the
+            // dictionary is rebuilt key-for-key so an unrecognised class keeps
+            // its entry.
+            let honest = DetectorTrustLedger(
+                entries: ledger.entries.mapValues { entry in
+                    DetectorTrustEntry(
+                        trustScore: entry.trustScore,
+                        mode: entry.mode,
+                        falseSkipWeight: entry.falseSkipWeight,
+                        observationCount: 0
+                    )
+                }
+            )
+            guard let repaired = try encodeJSONString(honest) else { continue }
+            pending.append(
+                PendingLedgerReset(
+                    podcastId: podcastId,
+                    was: inflated.sorted(by: >),
+                    repaired: repaired
+                )
+            )
+        }
+        sqlite3_finalize(readStmt)
+
+        for reset in pending {
+            let stmt = try prepare(
+                "UPDATE podcast_profiles SET detectorTrustJSON = ? WHERE podcastId = ?"
+            )
+            defer { sqlite3_finalize(stmt) }
+            bind(stmt, 1, reset.repaired)
+            bind(stmt, 2, reset.podcastId)
+            try step(stmt, expecting: SQLITE_DONE)
+        }
+
+        if !pending.isEmpty {
+            // The repair destroys its own evidence: after this UPDATE nothing
+            // anywhere says the count was 16. The withdrawn counts travel in the
+            // log so a later pull can still tell a repaired store from one that
+            // was never forked. V57's argument, same shape.
+            let withdrawn = pending
+                .flatMap(\.was)
+                .sorted(by: >)
+                .map(String.init)
+                .joined(separator: ",")
+            logger.notice(
+                "playhead-scc6 V58: reset the per-class observationCount to 0 in \(pending.count, privacy: .public) detectorTrustJSON ledger(s); the counts withdrawn were \(withdrawn, privacy: .public), every one of them a count of WRITES rather than of episodes. No entry's mode, trustScore or falseSkipWeight moved, so no tier changed and no skip verdict flipped today; what changes is that a class must earn its next promotion on episodes the claim ledger can witness."
+            )
+        }
+        try setSchemaVersion(58)
     }
 
     /// playhead-kg8h: durably CLAIM one REQUESTED day-0 kickoff, before any of
