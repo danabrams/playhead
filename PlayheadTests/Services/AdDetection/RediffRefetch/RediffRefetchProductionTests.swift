@@ -110,7 +110,7 @@ struct RediffRefetchStateV28MigrationTests {
         // `transcript_chunks` rows and builds a UNIQUE index on that table. It
         // names neither the V28 `rediff_refetch_state` tables probed below nor
         // the bandwidth-totals table, so nothing this rung asserts moves.
-        #expect(AnalysisStore.currentSchemaVersion == 56)
+        #expect(AnalysisStore.currentSchemaVersion == 57)
         // Probe by using the API — both tables must be queryable.
         #expect(try await store.fetchRediffRefetchStates().isEmpty)
         #expect(try await store.fetchRediffBandwidthTotals() == RediffBandwidthTotals())

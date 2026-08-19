@@ -71,7 +71,7 @@ struct BackfillJobIdentityV44MigrationTests {
         // and never on `jobId`, `analysisAssetId` or the identity columns this
         // rung is about. A store with no `semantic_scan_results` rows at all is
         // a no-op for it.
-        #expect(AnalysisStore.currentSchemaVersion == 56)
+        #expect(AnalysisStore.currentSchemaVersion == 57)
 
         try await store.insertAsset(makeAsset(id: "asset-fresh"))
         try await store.insertBackfillJob(
@@ -165,7 +165,10 @@ struct BackfillJobIdentityV44MigrationTests {
         // worth keeping: the literal is what caught the V56 bump (this test was
         // RED on the 6gcy branch until this line moved), and the prose is what
         // stopped saying why.
-        #expect(try await store.schemaVersion() == 56)
+        //
+        // playhead-g7ln: V57 (the trait-profile episode-count reset). Same
+        // move, same reason the pin is kept.
+        #expect(try await store.schemaVersion() == 57)
         #expect(try await store.fetchBackfillJob(byId: "fm-legacy-complete") == nil,
                 "a completed row minted under the old preimage cannot be addressed again")
         #expect(try await store.fetchBackfillJob(byId: "fm-legacy-queued") == nil,

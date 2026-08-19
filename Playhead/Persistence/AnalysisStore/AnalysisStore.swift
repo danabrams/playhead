@@ -1971,7 +1971,7 @@ actor AnalysisStore {
     /// assertions automatically follow the production constant — hardcoding
     /// the integer in tests has been a recurring source of stale-assertion
     /// flakes whenever the schema bumps.
-    nonisolated static let currentSchemaVersion = 56
+    nonisolated static let currentSchemaVersion = 57
 
     /// H1: minimum age (in seconds) a `backfill_jobs` / `final_pass_jobs`
     /// row stuck in `status='running'` must reach before the launch-time
@@ -2927,6 +2927,10 @@ actor AnalysisStore {
             // ONE sample per row and deliberately claims no more — see the
             // block comment on the migration.
             try migrateSemanticScanLatencyHistoryV56IfNeeded()
+            // playhead-g7ln: `podcast_profiles.traitProfileJSON` carried an
+            // `episodesObserved` counted in BACKFILLS. Repairs the JSON in
+            // place, resetting only that one key — see the block comment.
+            try migrateTraitProfileEpisodeCountV57IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -3329,6 +3333,11 @@ actor AnalysisStore {
         // `semantic_scan_results` — or one already carrying the V56 shape —
         // still reaches v56.
         try migrateSemanticScanLatencyHistoryV56IfNeeded()
+        // playhead-g7ln (v57): guarded on `tableExists`, and every row-level
+        // repair is guarded on the key being present and non-zero, so a seeded
+        // fixture without `podcast_profiles` — or one whose profiles were
+        // written by this binary — still reaches v57.
+        try migrateTraitProfileEpisodeCountV57IfNeeded()
     }
     #endif
 
@@ -8180,6 +8189,170 @@ actor AnalysisStore {
             "playhead-6gcy V56: semantic_scan_results carries latencyMsTotal/latencyMsMax/latencySampleCount; latencyMs stops being the only cost a retried row remembers. Every pre-V56 row is seeded at ONE sample — the per-attempt costs before this migration were destroyed by the upserts and are not reconstructible, so the SPREAD starts now while the surviving sample is repaired exactly."
         )
         try setSchemaVersion(56)
+    }
+
+    // MARK: V57 — the TRAIT profile's episode count is episodes (playhead-g7ln)
+    //
+    // THIS MIGRATION RESETS DATA, deliberately, and it is the fifth quantity in
+    // this family. Read V49's block comment first: this is the identical unit
+    // defect, one column over, and V49 could not have caught it.
+    //
+    // WHAT WAS WRONG. `ShowTraitProfile.episodesObserved` is documented "number
+    // of episodes that have contributed to this profile".
+    // `ShowTraitProfile.updated(from:)` adds one on every call, and its only
+    // production caller — `AdDetectionService.updatePriors` — ran once per
+    // completed `runBackfill`. An asset is backfilled many times, so the value
+    // counted BACKFILLS. Measured on the 2026-08-18 t3 device pull, against the
+    // `trust_episode_observations` ledger and the `analysis_assets` rows:
+    //
+    //     simplecast   episodesObserved 104   episodes 8   13.0x
+    //     flightcast   episodesObserved  56   episodes 7    8.0x
+    //
+    // WHAT IT COST. Both readers are named for episodes and were handed
+    // backfills. `ShowTraitProfile.isReliable` (>= 3) is the ON/OFF gate for
+    // level 2 of `PriorHierarchyResolver.resolve`, and
+    // `PriorHierarchyResolver.traitBlendWeight` ramps 0.4 at 3 to 0.6 at 7+ and
+    // clamps. Both saturate inside the FIRST episode, so a one-episode show was
+    // blended at the weight of a mature seven-episode show. Both of the two
+    // profiles on the pull were at the clamp.
+    //
+    // WHY ZERO, AND NOT THE LEDGER COUNT. The ledger CAN answer "how many
+    // episodes contributed" — it reads 8 and 7, exactly the distinct-asset
+    // counts — so unlike V49 a faithful-looking reconstruction is available
+    // here, and it is deliberately NOT taken. Two different quantities are
+    // being confused if it is:
+    //
+    //   * "how many episodes were seen" — 8, and the ledger knows it;
+    //   * "how much cross-episode information is in these VALUES" — which is
+    //     what `isReliable` and `traitBlendWeight` are actually asking, and
+    //     the answer is about one episode's worth. The EMA is alpha = 0.3 and
+    //     it ran ~13 times per episode: `0.7^13 = 0.0097`, so 99 % of every
+    //     earlier episode was overwritten inside the next one. The persisted
+    //     vector is essentially the LAST episode's snapshot.
+    //
+    // Writing 8 would say those values are eight-episode-mature. They are not,
+    // and no reconstruction can make them so — the information was destroyed by
+    // the repeated EMA, which is the defect. Zero says "we do not know", which
+    // is true, and it has one further property no other value has: at
+    // `episodesObserved == 0`, `ShowTraitProfile.updated(from:)` takes its
+    // SENTINEL branch and REPLACES the vector instead of blending it, so the
+    // next real episode discards the corrupt state rather than averaging
+    // against it. Zero is not merely conservative here; it is the only value
+    // that rebuilds.
+    //
+    // WHAT A FIELD DEVICE DOES ON UPGRADE. Every profile's trait tier
+    // DEACTIVATES until three real episodes accrue — 2 of the 2 shows on the
+    // pull, both ON -> OFF, none OFF -> ON. Nothing else moves: the trait
+    // VALUES are preserved verbatim (they are the best estimate available and
+    // the next claimed episode replaces them anyway), and `mode`,
+    // `skipTrustScore`, `observationCount`, `recentFalseSkipSignals`,
+    // `adDurationStatsJSON`, `normalizedAdSlotPriors` and `sponsorLexicon` are
+    // not touched. Measured consequence at the resolver, both shows: level 2
+    // stops contributing at weight 0.600, `metadataTrust` falls 0.724 -> 0.500
+    // and 0.764 -> 0.500, and `typicalAdDuration` — the only OTHER
+    // `ResolvedPriors` axis with a production reader — does not change at all,
+    // because the trait tier never writes it. NO THRESHOLD WAS CHANGED.
+    //
+    // WHY A ROW-BY-ROW SWIFT REPAIR AND NOT `json_set`. Nothing in this repo
+    // has ever relied on SQLite's JSON1 functions, and a migration is the worst
+    // place to find out whether they are compiled in. Decoding through
+    // `ShowTraitProfile` itself also makes the repaired population EXACTLY the
+    // readable one: a blob this decoder rejects is already read as
+    // `ShowTraitProfile.unknown` by `PodcastProfile.traitProfile`, so it claims
+    // nothing and needs no repair. Round-tripping is lossless — every field is
+    // a `Float` that decodes and re-encodes to the same text.
+    //
+    // NO `PersistedStateRepairRecord`. The gyhw ledger is keyed on
+    // `PersistedStateInvariant`, and a new case there owes a predicate, a
+    // census line and a heal licence — a reporter obligation, not a migration
+    // one. V56 set the same precedent. The `notice` below carries the count and
+    // the values withdrawn so the repair is not evidence-free.
+
+    /// V57 migration — reset `podcast_profiles.traitProfileJSON`'s
+    /// `episodesObserved` to 0, the only key it touches.
+    ///
+    /// Idempotent twice over: the version ladder guards it, and the per-row
+    /// predicate (`episodesObserved != 0`) matches nothing on a second pass.
+    private func migrateTraitProfileEpisodeCountV57IfNeeded() throws {
+        let observed = (try schemaVersion() ?? 1)
+        guard observed < 57 else { return }
+        // DO NOT STEP OVER A ROLLED-BACK V39 — same rationale as V40–V56.
+        guard observed >= 56 else { return }
+        guard try tableExists("podcast_profiles") else {
+            try setSchemaVersion(57)
+            return
+        }
+
+        // Read every profile that carries a trait blob, then repair outside the
+        // read loop — a statement stepping over `podcast_profiles` while an
+        // UPDATE rewrites the same table is undefined in SQLite.
+        struct PendingTraitReset {
+            let podcastId: String
+            let was: Int
+            let repaired: String
+        }
+        var pending: [PendingTraitReset] = []
+        let readStmt = try prepare(
+            "SELECT podcastId, traitProfileJSON FROM podcast_profiles WHERE traitProfileJSON IS NOT NULL"
+        )
+        while sqlite3_step(readStmt) == SQLITE_ROW {
+            let podcastId = text(readStmt, 0)
+            // `try?`, not `try`: a blob this decoder rejects is ALREADY read as
+            // `.unknown` by `PodcastProfile.traitProfile`, so it asserts no
+            // maturity and there is nothing to withdraw. Skipping it is the
+            // repair being exactly co-extensive with the readable population,
+            // not a swallowed error.
+            let decoded = (try? decodeJSON(ShowTraitProfile.self, from: optionalText(readStmt, 1))) ?? nil
+            guard let profile = decoded, profile.episodesObserved != 0 else { continue }
+            // Every field but the count is carried through verbatim. The trait
+            // VECTOR is the best estimate available and is not the defect; the
+            // count is.
+            let honest = ShowTraitProfile(
+                musicDensity: profile.musicDensity,
+                speakerTurnRate: profile.speakerTurnRate,
+                singleSpeakerDominance: profile.singleSpeakerDominance,
+                structureRegularity: profile.structureRegularity,
+                sponsorRecurrence: profile.sponsorRecurrence,
+                insertionVolatility: profile.insertionVolatility,
+                transcriptReliability: profile.transcriptReliability,
+                episodesObserved: 0
+            )
+            guard let repaired = try encodeJSONString(honest) else { continue }
+            pending.append(
+                PendingTraitReset(
+                    podcastId: podcastId,
+                    was: profile.episodesObserved,
+                    repaired: repaired
+                )
+            )
+        }
+        sqlite3_finalize(readStmt)
+
+        for reset in pending {
+            let stmt = try prepare(
+                "UPDATE podcast_profiles SET traitProfileJSON = ? WHERE podcastId = ?"
+            )
+            defer { sqlite3_finalize(stmt) }
+            bind(stmt, 1, reset.repaired)
+            bind(stmt, 2, reset.podcastId)
+            try step(stmt, expecting: SQLITE_DONE)
+        }
+
+        if !pending.isEmpty {
+            // The repair destroys its own evidence: after this UPDATE nothing
+            // anywhere says the value was 104. The withdrawn counts travel in
+            // the log so a later pull can still tell a repaired store from one
+            // that was never broken.
+            let withdrawn = pending
+                .map(\.was)
+                .sorted(by: >)
+                .map(String.init)
+                .joined(separator: ",")
+            logger.notice(
+                "playhead-g7ln V57: reset traitProfile.episodesObserved to 0 on \(pending.count, privacy: .public) podcast profile(s); the counts withdrawn were \(withdrawn, privacy: .public), every one of them a count of BACKFILLS. The trait tier deactivates on those shows until three real episodes accrue; the trait VALUES, mode, trust, observationCount and the learned priors are untouched."
+            )
+        }
+        try setSchemaVersion(57)
     }
 
     /// playhead-kg8h: durably CLAIM one REQUESTED day-0 kickoff, before any of

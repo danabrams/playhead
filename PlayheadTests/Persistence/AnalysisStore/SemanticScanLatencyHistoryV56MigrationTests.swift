@@ -500,7 +500,11 @@ struct SemanticScanLatencyHistoryV56MigrationTests {
         AnalysisStore.resetMigratedPathsForTesting()
         let reopened = try AnalysisStore(directory: dir)
         try await reopened.migrate()
-        #expect(try await reopened.schemaVersion() == 56)
+        // playhead-g7ln: a rewound store climbs PAST this rung to head, so
+        // this compares against head rather than a literal — the same move
+        // 6gcy made on V55's and V52's rewind assertions. That V56's rung ran
+        // is carried by the three `raw` assertions below, not by this number.
+        #expect(try await reopened.schemaVersion() == AnalysisStore.currentSchemaVersion)
 
         let raw = try #require(try rawLatency(in: dir, rowId: "scan-mig"))
         // Lossless for the one sample that survived — the same kind of statement
@@ -590,7 +594,9 @@ struct SemanticScanLatencyHistoryV56MigrationTests {
         AnalysisStore.resetMigratedPathsForTesting()
         let reopened = try AnalysisStore(directory: dir)
         try await reopened.migrate()
-        #expect(try await reopened.schemaVersion() == 56)
+        // playhead-g7ln: head rather than a literal — see the note on
+        // `migrationSeedsOneSample`.
+        #expect(try await reopened.schemaVersion() == AnalysisStore.currentSchemaVersion)
     }
 
     // MARK: - 6. The folding rule, driven directly
