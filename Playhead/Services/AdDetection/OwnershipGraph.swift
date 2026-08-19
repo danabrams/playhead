@@ -218,9 +218,7 @@ struct OwnershipGraph: Sendable, Equatable {
     ///
     /// Refuses the feed's own host — see `feedHostDomain`.
     mutating func ingestITunesOwner(email: String) {
-        // Extract domain from email
-        guard let atIndex = email.firstIndex(of: "@") else { return }
-        let domainPart = String(email[email.index(after: atIndex)...])
+        guard let domainPart = Self.domain(ofEmail: email) else { return }
         guard let domain = structuralDomain(from: domainPart) else { return }
         setEntry(domain: domain, label: .showOwned, source: .itunesOwner)
     }
@@ -345,16 +343,71 @@ struct OwnershipGraph: Sendable, Equatable {
 
     /// Ingest every structural signal an RSS feed carries, in one call.
     ///
+    /// **This is the entry point production uses, and the two `ingest…`
+    /// methods above are its primitives.** It is not a convenience wrapper:
+    /// it is the only place that holds both declarations at once, which is
+    /// what the precedence rule below needs. Calling the primitives directly
+    /// bypasses that rule — `MetadataOwnershipWiringSourceCanaryTests` is what
+    /// stops production drifting back to doing so.
+    ///
     /// The feed URL is deliberately NOT a parameter (playhead-e8mg). It used
     /// to be, and it promoted the hosting platform to `.showOwned` on 96 % of
     /// real feeds; what it is good for now is `feedHostDomain`, i.e. saying
     /// which domain the other two routes may not claim.
+    ///
+    /// ## THE `<link>` IS REFUSED WHEN `<itunes:owner>` NAMES A DIFFERENT PARTY
+    ///
+    /// Two structural declarations that name different registrable domains
+    /// cannot both be the show. When they disagree, the owner address wins and
+    /// the `<link>` is dropped — not relabelled, DROPPED, so the domain falls
+    /// through to whatever the show-notes population already says about it
+    /// (usually `ownershipUndetermined`, i.e. "say nothing in either
+    /// direction" — playhead-kmw4's disposition for exactly this situation).
+    ///
+    /// Which one wins is not a coin toss. `<itunes:owner>` is the address
+    /// Apple uses to verify who is entitled to the feed; `<link>` is "the URL
+    /// of the website corresponding to the channel", which for a distributed
+    /// show is the distributor's site. Measured over 918 real feeds
+    /// (2026-08-19): 757 carry both and **they disagree on 492 of them
+    /// (65 %)**, and the `<link>` domains that recur across shows are networks
+    /// and platforms — iheart.com (41 shows), art19.com (38), spotify.com
+    /// (23), siriusxm.com (22), wondery.com (17), libsyn.com (17),
+    /// acast.com (14), simplecast.com (14).
+    ///
+    /// Measured on the device pull rather than argued (2026-08-18-t3, 15
+    /// analysed assets / 154 decoded spans): Conan's `<link>` is
+    /// `https://www.siriusxm.com` while its owner address is
+    /// `conaf@teamcoco.com`. Admitting the `<link>` puts `siriusxm.com` —
+    /// which appears in **724 of 724** episode descriptions, in the line
+    /// "Subscribe to SiriusXM Podcasts+ … visiting siriusxm.com/podcastsplus",
+    /// i.e. a paid-subscription READ — into the scanner as NEGATIVE evidence.
+    /// That is a HARD suppressor of `.lexicalAutoAd`: it takes the spans
+    /// carrying a negative hit from **1 of 154 to 18 of 154, and all 18 carry
+    /// a promotion hit**. Seventeen of those eighteen are bought by the
+    /// `<link>` alone, in exchange for one domain that is not the show's.
+    ///
+    /// When there is no owner address the `<link>` is admitted: it is then the
+    /// only structural declaration and nothing contradicts it (111 of the 918
+    /// are in that position). The feed-host exclusion still applies to it.
     mutating func ingestRSSFeed(
         linkURL: String?,
         itunesOwnerEmail: String?
     ) {
-        if let url = linkURL { ingestRSSLink(url) }
+        let ownerDomain = itunesOwnerEmail.flatMap(Self.domain(ofEmail:))
+            .flatMap { DomainNormalizer.etld1(from: $0) }
         if let email = itunesOwnerEmail { ingestITunesOwner(email: email) }
+
+        guard let url = linkURL else { return }
+        if let ownerDomain, DomainNormalizer.etld1(from: url) != ownerDomain {
+            return
+        }
+        ingestRSSLink(url)
+    }
+
+    /// The domain half of an email address, or nil if there is no `@`.
+    private static func domain(ofEmail email: String) -> String? {
+        guard let atIndex = email.firstIndex(of: "@") else { return nil }
+        return String(email[email.index(after: atIndex)...])
     }
 
     /// Batch-record show-notes domains from a single episode.

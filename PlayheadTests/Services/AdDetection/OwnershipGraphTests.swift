@@ -106,6 +106,81 @@ final class OwnershipGraphRSSTests: XCTestCase {
         XCTAssertEqual(graph.ownership(for: "myshow.com"), .show)
     }
 
+    /// playhead-e8mg: two structural declarations naming different parties
+    /// cannot both be the show, and the owner address is the one Apple uses to
+    /// verify who owns the feed. The `<link>` is DROPPED, not relabelled, so
+    /// the domain keeps whatever the show-notes population says about it.
+    func testLinkIsRefusedWhenTheOwnerAddressNamesADifferentDomain() {
+        var graph = OwnershipGraph(podcastId: "conan", feedHostDomain: "simplecast.com")
+        graph.ingestRSSFeed(
+            linkURL: "https://www.siriusxm.com",
+            itunesOwnerEmail: "conaf@teamcoco.com"
+        )
+
+        XCTAssertEqual(Set(graph.showOwnedDomains), Set(["teamcoco.com"]))
+        XCTAssertNil(graph.ownership(for: "siriusxm.com"))
+        XCTAssertTrue(graph.entries["siriusxm.com"] == nil, "dropped, not relabelled")
+    }
+
+    /// …and a refused `<link>` domain that recurs in the notes lands in the
+    /// undetermined set, which is "say nothing in either direction".
+    func testRefusedLinkDomainFallsThroughToTheUndeterminedSet() {
+        var graph = OwnershipGraph(podcastId: "conan", feedHostDomain: "simplecast.com")
+        graph.ingestRSSFeed(
+            linkURL: "https://www.siriusxm.com",
+            itunesOwnerEmail: "conaf@teamcoco.com"
+        )
+        for _ in 0..<5 {
+            graph.recordShowNotesDomain("https://siriusxm.com/podcastsplus")
+        }
+
+        XCTAssertEqual(graph.recurringShowNotesDomains, ["siriusxm.com"])
+        XCTAssertFalse(graph.showOwnedDomains.contains("siriusxm.com"))
+    }
+
+    /// Agreement admits both — the same domain by two routes is one entry.
+    func testLinkIsAdmittedWhenItAgreesWithTheOwnerAddress() {
+        var graph = OwnershipGraph(podcastId: "pod1", feedHostDomain: "simplecast.com")
+        graph.ingestRSSFeed(
+            linkURL: "https://www.myshow.com/about",
+            itunesOwnerEmail: "host@myshow.com"
+        )
+
+        XCTAssertEqual(Set(graph.showOwnedDomains), Set(["myshow.com"]))
+    }
+
+    /// With no owner address the `<link>` is the only structural declaration
+    /// and nothing contradicts it, so it is admitted. 111 of 918 real feeds
+    /// are in exactly this position.
+    func testLinkIsAdmittedWhenThereIsNoOwnerAddress() {
+        var graph = OwnershipGraph(podcastId: "pod1", feedHostDomain: "simplecast.com")
+        graph.ingestRSSFeed(linkURL: "https://www.myshow.com", itunesOwnerEmail: nil)
+
+        XCTAssertEqual(Set(graph.showOwnedDomains), Set(["myshow.com"]))
+    }
+
+    /// An owner address the graph REFUSES (it is the feed host) must not
+    /// silently license the `<link>` either — the precedence test is on what
+    /// the feed DECLARES, not on what survived the feed-host filter. Both are
+    /// refused here and the graph stays empty.
+    func testFeedHostOwnerAddressStillContradictsADifferentLink() {
+        var graph = OwnershipGraph(podcastId: "pod1", feedHostDomain: "anchor.fm")
+        graph.ingestRSSFeed(
+            linkURL: "https://www.someone-elses-site.com",
+            itunesOwnerEmail: "shows@anchor.fm"
+        )
+
+        XCTAssertTrue(graph.entries.isEmpty)
+    }
+
+    /// A malformed owner address declares no party, so it contradicts nothing.
+    func testOwnerAddressWithoutAnAtSignDoesNotRefuseTheLink() {
+        var graph = OwnershipGraph(podcastId: "pod1")
+        graph.ingestRSSFeed(linkURL: "https://www.myshow.com", itunesOwnerEmail: "noatsign")
+
+        XCTAssertEqual(Set(graph.showOwnedDomains), Set(["myshow.com"]))
+    }
+
     func testNilRSSFieldsSkipped() {
         var graph = OwnershipGraph(podcastId: "pod1")
         graph.ingestRSSFeed(linkURL: nil, itunesOwnerEmail: nil)

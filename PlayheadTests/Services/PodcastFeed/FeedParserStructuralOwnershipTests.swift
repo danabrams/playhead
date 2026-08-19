@@ -329,7 +329,10 @@ struct FeedParserRealFeedTests {
     }
 
     /// End to end on real bytes: parser → graph → the set the pipeline reads.
-    /// This is the assertion the bead is actually about.
+    /// This is the assertion the bead is actually about, and Conan is the case
+    /// that makes it interesting: the `<link>` names siriusxm.com and the
+    /// owner address names teamcoco.com, so the graph keeps the owner's and
+    /// drops the distributor's.
     @Test("Real bytes through the graph recover teamcoco.com and nothing else")
     func realBytesThroughTheOwnershipGraph() throws {
         for entry in try Self.manifest().feeds {
@@ -345,8 +348,9 @@ struct FeedParserRealFeedTests {
             let showOwned = Set(graph.showOwnedDomains)
 
             if entry.file.hasPrefix("conan") {
-                #expect(showOwned == ["teamcoco.com", "siriusxm.com"])
-                #expect(!showOwned.contains("simplecast.com"))
+                #expect(showOwned == ["teamcoco.com"])
+                #expect(!showOwned.contains("simplecast.com"), "the hosting platform")
+                #expect(!showOwned.contains("siriusxm.com"), "the distributor")
             } else {
                 #expect(showOwned == ["stevenbartlett.com"])
                 #expect(!showOwned.contains("flightcast.com"))

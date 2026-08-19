@@ -1336,6 +1336,30 @@ struct MetadataOwnershipWiringSourceCanaryTests {
         )
     }
 
+    /// `ingestRSSFeed` is not a convenience wrapper: it is the only place that
+    /// holds the `<link>` and the `<itunes:owner>` address at once, which is
+    /// what the precedence rule needs. A production caller that reaches past
+    /// it into `ingestRSSLink` admits siriusxm.com on Conan and takes the
+    /// spans carrying a negative hit from 1 of 154 to 18 of 154, with every
+    /// graph rail still green.
+    @Test("production reaches the graph through ingestRSSFeed, not the primitives")
+    func productionUsesTheComposedStructuralEntryPoint() throws {
+        let text = try Self.source("Playhead/Services/AdDetection/EpisodeMetadataProvider.swift")
+        #expect(
+            text.contains("graph.ingestRSSFeed("),
+            "the snapshot builder must compose both structural signals in one call"
+        )
+        for primitive in ["graph.ingestRSSLink(", "graph.ingestITunesOwner("] {
+            #expect(
+                !text.contains(primitive),
+                """
+                \(primitive) bypasses the <link>-vs-<itunes:owner> precedence rule in \
+                ingestRSSFeed — see OwnershipGraph.ingestRSSFeed for what that costs
+                """
+            )
+        }
+    }
+
     /// The graph's structural doors are two, and a caller that reaches past
     /// `ingestRSSFeed` into one of them is not the failure this pins. The
     /// failure is a THIRD door growing back: `ingestFeedURL` returning to

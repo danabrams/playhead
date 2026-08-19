@@ -135,6 +135,13 @@ final class MetadataShowOwnedDomainDevicePullEvalTests: XCTestCase {
         let ownershipUndeterminedAfter: [String]
         let addedToShowOwned: [String]
         let droppedFromShowOwned: [String]
+        /// A THIRD arm, and the reason it exists: `<link>` and
+        /// `<itunes:owner>` disagree on 65 % of real feeds (265 of the 757 of
+        /// 918 that carry both agree), and on Conan the `<link>` names the
+        /// DISTRIBUTOR. Measuring the owner route alone is the only way to
+        /// say what the `<link>` route costs ON TOP of it rather than
+        /// attributing the pair's total to both.
+        let showOwnedOwnerOnly: [String]
     }
 
     struct AssetReport: Encodable {
@@ -166,6 +173,23 @@ final class MetadataShowOwnedDomainDevicePullEvalTests: XCTestCase {
         /// the decision-level threshold crossing this change can reach, and
         /// the direction it can only move in.
         let autoAdSpansSuppressed: [String]
+        /// EXPOSURE, because `autoAdSpansSuppressed` has no power when nothing
+        /// fired to begin with. A negative hit anywhere in a span is a HARD
+        /// suppressor of `.lexicalAutoAd`, whether or not the span would
+        /// otherwise have fired — so this is the population the change puts
+        /// under the suppressor, and `spansWithPromotionHits` is the subset
+        /// where that suppression could ever have mattered.
+        let spansHardSuppressedBefore: Int
+        let spansHardSuppressedAfter: Int
+        let spansWithPromotionHits: Int
+        /// Spans newly hard-suppressed that ALSO carry a promotion hit — the
+        /// only population in which this change can cost a real detection.
+        let spansNewlySuppressedWithPromotionHits: [String]
+        /// The same exposure under the OWNER-ONLY arm. The difference between
+        /// this and `spansHardSuppressedAfter` is what the `<link>` route
+        /// costs by itself.
+        let spansHardSuppressedOwnerOnly: Int
+        let negativeHitsOwnerOnly: Int
         let metadataLedgerWeightBefore: Double
         let metadataLedgerWeightAfter: Double
     }
@@ -181,6 +205,8 @@ final class MetadataShowOwnedDomainDevicePullEvalTests: XCTestCase {
         var beforeUndetermined: [Set<String>] = []
         var afterOwnership: [Set<String>] = []
         var afterUndetermined: [Set<String>] = []
+        var ownerOnlyOwnership: [Set<String>] = []
+        var ownerOnlyUndetermined: [Set<String>] = []
 
         for show in corpus.shows {
             let feedURLString = show.feedURL
@@ -209,6 +235,15 @@ final class MetadataShowOwnedDomainDevicePullEvalTests: XCTestCase {
                 podcastId: podcastId
             )
 
+            // OWNER-ONLY: the `<itunes:owner>` route with no `<link>`.
+            let ownerOnly = EpisodeMetadataSnapshot.domainOwnership(
+                feedURL: feedURLString.flatMap(URL.init(string:)),
+                siteURL: nil,
+                ownerEmail: signals?.ownerEmail,
+                recentMetadata: recentMetadata,
+                podcastId: podcastId
+            )
+
             // BEFORE: main @ 8929cbf1, reconstructed and then PROVEN below.
             let before = try Self.preE8mgOwnership(
                 feedURL: feedURLString,
@@ -220,6 +255,8 @@ final class MetadataShowOwnedDomainDevicePullEvalTests: XCTestCase {
             beforeUndetermined.append(before.ownershipUndetermined)
             afterOwnership.append(after.showOwned)
             afterUndetermined.append(after.ownershipUndetermined)
+            ownerOnlyOwnership.append(ownerOnly.showOwned)
+            ownerOnlyUndetermined.append(ownerOnly.ownershipUndetermined)
 
             var bySource: [String: String] = [:]
             if let domain = signals?.siteURL.flatMap({ DomainNormalizer.etld1(from: $0.absoluteString) }),
@@ -246,7 +283,8 @@ final class MetadataShowOwnedDomainDevicePullEvalTests: XCTestCase {
                 ownershipUndeterminedBefore: before.ownershipUndetermined.sorted(),
                 ownershipUndeterminedAfter: after.ownershipUndetermined.sorted(),
                 addedToShowOwned: after.showOwned.subtracting(before.showOwned).sorted(),
-                droppedFromShowOwned: before.showOwned.subtracting(after.showOwned).sorted()
+                droppedFromShowOwned: before.showOwned.subtracting(after.showOwned).sorted(),
+                showOwnedOwnerOnly: ownerOnly.showOwned.sorted()
             ))
         }
 
@@ -308,6 +346,20 @@ final class MetadataShowOwnedDomainDevicePullEvalTests: XCTestCase {
                 }
             ).chunks.sorted(by: TranscriptChunkCanonicalizer.canonicalTimeOrder)
 
+            let extractorOwnerOnly = MetadataCueExtractor(
+                showOwnedDomains: ownerOnlyOwnership[asset.showIndex],
+                networkOwnedDomains: [],
+                ownershipUndeterminedDomains: ownerOnlyUndetermined[asset.showIndex]
+            )
+            let cuesOwnerOnly = extractorOwnerOnly.extractCues(
+                description: asset.feedDescription,
+                summary: asset.feedSummary
+            )
+            let hitsOwnerOnly = scanner.collectHits(
+                chunks: chunks,
+                metadataEntries: injector.inject(cues: cuesOwnerOnly, metadataTrust: 0.724)
+            )
+
             let hitsBefore = scanner.collectHits(chunks: chunks, metadataEntries: entriesBefore)
             let hitsAfter = scanner.collectHits(chunks: chunks, metadataEntries: entriesAfter)
             let metaHitsBefore = hitsBefore.filter(\.isMetadataOrigin)
@@ -361,6 +413,11 @@ final class MetadataShowOwnedDomainDevicePullEvalTests: XCTestCase {
             var autoAdBefore = 0
             var autoAdAfter = 0
             var suppressed: [String] = []
+            var hardBefore = 0
+            var hardAfter = 0
+            var withPromotion = 0
+            var hardOwnerOnly = 0
+            var newlySuppressedWithPromotion: [String] = []
             for span in asset.spans {
                 let decoded = DecodedSpan(
                     id: span.id,
@@ -381,6 +438,29 @@ final class MetadataShowOwnedDomainDevicePullEvalTests: XCTestCase {
                     "asset \(asset.id) span \(span.id): adding a suppressor cannot make the "
                     + "auto-ad rule fire"
                 )
+
+                // Exposure. Same overlap predicate the builder uses — a hit
+                // overlaps when its interval intersects the span's.
+                func overlapping(_ hits: [LexicalHit]) -> [LexicalHit] {
+                    hits.filter { $0.startTime <= span.endTime && $0.endTime >= span.startTime }
+                }
+                let negBefore = overlapping(hitsBefore).contains(where: \.isNegativePattern)
+                let overlapAfter = overlapping(hitsAfter)
+                let negAfter = overlapAfter.contains(where: \.isNegativePattern)
+                let promotion = overlapAfter.contains {
+                    !$0.isNegativePattern && !$0.isMetadataOrigin
+                }
+                let negOwnerOnly = hitsOwnerOnly.contains {
+                    $0.isNegativePattern
+                        && $0.startTime <= span.endTime && $0.endTime >= span.startTime
+                }
+                if negOwnerOnly { hardOwnerOnly += 1 }
+                if negBefore { hardBefore += 1 }
+                if negAfter { hardAfter += 1 }
+                if promotion { withPromotion += 1 }
+                if !negBefore && negAfter && promotion {
+                    newlySuppressedWithPromotion.append(span.id)
+                }
             }
 
             // The other consumer of a `.showOwnedDomain` cue: its 0.05
@@ -423,6 +503,12 @@ final class MetadataShowOwnedDomainDevicePullEvalTests: XCTestCase {
                 autoAdSpansBefore: autoAdBefore,
                 autoAdSpansAfter: autoAdAfter,
                 autoAdSpansSuppressed: suppressed,
+                spansHardSuppressedBefore: hardBefore,
+                spansHardSuppressedAfter: hardAfter,
+                spansWithPromotionHits: withPromotion,
+                spansNewlySuppressedWithPromotionHits: newlySuppressedWithPromotion,
+                spansHardSuppressedOwnerOnly: hardOwnerOnly,
+                negativeHitsOwnerOnly: hitsOwnerOnly.filter(\.isNegativePattern).count,
                 metadataLedgerWeightBefore: ledgerBefore,
                 metadataLedgerWeightAfter: ledgerAfter
             ))
@@ -620,6 +706,12 @@ final class MetadataShowOwnedDomainDevicePullEvalTests: XCTestCase {
                 let autoAdSpansBefore: Int
                 let autoAdSpansAfter: Int
                 let autoAdSpansSuppressed: Int
+                let spansHardSuppressedBefore: Int
+                let spansHardSuppressedAfter: Int
+                let spansWithPromotionHits: Int
+                let spansNewlySuppressedWithPromotionHits: Int
+                let spansHardSuppressedOwnerOnly: Int
+                let negativeHitsOwnerOnly: Int
                 let metadataLedgerWeightBefore: Double
                 let metadataLedgerWeightAfter: Double
             }
@@ -641,6 +733,14 @@ final class MetadataShowOwnedDomainDevicePullEvalTests: XCTestCase {
             autoAdSpansBefore: assets.reduce(0) { $0 + $1.autoAdSpansBefore },
             autoAdSpansAfter: assets.reduce(0) { $0 + $1.autoAdSpansAfter },
             autoAdSpansSuppressed: assets.reduce(0) { $0 + $1.autoAdSpansSuppressed.count },
+            spansHardSuppressedBefore: assets.reduce(0) { $0 + $1.spansHardSuppressedBefore },
+            spansHardSuppressedAfter: assets.reduce(0) { $0 + $1.spansHardSuppressedAfter },
+            spansWithPromotionHits: assets.reduce(0) { $0 + $1.spansWithPromotionHits },
+            spansNewlySuppressedWithPromotionHits: assets.reduce(0) {
+                $0 + $1.spansNewlySuppressedWithPromotionHits.count
+            },
+            spansHardSuppressedOwnerOnly: assets.reduce(0) { $0 + $1.spansHardSuppressedOwnerOnly },
+            negativeHitsOwnerOnly: assets.reduce(0) { $0 + $1.negativeHitsOwnerOnly },
             metadataLedgerWeightBefore: assets.reduce(0.0) { $0 + $1.metadataLedgerWeightBefore },
             metadataLedgerWeightAfter: assets.reduce(0.0) { $0 + $1.metadataLedgerWeightAfter }
         )
@@ -654,6 +754,8 @@ final class MetadataShowOwnedDomainDevicePullEvalTests: XCTestCase {
             print("[e8mg]   showOwned BEFORE (\(show.showOwnedBefore.count)): \(show.showOwnedBefore)")
             print("[e8mg]   showOwned AFTER  (\(show.showOwnedAfter.count)): \(show.showOwnedAfter) "
                   + "bySource=\(show.showOwnedAfterBySource)")
+            print("[e8mg]   showOwned OWNER-ONLY (\(show.showOwnedOwnerOnly.count)): "
+                  + "\(show.showOwnedOwnerOnly)")
             print("[e8mg]   added \(show.addedToShowOwned) dropped \(show.droppedFromShowOwned)")
             print("[e8mg]   undetermined \(show.ownershipUndeterminedBefore.count)"
                   + "->\(show.ownershipUndeterminedAfter.count)")
@@ -677,6 +779,16 @@ final class MetadataShowOwnedDomainDevicePullEvalTests: XCTestCase {
         print("[e8mg] TOTALS candidates \(totals.candidatesBefore)->\(totals.candidatesAfter) "
               + "autoAdSpans \(totals.autoAdSpansBefore)->\(totals.autoAdSpansAfter) "
               + "suppressed=\(totals.autoAdSpansSuppressed)")
+        print("[e8mg] TOTALS EXPOSURE spans=\(totals.spans) "
+              + "hardSuppressed \(totals.spansHardSuppressedBefore)"
+              + "->\(totals.spansHardSuppressedAfter) "
+              + "spansWithPromotionHits=\(totals.spansWithPromotionHits) "
+              + "newlySuppressedWithPromotion="
+              + "\(totals.spansNewlySuppressedWithPromotionHits)")
+        print("[e8mg] TOTALS OWNER-ONLY ARM negativeHits=\(totals.negativeHitsOwnerOnly) "
+              + "hardSuppressed=\(totals.spansHardSuppressedOwnerOnly) "
+              + "(the <link> route costs the difference against "
+              + "\(totals.spansHardSuppressedAfter))")
         print("[e8mg] TOTALS metadataLedgerWeight \(totals.metadataLedgerWeightBefore)"
               + "->\(totals.metadataLedgerWeightAfter)")
 
