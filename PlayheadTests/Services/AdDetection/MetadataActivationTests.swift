@@ -1225,3 +1225,59 @@ struct WeightFormulaTests {
         #expect(abs(entries[0].weight - expectedWeight) < 0.001)
     }
 }
+
+// MARK: - Ownership wiring (playhead-kmw4)
+
+/// The two call sites that carry the ownership-undetermined population from
+/// the graph to the cue extractor. Neither is reachable from a unit test:
+/// `PlayheadApp` builds the snapshot inside a SwiftUI `.task` that needs a
+/// live `ModelContainer`, and `AdDetectionService` constructs its extractor
+/// privately. Drop either argument and every graph rail, every extractor rail
+/// and every injector rail stays GREEN while the device behaves exactly as it
+/// did before the fix — which is the shape this repo has been bitten by often
+/// enough to have a name for it. So the wiring is pinned in source.
+@Suite("Metadata ownership wiring — source canary")
+struct MetadataOwnershipWiringSourceCanaryTests {
+
+    private static let repoRoot: URL = {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent() // .../AdDetection/
+            .deletingLastPathComponent() // .../Services/
+            .deletingLastPathComponent() // .../PlayheadTests/
+            .deletingLastPathComponent() // .../<repo root>/
+    }()
+
+    private static func source(_ relativePath: String) throws -> String {
+        try String(
+            contentsOf: repoRoot.appendingPathComponent(relativePath),
+            encoding: .utf8
+        )
+    }
+
+    @Test("AdDetectionService hands the undetermined set to the cue extractor")
+    func adDetectionServicePassesUndeterminedDomains() throws {
+        let text = try Self.source("Playhead/Services/AdDetection/AdDetectionService.swift")
+        #expect(
+            text.contains("ownershipUndeterminedDomains: snapshot.ownershipUndeterminedDomains"),
+            "loadEpisodeMetadataSignals must forward the snapshot's undetermined domains; "
+                + "without it every recurring show-notes domain falls through to .externalDomain "
+                + "and injects as POSITIVE sponsor evidence — the flip playhead-kmw4 declined"
+        )
+    }
+
+    @Test("PlayheadApp builds the snapshot from one graph and carries both sets")
+    func playheadAppCarriesBothOwnershipSets() throws {
+        let text = try Self.source("Playhead/App/PlayheadApp.swift")
+        #expect(
+            text.contains("EpisodeMetadataSnapshot.domainOwnership("),
+            "the production snapshot must come from domainOwnership(...), which builds ONE "
+                + "OwnershipGraph over the show's notes; two separate builds is how the two "
+                + "answers come to disagree"
+        )
+        #expect(
+            text.contains("ownershipUndeterminedDomains: ownership.ownershipUndetermined"),
+            "the snapshot must carry the undetermined set into the pipeline; dropping it "
+                + "restores the pre-kmw4 behaviour with every unit test still green"
+        )
+    }
+}

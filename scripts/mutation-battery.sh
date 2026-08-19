@@ -1454,8 +1454,23 @@ LEASE="Playhead/Services/AnalysisCoordinator/EpisodeExecutionLease.swift"
 # one file can see it. `$RUNNER` is the coverage-lane `BackfillJobRunner` and
 # `$AJRUN` is the pipeline runner; this is neither.
 FPRUN="Playhead/Services/AdDetection/FinalPassRetranscriptionRunner.swift"
+# playhead-kmw4 (KM series): the four layers of "who owns this domain". They are
+# four files on purpose — the defect this bead removes lived in the FIRST and was
+# only visible in the THIRD, and a fix to any one of them leaves the other three
+# able to restore it.
+#   $OWNG  the classifier: frequency used to promote a domain to `.showOwned`.
+#   $EMPRO the snapshot: which of the graph's two populations reach the pipeline.
+#   $MCEX  the consumer: what a domain in neither population is CALLED, which is
+#          where a "neutral" fix silently becomes the positive flip Dan declined.
+#   $PAPP  the production call site — the only place the real graph is built, and
+#          invisible to every unit test in the tree.
+OWNG="Playhead/Services/AdDetection/OwnershipGraph.swift"
+EMPRO="Playhead/Services/AdDetection/EpisodeMetadataProvider.swift"
+MCEX="Playhead/Services/AdDetection/MetadataCueExtractor.swift"
+PAPP="Playhead/App/PlayheadApp.swift"
 MUTABLE_FILES=(
   "$FPRUN"
+  "$OWNG" "$EMPRO" "$MCEX" "$PAPP"
   "$ORCH" "$STORE" "$CTRL" "$VIEW" "$TRIG" "$RSVC" "$TRUST" "$NPV" "$NPVM"
   "$BWPOL" "$KICK" "$KCOORD" "$SEAMS" "$ACT" "$ADSVC" "$PODC"
   "$THROT" "$FMREF" "$UMF" "$SFR" "$DTR" "$RUNNER" "$FMCLS" "$PROBE" "$PERMC" "$RT" "$MODEL" "$INGO" "$INVF"
@@ -2329,6 +2344,22 @@ FOCUSED_SUITES=(
   # flag cannot be turned on later onto the old reading" would have no rail at
   # all — which is the same shape as shipping the fix half done.
   -only-testing:PlayheadTests/CrossShowSyndicationExtractionTests
+  # playhead-kmw4: show-notes frequency stops classifying (KM series). Four
+  # suites, because the claim spans four layers and no one of them can observe
+  # another. `OwnershipGraphShowNotesTests` is the only place a COUNT is turned
+  # into a label, so it is the only thing KM01-KM04 can redden.
+  # `MetadataActivationConfigTests` carries the SNAPSHOT rails — which of the
+  # graph's two populations reaches the pipeline, and the end-to-end
+  # "injects nothing" assertion that is this bead's whole point.
+  # `DomainClassificationTests` is the only thing that can see what a domain in
+  # NEITHER population is called, which is where the declined positive flip
+  # lives (KM07). And the source canary is the only thing that can see the two
+  # call sites: drop either argument and the other three suites stay green while
+  # the device behaves exactly as it did before the fix.
+  -only-testing:PlayheadTests/OwnershipGraphShowNotesTests
+  -only-testing:PlayheadTests/MetadataActivationConfigTests
+  -only-testing:PlayheadTests/DomainClassificationTests
+  -only-testing:PlayheadTests/MetadataOwnershipWiringSourceCanaryTests
 )
 
 # Named to match the `/private/tmp/playhead-*` pattern `scripts/disk-cleanup.sh`
@@ -3898,6 +3929,33 @@ T_G7_ZERO="a profile already at 0 is not rewritten at all"
 T_G7_NULLPROFILE="a NULL traitProfileJSON is not given one"
 T_G7_NOSTEP="V57 does NOT step over a rolled-back V39"
 T_G7_LAUNCH="a second launch does not reset an episode counted under the NEW unit"
+
+# playhead-kmw4 — show-notes frequency stops classifying (KM series). Four
+# layers, and no one of them can observe another. The GRAPH rails see whether a
+# count promotes; they cannot see whether the snapshot carries the result. The
+# SNAPSHOT rails see the two populations; they cannot see what a consumer calls
+# a domain in neither. The EXTRACTOR rails are the only place the DECLINED
+# POSITIVE FLIP is visible at all — a domain that stops being show-owned falls
+# through to `.externalDomain` unless something stops it, and that is the
+# default a naive fix ships. And the SOURCE canary is the only thing that can
+# see the two call sites: drop either argument and every other rail here stays
+# green while the device behaves exactly as it did before the fix.
+#
+# XCTest rails are written Suite/method; the Swift Testing ones are verbatim
+# `@Test(...)` display names and may not contain a ';'.
+T_KM_NOPROMOTE="OwnershipGraphShowNotesTests/testFrequencyThresholdDoesNotPromoteToShowOwned"
+T_KM_SPONSOR="OwnershipGraphShowNotesTests/testHighFrequencySponsorDomainNeverBecomesShowOwned"
+T_KM_BELOW="OwnershipGraphShowNotesTests/testBelowThresholdIsNotReportedAsRecurring"
+T_KM_STRUCTURAL="OwnershipGraphShowNotesTests/testStructuralDomainAccruesCountButIsNotUndetermined"
+T_KM_RSSKEEP="OwnershipGraphShowNotesTests/testFrequencyDoesNotOverrideRSSSignal"
+T_KM_CUSTOM="OwnershipGraphShowNotesTests/testCustomThreshold"
+T_KM_SNAPSHOT="Recurring show-notes domains are ownership-undetermined, not show-owned"
+T_KM_INJECTS_NOTHING="A recurring show-notes domain injects nothing in either direction"
+T_KM_NOCUE="Ownership-undetermined domains produce no cue at all"
+T_KM_PRECEDENCE="A structural show-owned domain outranks the undetermined set"
+T_KM_UNCHANGED="Omitting the undetermined set leaves external classification intact"
+T_KM_WIRE_SVC="AdDetectionService hands the undetermined set to the cue extractor"
+T_KM_WIRE_APP="PlayheadApp builds the snapshot from one graph and carries both sets"
 # XCTest, so the harness addresses it by CLASS/method rather than by display name.
 T_G7_CANARY_CALLSITE="TraitEpisodeCountSourceCanaryTests/testRunBackfillForwardsTheEpisodeClaimIntoUpdatePriors"
 T_G7_CANARY_READERS="TraitEpisodeCountSourceCanaryTests/testEpisodesObservedIsReadOnlyWhereTheDocCommentSaysItIs"
@@ -9739,6 +9797,80 @@ MUTATIONS=(
   # and DC03 kill, so a KILLED verdict would mean a rename can change behaviour.
   "DC99|1133|STORE|$T_DC_RESET;$T_DC_MODES"
 
+  # ── playhead-kmw4 (KM series) — see the T_KM_* block for the four-layer
+  # framing. The one-line summary: "seen in >= 3 of this show's episode notes"
+  # was read as "the show owns it", and a recurring SPONSOR clears that bar by
+  # construction. Every mutant below is a way to put the wrong conclusion back,
+  # and they are deliberately spread across all four layers because a fix at any
+  # one of them leaves the other three able to restore it.
+
+  # KM01 restores the SHIPPED DEFECT VERBATIM: frequency promotes to
+  # `.showOwned` again. On the 2026-08-18 pull that is 100 domains across two
+  # shows, including three Diary of a CEO sponsors injected as ANTI-ad evidence.
+  "KM01|1134|OWNG|$T_KM_NOPROMOTE;$T_KM_SPONSOR;$T_KM_SNAPSHOT"
+
+  # KM02, the OTHER direction and the one that looks harmless: the recurrence
+  # report drops its threshold clause, so EVERY domain the notes ever mentioned
+  # is ownership-undetermined and the external-domain path — the positive half
+  # of this feature, which this bead deliberately does not touch — goes silent
+  # for good. Nothing is mislabelled; a whole signal simply stops existing.
+  "KM02|1135|OWNG|$T_KM_BELOW;$T_KM_SNAPSHOT"
+
+  # KM03, off-by-one on the same clause: `>` for `>=`. A domain sitting exactly
+  # ON the threshold falls out of the undetermined set and back into
+  # `.externalDomain` — the declined positive flip, reached by one character,
+  # and invisible to any test that does not sit exactly at the boundary.
+  "KM03|1136|OWNG|$T_KM_NOPROMOTE;$T_KM_CUSTOM"
+
+  # KM04 inverts the source guard, so a domain the FEED URL classified is
+  # re-labelled by the next show-notes mention. That is the structural signal —
+  # the only one production has — being overwritten by the frequency signal this
+  # bead just stripped of authority.
+  "KM04|1137|OWNG|$T_KM_RSSKEEP;$T_KM_STRUCTURAL"
+
+  # KM05 drops the undetermined set on the floor at the SNAPSHOT: the graph is
+  # right and nothing downstream hears about it. Every graph rail stays green
+  # and every recurring sponsor falls through to `.externalDomain`.
+  "KM05|1138|EMPRO|$T_KM_SNAPSHOT;$T_KM_INJECTS_NOTHING"
+
+  # KM06, the defect rebuilt ONE LAYER UP: the snapshot re-merges the recurring
+  # domains into `showOwned`. `OwnershipGraph` is untouched and correct, and the
+  # pipeline sees exactly what it saw before the fix.
+  "KM06|1139|EMPRO|$T_KM_SNAPSHOT;$T_KM_INJECTS_NOTHING"
+
+  # KM07 — THE DECLINED FLIP, and the most important mutant in the series. The
+  # extractor calls an ownership-undetermined domain `.externalDomain` instead
+  # of emitting nothing. It is what a naive "just delete the promotion" fix does
+  # by DEFAULT, it is what Dan explicitly declined pending corpus measurement,
+  # and it is not a small change: `.externalDomain` also feeds
+  # `RecentFeedSponsorAtlas`, where a sponsor pattern carries weight 1.5 against
+  # the metadata lexicon's 0.43.
+  "KM07|1140|MCEX|$T_KM_NOCUE;$T_KM_INJECTS_NOTHING"
+
+  # KM08 inverts the classification order, so the undetermined set outranks a
+  # structural show-owned domain. Behaviourally invisible on today's graph —
+  # the two populations are disjoint by construction — which is exactly why the
+  # extractor's own contract has to be pinned rather than inferred from its
+  # caller.
+  "KM08|1141|MCEX|$T_KM_PRECEDENCE"
+
+  # KM09 drops the argument at the SERVICE call site. Every rail above stays
+  # green; the shipped pipeline reverts to the pre-fix behaviour with the
+  # positive flip on top. Only the source canary can see it.
+  "KM09|1142|ADSVC|$T_KM_WIRE_SVC"
+
+  # KM10 drops it at the PRODUCTION call site, which is the only place the real
+  # graph is ever built. Same blindness one file over, and `PlayheadApp` is
+  # reachable from no unit test at all.
+  "KM10|1143|PAPP|$T_KM_WIRE_APP"
+
+  # KM99 — VACUITY CONTROL, and it MUST SURVIVE. The accumulator local in
+  # `recordShowNotesDomain` is renamed at its declaration and at both uses;
+  # nothing else changes. Non-empty expectation on purpose (playhead-ngsm): it
+  # names the rails KM01 and KM02 kill, so a KILLED verdict here would mean a
+  # rename changed behaviour.
+  "KM99|1144|OWNG|$T_KM_NOPROMOTE;$T_KM_BELOW"
+
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -9938,6 +10070,17 @@ describe_mutation() {
     DC10) echo "scc6: DetectorTrustLedger.seed stops copying the show scalar — the WELD between the two units, cut" ;;
     DC11) echo "scc6: applyCorrectObservation advances the entry from the SHOW scalar again — gard's defect, growing back" ;;
     DC99) echo "VACUITY CONTROL — the local holding the repaired ledger is renamed and nothing else is. MUST SURVIVE" ;;
+    KM01) echo "kmw4: show-notes frequency promotes to .showOwned again — the shipped defect verbatim, 100 domains on the 2026-08-18 pull" ;;
+    KM02) echo "kmw4: the recurrence report drops its threshold, so EVERY show-notes domain is undetermined and the external-domain path goes silent" ;;
+    KM03) echo "kmw4: recurrence uses > for >=, so a domain exactly ON the threshold flips to .externalDomain — the declined positive flip in one character" ;;
+    KM04) echo "kmw4: the source guard inverts, so a show-notes mention overwrites the FEED-URL classification — the only structural signal production has" ;;
+    KM05) echo "kmw4: the snapshot drops the undetermined set, so the graph is right and nothing downstream hears about it" ;;
+    KM06) echo "kmw4: the snapshot re-merges recurring domains into showOwned — the defect rebuilt one layer above a correct OwnershipGraph" ;;
+    KM07) echo "kmw4: THE DECLINED FLIP — an undetermined domain is called .externalDomain, which is what a naive 'just delete the promotion' ships" ;;
+    KM08) echo "kmw4: the extractor checks the undetermined set BEFORE showOwned, so a structural domain is suppressed by a count" ;;
+    KM09) echo "kmw4: AdDetectionService stops forwarding the undetermined set — every rail green, the shipped pipeline reverted" ;;
+    KM10) echo "kmw4: PlayheadApp stops forwarding it, at the only place the real graph is ever built" ;;
+    KM99) echo "VACUITY CONTROL — the frequency accumulator local is renamed and nothing else is. MUST SURVIVE" ;;
     YX99) echo "VACUITY CONTROL — the band in buildFMLedgerEntries is bound through a renamed intermediate on the line YX01 rewrites; nothing else changes. MUST SURVIVE" ;;
     NY01) echo "AdDetectionService.hotPathCandidates sorts the RAW array — the shipped defect: runBackfill canonicalized and the hot path did not" ;;
     NY02) echo "the hot path 'de-duplicates' by chunk.id, a per-ROW UUID, so a fast/final twin survives it intact" ;;
@@ -22497,6 +22640,210 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  # ---- playhead-kmw4: show-notes frequency stops classifying (KM series) ----
+
+  KM01)
+    snippet OLD <<'EOF'
+        entries[domain] = DomainOwnershipEntry(
+            domain: domain,
+            label: .unknown,
+            source: .showNotesFrequency,
+EOF
+    snippet NEW <<'EOF'
+        entries[domain] = DomainOwnershipEntry(
+            domain: domain,
+            label: newFrequency >= config.showNotesRecurrenceThreshold ? .showOwned : .unknown,
+            source: .showNotesFrequency,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  KM02)
+    snippet OLD <<'EOF'
+                    && $0.frequency >= config.showNotesRecurrenceThreshold
+EOF
+    snippet NEW <<'EOF'
+                    && $0.frequency >= 1
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  KM03)
+    snippet OLD <<'EOF'
+                    && $0.frequency >= config.showNotesRecurrenceThreshold
+EOF
+    snippet NEW <<'EOF'
+                    && $0.frequency > config.showNotesRecurrenceThreshold
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  KM04)
+    snippet OLD <<'EOF'
+        if let existing = existing,
+           existing.source != .showNotesFrequency {
+EOF
+    snippet NEW <<'EOF'
+        if let existing = existing,
+           existing.source == .showNotesFrequency {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  KM05)
+    snippet OLD <<'EOF'
+            ownershipUndetermined: Set(graph.recurringShowNotesDomains)
+EOF
+    snippet NEW <<'EOF'
+            ownershipUndetermined: []
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  KM06)
+    snippet OLD <<'EOF'
+            showOwned: Set(graph.showOwnedDomains),
+EOF
+    snippet NEW <<'EOF'
+            showOwned: Set(graph.showOwnedDomains).union(graph.recurringShowNotesDomains),
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  KM07)
+    snippet OLD <<'EOF'
+                // until a corpus says which way it points.
+                continue
+EOF
+    snippet NEW <<'EOF'
+                // until a corpus says which way it points.
+                cueType = .externalDomain
+                confidence = 0.80
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  KM08)
+    snippet OLD <<'EOF'
+            if showOwnedDomains.contains(domain) {
+                cueType = .showOwnedDomain
+                confidence = 0.95
+            } else if networkOwnedDomains.contains(domain) {
+                cueType = .networkOwnedDomain
+                confidence = 0.90
+            } else if ownershipUndeterminedDomains.contains(domain) {
+                // playhead-kmw4: recurs in this show's notes, and nothing
+                // says who owns it. Emitting NO cue is the point: the two
+                // available cue types both make a claim this evidence cannot
+                // support. `.showOwnedDomain` claims the show owns it, which
+                // is what shipped and what put three Diary of a CEO SPONSORS
+                // (linkedin.com, shopify.com, ketone.com) into the lexical
+                // scanner as ANTI-ad evidence. `.externalDomain` claims it is
+                // somebody else's, which would flip the same three to
+                // pro-ad evidence and take siriusxm.com / teamcoco.com — the
+                // two that may genuinely be show-owned — with them. Dan's
+                // call, 2026-08-19: remove the wrong signal, add no new one
+                // until a corpus says which way it points.
+                continue
+            } else {
+                cueType = .externalDomain
+                confidence = 0.80
+            }
+EOF
+    snippet NEW <<'EOF'
+            if ownershipUndeterminedDomains.contains(domain) {
+                continue
+            } else if showOwnedDomains.contains(domain) {
+                cueType = .showOwnedDomain
+                confidence = 0.95
+            } else if networkOwnedDomains.contains(domain) {
+                cueType = .networkOwnedDomain
+                confidence = 0.90
+            } else {
+                cueType = .externalDomain
+                confidence = 0.80
+            }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  KM09)
+    snippet OLD <<'EOF'
+            networkOwnedDomains: snapshot.networkOwnedDomains,
+            ownershipUndeterminedDomains: snapshot.ownershipUndeterminedDomains
+        )
+EOF
+    snippet NEW <<'EOF'
+            networkOwnedDomains: snapshot.networkOwnedDomains
+        )
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  KM10)
+    snippet OLD <<'EOF'
+                                showOwnedDomains: ownership.showOwned,
+                                ownershipUndeterminedDomains: ownership.ownershipUndetermined
+                            )
+EOF
+    snippet NEW <<'EOF'
+                                showOwnedDomains: ownership.showOwned
+                            )
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  KM99)
+    snippet OLD <<'EOF'
+        let newFrequency = (existing?.frequency ?? 0) + 1
+
+        // If already explicitly classified (RSS, sponsor, override), just bump frequency
+        if let existing = existing,
+           existing.source != .showNotesFrequency {
+            entries[domain] = DomainOwnershipEntry(
+                domain: domain,
+                label: existing.label,
+                source: existing.source,
+                frequency: newFrequency,
+                canonicalSponsorId: existing.canonicalSponsorId
+            )
+            return
+        }
+
+        // Frequency records, it does not classify (playhead-kmw4). Every
+        // entry reaching this point either does not exist yet or already has
+        // source `.showNotesFrequency`, and such an entry can only ever be
+        // `.unknown` — the branch above returns for every other source. So
+        // `.unknown` is a statement of what is known, not a fallback.
+        entries[domain] = DomainOwnershipEntry(
+            domain: domain,
+            label: .unknown,
+            source: .showNotesFrequency,
+            frequency: newFrequency,
+            canonicalSponsorId: nil
+        )
+EOF
+    snippet NEW <<'EOF'
+        let accruedFrequency = (existing?.frequency ?? 0) + 1
+
+        // If already explicitly classified (RSS, sponsor, override), just bump frequency
+        if let existing = existing,
+           existing.source != .showNotesFrequency {
+            entries[domain] = DomainOwnershipEntry(
+                domain: domain,
+                label: existing.label,
+                source: existing.source,
+                frequency: accruedFrequency,
+                canonicalSponsorId: existing.canonicalSponsorId
+            )
+            return
+        }
+
+        // Frequency records, it does not classify (playhead-kmw4). Every
+        // entry reaching this point either does not exist yet or already has
+        // source `.showNotesFrequency`, and such an entry can only ever be
+        // `.unknown` — the branch above returns for every other source. So
+        // `.unknown` is a statement of what is known, not a fallback.
+        entries[domain] = DomainOwnershipEntry(
+            domain: domain,
+            label: .unknown,
+            source: .showNotesFrequency,
+            frequency: accruedFrequency,
+            canonicalSponsorId: nil
+        )
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
   *)
     echo "mutation-battery: unknown mutation '$name'" >&2
     return 3 ;;
@@ -22591,6 +22938,10 @@ rec_file()   {
     FPRUN) printf '%s' "$FPRUN" ;;
     PTX)   printf '%s' "$PTX" ;;
     SSR)   printf '%s' "$SSR" ;;
+    OWNG)  printf '%s' "$OWNG" ;;
+    EMPRO) printf '%s' "$EMPRO" ;;
+    MCEX)  printf '%s' "$MCEX" ;;
+    PAPP)  printf '%s' "$PAPP" ;;
     *)     printf '%s' "" ;;
   esac
 }
