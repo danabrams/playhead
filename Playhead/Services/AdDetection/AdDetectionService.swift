@@ -13373,7 +13373,7 @@ actor AdDetectionService {
     ///     on the LAST pass (alpha 0.3 over ~13 applications retains ~1 % of
     ///     what preceded it), so the traits recorded for an episode can now
     ///     carry less transcript/feature coverage than they used to. Filed as
-    ///     playhead-4wgv; not fixable from here, because nothing in
+    ///     playhead-wgst; not fixable from here, because nothing in
     ///     `runBackfill` knows which pass is the last one.
     ///   * A banner "Yes" (`TrustScoringService.recordCorrectObservation`)
     ///     shares this claim and can take it FIRST (playhead-fh5v). That
