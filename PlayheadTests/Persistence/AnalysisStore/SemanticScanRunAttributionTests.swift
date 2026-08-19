@@ -182,7 +182,7 @@ struct SemanticScanRunAttributionTests {
         // `transcript_chunks` rows and builds a UNIQUE index on that table. It
         // names no `semantic_scan_results` column and back-fills nothing, so
         // the no-backfill proof below still has something to prove.
-        #expect(AnalysisStore.currentSchemaVersion == 57)
+        #expect(AnalysisStore.currentSchemaVersion == 58)
         for column in ["createdAt", "scenePhase", "runCorrelationId"] {
             #expect(
                 try probeColumnExists(in: dir, table: "semantic_scan_results", column: column),
