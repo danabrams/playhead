@@ -1259,9 +1259,11 @@ struct MetadataOwnershipWiringSourceCanaryTests {
         let text = try Self.source("Playhead/Services/AdDetection/AdDetectionService.swift")
         #expect(
             text.contains("ownershipUndeterminedDomains: snapshot.ownershipUndeterminedDomains"),
-            "loadEpisodeMetadataSignals must forward the snapshot's undetermined domains; "
-                + "without it every recurring show-notes domain falls through to .externalDomain "
-                + "and injects as POSITIVE sponsor evidence — the flip playhead-kmw4 declined"
+            """
+            loadEpisodeMetadataSignals must forward the snapshot's undetermined domains; \
+            without it every recurring show-notes domain falls through to .externalDomain \
+            and injects as POSITIVE sponsor evidence — the flip playhead-kmw4 declined
+            """
         )
     }
 
@@ -1270,14 +1272,18 @@ struct MetadataOwnershipWiringSourceCanaryTests {
         let text = try Self.source("Playhead/App/PlayheadApp.swift")
         #expect(
             text.contains("EpisodeMetadataSnapshot.domainOwnership("),
-            "the production snapshot must come from domainOwnership(...), which builds ONE "
-                + "OwnershipGraph over the show's notes; two separate builds is how the two "
-                + "answers come to disagree"
+            """
+            the production snapshot must come from domainOwnership(...), which builds ONE \
+            OwnershipGraph over the show's notes; two separate builds is how the two \
+            answers come to disagree
+            """
         )
         #expect(
             text.contains("ownershipUndeterminedDomains: ownership.ownershipUndetermined"),
-            "the snapshot must carry the undetermined set into the pipeline; dropping it "
-                + "restores the pre-kmw4 behaviour with every unit test still green"
+            """
+            the snapshot must carry the undetermined set into the pipeline; dropping it \
+            restores the pre-kmw4 behaviour with every unit test still green
+            """
         )
     }
 }
