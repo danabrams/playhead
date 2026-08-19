@@ -1464,13 +1464,15 @@ FPRUN="Playhead/Services/AdDetection/FinalPassRetranscriptionRunner.swift"
 #          where a "neutral" fix silently becomes the positive flip Dan declined.
 #   $PAPP  the production call site — the only place the real graph is built, and
 #          invisible to every unit test in the tree.
+FPARSE="Playhead/Services/PodcastFeed/PodcastFeedParser.swift"
+PDISC="Playhead/Services/PodcastFeed/PodcastDiscoveryService.swift"
 OWNG="Playhead/Services/AdDetection/OwnershipGraph.swift"
 EMPRO="Playhead/Services/AdDetection/EpisodeMetadataProvider.swift"
 MCEX="Playhead/Services/AdDetection/MetadataCueExtractor.swift"
 PAPP="Playhead/App/PlayheadApp.swift"
 MUTABLE_FILES=(
   "$FPRUN"
-  "$OWNG" "$EMPRO" "$MCEX" "$PAPP"
+  "$OWNG" "$EMPRO" "$MCEX" "$PAPP" "$FPARSE" "$PDISC"
   "$ORCH" "$STORE" "$CTRL" "$VIEW" "$TRIG" "$RSVC" "$TRUST" "$NPV" "$NPVM"
   "$BWPOL" "$KICK" "$KCOORD" "$SEAMS" "$ACT" "$ADSVC" "$PODC"
   "$THROT" "$FMREF" "$UMF" "$SFR" "$DTR" "$RUNNER" "$FMCLS" "$PROBE" "$PERMC" "$RT" "$MODEL" "$INGO" "$INVF"
@@ -1512,6 +1514,27 @@ MUTABLE_FILES=(
 # half-open-interval contract.
 
 FOCUSED_SUITES=(
+  # playhead-e8mg: the structural ownership routes (E8 series). Five suites,
+  # because the claim spans three layers and no one of them can observe
+  # another. The two FeedParser suites are the only things that can see which
+  # XML element became which field — and they are two rather than one on
+  # purpose: the synthetic suite isolates a shape, the real-feed suite is the
+  # two subscribed publishers' verbatim bytes, and E801/E805 are killed by both
+  # because "parses what I expected" and "parses what publishers emit" are
+  # different claims. The graph suites are the only things that can see the
+  # feed-host refusal and the <link>-vs-<itunes:owner> precedence, neither of
+  # which any parser test can reach. The persistence suite is the only thing
+  # that drives a real SwiftData upsert, so it is the only place a refresh that
+  # stops writing a field is observable. And the wiring canary is the only
+  # thing that can see `PlayheadApp` at all — it is reachable from no unit test,
+  # which is the blindness kmw4 hit one bead earlier.
+  -only-testing:PlayheadTests/FeedParserStructuralOwnershipTests
+  -only-testing:PlayheadTests/FeedParserRealFeedTests
+  -only-testing:PlayheadTests/OwnershipGraphRSSTests
+  -only-testing:PlayheadTests/OwnershipGraphShowNotesTests
+  -only-testing:PlayheadTests/OwnershipGraphEndToEndTests
+  -only-testing:PlayheadTests/PodcastStructuralOwnershipPersistenceTests
+  -only-testing:PlayheadTests/MetadataOwnershipWiringSourceCanaryTests
   # playhead-yx0f: the FABRICATED CertaintyBand (YX series). Two suites,
   # because the claim spans a pure DECODER and the FUSION WEIGHT it buys, and
   # neither can observe the other. `PersistedCertaintyBandTests` is the only
@@ -3956,6 +3979,58 @@ T_KM_PRECEDENCE="A structural show-owned domain outranks the undetermined set"
 T_KM_UNCHANGED="Omitting the undetermined set leaves external classification intact"
 T_KM_WIRE_SVC="AdDetectionService hands the undetermined set to the cue extractor"
 T_KM_WIRE_APP="PlayheadApp builds the snapshot from one graph and carries both sets"
+
+# ── playhead-e8mg (E8 series). Three layers, and the reason the mutants are
+# spread across all three is that a fix at any one of them leaves the others
+# able to restore the defect.
+#
+#   PARSER   — the channel <link> and the <itunes:owner> address are captured
+#              at all, and the two SCOPES that decide which element is which
+#              (<image> has its own <link>; <itunes:email> outside
+#              <itunes:owner> is somebody else's) open AND close.
+#   GRAPH    — the feed host is refused by both surviving routes, and the
+#              <link> is refused when the owner address names another party.
+#   WIRING   — the persisted values reach the one production graph build, and
+#              the seam composes through ingestRSSFeed rather than reaching
+#              past it into the primitives.
+#
+# The parser rails come in two kinds and both are load-bearing: SYNTHETIC ones
+# isolate a single shape, and the REAL-BYTES ones are the two subscribed feeds'
+# verbatim channel heads. E801 and E805 are killed by both; that redundancy is
+# the point, because a synthetic fixture proves the parser parses what its
+# author expected and only publisher bytes prove it parses what publishers emit.
+#
+# XCTest rails are written Suite/method; the Swift Testing ones are verbatim
+# `@Test(...)` display names and may not contain a ';'.
+T_E8_IMAGE_LINK="An <image><link> is NOT the channel link"
+T_E8_IMAGE_AFTER="A channel <link> after an <image> block is still captured"
+T_E8_IMAGE_FIRST="<image><link> first, channel <link> second — the channel one wins"
+T_E8_IMAGE_SELFCLOSE="A self-closing <itunes:image> does not swallow the channel <link>"
+T_E8_FIRST_WINS="The FIRST channel <link> wins"
+T_E8_BARE_EMAIL="An <itunes:email> outside <itunes:owner> is ignored"
+T_E8_EMAIL_AFTER="An <itunes:email> after </itunes:owner> is ignored"
+T_E8_ATOM_ALT="Atom feeds take the site link from rel=alternate, not rel=self"
+T_E8_ATOM_SELF="An atom self link in an RSS channel is not the site link"
+T_E8_REAL_CONAN="Conan: <link> is siriusxm.com and the owner is @teamcoco.com"
+T_E8_REAL_DOAC="Diary Of A CEO: no channel <link>, owner is @stevenbartlett.com"
+T_E8_REAL_GRAPH="Real bytes through the graph recover teamcoco.com and nothing else"
+T_E8_HOST_REFUSED="OwnershipGraphRSSTests/testFeedHostIsRefusedByBothStructuralRoutes"
+T_E8_HOST_SCOPED="OwnershipGraphRSSTests/testFeedHostExclusionDoesNotSuppressOtherDomains"
+T_E8_HOST_ETLD1="OwnershipGraphRSSTests/testFeedHostExclusionComparesRegistrableDomains"
+T_E8_HOST_NIL="OwnershipGraphRSSTests/testNilFeedHostRefusesNothing"
+T_E8_HOST_UNDET="OwnershipGraphShowNotesTests/testRefusedFeedHostThatRecursInNotesIsUndeterminedNotShowOwned"
+T_E8_LINK_REFUSED="OwnershipGraphRSSTests/testLinkIsRefusedWhenTheOwnerAddressNamesADifferentDomain"
+T_E8_LINK_FALLTHROUGH="OwnershipGraphRSSTests/testRefusedLinkDomainFallsThroughToTheUndeterminedSet"
+T_E8_LINK_AGREES="OwnershipGraphRSSTests/testLinkIsAdmittedWhenItAgreesWithTheOwnerAddress"
+T_E8_LINK_NO_OWNER="OwnershipGraphRSSTests/testLinkIsAdmittedWhenThereIsNoOwnerAddress"
+T_E8_LINK_BAD_EMAIL="OwnershipGraphRSSTests/testOwnerAddressWithoutAnAtSignDoesNotRefuseTheLink"
+T_E8_E2E="OwnershipGraphEndToEndTests/testRealWorldShowSetup"
+T_E8_SNAPSHOT="Recurring show-notes domains are ownership-undetermined, not show-owned"
+T_E8_WIRE_APP="PlayheadApp feeds the persisted <link> and <itunes:owner> into the graph"
+T_E8_WIRE_COMPOSED="production reaches the graph through ingestRSSFeed, not the primitives"
+T_E8_NO_FEEDURL="no production caller promotes the feed URL itself"
+T_E8_PERSIST_INSERT="A newly persisted Podcast carries the site link and owner address"
+T_E8_PERSIST_REFRESH="A refresh updates both, including back to nil"
 # XCTest, so the harness addresses it by CLASS/method rather than by display name.
 T_G7_CANARY_CALLSITE="TraitEpisodeCountSourceCanaryTests/testRunBackfillForwardsTheEpisodeClaimIntoUpdatePriors"
 T_G7_CANARY_READERS="TraitEpisodeCountSourceCanaryTests/testEpisodesObservedIsReadOnlyWhereTheDocCommentSaysItIs"
@@ -9871,6 +9946,103 @@ MUTATIONS=(
   # rename changed behaviour.
   "KM99|1144|OWNG|$T_KM_NOPROMOTE;$T_KM_BELOW"
 
+  # ── playhead-e8mg (E8 series) — see the T_E8_* block for the three-layer
+  # framing. The one-line summary: `OwnershipGraph` documented three structural
+  # sources for `.showOwned` and only the FEED URL had a production caller, so
+  # after kmw4 the whole of the product's structural ownership signal was the
+  # hosting platform. Every mutant below is a way to put that back, or to lose
+  # the two routes that replaced it.
+
+  # E801 removes the <image> SCOPE at its opening. The artwork block's own
+  # <link> becomes the channel link, which on the real Diary Of A CEO feed is
+  # the feed's own URL — flightcast.com promoted to `.showOwned` by the very
+  # parser this bead added. Killed by a synthetic rail AND by publisher bytes.
+  "E801|1145|FPARSE|$T_E8_IMAGE_LINK;$T_E8_REAL_DOAC"
+
+  # E802, the same defect one layer up: the scope still opens, and the <link>
+  # case stops consulting it.
+  "E802|1146|FPARSE|$T_E8_IMAGE_LINK;$T_E8_REAL_DOAC"
+
+  # E803, the MIRROR, and the direction a reviewer forgets: the scope never
+  # CLOSES, so the first legitimate <link> after the artwork block is discarded
+  # and every feed that orders <image> before <link> silently loses its site.
+  "E803|1147|FPARSE|$T_E8_IMAGE_AFTER;$T_E8_IMAGE_SELFCLOSE"
+
+  # E804 drops first-one-wins on <link>, so a later element overwrites the
+  # channel's. Invisible on any feed carrying exactly one.
+  "E804|1148|FPARSE|$T_E8_FIRST_WINS;$T_E8_IMAGE_FIRST"
+
+  # E805 stops requiring the <itunes:owner> wrapper, so ANY <itunes:email> in
+  # the channel is read as the owner's. Killed by a synthetic rail and by the
+  # real Conan bytes, whose owner address is the thing being impersonated.
+  "E805|1149|FPARSE|$T_E8_BARE_EMAIL;$T_E8_REAL_CONAN"
+
+  # E806, its mirror: the owner scope never closes.
+  "E806|1150|FPARSE|$T_E8_EMAIL_AFTER;$T_E8_REAL_CONAN"
+
+  # E807 admits `rel="self"` as the Atom site link — the feed's own address,
+  # i.e. the hosting platform, arriving by the one route that has no <image>
+  # block to hide behind.
+  "E807|1151|FPARSE|$T_E8_ATOM_ALT;$T_E8_ATOM_SELF"
+
+  # E808 deletes the feed-host refusal. `ingestFeedURL` is gone, but the
+  # surviving routes reach the same domain on 175 of 918 real feeds, so this
+  # is the deleted method restored through the door that replaced it.
+  "E808|1152|OWNG|$T_E8_HOST_REFUSED;$T_E8_E2E"
+
+  # E809 compares the RAW string rather than the registrable domain, so
+  # `rss2.flightcast.com` is not `flightcast.com` and the platform is admitted.
+  # Every feed whose URL carries a subdomain — which is nearly all of them.
+  "E809|1153|OWNG|$T_E8_HOST_ETLD1;$T_E8_HOST_REFUSED"
+
+  # E810 INVERTS the <link>-vs-owner precedence: the link is kept exactly when
+  # the owner address contradicts it. On the device that admits siriusxm.com
+  # and takes the spans carrying a negative hit from 1 of 154 to 18 of 154.
+  "E810|1154|OWNG|$T_E8_LINK_REFUSED;$T_E8_LINK_AGREES"
+
+  # E811 removes the precedence guard altogether — the shipped-first-commit
+  # behaviour, and the reason the second commit exists.
+  "E811|1155|OWNG|$T_E8_LINK_REFUSED;$T_E8_REAL_GRAPH"
+
+  # E812, the OTHER direction on the same guard: a feed with NO owner address
+  # loses its <link> too. Nothing is mislabelled; a signal 111 of 918 feeds
+  # depend on simply stops existing.
+  "E812|1156|OWNG|$T_E8_LINK_NO_OWNER;$T_E8_LINK_BAD_EMAIL"
+
+  # E813 stops the seam passing a feed host, so the exclusion is correct and
+  # unarmed. Every graph rail builds its own graph and stays green.
+  "E813|1157|EMPRO|$T_E8_SNAPSHOT;$T_E8_HOST_UNDET"
+
+  # E814 reaches past `ingestRSSFeed` into the primitives at the seam. The
+  # graph is right, the parser is right, and the precedence rule is bypassed.
+  # Only the source canary can see it.
+  "E814|1158|EMPRO|$T_E8_WIRE_COMPOSED"
+
+  # E815 drops the <itunes:owner> argument at the PRODUCTION call site — the
+  # only place the real graph is built, reachable from no unit test. It is
+  # this bead's own defect restored: teamcoco.com classified by nothing.
+  "E815|1159|PAPP|$T_E8_WIRE_APP"
+
+  # E816 drops the feed URL there instead, so the exclusion is off in
+  # production and nowhere else.
+  "E816|1160|PAPP|$T_E8_WIRE_APP"
+
+  # E817 stops the REFRESH path writing the owner address. A show that changes
+  # hands keeps the old one forever, and `.showOwned` is negative evidence, so
+  # the stale entry argues against ads on a domain the feed no longer claims.
+  "E817|1161|PDISC|$T_E8_PERSIST_REFRESH"
+
+  # E818 drops it on INSERT, so the field is nil for every podcast added after
+  # this ships and the whole bead is a no-op on a fresh install.
+  "E818|1162|PDISC|$T_E8_PERSIST_INSERT;$T_E8_PERSIST_REFRESH"
+
+  # E899 — VACUITY CONTROL, and it MUST SURVIVE. The local holding the owner's
+  # domain in `ingestRSSFeed` is renamed at its declaration and at both uses;
+  # nothing else changes. Non-empty expectation on purpose (playhead-ngsm) — it
+  # names the rails E810 and E811 kill, so a KILLED verdict here would mean a
+  # rename changed behaviour.
+  "E899|1163|OWNG|$T_E8_LINK_REFUSED;$T_E8_LINK_AGREES"
+
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -10081,6 +10253,25 @@ describe_mutation() {
     KM09) echo "kmw4: AdDetectionService stops forwarding the undetermined set — every rail green, the shipped pipeline reverted" ;;
     KM10) echo "kmw4: PlayheadApp stops forwarding it, at the only place the real graph is ever built" ;;
     KM99) echo "VACUITY CONTROL — the frequency accumulator local is renamed and nothing else is. MUST SURVIVE" ;;
+    E801) echo "e8mg: the <image> scope never opens, so the artwork block's own <link> becomes the channel link — flightcast.com on the real Diary Of A CEO feed" ;;
+    E802) echo "e8mg: the scope opens and the <link> case stops consulting it — the same defect one layer up" ;;
+    E803) echo "e8mg: the <image> scope never CLOSES, so the first legitimate <link> after the artwork block is discarded" ;;
+    E804) echo "e8mg: first-one-wins is dropped on <link>, so a later element overwrites the channel's" ;;
+    E805) echo "e8mg: the <itunes:owner> wrapper stops being required, so ANY <itunes:email> in the channel is read as the owner's" ;;
+    E806) echo "e8mg: the <itunes:owner> scope never closes, so an address after the block is captured as the owner's" ;;
+    E807) echo "e8mg: Atom rel=self is admitted as the site link — the feed's own address, i.e. the hosting platform" ;;
+    E808) echo "e8mg: the feed-host refusal is deleted, restoring ingestFeedURL through the door that replaced it (175 of 918 real feeds)" ;;
+    E809) echo "e8mg: the feed-host refusal compares the RAW string, so rss2.flightcast.com is not flightcast.com and the platform is admitted" ;;
+    E810) echo "e8mg: the <link>-vs-owner precedence INVERTS — siriusxm.com admitted, spans carrying a negative hit 1 of 154 -> 18 of 154" ;;
+    E811) echo "e8mg: the precedence guard is removed altogether — the shipped-first-commit behaviour this bead's second commit exists to fix" ;;
+    E812) echo "e8mg: the guard fires with no owner address too, so 111 of 918 feeds lose their only structural signal" ;;
+    E813) echo "e8mg: the seam stops passing a feed host — the exclusion is correct and unarmed, every graph rail green" ;;
+    E814) echo "e8mg: the seam reaches past ingestRSSFeed into the primitives, bypassing the precedence rule with everything else right" ;;
+    E815) echo "e8mg: PlayheadApp drops the <itunes:owner> argument — teamcoco.com classified by nothing, at the only place a real graph is built" ;;
+    E816) echo "e8mg: PlayheadApp drops the feed URL, so the exclusion is off in production and nowhere else" ;;
+    E817) echo "e8mg: the REFRESH path stops writing the owner address — a show that changes hands keeps the old one forever" ;;
+    E818) echo "e8mg: the INSERT path drops it, so the field is nil for every podcast added after this ships" ;;
+    E899) echo "VACUITY CONTROL — the owner-domain local in ingestRSSFeed is renamed and nothing else is. MUST SURVIVE" ;;
     YX99) echo "VACUITY CONTROL — the band in buildFMLedgerEntries is bound through a renamed intermediate on the line YX01 rewrites; nothing else changes. MUST SURVIVE" ;;
     NY01) echo "AdDetectionService.hotPathCandidates sorts the RAW array — the shipped defect: runBackfill canonicalized and the hot path did not" ;;
     NY02) echo "the hot path 'de-duplicates' by chunk.id, a per-ROW UUID, so a fast/final twin survives it intact" ;;
@@ -22783,6 +22974,223 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  E801)
+    snippet OLD <<'EOF'
+        if local == "image" {
+            imageDepth += 1
+            // fall through: the iTunes-artwork branch below still runs
+        }
+EOF
+    snippet NEW <<'EOF'
+        if local == "image" {
+            // fall through: the iTunes-artwork branch below still runs
+        }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  E802)
+    snippet OLD <<'EOF'
+            if feed.siteURL == nil, imageDepth == 0 {
+EOF
+    snippet NEW <<'EOF'
+            if feed.siteURL == nil {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  E803)
+    snippet OLD <<'EOF'
+        if local == "image" {
+            imageDepth = max(0, imageDepth - 1)
+            return
+        }
+EOF
+    snippet NEW <<'EOF'
+        if local == "image" {
+            return
+        }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  E804)
+    snippet OLD <<'EOF'
+            if feed.siteURL == nil, imageDepth == 0 {
+EOF
+    snippet NEW <<'EOF'
+            if imageDepth == 0 {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  E805)
+    snippet OLD <<'EOF'
+            if insideITunesOwner, feed.ownerEmail == nil {
+EOF
+    snippet NEW <<'EOF'
+            if feed.ownerEmail == nil {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  E806)
+    snippet OLD <<'EOF'
+        if local == "owner" && ns == Self.itunesNS {
+            insideITunesOwner = false
+            return
+        }
+EOF
+    snippet NEW <<'EOF'
+        if local == "owner" && ns == Self.itunesNS {
+            return
+        }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  E807)
+    snippet OLD <<'EOF'
+            if rel == nil || rel == "alternate", imageDepth == 0,
+EOF
+    snippet NEW <<'EOF'
+            if rel == nil || rel == "alternate" || rel == "self", imageDepth == 0,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  E808)
+    snippet OLD <<'EOF'
+        guard domain != feedHostDomain else { return nil }
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  E809)
+    snippet OLD <<'EOF'
+        guard let domain = DomainNormalizer.etld1(from: raw) else { return nil }
+        guard domain != feedHostDomain else { return nil }
+EOF
+    snippet NEW <<'EOF'
+        guard let domain = DomainNormalizer.etld1(from: raw) else { return nil }
+        guard raw != feedHostDomain else { return nil }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  E810)
+    snippet OLD <<'EOF'
+        if let ownerDomain, DomainNormalizer.etld1(from: url) != ownerDomain {
+EOF
+    snippet NEW <<'EOF'
+        if let ownerDomain, DomainNormalizer.etld1(from: url) == ownerDomain {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  E811)
+    snippet OLD <<'EOF'
+        if let ownerDomain, DomainNormalizer.etld1(from: url) != ownerDomain {
+            return
+        }
+        ingestRSSLink(url)
+EOF
+    snippet NEW <<'EOF'
+        _ = ownerDomain
+        ingestRSSLink(url)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  E812)
+    snippet OLD <<'EOF'
+        if let ownerDomain, DomainNormalizer.etld1(from: url) != ownerDomain {
+            return
+        }
+        ingestRSSLink(url)
+EOF
+    snippet NEW <<'EOF'
+        guard let ownerDomain, DomainNormalizer.etld1(from: url) == ownerDomain else {
+            return
+        }
+        ingestRSSLink(url)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  E813)
+    snippet OLD <<'EOF'
+            feedHostDomain: feedURL.flatMap { DomainNormalizer.etld1(from: $0.absoluteString) }
+EOF
+    snippet NEW <<'EOF'
+            feedHostDomain: nil
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  E814)
+    snippet OLD <<'EOF'
+        graph.ingestRSSFeed(
+            linkURL: siteURL?.absoluteString,
+            itunesOwnerEmail: ownerEmail
+        )
+EOF
+    snippet NEW <<'EOF'
+        if let siteURL { graph.ingestRSSLink(siteURL.absoluteString) }
+        if let ownerEmail { graph.ingestITunesOwner(email: ownerEmail) }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  E815)
+    snippet OLD <<'EOF'
+                                ownerEmail: episode.podcast?.ownerEmail,
+EOF
+    snippet NEW <<'EOF'
+                                ownerEmail: nil,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  E816)
+    snippet OLD <<'EOF'
+                                feedURL: episode.podcast?.feedURL,
+                                siteURL: episode.podcast?.siteURL,
+EOF
+    snippet NEW <<'EOF'
+                                feedURL: nil,
+                                siteURL: episode.podcast?.siteURL,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  E817)
+    snippet OLD <<'EOF'
+            existing.siteURL = feed.siteURL
+            existing.ownerEmail = feed.ownerEmail
+EOF
+    snippet NEW <<'EOF'
+            existing.siteURL = feed.siteURL
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  E818)
+    snippet OLD <<'EOF'
+                siteURL: feed.siteURL,
+                ownerEmail: feed.ownerEmail
+            )
+EOF
+    snippet NEW <<'EOF'
+                siteURL: feed.siteURL
+            )
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  E899)
+    snippet OLD <<'EOF'
+        let ownerDomain = itunesOwnerEmail.flatMap(Self.domain(ofEmail:))
+            .flatMap { DomainNormalizer.etld1(from: $0) }
+        if let email = itunesOwnerEmail { ingestITunesOwner(email: email) }
+
+        guard let url = linkURL else { return }
+        if let ownerDomain, DomainNormalizer.etld1(from: url) != ownerDomain {
+EOF
+    snippet NEW <<'EOF'
+        let declaredOwnerDomain = itunesOwnerEmail.flatMap(Self.domain(ofEmail:))
+            .flatMap { DomainNormalizer.etld1(from: $0) }
+        if let email = itunesOwnerEmail { ingestITunesOwner(email: email) }
+
+        guard let url = linkURL else { return }
+        if let ownerDomain = declaredOwnerDomain, DomainNormalizer.etld1(from: url) != ownerDomain {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
   KM99)
     snippet OLD <<'EOF'
         let newFrequency = (existing?.frequency ?? 0) + 1
@@ -22942,6 +23350,8 @@ rec_file()   {
     EMPRO) printf '%s' "$EMPRO" ;;
     MCEX)  printf '%s' "$MCEX" ;;
     PAPP)  printf '%s' "$PAPP" ;;
+    FPARSE) printf '%s' "$FPARSE" ;;
+    PDISC) printf '%s' "$PDISC" ;;
     *)     printf '%s' "" ;;
   esac
 }
