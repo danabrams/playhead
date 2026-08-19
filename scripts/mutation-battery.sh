@@ -1619,6 +1619,32 @@ FOCUSED_SUITES=(
   # reason: there the two layers were two BEADS' worth of claims; here the fold
   # rails exist precisely to say which HALF of one claim a mutant broke.
   -only-testing:PlayheadTests/SemanticScanLatencyHistoryV56MigrationTests
+  # playhead-g7ln: the trait episode count (G7 series). FOUR suites, because the
+  # claim spans three layers and no one of them can observe another.
+  #
+  # `TraitProfileEpisodeCountTests` drives the real `mutateProfile` closures, so
+  # it is the only thing that can see the COUNT and what it buys at the
+  # resolver. It cannot see the CALL SITE: it calls `updatePriorsForTesting` and
+  # chooses the flag itself, so a literal `true` in `runBackfill` leaves every
+  # one of its rails green — which is exactly what G703 proves.
+  #
+  # `TraitEpisodeCountSourceCanaryTests` is the only thing that can see that
+  # argument, and also the only thing that can see the READER ENUMERATION a unit
+  # change owes (V49's cautionary tale, playhead-scc6, is an enumeration done by
+  # hand that missed the per-class mirror).
+  #
+  # `TraitProfileEpisodeCountV57MigrationTests` is the only thing that can see
+  # what an UPGRADED DEVICE carries: a forward fix alone leaves 104 on disk
+  # forever, and no service-level rail can observe a store it never opened.
+  #
+  # `PriorHierarchyWireUpTests` is carried whole rather than by test, because it
+  # owns the create-branch bootstrap and the three-episode activation this bead
+  # re-points — the direction the fix must NOT break. It is the control on
+  # "gate everything and the trait tier is simply dead", which is G702.
+  -only-testing:PlayheadTests/TraitProfileEpisodeCountTests
+  -only-testing:PlayheadTests/TraitEpisodeCountSourceCanaryTests
+  -only-testing:PlayheadTests/TraitProfileEpisodeCountV57MigrationTests
+  -only-testing:PlayheadTests/PriorHierarchyWireUpTests
   # playhead-59c8: the unclassified-model-failure rails (UM series). Two suites,
   # because the claim spans two layers and neither can see the other: the pure
   # identity read and the token it builds (instant, no store), and a SOURCE
@@ -3828,6 +3854,32 @@ T_GC_FOLDACC="folding: a real retry accumulates total, max and count"
 T_GC_FOLDIDEM="folding: an idempotent rewrite changes nothing"
 T_GC_FOLDNIL="folding: an unmeasured retry is inert in both directions"
 T_GC_FOLDMAX="folding: max never falls, whatever order the attempts arrive in"
+
+# playhead-g7ln — the trait episode count (G7 series). Three layers, and no one
+# of them can observe another. The SERVICE rails drive the real
+# `mutateProfile` closures, so they see the count and what it buys at the
+# resolver; they CANNOT see the call site, because `updatePriorsForTesting`
+# chooses the flag itself and a literal `true` in `runBackfill` leaves every one
+# of them green. The SOURCE canary is the only thing that can see the argument.
+# And the MIGRATION rails are the only thing that can see what an upgraded
+# device carries — a forward fix leaves 104 on disk forever.
+T_G7_WITNESS="one claimed episode plus eight re-backfills counts ONE episode"
+T_G7_THREE="three claimed episodes count three, and the tier turns on"
+T_G7_BYTES="an unclaimed backfill leaves traitProfileJSON byte-identical"
+T_G7_MIRROR="an unclaimed backfill still accumulates durations, slots and sponsors"
+T_G7_CREATE_FALSE="an unclaimed create seeds NO trait profile"
+T_G7_CREATE_TRUE="updatePriors bootstraps traitProfileJSON for a show with no prior profile"
+T_G7_RESOLVER="the trait tier is inactive at one episode and active at three"
+T_G7_RESET="V57 resets an inflated episodesObserved to 0"
+T_G7_VALUES="V57 preserves every trait VALUE and touches only the count"
+T_G7_OTHERCOLS="V57 changes no other column: mode, trust, vetoes and priors survive"
+T_G7_ZERO="a profile already at 0 is not rewritten at all"
+T_G7_NULLPROFILE="a NULL traitProfileJSON is not given one"
+T_G7_NOSTEP="V57 does NOT step over a rolled-back V39"
+T_G7_LAUNCH="a second launch does not reset an episode counted under the NEW unit"
+# XCTest, so the harness addresses it by CLASS/method rather than by display name.
+T_G7_CANARY_CALLSITE="TraitEpisodeCountSourceCanaryTests/testRunBackfillForwardsTheEpisodeClaimIntoUpdatePriors"
+T_G7_CANARY_READERS="TraitEpisodeCountSourceCanaryTests/testEpisodesObservedIsReadOnlyWhereTheDocCommentSaysItIs"
 T_GC_FOLDFIRSTNIL="folding: an unmeasured first attempt records nothing"
 T_GC_FOLDSEED="folding: an idempotent rewrite SEEDS a row that has no record yet"
 T_JC_NORMALIZED="the two producers DISAGREE on normalizedText while agreeing on text — the key cannot be the normalised column"
@@ -9462,6 +9514,94 @@ MUTATIONS=(
   # changing no behaviour. Non-empty expectation on purpose (playhead-ngsm).
   "GC99|1105|SSR|$T_GC_FOLDACC;$T_GC_FOLDIDEM;$T_GC_FOLDNIL"
 
+  # ---- playhead-g7ln: the trait episode count counts EPISODES (G7 series) ----
+  #
+  # Batches are one-per-mutation wherever two edits would redden overlapping
+  # rails, which is most of them: the witness, the byte-identity rail and the
+  # resolver rail all read the same persisted column.
+
+  # Batch 1114 — G701, THE SHIPPED DEFECT restored in one token: the update path
+  # merges unconditionally, so `updated(from:)` runs once per BACKFILL again.
+  "G701|1114|ADSVC|$T_G7_WITNESS;$T_G7_BYTES;$T_G7_RESOLVER"
+
+  # Batch 1115 — G702, THE MIRROR, and the direction a "just gate it" fix breaks:
+  # nothing ever merges, so the trait tier is dead and `episodesObserved` never
+  # leaves 0. A rail set that only proves re-backfills do not count would pass.
+  "G702|1115|ADSVC|$T_G7_THREE;$T_G7_RESOLVER;$T_G7_CREATE_TRUE"
+
+  # Batch 1116 — G703, THE CALL SITE, and the reason the source canary exists:
+  # `runBackfill` passes a literal `true`. Every service-level rail in
+  # `TraitProfileEpisodeCountTests` stays GREEN, because they choose the flag
+  # themselves. Only the canary can see it.
+  "G703|1116|ADSVC|$T_G7_CANARY_CALLSITE"
+
+  # Batch 1117 — G704, the mirror of G703: the claim result is discarded and the
+  # gate is wired to a literal `false`. Same blindness, opposite direction — the
+  # trait profile freezes on every device and no runtime rail notices, because
+  # no runtime rail drives `runBackfill`.
+  "G704|1117|ADSVC|$T_G7_CANARY_CALLSITE"
+
+  # Batch 1118 — G705, the CREATE branch seeds unconditionally: a show whose
+  # episode nothing witnessed is credited one anyway. playhead-2qz6's
+  # `observationCount: 0` argument, in the column it did not reach.
+  "G705|1118|ADSVC|$T_G7_CREATE_FALSE"
+
+  # Batch 1119 — G706, the create branch never seeds. The mirror of G705 and the
+  # regression `PriorHierarchyWireUpTests` is carried for.
+  "G706|1119|ADSVC|$T_G7_CREATE_TRUE"
+
+  # Batch 1120 — G707, the else branch BLANKS the column instead of carrying it
+  # forward. An unclaimed re-backfill destroys the show's whole trait history —
+  # the loudest possible way to be wrong, and nothing but the byte-identity rail
+  # asks the question.
+  "G707|1120|ADSVC|$T_G7_BYTES;$T_G7_RESOLVER"
+
+  # Batch 1121 — G708, the gate is applied to the WHOLE priors merge rather than
+  # to the trait profile: the ad-duration aggregate, slot priors and sponsor
+  # lexicon freeze on every unclaimed backfill too. Every rail about the COUNT
+  # stays green; only the mirror sees it.
+  "G708|1121|ADSVC|$T_G7_MIRROR"
+
+  # Batch 1122 — G709, V57 writes the count back unchanged. The forward fix is
+  # intact and every service rail is green; every device that ever ran the old
+  # binary keeps its inflated number forever.
+  "G709|1122|STORE|$T_G7_RESET"
+
+  # Batch 1123 — G710, V57 resets to 3 — the `isReliable` floor. THE TUNING
+  # MUTANT: it "preserves current behaviour" by keeping the tier on, which is
+  # exactly the move the bead's acceptance criteria forbid, and it is
+  # indistinguishable from the real fix at every rail that only reads the count
+  # for non-zero-ness.
+  "G710|1123|STORE|$T_G7_RESET"
+
+  # Batch 1124 — G711, V57 drops the `episodesObserved != 0` predicate, so every
+  # row is rewritten whether it needs it or not. Harmless-looking; it is how a
+  # cost guard becomes a rewrite of rows the rung has nothing to say about.
+  "G711|1124|STORE|$T_G7_ZERO"
+
+  # Batch 1125 — G712, V57 blanks `traitProfileJSON` instead of resetting one
+  # key. The count comes out right and the show's measured traits are destroyed.
+  "G712|1125|STORE|$T_G7_VALUES;$T_G7_OTHERCOLS"
+
+  # Batch 1126 — G713, V57 drops its `observed >= 56` guard and repairs a store
+  # the ladder could not legally climb — the don't-step-over-a-rolled-back-V39
+  # rule, at this rung.
+  "G713|1126|STORE|$T_G7_NOSTEP"
+
+  # Batch 1127 — G714, the reader enumeration is a comment rather than a rail:
+  # the canary's licence list gains a wildcard, so a fourth reader of
+  # `episodesObserved` lands with nothing to stop it. Aimed at the canary's own
+  # anti-vacuity half — the CLOSED-IN-BOTH-DIRECTIONS check.
+  "G714|1127|TRUST|$T_G7_CANARY_READERS"
+
+  # G799 — VACUITY CONTROL, and it MUST SURVIVE. The gate parameter is renamed
+  # at its declaration, at the call site and at both uses; nothing else changes.
+  # It proves the anchors still match, the batch still builds and all four
+  # suites still run, while changing no behaviour.
+  # Non-empty expectation on purpose (playhead-ngsm) — it names the rails G701
+  # and G703 kill, so a KILLED verdict would mean a rename can change behaviour.
+  "G799|1128|ADSVC|$T_G7_WITNESS;$T_G7_CANARY_CALLSITE"
+
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -9634,6 +9774,21 @@ describe_mutation() {
     YX06) echo "yx0f: nil moves from the BOTTOM of the band order to the top, so an ungraded span never wins — invisible to every factor, visible only to a reader of the band" ;;
     YX07) echo "yx0f: certaintyFactor(of:) re-inlines its own decode and DRIFTS (.max for .min) — two readers of one column, this bead's shape one layer down" ;;
     YX09) echo "yx0f: the ledger DETAIL keeps the proxy while the WEIGHT is correct — DecisionLogger records a band that cannot be reconciled with the row" ;;
+    G701) echo "g7ln: the trait EMA merges unconditionally again — episodesObserved counts BACKFILLS, the shipped defect in one token" ;;
+    G702) echo "g7ln: nothing ever merges — the safe-looking direction, in which the trait tier is simply dead" ;;
+    G703) echo "g7ln: runBackfill passes a literal true — every service rail stays GREEN, only the source canary can see it" ;;
+    G704) echo "g7ln: runBackfill discards the claim and passes false — the same blindness, frozen instead of inflated" ;;
+    G705) echo "g7ln: the create branch seeds a one-episode profile for an episode nothing witnessed (2qz6's observationCount: 0 argument)" ;;
+    G706) echo "g7ln: the create branch never seeds, so a fresh show can never start its EMA" ;;
+    G707) echo "g7ln: an unclaimed re-backfill BLANKS traitProfileJSON instead of carrying it forward" ;;
+    G708) echo "g7ln: the claim gates the WHOLE priors merge — durations, slots and sponsors freeze too, and every count rail stays green" ;;
+    G709) echo "g7ln: V57 writes the count back unchanged — the forward fix is intact and every upgraded device keeps its 104" ;;
+    G710) echo "g7ln: V57 resets to 3, the isReliable floor — THE TUNING MUTANT, preserving current behaviour by keeping the tier on" ;;
+    G711) echo "g7ln: V57 drops its episodesObserved != 0 predicate and rewrites rows it has nothing to say about" ;;
+    G712) echo "g7ln: V57 blanks traitProfileJSON instead of resetting one key — the count is right and the traits are destroyed" ;;
+    G713) echo "g7ln: V57 drops its observed >= 56 guard and repairs a store the ladder could not legally climb" ;;
+    G714) echo "g7ln: a FOURTH reader of episodesObserved lands in an unlicensed file — the enumeration a unit change owes, unenforced" ;;
+    G799) echo "VACUITY CONTROL — a local holding the resolved trait JSON is renamed and nothing else is. MUST SURVIVE" ;;
     YX99) echo "VACUITY CONTROL — the band in buildFMLedgerEntries is bound through a renamed intermediate on the line YX01 rewrites; nothing else changes. MUST SURVIVE" ;;
     NY01) echo "AdDetectionService.hotPathCandidates sorts the RAW array — the shipped defect: runBackfill canonicalized and the hot path did not" ;;
     NY02) echo "the hot path 'de-duplicates' by chunk.id, a per-ROW UUID, so a fast/final twin survives it intact" ;;
@@ -21834,6 +21989,213 @@ EOF
 EOF
     snippet NEW <<'EOF'
         let position = await playbackService.snapshot().currentTime
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # ---- playhead-g7ln: the trait episode count counts EPISODES (G7 series) ----
+
+  G701)
+    snippet OLD <<'EOF'
+                    if countsAsEpisodeObservation {
+                        mergedTraitProfileJSON = Self.mergedTraitProfileJSON(
+EOF
+    snippet NEW <<'EOF'
+                    if countsAsEpisodeObservation || !countsAsEpisodeObservation {
+                        mergedTraitProfileJSON = Self.mergedTraitProfileJSON(
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  G702)
+    snippet OLD <<'EOF'
+                    if countsAsEpisodeObservation {
+                        mergedTraitProfileJSON = Self.mergedTraitProfileJSON(
+EOF
+    snippet NEW <<'EOF'
+                    if countsAsEpisodeObservation && !countsAsEpisodeObservation {
+                        mergedTraitProfileJSON = Self.mergedTraitProfileJSON(
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  G703)
+    snippet OLD <<'EOF'
+                countsAsEpisodeObservation: countedEpisodeObservation
+EOF
+    snippet NEW <<'EOF'
+                countsAsEpisodeObservation: true
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  G704)
+    snippet OLD <<'EOF'
+            let countedEpisodeObservation = await recordConfirmedWindowObservation(
+EOF
+    snippet NEW <<'EOF'
+            await recordConfirmedWindowObservation(
+EOF
+    patch "$file" "$OLD" "$NEW" || return $?
+    snippet OLD <<'EOF'
+                countsAsEpisodeObservation: countedEpisodeObservation
+EOF
+    snippet NEW <<'EOF'
+                countsAsEpisodeObservation: false
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  G705)
+    snippet OLD <<'EOF'
+                    let initialTraitProfileJSON = countsAsEpisodeObservation
+EOF
+    snippet NEW <<'EOF'
+                    let initialTraitProfileJSON = countsAsEpisodeObservation || !countsAsEpisodeObservation
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  G706)
+    snippet OLD <<'EOF'
+                    let initialTraitProfileJSON = countsAsEpisodeObservation
+EOF
+    snippet NEW <<'EOF'
+                    let initialTraitProfileJSON = countsAsEpisodeObservation && !countsAsEpisodeObservation
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  G707)
+    snippet OLD <<'EOF'
+                        mergedTraitProfileJSON = nil
+                        resolvedTraitProfileJSON = existing.traitProfileJSON
+                    }
+EOF
+    snippet NEW <<'EOF'
+                        mergedTraitProfileJSON = nil
+                        resolvedTraitProfileJSON = existing.traitProfileJSON == nil ? nil : nil
+                    }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  G708)
+    snippet OLD <<'EOF'
+                update: { existing in
+                    // Merge slot positions (exponential moving average).
+EOF
+    snippet NEW <<'EOF'
+                update: { existing in
+                    guard countsAsEpisodeObservation else { return existing }
+                    // Merge slot positions (exponential moving average).
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  G709)
+    snippet OLD <<'EOF'
+                transcriptReliability: profile.transcriptReliability,
+                episodesObserved: 0
+            )
+EOF
+    snippet NEW <<'EOF'
+                transcriptReliability: profile.transcriptReliability,
+                episodesObserved: profile.episodesObserved
+            )
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  G710)
+    snippet OLD <<'EOF'
+                transcriptReliability: profile.transcriptReliability,
+                episodesObserved: 0
+            )
+EOF
+    snippet NEW <<'EOF'
+                transcriptReliability: profile.transcriptReliability,
+                episodesObserved: 3
+            )
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  G711)
+    snippet OLD <<'EOF'
+            guard let profile = decoded, profile.episodesObserved != 0 else { continue }
+EOF
+    snippet NEW <<'EOF'
+            guard let profile = decoded else { continue }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  G712)
+    snippet OLD <<'EOF'
+                "UPDATE podcast_profiles SET traitProfileJSON = ? WHERE podcastId = ?"
+            )
+            defer { sqlite3_finalize(stmt) }
+            bind(stmt, 1, reset.repaired)
+EOF
+    snippet NEW <<'EOF'
+                "UPDATE podcast_profiles SET traitProfileJSON = ? WHERE podcastId = ?"
+            )
+            defer { sqlite3_finalize(stmt) }
+            bind(stmt, 1, "{}")
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  G713)
+    snippet OLD <<'EOF'
+        // DO NOT STEP OVER A ROLLED-BACK V39 — same rationale as V40–V56.
+        guard observed >= 56 else { return }
+EOF
+    snippet NEW <<'EOF'
+        // DO NOT STEP OVER A ROLLED-BACK V39 — same rationale as V40–V56.
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  G714)
+    snippet OLD <<'EOF'
+                    let decayed = max(0, profile.recentFalseSkipSignals / 2)
+EOF
+    snippet NEW <<'EOF'
+                    let decayed = profile.traitProfile.episodesObserved >= 0
+                        ? max(0, profile.recentFalseSkipSignals / 2)
+                        : profile.recentFalseSkipSignals
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  G799)
+    snippet OLD <<'EOF'
+                    let resolvedTraitProfileJSON: String?
+                    let mergedTraitProfileJSON: String?
+                    if countsAsEpisodeObservation {
+                        mergedTraitProfileJSON = Self.mergedTraitProfileJSON(
+                            existing: existing,
+                            featureWindows: featureWindows,
+                            chunks: chunks,
+                            confirmedAdWindows: nonSuppressedWindows,
+                            episodeDuration: episodeDuration
+                        )
+                        resolvedTraitProfileJSON = mergedTraitProfileJSON ?? existing.traitProfileJSON
+                    } else {
+                        mergedTraitProfileJSON = nil
+                        resolvedTraitProfileJSON = existing.traitProfileJSON
+                    }
+EOF
+    snippet NEW <<'EOF'
+                    let traitProfileJSONToPersist: String?
+                    let mergedTraitProfileJSON: String?
+                    if countsAsEpisodeObservation {
+                        mergedTraitProfileJSON = Self.mergedTraitProfileJSON(
+                            existing: existing,
+                            featureWindows: featureWindows,
+                            chunks: chunks,
+                            confirmedAdWindows: nonSuppressedWindows,
+                            episodeDuration: episodeDuration
+                        )
+                        traitProfileJSONToPersist = mergedTraitProfileJSON ?? existing.traitProfileJSON
+                    } else {
+                        mergedTraitProfileJSON = nil
+                        traitProfileJSONToPersist = existing.traitProfileJSON
+                    }
+EOF
+    patch "$file" "$OLD" "$NEW" || return $?
+    snippet OLD <<'EOF'
+                        traitProfileJSON: resolvedTraitProfileJSON,
+EOF
+    snippet NEW <<'EOF'
+                        traitProfileJSON: traitProfileJSONToPersist,
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
