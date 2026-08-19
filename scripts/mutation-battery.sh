@@ -1645,6 +1645,27 @@ FOCUSED_SUITES=(
   -only-testing:PlayheadTests/TraitEpisodeCountSourceCanaryTests
   -only-testing:PlayheadTests/TraitProfileEpisodeCountV57MigrationTests
   -only-testing:PlayheadTests/PriorHierarchyWireUpTests
+  # playhead-scc6: the PER-CLASS observationCount (DC series). TWO suites, and
+  # the split is the same argument g7ln's makes one arm up.
+  #
+  # `DetectorTrustObservationCountV58MigrationTests` is the only thing that can
+  # see what an UPGRADED DEVICE carries. Every rail in it drives the real ladder
+  # over a store whose `detectorTrustJSON` was written in the old unit — which is
+  # what all four 2026-08-18 device pulls carry, `fusion` at 16 against 8 claimed
+  # episodes.
+  #
+  # `DetectorTrustObservationCountSourceCanaryTests` is the only thing that can
+  # see the READER ENUMERATION (V49's cautionary tale is THIS bead: an
+  # enumeration done by hand that missed the mirror the skip gate reads), the
+  # LADDER REGISTRATION count, and the absence of a JSON1 dependency. None of
+  # the three is observable from a runtime assertion — a rung called twice is
+  # idempotent, and an enumeration is a property of the whole tree.
+  #
+  # `TrustEpisodeObservationV49MigrationTests` is already carried above; its
+  # fixtures now fork a ledger, which is what makes it able to see this defect
+  # at all.
+  -only-testing:PlayheadTests/DetectorTrustObservationCountV58MigrationTests
+  -only-testing:PlayheadTests/DetectorTrustObservationCountSourceCanaryTests
   # playhead-59c8: the unclassified-model-failure rails (UM series). Two suites,
   # because the claim spans two layers and neither can see the other: the pure
   # identity read and the token it builds (instant, no store), and a SOURCE
@@ -3880,6 +3901,24 @@ T_G7_LAUNCH="a second launch does not reset an episode counted under the NEW uni
 # XCTest, so the harness addresses it by CLASS/method rather than by display name.
 T_G7_CANARY_CALLSITE="TraitEpisodeCountSourceCanaryTests/testRunBackfillForwardsTheEpisodeClaimIntoUpdatePriors"
 T_G7_CANARY_READERS="TraitEpisodeCountSourceCanaryTests/testEpisodesObservedIsReadOnlyWhereTheDocCommentSaysItIs"
+
+# playhead-scc6 — the PER-CLASS observationCount (DC series). Two layers, and the
+# second is the one V49 skipped. The MIGRATION rails see what an upgraded device
+# carries; the SOURCE canary sees the reader enumeration and the ladder
+# registration, neither of which any runtime assertion can reach.
+T_DC_RESET="V58 resets every inflated per-class observationCount to 0"
+T_DC_FIELDS="V58 preserves every other field of every entry, bit-exact"
+T_DC_MODES="V58 moves no entry's mode in either direction"
+T_DC_UNKNOWN="a class key this binary does not recognise is repaired and kept"
+T_DC_OTHERCOLS="V58 changes no other column: the show scalar, mode, trust, vetoes and priors survive"
+T_DC_COST="a shadow class that was one gesture from manual now needs three"
+T_DC_ZERO="a ledger already at zero is not rewritten at all"
+T_DC_CORRUPT="a ledger the decoder rejects is left exactly as it is"
+T_DC_NOSTEP="V58 does NOT step over a rolled-back V39"
+T_DC_V49="V49 resets the per-backfill counts and leaves mode, trust and the veto counter alone"
+# XCTest, so the harness addresses it by CLASS/method rather than by display name.
+T_DC_CANARY_LADDER="DetectorTrustObservationCountSourceCanaryTests/testV58IsRegisteredInBothLaddersExactlyOnceEach"
+T_DC_CANARY_SITES="DetectorTrustObservationCountSourceCanaryTests/testEveryReadOfThePerClassCountIsOneOfTheEnumeratedSites"
 T_GC_FOLDFIRSTNIL="folding: an unmeasured first attempt records nothing"
 T_GC_FOLDSEED="folding: an idempotent rewrite SEEDS a row that has no record yet"
 T_JC_NORMALIZED="the two producers DISAGREE on normalizedText while agreeing on text — the key cannot be the normalised column"
@@ -9613,6 +9652,93 @@ MUTATIONS=(
   # and G703 kill, so a KILLED verdict would mean a rename can change behaviour.
   "G799|1120|ADSVC|$T_G7_WITNESS;$T_G7_CANARY_CALLSITE"
 
+  # ---- playhead-scc6: the PER-CLASS observationCount counts EPISODES (DC) ----
+  #
+  # ONE MUTATION PER BATCH, and the reason is the shape of the thing rather than
+  # caution: almost every edit to the repair changes a COUNT, and almost every
+  # rail reads a count, so two count mutants in one batch cannot be told apart
+  # by which test failed. The three that do not touch the repair (DC07, DC09,
+  # DC10, DC11) are kept separate for the same reason at one remove — DC07 and
+  # DC09 both redden the step-over rail, DC10 and DC11 both redden the canary's
+  # site count.
+
+  # DC01, THE INERT FIX: V58 writes the count back unchanged. Every forward rail
+  # is green and every device that ever ran the old binary keeps its 16 forever.
+  # g7ln's G709, one column over.
+  "DC01|1122|STORE|$T_DC_RESET"
+
+  # DC02, THE TUNING MUTANT: V58 resets to 3 — exactly
+  # `shadowToManualObservations`, so every repaired class stays one observation
+  # from `manual` and "current behaviour is preserved". That is the move the
+  # acceptance criteria forbid by name, and it is indistinguishable from the real
+  # fix at any rail that only reads the count for non-zero-ness.
+  "DC02|1123|STORE|$T_DC_RESET"
+
+  # DC03, THE DEMOTION NOBODY CHOSE: the repair also writes `mode`. A migration
+  # that moves a posture is V49's stated forbidden direction, and it is what a
+  # "helpfully re-run promotion after zeroing the count" fix does.
+  "DC03|1124|STORE|$T_DC_MODES"
+
+  # DC04, THE DROPPED FUTURE KEY: the repair rebuilds through
+  # `SkipDetectorClass(rawValue:)`, so a class a NEWER build stored is silently
+  # deleted. `DetectorTrustLedger`'s whole storage argument is that such a key
+  # survives a round trip; this is the one place a migration can break it, and
+  # no count rail can see it.
+  "DC04|1125|STORE|$T_DC_UNKNOWN"
+
+  # DC05, THE COST GUARD BECOMES A REWRITE: the `!= 0` predicate goes, so every
+  # ledger on the device is re-encoded whether the rung has anything to say about
+  # it or not. Harmless-looking, and it is how an already-correct row acquires a
+  # new byte pattern on upgrade. g7ln's G711.
+  "DC05|1126|STORE|$T_DC_ZERO"
+
+  # DC06, THE FORGIVING DECODE: the repair reads the column through
+  # `DetectorTrustLedger.decode`, which SWALLOWS a decode failure into an empty
+  # ledger — so an unreadable blob is re-encoded as `{}` and destroyed. The
+  # direction that matters: the blob claimed nothing (every class already falls
+  # back to its seed), so the repair had nothing to fix and everything to lose.
+  "DC06|1127|STORE|$T_DC_CORRUPT"
+
+  # DC07, THE STEP-OVER: V58 drops its `observed >= 57` guard and repairs a store
+  # the ladder could not legally climb — the don't-step-over-a-rolled-back-V39
+  # rule, at this rung. It also STAMPS 58 on a database still at 38.
+  "DC07|1128|STORE|$T_DC_NOSTEP"
+
+  # DC08, THE LISTENER'S RECORD: the repair zeroes `falseSkipWeight` as well.
+  # That counter is the record of the vetoes the user actually gave, and
+  # resetting it relitigates a decision they made — V49's
+  # `recentFalseSkipSignals` contract, one column down.
+  "DC08|1129|STORE|$T_DC_FIELDS"
+
+  # DC09, THE UNREGISTERED RUNG: the call is removed from
+  # `migrateOnlyForTesting`. Every fixture-driven migration test then stops one
+  # rung short while the production ladder is fine — and the expectation names
+  # the CANARY, because a rung called twice is idempotent and a rung called once
+  # too few is only visible where the count is asserted.
+  "DC09|1130|STORE|$T_DC_CANARY_LADDER"
+
+  # DC10, THE BRIDGE: `DetectorTrustLedger.seed` stops copying
+  # `profile.observationCount` into a show-governed class and seeds 0 instead.
+  # That function is where the show scalar BECOMES the per-class quantity, so it
+  # is the single line at which the two units are welded together — and the
+  # canary counts it for exactly that reason.
+  "DC10|1131|DETLED|$T_DC_CANARY_SITES"
+
+  # DC11, THE RE-COUPLING: `applyCorrectObservation` advances the entry from the
+  # SHOW scalar rather than from the entry's own count. It is the defect
+  # playhead-gard removed, growing back — and on a store where the two agree it
+  # is behaviourally invisible, which is the whole argument for enumerating the
+  # readers mechanically instead of by hand.
+  "DC11|1132|TRUST|$T_DC_CANARY_SITES"
+
+  # DC99 — VACUITY CONTROL, and it MUST SURVIVE. The local holding the repaired
+  # ledger is renamed at its declaration and at its single use; nothing else
+  # changes. It proves the anchors still match, the batch still builds and both
+  # suites still run, while changing no behaviour.
+  # Non-empty expectation on purpose (playhead-ngsm) — it names the rails DC01
+  # and DC03 kill, so a KILLED verdict would mean a rename can change behaviour.
+  "DC99|1133|STORE|$T_DC_RESET;$T_DC_MODES"
+
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -9800,6 +9926,18 @@ describe_mutation() {
     G713) echo "g7ln: V57 drops its observed >= 56 guard and repairs a store the ladder could not legally climb" ;;
     G714) echo "g7ln: a FOURTH reader of episodesObserved lands in an unlicensed file — the enumeration a unit change owes, unenforced" ;;
     G799) echo "VACUITY CONTROL — a local holding the resolved trait JSON is renamed and nothing else is. MUST SURVIVE" ;;
+    DC01) echo "scc6: V58 writes the per-class count back unchanged — every upgraded device keeps its 16" ;;
+    DC02) echo "scc6: V58 resets to 3, the shadowToManualObservations floor — THE TUNING MUTANT, preserving current behaviour" ;;
+    DC03) echo "scc6: the repair also writes mode — a demotion nobody chose, in a migration" ;;
+    DC04) echo "scc6: the repair rebuilds through SkipDetectorClass(rawValue:), silently deleting a newer build's class key" ;;
+    DC05) echo "scc6: V58 drops its non-zero predicate and re-encodes every ledger on the device" ;;
+    DC06) echo "scc6: V58 decodes through the FORGIVING path, so an unreadable ledger is re-encoded as {} and destroyed" ;;
+    DC07) echo "scc6: V58 drops its observed >= 57 guard and repairs (and stamps) a store the ladder could not legally climb" ;;
+    DC08) echo "scc6: the repair zeroes falseSkipWeight too — the listener's own veto record, relitigated by a migration" ;;
+    DC09) echo "scc6: the V58 call is removed from migrateOnlyForTesting — every fixture-driven test stops one rung short" ;;
+    DC10) echo "scc6: DetectorTrustLedger.seed stops copying the show scalar — the WELD between the two units, cut" ;;
+    DC11) echo "scc6: applyCorrectObservation advances the entry from the SHOW scalar again — gard's defect, growing back" ;;
+    DC99) echo "VACUITY CONTROL — the local holding the repaired ledger is renamed and nothing else is. MUST SURVIVE" ;;
     YX99) echo "VACUITY CONTROL — the band in buildFMLedgerEntries is bound through a renamed intermediate on the line YX01 rewrites; nothing else changes. MUST SURVIVE" ;;
     NY01) echo "AdDetectionService.hotPathCandidates sorts the RAW array — the shipped defect: runBackfill canonicalized and the hot path did not" ;;
     NY02) echo "the hot path 'de-duplicates' by chunk.id, a per-ROW UUID, so a fast/final twin survives it intact" ;;
@@ -22207,6 +22345,155 @@ EOF
 EOF
     snippet NEW <<'EOF'
                         traitProfileJSON: traitProfileJSONToPersist,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # ---- playhead-scc6: the PER-CLASS observationCount counts EPISODES (DC) ----
+
+  DC01)
+    snippet OLD <<'EOF'
+                        falseSkipWeight: entry.falseSkipWeight,
+                        observationCount: 0
+EOF
+    snippet NEW <<'EOF'
+                        falseSkipWeight: entry.falseSkipWeight,
+                        observationCount: entry.observationCount
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DC02)
+    snippet OLD <<'EOF'
+                        falseSkipWeight: entry.falseSkipWeight,
+                        observationCount: 0
+EOF
+    snippet NEW <<'EOF'
+                        falseSkipWeight: entry.falseSkipWeight,
+                        observationCount: 3
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DC03)
+    snippet OLD <<'EOF'
+                        trustScore: entry.trustScore,
+                        mode: entry.mode,
+                        falseSkipWeight: entry.falseSkipWeight,
+                        observationCount: 0
+EOF
+    snippet NEW <<'EOF'
+                        trustScore: entry.trustScore,
+                        mode: SkipMode.shadow.rawValue,
+                        falseSkipWeight: entry.falseSkipWeight,
+                        observationCount: 0
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DC04)
+    snippet OLD <<'EOF'
+                entries: ledger.entries.mapValues { entry in
+EOF
+    snippet NEW <<'EOF'
+                entries: ledger.entries
+                    .filter { SkipDetectorClass(rawValue: $0.key) != nil }
+                    .mapValues { entry in
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DC05)
+    snippet OLD <<'EOF'
+            guard !inflated.isEmpty else { continue }
+EOF
+    snippet NEW <<'EOF'
+            guard !inflated.isEmpty || inflated.isEmpty else { continue }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DC06)
+    snippet OLD <<'EOF'
+            guard let ledger = decoded else { continue }
+            let inflated = ledger.entries.values.map(\.observationCount).filter { $0 != 0 }
+            guard !inflated.isEmpty else { continue }
+EOF
+    snippet NEW <<'EOF'
+            let ledger = decoded ?? DetectorTrustLedger()
+            let inflated = ledger.entries.values.map(\.observationCount).filter { $0 != 0 }
+            guard !inflated.isEmpty || decoded == nil else { continue }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DC07)
+    snippet OLD <<'EOF'
+        // DO NOT STEP OVER A ROLLED-BACK V39 — same rationale as V40–V57.
+        guard observed >= 57 else { return }
+EOF
+    snippet NEW <<'EOF'
+        // DO NOT STEP OVER A ROLLED-BACK V39 — same rationale as V40–V57.
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DC08)
+    snippet OLD <<'EOF'
+                        falseSkipWeight: entry.falseSkipWeight,
+                        observationCount: 0
+EOF
+    snippet NEW <<'EOF'
+                        falseSkipWeight: 0,
+                        observationCount: 0
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DC09)
+    snippet OLD <<'EOF'
+        // ledger — still reaches v58.
+        try migrateDetectorTrustObservationCountV58IfNeeded()
+EOF
+    snippet NEW <<'EOF'
+        // ledger — still reaches v58.
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DC10)
+    snippet OLD <<'EOF'
+            observationCount: profile.observationCount
+EOF
+    snippet NEW <<'EOF'
+            observationCount: 0
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DC11)
+    snippet OLD <<'EOF'
+        var ledger = Self.materialized(profile.detectorTrustLedger, from: profile)
+        let entry = ledger.entry(for: detector, seededFrom: profile)
+        let entryObservations = entry.observationCount + 1
+EOF
+    snippet NEW <<'EOF'
+        var ledger = Self.materialized(profile.detectorTrustLedger, from: profile)
+        let entry = ledger.entry(for: detector, seededFrom: profile)
+        let entryObservations = profile.observationCount + 1
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DC99)
+    snippet OLD <<'EOF'
+            let honest = DetectorTrustLedger(
+EOF
+    snippet NEW <<'EOF'
+            let repairedLedger = DetectorTrustLedger(
+EOF
+    patch "$file" "$OLD" "$NEW" || return $?
+    # V57 carries a BYTE-IDENTICAL `guard let repaired = try
+    # encodeJSONString(honest) else { continue }` eight rungs up, so the anchor
+    # has to reach the line after it to be unique. Caught by --dry-run, which is
+    # what --dry-run is for.
+    snippet OLD <<'EOF'
+            guard let repaired = try encodeJSONString(honest) else { continue }
+            pending.append(
+                PendingLedgerReset(
+EOF
+    snippet NEW <<'EOF'
+            guard let repaired = try encodeJSONString(repairedLedger) else { continue }
+            pending.append(
+                PendingLedgerReset(
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
