@@ -48,25 +48,38 @@ struct EpisodeMetadataSnapshot: Sendable {
     /// over the same episode corpus: computing them separately would walk
     /// every episode's notes twice and let the two answers drift.
     struct ShowDomainOwnership: Sendable, Equatable {
-        /// Domains a STRUCTURAL signal says the show owns. In production
-        /// today that is the feed URL's eTLD+1 and nothing else — RSS
-        /// `<link>` and `<itunes:owner>` are not persisted by the feed
-        /// parser, so `OwnershipGraph.ingestRSSLink` / `ingestITunesOwner`
-        /// have no production caller (playhead-kmw4).
+        /// Domains a STRUCTURAL signal says the show owns: the channel
+        /// `<link>` and the `<itunes:owner>` email's eTLD+1, minus the feed's
+        /// own host (playhead-e8mg). Until that bead the only route with a
+        /// production caller was the feed URL, which is the one route that is
+        /// now gone — it resolved to `simplecast.com` and `flightcast.com` on
+        /// the two subscribed shows, i.e. the hosting platform in both cases.
         let showOwned: Set<String>
         /// Domains that recur in the notes with no ownership signal at all.
         let ownershipUndetermined: Set<String>
     }
 
+    /// Build the one `OwnershipGraph` the pipeline reads.
+    ///
+    /// `feedURL` is an EXCLUSION, not a source. Its eTLD+1 becomes the graph's
+    /// `feedHostDomain`, the single domain `<link>` and `<itunes:owner>` are
+    /// not allowed to claim. Read `OwnershipGraph.feedHostDomain` before
+    /// changing that — the measurement is there.
     static func domainOwnership(
         feedURL: URL?,
+        siteURL: URL?,
+        ownerEmail: String?,
         recentMetadata: [FeedDescriptionMetadata],
         podcastId: String
     ) -> ShowDomainOwnership {
-        var graph = OwnershipGraph(podcastId: podcastId)
-        if let feedURL {
-            graph.ingestFeedURL(feedURL.absoluteString)
-        }
+        var graph = OwnershipGraph(
+            podcastId: podcastId,
+            feedHostDomain: feedURL.flatMap { DomainNormalizer.etld1(from: $0.absoluteString) }
+        )
+        graph.ingestRSSFeed(
+            linkURL: siteURL?.absoluteString,
+            itunesOwnerEmail: ownerEmail
+        )
 
         for metadata in recentMetadata {
             var episodeDomains = Set<String>()
@@ -86,11 +99,15 @@ struct EpisodeMetadataSnapshot: Sendable {
 
     static func showOwnedDomains(
         feedURL: URL?,
+        siteURL: URL?,
+        ownerEmail: String?,
         recentMetadata: [FeedDescriptionMetadata],
         podcastId: String
     ) -> Set<String> {
         domainOwnership(
             feedURL: feedURL,
+            siteURL: siteURL,
+            ownerEmail: ownerEmail,
             recentMetadata: recentMetadata,
             podcastId: podcastId
         ).showOwned

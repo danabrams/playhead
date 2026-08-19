@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom" xmlns:content="http://purl.org/rss/1.0/modules/content/" xmlns:googleplay="http://www.google.com/schemas/play-podcasts/1.0" xmlns:itunes="http://www.itunes.com/dtds/podcast-1.0.dtd" xmlns:media="http://search.yahoo.com/mrss/" xmlns:podcast="https://podcastindex.org/namespace/1.0">
+  <channel>
+    <atom:link href="https://feeds.simplecast.com/dHoohVNH" rel="self" title="MP3 Audio" type="application/atom+xml"/>
+    <atom:link href="https://simplecast.superfeedr.com" rel="hub" xmlns="http://www.w3.org/2005/Atom"/>
+    <generator>https://simplecast.com</generator>
+    <title>Conan O’Brien Needs A Friend</title>
+    <description>After 25 years at the Late Night desk, Conan realized that the only people at his holiday party are the men and women who work for him. Over the years and despite thousands of interviews, Conan has never made a real and lasting friendship with any of his celebrity guests. So, he started a podcast to do just that. Deeper, unboundedly playful, and free from FCC regulations, Conan O’Brien Needs a Friend is a weekly opportunity for Conan to hang out with the people he enjoys most and perhaps find some real friendship along the way.
+
+Subscribe to SiriusXM Podcasts+ to listen to new episodes of Conan O&apos;Brien Needs a Friend ad-free and a whole week early.
+Start a free trial now on Apple Podcasts or by visiting siriusxm.com/podcastsplus.</description>
+    <copyright>2024 Team Coco &amp; Earwolf</copyright>
+    <language>en-us</language>
+    <pubDate>Mon, 17 Aug 2026 04:05:00 +0000</pubDate>
+    <lastBuildDate>Mon, 17 Aug 2026 04:05:21 +0000</lastBuildDate>
+    <podcast:txt purpose="">916303</podcast:txt>
+    <image>
+      <link>https://www.siriusxm.com</link>
+      <title>Conan O’Brien Needs A Friend</title>
+      <url>https://image.simplecastcdn.com/images/8436e3c1-2479-4466-ac48-fa58259960bb/371e5714-91ee-4e31-9ef3-cdd31ebfb9f5/3000x3000/conanobrienneedsafriend-keyart-sxm-3000x3000.jpg?aid=rss_feed</url>
+    </image>
+    <link>https://www.siriusxm.com</link>
+    <itunes:type>episodic</itunes:type>
+    <itunes:summary>After 25 years at the Late Night desk, Conan realized that the only people at his holiday party are the men and women who work for him. Over the years and despite thousands of interviews, Conan has never made a real and lasting friendship with any of his celebrity guests. So, he started a podcast to do just that. Deeper, unboundedly playful, and free from FCC regulations, Conan O’Brien Needs a Friend is a weekly opportunity for Conan to hang out with the people he enjoys most and perhaps find some real friendship along the way.
+
+Subscribe to SiriusXM Podcasts+ to listen to new episodes of Conan O&apos;Brien Needs a Friend ad-free and a whole week early.
+Start a free trial now on Apple Podcasts or by visiting siriusxm.com/podcastsplus.</itunes:summary>
+    <itunes:author>Team Coco &amp; Earwolf</itunes:author>
+    <itunes:explicit>true</itunes:explicit>
+    <itunes:image href="https://image.simplecastcdn.com/images/8436e3c1-2479-4466-ac48-fa58259960bb/371e5714-91ee-4e31-9ef3-cdd31ebfb9f5/3000x3000/conanobrienneedsafriend-keyart-sxm-3000x3000.jpg?aid=rss_feed"/>
+    <itunes:new-feed-url>https://feeds.simplecast.com/dHoohVNH</itunes:new-feed-url>
+    <itunes:owner>
+      <itunes:name>Team Coco &amp; Earwolf</itunes:name>
+      <itunes:email>conaf@teamcoco.com</itunes:email>
+    </itunes:owner>
+    <itunes:category text="Comedy"/>
+  </channel>
+</rss>

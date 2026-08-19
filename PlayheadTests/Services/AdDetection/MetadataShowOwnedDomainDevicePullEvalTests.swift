@@ -1,40 +1,55 @@
 // MetadataShowOwnedDomainDevicePullEvalTests.swift
-// playhead-kmw4: what removing the show-notes-frequency -> `.showOwned`
-// promotion actually does to a real device's pipeline.
+// What the show-owned domain population does to a real device's pipeline.
 //
-// WHY THIS EXISTS AS A TEST AND NOT A SCRIPT. Every number this bead is
-// answerable for is produced by production types — `OwnershipGraph`,
+// playhead-kmw4 wrote this file to measure ONE transition — removing the
+// show-notes-frequency promotion — and that transition has merged. playhead-e8mg
+// retargets the same machinery at the NEXT one, because the question the file
+// answers is not "what did kmw4 do" but "what is `showOwned` costing this
+// device today". The arms are now:
+//
+//   BEFORE = main @ 8929cbf1. `showOwned` is the FEED URL's eTLD+1 and nothing
+//            else: `simplecast.com` for Conan, `flightcast.com` for Diary Of A
+//            CEO — the hosting platform in both cases.
+//   AFTER  = playhead-e8mg. `showOwned` is the channel `<link>` and the
+//            `<itunes:owner>` email domain, minus the feed's own host. The feed
+//            URL survives only as that exclusion.
+//
+// WHY THIS IS A TEST AND NOT A SCRIPT (kmw4's reason, unchanged). Every number
+// here is produced by production types — `FeedParser`, `OwnershipGraph`,
 // `MetadataCueExtractor`, `MetadataLexiconInjector`, `LexicalScanner`,
-// `LexicalAutoAdEvidenceBuilder`. A Python re-implementation of the scanner
-// would measure the re-implementation. So the corpus comes in as JSON
-// (`scripts/kmw4-export-device-corpus.py`) and the real code does the work.
+// `LexicalAutoAdEvidenceBuilder`. A Python re-implementation would measure the
+// re-implementation. The corpus arrives as JSON
+// (`scripts/kmw4-export-device-corpus.py`, unchanged) and the real code works.
 //
-// HOW THE "BEFORE" ARM IS BUILT, because this is the one place the eval could
-// lie. It does NOT keep a copy of the old code. The old `recordShowNotesDomain`
-// promoted exactly those show-notes domains whose frequency reached the
-// threshold, and left every other entry alone — so the old show-owned set is
-// EXACTLY `showOwned ∪ ownershipUndetermined` from today's
-// `EpisodeMetadataSnapshot.domainOwnership`. `assertBeforeArmMatchesHistory`
-// pins that identity against the graph's own frequency table rather than
-// asserting it in prose.
+// WHERE THE OWNERSHIP SIGNALS COME FROM, which is the part e8mg adds. The
+// device pull predates the schema change, so `Playhead.store` has no siteURL
+// or ownerEmail column to export. They are recovered instead by running the
+// production `FeedParser` over the two subscribed feeds' REAL channel heads in
+// `PlayheadTests/Fixtures/RealFeeds`, matched by feed URL. So the eval's
+// ownership inputs are publisher bytes parsed by shipping code, not values
+// typed into a fixture by the person measuring.
 //
-// STAGING: write the JSON export's path into `<repo>/.kmw4-corpus-path` (both
-// pointer files are gitignored). The corpus is NOT in the repo — 17.8 MB of a
-// device's transcripts — so with no pointer this SKIPS, the same shape as the
-// `PLAYHEAD_X7RK_CORPUS` / `PLAYHEAD_RTY3_CORPUS` corpus lanes. A path in
-// `<repo>/.kmw4-report-path` writes the full report as JSON. See
-// `corpusPath()` for why this is a file and not an exported variable.
+// THE DIRECTION REVERSES, AND THE INVARIANTS REVERSE WITH IT. kmw4 REMOVED
+// negative evidence, so confidence could only rise and the auto-ad rule could
+// only un-block. e8mg ADDS negative entries, so confidence can only fall and a
+// span can only lose `.lexicalAutoAd`. Both are asserted, because an assertion
+// in the wrong direction is a test that cannot fail.
 //
 // WHAT IT CANNOT SEE — read before quoting any number:
 //  * It measures the LEXICAL half of the pipeline (metadata lexicon entries,
 //    the hits they produce, the candidates they weight, and the auto-ad rule
-//    they suppress). Removing a `.showOwnedDomain` cue ALSO removes its
-//    contribution to `FeedDescriptionEvidenceBuilder` (cue-type weight 0.05,
-//    an ad-evidence term). That is measured separately here as a ledger-weight
-//    delta, but the fusion gate that consumes it is not re-run.
+//    they suppress). A `.showOwnedDomain` cue ALSO carries a 0.05 cue-type
+//    weight in `FeedDescriptionEvidenceBuilder`; that delta is measured here,
+//    but the fusion gate consuming it is not re-run.
 //  * `ad_windows` on the device were produced by the shipped pipeline. Nothing
 //    here re-derives them, so "a decision changes" means "an input to the
 //    decision changes by this much", not "the device would have skipped".
+//
+// STAGING: write the JSON export's path into `<repo>/.kmw4-corpus-path` (both
+// pointer files are gitignored). The corpus is NOT in the repo — 17 MB of a
+// device's transcripts — so with no pointer this SKIPS. A path in
+// `<repo>/.kmw4-report-path` writes the full report as JSON. See `corpusPath()`
+// for why this is a file and not an exported variable.
 
 import Foundation
 import XCTest
@@ -107,10 +122,18 @@ final class MetadataShowOwnedDomainDevicePullEvalTests: XCTestCase {
         let title: String?
         let feedURL: String?
         let feedDomain: String?
+        let siteURL: String?
+        let siteDomain: String?
+        let ownerEmail: String?
+        let ownerDomain: String?
         let episodes: Int
         let showOwnedBefore: [String]
         let showOwnedAfter: [String]
-        let ownershipUndetermined: [String]
+        /// Which of the two surviving routes produced each AFTER entry.
+        let showOwnedAfterBySource: [String: String]
+        let ownershipUndeterminedBefore: [String]
+        let ownershipUndeterminedAfter: [String]
+        let addedToShowOwned: [String]
         let droppedFromShowOwned: [String]
     }
 
@@ -123,36 +146,45 @@ final class MetadataShowOwnedDomainDevicePullEvalTests: XCTestCase {
         let metadataEntriesAfter: Int
         let negativeEntriesBefore: Int
         let negativeEntriesAfter: Int
-        let negativeEntrySources: [String]
+        let negativeEntrySourcesBefore: [String]
+        let negativeEntrySourcesAfter: [String]
         let metadataHitsBefore: Int
         let metadataHitsAfter: Int
         let negativeHitsBefore: Int
         let negativeHitsAfter: Int
-        let negativeHitDomains: [String]
+        let negativeHitDomainsAfter: [String]
         let candidatesBefore: Int
         let candidatesAfter: Int
         /// Candidates whose confidence moved at all, per trust value.
         let candidatesChangedByTrust: [String: Int]
-        let maxConfidenceDeltaByTrust: [String: Double]
+        /// Most-negative confidence movement, per trust value. Adding negative
+        /// evidence can only push a confidence DOWN, so this is <= 0.
+        let minConfidenceDeltaByTrust: [String: Double]
         let autoAdSpansBefore: Int
         let autoAdSpansAfter: Int
-        let autoAdSpansUnblocked: [String]
+        /// Spans that fired `.lexicalAutoAd` before and no longer do. This is
+        /// the decision-level threshold crossing this change can reach, and
+        /// the direction it can only move in.
+        let autoAdSpansSuppressed: [String]
         let metadataLedgerWeightBefore: Double
         let metadataLedgerWeightAfter: Double
     }
 
     // MARK: - The eval
 
-    func testDevicePullShowOwnedRemoval() throws {
+    func testDevicePullStructuralOwnership() throws {
         let corpus = try Self.loadCorpus()
+        let feeds = try Self.realFeedSignals()
 
         var showReports: [ShowReport] = []
         var beforeOwnership: [Set<String>] = []
+        var beforeUndetermined: [Set<String>] = []
         var afterOwnership: [Set<String>] = []
-        var undetermined: [Set<String>] = []
+        var afterUndetermined: [Set<String>] = []
 
         for show in corpus.shows {
-            let feedURL = show.feedURL.flatMap(URL.init(string:))
+            let feedURLString = show.feedURL
+            let podcastId = show.podcastId ?? show.feedURL ?? "unknown"
             let recentMetadata = show.episodes.map { episode in
                 FeedDescriptionMetadata(
                     feedDescription: episode.feedDescription,
@@ -160,32 +192,61 @@ final class MetadataShowOwnedDomainDevicePullEvalTests: XCTestCase {
                     sourceHashes: .init()
                 )
             }
-            let ownership = EpisodeMetadataSnapshot.domainOwnership(
-                feedURL: feedURL,
-                recentMetadata: recentMetadata,
-                podcastId: show.podcastId ?? show.feedURL ?? "unknown"
-            )
-            let before = ownership.showOwned.union(ownership.ownershipUndetermined)
-
-            try Self.assertBeforeArmMatchesHistory(
-                feedURL: feedURL,
-                recentMetadata: recentMetadata,
-                podcastId: show.podcastId ?? show.feedURL ?? "unknown",
-                reconstructedBefore: before
+            let signals = feedURLString.flatMap { feeds[$0] }
+            XCTAssertNotNil(
+                signals,
+                "no real-feed fixture for \(feedURLString ?? "nil") — the eval's "
+                + "ownership inputs must come from publisher bytes, so a missing "
+                + "fixture is a hole, not a default"
             )
 
-            beforeOwnership.append(before)
-            afterOwnership.append(ownership.showOwned)
-            undetermined.append(ownership.ownershipUndetermined)
+            // AFTER: what production now builds.
+            let after = EpisodeMetadataSnapshot.domainOwnership(
+                feedURL: feedURLString.flatMap(URL.init(string:)),
+                siteURL: signals?.siteURL,
+                ownerEmail: signals?.ownerEmail,
+                recentMetadata: recentMetadata,
+                podcastId: podcastId
+            )
+
+            // BEFORE: main @ 8929cbf1, reconstructed and then PROVEN below.
+            let before = try Self.preE8mgOwnership(
+                feedURL: feedURLString,
+                recentMetadata: recentMetadata,
+                podcastId: podcastId
+            )
+
+            beforeOwnership.append(before.showOwned)
+            beforeUndetermined.append(before.ownershipUndetermined)
+            afterOwnership.append(after.showOwned)
+            afterUndetermined.append(after.ownershipUndetermined)
+
+            var bySource: [String: String] = [:]
+            if let domain = signals?.siteURL.flatMap({ DomainNormalizer.etld1(from: $0.absoluteString) }),
+               after.showOwned.contains(domain) {
+                bySource[domain] = "rssLink"
+            }
+            if let domain = signals?.ownerEmail.flatMap({ DomainNormalizer.etld1(from: $0) }),
+               after.showOwned.contains(domain) {
+                bySource[domain] = bySource[domain].map { "\($0)+itunesOwner" } ?? "itunesOwner"
+            }
+
             showReports.append(ShowReport(
                 title: show.title,
                 feedURL: show.feedURL,
                 feedDomain: show.feedURL.flatMap { DomainNormalizer.etld1(from: $0) },
+                siteURL: signals?.siteURL?.absoluteString,
+                siteDomain: signals?.siteURL.flatMap { DomainNormalizer.etld1(from: $0.absoluteString) },
+                ownerEmail: signals?.ownerEmail,
+                ownerDomain: signals?.ownerEmail.flatMap { DomainNormalizer.etld1(from: $0) },
                 episodes: show.episodes.count,
-                showOwnedBefore: before.sorted(),
-                showOwnedAfter: ownership.showOwned.sorted(),
-                ownershipUndetermined: ownership.ownershipUndetermined.sorted(),
-                droppedFromShowOwned: before.subtracting(ownership.showOwned).sorted()
+                showOwnedBefore: before.showOwned.sorted(),
+                showOwnedAfter: after.showOwned.sorted(),
+                showOwnedAfterBySource: bySource,
+                ownershipUndeterminedBefore: before.ownershipUndetermined.sorted(),
+                ownershipUndeterminedAfter: after.ownershipUndetermined.sorted(),
+                addedToShowOwned: after.showOwned.subtracting(before.showOwned).sorted(),
+                droppedFromShowOwned: before.showOwned.subtracting(after.showOwned).sorted()
             ))
         }
 
@@ -204,12 +265,13 @@ final class MetadataShowOwnedDomainDevicePullEvalTests: XCTestCase {
 
             let extractorBefore = MetadataCueExtractor(
                 showOwnedDomains: beforeOwnership[asset.showIndex],
-                networkOwnedDomains: []
+                networkOwnedDomains: [],
+                ownershipUndeterminedDomains: beforeUndetermined[asset.showIndex]
             )
             let extractorAfter = MetadataCueExtractor(
                 showOwnedDomains: afterOwnership[asset.showIndex],
                 networkOwnedDomains: [],
-                ownershipUndeterminedDomains: undetermined[asset.showIndex]
+                ownershipUndeterminedDomains: afterUndetermined[asset.showIndex]
             )
             let cuesBefore = extractorBefore.extractCues(
                 description: asset.feedDescription,
@@ -257,7 +319,7 @@ final class MetadataShowOwnedDomainDevicePullEvalTests: XCTestCase {
             // from the hit count, so the SET must be identical and only the
             // confidence can move. That is an assertion, not an assumption.
             var changedByTrust: [String: Int] = [:]
-            var maxDeltaByTrust: [String: Double] = [:]
+            var minDeltaByTrust: [String: Double] = [:]
             var candidatesBefore = 0
             var candidatesAfter = 0
             for trust in Self.trustSweep {
@@ -278,19 +340,19 @@ final class MetadataShowOwnedDomainDevicePullEvalTests: XCTestCase {
                     "asset \(asset.id): negative metadata hits must not change the candidate SET"
                 )
                 var changed = 0
-                var maxDelta = 0.0
+                var minDelta = 0.0
                 for (lhs, rhs) in zip(before, after) {
                     let delta = rhs.confidence - lhs.confidence
                     if abs(delta) > 1e-12 { changed += 1 }
-                    maxDelta = max(maxDelta, delta)
-                    XCTAssertGreaterThanOrEqual(
-                        delta, -1e-12,
-                        "asset \(asset.id): removing NEGATIVE evidence cannot lower a confidence"
+                    minDelta = min(minDelta, delta)
+                    XCTAssertLessThanOrEqual(
+                        delta, 1e-12,
+                        "asset \(asset.id): ADDING negative evidence cannot raise a confidence"
                     )
                 }
                 let key = String(format: "%.3f", trust)
                 changedByTrust[key] = changed
-                maxDeltaByTrust[key] = maxDelta
+                minDeltaByTrust[key] = minDelta
             }
 
             // The decision-level threshold this change can actually reach: a
@@ -298,7 +360,7 @@ final class MetadataShowOwnedDomainDevicePullEvalTests: XCTestCase {
             // `.lexicalAutoAd`, which is the only lexical route to auto-skip.
             var autoAdBefore = 0
             var autoAdAfter = 0
-            var unblocked: [String] = []
+            var suppressed: [String] = []
             for span in asset.spans {
                 let decoded = DecodedSpan(
                     id: span.id,
@@ -313,10 +375,11 @@ final class MetadataShowOwnedDomainDevicePullEvalTests: XCTestCase {
                 let firedAfter = !autoAdBuilder.buildEntries(hits: hitsAfter, for: decoded).isEmpty
                 if firedBefore { autoAdBefore += 1 }
                 if firedAfter { autoAdAfter += 1 }
-                if !firedBefore && firedAfter { unblocked.append(span.id) }
+                if firedBefore && !firedAfter { suppressed.append(span.id) }
                 XCTAssertFalse(
-                    firedBefore && !firedAfter,
-                    "asset \(asset.id) span \(span.id): removing a suppressor cannot un-fire the auto-ad rule"
+                    !firedBefore && firedAfter,
+                    "asset \(asset.id) span \(span.id): adding a suppressor cannot make the "
+                    + "auto-ad rule fire"
                 )
             }
 
@@ -346,47 +409,58 @@ final class MetadataShowOwnedDomainDevicePullEvalTests: XCTestCase {
                 metadataEntriesAfter: entriesAfter.count,
                 negativeEntriesBefore: negativeBefore.count,
                 negativeEntriesAfter: negativeAfter.count,
-                negativeEntrySources: negativeBefore.map(\.sourceValue).sorted(),
+                negativeEntrySourcesBefore: negativeBefore.map(\.sourceValue).sorted(),
+                negativeEntrySourcesAfter: negativeAfter.map(\.sourceValue).sorted(),
                 metadataHitsBefore: metaHitsBefore.count,
                 metadataHitsAfter: metaHitsAfter.count,
                 negativeHitsBefore: negHitsBefore.count,
                 negativeHitsAfter: negHitsAfter.count,
-                negativeHitDomains: negHitsBefore.map { $0.matchedText.lowercased() }.sorted(),
+                negativeHitDomainsAfter: negHitsAfter.map { $0.matchedText.lowercased() }.sorted(),
                 candidatesBefore: candidatesBefore,
                 candidatesAfter: candidatesAfter,
                 candidatesChangedByTrust: changedByTrust,
-                maxConfidenceDeltaByTrust: maxDeltaByTrust,
+                minConfidenceDeltaByTrust: minDeltaByTrust,
                 autoAdSpansBefore: autoAdBefore,
                 autoAdSpansAfter: autoAdAfter,
-                autoAdSpansUnblocked: unblocked,
+                autoAdSpansSuppressed: suppressed,
                 metadataLedgerWeightBefore: ledgerBefore,
                 metadataLedgerWeightAfter: ledgerAfter
             ))
         }
 
-        // The bead's headline claim, asserted rather than narrated: after the
-        // change, NOTHING on this device injects a negative metadata pattern.
-        let negAfter = assetReports.reduce(0) { $0 + $1.negativeEntriesAfter }
-        XCTAssertEqual(negAfter, 0, "a negative metadata entry survived the removal")
+        // The bead's headline claim, asserted rather than narrated: the show's
+        // OWN domain is structurally recognisable again. Nothing on main
+        // classifies `teamcoco.com`, and after this change something does.
+        let recovered = showReports.contains { $0.showOwnedAfter.contains("teamcoco.com") }
+        XCTAssertTrue(recovered, "teamcoco.com is still classified by nothing")
+        let platformSurvives = showReports.contains {
+            guard let feedDomain = $0.feedDomain else { return false }
+            return $0.showOwnedAfter.contains(feedDomain)
+        }
+        XCTAssertFalse(platformSurvives, "a feed host is still being called show-owned")
 
         Self.emit(corpus: corpus, shows: showReports, assets: assetReports)
     }
 
     // MARK: - Before-arm fidelity
 
-    /// The "before" set is reconstructed, so prove the reconstruction against
-    /// the graph's own frequency table: the old code promoted a domain iff its
-    /// show-notes frequency reached the threshold, so the reconstructed set
-    /// must be exactly {feed-URL domain} ∪ {domains at or above threshold}.
-    private static func assertBeforeArmMatchesHistory(
-        feedURL: URL?,
+    /// The BEFORE arm is a reconstruction — `ingestFeedURL` no longer exists —
+    /// so it is proven rather than asserted in prose. The deleted method did
+    /// exactly one thing: `setEntry(domain:label:.showOwned, source:.feedURL)`
+    /// for the feed URL's eTLD+1. The only door left with that behaviour is
+    /// `ingestRSSLink` on a graph with no feed-host exclusion, and it differs
+    /// only in the `source` tag — which neither reader of this graph looks at.
+    /// `showOwnedDomains` reads the LABEL; `recurringShowNotesDomains` reads
+    /// `source == .showNotesFrequency`, and both `.feedURL` and `.rssLink`
+    /// fail that test identically. The checks below pin all three facts.
+    private static func preE8mgOwnership(
+        feedURL: String?,
         recentMetadata: [FeedDescriptionMetadata],
-        podcastId: String,
-        reconstructedBefore: Set<String>
-    ) throws {
+        podcastId: String
+    ) throws -> EpisodeMetadataSnapshot.ShowDomainOwnership {
         var graph = OwnershipGraph(podcastId: podcastId)
         if let feedURL {
-            graph.ingestFeedURL(feedURL.absoluteString)
+            graph.ingestRSSLink(feedURL)
         }
         for metadata in recentMetadata {
             var episodeDomains = Set<String>()
@@ -397,17 +471,69 @@ final class MetadataShowOwnedDomainDevicePullEvalTests: XCTestCase {
                 graph.recordShowNotesDomain(domain)
             }
         }
+
+        let expectedFeedDomain = feedURL.flatMap { DomainNormalizer.etld1(from: $0) }
+        let showOwned = Set(graph.showOwnedDomains)
+        XCTAssertEqual(
+            showOwned, Set([expectedFeedDomain].compactMap(\.self)),
+            "the reconstructed pre-e8mg show-owned set must be exactly the feed host"
+        )
+        if let expectedFeedDomain {
+            let entry = graph.entries[expectedFeedDomain]
+            XCTAssertEqual(entry?.label, .showOwned)
+            XCTAssertNotEqual(
+                entry?.source, .showNotesFrequency,
+                "the feed-host entry must not be a frequency entry, or the undetermined "
+                + "set would differ from what shipped"
+            )
+        }
         let threshold = OwnershipGraphConfig.default.showNotesRecurrenceThreshold
-        var historical = Set(graph.entries.values
+        let historical = Set(graph.entries.values
             .filter { $0.source == .showNotesFrequency && $0.frequency >= threshold }
             .map(\.domain))
-        historical.formUnion(graph.entries.values
-            .filter { $0.label == .showOwned }
-            .map(\.domain))
         XCTAssertEqual(
-            historical, reconstructedBefore,
-            "the reconstructed pre-kmw4 show-owned set does not match the frequency table"
+            historical, Set(graph.recurringShowNotesDomains),
+            "the reconstructed pre-e8mg undetermined set does not match the frequency table"
         )
+
+        return EpisodeMetadataSnapshot.ShowDomainOwnership(
+            showOwned: showOwned,
+            ownershipUndetermined: Set(graph.recurringShowNotesDomains)
+        )
+    }
+
+    // MARK: - Real feed signals
+
+    struct RealFeedSignals {
+        let siteURL: URL?
+        let ownerEmail: String?
+    }
+
+    /// Parse the committed channel heads with the PRODUCTION parser, keyed by
+    /// feed URL. If this ever returns a value the shipped parser would not
+    /// produce, the eval is measuring a fiction.
+    static func realFeedSignals() throws -> [String: RealFeedSignals] {
+        struct Manifest: Decodable {
+            let feeds: [Entry]
+            struct Entry: Decodable {
+                let feedURL: String
+                let file: String
+            }
+        }
+        let directory = repositoryRoot().appendingPathComponent("PlayheadTests/Fixtures/RealFeeds")
+        let manifestData = try Data(contentsOf: directory.appendingPathComponent("manifest.json"))
+        let manifest = try JSONDecoder().decode(Manifest.self, from: manifestData)
+
+        var result: [String: RealFeedSignals] = [:]
+        for entry in manifest.feeds {
+            let data = try Data(contentsOf: directory.appendingPathComponent(entry.file))
+            let feed = try FeedParser().parse(data: data, baseURL: URL(string: entry.feedURL))
+            result[entry.feedURL] = RealFeedSignals(
+                siteURL: feed.siteURL,
+                ownerEmail: feed.ownerEmail
+            )
+        }
+        return result
     }
 
     // MARK: - Staging
@@ -493,7 +619,7 @@ final class MetadataShowOwnedDomainDevicePullEvalTests: XCTestCase {
                 let candidatesAfter: Int
                 let autoAdSpansBefore: Int
                 let autoAdSpansAfter: Int
-                let autoAdSpansUnblocked: Int
+                let autoAdSpansSuppressed: Int
                 let metadataLedgerWeightBefore: Double
                 let metadataLedgerWeightAfter: Double
             }
@@ -514,39 +640,44 @@ final class MetadataShowOwnedDomainDevicePullEvalTests: XCTestCase {
             candidatesAfter: assets.reduce(0) { $0 + $1.candidatesAfter },
             autoAdSpansBefore: assets.reduce(0) { $0 + $1.autoAdSpansBefore },
             autoAdSpansAfter: assets.reduce(0) { $0 + $1.autoAdSpansAfter },
-            autoAdSpansUnblocked: assets.reduce(0) { $0 + $1.autoAdSpansUnblocked.count },
+            autoAdSpansSuppressed: assets.reduce(0) { $0 + $1.autoAdSpansSuppressed.count },
             metadataLedgerWeightBefore: assets.reduce(0.0) { $0 + $1.metadataLedgerWeightBefore },
             metadataLedgerWeightAfter: assets.reduce(0.0) { $0 + $1.metadataLedgerWeightAfter }
         )
 
-        print("[kmw4] source=\(corpus.source)")
+        print("[e8mg] source=\(corpus.source)")
         for show in shows {
-            print("[kmw4] show \"\(show.title ?? "?")\" feed=\(show.feedURL ?? "?") "
-                  + "feedDomain=\(show.feedDomain ?? "nil") episodes=\(show.episodes)")
-            print("[kmw4]   showOwned BEFORE (\(show.showOwnedBefore.count)) "
-                  + "AFTER (\(show.showOwnedAfter.count)): \(show.showOwnedAfter)")
-            print("[kmw4]   dropped (\(show.droppedFromShowOwned.count)): \(show.droppedFromShowOwned)")
+            print("[e8mg] show \"\(show.title ?? "?")\" feed=\(show.feedURL ?? "?") "
+                  + "feedDomain=\(show.feedDomain ?? "nil") "
+                  + "siteDomain=\(show.siteDomain ?? "nil") "
+                  + "ownerDomain=\(show.ownerDomain ?? "nil") episodes=\(show.episodes)")
+            print("[e8mg]   showOwned BEFORE (\(show.showOwnedBefore.count)): \(show.showOwnedBefore)")
+            print("[e8mg]   showOwned AFTER  (\(show.showOwnedAfter.count)): \(show.showOwnedAfter) "
+                  + "bySource=\(show.showOwnedAfterBySource)")
+            print("[e8mg]   added \(show.addedToShowOwned) dropped \(show.droppedFromShowOwned)")
+            print("[e8mg]   undetermined \(show.ownershipUndeterminedBefore.count)"
+                  + "->\(show.ownershipUndeterminedAfter.count)")
         }
-        for asset in assets where asset.negativeEntriesBefore > 0 || asset.negativeHitsBefore > 0 {
-            print("[kmw4] asset \(asset.assetId) \"\(asset.title ?? "?")\" "
+        for asset in assets where asset.negativeEntriesAfter > 0 || asset.negativeEntriesBefore > 0 {
+            print("[e8mg] asset \(asset.assetId) \"\(asset.title ?? "?")\" "
                   + "negEntries \(asset.negativeEntriesBefore)->\(asset.negativeEntriesAfter) "
-                  + "\(asset.negativeEntrySources) "
+                  + "\(asset.negativeEntrySourcesAfter) "
                   + "negHits \(asset.negativeHitsBefore)->\(asset.negativeHitsAfter) "
-                  + "\(asset.negativeHitDomains) "
+                  + "\(asset.negativeHitDomainsAfter) "
                   + "cand \(asset.candidatesBefore)/\(asset.candidatesAfter) "
-                  + "changed \(asset.candidatesChangedByTrust) maxΔ \(asset.maxConfidenceDeltaByTrust) "
+                  + "changed \(asset.candidatesChangedByTrust) minΔ \(asset.minConfidenceDeltaByTrust) "
                   + "autoAd \(asset.autoAdSpansBefore)->\(asset.autoAdSpansAfter) "
                   + "ledger \(asset.metadataLedgerWeightBefore)->\(asset.metadataLedgerWeightAfter)")
         }
-        print("[kmw4] TOTALS assets=\(totals.assets) spans=\(totals.spans)")
-        print("[kmw4] TOTALS metadataEntries \(totals.metadataEntriesBefore)->\(totals.metadataEntriesAfter) "
+        print("[e8mg] TOTALS assets=\(totals.assets) spans=\(totals.spans)")
+        print("[e8mg] TOTALS metadataEntries \(totals.metadataEntriesBefore)->\(totals.metadataEntriesAfter) "
               + "negativeEntries \(totals.negativeEntriesBefore)->\(totals.negativeEntriesAfter)")
-        print("[kmw4] TOTALS metadataHits \(totals.metadataHitsBefore)->\(totals.metadataHitsAfter) "
+        print("[e8mg] TOTALS metadataHits \(totals.metadataHitsBefore)->\(totals.metadataHitsAfter) "
               + "negativeHits \(totals.negativeHitsBefore)->\(totals.negativeHitsAfter)")
-        print("[kmw4] TOTALS candidates \(totals.candidatesBefore)->\(totals.candidatesAfter) "
+        print("[e8mg] TOTALS candidates \(totals.candidatesBefore)->\(totals.candidatesAfter) "
               + "autoAdSpans \(totals.autoAdSpansBefore)->\(totals.autoAdSpansAfter) "
-              + "unblocked=\(totals.autoAdSpansUnblocked)")
-        print("[kmw4] TOTALS metadataLedgerWeight \(totals.metadataLedgerWeightBefore)"
+              + "suppressed=\(totals.autoAdSpansSuppressed)")
+        print("[e8mg] TOTALS metadataLedgerWeight \(totals.metadataLedgerWeightBefore)"
               + "->\(totals.metadataLedgerWeightAfter)")
 
         guard let out = reportPath() else { return }
@@ -555,9 +686,9 @@ final class MetadataShowOwnedDomainDevicePullEvalTests: XCTestCase {
         let report = Report(source: corpus.source, shows: shows, assets: assets, totals: totals)
         do {
             try encoder.encode(report).write(to: URL(fileURLWithPath: out))
-            print("[kmw4] wrote \(out)")
+            print("[e8mg] wrote \(out)")
         } catch {
-            print("[kmw4] could not write \(out): \(error)")
+            print("[e8mg] could not write \(out): \(error)")
         }
     }
 }

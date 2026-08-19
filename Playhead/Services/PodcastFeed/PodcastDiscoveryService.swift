@@ -246,13 +246,22 @@ actor PodcastDiscoveryService {
             existing.title = feed.title
             existing.author = feed.author
             existing.artworkURL = feed.artworkURL
+            // playhead-e8mg: refreshed like every other channel-level field.
+            // A publisher that MOVES its site or hands the feed to a new
+            // owner must be able to move the ownership graph with it, and a
+            // row that predates this bead (or arrived by iCloud sync, which
+            // does not carry these) is nil until the first refresh writes it.
+            existing.siteURL = feed.siteURL
+            existing.ownerEmail = feed.ownerEmail
             podcast = existing
         } else {
             podcast = Podcast(
                 feedURL: feedURL,
                 title: feed.title,
                 author: feed.author,
-                artworkURL: feed.artworkURL
+                artworkURL: feed.artworkURL,
+                siteURL: feed.siteURL,
+                ownerEmail: feed.ownerEmail
             )
             context.insert(podcast)
         }

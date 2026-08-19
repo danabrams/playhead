@@ -65,6 +65,24 @@ final class Podcast {
     /// type as `effective(override:global:)` so call sites cannot drift.
     var autoDownloadOverride: AutoDownloadOnSubscribe?
 
+    /// The feed's channel-level `<link>` — RSS 2.0's "URL of the website
+    /// corresponding to the channel". Optional because a feed need not carry
+    /// one (measured 2026-08-19: 59 of 918 real feeds do not, and The Diary
+    /// Of A CEO is one of them) and because a `Podcast` created by iCloud
+    /// subscription sync has never seen the XML — `SubscriptionRecord` does
+    /// not carry this field, so such a row stays nil until the next feed
+    /// refresh fills it in.
+    ///
+    /// playhead-e8mg: persisted so `OwnershipGraph.ingestRSSLink` has a
+    /// production caller. It is NOT "the show's domain" on its own — see the
+    /// field's twin doc on `ParsedFeed.siteURL` and the guard in
+    /// `OwnershipGraph`.
+    var siteURL: URL?
+
+    /// The feed's `<itunes:owner><itunes:email>` address, verbatim. Same
+    /// nil-until-refreshed contract as `siteURL`.
+    var ownerEmail: String?
+
     init(
         feedURL: URL,
         title: String,
@@ -74,7 +92,9 @@ final class Podcast {
         subscribedAt: Date = .now,
         notificationsEnabled: Bool = true,
         keepFullMusic: Bool = false,
-        autoDownloadOverride: AutoDownloadOnSubscribe? = nil
+        autoDownloadOverride: AutoDownloadOnSubscribe? = nil,
+        siteURL: URL? = nil,
+        ownerEmail: String? = nil
     ) {
         self.feedURL = feedURL
         self.title = title
@@ -85,6 +105,8 @@ final class Podcast {
         self.notificationsEnabled = notificationsEnabled
         self.keepFullMusic = keepFullMusic
         self.autoDownloadOverride = autoDownloadOverride
+        self.siteURL = siteURL
+        self.ownerEmail = ownerEmail
     }
 }
 

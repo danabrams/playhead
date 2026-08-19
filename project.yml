@@ -247,6 +247,13 @@ targets:
           # / categorized golden subdirs (synthetic/, real-dogfood/)
           # cannot collide on shared basenames in future expansions.
           - "Fixtures/ChapterPlanGoldenSet/**"
+          # playhead-e8mg: verbatim channel heads of the two subscribed feeds,
+          # read at runtime via #filePath by
+          # FeedParserStructuralOwnershipTests and the device-pull eval. Same
+          # rationale as every exclude above — a generic basename
+          # (manifest.json) in the resource-copy phase is a "Multiple commands
+          # produce" waiting for the second fixture family that wants one.
+          - "Fixtures/RealFeeds/**"
     dependencies:
       - target: Playhead
     settings:

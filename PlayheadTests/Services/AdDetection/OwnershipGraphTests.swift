@@ -45,12 +45,47 @@ final class OwnershipGraphRSSTests: XCTestCase {
         XCTAssertEqual(graph.ownership(for: "myshow.com"), .show)
     }
 
-    func testIngestFeedURLMarksShowOwned() {
-        var graph = OwnershipGraph(podcastId: "pod1")
-        graph.ingestFeedURL("https://feeds.megaphone.fm/myshow")
+    /// playhead-e8mg: the feed host is the one domain a structural signal may
+    /// not claim, and the route that used to claim it is gone. Both surviving
+    /// routes name `megaphone.fm` here and the graph still refuses it.
+    func testFeedHostIsRefusedByBothStructuralRoutes() {
+        var graph = OwnershipGraph(podcastId: "pod1", feedHostDomain: "megaphone.fm")
+        graph.ingestRSSLink("https://feeds.megaphone.fm/myshow")
+        graph.ingestITunesOwner(email: "shows@megaphone.fm")
 
-        // eTLD+1 of feeds.megaphone.fm is megaphone.fm
+        XCTAssertNil(graph.ownership(for: "megaphone.fm"))
+        XCTAssertTrue(graph.entries.isEmpty)
+    }
+
+    /// The refusal is scoped to that one domain, not to the routes.
+    func testFeedHostExclusionDoesNotSuppressOtherDomains() {
+        var graph = OwnershipGraph(podcastId: "pod1", feedHostDomain: "megaphone.fm")
+        graph.ingestRSSLink("https://www.myshow.com")
+        graph.ingestITunesOwner(email: "host@myshow.co.uk")
+
+        XCTAssertEqual(graph.ownership(for: "myshow.com"), .show)
+        XCTAssertEqual(graph.ownership(for: "myshow.co.uk"), .show)
+        XCTAssertNil(graph.ownership(for: "megaphone.fm"))
+    }
+
+    /// An unknown feed host admits everything. That is an ABSENCE of a
+    /// constraint, not a licence — a graph built without one behaves exactly
+    /// as it did before the exclusion existed.
+    func testNilFeedHostRefusesNothing() {
+        var graph = OwnershipGraph(podcastId: "pod1")
+        graph.ingestRSSLink("https://feeds.megaphone.fm/myshow")
+
         XCTAssertEqual(graph.ownership(for: "megaphone.fm"), .show)
+    }
+
+    /// The exclusion is on the eTLD+1, so the SUBDOMAIN spelling a real feed
+    /// URL actually uses is refused too — `rss2.flightcast.com` against a
+    /// host domain of `flightcast.com`.
+    func testFeedHostExclusionComparesRegistrableDomains() {
+        var graph = OwnershipGraph(podcastId: "pod1", feedHostDomain: "flightcast.com")
+        graph.ingestRSSLink("https://rss2.flightcast.com/xmsftuzjjykcmqwolaqn6mdn.xml")
+
+        XCTAssertTrue(graph.entries.isEmpty)
     }
 
     func testIngestITunesOwnerEmail() {
@@ -61,21 +96,19 @@ final class OwnershipGraphRSSTests: XCTestCase {
     }
 
     func testBulkRSSIngest() {
-        var graph = OwnershipGraph(podcastId: "pod1")
+        var graph = OwnershipGraph(podcastId: "pod1", feedHostDomain: "simplecast.com")
         graph.ingestRSSFeed(
-            feedURL: "https://feeds.simplecast.com/abc",
             linkURL: "https://www.myshow.com",
             itunesOwnerEmail: "host@myshow.com"
         )
 
-        // eTLD+1 of feeds.simplecast.com is simplecast.com
-        XCTAssertEqual(graph.ownership(for: "simplecast.com"), .show)
+        XCTAssertNil(graph.ownership(for: "simplecast.com"))
         XCTAssertEqual(graph.ownership(for: "myshow.com"), .show)
     }
 
     func testNilRSSFieldsSkipped() {
         var graph = OwnershipGraph(podcastId: "pod1")
-        graph.ingestRSSFeed(feedURL: nil, linkURL: nil, itunesOwnerEmail: nil)
+        graph.ingestRSSFeed(linkURL: nil, itunesOwnerEmail: nil)
         XCTAssertTrue(graph.entries.isEmpty)
     }
 
@@ -150,15 +183,32 @@ final class OwnershipGraphShowNotesTests: XCTestCase {
     /// undetermined set is "no signal", not "lots of mentions".
     func testStructuralDomainAccruesCountButIsNotUndetermined() {
         var graph = OwnershipGraph(podcastId: "pod1")
-        graph.ingestFeedURL("https://feeds.simplecast.com/abc")
+        graph.ingestRSSLink("https://www.myshow.com")
+        for _ in 0..<5 {
+            graph.recordShowNotesDomain("https://myshow.com/show")
+        }
+
+        XCTAssertEqual(graph.ownership(for: "myshow.com"), .show)
+        XCTAssertEqual(graph.entries["myshow.com"]?.source, .rssLink)
+        XCTAssertEqual(graph.entries["myshow.com"]?.frequency, 5)
+        XCTAssertTrue(graph.recurringShowNotesDomains.isEmpty)
+    }
+
+    /// The mirror, and the case playhead-e8mg creates: a REFUSED feed host
+    /// that also recurs in the notes is not structurally classified any more,
+    /// so it falls through to the undetermined set — "say nothing", never
+    /// `.showOwned`. It must not come back as ownership by another door.
+    func testRefusedFeedHostThatRecursInNotesIsUndeterminedNotShowOwned() {
+        var graph = OwnershipGraph(podcastId: "pod1", feedHostDomain: "simplecast.com")
+        graph.ingestRSSLink("https://feeds.simplecast.com/abc")
         for _ in 0..<5 {
             graph.recordShowNotesDomain("https://simplecast.com/show")
         }
 
-        XCTAssertEqual(graph.ownership(for: "simplecast.com"), .show)
-        XCTAssertEqual(graph.entries["simplecast.com"]?.source, .feedURL)
-        XCTAssertEqual(graph.entries["simplecast.com"]?.frequency, 5)
-        XCTAssertTrue(graph.recurringShowNotesDomains.isEmpty)
+        XCTAssertEqual(graph.ownership(for: "simplecast.com"), .unknown)
+        XCTAssertEqual(graph.entries["simplecast.com"]?.source, .showNotesFrequency)
+        XCTAssertEqual(graph.recurringShowNotesDomains, ["simplecast.com"])
+        XCTAssertTrue(graph.showOwnedDomains.isEmpty)
     }
 
     /// A sponsor registration lifts the domain out of the undetermined set:
@@ -264,9 +314,9 @@ final class OwnershipGraphSponsorTests: XCTestCase {
     func testShowOwnedDomainsList() {
         var graph = OwnershipGraph(podcastId: "pod1")
         graph.ingestRSSLink("https://myshow.com")
-        graph.ingestFeedURL("https://feeds.example.com/myshow")
+        graph.ingestITunesOwner(email: "host@myshow.fm")
 
-        XCTAssertEqual(Set(graph.showOwnedDomains), Set(["myshow.com", "example.com"]))
+        XCTAssertEqual(Set(graph.showOwnedDomains), Set(["myshow.com", "myshow.fm"]))
     }
 
     func testSponsorDoesNotOverrideUserOverride() {
@@ -369,11 +419,13 @@ final class OwnershipGraphDomainLookupTests: XCTestCase {
 final class OwnershipGraphEndToEndTests: XCTestCase {
 
     func testRealWorldShowSetup() {
-        var graph = OwnershipGraph(podcastId: "conan")
+        var graph = OwnershipGraph(
+            podcastId: "conan",
+            feedHostDomain: DomainNormalizer.etld1(from: "https://feeds.simplecast.com/dHoohVNH")
+        )
 
         // RSS signals
         graph.ingestRSSFeed(
-            feedURL: "https://feeds.simplecast.com/dHoohVNH",
             linkURL: "https://www.teamcoco.com",
             itunesOwnerEmail: "podcasts@teamcoco.com"
         )
@@ -398,7 +450,8 @@ final class OwnershipGraphEndToEndTests: XCTestCase {
 
         // Verify classifications
         XCTAssertEqual(graph.ownership(for: "teamcoco.com"), .show)
-        XCTAssertEqual(graph.ownership(for: "simplecast.com"), .show)
+        // playhead-e8mg: the hosting platform is NOT the show.
+        XCTAssertNil(graph.ownership(for: "simplecast.com"))
         XCTAssertEqual(graph.ownership(for: "betterhelp.com"), .thirdParty)
         XCTAssertEqual(graph.ownership(for: "squarespace.com"), .thirdParty)
         XCTAssertEqual(graph.sponsorId(for: "betterhelp.com"), "entry-betterhelp")
