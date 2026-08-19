@@ -9520,79 +9520,84 @@ MUTATIONS=(
   # rails, which is most of them: the witness, the byte-identity rail and the
   # resolver rail all read the same persisted column.
 
-  # Batch 1114 — G701, THE SHIPPED DEFECT restored in one token: the update path
+  # G701, THE SHIPPED DEFECT restored in one token: the update path
   # merges unconditionally, so `updated(from:)` runs once per BACKFILL again.
   "G701|1114|ADSVC|$T_G7_WITNESS;$T_G7_BYTES;$T_G7_RESOLVER"
 
-  # Batch 1115 — G702, THE MIRROR, and the direction a "just gate it" fix breaks:
+  # G702, THE MIRROR, and the direction a "just gate it" fix breaks:
   # nothing ever merges, so the trait tier is dead and `episodesObserved` never
   # leaves 0. A rail set that only proves re-backfills do not count would pass.
   "G702|1115|ADSVC|$T_G7_THREE;$T_G7_RESOLVER;$T_G7_CREATE_TRUE"
 
-  # Batch 1116 — G703, THE CALL SITE, and the reason the source canary exists:
+  # G703, THE CALL SITE, and the reason the source canary exists:
   # `runBackfill` passes a literal `true`. Every service-level rail in
   # `TraitProfileEpisodeCountTests` stays GREEN, because they choose the flag
   # themselves. Only the canary can see it.
   "G703|1116|ADSVC|$T_G7_CANARY_CALLSITE"
 
-  # Batch 1117 — G704, the mirror of G703: the claim result is discarded and the
+  # G704, the mirror of G703: the claim result is discarded and the
   # gate is wired to a literal `false`. Same blindness, opposite direction — the
   # trait profile freezes on every device and no runtime rail notices, because
   # no runtime rail drives `runBackfill`.
   "G704|1117|ADSVC|$T_G7_CANARY_CALLSITE"
 
-  # Batch 1118 — G705, the CREATE branch seeds unconditionally: a show whose
+  # G705, the CREATE branch seeds unconditionally: a show whose
   # episode nothing witnessed is credited one anyway. playhead-2qz6's
   # `observationCount: 0` argument, in the column it did not reach.
   "G705|1118|ADSVC|$T_G7_CREATE_FALSE"
 
-  # Batch 1119 — G706, the create branch never seeds. The mirror of G705 and the
+  # G706, the create branch never seeds. The mirror of G705 and the
   # regression `PriorHierarchyWireUpTests` is carried for.
   "G706|1119|ADSVC|$T_G7_CREATE_TRUE"
 
-  # Batch 1120 — G707, the else branch BLANKS the column instead of carrying it
+  # G707, the else branch BLANKS the column instead of carrying it
   # forward. An unclaimed re-backfill destroys the show's whole trait history —
   # the loudest possible way to be wrong, and nothing but the byte-identity rail
   # asks the question.
-  "G707|1120|ADSVC|$T_G7_BYTES;$T_G7_RESOLVER"
+  "G707|1119|ADSVC|$T_G7_BYTES;$T_G7_RESOLVER"
 
-  # Batch 1121 — G708, the gate is applied to the WHOLE priors merge rather than
+  # G708, the gate is applied to the WHOLE priors merge rather than
   # to the trait profile: the ad-duration aggregate, slot priors and sponsor
   # lexicon freeze on every unclaimed backfill too. Every rail about the COUNT
   # stays green; only the mirror sees it.
   "G708|1121|ADSVC|$T_G7_MIRROR"
 
-  # Batch 1122 — G709, V57 writes the count back unchanged. The forward fix is
+  # G709, V57 writes the count back unchanged. The forward fix is
   # intact and every service rail is green; every device that ever ran the old
   # binary keeps its inflated number forever.
-  "G709|1122|STORE|$T_G7_RESET"
+  "G709|1114|STORE|$T_G7_RESET"
 
-  # Batch 1123 — G710, V57 resets to 3 — the `isReliable` floor. THE TUNING
+  # G710, V57 resets to 3 — the `isReliable` floor. THE TUNING
   # MUTANT: it "preserves current behaviour" by keeping the tier on, which is
   # exactly the move the bead's acceptance criteria forbid, and it is
   # indistinguishable from the real fix at every rail that only reads the count
   # for non-zero-ness.
-  "G710|1123|STORE|$T_G7_RESET"
+  "G710|1115|STORE|$T_G7_RESET"
 
-  # Batch 1124 — G711, V57 drops the `episodesObserved != 0` predicate, so every
+  # G711, V57 drops the `episodesObserved != 0` predicate, so every
   # row is rewritten whether it needs it or not. Harmless-looking; it is how a
   # cost guard becomes a rewrite of rows the rung has nothing to say about.
-  "G711|1124|STORE|$T_G7_ZERO"
+  "G711|1116|STORE|$T_G7_ZERO"
 
-  # Batch 1125 — G712, V57 blanks `traitProfileJSON` instead of resetting one
-  # key. The count comes out right and the show's measured traits are destroyed.
-  "G712|1125|STORE|$T_G7_VALUES;$T_G7_OTHERCOLS"
+  # G712, V57 blanks `traitProfileJSON` instead of resetting one key. The count
+  # comes out right and the show's measured traits are destroyed. Expectation is
+  # the VALUES rail ALONE, deliberately: `migrationTouchesNothingElse` asserts
+  # `traitProfile.episodesObserved == 0`, and a blob the decoder rejects reads
+  # as `.unknown`, whose count IS 0 — so that rail passes on a mutant that
+  # destroyed the vector. Naming it here would have been a rail that cannot
+  # fail, i.e. a fabricated KILL.
+  "G712|1117|STORE|$T_G7_VALUES"
 
-  # Batch 1126 — G713, V57 drops its `observed >= 56` guard and repairs a store
+  # G713, V57 drops its `observed >= 56` guard and repairs a store
   # the ladder could not legally climb — the don't-step-over-a-rolled-back-V39
   # rule, at this rung.
-  "G713|1126|STORE|$T_G7_NOSTEP"
+  "G713|1118|STORE|$T_G7_NOSTEP"
 
-  # Batch 1127 — G714, the reader enumeration is a comment rather than a rail:
+  # G714, the reader enumeration is a comment rather than a rail:
   # the canary's licence list gains a wildcard, so a fourth reader of
   # `episodesObserved` lands with nothing to stop it. Aimed at the canary's own
   # anti-vacuity half — the CLOSED-IN-BOTH-DIRECTIONS check.
-  "G714|1127|TRUST|$T_G7_CANARY_READERS"
+  "G714|1114|TRUST|$T_G7_CANARY_READERS"
 
   # G799 — VACUITY CONTROL, and it MUST SURVIVE. The gate parameter is renamed
   # at its declaration, at the call site and at both uses; nothing else changes.
@@ -9600,7 +9605,7 @@ MUTATIONS=(
   # suites still run, while changing no behaviour.
   # Non-empty expectation on purpose (playhead-ngsm) — it names the rails G701
   # and G703 kill, so a KILLED verdict would mean a rename can change behaviour.
-  "G799|1128|ADSVC|$T_G7_WITNESS;$T_G7_CANARY_CALLSITE"
+  "G799|1120|ADSVC|$T_G7_WITNESS;$T_G7_CANARY_CALLSITE"
 
 )
 
