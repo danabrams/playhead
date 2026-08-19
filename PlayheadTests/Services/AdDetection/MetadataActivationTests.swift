@@ -204,8 +204,13 @@ struct MetadataActivationConfigTests {
                 "hot-path metadata lexicon injection must return before resolving priors when there are no cues")
     }
 
-    @Test("Ownership snapshot includes recurring show-notes domains")
-    func ownershipSnapshotIncludesRecurringShowNotesDomains() throws {
+    /// playhead-kmw4: the recurring show-notes domain is no longer
+    /// show-owned. It moves to `ownershipUndetermined`, and the ONLY
+    /// structural signal — the feed URL's own eTLD+1 — is what stays in
+    /// `showOwned`. The sponsor domain below the recurrence threshold is in
+    /// neither set, so its existing external-domain treatment is untouched.
+    @Test("Recurring show-notes domains are ownership-undetermined, not show-owned")
+    func ownershipSnapshotSeparatesStructuralFromRecurring() throws {
         let recentMetadata = [
             FeedDescriptionMetadata(
                 feedDescription: "More at https://mypodcast.com/one.",
@@ -229,15 +234,64 @@ struct MetadataActivationConfigTests {
             ),
         ]
 
-        let domains = EpisodeMetadataSnapshot.showOwnedDomains(
+        let ownership = EpisodeMetadataSnapshot.domainOwnership(
             feedURL: try #require(URL(string: "https://feeds.example.com/rss")),
             recentMetadata: recentMetadata,
             podcastId: "podcast-ownership-test"
         )
 
-        #expect(domains.contains("mypodcast.com"))
-        #expect(domains.contains("example.com"))
-        #expect(!domains.contains("betterhelp.com"))
+        #expect(ownership.showOwned == ["example.com"])
+        #expect(ownership.ownershipUndetermined == ["mypodcast.com"])
+        #expect(!ownership.ownershipUndetermined.contains("betterhelp.com"))
+
+        // The convenience accessor must agree with the pair it delegates to —
+        // two readers of one graph is how the answers drift.
+        let showOwned = EpisodeMetadataSnapshot.showOwnedDomains(
+            feedURL: try #require(URL(string: "https://feeds.example.com/rss")),
+            recentMetadata: recentMetadata,
+            podcastId: "podcast-ownership-test"
+        )
+        #expect(showOwned == ownership.showOwned)
+    }
+
+    /// End-to-end at the seam this bead exists for: a recurring sponsor
+    /// domain must produce NO lexicon entry — not a negative one (which is
+    /// what shipped) and not a positive one (which Dan declined pending a
+    /// corpus). The domain below the threshold still injects positively, so
+    /// the external-domain path is demonstrably still alive.
+    @Test("A recurring show-notes domain injects nothing in either direction")
+    func recurringDomainInjectsNothing() throws {
+        let notes = "This episode is brought to you by https://linkedin.com/doac "
+            + "and https://newsponsor.com/offer."
+        let recentMetadata = (0..<4).map { index in
+            FeedDescriptionMetadata(
+                feedDescription: "Visit https://linkedin.com/ep\(index).",
+                feedSummary: nil,
+                sourceHashes: .init(descriptionHash: Int64(index), summaryHash: nil)
+            )
+        }
+
+        let ownership = EpisodeMetadataSnapshot.domainOwnership(
+            feedURL: try #require(URL(string: "https://rss2.flightcast.com/abc")),
+            recentMetadata: recentMetadata,
+            podcastId: "podcast-injects-nothing"
+        )
+        #expect(ownership.ownershipUndetermined.contains("linkedin.com"))
+        #expect(!ownership.showOwned.contains("linkedin.com"))
+
+        let extractor = MetadataCueExtractor(
+            showOwnedDomains: ownership.showOwned,
+            networkOwnedDomains: [],
+            ownershipUndeterminedDomains: ownership.ownershipUndetermined
+        )
+        let cues = extractor.extractCues(description: notes, summary: nil)
+        #expect(!cues.contains { $0.normalizedValue == "linkedin.com" })
+        #expect(cues.contains { $0.normalizedValue == "newsponsor.com" && $0.cueType == .externalDomain })
+
+        let injector = MetadataLexiconInjector(config: .allEnabled)
+        let entries = injector.inject(cues: cues, metadataTrust: 0.724)
+        #expect(!entries.contains { $0.sourceValue == "linkedin.com" })
+        #expect(entries.contains { $0.sourceValue == "newsponsor.com" && !$0.isNegativePattern })
     }
 }
 
@@ -1169,5 +1223,67 @@ struct WeightFormulaTests {
         // -(0.8 * 0.5 * 0.75) = -0.30
         let expectedWeight = -(0.8 * 0.5 * 0.75)
         #expect(abs(entries[0].weight - expectedWeight) < 0.001)
+    }
+}
+
+// MARK: - Ownership wiring (playhead-kmw4)
+
+/// The two call sites that carry the ownership-undetermined population from
+/// the graph to the cue extractor. Neither is reachable from a unit test:
+/// `PlayheadApp` builds the snapshot inside a SwiftUI `.task` that needs a
+/// live `ModelContainer`, and `AdDetectionService` constructs its extractor
+/// privately. Drop either argument and every graph rail, every extractor rail
+/// and every injector rail stays GREEN while the device behaves exactly as it
+/// did before the fix — which is the shape this repo has been bitten by often
+/// enough to have a name for it. So the wiring is pinned in source.
+@Suite("Metadata ownership wiring — source canary")
+struct MetadataOwnershipWiringSourceCanaryTests {
+
+    private static let repoRoot: URL = {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent() // .../AdDetection/
+            .deletingLastPathComponent() // .../Services/
+            .deletingLastPathComponent() // .../PlayheadTests/
+            .deletingLastPathComponent() // .../<repo root>/
+    }()
+
+    private static func source(_ relativePath: String) throws -> String {
+        try String(
+            contentsOf: repoRoot.appendingPathComponent(relativePath),
+            encoding: .utf8
+        )
+    }
+
+    @Test("AdDetectionService hands the undetermined set to the cue extractor")
+    func adDetectionServicePassesUndeterminedDomains() throws {
+        let text = try Self.source("Playhead/Services/AdDetection/AdDetectionService.swift")
+        #expect(
+            text.contains("ownershipUndeterminedDomains: snapshot.ownershipUndeterminedDomains"),
+            """
+            loadEpisodeMetadataSignals must forward the snapshot's undetermined domains; \
+            without it every recurring show-notes domain falls through to .externalDomain \
+            and injects as POSITIVE sponsor evidence — the flip playhead-kmw4 declined
+            """
+        )
+    }
+
+    @Test("PlayheadApp builds the snapshot from one graph and carries both sets")
+    func playheadAppCarriesBothOwnershipSets() throws {
+        let text = try Self.source("Playhead/App/PlayheadApp.swift")
+        #expect(
+            text.contains("EpisodeMetadataSnapshot.domainOwnership("),
+            """
+            the production snapshot must come from domainOwnership(...), which builds ONE \
+            OwnershipGraph over the show's notes; two separate builds is how the two \
+            answers come to disagree
+            """
+        )
+        #expect(
+            text.contains("ownershipUndeterminedDomains: ownership.ownershipUndetermined"),
+            """
+            the snapshot must carry the undetermined set into the pipeline; dropping it \
+            restores the pre-kmw4 behaviour with every unit test still green
+            """
+        )
     }
 }

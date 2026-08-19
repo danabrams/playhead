@@ -10503,7 +10503,8 @@ actor AdDetectionService {
         let feedMetadata = snapshot.feedMetadata
         let extractor = MetadataCueExtractor(
             showOwnedDomains: snapshot.showOwnedDomains,
-            networkOwnedDomains: snapshot.networkOwnedDomains
+            networkOwnedDomains: snapshot.networkOwnedDomains,
+            ownershipUndeterminedDomains: snapshot.ownershipUndeterminedDomains
         )
         let cues = extractor.extractCues(
             description: feedMetadata.feedDescription,

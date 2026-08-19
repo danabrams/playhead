@@ -139,3 +139,8 @@ TestFixtures/Corpus/Snapshots/fingerprints/
 # Scoped-gate transcripts written into a bead worktree (playhead-vtjx).
 # Multi-MB xcodebuild logs are session artifacts, not repo artifacts.
 gate-*.log
+
+# playhead-kmw4: local pointers to the (out-of-repo) device-pull corpus and
+# the eval report it writes. See MetadataShowOwnedDomainDevicePullEvalTests.
+.kmw4-corpus-path
+.kmw4-report-path

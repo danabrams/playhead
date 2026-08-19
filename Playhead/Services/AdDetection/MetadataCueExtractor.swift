@@ -31,22 +31,30 @@ struct MetadataCueExtractor: Sendable {
     private let knownSponsors: [String]
 
     /// Domains owned by the show (e.g. "teamcoco.com"). Used to classify
-    /// extracted URLs as show-owned vs external.
+    /// extracted URLs as show-owned vs external. Structural signals only
+    /// since playhead-kmw4 — show-notes frequency no longer feeds this set.
     private let showOwnedDomains: Set<String>
 
     /// Domains owned by the podcast network (e.g. "earwolf.com").
     private let networkOwnedDomains: Set<String>
+
+    /// Domains that recur in this show's notes with NO ownership signal
+    /// behind them (playhead-kmw4). These produce no cue at all — see
+    /// `extractDomainCues`.
+    private let ownershipUndeterminedDomains: Set<String>
 
     // MARK: - Init
 
     init(
         knownSponsors: [String] = [],
         showOwnedDomains: Set<String> = [],
-        networkOwnedDomains: Set<String> = []
+        networkOwnedDomains: Set<String> = [],
+        ownershipUndeterminedDomains: Set<String> = []
     ) {
         self.knownSponsors = knownSponsors
         self.showOwnedDomains = showOwnedDomains
         self.networkOwnedDomains = networkOwnedDomains
+        self.ownershipUndeterminedDomains = ownershipUndeterminedDomains
     }
 
     // MARK: - Public API
@@ -422,6 +430,20 @@ struct MetadataCueExtractor: Sendable {
             } else if networkOwnedDomains.contains(domain) {
                 cueType = .networkOwnedDomain
                 confidence = 0.90
+            } else if ownershipUndeterminedDomains.contains(domain) {
+                // playhead-kmw4: recurs in this show's notes, and nothing
+                // says who owns it. Emitting NO cue is the point: the two
+                // available cue types both make a claim this evidence cannot
+                // support. `.showOwnedDomain` claims the show owns it, which
+                // is what shipped and what put three Diary of a CEO SPONSORS
+                // (linkedin.com, shopify.com, ketone.com) into the lexical
+                // scanner as ANTI-ad evidence. `.externalDomain` claims it is
+                // somebody else's, which would flip the same three to
+                // pro-ad evidence and take siriusxm.com / teamcoco.com — the
+                // two that may genuinely be show-owned — with them. Dan's
+                // call, 2026-08-19: remove the wrong signal, add no new one
+                // until a corpus says which way it points.
+                continue
             } else {
                 cueType = .externalDomain
                 confidence = 0.80

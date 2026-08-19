@@ -103,13 +103,77 @@ final class OwnershipGraphShowNotesTests: XCTestCase {
         XCTAssertEqual(graph.ownership(for: "somelink.com"), .unknown)
     }
 
-    func testFrequencyThresholdPromotesToShowOwned() {
+    /// playhead-kmw4: crossing the recurrence threshold used to promote the
+    /// domain to `.showOwned`. It does not any more — a recurring SPONSOR
+    /// clears the same bar — so the domain stays `.unknown` and surfaces only
+    /// as "ownership undetermined".
+    func testFrequencyThresholdDoesNotPromoteToShowOwned() {
         var graph = OwnershipGraph(podcastId: "pod1")
         graph.recordShowNotesDomain("https://myshow.com")
         graph.recordShowNotesDomain("https://myshow.com")
         graph.recordShowNotesDomain("https://myshow.com")
 
-        XCTAssertEqual(graph.ownership(for: "myshow.com"), .show)
+        XCTAssertEqual(graph.ownership(for: "myshow.com"), .unknown)
+        XCTAssertTrue(graph.showOwnedDomains.isEmpty)
+        XCTAssertEqual(graph.recurringShowNotesDomains, ["myshow.com"])
+        XCTAssertEqual(graph.entries["myshow.com"]?.frequency, 3)
+    }
+
+    /// A domain BELOW the recurrence threshold is not "undetermined" either —
+    /// it is simply unremarkable, and the caller's fall-through (external
+    /// domain) still applies to it. The threshold is what separates the two.
+    func testBelowThresholdIsNotReportedAsRecurring() {
+        var graph = OwnershipGraph(podcastId: "pod1")
+        graph.recordShowNotesDomain("https://rare.com")
+        graph.recordShowNotesDomain("https://rare.com")
+
+        XCTAssertEqual(graph.ownership(for: "rare.com"), .unknown)
+        XCTAssertTrue(graph.recurringShowNotesDomains.isEmpty)
+    }
+
+    /// The sponsor case the bead was filed for, in miniature: a domain that
+    /// appears in 69 of a show's episodes is still not evidence the show owns
+    /// it. Nothing about a large count changes the answer.
+    func testHighFrequencySponsorDomainNeverBecomesShowOwned() {
+        var graph = OwnershipGraph(podcastId: "pod1")
+        for _ in 0..<69 {
+            graph.recordShowNotesDomain("https://linkedin.com")
+        }
+
+        XCTAssertEqual(graph.ownership(for: "linkedin.com"), .unknown)
+        XCTAssertFalse(graph.showOwnedDomains.contains("linkedin.com"))
+        XCTAssertEqual(graph.recurringShowNotesDomains, ["linkedin.com"])
+    }
+
+    /// A structurally classified domain keeps its label and stays OUT of the
+    /// undetermined set no matter how often the notes mention it — the
+    /// undetermined set is "no signal", not "lots of mentions".
+    func testStructuralDomainAccruesCountButIsNotUndetermined() {
+        var graph = OwnershipGraph(podcastId: "pod1")
+        graph.ingestFeedURL("https://feeds.simplecast.com/abc")
+        for _ in 0..<5 {
+            graph.recordShowNotesDomain("https://simplecast.com/show")
+        }
+
+        XCTAssertEqual(graph.ownership(for: "simplecast.com"), .show)
+        XCTAssertEqual(graph.entries["simplecast.com"]?.source, .feedURL)
+        XCTAssertEqual(graph.entries["simplecast.com"]?.frequency, 5)
+        XCTAssertTrue(graph.recurringShowNotesDomains.isEmpty)
+    }
+
+    /// A sponsor registration lifts the domain out of the undetermined set:
+    /// it now has a real classification, so the "say nothing" treatment ends.
+    func testSponsorRegistrationRemovesDomainFromUndeterminedSet() {
+        var graph = OwnershipGraph(podcastId: "pod1")
+        for _ in 0..<4 {
+            graph.recordShowNotesDomain("https://betterhelp.com")
+        }
+        XCTAssertEqual(graph.recurringShowNotesDomains, ["betterhelp.com"])
+
+        graph.registerSponsorDomain("https://betterhelp.com")
+
+        XCTAssertEqual(graph.ownership(for: "betterhelp.com"), .thirdParty)
+        XCTAssertTrue(graph.recurringShowNotesDomains.isEmpty)
     }
 
     func testFrequencyBelowThresholdStaysUnknown() {
@@ -147,11 +211,15 @@ final class OwnershipGraphShowNotesTests: XCTestCase {
 
     func testCustomThreshold() {
         let config = OwnershipGraphConfig(
-            showOwnedFrequencyThreshold: 1
+            showNotesRecurrenceThreshold: 1
         )
         var graph = OwnershipGraph(podcastId: "pod1", config: config)
         graph.recordShowNotesDomain("https://instant.com")
-        XCTAssertEqual(graph.ownership(for: "instant.com"), .show)
+
+        // The knob still governs WHEN a domain counts as recurring; it no
+        // longer governs whether it is called show-owned (playhead-kmw4).
+        XCTAssertEqual(graph.ownership(for: "instant.com"), .unknown)
+        XCTAssertEqual(graph.recurringShowNotesDomains, ["instant.com"])
     }
 }
 
@@ -338,30 +406,38 @@ final class OwnershipGraphEndToEndTests: XCTestCase {
 
     func testConfigDefaultValues() {
         let config = OwnershipGraphConfig.default
-        XCTAssertEqual(config.showOwnedFrequencyThreshold, 3)
+        // playhead-kmw4 renamed the knob and changed what it licenses; the
+        // VALUE is deliberately unchanged.
+        XCTAssertEqual(config.showNotesRecurrenceThreshold, 3)
     }
 
     func testConfigDefaultHasNoUbiquitousPresenceRatio() {
-        // Verify OwnershipGraphConfig.default only has showOwnedFrequencyThreshold.
+        // Verify OwnershipGraphConfig.default only has showNotesRecurrenceThreshold.
         // The old ubiquitousPresenceRatio field was removed; this test ensures
         // the struct contains only the expected property.
         let config = OwnershipGraphConfig.default
         let mirror = Mirror(reflecting: config)
         let propertyNames = mirror.children.compactMap(\.label)
-        XCTAssertTrue(propertyNames.contains("showOwnedFrequencyThreshold"))
+        XCTAssertTrue(propertyNames.contains("showNotesRecurrenceThreshold"))
         XCTAssertFalse(propertyNames.contains("ubiquitousPresenceRatio"),
                        "ubiquitousPresenceRatio should have been removed from OwnershipGraphConfig")
+        // The promotion knob is GONE, not renamed-and-kept: a reader who
+        // greps for the old name must find nothing (playhead-kmw4).
+        XCTAssertFalse(propertyNames.contains("showOwnedFrequencyThreshold"),
+                       "the frequency->showOwned promotion knob was removed by playhead-kmw4")
     }
 
     func testSignalPriorityOrder() {
         // user override > RSS/sponsor > frequency
         var graph = OwnershipGraph(podcastId: "pod1")
 
-        // 1. Frequency classifies as showOwned
+        // 1. Frequency classifies NOTHING (playhead-kmw4) — it only reports
+        //    the domain as recurring with ownership undetermined.
         for _ in 0..<5 {
             graph.recordShowNotesDomain("https://example.com")
         }
-        XCTAssertEqual(graph.ownership(for: "example.com"), .show)
+        XCTAssertEqual(graph.ownership(for: "example.com"), .unknown)
+        XCTAssertEqual(graph.recurringShowNotesDomains, ["example.com"])
 
         // 2. Sponsor registration overrides frequency
         graph.registerSponsorDomain("https://example.com")

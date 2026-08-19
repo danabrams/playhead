@@ -285,14 +285,21 @@ struct PlayheadApp: App {
                                 recentMetadata.append(feedMetadata)
                             }
                             let podcastId = episode.podcast?.feedURL.absoluteString ?? episodeId
-                            let showOwnedDomains = EpisodeMetadataSnapshot.showOwnedDomains(
+                            // playhead-kmw4: ONE graph build produces both
+                            // populations. `showOwned` is structural only (the
+                            // feed URL's eTLD+1); `ownershipUndetermined` is
+                            // the recurring-in-show-notes set that used to be
+                            // promoted to show-owned by count alone and is now
+                            // silent in both directions.
+                            let ownership = EpisodeMetadataSnapshot.domainOwnership(
                                 feedURL: episode.podcast?.feedURL,
                                 recentMetadata: recentMetadata,
                                 podcastId: podcastId
                             )
                             return EpisodeMetadataSnapshot(
                                 feedMetadata: feedMetadata,
-                                showOwnedDomains: showOwnedDomains
+                                showOwnedDomains: ownership.showOwned,
+                                ownershipUndeterminedDomains: ownership.ownershipUndetermined
                             )
                         }
                     )
