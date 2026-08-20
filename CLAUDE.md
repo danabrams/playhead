@@ -166,6 +166,71 @@ Two corollaries worth knowing before the next `rc=65`:
 - **`rc=65` with no tests is no longer self-diagnosed as a broken tree.** It now names CONTENTION, a WEDGED RUNNER (`blessSimulatorHub` / `service hub IS NOT still alive`, with the `simctl shutdown all` recovery), DISK, OOM, a real BUILD FAILURE, or **UNDIAGNOSED** — and prints the matched line as evidence. `xcrun: error: unable to find utility "simctl"` is labelled a **secondary** symptom: it is xcodebuild's diagnostic collection shelling out through the global `xcode-select`, not the 2026-07-16 clone-parallelism gotcha, and chasing it wastes the round.
 - **The battery has never run `git checkout -- .`, and earlier prose here and in its own header said it did.** `restore_sources` is `git checkout -- "${MUTABLE_FILES[@]}"` and cannot touch a file it does not mutate. The blanket checkout was a *remedy people copied out of that wrong prose*, and on 2026-08-04 three agents destroyed their own uncommitted work running it by hand. If you want to know whether a run left residue, ask: `git status --porcelain -- Playhead`.
 
+
+### The gate can die of MEMORY, and it now says so instead of leaving a bare 137 (playhead-3rql)
+
+**Six consecutive merge gates produced NO VERDICT across two branches on 2026-08-20, and the explanation everyone worked from was wrong.** The reading was a dose–response: one bead had added 38 tests, the plan was at its ceiling, and 38 more tests tipped it. The experiment that settles it had not been run. It has now:
+
+| run | population | result |
+|---|---|---|
+| `EXP1` — keep playhead-shu5's 38 new tests, skip 38 UNRELATED ones (`TargetedWindowNarrowerTests`) | 11,569 — **identical to the pre-shu5 control that passed** | host killed at 90 % of the log, `Killed: 9`, `GATE_EXIT=137` |
+
+Same count, different 38 tests, same death at the same place. **shu5's tests are innocent and the count is not the variable.** Two hours later the *unmodified* plan — all 11,626 tests, nothing skipped — passed twice in a row with zero failures. The outcome is stochastic, and what makes it stochastic is not the plan.
+
+**WHAT IS ACTUALLY SHORT, measured by sampling `vm_stat` + `vm.swapusage` every 10 s across whole runs and around bare simulator boots.** The quantity is **demand** = `active + wired + compressor + swap`:
+
+```
+macOS with the simulator SHUT DOWN                     6.4 – 9.8 GiB
++ a booted iOS 27 simulator, idle, settled 5 min      16.5 – 20.5 GiB   (200–290 processes)
++ the app launched, before one Swift Testing test     20.9 GiB
+  the same run, at the moment it died                 20.5 GiB
+box RAM                                               16.0 GiB
+```
+
+Two things follow, and both contradict how this failure was being read:
+
+- **The run is already over the box's ceiling before the first test starts, and demand is FLAT across the test phase.** So "which tests ran" cannot predict the outcome, and no PerfGating, sharding or narrowing acts on the term that is large. A booted simulator costs 10–13 GiB on a 16 GiB machine; the whole test run adds about 2 GiB on top.
+- **It is neither a leak nor a late spike** — the two possibilities the bead named. The single largest step in the series is the simulator's own boot (compressor 0.65 → 7.8 GiB, swap 0.5 → 7.6 GiB), and it happens between `simctl boot` and the first `◇ Test`.
+
+**`Pages free` IS NOT FREE MEMORY, and the bead was filed on that reading.** macOS keeps very few free pages by design; this box at rest reads ~1.0 GiB free with 7.5 GiB reclaimable and is short of nothing. The 0.29 GB that made memory the prime suspect was a correct reading of the wrong quantity — the standing defect class. Use demand, or `free + inactive + speculative + purgeable` if you want the reclaimable figure.
+
+**THE TEST HOST'S FOOTPRINT DOES SCALE WITH CONCURRENCY, and it is the only term the harness controls.** Measured with `/usr/bin/footprint -p` (phys_footprint, not rss — a page the compressor has taken is no longer resident, so rss falls while a process grows):
+
+```
+~1,000 tests in flight (scoped run)     285 MiB
+~11,000 tests in flight (full plan)   2,110 – 2,223 MiB
+serialized                              ~290 MiB
+```
+
+Swift Testing starts **essentially every test at once**: peak in-flight is 11,000–11,400 on every full-plan log, cold or warm, passing or dying. So serializing buys about **1.9 GiB** — a real fraction of the 5–7 GiB overshoot, but not all of it.
+
+**Which knobs exist, measured, because three of the four obvious ones do nothing:**
+
+- `SWT_EXPERIMENTAL_MAXIMUM_PARALLELIZATION_WIDTH` — the string is in `Testing.framework` and the variable does reach the test process, and **Xcode's XCTest-hosted Swift Testing ignores it**. Peak in-flight was unchanged at 962 with it set to 100, and at 82 with it set to 4.
+- `TEST_RUNNER_<VAR>=…` on the `xcodebuild` command line — **not forwarded to a unit-test host.** Proved with `PerfGate`: `TEST_RUNNER_PLAYHEAD_RUN_PERF=1` left the gated test skipping.
+- The test plan's `defaultOptions.environmentVariableEntries` — **works.** Same probe, same test, ran and passed. This is how `PlayheadPerfTests` sets `PLAYHEAD_RUN_PERF`, and it is the only route into the test process.
+- The test plan's `"parallelizable": false` on the test target — **works, and is the only knob that bounds Swift Testing.** Peak in-flight 962 → 1. It costs ~1.8× on the test phase (1,117 tests: 17.6 s → 31.4 s) and it exposes **playhead-sip2**: four `SkipOrchestratorRevertTests` tests that pass only because the scheduler interleaves them.
+
+**WHAT THE GATE DOES NOW.** `scripts/fast-gate.sh` samples memory for the whole run (`scripts/gate-memory-sample.py`, ~10 s interval, no flag to forget) and ends by classifying the outcome (`scripts/gate_memory_verdict.py`):
+
+```
+COMPLETE    an outcome line in EITHER format, one host pid, no signal death
+RESTARTED   a second test-host pid, or the restart marker
+NO-VERDICT  `Killed: 9`, exit 137/143, or no outcome line at all
+```
+
+and, when it is not COMPLETE, printing RAM against the measured peak demand. Four things it deliberately gets right, each because a reading went wrong that way first:
+
+- **The host pid is checked independently of the restart marker.** `Restarting after unexpected exit, crash, or test timeout` is xcodebuild's, it is buffered, and EXP1 lost its host without it ever being printed. The pid is the app's own testimony.
+- **The peak DURING the run is reported separately from the peak AFTER it went quiet.** The most expensive memory event in a killed run is the aftermath: xcodebuild collecting diagnostics from a 200-process simulator drove swap from 8.3 GiB to 30.2 GiB, six minutes after the last test. Quoting that as what the tests needed is the same defect one layer along.
+- **A column an older sampler did not write reads `not recorded`, never `0.0 GiB`** — a printed zero would invent a disk-full diagnosis.
+- **Only the LAST `xcodebuild` invocation in a log is judged.** A log can hold several (the wedged-sim retry appends to it; the residual pass is a second one), and each brings its own host pid, so counting pids over the file reports one-pid-per-invocation as a mid-run restart.
+
+Rails: `python3 -m unittest scripts.tests.test_gate_memory_verdict` — 20 tests, ~0.03 s, no build.
+
+**DO NOT EDIT A SHELL SCRIPT WHILE A RUN OF IT IS IN FLIGHT.** `bash`/`zsh` read a script incrementally by byte offset, so an edit mid-run makes the shell resume at a shifted offset. This bead's own RUN2 did it: `scripts/fast-gate.sh: line 284: he: command not found`, followed by a second complete `xcodebuild test` of the whole plan. It cost a run and nearly cost a wrong conclusion — the second invocation's `tee "$LOG"` (no `-a`) truncated the log the verdict was about to read.
+
+
 ### The full plan runs ONCE, before merge — not per review round (Dan 2026-08-13)
 
 **A review round uses `-only-testing:` over the suites its diff touches. The full plan is the merge gate and nothing else.** This is a measured decision, not a preference.
