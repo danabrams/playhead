@@ -133,6 +133,21 @@
 //      Content-addressed id, so a recompose over unchanged inputs is a true
 //      no-op.
 //
+//      AND, SINCE playhead-6ruv, `evidenceSources` CARRIES WHETHER THE MODEL
+//      NAMED AN ADVERTISER. Dan vetoed [1131.6–1210.9] on `CD2976E6` — the
+//      guest saying *"my sponsored through the Northface … then I started
+//      doing corporate speaking"*, graded `strong`, with no advertiser, no
+//      product, no CTA, no URL and no promo code in it. Commercial VOCABULARY
+//      read as commercial INTENT. The mark carried NOTHING that could have
+//      said so, and could not have: the coarse schema is a disposition plus
+//      two fields. The REFINEMENT pass answers exactly that question — a
+//      `passB` `containsAd` row's `spansJSON` carries `commercialIntent`,
+//      `ownership` and an `anchors` array naming a KIND (`url`, `brandSpan`,
+//      `promoCode`) — and this composer read none of it. See ``Attribution``,
+//      including what it does NOT do: it changes no confidence, no tier and
+//      no geometry, and it does not touch Dan's mark, which has no refinement
+//      under it and is `.unrefined` before and after.
+//
 //      playhead-mqqd: THE GATE IS DERIVED, NOT TYPED. It used to be a
 //      hard-coded literal sitting beside two more hard-coded literals (the edge
 //      anchors) with nothing enforcing that the three agreed — 24 of the 45
@@ -508,11 +523,35 @@ enum SemanticSweepMarkComposer {
             * corroborationFactor(affirming: affirming, dissenting: dissenting)
     }
 
-    /// Minimal decode of the two keys that say WHETHER THE MODEL GRADED THIS
-    /// and how. Deliberately reads only those, so the two payload shapes and
-    /// every future field they gain decode without this composer knowing about
-    /// them — the same narrow-decode pattern `AdDetectionService`'s
+    /// One entry of `BackfillJobRunner.EncodedAnchor`, decoded down to the only
+    /// field this composer reads: WHAT KIND of thing the model pointed at.
+    ///
+    /// `kind` is decoded as a RAW STRING and mapped afterwards, deliberately.
+    /// A typed `EvidenceAnchorKind` THROWS on a raw value it does not know, and
+    /// a throw here takes the WHOLE payload with it — every dimension of every
+    /// span on the row would read as unreadable because one anchor was new.
+    /// An unrecognised kind is one anchor we cannot name, which is what it
+    /// actually is, so that is what it decodes to.
+    private struct PersistedAnchor: Decodable {
+        let kind: String?
+
+        var anchorKind: EvidenceAnchorKind? {
+            kind.flatMap(EvidenceAnchorKind.init(rawValue:))
+        }
+    }
+
+    /// Minimal decode of the keys that say WHETHER THE MODEL JUDGED THIS and
+    /// what it judged. Deliberately reads only those, so the two payload shapes
+    /// and every future field they gain decode without this composer knowing
+    /// about them — the same narrow-decode pattern `AdDetectionService`'s
     /// `SpanTrustDecode` uses over the same column.
+    ///
+    /// It is named for the first fact it carried and it now carries three more
+    /// (playhead-6ruv). They live in ONE struct rather than two on purpose:
+    /// every one of them is gated on the same `ownershipInferenceWasSuppressed`
+    /// flag, and a second decoder over this column would be a second place for
+    /// that gate to drift — which is exactly what playhead-yx0f consolidated
+    /// away for the band.
     private struct PersistedCertainty: Decodable {
         let certainty: CertaintyBand?
         /// `BackfillJobRunner.EncodedRefinedSpan`'s flag, absent on the coarse
@@ -524,12 +563,51 @@ enum SemanticSweepMarkComposer {
         /// the refined-span array carries per-span line refs under other names
         /// and is read through its own path. See ``supportLineRefs(of:)``.
         let supportLineRefs: [Int]?
+        /// playhead-6ruv: paid / owned / affiliate / organic / unknown, and
+        /// thirdParty / show / network / guest / unknown. Refined-span shape
+        /// only. Raw strings for the reason ``PersistedAnchor/kind`` is one.
+        let commercialIntent: String?
+        let ownership: String?
+        /// playhead-6ruv: WHAT the model pointed at inside this span — a url,
+        /// a brandSpan, a promoCode, each anchored to a line.
+        let anchors: [PersistedAnchor]?
 
         /// The band this span may CONTRIBUTE — `nil` when the model did not
         /// grade it, and `nil` when the runner did the grading.
         var attributableBand: CertaintyBand? {
             ownershipInferenceWasSuppressed == true ? nil : certainty
         }
+
+        /// The DIMENSIONS this span may contribute — `nil` when the RUNNER
+        /// wrote them rather than the model (playhead-6ruv).
+        ///
+        /// The same gate as ``attributableBand`` and for a sharper reason.
+        /// `PermissiveAdClassifier.makeAnchorlessSpan` hardcodes
+        /// `commercialIntent: .paid` and `ownership: .thirdParty` on every
+        /// permissive-bypass span — verbatim on the 2026-08-19 pull,
+        /// `{"anchors":[],"certainty":"strong","commercialIntent":"paid",
+        /// …,"ownership":"thirdParty","ownershipInferenceWasSuppressed":true}`
+        /// — so reading those two as the model's judgement would say "a paid
+        /// third-party ad" about audio no model ever classified. That is
+        /// playhead-6ruv's own defect, one layer down: a value that names one
+        /// thing read as though it named another.
+        var attributableDimensions: SpanDimensions? {
+            guard ownershipInferenceWasSuppressed != true else { return nil }
+            return SpanDimensions(
+                commercialIntent: commercialIntent
+                    .flatMap(CommercialIntent.init(rawValue:)),
+                ownership: ownership.flatMap(Ownership.init(rawValue:)),
+                anchorKinds: Set((anchors ?? []).compactMap(\.anchorKind))
+            )
+        }
+    }
+
+    /// What ONE refined span says about who is being sold, once the permissive
+    /// gate has let it speak (playhead-6ruv).
+    private struct SpanDimensions {
+        let commercialIntent: CommercialIntent?
+        let ownership: Ownership?
+        let anchorKinds: Set<EvidenceAnchorKind>
     }
 
     /// How much the MODEL'S OWN certainty for this row's presence claim
@@ -726,8 +804,17 @@ enum SemanticSweepMarkComposer {
             localise($0, scanRows: scanRows, supportLines: supportLines)
         }
 
-        // Stage 7: emit.
-        return localised.map { makeMark($0, analysisAssetId: analysisAssetId) }
+        // Stage 7: emit. playhead-6ruv attributes each surviving extent from
+        // the refinement rows under IT rather than under the coarse window it
+        // came from, because stages 3–6 have already decided what audio this
+        // mark covers and that is the audio the banner claims.
+        return localised.map {
+            makeMark(
+                $0,
+                attribution: attribution(for: $0, in: scanRows),
+                analysisAssetId: analysisAssetId
+            )
+        }
     }
 
     // MARK: - Stages 1–2: presence, refined
@@ -1317,6 +1404,248 @@ enum SemanticSweepMarkComposer {
         return result
     }
 
+    // MARK: - Attribution (playhead-6ruv)
+
+    /// WHETHER THE MODEL NAMED AN ADVERTISER UNDER THIS MARK, and — when it did
+    /// not — WHY NOT. Four cases, because they are four different claims, and
+    /// the whole of this bead is that a claim about one thing was being read as
+    /// a claim about another.
+    ///
+    /// # The field case
+    ///
+    /// 2026-08-19, asset `CD2976E6`, window [1131.6–1210.9]. The coarse model
+    /// returned `{"supportLineRefs":[46],"certainty":"strong"}` over Alex
+    /// Honnold saying *"my sponsored through the Northface was like, I think my
+    /// 1st year was like 10 K a year … then I started doing corporate speaking
+    /// … they also had to get all this sort of marketing material"*. There is
+    /// no advertiser, no product, no CTA, no URL and no promo code in it — it
+    /// is a climber describing how he earns a living, and Dan vetoed the mark.
+    /// Commercial VOCABULARY was read as commercial INTENT.
+    ///
+    /// The row carried nothing that could have said so, and it could not have:
+    /// `CoarseScreeningSchema` is a disposition plus a support object with
+    /// exactly two fields. **THAT MARK IS `.unrefined` AND STAYS `.unrefined`.**
+    /// This type does not fix it. What it does is stop it being
+    /// indistinguishable from a mark the model anchored to a brand: measured on
+    /// the same pull, of the 79 persisted sweep marks **5 are `.refined` with a
+    /// naming anchor, 10 are `.suppressed`, 64 are `.unrefined`** — and Dan's
+    /// is one of the 64.
+    ///
+    /// # It is a RECORD, not a tier
+    ///
+    /// Nothing here moves a confidence, an `eligibilityGate` or an edge anchor,
+    /// and ``makeMark(_:attribution:analysisAssetId:)`` is where that is
+    /// asserted rather than promised. Treating an unnameable verdict as a
+    /// weaker OBJECT than a nameable one is a policy question about what a
+    /// banner may claim, and it is **Dan's** — the bead says so in as many
+    /// words. This makes the distinction exist and be readable at rest; it does
+    /// not spend it.
+    enum Attribution: Equatable, Sendable {
+        /// No refinement pass affirmed an ad anywhere in this extent. Presence
+        /// with no attributable advertiser BY CONSTRUCTION — the coarse lane
+        /// was never asked who the advertiser was.
+        case unrefined
+        /// A refinement DID affirm, and its payload yielded no spans at all: an
+        /// empty array, or bytes that will not decode as the refined shape. A
+        /// failure of OUR RECORDS, not of the verdict — held apart from
+        /// ``unrefined`` for the same reason ``Localisation/unreadable`` is
+        /// held apart from ``Localisation/absent``.
+        case unreadable
+        /// Spans exist and EVERY one of them is a permissive-bypass span whose
+        /// dimensions `PermissiveAdClassifier` hardcoded. The model judged
+        /// nothing here; the runner did. 10 of the 79 marks on the 2026-08-19
+        /// pull, and 9 of the 11 refined spans on the 2026-08-10 one.
+        case suppressed
+        /// At least one span the MODEL itself judged, with what it judged.
+        case refined(Refinement)
+
+        /// Did the model point at something that NAMES an advertiser?
+        /// `false` for every case but a ``refined`` one carrying a naming
+        /// anchor — an absence of evidence never reads as evidence.
+        var namesAnAdvertiser: Bool {
+            switch self {
+            case .refined(let refinement): refinement.namesAnAdvertiser
+            case .unrefined, .unreadable, .suppressed: false
+            }
+        }
+    }
+
+    /// The dimensions the MODEL'S OWN spans under one mark carried, unioned.
+    ///
+    /// Unioned rather than reduced to a single value because a mark can rest on
+    /// several refined spans and they need not agree; collapsing them would
+    /// pick one span's answer and print it over audio it never saw, which is
+    /// the substitution stage 3's own comment refuses at the level of extent.
+    struct Refinement: Equatable, Sendable {
+        var anchorKinds: Set<EvidenceAnchorKind> = []
+        var commercialIntents: Set<CommercialIntent> = []
+        var ownerships: Set<Ownership> = []
+
+        /// The anchor kinds that NAME something a listener could be sold.
+        ///
+        /// `ctaPhrase` and `disclosurePhrase` are deliberately NOT here. *"Go
+        /// to the link in the description"* is a call to action with no
+        /// advertiser in it, and *"this episode is sponsored"* is a disclosure
+        /// with no advertiser in it — both are exactly the commercial
+        /// VOCABULARY this bead exists because the model over-reads. A url, a
+        /// brand span or a promo code identifies WHO.
+        static let namingAnchorKinds: Set<EvidenceAnchorKind> =
+            [.brandSpan, .url, .promoCode]
+
+        var namesAnAdvertiser: Bool {
+            !anchorKinds.isDisjoint(with: Self.namingAnchorKinds)
+        }
+    }
+
+    /// Every refined span the MODEL judged under this extent, unioned.
+    ///
+    /// # Which rows are asked
+    ///
+    /// The REFINEMENT pass only, affirming (`containsAd`) and EXAMINED, whose
+    /// window overlaps the extent. Each condition is load-bearing and each has
+    /// a precedent in this file:
+    ///
+    ///   * `passA` rows are excluded outright, and that is a LIMIT rather than
+    ///     a design choice. `PermissiveAdClassifier.parse` writes the same
+    ///     hardcoded `.strong` into a coarse payload, `usedPermissiveFallback`
+    ///     exists on `SemanticScanResult` but has **no column** in
+    ///     `semantic_scan_results`, so a permissive coarse row is byte-identical
+    ///     to a genuine one and no read can tell them apart. Filed separately;
+    ///     it needs a schema change. What follows from it here: attribution can
+    ///     say the model named a brand, and it can never certify that the
+    ///     PRESENCE verdict under a `.unrefined` mark was the model's at all.
+    ///   * a DECLINED `passB` row means "found no edges", never "there is no
+    ///     ad" — the same reason ``corroboration(for:in:)`` and
+    ///     ``clearedSpans(in:)`` both scope themselves — so it attributes
+    ///     nothing rather than contradicting anything.
+    ///   * an UNEXAMINED row looked at nothing, so its `disposition` column is
+    ///     not a verdict about the audio (the field sweep really does end
+    ///     `2581–2676 | abstain | cancelled`).
+    ///
+    /// # Overlap, and what it cannot see
+    ///
+    /// Plain overlap, the same predicate stage 2 uses to pair a refinement with
+    /// a coarse window and ``corroboration(for:in:)`` uses to count replicates.
+    /// A refined span's own geometry is `firstLineRef`/`lastLineRef`, which are
+    /// line refs rather than seconds, and only the ROW carries the projection
+    /// into seconds — so row overlap is the finest grain available at rest. A
+    /// row that overlaps this extent by a fraction of a second therefore speaks
+    /// for all of it. Stated rather than hidden: the alternative is resolving
+    /// line refs through a `SupportLineIndex`, which stage 6 already shows can
+    /// only be done for a row whose transcript version still exists, and 130 of
+    /// the pull's 301 coarse rows fail that test (playhead-kg6i).
+    static func attribution(
+        for extent: Extent,
+        in rows: [SemanticScanResult]
+    ) -> Attribution {
+        var sawRefinement = false
+        var sawSpan = false
+        var sawJudged = false
+        var refinement = Refinement()
+
+        for row in rows where row.scanPass == refinementScanPass {
+            guard row.disposition == .containsAd,
+                  row.didExamineWindow,
+                  row.windowStartTime.isFinite, row.windowEndTime.isFinite,
+                  row.windowEndTime > row.windowStartTime,
+                  extent.overlaps(start: row.windowStartTime, end: row.windowEndTime)
+            else { continue }
+            sawRefinement = true
+            for span in refinedSpans(of: row) {
+                sawSpan = true
+                guard let dimensions = span.attributableDimensions else { continue }
+                sawJudged = true
+                refinement.anchorKinds.formUnion(dimensions.anchorKinds)
+                if let intent = dimensions.commercialIntent {
+                    refinement.commercialIntents.insert(intent)
+                }
+                if let ownership = dimensions.ownership {
+                    refinement.ownerships.insert(ownership)
+                }
+            }
+        }
+
+        guard sawRefinement else { return .unrefined }
+        guard sawSpan else { return .unreadable }
+        return sawJudged ? .refined(refinement) : .suppressed
+    }
+
+    /// The refined spans persisted on one `passB` row, or none.
+    ///
+    /// The ARRAY shape only — `encodeRefinedSpans` is the only writer of a
+    /// refinement payload and it always writes an array. A payload that will
+    /// not decode as one yields nothing, which ``attribution(for:in:)`` reports
+    /// as ``Attribution/unreadable`` rather than as an absence of refinement.
+    private static func refinedSpans(of row: SemanticScanResult) -> [PersistedCertainty] {
+        guard let data = row.spansJSON.data(using: .utf8),
+              let spans = try? JSONDecoder().decode([PersistedCertainty].self, from: data)
+        else { return [] }
+        return spans
+    }
+
+    // MARK: - Attribution, persisted
+
+    /// The `evidenceSources` token this composer stamps first on every mark, so
+    /// a reader can tell a sweep mark's projection from any other producer's
+    /// use of the column. Deliberately the same literal as ``metadataSource``.
+    static let evidenceSourceLane = metadataSource
+
+    /// The token that says WHICH of the four attributions a mark got.
+    static func evidenceSourceState(of attribution: Attribution) -> String {
+        switch attribution {
+        case .unrefined: "unrefined"
+        case .unreadable: "refinementUnreadable"
+        case .suppressed: "refinementSuppressed"
+        case .refined: "refined"
+        }
+    }
+
+    /// The attribution, rendered into the `evidenceSources` column.
+    ///
+    /// # Why this column and not `advertiser`
+    ///
+    /// `advertiser`, `product` and `adDescription` are BANNER COPY, and a
+    /// change to what a banner says is Dan's. They are also unfillable from
+    /// what is persisted: an anchor carries a `kind` and a `lineRef`, never the
+    /// brand's TEXT, so the honest options were a whole transcript line in a
+    /// field the UI prints verbatim, or nothing. `metadataConfidence` stays
+    /// `nil` and the banner copy stays generic and no-hallucination, exactly as
+    /// before. `evidenceSources` is the column that already means "which
+    /// evidence channels back this window", it is NULL on all 79 sweep marks
+    /// today, and no view reads it.
+    ///
+    /// # The one consequence, named rather than absorbed
+    ///
+    /// `AdWindowMaterialIdentity.producerRevisionToken` hashes this column, so
+    /// a sweep mark's suggest-card identity now moves when a later scan changes
+    /// its attribution. That is the SAME consequence playhead-92im accepted for
+    /// `confidence` and it lands the same way: the mark's `id` is content-
+    /// addressed on geometry alone, so the row is updated in place rather than
+    /// orphaned, and a recompose over unchanged rows is byte-identical.
+    ///
+    /// # The form
+    ///
+    /// A JSON array of strings — the shape `TrainingExample.evidenceSources`
+    /// uses and one of the two `AnalysisStore+CrossUserSharing` already parses.
+    /// Order is CANONICAL (lane, state, then each group sorted) so two
+    /// composes over the same rows produce byte-identical text and the
+    /// revision token above is stable; a `Set`'s own iteration order is seeded
+    /// per process and would not be.
+    ///
+    /// `nil` when the array will not encode, which cannot happen for `[String]`
+    /// — an unwritable projection writes NOTHING rather than something wrong,
+    /// which leaves the column exactly where it was before this bead.
+    static func evidenceSources(for attribution: Attribution) -> String? {
+        var tokens = [evidenceSourceLane, evidenceSourceState(of: attribution)]
+        if case .refined(let refinement) = attribution {
+            tokens += refinement.anchorKinds.map { "anchor:\($0.rawValue)" }.sorted()
+            tokens += refinement.commercialIntents.map { "intent:\($0.rawValue)" }.sorted()
+            tokens += refinement.ownerships.map { "ownership:\($0.rawValue)" }.sorted()
+        }
+        guard let data = try? JSONEncoder().encode(tokens) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
     // MARK: - Stage 7: emit
 
     /// The EXTENT this producer can prove, and the single source of truth for
@@ -1349,7 +1678,18 @@ enum SemanticSweepMarkComposer {
     static let extentSupport: SpanExtentSupport = .unanchored
 
     /// Build the content-addressed mark-only `AdWindow` for a surviving extent.
-    static func makeMark(_ extent: Extent, analysisAssetId: String) -> AdWindow {
+    ///
+    /// playhead-6ruv: `attribution` has NO DEFAULT, and that is the point. A
+    /// defaulted `.unrefined` is a value that would read "the model named
+    /// nothing" for a caller that simply forgot to ask — an absence
+    /// manufactured out of an omission, which is this bead's own defect class.
+    /// It moves ``AdWindow/evidenceSources`` and NOTHING else; every other
+    /// field below is computed exactly as it was.
+    static func makeMark(
+        _ extent: Extent,
+        attribution: Attribution,
+        analysisAssetId: String
+    ) -> AdWindow {
         // playhead-mqqd: ONE value, used twice — the anchor columns below and
         // the gate derived from it. Never two expressions that happen to agree.
         let support = extentSupport
@@ -1379,7 +1719,10 @@ enum SemanticSweepMarkComposer {
             metadataPromptVersion: nil,
             wasSkipped: false,
             userDismissedBanner: false,
-            evidenceSources: nil,
+            // playhead-6ruv: WHETHER THE MODEL NAMED AN ADVERTISER, projected
+            // from the refinement pass that was asked exactly that question and
+            // whose answer this composer read nothing of. See ``Attribution``.
+            evidenceSources: evidenceSources(for: attribution),
             // playhead-mqqd: DERIVED from `support`, not typed. It reads
             // `markOnly` today because the coarse lane proved no edge — see
             // `extentSupport` for why it cannot — and it will read whatever the
