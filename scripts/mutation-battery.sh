@@ -1563,6 +1563,11 @@ FOCUSED_SUITES=(
   -only-testing:PlayheadTests/SupportLineIndexTests
   -only-testing:PlayheadTests/SemanticSweepLocalisationTests
   -only-testing:PlayheadTests/SemanticSweepMergeBarrierTests
+  # And the WIRE canary, which is the only thing that can see a correct
+  # composer that is never handed an index. Left out of the first version of
+  # this list, and batches 1189/1190 REFUSED TO RUN rather than crediting
+  # SU23/SU24 with a survival — which is the check working.
+  -only-testing:PlayheadTests/SemanticSweepSupportLineWiringSourceCanaryTests
   # playhead-f5ao: the write-only-at-init mirror (F5 series). Two suites,
   # because the two halves of the claim are unobservable from each other. The
   # readiness suite is the only thing that can compare the first-✓ tooltip's
@@ -5758,10 +5763,13 @@ MUTATIONS=(
   # `abstain | cancelled`) speak; SU06 lets an AFFIRMING pass B be read as a
   # declined zoom, which would take stage 2's answer through stage 6's door.
   # Batched: four independent guards in one predicate, four disjoint fixtures.
+  # SU03/SU05/SU06 and SU19/SU20/SU21 each edit the SAME guard, so they cannot
+  # share a batch: the first edit removes a line the next one's anchor needs
+  # and the batch ERRORs. Found by running it. One batch each below.
   "SU03|1182|SWEEP|$T_SHU5_FOREIGN_ZOOM"
   "SU04|1182|SWEEP|$T_SHU5_FULLWIDTH_ZOOM"
-  "SU05|1182|SWEEP|$T_SHU5_CANCELLED_ZOOM"
-  "SU06|1182|SWEEP|$T_SHU5_AFFIRM_ZOOM"
+  "SU05|1191|SWEEP|$T_SHU5_CANCELLED_ZOOM"
+  "SU06|1192|SWEEP|$T_SHU5_AFFIRM_ZOOM"
 
   # The index's own refusals. SU07 is THE one: resolve a stale row anyway, and
   # on the real CD2976E6 the mark lands on [1570.98, 1593.24] — the guest
@@ -5811,8 +5819,8 @@ MUTATIONS=(
   # Batched: one deletion and three predicate edits, four disjoint fixtures.
   "SU18|1187|SWEEP|$T_SHU5_BAR_SPLITS"
   "SU19|1187|SWEEP|$T_SHU5_BAR_UNEXAMINED"
-  "SU20|1187|SWEEP|$T_SHU5_BAR_PASSB"
-  "SU21|1187|SWEEP|$T_SHU5_BAR_PREDICATE"
+  "SU20|1193|SWEEP|$T_SHU5_BAR_PASSB"
+  "SU21|1194|SWEEP|$T_SHU5_BAR_PREDICATE"
   "SU22|1188|SLIDX|$T_SHU5_BAR_TOUCH"
 
   # THE WIRES, and they are the defect a pure-composer battery structurally
@@ -17405,10 +17413,12 @@ EOF
 
   SU17)
     snippet OLD <<'EOF'
-            ).clamped(to: window)
+            AdSpanBounds(start: $0.start - pad, end: $0.end + pad)
+                .clamped(to: window)
 EOF
     snippet NEW <<'EOF'
-            )
+            AdSpanBounds(start: $0.start - pad, end: $0.end + pad)
+                .clamped(to: AdSpanBounds(start: -.infinity, end: .infinity))
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 

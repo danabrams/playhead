@@ -216,6 +216,8 @@ struct SupportLineIndex: Sendable, Equatable {
             first <= last
         else { return nil }
 
+        // Read ONLY to check that this index reproduces the row's window; the
+        // returned geometry is built by `bounds` from the dictionary.
         var run: [Line] = []
         run.reserveCapacity(last - first + 1)
         for ref in first...last {
@@ -233,15 +235,24 @@ struct SupportLineIndex: Sendable, Equatable {
               lowest >= first, highest <= last
         else { return nil }
 
-        // `run` is indexed by `ref - first` and every ref is inside the run, so
-        // no lookup below can fail — the geometry is read out of the array the
-        // guards above already validated, never re-fetched from the dictionary.
-        func bounds(from lower: Int, through upper: Int) -> AdSpanBounds {
-            let slice = run[(lower - first)...(upper - first)]
-            return AdSpanBounds(
-                start: slice.map(\.startTime).min() ?? window.startTime,
-                end: slice.map(\.endTime).max() ?? window.endTime
-            )
+        // TOTAL ON PURPOSE — it must not depend on the guards above for
+        // MEMORY safety, only for correctness (playhead-shu5, mutant SU10).
+        //
+        // This was `run[(lower - first)...(upper - first)]`, which is sound
+        // only while `lowest >= first, highest <= last` holds. Deleting that
+        // guard — the obvious mutation of "a ref outside the window must not
+        // resolve" — therefore did not produce a WRONG ANSWER, it produced an
+        // index-out-of-range that took the test host down. A crashed host emits
+        // no per-test verdict at all, so the battery scored SU07, SU08, SU09
+        // AND SU10 as SURVIVED off one crash: three rails silenced by the
+        // fourth. A guard doing double duty as a bounds check is a guard whose
+        // removal cannot be measured.
+        func bounds(from lower: Int, through upper: Int) -> AdSpanBounds? {
+            let present = (lower...upper).compactMap { lines[$0] }
+            guard let start = present.map(\.startTime).min(),
+                  let end = present.map(\.endTime).max()
+            else { return nil }
+            return AdSpanBounds(start: start, end: end)
         }
 
         var spans: [AdSpanBounds] = []
@@ -252,11 +263,15 @@ struct SupportLineIndex: Sendable, Equatable {
                 previous = ref
                 continue
             }
-            spans.append(bounds(from: runStartRef, through: previous))
+            if let span = bounds(from: runStartRef, through: previous) {
+                spans.append(span)
+            }
             runStartRef = ref
             previous = ref
         }
-        spans.append(bounds(from: runStartRef, through: previous))
-        return spans
+        if let span = bounds(from: runStartRef, through: previous) {
+            spans.append(span)
+        }
+        return spans.isEmpty ? nil : spans
     }
 }

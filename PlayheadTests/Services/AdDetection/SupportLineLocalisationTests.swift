@@ -511,18 +511,38 @@ struct SemanticSweepLocalisationTests {
     /// **SHRINK ONLY, THE OTHER HALF.** A localisation too short to survive the
     /// duration floor returns the extent UNCHANGED — `clip`'s rule, that
     /// refining geometry must never destroy the mark it is refining.
+    ///
+    /// THE FIXTURE HAS TO REPRODUCE THE ROW'S WINDOW, and the first version of
+    /// this test did not — it shortened line 62 in place, which broke
+    /// `runEnd == window.endTime`, so the index REFUSED and the mark kept its
+    /// window for the wrong reason. It passed under mutant SU15 (which deletes
+    /// this very fallback) because it never reached it. Two lines here: a short
+    /// CITED one and a long uncited one, together spanning the row's window
+    /// exactly, so resolution succeeds and the floor is what does the work.
     @Test("a localisation under the duration floor leaves the mark unchanged")
     func anUnderLengthLocalisationLeavesTheMarkAlone() {
-        var lines = Fx.fieldLines
-        lines[62] = SupportLineIndex.Line(
-            startTime: 1_610.0, endTime: 1_611.0,
-            firstAtomOrdinal: 1_861, lastAtomOrdinal: 1_868
-        )
+        let lines: [Int: SupportLineIndex.Line] = [
+            62: SupportLineIndex.Line(startTime: 1_600.0, endTime: 1_601.0,
+                                      firstAtomOrdinal: 1_861, lastAtomOrdinal: 1_868),
+            63: SupportLineIndex.Line(startTime: 1_601.5, endTime: 1_611.42,
+                                      firstAtomOrdinal: 1_869, lastAtomOrdinal: 1_900),
+        ]
         let index = SupportLineIndex(transcriptVersion: Fx.transcriptVersion, lines: lines)
-        let marks = Fx.compose(rows: [Fx.fieldCoarseRow], supportLines: index)
+        let row = Fx.row(id: "short-support", start: 1_600.0, end: 1_611.42,
+                         atoms: 1_861...1_900, spansJSON: Fx.support([62]))
 
-        #expect(marks.count == 1)
-        #expect(marks.first?.startTime == 1_510.38)
+        #expect(index.resolve(
+            supportLineRefs: [62],
+            in: SupportLineIndex.RowWindow(
+                transcriptVersion: Fx.transcriptVersion,
+                firstAtomOrdinal: 1_861, lastAtomOrdinal: 1_900,
+                startTime: 1_600.0, endTime: 1_611.42
+            )
+        )?.first?.duration == 1.0, "control: the localisation IS 1.0 s, under the 2.0 s floor")
+
+        let marks = Fx.compose(rows: [row], supportLines: index)
+        #expect(marks.count == 1, "refining geometry must never destroy the mark it refines")
+        #expect(marks.first?.startTime == 1_600.0)
         #expect(marks.first?.endTime == 1_611.42)
     }
 
@@ -547,6 +567,15 @@ struct SemanticSweepLocalisationTests {
         let wide = Fx.compose(rows: [Fx.fieldCoarseRow])
         let narrow = Fx.compose(rows: [Fx.fieldCoarseRow], supportLines: Fx.fieldIndex)
 
+        // ASSERT THE VALUE, NOT ONLY THE AGREEMENT. `wide == narrow` compares
+        // two outputs of the same function, so a constant substituted into
+        // BOTH satisfies it — mutant SU16 replaced the carried grade with
+        // `unevidencedMarkConfidence` and this test passed. The field row is
+        // `strong` on a `good` transcript with one uncontradicted screening,
+        // so its grade is the ceiling exactly.
+        #expect(wide.first?.confidence == SemanticSweepMarkComposer.maximumMarkConfidence)
+        #expect(narrow.first?.confidence == SemanticSweepMarkComposer.maximumMarkConfidence)
+        #expect(narrow.first?.confidence != SemanticSweepMarkComposer.unevidencedMarkConfidence)
         #expect(wide.first?.confidence == narrow.first?.confidence)
         // The narrowing moved the START here — line 62 ends where the window
         // does — so the control has to compare the edge that actually moved.
@@ -579,24 +608,32 @@ struct SemanticSweepLocalisationTests {
 
     /// However a pad is set, it may never carry a mark outside the audio the
     /// model examined.
+    ///
+    /// ASSERTED AT A PAD THAT MAKES IT LOAD-BEARING, not at the shipped one.
+    /// At `supportLocalisationPadSeconds == 0.0` the clamp cannot bite through
+    /// any production path — a resolved span is built from lines inside a run
+    /// that reproduces the row's window, and a declined pass-B window must lie
+    /// inside it — so mutant SU17 (delete the clamp) is EQUIVALENT at today's
+    /// constant, and the first version of this test passed for that reason
+    /// rather than for its own. `padded` takes the pad so the contract can be
+    /// stated at the value where it does work; the constant is checked
+    /// separately above.
     @Test("a pad is clamped to the window the model examined")
     func aPadIsClampedToTheExaminedWindow() {
-        let narrowWindowRow = Fx.row(id: "tight", start: 1_590.0, end: 1_611.42,
-                                     atoms: 1_861...1_868, spansJSON: Fx.support([62]))
-        var lines = Fx.fieldLines
-        lines[62] = SupportLineIndex.Line(
-            startTime: 1_589.0, endTime: 1_612.42,
-            firstAtomOrdinal: 1_861, lastAtomOrdinal: 1_868
-        )
-        // A line WIDER than the row's window cannot widen the mark.
-        let index = SupportLineIndex(transcriptVersion: Fx.transcriptVersion, lines: lines)
-        let spans = SemanticSweepMarkComposer.contribution(
-            of: narrowWindowRow, in: [narrowWindowRow], supportLines: index
-        )
+        let window = AdSpanBounds(start: 1_590.0, end: 1_611.42)
+        let span = AdSpanBounds(start: 1_592.0, end: 1_610.0)
 
-        #expect(spans.count == 1)
-        #expect(spans.first?.start ?? 0 >= 1_590.0)
-        #expect(spans.first?.end ?? 0 <= 1_611.42)
+        let unpadded = SemanticSweepMarkComposer.padded([span], within: window, pad: 0)
+        #expect(unpadded == [span], "control: a zero pad changes nothing")
+
+        let padded = SemanticSweepMarkComposer.padded([span], within: window, pad: 5)
+        #expect(padded.count == 1)
+        #expect(padded.first?.start == 1_590.0, "1592 - 5 = 1587 would leave the window")
+        #expect(padded.first?.end == 1_611.42, "1610 + 5 = 1615 would leave the window")
+
+        let wide = SemanticSweepMarkComposer.padded([span], within: window, pad: 2)
+        #expect(wide.first?.start == 1_590.0, "1592 - 2 = 1590 is exactly the edge")
+        #expect(wide.first?.end == 1_611.42, "1610 + 2 = 1612 is past it")
     }
 }
 

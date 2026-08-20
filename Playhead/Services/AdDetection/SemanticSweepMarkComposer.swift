@@ -1178,7 +1178,10 @@ enum SemanticSweepMarkComposer {
     ///
     /// So the rule that would fix Dan's second veto costs six correct
     /// detections to remove two wrong marks. That is a RECALL trade, not a
-    /// geometry fix. It is one line, right here, when he says so.
+    /// geometry fix. It is one line, right here, when he says so — and that
+    /// claim is only true because mutant SU12 proved it was NOT: the change
+    /// used to be silently undone by ``localise(_:scanRows:supportLines:)``'s
+    /// duration-floor rescue, which is now a separate refusal.
     static func contribution(
         of row: SemanticScanResult,
         in rows: [SemanticScanResult],
@@ -1191,17 +1194,28 @@ enum SemanticSweepMarkComposer {
         }
     }
 
-    /// Widen each span by ``supportLocalisationPadSeconds`` at both edges and
-    /// clamp the result to the window the model examined.
-    private static func padded(
+    /// Widen each span by `pad` at both edges and clamp the result to the
+    /// window the model examined.
+    ///
+    /// THE PAD IS A PARAMETER SO THE CLAMP HAS A REACHABLE CONTRACT (mutant
+    /// SU17). With ``supportLocalisationPadSeconds`` at 0.0 the clamp can never
+    /// bite through either production path — a resolved span is built from
+    /// lines inside a run that reproduces the row's window, and a declined
+    /// pass-B window is required to lie inside it — so deleting the clamp is an
+    /// EQUIVALENT mutation at today's constant, and a test written against the
+    /// shipped value can only ever pass. That is not a reason to drop the
+    /// clamp: it is the whole of what keeps a future non-zero pad, which is
+    /// Dan's to set, from carrying a mark outside the audio the model examined.
+    /// Injecting the pad lets the contract be asserted at the value that makes
+    /// it load-bearing instead of at the one that makes it inert.
+    static func padded(
         _ spans: [AdSpanBounds],
-        within window: AdSpanBounds
+        within window: AdSpanBounds,
+        pad: Double = supportLocalisationPadSeconds
     ) -> [AdSpanBounds] {
         spans.compactMap {
-            AdSpanBounds(
-                start: $0.start - supportLocalisationPadSeconds,
-                end: $0.end + supportLocalisationPadSeconds
-            ).clamped(to: window)
+            AdSpanBounds(start: $0.start - pad, end: $0.end + pad)
+                .clamped(to: window)
         }
     }
 
@@ -1221,14 +1235,31 @@ enum SemanticSweepMarkComposer {
     /// licence to change ADMISSION, so the order is: decide whether, then
     /// decide how wide.
     ///
-    /// # The two refusals
+    /// # THREE refusals, and two of them used to be ONE
     ///
     /// An extent no presence row overlaps is returned UNCHANGED — a mark is
     /// never deleted because the search for its own evidence came back empty.
-    /// And if contributions exist but every piece falls under
-    /// `minimumMarkDurationSeconds`, the extent is returned UNCHANGED too: that
-    /// is `clip`'s rule (*"refining geometry must never destroy the mark it is
+    ///
+    /// If contributions exist but every piece falls under
+    /// `minimumMarkDurationSeconds`, the extent is returned UNCHANGED: that is
+    /// `clip`'s rule (*"refining geometry must never destroy the mark it is
     /// refining"*), applied to the other refiner.
+    ///
+    /// And if NO contributor offered a single span, nothing here is supported
+    /// and nothing is returned. **That was folded into the duration-floor
+    /// refusal and mutant SU12 found it**, which is the whole argument for
+    /// separating them: SU12 is playhead-my33's proposed one-line change
+    /// (`.absent` contributes nothing), and with the two folded together the
+    /// mark was RESCUED by the floor rule and the knob did nothing. The bead
+    /// and the comment on ``contribution(of:in:supportLines:)`` both said "it
+    /// is one line"; it was not, and only a mutation could say so. Two
+    /// different claims — *"the refinement is too small to use"* and *"there is
+    /// nothing to refine"* — sharing one `guard`.
+    ///
+    /// The branch is UNREACHABLE today, deliberately: every `Localisation`
+    /// currently yields at least the row's window, so `contributed` is always
+    /// true and this is byte-identical to the folded version. SU12 is what
+    /// makes it reachable, and what proves it is not decoration.
     ///
     /// Pieces are unioned with `mergeGapSeconds` before the duration floor, so
     /// two adjacent supported segments become one mark rather than two
@@ -1247,10 +1278,15 @@ enum SemanticSweepMarkComposer {
 
         let bounds = AdSpanBounds(start: extent.start, end: extent.end)
         var pieces: [AdSpanBounds] = []
+        var contributed = false
         for row in contributors {
             let spans = contribution(of: row, in: scanRows, supportLines: supportLines)
+            if !spans.isEmpty { contributed = true }
             pieces.append(contentsOf: spans.compactMap { $0.clamped(to: bounds) })
         }
+        // NOTHING under this extent is supported. Distinct from the floor
+        // refusal below — see the header.
+        guard contributed else { return [] }
 
         let unioned = union(pieces)
             .filter { $0.duration >= minimumMarkDurationSeconds }
