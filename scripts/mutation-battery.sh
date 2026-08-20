@@ -5818,7 +5818,13 @@ MUTATIONS=(
   # gap test from open to closed, barring a merge that swallows no audio.
   # Batched: one deletion and three predicate edits, four disjoint fixtures.
   "SU18|1187|SWEEP|$T_SHU5_BAR_SPLITS"
-  "SU19|1187|SWEEP|$T_SHU5_BAR_UNEXAMINED"
+  # SU19 IS NOT BATCHED WITH SU18, and the first run proved why: SU18 deletes
+  # the barrier CHECK, and SU19 widens the barrier POPULATION. With both
+  # applied the population is never read, so SU19 printed SURVIVED against a
+  # rail that works. A mutant that removes the CONSUMER of what another mutant
+  # changes makes the second unobservable — a different hazard from the
+  # overlapping-anchor one, and invisible to the anchor check.
+  "SU19|1195|SWEEP|$T_SHU5_BAR_UNEXAMINED"
   "SU20|1193|SWEEP|$T_SHU5_BAR_PASSB"
   "SU21|1194|SWEEP|$T_SHU5_BAR_PREDICATE"
   "SU22|1188|SLIDX|$T_SHU5_BAR_TOUCH"
