@@ -1263,6 +1263,7 @@ INVF="Playhead/Services/AdDetection/InventorySanityFilter.swift"
 # extent policy is in it — so every Y rail but the wire-in ones is a one-line
 # edit to a stage whose claim has its own named test.
 SWEEP="Playhead/Services/AdDetection/SemanticSweepMarkComposer.swift"
+SLIDX="Playhead/Services/AdDetection/SupportLineIndex.swift"
 # playhead-lxkq: the ad-likelihood SCAN ORDER (X01-X14). SCANORD is the pure
 # permutation policy — every ranking, budget and degenerate-input claim is a
 # one-line edit there. The two WIRES live elsewhere and are the defect a pure
@@ -1477,7 +1478,7 @@ MUTABLE_FILES=(
   "$BWPOL" "$KICK" "$KCOORD" "$SEAMS" "$ACT" "$ADSVC" "$PODC"
   "$THROT" "$FMREF" "$UMF" "$SFR" "$DTR" "$RUNNER" "$FMCLS" "$PROBE" "$PERMC" "$RT" "$MODEL" "$INGO" "$INVF"
   "$FMDL" "$FMCP"
-  "$SWEEP" "$SCANORD" "$SCRATCH" "$SCRATCHH" "$FMSUP" "$GATE"
+  "$SWEEP" "$SLIDX" "$SCANORD" "$SCRATCH" "$SCRATCHH" "$FMSUP" "$GATE"
   "$FUSION" "$DSPAN" "$EXTENT" "$RSLOT" "$ATOMEV"
   "$EVCAT" "$PROJ" "$TWNARR"
   "$DETCLS" "$DETLED" "$SPLIT" "$HOTGATE" "$UGCEN" "$POLICY" "$SEGAGG"
@@ -1547,6 +1548,21 @@ FOCUSED_SUITES=(
   # never produce) is observable at all.
   -only-testing:PlayheadTests/PersistedCertaintyBandTests
   -only-testing:PlayheadTests/FMLedgerCertaintyBandTests
+  # playhead-shu5: the extent that was the SCAN WINDOW (SU series). Three
+  # suites, because the claim spans three layers and none can observe another.
+  # `SupportLineIndexTests` is the only thing that can see the COORDINATE
+  # SYSTEM — which segmentation a ref belongs to, and every one of the five
+  # ways an index refuses to speak for a row; a composer test can only see the
+  # answer, never why it was refused. `SemanticSweepLocalisationTests` is the
+  # only thing that can see the composer STAGE — the two localisation sources,
+  # the shrink-only halves, and that a narrowed mark keeps its grade and its
+  # markOnly tier. `SemanticSweepMergeBarrierTests` is the only thing that can
+  # see the barrier, and in particular that the predicate is the DISPOSITION
+  # and not `spansJSON == "[]"` — a row can be `containsAd` and carry "[]" at
+  # once, and 19 of the pull's 301 coarse verdicts do.
+  -only-testing:PlayheadTests/SupportLineIndexTests
+  -only-testing:PlayheadTests/SemanticSweepLocalisationTests
+  -only-testing:PlayheadTests/SemanticSweepMergeBarrierTests
   # playhead-f5ao: the write-only-at-init mirror (F5 series). Two suites,
   # because the two halves of the claim are unobservable from each other. The
   # readiness suite is the only thing that can compare the first-✓ tooltip's
@@ -2803,6 +2819,37 @@ T_Y3YA_UNCERTAIN="an uncertain verdict produces nothing"
 T_Y3YA_UNEXAMINED="a containsAd row whose scan never examined the window produces nothing"
 T_Y3YA_SENTINEL="a no-work sentinel row produces nothing"
 T_Y3YA_PASSB_DECLINED="a declined passB refinement leaves presence standing, at the window it examined"
+
+# ---- playhead-shu5: the extent that was the SCAN WINDOW (SU series) ----
+T_SHU5_FIELD_CTA="Dan's CD2976E6 false positive lands on the CTA, not on the whole window"
+T_SHU5_REFS_NARROW="a coarse row with no refinement is narrowed by its supportLineRefs"
+T_SHU5_CONTROL_WINDOW="with no refinement and no index the extent is still the scan window"
+T_SHU5_STALE_KEEPS="a row from a stale transcript version keeps its window, it is not narrowed"
+T_SHU5_ABSENT_KEEPS="a verdict that named no lines keeps its window (playhead-my33 owns changing this)"
+T_SHU5_DISTINCT="named-nothing and named-unreadably are DIFFERENT localisations"
+T_SHU5_AFFIRM_ZOOM="an affirming pass-B row does not localise through the declined path"
+T_SHU5_FOREIGN_ZOOM="a declined refinement from another transcript version does not localise"
+T_SHU5_FULLWIDTH_ZOOM="a declined refinement as wide as the window does not localise"
+T_SHU5_CANCELLED_ZOOM="a cancelled refinement does not localise"
+T_SHU5_NO_ADMIT="localisation never admits a mark the coarse geometry suppressed"
+T_SHU5_FLOOR="a localisation under the duration floor leaves the mark unchanged"
+T_SHU5_SPLIT="two separated supported regions become two marks, not one straddling them"
+T_SHU5_CONF="narrowing a mark does not change its confidence"
+T_SHU5_PAD_CLAMP="a pad is clamped to the window the model examined"
+T_SHU5_IDX_GAP="a gap between refs becomes two spans, never one straddling the unsupported line"
+T_SHU5_IDX_STALE="an index for a different transcript version resolves NOTHING"
+T_SHU5_IDX_BOUNDS="a window whose bounds do not reproduce in this index resolves nothing"
+T_SHU5_IDX_OUTSIDE="a ref outside the window's own line range resolves nothing"
+T_SHU5_IDX_HOLE="a non-contiguous run of lines resolves nothing"
+T_SHU5_IDX_KEYS="building from segments keys by segmentIndex, not array position"
+T_SHU5_BAR_SPLITS="two verdicts either side of a cleared window stay two marks"
+T_SHU5_BAR_UNEXAMINED="an unexamined row is not a barrier"
+T_SHU5_BAR_PASSB="a declined refinement is not a barrier"
+T_SHU5_BAR_PREDICATE="a containsAd row whose support payload is empty is NOT a cleared window"
+T_SHU5_BAR_TOUCH="a cleared window that only touches the gap edge does not bar"
+T_SHU5_WIRE="every SemanticSweepMarkComposer.compose call site passes supportLines"
+T_SHU5_WIRE_SVC="the service builds its index from the backfill's own segments and version"
+T_SHU5_WIRE_RUN="the runner builds its index from inputs.segments, not a fresh segmentation"
 T_Y3YA_ORPHAN_PASSB="a passB verdict with no coarse parent stands on its own"
 T_Y3YA_NO_GATE="no anchor anywhere still emits the mark"
 T_Y3YA_CLIP_UNANCHORED="a clipped mark still records both edges as unanchored"
@@ -5681,6 +5728,100 @@ MUTATIONS=(
   # one a merge condition, with distinct fixtures.
   "Y17|102|SWEEP|$T_Y3YA_CEILING"
   "Y18|102|SWEEP|$T_Y3YA_MERGE_CEILING"
+
+  # ---- playhead-shu5, the SU series: the extent IS the scan window ----
+  #
+  # The bead is one line of geometry: `start: window.windowStartTime, end:
+  # window.windowEndTime`, with the model's own `supportLineRefs` discarded.
+  # These rails cover the three layers separately, because a defect in any one
+  # of them is invisible from the other two.
+  #
+  # SU01 deletes stage 6 entirely — the shipped defect verbatim. Own batch: it
+  # reverts every localisation at once, so a batched partner would be credited
+  # off it.
+  "SU01|1180|SWEEP|$T_SHU5_FIELD_CTA;$T_SHU5_REFS_NARROW;$T_SHU5_SPLIT"
+
+  # SU02 removes the DECLINED-pass-B source. It is the tempting deletion,
+  # because the old file header said in so many words that a declined pass B
+  # leaves the coarse extent standing — the sentence this bead corrects. SU12
+  # is its mirror on the OTHER source: it turns `.absent` into no evidence,
+  # which is playhead-my33's proposed change, so the rail exists to make that
+  # decision visible rather than silent. Batched: disjoint sources, disjoint
+  # rails, and the index path keeps SU02's fixture composing.
+  "SU02|1181|SWEEP|$T_SHU5_FIELD_CTA"
+  "SU12|1181|SWEEP|$T_SHU5_ABSENT_KEEPS"
+
+  # The four guards on the declined-zoom source, each of which is a way to
+  # read one row's geometry as another's. SU03 drops the transcript-version
+  # match; SU04 lets a refinement as wide as the window count as a narrowing;
+  # SU05 lets a CANCELLED refinement (the field sweep really does end
+  # `abstain | cancelled`) speak; SU06 lets an AFFIRMING pass B be read as a
+  # declined zoom, which would take stage 2's answer through stage 6's door.
+  # Batched: four independent guards in one predicate, four disjoint fixtures.
+  "SU03|1182|SWEEP|$T_SHU5_FOREIGN_ZOOM"
+  "SU04|1182|SWEEP|$T_SHU5_FULLWIDTH_ZOOM"
+  "SU05|1182|SWEEP|$T_SHU5_CANCELLED_ZOOM"
+  "SU06|1182|SWEEP|$T_SHU5_AFFIRM_ZOOM"
+
+  # The index's own refusals. SU07 is THE one: resolve a stale row anyway, and
+  # on the real CD2976E6 the mark lands on [1570.98, 1593.24] — the guest
+  # saying goodbye to his wife — while missing the CTA entirely. SU08 and SU09
+  # drop the two halves of the window-reproduction check (times, then the
+  # contiguous run), SU10 lets a ref outside the window's own line range
+  # resolve, and SU11 spans a HOLE in the run. Batched: five independent
+  # guards, five disjoint fixtures, none reaching another's assertion.
+  "SU07|1183|SLIDX|$T_SHU5_IDX_STALE;$T_SHU5_STALE_KEEPS"
+  "SU08|1183|SLIDX|$T_SHU5_IDX_BOUNDS"
+  "SU09|1183|SLIDX|$T_SHU5_IDX_HOLE"
+  "SU10|1183|SLIDX|$T_SHU5_IDX_OUTSIDE"
+
+  # SU11 joins non-consecutive refs into one span — this bead's own defect at
+  # line granularity, swallowing the unsupported lines between two cited ones.
+  # SU13 keys the index by ARRAY POSITION instead of `segmentIndex`, which is
+  # byte-identical whenever a caller happens to pass segment 0 first and wrong
+  # the moment it passes a narrowed slice. Batched: distinct functions.
+  "SU11|1184|SLIDX|$T_SHU5_IDX_GAP;$T_SHU5_SPLIT"
+  "SU13|1184|SLIDX|$T_SHU5_IDX_KEYS"
+
+  # SU14 moves stage 6 AHEAD of the dedupe. Measured on the 2026-08-19 pull
+  # that surfaces three new marks on 9126552E which, read as transcript, are
+  # two hosts talking about a sculpture — a geometry fix silently becoming an
+  # admission change. Own batch: it reorders `compose` itself.
+  "SU14|1185|SWEEP|$T_SHU5_NO_ADMIT"
+
+  # The two refusals that keep stage 6 from DELETING a mark, and the two
+  # things it must not touch. SU15 drops the duration-floor fallback (refining
+  # geometry destroying the mark it refines — `clip`'s rule, broken); SU16
+  # re-grades a narrowed mark instead of carrying its confidence, which would
+  # move marks across the 0.70 preload floor for a reason that is not evidence;
+  # SU17 drops the pad's clamp, so a pad could carry a mark outside the audio
+  # the model examined. Batched: three disjoint sites, three disjoint rails.
+  "SU15|1186|SWEEP|$T_SHU5_FLOOR"
+  "SU16|1186|SWEEP|$T_SHU5_CONF"
+  "SU17|1186|SWEEP|$T_SHU5_PAD_CLAMP"
+
+  # The merge barrier. SU18 deletes it. SU19 and SU20 drop its two scope
+  # guards — an unexamined row looked at nothing, and a passB `noAds` means
+  # "found no edges" rather than "no ad here". SU21 IS THE MISREADING THIS
+  # BEAD'S OWN TEXT MADE: test `spansJSON == "[]"` instead of the disposition.
+  # It reads like "the model cleared this window" and it is not —
+  # `encodeSupport` writes that string for a NIL support object, so 19 of the
+  # pull's 301 coarse verdicts are `containsAd` carrying "[]". SU22 closes the
+  # gap test from open to closed, barring a merge that swallows no audio.
+  # Batched: one deletion and three predicate edits, four disjoint fixtures.
+  "SU18|1187|SWEEP|$T_SHU5_BAR_SPLITS"
+  "SU19|1187|SWEEP|$T_SHU5_BAR_UNEXAMINED"
+  "SU20|1187|SWEEP|$T_SHU5_BAR_PASSB"
+  "SU21|1187|SWEEP|$T_SHU5_BAR_PREDICATE"
+  "SU22|1188|SLIDX|$T_SHU5_BAR_TOUCH"
+
+  # THE WIRES, and they are the defect a pure-composer battery structurally
+  # cannot see: every composer test above passes its own index, so all of them
+  # stay green while production passes `nil` and every mark on the device keeps
+  # its whole scan window. Separate batches because each is the other's
+  # control — dropping ONE site must redden ONE rail.
+  "SU23|1189|ADSVC|$T_SHU5_WIRE;$T_SHU5_WIRE_SVC"
+  "SU24|1190|RUNNER|$T_SHU5_WIRE;$T_SHU5_WIRE_RUN"
 
   # -------------------------------------------------------------------------
   # playhead-lxkq — the ad-likelihood scan ORDER (X01-X16)
@@ -16863,7 +17004,14 @@ EOF
 
   Y04)
     snippet OLD <<'EOF'
-            result.append(contentsOf: narrowed.isEmpty ? [window] : narrowed)
+            result.append(contentsOf: narrowed.isEmpty
+                ? [scored(
+                    start: window.windowStartTime,
+                    end: window.windowEndTime,
+                    restingOn: [window],
+                    in: rows
+                )]
+                : narrowed)
 EOF
     snippet NEW <<'EOF'
             result.append(contentsOf: narrowed)
@@ -16874,7 +17022,14 @@ EOF
     snippet OLD <<'EOF'
         for (index, refinement) in refinements.enumerated()
         where !claimedRefinements.contains(index) {
-            result.append(refinement)
+            result.append(
+                scored(
+                    start: refinement.windowStartTime,
+                    end: refinement.windowEndTime,
+                    restingOn: [refinement],
+                    in: rows
+                )
+            )
         }
 EOF
     snippet NEW <<'EOF'
@@ -16892,7 +17047,7 @@ EOF
 
   Y07)
     snippet OLD <<'EOF'
-            eligibilityGate: SkipEligibilityGate.markOnly.rawValue,
+            eligibilityGate: ComposedMarkGate.eligibility(for: support).rawValue,
 EOF
     snippet NEW <<'EOF'
             eligibilityGate: SkipEligibilityGate.eligible.rawValue,
@@ -16901,8 +17056,8 @@ EOF
 
   Y08)
     snippet OLD <<'EOF'
-            startEdgeAnchor: AutoSkipEdgeAnchor.unanchored.rawValue,
-            endEdgeAnchor: AutoSkipEdgeAnchor.unanchored.rawValue
+            startEdgeAnchor: support.startAnchor.rawValue,
+            endEdgeAnchor: support.endAnchor.rawValue
 EOF
     snippet NEW <<'EOF'
             startEdgeAnchor: AutoSkipEdgeAnchor.stingerSnapped.rawValue,
@@ -16929,10 +17084,10 @@ EOF
 
   Y10)
     snippet OLD <<'EOF'
-    static let markConfidence = 0.70
+    static let maximumMarkConfidence = 0.70
 EOF
     snippet NEW <<'EOF'
-    static let markConfidence = 0.50
+    static let maximumMarkConfidence = 0.50
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -17005,11 +17160,320 @@ EOF
     snippet OLD <<'EOF'
             if var last = result.last,
                extent.start <= last.end + mergeGapSeconds,
+               !barriers.contains(where: {
+                   $0.coversGap(from: last.end, to: extent.start)
+               }),
                max(last.end, extent.end) - last.start <= maximumMarkDurationSeconds {
 EOF
     snippet NEW <<'EOF'
             if var last = result.last,
-               extent.start <= last.end + mergeGapSeconds {
+               extent.start <= last.end + mergeGapSeconds,
+               !barriers.contains(where: {
+                   $0.coversGap(from: last.end, to: extent.start)
+               }) {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # ── playhead-shu5: the extent that was the scan window ───────────────────
+
+  SU01)
+    snippet OLD <<'EOF'
+        let localised = survivors.flatMap {
+            localise($0, scanRows: scanRows, supportLines: supportLines)
+        }
+
+        // Stage 7: emit.
+        return localised.map { makeMark($0, analysisAssetId: analysisAssetId) }
+EOF
+    snippet NEW <<'EOF'
+        // Stage 7: emit.
+        return survivors.map { makeMark($0, analysisAssetId: analysisAssetId) }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SU02)
+    snippet OLD <<'EOF'
+        let declined = declinedRefinementSpans(over: row, in: rows)
+        if !declined.isEmpty { return .named(padded(declined, within: window)) }
+EOF
+    snippet NEW <<'EOF'
+        _ = declinedRefinementSpans(over: row, in: rows)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SU12)
+    snippet OLD <<'EOF'
+        case .unreadable, .absent:
+            [AdSpanBounds(start: row.windowStartTime, end: row.windowEndTime)]
+EOF
+    snippet NEW <<'EOF'
+        case .unreadable:
+            [AdSpanBounds(start: row.windowStartTime, end: row.windowEndTime)]
+        case .absent: []
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SU03)
+    snippet OLD <<'EOF'
+                  row.transcriptVersion == window.transcriptVersion,
+                  row.windowStartTime.isFinite, row.windowEndTime.isFinite,
+EOF
+    snippet NEW <<'EOF'
+                  row.windowStartTime.isFinite, row.windowEndTime.isFinite,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SU04)
+    snippet OLD <<'EOF'
+                  row.windowEndTime - row.windowStartTime < coarseDuration
+            else { return nil }
+EOF
+    snippet NEW <<'EOF'
+                  row.windowEndTime - row.windowStartTime <= coarseDuration
+            else { return nil }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SU05)
+    snippet OLD <<'EOF'
+            guard row.scanPass == refinementScanPass,
+                  row.disposition != .containsAd,
+                  row.didExamineWindow,
+EOF
+    snippet NEW <<'EOF'
+            guard row.scanPass == refinementScanPass,
+                  row.disposition != .containsAd,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SU06)
+    snippet OLD <<'EOF'
+            guard row.scanPass == refinementScanPass,
+                  row.disposition != .containsAd,
+                  row.didExamineWindow,
+                  row.transcriptVersion == window.transcriptVersion,
+EOF
+    snippet NEW <<'EOF'
+            guard row.scanPass == refinementScanPass,
+                  row.didExamineWindow,
+                  row.transcriptVersion == window.transcriptVersion,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SU07)
+    snippet OLD <<'EOF'
+        guard window.transcriptVersion == transcriptVersion else { return nil }
+EOF
+    snippet NEW <<'EOF'
+
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SU08)
+    snippet OLD <<'EOF'
+              abs(runStart - window.startTime) <= Self.boundaryEpsilon,
+              abs(runEnd - window.endTime) <= Self.boundaryEpsilon
+        else { return nil }
+EOF
+    snippet NEW <<'EOF'
+              runStart.isFinite, runEnd.isFinite
+        else { return nil }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SU09)
+    snippet OLD <<'EOF'
+            guard let line = lines[ref] else { return nil }
+            run.append(line)
+EOF
+    snippet NEW <<'EOF'
+            guard let line = lines[ref] else { continue }
+            run.append(line)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SU10)
+    snippet OLD <<'EOF'
+        guard let lowest = sorted.first, let highest = sorted.last,
+              lowest >= first, highest <= last
+        else { return nil }
+EOF
+    snippet NEW <<'EOF'
+        guard let lowest = sorted.first, let highest = sorted.last,
+              lowest >= first, highest <= last + 1
+        else { return nil }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SU11)
+    snippet OLD <<'EOF'
+            if ref == previous + 1 {
+                previous = ref
+                continue
+            }
+EOF
+    snippet NEW <<'EOF'
+            if ref >= previous + 1 {
+                previous = ref
+                continue
+            }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SU13)
+    snippet OLD <<'EOF'
+        for segment in segments {
+            // First writer wins, so a duplicated `segmentIndex` (which
+            // `planPassA`'s own sort tolerates) cannot silently redefine a line
+            // the model was already shown.
+            guard lines[segment.segmentIndex] == nil else { continue }
+            lines[segment.segmentIndex] = Line(
+EOF
+    snippet NEW <<'EOF'
+        for (position, segment) in segments.enumerated() {
+            // First writer wins, so a duplicated `segmentIndex` (which
+            // `planPassA`'s own sort tolerates) cannot silently redefine a line
+            // the model was already shown.
+            guard lines[position] == nil else { continue }
+            lines[position] = Line(
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SU14)
+    snippet OLD <<'EOF'
+        let survivors = clipped.filter { extent in
+            !blocking.contains { extent.overlaps(start: $0.start, end: $0.end) }
+        }
+
+        // Stage 6: localise. Runs AFTER the dedupe on purpose — see
+        // `localise(_:scanRows:supportLines:)`.
+        let localised = survivors.flatMap {
+            localise($0, scanRows: scanRows, supportLines: supportLines)
+        }
+EOF
+    snippet NEW <<'EOF'
+        let localisedFirst = clipped.flatMap {
+            localise($0, scanRows: scanRows, supportLines: supportLines)
+        }
+        let localised = localisedFirst.filter { extent in
+            !blocking.contains { extent.overlaps(start: $0.start, end: $0.end) }
+        }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SU15)
+    snippet OLD <<'EOF'
+        guard !unioned.isEmpty else { return [extent] }
+EOF
+    snippet NEW <<'EOF'
+        guard !unioned.isEmpty else { return [] }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SU16)
+    snippet OLD <<'EOF'
+            Extent(start: $0.start, end: $0.end, confidence: extent.confidence)
+EOF
+    snippet NEW <<'EOF'
+            Extent(start: $0.start, end: $0.end, confidence: unevidencedMarkConfidence)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SU17)
+    snippet OLD <<'EOF'
+            ).clamped(to: window)
+EOF
+    snippet NEW <<'EOF'
+            )
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SU18)
+    snippet OLD <<'EOF'
+               !barriers.contains(where: {
+                   $0.coversGap(from: last.end, to: extent.start)
+               }),
+               max(last.end, extent.end) - last.start <= maximumMarkDurationSeconds {
+EOF
+    snippet NEW <<'EOF'
+               max(last.end, extent.end) - last.start <= maximumMarkDurationSeconds {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SU19)
+    snippet OLD <<'EOF'
+            guard row.scanPass != refinementScanPass,
+                  row.didExamineWindow,
+                  row.disposition != .containsAd,
+EOF
+    snippet NEW <<'EOF'
+            guard row.scanPass != refinementScanPass,
+                  row.disposition != .containsAd,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SU20)
+    snippet OLD <<'EOF'
+            guard row.scanPass != refinementScanPass,
+                  row.didExamineWindow,
+EOF
+    snippet NEW <<'EOF'
+            guard row.didExamineWindow,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SU21)
+    snippet OLD <<'EOF'
+                  row.disposition != .containsAd,
+                  row.windowStartTime.isFinite, row.windowEndTime.isFinite,
+                  row.windowEndTime > row.windowStartTime
+            else { return nil }
+            return AdSpanBounds(start: row.windowStartTime, end: row.windowEndTime)
+EOF
+    snippet NEW <<'EOF'
+                  row.spansJSON == "[]",
+                  row.windowStartTime.isFinite, row.windowEndTime.isFinite,
+                  row.windowEndTime > row.windowStartTime
+            else { return nil }
+            return AdSpanBounds(start: row.windowStartTime, end: row.windowEndTime)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SU22)
+    snippet OLD <<'EOF'
+    func coversGap(from lower: Double, to upper: Double) -> Bool {
+        start < upper && end > lower
+    }
+EOF
+    snippet NEW <<'EOF'
+    func coversGap(from lower: Double, to upper: Double) -> Bool {
+        start <= upper && end >= lower
+    }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SU23)
+    snippet OLD <<'EOF'
+                    supportLines: SupportLineIndex(
+                        segments: TranscriptSegmenter.segment(atoms: atoms),
+                        transcriptVersion: transcriptVersion.transcriptVersion
+                    ),
+                    analysisAssetId: analysisAssetId
+EOF
+    snippet NEW <<'EOF'
+                    analysisAssetId: analysisAssetId
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SU24)
+    snippet OLD <<'EOF'
+                    supportLines: SupportLineIndex(
+                        segments: inputs.segments,
+                        transcriptVersion: inputs.transcriptVersion
+                    )
+EOF
+    snippet NEW <<'EOF'
+                    supportLines: nil
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -23563,6 +24027,7 @@ rec_file()   {
     INGO)  printf '%s' "$INGO" ;;
     INVF)  printf '%s' "$INVF" ;;
     SWEEP) printf '%s' "$SWEEP" ;;
+    SLIDX) printf '%s' "$SLIDX" ;;
     SCANORD) printf '%s' "$SCANORD" ;;
     SCRATCH)  printf '%s' "$SCRATCH" ;;
     SCRATCHH) printf '%s' "$SCRATCHH" ;;

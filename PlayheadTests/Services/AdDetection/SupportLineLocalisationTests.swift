@@ -712,3 +712,77 @@ struct SemanticSweepMergeBarrierTests {
         #expect(Fx.compose(rows: rows).count == 1)
     }
 }
+
+// MARK: - 4. The wires
+
+/// A correct composer that is never handed an index is the defect a pure
+/// composer battery structurally cannot see: every test above passes its own
+/// `SupportLineIndex`, so all of them stay green while production passes `nil`
+/// and every mark on the device keeps its whole scan window. There are exactly
+/// two `compose` call sites and both must supply one.
+///
+/// This is a SOURCE canary for the same reason `PlayheadRuntimeWiringSource-
+/// CanaryTests` is: driving either site for real needs a store, a transcript
+/// and an FM cohort gate, and none of that is reachable from a unit test.
+@Suite("both compose call sites are handed a SupportLineIndex (playhead-shu5)",
+       .timeLimit(.minutes(1)))
+struct SemanticSweepSupportLineWiringSourceCanaryTests {
+
+    /// `PlayheadTests/Services/AdDetection/<this file>` → repo root.
+    private static func source(_ relative: String, filePath: String = #filePath) throws -> String {
+        let root = URL(fileURLWithPath: filePath)
+            .deletingLastPathComponent()   // AdDetection
+            .deletingLastPathComponent()   // Services
+            .deletingLastPathComponent()   // PlayheadTests
+            .deletingLastPathComponent()   // repo root
+        return try String(contentsOf: root.appendingPathComponent(relative), encoding: .utf8)
+    }
+
+    /// The composer's ONE optional parameter is the one that decides whether
+    /// this bead does anything at all, so a call site that omits it compiles,
+    /// passes every test above, and ships the old geometry.
+    @Test("every SemanticSweepMarkComposer.compose call site passes supportLines")
+    func everyCallSitePassesSupportLines() throws {
+        let sites = [
+            "Playhead/Services/AdDetection/AdDetectionService.swift",
+            "Playhead/Services/AdDetection/BackfillJobRunner.swift",
+        ]
+        for path in sites {
+            let text = try Self.source(path)
+            let calls = text.components(separatedBy: "SemanticSweepMarkComposer.compose(").dropFirst()
+            #expect(!calls.isEmpty, "\(path) no longer calls the composer at all")
+            for call in calls {
+                let arguments = call.prefix(while: { $0 != ")" })
+                #expect(arguments.contains("supportLines:"),
+                        "a compose call in \(path) omits supportLines: \(arguments)")
+            }
+        }
+    }
+
+    /// And the index it passes must be built from SEGMENTS, at a
+    /// `transcriptVersion`. An index built with the wrong version string
+    /// refuses everything silently — the failure would look exactly like
+    /// success.
+    @Test("the service builds its index from the backfill's own segments and version")
+    func theServiceBuildsFromItsOwnSegments() throws {
+        let text = try Self.source("Playhead/Services/AdDetection/AdDetectionService.swift")
+
+        #expect(text.contains("SupportLineIndex("))
+        #expect(text.contains("segments: TranscriptSegmenter.segment(atoms: atoms)"))
+        #expect(text.contains("transcriptVersion: transcriptVersion.transcriptVersion"))
+    }
+
+    /// The runner's half. It has the segmentation already — `inputs.segments`
+    /// is what `planPassA` windowed against — so re-segmenting there would be a
+    /// second source of truth for the coordinate system this bead exists to
+    /// pin down.
+    @Test("the runner builds its index from inputs.segments, not a fresh segmentation")
+    func theRunnerBuildsFromInputsSegments() throws {
+        let text = try Self.source("Playhead/Services/AdDetection/BackfillJobRunner.swift")
+
+        #expect(text.contains("SupportLineIndex("))
+        #expect(text.contains("segments: inputs.segments"))
+        #expect(!text.contains("SupportLineIndex(\n                        segments: TranscriptSegmenter"),
+                "the runner must not re-segment; inputs.segments IS the plan's segmentation")
+    }
+}
