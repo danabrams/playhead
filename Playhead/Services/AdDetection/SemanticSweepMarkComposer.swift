@@ -1631,8 +1631,16 @@ enum SemanticSweepMarkComposer {
     ///
     /// # The form
     ///
-    /// A JSON array of strings — the shape `TrainingExample.evidenceSources`
-    /// uses and one of the two `AnalysisStore+CrossUserSharing` already parses.
+    /// A JSON array of strings — one of the two shapes
+    /// `AnalysisStore+CrossUserSharing` already parses out of this column; the
+    /// other is comma-separated text. (The local-learning corpus's own
+    /// `evidenceSources` is the same shape. It is described rather than NAMED
+    /// here on purpose: `trainingExamplesRemainInsideLocalLearningBoundary`
+    /// enumerates production sources for that type's NAME and asserts the set
+    /// is a subset of seven allowlisted files, and a text scan cannot tell a
+    /// doc comment from a consumer. Widening the allowlist to admit a comment
+    /// would grant this file a standing licence for a real egress consumer
+    /// later, which is the opposite of what that canary is for.)
     /// Order is CANONICAL (lane, state, then each group sorted) so two
     /// composes over the same rows produce byte-identical text and the
     /// revision token above is stable; a `Set`'s own iteration order is seeded
