@@ -258,6 +258,33 @@ Rails: `python3 -m unittest scripts.tests.test_gate_memory_verdict` — 20 tests
 **DO NOT EDIT A SHELL SCRIPT WHILE A RUN OF IT IS IN FLIGHT.** `bash`/`zsh` read a script incrementally by byte offset, so an edit mid-run makes the shell resume at a shifted offset. This bead's own RUN2 did it: `scripts/fast-gate.sh: line 284: he: command not found`, followed by a second complete `xcodebuild test` of the whole plan. It cost a run and nearly cost a wrong conclusion — the second invocation's `tee "$LOG"` (no `-a`) truncated the log the verdict was about to read.
 
 
+### The gate boots a TRIMMED simulator, and serializes Swift Testing (playhead-blsh)
+
+**The merge gate used to run 5-7 GiB over this box and whether it survived was close to a coin flip.** On 2026-08-20 the same plan produced six void merge gates, two `GATE_EXIT=137` kills and four clean passes, and **nothing about which tests ran predicted it** — proven directly by keeping the 38 tests everyone suspected and removing 38 unrelated ones, which reproduced the death exactly (playhead-3rql). The term that is large is not the tests. It is the simulator.
+
+Measured here, `demand = active + wired + compressor + swap`, sampled every 10 s. **`Pages free` is NOT free memory** — this box reads ~1 GiB at rest and is short of nothing; an earlier diagnosis was built on `Pages free` and was wrong.
+
+| | processes | demand |
+|---|---|---|
+| macOS, simulator SHUT DOWN | 0 | 6.98 GiB |
+| booted iOS 27 simulator, idle, settled 5 min | **301** | **20.33 GiB** |
+| the same, `scripts/sim-trim.sh` applied | **112** | **13.10 GiB** |
+
+So an idle simulator costs **+13.35 GiB** on a 16 GiB box, and the trim removes **7.23 GiB of it** — more than half — before xcodebuild has compiled anything.
+
+**`simctl boot --disabledJob=<label>` is INERT on this runtime and that is measured, not assumed.** Booted with six `--disabledJob` flags on a freshly erased device and settled five minutes, all six were RUNNING, 293 processes against a vanilla 301, demand 20.17 against 20.33 GiB; `launchctl print-disabled` inside the device lists none of them. **Read the settling curve before you re-test it**: at ONE minute three of those six read "absent" and it looks like a partial win — they were merely not started yet. The earlier report that "process count fell only 230 → 201" is almost certainly that same artefact.
+
+What works is launchctl's own, inside the device: `simctl spawn <udid> launchctl disable user/<uid>/<label>` (so it cannot be demand-launched) followed by `bootout` (so the running one goes). Both are supported launchctl operations. `scripts/fast-gate.sh` applies them on every run; the list is `scripts/sim-trim-jobs.txt`, one label per line with the family and the reason.
+
+Four things to know before you touch it:
+
+- **The admission rule is mechanical, and `scripts/sim-trim.sh` enforces the other half.** A label goes in the default tier only when the framework it backs is imported NOWHERE in `Playhead/` or `PlayheadTests/` — measured, `HealthKit CoreLocation MapKit Photos EventKit Contacts WidgetKit ActivityKit CoreSpotlight CallKit Intents WebKit Vision` are all **0 imports**. The KEEP list in the script names the daemons behind the frameworks that ARE imported (SpringBoard and RunningBoard for launching the host and for SCENE PHASE, `dasd` for BGTaskScheduler, `nsurlsessiond`, `mediaremoted`, `usernotificationsd`, `storekitd`, `mobileassetd`, `installd`…), and **a job file that names one of them fails the run** rather than being skipped.
+- **Siri / Apple Intelligence / speech is NOT trimmed, and that is deliberate.** Those 23 labels are in `scripts/sim-trim-jobs-tier-b.txt`, applied only with `--include-tier-b`, because `Speech` and `FoundationModels` really are imported. Turning them off is a COVERAGE decision and it is Dan's.
+- **The verdict is the process count, not the exit code.** Every operation here can report success and change nothing — that is exactly what `--disabledJob` does — so the script re-reads `launchctl list` afterwards and names every label it was told to remove that is still running.
+- **THE TRIM OUTLIVES `simctl erase`.** launchd's overrides live in `/private/var/tmp/com.apple.CoreSimulator.SimDevice.<udid>/disabled.plist`, OUTSIDE the device's data directory, so erasing and rebooting leaves every disable in place. Convenient for the gate and a trap for a CONTROL: a run you believe is untrimmed is trimmed unless somebody undoes it. `scripts/sim-trim.sh --restore` is the undo, and the restored jobs only start on the NEXT boot.
+
+**Option C, serialization, ships with it.** `"parallelizable": false` on the PlayheadTests target in `TestPlans/PlayheadFastTests.xctestplan` is the ONLY knob that bounds Swift Testing's concurrency under Xcode — the experimental env var reaches the process and is not honoured (playhead-3rql). It cuts the test host's footprint from 2.1-2.2 GiB to ~0.29 GiB and costs roughly 4x on the test phase. It also exposed **playhead-sip2**, four `SkipOrchestratorRevertTests` that passed only because the scheduler starved a detached task; they are fixed, and the shape is worth remembering: **in `.auto` mode `receiveAdWindows` persists `applied` from a detached `Task`, so a test that reads the row without draining `_waitForRecurrenceBackgroundWorkForTesting()` is reading a value it never synchronized with.** Under the parallel plan it reads `confirmed` and passes by luck.
+
 ### The full plan runs ONCE, before merge — not per review round (Dan 2026-08-13)
 
 **A review round uses `-only-testing:` over the suites its diff touches. The full plan is the merge gate and nothing else.** This is a measured decision, not a preference.

@@ -154,7 +154,11 @@ sim_state () {
     | sed -E 's/.*\((Booted|Shutdown|Booting|Shutting Down)\).*/\1/'
 }
 sim_proc_count () {
-  ps -Ao args= | /usr/bin/grep -c -e '/CoreSimulator/' -e '\.simruntime/'
+  # The bracket is not decoration. `ps` and `grep` run concurrently in a
+  # pipeline, so a pattern written literally appears in grep's OWN argv and the
+  # count includes the counter — the same self-match that `pgrep -f` is banned
+  # here for. `[r]` cannot match the argv that contains `[r]`.
+  ps -Ao args= | /usr/bin/grep -c -e '/CoreSimulato[r]/' -e '\.simruntim[e]/'
 }
 lc () { xcrun simctl spawn "$SIM_ID" launchctl "$@" 2>&1; }
 
