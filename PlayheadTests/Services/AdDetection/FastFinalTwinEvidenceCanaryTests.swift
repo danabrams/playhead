@@ -152,7 +152,10 @@ struct FastFinalTwinEvidenceCanaryTests {
         // consumers should be giving.
         let single = scanner.scan(
             chunks: [Self.twinPair()[0]],
-            analysisAssetId: "asset-99yt"
+            analysisAssetId: "asset-99yt",
+            // playhead-2kxd: this service was built with no profile, so
+            // "no show identity" is the same input it always had here.
+            podcastId: nil
         )
         #expect(single.isEmpty, """
             one row carrying one weight-0.9 hit must not clear \
@@ -180,7 +183,10 @@ struct FastFinalTwinEvidenceCanaryTests {
         #expect(canonicalization.chunks.count == 1)
         #expect(scanner.scan(
             chunks: canonicalization.chunks,
-            analysisAssetId: "asset-99yt"
+            analysisAssetId: "asset-99yt",
+            // playhead-2kxd: this service was built with no profile, so
+            // "no show identity" is the same input it always had here.
+            podcastId: nil
         ).isEmpty)
 
         // (4) Control: two INDEPENDENT hits still promote, through the same
@@ -190,7 +196,10 @@ struct FastFinalTwinEvidenceCanaryTests {
             .canonicalize(Self.independentPair()).chunks
         let independentCandidates = scanner.scan(
             chunks: independent,
-            analysisAssetId: "asset-99yt"
+            analysisAssetId: "asset-99yt",
+            // playhead-2kxd: this service was built with no profile, so
+            // "no show identity" is the same input it always had here.
+            podcastId: nil
         )
         #expect(independentCandidates.count == 1)
         #expect(independentCandidates.first?.hitCount == 2)
@@ -212,11 +221,17 @@ struct FastFinalTwinEvidenceCanaryTests {
             ),
         ]
         let raw = try #require(scanner.scan(
-            chunks: withTwin, analysisAssetId: "asset-99yt"
+            chunks: withTwin, analysisAssetId: "asset-99yt",
+            // playhead-2kxd: this service was built with no profile, so
+            // "no show identity" is the same input it always had here.
+            podcastId: nil
         ).first)
         let canonical = try #require(scanner.scan(
             chunks: TranscriptChunkCanonicalizer.canonicalize(withTwin).chunks,
-            analysisAssetId: "asset-99yt"
+            analysisAssetId: "asset-99yt",
+            // playhead-2kxd: this service was built with no profile, so
+            // "no show identity" is the same input it always had here.
+            podcastId: nil
         ).first)
 
         #expect(raw.hitCount == 3)
@@ -243,7 +258,10 @@ struct FastFinalTwinEvidenceCanaryTests {
 
         let fromTwin = try await service.hotPathCandidatesForTesting(
             from: Self.twinPair(),
-            analysisAssetId: "asset-99yt"
+            analysisAssetId: "asset-99yt",
+            // playhead-2kxd: this service was built with no profile, so
+            // "no show identity" is the same input it always had here.
+            podcastId: nil
         )
         #expect(fromTwin.isEmpty, """
             one utterance transcribed twice is one observation; the hot path \
@@ -253,7 +271,10 @@ struct FastFinalTwinEvidenceCanaryTests {
         // Control, through the identical call: independent evidence promotes.
         let fromIndependent = try await service.hotPathCandidatesForTesting(
             from: Self.independentPair(),
-            analysisAssetId: "asset-99yt"
+            analysisAssetId: "asset-99yt",
+            // playhead-2kxd: this service was built with no profile, so
+            // "no show identity" is the same input it always had here.
+            podcastId: nil
         )
         #expect(fromIndependent.count == 1)
         #expect(fromIndependent.first?.hitCount == 2)

@@ -886,7 +886,8 @@ struct MetadataLexiconTwoHitRuleTests {
 
         let candidates = try await service.hotPathCandidatesForTesting(
             from: chunks,
-            analysisAssetId: "asset-hotpath-metadata"
+            analysisAssetId: "asset-hotpath-metadata",
+            podcastId: nil
         )
 
         #expect(candidates.count == 1,
@@ -920,7 +921,8 @@ struct MetadataLexiconTwoHitRuleTests {
 
         let candidates = try await service.hotPathCandidatesForTesting(
             from: chunks,
-            analysisAssetId: "asset-hotpath-show-owned"
+            analysisAssetId: "asset-hotpath-show-owned",
+            podcastId: nil
         )
 
         #expect(candidates.isEmpty,

@@ -300,7 +300,7 @@ struct TraitProfileEpisodeCountTests {
         }
         let afterOne = try #require(await store.fetchProfile(podcastId: podcastId))
         let resolvedAtOne = await makeService(store: store, profile: afterOne)
-            .resolveEpisodePriorsForTesting()
+            .resolveEpisodePriorsForTesting(podcastId: podcastId)
         #expect(resolvedAtOne.activeLevel == .global, "one episode must not activate the trait tier")
         #expect(resolvedAtOne.levelContributions[.traitDerived] == nil)
 
@@ -327,7 +327,7 @@ struct TraitProfileEpisodeCountTests {
         let afterThree = try #require(await store.fetchProfile(podcastId: podcastId))
         #expect(afterThree.traitProfile.episodesObserved == 3)
         let resolvedAtThree = await makeService(store: store, profile: afterThree)
-            .resolveEpisodePriorsForTesting()
+            .resolveEpisodePriorsForTesting(podcastId: podcastId)
         #expect(resolvedAtThree.activeLevel == .traitDerived)
         // 0.4 at three episodes, NOT the 0.6 clamp the old unit reached inside
         // the first one. The ramp is what the count buys, so it is asserted.
