@@ -1568,6 +1568,23 @@ FOCUSED_SUITES=(
   # this list, and batches 1189/1190 REFUSED TO RUN rather than crediting
   # SU23/SU24 with a survival — which is the check working.
   -only-testing:PlayheadTests/SemanticSweepSupportLineWiringSourceCanaryTests
+  # playhead-6ruv: TALKING ABOUT sponsorship read as an ad (AT series). Three
+  # suites, because the claim has three halves and none of them can observe
+  # another. `SemanticSweepAttributionTests` is the only thing that can see WHAT
+  # THE MODEL NAMED — the anchor kinds, the intent, the ownership, and the
+  # permissive-bypass span whose dimensions the RUNNER wrote and which must
+  # contribute nothing. `SemanticSweepAttributionAbsenceTests` is the only thing
+  # that can see the four claims held APART: Dan's own unrefined mark, a
+  # refinement that affirmed and yielded no spans, a declined one, an unexamined
+  # one, and the coarse half that is blind BY CONSTRUCTION. And
+  # `SemanticSweepAttributionPersistenceTests` is the only thing that can see
+  # the projection actually reach the row — the canonical bytes (which
+  # `producerRevisionToken` hashes), and the invariant that the attribution
+  # moves `evidenceSources` and NOTHING else, which is what keeps this bead out
+  # of the tier decision that is Dan's.
+  -only-testing:PlayheadTests/SemanticSweepAttributionTests
+  -only-testing:PlayheadTests/SemanticSweepAttributionAbsenceTests
+  -only-testing:PlayheadTests/SemanticSweepAttributionPersistenceTests
   # playhead-f5ao: the write-only-at-init mirror (F5 series). Two suites,
   # because the two halves of the claim are unobservable from each other. The
   # readiness suite is the only thing that can compare the first-✓ tooltip's
@@ -2855,6 +2872,21 @@ T_SHU5_BAR_TOUCH="a cleared window that only touches the gap edge does not bar"
 T_SHU5_WIRE="every SemanticSweepMarkComposer.compose call site passes supportLines"
 T_SHU5_WIRE_SVC="the service builds its index from the backfill's own segments and version"
 T_SHU5_WIRE_RUN="the runner builds its index from inputs.segments, not a fresh segmentation"
+
+# ---- playhead-6ruv: TALKING ABOUT sponsorship read as an ad (AT series) ----
+T_6RUV_PERMISSIVE="a PERMISSIVE span contributes no dimensions at all — the runner wrote them"
+T_6RUV_MIXED="a genuine span beside a permissive one reports ONLY the genuine one"
+T_6RUV_CTA_NOT_NAME="a CTA or a disclosure phrase is not a NAME"
+T_6RUV_UNREADABLE="named-nothing and refined-unreadably are DIFFERENT attributions"
+T_6RUV_COARSE_BLIND="a COARSE row never attributes, whatever its payload looks like"
+T_6RUV_DANS_MARK="Dan's CD2976E6 [1131.6-1210.9] mark is UNREFINED, before and after"
+T_6RUV_UNEXAMINED="an UNEXAMINED refinement attributes nothing"
+T_6RUV_DECLINED="a DECLINED refinement attributes nothing and claims nothing"
+T_6RUV_OVERLAP="a refinement that does not overlap the extent attributes nothing"
+T_6RUV_MOVES_ONLY="attribution moves evidenceSources and NOTHING else"
+T_6RUV_COMPOSED="a composed mark carries its own attribution"
+T_6RUV_CANONICAL="each attribution renders to one canonical, pinned string"
+T_6RUV_ORDER="the rendering does not depend on the order the spans were read in"
 T_Y3YA_ORPHAN_PASSB="a passB verdict with no coarse parent stands on its own"
 T_Y3YA_NO_GATE="no anchor anywhere still emits the mark"
 T_Y3YA_CLIP_UNANCHORED="a clipped mark still records both edges as unanchored"
@@ -5843,6 +5875,91 @@ MUTATIONS=(
   # while its real rail was failing in the same run.
   "SU23|1189|ADSVC|$T_SHU5_WIRE;$T_SHU5_WIRE_SVC"
   "SU24|1190|RUNNER|$T_SHU5_WIRE_RUN"
+
+  # ---- playhead-6ruv, the AT series: WHETHER THE MODEL NAMED AN ADVERTISER ----
+  #
+  # Dan vetoed CD2976E6 [1131.6-1210.9] — the guest saying "my sponsored
+  # through the Northface ... then I started doing corporate speaking" — graded
+  # `strong`, with no advertiser, no product, no CTA, no URL and no promo code
+  # in it. The mark carried nothing that could have said so, because the coarse
+  # schema is a disposition plus two fields. The REFINEMENT pass answers exactly
+  # that question and the composer read none of it.
+  #
+  # WHAT EVERY RAIL HERE IS REALLY ABOUT: this projection can only be worth
+  # something if it is honest about which of four things it knows, and every one
+  # of the four failure modes is SILENT — a green build, a well-formed column, a
+  # token array a reader will believe. So each rail names one CLAIM the
+  # attribution makes and one test that would go quiet if it stopped being true.
+
+  # AT01 IS THE HEADLINE AND IT IS THIS BEAD'S OWN DEFECT ONE LAYER DOWN.
+  # `PermissiveAdClassifier.makeAnchorlessSpan` hardcodes `commercialIntent:
+  # .paid` and `ownership: .thirdParty` and says so in its own comment; drop the
+  # `ownershipInferenceWasSuppressed` gate and those become "the model's
+  # judgement". Measured on the 2026-08-19 t4 pull: with the gate, 5 of the 79
+  # sweep marks are `.refined` and 10 are `.suppressed`; without it, all 15 read
+  # `paid` / `thirdParty` — ten marks carrying a verdict no model ever gave.
+  # Own batch: AT99 edits the same region, and every other rail is observed
+  # through the value this one fabricates.
+  "AT01|1196|SWEEP|$T_6RUV_PERMISSIVE"
+
+  # AT02 widens what NAMES an advertiser to the two kinds that name nobody: a
+  # call to action ("go to the link in the description") and a disclosure
+  # ("this episode is sponsored") are exactly the commercial VOCABULARY the
+  # model over-reads, which is the whole bead. AT03 collapses `.unreadable` into
+  # `.unrefined` — a failure of OUR RECORDS read as a property of the VERDICT,
+  # the same pair shu5 had to hold apart one stage earlier. Batched: a static
+  # Set against a guard's return value, two disjoint fixtures.
+  "AT02|1197|SWEEP|$T_6RUV_CTA_NOT_NAME"
+  "AT03|1197|SWEEP|$T_6RUV_UNREADABLE"
+
+  # AT04 lets the COARSE pass attribute. It has to be its own batch and it is
+  # the one rail whose reason is a LIMIT rather than a defect: a permissive
+  # coarse row is byte-identical to a genuine one (`usedPermissiveFallback` has
+  # no column in `semantic_scan_results`), so reading `passA` at all would put
+  # dimensions on a mark that cannot be told apart from a fabrication. It also
+  # reaches Dan's own row and the composed mark, which is why it names three
+  # victims: with it applied his `.unrefined` mark reads `.unreadable`.
+  "AT04|1198|SWEEP|$T_6RUV_COARSE_BLIND;$T_6RUV_DANS_MARK;$T_6RUV_COMPOSED"
+
+  # The two scope guards on the refinement population, and they edit the SAME
+  # guard so they cannot share a batch — the first edit removes a line the
+  # second one's anchor needs and the batch ERRORs (the lesson SU03/SU05/SU06
+  # already paid for). AT05 lets an UNEXAMINED row speak, and the field sweep
+  # really does end `2581-2676 | abstain | cancelled`. AT06 lets a DECLINED
+  # pass B speak, which reads "found no edges" as a statement about ads — the
+  # same scoping `corroboration(for:in:)` and `clearedSpans(in:)` both apply.
+  "AT05|1199|SWEEP|$T_6RUV_UNEXAMINED"
+  "AT06|1200|SWEEP|$T_6RUV_DECLINED"
+
+  # AT07 IS THE SHIPPED STATE VERBATIM: `makeMark` writes `nil` and the whole
+  # projection evaporates, exactly as it stood before this bead. AT10 lets a
+  # refinement of OTHER AUDIO attribute this mark. Batched: AT07 removes the
+  # CONSUMER of `evidenceSources(for:)` and AT10 changes `attribution(for:in:)`,
+  # whose rail calls it directly rather than through a mark — so neither can
+  # make the other unobservable, which is the SU18/SU19 hazard checked rather
+  # than assumed.
+  "AT07|1201|SWEEP|$T_6RUV_MOVES_ONLY;$T_6RUV_COMPOSED"
+  "AT10|1201|SWEEP|$T_6RUV_OVERLAP"
+
+  # The two ways the rendering can go quiet, on the same line, so one batch
+  # each. AT08 drops the anchor tokens, which makes a mark the model anchored to
+  # a brand byte-identical at rest to one it merely graded — the distinction
+  # this bead exists to create, deleted at the last step. AT09 drops the
+  # CANONICAL order: a `Set`'s iteration order is seeded per PROCESS, so the
+  # column would be byte-stable within a run and not across runs, and
+  # `AdWindowMaterialIdentity.producerRevisionToken` hashes it — the suggest
+  # card's identity would move for a mark nothing about which changed.
+  "AT08|1202|SWEEP|$T_6RUV_CANONICAL;$T_6RUV_ORDER"
+  "AT09|1203|SWEEP|$T_6RUV_CANONICAL;$T_6RUV_ORDER"
+
+  # AT99 IS THE VACUITY CONTROL AND IT MUST SURVIVE. It renames the local that
+  # carries AT01's value, in the very loop AT01's effect is observed through, so
+  # it proves the anchor still matches and the batch machinery still applies and
+  # runs. Its expectation is deliberately NON-EMPTY (playhead-ngsm: an entry
+  # with an empty expectation is scored KILLED, which makes a control expressed
+  # that way worthless) and it names the rail AT01 kills — so a KILLED verdict
+  # here would mean a rename can change behaviour and something is very wrong.
+  "AT99|1204|SWEEP|$T_6RUV_PERMISSIVE"
 
   # -------------------------------------------------------------------------
   # playhead-lxkq — the ad-likelihood scan ORDER (X01-X16)
@@ -10610,6 +10727,17 @@ describe_mutation() {
     SU22) echo "the gap test closes, so a barrier that only TOUCHES the join bars the merge" ;;
     SU23) echo "AdDetectionService stops passing the index — a correct composer never handed one" ;;
     SU24) echo "BackfillJobRunner stops passing the index" ;;
+    AT01) echo "THE PERMISSIVE GATE IS DROPPED — the runner's hardcoded paid/thirdParty read as the model's judgement" ;;
+    AT02) echo "a CTA or a disclosure phrase counts as NAMING an advertiser — the bead's own over-read, one layer down" ;;
+    AT03) echo "a refinement that yielded no spans reads as no refinement at all" ;;
+    AT04) echo "the COARSE pass attributes — and a permissive coarse row is byte-identical to a genuine one" ;;
+    AT05) echo "an UNEXAMINED refinement attributes — the field sweep really does end abstain|cancelled" ;;
+    AT06) echo "a DECLINED refinement attributes — found no edges read as a statement about ads" ;;
+    AT07) echo "THE SHIPPED STATE VERBATIM: makeMark writes nil and the whole projection evaporates" ;;
+    AT08) echo "the anchor tokens are dropped, so a named advertiser is byte-identical at rest to none" ;;
+    AT09) echo "the rendering loses its canonical order, so the revision token moves for no reason" ;;
+    AT10) echo "a refinement of OTHER AUDIO attributes this mark" ;;
+    AT99) echo "VACUITY CONTROL: the local carrying the attributable dimensions is renamed" ;;
     NY02) echo "the hot path 'de-duplicates' by chunk.id, a per-ROW UUID, so a fast/final twin survives it intact" ;;
     NY03) echo "BoundaryExpander.makeLexicalContext scans the raw array — the user's 'Hearing an ad' tap gets a phantom lexical candidate" ;;
     NY04) echo "SpecialistShadowDispatcher.buildPrompt joins the raw array — the twin repeats the utterance on the adjacent prompt line" ;;
@@ -17521,6 +17649,143 @@ EOF
 EOF
     snippet NEW <<'EOF'
                     supportLines: nil
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # ── playhead-6ruv: whether the model NAMED an advertiser ─────────────────
+
+  AT01)
+    snippet OLD <<'EOF'
+            guard ownershipInferenceWasSuppressed != true else { return nil }
+            return SpanDimensions(
+EOF
+    snippet NEW <<'EOF'
+            return SpanDimensions(
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  AT02)
+    snippet OLD <<'EOF'
+            [.brandSpan, .url, .promoCode]
+EOF
+    snippet NEW <<'EOF'
+            [.brandSpan, .url, .promoCode, .ctaPhrase, .disclosurePhrase]
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  AT03)
+    snippet OLD <<'EOF'
+        guard sawSpan else { return .unreadable }
+EOF
+    snippet NEW <<'EOF'
+        guard sawSpan else { return .unrefined }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  AT04)
+    snippet OLD <<'EOF'
+        for row in rows where row.scanPass == refinementScanPass {
+            guard row.disposition == .containsAd,
+EOF
+    snippet NEW <<'EOF'
+        for row in rows {
+            guard row.disposition == .containsAd,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  AT05)
+    snippet OLD <<'EOF'
+            guard row.disposition == .containsAd,
+                  row.didExamineWindow,
+                  row.windowStartTime.isFinite, row.windowEndTime.isFinite,
+                  row.windowEndTime > row.windowStartTime,
+                  extent.overlaps(start: row.windowStartTime, end: row.windowEndTime)
+EOF
+    snippet NEW <<'EOF'
+            guard row.disposition == .containsAd,
+                  row.windowStartTime.isFinite, row.windowEndTime.isFinite,
+                  row.windowEndTime > row.windowStartTime,
+                  extent.overlaps(start: row.windowStartTime, end: row.windowEndTime)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  AT06)
+    snippet OLD <<'EOF'
+            guard row.disposition == .containsAd,
+                  row.didExamineWindow,
+                  row.windowStartTime.isFinite, row.windowEndTime.isFinite,
+                  row.windowEndTime > row.windowStartTime,
+                  extent.overlaps(start: row.windowStartTime, end: row.windowEndTime)
+EOF
+    snippet NEW <<'EOF'
+            guard row.didExamineWindow,
+                  row.windowStartTime.isFinite, row.windowEndTime.isFinite,
+                  row.windowEndTime > row.windowStartTime,
+                  extent.overlaps(start: row.windowStartTime, end: row.windowEndTime)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  AT07)
+    snippet OLD <<'EOF'
+            evidenceSources: evidenceSources(for: attribution),
+EOF
+    snippet NEW <<'EOF'
+            evidenceSources: nil,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  AT08)
+    snippet OLD <<'EOF'
+            tokens += refinement.anchorKinds.map { "anchor:\($0.rawValue)" }.sorted()
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  AT09)
+    snippet OLD <<'EOF'
+            tokens += refinement.anchorKinds.map { "anchor:\($0.rawValue)" }.sorted()
+EOF
+    snippet NEW <<'EOF'
+            tokens += refinement.anchorKinds.map { "anchor:\($0.rawValue)" }.sorted().reversed()
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  AT10)
+    snippet OLD <<'EOF'
+                  extent.overlaps(start: row.windowStartTime, end: row.windowEndTime)
+            else { continue }
+            sawRefinement = true
+EOF
+    snippet NEW <<'EOF'
+                  row.windowEndTime.isFinite
+            else { continue }
+            sawRefinement = true
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  AT99)
+    snippet OLD <<'EOF'
+                guard let dimensions = span.attributableDimensions else { continue }
+                sawJudged = true
+                refinement.anchorKinds.formUnion(dimensions.anchorKinds)
+                if let intent = dimensions.commercialIntent {
+                    refinement.commercialIntents.insert(intent)
+                }
+                if let ownership = dimensions.ownership {
+                    refinement.ownerships.insert(ownership)
+                }
+EOF
+    snippet NEW <<'EOF'
+                guard let judged = span.attributableDimensions else { continue }
+                sawJudged = true
+                refinement.anchorKinds.formUnion(judged.anchorKinds)
+                if let intent = judged.commercialIntent {
+                    refinement.commercialIntents.insert(intent)
+                }
+                if let ownership = judged.ownership {
+                    refinement.ownerships.insert(ownership)
+                }
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
