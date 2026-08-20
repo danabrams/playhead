@@ -6942,6 +6942,16 @@ actor AdDetectionService {
                 let sweepMarks = SemanticSweepMarkComposer.compose(
                     scanRows: semanticScanResults,
                     existingWindows: existingWindows,
+                    // playhead-shu5: the geometry a coarse row's
+                    // `supportLineRefs` are indices INTO. Segmented HERE from
+                    // the same `atoms` the whole backfill reads, so the index
+                    // and the rows it resolves can only ever disagree by
+                    // TRANSCRIPT VERSION — which `resolve` checks, and which
+                    // is the one way this could go silently wrong.
+                    supportLines: SupportLineIndex(
+                        segments: TranscriptSegmenter.segment(atoms: atoms),
+                        transcriptVersion: transcriptVersion.transcriptVersion
+                    ),
                     analysisAssetId: analysisAssetId
                 )
                 let reconciledSweep = Self.reconcileVersionScopedMarkSets(
