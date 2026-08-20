@@ -228,7 +228,7 @@ struct PriorHierarchyWireUpTests {
     func wireUpNoProfile() async {
         let store = try! await makeTestStore()
         let service = makeService(store: store, profile: nil)
-        let resolved = await service.resolveEpisodePriorsForTesting()
+        let resolved = await service.resolveEpisodePriorsForTesting(podcastId: "podcast-test-1")
         #expect(resolved.activeLevel == .global)
         #expect(resolved.typicalAdDuration == GlobalPriorDefaults.standard.typicalAdDuration)
     }
@@ -241,7 +241,7 @@ struct PriorHierarchyWireUpTests {
             observationCount: 1
         )
         let service = makeService(store: store, profile: profile)
-        let resolved = await service.resolveEpisodePriorsForTesting()
+        let resolved = await service.resolveEpisodePriorsForTesting(podcastId: profile.podcastId)
         #expect(resolved.activeLevel == .global)
         #expect(resolved.typicalAdDuration == GlobalPriorDefaults.standard.typicalAdDuration)
     }
@@ -255,7 +255,7 @@ struct PriorHierarchyWireUpTests {
             observationCount: 12
         )
         let service = makeService(store: store, profile: profile)
-        let resolved = await service.resolveEpisodePriorsForTesting()
+        let resolved = await service.resolveEpisodePriorsForTesting(podcastId: profile.podcastId)
         #expect(resolved.activeLevel == .showLocal)
         // Range should be shifted toward the 5s mean — center much smaller than 60.
         let center = (resolved.typicalAdDuration.lowerBound + resolved.typicalAdDuration.upperBound) / 2.0
@@ -271,7 +271,7 @@ struct PriorHierarchyWireUpTests {
             observationCount: 12
         )
         let service = makeService(store: store, profile: profile)
-        let resolved = await service.resolveEpisodePriorsForTesting()
+        let resolved = await service.resolveEpisodePriorsForTesting(podcastId: profile.podcastId)
         let prior = DurationPrior(resolvedPriors: resolved)
         // The resolver blends the builder's show-local range (0...17) with the
         // global default 30...90 at the show-local weight (0.8 at episode count
@@ -296,7 +296,7 @@ struct PriorHierarchyWireUpTests {
             observationCount: 10
         )
         let service = makeService(store: store, profile: profile)
-        let resolved = await service.resolveEpisodePriorsForTesting()
+        let resolved = await service.resolveEpisodePriorsForTesting(podcastId: profile.podcastId)
         // Falls back to global defaults rather than crashing.
         #expect(resolved.activeLevel == .global)
         #expect(resolved.typicalAdDuration == GlobalPriorDefaults.standard.typicalAdDuration)
@@ -355,7 +355,7 @@ struct PriorHierarchyWireUpTests {
         try await store.upsertProfile(current)
 
         let service = makeService(store: store, profile: current)
-        let resolved = await service.resolveEpisodePriorsForTesting()
+        let resolved = await service.resolveEpisodePriorsForTesting(podcastId: current.podcastId)
         #expect(resolved.activeLevel == .network)
     }
 
@@ -410,7 +410,7 @@ struct PriorHierarchyWireUpTests {
         try await store.upsertProfile(current)
 
         let service = makeService(store: store, profile: current)
-        let resolved = await service.resolveEpisodePriorsForTesting()
+        let resolved = await service.resolveEpisodePriorsForTesting(podcastId: current.podcastId)
 
         // First, the network branch must have actually executed — without
         // this, the blend assertion below could pass with `.global` active
@@ -484,7 +484,7 @@ struct PriorHierarchyWireUpTests {
         try await store.upsertProfile(current)
 
         let service = makeService(store: store, profile: current)
-        let resolved = await service.resolveEpisodePriorsForTesting()
+        let resolved = await service.resolveEpisodePriorsForTesting(podcastId: current.podcastId)
 
         // Global midpoint is 60s. After blending in the network's ~10s
         // mean at the peak decay weight (0.5), the resolved center must
@@ -524,7 +524,7 @@ struct PriorHierarchyWireUpTests {
         try await store.upsertProfile(current)
 
         let service = makeService(store: store, profile: current)
-        let resolved = await service.resolveEpisodePriorsForTesting()
+        let resolved = await service.resolveEpisodePriorsForTesting(podcastId: current.podcastId)
         #expect(resolved.activeLevel == .global)
         #expect(resolved.typicalAdDuration == GlobalPriorDefaults.standard.typicalAdDuration)
     }
@@ -616,7 +616,7 @@ struct PriorHierarchyWireUpTests {
         try await store.upsertProfile(current)
 
         let service = makeService(store: store, profile: current)
-        let resolved = await service.resolveEpisodePriorsForTesting()
+        let resolved = await service.resolveEpisodePriorsForTesting(podcastId: current.podcastId)
         #expect(resolved.activeLevel == .showLocal)
 
         // Prove show-local actually wins the blend rather than
@@ -693,7 +693,7 @@ struct PriorHierarchyWireUpTests {
         try await store.upsertProfile(current)
 
         let service = makeService(store: store, profile: current)
-        let resolved = await service.resolveEpisodePriorsForTesting()
+        let resolved = await service.resolveEpisodePriorsForTesting(podcastId: current.podcastId)
         #expect(resolved.activeLevel == .global)
         #expect(resolved.typicalAdDuration == GlobalPriorDefaults.standard.typicalAdDuration)
     }
@@ -744,7 +744,7 @@ struct PriorHierarchyWireUpTests {
         try await store.upsertProfile(current)
 
         let service = makeService(store: store, profile: current)
-        let resolved = await service.resolveEpisodePriorsForTesting()
+        let resolved = await service.resolveEpisodePriorsForTesting(podcastId: current.podcastId)
         #expect(resolved.activeLevel == .global)
         // Resolved typicalAdDuration must equal the global default
         // exactly — no blend happened.
@@ -2448,7 +2448,7 @@ struct PriorHierarchyWireUpTests {
         // point must report `.traitDerived` as the dominant level when
         // it sees this profile.
         let service = makeService(store: store, profile: after)
-        let resolved = await service.resolveEpisodePriorsForTesting()
+        let resolved = await service.resolveEpisodePriorsForTesting(podcastId: podcastId)
         #expect(resolved.activeLevel == .traitDerived)
     }
 
@@ -2526,7 +2526,7 @@ struct PriorHierarchyWireUpTests {
         #expect(trait.musicDensity > 0.5)
 
         let service = makeService(store: store, profile: after)
-        let resolved = await service.resolveEpisodePriorsForTesting()
+        let resolved = await service.resolveEpisodePriorsForTesting(podcastId: podcastId)
         #expect(resolved.activeLevel == .traitDerived)
     }
 

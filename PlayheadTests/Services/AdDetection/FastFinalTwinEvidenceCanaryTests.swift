@@ -243,7 +243,10 @@ struct FastFinalTwinEvidenceCanaryTests {
 
         let fromTwin = try await service.hotPathCandidatesForTesting(
             from: Self.twinPair(),
-            analysisAssetId: "asset-99yt"
+            analysisAssetId: "asset-99yt",
+            // playhead-2kxd: this service was built with no profile, so
+            // "no show identity" is the same input it always had here.
+            podcastId: nil
         )
         #expect(fromTwin.isEmpty, """
             one utterance transcribed twice is one observation; the hot path \
@@ -253,7 +256,10 @@ struct FastFinalTwinEvidenceCanaryTests {
         // Control, through the identical call: independent evidence promotes.
         let fromIndependent = try await service.hotPathCandidatesForTesting(
             from: Self.independentPair(),
-            analysisAssetId: "asset-99yt"
+            analysisAssetId: "asset-99yt",
+            // playhead-2kxd: this service was built with no profile, so
+            // "no show identity" is the same input it always had here.
+            podcastId: nil
         )
         #expect(fromIndependent.count == 1)
         #expect(fromIndependent.first?.hitCount == 2)

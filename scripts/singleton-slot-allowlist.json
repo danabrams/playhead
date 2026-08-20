@@ -4,9 +4,19 @@
     "",
     "A `why` must say WHAT BOUNDS THE POPULATION TO ONE. 'It is fine' is not a",
     "reason; 'the slot IS the reentry guard, and here is the line that enforces",
-    "it' is. Two of the seven entries below are not licences at all — they name",
-    "a filed bead, so the amnesty is visibly temporary rather than quietly",
-    "permanent.",
+    "it' is.",
+    "",
+    "THE TEMPORARY AMNESTY WORKED ONCE, WHICH IS THE POINT OF RECORDING IT.",
+    "This list shipped with seven entries, exactly ONE of which was not a",
+    "licence at all — it named a filed bead. (playhead-mfeq's own notes, and",
+    "CLAUDE.md, said TWO; there was only ever one bead id in this file, and",
+    "the miscount is corrected here rather than propagated.) That entry is now",
+    "GONE: AdDetectionService.currentPodcastProfile was fixed by playhead-2kxd",
+    "— the profile is keyed by show in `podcastProfilesByShowId` — so the entry",
+    "was deleted in the same change rather than left behind to license whatever",
+    "inherits the name. SIX entries remain and every one of them is a real",
+    "licence, so a `why` that names a bead should now be read as a promise",
+    "somebody has to keep, not as a category this list normally contains.",
     "",
     "THE LIST IS CLOSED IN BOTH DIRECTIONS. A new match fails the gate, and an",
     "entry that matches nothing ALSO fails it: a licence for a field nobody can",
@@ -29,12 +39,6 @@
     "module docstring for why, and `--report-all` for the standing count."
   ],
   "allow": [
-    {
-      "type": "AdDetectionService",
-      "field": "currentPodcastProfile",
-      "file": "Playhead/Services/AdDetection/AdDetectionService.swift",
-      "why": "NOT A LICENCE — a live instance, filed as playhead-2kxd (P1). The file says so itself in three places: 'that actor state may belong to the previous episode' (~11292), 'an interleaving updatePriors / recordSuccessfulObservation turn could rewrite currentPodcastProfile between the two reads' (~12876), and a public setter deleted in review because it 'could clobber an in-flight updatePriors' (~2050). Three rounds have each hardened one READ SITE and left the slot. Out of playhead-mfeq's scope, which was the three AnalysisWorkScheduler fields; allowlisted so the rule can ship green while 2kxd carries the fix."
-    },
     {
       "type": "AnalysisWorkScheduler",
       "field": "lastBroadcastCancelCauseForTesting",

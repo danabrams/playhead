@@ -2043,17 +2043,109 @@ actor AdDetectionService {
     private let audioForensicsDetector = AudioForensicsBoundaryDetector()
     /// Per-show priors parsed from the current PodcastProfile.
     private var showPriors: ShowPriors
-    /// playhead-8n1: cache the current PodcastProfile so the Phase 4
-    /// shadow phase can thread it into `RegionFeatureExtractor`, which
-    /// in turn constructs a `LexicalScanner` with per-show sponsor
-    /// patterns. Kept in sync with `scanner`/`showPriors` in init and
-    /// in `updatePriors`. (skeptical-review-cycle-16 M-1: the public
-    /// `updateProfile(_:)` setter was removed because it had zero
-    /// callers and its post-hoc in-memory write could clobber an
-    /// in-flight `updatePriors` if a future caller were added. If the
-    /// API needs to come back, gate the post-await assignments in
-    /// `updatePriors` on a generation token before re-introducing it.)
-    private var currentPodcastProfile: PodcastProfile?
+    /// playhead-8n1 / playhead-2kxd: the per-show `PodcastProfile` cache the
+    /// Phase 4 shadow phase threads into `RegionFeatureExtractor` (which in
+    /// turn constructs a `LexicalScanner` with per-show sponsor patterns).
+    ///
+    /// **KEYED BY THE SHOW IT BELONGS TO, and that is the whole point
+    /// (playhead-2kxd).** Until this bead it was a single optional slot
+    /// (`currentPodcastProfile`) naming "the current podcast" on an actor that
+    /// more than one episode's analysis enters: `nowCap` is 2 and a playback
+    /// job bypasses the cap entirely, so two episodes — possibly two different
+    /// shows — can be in the pipeline at once. Worse, the slot was never
+    /// LOADED for the episode being analysed; production never passes
+    /// `podcastProfile:` at init, so the only writer was `updatePriors` at the
+    /// END of a backfill. A read during show A's backfill therefore answered
+    /// with whichever show last finished one — sequentially as well as
+    /// concurrently.
+    ///
+    /// Three review rounds each hardened ONE read site and left the slot:
+    /// `classifyCandidates` ("never fall back … that actor state may belong to
+    /// the previous episode"), `resolveEpisodePriors` (snapshot `networkId`
+    /// AND `observationCount` before the await), and skeptical-review-cycle-16
+    /// M-1, which deleted the public `updateProfile(_:)` setter because "its
+    /// post-hoc in-memory write could clobber an in-flight `updatePriors`".
+    /// Vigilance per site, on a shape that keeps manufacturing sites.
+    ///
+    /// The cure is the one this repo has already proved twice —
+    /// `AnalysisWorkScheduler.runningJobs` (`[String: RunningJob]`,
+    /// playhead-lmrx R3) and `hotPathRunInFlightAssetIds` fifteen lines below
+    /// — key the state on the identity it belongs to. Every read now names a
+    /// show and gets that show's profile or nothing; a read that cannot name
+    /// one FAILS CLOSED, which is the posture `classifyCandidates` already
+    /// argued for in prose.
+    ///
+    /// **Reach it only through ``cachedPodcastProfile(forShowId:)`` and
+    /// ``cachePodcastProfile(_:)``.** `AdDetectionServiceProfileKeyingCanaryTests`
+    /// fails the build if any other line in this file mentions the storage, and
+    /// if any read passes a literal instead of a show identity — a rule plus
+    /// something that enforces it, because a prose survey of read sites decays
+    /// the moment somebody adds one.
+    ///
+    /// **Bound on growth:** one entry per distinct show whose `updatePriors`
+    /// completed in this process (plus at most one seeded at init), i.e. the
+    /// number of subscribed shows analysed since launch — tens, holding a
+    /// handful of small strings each. Entries are deliberately NOT evicted on
+    /// completion the way `hotPathRunInFlightAssetIds` are: this is a cache of
+    /// the latest persisted profile per show, not an in-flight registry.
+    private var podcastProfilesByShowId: [String: PodcastProfile] = [:]
+
+    /// playhead-2kxd: the ONLY read path for ``podcastProfilesByShowId``.
+    ///
+    /// Fails closed on a `nil` or empty show id rather than answering with
+    /// some other show's profile — the same rule `classifyCandidates` applies
+    /// to `RecurrenceMaterialIdentity.canonicalIdentifier`. An empty
+    /// `podcastId` is already the codebase's spelling of "no show identity"
+    /// (see `RegionShadowPhase.run` and `SemanticScanClaim.claimRow`), so it
+    /// must not be a dictionary key.
+    private func cachedPodcastProfile(forShowId showId: String?) -> PodcastProfile? {
+        guard let showId, !showId.isEmpty else { return nil }
+        return podcastProfilesByShowId[showId]
+    }
+
+    /// playhead-2kxd: the ONLY write path for ``podcastProfilesByShowId``.
+    ///
+    /// Keys on `profile.podcastId` — the identity the VALUE carries — rather
+    /// than on a caller-supplied id, so a caller cannot file show B's profile
+    /// under show A's name. Drops a profile with an empty id for the same
+    /// reason the reader refuses one.
+    private func cachePodcastProfile(_ profile: PodcastProfile) {
+        guard !profile.podcastId.isEmpty else { return }
+        podcastProfilesByShowId[profile.podcastId] = profile
+    }
+
+    /// playhead-2kxd: seed the per-show cache from the optional init-time
+    /// profile. `static` because it runs during `init`, before `self` is
+    /// available; the empty-id refusal mirrors ``cachePodcastProfile(_:)``.
+    private static func seededProfileMap(
+        _ profile: PodcastProfile?
+    ) -> [String: PodcastProfile] {
+        guard let profile, !profile.podcastId.isEmpty else { return [:] }
+        return [profile.podcastId: profile]
+    }
+
+    #if DEBUG
+    /// Test-only view of the per-show cache. Exists so a test can assert the
+    /// KEYING directly — that a write for show B leaves show A's entry alone —
+    /// without driving a full backfill. Goes through the production reader, so
+    /// it cannot observe a state the production path cannot.
+    func cachedPodcastProfileForTesting(showId: String?) -> PodcastProfile? {
+        cachedPodcastProfile(forShowId: showId)
+    }
+
+    /// Test-only view of the cache's KEY SET, and it exists because the
+    /// accessor above cannot answer the question.
+    /// `cachedPodcastProfileForTesting(showId: "")` returns `nil` whether the
+    /// empty id was never stored OR the reader simply refuses to look it up —
+    /// so a rail written on the reader alone passes even with
+    /// ``cachePodcastProfile(_:)``'s guard deleted, which is a test that would
+    /// hold if the thing it names never happened. This is the only thing that
+    /// can tell the two apart.
+    func cachedProfileShowIdsForTesting() -> Set<String> {
+        Set(podcastProfilesByShowId.keys)
+    }
+    #endif
+
     /// Episode duration for position-based scoring.
     private var episodeDuration: Double = 0
 
@@ -2374,7 +2466,12 @@ actor AdDetectionService {
         self.config = config
         self.scanner = LexicalScanner(podcastProfile: podcastProfile)
         self.showPriors = ShowPriors.from(profile: podcastProfile)
-        self.currentPodcastProfile = podcastProfile
+        // playhead-2kxd: seed the per-show cache under the profile's OWN
+        // podcastId. Production never passes this argument (see
+        // `PlayheadRuntime`), so in the shipping app the map starts empty and
+        // the only writer is `updatePriors` — which is precisely why a single
+        // slot answered every episode with the last show that finished one.
+        self.podcastProfilesByShowId = Self.seededProfileMap(podcastProfile)
         self.backfillJobRunnerFactory = backfillJobRunnerFactory
         self.canUseFoundationModelsProvider = canUseFoundationModelsProvider
         self.shadowSkipMarker = shadowSkipMarker
@@ -3356,9 +3453,18 @@ actor AdDetectionService {
     // removed (zero callers in production or tests). The post-hoc
     // in-memory write at `currentPodcastProfile = profile` could clobber
     // an in-flight `updatePriors`'s post-await assignment if a future
-    // caller were ever added. If the API needs to come back, also gate
-    // the post-await assignments in `updatePriors` on a generation
-    // token / fingerprint check before re-introducing the public setter.
+    // caller were ever added, so the note here used to say: gate the
+    // post-await assignments on a generation token before re-introducing
+    // the setter.
+    //
+    // playhead-2kxd removed the slot that made that necessary. The profile
+    // is now `podcastProfilesByShowId`, keyed by show, written only through
+    // `cachePodcastProfile(_:)` which keys on the value's own `podcastId`.
+    // A returning setter would file its argument under that argument's show,
+    // so it could not clobber another show's entry at all — and against the
+    // SAME show it is last-writer-wins on one row, which is what a setter
+    // means. No generation token is needed; what a setter would still owe is
+    // a reason it is not just re-reading what `updatePriors` persists.
 
     /// Rebuild the smallest hot-path replay slice that can still reproduce the
     /// hypothesis engine's transitive context growth for duplicate chunk
@@ -3885,7 +3991,12 @@ actor AdDetectionService {
         // preserve the legacy lexical merge path.
         let candidates = try await hotPathCandidates(
             from: chunks,
-            analysisAssetId: analysisAssetId
+            analysisAssetId: analysisAssetId,
+            // playhead-2kxd: the request's show. Already the authority for
+            // recurrence matching in `classifyCandidates` below, on the same
+            // reasoning; now it is the authority for the metadata trust weight
+            // too, instead of whichever show last finished a backfill.
+            podcastId: podcastId
         )
 
         guard !candidates.isEmpty else {
@@ -4265,7 +4376,9 @@ actor AdDetectionService {
         // once per episode before the first metadata consumption point. Lexical
         // injection and the later fusion loop must share the same snapshot so
         // concurrent profile updates cannot change metadata trust mid-run.
-        let resolvedEpisodePriors = await resolveEpisodePriors()
+        // playhead-2kxd: the request's show, so the priors this episode is
+        // fused against belong to the show it is an episode OF.
+        let resolvedEpisodePriors = await resolveEpisodePriors(podcastId: podcastId)
         let metadataLexiconEntries = metadataLexiconEntries(
             from: metadataCues,
             metadataTrust: resolvedEpisodePriors.metadataTrust
@@ -4419,7 +4532,12 @@ actor AdDetectionService {
             featureWindows: featureWindows,
             episodeDuration: episodeDuration,
             priors: showPriors,
-            podcastProfile: currentPodcastProfile,
+            // playhead-2kxd: THE REQUEST'S show, not "the current one". The
+            // profile handed to `RegionShadowPhase` becomes that phase's
+            // per-show sponsor lexicon, and `podcastId:` eight lines below is
+            // already the request's — the two must name the same show or the
+            // phase scans episode A's audio against episode B's sponsors.
+            podcastProfile: cachedPodcastProfile(forShowId: podcastId),
             fmWindows: fmRefinementWindows,
             // playhead-shjn: `podcastId` is handed through VERBATIM (empty
             // string included) — `RegionShadowPhase.run` is the single place
@@ -4818,12 +4936,24 @@ actor AdDetectionService {
         // inside `SelfPromoShowIdentity`. Gated on `selfPromoBank == nil` (same as
         // the word stream) so the flag-OFF path builds nothing — byte-identical
         // to pre-fl4j.
-        let selfPromoShowIdentity: SelfPromoShowIdentity = selfPromoBank == nil
-            ? .none
-            : SelfPromoShowIdentity(
-                title: currentPodcastProfile?.title,
-                networkId: currentPodcastProfile?.networkId
+        //
+        // playhead-2kxd: "the show's OWN identity" is THIS REQUEST'S show. The
+        // whole point of the tokens is to let the episode be recognised naming
+        // ITSELF; sourced from a slot they could name the previous episode's
+        // show, and a self-promo phrase would then be corroborated by a title
+        // this episode never says — or, worse, fail to be corroborated by the
+        // one it does. Resolved inside the `else` so the flag-OFF path still
+        // touches nothing.
+        let selfPromoShowIdentity: SelfPromoShowIdentity
+        if selfPromoBank == nil {
+            selfPromoShowIdentity = .none
+        } else {
+            let selfPromoShowProfile = cachedPodcastProfile(forShowId: podcastId)
+            selfPromoShowIdentity = SelfPromoShowIdentity(
+                title: selfPromoShowProfile?.title,
+                networkId: selfPromoShowProfile?.networkId
             )
+        }
         let bracketShowTrust: Double
         if config.bracketRefinementEnabled, !podcastId.isEmpty {
             let trustStore = bracketTrustStoreLazy()
@@ -10443,9 +10573,16 @@ actor AdDetectionService {
     /// `scanner.scanChunk` per chunk), `scanner.scan`,
     /// `hotPathBoundaryExpansionContext` and `makeHotPathHypothesisCandidate`.
     /// It is idempotent, and single-pass input passes through byte-identically.
+    ///
+    /// playhead-2kxd: `podcastId` is threaded in (rather than read off actor
+    /// state) because the metadata-lexicon injection below is weighted by this
+    /// show's `metadataTrust`. The hot path's caller carries it as an optional
+    /// — `nil` means "this caller genuinely lacks show identity", which
+    /// resolves to global priors rather than to the last show's.
     private func hotPathCandidates(
         from chunks: [TranscriptChunk],
-        analysisAssetId: String
+        analysisAssetId: String,
+        podcastId: String?
     ) async throws -> [LexicalCandidate] {
         // `canonicalize` returns the mixed path already time-ordered but hands
         // a single-pass array back byte-identically — i.e. in `chunkIndex`
@@ -10456,7 +10593,10 @@ actor AdDetectionService {
         let (metadataCues, _) = await loadEpisodeMetadataSignals(
             analysisAssetId: analysisAssetId
         )
-        let metadataEntries = await metadataLexiconEntries(from: metadataCues)
+        let metadataEntries = await metadataLexiconEntries(
+            from: metadataCues,
+            podcastId: podcastId
+        )
 
         let hypothesisCandidates = try await hypothesisCandidates(
             from: orderedChunks,
@@ -10513,11 +10653,14 @@ actor AdDetectionService {
         return (cues, feedMetadata.chapterEvidence ?? [])
     }
 
+    /// playhead-2kxd: `podcastId` names the show whose `metadataTrust` weights
+    /// the injection. Threaded from the caller rather than read off a slot.
     private func metadataLexiconEntries(
-        from cues: [EpisodeMetadataCue]
+        from cues: [EpisodeMetadataCue],
+        podcastId: String?
     ) async -> [MetadataLexiconEntry] {
         guard !cues.isEmpty else { return [] }
-        let priors = await resolveEpisodePriors()
+        let priors = await resolveEpisodePriors(podcastId: podcastId)
         return metadataLexiconEntries(
             from: cues,
             metadataTrust: priors.metadataTrust
@@ -10540,13 +10683,18 @@ actor AdDetectionService {
     }
 
     #if DEBUG
+    /// playhead-2kxd: `podcastId` has no default — see
+    /// `resolveEpisodePriorsForTesting` for why a test shim must not be able
+    /// to ask "the current show".
     func hotPathCandidatesForTesting(
         from chunks: [TranscriptChunk],
-        analysisAssetId: String
+        analysisAssetId: String,
+        podcastId: String?
     ) async throws -> [LexicalCandidate] {
         try await hotPathCandidates(
             from: chunks,
-            analysisAssetId: analysisAssetId
+            analysisAssetId: analysisAssetId,
+            podcastId: podcastId
         )
     }
     #endif
@@ -11455,9 +11603,13 @@ actor AdDetectionService {
         // metric "out of confirmed-ad candidates, how many were answered
         // from cache" — the actual signal the auto-disable guard wants.
         // The request's show identity is authoritative for recurrence
-        // matching. Never fall back to `currentPodcastProfile`: that actor
-        // state may belong to the previous episode, and a nil/blank request
-        // must fail closed instead of querying a stale show's cache.
+        // matching. This site never fell back to the `currentPodcastProfile`
+        // slot, on the grounds that "that actor state may belong to the
+        // previous episode, and a nil/blank request must fail closed instead
+        // of querying a stale show's cache". playhead-2kxd made that the rule
+        // for the WHOLE FILE rather than the discipline of this one site: the
+        // profile is keyed by show now, and `cachedPodcastProfile(forShowId:)`
+        // fails closed on nil/empty exactly as this line does.
         let cacheShowId =
             RecurrenceMaterialIdentity.canonicalIdentifier(podcastId)
 
@@ -12993,30 +13145,34 @@ actor AdDetectionService {
 
     // MARK: - Prior Hierarchy Resolution (playhead-084j)
 
-    /// Resolve the 4-level prior hierarchy for the current episode.
+    /// Resolve the 4-level prior hierarchy for the episode of `podcastId`.
     ///
     /// Called from `runBackfill` exactly once per episode (outside the
     /// per-span loop). The result feeds `DurationPrior(resolvedPriors:)` so
     /// fusion is show-aware, not stuck on `GlobalPriorDefaults.standard`.
     ///
+    /// **`podcastId` is the request's show and is not optional-by-default
+    /// (playhead-2kxd).** It used to read a `currentPodcastProfile` slot, so
+    /// the priors an episode was fused against were the last show whose
+    /// backfill finished — not necessarily this one. `nil`/empty means "this
+    /// caller has no show identity" (the hot path's `podcastId: String?`), and
+    /// resolves to global defaults rather than to somebody else's priors.
+    ///
     /// Audit (as of spxs):
     ///   • Global: always `GlobalPriorDefaults.standard`.
     ///   • Network: derived via `NetworkPriorsBuilder.build` from all
-    ///     `PodcastProfile` rows that share the current show's `networkId`.
-    ///     `nil` when the current show has no `networkId` recorded yet
+    ///     `PodcastProfile` rows that share THIS show's `networkId`.
+    ///     `nil` when the show has no `networkId` recorded yet
     ///     (RSS-metadata writer lands in a follow-up bead) or when no
     ///     sibling shows in the network meet the per-show sample-count
     ///     threshold. The network fetch is `async` because of the SQL hop;
     ///     the `await` is a real reentrancy point on this actor, NOT an
-    ///     atomicity guarantee. The cycle-5 L-2 fix snapshots
-    ///     `networkId` and `observationCount` into locals BEFORE the await
-    ///     so an interleaving turn that rewrites `currentPodcastProfile`
-    ///     can't desync the network tier's inputs.
-    ///   • Trait: `currentPodcastProfile?.traitProfile ?? .unknown`. The
-    ///     persistence layer reads cleanly; profiles without a writer
-    ///     fall through to `.unknown`, which is non-reliable, so the trait
-    ///     level stays inactive — graceful degradation.
-    ///   • Show-local: derived from `currentPodcastProfile.adDurationStatsJSON`
+    ///     atomicity guarantee — see the snapshot note below.
+    ///   • Trait: this show's `traitProfile`, or `.unknown`. The persistence
+    ///     layer reads cleanly; profiles without a writer fall through to
+    ///     `.unknown`, which is non-reliable, so the trait level stays
+    ///     inactive — graceful degradation.
+    ///   • Show-local: derived from this show's `adDurationStatsJSON`
     ///     via `ShowLocalPriorsBuilder.build`. Returns nil for shows below
     ///     `ShowLocalPriorsBuilder.minSampleCount`, which keeps the resolver
     ///     at global defaults until enough confirmed ads have been observed.
@@ -13028,35 +13184,34 @@ actor AdDetectionService {
     ///
     /// Snapshot consistency: the `await` on `store.fetchProfiles(forNetworkId:)`
     /// can interleave with other turns on this actor, so this method does
-    /// NOT execute as a single uninterrupted actor turn. Instead, the
-    /// network tier's two inputs (`networkId` and `observationCount`) are
-    /// snapshotted into locals before the await; the resolver call below
-    /// is pure. Tests pin the snapshot pattern via
+    /// NOT execute as a single uninterrupted actor turn. It resolves the
+    /// profile ONCE into an immutable local up front, so every tier below is
+    /// computed from one value — a stronger statement than cycle-5 L-2's
+    /// two-field snapshot, and one that no longer depends on a future editor
+    /// noticing which fields had to be lifted. Tests pin it via
     /// `resolveEpisodePriorsSnapshotsObservationCountPreAwait` (cycle-6)
     /// and the `mutateProfile`-style write-side canaries in
     /// `AdDetectionServiceUpdatePriorsAtomicityCanaryTests`.
-    private func resolveEpisodePriors() async -> ResolvedPriors {
-        let traitProfile = currentPodcastProfile?.traitProfile ?? .unknown
-        let showLocal = ShowLocalPriorsBuilder.build(from: currentPodcastProfile)
+    private func resolveEpisodePriors(podcastId: String?) async -> ResolvedPriors {
+        let episodeProfile = cachedPodcastProfile(forShowId: podcastId)
+        let traitProfile = episodeProfile?.traitProfile ?? .unknown
+        let showLocal = ShowLocalPriorsBuilder.build(from: episodeProfile)
 
-        // playhead-spxs: gather the network tier. Skipped when the current
-        // show has no networkId recorded — falls back to nil which the
-        // resolver treats as "tier inactive". Errors in the SQL fetch are
-        // also treated as "tier inactive" (logged then dropped) so a
-        // transient persistence failure can't block ad detection.
+        // playhead-spxs: gather the network tier. Skipped when this show has
+        // no networkId recorded — falls back to nil which the resolver treats
+        // as "tier inactive". Errors in the SQL fetch are also treated as
+        // "tier inactive" (logged then dropped) so a transient persistence
+        // failure can't block ad detection.
         //
-        // cycle-5 L-2: snapshot `networkId` AND `observationCount` from
-        // `currentPodcastProfile` BEFORE the `fetchProfiles` await.
-        // The await is a real reentrancy point on this actor, so an
-        // interleaving `updatePriors` / `recordSuccessfulObservation`
-        // turn could rewrite `currentPodcastProfile` between the two
-        // reads. Snapshotting both fields up front keeps the network
-        // tier's decay weight consistent with the networkId it was
-        // computed from — the snapshot-consistency contract that the
-        // resolver header documents.
+        // cycle-5 L-2 snapshotted `networkId` AND `observationCount` before
+        // the `fetchProfiles` await, because the await is a real reentrancy
+        // point and an interleaving `updatePriors` turn could rewrite the
+        // profile slot between the two reads. playhead-2kxd subsumes that:
+        // `episodeProfile` is a `let` resolved once, so there is no slot left
+        // to be rewritten and every tier above and below reads one value.
         var networkPriors: NetworkPriors? = nil
         var networkDecay: Float = 0
-        if let snapshotProfile = currentPodcastProfile,
+        if let snapshotProfile = episodeProfile,
            let networkId = snapshotProfile.networkId,
            !networkId.isEmpty {
             let observedAtSnapshot = snapshotProfile.observationCount
@@ -13088,8 +13243,13 @@ actor AdDetectionService {
     ///
     /// `#if DEBUG` matches the existing pattern for other `*ForTesting`
     /// entry points in this file (see `acousticFunnelForTesting` etc.).
-    func resolveEpisodePriorsForTesting() async -> ResolvedPriors {
-        await resolveEpisodePriors()
+    ///
+    /// playhead-2kxd: `podcastId` has NO DEFAULT, for the same reason
+    /// `updatePriorsForTesting`'s `countsAsEpisodeObservation` has none — a
+    /// default would let a test silently ask "the current show", which is
+    /// exactly the question this bead removed from the production API.
+    func resolveEpisodePriorsForTesting(podcastId: String?) async -> ResolvedPriors {
+        await resolveEpisodePriors(podcastId: podcastId)
     }
 
     /// Test-only entry point that drives `updatePriors` end-to-end.
@@ -13215,9 +13375,10 @@ actor AdDetectionService {
     ///
     /// **ORDERING.** Called BEFORE `updatePriors` so that (a) a brand-new
     /// profile is created by the trust owner rather than by the priors merge,
-    /// and (b) `updatePriors` — which runs last and refreshes
-    /// `currentPodcastProfile` / `showPriors` — reads the POST-promotion row,
-    /// so the in-memory copy can never disagree with the persisted mode.
+    /// and (b) `updatePriors` — which runs last and refreshes this show's
+    /// entry in `podcastProfilesByShowId` (and `showPriors`) — reads the
+    /// POST-promotion row, so the in-memory copy can never disagree with the
+    /// persisted mode.
     @discardableResult
     private func recordConfirmedWindowObservation(
         podcastId: String,
@@ -13672,9 +13833,19 @@ actor AdDetectionService {
         }
 
         // Refresh the in-memory priors for subsequent use.
+        //
+        // ⚠️ playhead-2kxd fixed the PROFILE and deliberately did not touch the
+        // two lines above it. `showPriors` and `scanner` are the same shape —
+        // one slot standing for a set, derived from this same profile — and
+        // they still hold whichever show wrote last. That is FILED, not fixed,
+        // because their read sites are a different (larger) population; see
+        // playhead-jjke. Do not read the keyed write below as covering them.
         showPriors = ShowPriors.from(profile: updatedProfile)
         scanner = LexicalScanner(podcastProfile: updatedProfile)
-        currentPodcastProfile = updatedProfile
+        // playhead-2kxd: keyed on `updatedProfile.podcastId` — the identity the
+        // VALUE carries — so this cannot file one show's profile under
+        // another's name even if `podcastId` and the returned row ever diverge.
+        cachePodcastProfile(updatedProfile)
 
         logger.info("Updated priors for podcast \(podcastId): observations=\(updatedProfile.observationCount) trust=\(updatedProfile.skipTrustScore, format: .fixed(precision: 2))")
     }

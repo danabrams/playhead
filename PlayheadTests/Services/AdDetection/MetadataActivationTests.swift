@@ -153,7 +153,11 @@ struct MetadataActivationConfigTests {
                 .appendingPathComponent("Playhead/Services/AdDetection/AdDetectionService.swift"),
             encoding: .utf8
         )
-        let resolveNeedle = "let resolvedEpisodePriors = await resolveEpisodePriors()"
+        // playhead-2kxd: the resolver takes the request's show now, so the
+        // needle carries the argument. Keeping the old zero-arg spelling would
+        // have made this canary report "call sites not found" — a canary that
+        // can no longer find what it guards is not a canary.
+        let resolveNeedle = "let resolvedEpisodePriors = await resolveEpisodePriors(podcastId: podcastId)"
         let injectionNeedle = "let metadataLexiconEntries = metadataLexiconEntries("
         guard let resolveRange = source.range(of: resolveNeedle),
               let injectionRange = source.range(of: injectionNeedle) else {
@@ -178,14 +182,21 @@ struct MetadataActivationConfigTests {
                 .appendingPathComponent("Playhead/Services/AdDetection/AdDetectionService.swift"),
             encoding: .utf8
         )
+        // playhead-2kxd: both helpers take `podcastId` now. The sync needle is
+        // anchored on `metadataTrust:` as well, because the async helper's own
+        // first two lines would otherwise match it — a needle that can match
+        // the thing it is supposed to be the boundary of would slice an empty
+        // body and make the ordering check vacuous.
         let asyncHelperNeedle = """
             private func metadataLexiconEntries(
-                from cues: [EpisodeMetadataCue]
+                from cues: [EpisodeMetadataCue],
+                podcastId: String?
             ) async -> [MetadataLexiconEntry] {
         """
         let syncHelperNeedle = """
             private func metadataLexiconEntries(
                 from cues: [EpisodeMetadataCue],
+                metadataTrust: Float
         """
         guard let helperStart = source.range(of: asyncHelperNeedle)?.upperBound,
               let helperEnd = source.range(of: syncHelperNeedle, range: helperStart..<source.endIndex)?.lowerBound else {
@@ -195,7 +206,9 @@ struct MetadataActivationConfigTests {
 
         let helperBody = source[helperStart..<helperEnd]
         guard let emptyGuardRange = helperBody.range(of: "guard !cues.isEmpty else { return [] }"),
-              let resolveRange = helperBody.range(of: "let priors = await resolveEpisodePriors()") else {
+              let resolveRange = helperBody.range(
+                  of: "let priors = await resolveEpisodePriors(podcastId: podcastId)"
+              ) else {
             Issue.record("Expected empty-cue guard and prior-resolution call in async metadataLexiconEntries helper")
             return
         }
@@ -886,7 +899,8 @@ struct MetadataLexiconTwoHitRuleTests {
 
         let candidates = try await service.hotPathCandidatesForTesting(
             from: chunks,
-            analysisAssetId: "asset-hotpath-metadata"
+            analysisAssetId: "asset-hotpath-metadata",
+            podcastId: nil
         )
 
         #expect(candidates.count == 1,
@@ -920,7 +934,8 @@ struct MetadataLexiconTwoHitRuleTests {
 
         let candidates = try await service.hotPathCandidatesForTesting(
             from: chunks,
-            analysisAssetId: "asset-hotpath-show-owned"
+            analysisAssetId: "asset-hotpath-show-owned",
+            podcastId: nil
         )
 
         #expect(candidates.isEmpty,
