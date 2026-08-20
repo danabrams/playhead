@@ -1532,8 +1532,14 @@ enum SemanticSweepMarkComposer {
     /// row that overlaps this extent by a fraction of a second therefore speaks
     /// for all of it. Stated rather than hidden: the alternative is resolving
     /// line refs through a `SupportLineIndex`, which stage 6 already shows can
-    /// only be done for a row whose transcript version still exists, and 130 of
-    /// the pull's 301 coarse rows fail that test (playhead-kg6i).
+    /// only be done for a row whose transcript version still EXISTS — and on
+    /// the 2026-08-19 t4 pull **280 of the 301 coarse `containsAd` rows carry a
+    /// `transcriptVersion` that no surviving `transcript_chunks` row carries**,
+    /// which is playhead-kg6i's territory and not a bound this bead can move.
+    /// (Say what that 280 counts: rows whose segmentation is GONE from the
+    /// database, which is not the same population as the rows stage 6 answers
+    /// `.unreadable` for, nor the count in kg6i's own title. Three quantities,
+    /// three measurements; quote whichever you actually took.)
     static func attribution(
         for extent: Extent,
         in rows: [SemanticScanResult]
