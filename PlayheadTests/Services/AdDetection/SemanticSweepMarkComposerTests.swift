@@ -704,6 +704,7 @@ struct SemanticSweepAdditiveOnlyTests {
     func sweepMarksAreAKnownExportDisposition() {
         let mark = SemanticSweepMarkComposer.makeMark(
             SemanticSweepMarkComposer.Extent(start: 508, end: 599),
+            attribution: .unrefined,
             analysisAssetId: Fx.assetId
         )
 
@@ -717,6 +718,7 @@ struct SemanticSweepAdditiveOnlyTests {
     func sweepMarksAreReconcilable() {
         let mark = SemanticSweepMarkComposer.makeMark(
             SemanticSweepMarkComposer.Extent(start: 508, end: 599),
+            attribution: .unrefined,
             analysisAssetId: Fx.assetId
         )
 

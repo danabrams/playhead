@@ -146,6 +146,7 @@ struct ComposedMarkGateTests {
     func sweepMarkGateTracksItsDeclaredExtent() {
         let mark = SemanticSweepMarkComposer.makeMark(
             SemanticSweepMarkComposer.Extent(start: 508, end: 599),
+            attribution: .unrefined,
             analysisAssetId: Self.assetId
         )
         let declared = SemanticSweepMarkComposer.extentSupport
