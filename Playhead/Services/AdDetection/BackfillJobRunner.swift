@@ -5050,7 +5050,18 @@ actor BackfillJobRunner {
         if semanticSweepMarkEnabled, mode.canProposeNewRegions {
             do {
                 try await composeSemanticSweepMarks(
-                    analysisAssetId: inputs.analysisAssetId
+                    analysisAssetId: inputs.analysisAssetId,
+                    // playhead-shu5: the geometry `supportLineRefs` index
+                    // into. `inputs.segments` may already be NARROWED for
+                    // resume, and that is safe rather than lossy: segment
+                    // indices come from the FULL segmentation, so a partial
+                    // index simply cannot reproduce a row's window and
+                    // `resolve` refuses it. Refusing leaves that row's coarse
+                    // extent exactly where it was.
+                    supportLines: SupportLineIndex(
+                        segments: inputs.segments,
+                        transcriptVersion: inputs.transcriptVersion
+                    )
                 )
             } catch {
                 logger.warning(
@@ -6158,7 +6169,10 @@ actor BackfillJobRunner {
     /// (no model, no re-scan) and delegates the version-scoped set-difference to
     /// the SAME shared reconcile invariant the service site uses, so the
     /// runner-tail site and Step 18c stay in lockstep.
-    private func composeSemanticSweepMarks(analysisAssetId: String) async throws {
+    private func composeSemanticSweepMarks(
+        analysisAssetId: String,
+        supportLines: SupportLineIndex? = nil
+    ) async throws {
         let scanRows = try await store.fetchSemanticScanResults(
             analysisAssetId: analysisAssetId
         )
@@ -6167,6 +6181,7 @@ actor BackfillJobRunner {
         let marks = SemanticSweepMarkComposer.compose(
             scanRows: scanRows,
             existingWindows: existingWindows,
+            supportLines: supportLines,
             analysisAssetId: analysisAssetId
         )
         let reconciled = AdDetectionService.reconcileVersionScopedMarkSets(

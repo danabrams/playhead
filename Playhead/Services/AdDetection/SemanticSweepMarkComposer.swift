@@ -45,17 +45,32 @@
 //      `BackfillJobRunner.makePassBScanResult` already projects its refined
 //      spans back to SECONDS. Where such a row exists and still says
 //      `containsAd`, it is the extent. Where pass B ran and DECLINED, the
-//      coarse presence verdict stands with its coarse extent: pass A said an
-//      ad is here, pass B failed to localize it, and a failure to localize is
-//      not a retraction (playhead-ynmk — a confirmation asserts presence,
-//      never extent). This matters concretely because
-//      `BackfillJobRunner.swift:3645` persists an empty pass-B result as
-//      `.noAds`.
+//      coarse presence verdict stands: pass A said an ad is here, pass B
+//      failed to localize it, and a failure to localize is not a retraction
+//      (playhead-ynmk — a confirmation asserts presence, never extent). This
+//      matters concretely because the pass-B writer persists an empty result
+//      as `.noAds`.
+//
+//      WHAT IT STANDS AT CHANGED IN playhead-shu5, and the correction is one
+//      sentence: a declined pass-B row's OWN WINDOW is not nothing. The
+//      refinement planner builds it out of `focusLineRefs` — the coarse row's
+//      `supportLineRefs`, expanded to `minimumZoomSpanLines` — and the writer
+//      persists `windowSegments.map(\.startTime).min()/max()` for exactly the
+//      case where the model returned no spans, so that a row "can say where we
+//      looked". That is the coarse row's own localisation, projected into
+//      seconds by the code that owned the segments, at the row's own
+//      transcript version. Stage 6 reads it. The presence verdict still
+//      stands; it stands over the seconds the model pointed at rather than
+//      over the whole ~95 s tile it was handed.
 //
 //   3. MERGE. The sweep tiles ~95 s windows front to back, so one 3-minute pod
 //      lands across two of them. Two touching banners for one ad break is a
 //      worse surface than one. Bounded by `mergeGapSeconds` so two genuinely
-//      separate breaks never fuse across the show between them.
+//      separate breaks never fuse across the show between them — and, since
+//      playhead-shu5, BARRED outright by any window a presence-pass row
+//      EXAMINED AND DID NOT AFFIRM. `mergeGapSeconds` bounds a gap by its
+//      SIZE; a cleared window is a gap somebody looked at and said no to, and
+//      no size makes that absorbable.
 //
 //   4. CLIP to a PROVEN edge when one is available, and NEVER require one.
 //      "Proven" is the same definition `SpanExtentSupport` uses — a
@@ -91,7 +106,28 @@
 //      choice while this lane is new; revisiting it is a measurement, not a
 //      guess. `anOverlappedVerdictProducesNothing` asserts the loss.
 //
-//   6. EMIT. `eligibilityGate == .markOnly`; `decisionState == .candidate`;
+//   6. LOCALISE (playhead-shu5). THE EXTENT IS NOT THE SCAN WINDOW. Every
+//      surviving extent is narrowed to the seconds the model itself named,
+//      and it can only SHRINK — the whole pipeline above, dedupe included,
+//      has already decided WHETHER this mark exists, so localisation decides
+//      only HOW WIDE it is and can never admit a verdict the coarse geometry
+//      suppressed — nor remove one: a row whose refs cannot be read, and a row
+//      that named none, both keep their window. See ``Localisation`` for why
+//      those two are nonetheless held apart, and ``contribution(of:in:supportLines:)``
+//      for the one line where treating `.absent` as no evidence at all is
+//      Dan's to authorise (playhead-my33).
+//
+//      THE FIELD CASE, which is Dan's own correction of 2026-08-19. On
+//      `CD2976E6` this composer marked [1510.4–1611.4] — 101.0 s — off a
+//      window whose `spansJSON` reads
+//      `{"certainty":"strong","supportLineRefs":[62]}`. The promotional
+//      content in it is the LAST 9.5 s: *"What you just listened to was a most
+//      replayed moment from a previous episode … check the description."* The
+//      model was right and the boundary was wrong; 92 s of the guest talking
+//      about climbing was inside a banner. Localised, that mark is
+//      [1590.0–1611.4] and gives 79.6 s of show back.
+//
+//   7. EMIT. `eligibilityGate == .markOnly`; `decisionState == .candidate`;
 //      BOTH edge anchors `.unanchored`; `metadataConfidence == nil` so the
 //      banner copy is generic and no advertiser is hallucinated.
 //      Content-addressed id, so a recompose over unchanged inputs is a true
@@ -308,6 +344,33 @@ enum SemanticSweepMarkComposer {
     /// owns the `passA` counterpart.
     static let refinementScanPass = "passB"
 
+    /// How far a LOCALISED span is widened at each edge before it becomes a
+    /// mark (playhead-shu5).
+    ///
+    /// # This is a PRODUCT THRESHOLD and it is deliberately at zero
+    ///
+    /// It is named rather than absent so that moving it is an edit to one line
+    /// with a reason attached, and it is **Dan's call**. Zero is the
+    /// conservative default, and the argument for it is his own: *"if its an ad
+    /// and i click yes i still lose part of the show"* — OUTER edges (an
+    /// episode's very start and end) are cheap to widen, INNER edges eat the
+    /// show, and every span this constant touches is an INNER edge by
+    /// construction, because stage 6 only ever narrows something already
+    /// inside a scan window.
+    ///
+    /// Two further reasons zero is the right place to start. A localised span's
+    /// bounds are a SEGMENT's bounds, and a segment boundary is already a real
+    /// event in the audio — `TranscriptSegmenter` breaks on a ≥ 1.5 s pause, a
+    /// max-duration cut, a speaker turn or sentence punctuation — so it is not
+    /// an arbitrary cut that needs slack around it. And the ONE thing a pad
+    /// buys, catching an ad whose first words fall in a segment the model did
+    /// not cite, is bought by under-marking a banner the listener still has to
+    /// confirm, which is the cheap failure of the two.
+    ///
+    /// Applied symmetrically and then CLAMPED to the coarse window: a pad may
+    /// never carry a mark outside the audio the model actually examined.
+    static let supportLocalisationPadSeconds = 0.0
+
     // MARK: - Confidence (playhead-92im)
     //
     // THREE FACTORS, each of which reads its own NEUTRAL value when the thing
@@ -456,6 +519,11 @@ enum SemanticSweepMarkComposer {
         /// payload and on legacy rows. See ``certaintyFactor(of:)`` for why a
         /// consumer of `certainty` must read it.
         let ownershipInferenceWasSuppressed: Bool?
+        /// playhead-shu5: WHICH TRANSCRIPT LINES the model said its verdict
+        /// rests on. Present on the `passA` (`CoarseSupportSchema`) shape only;
+        /// the refined-span array carries per-span line refs under other names
+        /// and is read through its own path. See ``supportLineRefs(of:)``.
+        let supportLineRefs: [Int]?
 
         /// The band this span may CONTRIBUTE — `nil` when the model did not
         /// grade it, and `nil` when the runner did the grading.
@@ -609,10 +677,19 @@ enum SemanticSweepMarkComposer {
     ///     edges harvested from `existingWindows`; pass explicitly to widen the
     ///     source. An empty array is not a refusal — it simply means no edge
     ///     gets clipped.
+    ///   - supportLines: the segment geometry a coarse row's `supportLineRefs`
+    ///     index into, built by the caller from the segments it already holds
+    ///     (playhead-shu5). `nil` — or an index stamped with a different
+    ///     `transcriptVersion` than a given row — means that row's refs are
+    ///     UNREADABLE, never that it has none; see
+    ///     ``localise(_:scanRows:supportLines:)`` for why the two get opposite
+    ///     answers. Passing `nil` leaves this producer's geometry exactly where
+    ///     the pass-B rows put it, which is what every pre-shu5 caller got.
     static func compose(
         scanRows: [SemanticScanResult],
         existingWindows: [AdWindow],
         provenAnchorEdges: [Double]? = nil,
+        supportLines: SupportLineIndex? = nil,
         analysisAssetId: String
     ) -> [AdWindow] {
         let anchors = provenAnchorEdges ?? Self.provenAnchorEdges(in: existingWindows)
@@ -621,8 +698,8 @@ enum SemanticSweepMarkComposer {
         let presence = presenceExtents(scanRows)
         guard !presence.isEmpty else { return [] }
 
-        // Stage 3: merge.
-        let merged = mergeExtents(presence)
+        // Stage 3: merge, barred by any window a presence pass CLEARED.
+        let merged = mergeExtents(presence, barredBy: clearedSpans(in: scanRows))
 
         // Stage 4: clip to a proven edge when one is in reach.
         let clipped = merged
@@ -643,8 +720,14 @@ enum SemanticSweepMarkComposer {
             !blocking.contains { extent.overlaps(start: $0.start, end: $0.end) }
         }
 
-        // Stage 6: emit.
-        return survivors.map { makeMark($0, analysisAssetId: analysisAssetId) }
+        // Stage 6: localise. Runs AFTER the dedupe on purpose — see
+        // `localise(_:scanRows:supportLines:)`.
+        let localised = survivors.flatMap {
+            localise($0, scanRows: scanRows, supportLines: supportLines)
+        }
+
+        // Stage 7: emit.
+        return localised.map { makeMark($0, analysisAssetId: analysisAssetId) }
     }
 
     // MARK: - Stages 1–2: presence, refined
@@ -777,7 +860,29 @@ enum SemanticSweepMarkComposer {
     /// stage 4's clip exists to avoid. A nested extent contributes 0 new
     /// seconds and so changes nothing, which is what keeps a recompose over
     /// unchanged inputs byte-identical.
-    static func mergeExtents(_ extents: [Extent]) -> [Extent] {
+    ///
+    /// playhead-shu5: AND NEVER ACROSS A WINDOW THE MODEL CLEARED. `barredBy`
+    /// carries the spans a presence-pass row EXAMINED and did NOT affirm; a
+    /// merge whose gap any of them covers is refused outright, at any distance.
+    /// The two bounds answer different questions and neither implies the other:
+    /// `mergeGapSeconds` asks how BIG the swallowed gap is, and this asks
+    /// whether anybody LOOKED at it and said no. A verdict of `noAds` over
+    /// audio is evidence about that audio; absorbing it into a banner because
+    /// its two neighbours both fired is precisely "presence laundered into
+    /// extent", one level up from the case stage 3's own comment already
+    /// refuses.
+    ///
+    /// Measured on the 2026-08-19 t4 pull, this fires exactly once across all
+    /// 15 assets: `561CEF5B`'s [420.9–619.6] mark is two coarse `containsAd`
+    /// windows 0.42 s apart, and a THIRD `passA` row examined [497.3–607.1] and
+    /// returned `noAds` — a window that spans the join. It becomes two marks.
+    /// One instance is the honest count and it is stated rather than rounded
+    /// up: the rule is here because the shape is wrong, not because it is
+    /// common.
+    static func mergeExtents(
+        _ extents: [Extent],
+        barredBy barriers: [AdSpanBounds] = []
+    ) -> [Extent] {
         let sorted = extents.sorted {
             $0.start != $1.start ? $0.start < $1.start : $0.end < $1.end
         }
@@ -785,6 +890,9 @@ enum SemanticSweepMarkComposer {
         for extent in sorted {
             if var last = result.last,
                extent.start <= last.end + mergeGapSeconds,
+               !barriers.contains(where: {
+                   $0.coversGap(from: last.end, to: extent.start)
+               }),
                max(last.end, extent.end) - last.start <= maximumMarkDurationSeconds {
                 let held = max(0, last.duration)
                 let added = max(0, extent.end - last.end)
@@ -831,6 +939,37 @@ enum SemanticSweepMarkComposer {
             }
         }
         return result
+    }
+
+    /// The spans a PRESENCE-pass row examined and did NOT affirm — the windows
+    /// a merge may never bridge (playhead-shu5).
+    ///
+    /// Scoped to the presence pass for the same reason ``corroboration(for:in:)``
+    /// is: `passB`'s `.noAds` means "found no edges", never "there is no ad", so
+    /// a refinement that failed to localize must not bar anything. And gated on
+    /// `didExamineWindow` for the same reason stage 1 is: a cancelled or refused
+    /// row did not look, so its disposition column is not a verdict about the
+    /// audio and cannot clear it.
+    ///
+    /// NOTE WHAT IS **NOT** THE PREDICATE HERE: `spansJSON == "[]"`. It reads
+    /// like "the model cleared this window" and it is not — `encodeSupport`
+    /// writes exactly that string for a NIL support object, so a row can carry
+    /// `disposition == .containsAd` and `spansJSON == "[]"` at once. On the
+    /// 2026-08-19 pull 19 of the 301 coarse `containsAd` rows do, including the
+    /// second half of the very mark Dan vetoed. Those rows are affirmations
+    /// with no localisation; reading them as denials would have inverted their
+    /// meaning. What they get instead is stage 6's answer: they contribute no
+    /// EXTENT.
+    static func clearedSpans(in rows: [SemanticScanResult]) -> [AdSpanBounds] {
+        rows.compactMap { row in
+            guard row.scanPass != refinementScanPass,
+                  row.didExamineWindow,
+                  row.disposition != .containsAd,
+                  row.windowStartTime.isFinite, row.windowEndTime.isFinite,
+                  row.windowEndTime > row.windowStartTime
+            else { return nil }
+            return AdSpanBounds(start: row.windowStartTime, end: row.windowEndTime)
+        }
     }
 
     // MARK: - Stage 4: clip
@@ -888,7 +1027,297 @@ enum SemanticSweepMarkComposer {
         return edges.sorted()
     }
 
-    // MARK: - Stage 6: emit
+    // MARK: - Stage 6: localise (playhead-shu5)
+
+    /// THE TRANSCRIPT LINES the model said this coarse row's verdict rests on,
+    /// or `nil` when it named NONE.
+    ///
+    /// `nil` covers three spellings of the same claim, and they are the same
+    /// claim: no support object at all (`spansJSON == "[]"`, which
+    /// `encodeSupport` writes for a nil `support`), a support object whose
+    /// `supportLineRefs` array is empty, and a payload that will not decode as
+    /// the coarse shape. In each the model asserted presence and pointed at
+    /// nothing.
+    ///
+    /// Refinement rows are excluded outright: a `passB` payload is an ARRAY of
+    /// refined spans whose geometry is already in the row's own window, so
+    /// there is nothing here to resolve.
+    static func supportLineRefs(of row: SemanticScanResult) -> [Int]? {
+        guard row.scanPass != refinementScanPass,
+              let data = row.spansJSON.data(using: .utf8),
+              let support = try? JSONDecoder().decode(PersistedCertainty.self, from: data),
+              let refs = support.supportLineRefs,
+              !refs.isEmpty
+        else { return nil }
+        return refs
+    }
+
+    /// The windows a DECLINED pass-B row looked at inside this coarse window —
+    /// i.e. this row's own `supportLineRefs`, already projected into seconds by
+    /// the writer that owned the segments.
+    ///
+    /// Three conditions, each load-bearing:
+    ///   * the row DECLINED (`disposition != .containsAd`) and EXAMINED its
+    ///     window. An affirming pass B is stage 2's business, not this one;
+    ///     an unexamined row looked at nothing and localises nothing.
+    ///   * it carries the SAME `transcriptVersion` as the coarse row. A
+    ///     refinement plan is built from one segmentation, so a row from
+    ///     another version is a different episode's geometry wearing the same
+    ///     seconds.
+    ///   * it is strictly INSIDE and strictly NARROWER than the coarse window.
+    ///     A zoom that covers the whole tile localised nothing, and one that
+    ///     reaches outside it is not this window's zoom.
+    static func declinedRefinementSpans(
+        over window: SemanticScanResult,
+        in rows: [SemanticScanResult]
+    ) -> [AdSpanBounds] {
+        let coarseDuration = window.windowEndTime - window.windowStartTime
+        return rows.compactMap { row in
+            guard row.scanPass == refinementScanPass,
+                  row.disposition != .containsAd,
+                  row.didExamineWindow,
+                  row.transcriptVersion == window.transcriptVersion,
+                  row.windowStartTime.isFinite, row.windowEndTime.isFinite,
+                  row.windowEndTime > row.windowStartTime,
+                  row.windowStartTime >= window.windowStartTime - SupportLineIndex.boundaryEpsilon,
+                  row.windowEndTime <= window.windowEndTime + SupportLineIndex.boundaryEpsilon,
+                  row.windowEndTime - row.windowStartTime < coarseDuration
+            else { return nil }
+            return AdSpanBounds(start: row.windowStartTime, end: row.windowEndTime)
+        }
+    }
+
+    /// WHERE ONE PRESENCE ROW SAYS ITS AD IS — and, when it does not say, WHY
+    /// NOT. The three cases are kept apart because they are three different
+    /// claims, and the whole of this bead is that a claim about one thing was
+    /// being read as a claim about another.
+    enum Localisation: Equatable {
+        /// The model named these seconds, and we can read them.
+        case named([AdSpanBounds])
+        /// The model named LINES WE CANNOT READ — a stale `transcriptVersion`,
+        /// no index, a window this index does not reproduce. A failure of OUR
+        /// RECORDS, not of the verdict.
+        case unreadable
+        /// The model named NOTHING: no support object, or an empty
+        /// `supportLineRefs`. A property of the VERDICT.
+        case absent
+    }
+
+    /// Ask one row where its ad is.
+    ///
+    ///   1. a REFINEMENT row already IS the model's narrowing — its own window
+    ///      is the answer;
+    ///   2. a coarse row whose DECLINED pass B left a narrower window is
+    ///      localised by that window (see ``declinedRefinementSpans(over:in:)``);
+    ///   3. a coarse row whose `supportLineRefs` RESOLVE is localised by the
+    ///      spans they name;
+    ///   4. named but unresolvable → `.unreadable`;
+    ///   5. named nothing → `.absent`.
+    static func localisation(
+        of row: SemanticScanResult,
+        in rows: [SemanticScanResult],
+        supportLines: SupportLineIndex?
+    ) -> Localisation {
+        let window = AdSpanBounds(start: row.windowStartTime, end: row.windowEndTime)
+        guard row.scanPass != refinementScanPass else { return .named([window]) }
+
+        let declined = declinedRefinementSpans(over: row, in: rows)
+        if !declined.isEmpty { return .named(padded(declined, within: window)) }
+
+        guard let refs = supportLineRefs(of: row) else { return .absent }
+        guard let resolved = supportLines?.resolve(
+            supportLineRefs: refs,
+            in: SupportLineIndex.RowWindow(
+                transcriptVersion: row.transcriptVersion,
+                firstAtomOrdinal: row.windowFirstAtomOrdinal,
+                lastAtomOrdinal: row.windowLastAtomOrdinal,
+                startTime: row.windowStartTime,
+                endTime: row.windowEndTime
+            )
+        ) else { return .unreadable }
+        return .named(padded(resolved, within: window))
+    }
+
+    /// What one presence row contributes to a mark's extent.
+    ///
+    /// # `.unreadable` AND `.absent` GET THE SAME ANSWER HERE, AND THAT IS A DECISION
+    ///
+    /// Both keep the row's whole window, which is the pre-shu5 behaviour, so
+    /// this bead never removes a mark — it only narrows the ones it can read.
+    ///
+    /// `.unreadable` keeping its window is not in question: our records failed,
+    /// not the model, and inventing geometry is how a boundary lands on the
+    /// show (`SupportLineIndex`'s header carries the measured witness, 22 s
+    /// off). What IS in question is how many rows land there — **130 of the
+    /// 301**, every one of them because the episode's transcript has moved on
+    /// since the scan and the row's segmentation no longer exists. That is a
+    /// bound on this bead's reach and it belongs to **playhead-kg6i**, not
+    /// here: shrinking it means composing from fewer versions, which removes
+    /// marks.
+    ///
+    /// `.absent` is a genuine open question and it is **Dan's**, filed as
+    /// **playhead-my33**. A `containsAd` row that names no lines is presence
+    /// with no localisation — the thing `maximumMarkDurationSeconds` already
+    /// calls "a TARGETING problem … not something to put in front of a
+    /// listener" — so there is a real case for contributing nothing. It was
+    /// measured before it was declined: 19 of the 301 coarse `containsAd` rows
+    /// on the 2026-08-19 pull are `.absent`, dropping them removes 2 marks and
+    /// a further 267.5 s (Dan's own [1131.6–1287.2] would fall to
+    /// [1131.6–1210.9]).
+    ///
+    /// **COUNT THE WINDOWS, NOT THE ROWS.** Those 19 rows are only **10
+    /// distinct windows** — the sweep re-scans an episode after its transcript
+    /// moves, so `A9F6DF05 6814.0–6874.1` alone appears four times. Read as
+    /// transcript, **6 of the 10 are real ads** (LifeLock/Paragold, NetSuite
+    /// ×2, Whisperflow, Progressive, the show's own conversation-cards promo)
+    /// and **4 are show** — `A9F6DF05` 68.9–187.3 and 4368.2–4439.3,
+    /// `CD2976E6` 1211.2–1287.2 (Dan's own), `E51B25E4` 4840.7–4960.7. A
+    /// first draft of this note said "roughly fifteen of the nineteen are real
+    /// ads", which is the row count wearing the window count's meaning — the
+    /// standing defect class, in the comment describing the fix for it.
+    ///
+    /// So the rule that would fix Dan's second veto costs six correct
+    /// detections to remove two wrong marks. That is a RECALL trade, not a
+    /// geometry fix. It is one line, right here, when he says so — and that
+    /// claim is only true because mutant SU12 proved it was NOT: the change
+    /// used to be silently undone by ``localise(_:scanRows:supportLines:)``'s
+    /// duration-floor rescue, which is now a separate refusal.
+    static func contribution(
+        of row: SemanticScanResult,
+        in rows: [SemanticScanResult],
+        supportLines: SupportLineIndex?
+    ) -> [AdSpanBounds] {
+        switch localisation(of: row, in: rows, supportLines: supportLines) {
+        case .named(let spans): spans
+        case .unreadable, .absent:
+            [AdSpanBounds(start: row.windowStartTime, end: row.windowEndTime)]
+        }
+    }
+
+    /// Widen each span by `pad` at both edges and clamp the result to the
+    /// window the model examined.
+    ///
+    /// THE PAD IS A PARAMETER SO THE CLAMP HAS A REACHABLE CONTRACT (mutant
+    /// SU17). With ``supportLocalisationPadSeconds`` at 0.0 the clamp can never
+    /// bite through either production path — a resolved span is built from
+    /// lines inside a run that reproduces the row's window, and a declined
+    /// pass-B window is required to lie inside it — so deleting the clamp is an
+    /// EQUIVALENT mutation at today's constant, and a test written against the
+    /// shipped value can only ever pass. That is not a reason to drop the
+    /// clamp: it is the whole of what keeps a future non-zero pad, which is
+    /// Dan's to set, from carrying a mark outside the audio the model examined.
+    /// Injecting the pad lets the contract be asserted at the value that makes
+    /// it load-bearing instead of at the one that makes it inert.
+    static func padded(
+        _ spans: [AdSpanBounds],
+        within window: AdSpanBounds,
+        pad: Double = supportLocalisationPadSeconds
+    ) -> [AdSpanBounds] {
+        spans.compactMap {
+            AdSpanBounds(start: $0.start - pad, end: $0.end + pad)
+                .clamped(to: window)
+        }
+    }
+
+    /// Narrow one surviving extent to the seconds the model itself named.
+    ///
+    /// # It can only SHRINK, and that is the whole safety argument
+    ///
+    /// Every returned extent is a subset of `extent`, so this stage cannot
+    /// admit a mark the pipeline above suppressed. That matters concretely
+    /// rather than theoretically: measured on the 2026-08-19 pull, running the
+    /// localisation EARLIER — before stage 5's dedupe — surfaced three brand
+    /// new marks on `9126552E` at [586.4–676.0], [1332.4–1407.5] and
+    /// [1446.7–1490.0], and reading their transcripts they are the two hosts
+    /// talking about a sculpture, a dive and an ego. They were suppressed only
+    /// because their coarse extent happened to overlap another producer's
+    /// window, and narrowing them released them. A geometry fix is not a
+    /// licence to change ADMISSION, so the order is: decide whether, then
+    /// decide how wide.
+    ///
+    /// # THREE refusals, and two of them used to be ONE
+    ///
+    /// An extent no presence row overlaps is returned UNCHANGED — a mark is
+    /// never deleted because the search for its own evidence came back empty.
+    ///
+    /// If contributions exist but every piece falls under
+    /// `minimumMarkDurationSeconds`, the extent is returned UNCHANGED: that is
+    /// `clip`'s rule (*"refining geometry must never destroy the mark it is
+    /// refining"*), applied to the other refiner.
+    ///
+    /// And if NO contributor offered a single span, nothing here is supported
+    /// and nothing is returned. **That was folded into the duration-floor
+    /// refusal and mutant SU12 found it**, which is the whole argument for
+    /// separating them: SU12 is playhead-my33's proposed one-line change
+    /// (`.absent` contributes nothing), and with the two folded together the
+    /// mark was RESCUED by the floor rule and the knob did nothing. The bead
+    /// and the comment on ``contribution(of:in:supportLines:)`` both said "it
+    /// is one line"; it was not, and only a mutation could say so. Two
+    /// different claims — *"the refinement is too small to use"* and *"there is
+    /// nothing to refine"* — sharing one `guard`.
+    ///
+    /// The branch is UNREACHABLE today, deliberately: every `Localisation`
+    /// currently yields at least the row's window, so `contributed` is always
+    /// true and this is byte-identical to the folded version. SU12 is what
+    /// makes it reachable, and what proves it is not decoration.
+    ///
+    /// Pieces are unioned with `mergeGapSeconds` before the duration floor, so
+    /// two adjacent supported segments become one mark rather than two
+    /// touching banners — the same question stage 3 asks, asked again at the
+    /// finer granularity localisation just created.
+    static func localise(
+        _ extent: Extent,
+        scanRows: [SemanticScanResult],
+        supportLines: SupportLineIndex?
+    ) -> [Extent] {
+        let contributors = scanRows.filter {
+            isPresenceVerdict($0)
+                && extent.overlaps(start: $0.windowStartTime, end: $0.windowEndTime)
+        }
+        guard !contributors.isEmpty else { return [extent] }
+
+        let bounds = AdSpanBounds(start: extent.start, end: extent.end)
+        var pieces: [AdSpanBounds] = []
+        var contributed = false
+        for row in contributors {
+            let spans = contribution(of: row, in: scanRows, supportLines: supportLines)
+            if !spans.isEmpty { contributed = true }
+            pieces.append(contentsOf: spans.compactMap { $0.clamped(to: bounds) })
+        }
+        // NOTHING under this extent is supported. Distinct from the floor
+        // refusal below — see the header.
+        guard contributed else { return [] }
+
+        let unioned = union(pieces)
+            .filter { $0.duration >= minimumMarkDurationSeconds }
+        guard !unioned.isEmpty else { return [extent] }
+
+        // The grade is carried through untouched, exactly as `clip` does: this
+        // stage refines GEOMETRY, and where an ad is says nothing about how
+        // well evidenced the claim that it IS an ad was.
+        return unioned.map {
+            Extent(start: $0.start, end: $0.end, confidence: extent.confidence)
+        }
+    }
+
+    /// Sweep-union spans whose gap is at most `mergeGapSeconds`.
+    private static func union(_ spans: [AdSpanBounds]) -> [AdSpanBounds] {
+        let sorted = spans.sorted {
+            $0.start != $1.start ? $0.start < $1.start : $0.end < $1.end
+        }
+        var result: [AdSpanBounds] = []
+        for span in sorted {
+            if var last = result.last, span.start <= last.end + mergeGapSeconds {
+                last.end = max(last.end, span.end)
+                result[result.count - 1] = last
+            } else {
+                result.append(span)
+            }
+        }
+        return result
+    }
+
+    // MARK: - Stage 7: emit
 
     /// The EXTENT this producer can prove, and the single source of truth for
     /// both the row's anchor columns and — through ``ComposedMarkGate`` — its
