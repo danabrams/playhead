@@ -138,6 +138,43 @@ class Classification(unittest.TestCase):
         self.assertIn("roughly 40 in flight", out)
 
 
+class MultipleInvocations(unittest.TestCase):
+    """A gate log can hold more than one `xcodebuild test`.
+
+    fast-gate retries once on a wedged simulator and runs a residual pass, and
+    a run whose script was edited mid-flight re-executed the whole thing. Each
+    invocation has its own host pid, so counting pids over the file reports a
+    mid-run host restart that never happened.
+    """
+
+    BANNER = "Command line invocation:\n    xcodebuild test\n"
+
+    def test_two_invocations_are_not_a_host_restart(self):
+        text = (
+            self.BANNER + log(pids=("100",))
+            + self.BANNER + log(pids=("200",))
+        )
+        code, out = run(text, rc=0)
+        self.assertEqual(code, 0, out)
+        self.assertNotIn("replaced mid-run", out)
+        self.assertIn("last of 2 invocations", out)
+
+    def test_a_restart_INSIDE_the_last_invocation_is_still_caught(self):
+        text = (
+            self.BANNER + log(pids=("100",))
+            + self.BANNER + log(pids=("200", "201"), summary=False)
+        )
+        code, out = run(text, rc=0)
+        self.assertEqual(code, 1)
+        self.assertIn("200 -> 201", out)
+        self.assertIn("2 xcodebuild invocations", out)
+
+    def test_a_single_invocation_is_unchanged(self):
+        code, out = run(self.BANNER + log(pids=("100", "101"), summary=False), rc=0)
+        self.assertIn("100 -> 101", out)
+        self.assertNotIn("invocations", out)
+
+
 class MemoryReporting(unittest.TestCase):
 
     def test_without_a_series_it_refuses_to_claim_anything_about_memory(self):

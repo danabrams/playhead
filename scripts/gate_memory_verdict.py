@@ -52,6 +52,23 @@ MIB = 1024 * 1024
 # reading the log
 # --------------------------------------------------------------------------
 
+def last_invocation(text: str) -> tuple[str, int]:
+    """(the text of the LAST xcodebuild invocation, how many there were).
+
+    A gate log can hold more than one invocation — `fast-gate.sh` retries once
+    on a wedged simulator, and the residual re-run is a second `xcodebuild test`.
+    Counting host pids across the whole file then reports one pid per
+    invocation as a mid-run host restart, which is a different event with a
+    different remedy. gate_baseline.py cuts at the same banner for the same
+    reason: two attempts must never be unioned into one population.
+    """
+    banner = "Command line invocation:"
+    starts = [m.start() for m in re.finditer(re.escape(banner), text)]
+    if len(starts) <= 1:
+        return text, max(len(starts), 1)
+    return text[starts[-1]:], len(starts)
+
+
 def host_pids(text: str) -> list[str]:
     """The test-host pids that appear in the console, in first-seen order.
 
@@ -247,14 +264,17 @@ def report(log_path: str, rc: int, series_path: str, out=sys.stdout) -> int:
         print(f"gate-memory: CANNOT EVALUATE — {exc}", file=out)
         return 2
 
-    verdict, reasons = classify(text, rc)
-    started, finished = inflight_at_end(text)
+    scoped, invocations = last_invocation(text)
+    verdict, reasons = classify(scoped, rc)
+    started, finished = inflight_at_end(scoped)
     rows = series_rows(series_path)
     stats = summarise_series(rows)
     ram = ram_mib()
 
     if verdict == "COMPLETE":
         line = f"gate-memory: the run reached a verdict (xcodebuild exit {rc})."
+        if invocations > 1:
+            line += f" (last of {invocations} invocations in this log)"
         if stats:
             line += (
                 f" Peak demand {stats['demand_peak_during_run'] / 1024:.1f} GiB"
@@ -266,6 +286,12 @@ def report(log_path: str, rc: int, series_path: str, out=sys.stdout) -> int:
 
     print("", file=out)
     print(f"gate-memory: THE RUN DID NOT REACH A VERDICT — {verdict}", file=out)
+    if invocations > 1:
+        print(
+            f"gate-memory:   * this log holds {invocations} xcodebuild invocations;"
+            " only the last one is judged above",
+            file=out,
+        )
     for reason in reasons:
         print(f"gate-memory:   * {reason}", file=out)
     if started:
