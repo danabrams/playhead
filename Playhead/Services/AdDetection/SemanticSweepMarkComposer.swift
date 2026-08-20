@@ -1163,12 +1163,22 @@ enum SemanticSweepMarkComposer {
     /// measured before it was declined: 19 of the 301 coarse `containsAd` rows
     /// on the 2026-08-19 pull are `.absent`, dropping them removes 2 marks and
     /// a further 267.5 s (Dan's own [1131.6–1287.2] would fall to
-    /// [1131.6–1210.9]) — **and, read as transcript, roughly fifteen of the
-    /// nineteen are real ads**: LifeLock, Paragold, NetSuite, Whisperflow,
-    /// Progressive, the show's own conversation-cards promo. Four are show. So
-    /// the rule that would fix Dan's second veto also deletes a dozen correct
-    /// detections, which is a RECALL trade and not a geometry fix. It is one
-    /// line, right here, when he says so.
+    /// [1131.6–1210.9]).
+    ///
+    /// **COUNT THE WINDOWS, NOT THE ROWS.** Those 19 rows are only **10
+    /// distinct windows** — the sweep re-scans an episode after its transcript
+    /// moves, so `A9F6DF05 6814.0–6874.1` alone appears four times. Read as
+    /// transcript, **6 of the 10 are real ads** (LifeLock/Paragold, NetSuite
+    /// ×2, Whisperflow, Progressive, the show's own conversation-cards promo)
+    /// and **4 are show** — `A9F6DF05` 68.9–187.3 and 4368.2–4439.3,
+    /// `CD2976E6` 1211.2–1287.2 (Dan's own), `E51B25E4` 4840.7–4960.7. A
+    /// first draft of this note said "roughly fifteen of the nineteen are real
+    /// ads", which is the row count wearing the window count's meaning — the
+    /// standing defect class, in the comment describing the fix for it.
+    ///
+    /// So the rule that would fix Dan's second veto costs six correct
+    /// detections to remove two wrong marks. That is a RECALL trade, not a
+    /// geometry fix. It is one line, right here, when he says so.
     static func contribution(
         of row: SemanticScanResult,
         in rows: [SemanticScanResult],
