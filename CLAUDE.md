@@ -175,7 +175,21 @@ Two corollaries worth knowing before the next `rc=65`:
 |---|---|---|
 | `EXP1` — keep playhead-shu5's 38 new tests, skip 38 UNRELATED ones (`TargetedWindowNarrowerTests`) | 11,569 — **identical to the pre-shu5 control that passed** | host killed at 90 % of the log, `Killed: 9`, `GATE_EXIT=137` |
 
-Same count, different 38 tests, same death at the same place. **shu5's tests are innocent and the count is not the variable.** Two hours later the *unmodified* plan — all 11,626 tests, nothing skipped — passed twice in a row with zero failures. The outcome is stochastic, and what makes it stochastic is not the plan.
+Same count, different 38 tests, same death at the same place. **shu5's tests are innocent and the count is not the variable.**
+
+**THE OUTCOME IS A COIN FLIP, AND HERE IS THE WHOLE DAY'S TALLY** — eight full-plan runs on one branch, same protocol every time (`.derivedData` removed, simulator shut down + erased + re-read, no `-skip-testing:` except where stated):
+
+| run | configuration | outcome |
+|---|---|---|
+| `RUN2` (two invocations) | unmodified | **completed**, `** TEST SUCCEEDED **` ×2, 11,626 passed, 230.7 s and 211.3 s |
+| `EXP1` | 38 unrelated skipped | **killed**, `Killed: 9`, exit 137 |
+| `ACCEPT-1` | unmodified | **completed**, `** TEST SUCCEEDED **`, 251.6 s |
+| `ACCEPT-2` | unmodified | **killed**, exit 137 |
+| `EXP2` | serialized | **completed**, `** TEST FAILED **` (the four of playhead-sip2), 1,147 s |
+| `ACCEPT-3` | unmodified | **completed**, `** TEST FAILED **` (3 starvation flakes), 282.3 s |
+| `ACCEPT-4` | unmodified | **killed**, exit 137 |
+
+Unmodified: **four completed, two killed.** Every kill has the same signature — ~414 tests in flight at ~90 % of the log, no `Restarting after unexpected exit` line, `Killed: 9`, no result bundle. Every completion has the same memory series as every kill. **Do not read a green gate as evidence that anything was fixed, and do not read a red one as evidence that anything broke:** on this box, at this ceiling, run it again.
 
 **WHAT IS ACTUALLY SHORT, measured by sampling `vm_stat` + `vm.swapusage` every 10 s across whole runs and around bare simulator boots.** The quantity is **demand** = `active + wired + compressor + swap`:
 
