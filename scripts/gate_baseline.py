@@ -847,8 +847,38 @@ _BLOCK_ENTRY = re.compile(r"^[ \t]+(\S.*?)\s*$")
 _BLOCK_NAME = re.compile(r"^([A-Za-z_][A-Za-z0-9_.]*)\.([A-Za-z_][A-Za-z0-9_]*)(\(\))?$")
 
 
+# playhead-3rql: the console spells the SAME test's name two different ways.
+#
+#   ◇ Test "a row leased through acquireLease \342\200\224 the production shape ..." started.
+#   ✔ Test "a row leased through acquireLease — the production shape ..." passed after 143.874 seconds.
+#
+# The start line escapes non-ASCII as C octal byte escapes; the verdict line
+# prints the character. Keyed literally, those are two tests: one that started
+# and never reported, and one that passed without ever starting. The census is
+# `started - ran - skipped`, so the first is reported as a CASUALTY — on a run
+# with zero failures, zero restarts and a `** TEST SUCCEEDED **`.
+#
+# It is the standing defect class in the census machinery for a fourth time (see
+# the 19/18, 33/15 and 30/14 corrections in CLAUDE.md): a value that names one
+# thing read as though it named another. Decoding is deliberately conservative —
+# only maximal runs of `\NNN` that decode as valid UTF-8 are folded, so a test
+# name that genuinely contains a backslash and three digits is left alone.
+_OCTAL_ESCAPE_RUN = re.compile(r"(?:\\[0-3][0-7][0-7])+")
+
+
+def decode_octal_escapes(name):
+    def fold(match):
+        text = match.group(0)
+        raw = bytes(int(text[i + 1:i + 4], 8) for i in range(0, len(text), 4))
+        try:
+            return raw.decode("utf-8")
+        except UnicodeDecodeError:
+            return text
+    return _OCTAL_ESCAPE_RUN.sub(fold, name)
+
+
 def st_key(name):
-    return FRAMEWORK_SWIFT_TESTING + "::" + name
+    return FRAMEWORK_SWIFT_TESTING + "::" + decode_octal_escapes(name)
 
 
 def xc_key(suite, method):
@@ -979,6 +1009,7 @@ def parse_run(text):
         m = _ST_ISSUE_NAMED.search(line) or _ST_ISSUE_FUNC.search(line)
         if m:
             name, source, message = m.group(1), m.group(3), m.group(6)
+            name = decode_octal_escapes(name)
             failure = failure_for(st_key(name), FRAMEWORK_SWIFT_TESTING, name)
             failure.kinds.add(_kind_of_issue(message))
             if source and not failure.source:
@@ -987,7 +1018,7 @@ def parse_run(text):
 
         m = _ST_FAIL_NAMED.search(line) or _ST_FAIL_FUNC.search(line)
         if m:
-            name = m.group(1)
+            name = decode_octal_escapes(m.group(1))
             failure = failure_for(st_key(name), FRAMEWORK_SWIFT_TESTING, name)
             # None when the line was truncated before its duration. The FAILURE
             # is what matters and is already recorded; a missing duration must
