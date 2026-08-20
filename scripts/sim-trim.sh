@@ -56,12 +56,14 @@ SIM_ID="${PLAYHEAD_SIM_ID:-}"
 INCLUDE_TIER_B="${PLAYHEAD_SIM_TRIM_TIER_B:-0}"
 SETTLE=0
 REPORT_ONLY=0
+RESTORE=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --sim-id) SIM_ID="$2"; shift 2 ;;
     --include-tier-b) INCLUDE_TIER_B=1; shift ;;
     --settle) SETTLE="$2"; shift 2 ;;
     --report-only) REPORT_ONLY=1; shift ;;
+    --restore) RESTORE=1; shift ;;
     *) echo "sim-trim: unknown argument '$1'" >&2; exit 2 ;;
   esac
 done
@@ -180,6 +182,37 @@ FILES=(scripts/sim-trim-jobs.txt)
 LABELS="$(cat "${FILES[@]}" | sed 's/#.*//' | tr -d ' \t' | /usr/bin/grep -v '^$' | sort -u)"
 COUNT="$(printf '%s\n' "$LABELS" | wc -l | tr -d ' ')"
 
+# --- --restore: put the device back the way an untrimmed gate finds it --------
+# THE TRIM OUTLIVES `simctl erase`, which is the opposite of what the erase in
+# the gate's own preamble leads you to expect. launchd's overrides for this
+# device live in /private/var/tmp/com.apple.CoreSimulator.SimDevice.<udid>/
+# disabled.plist — OUTSIDE the device's data directory — so erasing the device
+# and rebooting it leaves every disable in place. Measured: a boot after an
+# erase reported 15 jobs already recorded disabled from an earlier session.
+#
+# That is convenient for the gate and a trap for anyone measuring a CONTROL:
+# a run intended to be untrimmed is trimmed unless somebody undoes it. This is
+# the undo, and it goes through `launchctl enable` rather than deleting the
+# plist, so launchd is the thing that changes its own mind.
+if [ "$RESTORE" = "1" ]; then
+  ALL="$(cat scripts/sim-trim-jobs.txt scripts/sim-trim-jobs-tier-b.txt | sed 's/#.*//' | tr -d ' \t' | /usr/bin/grep -v '^$' | sort -u)"
+  BEFORE_R="$(sim_proc_count)"
+  echo "sim-trim: RESTORING $(printf '%s\n' "$ALL" | /usr/bin/grep -c .) job(s) on $SIM_ID (procs_before=$BEFORE_R)"
+  export SIM_ID DOMAIN
+  printf '%s\n' "$ALL" | xargs -P 6 -I{} sh -c \
+    'xcrun simctl spawn "$SIM_ID" launchctl enable "$DOMAIN/{}" >/dev/null 2>&1' >/dev/null 2>&1
+  STILL="$(lc print-disabled "$DOMAIN" | sed -n 's/.*"\(.*\)" => disabled.*/\1/p' | sort -u)"
+  LEFT="$(comm -12 <(printf '%s\n' "$ALL") <(printf '%s\n' "$STILL"))"
+  if [ -n "$LEFT" ]; then
+    echo "sim-trim: STILL DISABLED after restore — the control would be contaminated:"
+    printf '  %s\n' $LEFT
+    exit 3
+  fi
+  echo "sim-trim: restore OK — no listed job is recorded disabled."
+  echo "sim-trim: REBOOT the device for the restored jobs to actually start."
+  exit 0
+fi
+
 # A KEEP-list label in the job file is a hard stop, not a skip.
 CLASH="$(comm -12 <(printf '%s\n' "$LABELS") <(printf '%s\n' "$KEEP" | tr -d ' \t' | /usr/bin/grep -v '^$' | sort -u))"
 if [ -n "$CLASH" ]; then
@@ -197,7 +230,13 @@ BEFORE="$(sim_proc_count)"
 KNOWN_BEFORE="$(lc list | awk -F'\t' 'NR>1 {print $3}' | sort -u)"
 echo "sim-trim: $SIM_ID domain=$DOMAIN jobs=$COUNT tier_b=$INCLUDE_TIER_B  procs_before=$BEFORE"
 
-UNKNOWN="$(comm -23 <(printf '%s\n' "$LABELS") <(printf '%s\n' "$KNOWN_BEFORE"))"
+# A label is "unknown" only if launchd has neither a loaded job nor an override
+# for it. Without the second clause a re-run reports all 118 as unknown — because
+# `bootout` deletes the job from the domain, so everything the trim already
+# removed reads as missing. That is the same shape as the census defect this repo
+# keeps finding: a name that is ABSENT for a known reason read as evidence.
+PRE_DISABLED="$(lc print-disabled "$DOMAIN" | sed -n 's/.*"\(.*\)" => disabled.*/\1/p' | sort -u)"
+UNKNOWN="$(comm -23 <(comm -23 <(printf '%s\n' "$LABELS") <(printf '%s\n' "$KNOWN_BEFORE")) <(printf '%s\n' "$PRE_DISABLED"))"
 
 if [ "$REPORT_ONLY" = "1" ]; then
   echo "sim-trim: --report-only, nothing disabled"
