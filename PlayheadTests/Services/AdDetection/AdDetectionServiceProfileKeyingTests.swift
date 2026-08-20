@@ -341,6 +341,69 @@ struct AdDetectionServiceProfileKeyingTests {
         #expect(await service.cachedPodcastProfileForTesting(showId: nil) == nil)
     }
 
+    // MARK: - What the substitution is WORTH, on the owner's real device
+
+    /// playhead-2kxd acceptance criterion 6. "Two shows can be in the pipeline
+    /// at once" only matters if reading the wrong one CHANGES something, and
+    /// that is a question about real profiles rather than about fixtures.
+    ///
+    /// These two payloads are copied verbatim out of `podcast_profiles` in the
+    /// 2026-08-18 t3 device pull — the only two rows in it, and the whole
+    /// population of shows the owner's device has ever analysed. Both clear
+    /// every gate, so both shows have an ACTIVE show-local tier: substituting
+    /// one for the other is not a fallback to defaults, it is one show's
+    /// measured ad length asserted about another's episode.
+    ///
+    /// The test asserts the DIFFERENCE, not a particular number, so a future
+    /// change to `durationRangeHalfWidth` or the blend weights does not make
+    /// it a maintenance chore. What it pins is the claim the bead rests on:
+    /// on the real corpus these are not interchangeable.
+    @Test("device corpus: the two shows' resolved priors are materially different")
+    func deviceCorpusShowsAreNotInterchangeable() {
+        // Conan O'Brien Needs A Friend — 488 confirmed ad samples, mean 41.1 s.
+        let conan = makeProfile(
+            podcastId: "https://feeds.simplecast.com/dHoohVNH",
+            adDurationStatsJSON: #"{"sampleCount":488,"meanDuration":41.08485035056562}"#,
+            observationCount: 8
+        )
+        // The Diary Of A CEO — 113 samples, mean 20.0 s.
+        let doac = makeProfile(
+            podcastId: "https://rss2.flightcast.com/xmsftuzjjykcmqwolaqn6mdn",
+            adDurationStatsJSON: #"{"sampleCount":113,"meanDuration":19.969017852110145}"#,
+            observationCount: 7
+        )
+
+        func resolved(_ profile: PodcastProfile) -> ResolvedPriors {
+            PriorHierarchyResolver.resolve(
+                globalDefaults: .standard,
+                networkPriors: nil,
+                networkDecay: 0,
+                traitProfile: profile.traitProfile,
+                showLocalPriors: ShowLocalPriorsBuilder.build(from: profile)
+            )
+        }
+
+        let conanPriors = resolved(conan)
+        let doacPriors = resolved(doac)
+
+        #expect(conanPriors.activeLevel == .showLocal)
+        #expect(doacPriors.activeLevel == .showLocal)
+        #expect(
+            conanPriors.typicalAdDuration != doacPriors.typicalAdDuration,
+            """
+            playhead-2kxd: the two shows on the device pull resolve to the same \
+            typicalAdDuration, which would mean a cross-show read costs nothing \
+            on this corpus. Measured 2026-08-18 they do not: 41.1 s mean against \
+            20.0 s. Conan \(conanPriors.typicalAdDuration), DOAC \
+            \(doacPriors.typicalAdDuration).
+            """
+        )
+        // Direction, so the reading is not just "they differ": the show with
+        // the longer measured ads must resolve to the longer band.
+        #expect(conanPriors.typicalAdDuration.lowerBound > doacPriors.typicalAdDuration.lowerBound)
+        #expect(conanPriors.typicalAdDuration.upperBound > doacPriors.typicalAdDuration.upperBound)
+    }
+
     /// The key set is the real subject of the bead: one entry per show, named
     /// by that show. Pinned directly so a future change that quietly collapses
     /// it back to a single entry is a red test rather than a code review.
