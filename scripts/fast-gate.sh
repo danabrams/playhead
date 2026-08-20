@@ -280,6 +280,33 @@ run_gate () {
 
 echo "fast-gate: plan=$PLAN dest=$DEST derived=$DERIVED jobs=$JOBS (single-host; no clone parallelism)"
 LOG="$(mktemp -t fast-gate.XXXXXX)"
+
+# playhead-3rql: sample memory for the WHOLE run, not once at the end.
+# Six merge gates died of memory exhaustion and were each triaged by hand as a
+# test problem; the controlled experiment that settled it (keep the suspect 38
+# tests, remove 38 unrelated ones) died identically. Nothing in the run said so
+# because nothing was measuring. The series is cheap (a vm_stat and a ps every
+# 10 s) and it is what turns the next occurrence into a reading instead of a
+# reconstruction. It is deliberately NOT behind a skip flag: an instrument you
+# have to remember to switch on is off.
+MEM_SERIES="${PLAYHEAD_MEMORY_SERIES:-}"
+if [ -z "$MEM_SERIES" ]; then
+  MEM_SERIES="$(mktemp -t fast-gate-mem.XXXXXX).csv"
+fi
+MEM_ARGS=(--interval 10 --log "$LOG")
+[ "${PLAYHEAD_MEMORY_FOOTPRINT:-0}" = "1" ] && MEM_ARGS+=(--footprint)
+MEM_PID=""
+if command -v python3 >/dev/null 2>&1; then
+  python3 scripts/gate-memory-sample.py "$MEM_SERIES" "${MEM_ARGS[@]}" &
+  MEM_PID=$!
+fi
+stop_memory_sampler () {
+  [ -n "$MEM_PID" ] || return 0
+  kill -TERM "$MEM_PID" 2>/dev/null
+  wait "$MEM_PID" 2>/dev/null
+  MEM_PID=""
+}
+
 run_gate ${1+"$@"} 2>&1 | tee "$LOG"
 RC="${PIPESTATUS[0]}"
 
@@ -301,8 +328,25 @@ fi
 # ---------------------------------------------------------------------------
 # playhead-voez: the baseline verdict.
 # ---------------------------------------------------------------------------
+stop_memory_sampler
+
+# playhead-3rql: say, in memory terms, whether the run reached a verdict at all.
+# Exit codes are untouched — this reports, it does not judge. A run that DID
+# reach a verdict gets one line; a run that did not gets the evidence, and the
+# series is kept rather than deleted so it can be read afterwards.
+MEM_VERDICT_RC=0
+if [ -s "$MEM_SERIES" ]; then
+  python3 scripts/gate_memory_verdict.py --log "$LOG" --rc "$RC" --series "$MEM_SERIES"
+  MEM_VERDICT_RC=$?
+fi
+
 finish () {
   rm -f "$LOG"
+  if [ "$MEM_VERDICT_RC" -eq 0 ] && [ -z "${PLAYHEAD_MEMORY_SERIES:-}" ]; then
+    rm -f "$MEM_SERIES" "$MEM_SERIES.top"
+  elif [ -s "$MEM_SERIES" ]; then
+    echo "fast-gate: memory series kept at $MEM_SERIES"
+  fi
   [ -n "$BUNDLE_SCRATCH" ] && rm -rf "$BUNDLE_SCRATCH"
   exit "$1"
 }
