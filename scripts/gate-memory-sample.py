@@ -166,6 +166,7 @@ COLUMNS = [
     "simulator_mib",
     "compiler_mib",
     "testhost_footprint_mib",
+    "testhost_pid",
 ]
 
 
@@ -228,6 +229,7 @@ def main() -> int:
                 procs["simulator"],
                 procs["compiler"],
                 footprint_mib(host_pid) if args.footprint else -1,
+                host_pid,
             ]
             csv.write(",".join(str(v) for v in row) + "\n")
             top.write(
