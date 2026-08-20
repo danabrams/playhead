@@ -5834,8 +5834,15 @@ MUTATIONS=(
   # stay green while production passes `nil` and every mark on the device keeps
   # its whole scan window. Separate batches because each is the other's
   # control — dropping ONE site must redden ONE rail.
+  # SU23 names BOTH canaries and SU24 names only ONE, and the asymmetry is
+  # real rather than sloppy: the expectation field requires EVERY named test to
+  # fail. SU23 strips the argument from the `compose(` call itself, which the
+  # call-site canary sees; SU24 strips the index at the runner's OWN internal
+  # hop, one level above, where the `compose(` call still passes the parameter
+  # it was handed. Naming the call-site canary on SU24 too printed SURVIVED
+  # while its real rail was failing in the same run.
   "SU23|1189|ADSVC|$T_SHU5_WIRE;$T_SHU5_WIRE_SVC"
-  "SU24|1190|RUNNER|$T_SHU5_WIRE;$T_SHU5_WIRE_RUN"
+  "SU24|1190|RUNNER|$T_SHU5_WIRE_RUN"
 
   # -------------------------------------------------------------------------
   # playhead-lxkq — the ad-likelihood scan ORDER (X01-X16)
