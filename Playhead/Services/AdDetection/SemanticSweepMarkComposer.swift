@@ -111,8 +111,11 @@
 //      and it can only SHRINK — the whole pipeline above, dedupe included,
 //      has already decided WHETHER this mark exists, so localisation decides
 //      only HOW WIDE it is and can never admit a verdict the coarse geometry
-//      suppressed. See `localise(_:scanRows:supportLines:)` for the ladder and
-//      for why an unreadable ref and an absent one get opposite answers.
+//      suppressed — nor remove one: a row whose refs cannot be read, and a row
+//      that named none, both keep their window. See ``Localisation`` for why
+//      those two are nonetheless held apart, and ``contribution(of:in:supportLines:)``
+//      for the one line where treating `.absent` as no evidence at all is
+//      Dan's to authorise (playhead-my33).
 //
 //      THE FIELD CASE, which is Dan's own correction of 2026-08-19. On
 //      `CD2976E6` this composer marked [1510.4–1611.4] — 101.0 s — off a
@@ -1084,45 +1087,44 @@ enum SemanticSweepMarkComposer {
         }
     }
 
-    /// What ONE presence row contributes to a mark's extent, or `nil` when it
-    /// contributes NOTHING.
+    /// WHERE ONE PRESENCE ROW SAYS ITS AD IS — and, when it does not say, WHY
+    /// NOT. The three cases are kept apart because they are three different
+    /// claims, and the whole of this bead is that a claim about one thing was
+    /// being read as a claim about another.
+    enum Localisation: Equatable {
+        /// The model named these seconds, and we can read them.
+        case named([AdSpanBounds])
+        /// The model named LINES WE CANNOT READ — a stale `transcriptVersion`,
+        /// no index, a window this index does not reproduce. A failure of OUR
+        /// RECORDS, not of the verdict.
+        case unreadable
+        /// The model named NOTHING: no support object, or an empty
+        /// `supportLineRefs`. A property of the VERDICT.
+        case absent
+    }
+
+    /// Ask one row where its ad is.
     ///
-    /// The ladder, in the order it is tried, and the two `nil`s are not the
-    /// same `nil`:
-    ///
-    ///   1. a REFINEMENT row is already the model's narrowing — its own window
-    ///      is its contribution;
-    ///   2. a coarse row whose DECLINED pass B left a narrower window
-    ///      contributes that window (see ``declinedRefinementSpans(over:in:)``);
-    ///   3. a coarse row whose `supportLineRefs` RESOLVE contributes the spans
-    ///      they name;
-    ///   4. a coarse row that NAMED lines we cannot read — a stale
-    ///      `transcriptVersion`, a window this index does not reproduce —
-    ///      contributes its whole window, unchanged. Our records failed, not
-    ///      the model, and guessing at the geometry is how the boundary would
-    ///      land on the show (see `SupportLineIndex`'s header for the measured
-    ///      witness where it lands 22 s off);
-    ///   5. a coarse row that NAMED NOTHING contributes `nil`. Presence with no
-    ///      localisation is exactly what `maximumMarkDurationSeconds` already
-    ///      calls "a TARGETING problem … not something to put in front of a
-    ///      listener", and this is that rule at window scale rather than at
-    ///      300 s.
-    ///
-    /// 4 and 5 are the halves that must never be collapsed. One is a statement
-    /// about the verdict, the other about our ability to read it, and treating
-    /// an unreadable ref as an absent one would silently delete evidence.
-    static func contribution(
+    ///   1. a REFINEMENT row already IS the model's narrowing — its own window
+    ///      is the answer;
+    ///   2. a coarse row whose DECLINED pass B left a narrower window is
+    ///      localised by that window (see ``declinedRefinementSpans(over:in:)``);
+    ///   3. a coarse row whose `supportLineRefs` RESOLVE is localised by the
+    ///      spans they name;
+    ///   4. named but unresolvable → `.unreadable`;
+    ///   5. named nothing → `.absent`.
+    static func localisation(
         of row: SemanticScanResult,
         in rows: [SemanticScanResult],
         supportLines: SupportLineIndex?
-    ) -> [AdSpanBounds]? {
+    ) -> Localisation {
         let window = AdSpanBounds(start: row.windowStartTime, end: row.windowEndTime)
-        guard row.scanPass != refinementScanPass else { return [window] }
+        guard row.scanPass != refinementScanPass else { return .named([window]) }
 
         let declined = declinedRefinementSpans(over: row, in: rows)
-        if !declined.isEmpty { return padded(declined, within: window) }
+        if !declined.isEmpty { return .named(padded(declined, within: window)) }
 
-        guard let refs = supportLineRefs(of: row) else { return nil }
+        guard let refs = supportLineRefs(of: row) else { return .absent }
         guard let resolved = supportLines?.resolve(
             supportLineRefs: refs,
             in: SupportLineIndex.RowWindow(
@@ -1132,8 +1134,51 @@ enum SemanticSweepMarkComposer {
                 startTime: row.windowStartTime,
                 endTime: row.windowEndTime
             )
-        ) else { return [window] }
-        return padded(resolved, within: window)
+        ) else { return .unreadable }
+        return .named(padded(resolved, within: window))
+    }
+
+    /// What one presence row contributes to a mark's extent.
+    ///
+    /// # `.unreadable` AND `.absent` GET THE SAME ANSWER HERE, AND THAT IS A DECISION
+    ///
+    /// Both keep the row's whole window, which is the pre-shu5 behaviour, so
+    /// this bead never removes a mark — it only narrows the ones it can read.
+    ///
+    /// `.unreadable` keeping its window is not in question: our records failed,
+    /// not the model, and inventing geometry is how a boundary lands on the
+    /// show (`SupportLineIndex`'s header carries the measured witness, 22 s
+    /// off). What IS in question is how many rows land there — **130 of the
+    /// 301**, every one of them because the episode's transcript has moved on
+    /// since the scan and the row's segmentation no longer exists. That is a
+    /// bound on this bead's reach and it belongs to **playhead-kg6i**, not
+    /// here: shrinking it means composing from fewer versions, which removes
+    /// marks.
+    ///
+    /// `.absent` is a genuine open question and it is **Dan's**, filed as
+    /// **playhead-my33**. A `containsAd` row that names no lines is presence
+    /// with no localisation — the thing `maximumMarkDurationSeconds` already
+    /// calls "a TARGETING problem … not something to put in front of a
+    /// listener" — so there is a real case for contributing nothing. It was
+    /// measured before it was declined: 19 of the 301 coarse `containsAd` rows
+    /// on the 2026-08-19 pull are `.absent`, dropping them removes 2 marks and
+    /// a further 267.5 s (Dan's own [1131.6–1287.2] would fall to
+    /// [1131.6–1210.9]) — **and, read as transcript, roughly fifteen of the
+    /// nineteen are real ads**: LifeLock, Paragold, NetSuite, Whisperflow,
+    /// Progressive, the show's own conversation-cards promo. Four are show. So
+    /// the rule that would fix Dan's second veto also deletes a dozen correct
+    /// detections, which is a RECALL trade and not a geometry fix. It is one
+    /// line, right here, when he says so.
+    static func contribution(
+        of row: SemanticScanResult,
+        in rows: [SemanticScanResult],
+        supportLines: SupportLineIndex?
+    ) -> [AdSpanBounds] {
+        switch localisation(of: row, in: rows, supportLines: supportLines) {
+        case .named(let spans): spans
+        case .unreadable, .absent:
+            [AdSpanBounds(start: row.windowStartTime, end: row.windowEndTime)]
+        }
     }
 
     /// Widen each span by ``supportLocalisationPadSeconds`` at both edges and
@@ -1168,11 +1213,11 @@ enum SemanticSweepMarkComposer {
     ///
     /// # The two refusals
     ///
-    /// If NO contributing row localises — every one of them named nothing —
-    /// the extent has no supported second in it and nothing is returned. If
-    /// contributions exist but every piece falls under
-    /// `minimumMarkDurationSeconds`, the extent is returned UNCHANGED: that is
-    /// `clip`'s rule (*"refining geometry must never destroy the mark it is
+    /// An extent no presence row overlaps is returned UNCHANGED — a mark is
+    /// never deleted because the search for its own evidence came back empty.
+    /// And if contributions exist but every piece falls under
+    /// `minimumMarkDurationSeconds`, the extent is returned UNCHANGED too: that
+    /// is `clip`'s rule (*"refining geometry must never destroy the mark it is
     /// refining"*), applied to the other refiner.
     ///
     /// Pieces are unioned with `mergeGapSeconds` before the duration floor, so
@@ -1191,15 +1236,11 @@ enum SemanticSweepMarkComposer {
         guard !contributors.isEmpty else { return [extent] }
 
         let bounds = AdSpanBounds(start: extent.start, end: extent.end)
-        var anyLocalisation = false
         var pieces: [AdSpanBounds] = []
         for row in contributors {
-            guard let spans = contribution(of: row, in: scanRows, supportLines: supportLines)
-            else { continue }
-            anyLocalisation = true
+            let spans = contribution(of: row, in: scanRows, supportLines: supportLines)
             pieces.append(contentsOf: spans.compactMap { $0.clamped(to: bounds) })
         }
-        guard anyLocalisation else { return [] }
 
         let unioned = union(pieces)
             .filter { $0.duration >= minimumMarkDurationSeconds }

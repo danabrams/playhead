@@ -394,19 +394,34 @@ struct SemanticSweepExtentPolicyTests {
 
     /// The other half of the same rule, and the reason it is safe: a passB pass
     /// that ran and DECLINED does not retract the coarse presence verdict. Pass
-    /// A said an ad is here; pass B failed to localize it. Presence survives,
-    /// extent stays coarse — playhead-ynmk's presence-not-extent rule applied to
-    /// the composer's own input.
-    @Test("a declined passB refinement leaves the coarse presence verdict standing")
-    func aDeclinedPassBLeavesTheCoarseWindow() {
+    /// A said an ad is here; pass B failed to localize it. Presence survives —
+    /// playhead-ynmk's presence-not-extent rule applied to the composer's own
+    /// input.
+    ///
+    /// **WHAT IT STANDS AT CHANGED IN playhead-shu5, and this test used to
+    /// assert the other answer.** It expected [508, 599] — the whole coarse
+    /// window — on the reasoning that a declined pass B contributes nothing.
+    /// That reasoning skipped a step: the declined row's own WINDOW is not
+    /// nothing. The refinement planner builds it out of `focusLineRefs`, which
+    /// is the coarse row's `supportLineRefs` expanded to `minimumZoomSpanLines`,
+    /// and the pass-B writer persists the plan's segment bounds precisely so
+    /// that a row which found no ads can still "say where we looked". So the
+    /// coarse verdict stands over the seconds the model POINTED AT, not over
+    /// the ~95 s tile it was handed.
+    ///
+    /// The claim this test was written to protect is untouched and is still
+    /// asserted below: the mark SURVIVES. A failure to localize is not a
+    /// retraction, and it never was.
+    @Test("a declined passB refinement leaves presence standing, at the window it examined")
+    func aDeclinedPassBLeavesPresenceStandingAtItsOwnWindow() {
         let marks = Fx.compose(rows: [
             Fx.row(id: "a", start: 508, end: 599),
             Fx.row(id: "b", start: 520, end: 551, disposition: .noAds, scanPass: "passB"),
         ])
 
-        #expect(marks.count == 1)
-        #expect(marks.first?.startTime == 508)
-        #expect(marks.first?.endTime == 599)
+        #expect(marks.count == 1, "presence is NOT retracted by a failure to localize")
+        #expect(marks.first?.startTime == 520)
+        #expect(marks.first?.endTime == 551)
     }
 
     /// A passB verdict outside every coarse containsAd window is itself a
