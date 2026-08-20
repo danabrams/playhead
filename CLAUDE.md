@@ -209,7 +209,20 @@ Swift Testing starts **essentially every test at once**: peak in-flight is 11,00
 - `SWT_EXPERIMENTAL_MAXIMUM_PARALLELIZATION_WIDTH` — the string is in `Testing.framework` and the variable does reach the test process, and **Xcode's XCTest-hosted Swift Testing ignores it**. Peak in-flight was unchanged at 962 with it set to 100, and at 82 with it set to 4.
 - `TEST_RUNNER_<VAR>=…` on the `xcodebuild` command line — **not forwarded to a unit-test host.** Proved with `PerfGate`: `TEST_RUNNER_PLAYHEAD_RUN_PERF=1` left the gated test skipping.
 - The test plan's `defaultOptions.environmentVariableEntries` — **works.** Same probe, same test, ran and passed. This is how `PlayheadPerfTests` sets `PLAYHEAD_RUN_PERF`, and it is the only route into the test process.
-- The test plan's `"parallelizable": false` on the test target — **works, and is the only knob that bounds Swift Testing.** Peak in-flight 962 → 1. It costs ~1.8× on the test phase (1,117 tests: 17.6 s → 31.4 s) and it exposes **playhead-sip2**: four `SkipOrchestratorRevertTests` tests that pass only because the scheduler interleaves them.
+- The test plan's `"parallelizable": false` on the test target — **works, and is the only knob that bounds Swift Testing.** Peak in-flight 962 → 1.
+
+**Serialization was measured on the WHOLE plan, once, and it is a real trade rather than a fix — which is why it is not on.** `EXP2`, same protocol as every other run here:
+
+```
+                      unmodified            serialized
+test phase            230 – 252 s           1,147 s        4.6x
+peak demand           22.7 – 24.6 GiB       20.2 GiB       -2.5 to -4.4 GiB
+swap peak             10.4 – 29.3 GiB       7.8 GiB
+host peak footprint   2,110 – 2,223 MiB     ~660 MiB rss
+outcome               3 completed, 2 killed completed, 0 restarts, 0 NO VERDICT
+```
+
+It buys about 2 GiB of the 5–7 GiB overshoot and roughly quadruples the merge gate. It also turns **playhead-sip2** into four hard failures: `SkipOrchestratorRevertTests` has four tests that pass only because the scheduler interleaves them, and they fail in the full serialized plan exactly as they do scoped. Adopting it is a cost decision for the whole team, so it is written up in **playhead-blsh** rather than taken here.
 
 **WHAT THE GATE DOES NOW.** `scripts/fast-gate.sh` samples memory for the whole run (`scripts/gate-memory-sample.py`, ~10 s interval, no flag to forget) and ends by classifying the outcome (`scripts/gate_memory_verdict.py`):
 
@@ -390,6 +403,7 @@ Three things that will bite whoever re-measures:
 
 - **A cold/warm split was tried and the data rejected it.** The obvious refinement is a cheaper threshold when `.derivedData/Build` exists, since a fresh worktree must create ~2.8 GiB of cache. Run 2 was the warm one and drew down **more**. Simulator state moves by ~8 GiB depending on whether the destination was recently erased, and it swamps the cache saving. Two variables, two runs, neither isolated.
 - **`df` Avail on APFS lags on the way back up.** Run 2 read 8.86 GiB free the moment it exited and 16.00 GiB two minutes later. The *minimum* is still the number to use — it is the same metric by which this box "hit 100 % capacity" — but never compute what a run keeps from a reading taken at exit.
+- **THE 13.5 GiB DOES NOT COVER SWAP, AND SWAP IS WHAT ACTUALLY FILLS THE VOLUME (playhead-3rql, 2026-08-20).** The two runs above were measured on a box that was not short of memory, so their drawdown is cache and build products. On a run that exceeds RAM the kernel pages, the swapfile lives on this same volume, and the arithmetic changes completely: `ACCEPT-2` started with **31.75 GiB free**, passed the preflight comfortably, and ended with **0.48 GiB** — because `vm.swapusage used` had grown to **29.97 GiB**. Most of that is not the test phase (steady at ~8 GiB of swap and ~17 GiB free) but the AFTERMATH: once the test host died, xcodebuild spent minutes collecting diagnostics from a 200-process simulator and swap went 13 → 30 GiB. That is what converts a recoverable host restart into `Killed: 9` with no result bundle at all. So a preflight figure measured on a healthy run is not a bound on a sick one, and the honest reading of a 137 is to look at `disk free min` on the memory series (`scripts/gate-memory-sample.py` records both) before concluding anything about RAM.
 - **The threshold applies to selective runs too** (`-only-testing:`, i.e. how `mutation-battery.sh` drives the gate). A selective run costs less, but how much less was not measured, so the conservative number governs. If that bites, `--reclaim-disk` or `PLAYHEAD_DISK_MIN_GIB` are the answers.
 
 `PLAYHEAD_SKIP_DISK_PREFLIGHT=1` bypasses the check entirely. It is deliberately **not** printed in the refusal, for the same reason as `PLAYHEAD_SKIP_BASELINE`: an override quoted in the failure message stops being an override and becomes the documented workaround.
