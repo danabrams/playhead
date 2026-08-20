@@ -10178,6 +10178,18 @@ MUTATIONS=(
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
 # script permanently red, which would train people to ignore it):
 #
+#   PK08 (playhead-2kxd) — delete `!showId.isEmpty` from the READER's guard in
+#   `cachedPodcastProfile(forShowId:)`, leaving `guard let showId else { return
+#   nil }`. It SURVIVES, and it is a PROVEN EQUIVALENT rather than a missing
+#   rail: with the writer's guard intact (PK06/PK07 cover both writers) the
+#   empty string is never a key, so `podcastProfilesByShowId[""]` is `nil`
+#   either way and no test could distinguish the two. Note the reader guard is
+#   not therefore pointless — it is defense-in-depth against a future writer
+#   that does not go through `cachePodcastProfile(_:)`, and what actually
+#   prevents that writer is `AdDetectionServiceProfileKeyingCanaryTests`'s
+#   storage allow-list, not a behavioural test. Deleting the whole guard is not
+#   a candidate at all: `showId` is optional, so it fails to compile.
+#
 #   N01 — `revertWindow`: relocate its `recordThresholdControlSignal` and trust
 #   penalty BELOW the lifecycle guard, so a replacement landing during
 #   `store.persistRevertedAdWindow` discards feedback the CAPTURED show is
