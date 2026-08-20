@@ -308,7 +308,15 @@ struct AdDetectionServiceProfileKeyingTests {
     /// (see `RegionShadowPhase.run` and `SemanticScanClaim.claimRow`), so it
     /// must never become a dictionary key — otherwise every identity-less
     /// episode shares one entry and the slot is back under another name.
-    @Test("a profile carrying an empty podcastId is not cached at all")
+    ///
+    /// ASSERTED ON THE KEY SET, NOT ON THE READER. `cachedPodcastProfileForTesting(showId: "")`
+    /// answers `nil` whether the empty id was never stored or the reader
+    /// merely refuses to look it up, so a rail written on the reader alone
+    /// would hold with `cachePodcastProfile`'s guard deleted — a test that
+    /// passes if the thing it names never happened. Both writers are exercised:
+    /// the init seed (`seededProfileMap`) and the post-backfill cache
+    /// (`cachePodcastProfile`) have separate guards and separate mutants.
+    @Test("a profile carrying an empty podcastId is not cached at all, by either writer")
     func emptyPodcastIdIsNeverAKey() async throws {
         let store = try await makeTestStore()
         let service = makeService(
@@ -316,7 +324,39 @@ struct AdDetectionServiceProfileKeyingTests {
             profile: makeProfile(podcastId: "", title: "identity-less")
         )
 
+        // Writer 1: the init seed.
+        #expect(
+            await service.cachedProfileShowIdsForTesting().isEmpty,
+            "seededProfileMap admitted an empty podcastId as a key"
+        )
+
+        // Writer 2: a completed backfill that carries no show identity.
+        try await finishBackfill(service, forShow: "", windowId: "win-2kxd-empty")
+        #expect(
+            !(await service.cachedProfileShowIdsForTesting().contains("")),
+            "cachePodcastProfile admitted an empty podcastId as a key"
+        )
+
         #expect(await service.cachedPodcastProfileForTesting(showId: "") == nil)
         #expect(await service.cachedPodcastProfileForTesting(showId: nil) == nil)
+    }
+
+    /// The key set is the real subject of the bead: one entry per show, named
+    /// by that show. Pinned directly so a future change that quietly collapses
+    /// it back to a single entry is a red test rather than a code review.
+    @Test("the cache holds one entry per show, named by that show")
+    func theCacheIsKeyedByShow() async throws {
+        let store = try await makeTestStore()
+        let service = makeService(
+            store: store,
+            profile: makeShowLocalActivatingProfile(podcastId: Self.showA)
+        )
+        #expect(await service.cachedProfileShowIdsForTesting() == [Self.showA])
+
+        try await finishBackfill(service, forShow: Self.showB)
+        #expect(
+            await service.cachedProfileShowIdsForTesting() == [Self.showA, Self.showB],
+            "show B's backfill must ADD an entry, not replace show A's"
+        )
     }
 }

@@ -2132,6 +2132,18 @@ actor AdDetectionService {
     func cachedPodcastProfileForTesting(showId: String?) -> PodcastProfile? {
         cachedPodcastProfile(forShowId: showId)
     }
+
+    /// Test-only view of the cache's KEY SET, and it exists because the
+    /// accessor above cannot answer the question.
+    /// `cachedPodcastProfileForTesting(showId: "")` returns `nil` whether the
+    /// empty id was never stored OR the reader simply refuses to look it up —
+    /// so a rail written on the reader alone passes even with
+    /// ``cachePodcastProfile(_:)``'s guard deleted, which is a test that would
+    /// hold if the thing it names never happened. This is the only thing that
+    /// can tell the two apart.
+    func cachedProfileShowIdsForTesting() -> Set<String> {
+        Set(podcastProfilesByShowId.keys)
+    }
     #endif
 
     /// Episode duration for position-based scoring.

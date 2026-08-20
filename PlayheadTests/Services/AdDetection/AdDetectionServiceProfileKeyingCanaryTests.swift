@@ -45,6 +45,26 @@ struct AdDetectionServiceProfileKeyingCanaryTests {
         "return podcastProfilesByShowId[showId]",
         "podcastProfilesByShowId[profile.podcastId] = profile",
         "self.podcastProfilesByShowId = Self.seededProfileMap(podcastProfile)",
+        // `#if DEBUG` only, and a READ of the key set rather than of any
+        // profile: it is what lets a test tell "the empty id was never
+        // stored" from "the reader refuses to look it up".
+        "Set(podcastProfilesByShowId.keys)",
+    ]
+
+    /// The expressions a read is allowed to be keyed on. Both name a show
+    /// identity that was handed IN — `podcastId` at every production read,
+    /// `showId` inside the DEBUG accessor.
+    ///
+    /// This is an allow-list of NAMES rather than a shape check, and the
+    /// difference is the whole point: `catalogShowId` and `analysisAssetId`
+    /// are both in scope inside `runBackfill`, both are perfectly well-formed
+    /// identifiers, and neither is this episode's show. A predicate that only
+    /// asked "is it an identifier rather than a literal?" would wave both
+    /// through — which is the same mistake as reading a value that names one
+    /// thing as though it named another.
+    private static let sanctionedReadArguments: Set<String> = [
+        "podcastId",
+        "showId",
     ]
 
     private func strippedService() throws -> String {
@@ -119,19 +139,25 @@ struct AdDetectionServiceProfileKeyingCanaryTests {
             """
         )
 
-        let bad = arguments.filter { !Self.isShowIdentityExpression($0.text) }
+        let bad = arguments.filter { !Self.sanctionedReadArguments.contains($0.text) }
         #expect(
             bad.isEmpty,
             """
-            playhead-2kxd: a profile read does not name a show, at line(s) \
+            playhead-2kxd: a profile read is keyed on something other than the \
+            show identity handed in, at line(s) \
             \(bad.map(\.number).map(String.init).joined(separator: ", ")):
 
             \(bad.map { "  \($0.number): cachedPodcastProfile(forShowId: \($0.text))" }.joined(separator: "\n"))
 
             The question every read has to answer is *whose profile is this*. \
             A string literal hardcodes one show; `nil` asks for "the current \
-            one", which is the question this bead deleted. Pass the request's \
-            `podcastId`.
+            one", which is the question this bead deleted; and an in-scope \
+            identifier from a DIFFERENT identity space — `catalogShowId`, \
+            `analysisAssetId` — is the failure that looks most like success. \
+            Pass the request's `podcastId`. If a new call site genuinely \
+            threads the show under another name, add that name to \
+            `sanctionedReadArguments`, deliberately, in a diff a reviewer \
+            reads.
             """
         )
     }
@@ -230,29 +256,43 @@ struct AdDetectionServiceProfileKeyingCanaryTests {
         )
     }
 
-    @Test("control: the read check rejects nil and a string literal, and accepts an identifier")
-    func readCheckFiresOnALiteralOrNil() {
-        #expect(Self.isShowIdentityExpression("podcastId"))
-        #expect(Self.isShowIdentityExpression("showId"))
-        #expect(!Self.isShowIdentityExpression("nil"))
-
+    @Test("control: the read check rejects nil, a literal, and a WRONG in-scope identifier")
+    func readCheckFiresOnALiteralNilOrWrongIdentity() {
         // A string literal survives stripping as a blanked pair of quotes,
-        // which is exactly the shape the predicate has to refuse.
+        // which is exactly the shape the check has to refuse.
         let literalCall = SwiftSourceInspector.strippingCommentsAndStrings(
             #"_ = cachedPodcastProfile(forShowId: "show-hardcoded")"#
         )
-        let args = Self.readCallArguments(in: literalCall)
-        #expect(args.count == 1, "the extractor must find the call at all")
+        let literalArgs = Self.readCallArguments(in: literalCall)
+        #expect(literalArgs.count == 1, "the extractor must find the call at all")
         #expect(
-            args.allSatisfy { !Self.isShowIdentityExpression($0.text) },
-            "a hardcoded show id must be refused; got \(args.map(\.text))"
+            literalArgs.allSatisfy { !Self.sanctionedReadArguments.contains($0.text) },
+            "a hardcoded show id must be refused; got \(literalArgs.map(\.text))"
         )
 
-        let nilCall = "_ = cachedPodcastProfile(forShowId: nil)"
-        #expect(
-            Self.readCallArguments(in: nilCall).allSatisfy { !Self.isShowIdentityExpression($0.text) },
-            "`nil` asks for `the current show`, which is the question this bead deleted"
-        )
+        for rejected in ["nil", "catalogShowId", "analysisAssetId", ""] {
+            let call = "_ = cachedPodcastProfile(forShowId: \(rejected))"
+            let args = Self.readCallArguments(in: call)
+            #expect(args.count == 1, "the extractor must find `\(rejected)`")
+            #expect(
+                args.allSatisfy { !Self.sanctionedReadArguments.contains($0.text) },
+                """
+                `\(rejected)` must be refused. `nil` asks for "the current \
+                show"; `catalogShowId` and `analysisAssetId` are in-scope \
+                identifiers from other identity spaces, which is the \
+                rejection that matters most and the one a shape-only check \
+                would miss.
+                """
+            )
+        }
+
+        // …and the two sanctioned names must be ACCEPTED, or the check is a
+        // rule nobody could ever satisfy.
+        for accepted in ["podcastId", "showId"] {
+            let args = Self.readCallArguments(in: "_ = cachedPodcastProfile(forShowId: \(accepted))")
+            #expect(args.map(\.text) == [accepted])
+            #expect(args.allSatisfy { Self.sanctionedReadArguments.contains($0.text) })
+        }
     }
 
     @Test("control: the shadow-phase check rejects a profile keyed on a DIFFERENT identifier")
@@ -329,13 +369,6 @@ struct AdDetectionServiceProfileKeyingCanaryTests {
                 .components(separatedBy: "\n").count
             return SourceLine(number: line, text: arg)
         }
-    }
-
-    /// A show identity is a bare identifier (optionally a member access such
-    /// as `profile.podcastId`) — never `nil`, never a literal.
-    private static func isShowIdentityExpression(_ text: String) -> Bool {
-        guard text != "nil", !text.isEmpty, !text.contains("\"") else { return false }
-        return regexMatches(#"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$"#, in: text)
     }
 
     /// The balanced-paren argument text that follows `opener` in `source`.
