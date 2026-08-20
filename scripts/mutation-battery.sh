@@ -2383,6 +2383,18 @@ FOCUSED_SUITES=(
   -only-testing:PlayheadTests/MetadataActivationConfigTests
   -only-testing:PlayheadTests/DomainClassificationTests
   -only-testing:PlayheadTests/MetadataOwnershipWiringSourceCanaryTests
+  # playhead-2kxd: the podcast profile keyed BY SHOW (PK series). Two suites,
+  # because the two halves of the claim cannot observe each other. The
+  # behavioural suite is the only thing that drives TWO SHOWS through one
+  # actor — sequentially and genuinely interleaved — so it is the only thing
+  # that can see a slot answering with the wrong show. The source canary is
+  # the only thing that can see the read site somebody adds NEXT: three review
+  # rounds each hardened one read by hand and the defect survived all three,
+  # which is precisely the evidence that a behavioural suite over today's call
+  # sites is not enough. It is also the only thing that can catch a read keyed
+  # on `catalogShowId` — in scope, well-formed, and a different identity space.
+  -only-testing:PlayheadTests/AdDetectionServiceProfileKeyingTests
+  -only-testing:PlayheadTests/AdDetectionServiceProfileKeyingCanaryTests
 )
 
 # Named to match the `/private/tmp/playhead-*` pattern `scripts/disk-cleanup.sh`
@@ -4305,6 +4317,20 @@ T_CL_DETAIL_SELECTED="Catalog DETAIL reports the entries this span heard, not th
 T_CL_ARITH="Catalog weight is entryCount x perEntryFraction x cap, clamped at the cap"
 T_CL_XSHOW_HULL="Read set: a repeat's HULL does not put it in the read set of the spans between"
 T_CL_XSHOW_ONE="Read set: a brand heard twice inside one span yields ONE entity"
+
+# playhead-2kxd — the podcast profile keyed BY SHOW (PK series). Behavioural
+# rails first, then the three source canaries.
+T_PK_ASKED="resolveEpisodePriors answers for the show it was ASKED about, not the last show written"
+T_PK_OTHER="resolveEpisodePriors for the OTHER show reports that show, not the seeded one"
+T_PK_INTERLEAVE="two shows interleaved across the actor's await points never read each other's profile"
+T_PK_UNTOUCHED="a completed backfill for one show leaves the other show's entry untouched"
+T_PK_UNKNOWN="a show nobody has analysed resolves to nothing, not to somebody else's profile"
+T_PK_FAILCLOSED="a nil or empty show id fails closed even when profiles are cached"
+T_PK_EMPTYKEY="a profile carrying an empty podcastId is not cached at all, by either writer"
+T_PK_KEYSET="the cache holds one entry per show, named by that show"
+T_PK_STORAGE="the per-show profile storage is mentioned only by its declaration, its two accessors and the init seed"
+T_PK_READS="every read of the per-show profile passes a show identity, never a literal and never nil"
+T_PK_SHADOW="RegionShadowPhase gets the profile of the very show it is told about"
 
 MUTATIONS=(
   # Batch 900 — JC01, THE SHIPPED DEFECT VERBATIM. The pre-insert guard asks
@@ -10067,6 +10093,86 @@ MUTATIONS=(
   # rename changed behaviour.
   "E899|1163|OWNG|$T_E8_LINK_REFUSED;$T_E8_LINK_AGREES"
 
+  # ── playhead-2kxd — the podcast profile keyed BY SHOW (PK series) ──────────
+  #
+  # Read the series as three groups, because they cover three different ways
+  # the defect comes back and only one of them is the one that shipped.
+  #
+  #   PK01/PK02  restore the SLOT — one entry, or a fallback to "whatever is
+  #              in there". This is the shipped defect, and PK02 is the exact
+  #              thing `classifyCandidates`'s comment refused to do.
+  #   PK03-PK05  keep the map and key it WRONG at one call site. PK04 and PK05
+  #              use identifiers that are genuinely in scope and genuinely
+  #              well-formed, which is the failure mode that looks most like
+  #              success.
+  #   PK06/PK07  delete one of the two empty-id guards. They are two entries
+  #              rather than one because there are two writers with two
+  #              guards, and a rail that only drove one of them would credit
+  #              the other for free.
+  #
+  # NOTE ON THE CANARY IN THE KILL SETS. Every mutation that touches the
+  # storage line necessarily reddens `$T_PK_STORAGE` as well — an allow-list
+  # of exact lines cannot be otherwise. That is not double-counting a rail:
+  # the canary is what catches the shape on a tree where no behavioural test
+  # happens to cover the new site, and naming it here is what proves it does.
+
+  # PK01 — THE SLOT, RESTORED VERBATIM. The write replaces the whole map
+  # instead of inserting one entry, so exactly one show's profile exists at a
+  # time and it is the last one that finished a backfill. Measured on the base
+  # commit with this same scenario: show A resolves to `.global` the moment
+  # show B's `updatePriors` lands, i.e. A's show-local tier — 20 confirmed ad
+  # samples over 12 episodes — silently deactivates.
+  "PK01|1164|ADSVC|$T_PK_ASKED;$T_PK_UNTOUCHED;$T_PK_KEYSET;$T_PK_STORAGE"
+
+  # PK02 — the read FALLS BACK to whatever is cached when the requested show
+  # is absent. This is precisely what `classifyCandidates` has always refused
+  # in prose ("a nil/blank request must fail closed instead of querying a
+  # stale show's cache") and what nothing enforced. A show nobody has analysed
+  # is answered with a stranger's sponsor lexicon and duration priors.
+  "PK02|1165|ADSVC|$T_PK_UNKNOWN;$T_PK_STORAGE"
+
+  # PK03 — the resolver stops naming a show: `forShowId: nil`. Every episode
+  # falls to global defaults, which is the QUIET direction — no wrong show,
+  # just the whole prior hierarchy switched off. Killed by the canary (a read
+  # that names no show) and by the fixture check in the behavioural rail.
+  "PK03|1166|ADSVC|$T_PK_READS;$T_PK_ASKED"
+
+  # PK04 — `RegionShadowPhase` is handed the profile keyed on
+  # `analysisAssetId`. An asset id is not a show id, so the phase is told
+  # "this episode is show X" while being given nothing (or, on a collision,
+  # anything). Both canaries see it: the read is keyed on an unsanctioned
+  # name, AND the phase's two arguments stop naming the same expression.
+  "PK04|1167|ADSVC|$T_PK_READS;$T_PK_SHADOW"
+
+  # PK05 — the SELF-PROMO identity is keyed on `catalogShowId`. This is the
+  # entry that justifies the canary being an allow-list of NAMES rather than a
+  # check that the argument is an identifier: `catalogShowId` is in scope, is
+  # well-formed, and is a different identity space. No behavioural test in the
+  # tree covers this site (it needs the self-promo bank flag on and a full
+  # backfill), so the canary is the ONLY thing that can see it — which is the
+  # whole argument for having one.
+  "PK05|1168|ADSVC|$T_PK_READS"
+
+  # PK06 — the INIT SEED's empty-id guard is deleted, so a profile carrying no
+  # show identity becomes the `""` key. Every identity-less episode would then
+  # share one entry: the slot, back under another name.
+  "PK06|1169|ADSVC|$T_PK_EMPTYKEY"
+
+  # PK07 — the POST-BACKFILL writer's empty-id guard is deleted. Same defect,
+  # different writer. It is a separate entry because the rail that covers PK06
+  # would pass with this guard gone and vice versa — and note that the rail
+  # can only tell them apart by reading the KEY SET: the reader answers `nil`
+  # for `""` either way, so a test written on the reader alone would credit
+  # both guards for free.
+  "PK07|1170|ADSVC|$T_PK_EMPTYKEY"
+
+  # PK99 — VACUITY CONTROL, and it MUST SURVIVE. A pure rename of the local in
+  # `resolveEpisodePriors` that holds the resolved profile: declaration and
+  # all three uses, nothing else. Non-empty expectation on purpose — it names
+  # the rails PK01 and PK03 kill, so a KILLED verdict here would mean a rename
+  # changed behaviour.
+  "PK99|1171|ADSVC|$T_PK_ASKED;$T_PK_UNTOUCHED"
+
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -10296,6 +10402,14 @@ describe_mutation() {
     E817) echo "e8mg: the REFRESH path stops writing the owner address — a show that changes hands keeps the old one forever" ;;
     E818) echo "e8mg: the INSERT path drops it, so the field is nil for every podcast added after this ships" ;;
     E899) echo "VACUITY CONTROL — the owner-domain local in ingestRSSFeed is renamed and nothing else is. MUST SURVIVE" ;;
+    PK01) echo "2kxd SHIPPED DEFECT: cachePodcastProfile REPLACES the map, so one show's profile exists at a time — the slot, restored" ;;
+    PK02) echo "2kxd: the read falls back to podcastProfilesByShowId.values.first — exactly what classifyCandidates refused in prose" ;;
+    PK03) echo "2kxd: resolveEpisodePriors names no show (forShowId: nil) — every episode falls to global defaults, the QUIET direction" ;;
+    PK04) echo "2kxd: RegionShadowPhase is handed the profile keyed on analysisAssetId — an asset id is not a show id" ;;
+    PK05) echo "2kxd: the self-promo identity is keyed on catalogShowId — in scope, well-formed, and a different identity space" ;;
+    PK06) echo "2kxd: the INIT SEED admits an empty podcastId as a key, so every identity-less episode shares one entry" ;;
+    PK07) echo "2kxd: the POST-BACKFILL writer admits an empty podcastId as a key — same defect, the other writer" ;;
+    PK99) echo "VACUITY CONTROL — the resolved-profile local in resolveEpisodePriors is renamed and nothing else is. MUST SURVIVE" ;;
     YX99) echo "VACUITY CONTROL — the band in buildFMLedgerEntries is bound through a renamed intermediate on the line YX01 rewrites; nothing else changes. MUST SURVIVE" ;;
     NY01) echo "AdDetectionService.hotPathCandidates sorts the RAW array — the shipped defect: runBackfill canonicalized and the hot path did not" ;;
     NY02) echo "the hot path 'de-duplicates' by chunk.id, a per-ROW UUID, so a fast/final twin survives it intact" ;;
@@ -23273,6 +23387,104 @@ EOF
             frequency: accruedFrequency,
             canonicalSponsorId: nil
         )
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  PK01)
+    snippet OLD <<'EOF'
+    private func cachePodcastProfile(_ profile: PodcastProfile) {
+        guard !profile.podcastId.isEmpty else { return }
+        podcastProfilesByShowId[profile.podcastId] = profile
+    }
+EOF
+    snippet NEW <<'EOF'
+    private func cachePodcastProfile(_ profile: PodcastProfile) {
+        guard !profile.podcastId.isEmpty else { return }
+        podcastProfilesByShowId = [profile.podcastId: profile]
+    }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  PK02)
+    snippet OLD <<'EOF'
+        guard let showId, !showId.isEmpty else { return nil }
+        return podcastProfilesByShowId[showId]
+EOF
+    snippet NEW <<'EOF'
+        guard let showId, !showId.isEmpty else { return nil }
+        return podcastProfilesByShowId[showId] ?? podcastProfilesByShowId.values.first
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  PK03)
+    snippet OLD <<'EOF'
+        let episodeProfile = cachedPodcastProfile(forShowId: podcastId)
+EOF
+    snippet NEW <<'EOF'
+        let episodeProfile = cachedPodcastProfile(forShowId: nil)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  PK04)
+    snippet OLD <<'EOF'
+            podcastProfile: cachedPodcastProfile(forShowId: podcastId),
+EOF
+    snippet NEW <<'EOF'
+            podcastProfile: cachedPodcastProfile(forShowId: analysisAssetId),
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  PK05)
+    snippet OLD <<'EOF'
+            let selfPromoShowProfile = cachedPodcastProfile(forShowId: podcastId)
+EOF
+    snippet NEW <<'EOF'
+            let selfPromoShowProfile = cachedPodcastProfile(forShowId: catalogShowId)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  PK06)
+    snippet OLD <<'EOF'
+        guard let profile, !profile.podcastId.isEmpty else { return [:] }
+        return [profile.podcastId: profile]
+EOF
+    snippet NEW <<'EOF'
+        guard let profile else { return [:] }
+        return [profile.podcastId: profile]
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  PK07)
+    snippet OLD <<'EOF'
+    private func cachePodcastProfile(_ profile: PodcastProfile) {
+        guard !profile.podcastId.isEmpty else { return }
+        podcastProfilesByShowId[profile.podcastId] = profile
+    }
+EOF
+    snippet NEW <<'EOF'
+    private func cachePodcastProfile(_ profile: PodcastProfile) {
+        podcastProfilesByShowId[profile.podcastId] = profile
+    }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  PK99)
+    snippet OLD <<'EOF'
+        let episodeProfile = cachedPodcastProfile(forShowId: podcastId)
+        let traitProfile = episodeProfile?.traitProfile ?? .unknown
+        let showLocal = ShowLocalPriorsBuilder.build(from: episodeProfile)
+EOF
+    snippet NEW <<'EOF'
+        let resolvedShowProfile = cachedPodcastProfile(forShowId: podcastId)
+        let traitProfile = resolvedShowProfile?.traitProfile ?? .unknown
+        let showLocal = ShowLocalPriorsBuilder.build(from: resolvedShowProfile)
+EOF
+    patch "$file" "$OLD" "$NEW"
+    snippet OLD <<'EOF'
+        if let snapshotProfile = episodeProfile,
+EOF
+    snippet NEW <<'EOF'
+        if let snapshotProfile = resolvedShowProfile,
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
