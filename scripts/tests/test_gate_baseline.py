@@ -4062,5 +4062,66 @@ class FastGateBundleWiringTests(unittest.TestCase):
                           written[gb.NO_VERDICT_KEY][gb.CENSUS_TESTS_KEY])
 
 
+class OctalEscapedConsoleNames(unittest.TestCase):
+    """playhead-3rql: the console spells one test's name two different ways.
+
+    Measured on a real full-plan run that PASSED — 11,626 tests, zero failures,
+    zero host restarts, `** TEST SUCCEEDED **`:
+
+        ◇ Test "... acquireLease \\342\\200\\224 the production shape ..." started.
+        ✔ Test "... acquireLease — the production shape ..." passed after 143.874 seconds.
+
+    The start line escapes non-ASCII as C octal byte escapes and the verdict
+    line prints the character. Keyed literally they are two different tests, so
+    the census (`started - ran - skipped`) reports the first as a casualty that
+    lost its verdict. That is the whole gate going red on a clean run.
+    """
+
+    EM = "\\342\\200\\224"          # the octal spelling of U+2014
+    NAME = "a row leased through acquireLease %s the production shape"
+
+    def escaped(self):
+        return self.NAME % self.EM
+
+    def literal(self):
+        return self.NAME % "\u2014"
+
+    def test_the_two_spellings_are_one_key(self):
+        self.assertEqual(gb.st_key(self.escaped()), gb.st_key(self.literal()))
+
+    def test_a_test_started_escaped_and_passed_literal_is_not_a_casualty(self):
+        run = gb.parse_run(log(
+            '◇ Test "%s" started.\n' % self.escaped()
+            + '✔ Test "%s" passed after 143.874 seconds.\n' % self.literal()
+        ))
+        self.assertEqual(set(), run.no_verdict)
+
+    def test_a_genuinely_lost_verdict_is_still_a_casualty(self):
+        # Anti-vacuity: folding the escapes must not fold every name together.
+        run = gb.parse_run(log(st_silent("only started")))
+        self.assertEqual({gb.st_key("only started")}, run.no_verdict)
+
+    def test_a_failure_reported_escaped_is_reported_readably(self):
+        run = gb.parse_run(log(
+            '◇ Test "%s" started.\n' % self.escaped()
+            + '✘ Test "%s" failed after 1.0 seconds with 1 issue.\n' % self.escaped()
+        ))
+        key = gb.st_key(self.literal())
+        self.assertIn(key, run.failures)
+        self.assertEqual(self.literal(), run.failures[key].name)
+
+    def test_an_escape_that_is_not_valid_utf8_is_left_alone(self):
+        # \377\377 is not a UTF-8 sequence. Decoding it would either throw or
+        # invent a name; the honest answer is to leave the spelling as printed.
+        self.assertEqual("bad \\377\\377 bytes",
+                         gb.decode_octal_escapes("bad \\377\\377 bytes"))
+
+    def test_a_backslash_and_three_digits_that_are_not_an_escape_survive(self):
+        self.assertEqual("path C:\\999 ok", gb.decode_octal_escapes("path C:\\999 ok"))
+
+    def test_names_without_escapes_are_untouched(self):
+        self.assertEqual("plain name", gb.decode_octal_escapes("plain name"))
+
+
 if __name__ == "__main__":
     unittest.main()
