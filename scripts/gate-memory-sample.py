@@ -74,6 +74,22 @@ def vm_stat_sample() -> dict[str, int]:
     return sample
 
 
+def disk_free_mib(path: str = "/System/Volumes/Data") -> int:
+    """Free space on the volume the swapfile lives on.
+
+    Swap is the only thing standing between this box and a memorystatus kill,
+    and swap is a FILE. A run can therefore die of memory because the DISK ran
+    out — which reads as neither, unless both are on the same series.
+    scripts/gate-disk-sample.sh measures this for the gate's own artefacts; this
+    column exists so a memory reading is never interpreted without it.
+    """
+    try:
+        st = os.statvfs(path)
+    except OSError:
+        return -1
+    return int(st.f_bavail * st.f_frsize) // MIB
+
+
 def swap_used_mib() -> int:
     out = subprocess.run(
         ["sysctl", "-n", "vm.swapusage"], capture_output=True, text=True, check=False
@@ -167,6 +183,7 @@ COLUMNS = [
     "compiler_mib",
     "testhost_footprint_mib",
     "testhost_pid",
+    "disk_free_mib",
 ]
 
 
@@ -230,6 +247,7 @@ def main() -> int:
                 procs["compiler"],
                 footprint_mib(host_pid) if args.footprint else -1,
                 host_pid,
+                disk_free_mib(),
             ]
             csv.write(",".join(str(v) for v in row) + "\n")
             top.write(
