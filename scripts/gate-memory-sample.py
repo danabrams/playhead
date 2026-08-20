@@ -95,28 +95,55 @@ CLASSES = (
 )
 
 
-def process_sample() -> tuple[dict[str, int], list[tuple[int, str]]]:
+def process_sample() -> tuple[dict[str, int], list[tuple[int, str]], int]:
     out = subprocess.run(
-        ["ps", "-Ao", "rss=,comm="], capture_output=True, text=True, check=False
+        ["ps", "-Ao", "pid=,rss=,comm="], capture_output=True, text=True, check=False
     ).stdout
     totals = {name: 0 for name, _ in CLASSES}
     rows: list[tuple[int, str]] = []
+    host_pid = 0
+    host_rss = -1
     for line in out.splitlines():
-        line = line.strip()
-        if not line:
+        parts = line.strip().split(None, 2)
+        if len(parts) < 3 or not parts[0].isdigit() or not parts[1].isdigit():
             continue
-        rss_raw, _, path = line.partition(" ")
-        if not rss_raw.isdigit():
-            continue
-        rss_mib = int(rss_raw) // 1024
-        path = path.strip()
+        pid = int(parts[0])
+        rss_mib = int(parts[1]) // 1024
+        path = parts[2].strip()
         rows.append((rss_mib, path))
         for name, pred in CLASSES:
             if pred(path):
                 totals[name] += rss_mib
+                if name == "testhost" and rss_mib > host_rss:
+                    host_rss, host_pid = rss_mib, pid
                 break
     rows.sort(reverse=True)
-    return totals, rows[:8]
+    return totals, rows[:8], host_pid
+
+
+def footprint_mib(pid: int) -> int:
+    """Physical footprint of one process, in MiB, or -1.
+
+    RSS is not the quantity that matters under pressure: a page the compressor
+    has taken is no longer resident, so a process whose footprint is growing can
+    show a FLAT or FALLING rss while the compressor fills. That is the standing
+    defect class in instrument form, so the sampler measures both.
+    """
+    if not pid:
+        return -1
+    try:
+        out = subprocess.run(
+            ["/usr/bin/footprint", "-p", str(pid)],
+            capture_output=True, text=True, check=False, timeout=20,
+        ).stdout
+    except (OSError, subprocess.TimeoutExpired):
+        return -1
+    m = re.search(r"Footprint:\s+([\d.]+)\s*([KMG]B)", out)
+    if not m:
+        return -1
+    value = float(m.group(1))
+    scale = {"KB": 1 / 1024, "MB": 1.0, "GB": 1024.0}[m.group(2)]
+    return int(value * scale)
 
 
 COLUMNS = [
@@ -138,6 +165,7 @@ COLUMNS = [
     "testhost_mib",
     "simulator_mib",
     "compiler_mib",
+    "testhost_footprint_mib",
 ]
 
 
@@ -146,6 +174,13 @@ def main() -> int:
     ap.add_argument("out")
     ap.add_argument("--interval", type=float, default=10.0)
     ap.add_argument("--log", default="")
+    ap.add_argument(
+        "--footprint",
+        action="store_true",
+        help="also sample the test host's PHYSICAL FOOTPRINT via /usr/bin/footprint. "
+             "Costs a vmmap of the target each sample, so it is opt-in: use it on a "
+             "diagnostic run, not on a run whose verdict you intend to trust.",
+    )
     args = ap.parse_args()
 
     top_path = args.out + ".top"
@@ -163,7 +198,7 @@ def main() -> int:
         while not stop["now"]:
             now = time.time()
             vm = vm_stat_sample()
-            procs, biggest = process_sample()
+            procs, biggest, host_pid = process_sample()
             log_bytes = 0
             if args.log:
                 try:
@@ -192,6 +227,7 @@ def main() -> int:
                 procs["testhost"],
                 procs["simulator"],
                 procs["compiler"],
+                footprint_mib(host_pid) if args.footprint else -1,
             ]
             csv.write(",".join(str(v) for v in row) + "\n")
             top.write(
