@@ -744,6 +744,7 @@ enum SemanticSweepMarkComposer {
     /// and 34 dissenting, against just 5 same-version dissenting votes in the
     /// whole file — so almost every one of the 282 was already worthless and
     /// the 34 were doing all the work.
+    ///
     /// **8 of the 79 marks change, all 8 upward, and the geometry of every
     /// mark is byte-identical** (nothing downstream of the grade reads it, so a
     /// re-grade can never move an edge). Decision-level crossings, all upward,
