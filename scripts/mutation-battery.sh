@@ -1567,6 +1567,16 @@ MUTABLE_FILES=(
 # half-open-interval contract.
 
 FOCUSED_SUITES=(
+  # playhead-tktr: the V60 retraction of three disclaimed banner receipts (TK
+  # series). ONE suite, and one is right here: the rung is nine directions over
+  # a single migration, and every direction is observable from the same fixture
+  # — the device's own five rows on asset 0FF7EFF3 plus the twelve
+  # `bannerAutoSkipConfirmed` rows nobody disclaimed. There is no second layer
+  # that could be right while this one is wrong. What the suite CANNOT see is
+  # named in its own header rather than papered over: V60's `tableExists` guard
+  # is unreachable through `migrate()`, because the ladder ALTERs
+  # `correction_events` unconditionally hundreds of rungs earlier.
+  -only-testing:PlayheadTests/DisclaimedBannerReceiptRetractionV60MigrationTests
   # playhead-e8mg: the structural ownership routes (E8 series). Five suites,
   # because the claim spans three layers and no one of them can observe
   # another. The two FeedParser suites are the only things that can see which
@@ -4522,7 +4532,104 @@ T_PK_STORAGE="the per-show profile storage is mentioned only by its declaration,
 T_PK_READS="every read of the per-show profile passes a show identity, never a literal and never nil"
 T_PK_SHADOW="RegionShadowPhase gets the profile of the very show it is told about"
 
+# ---- playhead-tktr: the retraction of three DISCLAIMED banner receipts (TK series) ----
+#
+# NINE rails rather than three, because "deletes exactly three" is not one claim.
+# It is a CARDINALITY (three, not two and not four), a POPULATION (three keys,
+# not a predicate over `source`), an IDENTITY (the row at the key must be the row
+# that was disclaimed), an IDEMPOTENCE (absent is the expected reading, not an
+# error), a BLAST RADIUS (one table) and a NON-CLAIM (`playheadTimeAtCorrection`
+# stays NULL on the two kept rows — UNKNOWN IS NOT ZERO). One test asserting all
+# six reports a fourth id, a source-wide DELETE, a dropped identity check and a
+# rung that never ran identically.
+T_TK_THREE="V60 deletes exactly the three receipts Dan disclaimed"
+T_TK_KEPT="V60 leaves the pre-roll receipt and the 10:07 denial untouched"
+T_TK_TWELVE="the other twelve bannerAutoSkipConfirmed rows survive — unknown is not wrong"
+T_TK_IDEM="a second run over an already-retracted database deletes nothing and does not throw"
+T_TK_FOREIGN="a database that never held these rows migrates to v60 untouched"
+T_TK_IMPOSTER="a primary key that has come to name something else takes nothing with it"
+T_TK_STAMP="a ladder that cannot read correction_events does not stamp v60"
+T_TK_WINDOWS="the ad_windows the retracted receipts pointed at survive"
+T_TK_TABLE="the retraction table names the three disclaimed ids and neither kept one"
+
 MUTATIONS=(
+  # ---- playhead-tktr (TK series): the V60 retraction, and the five ways a
+  #      migration that deletes three rows can look correct and not be ----
+  #
+  # Dan disclaimed THREE `bannerAutoSkipConfirmed` receipts of 2026-08-21 — four
+  # taps inside 5.3 s of wall clock for windows spanning 71.3 minutes of episode
+  # time. The device holds FIFTEEN such rows. Twelve of them are UNFALSIFIABLE,
+  # not false, and POSITION UNKNOWN IS NOT POSITION WRONG: taking them would be
+  # destroying evidence on the strength of a claim nobody made. Every rail below
+  # is a way to get the population wrong while still passing "three fewer rows".
+
+  # Batch 1240 — TK01, ONE TOO MANY, and it takes the row he actually meant. The
+  # pre-roll receipt is appended to the table. It is the same asset, the same
+  # source and the same second as the three; the ONLY thing separating it is
+  # that the listener had heard that audio. A cardinality check alone credits
+  # this as "the retraction ran".
+  "TK01|1240|STORE|$T_TK_THREE;$T_TK_KEPT;$T_TK_TWELVE;$T_TK_IDEM;$T_TK_WINDOWS;$T_TK_TABLE"
+
+  # Batch 1240 — TK04, THE KEY IS THE WHOLE IDENTITY. The stored-versus-expected
+  # check and the delete's own asset/source/scope terms both go, leaving a bare
+  # `WHERE id = ?`. Every rail about WHICH rows go stays green — the three
+  # really are deleted — and the rung will now take whatever a reused primary
+  # key has come to name. Paired with TK01 because their victims are disjoint.
+  "TK04|1240|STORE|$T_TK_IMPOSTER"
+
+  # Batch 1241 — TK02, ONE TOO FEW. The third entry is dropped, so the 30 s
+  # receipt at 4279.302 survives. This is the direction a reader never checks,
+  # because a retraction that removes fewer rows than authorised looks
+  # conservative rather than wrong — and the boost it leaves standing is the
+  # whole reason the bead exists.
+  "TK02|1241|STORE|$T_TK_THREE;$T_TK_IDEM;$T_TK_WINDOWS;$T_TK_TABLE"
+
+  # Batch 1241 — TK06, THE FALSE BACKFILL. Every NULL
+  # `playheadTimeAtCorrection` is set to 0. It reads as tidying a nullable
+  # column and it is a fabricated claim: zero says the listener was at the top
+  # of the episode, which is precisely what nobody can assert about a pre-V59
+  # row. Killed only by the kept-rows rail, which is why that rail asserts the
+  # NULL rather than merely asserting the row exists.
+  "TK06|1241|STORE|$T_TK_KEPT"
+
+  # Batch 1242 — TK03, A PREDICATE INSTEAD OF A KEY LIST, i.e. FIFTEEN. The
+  # per-receipt statement becomes `DELETE FROM correction_events WHERE source =
+  # ?`. This is the migration somebody writes when they read the bead as "the
+  # banner confirmations are untrustworthy" instead of "these three were
+  # disclaimed", and it is the single most destructive thing this rung could do.
+  # Alone in its batch because it reddens five of the nine.
+  "TK03|1242|STORE|$T_TK_THREE;$T_TK_KEPT;$T_TK_TWELVE;$T_TK_IDEM;$T_TK_WINDOWS"
+
+  # Batch 1243 — TK05, ABSENT BECOMES AN ERROR. A receipt the database does not
+  # hold throws instead of being counted. Every device that is not Dan's is in
+  # exactly that state, and so is Dan's the second time the rung is reached, so
+  # this turns a correct migration into a launch that cannot complete. It is the
+  # idempotence rail and the foreign-device rail together, and neither is
+  # reachable from a fixture that holds all three rows.
+  "TK05|1243|STORE|$T_TK_IDEM;$T_TK_FOREIGN;$T_TK_IMPOSTER"
+
+  # Batch 1243 — TK08, THE BLAST RADIUS WIDENS BY ONE TABLE. Each retraction
+  # also drops the asset's `ad_windows`. Those rows are DETECTION's own record —
+  # `dayZeroRediffByteExact`, confidence 1.0, minted by a byte diff the tap had
+  # nothing to do with — and nothing in Dan's statement disclaims them. Paired
+  # with TK05 because their victims are disjoint.
+  "TK08|1243|STORE|$T_TK_WINDOWS"
+
+  # Batch 1244 — TK07, THE RUNG THAT NEVER RUNS. `guard observed >= 59` becomes
+  # `>= 60`, so a device at V59 — every device there is — returns before the
+  # first statement AND before `setSchemaVersion(60)`. The retraction silently
+  # does not happen. It is an off-by-one in a guard whose whole job is to refuse
+  # a rolled-back V39, and it is invisible to any test that only reads rows.
+  "TK07|1244|STORE|$T_TK_THREE;$T_TK_IDEM;$T_TK_FOREIGN;$T_TK_IMPOSTER;$T_TK_WINDOWS"
+
+  # TK99 — VACUITY CONTROL, and it MUST SURVIVE. The local holding the observed
+  # stamp is renamed and nothing else changes: it proves the anchors still
+  # apply, the batch still builds and the suite still runs, while changing no
+  # behaviour. Non-empty expectation on purpose (playhead-ngsm) — an entry with
+  # an empty expectation iterates zero times and is credited KILLED, so a
+  # control that cannot fail proves nothing.
+  "TK99|1245|STORE|$T_TK_THREE;$T_TK_KEPT;$T_TK_TWELVE"
+
   # Batch 900 — JC01, THE SHIPPED DEFECT VERBATIM. The pre-insert guard asks
   # for the runner's own `fp-final-` fingerprint again, so an engine-written
   # final row for the same span is invisible and gets a second copy appended.
@@ -11627,6 +11734,189 @@ snippet() { IFS= read -r -d '' "$1" || true; }
 apply_mutation() {
   local name="$1" file="$2" OLD NEW
   case "$name" in
+
+  # ---- playhead-tktr: the V60 retraction of three disclaimed receipts (TK) ----
+
+  TK01)
+    snippet OLD <<'EOF'
+            scope: "exactTimeSpan:0FF7EFF3-CD54-4B14-98A7-148CD173AC42:4279.302:4309.420"
+        ),
+    ]
+EOF
+    snippet NEW <<'EOF'
+            scope: "exactTimeSpan:0FF7EFF3-CD54-4B14-98A7-148CD173AC42:4279.302:4309.420"
+        ),
+        DisclaimedBannerReceipt(
+            id: "11697881-92E4-4090-84EE-F7C4CA4AE650",
+            analysisAssetId: "0FF7EFF3-CD54-4B14-98A7-148CD173AC42",
+            source: "bannerAutoSkipConfirmed",
+            scope: "exactTimeSpan:0FF7EFF3-CD54-4B14-98A7-148CD173AC42:0.000:86.831"
+        ),
+    ]
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  TK02)
+    snippet OLD <<'EOF'
+        DisclaimedBannerReceipt(
+            id: "A3273865-4BF4-475B-921A-37000B5A0B94",
+            analysisAssetId: "0FF7EFF3-CD54-4B14-98A7-148CD173AC42",
+            source: "bannerAutoSkipConfirmed",
+            scope: "exactTimeSpan:0FF7EFF3-CD54-4B14-98A7-148CD173AC42:4279.302:4309.420"
+        ),
+    ]
+EOF
+    snippet NEW <<'EOF'
+    ]
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  TK03)
+    snippet OLD <<'EOF'
+            let deleteStmt = try prepare("""
+                DELETE FROM correction_events
+                 WHERE id = ?
+                   AND analysisAssetId = ?
+                   AND source = ?
+                   AND scope = ?
+                """)
+            defer { sqlite3_finalize(deleteStmt) }
+            bind(deleteStmt, 1, receipt.id)
+            bind(deleteStmt, 2, receipt.analysisAssetId)
+            bind(deleteStmt, 3, receipt.source)
+            bind(deleteStmt, 4, receipt.scope)
+            try step(deleteStmt, expecting: SQLITE_DONE)
+            let changed = Int(sqlite3_changes(db))
+            guard changed == 1 else {
+                throw AnalysisStoreError.queryFailed(
+                    "playhead-tktr V60: verified receipt deleted \(changed) row(s), expected exactly 1"
+                )
+            }
+EOF
+    snippet NEW <<'EOF'
+            let deleteStmt = try prepare("""
+                DELETE FROM correction_events
+                 WHERE source = ?
+                """)
+            defer { sqlite3_finalize(deleteStmt) }
+            bind(deleteStmt, 1, receipt.source)
+            try step(deleteStmt, expecting: SQLITE_DONE)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  TK04)
+    snippet OLD <<'EOF'
+            guard storedAsset == receipt.analysisAssetId,
+                  storedSource == receipt.source,
+                  storedScope == receipt.scope
+            else {
+                mismatched.append(receipt.id)
+                logger.fault(
+                    "playhead-tktr V60: the row at this primary key is not the receipt Dan disclaimed — leaving it alone. Retraction NOT performed for this id."
+                )
+                continue
+            }
+
+            let deleteStmt = try prepare("""
+                DELETE FROM correction_events
+                 WHERE id = ?
+                   AND analysisAssetId = ?
+                   AND source = ?
+                   AND scope = ?
+                """)
+            defer { sqlite3_finalize(deleteStmt) }
+            bind(deleteStmt, 1, receipt.id)
+            bind(deleteStmt, 2, receipt.analysisAssetId)
+            bind(deleteStmt, 3, receipt.source)
+            bind(deleteStmt, 4, receipt.scope)
+EOF
+    snippet NEW <<'EOF'
+            _ = (storedAsset, storedSource, storedScope, mismatched)
+
+            let deleteStmt = try prepare("""
+                DELETE FROM correction_events
+                 WHERE id = ?
+                """)
+            defer { sqlite3_finalize(deleteStmt) }
+            bind(deleteStmt, 1, receipt.id)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  TK05)
+    snippet OLD <<'EOF'
+            if probe == SQLITE_DONE {
+                sqlite3_finalize(selectStmt)
+                absent.append(receipt.id)
+                continue
+            }
+EOF
+    snippet NEW <<'EOF'
+            if probe == SQLITE_DONE {
+                sqlite3_finalize(selectStmt)
+                throw AnalysisStoreError.queryFailed(
+                    "playhead-tktr V60: a disclaimed receipt is missing"
+                )
+            }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  TK06)
+    snippet OLD <<'EOF'
+        )
+        try setSchemaVersion(60)
+    }
+EOF
+    snippet NEW <<'EOF'
+        )
+        try exec(
+            "UPDATE correction_events SET playheadTimeAtCorrection = 0 WHERE playheadTimeAtCorrection IS NULL"
+        )
+        try setSchemaVersion(60)
+    }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  TK07)
+    snippet OLD <<'EOF'
+        // DO NOT STEP OVER A ROLLED-BACK V39 — same rationale as V40-V59.
+        guard observed >= 59 else { return }
+        guard try tableExists("correction_events") else {
+EOF
+    snippet NEW <<'EOF'
+        // DO NOT STEP OVER A ROLLED-BACK V39 — same rationale as V40-V59.
+        guard observed >= 60 else { return }
+        guard try tableExists("correction_events") else {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  TK08)
+    snippet OLD <<'EOF'
+            retracted.append(receipt.id)
+        }
+EOF
+    snippet NEW <<'EOF'
+            try exec(
+                "DELETE FROM ad_windows WHERE analysisAssetId = '\(receipt.analysisAssetId)'"
+            )
+            retracted.append(receipt.id)
+        }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  TK99)
+    snippet OLD <<'EOF'
+        let observed = (try schemaVersion() ?? 1)
+        guard observed < 60 else { return }
+        // DO NOT STEP OVER A ROLLED-BACK V39 — same rationale as V40-V59.
+        guard observed >= 59 else { return }
+EOF
+    snippet NEW <<'EOF'
+        let stampOnDisk = (try schemaVersion() ?? 1)
+        guard stampOnDisk < 60 else { return }
+        // DO NOT STEP OVER A ROLLED-BACK V39 — same rationale as V40-V59.
+        guard stampOnDisk >= 59 else { return }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
 
   # ---- playhead-hzpa: an oversize abandonment records its size (HZ series) ----
 
