@@ -1105,6 +1105,9 @@ struct SkipOrchestratorBannerItemStreamTests {
             decisionState: "confirmed"
         )
         await orchestrator.receiveAdWindows([window])
+        // playhead-bwxi: walk into [60, 120) so the silence below is a real
+        // observation rather than an artefact of a playhead that never moved.
+        await orchestrator.updatePlayheadTime(70)
 
         // Collect with a bounded timeout. Shadow mode is log-only, so an
         // auto-tier card would falsely claim playback skipped this span.
@@ -1153,6 +1156,11 @@ struct SkipOrchestratorBannerItemStreamTests {
             decisionState: "confirmed"
         )
         await orchestrator.receiveAdWindows([window])
+        // playhead-bwxi: the auto tier presents on PLAYHEAD ENTRY, so the
+        // listener has to be inside [60, 120) for anything to reach the
+        // stream. Without this the assertion below is about a listener who is
+        // nowhere.
+        await orchestrator.updatePlayheadTime(70)
 
         let collectTask = Task<AdSkipBannerItem?, Never> {
             for await item in stream {
@@ -1203,6 +1211,14 @@ struct SkipOrchestratorBannerItemStreamTests {
         // Deliver the same window twice (simulates re-evaluation from detection).
         await orchestrator.receiveAdWindows([window])
         await orchestrator.receiveAdWindows([window])
+        // playhead-bwxi: and walk the span THREE times. Since the presentation
+        // moved to the position path, "once per window" has to survive
+        // repeated OBSERVATIONS inside the span as well as repeated
+        // deliveries — a fresh way for this to break that did not exist when
+        // the emitter lived in `evaluateAndPush`.
+        await orchestrator.updatePlayheadTime(70)
+        await orchestrator.updatePlayheadTime(80)
+        await orchestrator.updatePlayheadTime(90)
 
         // Collect up to two items, but expect exactly one.
         let collectTask = Task<Int, Never> {
@@ -1242,6 +1258,11 @@ struct SkipOrchestratorBannerItemStreamTests {
             decisionState: "candidate"
         )
         await orchestrator.receiveAdWindows([window])
+        // playhead-bwxi: walk INTO the span. A negative banner assertion taken
+        // with the playhead nowhere near the window now passes for the wrong
+        // reason — the presentation is position-gated, so "nothing arrived"
+        // would be true of a perfectly healthy window too.
+        await orchestrator.updatePlayheadTime(70)
 
         let collectTask = Task<AdSkipBannerItem?, Never> {
             for await item in stream {

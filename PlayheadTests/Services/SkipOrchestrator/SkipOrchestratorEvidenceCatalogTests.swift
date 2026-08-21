@@ -85,6 +85,11 @@ struct SkipOrchestratorEvidenceCatalogTests {
         await orchestrator.injectUserMarkedAd(
             start: 60, end: 120, analysisAssetId: "asset-1"
         )
+        // playhead-bwxi: the auto tier presents on PLAYHEAD ENTRY. In the
+        // field the listener IS inside the ad when they tap "Hearing an ad",
+        // so driving the position into the span is what reproduces the
+        // gesture rather than a concession to the test.
+        await orchestrator.updatePlayheadTime(70)
 
         try await Task.sleep(for: .milliseconds(120))
         task.cancel()
@@ -123,6 +128,11 @@ struct SkipOrchestratorEvidenceCatalogTests {
         await orchestrator.injectUserMarkedAd(
             start: 60, end: 120, analysisAssetId: "asset-1"
         )
+        // playhead-bwxi: the auto tier presents on PLAYHEAD ENTRY. In the
+        // field the listener IS inside the ad when they tap "Hearing an ad",
+        // so driving the position into the span is what reproduces the
+        // gesture rather than a concession to the test.
+        await orchestrator.updatePlayheadTime(70)
 
         try await Task.sleep(for: .milliseconds(120))
         task.cancel()
@@ -166,6 +176,11 @@ struct SkipOrchestratorEvidenceCatalogTests {
         await orchestrator.injectUserMarkedAd(
             start: 60, end: 120, analysisAssetId: "asset-1"
         )
+        // playhead-bwxi: the auto tier presents on PLAYHEAD ENTRY. In the
+        // field the listener IS inside the ad when they tap "Hearing an ad",
+        // so driving the position into the span is what reproduces the
+        // gesture rather than a concession to the test.
+        await orchestrator.updatePlayheadTime(70)
 
         try await Task.sleep(for: .milliseconds(120))
         task.cancel()
@@ -219,6 +234,11 @@ struct SkipOrchestratorEvidenceCatalogTests {
         await orchestrator.injectUserMarkedAd(
             start: 60, end: 120, analysisAssetId: "asset-1"
         )
+        // playhead-bwxi: the auto tier presents on PLAYHEAD ENTRY. In the
+        // field the listener IS inside the ad when they tap "Hearing an ad",
+        // so driving the position into the span is what reproduces the
+        // gesture rather than a concession to the test.
+        await orchestrator.updatePlayheadTime(70)
 
         try await Task.sleep(for: .milliseconds(120))
         task.cancel()
@@ -273,6 +293,11 @@ struct SkipOrchestratorEvidenceCatalogTests {
         await orchestrator.injectUserMarkedAd(
             start: 60, end: 120, analysisAssetId: "asset-1"
         )
+        // playhead-bwxi: the auto tier presents on PLAYHEAD ENTRY. In the
+        // field the listener IS inside the ad when they tap "Hearing an ad",
+        // so driving the position into the span is what reproduces the
+        // gesture rather than a concession to the test.
+        await orchestrator.updatePlayheadTime(70)
 
         try await Task.sleep(for: .milliseconds(120))
         task.cancel()
