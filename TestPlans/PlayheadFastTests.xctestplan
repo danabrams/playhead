@@ -9,6 +9,7 @@
   "defaultOptions" : {},
   "testTargets" : [
     {
+      "parallelizable" : false,
       "skippedTests" : [
         "BackgroundingCycleTests",
         "ForceQuitCycleTests",
