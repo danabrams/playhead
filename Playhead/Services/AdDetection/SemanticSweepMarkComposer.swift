@@ -735,8 +735,16 @@ enum SemanticSweepMarkComposer {
     ///
     /// WHAT THIS COSTS, NAMED RATHER THAN ABSORBED — the direction is UP, which
     /// is the direction that needs stating. Removing rows shrinks both counts,
-    /// so the factor can move either way in principle; on the pull it moves one
-    /// way. **8 of the 79 marks change, all 8 upward, and the geometry of every
+    /// so the factor can move either way in principle. WHY IT MOVES ONE WAY
+    /// HERE is arithmetic rather than luck: `corroborationFactor` is 1.0
+    /// whenever `dissenting == 0`, however many affirmers there are, so
+    /// dropping a cross-version AFFIRMER changes nothing unless there is
+    /// same-version dissent for it to have been offsetting. Counted over all
+    /// 301 coarse windows on the pull, the votes this removes are 282 affirming
+    /// and 34 dissenting, against just 5 same-version dissenting votes in the
+    /// whole file — so almost every one of the 282 was already worthless and
+    /// the 34 were doing all the work.
+    /// **8 of the 79 marks change, all 8 upward, and the geometry of every
     /// mark is byte-identical** (nothing downstream of the grade reads it, so a
     /// re-grade can never move an edge). Decision-level crossings, all upward,
     /// none downward: `SkipOrchestrator.preloadConfidenceThreshold` (0.70) **1**
