@@ -111,11 +111,20 @@
 //      and it can only SHRINK — the whole pipeline above, dedupe included,
 //      has already decided WHETHER this mark exists, so localisation decides
 //      only HOW WIDE it is and can never admit a verdict the coarse geometry
-//      suppressed — nor remove one: a row whose refs cannot be read, and a row
-//      that named none, both keep their window. See ``Localisation`` for why
-//      those two are nonetheless held apart, and ``contribution(of:in:supportLines:)``
-//      for the one line where treating `.absent` as no evidence at all is
-//      Dan's to authorise (playhead-my33).
+//      suppressed. A row whose refs cannot be READ still keeps its whole
+//      window: our records failed, not the model.
+//
+//      AND, SINCE playhead-my33, IT CAN NOW REMOVE A MARK — in exactly one
+//      case, which is Dan's call of 2026-08-21. A row that named NOTHING
+//      (`.absent`) contributes its window only when another row corroborates
+//      the SAME WINDOW; when it is the sole backing, it contributes nothing
+//      and the mark does not exist. So stage 6 is still shrink-only as a
+//      geometry operation — every piece it emits is a subset of the extent it
+//      was handed — and "shrink to nothing" is now a reachable answer.
+//      See ``Localisation`` for why `.absent` and `.unreadable` are held
+//      apart, ``corroborates(_:_:)`` for the predicate and why it is not
+//      version-scoped, and ``contribution(of:in:supportLines:)`` for what the
+//      rule cost, measured.
 //
 //      THE FIELD CASE, which is Dan's own correction of 2026-08-19. On
 //      `CD2976E6` this composer marked [1510.4–1611.4] — 101.0 s — off a
@@ -1141,8 +1150,11 @@ enum SemanticSweepMarkComposer {
     /// 2026-08-19 pull 19 of the 301 coarse `containsAd` rows do, including the
     /// second half of the very mark Dan vetoed. Those rows are affirmations
     /// with no localisation; reading them as denials would have inverted their
-    /// meaning. What they get instead is stage 6's answer: they contribute no
-    /// EXTENT.
+    /// meaning. What they get instead is stage 6's answer, and since
+    /// playhead-my33 it is conditional rather than flat: such a row contributes
+    /// its window when another row corroborates the SAME window, and nothing at
+    /// all when it is the sole backing. An affirmation nobody replicated is not
+    /// a denial either way — it just stops holding a banner up on its own.
     ///
     /// NOT VERSION-SCOPED, DELIBERATELY, AND THE DIRECTION IS WHY (playhead-kg6i).
     /// ``corroboration(for:in:atTranscriptVersion:)`` had to be scoped because a
@@ -1296,6 +1308,11 @@ enum SemanticSweepMarkComposer {
         case unreadable
         /// The model named NOTHING: no support object, or an empty
         /// `supportLineRefs`. A property of the VERDICT.
+        ///
+        /// Since playhead-my33 this is the ONLY case whose consumer can decline
+        /// to contribute an extent — see ``contribution(of:in:supportLines:)``.
+        /// The separation from ``unreadable`` stopped being bookkeeping and
+        /// started carrying a decision, which is what it was built for.
         case absent
     }
 
@@ -1334,50 +1351,198 @@ enum SemanticSweepMarkComposer {
         return .named(padded(resolved, within: window))
     }
 
+    /// Is `candidate` a CORROBORATING REPLICATE of `row`'s presence claim —
+    /// another examination of THE SAME AUDIO that also said an ad is in it?
+    /// (playhead-my33.)
+    ///
+    /// # The predicate, and each clause's job
+    ///
+    ///   * **A DIFFERENT ROW.** `id` is the table's primary key, so two
+    ///     distinct persisted rows always differ here and a row can never
+    ///     corroborate itself. Handing the same row in twice answers `false`,
+    ///     which is the direction that under-claims.
+    ///   * **A PRESENCE-PASS ROW.** `passB` is excluded for the reason
+    ///     ``corroboration(for:in:atTranscriptVersion:)`` and
+    ///     ``clearedSpans(in:)`` both exclude it: a refinement is a second look
+    ///     at a claim already made, not a second SCREENING of the audio, so it
+    ///     is not independent of the row it would be propping up. (A `passB`
+    ///     row that AFFIRMED is stage 2's business and has already narrowed
+    ///     this extent; one that DECLINED reaches `.named` through
+    ///     ``declinedRefinementSpans(over:in:)`` and never gets here.)
+    ///   * **AN ADMISSIBLE PRESENCE VERDICT** — the exact stage-1 predicate, so
+    ///     a row that could not mint a mark on its own cannot hold one up
+    ///     either. The `abstain | exceededContextWindow` row over `A9F6DF05`
+    ///     [68.9–187.3] on the pull is precisely this case, and it must not
+    ///     count.
+    ///   * **THE SAME WINDOW**, to ``SupportLineIndex/boundaryEpsilon`` — the
+    ///     tolerance ``declinedRefinementSpans(over:in:)`` already uses for the
+    ///     same job, absorbing a last-bit `REAL` round trip rather than
+    ///     licensing a near-miss.
+    ///
+    /// # Why BOUND EQUALITY rather than overlap
+    ///
+    /// The claim being corroborated is *"an ad is somewhere in this tile"* and
+    /// nothing narrower — that is the whole of what makes the row `.absent`. A
+    /// row over DIFFERENT seconds cannot speak to it: two neighbouring tiles
+    /// that each report an ad corroborate nothing about each other, and
+    /// admitting a partial overlap would let a mark stand on a claim about
+    /// audio it does not cover. That is "presence laundered into extent", the
+    /// substitution stages 3 and 4 already refuse, one level up.
+    ///
+    /// It is also not academic on this pull. Dan's own vetoed mark is the
+    /// witness: `CD2976E6` [1211.2–1287.2] is `.absent`, and the row it merged
+    /// with is [1131.6–1210.9] — ADJACENT, 0.3 s away, a different window.
+    /// Under an overlap predicate that neighbour would corroborate it and the
+    /// veto would survive; under bound equality it does not, and the mark falls
+    /// to [1131.6–1210.9], which is the outcome Dan asked for.
+    ///
+    /// # Why NOT scoped to one `transcriptVersion` (playhead-kg6i)
+    ///
+    /// kg6i established that a vote from a superseded transcript is not a
+    /// replicate of the same experiment, and it was right about the quantity it
+    /// governs — but that quantity is not this one, and the difference is in
+    /// what each selects rows BY.
+    ///
+    ///   * ``corroboration(for:in:atTranscriptVersion:)`` selects by OVERLAP and
+    ///     feeds an AGREEMENT statistic, `(1 + a) / (1 + a + d)`. Its witness is
+    ///     `561CEF5B` [692.76–791.70] against [620.34–720.00] and
+    ///     [720.78–820.80] — rows tiled at boundaries the claim does not share,
+    ///     so they are not even about the same audio. There `transcriptVersion`
+    ///     was the available proxy for "the same experiment", and the deeper
+    ///     property it stood in for was "the same claim".
+    ///   * This predicate asks for the same claim DIRECTLY, by requiring
+    ///     identical bounds. It is a MEMBERSHIP question — did more than one
+    ///     screening affirm exactly this audio — with no dissent term and no
+    ///     arithmetic that needs replicates.
+    ///
+    /// And once the audio is pinned, a re-transcription makes the second
+    /// screening MORE independent, not less: two rows at one version share
+    /// their whole input and replicate only the model's sampling, while two at
+    /// different versions share only the audio — which is what the claim is
+    /// about. Seconds are version-independent; that is already this file's own
+    /// reading, in ``corroboration(for:in:atTranscriptVersion:)``'s closing note
+    /// ("a stale row's window bounds are still real geometry") and in
+    /// ``clearedSpans(in:)``, which is deliberately not version-scoped either.
+    ///
+    /// MEASURED, because the choice decides the bead rather than decorating it:
+    /// on the 2026-08-19 t4 pull the 19 `.absent` rows sit at **19 distinct
+    /// `(window, transcriptVersion)` pairs**, and no admissible presence row
+    /// shares any of those pairs. A version-scoped predicate therefore
+    /// corroborates **nothing**, and Dan's sole-backing rule would collapse into
+    /// the drop-all option he explicitly declined. Stated the other way round:
+    /// the four windows that ARE corroborated here are corroborated *only*
+    /// across versions.
+    ///
+    /// `runCorrelationId` was considered as a "different FM call" spelling and
+    /// measured out: all five `containsAd` rows over `A9F6DF05` ~4038 s carry
+    /// the identical `fm-9330e821aeb36a0d` across four days and five calls, so
+    /// it does not separate re-screenings at all.
+    static func corroborates(
+        _ candidate: SemanticScanResult,
+        _ row: SemanticScanResult
+    ) -> Bool {
+        guard candidate.id != row.id,
+              candidate.scanPass != refinementScanPass,
+              isPresenceVerdict(candidate)
+        else { return false }
+        return abs(candidate.windowStartTime - row.windowStartTime)
+            <= SupportLineIndex.boundaryEpsilon
+            && abs(candidate.windowEndTime - row.windowEndTime)
+            <= SupportLineIndex.boundaryEpsilon
+    }
+
+    /// Did anything OTHER than `row` affirm an ad in exactly `row`'s window?
+    ///
+    /// The caller has already admitted `row` itself — ``localise(_:scanRows:supportLines:)``
+    /// only asks ``isPresenceVerdict(_:)``-passing rows — so this states nothing
+    /// about `row` and only counts its company.
+    static func isCorroborated(
+        _ row: SemanticScanResult,
+        in rows: [SemanticScanResult]
+    ) -> Bool {
+        rows.contains { corroborates($0, row) }
+    }
+
     /// What one presence row contributes to a mark's extent.
     ///
-    /// # `.unreadable` AND `.absent` GET THE SAME ANSWER HERE, AND THAT IS A DECISION
-    ///
-    /// Both keep the row's whole window, which is the pre-shu5 behaviour, so
-    /// this bead never removes a mark — it only narrows the ones it can read.
+    /// # `.unreadable` KEEPS ITS WINDOW; `.absent` KEEPS IT ONLY IF CORROBORATED
     ///
     /// `.unreadable` keeping its window is not in question: our records failed,
     /// not the model, and inventing geometry is how a boundary lands on the
     /// show (`SupportLineIndex`'s header carries the measured witness, 22 s
-    /// off). What IS in question is how many rows land there — **130 of the
-    /// 301**, every one of them because the episode's transcript has moved on
-    /// since the scan and the row's segmentation no longer exists. That is a
-    /// bound on this bead's reach and it belongs to **playhead-kg6i**, not
-    /// here: shrinking it means composing from fewer versions, which removes
-    /// marks.
+    /// off). What IS in question is how many rows land there — **174 of the
+    /// 301** on the 2026-08-19 t4 pull, every one of them because the episode's
+    /// transcript has moved on since the scan and the row's segmentation no
+    /// longer exists. (This line said **130** and that figure does not
+    /// reproduce. Re-measured with the same offline reconstruction that returns
+    /// playhead-kg6i's 211 cross-version rows to the digit, the split is 108
+    /// `.named` / 174 `.unreadable` / 19 `.absent`. Three quantities live in
+    /// this neighbourhood — rows at a superseded version (211), rows whose
+    /// chunks are gone from the database (280), rows this stage cannot resolve
+    /// (174) — and the file already warns they are three; quote whichever you
+    /// took.) That bound belongs to **playhead-kg6i**, not here: shrinking it
+    /// means composing from fewer versions, which removes marks.
     ///
-    /// `.absent` is a genuine open question and it is **Dan's**, filed as
-    /// **playhead-my33**. A `containsAd` row that names no lines is presence
-    /// with no localisation — the thing `maximumMarkDurationSeconds` already
-    /// calls "a TARGETING problem … not something to put in front of a
-    /// listener" — so there is a real case for contributing nothing. It was
-    /// measured before it was declined: 19 of the 301 coarse `containsAd` rows
-    /// on the 2026-08-19 pull are `.absent`, dropping them removes 2 marks and
-    /// a further 267.5 s (Dan's own [1131.6–1287.2] would fall to
-    /// [1131.6–1210.9]).
+    /// # `.absent` — DAN'S CALL, TAKEN 2026-08-21 (playhead-my33)
     ///
-    /// **COUNT THE WINDOWS, NOT THE ROWS.** Those 19 rows are only **10
-    /// distinct windows** — the sweep re-scans an episode after its transcript
-    /// moves, so `A9F6DF05 6814.0–6874.1` alone appears four times. Read as
-    /// transcript, **6 of the 10 are real ads** (LifeLock/Paragold, NetSuite
-    /// ×2, Whisperflow, Progressive, the show's own conversation-cards promo)
-    /// and **4 are show** — `A9F6DF05` 68.9–187.3 and 4368.2–4439.3,
-    /// `CD2976E6` 1211.2–1287.2 (Dan's own), `E51B25E4` 4840.7–4960.7. A
-    /// first draft of this note said "roughly fifteen of the nineteen are real
-    /// ads", which is the row count wearing the window count's meaning — the
-    /// standing defect class, in the comment describing the fix for it.
+    /// A `containsAd` row that names no lines is presence with no localisation
+    /// — the thing `maximumMarkDurationSeconds` already calls "a TARGETING
+    /// problem … not something to put in front of a listener". The two options
+    /// that had been measured are both lossy in one direction, so Dan chose
+    /// neither: **DROP ONLY WHERE IT IS THE SOLE BACKING.** An unlocalised row
+    /// may still contribute its window when another row corroborates the same
+    /// window; when it is the only thing holding a mark up, it contributes
+    /// nothing and the mark does not exist. See ``corroborates(_:_:)`` for what
+    /// "corroborates" means and why.
     ///
-    /// So the rule that would fix Dan's second veto costs six correct
-    /// detections to remove two wrong marks. That is a RECALL trade, not a
-    /// geometry fix. It is one line, right here, when he says so — and that
-    /// claim is only true because mutant SU12 proved it was NOT: the change
-    /// used to be silently undone by ``localise(_:scanRows:supportLines:)``'s
-    /// duration-floor rescue, which is now a separate refusal.
+    /// **COUNT THE WINDOWS, NOT THE ROWS.** The 19 `.absent` rows are only
+    /// **10 distinct windows** — the sweep re-scans an episode after its
+    /// transcript moves, so `A9F6DF05 6814.0–6874.1` alone appears four times.
+    /// Read as transcript, **6 of the 10 are real ads** (LifeLock/Paragold,
+    /// NetSuite ×2, Whisperflow, Progressive, the show's own conversation-cards
+    /// promo) and **4 are show** — `A9F6DF05` 68.9–187.3 and 4368.2–4439.3,
+    /// `CD2976E6` 1211.2–1287.2 (Dan's own), `E51B25E4` 4840.7–4960.7. A first
+    /// draft of this note said "roughly fifteen of the nineteen are real ads",
+    /// which is the row count wearing the window count's meaning — the standing
+    /// defect class, in the comment describing the fix for it.
+    ///
+    /// # WHAT IT COST, MEASURED — and the third population nobody had counted
+    ///
+    /// Recomposed over all 15 assets: **78 marks / 6,979.1 s**, against the
+    /// shipped **80 / 7,246.6 s**. Two marks removed and one narrowed, and all
+    /// three are SHOW: `A9F6DF05` [4368.18–4439.34], `E51B25E4`
+    /// [4840.74–4960.74], and Dan's own `CD2976E6` [1131.60–1287.18] falling to
+    /// [1131.60–1210.86]. **No confidence value moves at all** — the other 77
+    /// marks are geometry- AND grade-identical — because this stage refines
+    /// geometry and admission happened four stages earlier.
+    ///
+    /// **THE SIX AD WINDOWS COST NOTHING, BECAUSE THEY WERE NEVER MARKS.**
+    /// Every one of the six is suppressed by stage 5's additive-only dedupe:
+    /// two overlap a `dayZeroRediffByteExact` window at confidence 1.0
+    /// (`0FF7EFF3` ~3434 s, `561CEF5B` 0 s) and four overlap a window Dan
+    /// MARKED BY HAND (`A9F6DF05` ~2656 / ~4038 / ~6814 s, `C0610BF9` ~968 s —
+    /// `falseNegative` corrections with an empty `targetRefsJSON`, 2026-08-15).
+    /// Only **3 of the 10** windows reach this stage at all, and all three are
+    /// show. So "six correct detections lost" counts coarse VERDICTS, and the
+    /// quantity that matters is composed MARKS, where the answer is zero — the
+    /// same window-versus-row substitution the paragraph above corrects, one
+    /// population further along. The bead's trade was stated in good faith and
+    /// it is not what a recompose says.
+    ///
+    /// WHAT THIS MEASUREMENT CANNOT SAY, because the caveat is the interesting
+    /// half: the recompose runs against the device's `ad_windows` AS THEY ARE
+    /// TODAY, four of which are Dan's own later marks. It shows the permissive
+    /// half of the rule doing nothing HERE; that is not evidence it does
+    /// nothing. Four of the six ad windows ARE corroborated, and on an asset
+    /// where no other producer had found the ad they would keep their
+    /// contribution while drop-all would not. That difference IS the rule; it
+    /// simply has no instance on this pull.
+    ///
+    /// The change is still one line here — and that claim is only true because
+    /// mutant SU12 proved it was NOT: it used to be silently undone by
+    /// ``localise(_:scanRows:supportLines:)``'s duration-floor rescue, which is
+    /// now a separate refusal, and this bead is what makes that refusal
+    /// REACHABLE for the first time.
     static func contribution(
         of row: SemanticScanResult,
         in rows: [SemanticScanResult],
@@ -1385,8 +1550,12 @@ enum SemanticSweepMarkComposer {
     ) -> [AdSpanBounds] {
         switch localisation(of: row, in: rows, supportLines: supportLines) {
         case .named(let spans): spans
-        case .unreadable, .absent:
+        case .unreadable:
             [AdSpanBounds(start: row.windowStartTime, end: row.windowEndTime)]
+        case .absent:
+            isCorroborated(row, in: rows)
+                ? [AdSpanBounds(start: row.windowStartTime, end: row.windowEndTime)]
+                : []
         }
     }
 
@@ -1444,7 +1613,7 @@ enum SemanticSweepMarkComposer {
     /// And if NO contributor offered a single span, nothing here is supported
     /// and nothing is returned. **That was folded into the duration-floor
     /// refusal and mutant SU12 found it**, which is the whole argument for
-    /// separating them: SU12 is playhead-my33's proposed one-line change
+    /// separating them: SU12 was playhead-my33's proposed one-line change
     /// (`.absent` contributes nothing), and with the two folded together the
     /// mark was RESCUED by the floor rule and the knob did nothing. The bead
     /// and the comment on ``contribution(of:in:supportLines:)`` both said "it
@@ -1452,10 +1621,15 @@ enum SemanticSweepMarkComposer {
     /// different claims — *"the refinement is too small to use"* and *"there is
     /// nothing to refine"* — sharing one `guard`.
     ///
-    /// The branch is UNREACHABLE today, deliberately: every `Localisation`
-    /// currently yields at least the row's window, so `contributed` is always
-    /// true and this is byte-identical to the folded version. SU12 is what
-    /// makes it reachable, and what proves it is not decoration.
+    /// **THAT BRANCH IS LIVE AS OF playhead-my33 AND IT IS THE ONLY WAY A MARK
+    /// LEAVES THIS STAGE.** Until Dan's 2026-08-21 call every `Localisation`
+    /// yielded at least the row's window, so `contributed` was always true and
+    /// the branch was unreachable by construction; shu5 separated it on SU12's
+    /// evidence alone, one bead before anything could take it. Now an `.absent`
+    /// row with no corroborating replicate offers nothing, and an extent whose
+    /// contributors are ALL such rows returns `[]`. The distinction the split
+    /// bought is what makes that removal survive the floor rule instead of
+    /// being quietly undone by it.
     ///
     /// Pieces are unioned with `mergeGapSeconds` before the duration floor, so
     /// two adjacent supported segments become one mark rather than two

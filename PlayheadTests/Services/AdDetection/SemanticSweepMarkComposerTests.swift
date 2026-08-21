@@ -784,6 +784,14 @@ struct SemanticSweepConfidenceTests {
             Fx.row(id: "strong-degraded", start: 500, end: 590,
                    transcriptQuality: .degraded),
             Fx.row(id: "unevidenced", start: 700, end: 790, spansJSON: "[]"),
+            // playhead-my33: a `"[]"` row is `Localisation.absent`, and since
+            // Dan's sole-backing rule an absent row alone contributes no
+            // extent — the mark would not exist and this suite would be
+            // measuring three profiles, not four. The replicate is what keeps
+            // the UNEVIDENCED profile in the population; it is a second
+            // screening of the same window, so `corroborationFactor` reads
+            // (1+2)/(1+2+0) = 1.0 and the confidence under test is unmoved.
+            Fx.row(id: "unevidenced-replicate", start: 700, end: 790, spansJSON: "[]"),
         ])
 
         #expect(marks.count == 4, "control: all four verdicts marked")
@@ -907,6 +915,12 @@ struct SemanticSweepConfidenceTests {
         let marks = Fx.compose(rows: [
             Fx.row(id: "graded", start: 100, end: 190),
             Fx.row(id: "ungraded", start: 300, end: 390, spansJSON: "[]"),
+            // playhead-my33: the replicate is what keeps the ungraded verdict
+            // MARKED at all — an `.absent` row with no corroborator now
+            // contributes no extent. It does not change the quantity under
+            // test: unanimity is not a bonus, so the corroboration factor is
+            // 1.0 at one replicate and at two.
+            Fx.row(id: "ungraded-replicate", start: 300, end: 390, spansJSON: "[]"),
         ])
 
         #expect(marks.count == 2, "control: an ungraded verdict is still MARKED")

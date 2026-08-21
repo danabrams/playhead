@@ -410,22 +410,23 @@ struct SemanticSweepLocalisationTests {
     }
 
     /// A `containsAd` row whose payload is `"[]"` — the model named nothing —
-    /// also keeps its window today. That is playhead-my33's decision to
-    /// revisit, and pinning it here is what makes the change visible when he
-    /// makes it.
-    @Test("a verdict that named no lines keeps its window (playhead-my33 owns changing this)")
-    func aVerdictThatNamedNothingKeepsItsWindow() {
+    /// used to keep its window. Since playhead-my33 it keeps it only when
+    /// another row corroborates the same window; alone it holds up nothing.
+    /// The full predicate lives in `SemanticSweepSoleBackingTests`; this pins
+    /// the SOLE case at the seam shu5 owns, because it is the sentence this
+    /// suite used to assert the opposite of.
+    @Test("a verdict that named no lines and stands alone produces NO mark (playhead-my33)")
+    func aVerdictThatNamedNothingAndStandsAloneIsDropped() {
         let row = Fx.row(id: "unlocalised", start: 700, end: 790, spansJSON: "[]")
         let marks = Fx.compose(rows: [row], supportLines: Fx.fieldIndex)
 
-        #expect(marks.count == 1)
-        #expect(marks.first?.startTime == 700)
-        #expect(marks.first?.endTime == 790)
+        #expect(marks.isEmpty, "sole backing, no localisation, no mark: \(marks.map(\.startTime))")
     }
 
-    /// `.absent` and `.unreadable` are held apart in the type even though they
-    /// get the same answer today, because they are different claims and
-    /// playhead-my33 moves only one of them.
+    /// `.absent` and `.unreadable` are held apart in the type BECAUSE they are
+    /// different claims, and since playhead-my33 they get different answers:
+    /// only `.absent` can decline to contribute. The localisations themselves
+    /// are unchanged — that separation is what the decision rides on.
     @Test("named-nothing and named-unreadably are DIFFERENT localisations")
     func absentAndUnreadableAreDistinct() {
         let named = Fx.fieldCoarseRow
@@ -645,6 +646,16 @@ struct SemanticSweepMergeBarrierTests {
 
     private typealias Fx = LocalisationFixture
 
+    // WHY THE VERDICT ROWS HERE CARRY THE DEFAULT `supportLineRefs` PAYLOAD
+    // (playhead-my33). They used to carry `"[]"`, chosen to keep localisation
+    // out of a suite about MERGE geometry — and `"[]"` is now the one payload
+    // that can remove a mark, because an unlocalised row with no replicate
+    // contributes no extent. Every count below would have read 0 and the suite
+    // would have been measuring the sole-backing rule instead of the barrier.
+    // The default payload names lines, `Fx.compose` passes no index, so each
+    // row is `Localisation.unreadable` and keeps its whole window — which is
+    // exactly the geometry these tests were written against.
+
     /// THE FIELD SHAPE, from 561CEF5B on the 2026-08-19 pull: two coarse
     /// `containsAd` windows 0.42 s apart, and a third `passA` row that examined
     /// [497.3–607.1] and returned `noAds` — a window spanning the join. Under
@@ -653,8 +664,8 @@ struct SemanticSweepMergeBarrierTests {
     @Test("two verdicts either side of a cleared window stay two marks")
     func aClearedWindowBarsTheMerge() {
         let rows = [
-            Fx.row(id: "a", start: 420.9, end: 529.8, spansJSON: "[]"),
-            Fx.row(id: "b", start: 530.22, end: 619.62, spansJSON: "[]"),
+            Fx.row(id: "a", start: 420.9, end: 529.8),
+            Fx.row(id: "b", start: 530.22, end: 619.62),
             Fx.row(id: "cleared", start: 497.34, end: 607.08, disposition: .noAds),
         ]
         let marks = Fx.compose(rows: rows).sorted { $0.startTime < $1.startTime }
@@ -669,8 +680,8 @@ struct SemanticSweepMergeBarrierTests {
     @Test("without a cleared window the same two verdicts merge")
     func withoutABarrierTheyMerge() {
         let rows = [
-            Fx.row(id: "a", start: 420.9, end: 529.8, spansJSON: "[]"),
-            Fx.row(id: "b", start: 530.22, end: 619.62, spansJSON: "[]"),
+            Fx.row(id: "a", start: 420.9, end: 529.8),
+            Fx.row(id: "b", start: 530.22, end: 619.62),
         ]
         let marks = Fx.compose(rows: rows)
 
@@ -684,8 +695,8 @@ struct SemanticSweepMergeBarrierTests {
     @Test("an unexamined row is not a barrier")
     func anUnexaminedRowIsNotABarrier() {
         let rows = [
-            Fx.row(id: "a", start: 420.9, end: 529.8, spansJSON: "[]"),
-            Fx.row(id: "b", start: 530.22, end: 619.62, spansJSON: "[]"),
+            Fx.row(id: "a", start: 420.9, end: 529.8),
+            Fx.row(id: "b", start: 530.22, end: 619.62),
             Fx.row(id: "cancelled", start: 497.34, end: 607.08,
                    disposition: .abstain, status: .cancelled),
         ]
@@ -698,8 +709,8 @@ struct SemanticSweepMergeBarrierTests {
     @Test("a declined refinement is not a barrier")
     func aDeclinedRefinementIsNotABarrier() {
         let rows = [
-            Fx.row(id: "a", start: 420.9, end: 529.8, spansJSON: "[]"),
-            Fx.row(id: "b", start: 530.22, end: 619.62, spansJSON: "[]"),
+            Fx.row(id: "a", start: 420.9, end: 529.8),
+            Fx.row(id: "b", start: 530.22, end: 619.62),
             Fx.row(id: "refine", start: 497.34, end: 607.08,
                    disposition: .noAds, scanPass: "passB"),
         ]
@@ -711,6 +722,12 @@ struct SemanticSweepMergeBarrierTests {
     /// `containsAd` AND carry `"[]"` — `encodeSupport` writes that string for a
     /// nil support object, and 19 of the 301 coarse verdicts on the pull are
     /// exactly that. Reading it as a denial would invert their meaning.
+    ///
+    /// STILL TRUE AFTER playhead-my33, and worth saying because that bead is
+    /// where such a row finally acquires a consequence. An unbacked `"[]"` row
+    /// now contributes no EXTENT — it stops holding a banner up. It does not
+    /// become a DENIAL, and this suite is what says so: an affirmation nobody
+    /// replicated clears no audio and bars no merge.
     @Test("a containsAd row whose support payload is empty is NOT a cleared window")
     func anEmptyPayloadIsNotAClearedWindow() {
         let unlocalised = Fx.row(id: "unlocalised", start: 497.34, end: 607.08,
@@ -727,8 +744,8 @@ struct SemanticSweepMergeBarrierTests {
     @Test("a cleared window that does not span the gap does not bar the merge")
     func aBarrierOffTheGapDoesNotBar() {
         let rows = [
-            Fx.row(id: "a", start: 420.9, end: 529.8, spansJSON: "[]"),
-            Fx.row(id: "b", start: 530.22, end: 619.62, spansJSON: "[]"),
+            Fx.row(id: "a", start: 420.9, end: 529.8),
+            Fx.row(id: "b", start: 530.22, end: 619.62),
             Fx.row(id: "elsewhere", start: 200.0, end: 300.0, disposition: .noAds),
         ]
 
@@ -741,8 +758,8 @@ struct SemanticSweepMergeBarrierTests {
     @Test("a cleared window that only touches the gap edge does not bar")
     func aTouchingBarrierDoesNotBar() {
         let rows = [
-            Fx.row(id: "a", start: 420.9, end: 529.8, spansJSON: "[]"),
-            Fx.row(id: "b", start: 530.22, end: 619.62, spansJSON: "[]"),
+            Fx.row(id: "a", start: 420.9, end: 529.8),
+            Fx.row(id: "b", start: 530.22, end: 619.62),
             Fx.row(id: "touching", start: 530.22, end: 607.08, disposition: .noAds),
         ]
 
