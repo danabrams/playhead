@@ -33,8 +33,12 @@
 # `disable` writes the launchd override so the job cannot be demand-launched
 # afterwards; `bootout` removes the one already running. Both are supported
 # launchctl operations, neither pokes the device's files behind launchd's back.
-# The overrides do NOT survive `simctl erase` — the gate erases — so this script
-# is meant to be re-run after every boot, which is exactly how fast-gate.sh uses it.
+#
+# THE OVERRIDES DO SURVIVE `simctl erase`. An earlier draft of this comment said
+# the opposite and it was wrong — see the --restore section below for where they
+# actually live and why that is a trap for a CONTROL run. fast-gate.sh re-applies
+# the trim on every run anyway, which is idempotent and is what makes the run
+# report what it actually got rather than what the last one left behind.
 #
 # THE VERDICT IS THE PROCESS COUNT, NOT THE EXIT CODE. Every operation here can
 # report success and change nothing (that is precisely what --disabledJob does),
