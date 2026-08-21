@@ -272,6 +272,18 @@ Measured here, `demand = active + wired + compressor + swap`, sampled every 10 s
 
 So an idle simulator costs **+13.35 GiB** on a 16 GiB box, and the trim removes **7.23 GiB of it** — more than half — before xcodebuild has compiled anything.
 
+**Full plan, four configurations, identical protocol each time (`.derivedData` removed, simulator shut down + erased + both verified by re-reading state, memory sampled every 10 s, no `-skip-testing:`):**
+
+| config | pre-run procs | pre-run demand | PEAK demand | peak swap | test-host peak rss | test phase | outcome |
+|---|---|---|---|---|---|---|---|
+| neither | 320 | 20.77 GiB | **23.36 GiB** | 10.62 GiB | 2.05 GiB | 207.3 s | 11,626 passed |
+| B only | 108 | 12.70 GiB | **13.20 GiB** | 0.88 GiB | 2.42 GiB | 243.2 s | 11,626 passed |
+| C only | 313 | 19.94 GiB | **22.06 GiB** | 9.21 GiB | 1.28 GiB | 1052.6 s | 11,626 passed |
+| B+C | 122 | 12.74 GiB | **13.74 GiB** | 1.63 GiB | 1.28 GiB | 1004.3 s | 11,626 passed |
+| B+C | 108 | 11.52 GiB | **13.00 GiB** | 0.64 GiB | 1.25 GiB | 1677.1 s | 11,626 passed |
+
+Every one of the five had **0 host restarts and 0 NO VERDICT**. **B and C do not weigh the same, and the table is why the order matters if either is ever questioned:** B removes **10.16 GiB** of peak demand and 9.7 GiB of swap and costs nothing; C removes **1.30 GiB** and costs **5.08x on the test phase** — a second observation of the bead's 4.6x, on a different tree, and worse rather than better. They are close to independent (B acts on the simulator, C on the test host) but **C adds nothing measurable on top of B**: once the simulator is gone the box is no longer short, and the test host's 0.8 GiB was never what killed the run. Baseline peaks 7.4 GiB OVER a 16 GiB box on 10.6 GiB of swap; with B it peaks 2.8 GiB UNDER with swap untouched; **C alone still peaks 6.1 GiB over on 9.2 GiB of swap.** So if the 5x is ever unwelcome, C is the half that can be dropped and B is not — a scheduling call, and Dan's. Note also that the two B+C phases differ by 673 s with near-identical memory, so the serialized phase's DURATION is itself load-sensitive.
+
 **`simctl boot --disabledJob=<label>` is INERT on this runtime and that is measured, not assumed.** Booted with six `--disabledJob` flags on a freshly erased device and settled five minutes, all six were RUNNING, 293 processes against a vanilla 301, demand 20.17 against 20.33 GiB; `launchctl print-disabled` inside the device lists none of them. **Read the settling curve before you re-test it**: at ONE minute three of those six read "absent" and it looks like a partial win — they were merely not started yet. The earlier report that "process count fell only 230 → 201" is almost certainly that same artefact.
 
 What works is launchctl's own, inside the device: `simctl spawn <udid> launchctl disable user/<uid>/<label>` (so it cannot be demand-launched) followed by `bootout` (so the running one goes). Both are supported launchctl operations. `scripts/fast-gate.sh` applies them on every run; the list is `scripts/sim-trim-jobs.txt`, one label per line with the family and the reason.
