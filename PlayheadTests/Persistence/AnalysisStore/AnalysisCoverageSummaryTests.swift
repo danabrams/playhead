@@ -1675,7 +1675,7 @@ struct FastTranscriptCoverageV37MigrationTests {
         // before measuring). The deletion is coverage-preserving by
         // construction, in BOTH directions, which is stronger than "it happens
         // not to fire on these fixtures".
-        #expect(AnalysisStore.currentSchemaVersion == 58)
+        #expect(AnalysisStore.currentSchemaVersion == 59)
     }
 
     /// THE MIGRATION EVIDENCE. An asset already on disk — written by a

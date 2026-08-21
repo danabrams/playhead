@@ -34,9 +34,17 @@
 //   • RE-ENTRY ON SEEK does not re-ask. A span fires at most once per revision;
 //     scrubbing back into it is not a new question.
 //
-// Contrast `emitBannerItem(for: ManagedWindow)`, the AUTO-SKIP banner, which
-// was always playhead-driven ("after an automatic skip is actually applied").
-// The suggest path simply never got the same treatment.
+// CORRECTED 2026-08-21 (playhead-bwxi). This header used to say that
+// `emitBannerItem(for: ManagedWindow)` — the AUTO-SKIP banner — "was always
+// playhead-driven", and that the suggest path simply never got the same
+// treatment. THAT WAS FALSE, and the belief is why the identical defect shipped
+// on the other tier three weeks later. `evaluateAndPush` called `emitBannerItem`
+// from inside its promotion loop, so the auto tier presented at DECISION time,
+// and the decision is made for every eligible window of the episode in one pass.
+// On 2026-08-21 that put four cards in front of Dan at ~87 s for windows at 0,
+// 1370, 3367 and 4279 s; he confirmed three of them for audio he had not heard
+// and stopped using the banner. Both tiers are position-gated now — see
+// `BannerPlayheadBiconditionalTests`, which pins the property across BOTH.
 //
 // OBSERVATION METHOD — no sleeps, no timeouts, no observer task.
 //

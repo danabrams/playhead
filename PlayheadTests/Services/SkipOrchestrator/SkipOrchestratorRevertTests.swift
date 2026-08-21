@@ -1357,6 +1357,8 @@ struct SkipOrchestratorRevertLifecycleRaceTests {
         )
         try await store.insertAdWindow(applied)
         await orchestrator.receiveAdWindows([applied])
+        // playhead-bwxi: the auto tier presents on PLAYHEAD ENTRY. Walk into the span.
+        await orchestrator.updatePlayheadTime(70.0)
         guard case let .present(card) = await probe.next() else {
             Issue.record("Expected an applied auto-skip card")
             return
@@ -1734,6 +1736,8 @@ struct SkipOrchestratorRevertTests {
         )
         try await store.insertAdWindow(ad)
         await orchestrator.receiveAdWindows([ad])
+        // playhead-bwxi: the auto tier presents on PLAYHEAD ENTRY. Walk into the span.
+        await orchestrator.updatePlayheadTime(70.0)
         guard case .present = await probe.next() else {
             Issue.record("Expected the managed card before time-range revert")
             return
@@ -2692,6 +2696,8 @@ struct SkipOrchestratorRevertTests {
         )
         try await store.insertAdWindow(ad)
         await orchestrator.receiveAdWindows([ad])
+        // playhead-bwxi: the auto tier presents on PLAYHEAD ENTRY. Walk into the span.
+        await orchestrator.updatePlayheadTime(70.0)
         guard case let .present(item) = await probe.next() else {
             Issue.record("Expected auto-skipped banner material")
             return
@@ -2830,6 +2836,8 @@ struct SkipOrchestratorRevertTests {
         )
         try await store.insertAdWindow(producer)
         await orchestrator.receiveAdWindows([producer])
+        // playhead-bwxi: the auto tier presents on PLAYHEAD ENTRY. Walk into the span.
+        await orchestrator.updatePlayheadTime(70.0)
         await appliedGate.waitUntilStarted()
         guard case let .present(item) = await probe.next() else {
             Issue.record("Expected auto-skip feedback card")
@@ -2996,6 +3004,8 @@ struct SkipOrchestratorRevertTests {
         )
         try await store.insertAdWindow(applied)
         await orchestrator.receiveAdWindows([applied])
+        // playhead-bwxi: the auto tier presents on PLAYHEAD ENTRY. Walk into the span.
+        await orchestrator.updatePlayheadTime(70.0)
         guard case let .present(item) = await probe.next() else {
             Issue.record("Expected applied auto-skip card")
             return
@@ -3226,6 +3236,9 @@ struct SkipOrchestratorRevertTests {
             try await store.insertAdWindow(window)
         }
         await orchestrator.receiveAdWindows(all)
+        // playhead-bwxi: the auto tier presents on PLAYHEAD ENTRY. Walk into the span.
+        await orchestrator.updatePlayheadTime(70.0)
+        await orchestrator.updatePlayheadTime(430.0)
 
         // Several windows are ingested, so collect presentations until both
         // auto-skip cards have arrived rather than assuming an emission order.
@@ -3345,6 +3358,8 @@ struct SkipOrchestratorRevertTests {
         )
         try await store.insertAdWindow(revisionA)
         await orchestrator.receiveAdWindows([revisionA])
+        // playhead-bwxi: the auto tier presents on PLAYHEAD ENTRY. Walk into the span.
+        await orchestrator.updatePlayheadTime(90.0)
         guard case let .present(itemA) = await probe.next() else {
             Issue.record("Expected revision-A card")
             return
@@ -3359,6 +3374,8 @@ struct SkipOrchestratorRevertTests {
         )
         try await store.insertOrReplaceAdWindow(revisionB)
         await orchestrator.receiveAdWindows([revisionB])
+        // playhead-bwxi: the auto tier presents on PLAYHEAD ENTRY. Walk into the span.
+        await orchestrator.updatePlayheadTime(90.0)
         guard case let .retireWindow(retirement) = await probe.next()
         else {
             Issue.record("Expected revision-A retirement")
@@ -4889,6 +4906,8 @@ struct SkipOrchestratorRevertTests {
             eligibilityGate: SkipEligibilityGate.eligible.rawValue
         )
         await orchestrator.receiveAdWindows([eligible])
+        // playhead-bwxi: the auto tier presents on PLAYHEAD ENTRY. Walk into the span.
+        await orchestrator.updatePlayheadTime(61.0)
 
         guard case let .retireWindow(retirement) =
             await probe.next()
@@ -5188,6 +5207,8 @@ struct SkipOrchestratorRevertTests {
         )
         await orchestrator.setActiveSkipMode(.auto)
         await orchestrator.receiveAdWindows([managed])
+        // playhead-bwxi: the auto tier presents on PLAYHEAD ENTRY. Walk into the span.
+        await orchestrator.updatePlayheadTime(61.0)
         guard case let .present(managedItem) = await probe.next() else {
             Issue.record("Expected explicit-retirement managed presentation")
             return
@@ -5468,11 +5489,21 @@ struct SkipOrchestratorRevertTests {
             eligibilityGate: SkipEligibilityGate.eligible.rawValue
         )
         await orchestrator.receiveAdWindows([managed])
+        // playhead-bwxi: the auto tier presents on PLAYHEAD ENTRY. Walk into the span.
+        await orchestrator.updatePlayheadTime(70.0)
         guard case .present = await probe.next() else {
             Issue.record("Expected pre-context managed presentation")
             return
         }
         #expect(!pushedCues.isEmpty)
+        // playhead-bwxi: and REWIND before the late context arrives.
+        // `reapplyInventoryFilterToManagedWindows` refuses to retire an
+        // `.applied` window the playhead has already reached, so the card's
+        // precondition (inside the span) and the retirement's (before it) are
+        // contradictory and have to be walked in that order. A bare
+        // `updatePlayheadTime` sets no seek suppression and auto-banner arming
+        // is one-way, so the rewind cannot re-present anything.
+        await orchestrator.updatePlayheadTime(10)
 
         await orchestrator.setDeclaredChapters(
             [
@@ -5532,6 +5563,8 @@ struct SkipOrchestratorRevertTests {
             eligibilityGate: SkipEligibilityGate.eligible.rawValue
         )
         await orchestrator.receiveAdWindows([eligible])
+        // playhead-bwxi: the auto tier presents on PLAYHEAD ENTRY. Walk into the span.
+        await orchestrator.updatePlayheadTime(60.0)
         guard case let .present(autoItem) = await probe.next() else {
             Issue.record("Expected initial auto-tier presentation")
             return
@@ -5602,6 +5635,8 @@ struct SkipOrchestratorRevertTests {
             eligibilityGate: SkipEligibilityGate.eligible.rawValue
         )
         await orchestrator.receiveAdWindows([eligible])
+        // playhead-bwxi: the auto tier presents on PLAYHEAD ENTRY. Walk into the span.
+        await orchestrator.updatePlayheadTime(70.0)
         guard case .present = await probe.next() else {
             Issue.record("Expected initial auto-tier presentation")
             return
@@ -5670,6 +5705,8 @@ struct SkipOrchestratorRevertTests {
             eligibilityGate: SkipEligibilityGate.eligible.rawValue
         )
         await orchestrator.receiveAdWindows([eligible])
+        // playhead-bwxi: the auto tier presents on PLAYHEAD ENTRY. Walk into the span.
+        await orchestrator.updatePlayheadTime(70.0)
         guard case .present = await probe.next() else {
             Issue.record("Expected initial auto-tier presentation")
             return
@@ -5743,6 +5780,8 @@ struct SkipOrchestratorRevertTests {
             eligibilityGate: SkipEligibilityGate.eligible.rawValue
         )
         await orchestrator.receiveAdWindows([eligible])
+        // playhead-bwxi: the auto tier presents on PLAYHEAD ENTRY. Walk into the span.
+        await orchestrator.updatePlayheadTime(70.0)
         guard case .present = await probe.next() else {
             Issue.record("Expected initial auto-tier presentation")
             return
@@ -6169,6 +6208,8 @@ struct SkipOrchestratorRevertTests {
             )
         )
         await orchestrator.receiveAdDecisionResults([eligible])
+        // playhead-bwxi: the auto tier presents on PLAYHEAD ENTRY. Walk into the span.
+        await orchestrator.updatePlayheadTime(90.0)
         guard case .present = await probe.next() else {
             Issue.record("Expected initial decision auto-tier presentation")
             return
@@ -6246,6 +6287,11 @@ struct SkipOrchestratorRevertTests {
             ifPlaybackLifecycleGeneration:
                 item.playbackLifecycleGeneration
         )
+        // playhead-bwxi: the promotion happens AFTER the entry that presented
+        // the suggest card, so the "no duplicate auto card" claim needs a fresh
+        // observation inside the span or it is asserting a silence the position
+        // gate would produce anyway.
+        await orchestrator.updatePlayheadTime(61)
 
         #expect(!pushedCues.isEmpty,
                 "Explicit Yes must skip even when automatic mode is shadow")
@@ -6743,6 +6789,8 @@ struct SkipOrchestratorRevertTests {
         )
         try await store.insertAdWindow(original)
         await orchestrator.receiveAdWindows([original])
+        // playhead-bwxi: the auto tier presents on PLAYHEAD ENTRY. Walk into the span.
+        await orchestrator.updatePlayheadTime(90.0)
         guard case let .present(originalItem) = await probe.next() else {
             Issue.record("Expected original Auto-Yes card")
             return
@@ -6776,6 +6824,8 @@ struct SkipOrchestratorRevertTests {
         )
         try await store.insertOrReplaceAdWindow(latest)
         await orchestrator.receiveAdWindows([latest])
+        // playhead-bwxi: the auto tier presents on PLAYHEAD ENTRY. Walk into the span.
+        await orchestrator.updatePlayheadTime(90.0)
         guard case .retireWindow = await probe.next() else {
             Issue.record("Expected stale card retirement")
             return
@@ -7024,6 +7074,8 @@ struct SkipOrchestratorRevertTests {
         let stream = await orchestrator.bannerEventStream()
         let probe = BoundedStreamProbe(stream)
         await orchestrator.receiveAdWindows([ad])
+        // playhead-bwxi: the auto tier presents on PLAYHEAD ENTRY. Walk into the span.
+        await orchestrator.updatePlayheadTime(70.0)
         guard case let .present(item) = await probe.next() else {
             Issue.record("Expected Listen card material")
             return
@@ -7091,6 +7143,8 @@ struct SkipOrchestratorRevertTests {
         let stream = await orchestrator.bannerEventStream()
         let probe = BoundedStreamProbe(stream)
         await orchestrator.receiveAdWindows([ad])
+        // playhead-bwxi: the auto tier presents on PLAYHEAD ENTRY. Walk into the span.
+        await orchestrator.updatePlayheadTime(70.0)
         guard case let .present(item) = await probe.next() else {
             Issue.record("Expected retryable Listen card material")
             return

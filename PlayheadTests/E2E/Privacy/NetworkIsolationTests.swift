@@ -254,6 +254,12 @@ struct NetworkIsolationTests {
         let (_, recorded) = try await withRecordedNetworkActivity {
             let bannerStream = await orchestrator.bannerItemStream()
             await orchestrator.receiveAdWindows([ad])
+            // playhead-bwxi: the banner-rendering producer path this test names
+            // is `emitBannerItem`, and since the presentation moved to the
+            // position path nothing enters it until the playhead is inside the
+            // span. Without this the 150 ms below measures an orchestrator
+            // doing nothing.
+            await orchestrator.updatePlayheadTime(45)
             // Pull at most one banner item so the test does not hang if
             // none is emitted; we only need to exercise the producer
             // path. The iterator is created and consumed inside the

@@ -429,14 +429,18 @@ struct BannerEvidenceOccurrenceWindowTests {
         let orchestrator = try await Self.makeHarness()
         var reader = BannerReader(await orchestrator.bannerItemStream())
 
-        // `injectUserMarkedAd` emits synchronously inside the actor, so the
-        // second injection is an exact frame boundary for the first.
+        // playhead-bwxi: the injection ARMS; the PLAYHEAD ENTRY presents. So the
+        // frame boundary is the second `updatePlayheadTime`, not the second
+        // injection — the header comment this replaced said the opposite and
+        // was true only while `evaluateAndPush` emitted inline.
         await orchestrator.injectUserMarkedAd(
             start: 1_800, end: 1_860, analysisAssetId: Self.assetId, windowId: "rty3-auto-midroll"
         )
         await orchestrator.injectUserMarkedAd(
             start: 5_000, end: 5_060, analysisAssetId: Self.assetId, windowId: "rty3-auto-sentinel"
         )
+        await orchestrator.updatePlayheadTime(1_805)
+        await orchestrator.updatePlayheadTime(5_005)
 
         let received = await reader.drain(until: "rty3-auto-sentinel")
         let banner = try #require(

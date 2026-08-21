@@ -324,6 +324,9 @@ struct SkipOrchestratorThresholdControlTests {
         let ad = makeSkipTestAdWindow(id: "ad-deny", startTime: 60, endTime: 120, confidence: 0.9, decisionState: "confirmed")
         try await store.insertAdWindow(ad)
         await orchestrator.receiveAdWindows([ad])
+        // playhead-bwxi: the auto tier presents on PLAYHEAD ENTRY, and every
+        // span here is [60, 120).
+        await orchestrator.updatePlayheadTime(70)
 
         let item = try #require(await firstPresentedBannerItem(events))
         #expect(item.windowId == "ad-deny")
@@ -788,6 +791,9 @@ struct SkipOrchestratorThresholdControlTests {
         )
         try await store.insertAdWindow(ad)
         await orchestrator.receiveAdWindows([ad])
+        // playhead-bwxi: the auto tier presents on PLAYHEAD ENTRY, and every
+        // span here is [60, 120).
+        await orchestrator.updatePlayheadTime(70)
 
         let item = try #require(await firstPresentedBannerItem(events))
         #expect(item.windowId == "ad-deny-stale-show")
@@ -887,6 +893,9 @@ struct SkipOrchestratorThresholdControlTests {
         )
         try await store.insertAdWindow(ad)
         await orchestrator.receiveAdWindows([ad])
+        // playhead-bwxi: the auto tier presents on PLAYHEAD ENTRY, and every
+        // span here is [60, 120).
+        await orchestrator.updatePlayheadTime(70)
 
         let item = try #require(await firstPresentedBannerItem(events))
         #expect(item.windowId == "ad-confirm")

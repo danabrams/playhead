@@ -1105,6 +1105,9 @@ struct SkipOrchestratorBannerItemStreamTests {
             decisionState: "confirmed"
         )
         await orchestrator.receiveAdWindows([window])
+        // playhead-bwxi: walk into [60, 120) so the silence below is a real
+        // observation rather than an artefact of a playhead that never moved.
+        await orchestrator.updatePlayheadTime(70)
 
         // Collect with a bounded timeout. Shadow mode is log-only, so an
         // auto-tier card would falsely claim playback skipped this span.
@@ -1119,9 +1122,21 @@ struct SkipOrchestratorBannerItemStreamTests {
         collectTask.cancel()
         let received = await collectTask.value
 
+        // playhead-bwxi: the claim is about the AUTO TIER, which is what this
+        // test's own name and message say. `received == nil` was a stronger
+        // assertion only because the playhead never moved: walk into the span
+        // and playhead-wq34's monotonicity fallback correctly delivers a
+        // SUGGEST card here — a row that would be silent on the managed tier in
+        // `.shadow` is diverted, and that is shipped, deliberate behaviour
+        // rather than a regression. Narrowing to the tier keeps the real claim
+        // ("no completed-action copy for a skip that did not happen") and stops
+        // asserting a silence the product does not promise.
         #expect(
-            received == nil,
-            "A confirmed shadow window did not skip and must not render the completed-action auto tier"
+            received?.tier != .autoSkipped,
+            """
+            A confirmed shadow window did not skip and must not render the \
+            completed-action auto tier; got \(String(describing: received?.tier))
+            """
         )
         let emitted = await orchestrator.emittedAutoSkipBannersSnapshot()
         #expect(!emitted.contains("ad-banner-1"))
@@ -1153,6 +1168,11 @@ struct SkipOrchestratorBannerItemStreamTests {
             decisionState: "confirmed"
         )
         await orchestrator.receiveAdWindows([window])
+        // playhead-bwxi: the auto tier presents on PLAYHEAD ENTRY, so the
+        // listener has to be inside [60, 120) for anything to reach the
+        // stream. Without this the assertion below is about a listener who is
+        // nowhere.
+        await orchestrator.updatePlayheadTime(70)
 
         let collectTask = Task<AdSkipBannerItem?, Never> {
             for await item in stream {
@@ -1203,6 +1223,14 @@ struct SkipOrchestratorBannerItemStreamTests {
         // Deliver the same window twice (simulates re-evaluation from detection).
         await orchestrator.receiveAdWindows([window])
         await orchestrator.receiveAdWindows([window])
+        // playhead-bwxi: and walk the span THREE times. Since the presentation
+        // moved to the position path, "once per window" has to survive
+        // repeated OBSERVATIONS inside the span as well as repeated
+        // deliveries — a fresh way for this to break that did not exist when
+        // the emitter lived in `evaluateAndPush`.
+        await orchestrator.updatePlayheadTime(70)
+        await orchestrator.updatePlayheadTime(80)
+        await orchestrator.updatePlayheadTime(90)
 
         // Collect up to two items, but expect exactly one.
         let collectTask = Task<Int, Never> {
@@ -1242,6 +1270,11 @@ struct SkipOrchestratorBannerItemStreamTests {
             decisionState: "candidate"
         )
         await orchestrator.receiveAdWindows([window])
+        // playhead-bwxi: walk INTO the span. A negative banner assertion taken
+        // with the playhead nowhere near the window now passes for the wrong
+        // reason — the presentation is position-gated, so "nothing arrived"
+        // would be true of a perfectly healthy window too.
+        await orchestrator.updatePlayheadTime(70)
 
         let collectTask = Task<AdSkipBannerItem?, Never> {
             for await item in stream {
@@ -1253,7 +1286,22 @@ struct SkipOrchestratorBannerItemStreamTests {
         collectTask.cancel()
         let received = await collectTask.value
 
-        #expect(received == nil, "Suppressed windows must not emit banners")
+        // playhead-bwxi: same narrowing as the shadow test above, same reason —
+        // with the playhead inside the span, playhead-wq34 diverts this row to
+        // the suggest tier rather than leaving it silent. What must not happen
+        // is an AUTO-tier card claiming a skip that never fired.
+        #expect(
+            received?.tier != .autoSkipped,
+            """
+            Suppressed windows must not emit an auto-skip banner; got \
+            \(String(describing: received?.tier))
+            """
+        )
+        #expect(
+            !(await orchestrator.emittedAutoSkipBannersSnapshot())
+                .contains("ad-suppressed"),
+            "and nothing may reach the auto-tier emission witness"
+        )
     }
 }
 
@@ -1917,6 +1965,10 @@ struct SkipOrchestratorSuggestTierTests {
 
         // 2. User taps the suggest banner — promotes under a fresh UUID.
         await orchestrator.acceptSuggestedSkip(windowId: markOnly.id)
+        // playhead-bwxi: the promoted window is the one that could double-card,
+        // and since the presentation moved to the position path it can only do
+        // so on an observation inside its span. [30, 60).
+        await orchestrator.updatePlayheadTime(45)
 
         // 3. LATE: gate flip arrives for the original id with the
         //    eligibilityGate cleared. Without the tap-then-flip
@@ -1943,6 +1995,10 @@ struct SkipOrchestratorSuggestTierTests {
             eligibilityGate: nil
         )
         await orchestrator.receiveAdWindows([lateFlipped])
+        // playhead-bwxi: and again after the late flip, so the auto-tier
+        // assertion below is a real observation rather than an artefact of a
+        // playhead that never moved.
+        await orchestrator.updatePlayheadTime(45)
 
         try await Task.sleep(for: .milliseconds(150))
         collectTask.cancel()

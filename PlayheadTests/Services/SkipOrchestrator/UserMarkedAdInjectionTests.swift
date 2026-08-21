@@ -118,6 +118,10 @@ struct UserMarkedAdInjectionTests {
             end: 120.0,
             analysisAssetId: "asset-1"
         )
+        // playhead-bwxi: the auto tier presents on PLAYHEAD ENTRY. A listener
+        // tapping "Hearing an ad" is inside the ad by definition, so this is
+        // the gesture reproduced, not a workaround.
+        await orchestrator.updatePlayheadTime(70)
 
         // Give the stream a moment to deliver.
         try await Task.sleep(for: .milliseconds(100))

@@ -673,7 +673,8 @@ actor SkipOrchestrator {
     private var segmentContinuations: [UUID: AsyncStream<[(start: Double, end: Double)]>.Continuation] = [:]
 
     /// Continuation-backed stream of banner items.
-    /// Emits once per window after an actual skip reaches `.applied`.
+    /// playhead-bwxi: emits once per window, on the position observation that
+    /// ENTERS an `.applied` window's span — not when the decision was made.
     private var bannerContinuations: [UUID: AsyncStream<AdSkipBannerItem>.Continuation] = [:]
 
     /// Production banner stream, including ordered invalidations.
@@ -707,6 +708,67 @@ actor SkipOrchestrator {
     ///     test `testEmittedAutoSkipBannersDoesNotLeakAcrossEpisodes`
     ///     fails if this clear is dropped).
     private var emittedAutoSkipBannerWindowIds: Set<String> = []
+
+    /// playhead-bwxi: window IDs whose auto-skip-tier banner is DECIDED but
+    /// not yet PRESENTED, because the playhead has not entered their span.
+    ///
+    /// THE FIELD PROOF (Dan's device, 2026-08-21, asset 0FF7EFF3, 4309.4 s).
+    /// `correction_events`, verbatim:
+    ///
+    ///     08:31:36  bannerAutoSkipConfirmed  [   0.000 -   86.831]
+    ///     08:31:39  bannerAutoSkipConfirmed  [1369.809 - 1548.487]
+    ///     08:31:40  bannerAutoSkipConfirmed  [3367.262 - 3534.576]
+    ///     08:31:42  bannerAutoSkipConfirmed  [4279.302 - 4309.420]
+    ///
+    /// Four banners inside six seconds, for windows at 0, 23, 56 and 71
+    /// MINUTES. Only the first was audio the listener had reached. Three
+    /// `bannerAutoSkipConfirmed` rows — the strongest positive signal the trust
+    /// system takes — were recorded for audio he had not heard, and he stopped
+    /// using the banner inside one episode.
+    ///
+    /// THE CAUSE, and it is the mirror of playhead-d3g0 one tier over.
+    /// `evaluateAndPush` promoted every eligible window to `.applied` in one
+    /// pass and called `emitBannerItem` from inside that loop, so the auto tier
+    /// presented at DECISION time. The decision is made for the whole episode
+    /// at once (nothing in `evaluateWindow` looks at whether the playhead has
+    /// reached the span — only whether it is past its END, the late-detection
+    /// rule), so one ingest produced one banner per window. d3g0 fixed exactly
+    /// this shape on the suggest tier on 2026-07-31 and left this tier alone,
+    /// under the belief — written into `SuggestBannerEntryGateTests`' own
+    /// header — that the auto banner "was always playhead-driven". It was not.
+    ///
+    /// Promotion now ARMS. Presentation happens in `updatePlayheadTime`, and
+    /// ONLY there, for the same reason d3g0 gives: `currentPlayheadTime` can be
+    /// a stale 0 between `beginEpisode` and the first position observation, so
+    /// a synchronous containment test at promotion time would banner a preroll
+    /// at a listener resuming at 44 minutes. Waiting for the position path
+    /// costs at most one observer tick and cannot be wrong.
+    ///
+    /// The gate that prevents re-fires is still `banneredWindowIds`, which is
+    /// written at the same two `evaluateAndPush` sites as before — arming did
+    /// not move it. So every downstream reader of that set behaves exactly as
+    /// it did; the only thing this bead moved is WHEN `emitBannerItem` runs.
+    ///
+    /// An armed ID that never has its span entered stays here, inert, until the
+    /// episode boundary clears it — the same deliberate non-pruning as
+    /// `armedSuggestWindowIds`, and bounded by the episode's window count.
+    private var armedAutoSkipBannerWindowIds: Set<String> = []
+
+    /// playhead-bwxi: has ANY position observation arrived for this episode?
+    ///
+    /// `currentPlayheadTime` is a stale 0 between `beginEpisode` and the first
+    /// observation (the same hazard `armedSuggestWindowIds` documents), so
+    /// stamping it onto a correction unobserved would assert the listener was
+    /// at the top of the episode. That is the one reading this bead's column
+    /// exists to make impossible, so an unobserved position is recorded as
+    /// NULL — unknown — rather than as zero.
+    private var hasObservedPlayheadThisEpisode = false
+
+    /// The listener's position, or `nil` when nothing has observed it yet.
+    /// Stamped onto every correction receipt this actor writes.
+    private var observedPlayheadTimeForCorrection: TimeInterval? {
+        hasObservedPlayheadThisEpisode ? currentPlayheadTime : nil
+    }
 
     /// playhead-d3g0: worst-case wall-clock delay the suggest banner is allowed
     /// between the playhead crossing an ad span's start and the banner item
@@ -1268,6 +1330,55 @@ actor SkipOrchestrator {
         }
         for (_, continuation) in bannerEventContinuations {
             continuation.yield(.present(item))
+        }
+    }
+
+    /// playhead-bwxi: the auto tier's ARM step. A window whose skip decision
+    /// has been made is not yet a banner; the banner belongs to the position
+    /// path, exactly as the suggest tier's does since playhead-d3g0.
+    ///
+    /// Deliberately unconditional — this never emits, not even when
+    /// `currentPlayheadTime` already looks like it is inside the span. See
+    /// `armedAutoSkipBannerWindowIds` for why a synchronous containment test
+    /// here is unsafe (stale 0 between `beginEpisode` and the first position
+    /// observation).
+    private func armAutoSkipBanner(for managed: ManagedWindow) {
+        armedAutoSkipBannerWindowIds.insert(managed.adWindow.id)
+    }
+
+    /// playhead-bwxi: the auto tier's emit trigger, and the twin of
+    /// `emitSuggestBannersOnPlayheadEntry`. Present every armed auto-skip
+    /// window whose span the playhead has ENTERED.
+    ///
+    /// "Entered" is the half-open interval `[snappedStart, snappedEnd)` — the
+    /// SAME predicate `PlaybackTransport.checkSkipCues` uses to fire the skip
+    /// itself (`currentSeconds >= start, currentSeconds < end`), on the same
+    /// `AVPlayer` periodic observation. The receipt and the skip therefore
+    /// agree by construction rather than by coincidence: if the orchestrator
+    /// never observes containment then the transport never fired a skip either,
+    /// and there is nothing to announce.
+    ///
+    /// It survives the skip it announces. `adTrailingCushionSeconds` pulls the
+    /// cue's trailing edge IN, so a skip lands at `end - cushion`, which is
+    /// still inside `[start, end)`. A missed entry tick is therefore caught by
+    /// the LANDING tick rather than lost.
+    ///
+    /// Leaving the set is one-way per episode, like the suggest tier's: a span
+    /// announces itself once, and scrubbing back into it does not re-announce.
+    private func emitAutoSkipBannersOnPlayheadEntry(at time: TimeInterval) {
+        guard !armedAutoSkipBannerWindowIds.isEmpty else { return }
+        let entered = armedAutoSkipBannerWindowIds
+            .compactMap { windows[$0] }
+            .filter { time >= $0.snappedStart && time < $0.snappedEnd }
+            .sorted {
+                if $0.snappedStart != $1.snappedStart {
+                    return $0.snappedStart < $1.snappedStart
+                }
+                return $0.adWindow.id < $1.adWindow.id
+            }
+        for managed in entered {
+            armedAutoSkipBannerWindowIds.remove(managed.adWindow.id)
+            emitBannerItem(for: managed)
         }
     }
 
@@ -1940,10 +2051,15 @@ actor SkipOrchestrator {
         lastSeekTime = nil
         skipSuppressedAfterSeek = false
         currentPlayheadTime = 0
+        hasObservedPlayheadThisEpisode = false
         latestUserSeekOperationGeneration = 0
         decisionLog.removeAll()
         banneredWindowIds.removeAll()
         emittedAutoSkipBannerWindowIds.removeAll()
+        // playhead-bwxi: an armed auto-skip banner is per-episode state, and a
+        // leak here would present the previous episode's receipt against the
+        // next episode's playhead.
+        armedAutoSkipBannerWindowIds.removeAll()
         suggestBanneredWindowIds.removeAll()
         suggestWindows.removeAll()
         armedSuggestWindowIds.removeAll()
@@ -2545,9 +2661,14 @@ actor SkipOrchestrator {
         activeEpisodeDuration = nil
         activeDeclaredChapters = []
         inAdState = false
+        hasObservedPlayheadThisEpisode = false
         latestUserSeekOperationGeneration = 0
         banneredWindowIds.removeAll()
         emittedAutoSkipBannerWindowIds.removeAll()
+        // playhead-bwxi: an armed auto-skip banner is per-episode state, and a
+        // leak here would present the previous episode's receipt against the
+        // next episode's playhead.
+        armedAutoSkipBannerWindowIds.removeAll()
         suggestBanneredWindowIds.removeAll()
         suggestWindows.removeAll()
         armedSuggestWindowIds.removeAll()
@@ -3770,6 +3891,7 @@ actor SkipOrchestrator {
     func updatePlayheadTime(_ time: TimeInterval) {
         guard time.isFinite else { return }
         currentPlayheadTime = time
+        hasObservedPlayheadThisEpisode = true
 
         // playhead-d3g0: the suggest banner's emit trigger. This is the ONLY
         // site that presents an armed suggestion; `receiveAdWindows` arms and
@@ -3777,6 +3899,13 @@ actor SkipOrchestrator {
         // the learning/seek bookkeeping below — Dan's decision makes this a
         // latency-sensitive path (`suggestEntryLatencyBudgetSeconds`).
         emitSuggestBannersOnPlayheadEntry(at: time)
+
+        // playhead-bwxi: the auto-skip banner's emit trigger, and the ONLY site
+        // that presents one. `evaluateAndPush` arms and nothing else emits. The
+        // suggest tier goes first because it is a PROSPECTIVE affordance whose
+        // whole value is being early enough to act on; the auto tier's card is
+        // a receipt for a skip that is happening on this same observation.
+        emitAutoSkipBannersOnPlayheadEntry(at: time)
 
         let consumed = pendingCatalogLearning.values.filter {
             time >= $0.eligiblePlayheadTime
@@ -3832,6 +3961,7 @@ actor SkipOrchestrator {
         lastSeekTime = Date()
         skipSuppressedAfterSeek = true
         currentPlayheadTime = time
+        hasObservedPlayheadThisEpisode = true
         logger.info("User seek to \(time, format: .fixed(precision: 1))s -- skip suppressed")
 
         // Do NOT remove existing cues ahead of the new position.
@@ -5388,6 +5518,10 @@ actor SkipOrchestrator {
             source: .bannerAutoSkipConfirmed,
             podcastId: sourcePodcastId,
             correctionType: .falseNegative,
+            // playhead-bwxi: WHERE THE LISTENER WAS. The three poisoned rows of
+            // 2026-08-21 are indistinguishable from honest ones precisely
+            // because this was not recorded.
+            playheadTimeAtCorrection: observedPlayheadTimeForCorrection,
             targetRefs: CorrectionTargetRefs(
                 adWindowId: windowId,
                 explicitFeedbackDetectionProjection:
@@ -5799,6 +5933,8 @@ actor SkipOrchestrator {
             source: source,
             podcastId: podcastId,
             correctionType: source.kind.correctionType,
+            // playhead-bwxi: WHERE THE LISTENER WAS.
+            playheadTimeAtCorrection: observedPlayheadTimeForCorrection,
             causalSource: correctionProvenance.isEmpty
                 ? nil
                 : CausalInference.inferCausalSource(
@@ -6556,6 +6692,8 @@ actor SkipOrchestrator {
             source: .bannerSuggestionDenied,
             podcastId: podcastId,
             correctionType: .falsePositive,
+            // playhead-bwxi: WHERE THE LISTENER WAS.
+            playheadTimeAtCorrection: observedPlayheadTimeForCorrection,
             causalSource: causalSource,
             targetRefs: CorrectionTargetRefs(
                 adWindowId: window.id,
@@ -6867,6 +7005,17 @@ actor SkipOrchestrator {
         Set(suggestWindows.keys)
     }
 
+    /// playhead-bwxi: snapshot of auto-skip-tier windows whose banner is
+    /// DECIDED but not yet PRESENTED (the playhead has not entered the span).
+    ///
+    /// Exists so a test can tell the two halves of this bead apart: "the skip
+    /// decision was not made" and "the decision was made and the card is
+    /// waiting for the playhead" look identical from the banner stream, and
+    /// only one of them is a regression.
+    func armedAutoSkipBannerWindowIDs() -> Set<String> {
+        armedAutoSkipBannerWindowIds
+    }
+
     /// Snapshot of suggestions whose banner delivery was acknowledged by the
     /// active host. Used by lifecycle tests to prove a stale observer cannot
     /// suppress replay in a replacement transaction.
@@ -6932,7 +7081,9 @@ actor SkipOrchestrator {
                     if !banneredWindowIds.contains(managed.adWindow.id) {
                         // Cycle-27 T-3 production-writer site (2 of 4): evaluateAndPush terminal-state branch.
                         banneredWindowIds.insert(managed.adWindow.id)
-                        emitBannerItem(for: managed)
+                        // playhead-bwxi: ARM, do not present. See
+                        // `armedAutoSkipBannerWindowIds`.
+                        armAutoSkipBanner(for: managed)
                     }
                     eligible.append(managed)
                 }
@@ -6954,7 +7105,9 @@ actor SkipOrchestrator {
                !banneredWindowIds.contains(managed.adWindow.id) {
                 // Cycle-27 T-3 production-writer site (3 of 4): evaluateAndPush promotion branch.
                 banneredWindowIds.insert(managed.adWindow.id)
-                emitBannerItem(for: managed)
+                // playhead-bwxi: ARM, do not present. See
+                // `armedAutoSkipBannerWindowIds`.
+                armAutoSkipBanner(for: managed)
             }
 
             if decision == .applied {

@@ -393,6 +393,17 @@ final class SkipOrchestratorPreloadTests: XCTestCase {
         // the emitted card truthfully represents an applied skip.
         await orchestrator.setActiveSkipMode(.auto)
 
+        // playhead-bwxi: the auto tier presents on PLAYHEAD ENTRY, not at the
+        // moment the decision is made, so the listener has to walk into each
+        // span for this test to observe anything. Both spans are walked, and
+        // the order matters: 20 s is inside `win-applied` [10, 40] — the
+        // NEGATIVE control, which must stay silent — and 210 s is inside
+        // `win-confirmed` [200, 230], the positive one. Driving only the
+        // second would make the `.applied` assertion below pass for the wrong
+        // reason: no banner, because the playhead never went there.
+        await orchestrator.updatePlayheadTime(20.0)
+        await orchestrator.updatePlayheadTime(210.0)
+
         // Cycle-23 H-1 (iteration-order-independent + pre-population-
         // specific): observe the EMISSION snapshot, not the suppression
         // gate. The cycle-22 gate-snapshot check was structurally
@@ -715,6 +726,11 @@ final class SkipOrchestratorPreloadTests: XCTestCase {
 
         await orchestrator.beginEpisode(analysisAssetId: "asset-1", episodeId: "asset-1")
         await orchestrator.setActiveSkipMode(.auto)
+        // playhead-bwxi: walk into `win-confirmed` [10, 40] — the auto tier
+        // presents on playhead entry. `win-marked` [100, 160] is deliberately
+        // NOT walked into, because the suggest-tier precondition below is
+        // about a window that is still ARMED.
+        await orchestrator.updatePlayheadTime(20.0)
         let received = await collector.value
         XCTAssertEqual(received.count, 1, "Setup precondition: auto-promoted window must emit one banner.")
 
@@ -839,6 +855,9 @@ final class SkipOrchestratorPreloadTests: XCTestCase {
         }
         await orchestrator.beginEpisode(analysisAssetId: "asset-1", episodeId: "asset-1")
         await orchestrator.setActiveSkipMode(.auto)
+        // playhead-bwxi: `win-ep1` is [10, 40]; the auto tier presents on
+        // playhead entry.
+        await orchestrator.updatePlayheadTime(20.0)
         let ep1Banners = await collector1.value
         XCTAssertEqual(
             ep1Banners.first?.windowId,
@@ -866,6 +885,10 @@ final class SkipOrchestratorPreloadTests: XCTestCase {
         }
         await orchestrator.beginEpisode(analysisAssetId: "asset-2", episodeId: "asset-2")
         await orchestrator.setActiveSkipMode(.auto)
+        // playhead-bwxi: `win-ep2` is [10, 40] on asset-2. `beginEpisode`
+        // resets the position, so episode 2 needs its own walk — which is the
+        // property being tested, one layer down.
+        await orchestrator.updatePlayheadTime(20.0)
         let ep2Banners = await collector2.value
         XCTAssertEqual(
             ep2Banners.count,
