@@ -229,7 +229,9 @@
 //
 //      THE ID STILL ADDRESSES GEOMETRY ONLY, and that is deliberate. A mark's
 //      grade depends on the WHOLE row set — the corroboration term counts every
-//      overlapping presence-pass replicate — so a later scan can re-grade a
+//      overlapping presence-pass replicate AT THE GRADED CLAIM'S OWN TRANSCRIPT
+//      VERSION (playhead-kg6i; it used to count them at every version, which is
+//      what that bead removed) — so a later scan can re-grade a
 //      mark whose id is unchanged, and the store updates it in place. Hashing
 //      the confidence into the id instead would mint a fresh row on every
 //      re-screen and orphan the one the user is looking at, which is worse.
@@ -486,6 +488,10 @@ enum SemanticSweepMarkComposer {
     /// `uncertain` declination are counted alike, because that is exactly how
     /// stage 1 already treats them at ADMISSION. Splitting them is a
     /// measurement, not a guess, and is not made here.
+    ///
+    /// WHICH ROWS ARE REPLICATES IS NOT THIS FUNCTION'S QUESTION — it is
+    /// ``corroboration(for:in:atTranscriptVersion:)``'s, and playhead-kg6i
+    /// answered it wrong until now. The arithmetic here is unchanged.
     static func corroborationFactor(affirming: Int, dissenting: Int) -> Double {
         let supporting = Double(max(0, affirming))
         let opposing = Double(max(0, dissenting))
@@ -691,21 +697,78 @@ enum SemanticSweepMarkComposer {
         }
     }
 
-    /// Count the PRESENCE-pass rows that examined this extent and say whether
-    /// each one affirmed an ad in it.
+    /// Count the PRESENCE-pass rows AT ONE TRANSCRIPT VERSION that examined this
+    /// extent, and say whether each one affirmed an ad in it.
     ///
     /// Scoped to the presence pass on purpose: `SemanticScanResult`'s own
     /// documentation is that `passB`'s `.noAds` means "found no edges", never
     /// "there is no ad", so a refinement that failed to localize must not be
     /// counted as a replicate voting against presence.
+    ///
+    /// # And scoped to ONE VERSION, which is playhead-kg6i
+    ///
+    /// `version` is not a filter bolted on; it is the definition of the
+    /// population this factor is about. A "replicate" is a REPEAT OF THE SAME
+    /// EXPERIMENT, and an FM screening is an experiment on a transcript. Two
+    /// rows formed against two different transcripts of the same audio are two
+    /// different experiments, so counting one as a vote about the other's claim
+    /// is this repo's standing defect class — a value that names one thing read
+    /// as though it named another.
+    ///
+    /// It is not a hypothetical. Measured on the 2026-08-19 t4 pull: **211 of
+    /// the 301 coarse `containsAd` rows carry a `transcriptVersion` the asset's
+    /// current canonical chunk set no longer hashes to**, and on nine of the
+    /// fifteen assets NOTHING was ever examined at the current version (six of
+    /// them carry exactly one row there and it is a playhead-pz32 `noWork:`
+    /// sentinel spanning `[0, 0]`). The un-scoped count therefore did not read
+    /// "the replicates disagreed"; on this data it usually read "an older
+    /// transcript was tiled into different windows".
+    ///
+    /// THE CLEANEST WITNESS, because it is one row against two: `561CEF5B`
+    /// [692.76–791.70] is a single `containsAd` row at version `deace512`. The
+    /// only other presence-pass rows over that audio are `[620.34–720.00]` and
+    /// `[720.78–820.80]`, both `noAds`, both at `37772e3f` — a DIFFERENT
+    /// transcript, tiled at boundaries that do not line up with the claim at
+    /// all. Un-scoped they voted it down 1-against-2 to `(1+1)/(1+1+2) = 0.5`
+    /// and the mark graded 0.350. Scoped, its own experiment is unanimous and
+    /// it grades 0.700.
+    ///
+    /// WHAT THIS COSTS, NAMED RATHER THAN ABSORBED — the direction is UP, which
+    /// is the direction that needs stating. Removing rows shrinks both counts,
+    /// so the factor can move either way in principle; on the pull it moves one
+    /// way. **8 of the 79 marks change, all 8 upward, and the geometry of every
+    /// mark is byte-identical** (nothing downstream of the grade reads it, so a
+    /// re-grade can never move an edge). Decision-level crossings, all upward,
+    /// none downward: `SkipOrchestrator.preloadConfidenceThreshold` (0.70) **1**
+    /// — the 561CEF5B witness above, joining the 36 marks that already sat at
+    /// the ceiling; `SkipPolicyConfig.enterThreshold` (0.65) 1;
+    /// `FinalPassRetranscriptionRunner.defaultConfidenceFloor` (0.50) 2;
+    /// `stayThreshold` (0.45) 5; `SkipPolicyMatrix.suppressionThreshold` (0.25)
+    /// 4; `shortSpanOverrideConfidence` (0.85) 0. **No threshold moved and no
+    /// mark's TIER moved**: `extentSupport` is `.unanchored`, so every mark is
+    /// still `.markOnly` and no confidence can reach auto-skip.
+    ///
+    /// WHAT THIS DELIBERATELY DOES NOT DO. It does not drop a stale row from the
+    /// COMPOSITION — that is option (b) of the bead, it would remove 48 of the
+    /// 79 marks and 4,739.9 s of 8,048.8 s of marked audio, and it is Dan's.
+    /// Seconds are version-independent, so a stale row's window bounds are still
+    /// real geometry; what is version-dependent is whether two rows are the same
+    /// experiment, and that is the only thing changed here.
+    ///
+    /// - Parameter version: the `transcriptVersion` of the claim being graded —
+    ///   i.e. of the row whose confidence term this count feeds. It has NO
+    ///   default on purpose: a defaulted "all versions" argument would leave the
+    ///   defect one keystroke away and invisible at the call site.
     static func corroboration(
         for extent: Extent,
-        in rows: [SemanticScanResult]
+        in rows: [SemanticScanResult],
+        atTranscriptVersion version: String
     ) -> (affirming: Int, dissenting: Int) {
         var affirming = 0
         var dissenting = 0
         for row in rows where row.scanPass != refinementScanPass {
-            guard row.didExamineWindow,
+            guard row.transcriptVersion == version,
+                  row.didExamineWindow,
                   row.windowStartTime.isFinite, row.windowEndTime.isFinite,
                   row.windowEndTime > row.windowStartTime,
                   extent.overlaps(start: row.windowStartTime, end: row.windowEndTime)
@@ -869,6 +932,13 @@ enum SemanticSweepMarkComposer {
         // three independent `passA` screenings said `uncertain`, one `passB`
         // row said `containsAd`, and it shipped at the same 0.70 as a mark two
         // clean screenings agreed on.
+        //
+        // playhead-kg6i NARROWS WHICH SCREENINGS COUNT AS THOSE THREE: only the
+        // ones formed against the refinement's OWN `transcriptVersion`. A pass-B
+        // row is re-run when the transcript moves, so it and the screenings that
+        // contradict it are normally at the same version and this reading
+        // survives; what no longer counts is a screening of a transcript the
+        // refinement never saw. The deduction is not weakened, it is aimed.
         for (index, refinement) in refinements.enumerated()
         where !claimedRefinements.contains(index) {
             result.append(
@@ -883,8 +953,21 @@ enum SemanticSweepMarkComposer {
         return result.filter { $0.duration >= minimumMarkDurationSeconds }
     }
 
-    /// Build an extent and grade it from the rows it rests on plus every
-    /// presence-pass replicate that examined the same audio.
+    /// Build an extent and grade it from the rows it rests on plus, FOR EACH OF
+    /// THEM, the presence-pass replicates OF THAT ROW'S OWN EXPERIMENT that
+    /// examined the same audio.
+    ///
+    /// playhead-kg6i: the corroboration count is computed INSIDE the map, once
+    /// per backing row, at that row's `transcriptVersion` — it used to be
+    /// hoisted out and shared, which is what made one set of votes speak for
+    /// claims formed against different transcripts. A backing pair is a coarse
+    /// window plus its pass-B narrowing and the two can genuinely differ in
+    /// version (the refinement is re-run when the transcript moves), so there is
+    /// no single version this could be hoisted back to without picking one row's
+    /// cohort to grade the other row's claim.
+    ///
+    /// The `min` over `backing` is unchanged and still means what it did: an
+    /// extent resting on two rows is only as good as its weaker second.
     private static func scored(
         start: Double,
         end: Double,
@@ -892,12 +975,16 @@ enum SemanticSweepMarkComposer {
         in rows: [SemanticScanResult]
     ) -> Extent {
         var extent = Extent(start: start, end: end)
-        let counts = corroboration(for: extent, in: rows)
         extent.confidence = backing
-            .map {
-                markConfidence(
-                    certaintyFactor: certaintyFactor(of: $0),
-                    transcriptQuality: $0.transcriptQuality,
+            .map { row in
+                let counts = corroboration(
+                    for: extent,
+                    in: rows,
+                    atTranscriptVersion: row.transcriptVersion
+                )
+                return markConfidence(
+                    certaintyFactor: certaintyFactor(of: row),
+                    transcriptQuality: row.transcriptQuality,
                     affirming: counts.affirming,
                     dissenting: counts.dissenting
                 )
@@ -1031,7 +1118,7 @@ enum SemanticSweepMarkComposer {
     /// The spans a PRESENCE-pass row examined and did NOT affirm — the windows
     /// a merge may never bridge (playhead-shu5).
     ///
-    /// Scoped to the presence pass for the same reason ``corroboration(for:in:)``
+    /// Scoped to the presence pass for the same reason ``corroboration(for:in:atTranscriptVersion:)``
     /// is: `passB`'s `.noAds` means "found no edges", never "there is no ad", so
     /// a refinement that failed to localize must not bar anything. And gated on
     /// `didExamineWindow` for the same reason stage 1 is: a cancelled or refused
@@ -1047,6 +1134,19 @@ enum SemanticSweepMarkComposer {
     /// with no localisation; reading them as denials would have inverted their
     /// meaning. What they get instead is stage 6's answer: they contribute no
     /// EXTENT.
+    ///
+    /// NOT VERSION-SCOPED, DELIBERATELY, AND THE DIRECTION IS WHY (playhead-kg6i).
+    /// ``corroboration(for:in:atTranscriptVersion:)`` had to be scoped because a
+    /// stale row was VOTING on a claim it is not a replicate of. A barrier casts
+    /// no vote: it refuses a merge, so admitting a stale one can only ever SPLIT
+    /// one mark into two narrower ones. Restricting this to the current version
+    /// would let merges bridge gaps somebody looked at and cleared — a REACH
+    /// change in the widening direction, on a lane whose whole downside budget is
+    /// "a wrong banner" — so it is not made here and is not smuggled in under a
+    /// bead about a counting error. Measured on the 2026-08-19 t4 pull, the
+    /// barrier fires exactly once across all 15 assets (`561CEF5B` [420.9–619.6],
+    /// see ``mergeExtents(_:barredBy:)``), so this is a statement about the rule
+    /// rather than about a population.
     static func clearedSpans(in rows: [SemanticScanResult]) -> [AdSpanBounds] {
         rows.compactMap { row in
             guard row.scanPass != refinementScanPass,
@@ -1515,7 +1615,7 @@ enum SemanticSweepMarkComposer {
     ///     say the model named a brand, and it can never certify that the
     ///     PRESENCE verdict under a `.unrefined` mark was the model's at all.
     ///   * a DECLINED `passB` row means "found no edges", never "there is no
-    ///     ad" — the same reason ``corroboration(for:in:)`` and
+    ///     ad" — the same reason ``corroboration(for:in:atTranscriptVersion:)`` and
     ///     ``clearedSpans(in:)`` both scope themselves — so it attributes
     ///     nothing rather than contradicting anything.
     ///   * an UNEXAMINED row looked at nothing, so its `disposition` column is
@@ -1525,7 +1625,7 @@ enum SemanticSweepMarkComposer {
     /// # Overlap, and what it cannot see
     ///
     /// Plain overlap, the same predicate stage 2 uses to pair a refinement with
-    /// a coarse window and ``corroboration(for:in:)`` uses to count replicates.
+    /// a coarse window and ``corroboration(for:in:atTranscriptVersion:)`` uses to count replicates.
     /// A refined span's own geometry is `firstLineRef`/`lastLineRef`, which are
     /// line refs rather than seconds, and only the ROW carries the projection
     /// into seconds — so row overlap is the finest grain available at rest. A

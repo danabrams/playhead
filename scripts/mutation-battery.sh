@@ -1585,6 +1585,15 @@ FOCUSED_SUITES=(
   -only-testing:PlayheadTests/SemanticSweepAttributionTests
   -only-testing:PlayheadTests/SemanticSweepAttributionAbsenceTests
   -only-testing:PlayheadTests/SemanticSweepAttributionPersistenceTests
+  # playhead-kg6i: a vote is a REPLICATE OF THE SAME EXPERIMENT (KG series).
+  # ONE suite, and the reason it is one rather than three is the opposite of
+  # shu5's: the whole claim lives in a single pure function and its one caller,
+  # so there is no second layer that could observe a defect this one cannot.
+  # `SemanticSweepConfidenceTests` next door grades marks too, but every row in
+  # its fixtures is at one version, so it is blind to this bead BY
+  # CONSTRUCTION — which is exactly why the defect survived playhead-92im's own
+  # rails. Listing it here would add build time and no observation.
+  -only-testing:PlayheadTests/SemanticSweepCorroborationScopeTests
   # playhead-f5ao: the write-only-at-init mirror (F5 series). Two suites,
   # because the two halves of the claim are unobservable from each other. The
   # readiness suite is the only thing that can compare the first-✓ tooltip's
@@ -2887,6 +2896,16 @@ T_6RUV_MOVES_ONLY="attribution moves evidenceSources and NOTHING else"
 T_6RUV_COMPOSED="a composed mark carries its own attribution"
 T_6RUV_CANONICAL="each attribution renders to one canonical, pinned string"
 T_6RUV_ORDER="the rendering does not depend on the order the spans were read in"
+
+# ---- playhead-kg6i: a vote is a REPLICATE OF THE SAME EXPERIMENT (KG series) ----
+T_KG6I_LONE="a lone verdict is not voted down by a transcript it never saw"
+T_KG6I_CROSS_AFFIRM="a cross-version affirmer no longer props up a contested claim"
+T_KG6I_SAME_DENY="a dissenter at the same transcript version still deducts"
+T_KG6I_SAME_AFFIRM="an affirming replicate at the same version still counts"
+T_KG6I_PAIR_REFINE="a pair is graded in each row's own cohort — the refinement's governs here"
+T_KG6I_PAIR_COARSE="a pair is graded in each row's own cohort — the coarse window's governs here"
+T_KG6I_GEOMETRY="version scoping changes the GRADE and not the geometry"
+T_KG6I_COUNTS="corroboration counts only the rows at the version it was asked about"
 T_Y3YA_ORPHAN_PASSB="a passB verdict with no coarse parent stands on its own"
 T_Y3YA_NO_GATE="no anchor anywhere still emits the mark"
 T_Y3YA_CLIP_UNANCHORED="a clipped mark still records both edges as unanchored"
@@ -5960,6 +5979,55 @@ MUTATIONS=(
   # that way worthless) and it names the rail AT01 kills — so a KILLED verdict
   # here would mean a rename can change behaviour and something is very wrong.
   "AT99|1204|SWEEP|$T_6RUV_PERMISSIVE"
+
+  # ---- playhead-kg6i, the KG series: a vote is a REPLICATE OF THE SAME
+  #      EXPERIMENT --------------------------------------------------------
+  #
+  # `corroboration` counted every overlapping presence-pass row as a vote and
+  # never read `transcriptVersion`. An FM screening is an experiment on a
+  # transcript, so a row formed against a transcript the app has moved past is
+  # not a replicate of today's claim. On the 2026-08-19 t4 pull that is 211 of
+  # the 301 coarse `containsAd` rows, and on nine of fifteen assets NOTHING was
+  # ever examined at the current version.
+  #
+  # The series has three shapes, because the defect and its two wrong repairs
+  # are each invisible from the others: KG01/KG02 restore the bug, KG03/KG04
+  # HOIST the count back out of the per-backing-row map (each in one direction,
+  # because a `min` over two cohorts can only ever equal one of them — see the
+  # two `…OwnCohort` rails), and KG05/KG06/KG07 are the over-corrections: stop
+  # counting at all, or turn scoping into DROPPING, which is option (b) of the
+  # bead and Dan's call rather than this one's.
+
+  # KG01 is the shipped defect verbatim, own batch: it reverts every scoped
+  # count at once, so a batched partner would be credited off it.
+  "KG01|1210|SWEEP|$T_KG6I_LONE;$T_KG6I_CROSS_AFFIRM;$T_KG6I_PAIR_REFINE;$T_KG6I_COUNTS"
+
+  # KG02 inverts the comparison. Own batch for the same reason, and it is the
+  # mutation a fixture with symmetric cohorts could not see at all — which is
+  # why `…OnlyItsOwnVersion` makes tv-1 and tv-2 deliberately asymmetric.
+  "KG02|1211|SWEEP|$T_KG6I_LONE;$T_KG6I_SAME_DENY;$T_KG6I_COUNTS"
+
+  # KG03/KG04 both rewrite the same six lines of `scored`, so one batch each.
+  "KG03|1212|SWEEP|$T_KG6I_PAIR_REFINE"
+  "KG04|1213|SWEEP|$T_KG6I_PAIR_COARSE"
+
+  # KG05 and KG06 edit adjacent lines of the same counting loop and share a
+  # victim, so they are batched apart: applied together, each would be credited
+  # off a state the other created.
+  "KG05|1214|SWEEP|$T_KG6I_SAME_DENY;$T_KG6I_SAME_AFFIRM;$T_KG6I_PAIR_REFINE;$T_KG6I_COUNTS"
+  "KG06|1215|SWEEP|$T_KG6I_SAME_AFFIRM;$T_KG6I_COUNTS"
+
+  # KG07 is option (b) smuggled in as a filter on `compose`'s own input — the
+  # one repair that would change GEOMETRY rather than the grade, and the reason
+  # `…NotTheGeometry` picks versions whose sort order puts the CLAIM last.
+  "KG07|1216|SWEEP|$T_KG6I_GEOMETRY"
+
+  # KG99 — VACUITY CONTROL, and it MUST SURVIVE. It renames the closure
+  # parameter in `scored`'s map, on the very lines KG03 and KG04 rewrite, and
+  # changes nothing else. Non-empty expectation on purpose (playhead-ngsm): it
+  # names the rail KG03 kills, so a KILLED verdict here would mean a rename can
+  # change behaviour.
+  "KG99|1217|SWEEP|$T_KG6I_PAIR_REFINE"
 
   # -------------------------------------------------------------------------
   # playhead-lxkq — the ad-likelihood scan ORDER (X01-X16)
@@ -10727,6 +10795,14 @@ describe_mutation() {
     SU22) echo "the gap test closes, so a barrier that only TOUCHES the join bars the merge" ;;
     SU23) echo "AdDetectionService stops passing the index — a correct composer never handed one" ;;
     SU24) echo "BackfillJobRunner stops passing the index" ;;
+    KG01) echo "THE SHIPPED DEFECT VERBATIM — corroboration counts every version's rows as replicates of one experiment" ;;
+    KG02) echo "the version comparison is INVERTED, so only rows from OTHER transcripts vote" ;;
+    KG03) echo "the count is hoisted out of the per-backing-row map and taken at the FIRST row's version" ;;
+    KG04) echo "the count is hoisted out and taken at the LAST row's version — the mirror of KG03" ;;
+    KG05) echo "a dissenting replicate stops counting — scoping the deduction away instead of aiming it" ;;
+    KG06) echo "an affirming replicate stops counting" ;;
+    KG07) echo "scoping becomes DROPPING: compose filters its input to the newest version (bead option (b), Dan's call)" ;;
+    KG99) echo "VACUITY CONTROL — the closure parameter in scored's map is renamed on the lines KG03/KG04 rewrite; nothing else changes. MUST SURVIVE" ;;
     AT01) echo "THE PERMISSIVE GATE IS DROPPED — the runner's hardcoded paid/thirdParty read as the model's judgement" ;;
     AT02) echo "a CTA or a disclosure phrase counts as NAMING an advertiser — the bead's own over-read, one layer down" ;;
     AT03) echo "a refinement that yielded no spans reads as no refinement at all" ;;
@@ -17649,6 +17725,138 @@ EOF
 EOF
     snippet NEW <<'EOF'
                     supportLines: nil
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # ── playhead-kg6i: a vote is a REPLICATE OF THE SAME EXPERIMENT ──────────
+
+  KG01)
+    snippet OLD <<'EOF'
+            guard row.transcriptVersion == version,
+                  row.didExamineWindow,
+EOF
+    snippet NEW <<'EOF'
+            guard row.didExamineWindow,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  KG02)
+    snippet OLD <<'EOF'
+            guard row.transcriptVersion == version,
+EOF
+    snippet NEW <<'EOF'
+            guard row.transcriptVersion != version,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  KG03)
+    snippet OLD <<'EOF'
+        extent.confidence = backing
+            .map { row in
+                let counts = corroboration(
+                    for: extent,
+                    in: rows,
+                    atTranscriptVersion: row.transcriptVersion
+                )
+                return markConfidence(
+EOF
+    snippet NEW <<'EOF'
+        let hoisted = corroboration(
+            for: extent,
+            in: rows,
+            atTranscriptVersion: backing.first?.transcriptVersion ?? ""
+        )
+        extent.confidence = backing
+            .map { row in
+                let counts = hoisted
+                return markConfidence(
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  KG04)
+    snippet OLD <<'EOF'
+        extent.confidence = backing
+            .map { row in
+                let counts = corroboration(
+                    for: extent,
+                    in: rows,
+                    atTranscriptVersion: row.transcriptVersion
+                )
+                return markConfidence(
+EOF
+    snippet NEW <<'EOF'
+        let hoisted = corroboration(
+            for: extent,
+            in: rows,
+            atTranscriptVersion: backing.last?.transcriptVersion ?? ""
+        )
+        extent.confidence = backing
+            .map { row in
+                let counts = hoisted
+                return markConfidence(
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  KG05)
+    snippet OLD <<'EOF'
+            } else {
+                dissenting += 1
+            }
+EOF
+    snippet NEW <<'EOF'
+            } else {
+                dissenting += 0
+            }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  KG06)
+    snippet OLD <<'EOF'
+            if row.disposition == .containsAd {
+                affirming += 1
+EOF
+    snippet NEW <<'EOF'
+            if row.disposition == .containsAd {
+                affirming += 0
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  KG07)
+    snippet OLD <<'EOF'
+        let presence = presenceExtents(scanRows)
+EOF
+    snippet NEW <<'EOF'
+        let newestVersion = scanRows.map(\.transcriptVersion).max() ?? ""
+        let presence = presenceExtents(
+            scanRows.filter { $0.transcriptVersion == newestVersion }
+        )
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  KG99)
+    snippet OLD <<'EOF'
+        extent.confidence = backing
+            .map { row in
+                let counts = corroboration(
+                    for: extent,
+                    in: rows,
+                    atTranscriptVersion: row.transcriptVersion
+                )
+                return markConfidence(
+                    certaintyFactor: certaintyFactor(of: row),
+                    transcriptQuality: row.transcriptQuality,
+EOF
+    snippet NEW <<'EOF'
+        extent.confidence = backing
+            .map { backingRow in
+                let counts = corroboration(
+                    for: extent,
+                    in: rows,
+                    atTranscriptVersion: backingRow.transcriptVersion
+                )
+                return markConfidence(
+                    certaintyFactor: certaintyFactor(of: backingRow),
+                    transcriptQuality: backingRow.transcriptQuality,
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
