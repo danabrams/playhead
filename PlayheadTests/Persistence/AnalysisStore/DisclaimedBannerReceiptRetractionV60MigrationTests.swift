@@ -19,8 +19,9 @@
 //      what Dan actually meant, and the 10:07 denial is a genuine one. A
 //      migration that took either would pass a "three fewer rows" assertion.
 //   3. NOT FIFTEEN, AND NOT AN ASSET SWEEP. The device holds fifteen
-//      `bannerAutoSkipConfirmed` rows and the other twelve are UNFALSIFIABLE,
-//      not false — POSITION UNKNOWN IS NOT POSITION WRONG. This is the
+//      `bannerAutoSkipConfirmed` rows — 4 on this asset, 11 over five others
+//      — and the twelve nobody disclaimed are UNFALSIFIABLE, not false:
+//      POSITION UNKNOWN IS NOT POSITION WRONG. This is the
 //      direction a predicate over `source`, over the asset, or over a
 //      `createdAt` window gets wrong, and every one of those predicates passes
 //      direction 1.
@@ -148,25 +149,54 @@ struct DisclaimedBannerReceiptRetractionV60MigrationTests {
         ),
     ]
 
-    /// The OTHER twelve `bannerAutoSkipConfirmed` rows the device holds, on
-    /// eleven other assets. Their positions were never recorded either — that
-    /// is the point. Nobody disclaimed them, so nothing may take them.
-    static let unfalsifiableRows: [DeviceRow] = (0..<12).map { index in
-        let other = String(format: "OTHERAST-0000-0000-0000-%012d", index)
-        let start = Double(index) * 100.0
-        let scope = "exactTimeSpan:\(other):\(String(format: "%.3f", start)):\(String(format: "%.3f", start + 30))"
-        return DeviceRow(
-            id: String(format: "UNFALSIF-0000-0000-0000-%012d", index),
-            assetId: other,
-            scope: scope,
-            createdAt: 1_787_000_000.0 + Double(index),
-            source: "bannerAutoSkipConfirmed",
-            podcastId: feed,
-            correctionType: "falseNegative",
-            normalizedScopeKey: scope,
-            identityKey: "26:explicit-banner-receipt-v2|36:\(other)|13:falseNegative|23:bannerAutoSkipConfirmed|\(index)"
-        )
-    }
+    /// The eleven `bannerAutoSkipConfirmed` rows the device holds on OTHER
+    /// assets, in the device's own distribution: `C0610BF9` 3, `C065AD03` 3,
+    /// `A9F6DF05` 2, `AA6CD430` 2, `CD2976E6` 1. Together with the KEPT
+    /// pre-roll on this asset they are the twelve of the fifteen that nobody
+    /// disclaimed.
+    ///
+    /// THE COUNT NAMES A POPULATION, AND IT HAD TO BE RE-DERIVED TO SAY SO.
+    /// The first version of this fixture was TWELVE synthetic rows on TWELVE
+    /// synthetic assets, under a comment claiming ELEVEN — three different
+    /// numbers for one population and none of them the device's. Counted:
+    /// 15 rows of this class, 4 on `0FF7EFF3` (three disclaimed, one kept) and
+    /// 11 over five other assets. "The other twelve" is 11 + the pre-roll, and
+    /// only that reading makes this suite's own third direction true.
+    ///
+    /// Their positions were never recorded either — that is the point. Nobody
+    /// disclaimed them, so nothing may take them.
+    static let unfalsifiableRows: [DeviceRow] = {
+        let distribution: [(asset: String, count: Int)] = [
+            ("C0610BF9-60D8-4A2E-97B2-8BD39A41B246", 3),
+            ("C065AD03-CF42-4FD8-9850-C385C4EE6798", 3),
+            ("A9F6DF05-6862-4077-9FB8-4C351B9CBBAA", 2),
+            ("AA6CD430-9974-4332-83EA-9C6734E2AC06", 2),
+            ("CD2976E6-9688-42C5-A620-21B10086396A", 1),
+        ]
+        var rows: [DeviceRow] = []
+        for (asset, count) in distribution {
+            for index in 0..<count {
+                let start = Double(index + 1) * 100.0
+                let scope = "exactTimeSpan:\(asset):"
+                    + String(format: "%.3f:%.3f", start, start + 30)
+                rows.append(
+                    DeviceRow(
+                        id: "UNFALSIFIABLE-\(asset.prefix(8))-\(index)",
+                        assetId: asset,
+                        scope: scope,
+                        createdAt: 1_787_000_000.0 + Double(rows.count),
+                        source: "bannerAutoSkipConfirmed",
+                        podcastId: feed,
+                        correctionType: "falseNegative",
+                        normalizedScopeKey: scope,
+                        identityKey: "26:explicit-banner-receipt-v2|36:\(asset)"
+                            + "|13:falseNegative|23:bannerAutoSkipConfirmed|\(index)"
+                    )
+                )
+            }
+        }
+        return rows
+    }()
 
     // MARK: - Raw-disk probes
     //
@@ -394,13 +424,13 @@ struct DisclaimedBannerReceiptRetractionV60MigrationTests {
         )
         defer { try? FileManager.default.removeItem(at: dir) }
 
-        #expect(try rawCorrectionIDs(in: dir).count == 17)
+        #expect(try rawCorrectionIDs(in: dir).count == 16, "the device's own population of this class")
 
         let reopened = try await remigrate(dir)
         #expect(try await reopened.schemaVersion() == AnalysisStore.currentSchemaVersion)
 
         let remaining = try rawCorrectionIDs(in: dir)
-        #expect(remaining.count == 14, "three rows go, and only three")
+        #expect(remaining.count == 13, "three rows go, and only three")
         for id in Self.retractedIDs {
             #expect(!remaining.contains(id), "\(id) was disclaimed and must be gone")
         }
@@ -474,7 +504,7 @@ struct DisclaimedBannerReceiptRetractionV60MigrationTests {
 
         let first = try await remigrate(dir)
         let afterFirst = try rawCorrectionIDs(in: dir)
-        #expect(afterFirst.count == 14)
+        #expect(afterFirst.count == 13)
 
         // The device's own shape: the stamp says 60 and nothing re-runs.
         let second = try await remigrate(dir)

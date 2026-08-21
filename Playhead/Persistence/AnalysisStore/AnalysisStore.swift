@@ -3358,6 +3358,20 @@ actor AnalysisStore {
         // ledger — still reaches v58.
         try migrateDetectorTrustObservationCountV58IfNeeded()
         try migrateCorrectionPlayheadPositionV59IfNeeded()
+        // playhead-tktr (v60): guarded on `tableExists`, and the retraction
+        // itself is three primary keys each verified against its own
+        // asset/source/scope, so a seeded fixture without `correction_events`
+        // — or any fixture that never held Dan's three disclaimed receipts,
+        // which is every fixture in the tree — still reaches v60.
+        //
+        // THIS LINE WAS MISSING FOR ONE COMMIT AND NINE GREEN TESTS DID NOT
+        // NOTICE. The new rung's own suite drives the PRODUCTION ladder, so it
+        // passed 9/9 while this ladder stopped at 59; what caught it was the
+        // mutation battery's unmutated baseline, which runs the eleven
+        // cross-rung tests that assert this ladder reaches head. A rung added
+        // to one ladder and not the other is invisible to any test written for
+        // that rung.
+        try migrateRetractDisclaimedBannerConfirmsV60IfNeeded()
     }
     #endif
 
