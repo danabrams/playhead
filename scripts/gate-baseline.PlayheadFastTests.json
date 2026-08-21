@@ -1,11 +1,11 @@
 {
   "mode": "full-plan",
   "no_verdict": {
-    "runs_observed": 1,
+    "runs_observed": 2,
     "tests": {}
   },
   "plan": "PlayheadFastTests",
-  "runs_observed": 10,
+  "runs_observed": 11,
   "tests": {
     "swift-testing::A Listen revert whose episode is replaced mid-flight still calibrates the captured show": {
       "failed_runs": 1,
@@ -14,7 +14,7 @@
         "timeout"
       ],
       "name": "A Listen revert whose episode is replaced mid-flight still calibrates the captured show",
-      "seen_runs": 1,
+      "seen_runs": 2,
       "source": "SkipOrchestratorRevertTests.swift"
     },
     "swift-testing::A background download enqueues analysis against the show it was queued with": {
@@ -24,7 +24,7 @@
         "assertion"
       ],
       "name": "A background download enqueues analysis against the show it was queued with",
-      "seen_runs": 2,
+      "seen_runs": 3,
       "source": "DownloadShowAttributionTests.swift"
     },
     "swift-testing::A banner No whose episode is replaced mid-flight calibrates the captured show": {
@@ -34,7 +34,7 @@
         "timeout"
       ],
       "name": "A banner No whose episode is replaced mid-flight calibrates the captured show",
-      "seen_runs": 9,
+      "seen_runs": 10,
       "source": "SkipOrchestratorRevertTests.swift"
     },
     "swift-testing::A cancel racing the permit hand-off leaves the gate usable either way": {
@@ -44,7 +44,7 @@
         "timeout"
       ],
       "name": "A cancel racing the permit hand-off leaves the gate usable either way",
-      "seen_runs": 5,
+      "seen_runs": 6,
       "source": "SpeechRecognitionRequestGateTests.swift"
     },
     "swift-testing::A cancelled waiter does not release a permit it never held": {
@@ -54,7 +54,7 @@
         "timeout"
       ],
       "name": "A cancelled waiter does not release a permit it never held",
-      "seen_runs": 5,
+      "seen_runs": 6,
       "source": "SpeechRecognitionRequestGateTests.swift"
     },
     "swift-testing::A completion delivered to a NEW manager instance still carries the show": {
@@ -64,7 +64,7 @@
         "assertion"
       ],
       "name": "A completion delivered to a NEW manager instance still carries the show",
-      "seen_runs": 2,
+      "seen_runs": 3,
       "source": "DownloadShowAttributionTests.swift"
     },
     "swift-testing::A force-quit resume re-queues the fresh download against the recovered show": {
@@ -74,7 +74,7 @@
         "assertion"
       ],
       "name": "A force-quit resume re-queues the fresh download against the recovered show",
-      "seen_runs": 2,
+      "seen_runs": 3,
       "source": "DownloadShowAttributionTests.swift"
     },
     "swift-testing::A holder that never returns is abandoned instead of holding forever": {
@@ -84,7 +84,7 @@
         "timeout"
       ],
       "name": "A holder that never returns is abandoned instead of holding forever",
-      "seen_runs": 2,
+      "seen_runs": 3,
       "source": "SpeechRecognitionRequestGateTests.swift"
     },
     "swift-testing::A load cancelled by the caller is not journaled as a failure": {
@@ -94,7 +94,7 @@
         "timeout"
       ],
       "name": "A load cancelled by the caller is not journaled as a failure",
-      "seen_runs": 1,
+      "seen_runs": 2,
       "source": "SpeechModelLoadRetryTests.swift"
     },
     "swift-testing::A never-finishing holder does not wedge a subsequent acquire": {
@@ -104,7 +104,7 @@
         "timeout"
       ],
       "name": "A never-finishing holder does not wedge a subsequent acquire",
-      "seen_runs": 9,
+      "seen_runs": 10,
       "source": "SpeechRecognitionRequestGateTests.swift"
     },
     "swift-testing::A suggest Yes whose episode is replaced mid-flight calibrates the captured show": {
@@ -114,7 +114,7 @@
         "timeout"
       ],
       "name": "A suggest Yes whose episode is replaced mid-flight calibrates the captured show",
-      "seen_runs": 1,
+      "seen_runs": 2,
       "source": "SkipOrchestratorRevertTests.swift"
     },
     "swift-testing::A suggest-only revert whose episode is replaced mid-loop keeps its receipt and stops retiring banners": {
@@ -124,7 +124,7 @@
         "timeout"
       ],
       "name": "A suggest-only revert whose episode is replaced mid-loop keeps its receipt and stops retiring banners",
-      "seen_runs": 1,
+      "seen_runs": 2,
       "source": "SkipOrchestratorRevertTests.swift"
     },
     "swift-testing::A time-range revert whose episode is replaced mid-loop calibrates the captured show and leaves the replacement alone": {
@@ -134,7 +134,7 @@
         "timeout"
       ],
       "name": "A time-range revert whose episode is replaced mid-loop calibrates the captured show and leaves the replacement alone",
-      "seen_runs": 9,
+      "seen_runs": 10,
       "source": "SkipOrchestratorRevertTests.swift"
     },
     "swift-testing::A transcript veto whose episode is replaced mid-flight still names the captured show": {
@@ -144,7 +144,7 @@
         "timeout"
       ],
       "name": "A transcript veto whose episode is replaced mid-flight still names the captured show",
-      "seen_runs": 9,
+      "seen_runs": 10,
       "source": "CorrectionAttributionCaptureTests.swift"
     },
     "swift-testing::A transfer backgroundDownload created but could not resume is abandoned by backgroundDownload itself": {
@@ -154,7 +154,7 @@
         "assertion"
       ],
       "name": "A transfer backgroundDownload created but could not resume is abandoned by backgroundDownload itself",
-      "seen_runs": 2,
+      "seen_runs": 3,
       "source": "BackgroundSessionIOTests.swift"
     },
     "swift-testing::A waiter cancelled while queued unblocks with CancellationError": {
@@ -164,7 +164,7 @@
         "timeout"
       ],
       "name": "A waiter cancelled while queued unblocks with CancellationError",
-      "seen_runs": 5,
+      "seen_runs": 6,
       "source": "SpeechRecognitionRequestGateTests.swift"
     },
     "swift-testing::Ambiguous legacy extension siblings are withheld through background serving": {
@@ -174,7 +174,7 @@
         "assertion"
       ],
       "name": "Ambiguous legacy extension siblings are withheld through background serving",
-      "seen_runs": 2,
+      "seen_runs": 3,
       "source": "StreamingDownloadTests.swift"
     },
     "swift-testing::An abandoned call is cancelled, so it stops competing for the recognizer": {
@@ -184,7 +184,7 @@
         "timeout"
       ],
       "name": "An abandoned call is cancelled, so it stops competing for the recognizer",
-      "seen_runs": 2,
+      "seen_runs": 3,
       "source": "SpeechRecognitionRequestGateTests.swift"
     },
     "swift-testing::Asset-id change cancels in-flight refresh and resets state": {
@@ -194,7 +194,7 @@
         "timeout"
       ],
       "name": "Asset-id change cancels in-flight refresh and resets state",
-      "seen_runs": 8,
+      "seen_runs": 9,
       "source": "SilenceCompressionCoordinatorTests.swift"
     },
     "swift-testing::Backfill completes successfully": {
@@ -204,7 +204,7 @@
         "timeout"
       ],
       "name": "Backfill completes successfully",
-      "seen_runs": 10,
+      "seen_runs": 11,
       "source": "BackgroundProcessingServiceTests.swift"
     },
     "swift-testing::Backfill expiration after work-task completion is idempotent (work-task wins)": {
@@ -214,7 +214,7 @@
         "timeout"
       ],
       "name": "Backfill expiration after work-task completion is idempotent (work-task wins)",
-      "seen_runs": 8,
+      "seen_runs": 9,
       "source": "BackgroundProcessingServiceLedgerTests.swift"
     },
     "swift-testing::Backfill expiration cancels work": {
@@ -224,7 +224,7 @@
         "timeout"
       ],
       "name": "Backfill expiration cancels work",
-      "seen_runs": 10,
+      "seen_runs": 11,
       "source": "BackgroundProcessingServiceTests.swift"
     },
     "swift-testing::Backfill expirationHandler writes expired outcome before markComplete": {
@@ -234,7 +234,7 @@
         "timeout"
       ],
       "name": "Backfill expirationHandler writes expired outcome before markComplete",
-      "seen_runs": 7,
+      "seen_runs": 8,
       "source": "BackgroundProcessingServiceLedgerTests.swift"
     },
     "swift-testing::Backfill handler invokes real work method, not startCapabilityObserver": {
@@ -244,7 +244,7 @@
         "timeout"
       ],
       "name": "Backfill handler invokes real work method, not startCapabilityObserver",
-      "seen_runs": 10,
+      "seen_runs": 11,
       "source": "BackgroundProcessingServiceTests.swift"
     },
     "swift-testing::Backfill happy path writes a terminal ledger row (noEligibleWork on fresh queue)": {
@@ -254,7 +254,7 @@
         "timeout"
       ],
       "name": "Backfill happy path writes a terminal ledger row (noEligibleWork on fresh queue)",
-      "seen_runs": 7,
+      "seen_runs": 8,
       "source": "BackgroundProcessingServiceLedgerTests.swift"
     },
     "swift-testing::Backfill skipped on thermal throttle via capabilitiesService": {
@@ -264,7 +264,7 @@
         "timeout"
       ],
       "name": "Backfill skipped on thermal throttle via capabilitiesService",
-      "seen_runs": 10,
+      "seen_runs": 11,
       "source": "BackgroundProcessingServiceTests.swift"
     },
     "swift-testing::Cancellation reaches the recognizer call and the permit is not freed until it unwinds": {
@@ -274,7 +274,7 @@
         "timeout"
       ],
       "name": "Cancellation reaches the recognizer call and the permit is not freed until it unwinds",
-      "seen_runs": 9,
+      "seen_runs": 10,
       "source": "SpeechRecognitionRequestGateTests.swift"
     },
     "swift-testing::Cancelling a download reaps its attribution": {
@@ -284,7 +284,7 @@
         "assertion"
       ],
       "name": "Cancelling a download reaps its attribution",
-      "seen_runs": 2,
+      "seen_runs": 3,
       "source": "DownloadShowAttributionTests.swift"
     },
     "swift-testing::Cancelling one waiter leaves the rest of the queue intact": {
@@ -294,7 +294,7 @@
         "timeout"
       ],
       "name": "Cancelling one waiter leaves the rest of the queue intact",
-      "seen_runs": 5,
+      "seen_runs": 6,
       "source": "SpeechRecognitionRequestGateTests.swift"
     },
     "swift-testing::Clearing the cache takes the attribution with it": {
@@ -304,7 +304,7 @@
         "assertion"
       ],
       "name": "Clearing the cache takes the attribution with it",
-      "seen_runs": 2,
+      "seen_runs": 3,
       "source": "DownloadShowAttributionTests.swift"
     },
     "swift-testing::Concurrent callers cannot overspend the budget": {
@@ -314,7 +314,7 @@
         "timeout"
       ],
       "name": "Concurrent callers cannot overspend the budget",
-      "seen_runs": 2,
+      "seen_runs": 3,
       "source": "SpeechModelLoadRetryTests.swift"
     },
     "swift-testing::Dropping the resume blob leaves the attribution for the resume path": {
@@ -324,7 +324,7 @@
         "assertion"
       ],
       "name": "Dropping the resume blob leaves the attribution for the resume path",
-      "seen_runs": 2,
+      "seen_runs": 3,
       "source": "DownloadShowAttributionTests.swift"
     },
     "swift-testing::Episode begin ⇒ ends any prior compression and refreshes plan": {
@@ -334,7 +334,7 @@
         "timeout"
       ],
       "name": "Episode begin ⇒ ends any prior compression and refreshes plan",
-      "seen_runs": 8,
+      "seen_runs": 9,
       "source": "SilenceCompressionCoordinatorTests.swift"
     },
     "swift-testing::Episode-bound seek rejects a stale same-episode lifecycle token": {
@@ -344,7 +344,7 @@
         "timeout"
       ],
       "name": "Episode-bound seek rejects a stale same-episode lifecycle token",
-      "seen_runs": 8,
+      "seen_runs": 9,
       "source": "SilenceCompressionCoordinatorTests.swift"
     },
     "swift-testing::Expiration mid-refresh completes task exactly once and reports success=false": {
@@ -354,7 +354,7 @@
         "assertion"
       ],
       "name": "Expiration mid-refresh completes task exactly once and reports success=false",
-      "seen_runs": 7,
+      "seen_runs": 8,
       "source": "BackgroundFeedRefreshServiceTests.swift"
     },
     "swift-testing::Full interruption cycle: playing → paused → playing": {
@@ -365,7 +365,7 @@
         "timeout"
       ],
       "name": "Full interruption cycle: playing → paused → playing",
-      "seen_runs": 10,
+      "seen_runs": 11,
       "source": "PlaybackInterruptionTests.swift"
     },
     "swift-testing::Handler fired before injection completes success once injection lands": {
@@ -375,7 +375,7 @@
         "timeout"
       ],
       "name": "Handler fired before injection completes success once injection lands",
-      "seen_runs": 10,
+      "seen_runs": 11,
       "source": "BackgroundProcessingServiceTests.swift"
     },
     "swift-testing::Handler fired with no injection times out and completes failure": {
@@ -385,7 +385,7 @@
         "timeout"
       ],
       "name": "Handler fired with no injection times out and completes failure",
-      "seen_runs": 10,
+      "seen_runs": 11,
       "source": "BackgroundProcessingServiceTests.swift"
     },
     "swift-testing::Headphone disconnect (oldDeviceUnavailable) pauses immediately": {
@@ -396,7 +396,7 @@
         "timeout"
       ],
       "name": "Headphone disconnect (oldDeviceUnavailable) pauses immediately",
-      "seen_runs": 10,
+      "seen_runs": 11,
       "source": "RouteChangeTests.swift"
     },
     "swift-testing::Headphone disconnect preserves currentTime": {
@@ -407,7 +407,7 @@
         "timeout"
       ],
       "name": "Headphone disconnect preserves currentTime",
-      "seen_runs": 10,
+      "seen_runs": 11,
       "source": "RouteChangeTests.swift"
     },
     "swift-testing::Incomplete pinned file does not block background retry admission": {
@@ -417,7 +417,7 @@
         "assertion"
       ],
       "name": "Incomplete pinned file does not block background retry admission",
-      "seen_runs": 2,
+      "seen_runs": 3,
       "source": "StreamingDownloadTests.swift"
     },
     "swift-testing::Interruption notification handled on actor without crash": {
@@ -428,7 +428,7 @@
         "timeout"
       ],
       "name": "Interruption notification handled on actor without crash",
-      "seen_runs": 10,
+      "seen_runs": 11,
       "source": "InterruptionHandlingTests.swift"
     },
     "swift-testing::Invariant 1 (DRAIN): eligible queue + free capacity fully drains — any depth, any job type": {
@@ -439,7 +439,7 @@
         "timeout"
       ],
       "name": "Invariant 1 (DRAIN): eligible queue + free capacity fully drains — any depth, any job type",
-      "seen_runs": 9,
+      "seen_runs": 10,
       "source": "AnalysisPipelineStallInvariantHarnessIntegrationTests.swift"
     },
     "swift-testing::Invariant 1: eligible queued work + free capacity drains within bounded passes": {
@@ -450,7 +450,7 @@
         "timeout"
       ],
       "name": "Invariant 1: eligible queued work + free capacity drains within bounded passes",
-      "seen_runs": 10,
+      "seen_runs": 11,
       "source": "AnalysisPipelineStallRegressionTests.swift"
     },
     "swift-testing::Invariant 3 (BACKGROUND): both BGTask entry points DISPATCH — queued set shrinks + progress outcome, never expired/0-done": {
@@ -460,7 +460,7 @@
         "timeout"
       ],
       "name": "Invariant 3 (BACKGROUND): both BGTask entry points DISPATCH — queued set shrinks + progress outcome, never expired/0-done",
-      "seen_runs": 10,
+      "seen_runs": 11,
       "source": "AnalysisPipelineStallInvariantHarnessIntegrationTests.swift"
     },
     "swift-testing::Invariant 4 (RECOVERY visibility): preanalysis_recovery records jobsSeen == actual eligible count": {
@@ -470,7 +470,7 @@
         "timeout"
       ],
       "name": "Invariant 4 (RECOVERY visibility): preanalysis_recovery records jobsSeen == actual eligible count",
-      "seen_runs": 10,
+      "seen_runs": 11,
       "source": "AnalysisPipelineStallInvariantHarnessIntegrationTests.swift"
     },
     "swift-testing::Invariant 5: the backfill BGTask window drains eligible work (pending strictly decreases)": {
@@ -480,7 +480,7 @@
         "timeout"
       ],
       "name": "Invariant 5: the backfill BGTask window drains eligible work (pending strictly decreases)",
-      "seen_runs": 10,
+      "seen_runs": 11,
       "source": "AnalysisPipelineStallBackgroundEntryPointsIntegrationTests.swift"
     },
     "swift-testing::Invariant 5a: a drain over eligible work strictly decreases pending": {
@@ -490,7 +490,7 @@
         "timeout"
       ],
       "name": "Invariant 5a: a drain over eligible work strictly decreases pending",
-      "seen_runs": 10,
+      "seen_runs": 11,
       "source": "AnalysisPipelineStallRegressionTests.swift"
     },
     "swift-testing::Invariant 6: pre-analysis recovery records jobsSeen >= #eligible queued": {
@@ -500,7 +500,7 @@
         "timeout"
       ],
       "name": "Invariant 6: pre-analysis recovery records jobsSeen >= #eligible queued",
-      "seen_runs": 10,
+      "seen_runs": 11,
       "source": "AnalysisPipelineStallBackgroundEntryPointsIntegrationTests.swift"
     },
     "swift-testing::Late injection arriving after timeout is a no-op for the timed-out waiter": {
@@ -510,7 +510,7 @@
         "timeout"
       ],
       "name": "Late injection arriving after timeout is a no-op for the timed-out waiter",
-      "seen_runs": 10,
+      "seen_runs": 11,
       "source": "BackgroundProcessingServiceTests.swift"
     },
     "swift-testing::Model loading is outside the permit, so a cold asset install cannot spend the budget": {
@@ -520,7 +520,7 @@
         "timeout"
       ],
       "name": "Model loading is outside the permit, so a cold asset install cannot spend the budget",
-      "seen_runs": 9,
+      "seen_runs": 10,
       "source": "SpeechRecognitionRequestGateTests.swift"
     },
     "swift-testing::Multiple concurrent waiters all wake on injection": {
@@ -530,7 +530,7 @@
         "timeout"
       ],
       "name": "Multiple concurrent waiters all wake on injection",
-      "seen_runs": 10,
+      "seen_runs": 11,
       "source": "BackgroundProcessingServiceTests.swift"
     },
     "swift-testing::Overlapping BG handlers each complete their own task independently": {
@@ -540,7 +540,7 @@
         "timeout"
       ],
       "name": "Overlapping BG handlers each complete their own task independently",
-      "seen_runs": 10,
+      "seen_runs": 11,
       "source": "BackgroundProcessingServiceTests.swift"
     },
     "swift-testing::Override OFF mid-episode forces immediate re-fetch": {
@@ -550,7 +550,7 @@
         "timeout"
       ],
       "name": "Override OFF mid-episode forces immediate re-fetch",
-      "seen_runs": 8,
+      "seen_runs": 9,
       "source": "SilenceCompressionCoordinatorTests.swift"
     },
     "swift-testing::Per-show override true ⇒ never engages even with valid plan": {
@@ -560,7 +560,7 @@
         "timeout"
       ],
       "name": "Per-show override true ⇒ never engages even with valid plan",
-      "seen_runs": 8,
+      "seen_runs": 9,
       "source": "SilenceCompressionCoordinatorTests.swift"
     },
     "swift-testing::Phone call ends with shouldResume → playback resumes": {
@@ -571,7 +571,7 @@
         "timeout"
       ],
       "name": "Phone call ends with shouldResume → playback resumes",
-      "seen_runs": 10,
+      "seen_runs": 11,
       "source": "PlaybackInterruptionTests.swift"
     },
     "swift-testing::Phone call interruption pauses playback": {
@@ -582,7 +582,7 @@
         "timeout"
       ],
       "name": "Phone call interruption pauses playback",
-      "seen_runs": 10,
+      "seen_runs": 11,
       "source": "PlaybackInterruptionTests.swift"
     },
     "swift-testing::PlaybackService deallocates after tearDown (no retain cycles)": {
@@ -592,7 +592,7 @@
         "timeout"
       ],
       "name": "PlaybackService deallocates after tearDown (no retain cycles)",
-      "seen_runs": 10,
+      "seen_runs": 11,
       "source": "LongFormPlaybackTests.swift"
     },
     "swift-testing::Posted willResignActive notification drives a real BG task submission end-to-end": {
@@ -602,7 +602,7 @@
         "timeout"
       ],
       "name": "Posted willResignActive notification drives a real BG task submission end-to-end",
-      "seen_runs": 10,
+      "seen_runs": 11,
       "source": "DownloadManagerTests.swift"
     },
     "swift-testing::Pre-analysis recovery with no reconciler writes failed/reconciler_unavailable": {
@@ -612,7 +612,7 @@
         "timeout"
       ],
       "name": "Pre-analysis recovery with no reconciler writes failed/reconciler_unavailable",
-      "seen_runs": 7,
+      "seen_runs": 8,
       "source": "BackgroundProcessingServiceLedgerTests.swift"
     },
     "swift-testing::Queueing writes the attribution and a terminal completion reaps it": {
@@ -622,7 +622,7 @@
         "assertion"
       ],
       "name": "Queueing writes the attribution and a terminal completion reaps it",
-      "seen_runs": 2,
+      "seen_runs": 3,
       "source": "DownloadShowAttributionTests.swift"
     },
     "swift-testing::Reconnect headphones + user tap play resumes from same position": {
@@ -633,7 +633,7 @@
         "timeout"
       ],
       "name": "Reconnect headphones + user tap play resumes from same position",
-      "seen_runs": 10,
+      "seen_runs": 11,
       "source": "RouteChangeTests.swift"
     },
     "swift-testing::Route change notification handled on actor without crash": {
@@ -644,7 +644,7 @@
         "timeout"
       ],
       "name": "Route change notification handled on actor without crash",
-      "seen_runs": 10,
+      "seen_runs": 11,
       "source": "InterruptionHandlingTests.swift"
     },
     "swift-testing::Scan completes over a 10-blob cache and reports every blob": {
@@ -654,7 +654,7 @@
         "timeout"
       ],
       "name": "Scan completes over a 10-blob cache and reports every blob",
-      "seen_runs": 3,
+      "seen_runs": 4,
       "source": "ForceQuitResumeTests.swift"
     },
     "swift-testing::Siri activation interruption pauses playback": {
@@ -665,7 +665,7 @@
         "timeout"
       ],
       "name": "Siri activation interruption pauses playback",
-      "seen_runs": 10,
+      "seen_runs": 11,
       "source": "PlaybackInterruptionTests.swift"
     },
     "swift-testing::Siri dismissal with shouldResume restores playback": {
@@ -676,7 +676,7 @@
         "timeout"
       ],
       "name": "Siri dismissal with shouldResume restores playback",
-      "seen_runs": 10,
+      "seen_runs": 11,
       "source": "PlaybackInterruptionTests.swift"
     },
     "swift-testing::Stop during stalled transcribe: no chunks persisted, no coverage advance, no .completed": {
@@ -686,7 +686,7 @@
         "timeout"
       ],
       "name": "Stop during stalled transcribe: no chunks persisted, no coverage advance, no .completed",
-      "seen_runs": 5,
+      "seen_runs": 6,
       "source": "TranscriptEngineStopTranscriptionTests.swift"
     },
     "swift-testing::The backfill handler still completes when the scheduler query times out": {
@@ -696,7 +696,7 @@
         "timeout"
       ],
       "name": "The backfill handler still completes when the scheduler query times out",
-      "seen_runs": 8,
+      "seen_runs": 9,
       "source": "BackfillSchedulerBoundingTests.swift"
     },
     "swift-testing::The expiration handler is armed before the handler awaits anything": {
@@ -706,7 +706,7 @@
         "timeout"
       ],
       "name": "The expiration handler is armed before the handler awaits anything",
-      "seen_runs": 8,
+      "seen_runs": 9,
       "source": "BackfillSchedulerBoundingTests.swift"
     },
     "swift-testing::The watchdog does not fire for a call that merely takes a while": {
@@ -716,7 +716,7 @@
         "timeout"
       ],
       "name": "The watchdog does not fire for a call that merely takes a while",
-      "seen_runs": 2,
+      "seen_runs": 3,
       "source": "SpeechRecognitionRequestGateTests.swift"
     },
     "swift-testing::Throwing fetchWindows preserves prior plan (no disengage)": {
@@ -726,7 +726,7 @@
         "timeout"
       ],
       "name": "Throwing fetchWindows preserves prior plan (no disengage)",
-      "seen_runs": 8,
+      "seen_runs": 9,
       "source": "SilenceCompressionCoordinatorTests.swift"
     },
     "swift-testing::Triggered timeout resumes all parked waiters and reports the count": {
@@ -736,7 +736,7 @@
         "timeout"
       ],
       "name": "Triggered timeout resumes all parked waiters and reports the count",
-      "seen_runs": 10,
+      "seen_runs": 11,
       "source": "BackgroundProcessingServiceTests.swift"
     },
     "swift-testing::a second row for one (asset, pass, fingerprint) is refused, and the survivor still takes the speakerId upgrade": {
@@ -746,7 +746,7 @@
         "timeout"
       ],
       "name": "a second row for one (asset, pass, fingerprint) is refused, and the survivor still takes the speakerId upgrade",
-      "seen_runs": 8,
+      "seen_runs": 9,
       "source": "TranscriptEngineTests.swift"
     },
     "swift-testing::aCancelledRunStillReportsWhatItsShardsFailedWith()": {
@@ -756,7 +756,7 @@
         "timeout"
       ],
       "name": "aCancelledRunStillReportsWhatItsShardsFailedWith()",
-      "seen_runs": 8,
+      "seen_runs": 9,
       "source": "TranscriptEngineFailureEventTests.swift"
     },
     "swift-testing::aStoppedRunReportsStoppedThroughItsOwnGate()": {
@@ -766,7 +766,7 @@
         "timeout"
       ],
       "name": "aStoppedRunReportsStoppedThroughItsOwnGate()",
-      "seen_runs": 8,
+      "seen_runs": 9,
       "source": "TranscriptEngineFailureEventTests.swift"
     },
     "swift-testing::an expired run records what the window achieved, not only that it ended": {
@@ -776,7 +776,7 @@
         "timeout"
       ],
       "name": "an expired run records what the window achieved, not only that it ended",
-      "seen_runs": 2,
+      "seen_runs": 3,
       "source": "BackgroundGrantBudgetTests.swift"
     },
     "swift-testing::an expired run's completion count is measured, not a literal zero": {
@@ -786,7 +786,7 @@
         "timeout"
       ],
       "name": "an expired run's completion count is measured, not a literal zero",
-      "seen_runs": 2,
+      "seen_runs": 3,
       "source": "BackgroundGrantBudgetTests.swift"
     },
     "swift-testing::an overlapping clear cannot strand re-enable intent": {
@@ -796,7 +796,7 @@
         "timeout"
       ],
       "name": "an overlapping clear cannot strand re-enable intent",
-      "seen_runs": 5,
+      "seen_runs": 6,
       "source": "RepeatedAdCacheServiceTests.swift"
     },
     "swift-testing::anOverlappingPredecessorDoesNotCreditTheSuccessor()": {
@@ -807,7 +807,7 @@
         "timeout"
       ],
       "name": "anOverlappingPredecessorDoesNotCreditTheSuccessor()",
-      "seen_runs": 8,
+      "seen_runs": 9,
       "source": "TranscriptEngineFailureEventTests.swift"
     },
     "swift-testing::appendedShardFailuresAreAccumulatedToo()": {
@@ -817,7 +817,7 @@
         "timeout"
       ],
       "name": "appendedShardFailuresAreAccumulatedToo()",
-      "seen_runs": 8,
+      "seen_runs": 9,
       "source": "TranscriptEngineFailureEventTests.swift"
     },
     "swift-testing::awaitJobsSettled waits for a running job and times out rather than lying": {
@@ -827,7 +827,7 @@
         "assertion"
       ],
       "name": "awaitJobsSettled waits for a running job and times out rather than lying",
-      "seen_runs": 2,
+      "seen_runs": 3,
       "source": "BackgroundGrantBudgetTests.swift"
     },
     "swift-testing::backfill expirationHandler emits an `expire` row": {
@@ -837,7 +837,7 @@
         "assertion"
       ],
       "name": "backfill expirationHandler emits an `expire` row",
-      "seen_runs": 10,
+      "seen_runs": 11,
       "source": "BackgroundProcessingServiceTelemetryTests.swift"
     },
     "swift-testing::beginEpisode cancels prior asset's in-flight lookahead refresh": {
@@ -847,7 +847,7 @@
         "timeout"
       ],
       "name": "beginEpisode cancels prior asset's in-flight lookahead refresh",
-      "seen_runs": 8,
+      "seen_runs": 9,
       "source": "SilenceCompressionCoordinatorTests.swift"
     },
     "swift-testing::both phases and the poll spend ONE deadline, anchored at the grant's start": {
@@ -857,7 +857,7 @@
         "timeout"
       ],
       "name": "both phases and the poll spend ONE deadline, anchored at the grant's start",
-      "seen_runs": 2,
+      "seen_runs": 3,
       "source": "BackfillCoarseFirstReorderTests.swift"
     },
     "swift-testing::cache deletion while background analysis enqueue is blocked leaves no resurrected artifacts": {
@@ -867,7 +867,7 @@
         "timeout"
       ],
       "name": "cache deletion while background analysis enqueue is blocked leaves no resurrected artifacts",
-      "seen_runs": 9,
+      "seen_runs": 10,
       "source": "BackgroundDownloadCompletionTests.swift"
     },
     "swift-testing::cancellationIsReportedInsteadOfReturningInSilence()": {
@@ -877,7 +877,7 @@
         "timeout"
       ],
       "name": "cancellationIsReportedInsteadOfReturningInSilence()",
-      "seen_runs": 8,
+      "seen_runs": 9,
       "source": "TranscriptEngineFailureEventTests.swift"
     },
     "swift-testing::dedupOnlyRerunWithOneBadShardStillCompletes()": {
@@ -887,7 +887,7 @@
         "timeout"
       ],
       "name": "dedupOnlyRerunWithOneBadShardStillCompletes()",
-      "seen_runs": 8,
+      "seen_runs": 9,
       "source": "TranscriptEngineFailureEventTests.swift"
     },
     "swift-testing::didCompleteWithError(URLError.notConnectedToInternet) emits noNetwork": {
@@ -897,7 +897,7 @@
         "assertion"
       ],
       "name": "didCompleteWithError(URLError.notConnectedToInternet) emits noNetwork",
-      "seen_runs": 5,
+      "seen_runs": 6,
       "source": "BackgroundURLSessionTests.swift"
     },
     "swift-testing::didCompleteWithError(URLError.timedOut) emits failed with taskExpired": {
@@ -907,7 +907,7 @@
         "assertion"
       ],
       "name": "didCompleteWithError(URLError.timedOut) emits failed with taskExpired",
-      "seen_runs": 3,
+      "seen_runs": 4,
       "source": "BackgroundURLSessionTests.swift"
     },
     "swift-testing::didFinishLaunching triggers scanForSuspendedTransfers on the registered manager": {
@@ -917,7 +917,7 @@
         "timeout"
       ],
       "name": "didFinishLaunching triggers scanForSuspendedTransfers on the registered manager",
-      "seen_runs": 9,
+      "seen_runs": 10,
       "source": "ForceQuitResumeTests.swift"
     },
     "swift-testing::duplicate fingerprint can upgrade missing speakerId and avgConfidence and re-emit chunk": {
@@ -927,7 +927,7 @@
         "timeout"
       ],
       "name": "duplicate fingerprint can upgrade missing speakerId and avgConfidence and re-emit chunk",
-      "seen_runs": 8,
+      "seen_runs": 9,
       "source": "TranscriptEngineTests.swift"
     },
     "swift-testing::each cancelled job keeps its own cause, so neither spends an attempt": {
@@ -937,7 +937,7 @@
         "assertion"
       ],
       "name": "each cancelled job keeps its own cause, so neither spends an attempt",
-      "seen_runs": 2,
+      "seen_runs": 3,
       "source": "BackgroundGrantBudgetTests.swift"
     },
     "swift-testing::engine does not emit .completed until finishAppending is called": {
@@ -947,7 +947,7 @@
         "timeout"
       ],
       "name": "engine does not emit .completed until finishAppending is called",
-      "seen_runs": 1,
+      "seen_runs": 2,
       "source": "TranscriptEngineTests.swift"
     },
     "swift-testing::expiry tells the SCHEDULER the grant is over, so the in-flight job requeues": {
@@ -957,7 +957,7 @@
         "timeout"
       ],
       "name": "expiry tells the SCHEDULER the grant is over, so the in-flight job requeues",
-      "seen_runs": 2,
+      "seen_runs": 3,
       "source": "BackgroundGrantBudgetTests.swift"
     },
     "swift-testing::five expired windows in a row still leave the job alive": {
@@ -967,7 +967,7 @@
         "timeout"
       ],
       "name": "five expired windows in a row still leave the job alive",
-      "seen_runs": 2,
+      "seen_runs": 3,
       "source": "BackgroundGrantBudgetTests.swift"
     },
     "swift-testing::handleBackfillTask emits matching `start` and `complete` rows": {
@@ -978,7 +978,7 @@
         "timeout"
       ],
       "name": "handleBackfillTask emits matching `start` and `complete` rows",
-      "seen_runs": 10,
+      "seen_runs": 11,
       "source": "BackgroundProcessingServiceTelemetryTests.swift"
     },
     "swift-testing::missing recognizer speakerId remains nil in chunks and events": {
@@ -988,7 +988,7 @@
         "timeout"
       ],
       "name": "missing recognizer speakerId remains nil in chunks and events",
-      "seen_runs": 8,
+      "seen_runs": 9,
       "source": "TranscriptEngineTests.swift"
     },
     "swift-testing::notePlayhead inside a music plan ⇒ engages with varispeed/high rate": {
@@ -998,7 +998,7 @@
         "timeout"
       ],
       "name": "notePlayhead inside a music plan ⇒ engages with varispeed/high rate",
-      "seen_runs": 8,
+      "seen_runs": 9,
       "source": "SilenceCompressionCoordinatorTests.swift"
     },
     "swift-testing::observeICloudSyncStatusFlipsOnSignOut()": {
@@ -1008,7 +1008,7 @@
         "timeout"
       ],
       "name": "observeICloudSyncStatusFlipsOnSignOut()",
-      "seen_runs": 10,
+      "seen_runs": 11,
       "source": "SettingsViewTests.swift"
     },
     "swift-testing::overlapping explicit clears keep writers fenced until both finish": {
@@ -1018,7 +1018,7 @@
         "timeout"
       ],
       "name": "overlapping explicit clears keep writers fenced until both finish",
-      "seen_runs": 5,
+      "seen_runs": 6,
       "source": "RepeatedAdCacheServiceTests.swift"
     },
     "swift-testing::perRunCountersDoNotLeakIntoTheNextSession()": {
@@ -1028,7 +1028,7 @@
         "timeout"
       ],
       "name": "perRunCountersDoNotLeakIntoTheNextSession()",
-      "seen_runs": 8,
+      "seen_runs": 9,
       "source": "TranscriptEngineFailureEventTests.swift"
     },
     "swift-testing::post-commit Listen trust calibration does not gate completion": {
@@ -1038,7 +1038,7 @@
         "timeout"
       ],
       "name": "post-commit Listen trust calibration does not gate completion",
-      "seen_runs": 1,
+      "seen_runs": 2,
       "source": "AdDetectionServiceListenRewindPersistenceTests.swift"
     },
     "swift-testing::recognizer speakerIds persist into chunks, events, and trait signals": {
@@ -1048,7 +1048,7 @@
         "timeout"
       ],
       "name": "recognizer speakerIds persist into chunks, events, and trait signals",
-      "seen_runs": 8,
+      "seen_runs": 9,
       "source": "TranscriptEngineTests.swift"
     },
     "swift-testing::recordUserSpeedChange resets planner so next tick re-engages": {
@@ -1058,7 +1058,7 @@
         "timeout"
       ],
       "name": "recordUserSpeedChange resets planner so next tick re-engages",
-      "seen_runs": 8,
+      "seen_runs": 9,
       "source": "SilenceCompressionCoordinatorTests.swift"
     },
     "swift-testing::resumeSuspendedTransfer consumes the persisted blob on success": {
@@ -1068,7 +1068,7 @@
         "assertion"
       ],
       "name": "resumeSuspendedTransfer consumes the persisted blob on success",
-      "seen_runs": 2,
+      "seen_runs": 3,
       "source": "ForceQuitResumeTests.swift"
     },
     "swift-testing::scheduleBackfillIfNeeded emits a `submit` row with success=false on throw": {
@@ -1078,7 +1078,7 @@
         "assertion"
       ],
       "name": "scheduleBackfillIfNeeded emits a `submit` row with success=false on throw",
-      "seen_runs": 8,
+      "seen_runs": 9,
       "source": "BackgroundProcessingServiceTelemetryTests.swift"
     },
     "swift-testing::scheduleBackfillIfNeeded emits a `submit` row with success=true": {
@@ -1088,7 +1088,7 @@
         "assertion"
       ],
       "name": "scheduleBackfillIfNeeded emits a `submit` row with success=true",
-      "seen_runs": 8,
+      "seen_runs": 9,
       "source": "BackgroundProcessingServiceTelemetryTests.swift"
     },
     "swift-testing::stale Auto-Yes cannot commit after durable material changes mid-suspension": {
@@ -1098,7 +1098,7 @@
         "timeout"
       ],
       "name": "stale Auto-Yes cannot commit after durable material changes mid-suspension",
-      "seen_runs": 2,
+      "seen_runs": 3,
       "source": "SkipOrchestratorRevertTests.swift"
     },
     "swift-testing::stale suggest completion cannot clear replacement provisional ownership": {
@@ -1108,7 +1108,7 @@
         "timeout"
       ],
       "name": "stale suggest completion cannot clear replacement provisional ownership",
-      "seen_runs": 2,
+      "seen_runs": 3,
       "source": "SkipOrchestratorRevertTests.swift"
     },
     "swift-testing::suggest Yes persists episode A feedback across direct replacement": {
@@ -1118,7 +1118,7 @@
         "timeout"
       ],
       "name": "suggest Yes persists episode A feedback across direct replacement",
-      "seen_runs": 2,
+      "seen_runs": 3,
       "source": "SkipOrchestratorRevertTests.swift"
     },
     "swift-testing::the cancel reaches every job it names": {
@@ -1128,7 +1128,7 @@
         "assertion"
       ],
       "name": "the cancel reaches every job it names",
-      "seen_runs": 2,
+      "seen_runs": 3,
       "source": "BackgroundGrantBudgetTests.swift"
     },
     "swift-testing::the charged sibling's handler spends its own budget": {
@@ -1138,7 +1138,7 @@
         "timeout"
       ],
       "name": "the charged sibling's handler spends its own budget",
-      "seen_runs": 2,
+      "seen_runs": 3,
       "source": "BackgroundGrantBudgetTests.swift"
     },
     "swift-testing::the coarse phase observes the queue BEFORE the drain has dispatched anything": {
@@ -1148,7 +1148,7 @@
         "timeout"
       ],
       "name": "the coarse phase observes the queue BEFORE the drain has dispatched anything",
-      "seen_runs": 2,
+      "seen_runs": 3,
       "source": "BackfillCoarseFirstReorderTests.swift"
     },
     "swift-testing::the poll loop is handed a deadline inside the measured grant, not 25 minutes": {
@@ -1158,7 +1158,7 @@
         "timeout"
       ],
       "name": "the poll loop is handed a deadline inside the measured grant, not 25 minutes",
-      "seen_runs": 2,
+      "seen_runs": 3,
       "source": "BackgroundGrantBudgetTests.swift"
     },
     "swift-testing::the runtime's coordinator recovers a show through the runtime's own resolver": {
@@ -1168,7 +1168,7 @@
         "assertion"
       ],
       "name": "the runtime's coordinator recovers a show through the runtime's own resolver",
-      "seen_runs": 2,
+      "seen_runs": 3,
       "source": "CoarseScanShowIdentityTests.swift"
     },
     "swift-testing::the work-deadline return MEASURES its completions too, and writes them": {
@@ -1178,7 +1178,7 @@
         "timeout"
       ],
       "name": "the work-deadline return MEASURES its completions too, and writes them",
-      "seen_runs": 2,
+      "seen_runs": 3,
       "source": "BackgroundGrantBudgetTests.swift"
     },
     "swift-testing::updateKeepFullMusicOverride(true) mid-flight disengages immediately": {
@@ -1188,7 +1188,7 @@
         "timeout"
       ],
       "name": "updateKeepFullMusicOverride(true) mid-flight disengages immediately",
-      "seen_runs": 8,
+      "seen_runs": 9,
       "source": "SilenceCompressionCoordinatorTests.swift"
     },
     "swift-testing::wrj8: a resume whose server validator still matches splices the blob": {
@@ -1198,7 +1198,7 @@
         "assertion"
       ],
       "name": "wrj8: a resume whose server validator still matches splices the blob",
-      "seen_runs": 2,
+      "seen_runs": 3,
       "source": "ForceQuitResumeTests.swift"
     }
   }
