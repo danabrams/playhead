@@ -584,7 +584,7 @@ struct MergedChildRowDedupeV40MigrationTests {
         // mirror V49 reset the show scalar without reaching. Third rung in a row
         // on `podcast_profiles`, and the third time it is irrelevant here for the
         // same reason: this fixture never writes that table.
-        #expect(AnalysisStore.currentSchemaVersion == 58)
+        #expect(AnalysisStore.currentSchemaVersion == 59)
 
         let db = try openRaw(dir)
         defer { sqlite3_close_v2(db) }
