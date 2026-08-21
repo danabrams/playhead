@@ -33,7 +33,8 @@
 //   6. A ROW THAT IS NOT THE ROW IS LEFT ALONE. The delete carries the row's
 //      own asset, source and scope, so a primary key that has come to name
 //      something else takes nothing with it.
-//   7. A FIXTURE WITHOUT `correction_events` still reaches v60.
+//   7. A LADDER THAT CANNOT READ THE TABLE DOES NOT STAMP v60. The stamp is
+//      read as evidence the retraction ran, so a failed run must not write it.
 //   8. THE BLAST RADIUS IS ONE TABLE. `ad_windows` — including the three
 //      windows the retracted receipts pointed at — survives untouched.
 //   9. THE POPULATION IS CLOSED AT THREE, checked as a VALUE. `disclaimed…V60`
@@ -191,6 +192,19 @@ struct DisclaimedBannerReceiptRetractionV60MigrationTests {
             throw NSError(domain: "openReadOnly", code: 1)
         }
         return handle
+    }
+
+    /// `_meta.schema_version` as it stands on disk, without opening the store.
+    private func rawSchemaVersion(in directory: URL) throws -> String? {
+        let db = try openReadOnly(directory)
+        defer { sqlite3_close_v2(db) }
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(
+            db, "SELECT value FROM _meta WHERE key = 'schema_version'", -1, &stmt, nil
+        ) == SQLITE_OK else { throw NSError(domain: "rawSchemaVersion", code: 2) }
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return String(cString: sqlite3_column_text(stmt, 0))
     }
 
     /// Every `correction_events.id` on disk, sorted.
@@ -528,10 +542,21 @@ struct DisclaimedBannerReceiptRetractionV60MigrationTests {
         )
     }
 
-    // MARK: - 7. No `correction_events` table at all
+    // MARK: - 7. A database V60 cannot read is not stamped as migrated
+    //
+    // V60 carries `guard try tableExists("correction_events")`, mirroring V59.
+    // That branch is UNREACHABLE THROUGH `migrate()` and this test is what says
+    // so rather than leaving a reader to assume it was exercised: the ladder
+    // runs `addColumnIfNeeded(table: "correction_events", …)` UNCONDITIONALLY,
+    // hundreds of rungs earlier, so a database missing the table dies there.
+    // The guard is defence in depth against a future reordering, and the
+    // property that IS testable — and is the one that matters — is that a
+    // ladder which fails does not leave the stamp at 60. A version stamp is
+    // read as evidence the retraction ran; it must never be written by a run
+    // that could not look.
 
-    @Test("a fixture without correction_events still reaches v60")
-    func migrationWithoutTheTable() async throws {
+    @Test("a ladder that cannot read correction_events does not stamp v60")
+    func migrationDoesNotStampAVersionItCouldNotReach() async throws {
         let dir = try makeTempDir(prefix: "TktrV60NoTable")
         defer { try? FileManager.default.removeItem(at: dir) }
 
@@ -546,8 +571,19 @@ struct DisclaimedBannerReceiptRetractionV60MigrationTests {
         #expect(sqlite3_exec(db, "DROP TABLE correction_events", nil, nil, nil) == SQLITE_OK)
         sqlite3_close_v2(db)
 
-        let reopened = try await remigrate(dir)
-        #expect(try await reopened.schemaVersion() == AnalysisStore.currentSchemaVersion)
+        AnalysisStore.resetMigratedPathsForTesting()
+        let reopened = try AnalysisStore(directory: dir)
+        await #expect(throws: (any Error).self) {
+            try await reopened.migrate()
+        }
+        // Read the stamp OFF DISK. `AnalysisStore.schemaVersion()` opens
+        // lazily, so asking the store would re-enter the same failing ladder
+        // and throw instead of answering — which is itself the reason this
+        // probe exists rather than a convenience.
+        #expect(
+            try rawSchemaVersion(in: dir) == "59",
+            "a run that could not read the table must not claim to have retracted anything"
+        )
     }
 
     // MARK: - 8. The blast radius is one table
