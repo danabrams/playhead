@@ -264,6 +264,34 @@
 #   a column that names a fate the row was not given — two functions, each
 #   individually correct.
 #
+#   PARTIAL RE-RUN 2026-08-21 (playhead-my33). Batches 1220-1231 only, added by
+#   this bead: MY01-MY11 plus the MY99 control, one batch each. FINAL 11 KILLED
+#   / 0 SURVIVED / 0 ERROR, plus MY99 SURVIVED as required, 14 builds (1
+#   baseline + 12 batches + 1 re-run of MY02). Batches 1-1217 were NOT re-run
+#   and carry the verdicts below.
+#
+#   MY02 SURVIVED FIRST TIME AND THE SURVIVOR WAS A VACUOUS RAIL, NOT AN
+#   EQUIVALENT MUTANT. MY02 is drop-all, a real behavioural change; four of its
+#   five rails killed it and `a localised sibling corroborates, and the tile is
+#   kept` stayed green. The fixture gave the "localised" sibling NO index, so it
+#   was `Localisation.unreadable` and kept the whole tile on its own — the
+#   assertion could not tell WHICH row produced the geometry, and drop-all
+#   produces the identical marks. Repaired by giving the sibling a resolvable
+#   `SupportLineIndex` so it reaches only the 23.94 s it named; the tile is then
+#   attributable to the absent row alone. Re-run: KILLED by all five. The rail
+#   was rewritten, the expectation was not relaxed and the entry was not
+#   deleted.
+#
+#   WHY MY07 IS REGISTERED THOUGH IT IS EQUIVALENT AT THE COMPOSE SEAM. It
+#   drops `corroborates`'s presence-pass clause, and an affirming `passB` row
+#   overlapping the extent is itself a CONTRIBUTOR — `localise` admits every
+#   `isPresenceVerdict` row regardless of pass — so the mark survives either
+#   way and no end-to-end test can ever kill it.
+#   `aRefinementDoesNotCorroborate` asserts on `corroborates` DIRECTLY, which
+#   is the only thing that can, and says so in its own doc comment. Keeping the
+#   clause is what makes the guard survive the day `localise`'s contributor set
+#   narrows.
+#
 #   PARTIAL RE-RUN 2026-08-21 (playhead-kg6i). Batches 1210-1217 only, added by
 #   this bead: KG01-KG07 plus the KG99 control, one batch each. FINAL 7 KILLED /
 #   0 SURVIVED / 0 ERROR, plus KG99 SURVIVED as required, 14 builds. Batches

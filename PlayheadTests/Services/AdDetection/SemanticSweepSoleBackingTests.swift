@@ -77,11 +77,29 @@ private enum SoleBackingFixture {
     /// A `containsAd` row carrying THIS is `Localisation.absent`.
     static let namedNothing = "[]"
 
+    /// A resolvable index for the `A9F6DF05` ~6814 s tile, at `versionB`.
+    /// Three consecutive lines covering it exactly, so a row citing line 12
+    /// alone localises to its LAST 23.94 s — which is what makes the
+    /// difference between "the absent row contributed its tile" and "the
+    /// sibling contributed its span" visible at all. See
+    /// `aLocalisedSiblingCorroborates`, and mutant MY02 for why it is here.
+    static var siblingIndex: SupportLineIndex {
+        SupportLineIndex(transcriptVersion: versionB, lines: [
+            10: SupportLineIndex.Line(startTime: 6_814.02, endTime: 6_834.00,
+                                      firstAtomOrdinal: 100, lastAtomOrdinal: 129),
+            11: SupportLineIndex.Line(startTime: 6_834.20, endTime: 6_850.00,
+                                      firstAtomOrdinal: 130, lastAtomOrdinal: 159),
+            12: SupportLineIndex.Line(startTime: 6_850.20, endTime: 6_874.14,
+                                      firstAtomOrdinal: 160, lastAtomOrdinal: 199),
+        ])
+    }
+
     static func row(
         id: String,
         start: Double,
         end: Double,
         version: String = versionA,
+        atoms: ClosedRange<Int> = 0...1,
         disposition: CoarseDisposition = .containsAd,
         status: SemanticScanStatus = .success,
         scanPass: String = "passA",
@@ -92,8 +110,8 @@ private enum SoleBackingFixture {
         SemanticScanResult(
             id: id,
             analysisAssetId: assetId,
-            windowFirstAtomOrdinal: 0,
-            windowLastAtomOrdinal: 1,
+            windowFirstAtomOrdinal: atoms.lowerBound,
+            windowLastAtomOrdinal: atoms.upperBound,
             windowStartTime: start,
             windowEndTime: end,
             scanPass: scanPass,
@@ -113,11 +131,12 @@ private enum SoleBackingFixture {
     }
 
     static func compose(rows: [SemanticScanResult],
-                        existing: [AdWindow] = []) -> [AdWindow] {
+                        existing: [AdWindow] = [],
+                        supportLines: SupportLineIndex? = nil) -> [AdWindow] {
         SemanticSweepMarkComposer.compose(
             scanRows: rows,
             existingWindows: existing,
-            supportLines: nil,
+            supportLines: supportLines,
             analysisAssetId: assetId
         )
     }
@@ -217,19 +236,35 @@ struct SemanticSweepSoleBackingTests {
     }
 
     /// A LOCALISED row over the same window corroborates too, and the absent
-    /// row still contributes its whole window — so the union is the tile, not
-    /// the narrowing. This is `A9F6DF05` ~6814 s and ~2656 s on the pull, where
-    /// one of the re-scans did cite a line.
+    /// row still contributes its WHOLE WINDOW — so the union is the tile, not
+    /// the sibling's narrowing. This is `A9F6DF05` ~6814 s and ~2656 s on the
+    /// pull, where one of the re-scans did cite a line.
+    ///
+    /// **THE SIBLING MUST ACTUALLY LOCALISE, AND MUTANT MY02 IS WHY.** The
+    /// first version of this test gave the sibling no index, so it was
+    /// `Localisation.unreadable` and kept the whole tile on its own — and the
+    /// assertion below passed under drop-all, where the absent row contributes
+    /// nothing at all. Four of MY02's five rails killed it and this one stayed
+    /// green: a test that cannot tell WHICH row produced the geometry is not a
+    /// test of the rule. With a resolvable index the sibling reaches only the
+    /// last 23.94 s, so the tile is attributable to the absent row and to
+    /// nothing else.
     @Test("a localised sibling corroborates, and the tile is kept")
     func aLocalisedSiblingCorroborates() {
-        let marks = Fx.compose(rows: [
-            Fx.row(id: "absent", start: 6_814.02, end: 6_874.14),
-            Fx.row(id: "named", start: 6_814.02, end: 6_874.14,
-                   version: Fx.versionB, spansJSON: Fx.coarseSupport([364])),
-        ])
+        let absent = Fx.row(id: "absent", start: 6_814.02, end: 6_874.14)
+        let named = Fx.row(id: "named", start: 6_814.02, end: 6_874.14,
+                           version: Fx.versionB, atoms: 100...199,
+                           spansJSON: Fx.coarseSupport([12]))
 
+        let siblingAlone = Fx.compose(rows: [named], supportLines: Fx.siblingIndex)
+        #expect(siblingAlone.count == 1)
+        #expect(siblingAlone.first?.startTime == 6_850.20,
+                "control: on its own the sibling reaches only the seconds it named")
+
+        let marks = Fx.compose(rows: [absent, named], supportLines: Fx.siblingIndex)
         #expect(marks.count == 1)
-        #expect(marks.first?.startTime == 6_814.02)
+        #expect(marks.first?.startTime == 6_814.02,
+                "the corroborated absent row contributes the TILE, widening the union back out")
         #expect(marks.first?.endTime == 6_874.14)
     }
 

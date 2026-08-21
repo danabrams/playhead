@@ -1538,6 +1538,18 @@ enum SemanticSweepMarkComposer {
     /// contribution while drop-all would not. That difference IS the rule; it
     /// simply has no instance on this pull.
     ///
+    /// AND DAN'S MARK IS TRIMMED, NOT REMOVED — the bead says this rule "fixes
+    /// Dan's own first false positive" and that is one word too strong. Read
+    /// back from `transcript_chunks`, the TAIL this drops ([1211.16–1287.18])
+    /// is Alex Honnold describing breaking a climb into pieces, and the HEAD
+    /// that survives ([1131.60–1210.86]) is *"my sponsored through the
+    /// Northface was like … I think my 1st year was like 10 K a year"* — which
+    /// is the passage playhead-6ruv records him vetoing, commercial VOCABULARY
+    /// read as commercial INTENT. Both halves are show; this bead gives back
+    /// 76.3 s of it and leaves 79.3 s standing. The head survives because it
+    /// NAMED a line (46) that today's segmentation can no longer resolve, so it
+    /// is `.unreadable` — the case this bead deliberately does not touch.
+    ///
     /// The change is still one line here — and that claim is only true because
     /// mutant SU12 proved it was NOT: it used to be silently undone by
     /// ``localise(_:scanRows:supportLines:)``'s duration-floor rescue, which is
