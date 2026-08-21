@@ -168,10 +168,31 @@ set -- ${FORWARD[@]+"${FORWARD[@]}"}
 
 BASELINE_FILE="${PLAYHEAD_GATE_BASELINE:-scripts/gate-baseline.${PLAN}.json}"
 
+# playhead-81ig: RESOLVE THE UDID FROM A NAME TOO, AND NEVER FAIL AT IT QUIETLY.
+# The default DEST is `platform=iOS Simulator,name=iPhone 17` — a NAME, with no
+# `id=` in it. Only the `id=` branch existed, so on the DEFAULT invocation SIM_ID
+# was empty, and every consumer guarded with `[ -n "$SIM_ID" ]` took its false
+# branch in SILENCE. That is how playhead-blsh shipped a simulator trim that
+# never ran: a trimmed and an untrimmed log were byte-identical, and two full
+# plans were accepted as evidence for a trim that was not applied to either.
 SIM_ID="${PLAYHEAD_SIM_ID:-}"
 if [ -z "$SIM_ID" ]; then
   case "$DEST" in
     *id=*) SIM_ID="$(printf '%s' "$DEST" | sed -n 's/.*id=\([0-9A-Fa-f-]*\).*/\1/p')" ;;
+  esac
+fi
+if [ -z "$SIM_ID" ]; then
+  case "$DEST" in
+    *name=*)
+      SIM_NAME="$(printf '%s' "$DEST" | sed -n 's/.*name=\([^,]*\).*/\1/p')"
+      # The FIRST device with this exact name, preferring a booted one. `simctl
+      # list devices` prints `    <name> (<UDID>) (<state>)`, and the name must
+      # match to the parenthesis or "iPhone 17" also matches "iPhone 17 Pro".
+      SIM_ID="$(xcrun simctl list devices 2>/dev/null \
+        | sed -n "s/^ *${SIM_NAME} (\([0-9A-Fa-f-]\{36\}\)) (Booted).*/\1/p" | sed -n 1p)"
+      [ -n "$SIM_ID" ] || SIM_ID="$(xcrun simctl list devices 2>/dev/null \
+        | sed -n "s/^ *${SIM_NAME} (\([0-9A-Fa-f-]\{36\}\)) (.*/\1/p" | sed -n 1p)"
+      ;;
   esac
 fi
 
@@ -318,6 +339,13 @@ if [ "${PLAYHEAD_SIM_TRIM:-1}" != "0" ] && [ -n "$SIM_ID" ] && [ -x scripts/sim-
     *) echo "fast-gate: sim-trim left jobs running (exit $TRIM_RC) — the run is only PARTLY trimmed; read the names above against the memory series." ;;
   esac
   echo "fast-gate: simulator processes after trim: $(ps -Ao args= | /usr/bin/grep -c -e '/CoreSimulato[r]/' -e '\.simruntim[e]/')"
+elif [ "${PLAYHEAD_SIM_TRIM:-1}" = "0" ]; then
+  echo "fast-gate: sim-trim DISABLED by PLAYHEAD_SIM_TRIM=0 — running UNTRIMMED, expect the 16 GiB ceiling."
+elif [ -z "$SIM_ID" ]; then
+  echo "fast-gate: sim-trim SKIPPED — could not resolve a simulator UDID from '$DEST'. RUNNING UNTRIMMED."
+  echo "fast-gate: set PLAYHEAD_SIM_ID to the device's UDID. A run with no trim line above it is not a trimmed run."
+else
+  echo "fast-gate: sim-trim SKIPPED — scripts/sim-trim.sh is missing or not executable. RUNNING UNTRIMMED."
 fi
 
 echo "fast-gate: plan=$PLAN dest=$DEST derived=$DERIVED jobs=$JOBS (single-host; no clone parallelism)"
