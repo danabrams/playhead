@@ -100,6 +100,19 @@ fi
 #   diagnosticextensionsd                 crash reports. A gate that loses a host and
 #                                         cannot say why is the thing blsh exists to end.
 #   CoreSimulator.bridge, dtdeviceinfod   Xcode's own channel into the device.
+#
+#   com.apple.nanoregistryd — THE ONE THAT WAS FOUND BY BISECTION, NOT BY
+#   READING. It is the paired-device (Watch) registry, it backs no framework
+#   this app imports, and by every rule in sim-trim-jobs.txt it belongs in the
+#   trim. Disabling it makes the NEXT BOOT UNUSABLE: `simctl bootstatus` prints
+#   nothing at all and hangs, and `simctl launch com.apple.Preferences` never
+#   returns — so xcodebuild could not install or start a test host either.
+#   Measured both directions: disabling it ALONE hangs, and disabling the other
+#   117 with it enabled boots to 97 processes and launches in ~10 s.
+#
+#   It matters because the disables OUTLIVE `simctl erase`: the damage is not to
+#   the run that applies the trim, it is to the NEXT one — which is exactly the
+#   kind of defect that gets blamed on somebody's diff.
 KEEP='
 com.apple.SpringBoard
 com.apple.backboardd
@@ -136,6 +149,7 @@ com.apple.CoreSimulator.bridge
 com.apple.coredevice.dtdeviceinfod
 com.apple.purplebuddy.budd
 com.apple.locationd
+com.apple.nanoregistryd
 com.apple.contactsd
 com.apple.accountsd
 com.apple.akd

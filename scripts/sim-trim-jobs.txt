@@ -129,7 +129,6 @@ com.apple.appprotectiond
 com.apple.nanotimekitcompaniond
 com.apple.companionappd
 com.apple.brook.brookcompaniond
-com.apple.nanoregistryd
 com.apple.nanoprefsyncd.2
 com.apple.appconduitd
 com.apple.wcd
@@ -139,6 +138,10 @@ com.apple.pairedunlockd
 com.apple.companionfindlocallyd
 com.apple.nanoappregistryd
 com.apple.nanosystemsettingsd
+# com.apple.nanoregistryd is NOT here. It is on the KEEP list, found by
+# bisection: disabling that ONE label makes the NEXT boot unusable — `simctl
+# bootstatus` prints nothing at all and `simctl launch` never returns. The other
+# 117 are fine. See the KEEP list in sim-trim.sh.
 
 # --- Sharing, continuity, social ------------ no Messages/AirDrop/Handoff surface
 com.apple.sharingd
