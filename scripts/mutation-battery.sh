@@ -1618,6 +1618,17 @@ FOCUSED_SUITES=(
   # CONSTRUCTION — which is exactly why the defect survived playhead-92im's own
   # rails. Listing it here would add build time and no observation.
   -only-testing:PlayheadTests/SemanticSweepCorroborationScopeTests
+  # playhead-my33: an unlocalised verdict may not hold a banner up ALONE (MY
+  # series). TWO suites, and the split is the same one shu5 made: the
+  # sole-backing suite is the only thing that can see the COMPOSED consequence
+  # — a mark that no longer exists, Dan's own mark losing its tail, and the
+  # control that a lone `.unreadable` row still keeps its window — while the
+  # predicate suite is the only thing that can see `corroborates` itself. The
+  # second is not a convenience: MY07 (the presence-pass clause) is EQUIVALENT
+  # at the compose seam, because an affirming `passB` row overlapping the
+  # extent is itself a contributor, so no end-to-end test can ever kill it.
+  -only-testing:PlayheadTests/SemanticSweepSoleBackingTests
+  -only-testing:PlayheadTests/SemanticSweepCorroborationPredicateTests
   # playhead-f5ao: the write-only-at-init mirror (F5 series). Two suites,
   # because the two halves of the claim are unobservable from each other. The
   # readiness suite is the only thing that can compare the first-✓ tooltip's
@@ -2930,6 +2941,30 @@ T_KG6I_PAIR_REFINE="a pair is graded in each row's own cohort — the refinement
 T_KG6I_PAIR_COARSE="a pair is graded in each row's own cohort — the coarse window's governs here"
 T_KG6I_GEOMETRY="version scoping changes the GRADE and not the geometry"
 T_KG6I_COUNTS="corroboration counts only the rows at the version it was asked about"
+
+# playhead-my33 — an unlocalised verdict may not hold a banner up ON ITS OWN.
+T_MY33_LONE="a lone verdict that named nothing produces NO mark"
+T_MY33_REPLICATED="a replicated verdict that named nothing keeps its whole window"
+T_MY33_DAN="Dan's CD2976E6 mark falls from [1131.6-1287.2] to [1131.6-1210.9]"
+T_MY33_DAN_TAIL="the same tail, replicated, is kept"
+T_MY33_FOUR="four unlocalised re-scans of one window corroborate one another"
+T_MY33_SIBLING="a localised sibling corroborates, and the tile is kept"
+T_MY33_UNREADABLE="a lone UNREADABLE verdict still keeps its window"
+T_MY33_TIER="a corroborated mark keeps its grade and stays markOnly on unanchored edges"
+T_MY33_CROSS="a CROSS-VERSION replicate corroborates"
+T_MY33_SAME="a SAME-version replicate corroborates"
+T_MY33_SELF="a row does not corroborate itself"
+T_MY33_OVERLAP="an OVERLAPPING row does not corroborate"
+T_MY33_ADJACENT="an ADJACENT row does not corroborate"
+T_MY33_EPSILON="bounds within boundaryEpsilon corroborate and bounds outside it do not"
+T_MY33_DENIAL="a noAds row over the same window does not corroborate"
+T_MY33_UNEXAMINED="an unexamined row does not corroborate"
+T_MY33_SENTINEL="a no-work sentinel does not corroborate"
+T_MY33_REFINEMENT="an affirming passB row does not corroborate"
+T_MY33_CROWD="a claim among rows that do not match finds no corroborator"
+T_MY33_SEAM="a verdict that named no lines and stands alone produces NO mark (playhead-my33)"
+T_MY33_STALE="a row from a stale transcript version keeps its window, it is not narrowed"
+T_MY33_NOINDEX="with no refinement and no index the extent is still the scan window"
 T_Y3YA_ORPHAN_PASSB="a passB verdict with no coarse parent stands on its own"
 T_Y3YA_NO_GATE="no anchor anywhere still emits the mark"
 T_Y3YA_CLIP_UNANCHORED="a clipped mark still records both edges as unanchored"
@@ -6052,6 +6087,86 @@ MUTATIONS=(
   # names the rail KG03 kills, so a KILLED verdict here would mean a rename can
   # change behaviour.
   "KG99|1217|SWEEP|$T_KG6I_PAIR_REFINE"
+
+  # ---- playhead-my33, the MY series: an unlocalised verdict may not hold a
+  #      banner up ON ITS OWN ------------------------------------------------
+  #
+  # A coarse row carrying `containsAd` with `spansJSON = "[]"` asserts an ad in
+  # a ~95 s tile and points at nothing inside it. Dan's call of 2026-08-21:
+  # DROP ONLY WHERE IT IS THE SOLE BACKING — it contributes its window when
+  # another row corroborates the SAME window, and nothing when it is alone.
+  #
+  # The series has four shapes, because each is invisible from the others.
+  # MY01/MY02/MY09 are the three ways to get the DECISION wrong (keep always,
+  # drop always, invert). MY03-MY08 are the six ways to get the PREDICATE
+  # wrong, one clause each plus the argument-order defect. MY10 re-folds the
+  # refusal shu5's SU12 separated, which is the only thing that lets the
+  # decision reach the output at all. MY11 blurs `.absent` into `.unreadable`,
+  # which is the one mistake `Localisation` exists to make impossible.
+  #
+  # Every one of these edits the same guard or the same switch, so they are one
+  # batch each — a batched partner would be credited off the other's state.
+
+  # MY01 is the SHIPPED-BEFORE behaviour verbatim: `.absent` keeps its window
+  # unconditionally, which is what this bead removes.
+  "MY01|1220|SWEEP|$T_MY33_LONE;$T_MY33_DAN;$T_MY33_SEAM"
+
+  # MY02 is the other lossy option — drop-all, which Dan explicitly declined.
+  # It is the mutant that proves the PERMISSIVE half is load-bearing rather
+  # than decoration, and it is the reason `sole` is not just `drop` renamed.
+  "MY02|1221|SWEEP|$T_MY33_REPLICATED;$T_MY33_FOUR;$T_MY33_SIBLING;$T_MY33_DAN_TAIL;$T_MY33_TIER"
+
+  # MY03 drops the identity clause, so a row corroborates ITSELF and nothing is
+  # ever sole. The quiet direction: every mark survives and the bead does
+  # nothing, which no count of marks could distinguish from "no such rows".
+  "MY03|1222|SWEEP|$T_MY33_SELF;$T_MY33_LONE;$T_MY33_SEAM"
+
+  # MY04 drops the admission clause, so a DENIAL, an unexamined row and a
+  # no-work sentinel all corroborate. Three rails because the clause fails
+  # three different ways — status, disposition, and `errorContext`.
+  "MY04|1223|SWEEP|$T_MY33_DENIAL;$T_MY33_UNEXAMINED;$T_MY33_SENTINEL;$T_MY33_CROWD"
+
+  # MY05 replaces bound equality with the composer's own OVERLAP predicate —
+  # the single most plausible wrong reading of "the same window", and the one
+  # that would have let Dan's veto survive on a neighbouring tile's evidence.
+  "MY05|1224|SWEEP|$T_MY33_OVERLAP;$T_MY33_CROWD"
+
+  # MY06 widens the tolerance from a last-bit round trip to a full second. It
+  # is the mutation a test written only against IDENTICAL bounds cannot see.
+  "MY06|1225|SWEEP|$T_MY33_EPSILON"
+
+  # MY07 drops the presence-pass clause. It is killed ONLY by the direct
+  # predicate rail: an affirming `passB` row overlapping the extent is itself a
+  # contributor, so at the `compose` seam this mutation is EQUIVALENT. That is
+  # stated in the test and is why the test asserts on `corroborates` directly.
+  "MY07|1226|SWEEP|$T_MY33_REFINEMENT"
+
+  # MY08 swaps the closure's arguments, so every one-sided clause is checked
+  # against the CLAIM instead of the candidate. Bounds are symmetric, so a
+  # fixture of well-formed replicates cannot see it at all.
+  "MY08|1227|SWEEP|$T_MY33_CROWD;$T_MY33_DENIAL"
+
+  # MY09 inverts the decision: corroborated rows are dropped and sole ones
+  # kept. Both halves of the rule redden, which is what tells it from MY01/MY02.
+  "MY09|1228|SWEEP|$T_MY33_LONE;$T_MY33_REPLICATED"
+
+  # MY10 re-folds the "nothing here is supported" refusal into the duration
+  # floor's rescue — the exact shape mutant SU12 found in playhead-shu5, when
+  # it was a latent hole. It is live now: with the two folded together every
+  # dropped mark comes back and this bead does nothing.
+  "MY10|1229|SWEEP|$T_MY33_LONE;$T_MY33_SEAM"
+
+  # MY11 blurs `.absent` into `.unreadable`, so a row whose refs WE cannot read
+  # is punished for our own records failing. `Localisation` exists to hold the
+  # two apart and this is the mutation that proves it still does.
+  "MY11|1230|SWEEP|$T_MY33_UNREADABLE;$T_MY33_STALE;$T_MY33_NOINDEX"
+
+  # MY99 — VACUITY CONTROL, and it MUST SURVIVE. It renames `corroborates`'s
+  # first parameter throughout its own body and changes nothing else, so it
+  # proves the anchor still matches and the batch machinery still applies and
+  # runs. Non-empty expectation on purpose (playhead-ngsm): it names the rail
+  # MY03 kills, so a KILLED verdict here would mean a rename changes behaviour.
+  "MY99|1231|SWEEP|$T_MY33_SELF"
 
   # -------------------------------------------------------------------------
   # playhead-lxkq — the ad-likelihood scan ORDER (X01-X16)
@@ -10820,6 +10935,18 @@ describe_mutation() {
     SU23) echo "AdDetectionService stops passing the index — a correct composer never handed one" ;;
     SU24) echo "BackfillJobRunner stops passing the index" ;;
     KG01) echo "THE SHIPPED DEFECT VERBATIM — corroboration counts every version's rows as replicates of one experiment" ;;
+    MY01) echo "THE PRE-BEAD BEHAVIOUR VERBATIM — an unlocalised verdict keeps its whole window with nothing backing it" ;;
+    MY02) echo "DROP-ALL, the option Dan declined — a corroborated unlocalised verdict contributes nothing either" ;;
+    MY03) echo "the identity clause is gone, so a row CORROBORATES ITSELF and nothing is ever sole backing" ;;
+    MY04) echo "the admission clause is gone, so a denial, an unexamined row and a no-work sentinel all corroborate" ;;
+    MY05) echo "the same window becomes ANY OVERLAPPING window — a neighbouring tile props up an unlocalised claim" ;;
+    MY06) echo "the bound tolerance widens from a last-bit round trip to a full second" ;;
+    MY07) echo "the presence-pass clause is gone, so a REFINEMENT counts as a second screening" ;;
+    MY08) echo "the closure arguments are swapped, so every one-sided clause is checked against the CLAIM" ;;
+    MY09) echo "the decision is INVERTED — corroborated rows drop and sole ones keep" ;;
+    MY10) echo "the \"nothing is supported\" refusal is re-folded into the duration floor's rescue (SU12's shape, now live)" ;;
+    MY11) echo "\`.absent\` and \`.unreadable\` are blurred, so our records failing costs the model its mark" ;;
+    MY99) echo "VACUITY CONTROL — renames corroborates()'s first parameter and changes nothing; MUST SURVIVE" ;;
     KG02) echo "the version comparison is INVERTED, so only rows from OTHER transcripts vote" ;;
     KG03) echo "the count is hoisted out of the per-backing-row map and taken at the FIRST row's version" ;;
     KG04) echo "the count is hoisted out and taken at the LAST row's version — the mirror of KG03" ;;
@@ -17881,6 +18008,197 @@ EOF
                 return markConfidence(
                     certaintyFactor: certaintyFactor(of: backingRow),
                     transcriptQuality: backingRow.transcriptQuality,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # ── playhead-my33: an unlocalised verdict may not hold a banner up ALONE ─
+
+  MY01)
+    snippet OLD <<'EOF'
+        switch localisation(of: row, in: rows, supportLines: supportLines) {
+        case .named(let spans): spans
+        case .unreadable:
+            [AdSpanBounds(start: row.windowStartTime, end: row.windowEndTime)]
+        case .absent:
+            isCorroborated(row, in: rows)
+                ? [AdSpanBounds(start: row.windowStartTime, end: row.windowEndTime)]
+                : []
+        }
+EOF
+    snippet NEW <<'EOF'
+        switch localisation(of: row, in: rows, supportLines: supportLines) {
+        case .named(let spans): spans
+        case .unreadable, .absent:
+            [AdSpanBounds(start: row.windowStartTime, end: row.windowEndTime)]
+        }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  MY02)
+    snippet OLD <<'EOF'
+        case .absent:
+            isCorroborated(row, in: rows)
+                ? [AdSpanBounds(start: row.windowStartTime, end: row.windowEndTime)]
+                : []
+EOF
+    snippet NEW <<'EOF'
+        case .absent:
+            []
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  MY03)
+    snippet OLD <<'EOF'
+        guard candidate.id != row.id,
+              candidate.scanPass != refinementScanPass,
+              isPresenceVerdict(candidate)
+        else { return false }
+EOF
+    snippet NEW <<'EOF'
+        guard candidate.scanPass != refinementScanPass,
+              isPresenceVerdict(candidate)
+        else { return false }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  MY04)
+    snippet OLD <<'EOF'
+        guard candidate.id != row.id,
+              candidate.scanPass != refinementScanPass,
+              isPresenceVerdict(candidate)
+        else { return false }
+EOF
+    snippet NEW <<'EOF'
+        guard candidate.id != row.id,
+              candidate.scanPass != refinementScanPass
+        else { return false }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  MY05)
+    snippet OLD <<'EOF'
+        return abs(candidate.windowStartTime - row.windowStartTime)
+            <= SupportLineIndex.boundaryEpsilon
+            && abs(candidate.windowEndTime - row.windowEndTime)
+            <= SupportLineIndex.boundaryEpsilon
+EOF
+    snippet NEW <<'EOF'
+        return candidate.windowStartTime < row.windowEndTime
+            && candidate.windowEndTime > row.windowStartTime
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  MY06)
+    snippet OLD <<'EOF'
+        return abs(candidate.windowStartTime - row.windowStartTime)
+            <= SupportLineIndex.boundaryEpsilon
+            && abs(candidate.windowEndTime - row.windowEndTime)
+            <= SupportLineIndex.boundaryEpsilon
+EOF
+    snippet NEW <<'EOF'
+        return abs(candidate.windowStartTime - row.windowStartTime) <= 1.0
+            && abs(candidate.windowEndTime - row.windowEndTime) <= 1.0
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  MY07)
+    snippet OLD <<'EOF'
+        guard candidate.id != row.id,
+              candidate.scanPass != refinementScanPass,
+              isPresenceVerdict(candidate)
+        else { return false }
+EOF
+    snippet NEW <<'EOF'
+        guard candidate.id != row.id,
+              isPresenceVerdict(candidate)
+        else { return false }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  MY08)
+    snippet OLD <<'EOF'
+        rows.contains { corroborates($0, row) }
+EOF
+    snippet NEW <<'EOF'
+        rows.contains { corroborates(row, $0) }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  MY09)
+    snippet OLD <<'EOF'
+            isCorroborated(row, in: rows)
+                ? [AdSpanBounds(start: row.windowStartTime, end: row.windowEndTime)]
+                : []
+EOF
+    snippet NEW <<'EOF'
+            isCorroborated(row, in: rows)
+                ? []
+                : [AdSpanBounds(start: row.windowStartTime, end: row.windowEndTime)]
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  MY10)
+    snippet OLD <<'EOF'
+        guard contributed else { return [] }
+EOF
+    snippet NEW <<'EOF'
+        guard contributed else { return [extent] }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  MY11)
+    snippet OLD <<'EOF'
+        switch localisation(of: row, in: rows, supportLines: supportLines) {
+        case .named(let spans): spans
+        case .unreadable:
+            [AdSpanBounds(start: row.windowStartTime, end: row.windowEndTime)]
+        case .absent:
+            isCorroborated(row, in: rows)
+                ? [AdSpanBounds(start: row.windowStartTime, end: row.windowEndTime)]
+                : []
+        }
+EOF
+    snippet NEW <<'EOF'
+        switch localisation(of: row, in: rows, supportLines: supportLines) {
+        case .named(let spans): spans
+        case .unreadable, .absent:
+            isCorroborated(row, in: rows)
+                ? [AdSpanBounds(start: row.windowStartTime, end: row.windowEndTime)]
+                : []
+        }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  MY99)
+    snippet OLD <<'EOF'
+    static func corroborates(
+        _ candidate: SemanticScanResult,
+        _ row: SemanticScanResult
+    ) -> Bool {
+        guard candidate.id != row.id,
+              candidate.scanPass != refinementScanPass,
+              isPresenceVerdict(candidate)
+        else { return false }
+        return abs(candidate.windowStartTime - row.windowStartTime)
+            <= SupportLineIndex.boundaryEpsilon
+            && abs(candidate.windowEndTime - row.windowEndTime)
+            <= SupportLineIndex.boundaryEpsilon
+    }
+EOF
+    snippet NEW <<'EOF'
+    static func corroborates(
+        _ replicate: SemanticScanResult,
+        _ row: SemanticScanResult
+    ) -> Bool {
+        guard replicate.id != row.id,
+              replicate.scanPass != refinementScanPass,
+              isPresenceVerdict(replicate)
+        else { return false }
+        return abs(replicate.windowStartTime - row.windowStartTime)
+            <= SupportLineIndex.boundaryEpsilon
+            && abs(replicate.windowEndTime - row.windowEndTime)
+            <= SupportLineIndex.boundaryEpsilon
+    }
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 

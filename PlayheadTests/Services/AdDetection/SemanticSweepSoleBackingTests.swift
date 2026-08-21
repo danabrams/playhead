@@ -354,7 +354,7 @@ struct SemanticSweepCorroborationPredicateTests {
 
     /// The tolerance is `SupportLineIndex.boundaryEpsilon` — enough to absorb a
     /// last-bit `REAL` round trip, far too small to reach another window.
-    @Test("bounds within boundaryEpsilon corroborate; bounds outside it do not")
+    @Test("bounds within boundaryEpsilon corroborate and bounds outside it do not")
     func theEpsilonIsATolerance() {
         let claim = Self.claim()
         let inside = Fx.row(id: "inside",
