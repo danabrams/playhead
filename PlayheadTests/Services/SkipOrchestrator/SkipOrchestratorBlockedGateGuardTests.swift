@@ -326,6 +326,12 @@ struct SkipOrchestratorBlockedGateGuardTests {
         let windowId = "ad-blocked-\(gateRaw)"
         let window = makeBlockedGateAdWindow(id: windowId, gateRaw: gateRaw)
         await orchestrator.receiveAdWindows([window])
+        // playhead-bwxi: walk into [60, 120). Both tier assertions below are
+        // NEGATIVE, and since the presentation moved to the position path a
+        // negative taken with the playhead never moved would pass for a
+        // perfectly healthy window too — it stops discriminating exactly where
+        // this suite is supposed to.
+        await orchestrator.updatePlayheadTime(70)
 
         try await Task.sleep(for: .milliseconds(100))
         collectTask.cancel()
