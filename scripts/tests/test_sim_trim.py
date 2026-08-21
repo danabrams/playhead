@@ -134,5 +134,82 @@ class KeepListCoversTheImportedFrameworks(unittest.TestCase):
             self.assertIn(label, keep)
 
 
+FAST_GATE = ROOT / "scripts" / "fast-gate.sh"
+
+
+class TheTrimMustNeverBeSilentlySkipped(unittest.TestCase):
+    """playhead-81ig: the trim shipped INERT and no log said so.
+
+    `fast-gate.sh` resolved the simulator UDID only from a `id=` destination, but
+    the default destination is `platform=iOS Simulator,name=iPhone 17` — a NAME.
+    So `SIM_ID` was empty on the default invocation, the `[ -n "$SIM_ID" ]` guard
+    took its false branch in SILENCE, and a trimmed run and an untrimmed run
+    produced byte-identical logs. Two full plans were accepted as evidence for a
+    trim that was applied to neither.
+
+    The house defect class, one layer up from where sim-trim.sh already fights it:
+    a guard that names an ABSENCE, whose false branch makes no claim.
+    """
+
+    def test_a_name_destination_is_resolved_too(self):
+        self.assertIn("*name=*)", FAST_GATE.read_text())
+
+    def test_every_skip_path_prints_something(self):
+        # The `if` that runs the trim must be followed by elif/else arms that SAY
+        # the run is untrimmed. A bare `fi` is the bug.
+        text = FAST_GATE.read_text()
+        start = text.index('if [ "${PLAYHEAD_SIM_TRIM:-1}" != "0" ]')
+        block = text[start:start + 3000]
+        self.assertIn("RUNNING UNTRIMMED", block)
+        for arm in ("elif [ \"${PLAYHEAD_SIM_TRIM:-1}\" = \"0\" ]",
+                    "elif [ -z \"$SIM_ID\" ]",
+                    "\nelse\n"):
+            self.assertIn(arm, block, f"missing arm: {arm!r}")
+
+    def test_a_trimmed_run_is_identifiable_from_its_log_alone(self):
+        # The one line a reader can grep for. Without it, "was this trimmed?" is
+        # unanswerable after the fact — which is how the inert version survived.
+        self.assertIn("simulator processes after trim:", FAST_GATE.read_text())
+
+
+class NameResolutionDoesNotMatchAPrefix(unittest.TestCase):
+    """`iPhone 17` must not resolve to `iPhone 17 Pro`.
+
+    Only one iPhone 17 exists on this box, so the confusable case cannot be
+    observed live — it is pinned against a fixture instead, because the failure
+    would be silent and wrong rather than loud.
+    """
+
+    LISTING = (
+        "== Devices ==\n"
+        "-- iOS 27.0 --\n"
+        "    iPhone 17 Pro (AAAAAAAA-1111-2222-3333-444444444444) (Shutdown) \n"
+        "    iPhone 17 (BBBBBBBB-1111-2222-3333-444444444444) (Booted) \n"
+    )
+
+    def _resolve(self, name: str, listing: str) -> str:
+        import subprocess
+        booted = subprocess.run(
+            ["sed", "-n", rf"s/^ *{name} (\([0-9A-Fa-f-]\{{36\}}\)) (Booted).*/\1/p"],
+            input=listing, capture_output=True, text=True, check=False).stdout.splitlines()
+        if booted:
+            return booted[0]
+        any_state = subprocess.run(
+            ["sed", "-n", rf"s/^ *{name} (\([0-9A-Fa-f-]\{{36\}}\)) (.*/\1/p"],
+            input=listing, capture_output=True, text=True, check=False).stdout.splitlines()
+        return any_state[0] if any_state else ""
+
+    def test_exact_name_wins_over_a_longer_one(self):
+        self.assertEqual(self._resolve("iPhone 17", self.LISTING),
+                         "BBBBBBBB-1111-2222-3333-444444444444")
+
+    def test_the_longer_name_still_resolves_to_itself(self):
+        self.assertEqual(self._resolve("iPhone 17 Pro", self.LISTING),
+                         "AAAAAAAA-1111-2222-3333-444444444444")
+
+    def test_an_unknown_name_resolves_to_nothing_rather_than_to_anything(self):
+        self.assertEqual(self._resolve("iPad Air", self.LISTING), "")
+
+
 if __name__ == "__main__":
     unittest.main()
