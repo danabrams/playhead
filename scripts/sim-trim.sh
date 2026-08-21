@@ -188,11 +188,20 @@ fi
 # set is identical under system/ and user/<uid>, but only one of them is the
 # domain `launchctl list` reports, and guessing it wrong makes every disable a
 # no-op that still exits 0.
+#
+# RETRIED, because `Booted` is not `ready`: for the first few tens of seconds
+# after boot `simctl spawn` can fail outright, and a single attempt turns that
+# into "could not resolve a launchd domain" — which, on a --restore, leaves a
+# CONTROL run silently trimmed while the harness carries on. Measured: a restore
+# invoked immediately after `simctl boot` returned failed this way.
 DOMAIN=""
-for uid in "$(id -u)" 501; do
-  if lc print-disabled "user/$uid" | /usr/bin/grep -q "disabled services"; then DOMAIN="user/$uid"; break; fi
+for attempt in $(seq 1 30); do
+  for uid in "$(id -u)" 501; do
+    if lc print-disabled "user/$uid" | /usr/bin/grep -q "disabled services"; then DOMAIN="user/$uid"; break 2; fi
+  done
+  sleep 4
 done
-[ -n "$DOMAIN" ] || { echo "sim-trim: could not resolve a launchd domain on $SIM_ID" >&2; exit 2; }
+[ -n "$DOMAIN" ] || { echo "sim-trim: could not resolve a launchd domain on $SIM_ID after 120 s" >&2; exit 2; }
 
 # --- the job list -------------------------------------------------------------
 FILES=(scripts/sim-trim-jobs.txt)
