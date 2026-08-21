@@ -1971,7 +1971,7 @@ actor AnalysisStore {
     /// assertions automatically follow the production constant — hardcoding
     /// the integer in tests has been a recurring source of stale-assertion
     /// flakes whenever the schema bumps.
-    nonisolated static let currentSchemaVersion = 58
+    nonisolated static let currentSchemaVersion = 59
 
     /// H1: minimum age (in seconds) a `backfill_jobs` / `final_pass_jobs`
     /// row stuck in `status='running'` must reach before the launch-time
@@ -2936,6 +2936,7 @@ actor AnalysisStore {
             // without ever reaching. Repairs the JSON in place, resetting only
             // that one key on every entry — see the block comment.
             try migrateDetectorTrustObservationCountV58IfNeeded()
+            try migrateCorrectionPlayheadPositionV59IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -3349,6 +3350,7 @@ actor AnalysisStore {
         // `podcast_profiles` — or one whose profiles have never forked a
         // ledger — still reaches v58.
         try migrateDetectorTrustObservationCountV58IfNeeded()
+        try migrateCorrectionPlayheadPositionV59IfNeeded()
     }
     #endif
 
@@ -8543,6 +8545,32 @@ actor AnalysisStore {
             )
         }
         try setSchemaVersion(58)
+    }
+
+    /// V59 migration (playhead-bwxi) — `correction_events` records WHERE THE
+    /// LISTENER WAS when the tap happened.
+    ///
+    /// A pure column add, nullable, with no backfill and none possible: the
+    /// position was never captured, so every pre-V59 row is honestly `NULL`
+    /// rather than reconstructed. Read a NULL as "unknown", never as 0 — a
+    /// zero would say the listener was at the top of the episode, which is
+    /// precisely the claim the four 2026-08-21 rows on asset 0FF7EFF3 could
+    /// neither support nor refute.
+    private func migrateCorrectionPlayheadPositionV59IfNeeded() throws {
+        let observed = (try schemaVersion() ?? 1)
+        guard observed < 59 else { return }
+        // DO NOT STEP OVER A ROLLED-BACK V39 — same rationale as V40-V58.
+        guard observed >= 58 else { return }
+        guard try tableExists("correction_events") else {
+            try setSchemaVersion(59)
+            return
+        }
+        try addColumnIfNeeded(
+            table: "correction_events",
+            column: "playheadTimeAtCorrection",
+            definition: "REAL"
+        )
+        try setSchemaVersion(59)
     }
 
     /// playhead-kg8h: durably CLAIM one REQUESTED day-0 kickoff, before any of
@@ -22922,8 +22950,8 @@ actor AnalysisStore {
              correctionType, causalSource, targetRefsJSON,
              firstSeenAt, lastSeenAt, submissionCount,
              normalizedScopeKey, effectiveCorrectionType,
-             correctionIdentityKey)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
+             correctionIdentityKey, playheadTimeAtCorrection)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
             ON CONFLICT(
                 analysisAssetId,
                 effectiveCorrectionType,
@@ -22976,7 +23004,20 @@ actor AnalysisStore {
                     WHEN excluded.correctionIdentityKey = ''
                     THEN COALESCE(excluded.targetRefsJSON, correction_events.targetRefsJSON)
                     ELSE correction_events.targetRefsJSON
-                END
+                END,
+                -- playhead-bwxi: FIRST-OBSERVATION PROVENANCE, like `id`,
+                -- `createdAt` and `firstSeenAt`, and unlike the attribution
+                -- columns above. The question this column answers is "where
+                -- was the listener when they said this", and a re-submission
+                -- of the same logical correction minutes later is a different
+                -- moment in the episode, not a better reading of the first.
+                -- COALESCE so a row written before V59, or by a seam that
+                -- carries no position, can still be filled in by a later
+                -- gesture that does.
+                playheadTimeAtCorrection = COALESCE(
+                    correction_events.playheadTimeAtCorrection,
+                    excluded.playheadTimeAtCorrection
+                )
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -23018,6 +23059,7 @@ actor AnalysisStore {
         bind(stmt, 12, normalizedScopeKey)
         bind(stmt, 13, effectiveType.rawValue)
         bind(stmt, 14, correctionIdentityKey)
+        bind(stmt, 15, event.playheadTimeAtCorrection)
         try step(stmt, expecting: SQLITE_DONE)
         // `sqlite3_changes` is the durable signal that a row was
         // actually inserted or updated. Combined with the pre-upsert
@@ -23051,7 +23093,8 @@ actor AnalysisStore {
         let sql = """
             SELECT id, analysisAssetId, scope, createdAt, source, podcastId,
                    correctionType, causalSource, targetRefsJSON,
-                   submissionCount, lastSeenAt, correctionIdentityKey
+                   submissionCount, lastSeenAt, correctionIdentityKey,
+                   playheadTimeAtCorrection
             FROM correction_events
             WHERE analysisAssetId = ?
             ORDER BY createdAt ASC
@@ -23094,6 +23137,13 @@ actor AnalysisStore {
                 ? nil
                 : sqlite3_column_double(stmt, 10)
             let correctionIdentityKey = optionalText(stmt, 11)
+            // playhead-bwxi: NULL means UNKNOWN, and must stay distinguishable
+            // from 0.0 — which would assert the listener was at the top of the
+            // episode. Every pre-V59 row is NULL and none is reconstructible.
+            let playheadTimeAtCorrection: Double? =
+                sqlite3_column_type(stmt, 12) == SQLITE_NULL
+                    ? nil
+                    : sqlite3_column_double(stmt, 12)
             results.append(CorrectionEvent(
                 id: id,
                 analysisAssetId: assetId,
@@ -23102,6 +23152,7 @@ actor AnalysisStore {
                 source: source,
                 podcastId: podcastId,
                 correctionType: correctionType,
+                playheadTimeAtCorrection: playheadTimeAtCorrection,
                 causalSource: causalSource,
                 targetRefs: targetRefs,
                 submissionCount: submissionCount,

@@ -411,6 +411,28 @@ struct CorrectionEvent: Sendable, Equatable {
     /// so a damaged/unknown source string cannot turn a private receipt into
     /// diagnostic export material.
     let isPrivateExplicitFeedbackReceipt: Bool
+    /// playhead-bwxi: WHERE THE LISTENER WAS when the tap happened, in episode
+    /// seconds. `nil` for rows written before schema V59, and for corrections
+    /// that do not come from a playback gesture.
+    ///
+    /// THE QUESTION THIS COLUMN EXISTS TO ANSWER. On 2026-08-21 four
+    /// `bannerAutoSkipConfirmed` rows landed on asset 0FF7EFF3 within six
+    /// seconds of each other, for windows at 0, 1370, 3367 and 4279 s. Three of
+    /// them were confirmations of audio the listener had not reached — the
+    /// banner was presenting the whole episode at once (fixed in the same
+    /// bead). Nothing in the row said so: `createdAt` is wall clock, `scope`
+    /// and `targetRefs` carry the WINDOW's span, and the listener's own
+    /// position was recorded nowhere. So a confirmation made after hearing and
+    /// one made seventy minutes early were the same row, and every historical
+    /// `bannerAutoSkipConfirmed` is unfalsifiable in both directions.
+    ///
+    /// With this, `playheadTimeAtCorrection ∈ [span.start, span.end)` is
+    /// checkable per row, and a corpus can be filtered on it rather than
+    /// trusted wholesale. Deliberately NOT part of the correction identity —
+    /// it is evidence about the gesture, not a discriminator between gestures,
+    /// and folding it into the key would turn one re-submitted correction into
+    /// several rows.
+    let playheadTimeAtCorrection: Double?
     /// Exact v32 persistence discriminator when this event was loaded from
     /// SQLite. In-memory events leave it nil and compute their identity from
     /// source/targets. Keeping the stored key lets read-side dedupe honor the
@@ -425,6 +447,10 @@ struct CorrectionEvent: Sendable, Equatable {
         source: CorrectionSource? = nil,
         podcastId: String? = nil,
         correctionType: CorrectionType? = nil,
+        // playhead-bwxi: declared HERE, between `correctionType` and
+        // `causalSource`, so every existing labelled call site can add it
+        // without reordering anything else.
+        playheadTimeAtCorrection: Double? = nil,
         causalSource: CausalSource? = nil,
         targetRefs: CorrectionTargetRefs? = nil,
         submissionCount: Int? = nil,
@@ -443,6 +469,12 @@ struct CorrectionEvent: Sendable, Equatable {
         self.targetRefs = targetRefs
         self.submissionCount = submissionCount
         self.lastSeenAt = lastSeenAt
+        // playhead-bwxi: a non-finite position is no position. A NaN would
+        // persist as a REAL that compares false against every span in both
+        // directions, which is exactly the "unfalsifiable" state this column
+        // exists to remove.
+        self.playheadTimeAtCorrection =
+            playheadTimeAtCorrection.flatMap { $0.isFinite ? $0 : nil }
         self.persistedCorrectionIdentityKey =
             persistedCorrectionIdentityKey
         self.isPrivateExplicitFeedbackReceipt =
@@ -465,5 +497,6 @@ struct CorrectionEvent: Sendable, Equatable {
             && lhs.lastSeenAt == rhs.lastSeenAt
             && lhs.isPrivateExplicitFeedbackReceipt
                 == rhs.isPrivateExplicitFeedbackReceipt
+            && lhs.playheadTimeAtCorrection == rhs.playheadTimeAtCorrection
     }
 }

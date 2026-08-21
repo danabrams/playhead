@@ -54,6 +54,35 @@
 // for the auto-skip receipt — and pinning one while the other regressed is
 // exactly what happened between d3g0 and this bead.
 //
+// MUTATION RECORD, both arrows and both tiers (2026-08-21, scoped runs on this
+// suite; every restore verified byte-exact by SHA-256 and `git status
+// --porcelain -- Playhead` clean afterwards). A rail that cannot fail is not
+// there, so each historical defect was re-introduced and the suite re-run:
+//
+//   M1  bwxi verbatim — `evaluateAndPush` calls `emitBannerItem` inside the
+//       promotion loop again (decision-time presentation)      KILLED, 5 of 6
+//       tests red, "The field moment" among them.
+//   M2  isp5's direction on the SUGGEST tier — presentation suppressed while
+//       the playhead is inside a markOnly window               KILLED, and
+//       "isp5's direction" fails by name.
+//   M3  isp5's direction on the AUTO tier — a skip fires and announces
+//       nothing                                                KILLED.
+//   M4  d3g0's direction on the SUGGEST tier — containment dropped, every
+//       armed suggestion presented on the first observation    KILLED.
+//   M5  bwxi's shape as a predicate — containment dropped on the AUTO
+//       tier                                                   KILLED.
+//   M6  the V59 column bound as NULL regardless of the gesture KILLED.
+//   M7  `observedPlayheadTimeForCorrection` returns the stale 0 instead of
+//       nil                                                    KILLED.
+//   --  unmutated tree: 8 tests / 13 cases pass (the vacuity control).
+//
+// ONE PROPERTY OF THE HARNESS, STATED SO IT IS NOT MISTAKEN FOR A HOLE. The
+// frame boundary is itself a suggest banner, so a TOTAL suggest-tier silence
+// (M2) makes `drain` block and the suite fails on its `.timeLimit` rather than
+// on an assertion. That is loud in the only direction that matters — the
+// dangerous failure would be silence read as a pass, and it is unreachable
+// here: no banner means no sentinel means no green.
+//
 // OBSERVATION METHOD — borrowed from `SuggestBannerEntryGateTests`, and for its
 // reason. Emission is SYNCHRONOUS inside the actor and `AsyncStream` buffers on
 // `yield`, so by the time an awaited orchestrator call returns, everything it
@@ -162,6 +191,8 @@ struct BannerPlayheadBiconditionalTests {
     /// out is not a frame boundary.
     private static let sentinelStart: Double = 1000
 
+    private static let playbackLifecycleGeneration: UInt64 = 1
+
     // MARK: Fixture construction
 
     private static func fieldWindow(
@@ -240,7 +271,8 @@ struct BannerPlayheadBiconditionalTests {
         )
     }
 
-    fileprivate static func makeHarness() async throws -> SkipOrchestrator {
+    fileprivate static func makeHarness() async throws
+        -> (orchestrator: SkipOrchestrator, store: AnalysisStore) {
         let store = try await makeTestStore()
         try await store.insertAsset(
             makeSkipTestAnalysisAsset(
@@ -265,9 +297,13 @@ struct BannerPlayheadBiconditionalTests {
         await orchestrator.beginEpisode(
             analysisAssetId: assetId,
             episodeId: episodeId,
-            podcastId: podcastId
+            podcastId: podcastId,
+            // Stated rather than defaulted: `confirmAutoSkippedBanner` refuses
+            // a nil generation, so a harness that left it nil would make every
+            // confirmation below return false and prove nothing.
+            playbackLifecycleGeneration: playbackLifecycleGeneration
         )
-        return orchestrator
+        return (orchestrator, store)
     }
 
     // MARK: The walk
@@ -355,7 +391,7 @@ struct BannerPlayheadBiconditionalTests {
         arguments: [BwxiBannerTier.autoSkip, BwxiBannerTier.suggest]
     )
     func banneredSetEqualsEnteredSetAtEveryObservation(tier: BwxiBannerTier) async throws {
-        let orchestrator = try await Self.makeHarness()
+        let (orchestrator, _) = try await Self.makeHarness()
         var reader = BiconditionalBannerReader(await orchestrator.bannerItemStream())
         nonisolated(unsafe) var pushedCues: [CMTimeRange] = []
         await orchestrator.setSkipCueHandler { pushedCues = $0 }
@@ -501,7 +537,7 @@ struct BannerPlayheadBiconditionalTests {
         arguments: [BwxiBannerTier.autoSkip, BwxiBannerTier.suggest]
     )
     func atEightySevenSecondsOnlyThePreRollHasBannered(tier: BwxiBannerTier) async throws {
-        let orchestrator = try await Self.makeHarness()
+        let (orchestrator, _) = try await Self.makeHarness()
         var reader = BiconditionalBannerReader(await orchestrator.bannerItemStream())
 
         await orchestrator.receiveAdWindows(
@@ -554,7 +590,7 @@ struct BannerPlayheadBiconditionalTests {
         arguments: [BwxiBannerTier.autoSkip, BwxiBannerTier.suggest]
     )
     func aPlayheadInsideADayZeroPreRollIsNeverSilent(tier: BwxiBannerTier) async throws {
-        let orchestrator = try await Self.makeHarness()
+        let (orchestrator, _) = try await Self.makeHarness()
         var reader = BiconditionalBannerReader(await orchestrator.bannerItemStream())
 
         await orchestrator.receiveAdWindows([
@@ -587,7 +623,7 @@ struct BannerPlayheadBiconditionalTests {
     @Test("Entry is half-open at both ends, and the same on both tiers")
     func entryIsHalfOpenAndIdenticalAcrossTiers() async throws {
         for tier in [BwxiBannerTier.autoSkip, BwxiBannerTier.suggest] {
-            let orchestrator = try await Self.makeHarness()
+            let (orchestrator, _) = try await Self.makeHarness()
             var reader = BiconditionalBannerReader(await orchestrator.bannerItemStream())
             await orchestrator.receiveAdWindows([
                 Self.fieldWindow(id: "edge", start: 100, end: 160, tier: tier)
@@ -620,7 +656,7 @@ struct BannerPlayheadBiconditionalTests {
         arguments: [BwxiBannerTier.autoSkip, BwxiBannerTier.suggest]
     )
     func aWindowObservedOnlyAtItsEndNeverBanners(tier: BwxiBannerTier) async throws {
-        let orchestrator = try await Self.makeHarness()
+        let (orchestrator, _) = try await Self.makeHarness()
         var reader = BiconditionalBannerReader(await orchestrator.bannerItemStream())
         await orchestrator.receiveAdWindows([
             Self.fieldWindow(id: "end-only", start: 100, end: 160, tier: tier)
@@ -655,7 +691,7 @@ struct BannerPlayheadBiconditionalTests {
         arguments: [BwxiBannerTier.autoSkip, BwxiBannerTier.suggest]
     )
     func theFirstObservationInsideTheSpanPresents(tier: BwxiBannerTier) async throws {
-        let orchestrator = try await Self.makeHarness()
+        let (orchestrator, _) = try await Self.makeHarness()
         var reader = BiconditionalBannerReader(await orchestrator.bannerItemStream())
         let tick = PlaybackService.periodicTimeObserverIntervalSeconds
         let spanStart = 600.0
@@ -687,6 +723,133 @@ struct BannerPlayheadBiconditionalTests {
             """
             worst-case presentation lateness is \(firstObservationInside - spanStart) s, \
             over the \(SkipOrchestrator.suggestEntryLatencyBudgetSeconds) s budget
+            """
+        )
+    }
+
+    // MARK: - 6. The receipt says WHERE THE LISTENER WAS (schema V59)
+
+    /// playhead-bwxi's second half. The four 2026-08-21 rows are
+    /// indistinguishable from honest ones because nothing in a
+    /// `correction_events` row records the listener's own position:
+    /// `createdAt` is wall clock and `scope`/`targetRefs` carry the WINDOW's
+    /// span. `playheadTimeAtCorrection` is the column that makes
+    /// `position ∈ [span.start, span.end)` a question anyone can ask of a row.
+    @Test("A confirmation records the playhead position, and it lands inside the span")
+    func aConfirmationRecordsWhereTheListenerWas() async throws {
+        let (orchestrator, store) = try await Self.makeHarness()
+        var reader = BiconditionalBannerReader(await orchestrator.bannerItemStream())
+        let windows = Self.fieldWindows.map {
+            Self.fieldWindow(
+                id: $0.id, start: $0.start, end: $0.end, tier: .autoSkip
+            )
+        }
+        // `persistConfirmedAutoSkip` re-reads the row it is confirming, so the
+        // window has to exist durably and not only in the actor. A confirmation
+        // over a row the store has never seen is refused, which is correct and
+        // would make this test vacuous.
+        for window in windows {
+            try await store.insertAdWindow(window)
+        }
+        await orchestrator.receiveAdWindows(windows)
+
+        // 40 s in: inside the pre-roll, and nowhere near the other three.
+        let observed = await Self.step(orchestrator, &reader, to: 40, index: 0)
+        let card = try #require(
+            observed.emitted.first,
+            "the pre-roll must have presented — nothing to confirm otherwise"
+        )
+        #expect(card.windowId == "bwxi-preroll")
+
+        // `step` parks the playhead on the sentinel to close the frame, so put
+        // the listener back where the card found them before they tap. Without
+        // this the receipt honestly records 1000 s — which is the mechanism
+        // working, and the wrong moment to be recording.
+        await orchestrator.updatePlayheadTime(40)
+
+        let accepted = await orchestrator.confirmAutoSkippedBanner(
+            windowId: card.windowId,
+            analysisAssetId: card.analysisAssetId,
+            startTime: card.adStartTime,
+            endTime: card.adEndTime,
+            ifCurrentEpisodeId: card.episodeId,
+            ifPlaybackLifecycleGeneration: card.playbackLifecycleGeneration,
+            ifWindowMaterialRevisionToken: card.windowMaterialRevisionToken
+        )
+        #expect(accepted, "the confirmation must commit; nothing else here means anything if it did not")
+
+        let events = try await store.loadCorrectionEvents(
+            analysisAssetId: Self.assetId
+        )
+        let receipt = try #require(
+            events.first { $0.source == .bannerAutoSkipConfirmed },
+            "expected a bannerAutoSkipConfirmed row; got \(events.map { $0.source })"
+        )
+        let position = try #require(
+            receipt.playheadTimeAtCorrection,
+            """
+            the receipt records no position. That is the 2026-08-21 state: \
+            three confirmations of audio the listener had not heard, sitting in \
+            the ledger as the strongest positive signal the trust system takes, \
+            with nothing in the row able to say so.
+            """
+        )
+        #expect(position == 40)
+        #expect(
+            position >= 0.0 && position < 86.831,
+            """
+            the recorded position \(position) s is OUTSIDE the span this \
+            confirmation is about — the shape of all three poisoned rows, and \
+            now a question a row can be asked
+            """
+        )
+    }
+
+    /// UNKNOWN IS NOT ZERO. `currentPlayheadTime` is a stale 0 until the first
+    /// position observation, so a seam that stamped it unconditionally would
+    /// record every pre-observation confirmation as "at the top of the
+    /// episode" — a specific, false, and unfalsifiable claim, which is the
+    /// exact failure mode the column exists to remove.
+    @Test("With no position observed, the receipt records NULL — not 0.0")
+    func anUnobservedPlayheadIsRecordedAsUnknownRatherThanZero() async throws {
+        let (orchestrator, store) = try await Self.makeHarness()
+        let window = Self.fieldWindow(
+            id: "bwxi-preroll", start: 0.0, end: 86.831, tier: .autoSkip
+        )
+        try await store.insertAdWindow(window)
+        await orchestrator.receiveAdWindows([window])
+
+        // No `updatePlayheadTime` at all — the state between `beginEpisode`
+        // and the first observation.
+        let accepted = await orchestrator.confirmAutoSkippedBanner(
+            windowId: window.id,
+            analysisAssetId: window.analysisAssetId,
+            startTime: window.startTime,
+            endTime: window.endTime,
+            ifCurrentEpisodeId: Self.episodeId,
+            ifPlaybackLifecycleGeneration: Self.playbackLifecycleGeneration,
+            ifWindowMaterialRevisionToken:
+                AdWindowMaterialIdentity.autoSkipToken(
+                    window: window,
+                    displayedStart: window.startTime,
+                    displayedEnd: window.endTime
+                )
+        )
+        #expect(accepted)
+
+        let events = try await store.loadCorrectionEvents(
+            analysisAssetId: Self.assetId
+        )
+        let receipt = try #require(
+            events.first { $0.source == .bannerAutoSkipConfirmed }
+        )
+        #expect(
+            receipt.playheadTimeAtCorrection == nil,
+            """
+            an unobserved position was recorded as \
+            \(String(describing: receipt.playheadTimeAtCorrection)) rather than \
+            left unknown. A 0.0 here asserts the listener was at 0:00, which is \
+            worse than saying nothing.
             """
         )
     }

@@ -754,6 +754,22 @@ actor SkipOrchestrator {
     /// `armedSuggestWindowIds`, and bounded by the episode's window count.
     private var armedAutoSkipBannerWindowIds: Set<String> = []
 
+    /// playhead-bwxi: has ANY position observation arrived for this episode?
+    ///
+    /// `currentPlayheadTime` is a stale 0 between `beginEpisode` and the first
+    /// observation (the same hazard `armedSuggestWindowIds` documents), so
+    /// stamping it onto a correction unobserved would assert the listener was
+    /// at the top of the episode. That is the one reading this bead's column
+    /// exists to make impossible, so an unobserved position is recorded as
+    /// NULL — unknown — rather than as zero.
+    private var hasObservedPlayheadThisEpisode = false
+
+    /// The listener's position, or `nil` when nothing has observed it yet.
+    /// Stamped onto every correction receipt this actor writes.
+    private var observedPlayheadTimeForCorrection: TimeInterval? {
+        hasObservedPlayheadThisEpisode ? currentPlayheadTime : nil
+    }
+
     /// playhead-d3g0: worst-case wall-clock delay the suggest banner is allowed
     /// between the playhead crossing an ad span's start and the banner item
     /// reaching the stream.
@@ -2035,6 +2051,7 @@ actor SkipOrchestrator {
         lastSeekTime = nil
         skipSuppressedAfterSeek = false
         currentPlayheadTime = 0
+        hasObservedPlayheadThisEpisode = false
         latestUserSeekOperationGeneration = 0
         decisionLog.removeAll()
         banneredWindowIds.removeAll()
@@ -2644,6 +2661,7 @@ actor SkipOrchestrator {
         activeEpisodeDuration = nil
         activeDeclaredChapters = []
         inAdState = false
+        hasObservedPlayheadThisEpisode = false
         latestUserSeekOperationGeneration = 0
         banneredWindowIds.removeAll()
         emittedAutoSkipBannerWindowIds.removeAll()
@@ -3873,6 +3891,7 @@ actor SkipOrchestrator {
     func updatePlayheadTime(_ time: TimeInterval) {
         guard time.isFinite else { return }
         currentPlayheadTime = time
+        hasObservedPlayheadThisEpisode = true
 
         // playhead-d3g0: the suggest banner's emit trigger. This is the ONLY
         // site that presents an armed suggestion; `receiveAdWindows` arms and
@@ -3942,6 +3961,7 @@ actor SkipOrchestrator {
         lastSeekTime = Date()
         skipSuppressedAfterSeek = true
         currentPlayheadTime = time
+        hasObservedPlayheadThisEpisode = true
         logger.info("User seek to \(time, format: .fixed(precision: 1))s -- skip suppressed")
 
         // Do NOT remove existing cues ahead of the new position.
@@ -5498,6 +5518,10 @@ actor SkipOrchestrator {
             source: .bannerAutoSkipConfirmed,
             podcastId: sourcePodcastId,
             correctionType: .falseNegative,
+            // playhead-bwxi: WHERE THE LISTENER WAS. The three poisoned rows of
+            // 2026-08-21 are indistinguishable from honest ones precisely
+            // because this was not recorded.
+            playheadTimeAtCorrection: observedPlayheadTimeForCorrection,
             targetRefs: CorrectionTargetRefs(
                 adWindowId: windowId,
                 explicitFeedbackDetectionProjection:
@@ -5909,6 +5933,8 @@ actor SkipOrchestrator {
             source: source,
             podcastId: podcastId,
             correctionType: source.kind.correctionType,
+            // playhead-bwxi: WHERE THE LISTENER WAS.
+            playheadTimeAtCorrection: observedPlayheadTimeForCorrection,
             causalSource: correctionProvenance.isEmpty
                 ? nil
                 : CausalInference.inferCausalSource(
@@ -6666,6 +6692,8 @@ actor SkipOrchestrator {
             source: .bannerSuggestionDenied,
             podcastId: podcastId,
             correctionType: .falsePositive,
+            // playhead-bwxi: WHERE THE LISTENER WAS.
+            playheadTimeAtCorrection: observedPlayheadTimeForCorrection,
             causalSource: causalSource,
             targetRefs: CorrectionTargetRefs(
                 adWindowId: window.id,
