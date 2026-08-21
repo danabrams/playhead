@@ -168,11 +168,21 @@ struct SemanticSweepCorroborationScopeTests {
     /// by an affirming re-screen of a different transcript. Removing that
     /// affirmer makes the mark WEAKER: `(1+2)/(1+2+1) = 0.75` becomes
     /// `(1+1)/(1+1+1) = 2/3`.
+    ///
+    /// THE DENIAL IS [150, 250] AND NOT [90, 200] FOR A REASON, and the vacuity
+    /// control below is what found it. Two verdicts over identical bounds are
+    /// two extents that stage 3 folds into one — but `clearedSpans` also makes
+    /// the denial a merge BARRIER, and `coversGap(from: last.end, to:
+    /// extent.start)` is evaluated with an INVERTED range when the two extents
+    /// overlap, so a denial that spans BOTH edges bars a merge that has no gap
+    /// to bridge and the fixture silently becomes two marks. Filed as
+    /// playhead-vz3l; it fires zero times on the t4 pull. A denial that
+    /// overlaps one edge only is a clean dissenting replicate and no barrier.
     @Test("a cross-version affirmer no longer props up a contested claim")
     func aCrossVersionAffirmerNoLongerPropsUpAContestedClaim() {
         let marks = Fx.compose(rows: [
             Fx.row(id: "claim", start: 100, end: 190, version: Fx.claimVersion),
-            Fx.row(id: "dissent-same", start: 90, end: 200,
+            Fx.row(id: "dissent-same", start: 150, end: 250,
                    version: Fx.claimVersion, disposition: .noAds),
             Fx.row(id: "affirm-other", start: 100, end: 190, version: Fx.otherVersion),
         ])
@@ -211,9 +221,13 @@ struct SemanticSweepCorroborationScopeTests {
     /// version: `(1+2)/(1+2+1) = 0.75`, against `(1+1)/(1+1+1) = 2/3` with the
     /// second affirmer removed. Both compositions are asserted so the test
     /// cannot pass by the two happening to agree.
+    ///
+    /// The denial overlaps ONE edge only — see
+    /// `aCrossVersionAffirmerNoLongerPropsUpAContestedClaim` for why a denial
+    /// spanning both edges would turn this fixture into two marks.
     @Test("an affirming replicate at the same version still counts")
     func aSameVersionAffirmerStillCounts() {
-        let dissent = Fx.row(id: "dissent", start: 90, end: 200,
+        let dissent = Fx.row(id: "dissent", start: 150, end: 250,
                              version: Fx.claimVersion, disposition: .noAds)
         let first = Fx.row(id: "claim-1", start: 100, end: 190, version: Fx.claimVersion)
         let second = Fx.row(id: "claim-2", start: 100, end: 190, version: Fx.claimVersion)
