@@ -1971,7 +1971,7 @@ actor AnalysisStore {
     /// assertions automatically follow the production constant — hardcoding
     /// the integer in tests has been a recurring source of stale-assertion
     /// flakes whenever the schema bumps.
-    nonisolated static let currentSchemaVersion = 59
+    nonisolated static let currentSchemaVersion = 60
 
     /// H1: minimum age (in seconds) a `backfill_jobs` / `final_pass_jobs`
     /// row stuck in `status='running'` must reach before the launch-time
@@ -2937,6 +2937,13 @@ actor AnalysisStore {
             // that one key on every entry — see the block comment.
             try migrateDetectorTrustObservationCountV58IfNeeded()
             try migrateCorrectionPlayheadPositionV59IfNeeded()
+            // playhead-tktr: retract the THREE bannerAutoSkipConfirmed receipts
+            // Dan disclaimed on 2026-08-21 — 5.3 s of wall clock spanning 71.3
+            // minutes of episode time. Three primary keys, each verified against
+            // its own asset/source/scope before anything is deleted; the other
+            // twelve such rows on that device are UNFALSIFIABLE, not false, and
+            // stay. See the block comment on the migration.
+            try migrateRetractDisclaimedBannerConfirmsV60IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -8571,6 +8578,187 @@ actor AnalysisStore {
             definition: "REAL"
         )
         try setSchemaVersion(59)
+    }
+
+    /// One `correction_events` row Dan disclaimed on 2026-08-21, spelled with
+    /// enough of its own identity that the primary key alone cannot retarget
+    /// the delete. Every value is verbatim from the t6 device pull.
+    ///
+    /// The population is CLOSED at three. It is not a filter, a rule or the
+    /// seed of a general retraction mechanism — see the block comment on
+    /// ``migrateRetractDisclaimedBannerConfirmsV60IfNeeded()`` for why the
+    /// other twelve `bannerAutoSkipConfirmed` rows on this device stay.
+    struct DisclaimedBannerReceipt: Sendable, Equatable {
+        let id: String
+        let analysisAssetId: String
+        let source: String
+        let scope: String
+    }
+
+    nonisolated static let disclaimedBannerReceiptsV60: [DisclaimedBannerReceipt] = [
+        DisclaimedBannerReceipt(
+            id: "1C7996C6-87C2-45E8-B91D-0DBCFB627D6E",
+            analysisAssetId: "0FF7EFF3-CD54-4B14-98A7-148CD173AC42",
+            source: "bannerAutoSkipConfirmed",
+            scope: "exactTimeSpan:0FF7EFF3-CD54-4B14-98A7-148CD173AC42:1369.809:1548.487"
+        ),
+        DisclaimedBannerReceipt(
+            id: "6A5908CA-8E98-45A1-9840-A1C5C770E168",
+            analysisAssetId: "0FF7EFF3-CD54-4B14-98A7-148CD173AC42",
+            source: "bannerAutoSkipConfirmed",
+            scope: "exactTimeSpan:0FF7EFF3-CD54-4B14-98A7-148CD173AC42:3367.262:3534.576"
+        ),
+        DisclaimedBannerReceipt(
+            id: "A3273865-4BF4-475B-921A-37000B5A0B94",
+            analysisAssetId: "0FF7EFF3-CD54-4B14-98A7-148CD173AC42",
+            source: "bannerAutoSkipConfirmed",
+            scope: "exactTimeSpan:0FF7EFF3-CD54-4B14-98A7-148CD173AC42:4279.302:4309.420"
+        ),
+    ]
+
+    // MARK: V60 — retract three banner receipts the listener DISCLAIMED
+    //             (playhead-tktr)
+    //
+    // WHAT DAN SAID, 2026-08-21: "yes, retract the three if they were not
+    // clicked in proximity to their playing." The condition is met, and the
+    // proof needs no `playheadTimeAtCorrection` — which is the point, because
+    // V59 added that column one commit ago and it can never be backfilled.
+    //
+    // THE WITNESS, from the 2026-08-21 t6 pull, verbatim. Four
+    // `bannerAutoSkipConfirmed` rows on asset 0FF7EFF3:
+    //
+    //     createdAt 1787315496.777   span [   0.000 -   86.831]   KEPT
+    //     createdAt 1787315499.151   span [1369.809 - 1548.487]   retracted
+    //     createdAt 1787315500.692   span [3367.262 - 3534.576]   retracted
+    //     createdAt 1787315502.063   span [4279.302 - 4309.420]   retracted
+    //
+    // 5.3 SECONDS OF WALL CLOCK SPANNING 71.3 MINUTES OF EPISODE TIME. A
+    // listener cannot be in proximity to all four; `ad_listen_rewinds` on this
+    // asset is ZERO, so no seeking explains it either. playhead-bwxi found the
+    // cause — `evaluateAndPush` presented the auto tier at DECISION time, so
+    // one ingest emitted every eligible window's banner at once, ~87 s into a
+    // 72-minute episode — and fixed it. This rung withdraws the four cards'
+    // three unearned receipts; the fourth WAS the pre-roll he had just heard.
+    //
+    // WHY THREE AND NOT FIFTEEN. The device holds fifteen
+    // `bannerAutoSkipConfirmed` rows. Twelve of them are UNFALSIFIABLE, not
+    // false: no column recorded where the listener was, which is exactly what
+    // V59 fixes going forward. **POSITION UNKNOWN IS NOT POSITION WRONG**, and
+    // Dan's statement covers this episode's four cards and nothing else. A
+    // predicate over `source`, over the asset, or over a `createdAt` window
+    // would take rows nobody disclaimed, so the population is spelled as three
+    // primary keys and the delete carries the row's own identity with it.
+    //
+    // WHY DELETING THE ROW IS THE WHOLE RETRACTION — checked before this was
+    // written, because a migration that looks like a fix and is not one is
+    // worse than none. `correctionBoostFactor` (and the `correctionFactorSnapshot`
+    // that superseded it) is COMPUTED ON READ: every call goes through
+    // `PersistentUserCorrectionStore.weightedCorrections`, which reloads
+    // `correction_events` from SQLite and decays by age. No column, cache or
+    // materialised score holds a boost, so removing the row removes the boost
+    // the next time detection asks. Two DERIVED artefacts persist and are
+    // deliberately NOT touched here — see playhead-ph2d, filed rather than
+    // fixed because unwinding either is a design question larger than this:
+    //
+    //   * `training_examples.userAction = 'reportedAd'` on spans overlapping
+    //     the three. Re-derived wholesale by
+    //     `TrainingExampleMaterializer.materialize(forAsset:)` from the
+    //     then-current corrections, keyed on a deterministic `te-scan-` id and
+    //     written `INSERT OR REPLACE`, so the label heals on this asset's next
+    //     correction. Nothing in the detection path reads the table.
+    //   * `repeated_ad_cache` rows minted by `scheduleConfirmedRecurrenceLearning`
+    //     at `learningLifecycle = 'explicitConfirmation'`, which outranks
+    //     `'consumed'` in the admission UPSERT. Those fingerprints stand on
+    //     day-0 rediff byte-exact evidence as well as on the tap, and the
+    //     product's only existing withdrawal path writes a permanent
+    //     revocation tombstone — far stronger than "un-confirm" and wrong
+    //     here. Downgrading rather than deleting is the design question.
+    //
+    // IDEMPOTENT TWICE OVER. The version ladder runs this once; and the
+    // statement itself is a DELETE of three primary keys, so a hand-rewound
+    // stamp on a device that has already run it deletes nothing and reports
+    // three ABSENT. Absent is the expected reading on every device that is not
+    // Dan's, and it is not an error.
+    //
+    // A ROW THAT IS NOT THE ROW IS LEFT ALONE, LOUDLY. Each id is verified
+    // against the asset, source and scope recorded on the pull before anything
+    // is deleted. A mismatch means the primary key now names something else,
+    // and the honest response to that is to delete nothing and say so — a
+    // silent no-op here would read as a completed retraction.
+    private func migrateRetractDisclaimedBannerConfirmsV60IfNeeded() throws {
+        let observed = (try schemaVersion() ?? 1)
+        guard observed < 60 else { return }
+        // DO NOT STEP OVER A ROLLED-BACK V39 — same rationale as V40-V59.
+        guard observed >= 59 else { return }
+        guard try tableExists("correction_events") else {
+            try setSchemaVersion(60)
+            return
+        }
+
+        var retracted: [String] = []
+        var absent: [String] = []
+        var mismatched: [String] = []
+
+        for receipt in Self.disclaimedBannerReceiptsV60 {
+            let selectStmt = try prepare("""
+                SELECT analysisAssetId, source, scope
+                  FROM correction_events
+                 WHERE id = ?
+                """)
+            bind(selectStmt, 1, receipt.id)
+            let probe = sqlite3_step(selectStmt)
+            guard probe == SQLITE_ROW || probe == SQLITE_DONE else {
+                let message = String(cString: sqlite3_errmsg(db))
+                sqlite3_finalize(selectStmt)
+                throw AnalysisStoreError.queryFailed(message)
+            }
+            if probe == SQLITE_DONE {
+                sqlite3_finalize(selectStmt)
+                absent.append(receipt.id)
+                continue
+            }
+            let storedAsset = text(selectStmt, 0)
+            let storedSource = optionalText(selectStmt, 1)
+            let storedScope = text(selectStmt, 2)
+            sqlite3_finalize(selectStmt)
+
+            guard storedAsset == receipt.analysisAssetId,
+                  storedSource == receipt.source,
+                  storedScope == receipt.scope
+            else {
+                mismatched.append(receipt.id)
+                logger.fault(
+                    "playhead-tktr V60: the row at this primary key is not the receipt Dan disclaimed — leaving it alone. Retraction NOT performed for this id."
+                )
+                continue
+            }
+
+            let deleteStmt = try prepare("""
+                DELETE FROM correction_events
+                 WHERE id = ?
+                   AND analysisAssetId = ?
+                   AND source = ?
+                   AND scope = ?
+                """)
+            defer { sqlite3_finalize(deleteStmt) }
+            bind(deleteStmt, 1, receipt.id)
+            bind(deleteStmt, 2, receipt.analysisAssetId)
+            bind(deleteStmt, 3, receipt.source)
+            bind(deleteStmt, 4, receipt.scope)
+            try step(deleteStmt, expecting: SQLITE_DONE)
+            let changed = Int(sqlite3_changes(db))
+            guard changed == 1 else {
+                throw AnalysisStoreError.queryFailed(
+                    "playhead-tktr V60: verified receipt deleted \(changed) row(s), expected exactly 1"
+                )
+            }
+            retracted.append(receipt.id)
+        }
+
+        logger.notice(
+            "playhead-tktr V60: retracted \(retracted.count, privacy: .public) of \(Self.disclaimedBannerReceiptsV60.count, privacy: .public) disclaimed bannerAutoSkipConfirmed receipt(s); \(absent.count, privacy: .public) already absent, \(mismatched.count, privacy: .public) left alone as a mismatch. Absent is the expected reading on a device that is not the one the retraction was authorised for."
+        )
+        try setSchemaVersion(60)
     }
 
     /// playhead-kg8h: durably CLAIM one REQUESTED day-0 kickoff, before any of
