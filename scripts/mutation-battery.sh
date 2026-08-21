@@ -264,6 +264,30 @@
 #   a column that names a fate the row was not given — two functions, each
 #   individually correct.
 #
+#   PARTIAL RE-RUN 2026-08-21 (playhead-kg6i). Batches 1210-1217 only, added by
+#   this bead: KG01-KG07 plus the KG99 control, one batch each. FINAL 7 KILLED /
+#   0 SURVIVED / 0 ERROR, plus KG99 SURVIVED as required, 14 builds. Batches
+#   1-1209 were NOT re-run and carry the verdicts above.
+#
+#   TWO OPERATIONAL FAULTS, neither about a mutation, both worth knowing:
+#     • Batch 1213's baseline came back `rc=65` with no tests and the script's
+#       own diagnosis was right — WEDGED RUNNER (`Mach error -308`), cleared by
+#       the DEVELOPER_DIR-qualified `simctl shutdown all && simctl boot`. The
+#       tree was NOT implicated and `git status --porcelain -- Playhead` was
+#       clean, which is the check to run rather than assuming residue.
+#     • Batch 1215's baseline came back `rc=28` — the DISK preflight, at 12 GiB
+#       against the 13.5 floor. The reservoir was the SIMULATOR DEVICE
+#       DIRECTORY at 3.59 GiB (`~/Library/Developer/CoreSimulator/Devices/
+#       <udid>`), not derivedData and not `$TMPDIR/Deleting-*`, which was empty.
+#       A shutdown + erase took it to 17 MiB and the volume from 12 to 22 GiB.
+#       Nothing was deleted by the refusal itself, as its own text says.
+#
+#   WHY KG03 AND KG04 ARE BOTH HERE, since a reviewer will ask whether one
+#   would do: `scored` takes the `min` over the backing rows' grades, and a
+#   `min` of two cohorts can only ever EQUAL one of them. So a fixture that
+#   kills the first-row hoist is byte-identical under the last-row hoist and
+#   vice versa. Two mutations, two fixtures, and it is not redundancy.
+#
 #   PARTIAL RE-RUN 2026-08-16 (playhead-f5ao). Batches 830-834 only, added by
 #   this bead: F501-F505, 5 entries, one batch each (F501/F502 edit the same
 #   function body; F503/F504/F505 all redden the same test). FINAL 5 KILLED /
