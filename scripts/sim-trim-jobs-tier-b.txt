@@ -1,0 +1,40 @@
+# scripts/sim-trim-jobs-tier-b.txt — Siri / Apple Intelligence / speech.
+#
+# NOT APPLIED BY DEFAULT. This file is read only with `sim-trim.sh --include-tier-b`,
+# and that flag is DAN'S CALL, not an implementer's, because unlike everything in
+# tier A these back frameworks the app genuinely imports:
+#
+#     Speech            2 files in Playhead/, 2 in PlayheadTests/
+#     FoundationModels  10 files in Playhead/, 14 in PlayheadTests/
+#
+# What is known: on the simulator FoundationModels is gracefully UNAVAILABLE
+# already (CLAUDE.md, phase-close section), and playhead-xul6 measured the
+# `SystemLanguageModel` read on this runtime as a 2003 ms TIMEOUT rather than
+# work — i.e. nothing on the other end answers even with these daemons running.
+# What is NOT known, and is why this is a decision rather than a measurement: a
+# test that asserts the graceful-unavailability PATH could take a different
+# branch when the daemon is absent rather than merely unresponsive, and that is
+# a change in what the gate proves.
+com.apple.assistantd
+com.apple.assistant_service
+com.apple.assistant_cdmd
+com.apple.siriactionsd
+com.apple.siriinferenced
+com.apple.siriknowledged
+com.apple.sirittsd
+com.apple.siri.context.service
+com.apple.intelligenceflowd
+com.apple.intelligencecontextd
+com.apple.intelligenceplatformd
+com.apple.intelligencetasksd
+com.apple.imageplaygroundd
+com.apple.textunderstandingd
+com.apple.generativeexperiencesd
+com.apple.GenerativeFunctions.agentstored
+com.apple.callintelligenced
+com.apple.translationd
+com.apple.naturallanguaged
+com.apple.modelmanagerd
+com.apple.corespeechd
+com.apple.speechmaintenanced
+com.apple.speechmodeltrainingd

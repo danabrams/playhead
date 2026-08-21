@@ -117,6 +117,12 @@
 #   PLAYHEAD_PLAN        test plan name (default: PlayheadFastTests)
 #   PLAYHEAD_BUILD_JOBS  concurrent compile jobs cap (default: 4)
 #   PLAYHEAD_SIM_ID      simulator UDID for -308 recovery (else parsed from DEST id=)
+#   PLAYHEAD_SIM_TRIM=0       do NOT trim the simulator (playhead-blsh). A control
+#                             run also needs `scripts/sim-trim.sh --restore` and a
+#                             reboot: the disables OUTLIVE `simctl erase`.
+#   PLAYHEAD_SIM_TRIM_TIER_B=1  also disable Siri/Apple Intelligence/speech. That
+#                             is a COVERAGE decision — Speech and FoundationModels
+#                             are both imported — and it is Dan's, not a default.
 #   PLAYHEAD_SKIP_BASELINE=1  bypass the baseline verdict (raw exit code)
 #   PLAYHEAD_GATE_BASELINE    baseline file path override
 #   PLAYHEAD_RESULT_BUNDLE    where to write the .xcresult (default: a scratch
@@ -277,6 +283,42 @@ run_gate () {
     -jobs "$JOBS" \
     "$@"
 }
+
+# Snag 2.5: TRIM THE SIMULATOR (playhead-blsh, option B).
+#
+# A booted iOS 27 simulator, idle and settled, costs +13.35 GiB of demand on a
+# 16 GiB box — 301 processes of home screen, wallpaper posters, widgets, News,
+# Health, Maps, Spotlight and Siri, none of which an audio app's unit tests
+# touch. That is why the merge gate ran 5-7 GiB over the box and why six of them
+# in one day produced no verdict at all (playhead-3rql). Trimmed: 112 processes
+# and 13.10 GiB, i.e. 7.23 GiB back before xcodebuild compiles anything.
+#
+# This runs BEFORE the build deliberately: the build then doubles as the
+# simulator's settle time, and a job disabled here cannot start during it.
+#
+# It reports rather than judges. A gate that refuses to run because three
+# daemons survived is worse than one that runs with three daemons, but a trim
+# that quietly did nothing is exactly the failure this bead exists to end — so
+# the outcome is printed either way and the process count goes in the log next
+# to the memory series that has to be read with it.
+#
+# PLAYHEAD_SIM_TRIM=0 turns it off (that is what a CONTROL run wants, plus
+# `scripts/sim-trim.sh --restore` and a reboot — the disables OUTLIVE
+# `simctl erase`). PLAYHEAD_SIM_TRIM_TIER_B=1 adds the Siri / Apple
+# Intelligence / speech tier, which is a COVERAGE decision and is Dan's.
+if [ "${PLAYHEAD_SIM_TRIM:-1}" != "0" ] && [ -n "$SIM_ID" ] && [ -x scripts/sim-trim.sh ]; then
+  TRIM_ARGS=(--sim-id "$SIM_ID")
+  [ "${PLAYHEAD_SIM_TRIM_TIER_B:-0}" = "1" ] && TRIM_ARGS+=(--include-tier-b)
+  ./scripts/sim-trim.sh "${TRIM_ARGS[@]}"
+  TRIM_RC=$?
+  case "$TRIM_RC" in
+    0) : ;;
+    1) echo "fast-gate: sim-trim REFUSED — a KEEP-list job is in the job file. Fix scripts/sim-trim-jobs.txt." ;;
+    2) echo "fast-gate: sim-trim could not reach the simulator — running UNTRIMMED, expect the 16 GiB ceiling." ;;
+    *) echo "fast-gate: sim-trim left jobs running (exit $TRIM_RC) — the run is only PARTLY trimmed; read the names above against the memory series." ;;
+  esac
+  echo "fast-gate: simulator processes after trim: $(ps -Ao args= | /usr/bin/grep -c -e '/CoreSimulato[r]/' -e '\.simruntim[e]/')"
+fi
 
 echo "fast-gate: plan=$PLAN dest=$DEST derived=$DERIVED jobs=$JOBS (single-host; no clone parallelism)"
 LOG="$(mktemp -t fast-gate.XXXXXX)"

@@ -1,0 +1,193 @@
+# scripts/sim-trim-jobs.txt — launchd jobs the merge gate boots the simulator WITHOUT.
+#
+# playhead-blsh, option B. Read scripts/sim-trim.sh for the mechanism and for the
+# measurement that made `simctl boot --disabledJob` unusable here.
+#
+# FORMAT:  <launchd label>  # <family> — why an audio-podcast unit-test gate does not need it
+#
+# ADMISSION RULE, and it is the whole safety argument: a label goes in TIER A only
+# when the framework it backs is imported NOWHERE in Playhead/ or PlayheadTests/.
+# Measured on this tree with `grep -rl '^import <F>'`:
+#
+#     HealthKit 0 · CoreLocation 0 · MapKit 0 · Photos 0 · EventKit 0 · Contacts 0
+#     WidgetKit 0 · ActivityKit 0 · CoreSpotlight 0 · CallKit 0 · Intents 0 · WebKit 0 · Vision 0
+#
+# and against the frameworks that ARE imported — AVFoundation, MediaPlayer, Speech,
+# UserNotifications, BackgroundTasks, FoundationModels, StoreKit, CloudKit, CoreML,
+# SwiftData, SwiftUI/UIKit — nothing here backs one. The daemons that do are in the
+# KEEP list in sim-trim.sh, which is the enforced half of this claim.
+#
+# TIER B (siri/intelligence/speech) is NOT in this file. It is DAN'S COVERAGE
+# DECISION, not an implementer's: Speech and FoundationModels are both imported.
+# It lives in sim-trim-jobs-tier-b.txt and only `--include-tier-b` reads it.
+
+# --- Health, Fitness, Sleep, Activity ------------------------------- HealthKit: 0 imports
+com.apple.healthappd
+com.apple.healthd
+com.apple.healthcontentd
+com.apple.healtheventsd
+com.apple.healthrecordsd
+com.apple.fitcore
+com.apple.fitcore.session
+com.apple.fitnesscoachingd
+com.apple.fitnessintelligenced
+com.apple.activityawardsd
+com.apple.activitysharingd
+com.apple.sleepd
+com.apple.biomed
+com.apple.biomesyncd
+com.apple.finhealthd
+
+# --- Mail ------------------------------------------------------------ no mail anything
+com.apple.email.maild
+com.apple.icloudmailagent
+
+# --- Calendar, Reminders, Contacts ------------------- EventKit: 0, Contacts: 0 imports
+com.apple.calaccessd
+com.apple.remindd
+com.apple.addressbooksyncd
+com.apple.contacts.postersyncd
+com.apple.eventkitsyncd
+com.apple.cmfsyncagent
+com.apple.peopled
+com.apple.ABDatabaseDoctor
+
+# --- Maps, navigation, geo, Find My ------------- CoreLocation: 0, MapKit: 0 imports
+com.apple.Maps.geocorrectiond
+com.apple.Maps.mapspushd
+com.apple.Maps.mapssyncd
+com.apple.maps.destinationd
+com.apple.navd
+com.apple.routined
+com.apple.MapKit.SnapshotService
+com.apple.geoanalyticsd
+com.apple.geod
+com.apple.findmy.findmylocated
+com.apple.nanomapscd
+
+# --- Photos and media analysis ------------------------ Photos: 0, Vision: 0 imports
+com.apple.photoanalysisd
+com.apple.cloudphotod
+com.apple.cloudphotod.sync
+com.apple.photosface
+com.apple.assetsd
+com.apple.assetsubscriptiond
+com.apple.mediaanalysisd
+
+# --- News ------------------------------------------------------------- no news anything
+com.apple.newsd
+com.apple.nanonewscd
+
+# --- Widgets, wallpaper posters, Live Activities ---- WidgetKit: 0, ActivityKit: 0
+# chronod is the widget host and PosterBoard the wallpaper host: between them they
+# account for ~30 of the ~113 non-launchd processes on a vanilla boot.
+com.apple.chronod
+com.apple.PosterBoard
+com.apple.liveactivitiesd
+
+# --- Spotlight, search, suggestions ------------------------- CoreSpotlight: 0 imports
+com.apple.searchd
+com.apple.searchtoold
+com.apple.spotlightknowledged
+com.apple.spotlightknowledged.updater
+com.apple.corespotlightservice
+com.apple.hybridsearchd
+com.apple.suggestd
+com.apple.parsecd
+com.apple.parsec-fbf
+com.apple.fileindexerd
+
+# --- Safari and web bookmarks --------------------------------------- WebKit: 0 imports
+com.apple.Safari.passwordbreachd
+com.apple.SafariBookmarksSyncAgent
+com.apple.WebBookmarks.webbookmarksd
+
+# --- Wallet, Passbook, finance ---------------------------- PassKit not imported
+com.apple.passd
+com.apple.NPKCompanionAgent
+com.apple.financed
+
+# --- Games -------------------------------------------------- GameKit not imported
+com.apple.gamed
+com.apple.gamesaved
+com.apple.GameController.gamecontrollerd
+
+# --- HomeKit ------------------------------------------------ HomeKit not imported
+com.apple.homed
+com.apple.homeeventsd
+
+# --- Screen Time, Family, managed settings -------- FamilyControls not imported
+com.apple.ScreenTimeAgent
+com.apple.ScreenTimeSettingsAgent
+com.apple.UsageTrackingAgent
+com.apple.familycircled
+com.apple.ManagedSettingsAgent
+com.apple.schooltimed
+com.apple.appprotectiond
+
+# --- Paired-device (Watch) companion stack ------- WatchConnectivity not imported
+com.apple.nanotimekitcompaniond
+com.apple.companionappd
+com.apple.brook.brookcompaniond
+com.apple.nanoprefsyncd.2
+com.apple.appconduitd
+com.apple.wcd
+com.apple.companionmessagesd
+com.apple.pairedsyncd
+com.apple.pairedunlockd
+com.apple.companionfindlocallyd
+com.apple.nanoappregistryd
+com.apple.nanosystemsettingsd
+# com.apple.nanoregistryd is NOT here. It is on the KEEP list, found by
+# bisection: disabling that ONE label makes the NEXT boot unusable — `simctl
+# bootstatus` prints nothing at all and `simctl launch` never returns. The other
+# 117 are fine. See the KEEP list in sim-trim.sh.
+
+# --- Sharing, continuity, social ------------ no Messages/AirDrop/Handoff surface
+com.apple.sharingd
+com.apple.sociallayerd
+com.apple.rapportd
+com.apple.avatarsd
+com.apple.coreservices.useractivityd
+com.apple.communicationtrustd
+
+# --- App Store, ads, promoted content -------------------------------------------
+# StoreKit IS imported (1 file), but storekitd is KEPT — see sim-trim.sh. These are
+# the Store's engagement/advertising services, which StoreKit does not need.
+com.apple.appstored
+com.apple.itunesstored
+com.apple.itunescloudd
+com.apple.amsengagementd
+com.apple.ap.promotedcontentd
+com.apple.ap.adprivacyd
+
+# --- Weather, clock, TV remote, CarPlay, Focus, telephony -----------------------
+# CallKit: 0 imports. The interruption tests drive AVAudioSession notifications
+# directly (PlayheadTests/.../InterruptionHarness*), never a real call.
+com.apple.weatherd
+com.apple.mobiletimerd
+com.apple.tvremoted
+com.apple.carkitd
+com.apple.CarPlayApp
+com.apple.donotdisturbd
+com.apple.telephonyutilities.callservicesd
+
+# --- Accessibility extras ------------------------------------------------------
+# axassetsd/AccessibilityUIServer back VoiceOver and accessibility assets; no test
+# asserts an accessibility behaviour that needs a live server.
+com.apple.AccessibilityUIServer
+com.apple.accessibility.axassetsd
+com.apple.voicebankingd
+
+# --- SSO / password autofill agents ---------------- AuthenticationServices: 0 imports
+com.apple.AuthenticationServicesCore.AuthenticationServicesAgent
+com.apple.AppSSODaemon
+
+# --- MDM / device management --------------------------------------------------
+com.apple.managedconfiguration.profiled
+com.apple.remotemanagementd
+com.apple.managedassetsd
+com.apple.DeviceConfigurationAgent
+
+# --- App Clips ----------------------------------------------------------------
+com.apple.ClipServices.clipserviced

@@ -258,6 +258,47 @@ Rails: `python3 -m unittest scripts.tests.test_gate_memory_verdict` — 20 tests
 **DO NOT EDIT A SHELL SCRIPT WHILE A RUN OF IT IS IN FLIGHT.** `bash`/`zsh` read a script incrementally by byte offset, so an edit mid-run makes the shell resume at a shifted offset. This bead's own RUN2 did it: `scripts/fast-gate.sh: line 284: he: command not found`, followed by a second complete `xcodebuild test` of the whole plan. It cost a run and nearly cost a wrong conclusion — the second invocation's `tee "$LOG"` (no `-a`) truncated the log the verdict was about to read.
 
 
+### The gate boots a TRIMMED simulator (playhead-blsh)
+
+**The merge gate used to run 5-7 GiB over this box and whether it survived was close to a coin flip.** On 2026-08-20 the same plan produced six void merge gates, two `GATE_EXIT=137` kills and four clean passes, and **nothing about which tests ran predicted it** — proven directly by keeping the 38 tests everyone suspected and removing 38 unrelated ones, which reproduced the death exactly (playhead-3rql). The term that is large is not the tests. It is the simulator.
+
+Measured here, `demand = active + wired + compressor + swap`, sampled every 10 s. **`Pages free` is NOT free memory** — this box reads ~1 GiB at rest and is short of nothing; an earlier diagnosis was built on `Pages free` and was wrong.
+
+| | processes | demand |
+|---|---|---|
+| macOS, simulator SHUT DOWN | 0 | 6.98 GiB |
+| booted iOS 27 simulator, idle, settled 5 min | **301** | **20.33 GiB** |
+| the same, `scripts/sim-trim.sh` applied | **112** | **13.10 GiB** |
+
+So an idle simulator costs **+13.35 GiB** on a 16 GiB box, and the trim removes **7.23 GiB of it** — more than half — before xcodebuild has compiled anything.
+
+**Full plan, four configurations, identical protocol each time (`.derivedData` removed, simulator shut down + erased + both verified by re-reading state, memory sampled every 10 s, no `-skip-testing:`). Only the `B only` row is the shipped configuration; the rest are the measurement that decided it.**
+
+| config | pre-run procs | pre-run demand | PEAK demand | peak swap | test-host peak rss | test phase | outcome |
+|---|---|---|---|---|---|---|---|
+| neither | 320 | 20.77 GiB | **23.36 GiB** | 10.62 GiB | 2.05 GiB | 207.3 s | 11,626 passed |
+| B only | 108 | 12.70 GiB | **13.20 GiB** | 0.88 GiB | 2.42 GiB | 243.2 s | 11,626 passed |
+| C only | 313 | 19.94 GiB | **22.06 GiB** | 9.21 GiB | 1.28 GiB | 1052.6 s | 11,626 passed |
+| B+C | 122 | 12.74 GiB | **13.74 GiB** | 1.63 GiB | 1.28 GiB | 1004.3 s | 11,626 passed |
+| B+C | 108 | 11.52 GiB | **13.00 GiB** | 0.64 GiB | 1.25 GiB | 1677.1 s | 11,626 passed |
+
+Every one of the five had **0 host restarts and 0 NO VERDICT**. **B and C do not weigh the same, and the table is why the order matters if either is ever questioned:** B removes **10.16 GiB** of peak demand and 9.7 GiB of swap and costs nothing; C removes **1.30 GiB** and costs **5.08x on the test phase** — a second observation of the bead's 4.6x, on a different tree, and worse rather than better. They are close to independent (B acts on the simulator, C on the test host) but **C adds nothing measurable on top of B**: once the simulator is gone the box is no longer short, and the test host's 0.8 GiB was never what killed the run. Baseline peaks 7.4 GiB OVER a 16 GiB box on 10.6 GiB of swap; with B it peaks 2.8 GiB UNDER with swap untouched; **C alone still peaks 6.1 GiB over on 9.2 GiB of swap.** **That is why C was dropped and B shipped alone (Dan, 2026-08-21).** Note also that the two B+C phases differ by 673 s with near-identical memory, so the serialized phase's DURATION is itself load-sensitive — one more reason its 5.08x is a floor rather than a price.
+
+**`simctl boot --disabledJob=<label>` is INERT on this runtime and that is measured, not assumed.** Booted with six `--disabledJob` flags on a freshly erased device and settled five minutes, all six were RUNNING, 293 processes against a vanilla 301, demand 20.17 against 20.33 GiB; `launchctl print-disabled` inside the device lists none of them. **Read the settling curve before you re-test it**: at ONE minute three of those six read "absent" and it looks like a partial win — they were merely not started yet. The earlier report that "process count fell only 230 → 201" is almost certainly that same artefact.
+
+What works is launchctl's own, inside the device: `simctl spawn <udid> launchctl disable user/<uid>/<label>` (so it cannot be demand-launched) followed by `bootout` (so the running one goes). Both are supported launchctl operations. `scripts/fast-gate.sh` applies them on every run; the list is `scripts/sim-trim-jobs.txt`, one label per line with the family and the reason.
+
+Four things to know before you touch it:
+
+- **The admission rule is mechanical, and `scripts/sim-trim.sh` enforces the other half.** A label goes in the default tier only when the framework it backs is imported NOWHERE in `Playhead/` or `PlayheadTests/` — measured, `HealthKit CoreLocation MapKit Photos EventKit Contacts WidgetKit ActivityKit CoreSpotlight CallKit Intents WebKit Vision` are all **0 imports**. The KEEP list in the script names the daemons behind the frameworks that ARE imported (SpringBoard and RunningBoard for launching the host and for SCENE PHASE, `dasd` for BGTaskScheduler, `nsurlsessiond`, `mediaremoted`, `usernotificationsd`, `storekitd`, `mobileassetd`, `installd`…), and **a job file that names one of them fails the run** rather than being skipped.
+- **Siri / Apple Intelligence / speech is NOT trimmed, and that is deliberate.** Those 23 labels are in `scripts/sim-trim-jobs-tier-b.txt`, applied only with `--include-tier-b`, because `Speech` and `FoundationModels` really are imported. Turning them off is a COVERAGE decision and it is Dan's.
+- **The verdict is the process count, not the exit code.** Every operation here can report success and change nothing — that is exactly what `--disabledJob` does — so the script re-reads `launchctl list` afterwards and names every label it was told to remove that is still running.
+- **THE TRIM OUTLIVES `simctl erase`.** launchd's overrides live in `/private/var/tmp/com.apple.CoreSimulator.SimDevice.<udid>/disabled.plist`, OUTSIDE the device's data directory, so erasing and rebooting leaves every disable in place. Convenient for the gate and a trap for a CONTROL: a run you believe is untrimmed is trimmed unless somebody undoes it. `scripts/sim-trim.sh --restore` is the undo, and the restored jobs only start on the NEXT boot.
+
+**OPTION C — SERIALIZING SWIFT TESTING — WAS MEASURED AND IS NOT SHIPPING (Dan, 2026-08-21).** `"parallelizable": false` on the PlayheadTests target is the ONLY knob that bounds Swift Testing's concurrency under Xcode (the experimental env var reaches the process and is not honoured, playhead-3rql), and it works: the test host's peak rss falls 2.05 → 1.28 GiB. **It is not in the tree.** When it was chosen, the framing was "saves ~1.9 GiB of a 5-7 GiB overshoot". B removes the overshoot outright, so on top of B, C buys 0.2-1.2 GiB of margin nobody needs for **5.08x on every future gate, standing, forever**. The measurement above is kept precisely so that case does not have to be re-derived: **C is still a one-line change and its cost is already known**, so if this box ever changes, read the table rather than re-running it.
+
+**KEEP `playhead-sip2`'s FIX — IT IS NOT AN ARTEFACT OF C, AND THE PARALLEL PLAN IS WHY IT MATTERS.** C is what *exposed* four `SkipOrchestratorRevertTests`; it is not what broke them. In `.auto` mode `receiveAdWindows` promotes a managed window and persists `applied` from a **detached `Task`**. Under the parallel plan — the one that ships — that task is starved past the end of the test, the row still reads `confirmed`, and the assertion passes **by luck**; serialized it lands first and reads `applied`. Measured: all five failing expectations reported `decisionState was applied`, and the veto's rollback was correct in both regimes. **A test that passes by luck under concurrency is worth fixing whether or not anything is serialized — more so, because concurrency is what hid it.** The general shape, which is the part to remember: **a test that reads a row the orchestrator writes from a detached Task, without draining `_waitForRecurrenceBackgroundWorkForTesting()`, is reading a value it never synchronized with.**
+
 ### The full plan runs ONCE, before merge — not per review round (Dan 2026-08-13)
 
 **A review round uses `-only-testing:` over the suites its diff touches. The full plan is the merge gate and nothing else.** This is a measured decision, not a preference.

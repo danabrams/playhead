@@ -1854,6 +1854,17 @@ struct SkipOrchestratorRevertTests {
         )
         try await store.insertAdWindow(ad)
         await orchestrator.receiveAdWindows([ad])
+        // playhead-sip2: SYNCHRONIZE WITH THE AUTO-APPLY BEFORE READING THE ROW.
+        // In `.auto` mode `receiveAdWindows` promotes a managed window and
+        // persists `applied` from a DETACHED `Task`. Under the plan's default
+        // parallel scheduling that task is starved past the end of the test and
+        // the row still reads `confirmed`, so this test used to assert
+        // `confirmed` and pass BY LUCK; serialized it lands first and the row
+        // reads `applied`. Either way the veto's rollback is correct — the
+        // assertion was reading a value it had never synchronized with. The
+        // orchestrator already exposes the wait, and 14 tests in
+        // AdCatalogWiringTests use it for exactly this.
+        await orchestrator._waitForRecurrenceBackgroundWorkForTesting()
         #expect(try await repeatedCache.store(
             showId: "podcast-1",
             fingerprint: RepeatedAdFingerprint(bits: 0x6161),
@@ -1879,9 +1890,12 @@ struct SkipOrchestratorRevertTests {
                 podcastId: "podcast-1"
             ))
         )
+        // `applied`, not `confirmed`: the auto-apply above is now awaited, so the
+        // settled pre-veto state is the one the failed veto had to leave alone.
+        let stateAfterFailedRevert = try await store.fetchAdWindow(id: ad.id)?.decisionState
         #expect(
-            try await store.fetchAdWindow(id: ad.id)?.decisionState
-                == AdDecisionState.confirmed.rawValue
+            stateAfterFailedRevert == AdDecisionState.applied.rawValue,
+            "decisionState was \(stateAfterFailedRevert ?? "nil")"
         )
         #expect(
             try await store.loadCorrectionEvents(
@@ -1945,6 +1959,17 @@ struct SkipOrchestratorRevertTests {
         )
         try await store.insertAdWindow(ad)
         await orchestrator.receiveAdWindows([ad])
+        // playhead-sip2: SYNCHRONIZE WITH THE AUTO-APPLY BEFORE READING THE ROW.
+        // In `.auto` mode `receiveAdWindows` promotes a managed window and
+        // persists `applied` from a DETACHED `Task`. Under the plan's default
+        // parallel scheduling that task is starved past the end of the test and
+        // the row still reads `confirmed`, so this test used to assert
+        // `confirmed` and pass BY LUCK; serialized it lands first and the row
+        // reads `applied`. Either way the veto's rollback is correct — the
+        // assertion was reading a value it had never synchronized with. The
+        // orchestrator already exposes the wait, and 14 tests in
+        // AdCatalogWiringTests use it for exactly this.
+        await orchestrator._waitForRecurrenceBackgroundWorkForTesting()
 
         let invalidRanges: [(Double, Double)] = [
             (.nan, 110),
@@ -1987,9 +2012,11 @@ struct SkipOrchestratorRevertTests {
         #expect(
             (await orchestrator.activeWindowIDs()).contains(ad.id)
         )
+        // `applied`, not `confirmed` — see the playhead-sip2 note above.
+        let stateAfterInvalidBounds = try await store.fetchAdWindow(id: ad.id)?.decisionState
         #expect(
-            try await store.fetchAdWindow(id: ad.id)?.decisionState
-                == AdDecisionState.confirmed.rawValue
+            stateAfterInvalidBounds == AdDecisionState.applied.rawValue,
+            "decisionState was \(stateAfterInvalidBounds ?? "nil")"
         )
         #expect(
             try await correctionStore.activeCorrections(
@@ -2105,6 +2132,12 @@ struct SkipOrchestratorRevertTests {
         // playhead-wq34: `.auto` — the gesture under test needs a MANAGED window.
         await orchestrator.setActiveSkipMode(.auto)
         await orchestrator.receiveAdWindows([source])
+        // playhead-sip2: drain the source ingest's DETACHED auto-apply before the
+        // material is replaced. Left in flight it lands AFTER
+        // `insertOrReplaceAdWindow` below and stamps `applied` onto the
+        // replacement's row, which is why this test read `applied` when
+        // serialized and `confirmed` when the parallel plan starved the task.
+        await orchestrator._waitForRecurrenceBackgroundWorkForTesting()
 
         let replacement = makeSkipTestAdWindow(
             id: sharedID,
@@ -2122,6 +2155,10 @@ struct SkipOrchestratorRevertTests {
         )
         // playhead-wq34: `.auto` — the gesture under test needs a MANAGED window.
         await orchestrator.setActiveSkipMode(.auto)
+        // playhead-sip2: and drain again. Entering `.auto` re-evaluates the
+        // hydrated replacement window and schedules ITS auto-apply, which is a
+        // second detached task racing the read below.
+        await orchestrator._waitForRecurrenceBackgroundWorkForTesting()
 
         #expect(
             !(await orchestrator.revertByTimeRange(
@@ -2137,9 +2174,13 @@ struct SkipOrchestratorRevertTests {
             try await store.fetchAdWindow(id: sharedID)
         )
         #expect(durable.analysisAssetId == replacement.analysisAssetId)
+        // `applied`: with both drains above, the replacement window's own
+        // auto-apply has settled before this read. The subject is that the
+        // OLD episode's veto did not touch it, not which of the two settled
+        // states it happens to be in.
         #expect(
-            durable.decisionState
-                == AdDecisionState.confirmed.rawValue
+            durable.decisionState == AdDecisionState.applied.rawValue,
+            "decisionState was \(durable.decisionState)"
         )
         #expect(
             try await correctionStore.activeCorrections(
@@ -2191,6 +2232,17 @@ struct SkipOrchestratorRevertTests {
             try await store.insertAdWindow(ad)
         }
         await orchestrator.receiveAdWindows(ads)
+        // playhead-sip2: SYNCHRONIZE WITH THE AUTO-APPLY BEFORE READING THE ROW.
+        // In `.auto` mode `receiveAdWindows` promotes a managed window and
+        // persists `applied` from a DETACHED `Task`. Under the plan's default
+        // parallel scheduling that task is starved past the end of the test and
+        // the row still reads `confirmed`, so this test used to assert
+        // `confirmed` and pass BY LUCK; serialized it lands first and the row
+        // reads `applied`. Either way the veto's rollback is correct — the
+        // assertion was reading a value it had never synchronized with. The
+        // orchestrator already exposes the wait, and 14 tests in
+        // AdCatalogWiringTests use it for exactly this.
+        await orchestrator._waitForRecurrenceBackgroundWorkForTesting()
         try await store.execForTesting("""
             CREATE TRIGGER round3_fail_second_range_revert
             BEFORE UPDATE OF decisionState ON ad_windows
@@ -2210,9 +2262,11 @@ struct SkipOrchestratorRevertTests {
         )
 
         for ad in ads {
+            // `applied`, not `confirmed` — see the playhead-sip2 note above.
+            let rolledBackState = try await store.fetchAdWindow(id: ad.id)?.decisionState
             #expect(
-                try await store.fetchAdWindow(id: ad.id)?.decisionState
-                    == AdDecisionState.confirmed.rawValue
+                rolledBackState == AdDecisionState.applied.rawValue,
+                "\(ad.id) decisionState was \(rolledBackState ?? "nil")"
             )
             #expect(
                 (await orchestrator.activeWindowIDs()).contains(ad.id)
