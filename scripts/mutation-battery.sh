@@ -3105,6 +3105,7 @@ T_2D6I_ORDER="The list is in episode order"
 T_2D6I_COPY="A row names the sponsor when one is known, and never a quantity"
 T_2D6I_HOP="A list row driven through the card's own action closure forwards every identity field"
 T_2D6I_PROVIDER="NowPlayingView gives the transcript sheet a receipt provider"
+T_2D6I_CAPTURE="the provider filters rows against the sheet's own captured transaction"
 T_2D6I_CLOSURE="the list's veto IS the card's veto closure, not a second seam"
 T_2D6I_NOYES="the list offers NO confirmation — a skip nobody saw cannot be confirmed"
 T_2D6I_GATED="the section renders only when there is something to show"
@@ -11378,6 +11379,18 @@ MUTATIONS=(
   # `denyAutoSkippedBanner` that skips the runtime lifecycle guard the card's
   # own closure applies.
   "MS11|1410|NPV|$T_2D6I_PROVIDER"
+
+  # MS16 is what the merge gate taught this bead. The provider's first version
+  # guarded on `runtime.currentEpisodeId`, and
+  # `ViewLayerCorrectionAttributionCaptureCanaryTests` failed it: a content
+  # closure recomputed while its sheet stays mounted must not read the live
+  # runtime (playhead-254m). The replacement filters each row against the
+  # sheet's CAPTURED transaction — which is also the only guard that survives
+  # the suspension, since a runtime sampled before the `await` says nothing
+  # about which episode's rows come back after it. MS16 deletes that filter: the
+  # 254m canary stays green (there is no live read to find) while the sheet
+  # lists another episode's skips.
+  "MS16|1416|NPV|$T_2D6I_CAPTURE"
   "MS12|1411|NPV|$T_2D6I_CLOSURE"
 
   # MS13/MS14 are the transcript surface. MS13 inverts the render gate, so the
@@ -11680,6 +11693,7 @@ describe_mutation() {
     MS09) echo "2d6i: the list stops being in episode order" ;;
     MS10) echo "2d6i: an unattributed row is titled with its WINDOW ID instead of a neutral phrase" ;;
     MS11) echo "2d6i: the provider returns a constant, so every orchestrator rail stays green and the section can only ever be empty" ;;
+    MS16) echo "2d6i: the provider stops filtering rows against the sheet's captured transaction — the 254m canary stays green because there is no live read to find" ;;
     MS12) echo "2d6i: the list veto is a SECOND spelling of denyAutoSkippedBanner rather than the card's own closure, skipping the runtime lifecycle guard" ;;
     MS13) echo "2d6i: the render gate is inverted — the section appears only when there is nothing to show" ;;
     MS14) echo "2d6i: the transcript surface gains a Yes, which writes bannerAutoSkipConfirmed for audio the listener never heard" ;;
@@ -26617,6 +26631,24 @@ EOF
 EOF
     snippet NEW <<'EOF'
                     return []
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # MS16 — the captured-context filter deleted. The rows come back unfiltered
+  # from whichever episode the orchestrator is serving when the closure resumes.
+  MS16)
+    snippet OLD <<'EOF'
+                    let rows = await runtime.skipOrchestrator
+                        .missedAutoSkipReceipts()
+                    return rows.filter {
+                        $0.item.episodeId == sourceContext.episodeId
+                            && $0.item.playbackLifecycleGeneration
+                                == sourceContext.playbackLifecycleGeneration
+                    }
+EOF
+    snippet NEW <<'EOF'
+                    return await runtime.skipOrchestrator
+                        .missedAutoSkipReceipts()
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 

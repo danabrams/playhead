@@ -77,6 +77,41 @@ struct MissedAutoSkipListWiringSourceCanaryTests {
         )
     }
 
+    /// AND IT FILTERS AGAINST THE CAPTURED CONTEXT, which the merge gate had to
+    /// teach this bead.
+    ///
+    /// The first version of the provider guarded on `runtime.currentEpisodeId`
+    /// and `ViewLayerCorrectionAttributionCaptureCanaryTests` failed it — a
+    /// content closure that is recomputed while its sheet stays mounted must
+    /// not read the live runtime (playhead-254m). That canary owns the ABSENCE
+    /// of the live read and will keep owning it. What it cannot see is whether
+    /// anything took the live read's PLACE: delete the filter entirely and it
+    /// stays green, while the sheet starts listing rows belonging to whatever
+    /// episode the orchestrator moved on to.
+    ///
+    /// The filter is also the correct guard on its own terms, which the live
+    /// read never was: sampling the runtime BEFORE the `await` says nothing
+    /// about which episode's rows come back AFTER it. Each row carries the
+    /// episode and playback generation stamped when its skip fired.
+    @Test("the provider filters rows against the sheet's own captured transaction")
+    func theProviderFiltersAgainstTheCapturedContext() throws {
+        let text = try Self.source(Self.nowPlaying)
+        for required in [
+            "$0.item.episodeId == sourceContext.episodeId",
+            "== sourceContext.playbackLifecycleGeneration",
+        ] {
+            #expect(
+                text.contains(required),
+                """
+                the missed-skip provider does not check `\(required)`. A sheet \
+                belongs to ONE playback transaction; without this it lists rows \
+                from whichever episode the orchestrator is serving when the \
+                closure resumes, and offers a veto that names the wrong audio.
+                """
+            )
+        }
+    }
+
     @Test("the list's veto IS the card's veto closure, not a second seam")
     func theListVetoIsTheCardsClosure() throws {
         let text = try Self.source(Self.nowPlaying)

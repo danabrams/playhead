@@ -710,20 +710,30 @@ struct NowPlayingView: View {
                     )
                 },
                 // playhead-2d6i: the passive list of auto-skips that fired
-                // while no banner host was attached. Scoped to the sheet's
-                // captured playback transaction for the same reason every
-                // other callback here is — a same-asset replay must not let an
-                // old sheet answer for the new lifecycle.
+                // while no banner host was attached.
+                //
+                // FILTERED AGAINST THE CAPTURED CONTEXT, NEVER AGAINST THE LIVE
+                // RUNTIME, and the first version of this closure got that wrong
+                // — it guarded on `runtime.currentEpisodeId` and
+                // `ViewLayerCorrectionAttributionCaptureCanaryTests` failed it
+                // on the merge gate. The canary is right twice over. It is
+                // playhead-254m's rule (this content closure is recomputed
+                // while the sheet stays mounted, so a live read is a different
+                // value on every recomputation), and the live read was ALSO
+                // racy on its own terms: sampling the runtime BEFORE the
+                // `await` says nothing about which episode's rows come back
+                // AFTER it. Each row carries the episode and playback
+                // generation stamped when its skip fired, so checking rows
+                // against the sheet's own transaction is both capture-only and
+                // correct across the suspension.
                 missedAutoSkipReceipts: {
-                    guard runtime.currentEpisodeId
-                            == sourceContext.episodeId,
-                          runtime.playEpisodeGeneration
-                            == sourceContext.playbackLifecycleGeneration
-                    else {
-                        return []
-                    }
-                    return await runtime.skipOrchestrator
+                    let rows = await runtime.skipOrchestrator
                         .missedAutoSkipReceipts()
+                    return rows.filter {
+                        $0.item.episodeId == sourceContext.episodeId
+                            && $0.item.playbackLifecycleGeneration
+                                == sourceContext.playbackLifecycleGeneration
+                    }
                 },
                 // playhead-2d6i: THE VETO IS THE CARD'S VETO. Not a second
                 // route to `denyAutoSkippedBanner` — literally the closure
