@@ -1314,6 +1314,10 @@ PTX="Playhead/Services/PlaybackTransport/PlaybackTransport.swift"
 # and leaves the other two's rails green.
 NQCUE="Playhead/Services/PlaybackTransport/AdSkipCue.swift"
 NQSND="Playhead/Services/PlaybackTransport/AdSkipCueSound.swift"
+# ...and the fourth layer, which is the only one no unit test in the tree can
+# reach: the SETTINGS view. A toggle bound to a key the seam does not read
+# leaves every behavioural rail green while the switch silently does nothing.
+NQSET="Playhead/Views/Settings/SettingsView.swift"
 # playhead-isp5: the ingest-outcome TAXONOMY. Its own file because two of the
 # W rails are about the audit row's own arithmetic — a drop counted as a
 # delivery, a reason that never renders — and those live in the value type, not
@@ -1550,7 +1554,7 @@ MUTABLE_FILES=(
   "$CLAIM" "$RECON" "$ATOM" "$AJRUN" "$ACOORD" "$ESUMBF" "$MPTRENG" "$MPTRIDX"
   "$BEXP" "$SPSHD" "$FMSHD" "$TCANON" "$SPLAN"
   "$BGPS" "$GRANT" "$LEASE"
-  "$PTX" "$NQCUE" "$NQSND"
+  "$PTX" "$NQCUE" "$NQSND" "$NQSET"
   "$ELV" "$BSB"
   "$UZWIRE" "$UZPROV" "$UZHLTH"
   "$SSR"
@@ -10962,7 +10966,14 @@ MUTATIONS=(
   # NQ14 — the extension precedence is reversed, so a compressed asset is
   # preferred over a PCM one and the cue needs a decoder at a seam that has
   # already spent 150 ms ducked.
-  "NQ14|1185|NQSND|Extension precedence is the order the header advertises"
+  #
+  # The canary is in the kill set because it was OBSERVED there and the first
+  # version of this record did not predict it: `testTheDropInAssetName…` pins
+  # `resourceExtensions.first == "caf"` as part of keeping the drop-in
+  # instructions honest. Recorded rather than left as an unexplained extra
+  # failure — an expectation that under-describes a mutation is a rail nobody
+  # can check.
+  "NQ14|1185|NQSND|Extension precedence is the order the header advertises;AdSkipCueSourceCanaryTests/testTheDropInAssetNameMatchesTheInstructions"
 
   # NQ15 — the placeholder's release ramp is deleted. The exponential decay
   # alone leaves a step of 112/32767 at the end of the buffer, and a step is a
@@ -10985,6 +10996,12 @@ MUTATIONS=(
   # becomes louder than the thing it acknowledges, and it is NOT ducked with
   # the episode (that is the point of a separate player).
   "NQ18|1189|NQSND|The placeholder produces a prepared player at the declared level"
+
+  # NQ19 — the Settings toggle binds a LITERAL key that has drifted from the
+  # one the seam reads. The switch moves, writes a key nobody consults, and the
+  # cue keeps sounding. Nothing in this tree drives `SettingsView`, so the wire
+  # canary is the ONLY instrument — which is the whole reason it exists.
+  "NQ19|1191|NQSET|AdSkipCueSourceCanaryTests/testTheSettingsToggleWritesTheKeyTheSeamReads;AdSkipCueSourceCanaryTests/testTheKeyLiteralAppearsInExactlyOneProductionFile"
 
   # NQ99 — VACUITY CONTROL, and it MUST SURVIVE. The local holding the request
   # instant in `playAdSkipCue` is renamed at its declaration and at both uses;
@@ -11260,6 +11277,7 @@ describe_mutation() {
     NQ16) echo "nqwr: the placeholder's attack ramp is deleted — no step in VALUE (both partials are sines), a step in SLOPE" ;;
     NQ17) echo "nqwr: the re-trigger window is shortened below the placeholder's own length, so a cue can overlap itself" ;;
     NQ18) echo "nqwr: the prepared player is left at full scale — the acknowledgement louder than what it acknowledges" ;;
+    NQ19) echo "nqwr: the Settings toggle binds a LITERAL key that has drifted from the seam's — the switch writes a key nobody reads" ;;
     NQ99) echo "VACUITY CONTROL — the request-instant local in playAdSkipCue is renamed and nothing else is. MUST SURVIVE" ;;
     YX99) echo "VACUITY CONTROL — the band in buildFMLedgerEntries is bound through a renamed intermediate on the line YX01 rewrites; nothing else changes. MUST SURVIVE" ;;
     NY01) echo "AdDetectionService.hotPathCandidates sorts the RAW array — the shipped defect: runBackfill canonicalized and the hot path did not" ;;
@@ -25503,6 +25521,7 @@ EOF
     }
 EOF
     snippet NEW <<'EOF'
+
     }
 EOF
     patch "$file" "$OLD" "$NEW" ;;
@@ -25668,6 +25687,17 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  NQ19)
+    snippet OLD <<'EOF'
+    @AppStorage(AdSkipCueSettings.userDefaultsKey)
+    private var adSkipCueEnabled = AdSkipCueSettings.defaultValue
+EOF
+    snippet NEW <<'EOF'
+    @AppStorage("playback.adSkipCueSound")
+    private var adSkipCueEnabled = AdSkipCueSettings.defaultValue
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
   NQ99)
     snippet OLD <<'EOF'
         let instant = now()
@@ -25785,6 +25815,7 @@ rec_file()   {
     PTX)   printf '%s' "$PTX" ;;
     NQCUE) printf '%s' "$NQCUE" ;;
     NQSND) printf '%s' "$NQSND" ;;
+    NQSET) printf '%s' "$NQSET" ;;
     SSR)   printf '%s' "$SSR" ;;
     OWNG)  printf '%s' "$OWNG" ;;
     EMPRO) printf '%s' "$EMPRO" ;;

@@ -26,9 +26,10 @@
 //       overlap, and `AdSkipCuePlayer` drops the second request for exactly
 //       this window. A longer asset means a cue can talk over itself; if the
 //       sound Dan picks needs longer, raise `retriggerWindow` with it.
-//     * Peak around −18 dBFS. It plays UNDER an episode that has just been
-//       ducked to 0.15 and is about to come back to full — it is an
-//       acknowledgement, not an alert.
+//     * Peak around −18 dBFS. It starts at the instant the episode returns
+//       from the skip duck, and it is deliberately NOT ducked with the episode
+//       (that is the point of a separate player) — so it must be authored
+//       quiet. It is an acknowledgement, not an alert.
 //     * Fade the tail to digital silence. A hard truncation reads as a glitch,
 //       which is the exact experience this cue exists to distinguish itself
 //       from.
@@ -85,10 +86,10 @@ struct AdSkipCueSound: Sendable, Equatable {
     /// neither subdued nor recognisable.
     static let retriggerWindow: Duration = .milliseconds(600)
 
-    /// Playback level for the cue, independent of the episode's own volume
-    /// (which the skip transition ducks to `PlaybackService.duckVolume`). The
-    /// cue is NOT ducked with the episode — that is the point of it being a
-    /// separate player — so it is authored quiet instead.
+    /// Playback level for the cue, independent of the episode's own volume.
+    /// The cue is NOT ducked with the episode — that is the point of it being a
+    /// separate player — so it is authored quiet instead. The VALUE is Dan's;
+    /// what `AdSkipCueTests` pins is only that it is below full scale.
     static let level: Float = 0.35
 
     /// The bundled asset, if the real sound has been dropped in.

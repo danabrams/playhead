@@ -46,6 +46,7 @@ final class AdSkipCueSourceCanaryTests: XCTestCase {
         "Playhead/Services/PlaybackTransport/AdSkipCueSound.swift"
     private static let transportPath =
         "Playhead/Services/PlaybackTransport/PlaybackTransport.swift"
+    private static let settingsPath = "Playhead/Views/Settings/SettingsView.swift"
 
     private func code(_ repoRelativePath: String) throws -> String {
         SwiftSourceInspector.strippingCommentsAndStrings(
@@ -261,6 +262,72 @@ final class AdSkipCueSourceCanaryTests: XCTestCase {
         XCTAssertTrue(
             AdSkipCueSettings.defaultValue,
             "default #3 is ON; flipping this constant is how it is overturned"
+        )
+    }
+
+    // MARK: - 5. The switch in Settings is the switch the seam reads
+
+    /// The WIRE canary, and the only thing in the tree that can see it. No test
+    /// drives `SettingsView`, so a toggle bound to a key nothing reads would
+    /// leave every behavioural rail green while the setting silently did
+    /// nothing — the acceptance criterion "a setting to silence it" is
+    /// otherwise unobservable.
+    func testTheSettingsToggleWritesTheKeyTheSeamReads() throws {
+        let settings = try code(Self.settingsPath)
+        XCTAssertTrue(
+            settings.contains("@AppStorage(AdSkipCueSettings.userDefaultsKey)"),
+            """
+            The Settings toggle must bind through \
+            `AdSkipCueSettings.userDefaultsKey`, not a literal. A literal drifts \
+            from the reader at the seam and the switch stops doing anything, \
+            with no test in the tree able to see it.
+            """
+        )
+        XCTAssertTrue(
+            settings.contains("Toggle(isOn: $adSkipCueEnabled)"),
+            "the toggle itself must still be there"
+        )
+        XCTAssertTrue(
+            settings.contains("private var adSkipCueEnabled = AdSkipCueSettings.defaultValue"),
+            """
+            The toggle's own default must be `AdSkipCueSettings.defaultValue`, \
+            so overturning default #3 moves the switch AND the seam together.
+            """
+        )
+    }
+
+    /// The other half: the key exists in exactly one place. Two spellings of
+    /// one key is how a reader and a writer come to disagree.
+    func testTheKeyLiteralAppearsInExactlyOneProductionFile() throws {
+        guard let repoRoot = SwiftSourceInspector.repositoryRoot(from: #filePath) else {
+            XCTFail("Could not locate repo root from \(#filePath)")
+            return
+        }
+        let productionRoot = repoRoot.appendingPathComponent("Playhead")
+        guard let enumerator = FileManager.default.enumerator(
+            at: productionRoot,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        ) else {
+            XCTFail("FileManager could not enumerate \(productionRoot.path)")
+            return
+        }
+        var files: [String] = []
+        for case let url as URL in enumerator where url.pathExtension == "swift" {
+            // Comments stripped, STRING LITERALS KEPT — the key is a literal
+            // and this rail is about where it may be written.
+            let stripped = SwiftSourceInspector.strippingComments(
+                try String(contentsOf: url, encoding: .utf8)
+            )
+            if stripped.contains("\"\(AdSkipCueSettings.userDefaultsKey)\"") {
+                files.append(
+                    url.path.replacingOccurrences(of: repoRoot.path + "/", with: "")
+                )
+            }
+        }
+        XCTAssertEqual(
+            files, [Self.cuePath],
+            "the key may be spelled once, in `AdSkipCueSettings`. Observed: \(files)"
         )
     }
 

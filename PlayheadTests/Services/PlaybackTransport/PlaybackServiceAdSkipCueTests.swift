@@ -13,12 +13,14 @@
 // The route-change cases are exact: `PlaybackService` registers its
 // route-change observer SYNCHRONOUSLY in `init` (block-based `addObserver`), so
 // a post is delivered without a registration race. The interruption observer is
-// an async notification sequence whose registration lags init by some
-// milliseconds — documented on `finishObserverToken` — so those cases perform
-// an explicit readiness handshake first and then post exactly once. Neither
-// case carries a wall-clock deadline: if production stops pausing, the drain
-// parks and the `.timeLimit` trait fails deterministically instead of
-// load-dependently (the shape `InterruptionHandlingTests` argues for).
+// an async notification SEQUENCE whose registration lags init by some
+// milliseconds — the lag documented on `finishObserverToken` — so those cases
+// post exactly ONCE, after a full skip transition has already run. See the note
+// above `interruptionOnSeamSuppressesCue` for why posting twice is not a
+// harder-working test but a broken one. No case carries a wall-clock deadline:
+// if production stops pausing, the drain parks and the `.timeLimit` trait fails
+// deterministically instead of load-dependently (the shape
+// `InterruptionHandlingTests` argues for).
 
 @preconcurrency import AVFoundation
 import Foundation
