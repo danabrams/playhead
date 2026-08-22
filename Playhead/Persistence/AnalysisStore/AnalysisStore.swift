@@ -8699,6 +8699,20 @@ actor AnalysisStore {
     // is deleted. A mismatch means the primary key now names something else,
     // and the honest response to that is to delete nothing and say so — a
     // silent no-op here would read as a completed retraction.
+    //
+    // WHY THIS RUNG DOES NOT USE THE playhead-gyhw REPAIR LEDGER, since V50 and
+    // V51 next door do. `PersistedStateRepairRecord` is keyed on a
+    // `PersistedStateInvariant` — it publishes "a row violated an invariant and
+    // this rung withdrew the violation", and the launch reporter drains it to a
+    // census that also EVALUATES those invariants independently. None of that
+    // is true here. These three rows violate nothing: they are well-formed
+    // receipts of gestures that really happened, and what disqualifies them is
+    // a fact about the LISTENER that no invariant over the database can state.
+    // Minting an invariant case for a population of three, closed, would put a
+    // permanent evaluator in the census for a condition that can never recur —
+    // V59 made the successor case checkable per row — so the rung reports what
+    // it did through `logger.notice` and the count, as V50 does alongside its
+    // ledger entry.
     private func migrateRetractDisclaimedBannerConfirmsV60IfNeeded() throws {
         let observed = (try schemaVersion() ?? 1)
         guard observed < 60 else { return }

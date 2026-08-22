@@ -4606,14 +4606,24 @@ MUTATIONS=(
   # this turns a correct migration into a launch that cannot complete. It is the
   # idempotence rail and the foreign-device rail together, and neither is
   # reachable from a fixture that holds all three rows.
+  #
+  # IT MUST RUN ALONE, AND THE NUMBER IS WHY: 926 OBSERVED FAILURES. Not the
+  # four this entry names — essentially every test in all 256 focused suites
+  # that migrates a store, because EVERY fixture in the tree is a database
+  # holding none of Dan's three ids. The first version of this batch paired
+  # TK08 with it "because their victims are disjoint", which was derived from
+  # the SECOND `migrate()` in each fixture and forgot the FIRST one, on a fresh
+  # database. TK08's rail was credited KILLED for a failure TK05 had already
+  # caused. A mutation whose blast radius is the whole tree can share a batch
+  # with nothing.
   "TK05|1243|STORE|$T_TK_IDEM;$T_TK_FOREIGN;$T_TK_IMPOSTER"
 
-  # Batch 1243 — TK08, THE BLAST RADIUS WIDENS BY ONE TABLE. Each retraction
+  # Batch 1246 — TK08, THE BLAST RADIUS WIDENS BY ONE TABLE. Each retraction
   # also drops the asset's `ad_windows`. Those rows are DETECTION's own record —
   # `dayZeroRediffByteExact`, confidence 1.0, minted by a byte diff the tap had
-  # nothing to do with — and nothing in Dan's statement disclaims them. Paired
-  # with TK05 because their victims are disjoint.
-  "TK08|1243|STORE|$T_TK_WINDOWS"
+  # nothing to do with — and nothing in Dan's statement disclaims them. ALONE,
+  # for the reason recorded on TK05 above.
+  "TK08|1246|STORE|$T_TK_WINDOWS"
 
   # Batch 1244 — TK07, THE RUNG THAT NEVER RUNS. `guard observed >= 59` becomes
   # `>= 60`, so a device at V59 — every device there is — returns before the
