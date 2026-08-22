@@ -1567,6 +1567,19 @@ MUTABLE_FILES=(
 # half-open-interval contract.
 
 FOCUSED_SUITES=(
+  # playhead-tktr / playhead-ph2d: the V60 downgrade of three unearned
+  # `repeated_ad_cache` grades (TK series). ONE suite, and one is right here:
+  # the rung is eleven directions over a single migration, and every direction
+  # is observable from the same fixture — the device's own four rows on asset
+  # 0FF7EFF3 plus the thirteen nobody disclaimed. There is no second layer that
+  # could be right while this one is wrong.
+  #
+  # NOTE THE HISTORY, because the rails read strangely without it: this suite
+  # replaced `DisclaimedBannerReceiptRetractionV60MigrationTests`, which pinned
+  # a DELETION of three `correction_events` rows. Dan withdrew that on the
+  # ground that the spans were genuine ads. No verdict was carried across — a
+  # rail that cannot apply to the new code is a LOST rail, not a passing one.
+  -only-testing:PlayheadTests/UnearnedRecurrenceGradeV60MigrationTests
   # playhead-e8mg: the structural ownership routes (E8 series). Five suites,
   # because the claim spans three layers and no one of them can observe
   # another. The two FeedParser suites are the only things that can see which
@@ -4522,7 +4535,136 @@ T_PK_STORAGE="the per-show profile storage is mentioned only by its declaration,
 T_PK_READS="every read of the per-show profile passes a show identity, never a literal and never nil"
 T_PK_SHADOW="RegionShadowPhase gets the profile of the very show it is told about"
 
+# ---- playhead-tktr: the retraction of three DISCLAIMED banner receipts (TK series) ----
+#
+# NINE rails rather than three, because "deletes exactly three" is not one claim.
+# It is a CARDINALITY (three, not two and not four), a POPULATION (three keys,
+# not a predicate over `source`), an IDENTITY (the row at the key must be the row
+# that was disclaimed), an IDEMPOTENCE (absent is the expected reading, not an
+# error), a BLAST RADIUS (one table) and a NON-CLAIM (`playheadTimeAtCorrection`
+# stays NULL on the two kept rows — UNKNOWN IS NOT ZERO). One test asserting all
+# six reports a fourth id, a source-wide DELETE, a dropped identity check and a
+# rung that never ran identically.
+T_TK_THREE="V60 downgrades the three unearned grades to consumedAutoSkip/consumed"
+T_TK_ONLYGRADE="V60 moves the grade and NOTHING else on the row"
+T_TK_PREROLL="the PRE-ROLL grade survives: he heard that one and meant that tap"
+T_TK_RECEIPTS="V60 deletes no correction_events row: the spans were genuine ads"
+T_TK_THIRTEEN="the other thirteen explicitConfirmation rows keep their grade"
+T_TK_TOMBSTONE="V60 writes no revocation: a tombstone is permanent and is the wrong instrument"
+T_TK_IDEM="a second run changes nothing, and a database without these rows migrates cleanly"
+T_TK_IMPOSTER="a provenance pair carrying a grade the tap did not buy is left alone"
+T_TK_NOTABLE="a fixture without repeated_ad_cache reaches v60 and downgrades nothing"
+T_TK_WINDOWS="the ad_windows the downgraded rows were learned from survive"
+T_TK_TABLE="the downgrade table names the three unearned grades and not the pre-roll"
+
 MUTATIONS=(
+  # ---- playhead-tktr / playhead-ph2d (TK series): the V60 DOWNGRADE ----
+  #
+  # READ THE HISTORY FIRST. This bead was opened, authorised and BUILT as a
+  # RETRACTION — delete three `bannerAutoSkipConfirmed` receipts of 2026-08-21,
+  # because four taps landed inside 5.3 s of wall clock for windows spanning
+  # 71.3 minutes of episode time. Dan WITHDREW it: "you can leave them if they
+  # were ads — for ph2d downgrade." All four windows are `dayZeroRediffByteExact`
+  # at confidence 1.0 and the skipping was correct, so the taps recorded TRUE
+  # FACTS WITH A FALSE PROVENANCE. What ships instead moves three
+  # `repeated_ad_cache` rows from `confirmedAutoSkipBanner`/`explicitConfirmation`
+  # to `consumedAutoSkip`/`consumed` — the rank a UI defect manufactured, put
+  # back where the row would have landed on its own merits.
+  #
+  # EVERY VERDICT THE DELETION EARNED WAS DISCARDED, not carried across. A rail
+  # that cannot apply to the new code is a LOST rail, not a passing one.
+
+  # Batch 1240 — TK01, ONE TOO MANY, and it takes the row he actually meant. The
+  # PRE-ROLL's window is appended to the table. Same asset, same show, same
+  # source and the same second as the three; the only thing separating it is
+  # that he had heard that audio. This is the direction Dan's decision creates
+  # and the reason `migrationKeepsThePreRoll` exists.
+  "TK01|1240|STORE|$T_TK_PREROLL;$T_TK_IDEM;$T_TK_TABLE"
+
+  # Batch 1240 — TK04, THE PROVENANCE PAIR IS THE WHOLE IDENTITY. The
+  # stored-versus-expected grade check and the UPDATE's own grade terms both go,
+  # leaving `WHERE sourceAssetId = ? AND sourceWindowId = ?`. The three still
+  # downgrade correctly, so every rail about WHICH rows move stays green, and
+  # the rung will now rewrite whatever grade a reused provenance pair carries.
+  "TK04|1240|STORE|$T_TK_IMPOSTER"
+
+  # Batch 1240 — TK08, THE BLAST RADIUS WIDENS BY ONE TABLE. Each downgrade also
+  # drops the asset's `ad_windows`. Those rows are DETECTION's own record —
+  # byte-exact rediff, confidence 1.0 — and they are the very evidence on which
+  # Dan let the receipts stand.
+  "TK08|1240|STORE|$T_TK_WINDOWS"
+
+  # Batch 1241 — TK02, ONE TOO FEW. The third entry is dropped, so the 30 s
+  # window at 4279.302 keeps a rank nobody earned. An under-correction looks
+  # conservative and is not: rank 2 is durably immune to being overwritten by
+  # the weaker learning that should own it.
+  "TK02|1241|STORE|$T_TK_THREE;$T_TK_IDEM;$T_TK_TABLE"
+
+  # Batch 1241 — TK09, THE WRONG INSTRUMENT. The rung also writes a
+  # `repeated_ad_cache_revocations` tombstone. The admission UPSERT consults
+  # that table in a `WHERE NOT EXISTS`, so it blacklists the material FOREVER —
+  # suppressing real ad audio on this show for good, which is far heavier than
+  # "the confirmation was not earned" and is exactly the path this rung was
+  # chosen over.
+  "TK09|1241|STORE|$T_TK_TOMBSTONE"
+
+  # Batch 1241 — TK11, THE GEOMETRY MOVES WITH THE GRADE. The UPDATE also resets
+  # `boundaryStart` and `lastSeenAt`. Where the ad was and when it was last seen
+  # are TRUE FACTS that the tap's provenance has no bearing on; a repair aimed
+  # at one quantity must not quietly rewrite three.
+  "TK11|1241|STORE|$T_TK_ONLYGRADE"
+
+  # Batch 1242 — TK03, A PREDICATE INSTEAD OF A PAIR LIST. The per-row statement
+  # becomes `WHERE learningSource = 'confirmedAutoSkipBanner'`, i.e. ELEVEN of
+  # the seventeen rows. This is the migration somebody writes who read ph2d as
+  # "banner-confirmed grades are untrustworthy" instead of "these three were
+  # bought by taps Dan disclaimed" — and it takes the pre-roll with it.
+  "TK03|1242|STORE|$T_TK_PREROLL;$T_TK_THIRTEEN;$T_TK_IDEM"
+
+  # Batch 1242 — TK10, THE WITHDRAWN RETRACTION, SMUGGLED BACK IN. The rung also
+  # deletes the three `correction_events` receipts. That is the migration this
+  # bead originally built and that Dan reversed; nothing but a rail asserting
+  # the receipts SURVIVE can tell the shipped rung from the one it replaced.
+  "TK10|1242|STORE|$T_TK_RECEIPTS"
+
+  # Batch 1243 — TK05, ABSENT BECOMES AN ERROR, AND IT RUNS ALONE. A provenance
+  # pair the database does not hold throws instead of being counted. Every
+  # device that is not Dan's is in exactly that state, so this turns a correct
+  # migration into a launch that cannot complete.
+  #
+  # ALONE, AND THE NUMBER IS WHY: the same mutation against the previous
+  # (deletion) rung produced 926 OBSERVED FAILURES — essentially every test in
+  # all 256 focused suites that migrates a store, because EVERY fixture in the
+  # tree is a database holding none of these rows. It was first batched with
+  # TK08 "because their victims are disjoint", derived from the SECOND
+  # `migrate()` in each fixture and forgetting the FIRST, on a fresh database;
+  # TK08 was credited KILLED for a failure TK05 had already caused. A mutation
+  # whose blast radius is the whole tree can share a batch with nothing.
+  "TK05|1243|STORE|$T_TK_IDEM"
+
+  # Batch 1244 — TK06, HALF A DOWNGRADE, AND IT IS WORSE THAN A DELETE. Only
+  # `learningLifecycle` moves; `learningSource` stays `confirmedAutoSkipBanner`.
+  # It reads as the minimal edit and it CORRUPTS the row:
+  # `RepeatedAdCacheService.recordConfirmedRecurrence` and `AdCatalogStore.insert`
+  # both guard `learningSource.authoritativeLifecycle == learningLifecycle`, so
+  # the pair it leaves behind is one no writer will ever re-establish — the row
+  # survives on disk as something the code refuses to accept. ALONE, because it
+  # is the rail this rung exists to have.
+  "TK06|1244|STORE|$T_TK_THREE"
+
+  # Batch 1245 — TK07, THE RUNG THAT NEVER RUNS. `guard observed >= 59` becomes
+  # `>= 60`, so a device at V59 — every device there is — returns before the
+  # first statement AND before `setSchemaVersion(60)`. An off-by-one in a guard
+  # whose whole job is to refuse a rolled-back V39.
+  "TK07|1245|STORE|$T_TK_THREE;$T_TK_IDEM;$T_TK_IMPOSTER"
+
+  # TK99 — VACUITY CONTROL, and it MUST SURVIVE. The local holding the observed
+  # stamp is renamed and nothing else changes: it proves the anchors still
+  # apply, the batch still builds and the suite still runs, while changing no
+  # behaviour. Non-empty expectation on purpose (playhead-ngsm) — an entry with
+  # an empty expectation iterates zero times and is credited KILLED.
+  "TK99|1246|STORE|$T_TK_THREE;$T_TK_PREROLL;$T_TK_THIRTEEN"
+
   # Batch 900 — JC01, THE SHIPPED DEFECT VERBATIM. The pre-insert guard asks
   # for the runner's own `fp-final-` fingerprint again, so an engine-written
   # final row for the same span is invisible and gets a second copy appended.
@@ -11627,6 +11769,270 @@ snippet() { IFS= read -r -d '' "$1" || true; }
 apply_mutation() {
   local name="$1" file="$2" OLD NEW
   case "$name" in
+
+  # ---- playhead-tktr / playhead-ph2d: the V60 recurrence-grade downgrade ----
+
+  TK01)
+    snippet OLD <<'EOF'
+        UnearnedRecurrenceGrade(
+            sourceAssetId: "0FF7EFF3-CD54-4B14-98A7-148CD173AC42",
+            sourceWindowId: "33AD12CE-C9C7-4443-AEED-12263202EFF7"
+        ),
+    ]
+EOF
+    snippet NEW <<'EOF'
+        UnearnedRecurrenceGrade(
+            sourceAssetId: "0FF7EFF3-CD54-4B14-98A7-148CD173AC42",
+            sourceWindowId: "33AD12CE-C9C7-4443-AEED-12263202EFF7"
+        ),
+        UnearnedRecurrenceGrade(
+            sourceAssetId: "0FF7EFF3-CD54-4B14-98A7-148CD173AC42",
+            sourceWindowId: "A5A6BD65-4FDC-45C5-8953-72EF9EC86666"
+        ),
+    ]
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  TK02)
+    snippet OLD <<'EOF'
+        UnearnedRecurrenceGrade(
+            sourceAssetId: "0FF7EFF3-CD54-4B14-98A7-148CD173AC42",
+            sourceWindowId: "33AD12CE-C9C7-4443-AEED-12263202EFF7"
+        ),
+    ]
+EOF
+    snippet NEW <<'EOF'
+    ]
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  TK03)
+    snippet OLD <<'EOF'
+            let updateStmt = try prepare("""
+                UPDATE repeated_ad_cache
+                   SET learningSource = ?, learningLifecycle = ?
+                 WHERE sourceAssetId = ?
+                   AND sourceWindowId = ?
+                   AND learningSource = ?
+                   AND learningLifecycle = ?
+                """)
+            defer { sqlite3_finalize(updateStmt) }
+            bind(updateStmt, 1, CatalogLearningSource.consumedAutoSkip.rawValue)
+            bind(updateStmt, 2, CatalogLearningLifecycle.consumed.rawValue)
+            bind(updateStmt, 3, grade.sourceAssetId)
+            bind(updateStmt, 4, grade.sourceWindowId)
+            bind(
+                updateStmt,
+                5,
+                CatalogLearningSource.confirmedAutoSkipBanner.rawValue
+            )
+            bind(
+                updateStmt,
+                6,
+                CatalogLearningLifecycle.explicitConfirmation.rawValue
+            )
+            try step(updateStmt, expecting: SQLITE_DONE)
+            let changed = Int(sqlite3_changes(db))
+            guard changed == 1 else {
+                throw AnalysisStoreError.queryFailed(
+                    "playhead-tktr V60: verified recurrence grade updated \(changed) row(s), expected exactly 1"
+                )
+            }
+EOF
+    snippet NEW <<'EOF'
+            let updateStmt = try prepare("""
+                UPDATE repeated_ad_cache
+                   SET learningSource = ?, learningLifecycle = ?
+                 WHERE learningSource = ?
+                """)
+            defer { sqlite3_finalize(updateStmt) }
+            bind(updateStmt, 1, CatalogLearningSource.consumedAutoSkip.rawValue)
+            bind(updateStmt, 2, CatalogLearningLifecycle.consumed.rawValue)
+            bind(
+                updateStmt,
+                3,
+                CatalogLearningSource.confirmedAutoSkipBanner.rawValue
+            )
+            try step(updateStmt, expecting: SQLITE_DONE)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  TK04)
+    snippet OLD <<'EOF'
+            guard storedSource
+                    == CatalogLearningSource.confirmedAutoSkipBanner.rawValue,
+                  storedLifecycle
+                    == CatalogLearningLifecycle.explicitConfirmation.rawValue
+            else {
+                mismatched.append(grade.sourceWindowId)
+                logger.fault(
+                    "playhead-tktr V60: the recurrence row learned from this window does not carry the grade the tap bought — leaving it alone. Downgrade NOT performed for this window."
+                )
+                continue
+            }
+
+            let updateStmt = try prepare("""
+                UPDATE repeated_ad_cache
+                   SET learningSource = ?, learningLifecycle = ?
+                 WHERE sourceAssetId = ?
+                   AND sourceWindowId = ?
+                   AND learningSource = ?
+                   AND learningLifecycle = ?
+                """)
+            defer { sqlite3_finalize(updateStmt) }
+            bind(updateStmt, 1, CatalogLearningSource.consumedAutoSkip.rawValue)
+            bind(updateStmt, 2, CatalogLearningLifecycle.consumed.rawValue)
+            bind(updateStmt, 3, grade.sourceAssetId)
+            bind(updateStmt, 4, grade.sourceWindowId)
+            bind(
+                updateStmt,
+                5,
+                CatalogLearningSource.confirmedAutoSkipBanner.rawValue
+            )
+            bind(
+                updateStmt,
+                6,
+                CatalogLearningLifecycle.explicitConfirmation.rawValue
+            )
+EOF
+    snippet NEW <<'EOF'
+            _ = (storedSource, storedLifecycle, mismatched)
+
+            let updateStmt = try prepare("""
+                UPDATE repeated_ad_cache
+                   SET learningSource = ?, learningLifecycle = ?
+                 WHERE sourceAssetId = ?
+                   AND sourceWindowId = ?
+                """)
+            defer { sqlite3_finalize(updateStmt) }
+            bind(updateStmt, 1, CatalogLearningSource.consumedAutoSkip.rawValue)
+            bind(updateStmt, 2, CatalogLearningLifecycle.consumed.rawValue)
+            bind(updateStmt, 3, grade.sourceAssetId)
+            bind(updateStmt, 4, grade.sourceWindowId)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  TK05)
+    snippet OLD <<'EOF'
+            if probe == SQLITE_DONE {
+                sqlite3_finalize(selectStmt)
+                absent.append(grade.sourceWindowId)
+                continue
+            }
+EOF
+    snippet NEW <<'EOF'
+            if probe == SQLITE_DONE {
+                sqlite3_finalize(selectStmt)
+                throw AnalysisStoreError.queryFailed(
+                    "playhead-tktr V60: an unearned recurrence grade is missing"
+                )
+            }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # TK06 MUTATES THE BIND, NOT THE SQL, AND THE FIRST VERSION DID THE OPPOSITE.
+  # Dropping the `?` from the SET clause left six `bind()` calls against five
+  # placeholders, so every index shifted by one, `sourceAssetId` was compared
+  # against the literal "consumed", nothing matched, and `guard changed == 1`
+  # threw. That reddens EIGHT tests and proves only that a malformed statement
+  # throws — the rail was scored KILLED for a defect it never introduced. The
+  # count is what gave it away: one victim predicted, eight observed. Binding
+  # the ORIGINAL source value back keeps the statement well-formed and produces
+  # the actual half-downgrade.
+  TK06)
+    snippet OLD <<'EOF'
+            bind(updateStmt, 1, CatalogLearningSource.consumedAutoSkip.rawValue)
+EOF
+    snippet NEW <<'EOF'
+            bind(
+                updateStmt,
+                1,
+                CatalogLearningSource.confirmedAutoSkipBanner.rawValue
+            )
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  TK07)
+    snippet OLD <<'EOF'
+        // DO NOT STEP OVER A ROLLED-BACK V39 — same rationale as V40-V59.
+        guard observed >= 59 else { return }
+        guard try tableExists("repeated_ad_cache") else {
+EOF
+    snippet NEW <<'EOF'
+        // DO NOT STEP OVER A ROLLED-BACK V39 — same rationale as V40-V59.
+        guard observed >= 60 else { return }
+        guard try tableExists("repeated_ad_cache") else {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  TK08)
+    snippet OLD <<'EOF'
+            downgraded.append(grade.sourceWindowId)
+        }
+EOF
+    snippet NEW <<'EOF'
+            try exec(
+                "DELETE FROM ad_windows WHERE analysisAssetId = '\(grade.sourceAssetId)'"
+            )
+            downgraded.append(grade.sourceWindowId)
+        }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  TK09)
+    snippet OLD <<'EOF'
+            downgraded.append(grade.sourceWindowId)
+        }
+EOF
+    snippet NEW <<'EOF'
+            try exec(
+                "INSERT OR IGNORE INTO repeated_ad_cache_revocations (sourceAssetId, sourceWindowId, revokedAt, revocationSource) VALUES ('\(grade.sourceAssetId)', '\(grade.sourceWindowId)', 0, 'manualVeto')"
+            )
+            downgraded.append(grade.sourceWindowId)
+        }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  TK10)
+    snippet OLD <<'EOF'
+            downgraded.append(grade.sourceWindowId)
+        }
+EOF
+    snippet NEW <<'EOF'
+            try exec(
+                "DELETE FROM correction_events WHERE id IN ('1C7996C6-87C2-45E8-B91D-0DBCFB627D6E', '6A5908CA-8E98-45A1-9840-A1C5C770E168', 'A3273865-4BF4-475B-921A-37000B5A0B94')"
+            )
+            downgraded.append(grade.sourceWindowId)
+        }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  TK11)
+    snippet OLD <<'EOF'
+                   SET learningSource = ?, learningLifecycle = ?
+                 WHERE sourceAssetId = ?
+EOF
+    snippet NEW <<'EOF'
+                   SET learningSource = ?, learningLifecycle = ?,
+                       boundaryStart = 0.0, lastSeenAt = 0.0
+                 WHERE sourceAssetId = ?
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  TK99)
+    snippet OLD <<'EOF'
+        let observed = (try schemaVersion() ?? 1)
+        guard observed < 60 else { return }
+        // DO NOT STEP OVER A ROLLED-BACK V39 — same rationale as V40-V59.
+        guard observed >= 59 else { return }
+EOF
+    snippet NEW <<'EOF'
+        let stampOnDisk = (try schemaVersion() ?? 1)
+        guard stampOnDisk < 60 else { return }
+        // DO NOT STEP OVER A ROLLED-BACK V39 — same rationale as V40-V59.
+        guard stampOnDisk >= 59 else { return }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
 
   # ---- playhead-hzpa: an oversize abandonment records its size (HZ series) ----
 

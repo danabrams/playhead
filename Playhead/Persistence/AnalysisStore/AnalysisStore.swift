@@ -1971,7 +1971,7 @@ actor AnalysisStore {
     /// assertions automatically follow the production constant — hardcoding
     /// the integer in tests has been a recurring source of stale-assertion
     /// flakes whenever the schema bumps.
-    nonisolated static let currentSchemaVersion = 59
+    nonisolated static let currentSchemaVersion = 60
 
     /// H1: minimum age (in seconds) a `backfill_jobs` / `final_pass_jobs`
     /// row stuck in `status='running'` must reach before the launch-time
@@ -2937,6 +2937,12 @@ actor AnalysisStore {
             // that one key on every entry — see the block comment.
             try migrateDetectorTrustObservationCountV58IfNeeded()
             try migrateCorrectionPlayheadPositionV59IfNeeded()
+            // playhead-tktr / playhead-ph2d: the three `repeated_ad_cache` rows
+            // whose `explicitConfirmation` grade was bought by banner taps Dan
+            // disclaimed drop to `consumedAutoSkip`/`consumed`. The RECEIPTS are
+            // NOT deleted — the spans were genuine ads and only the provenance
+            // rank was unearned. See the block comment on the migration.
+            try migrateDowngradeUnearnedRecurrenceGradeV60IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -3351,6 +3357,20 @@ actor AnalysisStore {
         // ledger — still reaches v58.
         try migrateDetectorTrustObservationCountV58IfNeeded()
         try migrateCorrectionPlayheadPositionV59IfNeeded()
+        // playhead-tktr (v60): guarded on `tableExists`, and the downgrade
+        // itself is three `(sourceAssetId, sourceWindowId)` pairs each verified
+        // against the grade it is expected to carry, so a seeded fixture
+        // without `repeated_ad_cache` — or any fixture that never held those
+        // three rows, which is every fixture in the tree — still reaches v60.
+        //
+        // THIS LINE WAS MISSING FOR ONE COMMIT AND NINE GREEN TESTS DID NOT
+        // NOTICE. The new rung's own suite drives the PRODUCTION ladder, so it
+        // passed 9/9 while this ladder stopped at 59; what caught it was the
+        // mutation battery's unmutated baseline, which runs the eleven
+        // cross-rung tests that assert this ladder reaches head. A rung added
+        // to one ladder and not the other is invisible to any test written for
+        // that rung.
+        try migrateDowngradeUnearnedRecurrenceGradeV60IfNeeded()
     }
     #endif
 
@@ -8571,6 +8591,207 @@ actor AnalysisStore {
             definition: "REAL"
         )
         try setSchemaVersion(59)
+    }
+
+    /// One `repeated_ad_cache` row whose `explicitConfirmation` grade was bought
+    /// by a banner tap the listener disclaimed, named by the WINDOW it was
+    /// learned from. Every value is verbatim from the 2026-08-21 t6 pull.
+    ///
+    /// The population is CLOSED at three. It is not a filter, a rule or the
+    /// seed of a general retraction mechanism — see the block comment on
+    /// ``migrateDowngradeUnearnedRecurrenceGradeV60IfNeeded()``.
+    struct UnearnedRecurrenceGrade: Sendable, Equatable {
+        /// `repeated_ad_cache.sourceAssetId`.
+        let sourceAssetId: String
+        /// `repeated_ad_cache.sourceWindowId` — the provenance pair's other
+        /// half, and the same identity the revocation tables key their
+        /// tombstones on.
+        let sourceWindowId: String
+    }
+
+    nonisolated static let unearnedRecurrenceGradesV60: [UnearnedRecurrenceGrade] = [
+        UnearnedRecurrenceGrade(
+            sourceAssetId: "0FF7EFF3-CD54-4B14-98A7-148CD173AC42",
+            sourceWindowId: "2E3D978D-C83D-46D1-B4E1-8285C411162D"
+        ),
+        UnearnedRecurrenceGrade(
+            sourceAssetId: "0FF7EFF3-CD54-4B14-98A7-148CD173AC42",
+            sourceWindowId: "B9366B42-D64B-4988-A8D5-E0927A16C163"
+        ),
+        UnearnedRecurrenceGrade(
+            sourceAssetId: "0FF7EFF3-CD54-4B14-98A7-148CD173AC42",
+            sourceWindowId: "33AD12CE-C9C7-4443-AEED-12263202EFF7"
+        ),
+    ]
+
+    // MARK: V60 — the grade a UI defect manufactured, put back where the row
+    //             would have landed on its own merits (playhead-tktr /
+    //             playhead-ph2d)
+    //
+    // WHAT DAN DECIDED, and it REVERSES what this bead was opened to do.
+    // playhead-tktr was authorised as a RETRACTION: delete three
+    // `bannerAutoSkipConfirmed` receipts of 2026-08-21, because four taps landed
+    // inside 5.3 s of wall clock for windows spanning 71.3 minutes of episode
+    // time and only the first was audio the listener had reached. That
+    // migration was built, tested and mutation-proved. It is WITHDRAWN. Dan,
+    // 2026-08-21: *"you can leave them if they were ads — for ph2d downgrade."*
+    //
+    // THE CONDITION IS MET AND IT IS CHECKABLE. All four windows on asset
+    // 0FF7EFF3 are `dayZeroRediffByteExact` at confidence 1.0, `wasSkipped = 1`,
+    // `decisionState = applied` — the bytes differed between two fetches, which
+    // is DAI-insertion evidence the tap had nothing to do with — and Dan's own
+    // verdict on the session was that the skipping was perfect throughout. So
+    // the three disclaimed taps recorded TRUE FACTS WITH A FALSE PROVENANCE.
+    // The record is right; deleting it would destroy a correct answer to
+    // punish how it was arrived at.
+    //
+    // WHAT IS ACTUALLY WRONG IS A RANK. `scheduleConfirmedRecurrenceLearning`
+    // banked each window's acoustic fingerprint show-wide at
+    // `learningSource = confirmedAutoSkipBanner` / `learningLifecycle =
+    // explicitConfirmation`, and the admission UPSERT in
+    // `upsertRepeatedAdCacheEntry` ranks `explicitConfirmation` 2 against
+    // `consumed` 1, refusing any update whose incoming lifecycle ranks LOWER.
+    // That rank asserts A HUMAN LOOKED AT THIS, and a UI defect manufactured
+    // it: playhead-bwxi's auto tier presented at DECISION time, so one ingest
+    // emitted every eligible window's banner at once ~87 s into a 72-minute
+    // episode. Downgrading to `consumedAutoSkip` / `consumed` puts the row
+    // exactly where it would have landed on its own merits — the listener DID
+    // play past all three skips, so `queueConsumedCatalogLearning` would have
+    // banked these same fingerprints at rank 1 anyway.
+    //
+    // BOTH COLUMNS MOVE, AND A LIFECYCLE-ONLY EDIT WOULD HAVE BEEN WORSE THAN A
+    // DELETE. `RepeatedAdCacheService.recordConfirmedRecurrence` and
+    // `AdCatalogStore.insert` both guard
+    // `learningSource.authoritativeLifecycle == learningLifecycle`, so
+    // `confirmedAutoSkipBanner` + `consumed` is a pair no writer will accept —
+    // the row would survive on disk as something the code refuses to
+    // re-establish. `consumedAutoSkip.authoritativeLifecycle == .consumed`, so
+    // the pair written here is the one the enum already calls authoritative.
+    //
+    // NOT A TOMBSTONE, AND NOT A DELETE. The product's only existing withdrawal
+    // path is `revokeRecurrenceEvidence`, which writes into
+    // `repeated_ad_cache_revocations` / `..._fingerprint_revocations`; the
+    // admission UPSERT consults both in a `WHERE NOT EXISTS`, so a tombstone
+    // blacklists that material FOREVER. That is far heavier than "the
+    // confirmation was not earned" and would suppress real ad audio on this
+    // show for good. A delete is wrong for the same reason one layer down: the
+    // consumed path would simply re-bank the fingerprint, so the only durable
+    // effect would be losing a true fingerprint until it did.
+    //
+    // NOTHING IS FORGOTTEN. The three `correction_events` receipts STAY — this
+    // rung does not touch that table at all — so the taps remain on the record
+    // and `playheadTimeAtCorrection` (V59) remains NULL on them, which is the
+    // honest reading. What changes is only what the CACHE claims about who
+    // vouched for the fingerprint.
+    //
+    // WHY THREE AND NOT SEVENTEEN. The table holds 17 rows, every one of them
+    // `explicitConfirmation`. Four are on this asset and the fourth is the
+    // PRE-ROLL [0.000 - 86.831], which Dan genuinely heard and genuinely meant;
+    // it keeps its grade. The other thirteen were never disclaimed by anybody.
+    // A predicate over `learningSource`, over the show, or over the asset would
+    // take rows nobody named, so the population is spelled as three
+    // `(sourceAssetId, sourceWindowId)` provenance pairs.
+    //
+    // IDEMPOTENT BECAUSE THE PREDICATE DISARMS ITSELF. The UPDATE requires the
+    // row to still carry `confirmedAutoSkipBanner` / `explicitConfirmation`, so
+    // once it has run the row no longer matches and a second pass changes
+    // nothing — on a hand-rewound stamp, and on every device that is not Dan's,
+    // where the rows are simply absent. Absent is the expected reading, not an
+    // error. And the downgrade is not a one-way door: a LATER genuine tap
+    // re-promotes the row (rank 1 <= 2), which is the whole point of putting it
+    // back on its merits.
+    private func migrateDowngradeUnearnedRecurrenceGradeV60IfNeeded() throws {
+        let observed = (try schemaVersion() ?? 1)
+        guard observed < 60 else { return }
+        // DO NOT STEP OVER A ROLLED-BACK V39 — same rationale as V40-V59.
+        guard observed >= 59 else { return }
+        guard try tableExists("repeated_ad_cache") else {
+            try setSchemaVersion(60)
+            return
+        }
+
+        var downgraded: [String] = []
+        var absent: [String] = []
+        var alreadyDowngraded: [String] = []
+        var mismatched: [String] = []
+
+        for grade in Self.unearnedRecurrenceGradesV60 {
+            let selectStmt = try prepare("""
+                SELECT learningSource, learningLifecycle
+                  FROM repeated_ad_cache
+                 WHERE sourceAssetId = ? AND sourceWindowId = ?
+                """)
+            bind(selectStmt, 1, grade.sourceAssetId)
+            bind(selectStmt, 2, grade.sourceWindowId)
+            let probe = sqlite3_step(selectStmt)
+            guard probe == SQLITE_ROW || probe == SQLITE_DONE else {
+                let message = String(cString: sqlite3_errmsg(db))
+                sqlite3_finalize(selectStmt)
+                throw AnalysisStoreError.queryFailed(message)
+            }
+            if probe == SQLITE_DONE {
+                sqlite3_finalize(selectStmt)
+                absent.append(grade.sourceWindowId)
+                continue
+            }
+            let storedSource = optionalText(selectStmt, 0)
+            let storedLifecycle = optionalText(selectStmt, 1)
+            sqlite3_finalize(selectStmt)
+
+            if storedSource == CatalogLearningSource.consumedAutoSkip.rawValue,
+               storedLifecycle == CatalogLearningLifecycle.consumed.rawValue {
+                alreadyDowngraded.append(grade.sourceWindowId)
+                continue
+            }
+            guard storedSource
+                    == CatalogLearningSource.confirmedAutoSkipBanner.rawValue,
+                  storedLifecycle
+                    == CatalogLearningLifecycle.explicitConfirmation.rawValue
+            else {
+                mismatched.append(grade.sourceWindowId)
+                logger.fault(
+                    "playhead-tktr V60: the recurrence row learned from this window does not carry the grade the tap bought — leaving it alone. Downgrade NOT performed for this window."
+                )
+                continue
+            }
+
+            let updateStmt = try prepare("""
+                UPDATE repeated_ad_cache
+                   SET learningSource = ?, learningLifecycle = ?
+                 WHERE sourceAssetId = ?
+                   AND sourceWindowId = ?
+                   AND learningSource = ?
+                   AND learningLifecycle = ?
+                """)
+            defer { sqlite3_finalize(updateStmt) }
+            bind(updateStmt, 1, CatalogLearningSource.consumedAutoSkip.rawValue)
+            bind(updateStmt, 2, CatalogLearningLifecycle.consumed.rawValue)
+            bind(updateStmt, 3, grade.sourceAssetId)
+            bind(updateStmt, 4, grade.sourceWindowId)
+            bind(
+                updateStmt,
+                5,
+                CatalogLearningSource.confirmedAutoSkipBanner.rawValue
+            )
+            bind(
+                updateStmt,
+                6,
+                CatalogLearningLifecycle.explicitConfirmation.rawValue
+            )
+            try step(updateStmt, expecting: SQLITE_DONE)
+            let changed = Int(sqlite3_changes(db))
+            guard changed == 1 else {
+                throw AnalysisStoreError.queryFailed(
+                    "playhead-tktr V60: verified recurrence grade updated \(changed) row(s), expected exactly 1"
+                )
+            }
+            downgraded.append(grade.sourceWindowId)
+        }
+
+        logger.notice(
+            "playhead-tktr V60: downgraded \(downgraded.count, privacy: .public) of \(Self.unearnedRecurrenceGradesV60.count, privacy: .public) unearned explicitConfirmation recurrence grade(s) to consumed; \(absent.count, privacy: .public) absent, \(alreadyDowngraded.count, privacy: .public) already consumed, \(mismatched.count, privacy: .public) left alone as a mismatch. The three banner receipts themselves are NOT touched — the spans were genuine ads and only the provenance rank was unearned."
+        )
+        try setSchemaVersion(60)
     }
 
     /// playhead-kg8h: durably CLAIM one REQUESTED day-0 kickoff, before any of

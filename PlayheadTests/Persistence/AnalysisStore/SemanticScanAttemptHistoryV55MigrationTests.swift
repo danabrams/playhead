@@ -491,7 +491,7 @@ struct SemanticScanAttemptHistoryV55MigrationTests {
         #expect(try await store.schemaVersion() == AnalysisStore.currentSchemaVersion)
         // Pinned to the LITERAL head so the next schema bump has to read this
         // rung, matching the convention of every sibling migration suite.
-        #expect(AnalysisStore.currentSchemaVersion == 59)
+        #expect(AnalysisStore.currentSchemaVersion == 60)
 
         let columns = try withReadOnlyHandle(in: dir) { db -> Set<String> in
             var stmt: OpaquePointer?

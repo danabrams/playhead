@@ -71,7 +71,7 @@ struct BackfillJobIdentityV44MigrationTests {
         // and never on `jobId`, `analysisAssetId` or the identity columns this
         // rung is about. A store with no `semantic_scan_results` rows at all is
         // a no-op for it.
-        #expect(AnalysisStore.currentSchemaVersion == 59)
+        #expect(AnalysisStore.currentSchemaVersion == 60)
 
         try await store.insertAsset(makeAsset(id: "asset-fresh"))
         try await store.insertBackfillJob(
@@ -175,7 +175,12 @@ struct BackfillJobIdentityV44MigrationTests {
         // so a sweep that greps only for `currentSchemaVersion` misses it. That
         // is the trap g7ln hit; it is recorded here because this line is where
         // it lands.
-        #expect(try await store.schemaVersion() == 59)
+        //
+        // playhead-tktr: V60 (the retraction of three disclaimed
+        // `bannerAutoSkipConfirmed` receipts). Same move, and the sweep that
+        // moved it found this line by grepping for the LITERAL, which is the
+        // only thing that works here.
+        #expect(try await store.schemaVersion() == 60)
         #expect(try await store.fetchBackfillJob(byId: "fm-legacy-complete") == nil,
                 "a completed row minted under the old preimage cannot be addressed again")
         #expect(try await store.fetchBackfillJob(byId: "fm-legacy-queued") == nil,
