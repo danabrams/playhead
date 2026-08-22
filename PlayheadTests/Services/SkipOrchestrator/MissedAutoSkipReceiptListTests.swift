@@ -518,6 +518,38 @@ struct MissedAutoSkipReceiptListTests {
             it can only be refused.
             """
         )
+
+        // AND THE READING THAT MAKES THE CLEAR LOAD-BEARING. `endEpisode` also
+        // clears `windows`, and `missedAutoSkipReceipts()` derives vetoability
+        // from `windows` — so a LEAKED row is invisible through this accessor
+        // right up until the new episode carries a window of the same id.
+        // Deliver exactly that. The window promotes to `.applied` at delivery
+        // (only the CARD waits for a position observation), so its material
+        // token is byte-identical to the leaked row's and the filter would
+        // re-validate it.
+        await orchestrator.receiveAdWindows([window])
+        #expect(
+            await orchestrator._managedDecisionStateForTesting(id: window.id)
+                == .applied,
+            """
+            the re-delivered window is not applied, so a leaked row could not \
+            be re-validated by it and this assertion would say nothing. \
+            Re-derive the fixture.
+            """
+        )
+        let afterRedelivery = await orchestrator.missedAutoSkipReceipts()
+        #expect(
+            afterRedelivery.isEmpty,
+            """
+            the PREVIOUS episode's uncorrected skip is being offered against \
+            THIS episode's window — \(afterRedelivery.map(\.windowId)). Window \
+            ids are not unique across episodes, so the live-state filter \
+            re-validates the stale row happily; its veto then names the old \
+            playback lifecycle and is refused. A leak that is invisible until \
+            an id repeats is still a leak, which is why the clear is explicit \
+            at both boundaries rather than left to the filter.
+            """
+        )
     }
 
     // MARK: - 4. Order, and the copy
