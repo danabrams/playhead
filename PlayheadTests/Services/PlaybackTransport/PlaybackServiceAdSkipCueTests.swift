@@ -139,24 +139,22 @@ struct PlaybackServiceAdSkipCueTests {
         )
     }
 
-    /// Proves the async-sequence interruption observer is LIVE before a test
-    /// depends on a single post reaching it, then restores `.playing` without
-    /// calling `play()` (which would start the real `AVPlayer` and let rate KVO
-    /// rewrite `status` asynchronously).
-    private static func awaitInterruptionObserverReady(
-        _ service: PlaybackService,
-        center: NotificationCenter
-    ) async {
-        let stream = await service.observeStates()
-        let ready = Task { await drainUntilPaused(stream) }
-        while !ready.isCancelled {
-            postInterruptionBegan(to: center)
-            if await service.snapshot().status == .paused { break }
-            try? await Task.sleep(for: .milliseconds(5))
-        }
-        await ready.value
-        await service._testingInjectState(playingState())
-    }
+    // NOTE ON POSTING EXACTLY ONCE. `PlaybackService` observes interruptions
+    // through an async notification SEQUENCE, whose registration lags `init`
+    // by some milliseconds (the lag documented on `finishObserverToken`, which
+    // is why THAT observer was moved to a block). The first version of these
+    // tests reposted `.began` in a loop until a pause was observed, and the
+    // duplicates are what failed: an extra notification, still queued in the
+    // same sequence, was handled AFTER the transition and silenced a cue the
+    // transition had legitimately sounded. A test that manufactures a second
+    // interruption is not testing an interruption.
+    //
+    // So every case below posts ONCE and drains the transport's own state
+    // stream with no deadline — the shape `InterruptionHandlingTests` argues
+    // for one directory over. Each post happens after a full skip transition
+    // has already run (many actor hops), so the observer is long since live;
+    // and if production ever stopped pausing, the drain parks and the
+    // `.timeLimit` trait fails deterministically rather than load-dependently.
 
     // MARK: - 1. It fires, once, on a real cut
 
@@ -357,22 +355,35 @@ struct PlaybackServiceAdSkipCueTests {
             cue: cue, center: center,
             sleeper: { _ in await interposer.run() }
         )
-        await Self.awaitInterruptionObserverReady(service, center: center)
+
+        // A first, UNINTERRUPTED cut, before anything is interposed. It is the
+        // precondition that makes the second one evidence — without it, "no
+        // cue" could equally mean the transport never emits at all — and its
+        // many actor hops are also what guarantee the async-sequence
+        // interruption observer is live before the only post this test makes.
+        // `SeamInterposer.run()` is inert until an action is installed, so this
+        // transition passes through the sleeper untouched.
+        await service._testingPerformSkipTransition(cueStart: 40, cueEnd: 70)
+        #expect(cue.playCount == 1, "precondition: an undisturbed cut sounds")
+        await service._testingInjectState(Self.playingState())
 
         let stream = await service.observeStates()
         await interposer.install {
             Self.postInterruptionBegan(to: center)
             await Self.drainUntilPaused(stream)
         }
-
         await service._testingPerformSkipTransition(
             cueStart: Self.cueStart, cueEnd: Self.cueEnd
         )
 
         #expect(await service.snapshot().status == .paused,
                 "precondition: the interruption paused playback")
-        #expect(cue.playCount == 0,
-                "a chime over a phone call is the alert this feature must never be")
+        #expect(cue.playCount == 1,
+                """
+                The interrupted cut must add no second sound — a chime over a \
+                phone call is the alert this feature must never be. Observed \
+                \(cue.events).
+                """)
         await service.tearDown()
     }
 
@@ -382,18 +393,18 @@ struct PlaybackServiceAdSkipCueTests {
         let center = NotificationCenter()
         let cue = RecordingAdSkipCuePlayer()
         let service = await Self.makeService(cue: cue, center: center)
-        await Self.awaitInterruptionObserverReady(service, center: center)
 
         await service._testingPerformSkipTransition(
             cueStart: Self.cueStart, cueEnd: Self.cueEnd
         )
-        #expect(cue.events.last == .play)
+        #expect(cue.events == [.play])
 
         let stream = await service.observeStates()
         Self.postInterruptionBegan(to: center)
         await Self.drainUntilPaused(stream)
 
-        #expect(cue.events.last == .stop)
+        #expect(cue.events == [.play, .stop],
+                "a cue must not outlive the audio it was acknowledging")
         await service.tearDown()
     }
 

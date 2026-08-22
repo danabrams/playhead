@@ -124,6 +124,13 @@ struct AdSkipCueSound: Sendable, Equatable {
     private static let placeholderPeak: Double = 0.22
     private static let placeholderDecaySeconds: Double = 0.13
     private static let placeholderAttackSeconds: Double = 0.006
+    /// Linear release over the tail so the last sample is digital silence.
+    /// An exponential decay alone still leaves a step at the buffer's end —
+    /// measured at 112/32767 for these constants — and a step is a click,
+    /// which is exactly the "glitch" reading the cue exists to be the opposite
+    /// of. The asset spec in the header asks a dropped-in sound for the same
+    /// thing, so the placeholder had better do it too.
+    private static let placeholderReleaseSeconds: Double = 0.02
     static let placeholderSampleRate: Int = 44_100
 
     /// A complete little-endian 16-bit mono PCM WAV file for the placeholder.
@@ -147,7 +154,9 @@ struct AdSkipCueSound: Sendable, Equatable {
                 2.0 * .pi * placeholderFundamentalHz * placeholderPartialRatio * seconds
             )
             let mixed = (fundamental + placeholderPartialLevel * fifth) / normalisation
-            let value = placeholderPeak * attack * decay * mixed
+            let remaining = placeholderDurationSeconds - seconds
+            let release = min(1.0, max(0.0, remaining / placeholderReleaseSeconds))
+            let value = placeholderPeak * attack * decay * release * mixed
             samples.append(Int16(clamping: Int((value * 32_767.0).rounded())))
         }
         return wavData(samples: samples, sampleRate: placeholderSampleRate)

@@ -94,10 +94,15 @@ struct AdSkipCueSoundTests {
             return Int16(bitPattern: raw)
         }
         let frames = payload.count / 2
-        #expect(abs(Int(sample(0))) <= 8, "the attack ramp must start at silence")
+        #expect(sample(0) == 0, "the attack ramp must start at digital silence")
         #expect(
-            abs(Int(sample(frames - 1))) <= 64,
-            "the decay must reach effective silence before the buffer ends"
+            abs(Int(sample(frames - 1))) <= 1,
+            """
+            The buffer must END at digital silence. An exponential decay alone \
+            leaves a step (measured at 112/32767 before the release ramp was \
+            added), and a step is a click — the exact "glitch" reading this \
+            cue exists to be the opposite of.
+            """
         )
         // And it must actually make a sound in between — an all-zero buffer
         // would satisfy both assertions above.
