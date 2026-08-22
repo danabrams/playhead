@@ -11930,16 +11930,25 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  # TK06 MUTATES THE BIND, NOT THE SQL, AND THE FIRST VERSION DID THE OPPOSITE.
+  # Dropping the `?` from the SET clause left six `bind()` calls against five
+  # placeholders, so every index shifted by one, `sourceAssetId` was compared
+  # against the literal "consumed", nothing matched, and `guard changed == 1`
+  # threw. That reddens EIGHT tests and proves only that a malformed statement
+  # throws — the rail was scored KILLED for a defect it never introduced. The
+  # count is what gave it away: one victim predicted, eight observed. Binding
+  # the ORIGINAL source value back keeps the statement well-formed and produces
+  # the actual half-downgrade.
   TK06)
     snippet OLD <<'EOF'
-                UPDATE repeated_ad_cache
-                   SET learningSource = ?, learningLifecycle = ?
-                 WHERE sourceAssetId = ?
+            bind(updateStmt, 1, CatalogLearningSource.consumedAutoSkip.rawValue)
 EOF
     snippet NEW <<'EOF'
-                UPDATE repeated_ad_cache
-                   SET learningSource = learningSource, learningLifecycle = ?
-                 WHERE sourceAssetId = ?
+            bind(
+                updateStmt,
+                1,
+                CatalogLearningSource.confirmedAutoSkipBanner.rawValue
+            )
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
