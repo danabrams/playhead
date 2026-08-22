@@ -1624,6 +1624,13 @@ FOCUSED_SUITES=(
   -only-testing:PlayheadTests/BannerPlayheadBiconditionalTests
   -only-testing:PlayheadTests/MissedAutoSkipReceiptListTests
   -only-testing:PlayheadTests/MissedAutoSkipListWiringSourceCanaryTests
+  # And `ViewLayerCorrectionAttributionCaptureCanaryTests`, which is NOT this
+  # bead's suite and is here for one reason: MS16's whole claim is that it stays
+  # GREEN while the sheet lists another episode's rows. That canary owns the
+  # ABSENCE of a live runtime read (playhead-254m) and it is what failed the
+  # merge gate on this bead's first provider. A mirror asserted in a comment and
+  # not run is not a mirror, so it runs.
+  -only-testing:PlayheadTests/ViewLayerCorrectionAttributionCaptureCanaryTests
   # playhead-tktr / playhead-ph2d: the V60 downgrade of three unearned
   # `repeated_ad_cache` grades (TK series). ONE suite, and one is right here:
   # the rung is eleven directions over a single migration, and every direction
