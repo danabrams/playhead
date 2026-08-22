@@ -940,7 +940,8 @@ struct BackfillCoarseCheckpointTests {
                     endTime: Double(idx + 1) * Self.segmentSeconds,
                     transcriptQuality: .good,
                     screening: CoarseScreeningSchema(disposition: .noAds, support: nil),
-                    latencyMillis: 1.0
+                    latencyMillis: 1.0,
+                    verdictProvenance: .model
                 )
             },
             failedWindows: []
@@ -961,7 +962,10 @@ struct BackfillCoarseCheckpointTests {
         )
     }
 
-    private func windowAt(_ idx: Int) -> FMCoarseWindowOutput {
+    private func windowAt(
+        _ idx: Int,
+        provenance: ScanVerdictProvenance = .model
+    ) -> FMCoarseWindowOutput {
         FMCoarseWindowOutput(
             windowIndex: idx,
             lineRefs: [idx],
@@ -969,7 +973,8 @@ struct BackfillCoarseCheckpointTests {
             endTime: Double(idx + 1) * Self.segmentSeconds,
             transcriptQuality: .good,
             screening: CoarseScreeningSchema(disposition: .noAds, support: nil),
-            latencyMillis: 1.0
+            latencyMillis: 1.0,
+            verdictProvenance: provenance
         )
     }
 
@@ -1055,6 +1060,60 @@ struct BackfillCoarseCheckpointTests {
         #expect(box.processedWindowCount == 1)
         let job = try #require(try await store.fetchBackfillJob(byId: jobId))
         #expect(job.progressCursor?.lastProcessedUpperBoundSec == nil)
+    }
+
+    // MARK: - playhead-iw7q: the window's PROVENANCE reaches the row
+
+    /// The wire-in the schema change exists for: whatever
+    /// `FMCoarseWindowOutput.verdictProvenance` says, the persisted `passA` row
+    /// says the same.
+    ///
+    /// Driven through `checkpointCoarseWindows` rather than asserted on
+    /// `makeScanResult` (which is private) because the question is whether the
+    /// value survives the WRITE — the whole defect was a field that existed on
+    /// the struct, travelled from the producer to the store, and was dropped at
+    /// the bind. A test that stopped at the struct would have passed for months.
+    @Test("playhead-iw7q: a permissive coarse window banks a row that SAYS so")
+    func checkpointCarriesVerdictProvenance() async throws {
+        let assetId = "asset-iw7q-provenance"
+        let jobId = "job-iw7q-provenance"
+        let store = try await makeTestStore()
+        try await store.insertAsset(makeAsset(id: assetId))
+        try await seedRunningJob(store, assetId: assetId, jobId: jobId)
+        let inputs = makeInputs(assetId: assetId, lineCount: 8)
+        let runner = makeProbedRunner(
+            store: store,
+            runtime: TestFMRuntime(tokenCountRule: { $0.count }).runtime,
+            probe: RowWriteProbe { _ in }
+        )
+
+        // Three windows, one per state, geometrically distinct so no two
+        // collide on `reuseKeyHash`.
+        let snapshot = FMCoarseBankedWindows(
+            plans: (0..<4).map { planAt($0) },
+            windows: [
+                windowAt(0, provenance: .model),
+                windowAt(1, provenance: .permissive),
+                windowAt(2, provenance: .unknown),
+            ],
+            failedWindows: []
+        )
+
+        await runner.checkpointCoarseWindows(
+            snapshot,
+            box: CoarseCheckpointBox(),
+            inputs: inputs,
+            plannedAudioSpans: plannedSpans(of: inputs),
+            jobId: jobId,
+            jobPhase: .fullEpisodeScan,
+            priorCursor: nil,
+            runMode: .shadow
+        )
+
+        let rows = try await passARows(store, assetId: assetId)
+            .sorted { $0.windowStartTime < $1.windowStartTime }
+        #expect(rows.count == 3)
+        #expect(rows.map(\.verdictProvenance) == [.model, .permissive, .unknown])
     }
 
     /// A `defuse()` that arrives after the LAST row still stops the CURSOR.
@@ -2208,7 +2267,8 @@ struct CoarseCoverageWalkTests {
             endTime: Double(index + 1) * 30.0,
             transcriptQuality: .good,
             screening: CoarseScreeningSchema(disposition: .noAds, support: nil),
-            latencyMillis: 1.0
+            latencyMillis: 1.0,
+            verdictProvenance: .model
         )
     }
 
@@ -2440,7 +2500,8 @@ struct CoarseCoverageWalkTests {
             endTime: 600.0,
             transcriptQuality: .good,
             screening: CoarseScreeningSchema(disposition: .noAds, support: nil),
-            latencyMillis: 1.0
+            latencyMillis: 1.0,
+            verdictProvenance: .model
         )
 
         let walk = BackfillJobRunner.coarseCoverageWalk(
@@ -2588,7 +2649,8 @@ struct CoarseCoverageWalkTests {
             endTime: 0.0,
             transcriptQuality: .good,
             screening: CoarseScreeningSchema(disposition: .noAds, support: nil),
-            latencyMillis: 1.0
+            latencyMillis: 1.0,
+            verdictProvenance: .model
         )
         let single = BackfillJobRunner.coarseCoverageWalk(
             plans: lonePlan,
@@ -2611,7 +2673,8 @@ struct CoarseCoverageWalkTests {
             endTime: 0.0,
             transcriptQuality: .good,
             screening: CoarseScreeningSchema(disposition: .noAds, support: nil),
-            latencyMillis: 1.0
+            latencyMillis: 1.0,
+            verdictProvenance: .model
         )
 
         let walk = BackfillJobRunner.coarseCoverageWalk(
@@ -2716,7 +2779,8 @@ struct CoarseCoverageWalkTests {
             endTime: 60.0,
             transcriptQuality: .good,
             screening: CoarseScreeningSchema(disposition: .noAds, support: nil),
-            latencyMillis: 1.0
+            latencyMillis: 1.0,
+            verdictProvenance: .model
         )
 
         let walk = BackfillJobRunner.coarseCoverageWalk(
@@ -2751,7 +2815,8 @@ struct CoarseCoverageWalkTests {
             endTime: 30.0,
             transcriptQuality: .good,
             screening: CoarseScreeningSchema(disposition: .noAds, support: nil),
-            latencyMillis: 1.0
+            latencyMillis: 1.0,
+            verdictProvenance: .model
         )
         let withFailure = BackfillJobRunner.coarseCoverageWalk(
             plans: shared,
@@ -2776,7 +2841,8 @@ struct CoarseCoverageWalkTests {
             endTime: 90.0,
             transcriptQuality: .good,
             screening: CoarseScreeningSchema(disposition: .noAds, support: nil),
-            latencyMillis: 1.0
+            latencyMillis: 1.0,
+            verdictProvenance: .model
         )
         let withUnpersisted = BackfillJobRunner.coarseCoverageWalk(
             plans: shared,
@@ -2832,7 +2898,8 @@ struct CoarseCoverageWalkTests {
             endTime: 60.0,
             transcriptQuality: .good,
             screening: CoarseScreeningSchema(disposition: .noAds, support: nil),
-            latencyMillis: 1.0
+            latencyMillis: 1.0,
+            verdictProvenance: .model
         )
         let walk = BackfillJobRunner.coarseCoverageWalk(
             plans: plans,
@@ -2906,7 +2973,8 @@ struct CoarseCoverageWalkInteriorHoleTests {
             endTime: end,
             transcriptQuality: .good,
             screening: CoarseScreeningSchema(disposition: .noAds, support: nil),
-            latencyMillis: 1.0
+            latencyMillis: 1.0,
+            verdictProvenance: .model
         )
     }
 

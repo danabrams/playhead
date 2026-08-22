@@ -71,7 +71,11 @@ struct BackfillJobIdentityV44MigrationTests {
         // and never on `jobId`, `analysisAssetId` or the identity columns this
         // rung is about. A store with no `semantic_scan_results` rows at all is
         // a no-op for it.
-        #expect(AnalysisStore.currentSchemaVersion == 60)
+        // 60 -> 61 read for this rung (playhead-iw7q): V61 ADDS ONE NULLABLE
+        // COLUMN, `semantic_scan_results.usedPermissiveFallback`, and writes
+        // nothing to it — no UPDATE, no DEFAULT, no row touched. It names no
+        // other table and no other column, so nothing this rung asserts moves.
+        #expect(AnalysisStore.currentSchemaVersion == 61)
 
         try await store.insertAsset(makeAsset(id: "asset-fresh"))
         try await store.insertBackfillJob(
@@ -180,7 +184,11 @@ struct BackfillJobIdentityV44MigrationTests {
         // `bannerAutoSkipConfirmed` receipts). Same move, and the sweep that
         // moved it found this line by grepping for the LITERAL, which is the
         // only thing that works here.
-        #expect(try await store.schemaVersion() == 60)
+        //
+        // playhead-iw7q: V61 (`semantic_scan_results.usedPermissiveFallback`).
+        // Same move, and found the same way — a grep for `currentSchemaVersion`
+        // does not reach this line, exactly as the paragraph above warns.
+        #expect(try await store.schemaVersion() == 61)
         #expect(try await store.fetchBackfillJob(byId: "fm-legacy-complete") == nil,
                 "a completed row minted under the old preimage cannot be addressed again")
         #expect(try await store.fetchBackfillJob(byId: "fm-legacy-queued") == nil,

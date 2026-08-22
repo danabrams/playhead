@@ -357,12 +357,17 @@ struct SemanticSweepAttributionAbsenceTests {
 
     /// THE LIMIT, PINNED SO IT CANNOT BE FORGOTTEN. A coarse row is never a
     /// source of dimensions — not even one carrying the refined shape.
-    /// `PermissiveAdClassifier.parse` writes the same hardcoded `.strong` into
-    /// a `passA` payload and `usedPermissiveFallback` has NO COLUMN in
-    /// `semantic_scan_results`, so a permissive coarse row is byte-identical to
-    /// a genuine one. Attribution can say the model named a brand; it can never
-    /// certify that the PRESENCE verdict under a `.unrefined` mark was the
-    /// model's at all.
+    /// Attribution can say the model named a brand; it does not certify that
+    /// the PRESENCE verdict under a `.unrefined` mark was the model's.
+    ///
+    /// playhead-iw7q: this comment used to give the REASON as "a permissive
+    /// coarse row is byte-identical to a genuine one", which stopped being true
+    /// at schema V61 — `SemanticScanResult.verdictProvenance` now records which
+    /// path produced a coarse verdict, and the sweep composer's certainty gate
+    /// already reads it. The LIMIT stands anyway, for a different reason: this
+    /// type reads DIMENSIONS (`commercialIntent` / `ownership` / anchors) and a
+    /// `CoarseSupportSchema` has none of them to read, whatever its provenance.
+    /// Wiring the new column into `Attribution` is playhead-6ruv's.
     @Test("a COARSE row never attributes, whatever its payload looks like")
     func coarseRowNeverAttributes() {
         let coarseWearingRefinedClothes = Fx.row(

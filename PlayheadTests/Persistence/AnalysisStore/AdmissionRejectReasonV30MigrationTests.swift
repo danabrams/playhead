@@ -65,7 +65,11 @@ struct AdmissionRejectReasonV30MigrationTests {
         // `backfill_jobs.progressCursor` to the prefix each asset's own
         // `semantic_scan_results` passA rows support, and touches no other
         // column and no other table. Nothing this rung asserts is named by it.
-        #expect(AnalysisStore.currentSchemaVersion == 60)
+        // 60 -> 61 read for this rung (playhead-iw7q): V61 ADDS ONE NULLABLE
+        // COLUMN, `semantic_scan_results.usedPermissiveFallback`, and writes
+        // nothing to it — no UPDATE, no DEFAULT, no row touched. It names no
+        // other table and no other column, so nothing this rung asserts moves.
+        #expect(AnalysisStore.currentSchemaVersion == 61)
         #expect(try probeColumnExists(in: dir, table: "analysis_jobs", column: "lastRejectReason"))
         #expect(try probeColumnExists(in: dir, table: "analysis_jobs", column: "lastRejectAt"))
     }

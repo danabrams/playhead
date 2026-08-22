@@ -1971,7 +1971,7 @@ actor AnalysisStore {
     /// assertions automatically follow the production constant — hardcoding
     /// the integer in tests has been a recurring source of stale-assertion
     /// flakes whenever the schema bumps.
-    nonisolated static let currentSchemaVersion = 60
+    nonisolated static let currentSchemaVersion = 61
 
     /// H1: minimum age (in seconds) a `backfill_jobs` / `final_pass_jobs`
     /// row stuck in `status='running'` must reach before the launch-time
@@ -2943,6 +2943,12 @@ actor AnalysisStore {
             // NOT deleted — the spans were genuine ads and only the provenance
             // rank was unearned. See the block comment on the migration.
             try migrateDowngradeUnearnedRecurrenceGradeV60IfNeeded()
+            // playhead-iw7q: `semantic_scan_results` learns WHO produced a
+            // row's verdict. Additive-only, one nullable column, and
+            // deliberately NOT backfilled — see the block comment on the
+            // migration for why a seeded 0 would be this bead's own defect
+            // shipped as a migration.
+            try migrateSemanticScanVerdictProvenanceV61IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -3371,6 +3377,15 @@ actor AnalysisStore {
         // to one ladder and not the other is invisible to any test written for
         // that rung.
         try migrateDowngradeUnearnedRecurrenceGradeV60IfNeeded()
+        // playhead-iw7q (v61): guarded on `tableExists`, and the single column
+        // add is `addColumnIfNeeded`, so a seeded fixture without
+        // `semantic_scan_results` — or one already carrying the V61 shape —
+        // still reaches v61.
+        //
+        // READ THE V60 NOTE ABOVE BEFORE ADDING A RUNG. A rung added to one
+        // ladder and not the other is invisible to any test written for that
+        // rung, and it cost V60 a commit.
+        try migrateSemanticScanVerdictProvenanceV61IfNeeded()
     }
     #endif
 
@@ -8794,6 +8809,84 @@ actor AnalysisStore {
         try setSchemaVersion(60)
     }
 
+    // MARK: V61 — a PERMISSIVE coarse row stops being byte-identical to a
+    // genuine one (playhead-iw7q)
+    //
+    /// `PermissiveAdGrammar.parse` writes a hardcoded `certainty: .strong` into
+    /// every `containsAd` it returns, and says so in its own header: *"the FM
+    /// never inferred these classification dimensions, the runner is hardcoding
+    /// them."* The REFINED half of that fabrication has recorded itself since
+    /// playhead-92im (`ownershipInferenceWasSuppressed: true` on every
+    /// `makeAnchorlessSpan`). The COARSE half recorded nothing:
+    /// `SemanticScanResult.usedPermissiveFallback` existed and had NO COLUMN, so
+    /// it was dropped at the write and a permissive `passA` row was
+    /// byte-identical at rest to one the model produced.
+    ///
+    /// Three consumers inherited the fabricated grade:
+    /// `SemanticSweepMarkComposer.certaintyBand(of:)` (the ceiling certainty
+    /// factor on a sweep mark), `AdDetectionService.buildFMLedgerEntries` (the
+    /// FM fusion weight, playhead-yx0f), and playhead-6ruv's attribution, which
+    /// could name a brand but could never certify that a `.unrefined` mark's
+    /// PRESENCE verdict was the model's.
+    ///
+    /// # THE BACKFILL IS `NULL`, AND THAT IS THE DECISION THIS MIGRATION MAKES
+    ///
+    /// There is no backfill and there cannot be one. The provenance of a
+    /// pre-V61 row is not recoverable from anything on disk — that
+    /// indistinguishability IS the defect — so the only two candidate seeds are
+    /// a lie and the truth:
+    ///
+    ///   * `DEFAULT 0` / `UPDATE … SET usedPermissiveFallback = 0` would assert
+    ///     *"the model graded this"* about **1,089 coarse rows on the
+    ///     2026-08-19 t4 pull and 1,406 on the 2026-08-21 t6 pull**, of which
+    ///     **282 and 362** actually carry a band that a consumer reads. That is
+    ///     this bead's own defect, inverted and shipped as a migration.
+    ///   * NULL says the record does not know, which is true of every one of
+    ///     them.
+    ///
+    /// So the column is added and nothing is written to it. **UNKNOWN IS NOT
+    /// ZERO**, and the property is enforced in code rather than by convention:
+    /// the column is nullable with no default, the reader maps NULL through
+    /// ``ScanVerdictProvenance/decoded(persistedFlag:)`` to
+    /// ``ScanVerdictProvenance/unknown``, and the one consumer that spends the
+    /// band asks ``ScanVerdictProvenance/licensesCoarseCertaintyBand``, which is
+    /// true for `.model` alone. A reader cannot reach `.unknown` and treat it as
+    /// either of the other two without writing `== .unknown`, which is a
+    /// deliberate act rather than a defaulted one.
+    ///
+    /// WHAT IT COSTS, measured on the t6 pull rather than argued: **113 of 125
+    /// recomposed sweep extents lose confidence, every one of them DOWNWARD**
+    /// (median 0.700 → 0.350, the `strong → nil` rung of the ladder), **0
+    /// upward**, and **zero crossings in either direction at the auto-skip
+    /// (0.80) or short-span-override (0.85) thresholds**. Sweep marks are
+    /// `markOnly` with a NULL `skipConfidence` — 119 of 122 persisted marks and
+    /// 0 of 122 respectively — so no confidence this lane can produce reaches
+    /// auto-skip at all. The direction is the conservative one throughout: a
+    /// verdict nobody can attribute stops claiming the ceiling.
+    ///
+    /// ADDITIVE AND IDEMPOTENT, so it needs no SAVEPOINT: `addColumnIfNeeded` is
+    /// a no-op on a store already carrying the V61 `CREATE TABLE`, and there is
+    /// no UPDATE to be non-idempotent.
+    private func migrateSemanticScanVerdictProvenanceV61IfNeeded() throws {
+        let observed = (try schemaVersion() ?? 1)
+        guard observed < 61 else { return }
+        // DO NOT STEP OVER A ROLLED-BACK V39 — same rationale as V40–V60.
+        guard observed >= 60 else { return }
+        guard try tableExists("semantic_scan_results") else {
+            try setSchemaVersion(61)
+            return
+        }
+        try addColumnIfNeeded(
+            table: "semantic_scan_results",
+            column: "usedPermissiveFallback",
+            definition: "INTEGER"
+        )
+        logger.notice(
+            "playhead-iw7q V61: semantic_scan_results.usedPermissiveFallback records WHO produced a row's verdict. Every pre-V61 row is left NULL = UNKNOWN and is NOT backfilled: a permissive coarse row was byte-identical to a genuine one, so no value could be recovered, and seeding 0 would certify every existing row as the model's own. Readers must not treat unknown as either — UNKNOWN IS NOT ZERO."
+        )
+        try setSchemaVersion(61)
+    }
+
     /// playhead-kg8h: durably CLAIM one REQUESTED day-0 kickoff, before any of
     /// the work it stands for has run.
     ///
@@ -11442,6 +11535,14 @@ actor AnalysisStore {
                 latencyMsTotal REAL,
                 latencyMsMax REAL,
                 latencySampleCount INTEGER,
+                -- playhead-iw7q (V61): WHO produced this row's verdict.
+                -- NULL = unknown, 0 = the model under its ordinary guardrails,
+                -- 1 = the permissive bypass, whose `certainty` the RUNNER
+                -- hardcodes. NULLABLE WITH NO DEFAULT for the V42/V52/V55/V56
+                -- reason, and here it is the whole point: a `DEFAULT 0` would
+                -- certify every pre-V61 row as the model's own, which is this
+                -- column's own defect inverted. UNKNOWN IS NOT ZERO.
+                usedPermissiveFallback INTEGER,
                 UNIQUE(reuseKeyHash)
             )
             """)
@@ -11524,6 +11625,15 @@ actor AnalysisStore {
         try addColumnIfNeeded(
             table: "semantic_scan_results",
             column: "latencySampleCount",
+            definition: "INTEGER"
+        )
+        // playhead-iw7q (V61): declared here as well as in
+        // `migrateSemanticScanVerdictProvenanceV61IfNeeded` so a fresh install
+        // and an upgrade converge on the same shape; both helpers are
+        // idempotent.
+        try addColumnIfNeeded(
+            table: "semantic_scan_results",
+            column: "usedPermissiveFallback",
             definition: "INTEGER"
         )
         try exec("CREATE INDEX IF NOT EXISTS idx_semantic_scan_results_asset_pass ON semantic_scan_results(analysisAssetId, scanPass)")
@@ -20566,8 +20676,9 @@ actor AnalysisStore {
     /// the read index, and it names its columns, so table ordinal never matters.
     ///
     /// playhead-bg2n appended 27–29 (firstAttemptAt, lastAttemptAt,
-    /// observedStatuses) and playhead-6gcy appended 30–32 (latencyMsTotal,
-    /// latencyMsMax, latencySampleCount), both at the TAIL for the reason below.
+    /// observedStatuses), playhead-6gcy appended 30–32 (latencyMsTotal,
+    /// latencyMsMax, latencySampleCount) and playhead-iw7q appended 33
+    /// (usedPermissiveFallback), all at the TAIL for the reason below.
     ///
     /// playhead-hx6n: the three V42 columns are APPENDED, never interleaved.
     /// `readSemanticScanResult` binds by positional index, so inserting a column
@@ -20584,7 +20695,8 @@ actor AnalysisStore {
         createdAt, scenePhase, runCorrelationId,
         suspendingLatencyMs, daemonPeersAtStart,
         firstAttemptAt, lastAttemptAt, observedStatuses,
-        latencyMsTotal, latencyMsMax, latencySampleCount
+        latencyMsTotal, latencyMsMax, latencySampleCount,
+        usedPermissiveFallback
         """
 
     /// H-1: canonicalize a `scanCohortJSON` before hashing so two
@@ -20945,8 +21057,9 @@ actor AnalysisStore {
              createdAt, scenePhase, runCorrelationId,
              suspendingLatencyMs, daemonPeersAtStart,
              firstAttemptAt, lastAttemptAt, observedStatuses,
-             latencyMsTotal, latencyMsMax, latencySampleCount)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             latencyMsTotal, latencyMsMax, latencySampleCount,
+             usedPermissiveFallback)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -21015,6 +21128,22 @@ actor AnalysisStore {
         bind(stmt, 31, latencyHistory.total)
         bind(stmt, 32, latencyHistory.max)
         bind(stmt, 33, latencyHistory.sampleCount)
+        // playhead-iw7q (V61). THE INCOMING VALUE, never carried forward from
+        // the existing row — and that is the opposite rule to `createdAt` and
+        // `firstAttemptAt` two blocks up, deliberately.
+        //
+        // Those two are properties of the ROW'S HISTORY, so a replace must not
+        // move them. This is a property of the VERDICT, and columns 9–10
+        // (`disposition`, `spansJSON`) are being overwritten with the incoming
+        // attempt's verdict on this same statement. Preserving the old
+        // provenance beside a new payload would attribute one attempt's path to
+        // another attempt's band — the standing defect class, in the one place
+        // this column exists to close it.
+        //
+        // `map`, never `?? 0`: `.unknown` writes NULL. A writer with no
+        // observation must not claim `.model`, which is what a coalesced zero
+        // would say. Same shape as `prewarmHit` on column 17.
+        bind(stmt, 34, result.verdictProvenance.persistedFlag.map { $0 ? 1 : 0 })
         try step(stmt, expecting: SQLITE_DONE)
     }
 
@@ -21805,6 +21934,16 @@ actor AnalysisStore {
             // column 19 = reuseKeyHash (not persisted back onto the struct)
             runMode: runMode,
             jobPhase: optionalText(stmt, 21) ?? "shadow",
+            // playhead-iw7q (V61): column 33. `optionalInt`, then
+            // `ScanVerdictProvenance.decoded(persistedFlag:)` — the one place a
+            // NULL becomes `.unknown`. `sqlite3_column_int` returns 0 for a
+            // NULL, and 0 here means `.model`, so the bare read would certify
+            // every pre-V61 row as the model's own. That is exactly the
+            // conflation this column exists to end, and it is the same trap
+            // `prewarmHit` documents two fields up.
+            verdictProvenance: ScanVerdictProvenance.decoded(
+                persistedFlag: optionalInt(stmt, 33).map { $0 != 0 }
+            ),
             // playhead-hx6n (V42). `createdAt` is `optionalDouble`, not
             // `sqlite3_column_double`: the latter returns 0.0 for a NULL, which
             // would date every pre-V42 row to 1970 and make it sort as the

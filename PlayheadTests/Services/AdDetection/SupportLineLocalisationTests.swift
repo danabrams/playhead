@@ -116,7 +116,13 @@ private enum LocalisationFixture {
             latencyMs: nil,
             prewarmHit: false,
             scanCohortJSON: makeCohortJSON(promptLabel: "shu5"),
-            transcriptVersion: version
+            transcriptVersion: version,
+            // playhead-iw7q: EXPLICIT, because the default is now `.unknown`.
+            // This fixture stands for a coarse row the MODEL produced — that is
+            // what makes its persisted band attributable at all — and the
+            // struct's default deliberately withholds the licence from a writer
+            // that says nothing.
+            verdictProvenance: .model
         )
     }
 

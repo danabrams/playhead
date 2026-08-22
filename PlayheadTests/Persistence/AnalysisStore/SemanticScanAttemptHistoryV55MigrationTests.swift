@@ -491,7 +491,14 @@ struct SemanticScanAttemptHistoryV55MigrationTests {
         #expect(try await store.schemaVersion() == AnalysisStore.currentSchemaVersion)
         // Pinned to the LITERAL head so the next schema bump has to read this
         // rung, matching the convention of every sibling migration suite.
-        #expect(AnalysisStore.currentSchemaVersion == 60)
+        // 60 -> 61 read for this rung (playhead-iw7q): V61 is on THIS table —
+        // it adds `semantic_scan_results.usedPermissiveFallback`. It is
+        // additive only: `addColumnIfNeeded` and nothing else, no UPDATE and no
+        // DEFAULT, so every existing column keeps its value and every row this
+        // rung reads is byte-identical before and after. The deliberate absence
+        // of a backfill is the point of that migration and is proved in its own
+        // suite; here it is what makes this rung's claims survive it.
+        #expect(AnalysisStore.currentSchemaVersion == 61)
 
         let columns = try withReadOnlyHandle(in: dir) { db -> Set<String> in
             var stmt: OpaquePointer?

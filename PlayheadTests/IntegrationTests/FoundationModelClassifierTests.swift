@@ -475,7 +475,8 @@ struct FoundationModelClassifierTests {
                             certainty: .moderate
                         )
                     ),
-                    latencyMillis: 10
+                    latencyMillis: 10,
+                    verdictProvenance: .model
                 ),
                 FMCoarseWindowOutput(
                     windowIndex: 1,
@@ -487,7 +488,8 @@ struct FoundationModelClassifierTests {
                         disposition: .noAds,
                         support: nil
                     ),
-                    latencyMillis: 10
+                    latencyMillis: 10,
+                    verdictProvenance: .model
                 )
             ],
             latencyMillis: 25,
@@ -533,7 +535,8 @@ struct FoundationModelClassifierTests {
                             certainty: .strong
                         )
                     ),
-                    latencyMillis: 8
+                    latencyMillis: 8,
+                    verdictProvenance: .model
                 )
             ],
             latencyMillis: 8,
@@ -612,7 +615,8 @@ struct FoundationModelClassifierTests {
                             certainty: .strong
                         )
                     ),
-                    latencyMillis: 8
+                    latencyMillis: 8,
+                    verdictProvenance: .model
                 )
             ],
             latencyMillis: 8,
@@ -1851,7 +1855,8 @@ struct FoundationModelClassifierTests {
                             certainty: .weak
                         )
                     ),
-                    latencyMillis: 1
+                    latencyMillis: 1,
+                    verdictProvenance: .model
                 )
             ],
             latencyMillis: 1,
@@ -2699,7 +2704,8 @@ struct FoundationModelClassifierTests {
                             certainty: .strong
                         )
                     ),
-                    latencyMillis: 5
+                    latencyMillis: 5,
+                    verdictProvenance: .model
                 )
             ],
             latencyMillis: 5,

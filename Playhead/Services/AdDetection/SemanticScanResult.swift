@@ -53,6 +53,107 @@ enum ScanScenePhase: String, Sendable, Hashable, CaseIterable {
     case unknown
 }
 
+/// playhead-iw7q (schema V61): WHO produced this row's verdict — the model under
+/// its ordinary guardrails, or the permissive bypass whose grade the RUNNER
+/// hardcodes.
+///
+/// # Why this is three-valued and not a `Bool`
+///
+/// `PermissiveAdGrammar.parse` writes a hardcoded `certainty: .strong` into
+/// the `passA` payload and says so in its own header: *"the FM never inferred
+/// these classification dimensions, the runner is hardcoding them."* The
+/// REFINED half of that fabrication records itself —
+/// `makeAnchorlessSpan` stamps `ownershipInferenceWasSuppressed: true` on every
+/// span (playhead-92im) — and the COARSE half recorded nothing at all, because
+/// `SemanticScanResult.usedPermissiveFallback` existed with **no column** in
+/// `semantic_scan_results`. A permissive coarse row was byte-identical at rest
+/// to one the model actually produced.
+///
+/// A two-valued column would have fixed that for rows written from now on and
+/// broken it for every row already on disk. There is no way to recover the
+/// provenance of a pre-V61 row — that indistinguishability IS the defect — so a
+/// migration that seeded `false` would assert *"the model graded this"* about
+/// **1,089 rows on the 2026-08-19 t4 pull and 1,406 on the 2026-08-21 t6 pull**
+/// that nobody can speak for. That is this bead's own defect, inverted and
+/// shipped as a backfill.
+///
+/// So: **UNKNOWN IS NOT ZERO.** The column is nullable with no default, NULL
+/// decodes to ``unknown``, and ``unknown`` is not ``model``.
+///
+/// # What each case licenses
+///
+///   * ``model`` — the `@Generable` path answered under Apple's ordinary
+///     guardrails. Its `CertaintyBand` is the model's own grade and is the ONLY
+///     state that licenses a coarse payload's band
+///     (`SemanticSweepMarkComposer.certaintyBand(of:)`).
+///   * ``permissive`` — the permissive string path answered, so any band on the
+///     payload was written by the runner. A POSITIVE claim, and the only state a
+///     telemetry count of permissive rows may include.
+///   * ``unknown`` — nothing recorded it. Every pre-V61 row, and any writer with
+///     no observation to offer. It licenses nothing in either direction: it is
+///     not evidence the model graded the row, and it is not evidence the bypass
+///     did.
+///
+/// There is deliberately no `Bool` bridge OUT of this type and no
+/// `init(rawValue:)` taking a boolean. The one way in from an observation is
+/// ``init(observedPermissiveFallback:)``, which is named for the observation
+/// precisely so that an ABSENCE cannot be spelled as one.
+enum ScanVerdictProvenance: String, Sendable, Hashable, CaseIterable {
+    case model
+    case permissive
+    case unknown
+
+    /// From a writer that ACTUALLY OBSERVED which path answered.
+    ///
+    /// Never reachable from a stored absence — that is ``unknown``, and it is
+    /// why this initialiser carries a label rather than being spelled
+    /// `init(_:)`. A call site that has to name `observedPermissiveFallback:`
+    /// has to have an observation to put in it.
+    init(observedPermissiveFallback: Bool) {
+        self = observedPermissiveFallback ? .permissive : .model
+    }
+
+    /// The persisted spelling: `nil` (SQL NULL) = ``unknown``, `false` =
+    /// ``model``, `true` = ``permissive``.
+    ///
+    /// Optional rather than `Bool` for the same reason `prewarmHit` became
+    /// optional at V52: a non-optional column forces a writer with no
+    /// observation to claim one.
+    var persistedFlag: Bool? {
+        switch self {
+        case .model: false
+        case .permissive: true
+        case .unknown: nil
+        }
+    }
+
+    /// The read half. A NULL column is ``unknown`` — never ``model``.
+    static func decoded(persistedFlag: Bool?) -> Self {
+        switch persistedFlag {
+        case .some(true): .permissive
+        case .some(false): .model
+        case .none: .unknown
+        }
+    }
+
+    /// May a `CertaintyBand` carried on a COARSE (`CoarseSupportSchema`)
+    /// payload be read as the MODEL'S OWN grade?
+    ///
+    /// Only for ``model``. The coarse payload has no per-span discriminator to
+    /// fall back on — that is the asymmetry with the refined shape, where
+    /// `ownershipInferenceWasSuppressed` travels with the span — so this
+    /// property is the whole of the record, and silence is not a licence.
+    var licensesCoarseCertaintyBand: Bool { self == .model }
+
+    /// Is this row KNOWN to have come from the permissive bypass?
+    ///
+    /// A positive claim, so ``unknown`` is `false` here as well. The two
+    /// predicates are deliberately not each other's negation: a reader that
+    /// wanted "how many permissive rows" and got `!licensesCoarseCertaintyBand`
+    /// would count every unattributed row as a bypass.
+    var isKnownPermissive: Bool { self == .permissive }
+}
+
 /// playhead-6gcy (schema V56): the three `semantic_scan_results` columns that
 /// hold a row's LATENCY history, and the ONE place an attempt is folded into it.
 ///
@@ -222,6 +323,14 @@ struct SemanticScanResult: Sendable, Equatable {
     /// Optional stable scope included in persistence reuse hashing so
     /// logically distinct jobs/phases that share the same window bounds do
     /// not collapse each other. Nil preserves legacy reuse semantics.
+    ///
+    /// **NOT PERSISTED AS ITSELF, and that is deliberate** (playhead-iw7q's
+    /// enumeration). It is an INGREDIENT of `reuseKeyHash`, which IS a column,
+    /// so it decides row identity without being recoverable from the row. The
+    /// value the runner puts here is the `jobId`, and the same `jobId` reaches
+    /// disk as `runCorrelationId` on every path that goes through
+    /// `BackfillJobRunner.attributed(_:jobId:)` — so "which job wrote this row"
+    /// is answerable, just not from this property.
     let reuseScope: String?
     /// Rev3-M5 (C4): run-mode discriminator persisted as a real column.
     /// Defaults to `.shadow` so existing call sites stay byte-identical.
@@ -235,18 +344,58 @@ struct SemanticScanResult: Sendable, Equatable {
     /// reconciliation and used by Rev3-M6 tests to verify that harvester
     /// and lexical narrowing phases actually produce strict-subset coverage.
     let jobPhase: String
+    // MARK: - The fields with NO COLUMN (playhead-iw7q enumerated them)
+    //
+    // `insertSemanticScanResult` binds 34 values and `semanticScanResultColumns`
+    // reads 34. Of this type's 36 stored properties, THREE reach neither —
+    // they exist in memory, travel from the producer to the store, and are
+    // dropped at the write:
+    //
+    //   * `reuseScope`               — folded into `reuseKeyHash` and not
+    //                                  recoverable from it. See below: it is a
+    //                                  KEY INGREDIENT, not a dropped attribute,
+    //                                  and it is the one of the three that is
+    //                                  deliberate.
+    //   * `refusalExplanation`       — dropped. playhead-807i.
+    //   * `permissiveFallbackReason` — dropped. playhead-807i.
+    //
+    // `usedPermissiveFallback` was a fourth until V61 and was the only one a
+    // CONSUMER read, which is why it is the one this bead fixed; see
+    // ``ScanVerdictProvenance``. The two remaining are diagnostic strings that
+    // no shipped consumer reads, so they are FILED rather than fixed here —
+    // adding a column nobody reads is not an improvement, and the enumeration
+    // is what makes the omission visible.
+
     /// playhead-36t: model-generated refusal explanation captured from
     /// `LanguageModelSession.GenerationError.Refusal.explanation` when
     /// the FM classifier refuses this window. Nil for successful scans,
     /// for permissive-path scans, and when the async explanation fetch
-    /// fails. Diagnostic only — does not affect routing or persistence
-    /// schema.
+    /// fails. Diagnostic only — does not affect routing.
+    ///
+    /// **NOT PERSISTED** — there is no `refusalExplanation` column, so this
+    /// survives only as long as the object does. playhead-807i.
     let refusalExplanation: String?
-    /// playhead-eu1: true when the @Generable default path refused this
-    /// window and the permissive string path was used as a fallback.
-    let usedPermissiveFallback: Bool
+    /// playhead-eu1 / playhead-iw7q (schema V61): WHO produced this row's
+    /// verdict — the `@Generable` path, the permissive string bypass, or a
+    /// binary that did not record it.
+    ///
+    /// **It was `Bool` and had NO COLUMN until V61**, so the flag `eu1`
+    /// introduced was computed by the runner, carried on this struct, and
+    /// dropped at the write. Three consumers inherited a `.strong` the runner
+    /// hardcoded and read it as the model's — see ``ScanVerdictProvenance`` for
+    /// the whole account, and for why `nil`/``ScanVerdictProvenance/unknown``
+    /// is a third state rather than a defaulted `false`.
+    ///
+    /// It DEFAULTS to ``ScanVerdictProvenance/unknown``, which is the
+    /// under-claiming direction: a writer that says nothing withholds the
+    /// licence instead of granting it.
+    let verdictProvenance: ScanVerdictProvenance
     /// Model-generated explanation from `Refusal.explanation` at the time the permissive
     /// fallback was triggered. `nil` if explanation was unavailable or the fallback was not used.
+    ///
+    /// **NOT PERSISTED** — there is no `permissiveFallbackReason` column.
+    /// ``verdictProvenance`` now records THAT the bypass ran; this records WHY,
+    /// and it is still dropped at the write. playhead-807i.
     let permissiveFallbackReason: String?
     /// playhead-hx6n (schema V42): UNIX seconds at which this row was written.
     ///
@@ -391,7 +540,7 @@ struct SemanticScanResult: Sendable, Equatable {
         runMode: SemanticScanPhase = .shadow,
         jobPhase: String = "shadow",
         refusalExplanation: String? = nil,
-        usedPermissiveFallback: Bool = false,
+        verdictProvenance: ScanVerdictProvenance = .unknown,
         permissiveFallbackReason: String? = nil,
         createdAt: Double? = nil,
         scenePhase: ScanScenePhase? = nil,
@@ -428,7 +577,7 @@ struct SemanticScanResult: Sendable, Equatable {
         self.runMode = runMode
         self.jobPhase = jobPhase
         self.refusalExplanation = refusalExplanation
-        self.usedPermissiveFallback = usedPermissiveFallback
+        self.verdictProvenance = verdictProvenance
         self.permissiveFallbackReason = permissiveFallbackReason
         self.createdAt = createdAt
         self.scenePhase = scenePhase
@@ -632,7 +781,7 @@ struct SemanticScanResult: Sendable, Equatable {
             runMode: runMode,
             jobPhase: jobPhase,
             refusalExplanation: refusalExplanation,
-            usedPermissiveFallback: usedPermissiveFallback,
+            verdictProvenance: verdictProvenance,
             permissiveFallbackReason: permissiveFallbackReason,
             createdAt: createdAt,
             scenePhase: scenePhase,
