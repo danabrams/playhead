@@ -363,15 +363,29 @@ struct MissedAutoSkipReceiptListTests {
         let receipt = try await Self.makeOneMissedReceipt(
             orchestrator, store, window: window, observeAt: 40
         )
+        // THE EXACT OBSERVATION, not merely "somewhere inside the span". The
+        // span START is also inside the span, so an `∈ [start, end)` assertion
+        // is satisfied by a receipt that records the WINDOW's edge instead of
+        // the LISTENER's position — the substitution of one quantity for
+        // another that this repo keeps finding, and the one that would make a
+        // list row claim the listener was at the top of the ad.
+        #expect(
+            receipt.playheadTimeAtSkip == 40,
+            """
+            the receipt says the skip fired at \(receipt.playheadTimeAtSkip) s \
+            and the observation that fired it was at 40 s. The span is \
+            [\(Self.preRollStart), \(Self.preRollEnd)), so its start would \
+            satisfy a containment test while naming the wrong thing.
+            """
+        )
         #expect(
             receipt.playheadTimeAtSkip >= Self.preRollStart
                 && receipt.playheadTimeAtSkip < Self.preRollEnd,
             """
-            the receipt says the skip fired at \(receipt.playheadTimeAtSkip) s, \
-            outside [\(Self.preRollStart), \(Self.preRollEnd)). The auto tier's \
-            emit trigger is containment on the same half-open predicate the \
-            transport fires the skip on, so this cannot be outside unless the \
-            two have come apart.
+            the receipt says the skip fired OUTSIDE the window it is about. The \
+            auto tier's emit trigger is containment on the same half-open \
+            predicate the transport fires the skip on, so this cannot happen \
+            unless the two have come apart.
             """
         )
 
