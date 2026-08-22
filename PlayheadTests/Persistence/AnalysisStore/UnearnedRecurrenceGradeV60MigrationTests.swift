@@ -45,7 +45,9 @@
 //      error.
 //   8. A ROW THAT IS NOT THE ROW IS LEFT ALONE.
 //   9. THE BLAST RADIUS IS ONE TABLE, and `ad_windows` in particular survives.
-//  10. A LADDER THAT CANNOT READ THE TABLE DOES NOT STAMP v60.
+//  10. AN ABSENT TABLE IS NOT AN ERROR. Unlike `correction_events`, this
+//      table is created only by a version-guarded rung, so the guard is
+//      genuinely reachable and the ladder reaches head downgrading nothing.
 //  11. THE POPULATION IS CLOSED AT THREE, checked as a VALUE.
 
 import Foundation
@@ -654,10 +656,23 @@ struct UnearnedRecurrenceGradeV60MigrationTests {
         #expect(try rowCount(in: dir, table: "ad_windows") == 4)
     }
 
-    // MARK: - 10. A ladder that cannot read the table does not stamp v60
+    // MARK: - 10. An absent table is not an error, and the guard IS reachable
+    //
+    // THIS DIRECTION ASSERTED THE OPPOSITE ONE COMMIT AGO, AND THE BATTERY'S
+    // UNMUTATED BASELINE IS WHAT SAID SO. It was carried over from the
+    // withdrawn deletion suite, where it was TRUE: `correction_events` is
+    // `ALTER`ed UNCONDITIONALLY hundreds of rungs before V60, so a database
+    // missing it dies in the ladder and V60's `tableExists` guard is
+    // unreachable. `repeated_ad_cache` is a different table with a different
+    // history — `createTables()` does not create it, only the version-guarded
+    // V21 rung does — so at a V59 stamp it is simply ABSENT, the guard fires,
+    // and the ladder reaches head having downgraded nothing.
+    //
+    // Same shape as the standing defect class one layer up: a claim that named
+    // one table, read as though it named another.
 
-    @Test("a ladder that cannot read repeated_ad_cache does not stamp v60")
-    func migrationDoesNotStampAVersionItCouldNotReach() async throws {
+    @Test("a fixture without repeated_ad_cache reaches v60 and downgrades nothing")
+    func migrationWithoutTheTable() async throws {
         let dir = try makeTempDir(prefix: "TktrV60NoTable")
         defer { try? FileManager.default.removeItem(at: dir) }
 
@@ -672,18 +687,24 @@ struct UnearnedRecurrenceGradeV60MigrationTests {
         #expect(sqlite3_exec(db, "DROP TABLE repeated_ad_cache", nil, nil, nil) == SQLITE_OK)
         sqlite3_close_v2(db)
 
-        AnalysisStore.resetMigratedPathsForTesting()
-        let reopened = try AnalysisStore(directory: dir)
-        await #expect(throws: (any Error).self) {
-            try await reopened.migrate()
-        }
-        // Read the stamp OFF DISK. `AnalysisStore.schemaVersion()` opens
-        // lazily, so asking the store would re-enter the same failing ladder
-        // and throw instead of answering.
+        let reopened = try await remigrate(dir)
         #expect(
-            try rawSchemaVersion(in: dir) == "59",
-            "a run that could not read the table must not claim to have downgraded anything"
+            try await reopened.schemaVersion() == AnalysisStore.currentSchemaVersion,
+            "an absent table is not an error — the rung has nothing to downgrade and says so by reaching head"
         )
+        // The stamp is also read OFF DISK, because `schemaVersion()` opens
+        // lazily and would answer from the same ladder under test.
+        #expect(try rawSchemaVersion(in: dir) == String(AnalysisStore.currentSchemaVersion))
+        // And the table really is still gone — the rung did not resurrect it.
+        var check: OpaquePointer?
+        #expect(sqlite3_open_v2(dbURL.path, &check, SQLITE_OPEN_READONLY, nil) == SQLITE_OK)
+        var stmt: OpaquePointer?
+        let existsSQL = "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='repeated_ad_cache'"
+        #expect(sqlite3_prepare_v2(check, existsSQL, -1, &stmt, nil) == SQLITE_OK)
+        #expect(sqlite3_step(stmt) == SQLITE_ROW)
+        #expect(sqlite3_column_int(stmt, 0) == 0, "V60 creates no table; it only ever repairs one")
+        sqlite3_finalize(stmt)
+        sqlite3_close_v2(check)
     }
 
     // MARK: - 11. The population is closed at three, as a value

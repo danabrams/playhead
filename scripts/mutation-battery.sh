@@ -4553,7 +4553,7 @@ T_TK_THIRTEEN="the other thirteen explicitConfirmation rows keep their grade"
 T_TK_TOMBSTONE="V60 writes no revocation: a tombstone is permanent and is the wrong instrument"
 T_TK_IDEM="a second run changes nothing, and a database without these rows migrates cleanly"
 T_TK_IMPOSTER="a provenance pair carrying a grade the tap did not buy is left alone"
-T_TK_STAMP="a ladder that cannot read repeated_ad_cache does not stamp v60"
+T_TK_NOTABLE="a fixture without repeated_ad_cache reaches v60 and downgrades nothing"
 T_TK_WINDOWS="the ad_windows the downgraded rows were learned from survive"
 T_TK_TABLE="the downgrade table names the three unearned grades and not the pre-roll"
 
