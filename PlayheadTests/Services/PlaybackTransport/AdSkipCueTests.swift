@@ -108,6 +108,23 @@ struct AdSkipCueSoundTests {
         // would satisfy both assertions above.
         let peak = (0..<frames).map { abs(Int(sample($0))) }.max() ?? 0
         #expect(peak > 2_000, "the placeholder must be audible, peak=\(peak)")
+
+        // `sample(0) == 0` alone does NOT prove there is an attack ramp: both
+        // partials are sines, so the buffer starts at zero whether or not one
+        // exists. What an attack ramp actually claims is that the first
+        // millisecond is quiet RELATIVE to the body — so that is what is
+        // measured. Without the ramp the signal reaches full amplitude inside
+        // one period of the fundamental (~56 samples at 784 Hz / 44.1 kHz).
+        let earlyPeak = (0..<60).map { abs(Int(sample($0))) }.max() ?? 0
+        #expect(
+            earlyPeak * 3 < peak,
+            """
+            The attack must RAMP: the first 60 samples peaked at \(earlyPeak) \
+            against a body peak of \(peak). A sine that opens at full \
+            amplitude has no step in value but a step in slope, and that is a \
+            click.
+            """
+        )
     }
 
     @Test("AVAudioPlayer can decode the placeholder")
@@ -185,7 +202,15 @@ struct AdSkipCueSoundTests {
             AdSkipCueSound(source: .placeholderTone).makePreparedPlayer()
         )
         #expect(player.volume == AdSkipCueSound.level)
-        #expect(player.numberOfLoops == 0)
+        #expect(player.numberOfLoops == 0, "a cue that loops is an alarm")
+        // Not a taste threshold — the LEVEL is Dan's. This is the mechanism
+        // claim underneath it: the cue is authored quiet because it plays
+        // under a show that has just been ducked and is about to come back,
+        // and it is deliberately NOT ducked with the episode (that is the
+        // point of a separate player). Shipping it at full scale makes the
+        // acknowledgement louder than the thing it acknowledges.
+        #expect(AdSkipCueSound.level < 1.0,
+                "observed \(AdSkipCueSound.level)")
     }
 
     // MARK: Helpers
