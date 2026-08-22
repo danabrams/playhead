@@ -182,7 +182,14 @@ struct SemanticScanRunAttributionTests {
         // `transcript_chunks` rows and builds a UNIQUE index on that table. It
         // names no `semantic_scan_results` column and back-fills nothing, so
         // the no-backfill proof below still has something to prove.
-        #expect(AnalysisStore.currentSchemaVersion == 60)
+        // 60 -> 61 read for this rung (playhead-iw7q): V61 is on THIS table —
+        // it adds `semantic_scan_results.usedPermissiveFallback`. It is
+        // additive only: `addColumnIfNeeded` and nothing else, no UPDATE and no
+        // DEFAULT, so every existing column keeps its value and every row this
+        // rung reads is byte-identical before and after. The deliberate absence
+        // of a backfill is the point of that migration and is proved in its own
+        // suite; here it is what makes this rung's claims survive it.
+        #expect(AnalysisStore.currentSchemaVersion == 61)
         for column in ["createdAt", "scenePhase", "runCorrelationId"] {
             #expect(
                 try probeColumnExists(in: dir, table: "semantic_scan_results", column: column),
