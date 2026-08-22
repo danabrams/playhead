@@ -10997,11 +10997,24 @@ MUTATIONS=(
   # the episode (that is the point of a separate player).
   "NQ18|1189|NQSND|The placeholder produces a prepared player at the declared level"
 
-  # NQ19 — the Settings toggle binds a LITERAL key that has drifted from the
+  # NQ19 — the Settings toggle binds a LITERAL key that has DRIFTED from the
   # one the seam reads. The switch moves, writes a key nobody consults, and the
   # cue keeps sounding. Nothing in this tree drives `SettingsView`, so the wire
   # canary is the ONLY instrument — which is the whole reason it exists.
-  "NQ19|1191|NQSET|AdSkipCueSourceCanaryTests/testTheSettingsToggleWritesTheKeyTheSeamReads;AdSkipCueSourceCanaryTests/testTheKeyLiteralAppearsInExactlyOneProductionFile"
+  #
+  # THE FIRST VERSION OF THIS RECORD ALSO EXPECTED THE "one spelling" RAIL AND
+  # WAS WRONG, which is the check on predicted-vs-observed doing its job: NQ19
+  # reported SURVIVED with one of two expected tests red. A drifted key is still
+  # ONE occurrence of `playback.adSkipCueEnabled` in the tree, so the census
+  # rail cannot see it. That rail catches the OTHER defect — the same key spelt
+  # twice — and NQ20 is what proves it does.
+  "NQ19|1191|NQSET|AdSkipCueSourceCanaryTests/testTheSettingsToggleWritesTheKeyTheSeamReads"
+
+  # NQ20 — the toggle spells the key as a LITERAL that is, today, correct.
+  # Behaviourally equivalent on the day it lands, which is exactly why it needs
+  # a rail: two spellings of one key is the state from which a rename moves one
+  # and not the other, and no runtime assertion can ever fail on it.
+  "NQ20|1192|NQSET|AdSkipCueSourceCanaryTests/testTheSettingsToggleWritesTheKeyTheSeamReads;AdSkipCueSourceCanaryTests/testTheKeyLiteralAppearsInExactlyOneProductionFile"
 
   # NQ99 — VACUITY CONTROL, and it MUST SURVIVE. The local holding the request
   # instant in `playAdSkipCue` is renamed at its declaration and at both uses;
@@ -11278,6 +11291,7 @@ describe_mutation() {
     NQ17) echo "nqwr: the re-trigger window is shortened below the placeholder's own length, so a cue can overlap itself" ;;
     NQ18) echo "nqwr: the prepared player is left at full scale — the acknowledgement louder than what it acknowledges" ;;
     NQ19) echo "nqwr: the Settings toggle binds a LITERAL key that has drifted from the seam's — the switch writes a key nobody reads" ;;
+    NQ20) echo "nqwr: the toggle spells the key as a literal that is correct TODAY — two spellings, from which a rename moves one and not the other" ;;
     NQ99) echo "VACUITY CONTROL — the request-instant local in playAdSkipCue is renamed and nothing else is. MUST SURVIVE" ;;
     YX99) echo "VACUITY CONTROL — the band in buildFMLedgerEntries is bound through a renamed intermediate on the line YX01 rewrites; nothing else changes. MUST SURVIVE" ;;
     NY01) echo "AdDetectionService.hotPathCandidates sorts the RAW array — the shipped defect: runBackfill canonicalized and the hot path did not" ;;
@@ -25694,6 +25708,17 @@ EOF
 EOF
     snippet NEW <<'EOF'
     @AppStorage("playback.adSkipCueSound")
+    private var adSkipCueEnabled = AdSkipCueSettings.defaultValue
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  NQ20)
+    snippet OLD <<'EOF'
+    @AppStorage(AdSkipCueSettings.userDefaultsKey)
+    private var adSkipCueEnabled = AdSkipCueSettings.defaultValue
+EOF
+    snippet NEW <<'EOF'
+    @AppStorage("playback.adSkipCueEnabled")
     private var adSkipCueEnabled = AdSkipCueSettings.defaultValue
 EOF
     patch "$file" "$OLD" "$NEW" ;;
