@@ -484,12 +484,62 @@ struct MissedAutoSkipReceiptListTests {
 
     // MARK: - 3. The list is per-episode
 
-    /// A missed receipt must not outlive the episode that produced it. The
-    /// live-state filter would hide it anyway, which is exactly why the clear
-    /// has to be explicit: a leak nobody can see is still a leak, and window
-    /// ids are not unique across episodes.
-    @Test("Missed receipts do not survive an episode boundary")
-    func missedReceiptsAreClearedAtTheEpisodeBoundary() async throws {
+    /// A missed receipt must not outlive the episode that produced it — and
+    /// this is asserted on the RAW dictionary, because the two clears MASK EACH
+    /// OTHER.
+    ///
+    /// `missedAutoSkipReceipts()` derives vetoability from `windows`, and
+    /// `endEpisode` clears `windows` as well, so after `endEpisode` the public
+    /// accessor returns an empty list whether or not the dictionary was
+    /// cleared. The first version of this test asserted exactly that and was
+    /// satisfied by an empty list it got for the wrong reason: mutation MS06
+    /// (delete the `endEpisode` clear) SURVIVED twice with this suite green.
+    /// A rail that cannot see its own subject is not a rail, which is what
+    /// `_missedAutoSkipReceiptCountForTesting()` exists for.
+    @Test("endEpisode clears the receipts themselves, not merely the list they are read through")
+    func endEpisodeClearsTheReceiptsThemselves() async throws {
+        let (orchestrator, store) = try await Self.makeHarness()
+        let window = Self.autoWindow(
+            id: "preroll", start: Self.preRollStart, end: Self.preRollEnd
+        )
+        _ = try await Self.makeOneMissedReceipt(
+            orchestrator, store, window: window, observeAt: 40
+        )
+        // NON-VACUITY: the row is really there before the boundary, so a zero
+        // afterwards is a clear rather than a fixture that never populated.
+        #expect(
+            await orchestrator._missedAutoSkipReceiptCountForTesting() == 1,
+            "the fixture recorded no receipt, so the assertion below proves nothing"
+        )
+
+        await orchestrator.endEpisode()
+        #expect(
+            await orchestrator._missedAutoSkipReceiptCountForTesting() == 0,
+            """
+            a missed receipt survived endEpisode. It is invisible through \
+            `missedAutoSkipReceipts()` — `windows` is empty too — right up \
+            until a later episode carries a window of the same id, at which \
+            point the filter re-validates the stale row and offers a veto that \
+            names the previous playback lifecycle. Window ids are not unique \
+            across episodes.
+            """
+        )
+        #expect(
+            await orchestrator.missedAutoSkipReceipts().isEmpty,
+            "and the list read through the filter is empty too"
+        )
+    }
+
+    /// THE OTHER CLEAR, and the one path that can see it behaviourally: a
+    /// `beginEpisode` with NO `endEpisode` in front of it.
+    ///
+    /// That is a same-asset REPLAY, and it is why every sibling per-episode
+    /// collection in this actor is cleared at both boundaries rather than at
+    /// one. Here the new transaction really does repopulate `windows`, so a
+    /// leaked row is re-validated by the filter and offered — with the OLD
+    /// playback lifecycle generation on it, so its veto can only be refused.
+    @Test("A replay with no endEpisode in front of it does not inherit the previous transaction's rows")
+    func aReplayDoesNotInheritThepreviousTransactionsRows() async throws {
         let (orchestrator, store) = try await Self.makeHarness()
         let window = Self.autoWindow(
             id: "preroll", start: Self.preRollStart, end: Self.preRollEnd
@@ -498,12 +548,7 @@ struct MissedAutoSkipReceiptListTests {
             orchestrator, store, window: window, observeAt: 40
         )
 
-        await orchestrator.endEpisode()
-        #expect(
-            await orchestrator.missedAutoSkipReceipts().isEmpty,
-            "a missed receipt survived endEpisode"
-        )
-
+        // Same episode, new playback transaction — no endEpisode.
         await orchestrator.beginEpisode(
             analysisAssetId: Self.assetId,
             episodeId: Self.episodeId,
@@ -511,43 +556,35 @@ struct MissedAutoSkipReceiptListTests {
             playbackLifecycleGeneration: Self.playbackLifecycleGeneration + 1
         )
         #expect(
-            await orchestrator.missedAutoSkipReceipts().isEmpty,
-            """
-            a missed receipt from the previous playback transaction is visible \
-            in the new one. Its veto carries the OLD lifecycle generation, so \
-            it can only be refused.
-            """
+            await orchestrator._missedAutoSkipReceiptCountForTesting() == 0,
+            "a receipt from the previous playback transaction survived beginEpisode"
         )
 
-        // AND THE READING THAT MAKES THE CLEAR LOAD-BEARING. `endEpisode` also
-        // clears `windows`, and `missedAutoSkipReceipts()` derives vetoability
-        // from `windows` — so a LEAKED row is invisible through this accessor
-        // right up until the new episode carries a window of the same id.
-        // Deliver exactly that. The window promotes to `.applied` at delivery
-        // (only the CARD waits for a position observation), so its material
-        // token is byte-identical to the leaked row's and the filter would
-        // re-validate it.
+        // And the harm, driven rather than reasoned about: the new transaction
+        // carries a window with the SAME id, which promotes to `.applied` at
+        // delivery (only the CARD waits for a position observation), so its
+        // material token is byte-identical to the leaked row's and the filter
+        // would re-validate it.
         await orchestrator.receiveAdWindows([window])
         #expect(
             await orchestrator._managedDecisionStateForTesting(id: window.id)
                 == .applied,
             """
             the re-delivered window is not applied, so a leaked row could not \
-            be re-validated by it and this assertion would say nothing. \
+            be re-validated by it and the assertion below would say nothing. \
             Re-derive the fixture.
             """
         )
-        let afterRedelivery = await orchestrator.missedAutoSkipReceipts()
+        let listed = await orchestrator.missedAutoSkipReceipts()
         #expect(
-            afterRedelivery.isEmpty,
+            listed.isEmpty,
             """
-            the PREVIOUS episode's uncorrected skip is being offered against \
-            THIS episode's window — \(afterRedelivery.map(\.windowId)). Window \
-            ids are not unique across episodes, so the live-state filter \
-            re-validates the stale row happily; its veto then names the old \
-            playback lifecycle and is refused. A leak that is invisible until \
-            an id repeats is still a leak, which is why the clear is explicit \
-            at both boundaries rather than left to the filter.
+            the PREVIOUS transaction's uncorrected skip is being offered \
+            against THIS one's window — \(listed.map(\.windowId)). Its veto \
+            names playback generation \
+            \(Self.playbackLifecycleGeneration) and the orchestrator is on \
+            \(Self.playbackLifecycleGeneration + 1), so tapping it is refused: \
+            a button that does nothing.
             """
         )
     }

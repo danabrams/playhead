@@ -3099,7 +3099,8 @@ T_2D6I_ANSWERED="An answered row leaves the list"
 T_2D6I_WITHHELD="A row whose producer material was replaced is withheld, not offered and refused"
 T_2D6I_POSITION="A veto from the list records where the listener actually was, not where the skip was"
 T_2D6I_NOCONFIRM="A missed skip writes no confirmation — only a card can confirm"
-T_2D6I_EPISODE="Missed receipts do not survive an episode boundary"
+T_2D6I_ENDEP="endEpisode clears the receipts themselves, not merely the list they are read through"
+T_2D6I_REPLAY="A replay with no endEpisode in front of it does not inherit the previous transaction's rows"
 T_2D6I_ORDER="The list is in episode order"
 T_2D6I_COPY="A row names the sponsor when one is known, and never a quantity"
 T_2D6I_HOP="A list row driven through the card's own action closure forwards every identity field"
@@ -11308,7 +11309,7 @@ MUTATIONS=(
   # MS01 IS THE SHIPPED DEFECT VERBATIM: the unattached arm records nothing, so
   # the skip leaves no trace. Own batch — it removes the whole feature at once,
   # so a batched partner would be credited off it.
-  "MS01|1400|ORCH|$T_2D6I_PARTITION;$T_2D6I_ATTACH;$T_2D6I_VETO;$T_2D6I_ANSWERED;$T_2D6I_WITHHELD;$T_2D6I_POSITION;$T_2D6I_NOCONFIRM;$T_2D6I_EPISODE;$T_2D6I_ORDER;$T_2D6I_COPY"
+  "MS01|1400|ORCH|$T_2D6I_PARTITION;$T_2D6I_ATTACH;$T_2D6I_VETO;$T_2D6I_ANSWERED;$T_2D6I_WITHHELD;$T_2D6I_POSITION;$T_2D6I_NOCONFIRM;$T_2D6I_ENDEP;$T_2D6I_REPLAY;$T_2D6I_ORDER;$T_2D6I_COPY"
 
   # MS02 IS THE DOUBLE-DELIVERY DIRECTION NOBODY LOOKS AT: the receipt is
   # recorded UNCONDITIONALLY, so a skip that got its card also accumulates a row
@@ -11332,11 +11333,26 @@ MUTATIONS=(
   "MS04|1403|ORCH|$T_2D6I_ANSWERED"
   "MS05|1404|ORCH|$T_2D6I_WITHHELD"
 
-  # MS06 drops the endEpisode clear. The live-state filter hides the leak, which
-  # is exactly why the clear is not optional: window ids are not unique across
-  # episodes, so a leaked row can be re-validated by the NEXT episode's window
-  # and offer a veto for the wrong audio.
-  "MS06|1405|ORCH|$T_2D6I_EPISODE"
+  # MS06/MS15 are the two per-episode clears, and THEY MASK EACH OTHER — which
+  # is why they are two rails and why one of them needed a raw accessor.
+  #
+  # MS06 (endEpisode) SURVIVED TWICE before the rail below existed, with every
+  # focused suite green including the test then named "Missed receipts do not
+  # survive an episode boundary". `missedAutoSkipReceipts()` derives
+  # vetoability from `windows`, and `endEpisode` clears `windows` too, so the
+  # public accessor returns an empty list either way; the only route back to a
+  # populated `windows` is `beginEpisode`, which clears the dictionary itself.
+  # An empty list was being read as evidence of a clear that had not run — the
+  # standing defect class, inside a rail. `_missedAutoSkipReceiptCountForTesting()`
+  # is what closes it, and it is the only thing that can.
+  "MS06|1405|ORCH|$T_2D6I_ENDEP"
+
+  # MS15 (beginEpisode) is observable BEHAVIOURALLY, and the path that sees it
+  # is a same-asset REPLAY — a `beginEpisode` with no `endEpisode` in front of
+  # it. There the new transaction really does repopulate `windows`, so a leaked
+  # row is re-validated by the filter and offered, carrying the OLD playback
+  # lifecycle generation, so its veto can only be refused.
+  "MS15|1415|ORCH|$T_2D6I_REPLAY"
 
   # MS07/MS08 are the two quantities this feature could substitute for each
   # other, one on each side of the hop. MS07 records the SPAN's start as the
@@ -11657,7 +11673,8 @@ describe_mutation() {
     MS03) echo "2d6i THE WRONG FIX: the missed receipt is replayed to a newly attached host as a CARD — a skip affordance for audio already gone" ;;
     MS04) echo "2d6i: the read-time filter stops checking the decision state, so an already-answered row keeps being offered" ;;
     MS05) echo "2d6i: the read-time filter stops checking the material token, so a row the seam would refuse on its token is offered anyway" ;;
-    MS06) echo "2d6i: endEpisode stops clearing the list, so a row can be re-validated by the NEXT episode's window of the same id" ;;
+    MS06) echo "2d6i: endEpisode stops clearing the receipts — invisible through the filtered accessor, which is why the raw one exists" ;;
+    MS15) echo "2d6i: beginEpisode stops clearing the receipts, so a same-asset REPLAY inherits the previous transaction's uncorrectable rows" ;;
     MS07) echo "2d6i: the receipt records the SPAN START as the position the skip fired at — inside the span, so containment tests cannot see it" ;;
     MS08) echo "2d6i: the veto stamps the span onto playheadTimeAtCorrection, manufacturing the containment bwxi added the column to expose" ;;
     MS09) echo "2d6i: the list stops being in episode order" ;;
@@ -26497,6 +26514,40 @@ EOF
 EOF
     snippet NEW <<'EOF'
         latestUserSeekOperationGeneration = 0
+        banneredWindowIds.removeAll()
+        emittedAutoSkipBannerWindowIds.removeAll()
+        // playhead-bwxi: an armed auto-skip banner is per-episode state, and a
+        // leak here would present the previous episode's receipt against the
+        // next episode's playhead.
+        armedAutoSkipBannerWindowIds.removeAll()
+        suggestBanneredWindowIds.removeAll()
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # MS15 — the beginEpisode clear. Anchored through `decisionLog.removeAll()`,
+  # which is what distinguishes beginEpisode's block from endEpisode's
+  # byte-identical one.
+  MS15)
+    snippet OLD <<'EOF'
+        decisionLog.removeAll()
+        banneredWindowIds.removeAll()
+        emittedAutoSkipBannerWindowIds.removeAll()
+        // playhead-bwxi: an armed auto-skip banner is per-episode state, and a
+        // leak here would present the previous episode's receipt against the
+        // next episode's playhead.
+        armedAutoSkipBannerWindowIds.removeAll()
+        // playhead-2d6i: so is a MISSED receipt. A leak here would offer the
+        // previous episode's uncorrected skip against the next episode's
+        // windows — and `denyAutoSkippedBanner` would refuse it, leaving a row
+        // whose only possible action does nothing. The `windows`-derived filter
+        // in `missedAutoSkipReceipts()` would hide it, which is exactly why the
+        // clear has to be here too: a leak that is invisible is still a leak,
+        // and the next episode could legitimately reuse a window id.
+        missedAutoSkipReceiptsByWindowId.removeAll()
+        suggestBanneredWindowIds.removeAll()
+EOF
+    snippet NEW <<'EOF'
+        decisionLog.removeAll()
         banneredWindowIds.removeAll()
         emittedAutoSkipBannerWindowIds.removeAll()
         // playhead-bwxi: an armed auto-skip banner is per-episode state, and a

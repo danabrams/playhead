@@ -7125,6 +7125,26 @@ actor SkipOrchestrator {
     /// because its cards are a live affordance, and this is a record of
     /// something already done. Pulling is also what makes "exactly one entry,
     /// not one per attach" unfalsifiable — reading twice returns the same list.
+    /// playhead-2d6i: TEST-ONLY OBSERVABILITY — the RAW row count, before the
+    /// live-state filter.
+    ///
+    /// It exists because the two per-episode clears MASK EACH OTHER, and a rail
+    /// that cannot see its own subject is not a rail. `missedAutoSkipReceipts()`
+    /// derives vetoability from `windows`, and `endEpisode` clears `windows`
+    /// too — so after `endEpisode` the public accessor returns an empty list
+    /// whether or not the dictionary was cleared, and the only way back to a
+    /// populated `windows` is `beginEpisode`, which clears the dictionary
+    /// itself. Mutation MS06 (delete the `endEpisode` clear) therefore SURVIVED
+    /// twice with every focused suite green, including the test named "Missed
+    /// receipts do not survive an episode boundary" — an empty list read as
+    /// evidence of a clear that had not run.
+    ///
+    /// Production must not read this: the filter is the contract, and a raw
+    /// count includes rows no surface may offer.
+    func _missedAutoSkipReceiptCountForTesting() -> Int {
+        missedAutoSkipReceiptsByWindowId.count
+    }
+
     func missedAutoSkipReceipts() -> [MissedAutoSkipReceipt] {
         missedAutoSkipReceiptsByWindowId.values
             .filter { receipt in
