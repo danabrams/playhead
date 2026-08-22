@@ -754,6 +754,39 @@ actor SkipOrchestrator {
     /// `armedSuggestWindowIds`, and bounded by the episode's window count.
     private var armedAutoSkipBannerWindowIds: Set<String> = []
 
+    /// playhead-2d6i: auto-skips that fired while NO banner host was attached,
+    /// keyed by window id.
+    ///
+    /// THE ASYMMETRY THIS CLOSES. `emitBannerItem` used to return without
+    /// yielding when both continuation dictionaries were empty — and both the
+    /// pre- and post-bwxi paths consume the window's one chance BEFORE that
+    /// check (`banneredWindowIds.insert` in `evaluateAndPush`, then
+    /// `armedAutoSkipBannerWindowIds.remove` in
+    /// `emitAutoSkipBannersOnPlayheadEntry`). So an auto-skip that fired from
+    /// the lock screen, from CarPlay, from a widget start, or during any locked
+    /// stretch left no receipt at all and could never be corrected. The suggest
+    /// tier has had `replayPendingSuggestBanners` since playhead-d3g0; the auto
+    /// tier had nothing.
+    ///
+    /// KEYED BY WINDOW, WHICH IS THE DOUBLE-DELIVERY GUARANTEE. A dictionary
+    /// keyed by `windowId` cannot hold two entries for one window, so "exactly
+    /// one list entry, not one per subsequent attach" is a property of the
+    /// STATE rather than of a delivery gate somebody could get wrong. The
+    /// suggest tier needs a gate because it PUSHES on subscribe; this list is
+    /// PULLED, so there is nothing to deliver twice.
+    ///
+    /// NOT PRUNED when a window is reverted, retired or corrected — the same
+    /// deliberate non-pruning as `armedSuggestWindowIds`, and for a stronger
+    /// reason here: `missedAutoSkipReceipts()` re-derives vetoability from
+    /// `windows` at READ time, so an entry whose window no longer satisfies
+    /// `denyAutoSkippedBanner`'s preconditions simply stops being listed. That
+    /// is one predicate instead of a removal call at every retirement site, and
+    /// a retirement site nobody remembered is exactly how a list comes to offer
+    /// a correction the transaction will refuse. Bounded by the episode's
+    /// window count and cleared at both episode boundaries.
+    private var missedAutoSkipReceiptsByWindowId:
+        [String: MissedAutoSkipReceipt] = [:]
+
     /// playhead-bwxi: has ANY position observation arrived for this episode?
     ///
     /// `currentPlayheadTime` is a stale 0 between `beginEpisode` and the first
@@ -1284,13 +1317,25 @@ actor SkipOrchestrator {
         activeEvidenceCatalog = catalog
     }
 
-    /// Emit a banner item for the given managed window to all banner listeners.
+    /// Emit a banner item for the given managed window to all banner listeners,
+    /// or — when no host is attached — record it as a missed receipt.
+    ///
+    /// playhead-2d6i: THIS BRANCH IS THE WHOLE INVARIANT, WRITTEN ONCE.
+    ///
+    ///     a CARD  iff  the playhead is inside the window AND a host is
+    ///                  attached;
+    ///     otherwise exactly one LIST ENTRY.
+    ///
+    /// The containment half is the caller's
+    /// (`emitAutoSkipBannersOnPlayheadEntry`, which is the only caller). The
+    /// attachment half is here, and it is an `if/else` rather than two
+    /// independent tests precisely so the two outcomes cannot both happen and
+    /// cannot both fail to happen. Before this bead the `else` was a bare
+    /// `return`: the window's one chance had already been consumed by the
+    /// caller, so the skip left no receipt at all.
     private func emitBannerItem(for managed: ManagedWindow) {
-        guard !bannerContinuations.isEmpty
-                || !bannerEventContinuations.isEmpty
-        else {
-            return
-        }
+        let hasAttachedHost = !bannerContinuations.isEmpty
+            || !bannerEventContinuations.isEmpty
         let adWindow = managed.adWindow
         let podcastId = activePodcastId ?? ""
         let entries = catalogEntries(overlapping: managed.snappedStart, end: managed.snappedEnd)
@@ -1313,6 +1358,29 @@ actor SkipOrchestrator {
             evidenceCatalogEntries: entries,
             tier: .autoSkipped
         )
+        guard hasAttachedHost else {
+            // playhead-2d6i: nobody is listening, and the caller has already
+            // spent this window's one chance. Keep the receipt so the listener
+            // can still say No to a skip they never saw.
+            //
+            // Deliberately BEFORE the `emittedAutoSkipBannerWindowIds` insert:
+            // that set means "reached the yield-to-subscriber path" and is read
+            // by `SkipOrchestratorPreloadTests` as exactly that. A missed
+            // receipt is the opposite of an emission and must not enter it.
+            missedAutoSkipReceiptsByWindowId[adWindow.id] =
+                MissedAutoSkipReceipt(
+                    item: item,
+                    // Safe to read directly rather than through
+                    // `observedPlayheadTimeForCorrection`: the only caller is
+                    // `emitAutoSkipBannersOnPlayheadEntry`, reached only from
+                    // `updatePlayheadTime`, which sets both fields before
+                    // calling. An unobserved playhead cannot reach this line —
+                    // `armedAutoSkipBannerWindowIds` would still hold the id.
+                    playheadTimeAtSkip: currentPlayheadTime,
+                    occurredAt: Date()
+                )
+            return
+        }
         // Cycle-26 L-1 / Cycle-27 L-2: this insert is consumed by
         // `emittedAutoSkipBannersSnapshot()` from canary tests. The
         // production gate that prevents re-fires is `banneredWindowIds`
@@ -2060,6 +2128,14 @@ actor SkipOrchestrator {
         // leak here would present the previous episode's receipt against the
         // next episode's playhead.
         armedAutoSkipBannerWindowIds.removeAll()
+        // playhead-2d6i: so is a MISSED receipt. A leak here would offer the
+        // previous episode's uncorrected skip against the next episode's
+        // windows — and `denyAutoSkippedBanner` would refuse it, leaving a row
+        // whose only possible action does nothing. The `windows`-derived filter
+        // in `missedAutoSkipReceipts()` would hide it, which is exactly why the
+        // clear has to be here too: a leak that is invisible is still a leak,
+        // and the next episode could legitimately reuse a window id.
+        missedAutoSkipReceiptsByWindowId.removeAll()
         suggestBanneredWindowIds.removeAll()
         suggestWindows.removeAll()
         armedSuggestWindowIds.removeAll()
@@ -2669,6 +2745,14 @@ actor SkipOrchestrator {
         // leak here would present the previous episode's receipt against the
         // next episode's playhead.
         armedAutoSkipBannerWindowIds.removeAll()
+        // playhead-2d6i: so is a MISSED receipt. A leak here would offer the
+        // previous episode's uncorrected skip against the next episode's
+        // windows — and `denyAutoSkippedBanner` would refuse it, leaving a row
+        // whose only possible action does nothing. The `windows`-derived filter
+        // in `missedAutoSkipReceipts()` would hide it, which is exactly why the
+        // clear has to be here too: a leak that is invisible is still a leak,
+        // and the next episode could legitimately reuse a window id.
+        missedAutoSkipReceiptsByWindowId.removeAll()
         suggestBanneredWindowIds.removeAll()
         suggestWindows.removeAll()
         armedSuggestWindowIds.removeAll()
@@ -7014,6 +7098,71 @@ actor SkipOrchestrator {
     /// only one of them is a regression.
     func armedAutoSkipBannerWindowIDs() -> Set<String> {
         armedAutoSkipBannerWindowIds
+    }
+
+    /// playhead-2d6i: the passive list. Auto-skips that fired while no banner
+    /// host was attached, in episode order, and STILL CORRECTABLE.
+    ///
+    /// THE FILTER IS THE FEATURE, not defensiveness. Dan's requirement is that
+    /// a list entry can correct — "if correcting from the list cannot reach
+    /// `confirmAutoSkippedBanner`'s counterpart, the feature is decorative" —
+    /// so this returns exactly the receipts whose veto would be ACCEPTED. The
+    /// predicate is `denyAutoSkippedBanner`'s own preconditions, re-derived
+    /// from live state rather than remembered:
+    ///
+    ///   * the window is still managed and still `.applied` — a span already
+    ///     reverted by a transcript veto, a listen-rewind or an earlier tap on
+    ///     this same list has nothing left to correct;
+    ///   * its material token still matches the one on the card — a producer
+    ///     that recomputed the span in place must not have an old receipt
+    ///     answered on its behalf (the same rule the card's Yes/No enforces).
+    ///
+    /// Deriving it here rather than pruning at each retirement site is what
+    /// keeps the list honest without a removal call in every path that can
+    /// retire a window. A row that would be refused is never shown.
+    ///
+    /// This is a PULL, deliberately: the suggest tier PUSHES on subscribe
+    /// because its cards are a live affordance, and this is a record of
+    /// something already done. Pulling is also what makes "exactly one entry,
+    /// not one per attach" unfalsifiable — reading twice returns the same list.
+    /// playhead-2d6i: TEST-ONLY OBSERVABILITY — the RAW row count, before the
+    /// live-state filter.
+    ///
+    /// It exists because the two per-episode clears MASK EACH OTHER, and a rail
+    /// that cannot see its own subject is not a rail. `missedAutoSkipReceipts()`
+    /// derives vetoability from `windows`, and `endEpisode` clears `windows`
+    /// too — so after `endEpisode` the public accessor returns an empty list
+    /// whether or not the dictionary was cleared, and the only way back to a
+    /// populated `windows` is `beginEpisode`, which clears the dictionary
+    /// itself. Mutation MS06 (delete the `endEpisode` clear) therefore SURVIVED
+    /// twice with every focused suite green, including the test named "Missed
+    /// receipts do not survive an episode boundary" — an empty list read as
+    /// evidence of a clear that had not run.
+    ///
+    /// Production must not read this: the filter is the contract, and a raw
+    /// count includes rows no surface may offer.
+    func _missedAutoSkipReceiptCountForTesting() -> Int {
+        missedAutoSkipReceiptsByWindowId.count
+    }
+
+    func missedAutoSkipReceipts() -> [MissedAutoSkipReceipt] {
+        missedAutoSkipReceiptsByWindowId.values
+            .filter { receipt in
+                guard let managed = windows[receipt.item.windowId],
+                      managed.decisionState == .applied,
+                      bannerMaterialRevisionToken(for: managed)
+                        == receipt.item.windowMaterialRevisionToken
+                else {
+                    return false
+                }
+                return true
+            }
+            .sorted {
+                if $0.item.adStartTime != $1.item.adStartTime {
+                    return $0.item.adStartTime < $1.item.adStartTime
+                }
+                return $0.item.windowId < $1.item.windowId
+            }
     }
 
     /// Snapshot of suggestions whose banner delivery was acknowledged by the

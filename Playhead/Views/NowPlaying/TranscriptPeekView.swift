@@ -38,6 +38,32 @@ struct TranscriptPeekView: View {
     /// trust signal may be recorded for the attempted mark.
     var onMarkAd: ((Double, Double) async -> Bool)?
 
+    /// playhead-2d6i: the passive list of auto-skips that fired while no
+    /// banner host was attached — a lock-screen stretch, CarPlay, a widget
+    /// start. Pulled rather than pushed: these are records of skips already
+    /// done, not live affordances, so nothing here pops.
+    ///
+    /// Optional so every existing call site, preview and test is byte-identical
+    /// — with no provider the section does not exist.
+    var missedAutoSkipReceipts: (() async -> [MissedAutoSkipReceipt])?
+
+    /// playhead-2d6i: the veto for one list entry. Production hands this
+    /// straight to `BannerFeedbackProductionActions.onNotAnAd`, i.e. the exact
+    /// closure a card's No calls, so the list cannot drift onto a second
+    /// correction path. `false` means the orchestrator refused (episode
+    /// replaced, window no longer applied, producer material moved) and the row
+    /// stays put, retryable.
+    var onMissedAutoSkipNotAnAd: ((MissedAutoSkipReceipt) async -> Bool)?
+
+    /// playhead-2d6i: the current list, refreshed on appear and after every
+    /// answered row. Not observed continuously: while this sheet is up, Now
+    /// Playing is still mounted underneath and its banner host is still
+    /// attached, so no NEW missed receipt can accrue behind it.
+    @State private var missedAutoSkips: [MissedAutoSkipReceipt] = []
+
+    /// Window ids whose veto is in flight, so a double-tap cannot submit twice.
+    @State private var vetoingMissedAutoSkipWindowIds: Set<String> = []
+
     /// Phase 5 (u4d): Which decoded span's popover is currently showing.
     @State private var selectedDecodedSpan: DecodedSpan? = nil
 
@@ -128,6 +154,14 @@ struct TranscriptPeekView: View {
                ) {
                 untranscribedTailFooter(span: tailSpan)
             }
+
+            // playhead-2d6i: skips the listener never saw a card for. Below the
+            // tail affordance because that one is about the audio playing NOW
+            // and this is about audio already gone; and rendered only when the
+            // list is non-empty, which is the ordinary case.
+            if !missedAutoSkips.isEmpty {
+                missedAutoSkipFooter
+            }
         }
         .background(AppColors.surface)
         // playhead-m1l9: the tail-mark confirmation lives on the always-present
@@ -159,6 +193,7 @@ struct TranscriptPeekView: View {
         .onAppear {
             peekViewModel.startPolling()
             peekViewModel.updatePlaybackPosition(currentTime)
+            refreshMissedAutoSkips()
         }
         .onDisappear {
             peekViewModel.stopPolling()
@@ -435,6 +470,92 @@ private extension TranscriptPeekView {
         .accessibilityHint("Reports the post-roll from the current position to the end of the episode as an ad")
     }
 
+    // MARK: Missed auto-skip receipts (playhead-2d6i)
+
+    /// The passive list. Auto-skips that happened while nothing was on screen
+    /// to show a card, each still answerable with the SAME veto the card
+    /// offers.
+    ///
+    /// Deliberately not a card and deliberately not animated in. The banner's
+    /// primary action is SKIP and a tap at entry is a PREDICTION
+    /// (feedback_banner_is_a_skip_affordance); this is audio already gone, so
+    /// the only honest action left is the correction. Dan, 2026-08-22: "a
+    /// PASSIVE LIST, not a card."
+    ///
+    /// One affordance per row, and it is the NO. Yes is deliberately absent:
+    /// the listener did not hear the ad — it was skipped without a card — so a
+    /// confirmation from here would be a positive trust signal for audio they
+    /// never reached, which is the 2026-08-21 field incident playhead-bwxi
+    /// exists to have ended. The veto costs nothing if wrong.
+    var missedAutoSkipFooter: some View {
+        VStack(spacing: 0) {
+            Divider()
+                .foregroundStyle(AppColors.textSecondary.opacity(0.2))
+
+            HStack {
+                Text("SKIPPED WHILE YOU WERE AWAY")
+                    .font(AppTypography.sans(size: 10, weight: .semibold))
+                    .foregroundStyle(AppColors.textTertiary)
+                    .tracking(1.2)
+                Spacer()
+            }
+            .padding(.horizontal, Spacing.md)
+            .padding(.top, Spacing.sm)
+            .padding(.bottom, Spacing.xs)
+
+            ScrollView(.vertical, showsIndicators: false) {
+                VStack(spacing: 0) {
+                    ForEach(missedAutoSkips) { receipt in
+                        missedAutoSkipRow(receipt)
+                    }
+                }
+            }
+            .frame(maxHeight: 132)
+        }
+        .background(AppColors.surface)
+    }
+
+    func missedAutoSkipRow(
+        _ receipt: MissedAutoSkipReceipt
+    ) -> some View {
+        HStack(spacing: Spacing.sm) {
+            VStack(alignment: .leading, spacing: 1) {
+                Text(receipt.displayTitle)
+                    .font(AppTypography.sans(size: 13, weight: .medium))
+                    .foregroundStyle(AppColors.textSecondary)
+                    .lineLimit(1)
+                Text(receipt.spanLabel)
+                    .font(AppTypography.sans(size: 11, weight: .regular))
+                    .foregroundStyle(AppColors.textTertiary)
+            }
+
+            Spacer()
+
+            Button {
+                submitMissedAutoSkipVeto(receipt)
+            } label: {
+                Text("Not an ad")
+                    .font(AppTypography.sans(size: 12, weight: .semibold))
+                    .foregroundStyle(AppColors.accent)
+            }
+            .buttonStyle(.plain)
+            .frame(minHeight: 44)
+            .disabled(
+                vetoingMissedAutoSkipWindowIds.contains(receipt.windowId)
+            )
+        }
+        .padding(.horizontal, Spacing.md)
+        .padding(.vertical, Spacing.xs)
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(
+            "\(receipt.displayTitle), \(receipt.spanLabel)"
+        )
+        .accessibilityHint(
+            "Reports this skipped section as not an ad and restores it"
+        )
+    }
+
     // MARK: Transcript Scroll
 
     var transcriptScroll: some View {
@@ -659,6 +780,49 @@ private extension TranscriptPeekView {
     // Phase 5 (u4d): the row's spoken label is
     // `TranscriptRowAccessibility.label` — see there for why it is not a method
     // on this view (playhead-d666 R1).
+
+    /// playhead-2d6i: re-read the passive list from the orchestrator.
+    ///
+    /// A PULL, and the reason is the shape of the thing rather than
+    /// convenience. The suggest tier replays on subscribe because a suggestion
+    /// is an affordance that expires; a missed receipt is a record, so nothing
+    /// is lost by asking for it when a surface opens. It also means the list
+    /// cannot be delivered twice: reading it again returns the same rows.
+    func refreshMissedAutoSkips() {
+        guard let provider = missedAutoSkipReceipts else {
+            missedAutoSkips = []
+            return
+        }
+        Task { @MainActor in
+            missedAutoSkips = await provider()
+        }
+    }
+
+    /// playhead-2d6i: answer one list entry with No.
+    ///
+    /// Routes through `onMissedAutoSkipNotAnAd`, which production binds to the
+    /// SAME `BannerFeedbackProductionActions.onNotAnAd` closure a card's No
+    /// calls — so this surface cannot acquire a second correction path that
+    /// drifts from the card's. A refusal (episode replaced, window no longer
+    /// applied, producer material moved) leaves the row where it is: the
+    /// gesture is retryable and the list is re-derived from live state, so a
+    /// row that has genuinely stopped being correctable disappears on the next
+    /// refresh rather than lingering as a button that does nothing.
+    func submitMissedAutoSkipVeto(_ receipt: MissedAutoSkipReceipt) {
+        guard let veto = onMissedAutoSkipNotAnAd,
+              !vetoingMissedAutoSkipWindowIds.contains(receipt.windowId)
+        else {
+            return
+        }
+        vetoingMissedAutoSkipWindowIds.insert(receipt.windowId)
+        Task { @MainActor in
+            defer {
+                vetoingMissedAutoSkipWindowIds.remove(receipt.windowId)
+            }
+            guard await veto(receipt) else { return }
+            refreshMissedAutoSkips()
+        }
+    }
 
     /// Submit the marked chunks as a false negative correction.
     ///

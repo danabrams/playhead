@@ -1212,6 +1212,14 @@ RSVC="Playhead/Services/AdDetection/RediffRefetch/RediffRefetchService.swift"
 TRUST="Playhead/Services/TrustScoring/TrustScoringService.swift"
 NPV="Playhead/Views/NowPlaying/NowPlayingView.swift"
 NPVM="Playhead/Views/NowPlaying/NowPlayingViewModel.swift"
+# playhead-2d6i: the passive missed-skip list's only surface. The section is
+# gated on `!missedAutoSkips.isEmpty` and its provider is OPTIONAL, so this is
+# the file in which the whole feature can go quiet without a compile error.
+TPEEK="Playhead/Views/NowPlaying/TranscriptPeekView.swift"
+# playhead-2d6i: the list row's own copy, which is subject to the voice rules in
+# feedback_peace_of_mind_not_metrics and lives on the model precisely so a test
+# can reach it.
+MSR="Playhead/Services/SkipOrchestrator/MissedAutoSkipReceipt.swift"
 # playhead-4dqe: day-0 at DOWNLOAD time. Four more places the download-time
 # path can silently stop working — the transport/budget policy that decides
 # whether it may spend, the readiness wait + ordering that decide whether it
@@ -1545,7 +1553,7 @@ PAPP="Playhead/App/PlayheadApp.swift"
 MUTABLE_FILES=(
   "$FPRUN"
   "$OWNG" "$EMPRO" "$MCEX" "$PAPP" "$FPARSE" "$PDISC"
-  "$ORCH" "$STORE" "$CTRL" "$VIEW" "$TRIG" "$RSVC" "$TRUST" "$NPV" "$NPVM"
+  "$ORCH" "$STORE" "$CTRL" "$VIEW" "$TRIG" "$RSVC" "$TRUST" "$NPV" "$NPVM" "$TPEEK" "$MSR"
   "$BWPOL" "$KICK" "$KCOORD" "$SEAMS" "$ACT" "$ADSVC" "$PODC"
   "$THROT" "$FMREF" "$UMF" "$SFR" "$DTR" "$RUNNER" "$FMCLS" "$PROBE" "$PERMC" "$RT" "$MODEL" "$INGO" "$INVF"
   "$FMDL" "$FMCP"
@@ -1586,6 +1594,43 @@ MUTABLE_FILES=(
 # half-open-interval contract.
 
 FOCUSED_SUITES=(
+  # playhead-2d6i: an auto-skip that fires with NO HOST ATTACHED (MS series).
+  # THREE suites, because the claim spans three layers and no one of them can
+  # observe another.
+  #
+  # `BannerPlayheadBiconditionalTests` is the only thing that can see the
+  # PARTITION — that a card and a list row are the two arms of one branch, so a
+  # skip produces exactly one of them and never both. It is bwxi's suite
+  # extended along the axis it could not see (it always subscribed before
+  # `beginEpisode`), which is why the extension lives there rather than beside
+  # it: a suite that pinned the list separately would leave the card path free
+  # to regress, and — the direction that actually bites — a list that ALSO
+  # fires when a card fired satisfies "the list is right" perfectly.
+  #
+  # `MissedAutoSkipReceiptListTests` is the only thing that can see everything
+  # DOWNSTREAM of a row existing: that its veto reaches `denyAutoSkippedBanner`
+  # and commits the same durable receipt a card's No does, what
+  # `playheadTimeAtCorrection` records for a gesture made far from the span,
+  # the read-time filter that withholds a row the seam would refuse, and the
+  # copy.
+  #
+  # `MissedAutoSkipListWiringSourceCanaryTests` is the only thing that can see
+  # the two production LINES in between — the provider `NowPlayingView` hands
+  # the transcript sheet (optional, so omitting it compiles and renders
+  # nothing) and that the veto is `bannerFeedbackActions.onNotAnAd` rather than
+  # a second spelling of the same call. It also pins an ABSENCE: no confirm
+  # seam on that surface, because a Yes from a list is a positive trust signal
+  # for audio the listener never heard.
+  -only-testing:PlayheadTests/BannerPlayheadBiconditionalTests
+  -only-testing:PlayheadTests/MissedAutoSkipReceiptListTests
+  -only-testing:PlayheadTests/MissedAutoSkipListWiringSourceCanaryTests
+  # And `ViewLayerCorrectionAttributionCaptureCanaryTests`, which is NOT this
+  # bead's suite and is here for one reason: MS16's whole claim is that it stays
+  # GREEN while the sheet lists another episode's rows. That canary owns the
+  # ABSENCE of a live runtime read (playhead-254m) and it is what failed the
+  # merge gate on this bead's first provider. A mirror asserted in a comment and
+  # not run is not a mirror, so it runs.
+  -only-testing:PlayheadTests/ViewLayerCorrectionAttributionCaptureCanaryTests
   # playhead-tktr / playhead-ph2d: the V60 downgrade of three unearned
   # `repeated_ad_cache` grades (TK series). ONE suite, and one is right here:
   # the rung is eleven directions over a single migration, and every direction
@@ -3051,6 +3096,27 @@ T_6RUV_ORDER="the rendering does not depend on the order the spans were read in"
 # ---- playhead-iw7q: a PERMISSIVE coarse row stops being byte-identical to a
 #      genuine one (IW series) --------------------------------------------
 T_IW7Q_MODEL_KEEPS="a MODEL coarse row keeps its band, at every rung of the ladder"
+
+# ---- playhead-2d6i, the MS series ------------------------------------------
+T_2D6I_PARTITION="THE EXTENDED PROPERTY: cards ∪ list is the entered set, and they never overlap"
+T_2D6I_ATTACH="Attaching a host later never converts a list entry into a card, and never duplicates it"
+T_2D6I_BICOND="THE PROPERTY: at every observation, the bannered set IS the entered set"
+T_2D6I_VETO="A list row's veto commits the same durable receipt a card's No does"
+T_2D6I_ANSWERED="An answered row leaves the list"
+T_2D6I_WITHHELD="A row whose producer material was replaced is withheld, not offered and refused"
+T_2D6I_POSITION="A veto from the list records where the listener actually was, not where the skip was"
+T_2D6I_NOCONFIRM="A missed skip writes no confirmation — only a card can confirm"
+T_2D6I_ENDEP="endEpisode clears the receipts themselves, not merely the list they are read through"
+T_2D6I_REPLAY="A replay with no endEpisode in front of it does not inherit the previous transaction's rows"
+T_2D6I_ORDER="The list is in episode order"
+T_2D6I_COPY="A row names the sponsor when one is known, and never a quantity"
+T_2D6I_HOP="A list row driven through the card's own action closure forwards every identity field"
+T_2D6I_PROVIDER="NowPlayingView gives the transcript sheet a receipt provider"
+T_2D6I_CAPTURE="the provider filters rows against the sheet's own captured transaction"
+T_2D6I_CLOSURE="the list's veto IS the card's veto closure, not a second seam"
+T_2D6I_NOYES="the list offers NO confirmation — a skip nobody saw cannot be confirmed"
+T_2D6I_GATED="the section renders only when there is something to show"
+
 T_IW7Q_PERMISSIVE="a PERMISSIVE coarse row is ungraded — the runner wrote that .strong"
 T_IW7Q_UNKNOWN="an UNKNOWN coarse row is ungraded too — silence is not a licence"
 T_IW7Q_NOT_MODEL="unknown does NOT read as model, on rows that are otherwise identical"
@@ -11232,6 +11298,126 @@ MUTATIONS=(
   # rename changed behaviour.
   "NQ99|1190|NQCUE|A second skip INSIDE the window is dropped, not overlapped;The window is half-open: the boundary instant is admitted"
 
+  # ---- playhead-2d6i, the MS series: an auto-skip that fires with NO HOST
+  #      ATTACHED leaves a receipt -------------------------------------------
+  #
+  # `emitBannerItem` returned without yielding when both continuation
+  # dictionaries were empty — and BOTH the pre- and post-bwxi paths consume the
+  # window's one chance BEFORE that check. So every auto-skip that fired from
+  # the lock screen, from CarPlay, from a widget start or during a locked
+  # stretch left no receipt at all, and the listener could never say No to it.
+  #
+  # Dan's decision is a PASSIVE LIST, not a card, so the series has to prove
+  # BOTH failure directions of one branch and not merely that the list exists:
+  # MS01 is the shipped defect (nothing recorded), MS02 is the mirror (recorded
+  # even when a card fired), and MS03 is the wrong FIX — replaying the receipt
+  # as a card on subscribe, which is the suggest tier's mechanism applied to a
+  # record of something already done.
+
+  # MS01 IS THE SHIPPED DEFECT VERBATIM: the unattached arm records nothing, so
+  # the skip leaves no trace. Own batch — it removes the whole feature at once,
+  # so a batched partner would be credited off it.
+  "MS01|1400|ORCH|$T_2D6I_PARTITION;$T_2D6I_ATTACH;$T_2D6I_VETO;$T_2D6I_ANSWERED;$T_2D6I_WITHHELD;$T_2D6I_POSITION;$T_2D6I_NOCONFIRM;$T_2D6I_ENDEP;$T_2D6I_REPLAY;$T_2D6I_ORDER;$T_2D6I_COPY"
+
+  # MS02 IS THE DOUBLE-DELIVERY DIRECTION NOBODY LOOKS AT: the receipt is
+  # recorded UNCONDITIONALLY, so a skip that got its card also accumulates a row
+  # asking the listener to judge it a second time. Every "the list is right"
+  # assertion passes under this mutant; only the partition sees it.
+  "MS02|1401|ORCH|$T_2D6I_PARTITION"
+
+  # MS03 IS THE WRONG FIX, and it is the one a reader who skimmed
+  # `replayPendingSuggestBanners` would write: the missed receipt is yielded to
+  # every newly attached host as a CARD. Dan rejected exactly this — a card for
+  # audio already gone asserts a skip affordance that no longer exists.
+  "MS03|1402|ORCH|$T_2D6I_ATTACH"
+
+  # MS04/MS05 are the read-time filter's two clauses. The filter is what makes
+  # "a list entry must be able to correct" true rather than hoped for, and each
+  # clause covers a case the other cannot see: MS04 keeps offering a row whose
+  # window has already been reverted (by this list, by a transcript veto, by a
+  # listen-rewind), MS05 keeps offering one whose producer material was
+  # replaced under it — the window is still `.applied` there, so the
+  # decision-state clause is blind to it.
+  "MS04|1403|ORCH|$T_2D6I_ANSWERED"
+  "MS05|1404|ORCH|$T_2D6I_WITHHELD"
+
+  # MS06/MS15 are the two per-episode clears, and THEY MASK EACH OTHER — which
+  # is why they are two rails and why one of them needed a raw accessor.
+  #
+  # MS06 (endEpisode) SURVIVED TWICE before the rail below existed, with every
+  # focused suite green including the test then named "Missed receipts do not
+  # survive an episode boundary". `missedAutoSkipReceipts()` derives
+  # vetoability from `windows`, and `endEpisode` clears `windows` too, so the
+  # public accessor returns an empty list either way; the only route back to a
+  # populated `windows` is `beginEpisode`, which clears the dictionary itself.
+  # An empty list was being read as evidence of a clear that had not run — the
+  # standing defect class, inside a rail. `_missedAutoSkipReceiptCountForTesting()`
+  # is what closes it, and it is the only thing that can.
+  "MS06|1405|ORCH|$T_2D6I_ENDEP"
+
+  # MS15 (beginEpisode) is observable BEHAVIOURALLY, and the path that sees it
+  # is a same-asset REPLAY — a `beginEpisode` with no `endEpisode` in front of
+  # it. There the new transaction really does repopulate `windows`, so a leaked
+  # row is re-validated by the filter and offered, carrying the OLD playback
+  # lifecycle generation, so its veto can only be refused.
+  "MS15|1415|ORCH|$T_2D6I_REPLAY"
+
+  # MS07/MS08 are the two quantities this feature could substitute for each
+  # other, one on each side of the hop. MS07 records the SPAN's start as the
+  # position at which the skip fired — inside the window, so an `∈ [start, end)`
+  # assertion cannot see it. MS08 stamps the span onto
+  # `playheadTimeAtCorrection`, which manufactures the containment playhead-bwxi
+  # added the column to expose: a correction made seventy minutes later reads as
+  # one made inside the ad.
+  "MS07|1406|ORCH|$T_2D6I_POSITION"
+  "MS08|1407|ORCH|$T_2D6I_POSITION"
+
+  # MS09/MS10 are the surface's two readings of a row. Order first, because a
+  # list of things that happened that is not in the order they happened is a
+  # list the listener cannot match against their own memory of the episode.
+  "MS09|1408|ORCH|$T_2D6I_ORDER"
+  "MS10|1409|MSR|$T_2D6I_COPY"
+
+  # MS11/MS12 are the two production lines no unit test can reach. MS11 is the
+  # feature going QUIET: the provider returns a constant, every orchestrator
+  # rail stays green, and the section can only ever be empty — the shape of
+  # playhead-o89d's six-week gate and of the sceneless-launch class in project
+  # memory. MS12 is the feature DRIFTING: a second spelling of
+  # `denyAutoSkippedBanner` that skips the runtime lifecycle guard the card's
+  # own closure applies.
+  "MS11|1410|NPV|$T_2D6I_PROVIDER"
+
+  # MS16 is what the merge gate taught this bead. The provider's first version
+  # guarded on `runtime.currentEpisodeId`, and
+  # `ViewLayerCorrectionAttributionCaptureCanaryTests` failed it: a content
+  # closure recomputed while its sheet stays mounted must not read the live
+  # runtime (playhead-254m). The replacement filters each row against the
+  # sheet's CAPTURED transaction — which is also the only guard that survives
+  # the suspension, since a runtime sampled before the `await` says nothing
+  # about which episode's rows come back after it. MS16 deletes that filter: the
+  # 254m canary stays green (there is no live read to find) while the sheet
+  # lists another episode's skips.
+  "MS16|1416|NPV|$T_2D6I_CAPTURE"
+  "MS12|1411|NPV|$T_2D6I_CLOSURE"
+
+  # MS13/MS14 are the transcript surface. MS13 inverts the render gate, so the
+  # section appears only when there is nothing to show. MS14 is the change a
+  # later contributor makes for symmetry — a Yes on the list — and it is the one
+  # that re-creates the 2026-08-21 incident through a new door: a confirmation
+  # for audio the listener never heard, which is the strongest positive signal
+  # the trust system takes.
+  "MS13|1412|TPEEK|$T_2D6I_GATED"
+  "MS14|1413|TPEEK|$T_2D6I_NOYES"
+
+  # MS99 — VACUITY CONTROL, and it MUST SURVIVE. It renames the local that
+  # carries the attachment test, at its declaration and at its one use, on the
+  # exact line MS01 and MS02 rewrite. Its expectation is deliberately NON-EMPTY
+  # (playhead-ngsm: an entry with an empty expectation is scored KILLED, which
+  # makes a control expressed that way worthless) and it names the rail MS01 and
+  # MS02 both kill, so a KILLED verdict here would mean a rename changed
+  # behaviour.
+  "MS99|1414|ORCH|$T_2D6I_PARTITION"
+
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -11502,6 +11688,23 @@ describe_mutation() {
     NQ19) echo "nqwr: the Settings toggle binds a LITERAL key that has drifted from the seam's — the switch writes a key nobody reads" ;;
     NQ20) echo "nqwr: the toggle spells the key as a literal that is correct TODAY — two spellings, from which a rename moves one and not the other" ;;
     NQ99) echo "VACUITY CONTROL — the request-instant local in playAdSkipCue is renamed and nothing else is. MUST SURVIVE" ;;
+    MS01) echo "2d6i THE SHIPPED DEFECT: an auto-skip with no host attached records nothing — the listener gets the skip and can never say No to it" ;;
+    MS02) echo "2d6i DOUBLE DELIVERY: the receipt is recorded even when a card fired, so one skip becomes a card AND a row" ;;
+    MS03) echo "2d6i THE WRONG FIX: the missed receipt is replayed to a newly attached host as a CARD — a skip affordance for audio already gone" ;;
+    MS04) echo "2d6i: the read-time filter stops checking the decision state, so an already-answered row keeps being offered" ;;
+    MS05) echo "2d6i: the read-time filter stops checking the material token, so a row the seam would refuse on its token is offered anyway" ;;
+    MS06) echo "2d6i: endEpisode stops clearing the receipts — invisible through the filtered accessor, which is why the raw one exists" ;;
+    MS15) echo "2d6i: beginEpisode stops clearing the receipts, so a same-asset REPLAY inherits the previous transaction's uncorrectable rows" ;;
+    MS07) echo "2d6i: the receipt records the SPAN START as the position the skip fired at — inside the span, so containment tests cannot see it" ;;
+    MS08) echo "2d6i: the veto stamps the span onto playheadTimeAtCorrection, manufacturing the containment bwxi added the column to expose" ;;
+    MS09) echo "2d6i: the list stops being in episode order" ;;
+    MS10) echo "2d6i: an unattributed row is titled with its WINDOW ID instead of a neutral phrase" ;;
+    MS11) echo "2d6i: the provider returns a constant, so every orchestrator rail stays green and the section can only ever be empty" ;;
+    MS16) echo "2d6i: the provider stops filtering rows against the sheet's captured transaction — the 254m canary stays green because there is no live read to find" ;;
+    MS12) echo "2d6i: the list veto is a SECOND spelling of denyAutoSkippedBanner rather than the card's own closure, skipping the runtime lifecycle guard" ;;
+    MS13) echo "2d6i: the render gate is inverted — the section appears only when there is nothing to show" ;;
+    MS14) echo "2d6i: the transcript surface gains a Yes, which writes bannerAutoSkipConfirmed for audio the listener never heard" ;;
+    MS99) echo "VACUITY CONTROL — the attachment-test local in emitBannerItem is renamed and nothing else is. MUST SURVIVE" ;;
     YX99) echo "VACUITY CONTROL — the band in buildFMLedgerEntries is bound through a renamed intermediate on the line YX01 rewrites; nothing else changes. MUST SURVIVE" ;;
     NY01) echo "AdDetectionService.hotPathCandidates sorts the RAW array — the shipped defect: runBackfill canonicalized and the hot path did not" ;;
     SU01) echo "THE SHIPPED DEFECT VERBATIM — stage 6 deleted, so a mark is its SCAN WINDOW again" ;;
@@ -26223,6 +26426,311 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+
+  # ---- playhead-2d6i, the MS series ---------------------------------------
+
+  # MS01 — the shipped defect verbatim: the unattached arm builds the receipt
+  # and drops it on the floor, exactly as the early `return` did.
+  MS01)
+    snippet OLD <<'EOF'
+            missedAutoSkipReceiptsByWindowId[adWindow.id] =
+                MissedAutoSkipReceipt(
+EOF
+    snippet NEW <<'EOF'
+            _ = adWindow.id
+            _ = MissedAutoSkipReceipt(
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # MS02 — recorded in BOTH arms. The card still fires; the list gains a row
+  # for it as well.
+  MS02)
+    snippet OLD <<'EOF'
+        guard hasAttachedHost else {
+            // playhead-2d6i: nobody is listening, and the caller has already
+EOF
+    snippet NEW <<'EOF'
+        missedAutoSkipReceiptsByWindowId[adWindow.id] = MissedAutoSkipReceipt(
+            item: item,
+            playheadTimeAtSkip: currentPlayheadTime,
+            occurredAt: Date()
+        )
+        guard hasAttachedHost else {
+            // playhead-2d6i: nobody is listening, and the caller has already
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # MS03 — the suggest tier's mechanism applied to a record: every newly
+  # attached host is handed the missed receipts as CARDS.
+  MS03)
+    snippet OLD <<'EOF'
+            self.replayPendingSuggestBanners(to: continuation)
+        }
+    }
+
+    private func removeBannerContinuation(id: UUID) {
+EOF
+    snippet NEW <<'EOF'
+            self.replayPendingSuggestBanners(to: continuation)
+            for receipt in self.missedAutoSkipReceipts() {
+                continuation.yield(receipt.item)
+            }
+        }
+    }
+
+    private func removeBannerContinuation(id: UUID) {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # MS04 — the filter's decision-state clause.
+  MS04)
+    snippet OLD <<'EOF'
+                guard let managed = windows[receipt.item.windowId],
+                      managed.decisionState == .applied,
+                      bannerMaterialRevisionToken(for: managed)
+EOF
+    snippet NEW <<'EOF'
+                guard let managed = windows[receipt.item.windowId],
+                      bannerMaterialRevisionToken(for: managed)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # MS05 — the filter's material-token clause.
+  MS05)
+    snippet OLD <<'EOF'
+                      managed.decisionState == .applied,
+                      bannerMaterialRevisionToken(for: managed)
+                        == receipt.item.windowMaterialRevisionToken
+                else {
+EOF
+    snippet NEW <<'EOF'
+                      managed.decisionState == .applied
+                else {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # MS06 — the endEpisode clear. Anchored through
+  # `latestUserSeekOperationGeneration = 0` immediately followed by
+  # `banneredWindowIds.removeAll()`, which is what distinguishes endEpisode's
+  # block from beginEpisode's byte-identical one (beginEpisode has
+  # `decisionLog.removeAll()` in between).
+  MS06)
+    snippet OLD <<'EOF'
+        latestUserSeekOperationGeneration = 0
+        banneredWindowIds.removeAll()
+        emittedAutoSkipBannerWindowIds.removeAll()
+        // playhead-bwxi: an armed auto-skip banner is per-episode state, and a
+        // leak here would present the previous episode's receipt against the
+        // next episode's playhead.
+        armedAutoSkipBannerWindowIds.removeAll()
+        // playhead-2d6i: so is a MISSED receipt. A leak here would offer the
+        // previous episode's uncorrected skip against the next episode's
+        // windows — and `denyAutoSkippedBanner` would refuse it, leaving a row
+        // whose only possible action does nothing. The `windows`-derived filter
+        // in `missedAutoSkipReceipts()` would hide it, which is exactly why the
+        // clear has to be here too: a leak that is invisible is still a leak,
+        // and the next episode could legitimately reuse a window id.
+        missedAutoSkipReceiptsByWindowId.removeAll()
+        suggestBanneredWindowIds.removeAll()
+EOF
+    snippet NEW <<'EOF'
+        latestUserSeekOperationGeneration = 0
+        banneredWindowIds.removeAll()
+        emittedAutoSkipBannerWindowIds.removeAll()
+        // playhead-bwxi: an armed auto-skip banner is per-episode state, and a
+        // leak here would present the previous episode's receipt against the
+        // next episode's playhead.
+        armedAutoSkipBannerWindowIds.removeAll()
+        suggestBanneredWindowIds.removeAll()
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # MS15 — the beginEpisode clear. Anchored through `decisionLog.removeAll()`,
+  # which is what distinguishes beginEpisode's block from endEpisode's
+  # byte-identical one.
+  MS15)
+    snippet OLD <<'EOF'
+        decisionLog.removeAll()
+        banneredWindowIds.removeAll()
+        emittedAutoSkipBannerWindowIds.removeAll()
+        // playhead-bwxi: an armed auto-skip banner is per-episode state, and a
+        // leak here would present the previous episode's receipt against the
+        // next episode's playhead.
+        armedAutoSkipBannerWindowIds.removeAll()
+        // playhead-2d6i: so is a MISSED receipt. A leak here would offer the
+        // previous episode's uncorrected skip against the next episode's
+        // windows — and `denyAutoSkippedBanner` would refuse it, leaving a row
+        // whose only possible action does nothing. The `windows`-derived filter
+        // in `missedAutoSkipReceipts()` would hide it, which is exactly why the
+        // clear has to be here too: a leak that is invisible is still a leak,
+        // and the next episode could legitimately reuse a window id.
+        missedAutoSkipReceiptsByWindowId.removeAll()
+        suggestBanneredWindowIds.removeAll()
+EOF
+    snippet NEW <<'EOF'
+        decisionLog.removeAll()
+        banneredWindowIds.removeAll()
+        emittedAutoSkipBannerWindowIds.removeAll()
+        // playhead-bwxi: an armed auto-skip banner is per-episode state, and a
+        // leak here would present the previous episode's receipt against the
+        // next episode's playhead.
+        armedAutoSkipBannerWindowIds.removeAll()
+        suggestBanneredWindowIds.removeAll()
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # MS07 — the position at which the skip fired becomes the SPAN's own start.
+  MS07)
+    snippet OLD <<'EOF'
+                    playheadTimeAtSkip: currentPlayheadTime,
+EOF
+    snippet NEW <<'EOF'
+                    playheadTimeAtSkip: managed.snappedStart,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # MS08 — the veto's V59 column stamps the SPAN instead of the listener.
+  MS08)
+    snippet OLD <<'EOF'
+            correctionType: source.kind.correctionType,
+            // playhead-bwxi: WHERE THE LISTENER WAS.
+            playheadTimeAtCorrection: observedPlayheadTimeForCorrection,
+EOF
+    snippet NEW <<'EOF'
+            correctionType: source.kind.correctionType,
+            // playhead-bwxi: WHERE THE LISTENER WAS.
+            playheadTimeAtCorrection: startTime,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # MS09 — episode order dropped.
+  MS09)
+    snippet OLD <<'EOF'
+            .sorted {
+                if $0.item.adStartTime != $1.item.adStartTime {
+                    return $0.item.adStartTime < $1.item.adStartTime
+                }
+                return $0.item.windowId < $1.item.windowId
+            }
+EOF
+    snippet NEW <<'EOF'
+            .sorted {
+                return $0.item.windowId > $1.item.windowId
+            }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # MS10 — the neutral fallback becomes the window id.
+  MS10)
+    snippet OLD <<'EOF'
+        return "Sponsor segment"
+EOF
+    snippet NEW <<'EOF'
+        return windowId
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # MS11 — the provider stops asking the orchestrator.
+  MS11)
+    snippet OLD <<'EOF'
+                    return await runtime.skipOrchestrator
+                        .missedAutoSkipReceipts()
+EOF
+    snippet NEW <<'EOF'
+                    return []
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # MS16 — the captured-context filter deleted. The rows come back unfiltered
+  # from whichever episode the orchestrator is serving when the closure resumes.
+  MS16)
+    snippet OLD <<'EOF'
+                    let rows = await runtime.skipOrchestrator
+                        .missedAutoSkipReceipts()
+                    return rows.filter {
+                        $0.item.episodeId == sourceContext.episodeId
+                            && $0.item.playbackLifecycleGeneration
+                                == sourceContext.playbackLifecycleGeneration
+                    }
+EOF
+    snippet NEW <<'EOF'
+                    return await runtime.skipOrchestrator
+                        .missedAutoSkipReceipts()
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # MS12 — a second spelling of the veto, which is how the two paths drift.
+  MS12)
+    snippet OLD <<'EOF'
+                onMissedAutoSkipNotAnAd: { receipt in
+                    await bannerFeedbackActions.onNotAnAd(receipt.item)
+                }
+EOF
+    snippet NEW <<'EOF'
+                onMissedAutoSkipNotAnAd: { receipt in
+                    await runtime.skipOrchestrator.denyAutoSkippedBanner(
+                        windowId: receipt.item.windowId,
+                        analysisAssetId: receipt.item.analysisAssetId,
+                        startTime: receipt.item.adStartTime,
+                        endTime: receipt.item.adEndTime,
+                        podcastId: receipt.item.podcastId,
+                        ifCurrentEpisodeId: receipt.item.episodeId,
+                        ifPlaybackLifecycleGeneration:
+                            receipt.item.playbackLifecycleGeneration,
+                        ifWindowMaterialRevisionToken:
+                            receipt.item.windowMaterialRevisionToken
+                    )
+                }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # MS13 — the render gate inverted.
+  MS13)
+    snippet OLD <<'EOF'
+            if !missedAutoSkips.isEmpty {
+EOF
+    snippet NEW <<'EOF'
+            if missedAutoSkips.isEmpty {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # MS14 — the surface acquires a confirm route. Declared rather than wired,
+  # because the rail is a text canary over the whole file: the point is that a
+  # contributor reaching for `confirmAutoSkippedBanner` from here is stopped at
+  # the first line they write, not after they have built the button.
+  MS14)
+    snippet OLD <<'EOF'
+    var onMissedAutoSkipNotAnAd: ((MissedAutoSkipReceipt) async -> Bool)?
+EOF
+    snippet NEW <<'EOF'
+    var onMissedAutoSkipNotAnAd: ((MissedAutoSkipReceipt) async -> Bool)?
+
+    /// A Yes from the list, routed to the orchestrator's
+    /// confirmAutoSkippedBanner seam for symmetry with the card.
+    var onMissedAutoSkipConfirmed: ((MissedAutoSkipReceipt) async -> Bool)?
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # MS99 — VACUITY CONTROL. The attachment-test local is renamed at its
+  # declaration and at its one use; nothing else changes. MUST SURVIVE.
+  MS99)
+    snippet OLD <<'EOF'
+        let hasAttachedHost = !bannerContinuations.isEmpty
+            || !bannerEventContinuations.isEmpty
+EOF
+    snippet NEW <<'EOF'
+        let hostIsAttached = !bannerContinuations.isEmpty
+            || !bannerEventContinuations.isEmpty
+EOF
+    patch "$file" "$OLD" "$NEW"
+    snippet OLD <<'EOF'
+        guard hasAttachedHost else {
+EOF
+    snippet NEW <<'EOF'
+        guard hostIsAttached else {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
   *)
     echo "mutation-battery: unknown mutation '$name'" >&2
     return 3 ;;
@@ -26250,6 +26758,8 @@ rec_file()   {
     TRUST) printf '%s' "$TRUST" ;;
     NPV)   printf '%s' "$NPV" ;;
     NPVM)  printf '%s' "$NPVM" ;;
+    TPEEK) printf '%s' "$TPEEK" ;;
+    MSR)   printf '%s' "$MSR" ;;
     BWPOL) printf '%s' "$BWPOL" ;;
     KICK)  printf '%s' "$KICK" ;;
     KCOORD) printf '%s' "$KCOORD" ;;

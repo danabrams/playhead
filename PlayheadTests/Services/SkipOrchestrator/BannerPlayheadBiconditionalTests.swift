@@ -3,6 +3,21 @@
 //
 //     A banner is presented for window W at time T  IF AND ONLY IF  W contains T.
 //
+// playhead-2d6i EXTENDED IT ALONG THE AXIS IT COULD NOT SEE, and the statement
+// the file now defends is:
+//
+//     a CARD  iff  the playhead is inside W AND a host is attached;
+//     otherwise exactly one LIST ENTRY.
+//
+// Everything below about the containment half stands unchanged. What was
+// missing is that every test in the original suite subscribes before
+// `beginEpisode`, so all of it is conditioned on a host being attached — and
+// the unsubscribed case is not exotic. It is playback from the lock screen,
+// from CarPlay, from a widget start, and any locked stretch, where
+// `emitBannerItem` returned without yielding while the CALLER had already spent
+// the window's one chance. The listener got the skip and could never say No to
+// it. See section 1b.
+//
 // Dan, 2026-08-21: "This is a second time we've had this regression, we
 // definitely need a regression test for it." It is the second time the property
 // broke and the THIRD time it was found in the field, and the three failures do
@@ -75,6 +90,52 @@
 //   M7  `observedPlayheadTimeForCorrection` returns the stale 0 instead of
 //       nil                                                    KILLED.
 //   --  unmutated tree: 8 tests / 13 cases pass (the vacuity control).
+//
+// playhead-2d6i's MUTATION RECORD, the MS series (2026-08-22). Registered in
+// `scripts/mutation-battery.sh` rather than run by hand, so the expectations
+// are checked against the OBSERVED victims on every future run. 16 mutants;
+// 15 KILLED, and every one of them reddened EXACTLY the tests its expectation
+// names — no mutant over- or under-described:
+//
+//   MS01  the shipped defect verbatim — the unattached arm records nothing
+//                                                          KILLED, 11 victims
+//   MS02  DOUBLE DELIVERY, direction A — recorded even when a card fired, so
+//         one skip becomes a card AND a row                 KILLED, and ONLY
+//         "THE EXTENDED PROPERTY" sees it: every "the list is right"
+//         assertion passes under this mutant.
+//   MS03  THE WRONG FIX — the receipt is replayed to a newly attached host as
+//         a CARD, which is Dan's decision reversed          KILLED
+//   MS04  the read-time filter drops its decision-state clause
+//                                                           KILLED
+//   MS05  ...and its material-token clause                  KILLED
+//   MS06  endEpisode stops clearing the receipts            KILLED (see below)
+//   MS15  beginEpisode stops clearing them                  KILLED
+//   MS07  the receipt records the SPAN START as where the skip fired
+//                                                           KILLED
+//   MS08  the veto stamps the SPAN onto playheadTimeAtCorrection
+//                                                           KILLED
+//   MS09  episode order dropped                             KILLED
+//   MS10  an unattributed row is titled with its window id  KILLED
+//   MS11  the provider returns a constant — every orchestrator rail stays
+//         green and the section can only ever be empty      KILLED
+//   MS12  the veto becomes a SECOND spelling of denyAutoSkippedBanner
+//                                                           KILLED
+//   MS13  the render gate inverted                          KILLED
+//   MS14  the transcript surface acquires a Yes             KILLED
+//   MS99  VACUITY CONTROL — the attachment-test local renamed
+//                                                           SURVIVED, 0 failures
+//
+// MS06 SURVIVED TWICE FIRST, AND THAT IS THE PART WORTH READING. The two
+// per-episode clears MASK EACH OTHER: `missedAutoSkipReceipts()` derives
+// vetoability from `windows`, and `endEpisode` clears `windows` as well, so
+// after it the public accessor returns an empty list whether or not the
+// dictionary was cleared — and the only route back to a populated `windows` is
+// `beginEpisode`, which clears the dictionary itself. The test asserted an
+// empty list and got one for the wrong reason. An empty list read as evidence
+// of a clear that had not run is this repo's standing defect class living
+// inside a rail. `_missedAutoSkipReceiptCountForTesting()` is the only thing
+// that can see MS06 at all; MS15 needed no accessor, because a same-asset
+// REPLAY really does repopulate `windows`.
 //
 // ONE PROPERTY OF THE HARNESS, STATED SO IT IS NOT MISTAKEN FOR A HOLE. The
 // frame boundary is itself a suggest banner, so a TOTAL suggest-tier silence
@@ -367,6 +428,30 @@ struct BannerPlayheadBiconditionalTests {
         ]
     }
 
+    /// playhead-2d6i: the same observation with NO host attached.
+    ///
+    /// Byte-for-byte the drive sequence of `step` minus the drain — same
+    /// position, same sentinel delivery, same `evaluateAndPush` — so the two
+    /// arms of the extended property differ in ONE variable: whether anybody
+    /// subscribed. A test that also changed how the orchestrator is driven
+    /// could not attribute its result to the attachment.
+    ///
+    /// No drain and no reader, because there is no stream to read. The
+    /// observable is `missedAutoSkipReceipts()`, and emission is synchronous
+    /// inside the actor, so by the time the last `await` returns the list is
+    /// already whatever this observation made it.
+    private static func unhostedStep(
+        _ orchestrator: SkipOrchestrator,
+        to time: Double,
+        index: Int
+    ) async {
+        await orchestrator.updatePlayheadTime(time)
+        await orchestrator.receiveAdWindows([
+            sentinelWindow(id: "bwxi-sentinel-\(index)")
+        ])
+        await orchestrator.updatePlayheadTime(sentinelStart)
+    }
+
     private static func windowsContaining(_ time: Double) -> Set<String> {
         Set(
             fieldWindows
@@ -525,6 +610,232 @@ struct BannerPlayheadBiconditionalTests {
             episode; got \(emissionCounts.sorted { $0.key < $1.key })
             """
         )
+    }
+
+    // MARK: - 1b. THE EXTENDED PROPERTY (playhead-2d6i)
+
+    /// THE BICONDITIONAL, EXTENDED ALONG THE AXIS THE ORIGINAL COULD NOT SEE.
+    ///
+    ///     a CARD  iff  the playhead is inside the window AND a host is
+    ///                  attached;
+    ///     otherwise exactly one LIST ENTRY.
+    ///
+    /// The suite above always subscribes before `beginEpisode`, so every one of
+    /// its assertions is conditioned on a host being attached and it says
+    /// nothing at all about the unsubscribed case. That case is not exotic: it
+    /// is playback from the lock screen, from CarPlay, from a widget start, and
+    /// any locked stretch. There, `emitBannerItem` returned without yielding —
+    /// while the CALLER had already spent the window's one chance — so the
+    /// listener got the skip and could never say No to it.
+    ///
+    /// WHY THIS IS ONE TEST PARAMETERISED ON ATTACHMENT AND NOT TWO TESTS. The
+    /// same argument the original header makes about the two arrows applies to
+    /// the two surfaces: a suite that pins the list separately invites a reader
+    /// to keep the list green and let the card path regress, and — the
+    /// direction that actually bites — a list that ALSO fires when a card fired
+    /// satisfies "the list is right" perfectly. So the claim is a PARTITION,
+    /// asserted at every observation of the same walk:
+    ///
+    ///   cards ∪ list == entered      (nothing is lost — playhead-2d6i/isp5)
+    ///   cards ∩ list == ∅            (nothing is double-delivered)
+    ///
+    /// `cards` is `emittedAutoSkipBannersSnapshot()`, which is populated ONLY
+    /// past the yield-to-subscriber gate, so it is the honest reading of "a
+    /// card was actually presented" in both arms.
+    @Test(
+        "THE EXTENDED PROPERTY: cards ∪ list is the entered set, and they never overlap",
+        arguments: [true, false]
+    )
+    func aCardIffAHostIsAttachedOtherwiseExactlyOneListEntry(
+        hostAttached: Bool
+    ) async throws {
+        let (orchestrator, _) = try await Self.makeHarness()
+        // Subscribed BEFORE the delivery in the attached arm, exactly as the
+        // suite above does; not at all in the other.
+        var reader: BiconditionalBannerReader?
+        if hostAttached {
+            reader = BiconditionalBannerReader(
+                await orchestrator.bannerItemStream()
+            )
+        }
+
+        await orchestrator.receiveAdWindows(
+            Self.fieldWindows.map {
+                Self.fieldWindow(
+                    id: $0.id, start: $0.start, end: $0.end, tier: .autoSkip
+                )
+            }
+        )
+
+        var enteredSoFar: Set<String> = []
+
+        for (index, time) in Self.schedule.enumerated() {
+            if hostAttached, var live = reader {
+                _ = await Self.step(
+                    orchestrator, &live, to: time, index: index
+                )
+                reader = live
+            } else {
+                await Self.unhostedStep(orchestrator, to: time, index: index)
+            }
+            enteredSoFar.formUnion(Self.windowsContaining(time))
+
+            let cards = await orchestrator.emittedAutoSkipBannersSnapshot()
+            let receipts = await orchestrator.missedAutoSkipReceipts()
+            let list = Set(receipts.map(\.windowId))
+            // THE COUNT, in the list's own terms. The list is a PULL, so
+            // "delivered exactly once" is not a delivery tally — it is that ONE
+            // skip is ONE ROW, on every read. A mechanism that appended per
+            // observation instead of keying by window satisfies every set
+            // assertion in this test and fails only here.
+            #expect(
+                receipts.count == list.count,
+                """
+                step \(index): the list holds \(receipts.count) rows for                 \(list.count) distinct windows —                 \(receipts.map(\.windowId).sorted()). One skip is one row.
+                """
+            )
+
+            #expect(
+                cards.union(list) == enteredSoFar,
+                """
+                hostAttached=\(hostAttached), playhead \(time) s (step \(index)):
+                  entered but neither carded nor listed: \
+                \(enteredSoFar.subtracting(cards.union(list)).sorted()) \
+                — the skip fired and left NO receipt at all, which is \
+                playhead-2d6i verbatim: the listener cannot see it, so they \
+                cannot correct it.
+                  carded or listed but NOT entered: \
+                \(cards.union(list).subtracting(enteredSoFar).sorted()) \
+                — a receipt for audio the listener has not reached \
+                (playhead-bwxi).
+                """
+            )
+            #expect(
+                cards.intersection(list).isEmpty,
+                """
+                hostAttached=\(hostAttached), step \(index): \
+                \(cards.intersection(list).sorted()) produced BOTH a card and a \
+                list entry. The list is the ELSE branch of the card, not a \
+                parallel ledger — a window that got its card must not also \
+                accumulate a row asking the listener to judge it again.
+                """
+            )
+            // The arm-specific half, so a failure names WHICH surface was
+            // wrong rather than only that the partition moved.
+            if hostAttached {
+                #expect(
+                    list.isEmpty,
+                    """
+                    a host was attached for the whole walk and the missed-skip \
+                    list still collected \(list.sorted()). Every one of those \
+                    skips was announced on a card.
+                    """
+                )
+            } else {
+                #expect(
+                    cards.isEmpty,
+                    """
+                    nobody was subscribed and \(cards.sorted()) reached the \
+                    yield-to-subscriber path anyway. Dan's decision is a \
+                    PASSIVE LIST, not a card — a receipt replayed as a card \
+                    asserts a skip affordance for audio already gone.
+                    """
+                )
+            }
+        }
+
+        // Every window the walk entered ended up on exactly one surface.
+        let allWindowIds = Set(Self.fieldWindows.map(\.id))
+        let finalCards = await orchestrator.emittedAutoSkipBannersSnapshot()
+        let finalList = Set(
+            await orchestrator.missedAutoSkipReceipts().map(\.windowId)
+        )
+        #expect(
+            (hostAttached ? finalCards : finalList) == allWindowIds,
+            """
+            hostAttached=\(hostAttached): all \(allWindowIds.count) windows were \
+            entered, so all \(allWindowIds.count) must have landed on the one \
+            surface this arm has. cards=\(finalCards.sorted()) \
+            list=\(finalList.sorted())
+            """
+        )
+    }
+
+    /// THE DOUBLE-DELIVERY DIRECTION THE PARTITION ABOVE CANNOT REACH: what a
+    /// host does when it ARRIVES.
+    ///
+    /// The walk holds attachment fixed for its whole length. Production does
+    /// not: the listener plays from the lock screen, the skip fires unattached,
+    /// and THEN they open the app. Two things must not happen at that moment —
+    /// the receipt must not pop as a card (Dan's decision), and the list must
+    /// not gain a row per attach (the suggest tier's "delivered exactly once",
+    /// on a surface that has no delivery).
+    ///
+    /// Three attaches, because one proves nothing about accumulation.
+    @Test("Attaching a host later never converts a list entry into a card, and never duplicates it")
+    func attachingAHostLaterNeitherCardsNorDuplicatesAMissedReceipt() async throws {
+        let (orchestrator, _) = try await Self.makeHarness()
+        let window = Self.fieldWindow(
+            id: "bwxi-preroll", start: 0.0, end: 86.831, tier: .autoSkip
+        )
+        await orchestrator.receiveAdWindows([window])
+
+        // The skip, with nobody watching.
+        await orchestrator.updatePlayheadTime(40)
+        let afterSkip = await orchestrator.missedAutoSkipReceipts()
+        #expect(
+            afterSkip.map(\.windowId) == ["bwxi-preroll"],
+            """
+            an auto-skip fired at 40 s with no host attached and left \
+            \(afterSkip.count) receipt(s). Before playhead-2d6i it left none: \
+            `emitBannerItem` returned early while `emitAutoSkipBannersOnPlayheadEntry` \
+            had already removed the id from the arming set.
+            """
+        )
+
+        for attach in 1...3 {
+            var reader = BiconditionalBannerReader(
+                await orchestrator.bannerItemStream()
+            )
+            // A frame boundary on the freshly attached stream, so "nothing
+            // arrived" is a positive observation rather than a timeout. The
+            // sentinel is a SUGGEST window; an auto-skip card would be
+            // `.autoSkipped`, so the two cannot be confused.
+            let sentinelId = "bwxi-sentinel-attach-\(attach)"
+            await orchestrator.receiveAdWindows([
+                Self.sentinelWindow(id: sentinelId)
+            ])
+            await orchestrator.updatePlayheadTime(Self.sentinelStart)
+            let delivered = await reader.drain(until: sentinelId)
+
+            #expect(
+                delivered.allSatisfy { $0.tier != .autoSkipped },
+                """
+                attach \(attach): a host subscribed and was handed \
+                \(delivered.filter { $0.tier == .autoSkipped }.map(\.windowId)) \
+                as an AUTO-SKIP CARD. The skip is seventy seconds behind the \
+                listener; the card's primary action is SKIP and there is \
+                nothing left to skip. Dan, 2026-08-22: a passive list, not a \
+                card.
+                """
+            )
+            let list = await orchestrator.missedAutoSkipReceipts()
+            #expect(
+                list.map(\.windowId) == ["bwxi-preroll"],
+                """
+                attach \(attach): the list reads \(list.map(\.windowId)) — one \
+                skip must be one row however many hosts come and go. \
+                (The suggest tier needs a delivery gate for this because it \
+                pushes on subscribe; this list is keyed by window id, so a \
+                duplicate here means something is building rows per attach.)
+                """
+            )
+            let cards = await orchestrator.emittedAutoSkipBannersSnapshot()
+            #expect(
+                cards.isEmpty,
+                "attach \(attach): \(cards.sorted()) reached the yield path on a mere attach"
+            )
+        }
     }
 
     // MARK: - 2. The field moment, stated as itself
