@@ -3,6 +3,21 @@
 //
 //     A banner is presented for window W at time T  IF AND ONLY IF  W contains T.
 //
+// playhead-2d6i EXTENDED IT ALONG THE AXIS IT COULD NOT SEE, and the statement
+// the file now defends is:
+//
+//     a CARD  iff  the playhead is inside W AND a host is attached;
+//     otherwise exactly one LIST ENTRY.
+//
+// Everything below about the containment half stands unchanged. What was
+// missing is that every test in the original suite subscribes before
+// `beginEpisode`, so all of it is conditioned on a host being attached — and
+// the unsubscribed case is not exotic. It is playback from the lock screen,
+// from CarPlay, from a widget start, and any locked stretch, where
+// `emitBannerItem` returned without yielding while the CALLER had already spent
+// the window's one chance. The listener got the skip and could never say No to
+// it. See section 1b.
+//
 // Dan, 2026-08-21: "This is a second time we've had this regression, we
 // definitely need a regression test for it." It is the second time the property
 // broke and the THIRD time it was found in the field, and the three failures do
@@ -75,6 +90,52 @@
 //   M7  `observedPlayheadTimeForCorrection` returns the stale 0 instead of
 //       nil                                                    KILLED.
 //   --  unmutated tree: 8 tests / 13 cases pass (the vacuity control).
+//
+// playhead-2d6i's MUTATION RECORD, the MS series (2026-08-22). Registered in
+// `scripts/mutation-battery.sh` rather than run by hand, so the expectations
+// are checked against the OBSERVED victims on every future run. 16 mutants;
+// 15 KILLED, and every one of them reddened EXACTLY the tests its expectation
+// names — no mutant over- or under-described:
+//
+//   MS01  the shipped defect verbatim — the unattached arm records nothing
+//                                                          KILLED, 11 victims
+//   MS02  DOUBLE DELIVERY, direction A — recorded even when a card fired, so
+//         one skip becomes a card AND a row                 KILLED, and ONLY
+//         "THE EXTENDED PROPERTY" sees it: every "the list is right"
+//         assertion passes under this mutant.
+//   MS03  THE WRONG FIX — the receipt is replayed to a newly attached host as
+//         a CARD, which is Dan's decision reversed          KILLED
+//   MS04  the read-time filter drops its decision-state clause
+//                                                           KILLED
+//   MS05  ...and its material-token clause                  KILLED
+//   MS06  endEpisode stops clearing the receipts            KILLED (see below)
+//   MS15  beginEpisode stops clearing them                  KILLED
+//   MS07  the receipt records the SPAN START as where the skip fired
+//                                                           KILLED
+//   MS08  the veto stamps the SPAN onto playheadTimeAtCorrection
+//                                                           KILLED
+//   MS09  episode order dropped                             KILLED
+//   MS10  an unattributed row is titled with its window id  KILLED
+//   MS11  the provider returns a constant — every orchestrator rail stays
+//         green and the section can only ever be empty      KILLED
+//   MS12  the veto becomes a SECOND spelling of denyAutoSkippedBanner
+//                                                           KILLED
+//   MS13  the render gate inverted                          KILLED
+//   MS14  the transcript surface acquires a Yes             KILLED
+//   MS99  VACUITY CONTROL — the attachment-test local renamed
+//                                                           SURVIVED, 0 failures
+//
+// MS06 SURVIVED TWICE FIRST, AND THAT IS THE PART WORTH READING. The two
+// per-episode clears MASK EACH OTHER: `missedAutoSkipReceipts()` derives
+// vetoability from `windows`, and `endEpisode` clears `windows` as well, so
+// after it the public accessor returns an empty list whether or not the
+// dictionary was cleared — and the only route back to a populated `windows` is
+// `beginEpisode`, which clears the dictionary itself. The test asserted an
+// empty list and got one for the wrong reason. An empty list read as evidence
+// of a clear that had not run is this repo's standing defect class living
+// inside a rail. `_missedAutoSkipReceiptCountForTesting()` is the only thing
+// that can see MS06 at all; MS15 needed no accessor, because a same-asset
+// REPLAY really does repopulate `windows`.
 //
 // ONE PROPERTY OF THE HARNESS, STATED SO IT IS NOT MISTAKEN FOR A HOLE. The
 // frame boundary is itself a suggest banner, so a TOTAL suggest-tier silence
