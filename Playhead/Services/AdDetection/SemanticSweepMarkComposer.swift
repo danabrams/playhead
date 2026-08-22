@@ -587,10 +587,55 @@ enum SemanticSweepMarkComposer {
         /// a brandSpan, a promoCode, each anchored to a line.
         let anchors: [PersistedAnchor]?
 
-        /// The band this span may CONTRIBUTE — `nil` when the model did not
-        /// grade it, and `nil` when the runner did the grading.
+        /// The band this REFINED SPAN may CONTRIBUTE — `nil` when the model
+        /// did not grade it, and `nil` when the runner did the grading.
+        ///
+        /// The discriminator travels WITH the span
+        /// (`BackfillJobRunner.EncodedRefinedSpan.ownershipInferenceWasSuppressed`),
+        /// so this reads correctly on a row of any vintage, including every row
+        /// written before playhead-iw7q added the column below. That is the
+        /// asymmetry ``coarseAttributableBand(rowProvenance:)`` exists for.
         var attributableBand: CertaintyBand? {
             ownershipInferenceWasSuppressed == true ? nil : certainty
+        }
+
+        /// The band a COARSE (`CoarseSupportSchema`) payload may CONTRIBUTE —
+        /// `nil` unless the ROW says the MODEL produced this verdict
+        /// (playhead-iw7q).
+        ///
+        /// # Why the coarse shape needs the row and the refined shape does not
+        ///
+        /// `CoarseScreeningSchema` is a disposition plus a support object with
+        /// exactly two fields, and neither of them is a provenance. There is no
+        /// per-span flag here to read, so the row's own
+        /// ``SemanticScanResult/verdictProvenance`` is the entire record —
+        /// which is why `usedPermissiveFallback` had to become a COLUMN before
+        /// this gate could exist at all, and why the header of
+        /// ``certaintyFactor(of:)`` said for two beads that this half was not
+        /// detectable at rest.
+        ///
+        /// # UNKNOWN IS NOT ZERO
+        ///
+        /// `.unknown` — every row written before schema V61 — returns `nil`,
+        /// exactly as `.permissive` does, and for a DIFFERENT reason: one is
+        /// *"the runner graded this"* and the other is *"nobody recorded who
+        /// graded this"*. They agree on what may be SPENT and disagree on what
+        /// is KNOWN, which is why the two states are kept apart on the row and
+        /// collapsed only here, at the point of attribution — the same shape
+        /// `ScanScenePhase`'s `nil`-versus-`.unknown` split already follows.
+        ///
+        /// Reading `.unknown` as `.model` would return the CEILING certainty
+        /// factor for 1,406 coarse rows on the 2026-08-21 t6 pull that nothing
+        /// can speak for. Reading it as `.permissive` would be a different
+        /// error with the same arithmetic — it would say the bypass wrote them,
+        /// which is equally unevidenced — and it is what
+        /// ``ScanVerdictProvenance/isKnownPermissive`` exists to stop a
+        /// TELEMETRY reader doing.
+        func coarseAttributableBand(
+            rowProvenance: ScanVerdictProvenance
+        ) -> CertaintyBand? {
+            guard rowProvenance.licensesCoarseCertaintyBand else { return nil }
+            return attributableBand
         }
 
         /// The DIMENSIONS this span may contribute — `nil` when the RUNNER
@@ -658,13 +703,24 @@ enum SemanticSweepMarkComposer {
     /// their classification dimensions are not real signals."* This is the
     /// second consumer to owe that debt.
     ///
-    /// THE COARSE HALF OF THE SAME FABRICATION IS NOT DETECTABLE AT REST, and
-    /// pretending otherwise would be worse than saying so: `PermissiveAd-
-    /// Classifier.parse` writes the identical hardcoded `.strong` into a
-    /// `passA` payload, and `usedPermissiveFallback` exists on
-    /// `SemanticScanResult` but has **no column** in `semantic_scan_results` —
-    /// so a permissive coarse row is byte-identical to a genuine one. Filed as
-    /// its own bead; it needs a schema change, not a read.
+    /// # THE COARSE HALF IS DETECTABLE AT REST SINCE SCHEMA V61 (playhead-iw7q)
+    ///
+    /// `PermissiveAdGrammar.parse` writes the identical hardcoded `.strong`
+    /// into a `passA` payload. This header said for two beads that the coarse
+    /// half "is not detectable at rest … filed as its own bead" — and **no such
+    /// bead existed**: `usedPermissiveFallback` was on `SemanticScanResult`
+    /// with no column in `semantic_scan_results`, three separate places claimed
+    /// the gap was filed, and `bd search permissive` returned nothing that
+    /// matched. The bead is playhead-iw7q and the column is
+    /// `usedPermissiveFallback INTEGER`.
+    ///
+    /// So the coarse half is gated now, by
+    /// ``PersistedCertainty/coarseAttributableBand(rowProvenance:)``, and the
+    /// gate opens for `.model` alone. **Every row written before V61 reads
+    /// `.unknown` and is therefore ungraded**: on the 2026-08-21 t6 pull that
+    /// is all 1,406 `passA` rows, of which 362 carried a band a consumer spent
+    /// (357 `strong`, 5 `moderate`). There is no backfill and there cannot be
+    /// one — see ``ScanVerdictProvenance``.
     static func certaintyFactor(of row: SemanticScanResult) -> Double {
         certaintyFactor(certaintyBand(of: row))
     }
@@ -691,12 +747,31 @@ enum SemanticSweepMarkComposer {
         }
         let decoder = JSONDecoder()
         if let support = try? decoder.decode(PersistedCertainty.self, from: data) {
-            return support.attributableBand
+            // COARSE shape. The payload carries no discriminator of its own, so
+            // the ROW is the only record — see
+            // ``PersistedCertainty/coarseAttributableBand(rowProvenance:)``.
+            return support.coarseAttributableBand(rowProvenance: row.verdictProvenance)
         }
         guard let spans = try? decoder.decode([PersistedCertainty].self, from: data),
               !spans.isEmpty else {
             return nil
         }
+        // REFINED shape. Each span carries its own `ownershipInferenceWasSuppressed`
+        // and that gate is unchanged (playhead-92im) — it works on a row of any
+        // vintage, so `.unknown` must NOT veto here: doing so would discard a
+        // discriminator the payload actually holds and would silently re-grade
+        // every pre-V61 refinement.
+        //
+        // A row the record POSITIVELY says came from the bypass is a different
+        // matter, and it is vetoed: `.permissive` is a claim, not an absence.
+        // Note what this does NOT close — playhead-e15r (P1, OPEN).
+        // `BackfillJobRunner.unionSpan` copies `certainty` from whichever input
+        // ranks higher while ANDing the suppression flag, so a permissive
+        // `.strong` unioned with a genuine `.moderate` persists as a `.strong`
+        // with the flag CLEARED. Outward expansion merges across windows, so
+        // such a span can live on a row whose OWN provenance is `.model`, and
+        // no row-level gate can see it. e15r's one-line fix is what closes that.
+        guard !row.verdictProvenance.isKnownPermissive else { return nil }
         // Seeded at the TOP of the order, so a non-empty array always returns
         // one of its own members' bands.
         return spans.reduce(CertaintyBand?.some(.strong)) { weakest, span in
@@ -1801,14 +1876,26 @@ enum SemanticSweepMarkComposer {
     /// a precedent in this file:
     ///
     ///   * `passA` rows are excluded outright, and that is a LIMIT rather than
-    ///     a design choice. `PermissiveAdClassifier.parse` writes the same
-    ///     hardcoded `.strong` into a coarse payload, `usedPermissiveFallback`
-    ///     exists on `SemanticScanResult` but has **no column** in
-    ///     `semantic_scan_results`, so a permissive coarse row is byte-identical
-    ///     to a genuine one and no read can tell them apart. Filed separately;
-    ///     it needs a schema change. What follows from it here: attribution can
-    ///     say the model named a brand, and it can never certify that the
-    ///     PRESENCE verdict under a `.unrefined` mark was the model's at all.
+    ///     a design choice. What follows from it here: attribution can say the
+    ///     model named a brand, and this type still cannot certify that the
+    ///     PRESENCE verdict under a `.unrefined` mark was the model's.
+    ///
+    ///     **The reason it could not has been removed, and this bullet is not
+    ///     yet the beneficiary.** It used to read "a permissive coarse row is
+    ///     byte-identical to a genuine one and no read can tell them apart.
+    ///     Filed separately; it needs a schema change" — and no such bead was
+    ///     ever filed, which is how playhead-iw7q came to exist. The schema
+    ///     change landed at V61 (`semantic_scan_results.usedPermissiveFallback`,
+    ///     `SemanticScanResult.verdictProvenance`), so a coarse row's
+    ///     provenance IS readable now and
+    ///     ``certaintyBand(of:)``'s coarse gate already spends it. Wiring it
+    ///     into this ``Attribution`` — a fifth case, or a qualifier on
+    ///     ``Attribution/unrefined`` — is playhead-6ruv's territory and is NOT
+    ///     done here. Two things bound the benefit before anyone reaches for
+    ///     it: every row already on disk reads `.unknown`, so the distinction
+    ///     is only informative for rows written from V61 onwards; and treating
+    ///     an unattributable verdict as a weaker OBJECT is a policy question
+    ///     about what a banner may claim, which is Dan's.
     ///   * a DECLINED `passB` row means "found no edges", never "there is no
     ///     ad" — the same reason ``corroboration(for:in:atTranscriptVersion:)`` and
     ///     ``clearedSpans(in:)`` both scope themselves — so it attributes

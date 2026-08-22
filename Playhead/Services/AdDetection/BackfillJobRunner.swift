@@ -6532,7 +6532,18 @@ actor BackfillJobRunner {
             transcriptVersion: inputs.transcriptVersion,
             reuseScope: jobId,
             runMode: runMode,
-            jobPhase: jobPhase.rawValue
+            jobPhase: jobPhase.rawValue,
+            // playhead-iw7q (V61): WHICH PATH produced the screening whose
+            // `certainty` is being encoded into `spansJSON` one line above.
+            //
+            // The two travel together on purpose. `encodeSupport` writes the
+            // band; this writes who graded it; and until V61 only the first of
+            // the two reached disk, so a `PermissiveAdGrammar.parse` hardcode
+            // was byte-identical at rest to a model grade. FORWARDED from the
+            // window output rather than derived here — the runner does not know
+            // which path answered, and a runner that guessed would be
+            // manufacturing the provenance rather than recording it.
+            verdictProvenance: windowOutput.verdictProvenance
         )
     }
 
@@ -6645,10 +6656,18 @@ actor BackfillJobRunner {
             reuseScope: jobId,
             runMode: runMode,
             jobPhase: jobPhase.rawValue,
-            // playhead-eu1: propagate permissive-fallback diagnostics so
-            // callers (tests, telemetry) can observe which windows were
-            // recovered via the auto-retry path.
-            usedPermissiveFallback: windowOutput.usedPermissiveFallback,
+            // playhead-eu1 / playhead-iw7q: propagate permissive-fallback
+            // provenance so callers (tests, telemetry, and since V61 the
+            // PERSISTED row) can observe which windows were recovered via the
+            // auto-retry path.
+            //
+            // `init(observedPermissiveFallback:)` and not a ternary: this site
+            // HAS an observation — the window output's own boolean — and the
+            // labelled initialiser is what separates that from the absence a
+            // pre-V61 row carries. See ``ScanVerdictProvenance``.
+            verdictProvenance: ScanVerdictProvenance(
+                observedPermissiveFallback: windowOutput.usedPermissiveFallback
+            ),
             permissiveFallbackReason: windowOutput.permissiveFallbackReason
         )
     }

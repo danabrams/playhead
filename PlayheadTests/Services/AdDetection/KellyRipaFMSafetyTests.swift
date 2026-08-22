@@ -307,7 +307,11 @@ struct PlayheadEu1AutoRetryTests {
 
     // MARK: - eu1 test 5: SemanticScanResult eu1 fields propagated
 
-    @Test("playhead-eu1: SemanticScanResult.usedPermissiveFallback defaults to false")
+    /// playhead-iw7q: the DEFAULT MOVED, from `false` to `.unknown`, and the
+    /// move is the bead. `false` said "the model produced this" about a row
+    /// whose writer had said nothing at all; `.unknown` says nothing, which is
+    /// what a writer that said nothing means.
+    @Test("playhead-iw7q: SemanticScanResult.verdictProvenance defaults to .unknown, NOT .model")
     func semanticScanResultFallbackDefault() {
         let result = SemanticScanResult(
             id: "sr-eu1-default",
@@ -330,11 +334,14 @@ struct PlayheadEu1AutoRetryTests {
             scanCohortJSON: "{}",
             transcriptVersion: "tx-eu1"
         )
-        #expect(result.usedPermissiveFallback == false)
+        #expect(result.verdictProvenance == .unknown)
+        #expect(result.verdictProvenance != .model)
+        #expect(result.verdictProvenance.licensesCoarseCertaintyBand == false)
+        #expect(result.verdictProvenance.isKnownPermissive == false)
         #expect(result.permissiveFallbackReason == nil)
     }
 
-    @Test("playhead-eu1: SemanticScanResult.usedPermissiveFallback and reason are set when fallback used")
+    @Test("playhead-eu1/iw7q: SemanticScanResult.verdictProvenance and reason are set when fallback used")
     func semanticScanResultFallbackSet() {
         let reason = "May contain sensitive content"
         let result = SemanticScanResult(
@@ -357,10 +364,12 @@ struct PlayheadEu1AutoRetryTests {
             prewarmHit: false,
             scanCohortJSON: "{}",
             transcriptVersion: "tx-eu1",
-            usedPermissiveFallback: true,
+            verdictProvenance: ScanVerdictProvenance(observedPermissiveFallback: true),
             permissiveFallbackReason: reason
         )
-        #expect(result.usedPermissiveFallback == true)
+        #expect(result.verdictProvenance == .permissive)
+        #expect(result.verdictProvenance.isKnownPermissive)
+        #expect(result.verdictProvenance.licensesCoarseCertaintyBand == false)
         #expect(result.permissiveFallbackReason == reason)
     }
 }

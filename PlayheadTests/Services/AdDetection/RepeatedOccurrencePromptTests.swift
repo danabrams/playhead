@@ -224,7 +224,8 @@ struct RepeatedOccurrencePromptTests {
                         disposition: .containsAd,
                         support: CoarseSupportSchema(supportLineRefs: [1, 3], certainty: .moderate)
                     ),
-                    latencyMillis: 10
+                    latencyMillis: 10,
+                    verdictProvenance: .model
                 )
             ],
             latencyMillis: 25,
@@ -362,7 +363,8 @@ struct RepeatedOccurrencePromptTests {
                             certainty: .moderate
                         )
                     ),
-                    latencyMillis: 10
+                    latencyMillis: 10,
+                    verdictProvenance: .model
                 )
             ],
             latencyMillis: 25,

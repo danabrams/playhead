@@ -940,7 +940,8 @@ struct BackfillCoarseCheckpointTests {
                     endTime: Double(idx + 1) * Self.segmentSeconds,
                     transcriptQuality: .good,
                     screening: CoarseScreeningSchema(disposition: .noAds, support: nil),
-                    latencyMillis: 1.0
+                    latencyMillis: 1.0,
+                    verdictProvenance: .model
                 )
             },
             failedWindows: []
@@ -969,7 +970,8 @@ struct BackfillCoarseCheckpointTests {
             endTime: Double(idx + 1) * Self.segmentSeconds,
             transcriptQuality: .good,
             screening: CoarseScreeningSchema(disposition: .noAds, support: nil),
-            latencyMillis: 1.0
+            latencyMillis: 1.0,
+            verdictProvenance: .model
         )
     }
 
@@ -2208,7 +2210,8 @@ struct CoarseCoverageWalkTests {
             endTime: Double(index + 1) * 30.0,
             transcriptQuality: .good,
             screening: CoarseScreeningSchema(disposition: .noAds, support: nil),
-            latencyMillis: 1.0
+            latencyMillis: 1.0,
+            verdictProvenance: .model
         )
     }
 
@@ -2440,7 +2443,8 @@ struct CoarseCoverageWalkTests {
             endTime: 600.0,
             transcriptQuality: .good,
             screening: CoarseScreeningSchema(disposition: .noAds, support: nil),
-            latencyMillis: 1.0
+            latencyMillis: 1.0,
+            verdictProvenance: .model
         )
 
         let walk = BackfillJobRunner.coarseCoverageWalk(
@@ -2588,7 +2592,8 @@ struct CoarseCoverageWalkTests {
             endTime: 0.0,
             transcriptQuality: .good,
             screening: CoarseScreeningSchema(disposition: .noAds, support: nil),
-            latencyMillis: 1.0
+            latencyMillis: 1.0,
+            verdictProvenance: .model
         )
         let single = BackfillJobRunner.coarseCoverageWalk(
             plans: lonePlan,
@@ -2611,7 +2616,8 @@ struct CoarseCoverageWalkTests {
             endTime: 0.0,
             transcriptQuality: .good,
             screening: CoarseScreeningSchema(disposition: .noAds, support: nil),
-            latencyMillis: 1.0
+            latencyMillis: 1.0,
+            verdictProvenance: .model
         )
 
         let walk = BackfillJobRunner.coarseCoverageWalk(
@@ -2716,7 +2722,8 @@ struct CoarseCoverageWalkTests {
             endTime: 60.0,
             transcriptQuality: .good,
             screening: CoarseScreeningSchema(disposition: .noAds, support: nil),
-            latencyMillis: 1.0
+            latencyMillis: 1.0,
+            verdictProvenance: .model
         )
 
         let walk = BackfillJobRunner.coarseCoverageWalk(
@@ -2751,7 +2758,8 @@ struct CoarseCoverageWalkTests {
             endTime: 30.0,
             transcriptQuality: .good,
             screening: CoarseScreeningSchema(disposition: .noAds, support: nil),
-            latencyMillis: 1.0
+            latencyMillis: 1.0,
+            verdictProvenance: .model
         )
         let withFailure = BackfillJobRunner.coarseCoverageWalk(
             plans: shared,
@@ -2776,7 +2784,8 @@ struct CoarseCoverageWalkTests {
             endTime: 90.0,
             transcriptQuality: .good,
             screening: CoarseScreeningSchema(disposition: .noAds, support: nil),
-            latencyMillis: 1.0
+            latencyMillis: 1.0,
+            verdictProvenance: .model
         )
         let withUnpersisted = BackfillJobRunner.coarseCoverageWalk(
             plans: shared,
@@ -2832,7 +2841,8 @@ struct CoarseCoverageWalkTests {
             endTime: 60.0,
             transcriptQuality: .good,
             screening: CoarseScreeningSchema(disposition: .noAds, support: nil),
-            latencyMillis: 1.0
+            latencyMillis: 1.0,
+            verdictProvenance: .model
         )
         let walk = BackfillJobRunner.coarseCoverageWalk(
             plans: plans,
@@ -2906,7 +2916,8 @@ struct CoarseCoverageWalkInteriorHoleTests {
             endTime: end,
             transcriptQuality: .good,
             screening: CoarseScreeningSchema(disposition: .noAds, support: nil),
-            latencyMillis: 1.0
+            latencyMillis: 1.0,
+            verdictProvenance: .model
         )
     }
 

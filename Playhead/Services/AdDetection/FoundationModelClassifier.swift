@@ -593,6 +593,23 @@ struct FMCoarseWindowOutput: Sendable, Equatable {
     /// window's attempt began (`FMDaemonCallCensus`). 0 = no self-contention;
     /// `nil` = not measured on this path.
     let daemonPeersAtStart: Int?
+    /// playhead-iw7q: WHICH PATH produced ``screening`` — and therefore whether
+    /// `screening.support?.certainty` is the model's own grade or a runner
+    /// hardcode.
+    ///
+    /// `PermissiveAdClassifier.parse` writes `certainty: .strong` on every
+    /// `containsAd` it returns, whatever the model said. Until this field
+    /// existed the coarse lane had no way to carry that fact to the row, so the
+    /// hardcode reached three consumers wearing the model's clothes. See
+    /// ``ScanVerdictProvenance``.
+    ///
+    /// **THE PARAMETER IS REQUIRED, DELIBERATELY.** A default of `.model` would
+    /// mean a future permissive call site that forgot it claimed the model; a
+    /// default of `.unknown` would mean the same site silently threw away a
+    /// provenance it was holding. Every construction of this type knows which
+    /// path it just came back from, so every construction says so, and adding
+    /// one has to answer the question.
+    let verdictProvenance: ScanVerdictProvenance
 
     init(
         windowIndex: Int,
@@ -602,6 +619,7 @@ struct FMCoarseWindowOutput: Sendable, Equatable {
         transcriptQuality: TranscriptQuality,
         screening: CoarseScreeningSchema,
         latencyMillis: Double,
+        verdictProvenance: ScanVerdictProvenance,
         suspendingLatencyMillis: Double? = nil,
         daemonPeersAtStart: Int? = nil
     ) {
@@ -612,6 +630,7 @@ struct FMCoarseWindowOutput: Sendable, Equatable {
         self.transcriptQuality = transcriptQuality
         self.screening = screening
         self.latencyMillis = latencyMillis
+        self.verdictProvenance = verdictProvenance
         self.suspendingLatencyMillis = suspendingLatencyMillis
         self.daemonPeersAtStart = daemonPeersAtStart
     }
@@ -1295,6 +1314,14 @@ struct FoundationModelClassifier: Sendable {
         var permissiveCounts = PermissiveFailureCounts.zero
         /// Permissive FM calls actually issued, charged against the pass budget.
         var attemptsSpent = 0
+        /// playhead-iw7q: did at least one chunk's VERDICT come back through
+        /// the permissive bypass?
+        ///
+        /// Distinct from ``attemptsSpent``, which counts bypass calls ISSUED —
+        /// a blocked attempt spends the budget and produces no verdict, so a
+        /// window that recovered on the standard path would read as permissive
+        /// if the counter were used here.
+        var usedPermissiveVerdict = false
         /// playhead-8d5r: why the chunks failed, when `output` is nil.
         ///
         /// The aggregate of the unexamined chunk statuses was already computed
@@ -2306,7 +2333,12 @@ struct FoundationModelClassifier: Sendable {
                                 endTime: recovered.endTime,
                                 transcriptQuality: recovered.transcriptQuality,
                                 screening: recovered.screening,
-                                latencyMillis: recovered.latencyMillis
+                                latencyMillis: recovered.latencyMillis,
+                                // playhead-iw7q: FORWARDED, never re-derived.
+                                // This is a re-wrap that renumbers the window;
+                                // stamping `.model` here would overwrite what
+                                // the subdivision actually observed.
+                                verdictProvenance: recovered.verdictProvenance
                             )
                         )
                         continue
@@ -2433,6 +2465,12 @@ struct FoundationModelClassifier: Sendable {
                                 transcriptQuality: plan.transcriptQuality,
                                 screening: screening,
                                 latencyMillis: permissiveLatency,
+                                // playhead-iw7q: the SENSITIVE-WINDOW ROUTE.
+                                // `PermissiveAdGrammar.parse` stamps
+                                // `certainty: .strong` on every `containsAd`
+                                // it returns, so this screening's band is the
+                                // runner's and the row must say so.
+                                verdictProvenance: .permissive,
                                 suspendingLatencyMillis: permissiveReading.suspendingMs,
                                 daemonPeersAtStart: permissivePeers
                             )
@@ -2596,6 +2634,9 @@ struct FoundationModelClassifier: Sendable {
                             transcriptQuality: output.transcriptQuality,
                             screening: output.screening,
                             latencyMillis: output.latencyMillis,
+                            // playhead-iw7q: FORWARDED. See the subdivision
+                            // re-wrap above.
+                            verdictProvenance: output.verdictProvenance,
                             suspendingLatencyMillis: output.suspendingLatencyMillis,
                             daemonPeersAtStart: output.daemonPeersAtStart
                         )
@@ -2666,6 +2707,10 @@ struct FoundationModelClassifier: Sendable {
                                     transcriptQuality: output.transcriptQuality,
                                     screening: output.screening,
                                     latencyMillis: output.latencyMillis,
+                                    // playhead-iw7q: FORWARDED. The qbib
+                                    // recovery below already stamped these
+                                    // `.permissive`.
+                                    verdictProvenance: output.verdictProvenance,
                                     suspendingLatencyMillis: output.suspendingLatencyMillis,
                                     daemonPeersAtStart: output.daemonPeersAtStart
                                 )
@@ -2972,6 +3017,10 @@ struct FoundationModelClassifier: Sendable {
                     transcriptQuality: plan.transcriptQuality,
                     screening: screening,
                     latencyMillis: untilScreened.continuousMs,
+                    // playhead-iw7q: qbib whole-window RECOVERY — the
+                    // `@Generable` path was safety-blocked and the bypass
+                    // answered, so this band is the runner's.
+                    verdictProvenance: .permissive,
                     suspendingLatencyMillis: untilScreened.suspendingMs,
                     daemonPeersAtStart: wholeAttemptPeers
                 )
@@ -3165,6 +3214,9 @@ struct FoundationModelClassifier: Sendable {
                         transcriptQuality: plan.transcriptQuality,
                         screening: screening,
                         latencyMillis: untilScreened.continuousMs,
+                        // playhead-iw7q: qbib HALF-window recovery, same
+                        // bypass as the whole-window arm above.
+                        verdictProvenance: .permissive,
                         suspendingLatencyMillis: untilScreened.suspendingMs,
                         daemonPeersAtStart: halfAttemptPeers
                     )
@@ -5416,6 +5468,10 @@ struct FoundationModelClassifier: Sendable {
                     transcriptQuality: plan.transcriptQuality,
                     screening: screening,
                     latencyMillis: reading.continuousMs,
+                    // playhead-iw7q: the `@Generable` path under Apple's
+                    // ordinary guardrails answered. `sanitize` preserves the
+                    // model's own `certainty`, so the band IS the model's.
+                    verdictProvenance: .model,
                     suspendingLatencyMillis: reading.suspendingMs,
                     daemonPeersAtStart: attemptPeers
                 )
@@ -5528,6 +5584,9 @@ struct FoundationModelClassifier: Sendable {
                                 transcriptQuality: plan.transcriptQuality,
                                 screening: screening,
                                 latencyMillis: retryReading.continuousMs,
+                                // playhead-iw7q: a rate-limit BACKOFF retry of
+                                // the same `@Generable` call. Still the model.
+                                verdictProvenance: .model,
                                 suspendingLatencyMillis: retryReading.suspendingMs,
                                 daemonPeersAtStart: attemptPeers
                             )
@@ -5809,7 +5868,28 @@ struct FoundationModelClassifier: Sendable {
             endTime: plan.endTime,
             transcriptQuality: plan.transcriptQuality,
             screening: CoarseScreeningSchema(disposition: disposition, support: nil),
-            latencyMillis: Self.latencyMillis(since: windowStart, clock: clock)
+            latencyMillis: Self.latencyMillis(since: windowStart, clock: clock),
+            // playhead-iw7q: an AGGREGATE of per-chunk verdicts, so its
+            // provenance is aggregated too — `.permissive` when ANY chunk's
+            // verdict came back through the bypass.
+            //
+            // Deliberately the CONSERVATIVE reading rather than an exact one.
+            // A chunk that answered on the standard path and a chunk that
+            // answered on the bypass both feed the same `disposition`, and
+            // nothing downstream can separate their contributions, so the row
+            // is labelled by the weaker of its inputs — the same "an extent is
+            // only as good as its weakest second" rule the sweep composer
+            // applies to spans. Note also that `support` is `nil` here, so this
+            // row carries no band for the label to gate; the label is about the
+            // RECORD being honest, not about a consumer today.
+            //
+            // `usedPermissiveVerdict`, NOT `attemptsSpent`. The counter records
+            // permissive attempts ISSUED, including ones the safety layer
+            // blocked — a window whose only bypass attempt was refused and
+            // whose verdict came from the standard path would be labelled
+            // `.permissive` by the counter, which is a value that names one
+            // thing read as though it named another.
+            verdictProvenance: outcome.usedPermissiveVerdict ? .permissive : .model
         )
         return outcome
     }
@@ -5854,6 +5934,9 @@ struct FoundationModelClassifier: Sendable {
             outcome.attemptsSpent += 1
             switch await classifyPermissively(segments: [subSegment], permissive: permissive) {
             case let .screened(screening):
+                // playhead-iw7q: a chunk VERDICT from the bypass, which the
+                // aggregate row is labelled by.
+                outcome.usedPermissiveVerdict = true
                 return .examined(screening.disposition)
             case let .blocked(reason):
                 outcome.permissiveCounts.increment(reason: reason)
@@ -5895,7 +5978,10 @@ struct FoundationModelClassifier: Sendable {
                         endTime: retryPlan.endTime,
                         transcriptQuality: retryPlan.transcriptQuality,
                         screening: screening,
-                        latencyMillis: Self.latencyMillis(since: retryStart, clock: clock)
+                        latencyMillis: Self.latencyMillis(since: retryStart, clock: clock),
+                        // playhead-iw7q: a shrink retry of the `@Generable`
+                        // call. Still the model.
+                        verdictProvenance: .model
                     )
                 )
             } catch {
@@ -6004,7 +6090,10 @@ struct FoundationModelClassifier: Sendable {
                         endTime: smartPlan.endTime,
                         transcriptQuality: smartPlan.transcriptQuality,
                         screening: screening,
-                        latencyMillis: Self.latencyMillis(since: retryStart, clock: clock)
+                        latencyMillis: Self.latencyMillis(since: retryStart, clock: clock),
+                        // playhead-iw7q: SMART-SHRINK retry of the
+                        // `@Generable` call. Still the model.
+                        verdictProvenance: .model
                     )
                 ]))
             } catch {

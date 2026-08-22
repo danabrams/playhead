@@ -8669,6 +8669,19 @@ actor AdDetectionService {
             // permissive-bypass `.strong` read as UNGRADED
             // (`ownershipInferenceWasSuppressed`, playhead-92im review).
             //
+            // playhead-iw7q: the COARSE half of that hardcode is gated too now,
+            // and this call site inherited the fix for free — which is the
+            // whole argument for the shared decoder. `certaintyBand(of:)` reads
+            // the ROW's `verdictProvenance` (schema V61) for a `passA` payload,
+            // because `CoarseSupportSchema` has no per-span flag to carry one.
+            // Two consequences here: a permissive coarse row weighs
+            // `fmCap * 0.5` instead of `fmCap`, and — because there is no
+            // backfill and there cannot be one — SO DOES EVERY ROW WRITTEN
+            // BEFORE V61, all of which read `.unknown`. On the 2026-08-21 t6
+            // pull that is 1,406 `passA` rows, 362 of which carried a band this
+            // line was spending. The direction is conservative in both cases:
+            // an unattributable verdict stops claiming the ceiling.
+            //
             // NO BAND ⇒ `.weak`, DELIBERATELY, AND NOT THE OLD PROXY. Three
             // options were available and only one of them is honest. Falling
             // back to `transcriptQuality` would reinstate this bead's defect
