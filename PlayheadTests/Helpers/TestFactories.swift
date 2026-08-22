@@ -160,7 +160,7 @@ extension SemanticScanResult {
     /// Six fields are decided by ``AnalysisStore``, not by the producer —
     /// and TWO MORE are decided by nobody: `refusalExplanation` and
     /// `permissiveFallbackReason` have no column at all (playhead-iw7q's
-    /// enumeration, filed as playhead-tkkm), so a fetched row always reads nil
+    /// enumeration, filed as playhead-807i), so a fetched row always reads nil
     /// for them however they were handed in. This helper models that.
     ///
     /// `firstAttemptAt`, `lastAttemptAt` and `observedStatusesCSV`
@@ -210,7 +210,7 @@ extension SemanticScanResult {
             // a column, so the store drops both and a fetched row always reads
             // nil — modelling them as surviving is exactly the "it went in so
             // it must be on disk" reading this helper exists to prevent.
-            // playhead-tkkm carries whether they should be persisted at all.
+            // playhead-807i carries whether they should be persisted at all.
             refusalExplanation: nil,
             // …and `verdictProvenance` DOES survive since V61, so it is
             // forwarded.

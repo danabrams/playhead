@@ -3076,6 +3076,20 @@ T_IW7Q_CANARY_LABELS="a .permissive label sits under a permissive call, and a .m
 T_IW7Q_CANARY_FORWARD="the three re-wraps forward the provenance rather than re-deriving it"
 T_IW7Q_CANARY_RUNNER="BackfillJobRunner carries the provenance onto both row shapes"
 T_IW7Q_CANARY_STATES="every FMCoarseWindowOutput in the classifier states a provenance"
+# Observed victims the first pass surfaced and the first draft of these
+# expectations did not predict — recorded rather than dropped, because an
+# expectation that UNDER-describes a mutation is a rail nobody can check
+# (the NQ14 note above says the same thing about the same mistake). The
+# five `…round-trips…` names are `SemanticScanPersistenceTests`, which
+# compares a whole fetched row against `asStoredOnFirstWrite` and is
+# therefore a SECOND, independent observer of every persistence rail here.
+T_IW7Q_REFINED_SURFACES="once refinement localizes it, the same durable row surfaces at the REFINED extent"
+T_IW7Q_COARSE_SUGGEST="a coarse-only row banked mid-flight reaches the suggest tier at coarse extent"
+T_IW7Q_RT_ASSET="SemanticScanResult round-trips and is queryable by asset"
+T_IW7Q_RT_UTF8="bind helper preserves UTF-8 edge cases (emoji, RTL, combining marks)"
+T_IW7Q_RT_V45="playhead-rkfp/ezmv (V45): the wait-vs-infer split round-trips, and NULL stays NULL"
+T_IW7Q_RT_REFUSAL="refusal scan results round-trip with failure metadata intact"
+T_IW7Q_RT_REUSE="reusable lookup returns the matching stored scan cohort when multiple cohorts exist"
 
 # ---- playhead-kg6i: a vote is a REPLICATE OF THE SAME EXPERIMENT (KG series) ----
 T_KG6I_LONE="a lone verdict is not voted down by a transcript it never saw"
@@ -6335,7 +6349,7 @@ MUTATIONS=(
   # IW01 is the shipped defect verbatim: the coarse gate is gone, so a runner
   # hardcode and a model grade are one value again. Own batch — it reverts the
   # whole read at once, so a batched partner would be credited off it.
-  "IW01|1300|SWEEP|$T_IW7Q_PERMISSIVE;$T_IW7Q_UNKNOWN;$T_IW7Q_NOT_MODEL;$T_IW7Q_FLOOR;$T_IW7Q_MONOTONE;$T_IW7Q_UNKNOWN_BAND"
+  "IW01|1300|SWEEP|$T_IW7Q_FLOOR;$T_IW7Q_PERMISSIVE;$T_IW7Q_NOT_MODEL;$T_IW7Q_UNKNOWN;$T_IW7Q_DEFAULT;$T_IW7Q_UNKNOWN_BAND"
 
   # IW02 is THE BACKFILL DEFECT EXPRESSED IN THE READER — `.unknown` licenses
   # the band, which is what `UPDATE … SET usedPermissiveFallback = 0` would have
@@ -6343,18 +6357,18 @@ MUTATIONS=(
   # only ever exercise a permissive row cannot see it: that is why
   # `unknownIsNotModel` exists as an INEQUALITY between two rows whose payloads
   # are byte-identical.
-  "IW02|1301|SWEEP|$T_IW7Q_UNKNOWN;$T_IW7Q_NOT_MODEL;$T_IW7Q_FLOOR;$T_IW7Q_MONOTONE;$T_IW7Q_UNKNOWN_BAND"
+  "IW02|1301|SWEEP|$T_IW7Q_UNKNOWN;$T_IW7Q_NOT_MODEL;$T_IW7Q_FLOOR;$T_IW7Q_DEFAULT;$T_IW7Q_UNKNOWN_BAND"
 
   # IW03 bypasses the gate AT THE CALL SITE rather than inside the helper —
   # the same behaviour by a different line, and the reason the gate has a rail
   # in `certaintyBand(of:)` as well as in `PersistedCertainty`.
-  "IW03|1302|SWEEP|$T_IW7Q_PERMISSIVE;$T_IW7Q_UNKNOWN;$T_IW7Q_NOT_MODEL;$T_IW7Q_FLOOR;$T_IW7Q_MONOTONE;$T_IW7Q_UNKNOWN_BAND"
+  "IW03|1302|SWEEP|$T_IW7Q_NOT_MODEL;$T_IW7Q_PERMISSIVE;$T_IW7Q_UNKNOWN;$T_IW7Q_FLOOR;$T_IW7Q_DEFAULT;$T_IW7Q_UNKNOWN_BAND"
 
   # IW04 is the OVER-CORRECTION: the refined branch gains the `.unknown` veto
   # too. Every `passB` row on disk reads `.unknown`, so this silently re-grades
   # the whole refinement population while discarding a discriminator the payload
   # actually carries. The asymmetry is the design, and this is its rail.
-  "IW04|1303|SWEEP|$T_IW7Q_REFINED_UNKNOWN"
+  "IW04|1303|SWEEP|$T_IW7Q_REFINED_UNKNOWN;$T_IW7Q_REFINED_SURFACES"
 
   # IW05 drops the refined branch's `.permissive` veto. The mirror of IW04, and
   # it is a positive CLAIM being ignored rather than an absence being trusted.
@@ -6363,21 +6377,21 @@ MUTATIONS=(
   # IW06 is UNKNOWN IS ZERO at the decode: a NULL column becomes `.model`. This
   # is the single line that turns 1,406 unattributable coarse rows on the
   # 2026-08-21 t6 pull into rows the model is credited with.
-  "IW06|1305|SCANRES|$T_IW7Q_DECODE;$T_IW7Q_PERSISTED;$T_IW7Q_NO_BACKFILL;$T_IW7Q_UNKNOWN_BAND;$T_IW7Q_ROUNDTRIP;$T_IW7Q_REPLACE_LOSE"
+  "IW06|1305|SCANRES|$T_IW7Q_WIRE;$T_IW7Q_PERSISTED;$T_IW7Q_REPLACE_LOSE;$T_IW7Q_ROUNDTRIP;$T_IW7Q_DECODE;$T_IW7Q_NO_BACKFILL;$T_IW7Q_UNKNOWN_BAND;$T_IW7Q_RT_REFUSAL;$T_IW7Q_RT_UTF8;$T_IW7Q_RT_V45;$T_IW7Q_RT_REUSE;$T_IW7Q_RT_ASSET"
 
   # IW07 is the same conflation on the WRITE side: `.unknown` persists 0 rather
   # than NULL, so a writer with no observation claims the model.
-  "IW07|1306|SCANRES|$T_IW7Q_NULL;$T_IW7Q_PERSISTED;$T_IW7Q_ROUNDTRIP;$T_IW7Q_REPLACE_LOSE"
+  "IW07|1306|SCANRES|$T_IW7Q_RT_REFUSAL;$T_IW7Q_RT_UTF8;$T_IW7Q_RT_V45;$T_IW7Q_RT_ASSET;$T_IW7Q_RT_REUSE;$T_IW7Q_PERSISTED;$T_IW7Q_REPLACE_LOSE;$T_IW7Q_ROUNDTRIP;$T_IW7Q_NULL;$T_IW7Q_WIRE"
 
   # IW08 widens the licence predicate to `!= .permissive`, i.e. "not proven to
   # be the runner" read as "proven to be the model" — an absence read as a
   # presence, one layer below IW02.
-  "IW08|1307|SCANRES|$T_IW7Q_UNKNOWN;$T_IW7Q_NOT_MODEL;$T_IW7Q_PREDICATES;$T_IW7Q_FLOOR;$T_IW7Q_MONOTONE;$T_IW7Q_UNKNOWN_BAND"
+  "IW08|1307|SCANRES|$T_IW7Q_PREDICATES;$T_IW7Q_DEFAULT;$T_IW7Q_UNKNOWN_BAND;$T_IW7Q_FLOOR;$T_IW7Q_UNKNOWN;$T_IW7Q_NOT_MODEL"
 
   # IW09 makes the two predicates each other's negation. A telemetry reader
   # would then count every unattributed row as a bypass — the SAME substitution
   # as IW08 with the sign flipped, and the reason both predicates exist.
-  "IW09|1308|SCANRES|$T_IW7Q_PREDICATES;$T_IW7Q_REFINED_UNKNOWN"
+  "IW09|1308|SCANRES|$T_IW7Q_PREDICATES;$T_IW7Q_REFINED_UNKNOWN;$T_IW7Q_REFINED_SURFACES"
 
   # IW10 moves the struct's default from `.unknown` to `.model`. Every writer
   # that says nothing then claims the model — the defect this bead exists to end
@@ -6387,23 +6401,23 @@ MUTATIONS=(
   # IW11 coalesces the bind: `?? 0` where the shipped code writes `map`. Same
   # shape as playhead-exxc's `prewarmHit` V52 finding, in the column added to
   # fix a strictly worse version of it.
-  "IW11|1310|STORE|$T_IW7Q_NULL;$T_IW7Q_ROUNDTRIP;$T_IW7Q_REPLACE_LOSE"
+  "IW11|1310|STORE|$T_IW7Q_ROUNDTRIP;$T_IW7Q_NULL;$T_IW7Q_REPLACE_LOSE;$T_IW7Q_RT_REFUSAL;$T_IW7Q_RT_UTF8;$T_IW7Q_RT_V45;$T_IW7Q_RT_ASSET;$T_IW7Q_RT_REUSE;$T_IW7Q_WIRE"
 
   # IW12 is the READ half of IW11 — `sqlite3_column_int` returns 0 for a NULL,
   # and 0 is `.model`. The raw-column probes in the V61 suite are what make this
   # distinguishable from IW11 at all: both leave the store's own round trip
   # self-consistent.
-  "IW12|1311|STORE|$T_IW7Q_NO_BACKFILL;$T_IW7Q_UNKNOWN_BAND;$T_IW7Q_ROUNDTRIP;$T_IW7Q_REPLACE_LOSE"
+  "IW12|1311|STORE|$T_IW7Q_WIRE;$T_IW7Q_REPLACE_LOSE;$T_IW7Q_UNKNOWN_BAND;$T_IW7Q_ROUNDTRIP;$T_IW7Q_NO_BACKFILL;$T_IW7Q_RT_REFUSAL;$T_IW7Q_RT_V45;$T_IW7Q_RT_UTF8;$T_IW7Q_RT_ASSET;$T_IW7Q_RT_REUSE"
 
   # IW13 IS THE BACKFILL THE MIGRATION DELIBERATELY DOES NOT PERFORM, added
   # back. It is the mutation that makes the decision a decision.
-  "IW13|1312|STORE|$T_IW7Q_NO_BACKFILL;$T_IW7Q_UNKNOWN_BAND"
+  "IW13|1312|STORE|$T_IW7Q_UNKNOWN_BAND;$T_IW7Q_NO_BACKFILL"
 
   # IW14 reads column 32 instead of 33 — the tail-append hazard
   # `semanticScanResultColumns` documents, on the column that just moved the
   # tail. `latencySampleCount` is NULL on these fixtures, so the row decodes
   # structurally fine and simply reports the wrong provenance.
-  "IW14|1313|STORE|$T_IW7Q_ROUNDTRIP;$T_IW7Q_REPLACE"
+  "IW14|1313|STORE|$T_IW7Q_RT_REFUSAL;$T_IW7Q_RT_V45;$T_IW7Q_RT_REUSE;$T_IW7Q_RT_UTF8;$T_IW7Q_RT_ASSET;$T_IW7Q_WIRE;$T_IW7Q_REPLACE;$T_IW7Q_ROUNDTRIP;$T_IW7Q_REFINED_SURFACES;$T_IW7Q_COARSE_SUGGEST"
 
   # IW15 labels the SENSITIVE-WINDOW ROUTE `.model`. This is the one the column
   # exists for: the arm that calls `PermissiveAdGrammar.parse` certifying its
@@ -6421,16 +6435,25 @@ MUTATIONS=(
   # one layer up. Killed twice over, and deliberately: the forward count falls
   # to two AND the nearest-producer rule fails, because a re-wrap sits under
   # neither producer.
-  "IW17|1316|FMCLS|$T_IW7Q_CANARY_FORWARD;$T_IW7Q_CANARY_LABELS"
+  "IW17|1316|FMCLS|$T_IW7Q_CANARY_LABELS;$T_IW7Q_CANARY_FORWARD"
 
   # IW18 drops the argument from the runner's coarse row builder, so the row
   # takes the struct default and every coarse row ever written reads `.unknown`.
   # The column would exist, be migrated, be read — and carry nothing.
-  "IW18|1317|RUNNER|$T_IW7Q_WIRE;$T_IW7Q_CANARY_RUNNER"
+  "IW18|1317|RUNNER|$T_IW7Q_WIRE;$T_IW7Q_CANARY_RUNNER;$T_IW7Q_REFINED_SURFACES;$T_IW7Q_COARSE_SUGGEST"
 
   # IW19 hardcodes `.model` in the same builder. Worse than IW18 in exactly the
   # way a fabricated value is worse than a missing one.
   "IW19|1318|RUNNER|$T_IW7Q_WIRE;$T_IW7Q_CANARY_RUNNER"
+
+  # IW20 — THE GATE RAISES INSTEAD OF WITHHOLDING: an unlicensed coarse payload
+  # comes back `.strong` rather than nil. It exists because the FIRST PASS of
+  # this series proved `gateIsMonotoneNonIncreasing` could not be killed by any
+  # of IW01/IW02/IW03/IW08 — its assertion is `factor(of: row) <= ungated`, and
+  # dropping a gate makes the two EQUAL. A rail nothing can kill is a rail
+  # nobody has shown bites, so this is the mutant that shows it: on a `.weak`
+  # payload the ungated factor is 0.5 and the mutant returns 1.0.
+  "IW20|1320|SWEEP|$T_IW7Q_MONOTONE;$T_IW7Q_PERMISSIVE;$T_IW7Q_UNKNOWN;$T_IW7Q_NOT_MODEL;$T_IW7Q_FLOOR;$T_IW7Q_DEFAULT;$T_IW7Q_UNKNOWN_BAND"
 
   # IW99 — VACUITY CONTROL, and it MUST SURVIVE. It renames the parameter
   # BINDING inside `coarseAttributableBand` — the argument LABEL is untouched,
@@ -11524,6 +11547,7 @@ describe_mutation() {
     IW17) echo "a coarse-pass RE-WRAP stamps a literal instead of forwarding what the recovery observed" ;;
     IW18) echo "the runner's coarse row builder drops the argument, so every coarse row takes the .unknown default" ;;
     IW19) echo "the runner's coarse row builder hardcodes .model, certifying every permissive coarse row" ;;
+    IW20) echo "the gate RAISES instead of withholding — an unlicensed coarse payload comes back .strong" ;;
     IW99) echo "VACUITY CONTROL — the parameter BINDING inside coarseAttributableBand is renamed; the label and every call site are untouched. MUST SURVIVE" ;;
     KG01) echo "THE SHIPPED DEFECT VERBATIM — corroboration counts every version's rows as replicates of one experiment" ;;
     MY01) echo "THE PRE-BEAD BEHAVIOUR VERBATIM — an unlocalised verdict keeps its whole window with nothing backing it" ;;
@@ -18958,6 +18982,15 @@ EOF
             // which path answered, and a runner that guessed would be
             // manufacturing the provenance rather than recording it.
             verdictProvenance: .model
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  IW20)
+    snippet OLD <<'EOF'
+            guard rowProvenance.licensesCoarseCertaintyBand else { return nil }
+EOF
+    snippet NEW <<'EOF'
+            guard rowProvenance.licensesCoarseCertaintyBand else { return .strong }
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 

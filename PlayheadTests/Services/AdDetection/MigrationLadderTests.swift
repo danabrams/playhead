@@ -104,6 +104,21 @@ struct MigrationLadderTests {
         }
         #expect(try probeIndexExists(in: dir, indexName: "idx_semantic_scan_results_lastAttemptAt"))
 
+        // playhead-iw7q (V61): WHO produced a row's verdict, on an UPGRADED
+        // database — the same direction, and the same argument, as the V55
+        // block above. `readSemanticScanResult` selects this column by NAME, so
+        // a rung that never ran turns every read of the table into a throwing
+        // query rather than a cosmetic gap.
+        //
+        // The column's VALUE is deliberately not asserted here: V61 backfills
+        // nothing, and proving that is the V61 suite's own job, on a raw-column
+        // probe rather than through the store.
+        #expect(try probeColumnExists(
+            in: dir,
+            table: "semantic_scan_results",
+            column: "usedPermissiveFallback"
+        ))
+
         // V7 sponsor knowledge tables (Phase 8).
         #expect(try probeTableExists(in: dir, table: "sponsor_knowledge_entries"))
         #expect(try probeTableExists(in: dir, table: "knowledge_candidate_events"))

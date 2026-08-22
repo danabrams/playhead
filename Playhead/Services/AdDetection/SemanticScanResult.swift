@@ -59,7 +59,7 @@ enum ScanScenePhase: String, Sendable, Hashable, CaseIterable {
 ///
 /// # Why this is three-valued and not a `Bool`
 ///
-/// `PermissiveAdClassifier.parse` writes a hardcoded `certainty: .strong` into
+/// `PermissiveAdGrammar.parse` writes a hardcoded `certainty: .strong` into
 /// the `passA` payload and says so in its own header: *"the FM never inferred
 /// these classification dimensions, the runner is hardcoding them."* The
 /// REFINED half of that fabrication records itself —
@@ -356,8 +356,8 @@ struct SemanticScanResult: Sendable, Equatable {
     //                                  KEY INGREDIENT, not a dropped attribute,
     //                                  and it is the one of the three that is
     //                                  deliberate.
-    //   * `refusalExplanation`       — dropped. playhead-tkkm.
-    //   * `permissiveFallbackReason` — dropped. playhead-tkkm.
+    //   * `refusalExplanation`       — dropped. playhead-807i.
+    //   * `permissiveFallbackReason` — dropped. playhead-807i.
     //
     // `usedPermissiveFallback` was a fourth until V61 and was the only one a
     // CONSUMER read, which is why it is the one this bead fixed; see
@@ -373,7 +373,7 @@ struct SemanticScanResult: Sendable, Equatable {
     /// fails. Diagnostic only — does not affect routing.
     ///
     /// **NOT PERSISTED** — there is no `refusalExplanation` column, so this
-    /// survives only as long as the object does. playhead-tkkm.
+    /// survives only as long as the object does. playhead-807i.
     let refusalExplanation: String?
     /// playhead-eu1 / playhead-iw7q (schema V61): WHO produced this row's
     /// verdict — the `@Generable` path, the permissive string bypass, or a
@@ -395,7 +395,7 @@ struct SemanticScanResult: Sendable, Equatable {
     ///
     /// **NOT PERSISTED** — there is no `permissiveFallbackReason` column.
     /// ``verdictProvenance`` now records THAT the bypass ran; this records WHY,
-    /// and it is still dropped at the write. playhead-tkkm.
+    /// and it is still dropped at the write. playhead-807i.
     let permissiveFallbackReason: String?
     /// playhead-hx6n (schema V42): UNIX seconds at which this row was written.
     ///

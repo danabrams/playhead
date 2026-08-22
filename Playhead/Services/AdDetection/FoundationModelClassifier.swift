@@ -597,7 +597,7 @@ struct FMCoarseWindowOutput: Sendable, Equatable {
     /// `screening.support?.certainty` is the model's own grade or a runner
     /// hardcode.
     ///
-    /// `PermissiveAdClassifier.parse` writes `certainty: .strong` on every
+    /// `PermissiveAdGrammar.parse` writes `certainty: .strong` on every
     /// `containsAd` it returns, whatever the model said. Until this field
     /// existed the coarse lane had no way to carry that fact to the row, so the
     /// hardcode reached three consumers wearing the model's clothes. See
