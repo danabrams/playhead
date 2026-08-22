@@ -131,6 +131,15 @@ struct SettingsView: View {
     @AppStorage(RepeatedAdCacheFeatureFlag.userDefaultsKey)
     private var repeatedAdCacheEnabled = RepeatedAdCacheFeatureFlag.defaultValue
 
+    /// playhead-nqwr: the ad-skip cue's silence switch. Default ON — a correct
+    /// auto-skip is otherwise indistinguishable from a buffering hiccup, which
+    /// is the defect the cue exists to remove. Read at the seam by
+    /// `PlaybackService` through `AdSkipCueSettings.isEnabled()`; this
+    /// `@AppStorage` binding writes the same key, so flipping it takes effect
+    /// on the very next skip with no observer in between.
+    @AppStorage(AdSkipCueSettings.userDefaultsKey)
+    private var adSkipCueEnabled = AdSkipCueSettings.defaultValue
+
     /// playhead-2jo: OPML import/export state. Owns the file picker /
     /// share-sheet plumbing for the Subscriptions group; the actual
     /// parse + import work lives on `OPMLImportExportViewModel`.
@@ -539,12 +548,29 @@ private extension SettingsView {
             .listRowBackground(AppColors.surface)
             .accessibilityLabel("Ad skip mode")
             .accessibilityValue(prefs.skipBehavior.displayName)
+
+            // playhead-nqwr. Placed in this section rather than under
+            // Playback because it describes what a SKIP does, and it is
+            // shown whatever the mode is: `.manual` still cuts audio when a
+            // suggestion is confirmed, and `.off` simply never reaches the
+            // transition that sounds it.
+            Toggle(isOn: $adSkipCueEnabled) {
+                Label("Skip Sound", systemImage: "waveform")
+                    .font(AppTypography.body)
+                    .foregroundStyle(AppColors.textPrimary)
+            }
+            .tint(AppColors.accent)
+            .listRowBackground(AppColors.surface)
+            .accessibilityIdentifier("Settings.adSkipCue.toggle")
         } header: {
             sectionHeader("Ad Detection")
         } footer: {
-            Text(skipBehaviorFooter(prefs))
-                .font(AppTypography.caption)
-                .foregroundStyle(AppColors.textTertiary)
+            VStack(alignment: .leading, spacing: Spacing.xs) {
+                Text(skipBehaviorFooter(prefs))
+                Text("A short sound plays when an ad is cut, so a skip is never mistaken for a dropout.")
+            }
+            .font(AppTypography.caption)
+            .foregroundStyle(AppColors.textTertiary)
         }
     }
 

@@ -1302,6 +1302,22 @@ UZHLTH="Playhead/Support/Diagnostics/DogfoodDiagnosticsAnalysisHealth.swift"
 # got committed as a listener position over `Episode.playbackPosition`, twice,
 # on 2026-08-15.
 PTX="Playhead/Services/PlaybackTransport/PlaybackTransport.swift"
+# playhead-nqwr (NQ series): the AD-SKIP CUE. Two new files plus `$PTX`, and
+# the split is not tidiness — each layer is unobservable from the others.
+# `$NQCUE` owns the two POLICIES: the listener's switch (whose default is a
+# READ, not a constant — `bool(forKey:)` would ship an ON-by-default flag OFF
+# for everyone who never opens Settings) and the re-trigger window that decides
+# what two adjacent cuts sound like. `$NQSND` owns the MATERIAL: the drop-in
+# lookup that makes swapping in Dan's real asset a zero-code change, and the
+# placeholder's envelope. `$PTX` owns the SEAM — where the cue is emitted, and
+# the three exits that silence it. A mutation in any one of the three compiles
+# and leaves the other two's rails green.
+NQCUE="Playhead/Services/PlaybackTransport/AdSkipCue.swift"
+NQSND="Playhead/Services/PlaybackTransport/AdSkipCueSound.swift"
+# ...and the fourth layer, which is the only one no unit test in the tree can
+# reach: the SETTINGS view. A toggle bound to a key the seam does not read
+# leaves every behavioural rail green while the switch silently does nothing.
+NQSET="Playhead/Views/Settings/SettingsView.swift"
 # playhead-isp5: the ingest-outcome TAXONOMY. Its own file because two of the
 # W rails are about the audit row's own arithmetic — a drop counted as a
 # delivery, a reason that never renders — and those live in the value type, not
@@ -1538,7 +1554,7 @@ MUTABLE_FILES=(
   "$CLAIM" "$RECON" "$ATOM" "$AJRUN" "$ACOORD" "$ESUMBF" "$MPTRENG" "$MPTRIDX"
   "$BEXP" "$SPSHD" "$FMSHD" "$TCANON" "$SPLAN"
   "$BGPS" "$GRANT" "$LEASE"
-  "$PTX"
+  "$PTX" "$NQCUE" "$NQSND" "$NQSET"
   "$ELV" "$BSB"
   "$UZWIRE" "$UZPROV" "$UZHLTH"
   "$SSR"
@@ -2518,6 +2534,36 @@ FOCUSED_SUITES=(
   # on `catalogShowId` — in scope, well-formed, and a different identity space.
   -only-testing:PlayheadTests/AdDetectionServiceProfileKeyingTests
   -only-testing:PlayheadTests/AdDetectionServiceProfileKeyingCanaryTests
+  # playhead-nqwr: an auto-skip should make a subdued sound (NQ series). FIVE
+  # suites, because the claim spans three layers plus a property no runtime
+  # assertion can reach.
+  #
+  # `PlaybackServiceAdSkipCueTests` is the only thing that drives a REAL skip
+  # transition and interposes an interruption or a vanished route INSIDE it. It
+  # is the only place the emit gate can be observed at all: every other suite
+  # holds an `AdSkipCuePlaying` directly and never reaches the transport.
+  #
+  # `AdSkipCuePlayerTests` is the only thing that can see the re-trigger window
+  # — the transport emits per CUT and has no opinion about it, so a transport
+  # test cannot tell "coalesced" from "never emitted twice".
+  #
+  # `AdSkipCueSoundTests` is the only thing that can see the drop-in contract
+  # and the placeholder's envelope; `AdSkipCueSettingsTests` the only thing that
+  # can see an UNTOUCHED install (every transport test injects the switch, so
+  # the default is invisible to all of them).
+  #
+  # And `AdSkipCueSourceCanaryTests` is the only thing that can see the two
+  # properties this feature is most likely to lose quietly: that the cue files
+  # never name `AVAudioSession` (a cue that reconfigures the shared session is a
+  # P0 in the listening path and is a no-op on the simulator, so no behavioural
+  # test in this tree can fail on it), and that there is exactly ONE emit site
+  # (Dan's default #4 — sound is reserved for actual CUTS — is the ABSENCE of a
+  # second call site, which is not a runtime state).
+  -only-testing:PlayheadTests/PlaybackServiceAdSkipCueTests
+  -only-testing:PlayheadTests/AdSkipCuePlayerTests
+  -only-testing:PlayheadTests/AdSkipCueSoundTests
+  -only-testing:PlayheadTests/AdSkipCueSettingsTests
+  -only-testing:PlayheadTests/AdSkipCueSourceCanaryTests
 )
 
 # Named to match the `/private/tmp/playhead-*` pattern `scripts/disk-cleanup.sh`
@@ -10829,6 +10875,154 @@ MUTATIONS=(
   # changed behaviour.
   "PK99|1171|ADSVC|$T_PK_ASKED;$T_PK_UNTOUCHED"
 
+  # ── playhead-nqwr — an auto-skip should MAKE A SOUND (NQ series) ───────────
+  #
+  # Read the series as four groups, because they are four different ways the
+  # cue stops being trustworthy and only one of them is loud:
+  #
+  #   NQ01-NQ03  the cue announces a cut THAT DID NOT HAPPEN, or announces one
+  #              into audio the listener is no longer hearing. This is the P0
+  #              direction: a chime over a phone call, or out of a room speaker
+  #              a second after the headphones came out.
+  #   NQ04-NQ06  a cue OUTLIVES the episode it was acknowledging — the three
+  #              transport exits, one entry each, because a rail that drove one
+  #              would credit the other two for free.
+  #   NQ07-NQ12  the two POLICIES: an ON-by-default switch that ships OFF, and
+  #              every plausible mis-scoping of the re-trigger window.
+  #   NQ13-NQ18  the MATERIAL: the drop-in lookup that makes Dan's real asset a
+  #              zero-code swap, and the placeholder's envelope and level.
+
+  # NQ01 — the `.playing` gate is deleted, so the cue fires whatever the
+  # transport is doing. `pause()` is what BOTH the interruption handler and the
+  # vanished-route handler call, so this single deletion is the whole class:
+  # a chime over a phone call, and a chime into the room after the headphones
+  # came out. It is the reason the gate is a live read at the seam rather than
+  # an assertion — the transition's own duck-settle `await` is a real window
+  # for either event to arrive.
+  "NQ01|1172|PTX|A skip performed while paused is silent;A route that vanishes on the seam suppresses the cue;An interruption landing on the seam suppresses the cue"
+
+  # NQ02 — the listener's switch stops being consulted. The quiet direction:
+  # nothing sounds wrong, the setting simply does nothing.
+  "NQ02|1173|PTX|The cue is silent when the listener has switched it off"
+
+  # NQ03 — the emit MOVES from the tail of `duckSeekRelease` to just after the
+  # duck. Every early `return` between those two points is a skip that did not
+  # happen — a cancelled seek, a replaced item — so the cue starts announcing
+  # cuts nobody heard. Note the fifth victim: the source canary is the only
+  # thing that can see the POSITION as a property rather than as a consequence.
+  "NQ03|1174|PTX|A failed seek sounds nothing;An item replaced mid-seam sounds nothing;A route that vanishes on the seam suppresses the cue;An interruption landing on the seam suppresses the cue;AdSkipCueSourceCanaryTests/testTheEmitHelperIsCalledOnceAndOnlyFromTheTransition"
+
+  # NQ04 — `pause()` stops silencing a sounding cue. The episode stops and the
+  # chime keeps ringing, which is the "alert" reading this feature exists to
+  # avoid. One deletion covers both events for the same reason NQ01 does.
+  "NQ04|1175|PTX|A vanished route silences a cue that is already sounding;An interruption silences a cue that is already sounding;AdSkipCueSourceCanaryTests/testTheCueIsSilencedAtEveryTransportExit"
+
+  # NQ05 — `tearDown()` stops silencing. The transport is terminal and the cue
+  # is still sounding into whatever comes next.
+  "NQ05|1176|PTX|Teardown silences a sounding cue;AdSkipCueSourceCanaryTests/testTheCueIsSilencedAtEveryTransportExit"
+
+  # NQ06 — `pauseAndDetachCurrentItem()` stops silencing. Same defect, the
+  # third exit; a separate entry because the rails for NQ04 and NQ05 both stay
+  # green with this one applied.
+  "NQ06|1177|PTX|Detaching the episode silences a sounding cue;AdSkipCueSourceCanaryTests/testTheCueIsSilencedAtEveryTransportExit"
+
+  # NQ07 — `isEnabled` reads `bool(forKey:)`. It answers `false` for a key
+  # nobody has written, so an ON-by-default switch ships OFF for every listener
+  # who never opens Settings — and on a device that is indistinguishable from
+  # the silence this whole bead exists to remove. The canary is in the kill set
+  # because the VALUE test would keep passing under several worse spellings
+  # (`bool(forKey:) || defaultValue`, for one).
+  "NQ07|1178|NQCUE|An untouched install has the cue ON;AdSkipCueSourceCanaryTests/testTheSwitchIsReadWithObjectForKeyAndNotBoolForKey"
+
+  # NQ08 — the default itself is flipped OFF. The same shipped consequence as
+  # NQ07 by a different route, which is why it is a separate entry: a rail on
+  # the READ does not constrain the CONSTANT.
+  "NQ08|1179|NQCUE|An untouched install has the cue ON;AdSkipCueSourceCanaryTests/testTheSwitchIsReadWithObjectForKeyAndNotBoolForKey"
+
+  # NQ09 — the re-trigger gate is deleted, so two cuts landing on top of each
+  # other overlap two copies of one short tone. Comb-filtered attack: neither
+  # subdued nor recognisable.
+  "NQ09|1180|NQCUE|A second skip INSIDE the window is dropped, not overlapped;The window is half-open: the boundary instant is admitted;Two cuts inside the re-trigger window make one sound"
+
+  # NQ10 — the window becomes CLOSED (`<=`), so a request at the re-admit
+  # instant is refused. The half-open direction, and the same interval
+  # convention `checkSkipCues` uses; it is one token and it compiles.
+  "NQ10|1181|NQCUE|The window is half-open: the boundary instant is admitted;A skip after the window sounds again"
+
+  # NQ11 — `stopAdSkipCue` no longer clears the window, so silencing a cue also
+  # suppresses the NEXT one. An interruption at 0:59 would swallow the cut at
+  # 1:00.
+  "NQ11|1182|NQCUE|Stopping clears the window, so the next skip is heard"
+
+  # NQ12 — `stopAdSkipCue` clears the window but never stops the sound. The
+  # bookkeeping is right and the speaker is still ringing.
+  "NQ12|1183|NQCUE|Stopping clears the window, so the next skip is heard"
+
+  # NQ13 — `resolve` ignores a bundled asset. The placeholder ships forever and
+  # Dan's real sound, dropped in exactly where the header says, is never heard.
+  # This is the mutation that makes the drop-in instructions a promise.
+  "NQ13|1184|NQSND|A dropped-in asset wins, for every extension the header advertises;An undecodable asset yields no player rather than a crash"
+
+  # NQ14 — the extension precedence is reversed, so a compressed asset is
+  # preferred over a PCM one and the cue needs a decoder at a seam that has
+  # already spent 150 ms ducked.
+  #
+  # The canary is in the kill set because it was OBSERVED there and the first
+  # version of this record did not predict it: `testTheDropInAssetName…` pins
+  # `resourceExtensions.first == "caf"` as part of keeping the drop-in
+  # instructions honest. Recorded rather than left as an unexplained extra
+  # failure — an expectation that under-describes a mutation is a rail nobody
+  # can check.
+  "NQ14|1185|NQSND|Extension precedence is the order the header advertises;AdSkipCueSourceCanaryTests/testTheDropInAssetNameMatchesTheInstructions"
+
+  # NQ15 — the placeholder's release ramp is deleted. The exponential decay
+  # alone leaves a step of 112/32767 at the end of the buffer, and a step is a
+  # click — the exact "glitch" reading the cue exists to be the opposite of.
+  "NQ15|1186|NQSND|The placeholder starts from silence and decays into it"
+
+  # NQ16 — the attack ramp is deleted. Note WHY this needs a rail of its own
+  # and why that rail cannot be `sample(0) == 0`: both partials are sines, so
+  # the buffer opens at zero either way. What is lost is a step in SLOPE, which
+  # is only visible as the first millisecond's amplitude relative to the body.
+  "NQ16|1187|NQSND|The placeholder starts from silence and decays into it"
+
+  # NQ17 — the re-trigger window is shortened below the placeholder's own
+  # length, so a cue can overlap itself. The window is quoted in the header as
+  # the asset-length bound, so this is the one constant that cannot be tuned in
+  # isolation.
+  "NQ17|1188|NQSND|A cue can never outlive the window that refuses the next one;A second skip INSIDE the window is dropped, not overlapped"
+
+  # NQ18 — the prepared player is left at full scale. The acknowledgement
+  # becomes louder than the thing it acknowledges, and it is NOT ducked with
+  # the episode (that is the point of a separate player).
+  "NQ18|1189|NQSND|The placeholder produces a prepared player at the declared level"
+
+  # NQ19 — the Settings toggle binds a LITERAL key that has DRIFTED from the
+  # one the seam reads. The switch moves, writes a key nobody consults, and the
+  # cue keeps sounding. Nothing in this tree drives `SettingsView`, so the wire
+  # canary is the ONLY instrument — which is the whole reason it exists.
+  #
+  # THE FIRST VERSION OF THIS RECORD ALSO EXPECTED THE "one spelling" RAIL AND
+  # WAS WRONG, which is the check on predicted-vs-observed doing its job: NQ19
+  # reported SURVIVED with one of two expected tests red. A drifted key is still
+  # ONE occurrence of `playback.adSkipCueEnabled` in the tree, so the census
+  # rail cannot see it. That rail catches the OTHER defect — the same key spelt
+  # twice — and NQ20 is what proves it does.
+  "NQ19|1191|NQSET|AdSkipCueSourceCanaryTests/testTheSettingsToggleWritesTheKeyTheSeamReads"
+
+  # NQ20 — the toggle spells the key as a LITERAL that is, today, correct.
+  # Behaviourally equivalent on the day it lands, which is exactly why it needs
+  # a rail: two spellings of one key is the state from which a rename moves one
+  # and not the other, and no runtime assertion can ever fail on it.
+  "NQ20|1192|NQSET|AdSkipCueSourceCanaryTests/testTheSettingsToggleWritesTheKeyTheSeamReads;AdSkipCueSourceCanaryTests/testTheKeyLiteralAppearsInExactlyOneProductionFile"
+
+  # NQ99 — VACUITY CONTROL, and it MUST SURVIVE. The local holding the request
+  # instant in `playAdSkipCue` is renamed at its declaration and at both uses;
+  # nothing else changes. Non-empty expectation on purpose (playhead-ngsm) — it
+  # names the rails NQ09 and NQ10 kill, so a KILLED verdict here would mean a
+  # rename changed behaviour.
+  "NQ99|1190|NQCUE|A second skip INSIDE the window is dropped, not overlapped;The window is half-open: the boundary instant is admitted"
+
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -11078,6 +11272,27 @@ describe_mutation() {
     PK06) echo "2kxd: the INIT SEED admits an empty podcastId as a key, so every identity-less episode shares one entry" ;;
     PK07) echo "2kxd: the POST-BACKFILL writer admits an empty podcastId as a key — same defect, the other writer" ;;
     PK99) echo "VACUITY CONTROL — the resolved-profile local in resolveEpisodePriors is renamed and nothing else is. MUST SURVIVE" ;;
+    NQ01) echo "nqwr: the .playing gate is deleted — the cue fires over a phone call and out of the room speaker after the headphones came out" ;;
+    NQ02) echo "nqwr: the listener's switch stops being consulted — the setting does nothing and nothing sounds wrong" ;;
+    NQ03) echo "nqwr: the emit MOVES from the tail of duckSeekRelease to just after the duck — every early return past it is a cut that did not happen" ;;
+    NQ04) echo "nqwr: pause() stops silencing a sounding cue — the episode stops and the chime keeps ringing" ;;
+    NQ05) echo "nqwr: tearDown() stops silencing a sounding cue" ;;
+    NQ06) echo "nqwr: pauseAndDetachCurrentItem() stops silencing a sounding cue" ;;
+    NQ07) echo "nqwr: isEnabled reads bool(forKey:), which is false for a key nobody wrote — an ON-by-default switch ships OFF" ;;
+    NQ08) echo "nqwr: the default itself is flipped OFF — the same shipped consequence as NQ07 by a route no rail on the READ constrains" ;;
+    NQ09) echo "nqwr: the re-trigger gate is deleted, so two adjacent cuts overlap two copies of one tone" ;;
+    NQ10) echo "nqwr: the re-trigger window becomes CLOSED (<=), refusing a request at the re-admit instant" ;;
+    NQ11) echo "nqwr: stopAdSkipCue no longer clears the window, so silencing one cue suppresses the NEXT one" ;;
+    NQ12) echo "nqwr: stopAdSkipCue clears the window but never stops the sound — right bookkeeping, still ringing" ;;
+    NQ13) echo "nqwr: resolve ignores a bundled asset, so Dan's real sound is never heard however correctly it is dropped in" ;;
+    NQ14) echo "nqwr: the extension precedence is reversed — a compressed asset wins over PCM at a seam already 150 ms ducked" ;;
+    NQ15) echo "nqwr: the placeholder's release ramp is deleted, leaving a 112/32767 step at the buffer end — a click" ;;
+    NQ16) echo "nqwr: the placeholder's attack ramp is deleted — no step in VALUE (both partials are sines), a step in SLOPE" ;;
+    NQ17) echo "nqwr: the re-trigger window is shortened below the placeholder's own length, so a cue can overlap itself" ;;
+    NQ18) echo "nqwr: the prepared player is left at full scale — the acknowledgement louder than what it acknowledges" ;;
+    NQ19) echo "nqwr: the Settings toggle binds a LITERAL key that has drifted from the seam's — the switch writes a key nobody reads" ;;
+    NQ20) echo "nqwr: the toggle spells the key as a literal that is correct TODAY — two spellings, from which a rename moves one and not the other" ;;
+    NQ99) echo "VACUITY CONTROL — the request-instant local in playAdSkipCue is renamed and nothing else is. MUST SURVIVE" ;;
     YX99) echo "VACUITY CONTROL — the band in buildFMLedgerEntries is bound through a renamed intermediate on the line YX01 rewrites; nothing else changes. MUST SURVIVE" ;;
     NY01) echo "AdDetectionService.hotPathCandidates sorts the RAW array — the shipped defect: runBackfill canonicalized and the hot path did not" ;;
     SU01) echo "THE SHIPPED DEFECT VERBATIM — stage 6 deleted, so a mark is its SCAN WINDOW again" ;;
@@ -25260,6 +25475,275 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+
+  # ---- playhead-nqwr: the ad-skip cue (NQ series) ----
+
+  NQ01)
+    snippet OLD <<'EOF'
+        guard !isTornDown,
+              case .playing = _state.status,
+              skipCueEnabled()
+        else {
+            return
+        }
+        skipCuePlayer.playAdSkipCue()
+EOF
+    snippet NEW <<'EOF'
+        guard !isTornDown,
+              skipCueEnabled()
+        else {
+            return
+        }
+        skipCuePlayer.playAdSkipCue()
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  NQ02)
+    snippet OLD <<'EOF'
+        guard !isTornDown,
+              case .playing = _state.status,
+              skipCueEnabled()
+        else {
+            return
+        }
+        skipCuePlayer.playAdSkipCue()
+EOF
+    snippet NEW <<'EOF'
+        guard !isTornDown,
+              case .playing = _state.status
+        else {
+            return
+        }
+        skipCuePlayer.playAdSkipCue()
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  NQ03)
+    snippet OLD <<'EOF'
+        // Duck
+        player.volume = Self.duckVolume
+EOF
+    snippet NEW <<'EOF'
+        // Duck
+        player.volume = Self.duckVolume
+        emitAdSkipCue()
+EOF
+    patch "$file" "$OLD" "$NEW" || return $?
+    snippet OLD <<'EOF'
+
+        emitAdSkipCue()
+    }
+EOF
+    snippet NEW <<'EOF'
+
+    }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  NQ04)
+    snippet OLD <<'EOF'
+        skipCuePlayer.stopAdSkipCue()
+        player.pause()
+        updateState { $0.status = .paused }
+EOF
+    snippet NEW <<'EOF'
+        player.pause()
+        updateState { $0.status = .paused }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  NQ05)
+    snippet OLD <<'EOF'
+        skipCuePlayer.stopAdSkipCue()
+        cancelActiveSkipTransition()
+        playerItemGeneration &+= 1
+        player.pause()
+EOF
+    snippet NEW <<'EOF'
+        cancelActiveSkipTransition()
+        playerItemGeneration &+= 1
+        player.pause()
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  NQ06)
+    snippet OLD <<'EOF'
+        skipCuePlayer.stopAdSkipCue()
+        cancelActiveSkipTransition()
+        playerItemGeneration &+= 1
+        rateObservation?.invalidate()
+EOF
+    snippet NEW <<'EOF'
+        cancelActiveSkipTransition()
+        playerItemGeneration &+= 1
+        rateObservation?.invalidate()
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  NQ07)
+    snippet OLD <<'EOF'
+        defaults.object(forKey: userDefaultsKey) as? Bool ?? defaultValue
+EOF
+    snippet NEW <<'EOF'
+        defaults.bool(forKey: userDefaultsKey)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  NQ08)
+    snippet OLD <<'EOF'
+    static let defaultValue = true
+EOF
+    snippet NEW <<'EOF'
+    static let defaultValue = false
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  NQ09)
+    snippet OLD <<'EOF'
+        if let admitAgainAt, instant < admitAgainAt {
+            lock.unlock()
+            return
+        }
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  NQ10)
+    snippet OLD <<'EOF'
+        if let admitAgainAt, instant < admitAgainAt {
+EOF
+    snippet NEW <<'EOF'
+        if let admitAgainAt, instant <= admitAgainAt {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  NQ11)
+    snippet OLD <<'EOF'
+        lock.lock()
+        admitAgainAt = nil
+        lock.unlock()
+        stopSound()
+EOF
+    snippet NEW <<'EOF'
+        stopSound()
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  NQ12)
+    snippet OLD <<'EOF'
+        lock.lock()
+        admitAgainAt = nil
+        lock.unlock()
+        stopSound()
+EOF
+    snippet NEW <<'EOF'
+        lock.lock()
+        admitAgainAt = nil
+        lock.unlock()
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  NQ13)
+    snippet OLD <<'EOF'
+        if let url = bundledAssetURL(in: bundle) {
+            return AdSkipCueSound(source: .bundledAsset(url))
+        }
+        return AdSkipCueSound(source: .placeholderTone)
+EOF
+    snippet NEW <<'EOF'
+        return AdSkipCueSound(source: .placeholderTone)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  NQ14)
+    snippet OLD <<'EOF'
+    static let resourceExtensions = ["caf", "wav", "aiff", "aif", "m4a", "mp3"]
+EOF
+    snippet NEW <<'EOF'
+    static let resourceExtensions = ["m4a", "mp3", "caf", "wav", "aiff", "aif"]
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  NQ15)
+    snippet OLD <<'EOF'
+            let remaining = placeholderDurationSeconds - seconds
+            let release = min(1.0, max(0.0, remaining / placeholderReleaseSeconds))
+EOF
+    snippet NEW <<'EOF'
+            let release = 1.0
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  NQ16)
+    snippet OLD <<'EOF'
+            let attack = min(1.0, seconds / placeholderAttackSeconds)
+EOF
+    snippet NEW <<'EOF'
+            let attack = 1.0
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  NQ17)
+    snippet OLD <<'EOF'
+    static let retriggerWindow: Duration = .milliseconds(600)
+EOF
+    snippet NEW <<'EOF'
+    static let retriggerWindow: Duration = .milliseconds(200)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  NQ18)
+    snippet OLD <<'EOF'
+        player?.volume = Self.level
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  NQ19)
+    snippet OLD <<'EOF'
+    @AppStorage(AdSkipCueSettings.userDefaultsKey)
+    private var adSkipCueEnabled = AdSkipCueSettings.defaultValue
+EOF
+    snippet NEW <<'EOF'
+    @AppStorage("playback.adSkipCueSound")
+    private var adSkipCueEnabled = AdSkipCueSettings.defaultValue
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  NQ20)
+    snippet OLD <<'EOF'
+    @AppStorage(AdSkipCueSettings.userDefaultsKey)
+    private var adSkipCueEnabled = AdSkipCueSettings.defaultValue
+EOF
+    snippet NEW <<'EOF'
+    @AppStorage("playback.adSkipCueEnabled")
+    private var adSkipCueEnabled = AdSkipCueSettings.defaultValue
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  NQ99)
+    snippet OLD <<'EOF'
+        let instant = now()
+        lock.lock()
+        if let admitAgainAt, instant < admitAgainAt {
+            lock.unlock()
+            return
+        }
+        admitAgainAt = instant.advanced(by: retriggerWindow)
+EOF
+    snippet NEW <<'EOF'
+        let requestedAt = now()
+        lock.lock()
+        if let admitAgainAt, requestedAt < admitAgainAt {
+            lock.unlock()
+            return
+        }
+        admitAgainAt = requestedAt.advanced(by: retriggerWindow)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
   *)
     echo "mutation-battery: unknown mutation '$name'" >&2
     return 3 ;;
@@ -25354,6 +25838,9 @@ rec_file()   {
     LEASE) printf '%s' "$LEASE" ;;
     FPRUN) printf '%s' "$FPRUN" ;;
     PTX)   printf '%s' "$PTX" ;;
+    NQCUE) printf '%s' "$NQCUE" ;;
+    NQSND) printf '%s' "$NQSND" ;;
+    NQSET) printf '%s' "$NQSET" ;;
     SSR)   printf '%s' "$SSR" ;;
     OWNG)  printf '%s' "$OWNG" ;;
     EMPRO) printf '%s' "$EMPRO" ;;

@@ -118,6 +118,18 @@ final class PlaybackService: NSObject, Sendable {
         (@Sendable (AVPlayerItem, CMTime) async -> Bool)?
     #endif
 
+    /// playhead-nqwr: the ad-skip cue. Injected so tests observe the SEAM
+    /// (was a cue emitted, and was it emitted once) without an audio device.
+    /// Production shares one process-wide player — there is one transport, and
+    /// building the `AVAudioPlayer` lazily keeps it off the launch path.
+    private let skipCuePlayer: AdSkipCuePlaying
+
+    /// playhead-nqwr: the user's switch, read at the seam rather than cached.
+    /// A cached copy would need an observer and could answer with a value the
+    /// user has already changed; the read is a single `UserDefaults` lookup, on
+    /// a path that has just performed a seek.
+    private let skipCueEnabled: @Sendable () -> Bool
+
     // MARK: - State
 
     private var _state = PlaybackState()
@@ -276,6 +288,10 @@ final class PlaybackService: NSObject, Sendable {
                 toleranceBefore: .zero,
                 toleranceAfter: .zero
             )
+        },
+        skipCuePlayer: AdSkipCuePlaying = AdSkipCuePlayer.shared,
+        skipCueEnabled: @escaping @Sendable () -> Bool = {
+            AdSkipCueSettings.isEnabled()
         }
     ) {
         let player = AVPlayer()
@@ -286,6 +302,8 @@ final class PlaybackService: NSObject, Sendable {
         self.notificationCenter = notificationCenter
         self.transitionSleeper = transitionSleeper
         self.itemSeekOperation = itemSeekOperation
+        self.skipCuePlayer = skipCuePlayer
+        self.skipCueEnabled = skipCueEnabled
 
         super.init()
 
@@ -351,6 +369,9 @@ final class PlaybackService: NSObject, Sendable {
         let interruptionTask = interruptionObservationTask
         interruptionTask?.cancel()
         interruptionObservationTask = nil
+        // playhead-nqwr: nothing may still be sounding once the transport is
+        // terminal.
+        skipCuePlayer.stopAdSkipCue()
         cancelActiveSkipTransition()
         playerItemGeneration &+= 1
         player.pause()
@@ -613,6 +634,12 @@ final class PlaybackService: NSObject, Sendable {
 
     func pause() {
         guard !isTornDown else { return }
+        // playhead-nqwr: silence a cue that is still ringing. This is the
+        // shared exit for a user pause, an interruption (`.began`) and a route
+        // that vanished (`.oldDeviceUnavailable`) — so unplugging headphones
+        // onto a seam cannot leave the chime playing out of the speaker after
+        // the episode has stopped.
+        skipCuePlayer.stopAdSkipCue()
         player.pause()
         updateState { $0.status = .paused }
         updateNowPlayingInfo()
@@ -633,6 +660,9 @@ final class PlaybackService: NSObject, Sendable {
         guard force || playerItem != nil || player.currentItem != nil else {
             return playerItemGeneration
         }
+        // playhead-nqwr: the episode is being taken away; a cue about it must
+        // not outlive it.
+        skipCuePlayer.stopAdSkipCue()
         cancelActiveSkipTransition()
         playerItemGeneration &+= 1
         rateObservation?.invalidate()
@@ -1176,6 +1206,41 @@ final class PlaybackService: NSObject, Sendable {
         isCurrentTimeObservedPlayhead = true
         updateState { $0.currentTime = seconds }
         updateNowPlayingInfo()
+
+        // playhead-nqwr: the LAST statement of the ONLY path that completes a
+        // skip, and the only site that sounds the cue.
+        //
+        // Every earlier `return` in this method is a skip that did not happen —
+        // a seek that was cancelled, an item that was replaced, a reservation
+        // Listen disarmed — so a cue placed here cannot announce one. It hangs
+        // off the transition itself rather than off a parallel prediction of
+        // it, which is the mistake playhead-bwxi had to undo for the banner: a
+        // second consumer of the same event drifts out of agreement with it.
+        emitAdSkipCue()
+    }
+
+    /// playhead-nqwr: sound the ad-skip cue for a cut that has just landed.
+    ///
+    /// Three gates, and the middle one is what makes an interruption or a
+    /// vanished route safe. `pause()` sets `.paused` SYNCHRONOUSLY on this
+    /// actor, and it is what both the interruption handler (`.began`) and the
+    /// route-change handler (`.oldDeviceUnavailable`) call — so a transport
+    /// that is no longer the thing the listener is hearing cannot emit, and the
+    /// check cannot race the event because both run here. The `await
+    /// transitionSleeper(...)` inside the transition is a real window for one
+    /// of those to arrive, which is why this is a live check and not an
+    /// assertion.
+    ///
+    /// Skipping while paused is deliberately silent for the same reason: no
+    /// audio moved that the listener could have noticed.
+    private func emitAdSkipCue() {
+        guard !isTornDown,
+              case .playing = _state.status,
+              skipCueEnabled()
+        else {
+            return
+        }
+        skipCuePlayer.playAdSkipCue()
     }
 
     private func isCurrentSkipTransition(
