@@ -708,6 +708,32 @@ struct NowPlayingView: View {
                             sourceContext.playbackLifecycleGeneration,
                         podcastId: sourceContext.podcastId
                     )
+                },
+                // playhead-2d6i: the passive list of auto-skips that fired
+                // while no banner host was attached. Scoped to the sheet's
+                // captured playback transaction for the same reason every
+                // other callback here is — a same-asset replay must not let an
+                // old sheet answer for the new lifecycle.
+                missedAutoSkipReceipts: {
+                    guard runtime.currentEpisodeId
+                            == sourceContext.episodeId,
+                          runtime.playEpisodeGeneration
+                            == sourceContext.playbackLifecycleGeneration
+                    else {
+                        return []
+                    }
+                    return await runtime.skipOrchestrator
+                        .missedAutoSkipReceipts()
+                },
+                // playhead-2d6i: THE VETO IS THE CARD'S VETO. Not a second
+                // route to `denyAutoSkippedBanner` — literally the closure
+                // `AdBannerView`'s No calls, handed the item the card would
+                // have carried. A list entry that could not reach this is
+                // decorative, and two call sites that merely agree today is
+                // how a surface comes to promise a correction the transaction
+                // will refuse.
+                onMissedAutoSkipNotAnAd: { receipt in
+                    await bannerFeedbackActions.onNotAnAd(receipt.item)
                 }
             )
             .presentationDetents([.medium, .large])
