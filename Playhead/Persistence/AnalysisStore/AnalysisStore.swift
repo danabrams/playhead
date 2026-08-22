@@ -21934,6 +21934,16 @@ actor AnalysisStore {
             // column 19 = reuseKeyHash (not persisted back onto the struct)
             runMode: runMode,
             jobPhase: optionalText(stmt, 21) ?? "shadow",
+            // playhead-iw7q (V61): column 33. `optionalInt`, then
+            // `ScanVerdictProvenance.decoded(persistedFlag:)` — the one place a
+            // NULL becomes `.unknown`. `sqlite3_column_int` returns 0 for a
+            // NULL, and 0 here means `.model`, so the bare read would certify
+            // every pre-V61 row as the model's own. That is exactly the
+            // conflation this column exists to end, and it is the same trap
+            // `prewarmHit` documents two fields up.
+            verdictProvenance: ScanVerdictProvenance.decoded(
+                persistedFlag: optionalInt(stmt, 33).map { $0 != 0 }
+            ),
             // playhead-hx6n (V42). `createdAt` is `optionalDouble`, not
             // `sqlite3_column_double`: the latter returns 0.0 for a NULL, which
             // would date every pre-V42 row to 1970 and make it sort as the
@@ -21955,17 +21965,7 @@ actor AnalysisStore {
             // as the cheapest one in the store.
             latencyMsTotal: optionalDouble(stmt, 30),
             latencyMsMax: optionalDouble(stmt, 31),
-            latencySampleCount: optionalInt(stmt, 32),
-            // playhead-iw7q (V61): column 33. `optionalInt`, then
-            // `ScanVerdictProvenance.decoded(persistedFlag:)` — the one place a
-            // NULL becomes `.unknown`. `sqlite3_column_int` returns 0 for a
-            // NULL, and 0 here means `.model`, so the bare read would certify
-            // every pre-V61 row as the model's own. That is exactly the
-            // conflation this column exists to end, and it is the same trap
-            // `prewarmHit` documents two fields up.
-            verdictProvenance: ScanVerdictProvenance.decoded(
-                persistedFlag: optionalInt(stmt, 33).map { $0 != 0 }
-            )
+            latencySampleCount: optionalInt(stmt, 32)
         )
     }
 

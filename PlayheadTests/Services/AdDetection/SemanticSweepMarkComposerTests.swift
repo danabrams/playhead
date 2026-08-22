@@ -118,7 +118,13 @@ private enum SweepFixture {
             latencyMs: nil,
             prewarmHit: false,
             scanCohortJSON: makeCohortJSON(promptLabel: "y3ya"),
-            transcriptVersion: "tv-1"
+            transcriptVersion: "tv-1",
+            // playhead-iw7q: EXPLICIT, because the default is now `.unknown`.
+            // These fixtures stand for a coarse row the MODEL produced — that is
+            // what makes their persisted band attributable at all — and the
+            // struct's default deliberately withholds the licence from a writer
+            // that says nothing. Saying it here is the fixture doing its job.
+            verdictProvenance: .model
         )
     }
 

@@ -1675,7 +1675,16 @@ struct FastTranscriptCoverageV37MigrationTests {
         // before measuring). The deletion is coverage-preserving by
         // construction, in BOTH directions, which is stronger than "it happens
         // not to fire on these fixtures".
-        #expect(AnalysisStore.currentSchemaVersion == 60)
+        //
+        // 60 -> 61 read for this rung (playhead-iw7q): V61 ADDS ONE NULLABLE
+        // COLUMN to `semantic_scan_results` and writes nothing to it — no
+        // UPDATE, no DEFAULT, no row touched. So it cannot move a coverage
+        // watermark, and it cannot move the `passA` / `didExamineWindow`
+        // population this file's numerator is taken over either: those are
+        // functions of `scanPass`, `status` and `errorContext`, none of which
+        // it reads or writes. The claim holds in both directions because the
+        // rung's whole body is `addColumnIfNeeded`.
+        #expect(AnalysisStore.currentSchemaVersion == 61)
     }
 
     /// THE MIGRATION EVIDENCE. An asset already on disk — written by a
