@@ -1331,6 +1331,9 @@ INVF="Playhead/Services/AdDetection/InventorySanityFilter.swift"
 # extent policy is in it — so every Y rail but the wire-in ones is a one-line
 # edit to a stage whose claim has its own named test.
 SWEEP="Playhead/Services/AdDetection/SemanticSweepMarkComposer.swift"
+# playhead-iw7q: the row TYPE, which is where `ScanVerdictProvenance` lives —
+# the three-state provenance and the two predicates a consumer may ask of it.
+SCANRES="Playhead/Services/AdDetection/SemanticScanResult.swift"
 SLIDX="Playhead/Services/AdDetection/SupportLineIndex.swift"
 # playhead-lxkq: the ad-likelihood SCAN ORDER (X01-X14). SCANORD is the pure
 # permutation policy — every ranking, budget and degenerate-input claim is a
@@ -1546,7 +1549,7 @@ MUTABLE_FILES=(
   "$BWPOL" "$KICK" "$KCOORD" "$SEAMS" "$ACT" "$ADSVC" "$PODC"
   "$THROT" "$FMREF" "$UMF" "$SFR" "$DTR" "$RUNNER" "$FMCLS" "$PROBE" "$PERMC" "$RT" "$MODEL" "$INGO" "$INVF"
   "$FMDL" "$FMCP"
-  "$SWEEP" "$SLIDX" "$SCANORD" "$SCRATCH" "$SCRATCHH" "$FMSUP" "$GATE"
+  "$SWEEP" "$SCANRES" "$SLIDX" "$SCANORD" "$SCRATCH" "$SCRATCHH" "$FMSUP" "$GATE"
   "$FUSION" "$DSPAN" "$EXTENT" "$RSLOT" "$ATOMEV"
   "$EVCAT" "$PROJ" "$TWNARR"
   "$DETCLS" "$DETLED" "$SPLIT" "$HOTGATE" "$UGCEN" "$POLICY" "$SEGAGG"
@@ -1666,6 +1669,32 @@ FOCUSED_SUITES=(
   -only-testing:PlayheadTests/SemanticSweepAttributionTests
   -only-testing:PlayheadTests/SemanticSweepAttributionAbsenceTests
   -only-testing:PlayheadTests/SemanticSweepAttributionPersistenceTests
+  # playhead-iw7q: a PERMISSIVE coarse row stops being byte-identical to a
+  # genuine one (IW series). FOUR suites, because the claim spans four layers
+  # and no one of them can observe another.
+  #
+  # `CoarseCertaintyProvenanceGateTests` is the only thing that can see the READ
+  # — the coarse gate, the asymmetry that leaves the refined gate alone, and
+  # that `.unknown` and `.permissive` reach the same band by different routes.
+  # `SemanticScanVerdictProvenanceV61MigrationTests` is the only thing that can
+  # see the DISK: it probes the raw column rather than asking the store, so a
+  # matched pair of bugs in the bind and the read cannot agree their way past
+  # it, and it is the only place the BACKFILL DECISION (a NULL, not a zero) is
+  # observable at all. `BackfillCoarseCheckpointTests` is the only thing that
+  # drives the real runner, so it is the only place the value is seen to survive
+  # the write path that dropped it for a year.
+  #
+  # And `PermissiveCoarseProvenanceSourceCanaryTests` is the only thing that can
+  # see WHICH ARM of `FoundationModelClassifier` stamps which label — the
+  # permissive coarse route needs a live iOS 26 FoundationModels session and
+  # FoundationModels is gracefully unavailable on the simulator, which is why
+  # `KellyRipaFMSafetyTests` declines to drive the same path in as many words. A
+  # column written `.model` on the arm that fabricates the band is worse than no
+  # column: it CERTIFIES the fabrication.
+  -only-testing:PlayheadTests/CoarseCertaintyProvenanceGateTests
+  -only-testing:PlayheadTests/SemanticScanVerdictProvenanceV61MigrationTests
+  -only-testing:PlayheadTests/BackfillCoarseCheckpointTests
+  -only-testing:PlayheadTests/PermissiveCoarseProvenanceSourceCanaryTests
   # playhead-kg6i: a vote is a REPLICATE OF THE SAME EXPERIMENT (KG series).
   # ONE suite, and the reason it is one rather than three is the opposite of
   # shu5's: the whole claim lives in a single pure function and its one caller,
@@ -3018,6 +3047,35 @@ T_6RUV_MOVES_ONLY="attribution moves evidenceSources and NOTHING else"
 T_6RUV_COMPOSED="a composed mark carries its own attribution"
 T_6RUV_CANONICAL="each attribution renders to one canonical, pinned string"
 T_6RUV_ORDER="the rendering does not depend on the order the spans were read in"
+
+# ---- playhead-iw7q: a PERMISSIVE coarse row stops being byte-identical to a
+#      genuine one (IW series) --------------------------------------------
+T_IW7Q_MODEL_KEEPS="a MODEL coarse row keeps its band, at every rung of the ladder"
+T_IW7Q_PERMISSIVE="a PERMISSIVE coarse row is ungraded — the runner wrote that .strong"
+T_IW7Q_UNKNOWN="an UNKNOWN coarse row is ungraded too — silence is not a licence"
+T_IW7Q_NOT_MODEL="unknown does NOT read as model, on rows that are otherwise identical"
+T_IW7Q_EMPTY="a coarse row with NO support payload is ungraded whatever its provenance"
+T_IW7Q_REFINED_UNKNOWN="a refined payload on an UNKNOWN row keeps its band — the SPAN carries the flag"
+T_IW7Q_REFINED_SUPPRESSED="playhead-92im's span gate is unchanged: a suppressed span is ungraded on a MODEL row"
+T_IW7Q_REFINED_PERMISSIVE="a refined payload on a PERMISSIVE row is vetoed — that is a CLAIM, not an absence"
+T_IW7Q_FLOOR="the mark a pre-V61 coarse row backs grades at the FLOOR, not the ceiling"
+T_IW7Q_MONOTONE="the gate can only ever DEDUCT — no provenance raises a band"
+T_IW7Q_BYTES="the two rows that used to be identical now differ IN THE BYTES"
+T_IW7Q_NULL="an UNKNOWN provenance writes SQL NULL, not 0"
+T_IW7Q_ROUNDTRIP="the flag round-trips through the store for all three states"
+T_IW7Q_NO_BACKFILL="a pre-V61 row arrives at V61 as UNKNOWN, and the column is NULL"
+T_IW7Q_UNKNOWN_BAND="UNKNOWN licenses nothing: the coarse band a pre-V61 row carries is NOT attributable"
+T_IW7Q_DECODE="decoded(persistedFlag:) maps the three column states onto the three cases"
+T_IW7Q_PERSISTED="persistedFlag round-trips every case, and only .unknown is NULL"
+T_IW7Q_PREDICATES="the two predicates are not each other's negation — unknown is false for BOTH"
+T_IW7Q_DEFAULT="the struct's own default is .unknown, not .model"
+T_IW7Q_REPLACE="a replace overwrites the provenance, because it overwrites the verdict"
+T_IW7Q_REPLACE_LOSE="a replace can also LOSE a provenance, and NULL is the honest answer"
+T_IW7Q_WIRE="playhead-iw7q: a permissive coarse window banks a row that SAYS so"
+T_IW7Q_CANARY_LABELS="a .permissive label sits under a permissive call, and a .model label under sanitize"
+T_IW7Q_CANARY_FORWARD="the three re-wraps forward the provenance rather than re-deriving it"
+T_IW7Q_CANARY_RUNNER="BackfillJobRunner carries the provenance onto both row shapes"
+T_IW7Q_CANARY_STATES="every FMCoarseWindowOutput in the classifier states a provenance"
 
 # ---- playhead-kg6i: a vote is a REPLICATE OF THE SAME EXPERIMENT (KG series) ----
 T_KG6I_LONE="a lone verdict is not voted down by a transcript it never saw"
@@ -6254,6 +6312,134 @@ MUTATIONS=(
   # that way worthless) and it names the rail AT01 kills — so a KILLED verdict
   # here would mean a rename can change behaviour and something is very wrong.
   "AT99|1204|SWEEP|$T_6RUV_PERMISSIVE"
+
+
+  # ---- playhead-iw7q, the IW series: a PERMISSIVE coarse row stops being
+  #      byte-identical to a genuine one --------------------------------------
+  #
+  # `PermissiveAdGrammar.parse` writes a hardcoded `certainty: .strong` into
+  # every `containsAd` it returns. The REFINED half of that fabrication has
+  # recorded itself since playhead-92im; the COARSE half recorded nothing,
+  # because `SemanticScanResult.usedPermissiveFallback` existed with NO COLUMN
+  # and was dropped at the write. V61 adds the column, and the state it adds is
+  # THREE-VALUED — because the provenance of a row already on disk is not
+  # recoverable from anything, so the honest backfill is a NULL and not a zero.
+  #
+  # The series has four shapes, one per layer, because each is invisible from
+  # the others: IW01-IW05 + IW99 are the READ (the gate and the asymmetry),
+  # IW06-IW10 are the TYPE (the three states and the two predicates),
+  # IW11-IW14 are the DISK (bind, read, migration, column index), and
+  # IW15-IW19 are the WIRE (which arm stamps which label, and whether the
+  # runner carries it to the row at all).
+
+  # IW01 is the shipped defect verbatim: the coarse gate is gone, so a runner
+  # hardcode and a model grade are one value again. Own batch — it reverts the
+  # whole read at once, so a batched partner would be credited off it.
+  "IW01|1300|SWEEP|$T_IW7Q_PERMISSIVE;$T_IW7Q_UNKNOWN;$T_IW7Q_NOT_MODEL;$T_IW7Q_FLOOR;$T_IW7Q_MONOTONE;$T_IW7Q_UNKNOWN_BAND"
+
+  # IW02 is THE BACKFILL DEFECT EXPRESSED IN THE READER — `.unknown` licenses
+  # the band, which is what `UPDATE … SET usedPermissiveFallback = 0` would have
+  # achieved from the other end. `.permissive` is still gated, so the rails that
+  # only ever exercise a permissive row cannot see it: that is why
+  # `unknownIsNotModel` exists as an INEQUALITY between two rows whose payloads
+  # are byte-identical.
+  "IW02|1301|SWEEP|$T_IW7Q_UNKNOWN;$T_IW7Q_NOT_MODEL;$T_IW7Q_FLOOR;$T_IW7Q_MONOTONE;$T_IW7Q_UNKNOWN_BAND"
+
+  # IW03 bypasses the gate AT THE CALL SITE rather than inside the helper —
+  # the same behaviour by a different line, and the reason the gate has a rail
+  # in `certaintyBand(of:)` as well as in `PersistedCertainty`.
+  "IW03|1302|SWEEP|$T_IW7Q_PERMISSIVE;$T_IW7Q_UNKNOWN;$T_IW7Q_NOT_MODEL;$T_IW7Q_FLOOR;$T_IW7Q_MONOTONE;$T_IW7Q_UNKNOWN_BAND"
+
+  # IW04 is the OVER-CORRECTION: the refined branch gains the `.unknown` veto
+  # too. Every `passB` row on disk reads `.unknown`, so this silently re-grades
+  # the whole refinement population while discarding a discriminator the payload
+  # actually carries. The asymmetry is the design, and this is its rail.
+  "IW04|1303|SWEEP|$T_IW7Q_REFINED_UNKNOWN"
+
+  # IW05 drops the refined branch's `.permissive` veto. The mirror of IW04, and
+  # it is a positive CLAIM being ignored rather than an absence being trusted.
+  "IW05|1304|SWEEP|$T_IW7Q_REFINED_PERMISSIVE"
+
+  # IW06 is UNKNOWN IS ZERO at the decode: a NULL column becomes `.model`. This
+  # is the single line that turns 1,406 unattributable coarse rows on the
+  # 2026-08-21 t6 pull into rows the model is credited with.
+  "IW06|1305|SCANRES|$T_IW7Q_DECODE;$T_IW7Q_PERSISTED;$T_IW7Q_NO_BACKFILL;$T_IW7Q_UNKNOWN_BAND;$T_IW7Q_ROUNDTRIP;$T_IW7Q_REPLACE_LOSE"
+
+  # IW07 is the same conflation on the WRITE side: `.unknown` persists 0 rather
+  # than NULL, so a writer with no observation claims the model.
+  "IW07|1306|SCANRES|$T_IW7Q_NULL;$T_IW7Q_PERSISTED;$T_IW7Q_ROUNDTRIP;$T_IW7Q_REPLACE_LOSE"
+
+  # IW08 widens the licence predicate to `!= .permissive`, i.e. "not proven to
+  # be the runner" read as "proven to be the model" — an absence read as a
+  # presence, one layer below IW02.
+  "IW08|1307|SCANRES|$T_IW7Q_UNKNOWN;$T_IW7Q_NOT_MODEL;$T_IW7Q_PREDICATES;$T_IW7Q_FLOOR;$T_IW7Q_MONOTONE;$T_IW7Q_UNKNOWN_BAND"
+
+  # IW09 makes the two predicates each other's negation. A telemetry reader
+  # would then count every unattributed row as a bypass — the SAME substitution
+  # as IW08 with the sign flipped, and the reason both predicates exist.
+  "IW09|1308|SCANRES|$T_IW7Q_PREDICATES;$T_IW7Q_REFINED_UNKNOWN"
+
+  # IW10 moves the struct's default from `.unknown` to `.model`. Every writer
+  # that says nothing then claims the model — the defect this bead exists to end
+  # arriving through a default rather than through a migration.
+  "IW10|1309|SCANRES|$T_IW7Q_DEFAULT"
+
+  # IW11 coalesces the bind: `?? 0` where the shipped code writes `map`. Same
+  # shape as playhead-exxc's `prewarmHit` V52 finding, in the column added to
+  # fix a strictly worse version of it.
+  "IW11|1310|STORE|$T_IW7Q_NULL;$T_IW7Q_ROUNDTRIP;$T_IW7Q_REPLACE_LOSE"
+
+  # IW12 is the READ half of IW11 — `sqlite3_column_int` returns 0 for a NULL,
+  # and 0 is `.model`. The raw-column probes in the V61 suite are what make this
+  # distinguishable from IW11 at all: both leave the store's own round trip
+  # self-consistent.
+  "IW12|1311|STORE|$T_IW7Q_NO_BACKFILL;$T_IW7Q_UNKNOWN_BAND;$T_IW7Q_ROUNDTRIP;$T_IW7Q_REPLACE_LOSE"
+
+  # IW13 IS THE BACKFILL THE MIGRATION DELIBERATELY DOES NOT PERFORM, added
+  # back. It is the mutation that makes the decision a decision.
+  "IW13|1312|STORE|$T_IW7Q_NO_BACKFILL;$T_IW7Q_UNKNOWN_BAND"
+
+  # IW14 reads column 32 instead of 33 — the tail-append hazard
+  # `semanticScanResultColumns` documents, on the column that just moved the
+  # tail. `latencySampleCount` is NULL on these fixtures, so the row decodes
+  # structurally fine and simply reports the wrong provenance.
+  "IW14|1313|STORE|$T_IW7Q_ROUNDTRIP;$T_IW7Q_REPLACE"
+
+  # IW15 labels the SENSITIVE-WINDOW ROUTE `.model`. This is the one the column
+  # exists for: the arm that calls `PermissiveAdGrammar.parse` certifying its
+  # own hardcode as the model's grade.
+  "IW15|1314|FMCLS|$T_IW7Q_CANARY_LABELS"
+
+  # IW16 does the same to qbib's whole-window permissive RECOVERY. Two arms,
+  # two rails — a canary that only knew about the dispatch route would credit
+  # the recovery arm with a correctness it does not have.
+  "IW16|1315|FMCLS|$T_IW7Q_CANARY_LABELS"
+
+  # IW17 makes a RE-WRAP stamp a literal instead of forwarding. The pass loop
+  # renumbers a recovered window into `windows.count`; stamping there overwrites
+  # what the recovery observed, which is the column not existing all over again
+  # one layer up. Killed twice over, and deliberately: the forward count falls
+  # to two AND the nearest-producer rule fails, because a re-wrap sits under
+  # neither producer.
+  "IW17|1316|FMCLS|$T_IW7Q_CANARY_FORWARD;$T_IW7Q_CANARY_LABELS"
+
+  # IW18 drops the argument from the runner's coarse row builder, so the row
+  # takes the struct default and every coarse row ever written reads `.unknown`.
+  # The column would exist, be migrated, be read — and carry nothing.
+  "IW18|1317|RUNNER|$T_IW7Q_WIRE;$T_IW7Q_CANARY_RUNNER"
+
+  # IW19 hardcodes `.model` in the same builder. Worse than IW18 in exactly the
+  # way a fabricated value is worse than a missing one.
+  "IW19|1318|RUNNER|$T_IW7Q_WIRE;$T_IW7Q_CANARY_RUNNER"
+
+  # IW99 — VACUITY CONTROL, and it MUST SURVIVE. It renames the parameter
+  # BINDING inside `coarseAttributableBand` — the argument LABEL is untouched,
+  # so no call site moves — on the exact line IW01 and IW02 rewrite. Its
+  # expectation is deliberately NON-EMPTY (playhead-ngsm: an entry with an empty
+  # expectation is scored KILLED, which makes a control expressed that way
+  # worthless) and it names the rail IW01 kills, so a KILLED verdict here would
+  # mean a rename changed behaviour.
+  "IW99|1319|SWEEP|$T_IW7Q_UNKNOWN"
 
   # ---- playhead-kg6i, the KG series: a vote is a REPLICATE OF THE SAME
   #      EXPERIMENT --------------------------------------------------------
@@ -11319,6 +11505,26 @@ describe_mutation() {
     SU22) echo "the gap test closes, so a barrier that only TOUCHES the join bars the merge" ;;
     SU23) echo "AdDetectionService stops passing the index — a correct composer never handed one" ;;
     SU24) echo "BackfillJobRunner stops passing the index" ;;
+    IW01) echo "THE SHIPPED DEFECT VERBATIM — the coarse gate is gone, so a runner hardcode reads as the model's grade" ;;
+    IW02) echo "the gate opens for anything that is NOT permissive, so UNKNOWN licenses the band — the backfill defect in the reader" ;;
+    IW03) echo "the coarse branch bypasses the gate at the CALL SITE instead of inside PersistedCertainty" ;;
+    IW04) echo "OVER-CORRECTION: the refined branch vetoes UNKNOWN too, silently re-grading every pre-V61 refinement" ;;
+    IW05) echo "the refined branch's .permissive veto is dropped — a positive claim ignored" ;;
+    IW06) echo "UNKNOWN IS ZERO at the decode: a NULL column becomes .model" ;;
+    IW07) echo "UNKNOWN IS ZERO at the write: .unknown persists 0 rather than SQL NULL" ;;
+    IW08) echo "the licence predicate widens to != .permissive — an absence read as a presence" ;;
+    IW09) echo "the two predicates become each other's negation, so an unattributed row counts as a bypass" ;;
+    IW10) echo "the struct's default moves from .unknown to .model — every silent writer claims the model" ;;
+    IW11) echo "the bind coalesces .unknown to 0 instead of writing NULL (exxc's prewarmHit shape, one column along)" ;;
+    IW12) echo "the reader uses the bare column int, so a NULL decodes to .model" ;;
+    IW13) echo "THE BACKFILL THE MIGRATION DELIBERATELY DOES NOT PERFORM, added back: every pre-V61 row seeded 0" ;;
+    IW14) echo "the reader takes column 32 instead of 33 — the tail-append hazard, on the column that just moved the tail" ;;
+    IW15) echo "the SENSITIVE-WINDOW permissive route labels its row .model — the arm the column exists for" ;;
+    IW16) echo "qbib's whole-window permissive RECOVERY labels its row .model" ;;
+    IW17) echo "a coarse-pass RE-WRAP stamps a literal instead of forwarding what the recovery observed" ;;
+    IW18) echo "the runner's coarse row builder drops the argument, so every coarse row takes the .unknown default" ;;
+    IW19) echo "the runner's coarse row builder hardcodes .model, certifying every permissive coarse row" ;;
+    IW99) echo "VACUITY CONTROL — the parameter BINDING inside coarseAttributableBand is renamed; the label and every call site are untouched. MUST SURVIVE" ;;
     KG01) echo "THE SHIPPED DEFECT VERBATIM — corroboration counts every version's rows as replicates of one experiment" ;;
     MY01) echo "THE PRE-BEAD BEHAVIOUR VERBATIM — an unlocalised verdict keeps its whole window with nothing backing it" ;;
     MY02) echo "DROP-ALL, the option Dan declined — a corroborated unlocalised verdict contributes nothing either" ;;
@@ -18525,6 +18731,246 @@ EOF
 EOF
     snippet NEW <<'EOF'
                     supportLines: nil
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # ── playhead-iw7q: a PERMISSIVE coarse row stops being byte-identical ────
+
+  IW01)
+    snippet OLD <<'EOF'
+            guard rowProvenance.licensesCoarseCertaintyBand else { return nil }
+            return attributableBand
+EOF
+    snippet NEW <<'EOF'
+            return attributableBand
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  IW02)
+    snippet OLD <<'EOF'
+            guard rowProvenance.licensesCoarseCertaintyBand else { return nil }
+EOF
+    snippet NEW <<'EOF'
+            guard !rowProvenance.isKnownPermissive else { return nil }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  IW03)
+    snippet OLD <<'EOF'
+            return support.coarseAttributableBand(rowProvenance: row.verdictProvenance)
+EOF
+    snippet NEW <<'EOF'
+            return support.attributableBand
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  IW04)
+    snippet OLD <<'EOF'
+        guard !row.verdictProvenance.isKnownPermissive else { return nil }
+EOF
+    snippet NEW <<'EOF'
+        guard row.verdictProvenance.licensesCoarseCertaintyBand else { return nil }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  IW05)
+    snippet OLD <<'EOF'
+        guard !row.verdictProvenance.isKnownPermissive else { return nil }
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  IW06)
+    snippet OLD <<'EOF'
+        case .none: .unknown
+EOF
+    snippet NEW <<'EOF'
+        case .none: .model
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  IW07)
+    snippet OLD <<'EOF'
+        case .unknown: nil
+EOF
+    snippet NEW <<'EOF'
+        case .unknown: false
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  IW08)
+    snippet OLD <<'EOF'
+    var licensesCoarseCertaintyBand: Bool { self == .model }
+EOF
+    snippet NEW <<'EOF'
+    var licensesCoarseCertaintyBand: Bool { self != .permissive }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  IW09)
+    snippet OLD <<'EOF'
+    var isKnownPermissive: Bool { self == .permissive }
+EOF
+    snippet NEW <<'EOF'
+    var isKnownPermissive: Bool { self != .model }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  IW10)
+    snippet OLD <<'EOF'
+        verdictProvenance: ScanVerdictProvenance = .unknown,
+EOF
+    snippet NEW <<'EOF'
+        verdictProvenance: ScanVerdictProvenance = .model,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  IW11)
+    snippet OLD <<'EOF'
+        bind(stmt, 34, result.verdictProvenance.persistedFlag.map { $0 ? 1 : 0 })
+EOF
+    snippet NEW <<'EOF'
+        bind(stmt, 34, (result.verdictProvenance.persistedFlag ?? false) ? 1 : 0)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  IW12)
+    snippet OLD <<'EOF'
+                persistedFlag: optionalInt(stmt, 33).map { $0 != 0 }
+EOF
+    snippet NEW <<'EOF'
+                persistedFlag: sqlite3_column_int(stmt, 33) != 0
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  IW13)
+    snippet OLD <<'EOF'
+        try addColumnIfNeeded(
+            table: "semantic_scan_results",
+            column: "usedPermissiveFallback",
+            definition: "INTEGER"
+        )
+        logger.notice(
+EOF
+    snippet NEW <<'EOF'
+        try addColumnIfNeeded(
+            table: "semantic_scan_results",
+            column: "usedPermissiveFallback",
+            definition: "INTEGER"
+        )
+        try exec(
+            """
+            UPDATE semantic_scan_results
+            SET usedPermissiveFallback = 0
+            WHERE usedPermissiveFallback IS NULL
+            """
+        )
+        logger.notice(
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  IW14)
+    snippet OLD <<'EOF'
+                persistedFlag: optionalInt(stmt, 33).map { $0 != 0 }
+EOF
+    snippet NEW <<'EOF'
+                persistedFlag: optionalInt(stmt, 32).map { $0 != 0 }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  IW15)
+    snippet OLD <<'EOF'
+                                // runner's and the row must say so.
+                                verdictProvenance: .permissive,
+EOF
+    snippet NEW <<'EOF'
+                                // runner's and the row must say so.
+                                verdictProvenance: .model,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  IW16)
+    snippet OLD <<'EOF'
+                    // answered, so this band is the runner's.
+                    verdictProvenance: .permissive,
+EOF
+    snippet NEW <<'EOF'
+                    // answered, so this band is the runner's.
+                    verdictProvenance: .model,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  IW17)
+    snippet OLD <<'EOF'
+                                verdictProvenance: recovered.verdictProvenance
+EOF
+    snippet NEW <<'EOF'
+                                verdictProvenance: .model
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  IW18)
+    snippet OLD <<'EOF'
+            jobPhase: jobPhase.rawValue,
+            // playhead-iw7q (V61): WHICH PATH produced the screening whose
+            // `certainty` is being encoded into `spansJSON` one line above.
+            //
+            // The two travel together on purpose. `encodeSupport` writes the
+            // band; this writes who graded it; and until V61 only the first of
+            // the two reached disk, so a `PermissiveAdGrammar.parse` hardcode
+            // was byte-identical at rest to a model grade. FORWARDED from the
+            // window output rather than derived here — the runner does not know
+            // which path answered, and a runner that guessed would be
+            // manufacturing the provenance rather than recording it.
+            verdictProvenance: windowOutput.verdictProvenance
+EOF
+    snippet NEW <<'EOF'
+            jobPhase: jobPhase.rawValue
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  IW19)
+    snippet OLD <<'EOF'
+            jobPhase: jobPhase.rawValue,
+            // playhead-iw7q (V61): WHICH PATH produced the screening whose
+            // `certainty` is being encoded into `spansJSON` one line above.
+            //
+            // The two travel together on purpose. `encodeSupport` writes the
+            // band; this writes who graded it; and until V61 only the first of
+            // the two reached disk, so a `PermissiveAdGrammar.parse` hardcode
+            // was byte-identical at rest to a model grade. FORWARDED from the
+            // window output rather than derived here — the runner does not know
+            // which path answered, and a runner that guessed would be
+            // manufacturing the provenance rather than recording it.
+            verdictProvenance: windowOutput.verdictProvenance
+EOF
+    snippet NEW <<'EOF'
+            jobPhase: jobPhase.rawValue,
+            // playhead-iw7q (V61): WHICH PATH produced the screening whose
+            // `certainty` is being encoded into `spansJSON` one line above.
+            //
+            // The two travel together on purpose. `encodeSupport` writes the
+            // band; this writes who graded it; and until V61 only the first of
+            // the two reached disk, so a `PermissiveAdGrammar.parse` hardcode
+            // was byte-identical at rest to a model grade. FORWARDED from the
+            // window output rather than derived here — the runner does not know
+            // which path answered, and a runner that guessed would be
+            // manufacturing the provenance rather than recording it.
+            verdictProvenance: .model
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  IW99)
+    snippet OLD <<'EOF'
+            rowProvenance: ScanVerdictProvenance
+        ) -> CertaintyBand? {
+            guard rowProvenance.licensesCoarseCertaintyBand else { return nil }
+EOF
+    snippet NEW <<'EOF'
+            rowProvenance provenanceOfTheRow: ScanVerdictProvenance
+        ) -> CertaintyBand? {
+            guard provenanceOfTheRow.licensesCoarseCertaintyBand else { return nil }
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -25807,6 +26253,7 @@ rec_file()   {
     INGO)  printf '%s' "$INGO" ;;
     INVF)  printf '%s' "$INVF" ;;
     SWEEP) printf '%s' "$SWEEP" ;;
+    SCANRES) printf '%s' "$SCANRES" ;;
     SLIDX) printf '%s' "$SLIDX" ;;
     SCANORD) printf '%s' "$SCANORD" ;;
     SCRATCH)  printf '%s' "$SCRATCH" ;;
