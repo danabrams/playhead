@@ -654,12 +654,23 @@ struct InvariantViolation: Sendable, Hashable, Codable {
         /// simply could not be written to produces that state by silence, and
         /// `dropWriteFailures` on the arming row is a second write in the same
         /// database that can fail for the same reason. So the residual goes to
-        /// a DIFFERENT medium — this JSON Lines stream, under `Caches/` — and
-        /// two independent surfaces have to fail together before an abandoned
-        /// download leaves no trace. That is
-        /// ``backgroundSessionCreationRefused``'s argument applied to the
-        /// instrument built beside it: an absence that was CAUSED and one that
-        /// was never ASKED FOR must not look alike.
+        /// this JSON Lines stream, under `Caches/`.
+        ///
+        /// **THAT IS A DIFFERENT FILE, NOT A DIFFERENT FAILURE DOMAIN.** An
+        /// earlier version of this comment said "two independent surfaces have
+        /// to fail together", and playhead-dyvh2 measures why that is wrong:
+        /// the app sets no data-protection entitlement, so this stream takes
+        /// the same `completeUntilFirstUserAuthentication` class the store sets
+        /// explicitly, and a pre-first-unlock background relaunch — or a full
+        /// volume — silences both. What it genuinely covers is a failure LOCAL
+        /// TO THE DATABASE: a corrupt or dropped table, a lock on one table.
+        /// Read it as that.
+        ///
+        /// It is still ``backgroundSessionCreationRefused``'s argument applied
+        /// to the instrument built beside it: an absence that was CAUSED and
+        /// one that was never ASKED FOR must not look alike. The description
+        /// says WHICH — a store that refused the row, or a build with no
+        /// recorder installed at all.
         ///
         /// Never expected on healthy hardware — it means a SQLite write to
         /// `analysis.sqlite` failed.

@@ -8979,13 +8979,24 @@ actor AnalysisStore {
     /// spelled as a date at the epoch.
     private func createBackgroundDownloadDropTables() throws {
         try exec("""
-            -- playhead-7dgx. READ THE TABLE, NOT `_meta.schema_version`, to
-            -- decide whether this build carried the instrument: these tables
-            -- are created before the migration ladder and can exist at an
-            -- older stamp. Always read `background_download_drop_arming`
-            -- alongside these rows — a count here means nothing without the
-            -- denominator, and `armedLaunches` is not an attempt count.
             CREATE TABLE IF NOT EXISTS background_download_drops (
+                -- playhead-7dgx. INSIDE the parentheses on purpose: SQLite
+                -- stores this statement from the CREATE keyword on, so a
+                -- comment ABOVE it is discarded and never reaches a pulled
+                -- file. Measured — an earlier cut put it above and the commit
+                -- message claimed it survived.
+                --
+                -- READ THE TABLE, NOT `_meta.schema_version`, to decide
+                -- whether this build carried the instrument: these tables are
+                -- created before the migration ladder and can exist at an
+                -- older stamp. Always read `background_download_drop_arming`
+                -- alongside these rows — a count here means nothing without
+                -- the denominator, and `armedLaunches` is not an attempt
+                -- count. Two more traps, because the CLI hides both:
+                -- `sqlite3` prints a BLANK LINE for a missing arming row, so
+                -- `SELECT count(*)` it first; and `GROUP BY reason` silently
+                -- omits raw values this build does not know, so run
+                -- `WHERE reason NOT IN (…)` before quoting any share.
                 id                 TEXT PRIMARY KEY,
                 episodeId          TEXT NOT NULL,
                 reason             TEXT NOT NULL,
@@ -9042,7 +9053,17 @@ actor AnalysisStore {
         // The rung's version guard cannot help: this helper runs from
         // `createTables()`, which is unconditional and runs BEFORE the ladder.
         // So the shape repair has to live here, in the same place the shape is
-        // declared, and every future column added above must be repeated below.
+        // declared, and every future column added to EITHER table must be
+        // repeated below — naming the table, because the two fail differently:
+        // a missing column on `background_download_drop_arming` breaks the seed
+        // and therefore the OPEN, while a missing one on
+        // `background_download_drops` merely breaks every insert.
+        //
+        // ONE COST OF THE REPAIR, worth knowing before relying on the comments
+        // above: `ALTER TABLE … ADD COLUMN` rewrites `sqlite_master.sql` from
+        // the STORED text, and the stored text of a table created by an older
+        // build has none of these comments in it. A repaired install therefore
+        // carries the columns but not the recipe. Measured at review.
         try addColumnIfNeeded(
             table: "background_download_drop_arming",
             column: "dropWriteFailures",
@@ -9161,6 +9182,12 @@ actor AnalysisStore {
         // written to prevent an overflow that caused a crash instead, on the
         // one call (`limit: .max`, meaning "everything") a later reader is
         // most likely to write.
+        //
+        // AT OR ABOVE `Int32.max` THE PROBE EQUALS THE CEILING, so `seen >
+        // ceiling` can never fire and `truncated` is hard-wired false. That is
+        // the honesty hole this page exists to close, and it is stated rather
+        // than hidden: it needs 2^31 rows to reach, and the alternative is a
+        // trap. Nothing in the codebase passes such a limit.
         let probe = ceiling >= Int(Int32.max) ? Int(Int32.max) : ceiling + 1
         let stmt = try prepare(
             "\(Self.backgroundDownloadDropSelectColumns) ORDER BY occurredAt DESC LIMIT ?"

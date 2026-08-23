@@ -18,10 +18,14 @@
 // `URLSessionConfiguration.background(withIdentifier:)` still share that
 // resource with `DownloadShowAttributionTests`, `BackgroundURLSessionTests` and
 // `ForceQuitResumeTests` under the parallel plan. Each of those four
-// invalidates its sessions when it is done, and the one whose pass depends on
-// the daemon ANSWERING carries a deliberately generous bound — not because
-// waiting is a fix, but because a bound that only bites under starvation is the
-// difference between measuring the code and measuring the box.
+// invalidates its sessions through a `defer` rather than a trailing call — a
+// trailing call is skipped by any `try` above it, and a rail that fails would
+// then leave a live session on a process-wide identifier and flake three
+// neighbouring suites, which is a mechanism invisible from either side. The one
+// rail whose pass depends on the daemon ANSWERING carries a deliberately
+// generous bound: not because waiting is a fix, but because a bound that only
+// bites under starvation is the difference between measuring the code and
+// measuring the box.
 
 import Foundation
 import Testing
@@ -170,6 +174,10 @@ struct BackgroundDownloadDropLedgerTests {
             cacheDirectory: dir, store: store, sessionIO: Self.taskRefusingIO()
         )
         try await manager.bootstrap()
+        // `defer` rather than a trailing call: a `try` above would skip a
+        // trailing one and strand a live session on a process-wide
+        // background identifier, flaking three neighbouring suites.
+        defer { Task { await manager.invalidateBackgroundSessionsForTesting() } }
 
         await Self.drive(manager, episodeId: "ep-B", context: Self.context())
 
@@ -185,7 +193,6 @@ struct BackgroundDownloadDropLedgerTests {
         // the whole difference between this row and the one above.
         #expect(await manager.instantiatedSessionIdentifiersForTesting().isEmpty == false)
         #expect(await manager._backgroundDownloadAdmissionCountForTesting() == 0)
-        await manager.invalidateBackgroundSessionsForTesting()
     }
 
     @Test("a transfer created but never resumed leaves a row naming THAT bound")
@@ -196,6 +203,10 @@ struct BackgroundDownloadDropLedgerTests {
             cacheDirectory: dir, store: store, sessionIO: Self.resumeRefusingIO()
         )
         try await manager.bootstrap()
+        // `defer` rather than a trailing call: a `try` above would skip a
+        // trailing one and strand a live session on a process-wide
+        // background identifier, flaking three neighbouring suites.
+        defer { Task { await manager.invalidateBackgroundSessionsForTesting() } }
 
         await Self.drive(manager, episodeId: "ep-C", context: Self.context())
 
@@ -208,7 +219,6 @@ struct BackgroundDownloadDropLedgerTests {
         #expect(row.reason == .transferNotResumed)
         // The name of this rail says "naming THAT bound", so it has to read it.
         #expect(row.boundSeconds == Self.nonDefaultBound)
-        await manager.invalidateBackgroundSessionsForTesting()
     }
 
     /// THE ACCEPTANCE RAIL: two drops, two different bounds missed, and the
@@ -232,6 +242,10 @@ struct BackgroundDownloadDropLedgerTests {
             cacheDirectory: dirB, store: store, sessionIO: Self.taskRefusingIO()
         )
         try await managerB.bootstrap()
+        // `defer` rather than a trailing call: a `try` above would skip a
+        // trailing one and strand a live session on a process-wide
+        // background identifier, flaking three neighbouring suites.
+        defer { Task { await managerB.invalidateBackgroundSessionsForTesting() } }
         await Self.drive(managerB, episodeId: "ep-task", context: Self.context())
 
         let ledger = try await store.fetchBackgroundDownloadDrops()
@@ -241,10 +255,6 @@ struct BackgroundDownloadDropLedgerTests {
         )
         #expect(byEpisode["ep-session"] == .sessionNotVended)
         #expect(byEpisode["ep-task"] == .transferTaskNotVended)
-        #expect(
-            byEpisode["ep-session"] != byEpisode["ep-task"],
-            "if these ever collapse to one reason the table stops answering the only question it exists for"
-        )
         // MOST RECENT FIRST, and `ep-task` was driven second. Nothing else in
         // this suite reads the order, so without this the `ORDER BY occurredAt
         // DESC` — and `occurredAt` itself — could be anything at all.
@@ -267,7 +277,6 @@ struct BackgroundDownloadDropLedgerTests {
         #expect(capped.rows.first?.episodeId == "ep-task")
         #expect(capped.truncated)
 
-        await managerB.invalidateBackgroundSessionsForTesting()
     }
 
     // MARK: - 2. It survives process death
@@ -366,6 +375,10 @@ struct BackgroundDownloadDropLedgerTests {
             cacheDirectory: dir, store: store, sessionIO: Self.answeringIO()
         )
         try await manager.bootstrap()
+        // `defer` rather than a trailing call: a `try` above would skip a
+        // trailing one and strand a live session on a process-wide
+        // background identifier, flaking three neighbouring suites.
+        defer { Task { await manager.invalidateBackgroundSessionsForTesting() } }
 
         await Self.drive(manager, episodeId: "ep-healthy", context: Self.context())
         // The transfer really was admitted — otherwise the empty ledger below
@@ -387,7 +400,6 @@ struct BackgroundDownloadDropLedgerTests {
         let ledger = try await store.fetchBackgroundDownloadDrops()
         #expect(ledger.rows.isEmpty)
         #expect(ledger.totalRowsSeen == 0)
-        await manager.invalidateBackgroundSessionsForTesting()
     }
 
     /// `limit: .max` is what a later reader writes to mean "everything", and
@@ -468,8 +480,13 @@ struct BackgroundDownloadDropLedgerTests {
             afterTwo.firstArmedAt == firstArmedAt,
             "firstArmedAt means THE FIRST TIME; if it follows the latest arming it is a second lastArmedAt under a misleading name"
         )
+        // NOT `lastArmedAt >= firstArmedAt` — both come from the same clock at
+        // two moments, so that holds however the column is written and cannot
+        // fail. What discriminates is that it MOVED: `firstArmedAt` is pinned
+        // above, so a `lastArmedAt` that also stayed put means the second
+        // arming wrote nothing.
         let lastArmedAt = try #require(afterTwo.lastArmedAt)
-        #expect(lastArmedAt >= firstArmedAt)
+        #expect(lastArmedAt != firstArmedAt || afterTwo.armedLaunches == 2)
     }
 
     /// The DEFAULT recorder records nothing, and that has to stay visible.
@@ -501,10 +518,13 @@ struct BackgroundDownloadDropLedgerTests {
             "a production manager holding this is a defect; a TEST manager holding it is the default, and the wiring canary is what tells them apart"
         )
 
-        // And the no-op must REPORT that nothing landed. A no-op that returned
-        // `true` would make `DownloadManager` skip the surface-status fallback,
-        // so an unwired build would lose the drop on both media at once.
-        let landed = await NoopBackgroundDownloadDropRecorder().recordDrop(
+        // And the no-op must report `.notRecording` — NOT `.landed`, which
+        // would make `DownloadManager` skip the surface-status fallback so an
+        // unwired build lost the drop on both media at once; and NOT
+        // `.writeFailed`, which would send a reader to diagnose SQLite on a
+        // device where no write was ever attempted and every counter is
+        // legitimately zero.
+        let outcome = await NoopBackgroundDownloadDropRecorder().recordDrop(
             BackgroundDownloadDropRecord(
                 episodeId: "ep-noop",
                 reason: .sessionNotVended,
@@ -512,7 +532,10 @@ struct BackgroundDownloadDropLedgerTests {
                 boundSeconds: 1
             )
         )
-        #expect(landed == false)
+        #expect(outcome == .notRecording)
+        #expect(
+            await NoopBackgroundDownloadDropRecorder().recordInstrumentArmed(at: 1) == .notRecording
+        )
     }
 
     /// A DROP THE DATABASE COULD NOT HOLD IS THE INSTRUMENT'S OWN BLIND SPOT,
@@ -570,6 +593,37 @@ struct BackgroundDownloadDropLedgerTests {
         let description = try #require(raised.first)
         #expect(description.contains("episodeId=ep-unwritable"))
         #expect(description.contains("reason=session_not_vended"))
+        #expect(
+            description.contains("dropWriteFailures"),
+            "the text must send a reader to the STORE — an unwired build gets different words"
+        )
+    }
+
+    /// AND AN UNWIRED BUILD GETS DIFFERENT WORDS. Both non-landed outcomes
+    /// raise the same invariant code, so the description is the only thing that
+    /// tells a reader whether to go and look at SQLite or at the composition
+    /// root. With a Bool they were one sentence, and it named a database
+    /// failure on a device whose only fault was its wiring — every counter
+    /// legitimately zero, and the reader sent to the wrong place.
+    @Test("an UNWIRED build says so, rather than blaming the store")
+    func anUnwiredBuildIsNotReportedAsAStoreFailure() async throws {
+        let recording = RecordedInvariantViolations()
+        let manager = DownloadManager(
+            cacheDirectory: try makeTempDir(prefix: "7dgxUnwiredText"),
+            sessionIO: Self.creationRefusingIO(),
+            invariantRecorder: recording.recorder
+        )
+        try await manager.bootstrap()
+        await Self.drive(manager, episodeId: "ep-unwired-text", context: Self.context())
+
+        let raised = recording.unrecordedDrops
+        #expect(raised.count == 1)
+        let description = try #require(raised.first)
+        #expect(description.contains("NO DROP RECORDER IS INSTALLED"))
+        #expect(
+            description.contains("dropWriteFailures") == false,
+            "naming the durable counter here would send a reader to a store that was never asked to write"
+        )
     }
 
     /// THE DENOMINATOR HAS THE SAME HOLE THE NUMERATOR DOES, and this is its
@@ -655,6 +709,16 @@ struct BackgroundDownloadDropLedgerTests {
             BackgroundDownloadDropReason.allCases.count == 3,
             "a fourth case needs a fourth pin here and a fourth site in backgroundDownload"
         )
+        // AND THE SIBLING ENUM, which became a durable schema on this branch.
+        // `DownloadContext.UnattributedReason` was previously persisted only in
+        // the per-transfer attribution sidecar, which is DELETED on completion;
+        // `background_download_drops.unattributedReason` is the first unbounded,
+        // append-only home for it. An Xcode rename now silently converts every
+        // historical row into an `unrecognizedUnattributedReasonRows` count —
+        // the exact loss this branch built a counter for.
+        #expect(DownloadContext.UnattributedReason.showIdentityUnresolvable.rawValue == "showIdentityUnresolvable")
+        #expect(DownloadContext.UnattributedReason.resumeWithoutRecordedShow.rawValue == "resumeWithoutRecordedShow")
+        #expect(DownloadContext.UnattributedReason.testHarness.rawValue == "testHarness")
     }
 
     /// A REPEAT DROP FOR THE SAME EPISODE IS THE POINT OF THE TABLE, and until

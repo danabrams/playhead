@@ -3187,7 +3187,12 @@ T_7DGX_OLDSHAPE="a store carrying the PRE-dropWriteFailures shape still opens, a
 T_7DGX_ARM_FAIL="a failed ARMING is raised on the second medium too"
 T_7DGX_UNBOUNDED="an unbounded limit returns everything instead of trapping"
 T_7DGX_UNKNOWN_REASON="an unrecognized reason is skipped and counted, never coerced into a known case"
-T_7DGX_ABSENT="a V61-shaped store genuinely lacks both tables, which is what makes ABSENT readable"
+# `aV61StoreGenuinelyLacksTheTable` deliberately has NO mutant and therefore
+# no variable here. It asserts that a table this suite itself dropped is
+# dropped — a vacuity guard for the rails around it, and a property of the
+# FIXTURE rather than of the code, so no production edit can redden it. A
+# defined-but-unreferenced expectation would be the same shape as an
+# allowlist entry matching nothing, which this repo already fails builds over.
 T_7DGX_LADDER="a V61 store climbs to head through the ladder-only seam and gains both tables"
 T_7DGX_FROM_V60="a store seeded two rungs back still reaches head, so V62 does not depend on running alone"
 T_7DGX_IDEMPOTENT="re-running the rung preserves armedLaunches and installedAt"
@@ -11668,7 +11673,15 @@ MUTATIONS=(
   # BD29 renames a persisted raw value. Every behavioural rail round-trips
   # through the enum and cannot see it; on a device it silently converts the
   # whole history of that reason into an unreadable-row count.
-  "BD29|1449|LEDGER|$T_7DGX_RAWVALUES;$T_7DGX_UNKNOWN_REASON"
+  #
+  # THE SECOND EXPECTATION IS `UNATTRIB_UNKNOWN`, NOT `UNKNOWN_REASON`, and the
+  # difference is the whole predicted-vs-observed discipline. `UNKNOWN_REASON`
+  # inserts a row whose reason is the literal `a_reason_from_2027`, which is
+  # unrecognised BEFORE and AFTER the rename — so it cannot fail, and naming it
+  # would have scored this mutant SURVIVED and manufactured a coverage hole.
+  # `UNATTRIB_UNKNOWN` inserts the literal `session_not_vended` and asserts
+  # `unrecognizedReasonRows == 0`, which the rename breaks.
+  "BD29|1449|LEDGER|$T_7DGX_RAWVALUES;$T_7DGX_UNATTRIB_UNKNOWN"
 
   # BD30 swaps WHICH bound the resume site records — `sessionCreationIO` for
   # `sessionIO`. The two carry the same VALUE by construction (`onItsOwnQueue`
@@ -11709,9 +11722,18 @@ MUTATIONS=(
   # fails to move and nothing anywhere says so.
   "BD36|1456|DLMGR|$T_7DGX_ARM_FAIL"
 
-  # BD37 restores the `+ 1` without the Int32 clamp, so `limit: .max` — what a
-  # later reader writes to mean "everything" — traps inside the store actor.
-  "BD37|1457|STORE|$T_7DGX_UNBOUNDED"
+  # BD37 drops the `+ 1` from the probe, so the page can never see the row that
+  # tells it it TRUNCATED — a window that stopped at its ceiling reports itself
+  # as the whole story.
+  #
+  # NOT the trap variant, deliberately. Restoring `ceiling + 1` without the
+  # Int32 clamp is the defect `anUnboundedLimitDoesNotTrap` exists for, and it
+  # would kill that test by TAKING THE HOST DOWN — which emits no per-test line
+  # at all (CLAUDE.md's census section is a long record of that), so the battery
+  # would score it `expected test never ran` rather than KILLED. A rail whose
+  # kill destroys the verdict is a lost rail; the test stays, the mutant aims
+  # somewhere a verdict survives.
+  "BD37|1457|STORE|$T_7DGX_DISTINCT"
 
   # BD99 — VACUITY CONTROL, and it MUST SURVIVE. It renames the parameter
   # BINDING inside `recordBackgroundDownloadDrop` — the argument LABEL and every
@@ -12070,7 +12092,7 @@ describe_mutation() {
     BD34) echo "the shape repair is gone, so a store holding an older arming table stops OPENING AT ALL" ;;
     BD35) echo "a failed arming reports success — the denominator's silent failure returns" ;;
     BD36) echo "a failed arming stops being raised on the second surface" ;;
-    BD37) echo "the Int32 clamp is gone, so limit: .max traps inside the store actor" ;;
+    BD37) echo "the probe loses its +1, so a truncated page reports itself as the whole story" ;;
     BD99) echo "VACUITY CONTROL — the parameter BINDING inside recordBackgroundDownloadDrop is renamed; the label and every call site are untouched. MUST SURVIVE" ;;
     IW01) echo "THE SHIPPED DEFECT VERBATIM — the coarse gate is gone, so a runner hardcode reads as the model's grade" ;;
     IW02) echo "the gate opens for anything that is NOT permissive, so UNKNOWN licenses the band — the backfill defect in the reader" ;;
@@ -12961,7 +12983,7 @@ EOF
     snippet OLD <<'EOF'
         boundSeconds: TimeInterval
     ) async {
-        let landed = await dropRecorder.recordDrop(
+        let outcome = await dropRecorder.recordDrop(
             BackgroundDownloadDropRecord(
                 episodeId: episodeId,
                 reason: reason,
@@ -12973,7 +12995,7 @@ EOF
     snippet NEW <<'EOF'
         boundSeconds bound: TimeInterval
     ) async {
-        let landed = await dropRecorder.recordDrop(
+        let outcome = await dropRecorder.recordDrop(
             BackgroundDownloadDropRecord(
                 episodeId: episodeId,
                 reason: reason,
@@ -12981,6 +13003,19 @@ EOF
                 boundSeconds: bound
             )
         )
+EOF
+    # TWO PATCHES, and the second is why this control had to be repaired: R1
+    # added a SECOND use of `boundSeconds` in the invariant text below, far
+    # outside the region above. Renaming only the first left the helper
+    # referring to a binding that no longer exists, so the mutant did not
+    # COMPILE — and a control that cannot report SURVIVED proves nothing about
+    # the 37 rails that rest on it.
+    patch "$file" "$OLD" "$NEW" || return $?
+    snippet OLD <<'EOF'
+            + "bound=\(boundSeconds)s — the download was abandoned and \(detail)"
+EOF
+    snippet NEW <<'EOF'
+            + "bound=\(bound)s — the download was abandoned and \(detail)"
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -13275,7 +13310,7 @@ EOF
         let probe = ceiling >= Int(Int32.max) ? Int(Int32.max) : ceiling + 1
 EOF
     snippet NEW <<'EOF'
-        let probe = ceiling + 1
+        let probe = ceiling
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 

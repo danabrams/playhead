@@ -1372,10 +1372,16 @@ actor DownloadManager {
     ///
     /// Idempotence is the CALLER's — this counts every call it receives.
     func armDropLedger() async {
-        let counted = await dropRecorder.recordInstrumentArmed(
+        let outcome = await dropRecorder.recordInstrumentArmed(
             at: Date().timeIntervalSince1970
         )
-        guard !counted else { return }
+        // `.notRecording` is SILENT here, and that is the difference between
+        // the two seams. A drop is a lost EVENT and is worth a line whatever
+        // the reason; an unarmed launch on a build with no recorder is not an
+        // anomaly, it is the documented meaning of `armedLaunches = 0`, and
+        // one line per launch saying so would be noise on every preview and
+        // every test.
+        guard outcome == .writeFailed else { return }
         // The DENOMINATOR's own silent failure, closed the same way the
         // numerator's is. A launch whose arming write failed is byte-identical
         // on disk to a launch that never ran, and it is one of the two things
@@ -2990,7 +2996,7 @@ actor DownloadManager {
         context: DownloadContext,
         boundSeconds: TimeInterval
     ) async {
-        let landed = await dropRecorder.recordDrop(
+        let outcome = await dropRecorder.recordDrop(
             BackgroundDownloadDropRecord(
                 episodeId: episodeId,
                 reason: reason,
@@ -2998,19 +3004,34 @@ actor DownloadManager {
                 boundSeconds: boundSeconds
             )
         )
-        guard !landed else { return }
+        guard outcome != .landed else { return }
         logger.error(
-            "Background download drop for \(episodeId, privacy: .public) was NOT durably recorded: reason=\(reason.rawValue, privacy: .public)"
+            "Background download drop for \(episodeId, privacy: .public) was NOT durably recorded: reason=\(reason.rawValue, privacy: .public) outcome=\(String(describing: outcome), privacy: .public)"
         )
+        // The two non-landed outcomes get DIFFERENT text, because they send a
+        // reader to different places. `.writeFailed` means the database
+        // refused a row and `dropWriteFailures` should carry it;
+        // `.notRecording` means no recorder was installed and every counter on
+        // disk is legitimately zero. One sentence covering both would point at
+        // SQLite on a device whose only fault is its wiring.
+        let detail: String = {
+            switch outcome {
+            case .landed:
+                return ""
+            case .writeFailed:
+                return "the background_download_drops row could not be written; "
+                    + "background_download_drop_arming.dropWriteFailures carries "
+                    + "the count unless that write failed too"
+            case .notRecording:
+                return "NO DROP RECORDER IS INSTALLED — nothing was attempted, "
+                    + "so every counter in background_download_drop_arming is "
+                    + "legitimately zero and the fault is the wiring, not the store"
+            }
+        }()
         invariantRecorder?(
             .backgroundDownloadDropNotRecorded,
-            """
-            episodeId=\(episodeId) reason=\(reason.rawValue) \
-            bound=\(boundSeconds)s — the download was abandoned and its \
-            background_download_drops row could not be written; \
-            background_download_drop_arming.dropWriteFailures carries the \
-            count unless that write failed too
-            """
+            "episodeId=\(episodeId) reason=\(reason.rawValue) "
+            + "bound=\(boundSeconds)s — the download was abandoned and \(detail)"
         )
     }
 

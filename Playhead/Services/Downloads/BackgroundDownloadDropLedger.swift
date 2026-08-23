@@ -412,6 +412,29 @@ struct BackgroundDownloadDropArming: Sendable, Equatable {
     let installedAt: Double
 }
 
+// MARK: - BackgroundDownloadDropWriteOutcome
+
+/// What happened to one attempted ledger write.
+///
+/// THREE STATES BECAUSE A `Bool` COLLAPSES TWO OF THEM, and this file exists to
+/// stop exactly that. With a Bool, the no-op recorder's `false` and a genuine
+/// SQLite failure are the same value — so an UNWIRED build raised
+/// `backgroundDownloadDropNotRecorded` saying the row "could not be written"
+/// and pointing at `dropWriteFailures`, on a device where no write was ever
+/// attempted and that counter reads 0. A reader would go and diagnose SQLite.
+/// The wiring canary makes that unreachable in production; it is expressible
+/// here, which is enough reason for the third case.
+enum BackgroundDownloadDropWriteOutcome: Sendable, Equatable {
+    /// The row reached disk.
+    case landed
+    /// A recorder that writes tried and failed. The durable counter carries it
+    /// unless that write failed too.
+    case writeFailed
+    /// This recorder does not write at all. Nothing was attempted, nothing
+    /// failed, and no counter anywhere moved.
+    case notRecording
+}
+
 // MARK: - BackgroundDownloadDropRecording
 
 /// Where an abandoned background download is recorded.
@@ -427,24 +450,25 @@ protocol BackgroundDownloadDropRecording: Sendable {
 
     /// Durably record one abandoned background download.
     ///
-    /// - Returns: `true` when the row reached disk. A conformer MUST NOT
-    ///   throw — the caller is on the recovery path of a failure it has
-    ///   already handled — but it must not swallow the outcome either. The
-    ///   caller uses `false` to raise the loss on a second, independent
-    ///   medium, which is the only reason a drop the database could not hold
-    ///   is not silent.
+    /// - Returns: what happened to the write. A conformer MUST NOT throw — the
+    ///   caller is on the recovery path of a failure it has already handled —
+    ///   but it must not swallow the outcome either. The caller uses anything
+    ///   other than `.landed` to raise the loss on a second medium, which is
+    ///   the only reason a drop the database could not hold is not silent.
     ///
-    /// A conformer that records nothing BY DESIGN returns `false`: there is
-    /// no row, and claiming otherwise would make the no-op indistinguishable
+    /// A conformer that records nothing BY DESIGN returns `.notRecording`,
+    /// never `.landed`: claiming success would make the no-op indistinguishable
     /// from a working ledger at the one call site that checks.
     @discardableResult
-    func recordDrop(_ record: BackgroundDownloadDropRecord) async -> Bool
+    func recordDrop(
+        _ record: BackgroundDownloadDropRecord
+    ) async -> BackgroundDownloadDropWriteOutcome
 
     /// Record that this process installed a live recorder, so that zero
     /// drops can be read as a positive claim rather than as silence.
     ///
-    /// - Returns: `true` when the count reached disk. The DENOMINATOR has the
-    ///   same hole the numerator does — a launch whose arming write failed is
+    /// - Returns: what happened to the count. The DENOMINATOR has the same hole
+    ///   the numerator does — a launch whose arming write failed is
     ///   byte-identical to a launch that never ran — so the outcome is
     ///   reported for the same reason, and the caller raises the loss on the
     ///   surface-status stream. The direction is conservative (an uncounted
@@ -458,7 +482,9 @@ protocol BackgroundDownloadDropRecording: Sendable {
     /// is what pins the single-call-site property, because nothing at runtime
     /// can see it.
     @discardableResult
-    func recordInstrumentArmed(at now: Double) async -> Bool
+    func recordInstrumentArmed(
+        at now: Double
+    ) async -> BackgroundDownloadDropWriteOutcome
 }
 
 // MARK: - NoopBackgroundDownloadDropRecorder
@@ -477,12 +503,17 @@ protocol BackgroundDownloadDropRecording: Sendable {
 /// stops it happening here, and `armedLaunches` is what would show it on a
 /// device pull if the canary were ever out-spelled.
 struct NoopBackgroundDownloadDropRecorder: BackgroundDownloadDropRecording {
-    /// `false`, not `true`: nothing was written, and a no-op that reported
-    /// success would be the one shape this whole file exists to make
-    /// impossible.
-    func recordDrop(_ record: BackgroundDownloadDropRecord) async -> Bool { false }
-    /// `false` for the same reason `recordDrop` is: nothing was counted.
-    func recordInstrumentArmed(at now: Double) async -> Bool { false }
+    /// `.notRecording`, and specifically NOT `.writeFailed`: nothing was
+    /// attempted, so a caller must not go on to report a database that could
+    /// not hold a row. That distinction is the reason the outcome is an enum.
+    func recordDrop(
+        _ record: BackgroundDownloadDropRecord
+    ) async -> BackgroundDownloadDropWriteOutcome { .notRecording }
+
+    /// Same, for the denominator.
+    func recordInstrumentArmed(
+        at now: Double
+    ) async -> BackgroundDownloadDropWriteOutcome { .notRecording }
 }
 
 // MARK: - AnalysisStoreBackgroundDownloadDropRecorder
@@ -511,10 +542,12 @@ struct AnalysisStoreBackgroundDownloadDropRecorder: BackgroundDownloadDropRecord
         self.store = store
     }
 
-    func recordDrop(_ record: BackgroundDownloadDropRecord) async -> Bool {
+    func recordDrop(
+        _ record: BackgroundDownloadDropRecord
+    ) async -> BackgroundDownloadDropWriteOutcome {
         do {
             try await store.insertBackgroundDownloadDrop(record)
-            return true
+            return .landed
         } catch {
             logger.error(
                 "background download drop NOT recorded for episode=\(record.episodeId, privacy: .public) reason=\(record.reason.rawValue, privacy: .public): \(String(describing: error), privacy: .public)"
@@ -532,19 +565,21 @@ struct AnalysisStoreBackgroundDownloadDropRecorder: BackgroundDownloadDropRecord
                     "background download drop write-failure counter ALSO failed: \(String(describing: error), privacy: .public)"
                 )
             }
-            return false
+            return .writeFailed
         }
     }
 
-    func recordInstrumentArmed(at now: Double) async -> Bool {
+    func recordInstrumentArmed(
+        at now: Double
+    ) async -> BackgroundDownloadDropWriteOutcome {
         do {
             try await store.noteBackgroundDownloadDropInstrumentArmed(at: now)
-            return true
+            return .landed
         } catch {
             logger.error(
                 "background download drop instrument NOT armed: \(String(describing: error), privacy: .public)"
             )
-            return false
+            return .writeFailed
         }
     }
 }
