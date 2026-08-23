@@ -12946,25 +12946,23 @@ EOF
 
   BD16)
     snippet OLD <<'EOF'
-        let counted = await dropRecorder.recordInstrumentArmed(
+        let outcome = await dropRecorder.recordInstrumentArmed(
             at: Date().timeIntervalSince1970
         )
-        guard !counted else { return }
 EOF
     snippet NEW <<'EOF'
-        let counted = true
-        guard !counted else { return }
+        let outcome = BackgroundDownloadDropWriteOutcome.landed
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
   BD17)
     snippet OLD <<'EOF'
             try await store.insertBackgroundDownloadDrop(record)
-            return true
+            return .landed
 EOF
     snippet NEW <<'EOF'
             _ = try await store.fetchBackgroundDownloadDropArming()
-            return true
+            return .landed
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -13030,27 +13028,27 @@ EOF
                     "background download drop write-failure counter ALSO failed: \(String(describing: error), privacy: .public)"
                 )
             }
-            return false
+            return .writeFailed
 EOF
     snippet NEW <<'EOF'
-            return false
+            return .writeFailed
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
   BD20)
     snippet OLD <<'EOF'
-            return false
+            return .writeFailed
         }
     }
 
-    func recordInstrumentArmed(at now: Double) async -> Bool {
+    func recordInstrumentArmed(
 EOF
     snippet NEW <<'EOF'
-            return true
+            return .landed
         }
     }
 
-    func recordInstrumentArmed(at now: Double) async -> Bool {
+    func recordInstrumentArmed(
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -13220,10 +13218,14 @@ EOF
 
   BD31)
     snippet OLD <<'EOF'
-    func recordDrop(_ record: BackgroundDownloadDropRecord) async -> Bool { false }
+    ) async -> BackgroundDownloadDropWriteOutcome { .notRecording }
+
+    /// Same, for the denominator.
 EOF
     snippet NEW <<'EOF'
-    func recordDrop(_ record: BackgroundDownloadDropRecord) async -> Bool { true }
+    ) async -> BackgroundDownloadDropWriteOutcome { .landed }
+
+    /// Same, for the denominator.
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -13280,13 +13282,13 @@ EOF
             logger.error(
                 "background download drop instrument NOT armed: \(String(describing: error), privacy: .public)"
             )
-            return false
+            return .writeFailed
 EOF
     snippet NEW <<'EOF'
             logger.error(
                 "background download drop instrument NOT armed: \(String(describing: error), privacy: .public)"
             )
-            return true
+            return .landed
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
