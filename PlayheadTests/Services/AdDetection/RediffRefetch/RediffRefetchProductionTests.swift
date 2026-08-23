@@ -114,7 +114,13 @@ struct RediffRefetchStateV28MigrationTests {
         // COLUMN, `semantic_scan_results.usedPermissiveFallback`, and writes
         // nothing to it — no UPDATE, no DEFAULT, no row touched. It names no
         // other table and no other column, so nothing this rung asserts moves.
-        #expect(AnalysisStore.currentSchemaVersion == 61)
+        // 61 -> 62 read for this rung (playhead-7dgx): V62 CREATES TWO NEW TABLES
+        // — `background_download_drops` and its single-row arming companion — and
+        // touches no existing table, column or row: no ALTER, no UPDATE, no DELETE
+        // and no backfill (every drop before this build deleted its own evidence,
+        // so there is nothing recoverable to seed). It names nothing this rung
+        // asserts, so no assertion here moves.
+        #expect(AnalysisStore.currentSchemaVersion == 62)
         // Probe by using the API — both tables must be queryable.
         #expect(try await store.fetchRediffRefetchStates().isEmpty)
         #expect(try await store.fetchRediffBandwidthTotals() == RediffBandwidthTotals())

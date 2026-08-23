@@ -1971,7 +1971,7 @@ actor AnalysisStore {
     /// assertions automatically follow the production constant — hardcoding
     /// the integer in tests has been a recurring source of stale-assertion
     /// flakes whenever the schema bumps.
-    nonisolated static let currentSchemaVersion = 61
+    nonisolated static let currentSchemaVersion = 62
 
     /// H1: minimum age (in seconds) a `backfill_jobs` / `final_pass_jobs`
     /// row stuck in `status='running'` must reach before the launch-time
@@ -2949,6 +2949,12 @@ actor AnalysisStore {
             // migration for why a seeded 0 would be this bead's own defect
             // shipped as a migration.
             try migrateSemanticScanVerdictProvenanceV61IfNeeded()
+            // playhead-7dgx: a background download the transfer daemon never
+            // started leaves a durable, countable row. Two new tables, nothing
+            // backfilled (every earlier drop deleted its own evidence), and an
+            // arming row seeded at zero so "nobody was counting" stays
+            // distinguishable from "counted, and there were none".
+            try migrateBackgroundDownloadDropsV62IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -3386,6 +3392,17 @@ actor AnalysisStore {
         // ladder and not the other is invisible to any test written for that
         // rung, and it cost V60 a commit.
         try migrateSemanticScanVerdictProvenanceV61IfNeeded()
+        // playhead-7dgx (v62): two brand-new tables, so there is nothing a
+        // seeded fixture can be missing — `CREATE TABLE IF NOT EXISTS` plus an
+        // `INSERT OR IGNORE` arming row, and a fixture already carrying the
+        // V62 shape still reaches v62.
+        //
+        // READ THE V60 NOTE ABOVE BEFORE ADDING A RUNG. A rung added to one
+        // ladder and not the other is invisible to any test written for that
+        // rung, and it cost V60 a commit.
+        // `BackgroundDownloadDropLadderSourceCanaryTests` now checks this
+        // mechanically, on the V58 canary's precedent.
+        try migrateBackgroundDownloadDropsV62IfNeeded()
     }
     #endif
 
@@ -8887,6 +8904,252 @@ actor AnalysisStore {
         try setSchemaVersion(61)
     }
 
+    // MARK: V62 — a background download the daemon never started stops being
+    //             invisible (playhead-7dgx)
+    //
+    // `DownloadManager.backgroundDownload` abandons a transfer on three paths
+    // when `BackgroundSessionIO`'s bound expires. Each one releases the
+    // in-flight reservation and DELETES the attribution sidecar — correct, and
+    // between them they destroy every trace the episode was ever asked for.
+    // What was left was one `os_log` line, and no device pull captures
+    // `os_log`. "How often does this fire in the field" had no answer.
+    //
+    // TWO TABLES, AND THE SECOND ONE IS THE POINT. `background_download_drops`
+    // is the numerator. `background_download_drop_arming` is the claim that
+    // anybody was counting: the recorder is an INJECTED dependency whose
+    // default is a no-op, and this repo has already shipped that hole once —
+    // `DownloadManager.workJournalRecorder` defaults to
+    // `NoopWorkJournalRecorder` and production never replaces it. Without an
+    // arming row, "zero drops" and "the recorder was never installed" are the
+    // same empty table.
+    //
+    // So the reader gets a three-state ladder, all of it on disk:
+    //   * no `background_download_drops` table (`_meta.schema_version` < 62)
+    //         — this build predates the instrument. Zero says NOTHING.
+    //   * table present, `armedLaunches = 0`
+    //         — the instrument shipped and no launch armed it. Still nothing.
+    //   * `armedLaunches = N > 0`, zero drop rows
+    //         — a POSITIVE CLAIM: N launches carried a live recorder and saw
+    //           no drop.
+    //
+    // `armedLaunches` IS NOT AN ATTEMPT COUNT and no drop RATE can be computed
+    // from it. Counting attempts would put a store write on the download hot
+    // path and a suspension point inside the reservation region
+    // playhead-nsjn / -gpdb / -7l6n built, so it is deliberately not taken
+    // here; see `BackgroundDownloadDropLedger.swift`.
+    //
+    // NOTHING IS BACKFILLED and nothing could be: every drop before this build
+    // deleted its own evidence. The absence of pre-V62 rows is honest.
+    //
+    // Idempotent: `CREATE TABLE IF NOT EXISTS` + `CREATE INDEX IF NOT EXISTS`
+    // + `INSERT OR IGNORE` on a single-row table, so it needs no SAVEPOINT and
+    // a second pass changes nothing.
+
+    /// V62 migration (playhead-7dgx) — the dropped-background-download ledger
+    /// and its arming row.
+    private func migrateBackgroundDownloadDropsV62IfNeeded() throws {
+        let observed = (try schemaVersion() ?? 1)
+        guard observed < 62 else { return }
+        // DO NOT STEP OVER A ROLLED-BACK V39 — same rationale as V40–V61.
+        guard observed >= 61 else { return }
+        try createBackgroundDownloadDropTables()
+        try setSchemaVersion(62)
+    }
+
+    /// The V62 DDL, shared verbatim by `createTables()` and the rung above so
+    /// a fresh install and an upgrade converge on the same shape. Both callers
+    /// are idempotent.
+    ///
+    /// `installedAt` is stamped when the arming row is first created, i.e.
+    /// when this install first opened a build carrying the instrument. It is
+    /// NOT NULL because it is always knowable; `firstArmedAt`/`lastArmedAt`
+    /// are nullable because "never armed" is a state that must not be
+    /// spelled as a date at the epoch.
+    private func createBackgroundDownloadDropTables() throws {
+        try exec("""
+            CREATE TABLE IF NOT EXISTS background_download_drops (
+                id                 TEXT PRIMARY KEY,
+                episodeId          TEXT NOT NULL,
+                reason             TEXT NOT NULL,
+                occurredAt         REAL NOT NULL,
+                -- NULL = the caller SAID it could not name the show, and
+                -- `unattributedReason` says why. Never a forgotten absence:
+                -- `DownloadContext` has no nil-taking initializer.
+                podcastId          TEXT,
+                unattributedReason TEXT,
+                isExplicitDownload INTEGER NOT NULL,
+                -- The BackgroundSessionIO bound that expired, in seconds.
+                -- Recorded rather than assumed so a later change to the bound
+                -- cannot silently re-scale this table's whole history.
+                boundSeconds       REAL NOT NULL
+            );
+        """)
+        try exec("CREATE INDEX IF NOT EXISTS idx_background_download_drops_occurred ON background_download_drops(occurredAt DESC);")
+        try exec("CREATE INDEX IF NOT EXISTS idx_background_download_drops_episode ON background_download_drops(episodeId, occurredAt DESC);")
+        try exec("""
+            CREATE TABLE IF NOT EXISTS background_download_drop_arming (
+                id            INTEGER PRIMARY KEY CHECK (id = 1),
+                armedLaunches INTEGER NOT NULL DEFAULT 0,
+                firstArmedAt  REAL,
+                lastArmedAt   REAL,
+                installedAt   REAL NOT NULL
+            );
+        """)
+        // Seeded at zero so that "installed but never armed" is a row a pull
+        // can read, rather than an absence indistinguishable from a build
+        // that never had the instrument at all.
+        let stmt = try prepare("""
+            INSERT OR IGNORE INTO background_download_drop_arming
+            (id, armedLaunches, firstArmedAt, lastArmedAt, installedAt)
+            VALUES (1, 0, NULL, NULL, ?)
+            """)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, Date().timeIntervalSince1970)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    // MARK: - Dropped background downloads (playhead-7dgx, schema v62)
+
+    /// Append one abandoned background download.
+    ///
+    /// The sole writer. Append-only on purpose: a repeat drop for the same
+    /// episode is the most interesting thing this table can show, so nothing
+    /// here upserts or coalesces.
+    func insertBackgroundDownloadDrop(_ record: BackgroundDownloadDropRecord) throws {
+        let sql = """
+            INSERT INTO background_download_drops
+            (id, episodeId, reason, occurredAt, podcastId, unattributedReason,
+             isExplicitDownload, boundSeconds)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, record.id)
+        bind(stmt, 2, record.episodeId)
+        bind(stmt, 3, record.reason.rawValue)
+        bind(stmt, 4, record.occurredAt)
+        bind(stmt, 5, record.podcastId)
+        bind(stmt, 6, record.unattributedReason?.rawValue)
+        bind(stmt, 7, record.isExplicitDownload ? 1 : 0)
+        bind(stmt, 8, record.boundSeconds)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    private static let backgroundDownloadDropSelectColumns = """
+        SELECT id, episodeId, reason, occurredAt, podcastId, unattributedReason,
+               isExplicitDownload, boundSeconds
+        FROM background_download_drops
+        """
+
+    /// Materializes one row, or `nil` when its `reason` is a raw value this
+    /// build does not know.
+    ///
+    /// A row is DROPPED rather than coerced into a default case, and the
+    /// direction matters: a wider-vocabulary build's row folded into
+    /// `sessionNotVended` would silently inflate that population, which is
+    /// this repo's standing defect class (a value that names one thing read as
+    /// though it named another). `fetchBackgroundDownloadDrops` reports how
+    /// many it skipped so the loss is never silent either.
+    private func readBackgroundDownloadDropRow(
+        _ stmt: OpaquePointer?
+    ) -> BackgroundDownloadDropRecord? {
+        let rawReason = text(stmt, 2)
+        guard let reason = BackgroundDownloadDropReason(rawValue: rawReason) else {
+            return nil
+        }
+        return BackgroundDownloadDropRecord(
+            id: text(stmt, 0),
+            episodeId: text(stmt, 1),
+            reason: reason,
+            occurredAt: sqlite3_column_double(stmt, 3),
+            podcastId: optionalText(stmt, 4),
+            unattributedReason: optionalText(stmt, 5).flatMap {
+                DownloadContext.UnattributedReason(rawValue: $0)
+            },
+            isExplicitDownload: sqlite3_column_int64(stmt, 6) != 0,
+            boundSeconds: sqlite3_column_double(stmt, 7)
+        )
+    }
+
+    /// Every recorded drop, most recent first, plus the count of rows this
+    /// build could not decode.
+    ///
+    /// `unrecognizedReasonRows` is not decoration: it is the difference
+    /// between "this device recorded three drops" and "this device recorded
+    /// three drops THAT I CAN READ", and a reader who is handed only the array
+    /// cannot tell those apart.
+    func fetchBackgroundDownloadDrops(
+        limit: Int = 500
+    ) throws -> (rows: [BackgroundDownloadDropRecord], unrecognizedReasonRows: Int) {
+        let stmt = try prepare(
+            "\(Self.backgroundDownloadDropSelectColumns) ORDER BY occurredAt DESC LIMIT ?"
+        )
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, max(0, limit))
+        var rows: [BackgroundDownloadDropRecord] = []
+        var unreadable = 0
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            if let row = readBackgroundDownloadDropRow(stmt) {
+                rows.append(row)
+            } else {
+                unreadable += 1
+            }
+        }
+        return (rows, unreadable)
+    }
+
+    /// Record that this process installed a live drop recorder.
+    ///
+    /// `firstArmedAt` is written only on the transition out of zero
+    /// (`CASE WHEN armedLaunches = 0`), so it keeps meaning "the first time"
+    /// rather than drifting to mean "the latest time".
+    ///
+    /// The `INSERT … ON CONFLICT` is what makes this work on a store whose
+    /// arming row is somehow missing — a hand-edited fixture, or a rung that
+    /// rolled back — instead of counting into a row that is not there.
+    func noteBackgroundDownloadDropInstrumentArmed(at now: Double) throws {
+        let sql = """
+            INSERT INTO background_download_drop_arming
+            (id, armedLaunches, firstArmedAt, lastArmedAt, installedAt)
+            VALUES (1, 1, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                armedLaunches = armedLaunches + 1,
+                firstArmedAt = CASE
+                    WHEN background_download_drop_arming.armedLaunches = 0
+                    THEN excluded.firstArmedAt
+                    ELSE background_download_drop_arming.firstArmedAt
+                END,
+                lastArmedAt = excluded.lastArmedAt
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, now)
+        bind(stmt, 2, now)
+        bind(stmt, 3, now)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// The arming row, or `nil` when the table holds none.
+    ///
+    /// `nil` rather than a zeroed value on purpose: a synthesized
+    /// `armedLaunches = 0` would be indistinguishable from a genuine
+    /// never-armed row, and those are different claims — one says the
+    /// migration ran, the other says nothing at all did.
+    func fetchBackgroundDownloadDropArming() throws -> BackgroundDownloadDropArming? {
+        let stmt = try prepare("""
+            SELECT armedLaunches, firstArmedAt, lastArmedAt, installedAt
+            FROM background_download_drop_arming WHERE id = 1
+            """)
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        return BackgroundDownloadDropArming(
+            armedLaunches: Int(sqlite3_column_int64(stmt, 0)),
+            firstArmedAt: optionalDouble(stmt, 1),
+            lastArmedAt: optionalDouble(stmt, 2),
+            installedAt: sqlite3_column_double(stmt, 3)
+        )
+    }
+
     /// playhead-kg8h: durably CLAIM one REQUESTED day-0 kickoff, before any of
     /// the work it stands for has run.
     ///
@@ -11785,6 +12048,13 @@ actor AnalysisStore {
             """)
         try exec("CREATE INDEX IF NOT EXISTS idx_decoded_spans_asset ON decoded_spans(assetId)")
         try exec("CREATE INDEX IF NOT EXISTS idx_decoded_spans_asset_time ON decoded_spans(assetId, startTime)")
+
+        // playhead-7dgx: the dropped-background-download ledger and its arming
+        // row. Declared here AND in `migrateBackgroundDownloadDropsV62IfNeeded`
+        // so a fresh install and an upgrade converge on the same shape — the
+        // V49 house rule. The two callers share ONE helper rather than two
+        // copies of the DDL, because two copies is how they drift.
+        try createBackgroundDownloadDropTables()
     }
 
     // MARK: - CRUD: analysis_assets

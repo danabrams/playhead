@@ -1499,12 +1499,22 @@ final class PlayheadRuntime {
         // post-init setter: the launch this record matters most on is the one
         // iOS makes with no scene, and a deferred hop is precisely what does
         // not run there.
+        // playhead-7dgx: and the DURABLE half of the same question. The
+        // surface-status stream above is a JSON Lines file under `Caches/`,
+        // which is anomaly-only and rotates; a dropped download needs a row a
+        // `SELECT count(*)` can reach, in the SQLite file a device pull copies
+        // whole. Injected at construction for the same reason the recorder
+        // above is — the sceneless relaunch is where this matters and a
+        // deferred hop does not run there.
         self.downloadManager = DownloadManager(
             invariantRecorder: { [surfaceStatusLogger] code, description in
                 surfaceStatusLogger.invariantViolated(
                     code: code, description: description
                 )
-            }
+            },
+            dropRecorder: AnalysisStoreBackgroundDownloadDropRecorder(
+                store: analysisStore
+            )
         )
 
         // playhead-o45p: construct the surface-status observer before

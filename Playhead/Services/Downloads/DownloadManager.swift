@@ -714,6 +714,29 @@ actor DownloadManager {
         @Sendable (InvariantViolation.Code, String) -> Void
     )?
 
+    /// playhead-7dgx: where a background download the transfer daemon never
+    /// started is DURABLY recorded.
+    ///
+    /// Non-optional, unlike ``invariantRecorder``. An optional recorder makes
+    /// "nobody injected one" and "nothing to record" the same `nil`, and this
+    /// ledger's entire purpose is telling those two apart; a named
+    /// ``NoopBackgroundDownloadDropRecorder`` at least says which it is at the
+    /// construction site.
+    ///
+    /// Passed at CONSTRUCTION, on `invariantRecorder`'s precedent and for the
+    /// same reason: the launch a dropped download matters most on is the one
+    /// iOS makes with no scene, and a post-init setter is precisely what does
+    /// not run there.
+    ///
+    /// **A production manager holding the no-op is a defect.** It is not
+    /// hypothetical — ``workJournalRecorder`` above is in exactly that state:
+    /// its default is never replaced by `PlayheadRuntime`, so every
+    /// `recordFailed` this actor makes goes nowhere. What stops that here is
+    /// `BackgroundDownloadDropWiringSourceCanaryTests` plus the arming row the
+    /// ledger keeps, which makes the state visible on a device pull rather
+    /// than only in source.
+    internal let dropRecorder: BackgroundDownloadDropRecording
+
     // MARK: - Streams
 
     private let progressContinuation: AsyncStream<DownloadProgress>.Continuation
@@ -744,8 +767,11 @@ actor DownloadManager {
         sessionIO: BackgroundSessionIO = .shared,
         invariantRecorder: (
             @Sendable (InvariantViolation.Code, String) -> Void
-        )? = nil
+        )? = nil,
+        dropRecorder: BackgroundDownloadDropRecording =
+            NoopBackgroundDownloadDropRecorder()
     ) {
+        self.dropRecorder = dropRecorder
         self.sessionIO = sessionIO
         self.enumerationIO = sessionIO.onItsOwnQueue(
             labelled: "\(sessionIO.queueLabel).enumeration"
@@ -1275,7 +1301,15 @@ actor DownloadManager {
     }
 
     /// Create required directories on first use.
-    func bootstrap() throws {
+    ///
+    /// playhead-7dgx: `async` because the FIRST thing it does is arm the
+    /// dropped-download ledger. Arming FIRST, before any work that can throw,
+    /// is deliberate — the claim being recorded is "this process installed a
+    /// live drop recorder", which is true whether or not the directory
+    /// creation below then fails, and a claim written last would be lost
+    /// exactly on the launches where downloads are most broken.
+    func bootstrap() async throws {
+        await dropRecorder.recordInstrumentArmed(at: Date().timeIntervalSince1970)
         let fm = FileManager.default
         for dir in [
             cacheDirectory,
@@ -2800,6 +2834,18 @@ actor DownloadManager {
             logger.error(
                 "Background download for \(episodeId, privacy: .public) NOT started: the background transfer daemon would not open a session"
             )
+            // playhead-7dgx: the cleanup above is correct and it destroys the
+            // last trace that this episode was ever asked for. The row is what
+            // survives it. `sessionCreationIO` is the bound that expired here —
+            // NOT `sessionIO`; they are separate queues with separate
+            // deadlines, and recording the wrong one would make this table lie
+            // about the very quantity the widening decision reads.
+            await recordBackgroundDownloadDrop(
+                episodeId: episodeId,
+                reason: .sessionNotVended,
+                context: context,
+                boundSeconds: sessionCreationIO.timeout
+            )
             return
         }
 
@@ -2826,6 +2872,16 @@ actor DownloadManager {
             deleteDownloadAttribution(episodeId: episodeId)
             logger.error(
                 "Background download for \(episodeId, privacy: .public) NOT started: the background transfer daemon did not answer"
+            )
+            // playhead-7dgx: a DIFFERENT failure from the one above and it
+            // gets a different reason. A session exists, so the download
+            // subsystem is alive for this process — only this episode is lost,
+            // and the remedy is per-episode rather than per-launch.
+            await recordBackgroundDownloadDrop(
+                episodeId: episodeId,
+                reason: .transferTaskNotVended,
+                context: context,
+                boundSeconds: sessionIO.timeout
             )
             return
         }
@@ -2858,9 +2914,51 @@ actor DownloadManager {
                 episodeId: episodeId
             )
             deleteDownloadAttribution(episodeId: episodeId)
+            // playhead-7dgx: THE THIRD ABANDONMENT IN THIS FUNCTION, and it is
+            // recorded for a reason worth stating rather than leaving to
+            // inference. The bead names two returns; a table called
+            // `background_download_drops` that counted two of the three drops
+            // in the function it is named after would be this repo's standing
+            // defect class shipped as the instrument meant to catch it — a
+            // value that names one thing read as though it named another. The
+            // reason is distinct, so a reader who wants only the two can still
+            // have them with a `WHERE reason IN (…)`.
+            await recordBackgroundDownloadDrop(
+                episodeId: episodeId,
+                reason: .transferNotResumed,
+                context: context,
+                boundSeconds: sessionIO.timeout
+            )
             return
         }
         logger.info("Queued background download for \(episodeId)")
+    }
+
+    /// Writes one `background_download_drops` row.
+    ///
+    /// Called only from the three abandonment paths in ``backgroundDownload``,
+    /// each of which has ALREADY released the reservation and deleted the
+    /// attribution sidecar — so this suspension point cannot strand any state:
+    /// a re-entrant caller arriving here finds the episode retryable, which is
+    /// exactly what the cleanup promised it.
+    ///
+    /// The recorder swallows its own errors, so this never throws and never
+    /// changes the caller's outcome. A drop that could not be recorded is
+    /// still a drop.
+    private func recordBackgroundDownloadDrop(
+        episodeId: String,
+        reason: BackgroundDownloadDropReason,
+        context: DownloadContext,
+        boundSeconds: TimeInterval
+    ) async {
+        await dropRecorder.recordDrop(
+            BackgroundDownloadDropRecord(
+                episodeId: episodeId,
+                reason: reason,
+                context: context,
+                boundSeconds: boundSeconds
+            )
+        )
     }
 
     /// playhead-nsjn: a transfer the daemon created but never started is
