@@ -127,10 +127,13 @@
 //     from `0|0||`. Ask `SELECT count(*) FROM background_download_drop_arming`
 //     FIRST. The Swift reader returns nil rather than a synthesized zero for
 //     exactly this reason; nothing on the raw-SQL path gives you that.
-//   * A `GROUP BY reason` silently omits raw values this build does not know.
-//     Run the complement — `WHERE reason NOT IN (…)` — before quoting any
-//     per-reason share, or a later build's fourth case under-reports every
-//     population you just counted.
+//   * A `GROUP BY reason` returns EVERY raw value, including ones this build
+//     cannot decode (measured). It is the SWIFT reader that is lossy here:
+//     `fetchBackgroundDownloadDrops` skips a row whose `reason` it cannot
+//     decode and counts it into `unrecognizedReasonRows`, so `rows` under-
+//     reports a later build's fourth case while raw SQL does not. Quote
+//     per-reason shares from SQL, and read the two `unrecognized…` counters
+//     before quoting anything from the Swift page.
 //
 // AND A "START FRESH" MOVES THE WHOLE HISTORY ASIDE.
 // `AnalysisStoreRecoveryCoordinator.quarantineAndRebuild` renames the store to

@@ -18,10 +18,16 @@
 // `URLSessionConfiguration.background(withIdentifier:)` still share that
 // resource with `DownloadShowAttributionTests`, `BackgroundURLSessionTests` and
 // `ForceQuitResumeTests` under the parallel plan. Each of those four
-// invalidates its sessions through a `defer` rather than a trailing call — a
-// trailing call is skipped by any `try` above it, and a rail that fails would
-// then leave a live session on a process-wide identifier and flake three
-// neighbouring suites, which is a mechanism invisible from either side. The one
+// invalidates its sessions through BOTH a `defer` AND a trailing `await`, on
+// `StreamingDownloadTests`' precedent: the `defer` covers the throw path,
+// where a trailing call is skipped by any `try` above it, and the trailing
+// call covers the pass path, where the `defer`'s unstructured `Task` is
+// awaited by nothing and can leave a live session on a process-wide
+// identifier past the end of the test — which would flake three neighbouring
+// suites, a mechanism invisible from either side. `invalidate…` is
+// idempotent, so carrying both costs nothing. An earlier cut of this suite
+// had only one of the two, and REPLACING one with the other is the specific
+// mistake this paragraph exists to stop. The one
 // rail whose pass depends on the daemon ANSWERING carries a deliberately
 // generous bound: not because waiting is a fix, but because a bound that only
 // bites under starvation is the difference between measuring the code and

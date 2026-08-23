@@ -672,8 +672,12 @@ struct InvariantViolation: Sendable, Hashable, Codable {
         /// says WHICH — a store that refused the row, or a build with no
         /// recorder installed at all.
         ///
-        /// Never expected on healthy hardware — it means a SQLite write to
-        /// `analysis.sqlite` failed.
+        /// Never expected on healthy hardware WITH THE RECORDER WIRED, and
+        /// the two readings are not interchangeable: `.writeFailed` means a
+        /// SQLite write to `analysis.sqlite` failed, while `.notRecording`
+        /// means no recorder was installed and every counter on disk is
+        /// legitimately zero. The description says which — do not go
+        /// diagnosing SQLite on a device whose only fault is its wiring.
         case backgroundDownloadDropNotRecorded =
             "background_download_drop_not_recorded"
 

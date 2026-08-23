@@ -2996,10 +2996,14 @@ actor DownloadManager {
     /// The recorder swallows its own STORE errors, so this never throws and
     /// never changes the caller's outcome. It does not swallow the OUTCOME:
     /// a row that did not land is raised on the surface-status invariant
-    /// stream, which is a different medium — a JSON Lines file under
-    /// `Caches/`, not this database — and one a device pull already reads.
-    /// That is what stops a drop the database could not hold from being
-    /// byte-identical, on disk, to no drop at all.
+    /// stream, a DIFFERENT FILE — JSON Lines under `Caches/`, not this
+    /// database — which a device pull already reads. It is NOT a different
+    /// failure domain: the app sets no data-protection entitlement, so that
+    /// file takes the same `completeUntilFirstUserAuthentication` class as
+    /// `analysis.sqlite`, and a pre-first-unlock relaunch or a full volume
+    /// silences both. What it genuinely covers is a failure LOCAL TO THE
+    /// DATABASE, and for that it is what stops a drop the database could not
+    /// hold from being byte-identical, on disk, to no drop at all.
     private func recordBackgroundDownloadDrop(
         episodeId: String,
         reason: BackgroundDownloadDropReason,

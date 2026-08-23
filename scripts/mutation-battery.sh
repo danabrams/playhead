@@ -11516,11 +11516,17 @@ MUTATIONS=(
   # asked for. The only witness was an `os_log` line no device pull captures.
   #
   # The series has four shapes, one per layer, because each is invisible from
-  # the others: BD01-BD04 + BD18 + BD99 are the CALL SITES (which path records
-  # what, and with which bound), BD05-BD08 are the SCHEMA (both ladders, the
-  # `createTables()` repair, and the seeded arming row), BD09-BD12 + BD14/BD15
-  # are the SQL (what each column actually holds on the way in and out), and
-  # BD13 + BD16 + BD17 are the WIRING (whether anything reaches disk at all).
+  # the others: the CALL SITES (which path records what, and with which
+  # bound), the SCHEMA (both ladders, the `createTables()` repair, and the
+  # seeded arming row), the SQL (what each column actually holds on the way in
+  # and out), and the WIRING (whether anything reaches disk at all).
+  #
+  # Read the four as a TAXONOMY, not as a census: BD01-BD04 + BD18 + BD99 are
+  # call sites, BD05-BD08 schema, BD09-BD12 + BD14/BD15 SQL, BD13 + BD16 +
+  # BD17 wiring — and BD19-BD40 extend all four layers rather than adding a
+  # fifth. The authoritative list is the MUTATIONS array below; an earlier cut
+  # of this paragraph enumerated only the first eighteen and read as though it
+  # were exhaustive.
 
   # BD01 is the shipped defect verbatim on path A: the session refusal goes
   # back to being an os_log line. Own batch — it removes a whole call site, so
@@ -13033,7 +13039,7 @@ EOF
     # outside the region above. Renaming only the first left the helper
     # referring to a binding that no longer exists, so the mutant did not
     # COMPILE — and a control that cannot report SURVIVED proves nothing about
-    # the 37 rails that rest on it.
+    # the 40 rails that rest on it.
     patch "$file" "$OLD" "$NEW" || return $?
     snippet OLD <<'EOF'
             + "bound=\(boundSeconds)s — the download was abandoned and \(detail)"
@@ -13361,6 +13367,12 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  # NOTE if this ever reports a LINT failure instead of a verdict: the mutant
+  # below is `identical_operands`, which is measured in `.swiftlint.yml` and
+  # named on CLAUDE.md's Tier D promotion shortlist. It is not in `only_rules`
+  # today, so the mutant compiles and lints clean. If that rule is promoted,
+  # `scripts/lint.sh --strict` runs before the build inside `fast-gate.sh` and
+  # this arm stops being killable — swap it for one that DELETES the guard.
   BD39)
     snippet OLD <<'EOF'
         guard outcome != .landed else { return }

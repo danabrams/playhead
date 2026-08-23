@@ -1,5 +1,5 @@
 // BackgroundDownloadDropWiringSourceCanaryTests.swift
-// playhead-7dgx — the four properties of this instrument that NO RUNTIME TEST
+// playhead-7dgx — the six properties of this instrument that NO RUNTIME TEST
 // CAN SEE, pinned in source.
 //
 // Each one is here because a unit test genuinely cannot reach it, not because
@@ -26,6 +26,15 @@
 //      attribution sidecar destroys the last trace of the request, so every one
 //      of them owes a row. A runtime test proves the three paths that exist
 //      today; only a source count notices a FOURTH one added later without one.
+//   5. THE ORDER OF THE NEW SUSPENSION POINT. The row is written AFTER the
+//      cleanup on every path. Both orders pass every behavioural rail — the
+//      row lands either way — and they differ only in what a re-entrant caller
+//      finds during the `await`, which is a property of the source text and of
+//      nothing a test can observe from outside.
+//   6. WHERE THE LEDGER IS ARMED. Arming must happen only after the store is
+//      known open, and `bootstrap()` must not touch the ledger at all. A
+//      runtime test sees the arming row either way; only the call SITE says
+//      whether an unopened store was armed.
 //
 // XCTest rather than Swift Testing, matching every other source canary here:
 // `xctestplan` can only filter XCTest classes, so a canary that might one day

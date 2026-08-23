@@ -8994,9 +8994,12 @@ actor AnalysisStore {
                 -- the denominator, and `armedLaunches` is not an attempt
                 -- count. Two more traps, because the CLI hides both:
                 -- `sqlite3` prints a BLANK LINE for a missing arming row, so
-                -- `SELECT count(*)` it first; and `GROUP BY reason` silently
-                -- omits raw values this build does not know, so run
-                -- `WHERE reason NOT IN (…)` before quoting any share.
+                -- `SELECT count(*)` it first; and RAW SQL IS THE HONEST
+                -- INSTRUMENT HERE, not the risky one — `GROUP BY reason`
+                -- returns every raw value including ones this build cannot
+                -- decode (measured), whereas the Swift reader
+                -- `fetchBackgroundDownloadDrops` SKIPS such a row and counts
+                -- it into `unrecognizedReasonRows`. Prefer SQL for totals.
                 id                 TEXT PRIMARY KEY,
                 episodeId          TEXT NOT NULL,
                 reason             TEXT NOT NULL,
@@ -9059,11 +9062,13 @@ actor AnalysisStore {
         // and therefore the OPEN, while a missing one on
         // `background_download_drops` merely breaks every insert.
         //
-        // ONE COST OF THE REPAIR, worth knowing before relying on the comments
-        // above: `ALTER TABLE … ADD COLUMN` rewrites `sqlite_master.sql` from
-        // the STORED text, and the stored text of a table created by an older
-        // build has none of these comments in it. A repaired install therefore
-        // carries the columns but not the recipe. Measured at review.
+        // ONE COST, worth knowing before relying on the comments above, and
+        // it is NOT the repair's doing: `ALTER TABLE … ADD COLUMN` leaves the
+        // stored `CREATE TABLE` text verbatim, comment included, and appends
+        // the new column before the closing paren (measured). What costs the
+        // recipe is `CREATE TABLE IF NOT EXISTS`, which never rewrites a table
+        // that already exists — so a store created by an older build carries
+        // that build's comments FOREVER, repaired or not.
         try addColumnIfNeeded(
             table: "background_download_drop_arming",
             column: "dropWriteFailures",
