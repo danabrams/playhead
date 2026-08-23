@@ -2656,12 +2656,19 @@ FOCUSED_SUITES=(
   # that a store STAMPED at head but missing the tables gets them back.
   #
   # `BackgroundDownloadDropWiringSourceCanaryTests` is the only thing that can
-  # see the four properties no runtime test can reach — the production wiring
-  # (`PlayheadRuntime.init` is reachable from no unit test and the recorder has
-  # a NO-OP default), the both-ladder registration, WHICH bound each site
-  # records (`onItsOwnQueue` copies the timeout, so the two are numerically
-  # equal and a swap is invisible to any assertion), and that every path
-  # deleting the attribution sidecar owes a row.
+  # see the SIX properties no runtime test can reach — the both-ladder
+  # registration, the production wiring (`PlayheadRuntime.init` is reachable
+  # from no unit test and the recorder has a NO-OP default), WHICH bound each
+  # site records (`onItsOwnQueue` copies the timeout, so the two are
+  # numerically equal and a swap is invisible to any assertion), that every
+  # path deleting the attribution sidecar owes a row, the ORDER of the new
+  # suspension point (the row is written AFTER the cleanup, and both orders
+  # pass every behavioural rail), and WHERE the ledger is armed (only after
+  # the store is known open, and never from `bootstrap()`).
+  #
+  # The count was "four" here until R7. It is the same enumeration the canary's
+  # own header carried, and R5 fixed only that copy — properties 5 and 6 were
+  # added in R1, which described just the original four in both places.
   -only-testing:PlayheadTests/BackgroundDownloadDropLedgerTests
   -only-testing:PlayheadTests/BackgroundDownloadDropsV62MigrationTests
   -only-testing:PlayheadTests/BackgroundDownloadDropWiringSourceCanaryTests
