@@ -181,6 +181,12 @@ struct BackgroundDownloadDropsV62MigrationTests {
         let beforeFetch = try await store.fetchBackgroundDownloadDropArming()
         let before = try #require(beforeFetch)
         #expect(before.armedLaunches == 2)
+        // BOTH stamps, against the INJECTED times, because this is the only
+        // place the clock is controlled. Without them `lastArmedAt` had no rail
+        // at all: degenerating it into a second `firstArmedAt` — the exact
+        // defect its own doc comment warns about — survived the whole branch.
+        #expect(before.firstArmedAt == 1000.0)
+        #expect(before.lastArmedAt == 2000.0)
 
         // Rewind only the STAMP, leaving the tables and their rows in place —
         // the shape a partially-rolled-back device is in, and the one where an

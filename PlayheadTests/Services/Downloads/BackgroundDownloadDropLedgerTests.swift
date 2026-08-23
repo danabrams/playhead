@@ -174,9 +174,14 @@ struct BackgroundDownloadDropLedgerTests {
             cacheDirectory: dir, store: store, sessionIO: Self.taskRefusingIO()
         )
         try await manager.bootstrap()
-        // `defer` rather than a trailing call: a `try` above would skip a
-        // trailing one and strand a live session on a process-wide
-        // background identifier, flaking three neighbouring suites.
+        // BOTH the `defer` and a trailing `await` at the end, which is what
+        // `StreamingDownloadTests` does and what an earlier cut of this suite
+        // got wrong by REPLACING one with the other. The `defer` covers the
+        // throw path, where a trailing call is skipped; the trailing `await`
+        // covers the pass path, where the `defer`'s unstructured `Task` is
+        // awaited by nothing and can leave a live session on a process-wide
+        // background identifier past the end of the test. `invalidate…` is
+        // idempotent, so the double call costs nothing.
         defer { Task { await manager.invalidateBackgroundSessionsForTesting() } }
 
         await Self.drive(manager, episodeId: "ep-B", context: Self.context())
@@ -193,6 +198,7 @@ struct BackgroundDownloadDropLedgerTests {
         // the whole difference between this row and the one above.
         #expect(await manager.instantiatedSessionIdentifiersForTesting().isEmpty == false)
         #expect(await manager._backgroundDownloadAdmissionCountForTesting() == 0)
+        await manager.invalidateBackgroundSessionsForTesting()
     }
 
     @Test("a transfer created but never resumed leaves a row naming THAT bound")
@@ -203,9 +209,14 @@ struct BackgroundDownloadDropLedgerTests {
             cacheDirectory: dir, store: store, sessionIO: Self.resumeRefusingIO()
         )
         try await manager.bootstrap()
-        // `defer` rather than a trailing call: a `try` above would skip a
-        // trailing one and strand a live session on a process-wide
-        // background identifier, flaking three neighbouring suites.
+        // BOTH the `defer` and a trailing `await` at the end, which is what
+        // `StreamingDownloadTests` does and what an earlier cut of this suite
+        // got wrong by REPLACING one with the other. The `defer` covers the
+        // throw path, where a trailing call is skipped; the trailing `await`
+        // covers the pass path, where the `defer`'s unstructured `Task` is
+        // awaited by nothing and can leave a live session on a process-wide
+        // background identifier past the end of the test. `invalidate…` is
+        // idempotent, so the double call costs nothing.
         defer { Task { await manager.invalidateBackgroundSessionsForTesting() } }
 
         await Self.drive(manager, episodeId: "ep-C", context: Self.context())
@@ -219,6 +230,7 @@ struct BackgroundDownloadDropLedgerTests {
         #expect(row.reason == .transferNotResumed)
         // The name of this rail says "naming THAT bound", so it has to read it.
         #expect(row.boundSeconds == Self.nonDefaultBound)
+        await manager.invalidateBackgroundSessionsForTesting()
     }
 
     /// THE ACCEPTANCE RAIL: two drops, two different bounds missed, and the
@@ -242,9 +254,14 @@ struct BackgroundDownloadDropLedgerTests {
             cacheDirectory: dirB, store: store, sessionIO: Self.taskRefusingIO()
         )
         try await managerB.bootstrap()
-        // `defer` rather than a trailing call: a `try` above would skip a
-        // trailing one and strand a live session on a process-wide
-        // background identifier, flaking three neighbouring suites.
+        // BOTH the `defer` and a trailing `await` at the end, which is what
+        // `StreamingDownloadTests` does and what an earlier cut of this suite
+        // got wrong by REPLACING one with the other. The `defer` covers the
+        // throw path, where a trailing call is skipped; the trailing `await`
+        // covers the pass path, where the `defer`'s unstructured `Task` is
+        // awaited by nothing and can leave a live session on a process-wide
+        // background identifier past the end of the test. `invalidate…` is
+        // idempotent, so the double call costs nothing.
         defer { Task { await managerB.invalidateBackgroundSessionsForTesting() } }
         await Self.drive(managerB, episodeId: "ep-task", context: Self.context())
 
@@ -276,7 +293,7 @@ struct BackgroundDownloadDropLedgerTests {
         #expect(capped.rows.count == 1)
         #expect(capped.rows.first?.episodeId == "ep-task")
         #expect(capped.truncated)
-
+        await managerB.invalidateBackgroundSessionsForTesting()
     }
 
     // MARK: - 2. It survives process death
@@ -375,9 +392,14 @@ struct BackgroundDownloadDropLedgerTests {
             cacheDirectory: dir, store: store, sessionIO: Self.answeringIO()
         )
         try await manager.bootstrap()
-        // `defer` rather than a trailing call: a `try` above would skip a
-        // trailing one and strand a live session on a process-wide
-        // background identifier, flaking three neighbouring suites.
+        // BOTH the `defer` and a trailing `await` at the end, which is what
+        // `StreamingDownloadTests` does and what an earlier cut of this suite
+        // got wrong by REPLACING one with the other. The `defer` covers the
+        // throw path, where a trailing call is skipped; the trailing `await`
+        // covers the pass path, where the `defer`'s unstructured `Task` is
+        // awaited by nothing and can leave a live session on a process-wide
+        // background identifier past the end of the test. `invalidate…` is
+        // idempotent, so the double call costs nothing.
         defer { Task { await manager.invalidateBackgroundSessionsForTesting() } }
 
         await Self.drive(manager, episodeId: "ep-healthy", context: Self.context())
@@ -400,6 +422,7 @@ struct BackgroundDownloadDropLedgerTests {
         let ledger = try await store.fetchBackgroundDownloadDrops()
         #expect(ledger.rows.isEmpty)
         #expect(ledger.totalRowsSeen == 0)
+        await manager.invalidateBackgroundSessionsForTesting()
     }
 
     /// `limit: .max` is what a later reader writes to mean "everything", and
@@ -485,8 +508,14 @@ struct BackgroundDownloadDropLedgerTests {
         // fail. What discriminates is that it MOVED: `firstArmedAt` is pinned
         // above, so a `lastArmedAt` that also stayed put means the second
         // arming wrote nothing.
+        // The escape clause an earlier cut used here (`… || armedLaunches == 2`)
+        // is asserted three lines above, so the expectation could only fail as
+        // collateral of a failure already reported. `lastArmedAt` is pinned to
+        // INJECTED times in `BackgroundDownloadDropsV62MigrationTests` instead,
+        // where the clock is controlled; all that is claimed here is that it
+        // MOVED, which a `firstArmedAt`-shaped degeneration breaks.
         let lastArmedAt = try #require(afterTwo.lastArmedAt)
-        #expect(lastArmedAt != firstArmedAt || afterTwo.armedLaunches == 2)
+        #expect(lastArmedAt != firstArmedAt)
     }
 
     /// The DEFAULT recorder records nothing, and that has to stay visible.
@@ -660,6 +689,49 @@ struct BackgroundDownloadDropLedgerTests {
         let raised = recording.unrecordedDrops
         #expect(raised.count == 1)
         #expect(try #require(raised.first).contains("arming=failed"))
+    }
+
+    /// ROUND THREE'S HEADLINE BEHAVIOUR CHANGE, railed. `armDropLedger` is
+    /// SILENT on `.notRecording` — an unwired build's unarmed launch is not an
+    /// anomaly, it is the documented meaning of `armedLaunches = 0`. Nothing
+    /// tested it: every existing rail that reaches `armDropLedger()` either has
+    /// a wired recorder or no `invariantRecorder`, so widening the guard back
+    /// to "anything but landed" survived the whole branch and would put a line
+    /// on every launch of every unwired build.
+    @Test("an UNWIRED build's arming is silent, not an anomaly")
+    func anUnwiredArmingIsSilent() async throws {
+        let recording = RecordedInvariantViolations()
+        let manager = DownloadManager(
+            cacheDirectory: try makeTempDir(prefix: "7dgxUnwiredArm"),
+            sessionIO: Self.creationRefusingIO(),
+            invariantRecorder: recording.recorder
+        )
+        await manager.armDropLedger()
+        #expect(recording.unrecordedDrops.isEmpty)
+    }
+
+    /// And the MIRROR: a drop that DID land must say nothing either. Without
+    /// this, deleting the `guard outcome != .landed` makes every successful
+    /// drop raise the loss invariant with an empty detail, and no rail moves.
+    @Test("a drop that LANDS raises nothing")
+    func aLandedDropRaisesNothing() async throws {
+        let (store, _) = try await makeTestStoreWithDirectory()
+        let recording = RecordedInvariantViolations()
+        let manager = DownloadManager(
+            cacheDirectory: try makeTempDir(prefix: "7dgxLandedQuiet"),
+            sessionIO: Self.creationRefusingIO(),
+            invariantRecorder: recording.recorder,
+            dropRecorder: AnalysisStoreBackgroundDownloadDropRecorder(store: store)
+        )
+        try await manager.bootstrap()
+        await Self.drive(manager, episodeId: "ep-quiet", context: Self.context())
+
+        let landed = try await store.fetchBackgroundDownloadDrops()
+        #expect(landed.rows.count == 1)
+        #expect(
+            recording.unrecordedDrops.isEmpty,
+            "the loss invariant is for a row that did NOT land; raising it on success makes the line meaningless"
+        )
     }
 
     /// The arming row's `nil` contract, which nothing else reaches.

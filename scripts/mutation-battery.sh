@@ -2670,7 +2670,10 @@ FOCUSED_SUITES=(
   # observers, and the V60 note in `migrateOnlyForTesting` records that a rung
   # registered in one ladder and not the other is invisible to every test
   # written FOR that rung. These are what saw it.
-  -only-testing:PlayheadTests/MigrationLadderTests
+  #
+  # `MigrationLadderTests` is deliberately NOT repeated here — it is already in
+  # this list, above, and a second declaration of the same fact is one that can
+  # drift.
   -only-testing:PlayheadTests/MergedChildRowDedupeV40MigrationTests
 )
 
@@ -3186,6 +3189,8 @@ T_7DGX_C_BOOTSTRAP="testBootstrapDoesNotTouchTheDropLedger"
 T_7DGX_OLDSHAPE="a store carrying the PRE-dropWriteFailures shape still opens, and is repaired"
 T_7DGX_ARM_FAIL="a failed ARMING is raised on the second medium too"
 T_7DGX_UNBOUNDED="an unbounded limit returns everything instead of trapping"
+T_7DGX_ARM_SILENT="an UNWIRED build's arming is silent, not an anomaly"
+T_7DGX_LANDED_QUIET="a drop that LANDS raises nothing"
 T_7DGX_UNKNOWN_REASON="an unrecognized reason is skipped and counted, never coerced into a known case"
 # `aV61StoreGenuinelyLacksTheTable` deliberately has NO mutant and therefore
 # no variable here. It asserts that a table this suite itself dropped is
@@ -11735,6 +11740,24 @@ MUTATIONS=(
   # somewhere a verdict survives.
   "BD37|1457|STORE|$T_7DGX_DISTINCT"
 
+  # BD38 widens the arming seam's guard back to "anything but landed", so an
+  # UNWIRED build raises an anomaly on every launch — for a state that is the
+  # documented meaning of `armedLaunches = 0` rather than a fault. It survived
+  # the whole branch until round four went looking: that guard is round three's
+  # headline behaviour change and nothing tested it in either direction.
+  "BD38|1458|DLMGR|$T_7DGX_ARM_SILENT"
+
+  # BD39 is its MIRROR on the drop seam: every SUCCESSFUL drop raises the loss
+  # invariant, with an empty detail. Same shape, other direction, equally
+  # unrailed until now.
+  "BD39|1459|DLMGR|$T_7DGX_LANDED_QUIET"
+
+  # BD40 degenerates `lastArmedAt` into a second `firstArmedAt` — the exact
+  # defect that column's own doc comment warns about, and which had no rail at
+  # all because the assertion claiming to be one carried an escape clause that
+  # was already asserted three lines above it.
+  "BD40|1460|STORE|$T_7DGX_ARMS;$T_7DGX_IDEMPOTENT"
+
   # BD99 — VACUITY CONTROL, and it MUST SURVIVE. It renames the parameter
   # BINDING inside `recordBackgroundDownloadDrop` — the argument LABEL and every
   # call site are untouched — in the helper BD01 and BD03 delete calls to. Its
@@ -12093,6 +12116,9 @@ describe_mutation() {
     BD35) echo "a failed arming reports success — the denominator's silent failure returns" ;;
     BD36) echo "a failed arming stops being raised on the second surface" ;;
     BD37) echo "the probe loses its +1, so a truncated page reports itself as the whole story" ;;
+    BD38) echo "the arming seam raises an anomaly for an UNWIRED build — a line on every launch for a documented state" ;;
+    BD39) echo "every SUCCESSFUL drop raises the loss invariant, so the line stops meaning anything" ;;
+    BD40) echo "lastArmedAt degenerates into a second firstArmedAt" ;;
     BD99) echo "VACUITY CONTROL — the parameter BINDING inside recordBackgroundDownloadDrop is renamed; the label and every call site are untouched. MUST SURVIVE" ;;
     IW01) echo "THE SHIPPED DEFECT VERBATIM — the coarse gate is gone, so a runner hardcode reads as the model's grade" ;;
     IW02) echo "the gate opens for anything that is NOT permissive, so UNKNOWN licenses the band — the backfill defect in the reader" ;;
@@ -13313,6 +13339,47 @@ EOF
 EOF
     snippet NEW <<'EOF'
         let probe = ceiling
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BD38)
+    snippet OLD <<'EOF'
+        switch outcome {
+        case .landed, .notRecording:
+            return
+        case .writeFailed:
+            break
+        }
+EOF
+    snippet NEW <<'EOF'
+        switch outcome {
+        case .landed:
+            return
+        case .writeFailed, .notRecording:
+            break
+        }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BD39)
+    snippet OLD <<'EOF'
+        guard outcome != .landed else { return }
+EOF
+    snippet NEW <<'EOF'
+        guard outcome == outcome else { return }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BD40)
+    snippet OLD <<'EOF'
+                lastArmedAt = excluded.lastArmedAt
+EOF
+    snippet NEW <<'EOF'
+                lastArmedAt = CASE
+                    WHEN background_download_drop_arming.armedLaunches = 0
+                    THEN excluded.lastArmedAt
+                    ELSE background_download_drop_arming.lastArmedAt
+                END
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 

@@ -1375,13 +1375,23 @@ actor DownloadManager {
         let outcome = await dropRecorder.recordInstrumentArmed(
             at: Date().timeIntervalSince1970
         )
-        // `.notRecording` is SILENT here, and that is the difference between
-        // the two seams. A drop is a lost EVENT and is worth a line whatever
-        // the reason; an unarmed launch on a build with no recorder is not an
-        // anomaly, it is the documented meaning of `armedLaunches = 0`, and
-        // one line per launch saying so would be noise on every preview and
-        // every test.
-        guard outcome == .writeFailed else { return }
+        // A SWITCH, not `== .writeFailed`, so a fourth outcome added later
+        // fails to COMPILE here rather than being silently classified as
+        // "nothing to say" — which is the failure direction the three-case
+        // enum exists to remove, and an equality test quietly re-introduces.
+        //
+        // `.notRecording` is SILENT, and that is the difference between the two
+        // seams. A drop is a lost EVENT and is worth a line whatever the
+        // reason; an unarmed launch on a build with no recorder is not an
+        // anomaly, it is the documented meaning of `armedLaunches = 0`, and one
+        // line per launch saying so would be noise on every preview and every
+        // test.
+        switch outcome {
+        case .landed, .notRecording:
+            return
+        case .writeFailed:
+            break
+        }
         // The DENOMINATOR's own silent failure, closed the same way the
         // numerator's is. A launch whose arming write failed is byte-identical
         // on disk to a launch that never ran, and it is one of the two things

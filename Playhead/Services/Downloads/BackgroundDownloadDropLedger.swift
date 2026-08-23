@@ -270,10 +270,20 @@ struct BackgroundDownloadDropRecord: Sendable, Equatable {
     /// together would average two different products.
     let isExplicitDownload: Bool
 
-    /// The `BackgroundSessionIO` bound, in seconds, that expired to produce
-    /// this row. Recorded rather than assumed so that a later change to the
-    /// bound does not silently re-scale the whole history of this table —
-    /// and so the "should the bound be wider" question has evidence.
+    /// WHICH CEILING WAS CONFIGURED for the crossing this row's download died
+    /// on. Read the file header before using it, because the two obvious
+    /// readings are both wrong.
+    ///
+    /// It is NOT evidence for "should the bound be wider": the value has zero
+    /// variance within a build, and the data that question needs is the latency
+    /// of the calls that SUCCEEDED, which nothing records. And it is not
+    /// reliably the elapsed time either — a caller that JOINED an in-flight
+    /// session crossing gives up on the FIRST caller's deadline, after some
+    /// fraction of it.
+    ///
+    /// What it does buy: a later change to the bound cannot silently re-scale
+    /// this table's whole history, and a device running a non-default bound is
+    /// not read as if it ran the shipped one.
     let boundSeconds: Double
 
     init(
@@ -406,9 +416,12 @@ struct BackgroundDownloadDropArming: Sendable, Equatable {
     /// carrying the instrument. NOT ALWAYS: `noteBackgroundDownloadDropInstrumentArmed`
     /// re-creates the row if it is missing — that is deliberate, so a hand-
     /// edited or partially-rolled-back store still counts — and on that path
-    /// this stamps the ARM time instead. So read it as "the earliest moment
-    /// this install is known to have carried the instrument", which is true on
-    /// both paths, rather than as the migration's own timestamp.
+    /// this stamps the ARM time instead. There is a THIRD writer for the same
+    /// reason — `noteBackgroundDownloadDropWriteFailure` also re-creates a
+    /// missing row, and stamps the time of the FAILURE. So read it as "the
+    /// earliest moment this install is known to have carried the instrument",
+    /// which is true on all three paths, rather than as the migration's own
+    /// timestamp.
     let installedAt: Double
 }
 
@@ -459,7 +472,11 @@ protocol BackgroundDownloadDropRecording: Sendable {
     /// A conformer that records nothing BY DESIGN returns `.notRecording`,
     /// never `.landed`: claiming success would make the no-op indistinguishable
     /// from a working ledger at the one call site that checks.
-    @discardableResult
+    ///
+    /// NOT `@discardableResult`. An earlier cut marked it so, which removed the
+    /// only compile-time enforcement of the sentence above: a later caller
+    /// could drop the outcome with no diagnostic and the loss would go quiet
+    /// again. Nothing needs the attribute — both production callers bind it.
     func recordDrop(
         _ record: BackgroundDownloadDropRecord
     ) async -> BackgroundDownloadDropWriteOutcome
@@ -481,7 +498,8 @@ protocol BackgroundDownloadDropRecording: Sendable {
     /// every call it receives. `BackgroundDownloadDropWiringSourceCanaryTests`
     /// is what pins the single-call-site property, because nothing at runtime
     /// can see it.
-    @discardableResult
+    ///
+    /// NOT `@discardableResult`, for the reason given on `recordDrop`.
     func recordInstrumentArmed(
         at now: Double
     ) async -> BackgroundDownloadDropWriteOutcome
