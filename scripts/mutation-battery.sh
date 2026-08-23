@@ -12924,13 +12924,14 @@ EOF
 
   BD16)
     snippet OLD <<'EOF'
-    func armDropLedger() async {
-        await dropRecorder.recordInstrumentArmed(at: Date().timeIntervalSince1970)
-    }
+        let counted = await dropRecorder.recordInstrumentArmed(
+            at: Date().timeIntervalSince1970
+        )
+        guard !counted else { return }
 EOF
     snippet NEW <<'EOF'
-    func armDropLedger() async {
-    }
+        let counted = true
+        guard !counted else { return }
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -12986,7 +12987,9 @@ EOF
   BD19)
     snippet OLD <<'EOF'
             do {
-                try await store.noteBackgroundDownloadDropWriteFailure()
+                try await store.noteBackgroundDownloadDropWriteFailure(
+                    at: Date().timeIntervalSince1970
+                )
             } catch {
                 logger.error(
                     "background download drop write-failure counter ALSO failed: \(String(describing: error), privacy: .public)"
@@ -13005,14 +13008,14 @@ EOF
         }
     }
 
-    func recordInstrumentArmed(at now: Double) async {
+    func recordInstrumentArmed(at now: Double) async -> Bool {
 EOF
     snippet NEW <<'EOF'
             return true
         }
     }
 
-    func recordInstrumentArmed(at now: Double) async {
+    func recordInstrumentArmed(at now: Double) async -> Bool {
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
