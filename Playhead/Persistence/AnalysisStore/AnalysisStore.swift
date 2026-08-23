@@ -9067,8 +9067,11 @@ actor AnalysisStore {
         // stored `CREATE TABLE` text verbatim, comment included, and appends
         // the new column before the closing paren (measured). What costs the
         // recipe is `CREATE TABLE IF NOT EXISTS`, which never rewrites a table
-        // that already exists — so a store created by an older build carries
-        // that build's comments FOREVER, repaired or not.
+        // that already exists — so a store created by an older build keeps
+        // that build's comments for the life of the FILE, repaired or not.
+        // The one thing that does clear them is
+        // `AnalysisStoreRecoveryCoordinator.quarantineAndRebuild`, which moves
+        // the whole store aside and starts fresh.
         try addColumnIfNeeded(
             table: "background_download_drop_arming",
             column: "dropWriteFailures",

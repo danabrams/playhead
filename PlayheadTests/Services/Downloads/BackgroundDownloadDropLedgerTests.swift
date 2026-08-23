@@ -580,8 +580,11 @@ struct BackgroundDownloadDropLedgerTests {
     /// store that simply cannot be written to produces that exact state by
     /// silence — `SQLITE_FULL`, or a background relaunch before first unlock,
     /// since `analysis.sqlite` is `completeUntilFirstUserAuthentication`. So
-    /// the failure has to leave two traces, in two independent media, and this
-    /// asserts both.
+    /// the failure has to leave two traces, in two different FILES, and this
+    /// asserts both. Two files, NOT two independent failure domains: the JSONL
+    /// takes the same data-protection class as the store, so a pre-first-unlock
+    /// relaunch silences both. What the second file genuinely covers is a
+    /// failure LOCAL TO THIS DATABASE, which is what this fixture builds.
     @Test("a drop whose row cannot be written is counted AND raised on the second medium")
     func aFailedDropWriteIsCountedAndRaised() async throws {
         let dir = try makeTempDir(prefix: "7dgxWriteFailure")

@@ -5,18 +5,18 @@
 // Each one is here because a unit test genuinely cannot reach it, not because
 // a source check was easier:
 //
-//   1. THE PRODUCTION WIRING. `PlayheadRuntime.init` is reachable from no unit
+//   1. THE LADDER REGISTRATION. A rung called from `runSchemaMigration` but not
+//      from `migrateOnlyForTesting` leaves every fixture-driven test one rung
+//      short while every `currentSchemaVersion` assertion still passes, because
+//      the constant moved with it. It cost V60 a commit; the V58 canary is the
+//      precedent this copies.
+//   2. THE PRODUCTION WIRING. `PlayheadRuntime.init` is reachable from no unit
 //      test in this tree, and the recorder it injects has a NO-OP default. That
 //      exact shape has already shipped broken once, in the same actor:
 //      `DownloadManager.workJournalRecorder` defaults to
 //      `NoopWorkJournalRecorder` and production never replaces it, so every
 //      `recordFailed` the download path makes goes nowhere. Nothing failed when
 //      that happened, and nothing would fail here either.
-//   2. THE LADDER REGISTRATION. A rung called from `runSchemaMigration` but not
-//      from `migrateOnlyForTesting` leaves every fixture-driven test one rung
-//      short while every `currentSchemaVersion` assertion still passes, because
-//      the constant moved with it. It cost V60 a commit; the V58 canary is the
-//      precedent this copies.
 //   3. WHICH BOUND EACH SITE RECORDS. `sessionCreationIO` is built by
 //      `sessionIO.onItsOwnQueue(labelled:)`, which COPIES the timeout — so the
 //      two bounds are numerically equal by construction and no assertion over
