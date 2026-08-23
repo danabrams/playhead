@@ -260,6 +260,16 @@ final class BackgroundDownloadDropWiringSourceCanaryTests: XCTestCase {
             + "durable row's suspension point. This is the whole safety argument for adding an "
             + "`await` to this function and nothing at runtime can observe it."
         )
+        // The sequence above is TEXTUAL, and `defer` is the one construct that
+        // inverts execution order without moving a token: a
+        // `defer { deleteDownloadAttribution(…) }` written above the record
+        // call leaves this list identical while moving the deletion to after
+        // the suspension point — precisely what the list exists to prevent.
+        XCTAssertEqual(
+            SwiftSourceInspector.regexOccurrences(of: #"\bdefer\b"#, in: body), 0,
+            "playhead-7dgx: backgroundDownload must contain no `defer`. The ordering rail above "
+            + "reads source order, and `defer` is how source order stops meaning execution order."
+        )
     }
 
     /// The ledger records DAEMON DROPS. Nothing bounds the helper's call sites
@@ -311,8 +321,20 @@ final class BackgroundDownloadDropWiringSourceCanaryTests: XCTestCase {
         XCTAssertTrue(
             armIndex > guardIndex,
             "playhead-7dgx: the ledger must be armed only AFTER the degraded-launch guard. "
-            + "Armed above it, `armedLaunches` counts launches on which nothing could ever be "
-            + "recorded, and the ledger's central claim becomes unreadable."
+            + "Armed above it, `armedLaunches` counts launches on which the store never opened, "
+            + "and the ledger's central claim becomes unreadable."
+        )
+        // AND OUTSIDE THE GUARD'S OWN BODY. "After the guard header" alone is
+        // satisfied by `guard … else { await downloadManager.armDropLedger(); return }`
+        // — arming ONLY the degraded launches, the exact inversion of what the
+        // assertion above says it prevents.
+        let elseBody = try XCTUnwrap(
+            SwiftSourceInspector.firstBody(in: runtime, after: "guard storeOutcome.isOpen else"),
+            "could not isolate the degraded-launch guard's body"
+        )
+        XCTAssertEqual(
+            SwiftSourceInspector.regexOccurrences(of: #"\barmDropLedger\b"#, in: elseBody), 0,
+            "playhead-7dgx: the arming must be on the SUCCESS path, not inside the guard's else."
         )
     }
 
@@ -328,10 +350,17 @@ final class BackgroundDownloadDropWiringSourceCanaryTests: XCTestCase {
             "bootstrap() must stay SYNCHRONOUS — if this anchor no longer matches, the arming "
             + "hop has probably come back"
         )
-        XCTAssertEqual(
-            SwiftSourceInspector.regexOccurrences(of: #"\bdropRecorder\b"#, in: body), 0,
-            "playhead-7dgx: bootstrap() must not reach the drop recorder."
-        )
+        // THREE SPELLINGS, because banning only `dropRecorder` is out-spelled
+        // by the idiomatic re-introduction: `bootstrap()` is synchronous, so a
+        // contributor cannot write `await dropRecorder…` there — but
+        // `Task { await armDropLedger() }` compiles, restores the exact hop
+        // this canary forbids, and mentions neither `dropRecorder` nor `await`.
+        for symbol in [#"\bdropRecorder\b"#, #"\barmDropLedger\b"#, #"\brecordInstrumentArmed\b"#] {
+            XCTAssertEqual(
+                SwiftSourceInspector.regexOccurrences(of: symbol, in: body), 0,
+                "playhead-7dgx: bootstrap() must not reach the drop ledger by any route (\(symbol))."
+            )
+        }
     }
 
     /// The three reasons are distinct at the three sites. A copy-paste that

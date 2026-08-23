@@ -3183,6 +3183,9 @@ T_7DGX_C_ORDER="testTheDropRowIsRecordedAFTERTheCleanupOnEveryPath"
 T_7DGX_C_SITES="testTheDropRecorderIsCalledFromBackgroundDownloadAndNowhereElse"
 T_7DGX_C_ARMSITE="testTheLedgerIsArmedOnlyAfterTheStoreIsKnownOpen"
 T_7DGX_C_BOOTSTRAP="testBootstrapDoesNotTouchTheDropLedger"
+T_7DGX_OLDSHAPE="a store carrying the PRE-dropWriteFailures shape still opens, and is repaired"
+T_7DGX_ARM_FAIL="a failed ARMING is raised on the second medium too"
+T_7DGX_UNBOUNDED="an unbounded limit returns everything instead of trapping"
 T_7DGX_UNKNOWN_REASON="an unrecognized reason is skipped and counted, never coerced into a known case"
 T_7DGX_ABSENT="a V61-shaped store genuinely lacks both tables, which is what makes ABSENT readable"
 T_7DGX_LADDER="a V61 store climbs to head through the ladder-only seam and gains both tables"
@@ -11690,6 +11693,26 @@ MUTATIONS=(
   # population that proves nothing.
   "BD33|1453|RT|$T_7DGX_C_ARMSITE"
 
+  # BD34 removes the shape repair. `CREATE TABLE IF NOT EXISTS` is a no-op on a
+  # table that already exists in an older shape, so the seed INSERT then names a
+  # column that is not there, `createTables()` throws, and THE WHOLE STORE STOPS
+  # OPENING — which is not hypothetical: it happened on this branch and surfaced
+  # as an unrelated trust-profile test failing.
+  "BD34|1454|STORE|$T_7DGX_OLDSHAPE"
+
+  # BD35 makes a FAILED arming report success, so the denominator's own silent
+  # failure comes back — a launch that did not count is byte-identical to one
+  # that never ran.
+  "BD35|1455|LEDGER|$T_7DGX_ARM_FAIL"
+
+  # BD36 drops the second-surface raise for a failed arming. The counter still
+  # fails to move and nothing anywhere says so.
+  "BD36|1456|DLMGR|$T_7DGX_ARM_FAIL"
+
+  # BD37 restores the `+ 1` without the Int32 clamp, so `limit: .max` — what a
+  # later reader writes to mean "everything" — traps inside the store actor.
+  "BD37|1457|STORE|$T_7DGX_UNBOUNDED"
+
   # BD99 — VACUITY CONTROL, and it MUST SURVIVE. It renames the parameter
   # BINDING inside `recordBackgroundDownloadDrop` — the argument LABEL and every
   # call site are untouched — in the helper BD01 and BD03 delete calls to. Its
@@ -12026,7 +12049,7 @@ describe_mutation() {
     BD13) echo "the composition root injects the NO-OP recorder — workJournalRecorder's live defect, transplanted" ;;
     BD14) echo "the unattributed REASON is bound NULL, so a measured absence and an unnoticed one look alike" ;;
     BD15) echo "isExplicitDownload is INVERTED — the ledger reports the wrong product being broken" ;;
-    BD16) echo "bootstrap() stops arming, so durable drops sit beside a census saying nobody was counting" ;;
+    BD16) echo "armDropLedger() stops arming, so durable drops sit beside a census saying nobody was counting" ;;
     BD17) echo "the production recorder's write becomes a no-op that still throws, so nothing reaches disk" ;;
     BD18) echo "every row takes the SAME primary key, so the second drop collides and the ledger cannot count" ;;
     BD19) echo "a drop whose row could not be written stops being COUNTED — the positive claim becomes reachable by silence" ;;
@@ -12044,6 +12067,10 @@ describe_mutation() {
     BD31) echo "the NO-OP recorder reports that the row landed, so an unwired build loses the drop on both media" ;;
     BD32) echo "the arming goes back inside bootstrap() — async cache-directory creation and an unmanaged store opener" ;;
     BD33) echo "the ledger is armed ABOVE the degraded-launch guard, so armedLaunches counts launches that could record nothing" ;;
+    BD34) echo "the shape repair is gone, so a store holding an older arming table stops OPENING AT ALL" ;;
+    BD35) echo "a failed arming reports success — the denominator's silent failure returns" ;;
+    BD36) echo "a failed arming stops being raised on the second surface" ;;
+    BD37) echo "the Int32 clamp is gone, so limit: .max traps inside the store actor" ;;
     BD99) echo "VACUITY CONTROL — the parameter BINDING inside recordBackgroundDownloadDrop is renamed; the label and every call site are untouched. MUST SURVIVE" ;;
     IW01) echo "THE SHIPPED DEFECT VERBATIM — the coarse gate is gone, so a runner hardcode reads as the model's grade" ;;
     IW02) echo "the gate opens for anything that is NOT permissive, so UNKNOWN licenses the band — the backfill defect in the reader" ;;
@@ -13195,6 +13222,57 @@ EOF
 EOF
     snippet NEW <<'EOF'
             // failures and decides whether to offer a rebuild.
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BD34)
+    snippet OLD <<'EOF'
+        try addColumnIfNeeded(
+            table: "background_download_drop_arming",
+            column: "dropWriteFailures",
+            definition: "INTEGER NOT NULL DEFAULT 0"
+        )
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BD35)
+    snippet OLD <<'EOF'
+            logger.error(
+                "background download drop instrument NOT armed: \(String(describing: error), privacy: .public)"
+            )
+            return false
+EOF
+    snippet NEW <<'EOF'
+            logger.error(
+                "background download drop instrument NOT armed: \(String(describing: error), privacy: .public)"
+            )
+            return true
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BD36)
+    snippet OLD <<'EOF'
+        logger.error("Background download drop ledger NOT armed for this launch")
+        invariantRecorder?(
+            .backgroundDownloadDropNotRecorded,
+            "arming=failed — this launch had a live drop recorder and "
+            + "background_download_drop_arming.armedLaunches did not move, so "
+            + "any drop row it goes on to write has no launch in the denominator"
+        )
+EOF
+    snippet NEW <<'EOF'
+        logger.error("Background download drop ledger NOT armed for this launch")
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BD37)
+    snippet OLD <<'EOF'
+        let probe = ceiling >= Int(Int32.max) ? Int(Int32.max) : ceiling + 1
+EOF
+    snippet NEW <<'EOF'
+        let probe = ceiling + 1
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 

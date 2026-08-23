@@ -249,12 +249,12 @@ struct BackgroundDownloadDropLedgerTests {
         // this suite reads the order, so without this the `ORDER BY occurredAt
         // DESC` — and `occurredAt` itself — could be anything at all.
         #expect(ledger.rows.map(\.episodeId) == ["ep-task", "ep-session"])
+        // NOT `newest >= oldest` — the query is `ORDER BY occurredAt DESC`, so
+        // that holds for ANY value in the column including a frozen constant,
+        // and an earlier cut asserted it while claiming it discriminated
+        // exactly that case. The episode-order assertion above is what catches
+        // a frozen stamp; this catches a placeholder.
         let newest = try #require(ledger.rows.first).occurredAt
-        let oldest = try #require(ledger.rows.last).occurredAt
-        #expect(
-            newest >= oldest,
-            "a stamp that is not the time of the drop makes every ordering above a coincidence"
-        )
         #expect(newest > 0, "occurredAt must be the time of the drop, not a placeholder")
         #expect(ledger.truncated == false)
         #expect(ledger.totalRowsSeen == 2)
@@ -388,6 +388,29 @@ struct BackgroundDownloadDropLedgerTests {
         #expect(ledger.rows.isEmpty)
         #expect(ledger.totalRowsSeen == 0)
         await manager.invalidateBackgroundSessionsForTesting()
+    }
+
+    /// `limit: .max` is what a later reader writes to mean "everything", and
+    /// it must not trap. `bind(_:_:Int)` goes through the TRAPPING `Int32(_:)`,
+    /// and an earlier cut guarded on `Int.max` while handing exactly that value
+    /// to the trap — a branch written to prevent an overflow that caused a
+    /// crash instead, on the one call most likely to be written.
+    @Test("an unbounded limit returns everything instead of trapping")
+    func anUnboundedLimitDoesNotTrap() async throws {
+        let (store, _) = try await makeTestStoreWithDirectory()
+        for index in 1...3 {
+            try await store.insertBackgroundDownloadDrop(
+                BackgroundDownloadDropRecord(
+                    episodeId: "ep-limit-\(index)",
+                    reason: .sessionNotVended,
+                    context: Self.context(),
+                    boundSeconds: 1
+                )
+            )
+        }
+        let page = try await store.fetchBackgroundDownloadDrops(limit: .max)
+        #expect(page.rows.count == 3)
+        #expect(page.truncated == false)
     }
 
     // MARK: - 5. UNKNOWN IS NOT ZERO
@@ -538,14 +561,51 @@ struct BackgroundDownloadDropLedgerTests {
             "without this, `armedLaunches = 1, rows = 0` is byte-identical to a launch that armed and saw no drop"
         )
 
-        // Medium two: the surface-status stream, which is a JSON Lines file
-        // under Caches/ rather than this database — so the two can only go
-        // quiet together if the device has no writable storage at all.
+        // Medium two: the surface-status stream, a JSON Lines file under
+        // Caches/. NOT an independent failure domain — see the ledger header —
+        // but it does cover a failure local to this database, which is what
+        // this fixture builds.
         let raised = recording.unrecordedDrops
         #expect(raised.count == 1)
         let description = try #require(raised.first)
         #expect(description.contains("episodeId=ep-unwritable"))
         #expect(description.contains("reason=session_not_vended"))
+    }
+
+    /// THE DENOMINATOR HAS THE SAME HOLE THE NUMERATOR DOES, and this is its
+    /// rail. A launch whose arming write failed is byte-identical on disk to a
+    /// launch that never ran, and it is one of the two things that make
+    /// `armedLaunches = 0` beside real drop rows reachable. The numerator's
+    /// version of this was the top finding of round one; the denominator's was
+    /// left open until round two asked why.
+    @Test("a failed ARMING is raised on the second medium too")
+    func aFailedArmingIsRaised() async throws {
+        let dir = try makeTempDir(prefix: "7dgxArmFailure")
+        AnalysisStore.resetMigratedPathsForTesting()
+        let store = try AnalysisStore(directory: dir)
+        try await store.migrate()
+        TestScratchReaper.shared.adopt(dir, owner: store)
+
+        // Break exactly the arming table, leaving the drops table intact.
+        let dbURL = dir.appendingPathComponent("analysis.sqlite")
+        var db: OpaquePointer?
+        #expect(sqlite3_open_v2(dbURL.path, &db, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK)
+        sqlite3_busy_timeout(db, 3000)
+        #expect(sqlite3_exec(db, "DROP TABLE background_download_drop_arming", nil, nil, nil) == SQLITE_OK)
+        sqlite3_close_v2(db)
+
+        let recording = RecordedInvariantViolations()
+        let manager = DownloadManager(
+            cacheDirectory: try makeTempDir(prefix: "7dgxArmFailureCache"),
+            sessionIO: Self.creationRefusingIO(),
+            invariantRecorder: recording.recorder,
+            dropRecorder: AnalysisStoreBackgroundDownloadDropRecorder(store: store)
+        )
+        await manager.armDropLedger()
+
+        let raised = recording.unrecordedDrops
+        #expect(raised.count == 1)
+        #expect(try #require(raised.first).contains("arming=failed"))
     }
 
     /// The arming row's `nil` contract, which nothing else reaches.

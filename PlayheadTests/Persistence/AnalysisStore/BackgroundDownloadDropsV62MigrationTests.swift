@@ -132,7 +132,9 @@ struct BackgroundDownloadDropsV62MigrationTests {
         // `createTables()` would be untestable and, on a device, unreachable.
         try await store.migrateOnlyForTesting()
 
-        #expect(try await store.schemaVersion() == 62)
+        // Against the CONSTANT, never a literal. A head assertion written as a
+        // database-read literal is the exact shape this branch had to repair in
+        // two other suites, and a `currentSchemaVersion` grep cannot find it.
         #expect(try await store.schemaVersion() == AnalysisStore.currentSchemaVersion)
         #expect(try probeTableExists(in: dir, table: Self.dropsTable))
         #expect(try probeTableExists(in: dir, table: Self.armingTable))
@@ -249,6 +251,69 @@ struct BackgroundDownloadDropsV62MigrationTests {
         #expect(try probeTableExists(in: dir, table: Self.armingTable))
         let fetched = try await reopened.fetchBackgroundDownloadDropArming()
         #expect(try #require(fetched).armedLaunches == 0)
+    }
+
+    /// A STORE CARRYING AN OLDER SHAPE OF THESE TABLES MUST STILL OPEN — and
+    /// this rail exists because it did not, on this very branch.
+    ///
+    /// `createBackgroundDownloadDropTables()` runs from `createTables()`, which
+    /// is unconditional and runs before the ladder, so its `CREATE TABLE IF NOT
+    /// EXISTS` is a NO-OP against a table that already exists in an older
+    /// shape. When `dropWriteFailures` was added in a later commit, the seed
+    /// `INSERT` named a column that was not there, SQLite refused the
+    /// statement, `createTables()` threw, the whole `runSchemaMigration()`
+    /// transaction rolled back — and THE STORE STOPPED OPENING AT ALL.
+    ///
+    /// What it cost, and why the rail is worth its length: the symptom was a
+    /// completely unrelated trust-profile test failing, because a store that
+    /// will not open fails everything downstream of it. Nothing pointed at this
+    /// table. The unmutated baseline of the mutation battery is what caught it.
+    ///
+    /// The version guard cannot help here — the rung never runs, because
+    /// `createTables()` throws first — so the repair has to live in the DDL
+    /// helper, and every future column added to either table owes an
+    /// `addColumnIfNeeded` beside it. This test is what makes forgetting that
+    /// a red rail rather than a bricked device.
+    @Test("a store carrying the PRE-dropWriteFailures shape still opens, and is repaired")
+    func anOlderArmingShapeIsRepairedRatherThanBrickingTheStore() async throws {
+        let dir = try makeTempDir(prefix: "V62OldShape")
+        AnalysisStore.resetMigratedPathsForTesting()
+        let store = try AnalysisStore(directory: dir)
+        try await store.migrate()
+        TestScratchReaper.shared.adopt(dir, owner: store)
+
+        // Rebuild the arming table in its pre-`dropWriteFailures` shape, with a
+        // row in it, exactly as a store created by the earlier commit holds it.
+        let db = try openRawReadWrite(dir)
+        let oldShape = "CREATE TABLE background_download_drop_arming (id INTEGER PRIMARY KEY CHECK (id = 1), armedLaunches INTEGER NOT NULL DEFAULT 0, firstArmedAt REAL, lastArmedAt REAL, installedAt REAL NOT NULL)"
+        let oldRow = "INSERT INTO background_download_drop_arming (id, armedLaunches, firstArmedAt, lastArmedAt, installedAt) VALUES (1, 4, 100.0, 200.0, 50.0)"
+        for sql in ["DROP TABLE \(Self.armingTable)", oldShape, oldRow] {
+            #expect(sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK, "\(sql)")
+        }
+        sqlite3_close_v2(db)
+        #expect(try probeColumnExists(in: dir, table: Self.armingTable, column: "dropWriteFailures") == false)
+
+        // The open must SUCCEED. Before the repair this threw, and it took the
+        // entire analysis pipeline down with it.
+        AnalysisStore.resetMigratedPathsForTesting()
+        let reopened = try AnalysisStore(directory: dir)
+        try await reopened.migrate()
+
+        #expect(try probeColumnExists(in: dir, table: Self.armingTable, column: "dropWriteFailures"))
+        let fetched = try await reopened.fetchBackgroundDownloadDropArming()
+        let arming = try #require(fetched)
+        // The history SURVIVES the repair — a column add must not reset the
+        // counter it is being added beside.
+        #expect(arming.armedLaunches == 4)
+        #expect(arming.firstArmedAt == 100.0)
+        #expect(arming.installedAt == 50.0)
+        #expect(arming.dropWriteFailures == 0, "a column with no history reads zero, which is the honest value here")
+
+        // And the store is genuinely usable afterwards, not merely open.
+        try await reopened.noteBackgroundDownloadDropWriteFailure(at: 300.0)
+        let after = try #require(try await reopened.fetchBackgroundDownloadDropArming())
+        #expect(after.dropWriteFailures == 1)
+        #expect(after.armedLaunches == 4)
     }
 
     /// THE STAMP IS NOT THE DISCRIMINATOR, and this is the state that proves

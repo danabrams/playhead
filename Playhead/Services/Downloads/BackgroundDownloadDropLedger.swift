@@ -27,6 +27,12 @@
 // bound exists to escape. So this bead makes the loss MEASURABLE and stops
 // there.
 //
+// One exception to "elapsed IS the bound" below, because it is not universally
+// true: `backgroundSession(for:requestedBy:)` lets a second caller JOIN an
+// in-flight crossing rather than submitting its own, and such a caller gives up
+// when the FIRST caller's deadline fires — after an arbitrary fraction of the
+// bound. Those rows carry a `boundSeconds` the call never waited out.
+//
 // `boundSeconds` RECORDS WHICH CEILING WAS CONFIGURED AND NOTHING MORE, and
 // that limit is stated here because the obvious reading of it is wrong.
 // `BackgroundSessionIO.timeout` is a `let` on one shared instance and
@@ -68,12 +74,12 @@
 //      `workJournalRecorder` defaults to `NoopWorkJournalRecorder` and
 //      production never replaces it, so every `recordFailed` it makes goes
 //      nowhere. A default no-op plus an intention is not a mechanism.
-//      `background_download_drop_arming` is the mechanism: one row,
-//      `armedLaunches` incremented once per process from
-//      `DownloadManager.bootstrap()`. `armedLaunches = 0` alongside zero
-//      drops means NOBODY WAS COUNTING; `armedLaunches = 37` alongside
-//      zero drops is a positive claim that 37 launches carried a live
-//      recorder and saw no drop.
+//      `background_download_drop_arming` is the mechanism: one row, whose
+//      `armedLaunches` is incremented once per launch from
+//      ``DownloadManager/armDropLedger()`` — see below for exactly what that
+//      counts, because the obvious reading is wrong. `armedLaunches = 0`
+//      alongside zero drops means NOBODY WAS COUNTING; `armedLaunches = 37`
+//      alongside zero drops AND zero `dropWriteFailures` is a positive claim.
 //
 //   3. THE RECORDER WAS LIVE AND ITS WRITES FAILED. Without a third state,
 //      `armedLaunches > 0` with zero rows would be indistinguishable from a
@@ -85,12 +91,52 @@
 //      being reachable by silence.
 //
 //      THE RESIDUAL, NAMED RATHER THAN HIDDEN: the failure counter is itself
-//      a store write. If BOTH fail, this database is left saying nothing — so
-//      a drop that could not be recorded ALSO raises
+//      a store write. If BOTH fail, this database says nothing — so a drop
+//      that could not be recorded ALSO raises
 //      `backgroundDownloadDropNotRecorded` on the surface-status invariant
-//      stream, which is a DIFFERENT medium (JSON Lines under `Caches/`) and
-//      one a device pull already reads. Two independent media have to fail
-//      together before the loss goes quiet.
+//      stream, a JSON Lines file under `Caches/` that a device pull already
+//      reads.
+//
+//      **THAT FALLBACK IS A DIFFERENT FILE, NOT A DIFFERENT FAILURE DOMAIN,
+//      and an earlier version of this comment claimed "two independent media
+//      have to fail together" — which is the kind of claim this file exists to
+//      stop people making.** The app sets no data-protection entitlement, so
+//      the JSONL takes the container default: the same
+//      `completeUntilFirstUserAuthentication` class `AnalysisStore` sets
+//      explicitly. A pre-first-unlock background relaunch — one of the two
+//      causes named above — silences BOTH, and so does a full volume. The
+//      JSONL write is fire-and-forget onto its own queue, and it rotates per
+//      launch at 200 files on a volume iOS purges under pressure, while the
+//      ledger it backstops is unbounded.
+//
+//      What it genuinely covers is narrower and still worth having: a failure
+//      LOCAL TO THIS DATABASE — a corrupt or dropped table, a lock on one
+//      table — where the row cannot be written and the file system is fine.
+//      Read it as that, not as a second chance at a dead device.
+//
+// THESE ARE THREE CELLS OF A TRUTH TABLE, NOT A LADDER, and reading them in
+// order is how a reader reaches a wrong conclusion. `armedLaunches = 0` beside
+// REAL DROP ROWS is reachable — a drop before the launch Task arms, or an
+// arming write that itself failed — and it means "these rows are real and the
+// denominator is missing", not "nothing happened". Read all three numbers
+// every time.
+//
+// TWO MECHANICAL TRAPS FOR WHOEVER RUNS THE QUERIES.
+//
+//   * `sqlite3` prints an EMPTY LINE for a missing row, which is one glance
+//     from `0|0||`. Ask `SELECT count(*) FROM background_download_drop_arming`
+//     FIRST. The Swift reader returns nil rather than a synthesized zero for
+//     exactly this reason; nothing on the raw-SQL path gives you that.
+//   * A `GROUP BY reason` silently omits raw values this build does not know.
+//     Run the complement — `WHERE reason NOT IN (…)` — before quoting any
+//     per-reason share, or a later build's fourth case under-reports every
+//     population you just counted.
+//
+// AND A "START FRESH" MOVES THE WHOLE HISTORY ASIDE.
+// `AnalysisStoreRecoveryCoordinator.quarantineAndRebuild` renames the store to
+// a sibling `AnalysisStore-quarantined-<stamp>-*` and builds a fresh one whose
+// `armedLaunches` is 0 and whose `installedAt` dates the REBUILD. Before
+// concluding "never armed", list those siblings — and take them in the pull.
 //
 // NAME THE NUMERATOR AND THE DENOMINATOR. The numerator is
 // `background_download_drops` rows. The denominator `armedLaunches` gives
@@ -110,16 +156,28 @@
 // the population that could actually have written a row, and the only honest
 // denominator for "and saw none".
 //
-//   * A DEGRADED LAUNCH IS DELIBERATELY NOT COUNTED. `openAtLaunch` failing
-//     is the documented "playback works, analysis does not" path; a launch
-//     that could not open the store observed nothing, and counting it would
-//     let a run of unopenable launches read as a positive claim.
-//   * A LAUNCH THAT DIES BEFORE THAT TASK RUNS IS NOT COUNTED EITHER, even
-//     though the recorder was live from the moment `DownloadManager` was
-//     constructed. So this is a LOWER BOUND.
+//   * A DEGRADED LAUNCH IS DELIBERATELY NOT COUNTED. `openAtLaunch` failing is
+//     the documented "playback works, analysis does not" path, and counting
+//     those launches would let a run of unopenable ones read as a positive
+//     claim. **That is NOT the same as "such a launch could not have written a
+//     row", and an earlier version of this comment said it was.**
+//     `AnalysisStore` opens LAZILY, so a drop later in that same launch
+//     reaches `ensureOpen()` through `insertBackgroundDownloadDrop` and may
+//     well succeed. Rows can exist whose launch is not in the denominator.
+//   * A LAUNCH THAT DROPS BEFORE THE LAUNCH TASK REACHES THE ARMING IS NOT
+//     COUNTED EITHER, and that window is wider than it looks: `openAtLaunch`
+//     runs the whole migration ladder first, and `PlayheadRuntime` already
+//     records (playhead-8u3i) that a cold BGProcessingTask wake fires its
+//     handler ahead of this Task's body.
+//   * A LAUNCH THAT DIES BEFORE THE TASK RUNS AT ALL is likewise uncounted,
+//     even though the recorder was live from the moment `DownloadManager` was
+//     constructed.
 //
-// Both directions are conservative: it can under-claim that somebody was
-// counting, never over-claim.
+// Every direction is conservative — it can under-claim that somebody was
+// counting, never over-claim — so read `armedLaunches` as a LOWER BOUND on
+// COUNTING launches and NOT as an upper bound on RECORDING ones. The
+// consequence to hold on to is above: `armedLaunches = 0` beside real rows is
+// a reachable, meaningful state, not a contradiction.
 //
 // It is armed from `PlayheadRuntime` rather than from
 // `DownloadManager.bootstrap()`, where it started, for two reasons found in
@@ -385,9 +443,22 @@ protocol BackgroundDownloadDropRecording: Sendable {
     /// Record that this process installed a live recorder, so that zero
     /// drops can be read as a positive claim rather than as silence.
     ///
-    /// Idempotence is the CALLER's: `DownloadManager.bootstrap()` runs once
-    /// per manager, and a conformer counts every call it receives.
-    func recordInstrumentArmed(at now: Double) async
+    /// - Returns: `true` when the count reached disk. The DENOMINATOR has the
+    ///   same hole the numerator does — a launch whose arming write failed is
+    ///   byte-identical to a launch that never ran — so the outcome is
+    ///   reported for the same reason, and the caller raises the loss on the
+    ///   surface-status stream. The direction is conservative (an uncounted
+    ///   arming under-claims that somebody was counting), which is why this is
+    ///   a report rather than a second durable counter: a failure counter for
+    ///   the failure counter is where that regress has to stop.
+    ///
+    /// Idempotence is the CALLER's: `DownloadManager.armDropLedger()` has one
+    /// production call site and no guard of its own, and a conformer counts
+    /// every call it receives. `BackgroundDownloadDropWiringSourceCanaryTests`
+    /// is what pins the single-call-site property, because nothing at runtime
+    /// can see it.
+    @discardableResult
+    func recordInstrumentArmed(at now: Double) async -> Bool
 }
 
 // MARK: - NoopBackgroundDownloadDropRecorder
@@ -410,7 +481,8 @@ struct NoopBackgroundDownloadDropRecorder: BackgroundDownloadDropRecording {
     /// success would be the one shape this whole file exists to make
     /// impossible.
     func recordDrop(_ record: BackgroundDownloadDropRecord) async -> Bool { false }
-    func recordInstrumentArmed(at now: Double) async {}
+    /// `false` for the same reason `recordDrop` is: nothing was counted.
+    func recordInstrumentArmed(at now: Double) async -> Bool { false }
 }
 
 // MARK: - AnalysisStoreBackgroundDownloadDropRecorder
@@ -452,7 +524,9 @@ struct AnalysisStoreBackgroundDownloadDropRecorder: BackgroundDownloadDropRecord
             // could not hold". It can fail too — the caller raises the loss on
             // the surface-status stream for exactly that case.
             do {
-                try await store.noteBackgroundDownloadDropWriteFailure()
+                try await store.noteBackgroundDownloadDropWriteFailure(
+                    at: Date().timeIntervalSince1970
+                )
             } catch {
                 logger.error(
                     "background download drop write-failure counter ALSO failed: \(String(describing: error), privacy: .public)"
@@ -462,13 +536,15 @@ struct AnalysisStoreBackgroundDownloadDropRecorder: BackgroundDownloadDropRecord
         }
     }
 
-    func recordInstrumentArmed(at now: Double) async {
+    func recordInstrumentArmed(at now: Double) async -> Bool {
         do {
             try await store.noteBackgroundDownloadDropInstrumentArmed(at: now)
+            return true
         } catch {
             logger.error(
                 "background download drop instrument NOT armed: \(String(describing: error), privacy: .public)"
             )
+            return false
         }
     }
 }

@@ -8924,13 +8924,25 @@ actor AnalysisStore {
     // same empty table.
     //
     // So the reader gets a three-state ladder, all of it on disk:
-    //   * no `background_download_drops` table (`_meta.schema_version` < 62)
+    //   * no `background_download_drops` TABLE
     //         — this build predates the instrument. Zero says NOTHING.
     //   * table present, `armedLaunches = 0`
-    //         — the instrument shipped and no launch armed it. Still nothing.
-    //   * `armedLaunches = N > 0`, zero drop rows
+    //         — no launch armed it. Read the drop rows anyway; see below.
+    //   * `armedLaunches = N > 0`, zero drop rows, `dropWriteFailures = 0`
     //         — a POSITIVE CLAIM: N launches carried a live recorder and saw
     //           no drop.
+    //
+    // DO NOT USE `_meta.schema_version < 62` AS THE DISCRIMINATOR. This helper
+    // runs from `createTables()`, which is unconditional and runs BEFORE the
+    // ladder, so a store parked below the V39 rollback floor carries both
+    // tables and real rows at a stamp of 38.
+    // `theTablesExistBelowTheV39RollbackFloor` builds that state and pins it.
+    //
+    // AND THESE ARE THREE CELLS OF A TRUTH TABLE, NOT A LADDER. Read all three
+    // numbers every time: `armedLaunches = 0` beside real drop rows is
+    // reachable (a drop before the launch Task arms, or an arming write that
+    // failed) and means "these rows are real and the denominator is missing",
+    // not "nothing happened".
     //
     // `armedLaunches` IS NOT AN ATTEMPT COUNT and no drop RATE can be computed
     // from it. Counting attempts would put a store write on the download hot
@@ -8967,6 +8979,12 @@ actor AnalysisStore {
     /// spelled as a date at the epoch.
     private func createBackgroundDownloadDropTables() throws {
         try exec("""
+            -- playhead-7dgx. READ THE TABLE, NOT `_meta.schema_version`, to
+            -- decide whether this build carried the instrument: these tables
+            -- are created before the migration ladder and can exist at an
+            -- older stamp. Always read `background_download_drop_arming`
+            -- alongside these rows — a count here means nothing without the
+            -- denominator, and `armedLaunches` is not an attempt count.
             CREATE TABLE IF NOT EXISTS background_download_drops (
                 id                 TEXT PRIMARY KEY,
                 episodeId          TEXT NOT NULL,
@@ -8989,6 +9007,13 @@ actor AnalysisStore {
         try exec("""
             CREATE TABLE IF NOT EXISTS background_download_drop_arming (
                 id            INTEGER PRIMARY KEY CHECK (id = 1),
+                -- LAUNCHES on which the analysis store opened and the drop
+                -- recorder was live. NOT a count of download ATTEMPTS, and NO
+                -- DROP RATE CAN BE COMPUTED FROM IT — dividing the drop rows
+                -- by this number produces a plausible-looking fiction. Read it
+                -- as "was anyone counting, and for how long". A LOWER BOUND:
+                -- see BackgroundDownloadDropLedger.swift for the two ways a
+                -- launch that could record is not counted here.
                 armedLaunches INTEGER NOT NULL DEFAULT 0,
                 -- Drops whose row could not be written. Without this,
                 -- `armedLaunches > 0` with zero rows is reachable by a store
@@ -9000,6 +9025,29 @@ actor AnalysisStore {
                 installedAt   REAL NOT NULL
             );
         """)
+        // EVERY COLUMN THAT CAME LATER IS RE-ADDED HERE, and this is not
+        // belt-and-braces — it is the only thing that stops this helper
+        // BRICKING A STORE.
+        //
+        // `CREATE TABLE IF NOT EXISTS` is a NO-OP on a table that already
+        // exists in an OLDER SHAPE. The seed below then names a column that is
+        // not there, SQLite refuses the statement, `createTables()` throws, the
+        // whole `runSchemaMigration()` transaction rolls back, and the store
+        // fails to OPEN — taking the entire analysis pipeline with it, not just
+        // this ledger. Measured on this branch: adding `dropWriteFailures` in a
+        // later commit made every store created by the earlier one unopenable,
+        // and it surfaced as an unrelated trust-profile test failing, because a
+        // store that will not open fails everything downstream of it.
+        //
+        // The rung's version guard cannot help: this helper runs from
+        // `createTables()`, which is unconditional and runs BEFORE the ladder.
+        // So the shape repair has to live here, in the same place the shape is
+        // declared, and every future column added above must be repeated below.
+        try addColumnIfNeeded(
+            table: "background_download_drop_arming",
+            column: "dropWriteFailures",
+            definition: "INTEGER NOT NULL DEFAULT 0"
+        )
         // Seeded at zero so that "installed but never armed" is a row a pull
         // can read, rather than an absence indistinguishable from a build
         // that never had the instrument at all.
@@ -9107,11 +9155,18 @@ actor AnalysisStore {
         // meaning "this is what fitted" — the same shape the arming row exists
         // to close, one function along.
         let ceiling = max(0, limit)
+        // The probe is clamped at `Int32.max` because `bind(_:_:Int)` goes
+        // through the TRAPPING `Int32(_:)`. An earlier cut guarded on
+        // `Int.max` and handed that value straight to the trap — a branch
+        // written to prevent an overflow that caused a crash instead, on the
+        // one call (`limit: .max`, meaning "everything") a later reader is
+        // most likely to write.
+        let probe = ceiling >= Int(Int32.max) ? Int(Int32.max) : ceiling + 1
         let stmt = try prepare(
             "\(Self.backgroundDownloadDropSelectColumns) ORDER BY occurredAt DESC LIMIT ?"
         )
         defer { sqlite3_finalize(stmt) }
-        bind(stmt, 1, ceiling == Int.max ? ceiling : ceiling + 1)
+        bind(stmt, 1, probe)
         var rows: [BackgroundDownloadDropRecord] = []
         var unrecognizedReason = 0
         var unrecognizedUnattributed = 0
@@ -9138,6 +9193,9 @@ actor AnalysisStore {
             unrecognizedUnattributedReasonRows: unrecognizedUnattributed,
             truncated: truncated
         )
+        // NOTE for the next reader: every count returned here is over the
+        // WINDOW, not over the table. `truncated` says so; it does not fix it.
+        // The table's own totals come from SQL.
     }
 
     /// Record that this process installed a live drop recorder.
@@ -9183,16 +9241,26 @@ actor AnalysisStore {
     /// arming row is missing, this creates it rather than counting into a row
     /// that is not there. `armedLaunches` stays 0 on that path — a failure is
     /// not an arming, and inventing one here would manufacture the very claim
-    /// this column exists to withhold.
-    func noteBackgroundDownloadDropWriteFailure() throws {
-        try exec("""
+    /// this column exists to withhold. On that same path `installedAt` dates
+    /// the FAILURE rather than the migration, which is the third writer that
+    /// stamp can have; see `BackgroundDownloadDropArming.installedAt`.
+    ///
+    /// Takes the clock rather than reading `strftime('%s','now')` in SQL, for
+    /// two reasons: that is whole SECONDS while every other stamp in this
+    /// section is sub-second, and a time nobody can inject is a time no test
+    /// can pin.
+    func noteBackgroundDownloadDropWriteFailure(at now: Double) throws {
+        let stmt = try prepare("""
             INSERT INTO background_download_drop_arming
             (id, armedLaunches, dropWriteFailures, firstArmedAt, lastArmedAt,
              installedAt)
-            VALUES (1, 0, 1, NULL, NULL, strftime('%s', 'now'))
+            VALUES (1, 0, 1, NULL, NULL, ?)
             ON CONFLICT(id) DO UPDATE SET
                 dropWriteFailures = dropWriteFailures + 1
             """)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, now)
+        try step(stmt, expecting: SQLITE_DONE)
     }
 
     /// The arming row, or `nil` when the table holds none.

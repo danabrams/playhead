@@ -1372,7 +1372,23 @@ actor DownloadManager {
     ///
     /// Idempotence is the CALLER's — this counts every call it receives.
     func armDropLedger() async {
-        await dropRecorder.recordInstrumentArmed(at: Date().timeIntervalSince1970)
+        let counted = await dropRecorder.recordInstrumentArmed(
+            at: Date().timeIntervalSince1970
+        )
+        guard !counted else { return }
+        // The DENOMINATOR's own silent failure, closed the same way the
+        // numerator's is. A launch whose arming write failed is byte-identical
+        // on disk to a launch that never ran, and it is one of the two things
+        // that make `armedLaunches = 0` beside real drop rows reachable — so it
+        // is said out loud on the second surface rather than left to be
+        // inferred from a number that did not move.
+        logger.error("Background download drop ledger NOT armed for this launch")
+        invariantRecorder?(
+            .backgroundDownloadDropNotRecorded,
+            "arming=failed — this launch had a live drop recorder and "
+            + "background_download_drop_arming.armedLaunches did not move, so "
+            + "any drop row it goes on to write has no launch in the denominator"
+        )
     }
 
     // MARK: - Background Session
