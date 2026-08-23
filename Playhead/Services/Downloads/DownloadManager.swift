@@ -1302,14 +1302,15 @@ actor DownloadManager {
 
     /// Create required directories on first use.
     ///
-    /// playhead-7dgx: `async` because the FIRST thing it does is arm the
-    /// dropped-download ledger. Arming FIRST, before any work that can throw,
-    /// is deliberate — the claim being recorded is "this process installed a
-    /// live drop recorder", which is true whether or not the directory
-    /// creation below then fails, and a claim written last would be lost
-    /// exactly on the launches where downloads are most broken.
-    func bootstrap() async throws {
-        await dropRecorder.recordInstrumentArmed(at: Date().timeIntervalSince1970)
+    /// playhead-7dgx: this deliberately does NOT arm the dropped-download
+    /// ledger, and a first cut of that bead had it do so. Arming here made
+    /// this method `async` and put the directory creation below behind a full
+    /// `AnalysisStore` open — on an upgrade launch, the entire migration
+    /// ladder — widening a window in which every other method on this actor
+    /// sees the cache directories absent. Worse, it made this actor an
+    /// UNMANAGED opener of `analysis.sqlite`, racing
+    /// `AnalysisStoreRecoveryCoordinator`. See ``armDropLedger()``.
+    func bootstrap() throws {
         let fm = FileManager.default
         for dir in [
             cacheDirectory,
@@ -1354,6 +1355,24 @@ actor DownloadManager {
         // Rebuild access log from file system.
         try rebuildAccessLog()
         logger.info("DownloadManager bootstrapped at \(self.cacheDirectory.path)")
+    }
+
+    /// playhead-7dgx: record that this launch had a LIVE dropped-download
+    /// recorder, so that zero drop rows can be read as a positive claim
+    /// instead of as silence.
+    ///
+    /// Called from exactly one production site — `PlayheadRuntime`'s launch
+    /// Task, immediately after `AnalysisStoreRecoveryCoordinator.openAtLaunch`
+    /// reports the store OPEN — and that position is the whole meaning of the
+    /// number. A degraded launch (store not open) is deliberately not counted:
+    /// a launch that could not open the store observed nothing, and counting
+    /// it would let a run of unopenable launches read as evidence of no drops.
+    /// `BackgroundDownloadDropWiringSourceCanaryTests` pins the call site and
+    /// its ordering, because nothing at runtime can see either.
+    ///
+    /// Idempotence is the CALLER's — this counts every call it receives.
+    func armDropLedger() async {
+        await dropRecorder.recordInstrumentArmed(at: Date().timeIntervalSince1970)
     }
 
     // MARK: - Background Session
@@ -2942,22 +2961,40 @@ actor DownloadManager {
     /// a re-entrant caller arriving here finds the episode retryable, which is
     /// exactly what the cleanup promised it.
     ///
-    /// The recorder swallows its own errors, so this never throws and never
-    /// changes the caller's outcome. A drop that could not be recorded is
-    /// still a drop.
+    /// The recorder swallows its own STORE errors, so this never throws and
+    /// never changes the caller's outcome. It does not swallow the OUTCOME:
+    /// a row that did not land is raised on the surface-status invariant
+    /// stream, which is a different medium — a JSON Lines file under
+    /// `Caches/`, not this database — and one a device pull already reads.
+    /// That is what stops a drop the database could not hold from being
+    /// byte-identical, on disk, to no drop at all.
     private func recordBackgroundDownloadDrop(
         episodeId: String,
         reason: BackgroundDownloadDropReason,
         context: DownloadContext,
         boundSeconds: TimeInterval
     ) async {
-        await dropRecorder.recordDrop(
+        let landed = await dropRecorder.recordDrop(
             BackgroundDownloadDropRecord(
                 episodeId: episodeId,
                 reason: reason,
                 context: context,
                 boundSeconds: boundSeconds
             )
+        )
+        guard !landed else { return }
+        logger.error(
+            "Background download drop for \(episodeId, privacy: .public) was NOT durably recorded: reason=\(reason.rawValue, privacy: .public)"
+        )
+        invariantRecorder?(
+            .backgroundDownloadDropNotRecorded,
+            """
+            episodeId=\(episodeId) reason=\(reason.rawValue) \
+            bound=\(boundSeconds)s — the download was abandoned and its \
+            background_download_drops row could not be written; \
+            background_download_drop_arming.dropWriteFailures carries the \
+            count unless that write failed too
+            """
         )
     }
 

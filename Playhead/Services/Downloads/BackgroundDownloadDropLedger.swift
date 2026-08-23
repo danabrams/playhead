@@ -25,8 +25,20 @@
 // obviously safe — `playhead-ola7` records that background `URLSession`
 // CREATION can still block the cooperative pool, which is the deadlock the
 // bound exists to escape. So this bead makes the loss MEASURABLE and stops
-// there. `boundSeconds` on every row is what makes the widening question
-// answerable from data rather than from argument.
+// there.
+//
+// `boundSeconds` RECORDS WHICH CEILING WAS CONFIGURED AND NOTHING MORE, and
+// that limit is stated here because the obvious reading of it is wrong.
+// `BackgroundSessionIO.timeout` is a `let` on one shared instance and
+// `onItsOwnQueue` copies it verbatim, so every production row will read 10.0
+// until somebody changes the constant: the column has ZERO VARIANCE within a
+// build. And because `perform` returns nil AT the deadline, the elapsed time
+// on exactly these rows IS the bound, by construction. So it cannot answer
+// "would 15 s have caught this one" — the data for that is the latency
+// distribution of the calls that SUCCEEDED, and nothing records it. What the
+// column does buy is that a later change to the bound cannot silently
+// re-scale this table's whole history, and that a device running a
+// non-default bound is not read as if it ran the shipped one.
 //
 // ─────────────────────────────────────────────────────────────────────────
 // UNKNOWN IS NOT ZERO — AND THE READER NEEDS TWO QUERIES, NOT ONE
@@ -35,10 +47,19 @@
 // the defect, not the fix. There are two ways to be uncounted and they are
 // distinguished by two different facts on disk:
 //
-//   1. THE BUILD PREDATES THE INSTRUMENT. `background_download_drops` does
-//      not exist and `_meta.schema_version` reads < 62. That is a schema
-//      fact, not a convention: a pull can check it without trusting
-//      anybody. Zero rows in a store stamped 61 says nothing whatsoever.
+//   1. THE BUILD PREDATES THE INSTRUMENT. `background_download_drops` DOES
+//      NOT EXIST. That is a schema fact, not a convention: a pull can check
+//      it without trusting anybody.
+//
+//      READ THE TABLE, NOT THE STAMP. `_meta.schema_version < 62` is NOT the
+//      discriminator and using it throws away real evidence. `createTables()`
+//      runs unconditionally on every open, BEFORE the migration ladder, so a
+//      store parked below the V39 rollback floor — a real, documented,
+//      guarded population; see the `guard observed >= N` rule every rung from
+//      V40 up carries — holds both tables and a live arming row while its
+//      stamp still reads 38. Rows written there are genuine.
+//      `BackgroundDownloadDropsV62MigrationTests` pins that pairing so nobody
+//      re-derives the wrong recipe from the stamp.
 //
 //   2. THE BUILD HAS THE TABLE BUT NOBODY INSTALLED THE RECORDER. The
 //      recorder below is an injected dependency whose default is a NO-OP
@@ -54,6 +75,23 @@
 //      zero drops is a positive claim that 37 launches carried a live
 //      recorder and saw no drop.
 //
+//   3. THE RECORDER WAS LIVE AND ITS WRITES FAILED. Without a third state,
+//      `armedLaunches > 0` with zero rows would be indistinguishable from a
+//      genuine "no drops" — and a store can stop being writable for reasons
+//      that have nothing to do with downloads: `SQLITE_FULL`, or a
+//      `handleEventsForBackgroundURLSession` relaunch before first unlock,
+//      since `analysis.sqlite` is `completeUntilFirstUserAuthentication`.
+//      `dropWriteFailures` on the arming row counts them, so state (c) stops
+//      being reachable by silence.
+//
+//      THE RESIDUAL, NAMED RATHER THAN HIDDEN: the failure counter is itself
+//      a store write. If BOTH fail, this database is left saying nothing — so
+//      a drop that could not be recorded ALSO raises
+//      `backgroundDownloadDropNotRecorded` on the surface-status invariant
+//      stream, which is a DIFFERENT medium (JSON Lines under `Caches/`) and
+//      one a device pull already reads. Two independent media have to fail
+//      together before the loss goes quiet.
+//
 // NAME THE NUMERATOR AND THE DENOMINATOR. The numerator is
 // `background_download_drops` rows. The denominator `armedLaunches` gives
 // is LAUNCHES THAT ARMED THE RECORDER — it is NOT the number of background
@@ -64,12 +102,36 @@
 // Read `armedLaunches` as "was anyone counting, and for how long", never
 // as "out of how many downloads".
 //
-// `armedLaunches` is a LOWER BOUND on the launches that could have
-// recorded a drop: it is incremented from `bootstrap()`, which production
-// calls from a deferred `Task`, and a launch that dies before that Task
-// runs is not counted even though its recorder was live from the moment
-// `DownloadManager` was constructed. The direction is the conservative
-// one — it can under-claim that somebody was counting, never over-claim.
+// WHAT `armedLaunches` COUNTS, exactly, because the obvious reading is wrong
+// in two directions. It is incremented from ONE production call site:
+// `PlayheadRuntime`'s launch Task, immediately after
+// `AnalysisStoreRecoveryCoordinator.openAtLaunch` reports the store OPEN. So
+// it counts LAUNCHES ON WHICH THE STORE OPENED AND THE RECORDER WAS LIVE —
+// the population that could actually have written a row, and the only honest
+// denominator for "and saw none".
+//
+//   * A DEGRADED LAUNCH IS DELIBERATELY NOT COUNTED. `openAtLaunch` failing
+//     is the documented "playback works, analysis does not" path; a launch
+//     that could not open the store observed nothing, and counting it would
+//     let a run of unopenable launches read as a positive claim.
+//   * A LAUNCH THAT DIES BEFORE THAT TASK RUNS IS NOT COUNTED EITHER, even
+//     though the recorder was live from the moment `DownloadManager` was
+//     constructed. So this is a LOWER BOUND.
+//
+// Both directions are conservative: it can under-claim that somebody was
+// counting, never over-claim.
+//
+// It is armed from `PlayheadRuntime` rather than from
+// `DownloadManager.bootstrap()`, where it started, for two reasons found in
+// review. Arming there made `bootstrap()` `async` and put its cache-directory
+// creation behind a full `AnalysisStore` open — on an upgrade launch, the
+// whole migration ladder — widening a window in which every other method on
+// the actor sees the cache directories absent. And it made `DownloadManager`
+// an UNMANAGED opener of `analysis.sqlite`, racing
+// `AnalysisStoreRecoveryCoordinator` and able to bring the store up outside
+// the coordinator that counts consecutive failures and decides whether to
+// offer a rebuild. Arming from the one place that already knows the store is
+// open avoids both, and makes the quantity mean something better besides.
 
 import Foundation
 import OSLog
@@ -200,6 +262,57 @@ struct BackgroundDownloadDropRecord: Sendable, Equatable {
     }
 }
 
+// MARK: - BackgroundDownloadDropPage
+
+/// One read of `background_download_drops`, with everything a caller needs in
+/// order not to over-read the array.
+///
+/// Three companions to `rows`, and each exists because the array alone would
+/// let a reader state something stronger than the data supports.
+struct BackgroundDownloadDropPage: Sendable, Equatable {
+
+    /// The decoded rows, most recent first.
+    let rows: [BackgroundDownloadDropRecord]
+
+    /// Rows whose `reason` this build cannot decode — written by a build with
+    /// a wider vocabulary. They are NOT in `rows` and they are NOT lost:
+    /// "three drops" and "three drops I can read" are different claims.
+    let unrecognizedReasonRows: Int
+
+    /// Rows whose `unattributedReason` this build cannot decode. Counted
+    /// separately from the above because it is a different loss — the drop's
+    /// classification survives, the show attribution does not.
+    let unrecognizedUnattributedReasonRows: Int
+
+    /// `true` when more rows exist than the `limit` allowed back.
+    ///
+    /// Without it, a window that stops at its own ceiling reports "this is
+    /// what happened" while meaning "this is what fitted" — and the two
+    /// unreadable-row counters above would then be computed over the window
+    /// rather than over the table, silently.
+    let truncated: Bool
+
+    /// Every drop this page could read AND could not read. The honest
+    /// denominator for any per-reason share taken off `rows`.
+    var totalRowsSeen: Int {
+        rows.count + unrecognizedReasonRows + unrecognizedUnattributedReasonRows
+    }
+}
+
+// MARK: - BackgroundDownloadDropReadRefusal
+
+/// Why one persisted row could not be materialized. Returned rather than
+/// swallowed so the loss is counted rather than inferred from an absence.
+enum BackgroundDownloadDropReadRefusal: Error, Sendable, Equatable {
+    /// The `reason` column holds a raw value this build does not know.
+    case unrecognizedReason
+    /// The `unattributedReason` column holds a raw value this build does not
+    /// know. A row in this state cannot be built honestly: a nil there would
+    /// say the caller NAMED a show, which is the opposite of what the row
+    /// records.
+    case unrecognizedUnattributedReason
+}
+
 // MARK: - BackgroundDownloadDropArming
 
 /// The single `background_download_drop_arming` row: the positive claim
@@ -210,17 +323,34 @@ struct BackgroundDownloadDropRecord: Sendable, Equatable {
 /// "instrument installed, never armed" is expressible instead of being
 /// indistinguishable from an empty table.
 struct BackgroundDownloadDropArming: Sendable, Equatable {
-    /// Launches in which `DownloadManager.bootstrap()` armed the recorder.
-    /// A LOWER BOUND — see this file's header.
+    /// Launches on which the analysis store opened and the recorder was live.
+    /// A LOWER BOUND, and NOT a count of download attempts — see this file's
+    /// header for exactly what it does and does not measure.
     let armedLaunches: Int
+
+    /// Drops whose durable row could NOT be written.
+    ///
+    /// This is what stops "armed, and zero rows" from being reachable by
+    /// silence. Read `armedLaunches > 0 && drops == 0 && dropWriteFailures == 0`
+    /// as the positive claim; the same pair with `dropWriteFailures > 0` says
+    /// the opposite — drops happened and this database could not hold them,
+    /// and the surface-status invariant stream has the details.
+    let dropWriteFailures: Int
     /// When the first such launch happened. `nil` while `armedLaunches` is
     /// 0, and `nil` is the whole point: a zero here would date an arming
     /// that never occurred.
     let firstArmedAt: Double?
     /// When the most recent one happened. `nil` while `armedLaunches` is 0.
     let lastArmedAt: Double?
-    /// When the V62 migration created this row, i.e. when this install
-    /// first opened a build carrying the instrument.
+    /// When this row was created.
+    ///
+    /// Usually the V62 migration, i.e. when this install first opened a build
+    /// carrying the instrument. NOT ALWAYS: `noteBackgroundDownloadDropInstrumentArmed`
+    /// re-creates the row if it is missing — that is deliberate, so a hand-
+    /// edited or partially-rolled-back store still counts — and on that path
+    /// this stamps the ARM time instead. So read it as "the earliest moment
+    /// this install is known to have carried the instrument", which is true on
+    /// both paths, rather than as the migration's own timestamp.
     let installedAt: Double
 }
 
@@ -237,10 +367,20 @@ struct BackgroundDownloadDropArming: Sendable, Equatable {
 /// every test here deterministic instead of a poll loop.
 protocol BackgroundDownloadDropRecording: Sendable {
 
-    /// Durably record one abandoned background download. Best-effort:
-    /// a conformer MUST NOT throw, because the caller is on the recovery
-    /// path of a failure it has already handled.
-    func recordDrop(_ record: BackgroundDownloadDropRecord) async
+    /// Durably record one abandoned background download.
+    ///
+    /// - Returns: `true` when the row reached disk. A conformer MUST NOT
+    ///   throw — the caller is on the recovery path of a failure it has
+    ///   already handled — but it must not swallow the outcome either. The
+    ///   caller uses `false` to raise the loss on a second, independent
+    ///   medium, which is the only reason a drop the database could not hold
+    ///   is not silent.
+    ///
+    /// A conformer that records nothing BY DESIGN returns `false`: there is
+    /// no row, and claiming otherwise would make the no-op indistinguishable
+    /// from a working ledger at the one call site that checks.
+    @discardableResult
+    func recordDrop(_ record: BackgroundDownloadDropRecord) async -> Bool
 
     /// Record that this process installed a live recorder, so that zero
     /// drops can be read as a positive claim rather than as silence.
@@ -266,7 +406,10 @@ protocol BackgroundDownloadDropRecording: Sendable {
 /// stops it happening here, and `armedLaunches` is what would show it on a
 /// device pull if the canary were ever out-spelled.
 struct NoopBackgroundDownloadDropRecorder: BackgroundDownloadDropRecording {
-    func recordDrop(_ record: BackgroundDownloadDropRecord) async {}
+    /// `false`, not `true`: nothing was written, and a no-op that reported
+    /// success would be the one shape this whole file exists to make
+    /// impossible.
+    func recordDrop(_ record: BackgroundDownloadDropRecord) async -> Bool { false }
     func recordInstrumentArmed(at now: Double) async {}
 }
 
@@ -296,13 +439,26 @@ struct AnalysisStoreBackgroundDownloadDropRecorder: BackgroundDownloadDropRecord
         self.store = store
     }
 
-    func recordDrop(_ record: BackgroundDownloadDropRecord) async {
+    func recordDrop(_ record: BackgroundDownloadDropRecord) async -> Bool {
         do {
             try await store.insertBackgroundDownloadDrop(record)
+            return true
         } catch {
             logger.error(
                 "background download drop NOT recorded for episode=\(record.episodeId, privacy: .public) reason=\(record.reason.rawValue, privacy: .public): \(String(describing: error), privacy: .public)"
             )
+            // A second, independent durable write, so that a pull holding only
+            // this database can still tell "no drops" from "drops this store
+            // could not hold". It can fail too — the caller raises the loss on
+            // the surface-status stream for exactly that case.
+            do {
+                try await store.noteBackgroundDownloadDropWriteFailure()
+            } catch {
+                logger.error(
+                    "background download drop write-failure counter ALSO failed: \(String(describing: error), privacy: .public)"
+                )
+            }
+            return false
         }
     }
 

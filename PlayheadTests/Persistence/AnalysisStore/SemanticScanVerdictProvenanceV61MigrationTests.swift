@@ -506,6 +506,11 @@ struct SemanticScanVerdictProvenanceV61MigrationTests {
 
         #expect(try columnExists(in: dir, table: "semantic_scan_results",
                                  column: "usedPermissiveFallback"))
-        #expect(try await store.schemaVersion() == 61)
+        // playhead-7dgx: 62, not 61. This line reads the version off the
+        // DATABASE, so the sweep that bumps the `currentSchemaVersion`
+        // guards cannot see it — the trap the V44 suite's own comment
+        // records, hit again one rung later. V62 creates two NEW tables and
+        // touches no existing column, so nothing else here moves.
+        #expect(try await store.schemaVersion() == 62)
     }
 }

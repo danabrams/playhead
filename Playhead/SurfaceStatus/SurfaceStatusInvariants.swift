@@ -640,6 +640,32 @@ struct InvariantViolation: Sendable, Hashable, Codable {
         case backgroundSessionCreationRefused =
             "background_session_creation_refused"
 
+        /// playhead-7dgx: a background download was ABANDONED and the durable
+        /// row recording that could not be written.
+        ///
+        /// The description names the episode, WHICH of the three bounds was
+        /// missed, and the bound itself — the same fields the lost row would
+        /// have carried, so the loss is recoverable from this line alone.
+        ///
+        /// Why it reaches this channel as well as `background_download_drops`.
+        /// That table's whole value rests on a reading a device pull performs:
+        /// `armedLaunches > 0` beside zero rows is a POSITIVE CLAIM that
+        /// launches carried a live recorder and saw no drop. A store that
+        /// simply could not be written to produces that state by silence, and
+        /// `dropWriteFailures` on the arming row is a second write in the same
+        /// database that can fail for the same reason. So the residual goes to
+        /// a DIFFERENT medium — this JSON Lines stream, under `Caches/` — and
+        /// two independent surfaces have to fail together before an abandoned
+        /// download leaves no trace. That is
+        /// ``backgroundSessionCreationRefused``'s argument applied to the
+        /// instrument built beside it: an absence that was CAUSED and one that
+        /// was never ASKED FOR must not look alike.
+        ///
+        /// Never expected on healthy hardware — it means a SQLite write to
+        /// `analysis.sqlite` failed.
+        case backgroundDownloadDropNotRecorded =
+            "background_download_drop_not_recorded"
+
         /// playhead-dgly: one persisted-state invariant's CENSUS for this
         /// launch — which invariant, how many rows violate it, how many were
         /// judged, and how many it abstained on and why. The body is

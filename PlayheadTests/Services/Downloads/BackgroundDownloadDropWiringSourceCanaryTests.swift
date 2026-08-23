@@ -31,6 +31,7 @@
 // `xctestplan` can only filter XCTest classes, so a canary that might one day
 // need excluding stays XCTest-shaped.
 
+import Foundation
 import XCTest
 @testable import Playhead
 
@@ -209,6 +210,127 @@ final class BackgroundDownloadDropWiringSourceCanaryTests: XCTestCase {
             "playhead-7dgx: every path that deletes the attribution sidecar destroys the last "
             + "trace of the request and therefore owes a durable row. Found \(deletions) "
             + "deletion(s) and \(records) record(s)."
+        )
+    }
+
+    // MARK: - 5. The ORDER of the new suspension point
+
+    /// THE SAFETY ARGUMENT FOR ADDING AN `await` TO `backgroundDownload` IS AN
+    /// ORDERING, AND NOTHING AT RUNTIME CAN SEE IT.
+    ///
+    /// `recordBackgroundDownloadDrop` is a suspension point inside a function
+    /// whose reservation region three beads exist to protect (playhead-nsjn,
+    /// -gpdb, -7l6n). It is safe only because it sits AFTER the cleanup: by the
+    /// time the actor is released, the in-flight slot is back and the sidecar
+    /// is gone, so a re-entrant caller finds the episode retryable — exactly
+    /// what the cleanup promised it. Hoist any of the three above its release
+    /// and a second caller for the same episode can observe the episode still
+    /// held, or a sidecar for a transfer that no longer exists — and every
+    /// behavioural rail in this bead stays green, because the row is still
+    /// written with the same contents.
+    ///
+    /// So the sequence is pinned literally. It is brittle on purpose: a diff
+    /// that reorders these calls should have to say so.
+    func testTheDropRowIsRecordedAFTERTheCleanupOnEveryPath() throws {
+        let body = try backgroundDownloadBody()
+        let pattern = #"\b(releaseInFlightReservationIfUnclaimed|abandonUnstartedTransfer|deleteDownloadAttribution|recordBackgroundDownloadDrop)\("#
+        let regex = try NSRegularExpression(pattern: pattern)
+        let range = NSRange(body.startIndex..<body.endIndex, in: body)
+        let sequence = regex.matches(in: body, range: range).compactMap { match -> String? in
+            guard let r = Range(match.range(at: 1), in: body) else { return nil }
+            return String(body[r])
+        }
+        XCTAssertEqual(
+            sequence,
+            [
+                // path A — the daemon would not vend a session
+                "releaseInFlightReservationIfUnclaimed",
+                "deleteDownloadAttribution",
+                "recordBackgroundDownloadDrop",
+                // path B — downloadTask(with:) went unanswered
+                "releaseInFlightReservationIfUnclaimed",
+                "deleteDownloadAttribution",
+                "recordBackgroundDownloadDrop",
+                // path C — created, never resumed
+                "abandonUnstartedTransfer",
+                "deleteDownloadAttribution",
+                "recordBackgroundDownloadDrop",
+            ],
+            "playhead-7dgx: on every abandonment path the cleanup must complete BEFORE the "
+            + "durable row's suspension point. This is the whole safety argument for adding an "
+            + "`await` to this function and nothing at runtime can observe it."
+        )
+    }
+
+    /// The ledger records DAEMON DROPS. Nothing bounds the helper's call sites
+    /// to `backgroundDownload`, and the neighbours are tempting: `cancelDownload`
+    /// deletes the attribution sidecar too, and so do four delegate failure
+    /// arms. A row minted from any of them would make `count(*)` a count of
+    /// user cancels and network failures wearing a drop counter's name.
+    func testTheDropRecorderIsCalledFromBackgroundDownloadAndNowhereElse() throws {
+        let manager = try code(Self.managerPath)
+        XCTAssertEqual(
+            SwiftSourceInspector.regexOccurrences(
+                of: #"\brecordBackgroundDownloadDrop\("#, in: manager
+            ),
+            4,
+            "playhead-7dgx: exactly four — the private helper's declaration and its three call "
+            + "sites, all inside backgroundDownload. A fifth means some other path is minting "
+            + "rows into a table whose name says it counts daemon drops."
+        )
+    }
+
+    // MARK: - 6. Where the ledger is ARMED
+
+    /// `armedLaunches` is the denominator that lets zero drop rows be read as a
+    /// positive claim, and its whole meaning is the POSITION of one call.
+    ///
+    /// Above `openAtLaunch`'s guard it would count degraded launches, where
+    /// analysis is off and no row could ever be written — so a run of
+    /// unopenable launches would read as evidence that no download was dropped.
+    /// `PlayheadRuntime.init` is reachable from no unit test, so this ordering
+    /// is checkable nowhere else.
+    func testTheLedgerIsArmedOnlyAfterTheStoreIsKnownOpen() throws {
+        let runtime = try code(Self.runtimePath)
+        XCTAssertEqual(
+            SwiftSourceInspector.regexOccurrences(of: #"\barmDropLedger\(\)"#, in: runtime), 1,
+            "playhead-7dgx: exactly one production arming site."
+        )
+        let openIndex = try XCTUnwrap(
+            runtime.range(of: "analysisStoreRecovery.openAtLaunch(")?.lowerBound,
+            "could not find the launch open — this canary's anchor has drifted"
+        )
+        let guardIndex = try XCTUnwrap(
+            runtime.range(of: "guard storeOutcome.isOpen else", range: openIndex..<runtime.endIndex)?.upperBound,
+            "could not find the degraded-launch guard — this canary's anchor has drifted"
+        )
+        let armIndex = try XCTUnwrap(
+            runtime.range(of: "armDropLedger()")?.lowerBound,
+            "could not find the arming call"
+        )
+        XCTAssertTrue(
+            armIndex > guardIndex,
+            "playhead-7dgx: the ledger must be armed only AFTER the degraded-launch guard. "
+            + "Armed above it, `armedLaunches` counts launches on which nothing could ever be "
+            + "recorded, and the ledger's central claim becomes unreadable."
+        )
+    }
+
+    /// And it is NOT armed from `DownloadManager.bootstrap()`, where the first
+    /// cut of this bead put it. That made `bootstrap()` `async` and put its
+    /// cache-directory creation behind a full `AnalysisStore` open, and it made
+    /// `DownloadManager` an unmanaged opener of `analysis.sqlite` racing
+    /// `AnalysisStoreRecoveryCoordinator`.
+    func testBootstrapDoesNotTouchTheDropLedger() throws {
+        let manager = try code(Self.managerPath)
+        let body = try XCTUnwrap(
+            SwiftSourceInspector.firstBody(in: manager, after: "func bootstrap() throws"),
+            "bootstrap() must stay SYNCHRONOUS — if this anchor no longer matches, the arming "
+            + "hop has probably come back"
+        )
+        XCTAssertEqual(
+            SwiftSourceInspector.regexOccurrences(of: #"\bdropRecorder\b"#, in: body), 0,
+            "playhead-7dgx: bootstrap() must not reach the drop recorder."
         )
     }
 

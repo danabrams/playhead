@@ -2451,6 +2451,27 @@ final class PlayheadRuntime {
                 return  // Degraded launch: playback works, analysis does not.
             }
 
+            // playhead-7dgx: ARM the dropped-background-download ledger, and
+            // arm it HERE.
+            //
+            // THE POSITION IS THE WHOLE MEANING OF THE NUMBER, exactly as it is
+            // for the reporter below. `armedLaunches` is the denominator that
+            // lets zero drop rows be read as a positive claim rather than as
+            // silence, so it has to count launches that COULD have written a
+            // row — i.e. launches on which the store actually opened. Above the
+            // guard it would count degraded launches, where analysis is off and
+            // nothing could ever be recorded; a run of those would then read as
+            // evidence that no download was dropped.
+            //
+            // It is also why this is not done from `DownloadManager.bootstrap()`,
+            // where the first cut of this bead put it: that made `bootstrap()`
+            // `async` and put its cache-directory creation behind a full
+            // `AnalysisStore` open, and it made `DownloadManager` an UNMANAGED
+            // opener of `analysis.sqlite` — racing this coordinator, and able to
+            // bring the store up outside the thing that counts consecutive
+            // failures and decides whether to offer a rebuild.
+            await downloadManager.armDropLedger()
+
             // playhead-dgly: REPORT every persisted terminal state that is no
             // longer true, BEFORE this launch repairs any of it. Repairs
             // nothing itself — healing is playhead-gyhw.

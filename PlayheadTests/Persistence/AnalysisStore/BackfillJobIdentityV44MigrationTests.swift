@@ -194,7 +194,14 @@ struct BackfillJobIdentityV44MigrationTests {
         // playhead-iw7q: V61 (`semantic_scan_results.usedPermissiveFallback`).
         // Same move, and found the same way — a grep for `currentSchemaVersion`
         // does not reach this line, exactly as the paragraph above warns.
-        #expect(try await store.schemaVersion() == 61)
+        //
+        // playhead-7dgx: V62 (`background_download_drops` + its arming row). Same
+        // move again, and found the SAME WAY the paragraph above warns about — the
+        // sweep that bumped the fourteen `currentSchemaVersion` guards greps a
+        // CONSTANT and cannot reach a line that reads the version off the DATABASE.
+        // It took the mutation battery's unmutated baseline to surface this one, on
+        // a branch whose own scoped run was green.
+        #expect(try await store.schemaVersion() == 62)
         #expect(try await store.fetchBackfillJob(byId: "fm-legacy-complete") == nil,
                 "a completed row minted under the old preimage cannot be addressed again")
         #expect(try await store.fetchBackfillJob(byId: "fm-legacy-queued") == nil,

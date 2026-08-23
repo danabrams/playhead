@@ -8,11 +8,22 @@
 //                                           Zero drops says NOTHING.
 //   * present, `armedLaunches = 0`        -> the instrument shipped and no
 //                                           launch armed it. Still nothing.
-//   * `armedLaunches = N > 0`, zero rows  -> a POSITIVE CLAIM.
+//   * `armedLaunches = N > 0`, zero rows,
+//     `dropWriteFailures = 0`             -> a POSITIVE CLAIM.
 //
 // The first rung is why `aV61StoreGenuinelyLacksTheTable` exists. Without it
 // "the table is always there" is an assumption, and an assumption is exactly
 // what a reader cannot check against a pulled file.
+//
+// AND THE DISCRIMINATOR IS THE TABLE, NOT THE STAMP — which a first cut of
+// this bead got wrong, in the header of the file it was documenting. It said
+// "`_meta.schema_version` reads < 62", and that is not the same set.
+// `createTables()` runs unconditionally on every open, BEFORE the ladder, so a
+// store parked below the V39 rollback floor — a real, documented, guarded
+// population, which is why every rung from V40 up carries a `guard observed >=
+// N` — holds both tables and a live arming row at a stamp of 38. Rows written
+// there are genuine, and a reader following the stamp recipe would throw them
+// away. `theTablesExistBelowTheV39RollbackFloor` pins the pairing.
 
 import Foundation
 import Testing
@@ -24,6 +35,20 @@ struct BackgroundDownloadDropsV62MigrationTests {
 
     private static let dropsTable = "background_download_drops"
     private static let armingTable = "background_download_drop_arming"
+
+    /// A raw read-write handle carrying the same busy timeout the store's own
+    /// connection uses. Without it, a write racing the live WAL connection in
+    /// this process returns `SQLITE_BUSY` immediately and the test fails for a
+    /// reason that is not its subject.
+    private func openRawReadWrite(_ directory: URL) throws -> OpaquePointer? {
+        let dbURL = directory.appendingPathComponent("analysis.sqlite")
+        var db: OpaquePointer?
+        guard sqlite3_open_v2(dbURL.path, &db, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK else {
+            throw NSError(domain: "OpenRawReadWrite", code: 1)
+        }
+        sqlite3_busy_timeout(db, 3000)
+        return db
+    }
 
     private func probeTableExists(in directory: URL, table: String) throws -> Bool {
         let dbURL = directory.appendingPathComponent("analysis.sqlite")
@@ -82,6 +107,7 @@ struct BackgroundDownloadDropsV62MigrationTests {
         AnalysisStore.resetMigratedPathsForTesting()
         let store = try AnalysisStore(directory: dir)
         try await store.migrate()
+        TestScratchReaper.shared.adopt(dir, owner: store)
         #expect(try probeTableExists(in: dir, table: Self.dropsTable))
 
         try rewindToV61(dir)
@@ -97,6 +123,7 @@ struct BackgroundDownloadDropsV62MigrationTests {
         AnalysisStore.resetMigratedPathsForTesting()
         let store = try AnalysisStore(directory: dir)
         try await store.migrate()
+        TestScratchReaper.shared.adopt(dir, owner: store)
         try rewindToV61(dir)
 
         // `migrateOnlyForTesting` deliberately bypasses `createTables()`, so
@@ -124,6 +151,7 @@ struct BackgroundDownloadDropsV62MigrationTests {
         AnalysisStore.resetMigratedPathsForTesting()
         let store = try AnalysisStore(directory: dir)
         try await store.migrate()
+        TestScratchReaper.shared.adopt(dir, owner: store)
         try rewindToV61(dir)
         try seedSchemaVersion(60, in: dir)
 
@@ -144,6 +172,7 @@ struct BackgroundDownloadDropsV62MigrationTests {
         AnalysisStore.resetMigratedPathsForTesting()
         let store = try AnalysisStore(directory: dir)
         try await store.migrate()
+        TestScratchReaper.shared.adopt(dir, owner: store)
 
         try await store.noteBackgroundDownloadDropInstrumentArmed(at: 1000.0)
         try await store.noteBackgroundDownloadDropInstrumentArmed(at: 2000.0)
@@ -178,7 +207,105 @@ struct BackgroundDownloadDropsV62MigrationTests {
         #expect(try #require(fetched).armedLaunches == 0)
     }
 
-    // MARK: - 5. The drift guard
+    /// WHY `createTables()` CARRIES THE DDL AS WELL AS THE RUNG, and the only
+    /// state in which the difference is observable.
+    ///
+    /// A store whose stamp is at head has every rung gated out — `guard
+    /// observed < 62` is false — so if the tables are missing, the ladder can
+    /// never put them back and the instrument is dead on that install forever.
+    /// `createTables()` runs unconditionally on every open, which is what
+    /// repairs it. This is the same shape `MigrationLadderTests` pins for the
+    /// older tables ("stamped head repairs missing additive columns and
+    /// tombstone tables"); without this rail, removing the `createTables()`
+    /// call is invisible to every runtime test in the tree.
+    @Test("a store STAMPED at head but missing the tables gets them back on the next open")
+    func aStampedHeadStoreRepairsMissingTables() async throws {
+        let dir = try makeTempDir(prefix: "V62StampedHead")
+        AnalysisStore.resetMigratedPathsForTesting()
+        let store = try AnalysisStore(directory: dir)
+        try await store.migrate()
+        TestScratchReaper.shared.adopt(dir, owner: store)
+
+        // Drop the tables but LEAVE the stamp at head — every rung is now
+        // gated out and only `createTables()` can repair this.
+        let dbURL = dir.appendingPathComponent("analysis.sqlite")
+        var db: OpaquePointer?
+        #expect(sqlite3_open_v2(dbURL.path, &db, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK)
+        for sql in [
+            "DROP TABLE IF EXISTS \(Self.dropsTable)",
+            "DROP TABLE IF EXISTS \(Self.armingTable)",
+        ] {
+            #expect(sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK)
+        }
+        sqlite3_close_v2(db)
+        #expect(try probeTableExists(in: dir, table: Self.dropsTable) == false)
+
+        AnalysisStore.resetMigratedPathsForTesting()
+        let reopened = try AnalysisStore(directory: dir)
+        try await reopened.migrate()
+
+        #expect(try await reopened.schemaVersion() == AnalysisStore.currentSchemaVersion)
+        #expect(try probeTableExists(in: dir, table: Self.dropsTable))
+        #expect(try probeTableExists(in: dir, table: Self.armingTable))
+        let fetched = try await reopened.fetchBackgroundDownloadDropArming()
+        #expect(try #require(fetched).armedLaunches == 0)
+    }
+
+    /// THE STAMP IS NOT THE DISCRIMINATOR, and this is the state that proves
+    /// it.
+    ///
+    /// V39 is allowed to fail without throwing: it rolls back to its savepoint
+    /// and leaves `schema_version` at 38 so the next launch retries, and every
+    /// rung from V40 up declines to step over that. But `createTables()` runs
+    /// BEFORE the ladder and unconditionally — so such a store carries both V62
+    /// tables and a working arming row while reading 38.
+    ///
+    /// A reader who took `schema_version < 62` to mean "this build had no
+    /// instrument" would discard real rows from exactly the devices most likely
+    /// to be producing them. The fixture is the V40 suite's, verbatim: two
+    /// assets colliding on one fingerprint plus a trigger that aborts the
+    /// delete V39 needs.
+    @Test("the tables exist BELOW the V39 rollback floor, so table presence and not the stamp is the discriminator")
+    func theTablesExistBelowTheV39RollbackFloor() async throws {
+        let dir = try makeTempDir(prefix: "V62BelowFloor")
+        AnalysisStore.resetMigratedPathsForTesting()
+        let store = try AnalysisStore(directory: dir)
+        try await store.migrate()
+        TestScratchReaper.shared.adopt(dir, owner: store)
+
+        let db = try openRawReadWrite(dir)
+        let insertOld = "INSERT INTO analysis_assets (id, episodeId, assetFingerprint, sourceURL, analysisState, createdAt) VALUES ('v62-dupe-old', 'v62-ep-collide', 'ffee', 'file:///tmp/x.mp3', 'pending', 1.0)"
+        let insertNew = "INSERT INTO analysis_assets (id, episodeId, assetFingerprint, sourceURL, analysisState, createdAt) VALUES ('v62-dupe-new', 'v62-ep-collide', 'ffee', 'file:///tmp/x.mp3', 'pending', 2.0)"
+        let guardTrigger = "CREATE TRIGGER v62_v39_guard BEFORE DELETE ON analysis_assets BEGIN SELECT RAISE(ABORT, 'v62 below-floor fixture'); END"
+        for sql in [
+            "DROP TABLE IF EXISTS \(Self.dropsTable)",
+            "DROP TABLE IF EXISTS \(Self.armingTable)",
+            "DROP INDEX IF EXISTS idx_assets_episode_fingerprint",
+            "DROP INDEX IF EXISTS idx_chunks_asset_pass_fingerprint",
+            insertOld,
+            insertNew,
+            guardTrigger,
+            "UPDATE _meta SET value = '38' WHERE key = 'schema_version'",
+        ] {
+            #expect(sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK, "\(sql)")
+        }
+        sqlite3_close_v2(db)
+
+        AnalysisStore.resetMigratedPathsForTesting()
+        let reopened = try AnalysisStore(directory: dir)
+        try await reopened.migrate()
+
+        // The stamp is stuck below the floor…
+        #expect(try await reopened.schemaVersion() == 38)
+        // …and the tables are nonetheless present and usable.
+        #expect(try probeTableExists(in: dir, table: Self.dropsTable))
+        #expect(try probeTableExists(in: dir, table: Self.armingTable))
+        try await reopened.noteBackgroundDownloadDropInstrumentArmed(at: 5.0)
+        let fetched = try await reopened.fetchBackgroundDownloadDropArming()
+        #expect(try #require(fetched).armedLaunches == 1)
+    }
+
+    // MARK: - 6. The drift guard
 
     /// 61 -> 62 read for every rung that asserts `currentSchemaVersion`: V62
     /// CREATES TWO NEW TABLES and touches no existing one — no column, no

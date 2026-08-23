@@ -8990,6 +8990,11 @@ actor AnalysisStore {
             CREATE TABLE IF NOT EXISTS background_download_drop_arming (
                 id            INTEGER PRIMARY KEY CHECK (id = 1),
                 armedLaunches INTEGER NOT NULL DEFAULT 0,
+                -- Drops whose row could not be written. Without this,
+                -- `armedLaunches > 0` with zero rows is reachable by a store
+                -- that simply could not be written to, and that state is
+                -- byte-identical to this ledger's strongest positive claim.
+                dropWriteFailures INTEGER NOT NULL DEFAULT 0,
                 firstArmedAt  REAL,
                 lastArmedAt   REAL,
                 installedAt   REAL NOT NULL
@@ -9000,8 +9005,9 @@ actor AnalysisStore {
         // that never had the instrument at all.
         let stmt = try prepare("""
             INSERT OR IGNORE INTO background_download_drop_arming
-            (id, armedLaunches, firstArmedAt, lastArmedAt, installedAt)
-            VALUES (1, 0, NULL, NULL, ?)
+            (id, armedLaunches, dropWriteFailures, firstArmedAt, lastArmedAt,
+             installedAt)
+            VALUES (1, 0, 0, NULL, NULL, ?)
             """)
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, Date().timeIntervalSince1970)
@@ -9041,61 +9047,97 @@ actor AnalysisStore {
         FROM background_download_drops
         """
 
-    /// Materializes one row, or `nil` when its `reason` is a raw value this
-    /// build does not know.
+    /// Materializes one row, or names WHY it could not be.
     ///
-    /// A row is DROPPED rather than coerced into a default case, and the
-    /// direction matters: a wider-vocabulary build's row folded into
-    /// `sessionNotVended` would silently inflate that population, which is
-    /// this repo's standing defect class (a value that names one thing read as
-    /// though it named another). `fetchBackgroundDownloadDrops` reports how
-    /// many it skipped so the loss is never silent either.
+    /// A row carrying a raw value this build does not know is DROPPED rather
+    /// than coerced into a default case, and the direction matters: a
+    /// wider-vocabulary build's row folded into `sessionNotVended` would
+    /// silently inflate that population, which is this repo's standing defect
+    /// class. The refusal is returned rather than swallowed so
+    /// `fetchBackgroundDownloadDrops` can count it, and the two refusals are
+    /// counted SEPARATELY because they are different losses: one costs the
+    /// whole classification, the other costs the show attribution.
     private func readBackgroundDownloadDropRow(
         _ stmt: OpaquePointer?
-    ) -> BackgroundDownloadDropRecord? {
+    ) -> Result<BackgroundDownloadDropRecord, BackgroundDownloadDropReadRefusal> {
         let rawReason = text(stmt, 2)
         guard let reason = BackgroundDownloadDropReason(rawValue: rawReason) else {
-            return nil
+            return .failure(.unrecognizedReason)
         }
-        return BackgroundDownloadDropRecord(
+        // The SAME rule one column along, and it has to be the same rule. A
+        // `nil` here does not mean "unreadable" — `DownloadContext` has no
+        // nil-taking initializer, so on a row this build wrote a nil means the
+        // caller NAMED a show. Mapping an unknown raw value to nil would turn
+        // an absence that was measured into one nobody noticed, which is the
+        // distinction playhead-kkzu built `DownloadContext` to preserve.
+        var unattributed: DownloadContext.UnattributedReason?
+        if let rawUnattributed = optionalText(stmt, 5) {
+            guard let decoded = DownloadContext.UnattributedReason(
+                rawValue: rawUnattributed
+            ) else {
+                return .failure(.unrecognizedUnattributedReason)
+            }
+            unattributed = decoded
+        }
+        return .success(BackgroundDownloadDropRecord(
             id: text(stmt, 0),
             episodeId: text(stmt, 1),
             reason: reason,
             occurredAt: sqlite3_column_double(stmt, 3),
             podcastId: optionalText(stmt, 4),
-            unattributedReason: optionalText(stmt, 5).flatMap {
-                DownloadContext.UnattributedReason(rawValue: $0)
-            },
+            unattributedReason: unattributed,
             isExplicitDownload: sqlite3_column_int64(stmt, 6) != 0,
             boundSeconds: sqlite3_column_double(stmt, 7)
-        )
+        ))
     }
 
-    /// Every recorded drop, most recent first, plus the count of rows this
-    /// build could not decode.
+    /// Every recorded drop, most recent first, with everything the caller
+    /// needs in order not to over-read the array it is handed.
     ///
-    /// `unrecognizedReasonRows` is not decoration: it is the difference
-    /// between "this device recorded three drops" and "this device recorded
-    /// three drops THAT I CAN READ", and a reader who is handed only the array
-    /// cannot tell those apart.
+    /// The two unreadable-row counters are not decoration: they are the
+    /// difference between "this device recorded three drops" and "this device
+    /// recorded three drops THAT I CAN READ". `truncated` is the same
+    /// distinction for the window rather than for the rows.
     func fetchBackgroundDownloadDrops(
         limit: Int = 500
-    ) throws -> (rows: [BackgroundDownloadDropRecord], unrecognizedReasonRows: Int) {
+    ) throws -> BackgroundDownloadDropPage {
+        // `limit + 1` rows are asked for and at most `limit` are returned: the
+        // extra one is how the page knows it TRUNCATED. A window that silently
+        // stops at its own ceiling reports "this is what happened" while
+        // meaning "this is what fitted" — the same shape the arming row exists
+        // to close, one function along.
+        let ceiling = max(0, limit)
         let stmt = try prepare(
             "\(Self.backgroundDownloadDropSelectColumns) ORDER BY occurredAt DESC LIMIT ?"
         )
         defer { sqlite3_finalize(stmt) }
-        bind(stmt, 1, max(0, limit))
+        bind(stmt, 1, ceiling == Int.max ? ceiling : ceiling + 1)
         var rows: [BackgroundDownloadDropRecord] = []
-        var unreadable = 0
-        while sqlite3_step(stmt) == SQLITE_ROW {
-            if let row = readBackgroundDownloadDropRow(stmt) {
-                rows.append(row)
-            } else {
-                unreadable += 1
+        var unrecognizedReason = 0
+        var unrecognizedUnattributed = 0
+        var seen = 0
+        var truncated = false
+        // `nextRow` rather than a bare step comparison: an I/O or corruption
+        // error must not be reported as an empty ledger, which in this table
+        // is a claim rather than an absence of information.
+        while try nextRow(stmt) {
+            seen += 1
+            if seen > ceiling {
+                truncated = true
+                break
+            }
+            switch readBackgroundDownloadDropRow(stmt) {
+            case .success(let row): rows.append(row)
+            case .failure(.unrecognizedReason): unrecognizedReason += 1
+            case .failure(.unrecognizedUnattributedReason): unrecognizedUnattributed += 1
             }
         }
-        return (rows, unreadable)
+        return BackgroundDownloadDropPage(
+            rows: rows,
+            unrecognizedReasonRows: unrecognizedReason,
+            unrecognizedUnattributedReasonRows: unrecognizedUnattributed,
+            truncated: truncated
+        )
     }
 
     /// Record that this process installed a live drop recorder.
@@ -9110,8 +9152,9 @@ actor AnalysisStore {
     func noteBackgroundDownloadDropInstrumentArmed(at now: Double) throws {
         let sql = """
             INSERT INTO background_download_drop_arming
-            (id, armedLaunches, firstArmedAt, lastArmedAt, installedAt)
-            VALUES (1, 1, ?, ?, ?)
+            (id, armedLaunches, dropWriteFailures, firstArmedAt, lastArmedAt,
+             installedAt)
+            VALUES (1, 1, 0, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 armedLaunches = armedLaunches + 1,
                 firstArmedAt = CASE
@@ -9129,6 +9172,29 @@ actor AnalysisStore {
         try step(stmt, expecting: SQLITE_DONE)
     }
 
+    /// Count one drop whose durable row could NOT be written.
+    ///
+    /// A second best-effort write on the failure path of the first, and the
+    /// only thing that stops `armedLaunches > 0` with zero rows from being
+    /// reachable by silence. It THROWS rather than swallowing, because its
+    /// caller has a third medium to fall back on and needs to know.
+    ///
+    /// The `INSERT … ON CONFLICT` mirrors the arming writer: on a store whose
+    /// arming row is missing, this creates it rather than counting into a row
+    /// that is not there. `armedLaunches` stays 0 on that path — a failure is
+    /// not an arming, and inventing one here would manufacture the very claim
+    /// this column exists to withhold.
+    func noteBackgroundDownloadDropWriteFailure() throws {
+        try exec("""
+            INSERT INTO background_download_drop_arming
+            (id, armedLaunches, dropWriteFailures, firstArmedAt, lastArmedAt,
+             installedAt)
+            VALUES (1, 0, 1, NULL, NULL, strftime('%s', 'now'))
+            ON CONFLICT(id) DO UPDATE SET
+                dropWriteFailures = dropWriteFailures + 1
+            """)
+    }
+
     /// The arming row, or `nil` when the table holds none.
     ///
     /// `nil` rather than a zeroed value on purpose: a synthesized
@@ -9137,16 +9203,21 @@ actor AnalysisStore {
     /// migration ran, the other says nothing at all did.
     func fetchBackgroundDownloadDropArming() throws -> BackgroundDownloadDropArming? {
         let stmt = try prepare("""
-            SELECT armedLaunches, firstArmedAt, lastArmedAt, installedAt
+            SELECT armedLaunches, dropWriteFailures, firstArmedAt, lastArmedAt,
+                   installedAt
             FROM background_download_drop_arming WHERE id = 1
             """)
         defer { sqlite3_finalize(stmt) }
-        guard sqlite3_step(stmt) == SQLITE_ROW else { return nil }
+        // `nextRow` rather than a bare `sqlite3_step == SQLITE_ROW`: an I/O or
+        // corruption error must not read as "the table holds no row", which
+        // here is a documented CLAIM rather than an absence of information.
+        guard try nextRow(stmt) else { return nil }
         return BackgroundDownloadDropArming(
             armedLaunches: Int(sqlite3_column_int64(stmt, 0)),
-            firstArmedAt: optionalDouble(stmt, 1),
-            lastArmedAt: optionalDouble(stmt, 2),
-            installedAt: sqlite3_column_double(stmt, 3)
+            dropWriteFailures: Int(sqlite3_column_int64(stmt, 1)),
+            firstArmedAt: optionalDouble(stmt, 2),
+            lastArmedAt: optionalDouble(stmt, 3),
+            installedAt: sqlite3_column_double(stmt, 4)
         )
     }
 
