@@ -640,6 +640,47 @@ struct InvariantViolation: Sendable, Hashable, Codable {
         case backgroundSessionCreationRefused =
             "background_session_creation_refused"
 
+        /// playhead-7dgx: a background download was ABANDONED and the durable
+        /// row recording that could not be written.
+        ///
+        /// The description names the episode, WHICH of the three bounds was
+        /// missed, and the bound itself — the same fields the lost row would
+        /// have carried, so the loss is recoverable from this line alone.
+        ///
+        /// Why it reaches this channel as well as `background_download_drops`.
+        /// That table's whole value rests on a reading a device pull performs:
+        /// `armedLaunches > 0` beside zero rows is a POSITIVE CLAIM that
+        /// launches carried a live recorder and saw no drop. A store that
+        /// simply could not be written to produces that state by silence, and
+        /// `dropWriteFailures` on the arming row is a second write in the same
+        /// database that can fail for the same reason. So the residual goes to
+        /// this JSON Lines stream, under `Caches/`.
+        ///
+        /// **THAT IS A DIFFERENT FILE, NOT A DIFFERENT FAILURE DOMAIN.** An
+        /// earlier version of this comment said "two independent surfaces have
+        /// to fail together", and playhead-dyvh2 measures why that is wrong:
+        /// the app sets no data-protection entitlement, so this stream takes
+        /// the same `completeUntilFirstUserAuthentication` class the store sets
+        /// explicitly, and a pre-first-unlock background relaunch — or a full
+        /// volume — silences both. What it genuinely covers is a failure LOCAL
+        /// TO THE DATABASE: a corrupt or dropped table, a lock on one table.
+        /// Read it as that.
+        ///
+        /// It is still ``backgroundSessionCreationRefused``'s argument applied
+        /// to the instrument built beside it: an absence that was CAUSED and
+        /// one that was never ASKED FOR must not look alike. The description
+        /// says WHICH — a store that refused the row, or a build with no
+        /// recorder installed at all.
+        ///
+        /// Never expected on healthy hardware WITH THE RECORDER WIRED, and
+        /// the two readings are not interchangeable: `.writeFailed` means a
+        /// SQLite write to `analysis.sqlite` failed, while `.notRecording`
+        /// means no recorder was installed and every counter on disk is
+        /// legitimately zero. The description says which — do not go
+        /// diagnosing SQLite on a device whose only fault is its wiring.
+        case backgroundDownloadDropNotRecorded =
+            "background_download_drop_not_recorded"
+
         /// playhead-dgly: one persisted-state invariant's CENSUS for this
         /// launch — which invariant, how many rows violate it, how many were
         /// judged, and how many it abstained on and why. The body is

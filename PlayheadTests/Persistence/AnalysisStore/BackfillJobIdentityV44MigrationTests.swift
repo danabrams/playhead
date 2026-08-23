@@ -75,7 +75,13 @@ struct BackfillJobIdentityV44MigrationTests {
         // COLUMN, `semantic_scan_results.usedPermissiveFallback`, and writes
         // nothing to it — no UPDATE, no DEFAULT, no row touched. It names no
         // other table and no other column, so nothing this rung asserts moves.
-        #expect(AnalysisStore.currentSchemaVersion == 61)
+        // 61 -> 62 read for this rung (playhead-7dgx): V62 CREATES TWO NEW TABLES
+        // — `background_download_drops` and its single-row arming companion — and
+        // touches no existing table, column or row: no ALTER, no UPDATE, no DELETE
+        // and no backfill (every drop before this build deleted its own evidence,
+        // so there is nothing recoverable to seed). It names nothing this rung
+        // asserts, so no assertion here moves.
+        #expect(AnalysisStore.currentSchemaVersion == 62)
 
         try await store.insertAsset(makeAsset(id: "asset-fresh"))
         try await store.insertBackfillJob(
@@ -188,7 +194,14 @@ struct BackfillJobIdentityV44MigrationTests {
         // playhead-iw7q: V61 (`semantic_scan_results.usedPermissiveFallback`).
         // Same move, and found the same way — a grep for `currentSchemaVersion`
         // does not reach this line, exactly as the paragraph above warns.
-        #expect(try await store.schemaVersion() == 61)
+        //
+        // playhead-7dgx: V62 (`background_download_drops` + its arming row). Same
+        // move again, and found the SAME WAY the paragraph above warns about — the
+        // sweep that bumped the fourteen `currentSchemaVersion` guards greps a
+        // CONSTANT and cannot reach a line that reads the version off the DATABASE.
+        // It took the mutation battery's unmutated baseline to surface this one, on
+        // a branch whose own scoped run was green.
+        #expect(try await store.schemaVersion() == 62)
         #expect(try await store.fetchBackfillJob(byId: "fm-legacy-complete") == nil,
                 "a completed row minted under the old preimage cannot be addressed again")
         #expect(try await store.fetchBackfillJob(byId: "fm-legacy-queued") == nil,

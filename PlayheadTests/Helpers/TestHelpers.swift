@@ -1040,6 +1040,22 @@ final class RecordedInvariantViolations: @unchecked Sendable {
     func sessionRefusals(from site: String) -> [String] {
         sessionRefusals.filter { $0.contains("site=\(site)") }
     }
+
+    /// playhead-7dgx: descriptions of every abandoned background download
+    /// whose durable row could NOT be written. This is the SECOND medium the
+    /// drop ledger falls back on, so a test that asserts the database is empty
+    /// must be able to assert this is not.
+    var unrecordedDrops: [String] {
+        descriptions(of: .backgroundDownloadDropNotRecorded)
+    }
+
+    /// Every description recorded under one code. Kept general so the next
+    /// code added here does not need a third bespoke accessor.
+    func descriptions(of code: InvariantViolation.Code) -> [String] {
+        entries.withLock { list in
+            list.filter { $0.code == code }.map(\.description)
+        }
+    }
 }
 
 /// The retry probe three download terminal-failure tests share: after a

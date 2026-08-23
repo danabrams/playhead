@@ -1466,6 +1466,7 @@ SEGAGG="Playhead/Services/AdDetection/SegmentAggregator.swift"
 # must recover it from disk; BGFEED and EPPREP are the two callers that always
 # could and were dropping it.
 DLMGR="Playhead/Services/Downloads/DownloadManager.swift"
+LEDGER="Playhead/Services/Downloads/BackgroundDownloadDropLedger.swift"
 FQSCAN="Playhead/Services/Downloads/ForceQuitResumeScan.swift"
 BGFEED="Playhead/Services/PodcastFeed/BackgroundFeedRefreshService.swift"
 EPPREP="Playhead/Services/Downloads/EpisodePreparationCoordinator.swift"
@@ -1561,7 +1562,7 @@ MUTABLE_FILES=(
   "$FUSION" "$DSPAN" "$EXTENT" "$RSLOT" "$ATOMEV"
   "$EVCAT" "$PROJ" "$TWNARR"
   "$DETCLS" "$DETLED" "$SPLIT" "$HOTGATE" "$UGCEN" "$POLICY" "$SEGAGG"
-  "$DLMGR" "$FQSCAN" "$BGFEED" "$EPPREP" "$SCHED"
+  "$DLMGR" "$LEDGER" "$FQSCAN" "$BGFEED" "$EPPREP" "$SCHED"
   "$CLAIM" "$RECON" "$ATOM" "$AJRUN" "$ACOORD" "$ESUMBF" "$MPTRENG" "$MPTRIDX"
   "$BEXP" "$SPSHD" "$FMSHD" "$TCANON" "$SPLAN"
   "$BGPS" "$GRANT" "$LEASE"
@@ -2638,6 +2639,49 @@ FOCUSED_SUITES=(
   -only-testing:PlayheadTests/AdSkipCueSoundTests
   -only-testing:PlayheadTests/AdSkipCueSettingsTests
   -only-testing:PlayheadTests/AdSkipCueSourceCanaryTests
+  # playhead-7dgx: a dropped background download leaves a DURABLE row (BD
+  # series). THREE suites, because the claim spans three layers and no one of
+  # them can observe another.
+  #
+  # `BackgroundDownloadDropLedgerTests` is the only thing that drives the real
+  # `DownloadManager` through each of the three abandonment paths and reads the
+  # row back — including the anti-vacuity direction, that a HEALTHY download
+  # writes nothing, without which every other rail here is satisfied by a
+  # request counter wearing a drop counter's name.
+  #
+  # `BackgroundDownloadDropsV62MigrationTests` is the only thing that can see
+  # the SCHEMA half: that a V61 store genuinely LACKS the table (which is what
+  # makes "absent" readable as "this build predates the instrument"), that the
+  # ladder-only seam reaches V62 without `createTables()` painting over it, and
+  # that a store STAMPED at head but missing the tables gets them back.
+  #
+  # `BackgroundDownloadDropWiringSourceCanaryTests` is the only thing that can
+  # see the SIX properties no runtime test can reach — the both-ladder
+  # registration, the production wiring (`PlayheadRuntime.init` is reachable
+  # from no unit test and the recorder has a NO-OP default), WHICH bound each
+  # site records (`onItsOwnQueue` copies the timeout, so the two are
+  # numerically equal and a swap is invisible to any assertion), that every
+  # path deleting the attribution sidecar owes a row, the ORDER of the new
+  # suspension point (the row is written AFTER the cleanup, and both orders
+  # pass every behavioural rail), and WHERE the ledger is armed (only after
+  # the store is known open, and never from `bootstrap()`).
+  #
+  # The count was "four" here until R7. It is the same enumeration the canary's
+  # own header carried, and R5 fixed only that copy — properties 5 and 6 were
+  # added in R1, which described just the original four in both places.
+  -only-testing:PlayheadTests/BackgroundDownloadDropLedgerTests
+  -only-testing:PlayheadTests/BackgroundDownloadDropsV62MigrationTests
+  -only-testing:PlayheadTests/BackgroundDownloadDropWiringSourceCanaryTests
+  # And two suites that are NOT this bead's and are here because the V62 rung
+  # moves `currentSchemaVersion`: they are the cross-rung "reaches head"
+  # observers, and the V60 note in `migrateOnlyForTesting` records that a rung
+  # registered in one ladder and not the other is invisible to every test
+  # written FOR that rung. These are what saw it.
+  #
+  # `MigrationLadderTests` is deliberately NOT repeated here — it is already in
+  # this list, above, and a second declaration of the same fact is one that can
+  # drift.
+  -only-testing:PlayheadTests/MergedChildRowDedupeV40MigrationTests
 )
 
 # Named to match the `/private/tmp/playhead-*` pattern `scripts/disk-cleanup.sh`
@@ -3125,6 +3169,58 @@ T_IW7Q_REFINED_UNKNOWN="a refined payload on an UNKNOWN row keeps its band — t
 T_IW7Q_REFINED_SUPPRESSED="playhead-92im's span gate is unchanged: a suppressed span is ungraded on a MODEL row"
 T_IW7Q_REFINED_PERMISSIVE="a refined payload on a PERMISSIVE row is vetoed — that is a CLAIM, not an absence"
 T_IW7Q_FLOOR="the mark a pre-V61 coarse row backs grades at the FLOOR, not the ceiling"
+
+# ---- playhead-7dgx, the BD series: a dropped background download leaves a
+#      DURABLE, COUNTABLE row --------------------------------------------
+# Swift Testing display names, verbatim.
+T_7DGX_SESSION="a session the daemon will not vend leaves a row naming THAT bound"
+T_7DGX_TASK="a downloadTask(with:) the daemon never answers leaves a row naming THAT bound"
+T_7DGX_RESUME="a transfer created but never resumed leaves a row naming THAT bound"
+T_7DGX_DISTINCT="the two bounds produce DISTINGUISHABLE rows in one store"
+T_7DGX_DURABLE="the row is on disk, not in memory — a second store on the same file reads it"
+T_7DGX_UNATTRIB="an unattributed download records WHY it carries no show"
+T_7DGX_HEALTHY="a download the daemon answers writes NO row, and neither does a duplicate request"
+T_7DGX_NEVER_ARMED="a migrated but never-armed store says so: zero launches and a NULL first-armed time"
+T_7DGX_ARMS="arming counts a launch, and a second launch counts again without moving firstArmedAt"
+T_7DGX_DEFAULT_NOOP="the default recorder is the no-op, and the no-op reports that nothing landed"
+T_7DGX_WRITE_FAIL="a drop whose row cannot be written is counted AND raised on the second medium"
+T_7DGX_ARMING_NIL="an absent arming row reads as nil, never as a synthesized zero"
+T_7DGX_RAWVALUES="the persisted reason strings are pinned — renaming one is a migration"
+T_7DGX_REPEAT="two drops for the SAME episode are two rows, not one"
+T_7DGX_UNATTRIB_UNKNOWN="an unrecognized unattributedReason is counted too, never read as an attributed row"
+T_7DGX_BELOW_FLOOR="the tables exist BELOW the V39 rollback floor, so table presence and not the stamp is the discriminator"
+T_7DGX_C_ORDER="testTheDropRowIsRecordedAFTERTheCleanupOnEveryPath"
+T_7DGX_C_SITES="testTheDropRecorderIsCalledFromBackgroundDownloadAndNowhereElse"
+T_7DGX_C_ARMSITE="testTheLedgerIsArmedOnlyAfterTheStoreIsKnownOpen"
+T_7DGX_C_BOOTSTRAP="testBootstrapDoesNotTouchTheDropLedger"
+T_7DGX_OLDSHAPE="a store carrying the PRE-dropWriteFailures shape still opens, and is repaired"
+T_7DGX_ARM_FAIL="a failed ARMING is raised on the second medium too"
+T_7DGX_UNBOUNDED="an unbounded limit returns everything instead of trapping"
+T_7DGX_ARM_SILENT="an UNWIRED build's arming is silent, not an anomaly"
+T_7DGX_LANDED_QUIET="a drop that LANDS raises nothing"
+T_7DGX_UNKNOWN_REASON="an unrecognized reason is skipped and counted, never coerced into a known case"
+# `aV61StoreGenuinelyLacksTheTable` deliberately has NO mutant and therefore
+# no variable here. It asserts that a table this suite itself dropped is
+# dropped — a vacuity guard for the rails around it, and a property of the
+# FIXTURE rather than of the code, so no production edit can redden it. A
+# defined-but-unreferenced expectation would be the same shape as an
+# allowlist entry matching nothing, which this repo already fails builds over.
+T_7DGX_LADDER="a V61 store climbs to head through the ladder-only seam and gains both tables"
+T_7DGX_FROM_V60="a store seeded two rungs back still reaches head, so V62 does not depend on running alone"
+T_7DGX_IDEMPOTENT="re-running the rung preserves armedLaunches and installedAt"
+T_7DGX_FRESH="a fresh store is at head with both tables and a seeded arming row"
+T_7DGX_STAMPED="a store STAMPED at head but missing the tables gets them back on the next open"
+# XCTest source canaries, by method name.
+T_7DGX_C_LADDER="testV62IsRegisteredInBothLaddersExactlyOnceEach"
+T_7DGX_C_DDL="testTheDDLIsSharedRatherThanCopied"
+T_7DGX_C_WIRING="testProductionWiresTheStoreBackedDropRecorder"
+T_7DGX_C_BOUND="testEachDropSiteRecordsTheBoundThatActuallyExpired"
+T_7DGX_C_PAIR="testEveryAttributionDeletionInBackgroundDownloadOwesARow"
+T_7DGX_C_REASONS="testTheThreeDropSitesUseThreeDistinctReasons"
+# Not this bead's suite: the cross-rung observer that a ladder stopping one
+# rung short reddens.
+T_7DGX_V40_NOSTEP="V40 does NOT step over a rolled-back V39 — a database left at 38 stays retryable"
+T_7DGX_C6_FRESH="C6: fresh DB migrate() reaches currentSchemaVersion with all expected shape"
 T_IW7Q_MONOTONE="the gate can only ever DEDUCT — no provenance raises a band"
 T_IW7Q_BYTES="the two rows that used to be identical now differ IN THE BYTES"
 T_IW7Q_NULL="an UNKNOWN provenance writes SQL NULL, not 0"
@@ -11418,6 +11514,271 @@ MUTATIONS=(
   # behaviour.
   "MS99|1414|ORCH|$T_2D6I_PARTITION"
 
+  # ---- playhead-7dgx, the BD series: a dropped background download leaves a
+  #      DURABLE, COUNTABLE row -----------------------------------------------
+  #
+  # `backgroundDownload` abandons a transfer on three paths when
+  # `BackgroundSessionIO`'s bound expires, and each one DELETES the attribution
+  # sidecar — so between them they destroy every trace the episode was ever
+  # asked for. The only witness was an `os_log` line no device pull captures.
+  #
+  # The series has four shapes, one per layer, because each is invisible from
+  # the others: the CALL SITES (which path records what, and with which
+  # bound), the SCHEMA (both ladders, the `createTables()` repair, and the
+  # seeded arming row), the SQL (what each column actually holds on the way in
+  # and out), and the WIRING (whether anything reaches disk at all).
+  #
+  # Read the four as a TAXONOMY, not as a census: BD01-BD04 + BD18 + BD99 are
+  # call sites, BD05-BD08 schema, BD09-BD12 + BD14/BD15 SQL, BD13 + BD16 +
+  # BD17 wiring — and BD19-BD40 extend all four layers rather than adding a
+  # fifth. The authoritative list is the MUTATIONS array below; an earlier cut
+  # of this paragraph enumerated only the first eighteen and read as though it
+  # were exhaustive.
+
+  # BD01 is the shipped defect verbatim on path A: the session refusal goes
+  # back to being an os_log line. Own batch — it removes a whole call site, so
+  # a batched partner would be credited off the canaries it reddens.
+  "BD01|1420|DLMGR|$T_7DGX_SESSION;$T_7DGX_DISTINCT;$T_7DGX_DURABLE;$T_7DGX_UNATTRIB;$T_7DGX_REPEAT;$T_7DGX_C_PAIR;$T_7DGX_C_BOUND;$T_7DGX_C_REASONS;$T_7DGX_C_ORDER;$T_7DGX_C_SITES"
+
+  # BD02 is the COPY-PASTE COLLAPSE, which is the likeliest real regression
+  # here: both sites keep recording, and the two populations merge. A refused
+  # SESSION is a per-launch outage of the whole download subsystem; a refused
+  # TASK is one episode. Counting them as one makes the remedy unchoosable.
+  "BD02|1421|DLMGR|$T_7DGX_TASK;$T_7DGX_DISTINCT;$T_7DGX_C_REASONS"
+
+  # BD03 removes path C — the abandonment the bead does NOT name, recorded
+  # because a table called `background_download_drops` that counts two of the
+  # three drops in the function it is named after is the standing defect class
+  # shipped as the instrument meant to catch it.
+  "BD03|1422|DLMGR|$T_7DGX_RESUME;$T_7DGX_C_PAIR;$T_7DGX_C_REASONS;$T_7DGX_C_BOUND;$T_7DGX_C_ORDER;$T_7DGX_C_SITES"
+
+  # BD04 records the shipped CONSTANT instead of the bound that expired. On a
+  # device whose bound had been changed the column would report 10 s for a
+  # refusal that happened at 2 s — which is exactly the number the "should the
+  # bound be wider" decision reads.
+  "BD04|1423|DLMGR|$T_7DGX_SESSION;$T_7DGX_C_BOUND"
+
+  # BD05 is THE V60 MISTAKE REPEATED: the rung is in the production ladder and
+  # not in `migrateOnlyForTesting`. Every fixture-driven test then stops one
+  # rung short while `currentSchemaVersion` assertions still pass, because the
+  # constant moved with it.
+  "BD05|1424|STORE|$T_7DGX_LADDER;$T_7DGX_FROM_V60;$T_7DGX_IDEMPOTENT;$T_7DGX_C_LADDER;$T_7DGX_V40_NOSTEP"
+
+  # BD06 is the mirror: registered in the test seam and not in production. The
+  # tables still appear (createTables() is unconditional) and the STAMP never
+  # moves, so a device reports schema 61 while carrying a V62 shape — and the
+  # three-state reading this bead's ledger depends on is read off that stamp.
+  "BD06|1425|STORE|$T_7DGX_FRESH;$T_7DGX_STAMPED;$T_7DGX_C_LADDER;$T_7DGX_C6_FRESH"
+
+  # BD07 drops the `createTables()` copy. The ladder still builds the tables on
+  # a fresh install, so this is invisible EXCEPT on a store whose stamp is
+  # already at head with the tables missing — where every rung is gated out and
+  # nothing can ever put them back. That state is the whole reason the house
+  # rule exists, and until this bead it had no rail here.
+  "BD07|1426|STORE|$T_7DGX_STAMPED;$T_7DGX_BELOW_FLOOR;$T_7DGX_C_DDL"
+
+  # BD08 stops SEEDING the arming row. Nothing else breaks — the arming UPSERT
+  # creates it on first use — and the state the whole three-state reading rests
+  # on becomes inexpressible: "installed but never armed" collapses back into
+  # "no evidence either way".
+  "BD08|1427|STORE|$T_7DGX_NEVER_ARMED;$T_7DGX_LADDER;$T_7DGX_FRESH;$T_7DGX_STAMPED"
+
+  # BD09 makes `firstArmedAt` follow the latest arming, i.e. a second
+  # `lastArmedAt` under a name that says the opposite.
+  "BD09|1428|STORE|$T_7DGX_ARMS"
+
+  # BD10 RESETS the launch count instead of incrementing it, so `armedLaunches`
+  # would mean "launches since the last one" while being read as "ever".
+  "BD10|1429|STORE|$T_7DGX_ARMS"
+
+  # BD11 coerces an unreadable `reason` into a known case — silently inflating
+  # whichever population the fallback names, by exactly the rows a reader most
+  # needs to notice.
+  "BD11|1430|STORE|$T_7DGX_UNKNOWN_REASON"
+
+  # BD12 is the other direction: the row is dropped and the drop is not
+  # counted, so "three drops" and "three drops I can read" become the same
+  # answer.
+  "BD12|1431|STORE|$T_7DGX_UNKNOWN_REASON"
+
+  # BD13 is `workJournalRecorder`'s live defect transplanted here: the
+  # composition root injects the NO-OP. Every test passes, the table exists,
+  # the migration runs, and the device records nothing.
+  "BD13|1432|RT|$T_7DGX_C_WIRING"
+
+  # BD14 binds NULL where the unattributed REASON goes, so an absence that was
+  # measured and one nobody noticed look alike on disk — playhead-kkzu's defect
+  # one table over.
+  "BD14|1433|STORE|$T_7DGX_UNATTRIB"
+
+  # BD15 inverts `isExplicitDownload`. A dropped user tap is a broken promise
+  # and a dropped auto-download is a missed opportunity; swapped, the ledger
+  # reports the wrong product being broken.
+  "BD15|1434|STORE|$T_7DGX_DURABLE;$T_7DGX_UNATTRIB"
+
+  # BD16 stops the launch arming. Drops are still recorded, so every row rail
+  # stays green — and a pull would read durable drops beside a census saying
+  # nobody was counting. The mutation is on the SEAM rather than on
+  # `PlayheadRuntime`'s call, so it reaches the tests as well as the canary;
+  # BD33 is the call-site half.
+  "BD16|1435|DLMGR|$T_7DGX_ARMS;$T_7DGX_DURABLE;$T_7DGX_WRITE_FAIL"
+
+  # BD17 makes the production recorder's write a no-op while still throwing, so
+  # the `catch` stays reachable and the whole thing compiles: the shape a
+  # best-effort recorder degrades into if the store call is ever "temporarily"
+  # commented out.
+  "BD17|1436|LEDGER|$T_7DGX_SESSION;$T_7DGX_TASK;$T_7DGX_RESUME;$T_7DGX_DISTINCT;$T_7DGX_DURABLE;$T_7DGX_UNATTRIB;$T_7DGX_REPEAT"
+
+  # BD18 gives every row the same primary key, so the second drop collides and
+  # is swallowed by the best-effort catch. The ledger would then report ONE
+  # drop no matter how many happened — a table that cannot count, which is the
+  # only thing it exists to do.
+  "BD18|1437|LEDGER|$T_7DGX_DISTINCT;$T_7DGX_REPEAT"
+
+  # BD19 stops COUNTING a drop whose row could not be written. `armedLaunches`
+  # keeps ticking, so a store that simply cannot be written to produces the
+  # ledger's strongest positive claim by silence — the standing defect class
+  # inside the instrument built to catch it.
+  "BD19|1439|LEDGER|$T_7DGX_WRITE_FAIL"
+
+  # BD20 makes the production recorder report SUCCESS on a failed write. The
+  # arming counter still moves, so BD19's rail is untouched; what is lost is the
+  # SECOND medium, and with it the only trace left when this database cannot
+  # hold anything.
+  "BD20|1440|LEDGER|$T_7DGX_WRITE_FAIL"
+
+  # BD21 hoists path A's row ABOVE the reservation release, putting a suspension
+  # point back inside the region playhead-nsjn / -gpdb / -7l6n exist to protect.
+  # Every behavioural rail stays green — the row is still written, with the same
+  # contents — which is exactly why the ordering canary exists.
+  "BD21|1441|DLMGR|$T_7DGX_C_ORDER"
+
+  # BD22 mints a row from `cancelDownload`, which also deletes the attribution
+  # sidecar and is the likeliest place for a later contributor to add one. The
+  # ledger would then count USER CANCELS as daemon drops.
+  "BD22|1442|DLMGR|$T_7DGX_HEALTHY;$T_7DGX_C_SITES"
+
+  # BD23 records a drop on the SUCCESS path. `count(*)` becomes a count of
+  # background downloads wearing a drop counter's name — the anti-vacuity
+  # direction, and until this entry the rail that guards it had no mutant.
+  "BD23|1443|DLMGR|$T_7DGX_HEALTHY"
+
+  # BD24 coerces an unreadable `unattributedReason` to nil — so a row whose
+  # show-absence cannot be explained comes back saying the show WAS named. The
+  # same substitution BD11 makes one column along, and the reason the two
+  # refusals are counted separately.
+  "BD24|1444|STORE|$T_7DGX_UNATTRIB_UNKNOWN"
+
+  # BD25 stops recording WHEN. Every ordering in this table becomes a
+  # coincidence of insertion order, and `ORDER BY occurredAt DESC` sorts a
+  # constant.
+  "BD25|1445|STORE|$T_7DGX_DISTINCT"
+
+  # BD26 flips the page to OLDEST first. A reader taking the first N rows as
+  # "the most recent drops" would get the oldest ones, silently.
+  "BD26|1446|STORE|$T_7DGX_DISTINCT"
+
+  # BD27 drops the truncation signal, so a window that stopped at its own
+  # ceiling reports "this is what happened" while meaning "this is what fitted".
+  "BD27|1447|STORE|$T_7DGX_DISTINCT"
+
+  # BD28 SYNTHESIZES a zeroed arming row where none exists. "The migration ran
+  # and nothing else did" and "nobody has ever opened this table" become the
+  # same answer — and BD08's kill runs entirely through that nil, so this is
+  # also the rail under a rail.
+  "BD28|1448|STORE|$T_7DGX_ARMING_NIL"
+
+  # BD29 renames a persisted raw value. Every behavioural rail round-trips
+  # through the enum and cannot see it; on a device it silently converts the
+  # whole history of that reason into an unreadable-row count.
+  #
+  # THE SECOND EXPECTATION IS `UNATTRIB_UNKNOWN`, NOT `UNKNOWN_REASON`, and the
+  # difference is the whole predicted-vs-observed discipline. `UNKNOWN_REASON`
+  # inserts a row whose reason is the literal `a_reason_from_2027`, which is
+  # unrecognised BEFORE and AFTER the rename — so it cannot fail, and naming it
+  # would have scored this mutant SURVIVED and manufactured a coverage hole.
+  # `UNATTRIB_UNKNOWN` inserts the literal `session_not_vended` and asserts
+  # `unrecognizedReasonRows == 0`, which the rename breaks.
+  "BD29|1449|LEDGER|$T_7DGX_RAWVALUES;$T_7DGX_UNATTRIB_UNKNOWN"
+
+  # BD30 swaps WHICH bound the resume site records — `sessionCreationIO` for
+  # `sessionIO`. The two carry the same VALUE by construction (`onItsOwnQueue`
+  # copies the timeout), so no assertion anywhere can see it. This is the mutant
+  # that shows the source canary is load-bearing rather than decorative.
+  "BD30|1450|DLMGR|$T_7DGX_C_BOUND"
+
+  # BD31 returns `true` from the NO-OP recorder. An unwired build would then
+  # skip the surface-status fallback too, losing the drop on both media at once
+  # — the failure mode the no-op's own doc comment forbids.
+  "BD31|1451|LEDGER|$T_7DGX_DEFAULT_NOOP"
+
+  # BD32 puts the arming back inside `bootstrap()`. That is where this bead's
+  # first cut had it, and it is a launch-path regression: `bootstrap()` becomes
+  # `async`, its cache-directory creation goes behind a full AnalysisStore open,
+  # and `DownloadManager` becomes an unmanaged opener of `analysis.sqlite`.
+  "BD32|1452|DLMGR|$T_7DGX_C_BOOTSTRAP"
+
+  # BD33 arms ABOVE the degraded-launch guard, so `armedLaunches` counts
+  # launches on which the store never opened and no row could ever have been
+  # written. The denominator the whole ledger rests on starts counting the
+  # population that proves nothing.
+  "BD33|1453|RT|$T_7DGX_C_ARMSITE"
+
+  # BD34 removes the shape repair. `CREATE TABLE IF NOT EXISTS` is a no-op on a
+  # table that already exists in an older shape, so the seed INSERT then names a
+  # column that is not there, `createTables()` throws, and THE WHOLE STORE STOPS
+  # OPENING — which is not hypothetical: it happened on this branch and surfaced
+  # as an unrelated trust-profile test failing.
+  "BD34|1454|STORE|$T_7DGX_OLDSHAPE"
+
+  # BD35 makes a FAILED arming report success, so the denominator's own silent
+  # failure comes back — a launch that did not count is byte-identical to one
+  # that never ran.
+  "BD35|1455|LEDGER|$T_7DGX_ARM_FAIL"
+
+  # BD36 drops the second-surface raise for a failed arming. The counter still
+  # fails to move and nothing anywhere says so.
+  "BD36|1456|DLMGR|$T_7DGX_ARM_FAIL"
+
+  # BD37 drops the `+ 1` from the probe, so the page can never see the row that
+  # tells it it TRUNCATED — a window that stopped at its ceiling reports itself
+  # as the whole story.
+  #
+  # NOT the trap variant, deliberately. Restoring `ceiling + 1` without the
+  # Int32 clamp is the defect `anUnboundedLimitDoesNotTrap` exists for, and it
+  # would kill that test by TAKING THE HOST DOWN — which emits no per-test line
+  # at all (CLAUDE.md's census section is a long record of that), so the battery
+  # would score it `expected test never ran` rather than KILLED. A rail whose
+  # kill destroys the verdict is a lost rail; the test stays, the mutant aims
+  # somewhere a verdict survives.
+  "BD37|1457|STORE|$T_7DGX_DISTINCT"
+
+  # BD38 widens the arming seam's guard back to "anything but landed", so an
+  # UNWIRED build raises an anomaly on every launch — for a state that is the
+  # documented meaning of `armedLaunches = 0` rather than a fault. It survived
+  # the whole branch until round four went looking: that guard is round three's
+  # headline behaviour change and nothing tested it in either direction.
+  "BD38|1458|DLMGR|$T_7DGX_ARM_SILENT"
+
+  # BD39 is its MIRROR on the drop seam: every SUCCESSFUL drop raises the loss
+  # invariant, with an empty detail. Same shape, other direction, equally
+  # unrailed until now.
+  "BD39|1459|DLMGR|$T_7DGX_LANDED_QUIET"
+
+  # BD40 degenerates `lastArmedAt` into a second `firstArmedAt` — the exact
+  # defect that column's own doc comment warns about, and which had no rail at
+  # all because the assertion claiming to be one carried an escape clause that
+  # was already asserted three lines above it.
+  "BD40|1460|STORE|$T_7DGX_ARMS;$T_7DGX_IDEMPOTENT"
+
+  # BD99 — VACUITY CONTROL, and it MUST SURVIVE. It renames the parameter
+  # BINDING inside `recordBackgroundDownloadDrop` — the argument LABEL and every
+  # call site are untouched — in the helper BD01 and BD03 delete calls to. Its
+  # expectation is deliberately NON-EMPTY (playhead-ngsm: an entry with an empty
+  # expectation is scored KILLED, which makes a control expressed that way
+  # worthless) and it names the rail BD01 kills, so a KILLED verdict here would
+  # mean a rename changed behaviour.
+  "BD99|1438|DLMGR|$T_7DGX_SESSION"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -11731,6 +12092,47 @@ describe_mutation() {
     SU22) echo "the gap test closes, so a barrier that only TOUCHES the join bars the merge" ;;
     SU23) echo "AdDetectionService stops passing the index — a correct composer never handed one" ;;
     SU24) echo "BackfillJobRunner stops passing the index" ;;
+    BD01) echo "THE SHIPPED DEFECT VERBATIM on path A — a refused session goes back to being an os_log line nobody can pull" ;;
+    BD02) echo "the COPY-PASTE COLLAPSE — path B reports path A's reason, merging a per-launch outage with a per-episode loss" ;;
+    BD03) echo "path C stops recording — the created-but-never-resumed drop is silent again" ;;
+    BD04) echo "the shipped CONSTANT is recorded instead of the bound that actually expired" ;;
+    BD05) echo "THE V60 MISTAKE REPEATED — the V62 rung is missing from migrateOnlyForTesting" ;;
+    BD06) echo "the mirror of BD05 — the V62 rung is missing from the production ladder, so the stamp never moves" ;;
+    BD07) echo "createTables() stops carrying the DDL, so a store stamped at head with the tables missing can never repair" ;;
+    BD08) echo "the arming row is no longer SEEDED, so \"installed but never armed\" stops being expressible" ;;
+    BD09) echo "firstArmedAt follows the LATEST arming — a second lastArmedAt under a name that says the opposite" ;;
+    BD10) echo "armedLaunches RESETS instead of incrementing, so it counts launches since the last one" ;;
+    BD11) echo "an unreadable reason is COERCED into a known case, silently inflating that population" ;;
+    BD12) echo "an unreadable row is dropped and NOT counted — three drops and three readable drops become one answer" ;;
+    BD13) echo "the composition root injects the NO-OP recorder — workJournalRecorder's live defect, transplanted" ;;
+    BD14) echo "the unattributed REASON is bound NULL, so a measured absence and an unnoticed one look alike" ;;
+    BD15) echo "isExplicitDownload is INVERTED — the ledger reports the wrong product being broken" ;;
+    BD16) echo "armDropLedger() stops arming, so durable drops sit beside a census saying nobody was counting" ;;
+    BD17) echo "the production recorder's write becomes a no-op that still throws, so nothing reaches disk" ;;
+    BD18) echo "every row takes the SAME primary key, so the second drop collides and the ledger cannot count" ;;
+    BD19) echo "a drop whose row could not be written stops being COUNTED — the positive claim becomes reachable by silence" ;;
+    BD20) echo "the production recorder reports SUCCESS on a failed write, so the second medium is never raised" ;;
+    BD21) echo "path A's row is hoisted ABOVE the reservation release — a suspension point back inside the protected region" ;;
+    BD22) echo "cancelDownload mints a drop row, so the ledger counts USER CANCELS as daemon drops" ;;
+    BD23) echo "a drop row is written on the SUCCESS path — count(*) becomes a download counter wearing a drop counter's name" ;;
+    BD24) echo "an unreadable unattributedReason is coerced to nil, so an unexplained absence reads as a NAMED show" ;;
+    BD25) echo "occurredAt stops being the time of the drop, so every ordering in the table is a coincidence" ;;
+    BD26) echo "the page returns OLDEST first while claiming most-recent" ;;
+    BD27) echo "the truncation signal is dropped — a window that stopped at its ceiling reports it as the whole story" ;;
+    BD28) echo "an absent arming row is SYNTHESIZED as a zeroed one, erasing the difference between two claims" ;;
+    BD29) echo "a persisted reason raw value is renamed — invisible to every enum round-trip, fatal to every historical row" ;;
+    BD30) echo "the resume site records the CREATION bound — numerically identical today, invisible to every assertion" ;;
+    BD31) echo "the NO-OP recorder reports that the row landed, so an unwired build loses the drop on both media" ;;
+    BD32) echo "the arming goes back inside bootstrap() — async cache-directory creation and an unmanaged store opener" ;;
+    BD33) echo "the ledger is armed ABOVE the degraded-launch guard, so armedLaunches counts launches that could record nothing" ;;
+    BD34) echo "the shape repair is gone, so a store holding an older arming table stops OPENING AT ALL" ;;
+    BD35) echo "a failed arming reports success — the denominator's silent failure returns" ;;
+    BD36) echo "a failed arming stops being raised on the second surface" ;;
+    BD37) echo "the probe loses its +1, so a truncated page reports itself as the whole story" ;;
+    BD38) echo "the arming seam raises an anomaly for an UNWIRED build — a line on every launch for a documented state" ;;
+    BD39) echo "every SUCCESSFUL drop raises the loss invariant, so the line stops meaning anything" ;;
+    BD40) echo "lastArmedAt degenerates into a second firstArmedAt" ;;
+    BD99) echo "VACUITY CONTROL — the parameter BINDING inside recordBackgroundDownloadDrop is renamed; the label and every call site are untouched. MUST SURVIVE" ;;
     IW01) echo "THE SHIPPED DEFECT VERBATIM — the coarse gate is gone, so a runner hardcode reads as the model's grade" ;;
     IW02) echo "the gate opens for anything that is NOT permissive, so UNKNOWN licenses the band — the backfill defect in the reader" ;;
     IW03) echo "the coarse branch bypasses the gate at the CALL SITE instead of inside PersistedCertainty" ;;
@@ -12417,6 +12819,588 @@ snippet() { IFS= read -r -d '' "$1" || true; }
 apply_mutation() {
   local name="$1" file="$2" OLD NEW
   case "$name" in
+
+  # ---- playhead-7dgx: the dropped-background-download ledger (BD series) ----
+
+  BD01)
+    snippet OLD <<'EOF'
+            await recordBackgroundDownloadDrop(
+                episodeId: episodeId,
+                reason: .sessionNotVended,
+                context: context,
+                boundSeconds: sessionCreationIO.timeout
+            )
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BD02)
+    snippet OLD <<'EOF'
+                reason: .transferTaskNotVended,
+EOF
+    snippet NEW <<'EOF'
+                reason: .sessionNotVended,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BD03)
+    snippet OLD <<'EOF'
+            await recordBackgroundDownloadDrop(
+                episodeId: episodeId,
+                reason: .transferNotResumed,
+                context: context,
+                boundSeconds: sessionIO.timeout
+            )
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BD04)
+    snippet OLD <<'EOF'
+                boundSeconds: sessionCreationIO.timeout
+EOF
+    snippet NEW <<'EOF'
+                boundSeconds: BackgroundSessionIO.defaultTimeout
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BD05)
+    snippet OLD <<'EOF'
+        try migrateBackgroundDownloadDropsV62IfNeeded()
+    }
+    #endif
+EOF
+    snippet NEW <<'EOF'
+    }
+    #endif
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BD06)
+    snippet OLD <<'EOF'
+            try migrateBackgroundDownloadDropsV62IfNeeded()
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BD07)
+    snippet OLD <<'EOF'
+        try createBackgroundDownloadDropTables()
+    }
+EOF
+    snippet NEW <<'EOF'
+    }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BD08)
+    snippet OLD <<'EOF'
+        let stmt = try prepare("""
+            INSERT OR IGNORE INTO background_download_drop_arming
+            (id, armedLaunches, dropWriteFailures, firstArmedAt, lastArmedAt,
+             installedAt)
+            VALUES (1, 0, 0, NULL, NULL, ?)
+            """)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, Date().timeIntervalSince1970)
+        try step(stmt, expecting: SQLITE_DONE)
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BD09)
+    snippet OLD <<'EOF'
+                firstArmedAt = CASE
+                    WHEN background_download_drop_arming.armedLaunches = 0
+                    THEN excluded.firstArmedAt
+                    ELSE background_download_drop_arming.firstArmedAt
+                END,
+EOF
+    snippet NEW <<'EOF'
+                firstArmedAt = excluded.firstArmedAt,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BD10)
+    snippet OLD <<'EOF'
+                armedLaunches = armedLaunches + 1,
+EOF
+    snippet NEW <<'EOF'
+                armedLaunches = 1,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BD11)
+    snippet OLD <<'EOF'
+        guard let reason = BackgroundDownloadDropReason(rawValue: rawReason) else {
+            return .failure(.unrecognizedReason)
+        }
+EOF
+    snippet NEW <<'EOF'
+        let reason = BackgroundDownloadDropReason(rawValue: rawReason) ?? .sessionNotVended
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BD12)
+    snippet OLD <<'EOF'
+            unrecognizedReasonRows: unrecognizedReason,
+EOF
+    snippet NEW <<'EOF'
+            unrecognizedReasonRows: 0,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BD13)
+    snippet OLD <<'EOF'
+            dropRecorder: AnalysisStoreBackgroundDownloadDropRecorder(
+                store: analysisStore
+            )
+EOF
+    snippet NEW <<'EOF'
+            dropRecorder: NoopBackgroundDownloadDropRecorder()
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BD14)
+    snippet OLD <<'EOF'
+        bind(stmt, 6, record.unattributedReason?.rawValue)
+EOF
+    snippet NEW <<'EOF'
+        bind(stmt, 6, nil as String?)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BD15)
+    snippet OLD <<'EOF'
+        bind(stmt, 7, record.isExplicitDownload ? 1 : 0)
+EOF
+    snippet NEW <<'EOF'
+        bind(stmt, 7, record.isExplicitDownload ? 0 : 1)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BD16)
+    snippet OLD <<'EOF'
+        let outcome = await dropRecorder.recordInstrumentArmed(
+            at: Date().timeIntervalSince1970
+        )
+EOF
+    snippet NEW <<'EOF'
+        let outcome = BackgroundDownloadDropWriteOutcome.landed
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BD17)
+    snippet OLD <<'EOF'
+            try await store.insertBackgroundDownloadDrop(record)
+            return .landed
+EOF
+    snippet NEW <<'EOF'
+            _ = try await store.fetchBackgroundDownloadDropArming()
+            return .landed
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BD18)
+    snippet OLD <<'EOF'
+        occurredAt: Double = Date().timeIntervalSince1970,
+        id: String = UUID().uuidString
+EOF
+    snippet NEW <<'EOF'
+        occurredAt: Double = Date().timeIntervalSince1970,
+        id: String = "background-download-drop"
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BD99)
+    snippet OLD <<'EOF'
+        boundSeconds: TimeInterval
+    ) async {
+        let outcome = await dropRecorder.recordDrop(
+            BackgroundDownloadDropRecord(
+                episodeId: episodeId,
+                reason: reason,
+                context: context,
+                boundSeconds: boundSeconds
+            )
+        )
+EOF
+    snippet NEW <<'EOF'
+        boundSeconds bound: TimeInterval
+    ) async {
+        let outcome = await dropRecorder.recordDrop(
+            BackgroundDownloadDropRecord(
+                episodeId: episodeId,
+                reason: reason,
+                context: context,
+                boundSeconds: bound
+            )
+        )
+EOF
+    # TWO PATCHES, and the second is why this control had to be repaired: R1
+    # added a SECOND use of `boundSeconds` in the invariant text below, far
+    # outside the region above. Renaming only the first left the helper
+    # referring to a binding that no longer exists, so the mutant did not
+    # COMPILE — and a control that cannot report SURVIVED proves nothing about
+    # the 40 rails that rest on it.
+    patch "$file" "$OLD" "$NEW" || return $?
+    snippet OLD <<'EOF'
+            + "bound=\(boundSeconds)s — the download was abandoned and \(detail)"
+EOF
+    snippet NEW <<'EOF'
+            + "bound=\(bound)s — the download was abandoned and \(detail)"
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BD19)
+    snippet OLD <<'EOF'
+            do {
+                try await store.noteBackgroundDownloadDropWriteFailure(
+                    at: Date().timeIntervalSince1970
+                )
+            } catch {
+                logger.error(
+                    "background download drop write-failure counter ALSO failed: \(String(describing: error), privacy: .public)"
+                )
+            }
+            return .writeFailed
+EOF
+    snippet NEW <<'EOF'
+            return .writeFailed
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BD20)
+    snippet OLD <<'EOF'
+            return .writeFailed
+        }
+    }
+
+    func recordInstrumentArmed(
+EOF
+    snippet NEW <<'EOF'
+            return .landed
+        }
+    }
+
+    func recordInstrumentArmed(
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BD21)
+    snippet OLD <<'EOF'
+            releaseInFlightReservationIfUnclaimed(episodeId: episodeId)
+            deleteDownloadAttribution(episodeId: episodeId)
+            logger.error(
+                "Background download for \(episodeId, privacy: .public) NOT started: the background transfer daemon would not open a session"
+            )
+EOF
+    snippet NEW <<'EOF'
+            await recordBackgroundDownloadDrop(
+                episodeId: episodeId,
+                reason: .sessionNotVended,
+                context: context,
+                boundSeconds: sessionCreationIO.timeout
+            )
+            releaseInFlightReservationIfUnclaimed(episodeId: episodeId)
+            deleteDownloadAttribution(episodeId: episodeId)
+            logger.error(
+                "Background download for \(episodeId, privacy: .public) NOT started: the background transfer daemon would not open a session"
+            )
+EOF
+    patch "$file" "$OLD" "$NEW" || return $?
+    snippet OLD <<'EOF'
+            // about the very quantity the widening decision reads.
+            await recordBackgroundDownloadDrop(
+                episodeId: episodeId,
+                reason: .sessionNotVended,
+                context: context,
+                boundSeconds: sessionCreationIO.timeout
+            )
+            return
+EOF
+    snippet NEW <<'EOF'
+            // about the very quantity the widening decision reads.
+            return
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BD22)
+    snippet OLD <<'EOF'
+            deleteDownloadAttribution(episodeId: episodeId)
+            logger.info("Cancelled download for \(episodeId)")
+EOF
+    snippet NEW <<'EOF'
+            deleteDownloadAttribution(episodeId: episodeId)
+            await recordBackgroundDownloadDrop(
+                episodeId: episodeId,
+                reason: .transferTaskNotVended,
+                context: DownloadContext(podcastId: "", isExplicitDownload: true),
+                boundSeconds: sessionIO.timeout
+            )
+            logger.info("Cancelled download for \(episodeId)")
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BD23)
+    snippet OLD <<'EOF'
+        logger.info("Queued background download for \(episodeId)")
+    }
+EOF
+    snippet NEW <<'EOF'
+        await recordBackgroundDownloadDrop(
+            episodeId: episodeId,
+            reason: .transferTaskNotVended,
+            context: context,
+            boundSeconds: sessionIO.timeout
+        )
+        logger.info("Queued background download for \(episodeId)")
+    }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BD24)
+    snippet OLD <<'EOF'
+        var unattributed: DownloadContext.UnattributedReason?
+        if let rawUnattributed = optionalText(stmt, 5) {
+            guard let decoded = DownloadContext.UnattributedReason(
+                rawValue: rawUnattributed
+            ) else {
+                return .failure(.unrecognizedUnattributedReason)
+            }
+            unattributed = decoded
+        }
+EOF
+    snippet NEW <<'EOF'
+        let unattributed = optionalText(stmt, 5).flatMap {
+            DownloadContext.UnattributedReason(rawValue: $0)
+        }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BD25)
+    snippet OLD <<'EOF'
+        bind(stmt, 4, record.occurredAt)
+EOF
+    snippet NEW <<'EOF'
+        bind(stmt, 4, 0.0)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BD26)
+    snippet OLD <<'EOF'
+            "\(Self.backgroundDownloadDropSelectColumns) ORDER BY occurredAt DESC LIMIT ?"
+EOF
+    snippet NEW <<'EOF'
+            "\(Self.backgroundDownloadDropSelectColumns) ORDER BY occurredAt ASC LIMIT ?"
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BD27)
+    snippet OLD <<'EOF'
+            if seen > ceiling {
+                truncated = true
+                break
+            }
+EOF
+    snippet NEW <<'EOF'
+            if seen > ceiling {
+                break
+            }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BD28)
+    snippet OLD <<'EOF'
+        guard try nextRow(stmt) else { return nil }
+        return BackgroundDownloadDropArming(
+EOF
+    snippet NEW <<'EOF'
+        guard try nextRow(stmt) else {
+            return BackgroundDownloadDropArming(
+                armedLaunches: 0,
+                dropWriteFailures: 0,
+                firstArmedAt: nil,
+                lastArmedAt: nil,
+                installedAt: 0
+            )
+        }
+        return BackgroundDownloadDropArming(
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BD29)
+    snippet OLD <<'EOF'
+    case sessionNotVended = "session_not_vended"
+EOF
+    snippet NEW <<'EOF'
+    case sessionNotVended = "sessionNotVended"
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BD30)
+    snippet OLD <<'EOF'
+                reason: .transferNotResumed,
+                context: context,
+                boundSeconds: sessionIO.timeout
+EOF
+    snippet NEW <<'EOF'
+                reason: .transferNotResumed,
+                context: context,
+                boundSeconds: sessionCreationIO.timeout
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BD31)
+    snippet OLD <<'EOF'
+    ) async -> BackgroundDownloadDropWriteOutcome { .notRecording }
+
+    /// Same, for the denominator.
+EOF
+    snippet NEW <<'EOF'
+    ) async -> BackgroundDownloadDropWriteOutcome { .landed }
+
+    /// Same, for the denominator.
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BD32)
+    snippet OLD <<'EOF'
+    func bootstrap() throws {
+        let fm = FileManager.default
+EOF
+    snippet NEW <<'EOF'
+    func bootstrap() async throws {
+        await dropRecorder.recordInstrumentArmed(at: Date().timeIntervalSince1970)
+        let fm = FileManager.default
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BD33)
+    snippet OLD <<'EOF'
+            let storeOutcome = await analysisStoreRecovery.openAtLaunch(analysisStore)
+            guard storeOutcome.isOpen else {
+                return  // Degraded launch: playback works, analysis does not.
+            }
+EOF
+    snippet NEW <<'EOF'
+            await downloadManager.armDropLedger()
+            let storeOutcome = await analysisStoreRecovery.openAtLaunch(analysisStore)
+            guard storeOutcome.isOpen else {
+                return  // Degraded launch: playback works, analysis does not.
+            }
+EOF
+    patch "$file" "$OLD" "$NEW" || return $?
+    snippet OLD <<'EOF'
+            // failures and decides whether to offer a rebuild.
+            await downloadManager.armDropLedger()
+EOF
+    snippet NEW <<'EOF'
+            // failures and decides whether to offer a rebuild.
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BD34)
+    snippet OLD <<'EOF'
+        try addColumnIfNeeded(
+            table: "background_download_drop_arming",
+            column: "dropWriteFailures",
+            definition: "INTEGER NOT NULL DEFAULT 0"
+        )
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BD35)
+    snippet OLD <<'EOF'
+            logger.error(
+                "background download drop instrument NOT armed: \(String(describing: error), privacy: .public)"
+            )
+            return .writeFailed
+EOF
+    snippet NEW <<'EOF'
+            logger.error(
+                "background download drop instrument NOT armed: \(String(describing: error), privacy: .public)"
+            )
+            return .landed
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BD36)
+    snippet OLD <<'EOF'
+        logger.error("Background download drop ledger NOT armed for this launch")
+        invariantRecorder?(
+            .backgroundDownloadDropNotRecorded,
+            "arming=failed — this launch had a live drop recorder and "
+            + "background_download_drop_arming.armedLaunches did not move, so "
+            + "any drop row it goes on to write has no launch in the denominator"
+        )
+EOF
+    snippet NEW <<'EOF'
+        logger.error("Background download drop ledger NOT armed for this launch")
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BD37)
+    snippet OLD <<'EOF'
+        let probe = ceiling >= Int(Int32.max) ? Int(Int32.max) : ceiling + 1
+EOF
+    snippet NEW <<'EOF'
+        let probe = ceiling
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BD38)
+    snippet OLD <<'EOF'
+        switch outcome {
+        case .landed, .notRecording:
+            return
+        case .writeFailed:
+            break
+        }
+EOF
+    snippet NEW <<'EOF'
+        switch outcome {
+        case .landed:
+            return
+        case .writeFailed, .notRecording:
+            break
+        }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # NOTE if this ever reports a LINT failure instead of a verdict: the mutant
+  # below is `identical_operands`, which is measured in `.swiftlint.yml` and
+  # named on CLAUDE.md's Tier D promotion shortlist. It is not in `only_rules`
+  # today, so the mutant compiles and lints clean. If that rule is promoted,
+  # `scripts/lint.sh --strict` runs before the build inside `fast-gate.sh` and
+  # this arm stops being killable — swap it for one that DELETES the guard.
+  BD39)
+    snippet OLD <<'EOF'
+        guard outcome != .landed else { return }
+EOF
+    snippet NEW <<'EOF'
+        guard outcome == outcome else { return }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BD40)
+    snippet OLD <<'EOF'
+                lastArmedAt = excluded.lastArmedAt
+EOF
+    snippet NEW <<'EOF'
+                lastArmedAt = CASE
+                    WHEN background_download_drop_arming.armedLaunches = 0
+                    THEN excluded.lastArmedAt
+                    ELSE background_download_drop_arming.lastArmedAt
+                END
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
 
   # ---- playhead-tktr / playhead-ph2d: the V60 recurrence-grade downgrade ----
 
@@ -26815,6 +27799,7 @@ rec_file()   {
     POLICY) printf '%s' "$POLICY" ;;
     SEGAGG) printf '%s' "$SEGAGG" ;;
     DLMGR) printf '%s' "$DLMGR" ;;
+    LEDGER) printf '%s' "$LEDGER" ;;
     FQSCAN) printf '%s' "$FQSCAN" ;;
     BGFEED) printf '%s' "$BGFEED" ;;
     EPPREP) printf '%s' "$EPPREP" ;;
