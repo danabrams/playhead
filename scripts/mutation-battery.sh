@@ -12933,7 +12933,7 @@ EOF
     snippet OLD <<'EOF'
         boundSeconds: TimeInterval
     ) async {
-        await dropRecorder.recordDrop(
+        let landed = await dropRecorder.recordDrop(
             BackgroundDownloadDropRecord(
                 episodeId: episodeId,
                 reason: reason,
@@ -12945,7 +12945,7 @@ EOF
     snippet NEW <<'EOF'
         boundSeconds bound: TimeInterval
     ) async {
-        await dropRecorder.recordDrop(
+        let landed = await dropRecorder.recordDrop(
             BackgroundDownloadDropRecord(
                 episodeId: episodeId,
                 reason: reason,
