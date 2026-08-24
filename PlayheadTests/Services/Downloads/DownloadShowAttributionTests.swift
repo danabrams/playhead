@@ -86,7 +86,7 @@ struct DownloadShowAttributionTests {
             """
             this manager is on the process-wide BackgroundSessionIO queue \
             (\(io.queueLabel)) — every assertion below is one parked \
-            downloadTask(with:) in an unrelated suite away from failing, \
+            downloadTask(with:) ANYWHERE IN THE PLAN away from failing, \
             which is what playhead-et2d fixed
             """,
             sourceLocation: sourceLocation
