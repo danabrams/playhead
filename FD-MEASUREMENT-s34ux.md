@@ -12,7 +12,7 @@ Measured 2026-08-24 by the orchestrator (the implementer agent was killed by
 five consecutive transient API 529s). Full-plan `scripts/fast-gate.sh` on
 `bead/playhead-s34ux` @ e77f42ac, using the fd probe committed in that commit.
 
-Raw series: `~/playhead-gate-artifacts/fd-series-s34ux.csv` (50 rows, 10 s interval)
+Raw series: `~/playhead-gate-artifacts/fd-series-s34ux.csv` (**49 samples**, 10 s interval)
 Full log:   `~/playhead-gate-artifacts/gate-s34ux-fdmeasure.log` (14.7 MB)
 
 ## The run
@@ -27,8 +27,8 @@ Full log:   `~/playhead-gate-artifacts/gate-s34ux-fdmeasure.log` (14.7 MB)
 | peak demand | 12.9 GiB of 16.0 GiB |
 | swap peak | 0.9 GiB |
 
-**Every one of the 63 recorded errors was the same failure**, and not one was a
-behavioural assertion:
+**Every one of the 63 recorded errors in THIS run was the same failure**, and in
+this run not one was a behavioural assertion:
 
     44 x Caught error: Migration failed: unable to open database file
     19 x Caught error: SQLite open failed (14): unable to open database file
@@ -41,16 +41,27 @@ By SQL statement: `PRAGMA journal_mode = WAL` x30, `BEGIN IMMEDIATE` x14.
 |---|---|---|---|
 | test-host open fds | **2,539** (2,536 vnode, 2 socket, 1 kqueue) | `kern.maxfilesperproc` 61,440 | **96 %** |
 | system-wide open files | 7,791 | `kern.maxfiles` 122,880 | 94 % |
-| disk free (min during run) | 25,302 MiB | 13.5 GiB preflight | comfortable |
+| disk free (min during run) | 25,302 MiB = **24.7 GiB** | 13.5 GiB preflight | comfortable |
 
-The fd count climbs monotonically 3 -> 2,539 across the test phase and falls to
-453 after it. That is a load curve, not an exhaustion cliff, and it peaks at
+The fd count climbs 3 -> 2,539 across the test phase and falls to 453 after it.
+That was read as a load curve rather than an exhaustion cliff, peaking at
 **4.1 %** of the per-process ceiling.
 
-**Stated caveat, because it is the one thing this cannot exclude:** the probe
-samples every 10 s, so a sub-10-second spike between samples is not ruled out.
-The shape argues against it — a smooth monotonic climb, no sawtooth — but the
-honest claim is "not supported at 10 s resolution", not "impossible".
+**Two things in that sentence are wrong and are corrected below:** the climb is
+NOT monotonic (the series has seven descents), and 4.1 % is against the wrong
+denominator. Post-correction the same shape reads the other way round — 2,539 ->
+966 in ten seconds is a COLLAPSE after the ceiling was hit, which is what a
+descriptor table does when the tests holding it finish.
+
+**A caveat was stated here and it was FALSE, and its falseness is the same
+defect one layer along.** It read: *"the probe samples every 10 s, so a
+sub-10-second spike between samples is not ruled out ... the honest claim is
+'not supported at 10 s resolution'."* There was a **2-second in-process probe
+running in the same run, writing to the same log**, and it is the instrument
+that caught `maxfd = 2559`. The document stated a resolution limit that a better
+instrument in the same evidence had already beaten. Same shape as the
+denominator error: reach for the figure that is easy to quote instead of the one
+that settles it, and never check whether the evidence already answers it.
 
 ## Two measurement traps found while building the probe (both the standing defect class)
 
@@ -73,9 +84,16 @@ too high and one that never comes back down.
 |---|---|---|---|
 | 2026-08-23 | `7dgx` branch | 7 | AdWindowIngestAudit, AdPodContinuationDayZeroSeed, SupportLineLocalisation |
 | 2026-08-23 | **main, diff absent** | 8 | ManualVetoReachesPersistedAnalysis x4, AdWindowIngestAudit x3, BackgroundProcessingService |
-| 2026-08-24 | `s34ux` @ e77f42ac | 56 | SuggestBannerEntryGate 11, UnresolvedShowIdentity 9, AnalysisPipelineStallRegression 9, AnalysisWorkSchedulerLaneGate 8 |
+| 2026-08-24 | `s34ux` @ e77f42ac | 56 | SuggestBannerEntryGate 11, UnresolvedShowIdentity 9, AnalysisWorkSchedulerLaneGate 8, AnalysisPipelineStallRegression **7** |
 
-Near-disjoint each time. Note also the COUNT is not stable: 7, 8, 56.
+**EXACTLY disjoint each time** — re-derived at audit, the three NEW sets share
+**zero** names across all three pairs, so "near-disjoint" understated it. The
+COUNT is not stable either: 7, 8, 56.
+
+Two corrections to that table's last row, both found by counting rather than
+skimming: `AnalysisPipelineStallRegression` is **7** NEW failures, not 9 (9 is
+its ISSUE-LINE count — a parameterised test records one line per argument set),
+and the row was ordered as though 9 outranked 8.
 
 ## THE NEXT HYPOTHESIS, stated as a lead and NOT as a finding
 
@@ -387,3 +405,57 @@ be stated rather than discovered.
 descriptors at the moment it was raised* is self-classifying, and the process
 can read its own count in microseconds. Nobody has built that and it is not in
 this bead.
+
+
+---
+
+# Corrections applied after audit, each with its witness
+
+An independent audit re-derived every number in this file. Nine were wrong.
+They are corrected in place above **and listed here**, because this bead's whole
+subject is a gate that told a reader something untrue, and a document that
+quietly fixes itself is the same failure in a smaller font.
+
+| # | claim as published | corrected | witness |
+|---|---|---|---|
+| 1 | rails "44 new, 32 fail against the shipped parser, 8 guards" | **70 new (323 total), 55 fail, 15 guards** | pre-bead `gate_baseline.py` restored into a scratch `scripts/`: `Ran 323`, 32 errors + 23 failures. `32 + 8` never equalled 44 either — the counts had grown twice under a sentence nobody re-derived |
+| 2 | the run's verdict `RED (0 known / 56 NEW)` | **`RED (1 known / 56 NEW)`** | the run's own line in `gate-s34ux-fdmeasure.log` |
+| 3 | disk min "25.3 GiB" | **24.7 GiB** | 25,302 MiB ÷ **1024**. It had been divided by 1000 |
+| 4 | "climbs **monotonically**" | **7 descents** in the series | recomputed off the CSV |
+| 5 | "a load curve, not an exhaustion cliff" | a **collapse after the ceiling** — 2,539 → 966 in ten seconds | the same CSV, read with the right denominator |
+| 6 | "50 rows" | **49 samples** | `csv.DictReader` over the file: a header line is not a sample |
+| 7 | "not one behavioural assertion" (of the population) | true of the s34ux run; **false of the main run**, which had exactly one | `Expectation failed: task.completedSuccess == false`, and it is the very failure the `0 known / 1 NEW` demonstration turns on — the sentence contradicted the evidence two sections below it |
+| 8 | "`AnalysisPipelineStallRegression` 9" | **7** NEW failures | 9 is the issue-LINE count; a parameterised test records one per argument set |
+| 9 | mutants "RD01–RD21" | **not contiguous**: no RD04, plus RD10b and RD10c — **22** mutants | `grep -o '"RD[0-9a-z]*"'` over the battery |
+
+And two corrections in the other direction, where the audit found the argument
+weaker than it needed to be:
+
+- **Prefer the external 2,539 over the lowest-available argument.** That figure
+  is a kernel-side `PROC_PIDLISTFDS` snapshot, so **99.18 % needs no inference
+  at all** — 21 descriptors of headroom, read directly. The `maxfd = soft − 1`
+  reasoning is still true and still worth keeping as the independent second
+  witness, but it is no longer load-bearing.
+- **The timing is tighter than claimed.** All 63 denials fall in
+  **02:43:20–02:43:23**, and the `maxfd = 2559` sample is at **02:43:20 — the
+  same second the burst starts**, not somewhere inside a 10-second gap.
+
+## The caveat this file owes, and did not state
+
+**There is no `EMFILE` anywhere in the log** — no "Too many open files", no
+`Code=24`, no `Code=23`. The exhaustion is established by ARITHMETIC (2,539
+against a 2,560 soft limit, `maxfd` at 2,559) and by the platform measurement
+that `open(2)` reports errno **9** at this ceiling. It is not read off an errno
+that says "too many open files", because this kernel never emits one here. State
+that plainly, or the next reader refutes the whole file with one `grep`.
+
+## The class these corrections belong to
+
+Seven of the nine are one habit: **quoting a figure that was easy to reach for
+without asking what it is a count OF**. `kern.maxfilesperproc` instead of the
+limit that binds. Issue lines instead of failures. Rows instead of samples. MiB
+÷ 1000. A rail count from two edits ago. And the 10-second caveat — a stated
+limit of one instrument while a better instrument in the same run had already
+beaten it — which is the same move applied to the evidence rather than to a
+number. **Name the numerator and the denominator, then ask whether something in
+the same evidence already answers the question better.**
