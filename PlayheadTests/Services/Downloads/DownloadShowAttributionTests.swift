@@ -19,21 +19,25 @@
 // which injects `unsharedSessionIO()` and asserts the queue it got is not the
 // shared one. The reason is one measurement rather than tidiness. The default
 // `BackgroundSessionIO.shared` is a process-wide singleton with ONE serial
-// queue; on the full-plan run of 2026-08-23 08:06 a single parked
-// `downloadTask(with:)` held that queue for 65 seconds, twelve submissions
-// across four suites arrived on one thread afterwards logging "reached the
-// daemon queue after its caller had already given up — not started", and all
-// seven tests in this file that build a manager failed together. They failed
-// as ASSERTIONS, which is why the seven baseline entries were recorded that
-// way, and why the recorded KIND said nothing about the cause: every refusal
-// branch in `backgroundDownload` DELETES the attribution sidecar, so this
-// suite reads a missing show and blames the code that writes it.
+// queue. On the full-plan run of 2026-08-23 08:06 THIS SUITE'S OWN
+// `downloadTask(with:) for kkzu-cleared` parked inside `nsurlsessiond` and
+// held that queue for 65 seconds; seventeen later submissions — twelve
+// distinct transfers across THREE suites (this one, `StreamingDownloadTests`,
+// `ForceQuitResumeTests`) — then arrived on one thread, microseconds apart, in
+// submission order, logging "reached the daemon queue after its caller had
+// already given up — not started". All seven tests in this file that build a
+// manager failed together. They failed as ASSERTIONS, which is why the seven
+// baseline entries were recorded that way, and why the recorded KIND said
+// nothing about the cause: every refusal branch in `backgroundDownload`
+// DELETES the attribution sidecar, so this suite reads a missing show and
+// blames the code that writes it.
 //
 // The helper keeps the real daemon and the production bound and changes only
 // the queue label — see `unsharedSessionIO` for what that does and does not
-// claim. `.neverAnswers` (playhead-7wia's fix for the other three victims)
-// cannot be used here: these tests need a genuinely ADMITTED transfer,
-// because the sidecar they assert on is what a refusal destroys.
+// claim; in particular it does NOT make a call immune to a slow daemon.
+// `.neverAnswers` (playhead-7wia's fix for the other three victims) cannot be
+// used here: these tests need a genuinely ADMITTED transfer, because the
+// sidecar they assert on is what a refusal destroys.
 
 import Foundation
 import Testing
@@ -55,6 +59,15 @@ struct DownloadShowAttributionTests {
     /// only under a full plan's own concurrency, and only when some OTHER
     /// suite parks the daemon — is the most expensive kind to diagnose: it
     /// reads as this file's defect and it is not.
+    ///
+    /// WHAT IT CANNOT SEE, so a green run is read for what it is worth. It
+    /// checks ONE label against ONE constant, so it says nothing about (a) a
+    /// `DownloadManager` built anywhere in this file WITHOUT this helper —
+    /// nothing enforces that route; (b) a custom label that is nevertheless
+    /// SHARED between managers, which `unsharedSessionIO`'s `UUID` rules out
+    /// today but this assertion would not notice; or (c) two calls made
+    /// through ONE manager, which share that manager's single queue by
+    /// construction and are unaffected by any of this.
     ///
     /// `#function` is evaluated at the CALL SITE, so each manager's queue is
     /// still labelled with the test that built it.
@@ -183,44 +196,51 @@ struct DownloadShowAttributionTests {
         )
         #expect(attributedJob?.podcastId?.isEmpty == false)
 
-        // Contrast arm, same harness: an UNATTRIBUTED download still
-        // enqueues, and still records no show. Without this the rail above
-        // could pass on a harness that hard-codes a podcastId somewhere.
+        // Contrast arm, same harness: an UNATTRIBUTED context still enqueues,
+        // and still records no show. Without this the rail above could pass on
+        // a harness that hard-codes a podcastId somewhere.
+        //
+        // playhead-et2d: THE SIDECAR IS WRITTEN DIRECTLY, not through
+        // `backgroundDownload`, and this arm is the only one in the file that
+        // needs that. `forceQuitResumeRecoversTheShow` below already uses the
+        // idiom; here the reason is that this arm ASSERTS AN ABSENCE and a
+        // refused transfer produces the same absence. All three no-answer
+        // branches of `backgroundDownload` delete the sidecar, and a completion
+        // that finds none defaults to `.unattributed(.resumeWithoutRecordedShow)`
+        // — byte-identical to the context this arm passes. So
+        // `unattributedJob?.podcastId == nil` reads the same whether the
+        // download was admitted or never started: this repo's standing defect
+        // class sitting inside the assertion.
+        //
+        // MEASURED, which is why the arm was moved off the daemon rather than
+        // given a witness: over the 57 de-duplicated full-plan logs of
+        // 2026-08-13 … 08-24, `Background download for kkzu-unattributed NOT
+        // started: the background transfer daemon did not answer` appears in
+        // 54, and `Queued background download for kkzu-unattributed` in 3. It
+        // WAS the eighth and last `downloadTask(with:)` this suite issued,
+        // ~1.3 s after the other seven, by which time seven live transfers to a
+        // non-resolving host had `nsurlsessiond` busy — those seven are queued
+        // successfully in 56 of the 57. A private queue does not change that
+        // (see `unsharedSessionIO`), so a witness here would have failed 54
+        // runs out of 57. Written directly, the record is present by
+        // construction, the assertion below is sensitive to the CONTEXT, and
+        // the suite stops issuing the one call that stalls every merge gate.
         let unattributed = "kkzu-unattributed"
-        await manager.backgroundDownload(
+        await manager.persistDownloadAttribution(
             episodeId: unattributed,
-            from: URL(string: "https://cdn.example.com/\(unattributed).mp3")!,
             context: .unattributed(
                 reason: .resumeWithoutRecordedShow,
                 isExplicitDownload: false
             )
         )
-        // playhead-et2d: THE ONLY ARM IN THIS SUITE THAT A REFUSED TRANSFER
-        // CANNOT REACH, so it is the only one that needs this line.
-        //
-        // Every other test here asserts a podcastId, and a refusal is visible
-        // to all of them: `backgroundDownload` releases the reservation and
-        // DELETES the sidecar on both of its no-answer paths, so the show goes
-        // missing. This arm asserts the ABSENCE of a show — and a refused
-        // transfer produces exactly that absence, from a sidecar that was
-        // deleted rather than one that recorded a null identity. `#expect(
-        // unattributedJob?.podcastId == nil)` therefore reads the same whether
-        // the download was admitted or never started, which is this repo's
-        // standing defect class sitting inside the assertion: a value that
-        // names one thing read as though it named another.
-        //
-        // NOT HYPOTHETICAL. `downloadTask(with:) for kkzu-unattributed … did
-        // not answer within 10.000000s` appears in 56 of the 57 preserved
-        // full-plan logs, and this test PASSED on every one of them. The
-        // sidecar is written for an unattributed context too (podcastId nil,
-        // reason recorded), so its presence here is the positive witness that
-        // the transfer was genuinely admitted.
         #expect(
             await manager.loadDownloadAttribution(episodeId: unattributed)
                 != nil,
-            "the contrast arm's transfer was refused, not queued — its \
-            podcastId == nil below would be reporting the refusal rather \
-            than the unattributed context"
+            """
+            no unattributed record reached the completion — its \
+            podcastId == nil below would be reporting a MISSING sidecar \
+            rather than a recorded absence of a show
+            """
         )
         let unattributedJob = try await completeBackgroundDownload(
             manager: manager, store: store,
