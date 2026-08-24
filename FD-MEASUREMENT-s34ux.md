@@ -418,12 +418,12 @@ quietly fixes itself is the same failure in a smaller font.
 
 | # | claim as published | corrected | witness |
 |---|---|---|---|
-| 1 | rails "44 new, 32 fail against the shipped parser, 8 guards" | **70 new (323 total), 55 fail, 15 guards** | pre-bead `gate_baseline.py` restored into a scratch `scripts/`: `Ran 323`, 32 errors + 23 failures. `32 + 8` never equalled 44 either — the counts had grown twice under a sentence nobody re-derived |
+| 1 | rails "44 new, 32 fail against the shipped parser, 8 guards" | **70 new (323 total), 55 fail, 15 guards — AGAINST THE PRE-BEAD BASELINE `105efd5f`** | pre-bead `gate_baseline.py` restored into a scratch `scripts/`: `Ran 323`, 32 errors + 23 failures. `32 + 8` never equalled 44 either — the counts had grown twice under a sentence nobody re-derived |
 | 2 | the run's verdict `RED (0 known / 56 NEW)` | **`RED (1 known / 56 NEW)`** | the run's own line in `gate-s34ux-fdmeasure.log` |
 | 3 | disk min "25.3 GiB" | **24.7 GiB** | 25,302 MiB ÷ **1024**. It had been divided by 1000 |
 | 4 | "climbs **monotonically**" | **2 descents in the climb**, both tiny (25→23, 1783→1779) | recomputed off the CSV — **and my first correction of this said 7, which was also wrong**: it counted the `-1` sentinel rows written before the test host existed as though they were readings. A sentinel is not a measurement. Over the 46 valid samples there are 6 descents, 4 of which are the post-peak collapse. The auditor's "two dips" was right and my correction over-shot it |
 | 5 | "a load curve, not an exhaustion cliff" | a **collapse after the ceiling** — 2,539 → 966 in ten seconds | the same CSV, read with the right denominator |
-| 6 | "50 rows" | **49 samples** | `csv.DictReader` over the file: a header line is not a sample |
+| 6 | "50 rows" | **49 data rows, of which only 46 carry an fd measurement** | `csv.DictReader` over the file: a header line is not a sample, and the first three rows carry the `-1` NOT-RECORDED sentinel because the test host did not exist yet. The file holds two series and the number has to say which one it is about |
 | 7 | "not one behavioural assertion" (of the population) | true of the s34ux run; **false of the main run**, which had exactly one | `Expectation failed: task.completedSuccess == false`, and it is the very failure the `0 known / 1 NEW` demonstration turns on — the sentence contradicted the evidence two sections below it |
 | 8 | "`AnalysisPipelineStallRegression` 9" | **7** NEW failures | 9 is the issue-LINE count; a parameterised test records one per argument set |
 | 9 | mutants "RD01–RD21" | **not contiguous**: no RD04, plus RD10b and RD10c — **22** mutants | `grep -o '"RD[0-9a-z]*"'` over the battery |
@@ -543,3 +543,20 @@ because the bead's remaining budget is owed to the gate's honesty, and it is
 recorded on `playhead-vk68m` as the concrete next step — it is the cheapest
 unexplored lead in the whole picture, and unlike the rest of it, it may well be
 a genuine leak with a genuine fix.
+
+
+## Say which baseline a rail split is measured against
+
+Two different denominators answer two different questions, and quoting either
+without naming it is the same habit as the rest of this file's corrections:
+
+| against | new rails | fail | pass both ways |
+|---|---|---|---|
+| **`105efd5f`, the pre-bead parser** — "how much of this bead's behaviour is load-bearing" | 70 | **55** | 15 |
+| **`f12cc592`, pre-review-round-1** — "how much of it did the REVIEW round add" | 26 | **13** | 57 |
+
+The first is the number to quote for the change as a whole. The second is the
+number to quote for what adversarial review bought, and it is the more
+interesting one: **review round 1 added 26 rails, removed none, and 13 of them
+fail against the code as it stood before that round** — i.e. half of what the
+reviewer wrote was pinning behaviour that did not yet exist or was wrong.
