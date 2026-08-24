@@ -981,6 +981,14 @@ func makeShard(
 ///     downloadTask(with:) for ep-stage-failure  … did not answer within 10s
 ///     downloadTask(with:) for kkzu-unattributed … did not answer within 10s
 ///
+/// READ "ALWAYS THE SAME FOUR" AS DATED (playhead-et2d). It holds for the
+/// SEVEN pre-7wia logs of the 57-log window measured below, and for none of
+/// the 44 after it. `kkzu-unattributed` no longer issues a
+/// `downloadTask(with:)` at all, and `DownloadShowAttributionTests`' other
+/// seven — which were on this queue the whole time and are absent from the
+/// list because they were being QUEUED rather than expiring — are on private
+/// queues now. See ``unsharedSessionIO`` below.
+///
 /// and then, 50–63 SECONDS LATER, three of the four arrive on one thread
 /// microseconds apart, in submission order:
 ///
@@ -1052,6 +1060,36 @@ func daemonSilentSessionIO(
 /// `DownloadShowAttributionTests` that construct a manager failed, every one of
 /// them an `Expectation failed:` on the attribution sidecar the refusal had
 /// just deleted.
+///
+/// THE BENEFIT POINTS OUTWARD, AND THAT IS THE OPPOSITE OF HOW IT READS.
+/// The parked call was this suite's OWN, so what a private queue takes away on
+/// that run is this suite's ability to refuse OTHER people's transfers. The
+/// run failed ELEVEN tests, not seven: four of them are
+/// `StreamingDownloadTests` (`ambiguous-legacy-siblings`,
+/// `incomplete-background-retry`) and `ForceQuitResumeTests` (`ep-res`,
+/// `ep-fresh`, `ep-rotated`), five transfers whose bodies never ran at all —
+/// an "already given up" line each — and those four are the ones a private
+/// queue would have saved outright.
+///
+/// ITS OWN SEVEN ARE THE ONES IT PROBABLY WOULD NOT HAVE, and the same log
+/// says so. In the same window FOURTEEN `allTasks` calls, already on private
+/// per-manager queues, blew the same 10 s bound with their bodies having RUN,
+/// and the whole 14 MB log carries exactly ONE `Queued background download`
+/// line. `nsurlsessiond` was answering nobody, and no dispatch queue is a
+/// remedy for that. So do not read a green `DownloadShowAttributionTests` as
+/// evidence that this helper worked; read it as evidence the daemon answered.
+///
+/// HOW OFTEN, over the same 57: 47 of them carry exactly ONE "already given
+/// up" line and it is `BackgroundSessionIOTests`' own 0.2 s `starved:` probe.
+/// Genuine head-of-line blocking appears in 7 logs BEFORE playhead-7wia landed
+/// (2026-08-18 23:00) and in ONE of the 44 after it — this one. Nor is the
+/// hazard cleared: about 121 of the 145 `DownloadManager(` constructions in
+/// `PlayheadTests` still take the default `.shared`, so the queue keeps every
+/// other participant it had. This suite stops being one of them. That is the
+/// whole of what changed, and it is worth having for its own sake — a suite
+/// that cannot park a process-wide queue cannot cost eleven tests in three
+/// files again — but it is not a reason to expect these seven tests to stop
+/// failing.
 ///
 /// WHAT A PRIVATE QUEUE REMOVES IS THE CROSS-SUITE AMPLIFICATION, AND ONLY
 /// THAT. One parked call can no longer refuse twelve transfers it has nothing

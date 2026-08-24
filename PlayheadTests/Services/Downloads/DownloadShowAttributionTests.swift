@@ -26,11 +26,21 @@
 // `ForceQuitResumeTests`) — then arrived on one thread, microseconds apart, in
 // submission order, logging "reached the daemon queue after its caller had
 // already given up — not started". All seven tests in this file that build a
-// manager failed together. They failed as ASSERTIONS, which is why the seven
-// baseline entries were recorded that way, and why the recorded KIND said
-// nothing about the cause: every refusal branch in `backgroundDownload`
-// DELETES the attribution sidecar, so this suite reads a missing show and
-// blames the code that writes it.
+// manager failed together — and so did four more in `StreamingDownloadTests`
+// and `ForceQuitResumeTests`, whose five transfers this suite's park had
+// refused. They failed as ASSERTIONS, which is why the seven baseline entries
+// were recorded that way, and why the recorded KIND said nothing about the
+// cause: every refusal branch in `backgroundDownload` DELETES the attribution
+// sidecar, so this suite reads a missing show and blames the code that writes
+// it.
+//
+// READ THE BENEFIT AS OUTWARD. The four in the other two files are the ones a
+// private queue would have saved; these seven probably not, because the same
+// log has fourteen `allTasks` calls blowing the same 10 s bound on queues that
+// were ALREADY private and exactly one `Queued background download` line in
+// 14 MB. Genuine head-of-line blocking appears in ONE of the 44 qualifying
+// full-plan logs since playhead-7wia landed. See `unsharedSessionIO` for the
+// numbers and for what this does not buy.
 //
 // The helper keeps the real daemon and the production bound and changes only
 // the queue label — see `unsharedSessionIO` for what that does and does not
@@ -85,9 +95,12 @@ struct DownloadShowAttributionTests {
             io.queueLabel != BackgroundSessionIO.defaultQueueLabel,
             """
             this manager is on the process-wide BackgroundSessionIO queue \
-            (\(io.queueLabel)) — every assertion below is one parked \
-            downloadTask(with:) ANYWHERE IN THE PLAN away from failing, \
-            which is what playhead-et2d fixed
+            (\(io.queueLabel)) — so its downloadTask(with:) can be refused by \
+            any parked call in the plan AND can itself park that queue for \
+            every other suite on it, which is the coupling playhead-et2d \
+            removed. Measured, the second direction is the one that bit: on \
+            2026-08-23 08:06 this suite's own kkzu-cleared held the queue 65 s \
+            and eleven tests in three files failed
             """,
             sourceLocation: sourceLocation
         )
