@@ -1034,9 +1034,13 @@ func daemonSilentSessionIO(
 /// defaulted so nobody can read this helper as a widened bound — widening is
 /// what playhead-nsjn / playhead-gpdb / playhead-ola7 own, and 7wia measured
 /// that at 60 s these calls are still queued, so a wider bound trades an
-/// assertion failure for a timeout. The ONLY difference from
-/// `BackgroundSessionIO.shared` is `queueLabel`: which serial queue the call
-/// is submitted to.
+/// assertion failure for a timeout. `makeManager` PINS `io.timeout` at the
+/// call site (review r3, mutant E11), because until then both headers asserted
+/// the bound and nothing enforced it; `behavior` is not pinnable —
+/// ``BackgroundSessionIO/Behavior`` is not `Equatable` and the only separating
+/// observation is a `perform`, i.e. a real daemon call — so mutant E3 measures
+/// it instead. The ONLY difference from `BackgroundSessionIO.shared` is
+/// `queueLabel`: which serial queue the call is submitted to.
 ///
 /// `.shared` is a process-wide singleton with ONE serial queue, and every
 /// `DownloadManager` that does not inject submits `downloadTask(with:)`,
