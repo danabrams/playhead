@@ -1,4 +1,12 @@
-# playhead-s34ux: the fd-exhaustion hypothesis is REFUTED by measurement
+# playhead-s34ux: fd exhaustion — REFUTED, then CONFIRMED by the same run's own log
+
+> **THE HEADLINE BELOW WAS WRONG AND IS CORRECTED AT THE BOTTOM OF THIS FILE.**
+> The measurement was right; the DENOMINATOR was not. `kern.maxfilesperproc`
+> (61,440) is not the limit that binds — the test host's own `RLIMIT_NOFILE`
+> **soft limit is 2,560**, which the same run printed on its own line, and the
+> peak of 2,539 is **99.2 % of it, not 4.1 %**. Read
+> [the correction](#the-correction-fd-exhaustion-is-confirmed) first; everything
+> above it is kept verbatim as the record of how the reading went wrong.
 
 Measured 2026-08-24 by the orchestrator (the implementer agent was killed by
 five consecutive transient API 529s). Full-plan `scripts/fast-gate.sh` on
@@ -187,3 +195,89 @@ making the gate honest.
   to match that one phrase as prose rather than as an errno.
 * **`playhead-5c006`** — mutant `R21` survives, and survives on `105efd5f` too.
   Pre-existing coverage hole in the gate's own rails, filed not fixed.
+
+
+---
+
+## THE CORRECTION: fd exhaustion is CONFIRMED
+
+Found 2026-08-24 by grepping this bead's own run log for the probe's first line.
+It had been there all along.
+
+    [s34ux-fd] pid=10985 getrlimit_rc=0 RLIMIT_NOFILE soft=2560
+               hard=9223372036854775807 scanCap=70000
+
+**`RLIMIT_NOFILE` soft = 2,560.** That is the number that binds, and it is what
+the bead brief asked for in the same breath as the sysctl: *"also check the
+host's own soft/hard `RLIMIT_NOFILE`, which is what actually binds and is
+usually far lower than the sysctl."* It is 24× lower.
+
+| | peak | limit | share |
+|---|---|---|---|
+| the reading above | 2,539 | `kern.maxfilesperproc` 61,440 | 4.1 % — "vast headroom" |
+| **the reading that binds** | **2,539** | **`RLIMIT_NOFILE` soft 2,560** | **99.2 % — at the ceiling** |
+
+Same numerator. Two denominators. Opposite conclusions. This is the standing
+defect class — a value that names one thing read as though it named another —
+committed by the instrument built to catch it, for the second time in this
+bead's own history.
+
+### The saturation is not inferred from the count. It is stated by the fd NUMBER.
+
+The probe records the highest descriptor the process was ever handed:
+
+    maxfd = 2559 = soft - 1
+
+`open()` returns the **lowest available** descriptor. To be handed 2559, every
+descriptor from 0 to 2558 must have been in use at that instant — the table was
+**completely full**, and the next `open()` had nothing left to return but
+`EMFILE`. That is a stronger claim than any count, and it does not depend on the
+count being accurate.
+
+**Which matters, because the count is NOT accurate here and says so.** The
+in-process probe's own peak count is 2,079 while its `maxfd` is 2,559: the scan
+walks fd 0 → 70,000 with `fcntl(F_GETFD)` and is not atomic, so ~480 descriptors
+were closed by other threads while it was still walking. A count taken over a
+churning table under-reads it. `maxfd` is the durable witness; the count is a
+lower bound.
+
+### The timing, from two independent instruments
+
+| | |
+|---|---|
+| external sampler peak (`proc_pidinfo`, 10 s) | **02:43:17** — fds 2,539, maxfd 2,559, elapsed 251.6 s |
+| in-process probe (`fcntl` scan, 2 s) | **t = 71 s** — fds 2,079, **maxfd 2,559** |
+| **the `CANTOPEN` burst** | **02:43:20 – 02:43:24** — all 63 denials, a 4-second window in a 7.5-minute run |
+| next external sample | 02:43:27 — fds **966**, i.e. −62 % in ten seconds |
+
+The two clocks reconcile: the sampler reads elapsed 251.6 s at 02:43:17 and the
+probe reads t = 71 s at the same saturation, which puts the test phase's start
+~180 s into the run — consistent with the build. **Both instruments put the
+table's saturation in the three seconds before the denials begin.**
+
+### What this does and does not establish
+
+- **Establishes:** the test host really does exhaust its descriptor table, and
+  `SQLITE_CANTOPEN` and the `EBADF` source-file read are what that looks like
+  from above. The `TestScratchReaper` refutation above still stands and is now
+  simply beside the point.
+- **Does NOT establish:** *what holds 2,560 descriptors.* Swift Testing starts
+  essentially every test at once (CLAUDE.md: 11,000–11,400 in flight) and a
+  WAL-mode SQLite store costs three descriptors — db, `-wal`, `-shm`. 11,000
+  tests cannot share 2,560 descriptors under any allocation, so the population
+  is bounded only by how fast stores are RELEASED. Whether that is a leak or
+  simply the shape of the plan is the open question, and it is
+  **`playhead-vk68m`**.
+- **RAISING THE LIMIT IS NOT A FIX** and must not be presented as one. It is
+  recorded here only because the number is now known: soft 2,560, hard
+  unlimited, so the ceiling is a soft limit the harness could raise. That would
+  move the cliff, not remove it.
+
+### Why the first reading survived scrutiny for a whole day
+
+Because every quantity in it was correct. The series was real, the sampling was
+sound, both measurement traps it documents are genuine, and the conclusion was
+still wrong — the error was one denominator, chosen by reaching for the number
+that was easy to read from outside the process instead of the number that binds
+inside it. The line that settles it was printed by this bead's own probe, in the
+log the whole time, and no one grepped for it.
