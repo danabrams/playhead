@@ -1475,34 +1475,39 @@ MUTATIONS = [
     ),
     (
         "RD06", GB,
-        "the BUNDLE unanimity rule becomes a search: an unrecognised message "
-        "is skipped instead of vetoing, so a real assertion is swallowed. "
-        "MOVED at playhead-s34ux R1: it used to mutate the direct-children "
-        "loop, and once that loop stopped vetoing — the veto is one rule in "
-        "one place now, and the sweep reads the direct children too — the old "
-        "position was a PROVEN EQUIVALENT and survived. Repointed at the live "
-        "veto rather than excused, the RD14 treatment",
-        """        if resource_cause((child.get("name") or "").strip()) is None:
+        "the unanimity VETO becomes a search: an unrecognised message is "
+        "skipped instead of vetoing, so a real assertion beside a denial is "
+        "swallowed. RE-ANCHORED TWICE. It first mutated the direct-children "
+        "loop; review round 1 moved the veto out of that loop and the old "
+        "position became a PROVEN EQUIVALENT, so it was repointed at the sweep. "
+        "The parameterised-test fix then merged classification and veto into "
+        "ONE walk, which is where it lives now — and where the property has "
+        "been the whole time",
+        """        cause = resource_cause(message)
+        if cause is None:
             return None
-    return found""",
-        """        if resource_cause((child.get("name") or "").strip()) is None:
+        if found is None:""",
+        """        cause = resource_cause(message)
+        if cause is None:
             continue
-    return found""",
+        if found is None:""",
         [DB + "test_a_failed_case_with_a_real_assertion_alongside_stays_a_failure",
          DD + "test_a_NESTED_assertion_vetoes_a_denial"],
     ),
     (
         "RD07", GB,
-        "a FAILED case with NO messages is classified from SILENCE — exactly "
-        "the inference playhead-t53a removed one category along",
-        """    if found is None:
-        # A FAILED case with no message naming a denied resource says nothing
-        # this category may act on, and silence is never routed here. It stays
-        # a FAILURE.
-        return None""",
-        """    if found is None:
-        return ("resource failure", "")""",
-        [DB + "test_a_failed_case_with_NO_messages_stays_a_failure"],
+        "a FAILED case with NO message at any depth is classified from "
+        "SILENCE — exactly the inference playhead-t53a removed one category "
+        "along, and the one this category refuses to make. ABSORBS the "
+        "short-lived RD44, which was the identical edit written against the "
+        "same line before these anchors were reconciled: two mutants with one "
+        "edit is a duplicate, not two rails",
+        """    # A FAILED case with no message anywhere beneath it says nothing this
+    # category may act on, and silence is never routed here. It stays a FAILURE.
+    return found""",
+        """    return found or ("resource failure", "")""",
+        [DB + "test_a_failed_case_with_NO_messages_stays_a_failure",
+         DNV + "test_a_message_less_FAILURE_is_still_never_classified"],
     ),
     (
         "RD08", GB,
@@ -1834,39 +1839,37 @@ MUTATIONS = [
     ),
     (
         "RD36", GB,
-        "the unanimity veto stops reaching descendants, so a nested genuine "
-        "assertion beside a denial leaves the NEW column silently",
-        '''    stack = list(node.get("children") or [])
+        "the walk stops DESCENDING, so it reads direct children only. That "
+        "breaks the veto (a nested assertion beside a denial no longer stops "
+        "the classification) AND the classification (a PARAMETERISED test's "
+        "failure lives under `Arguments`, so it becomes invisible again — the "
+        "defect the merge gate caught, 5 of 5 parameterised denials reported "
+        "as NEW while 10 of 10 flat ones classified). ABSORBS the short-lived "
+        "RD43, the identical edit",
+        """    stack = list(node.get("children") or [])
     while stack:
         child = stack.pop()
-        stack.extend(child.get("children") or [])
-        if child.get("nodeType") != _NODE_FAILURE_MESSAGE:
-            continue
-        if resource_cause((child.get("name") or "").strip()) is None:
-            return None
-    return found''',
-        "    return found",
-        [DD + "test_a_NESTED_assertion_vetoes_a_denial"],
+        stack.extend(child.get("children") or [])""",
+        """    stack = list(node.get("children") or [])
+    while stack:
+        child = stack.pop()""",
+        [DD + "test_a_NESTED_assertion_vetoes_a_denial",
+         DNV + "test_a_NESTED_denial_with_no_direct_message_IS_classified",
+         DNV + "test_the_real_PARAMETERISED_shape_from_a_captured_bundle"],
     ),
-    (
-        "RD37", GB,
-        "the descendant sweep starts CLASSIFYING as well as vetoing, so a "
-        "nested denial promotes a test whose own node said nothing — the "
-        "quiet direction, and the mirror of RD36",
-        '''        if cause is not None and found is None:
-            found = (cause, message)
-    if found is None:''',
-        '''        if cause is not None and found is None:
-            found = (cause, message)
-    for child in node.get("children") or []:
-        for nested in child.get("children") or []:
-            if nested.get("nodeType") == _NODE_FAILURE_MESSAGE and found is None:
-                nested_cause = resource_cause((nested.get("name") or "").strip())
-                if nested_cause is not None:
-                    found = (nested_cause, (nested.get("name") or "").strip())
-    if found is None:''',
-        [DD + "test_a_NESTED_denial_does_not_PROMOTE_a_message_less_failure"],
-    ),
+    # RD37 IS DELETED, NOT RE-ANCHORED, AND THAT IS THE POINT.
+    #
+    # It pinned "the descendant sweep must not CLASSIFY, only veto" — the
+    # direction round 1 called "the quiet direction". A real .xcresult refuted
+    # it: a FAILING PARAMETERISED test has no direct `Failure Message` at all,
+    # its denial hangs under `Arguments`, and refusing to classify that is what
+    # reported five healthy tests as regressions on the merge gate. The property
+    # is gone because it was WRONG, not because it became inconvenient, and its
+    # rail was reversed in the same commit with the evidence recorded beside it.
+    #
+    # A mutant deleted for any other reason is a rail being relaxed. This one is
+    # left as a comment so the next reader can check that claim rather than
+    # taking it.
     (
         "RD38", GB,
         "the CARRIED FORWARD announcement goes back inside `if no_verdict:`, "
@@ -1919,35 +1922,6 @@ MUTATIONS = [
         '''    "9": "EBADF — this platform's errno at the RLIMIT_NOFILE ceiling",''',
         '''    "9": "EBADF — a descriptor that was obtained and then went bad",''',
         [DW + "test_the_EBADF_cause_names_the_CEILING_not_a_stale_descriptor"],
-    ),
-    (
-        "RD43", GB,
-        "the classification goes back to reading DIRECT children only, so every "
-        "PARAMETERISED test's denial is invisible again — the defect the merge "
-        "gate caught, where 5 of 5 parameterised denials went out as NEW "
-        "FAILURES while 10 of 10 flat ones classified",
-        """    found = None
-    stack = list(node.get("children") or [])
-    while stack:
-        child = stack.pop()
-        stack.extend(child.get("children") or [])""",
-        """    found = None
-    stack = list(node.get("children") or [])
-    while stack:
-        child = stack.pop()""",
-        [DNV + "test_a_NESTED_denial_with_no_direct_message_IS_classified",
-         DNV + "test_the_real_PARAMETERISED_shape_from_a_captured_bundle"],
-    ),
-    (
-        "RD44", GB,
-        "silence starts being classified: a FAILED node with no message at any "
-        "depth is routed to RESOURCE, which is the one inference this whole "
-        "category refuses to make",
-        """    # A FAILED case with no message anywhere beneath it says nothing this
-    # category may act on, and silence is never routed here. It stays a FAILURE.
-    return found""",
-        """    return found or ("resource failure", "")""",
-        [DNV + "test_a_message_less_FAILURE_is_still_never_classified"],
     ),
     (
         "R99", GB,
