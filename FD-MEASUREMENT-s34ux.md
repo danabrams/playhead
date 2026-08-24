@@ -560,3 +560,39 @@ number to quote for what adversarial review bought, and it is the more
 interesting one: **review round 1 added 26 rails, removed none, and 13 of them
 fail against the code as it stood before that round** — i.e. half of what the
 reviewer wrote was pinning behaviour that did not yet exist or was wrong.
+
+## The ceiling may also be what kills the host — a lead from this bead's own merge gate
+
+The first merge-gate attempt on the finished branch (2026-08-24) reached the
+ceiling again — **peak 2,537 of `RLIMIT_NOFILE` soft 2,560, 99.1 %**, printed by
+the gate itself now — and then **lost its host**: 1 restart, 12,208 tests
+started, 1,716 NEW failures, run VOID.
+
+What sits immediately before the restart marker is not a test failure. It is
+Apple's own frameworks failing to open files:
+
+```
+[BiomeStorage] Failed to open lockfile /Users/…/CoreSimulator/Devices/…
+[BiomeStorage] Failed to assign a frameStore for: …
+[BiomeSource]  Error saving biome store event
+        (repeating, then)
+Restarting after unexpected exit, crash, or test timeout
+```
+
+At a full descriptor table it is not only `AnalysisStore` that is denied. **Every
+`open()` in the process fails**, including ones inside system frameworks that
+were never written to expect it — and one of those paths appears to take the
+host down.
+
+**This is a LEAD, not a finding.** A host restart on this box is stochastic:
+playhead-3rql measured four completed and two killed on one day with identical
+code. One co-occurrence is not causation. What makes it worth chasing is that
+the correlation is now cheap to test — the gate prints the fd peak against the
+binding limit on **every** run, so "do the runs that lose their host also reach
+the ceiling?" is answerable from the next handful of logs with no new
+instrumentation.
+
+If it holds it widens the picture considerably: the descriptor ceiling would stop
+being an explanation for `CANTOPEN` in a rotating set of suites and become a
+candidate explanation for the **void merge gates this repo has been treating as a
+memory problem**. Recorded on `playhead-vk68m`.
