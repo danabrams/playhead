@@ -981,13 +981,12 @@ func makeShard(
 ///     downloadTask(with:) for ep-stage-failure  … did not answer within 10s
 ///     downloadTask(with:) for kkzu-unattributed … did not answer within 10s
 ///
-/// READ "ALWAYS THE SAME FOUR" AS DATED (playhead-et2d). It holds for the
-/// SEVEN pre-7wia logs of the 57-log window measured below, and for none of
-/// the 44 after it. `kkzu-unattributed` no longer issues a
+/// READ "ALWAYS THE SAME FOUR" AS DATED (playhead-et2d). It holds for the 7
+/// pre-7wia logs of the 57-log window measured under ``unsharedSessionIO``,
+/// and for none of the 44 after it. `kkzu-unattributed` no longer issues a
 /// `downloadTask(with:)` at all, and `DownloadShowAttributionTests`' other
-/// seven — which were on this queue the whole time and are absent from the
-/// list because they were being QUEUED rather than expiring — are on private
-/// queues now. See ``unsharedSessionIO`` below.
+/// seven — on this queue the whole time, and missing from the list only
+/// because they were being QUEUED rather than expiring — are private now.
 ///
 /// and then, 50–63 SECONDS LATER, three of the four arrive on one thread
 /// microseconds apart, in submission order:
@@ -1024,9 +1023,9 @@ func daemonSilentSessionIO(
 /// production bound, and takes only the shared QUEUE away.
 ///
 /// Use this — rather than ``daemonSilentSessionIO`` — for a test whose subject
-/// needs a genuinely ADMITTED transfer. `.neverAnswers` cannot serve those:
-/// every refusal branch in `backgroundDownload` releases the reservation and
-/// DELETES the attribution sidecar, which is the very record such a test reads.
+/// needs a genuinely ADMITTED transfer. `.neverAnswers` cannot serve those: all
+/// THREE no-answer branches of `backgroundDownload` release the reservation and
+/// DELETE the attribution sidecar, which is the very record such a test reads.
 ///
 /// ─────────────────────────────────────────────────────────────────────────
 /// WHAT IT CHANGES AND WHAT IT DELIBERATELY DOES NOT (playhead-et2d)
@@ -1036,80 +1035,75 @@ func daemonSilentSessionIO(
 /// what playhead-nsjn / playhead-gpdb / playhead-ola7 own, and 7wia measured
 /// that at 60 s these calls are still queued, so a wider bound trades an
 /// assertion failure for a timeout. The ONLY difference from
-/// `BackgroundSessionIO.shared` is `queueLabel`, i.e. which serial queue the
-/// call is submitted to.
+/// `BackgroundSessionIO.shared` is `queueLabel`: which serial queue the call
+/// is submitted to.
 ///
-/// That one difference is the whole mechanism. `.shared` is a process-wide
-/// singleton with ONE serial queue, and every `DownloadManager` that does not
-/// inject submits `downloadTask(with:)`, `resume()` and the abandon-path
-/// `cancel()` onto it. MEASURED across 57 de-duplicated full-plan logs
-/// (2026-08-15 … 08-24 — 08-13 was a carried-over date, no log in the
-/// population is older than 08-15): on ONE of them, 2026-08-23 08:06,
-/// `downloadTask(with:) for kkzu-cleared` parked inside `nsurlsessiond` and
-/// held the queue for 65 s. SIX sibling `downloadTask(with:)` calls expired
-/// behind it inside 17 ms (08:06:01.288–.305) and a seventh, `kkzu-unattributed`,
-/// 10.1 s later. At 08:06:56.63 — the moment the parked body finally returned,
-/// 55 s after the six and 45 s after the seventh, and the anchor is named
-/// because "55 s after that" read against the nearer antecedent is 45 —
-/// SEVENTEEN submissions, twelve distinct transfers across THREE suites,
-/// arrived on a single thread, microseconds apart, in submission order, logging
+/// `.shared` is a process-wide singleton with ONE serial queue, and every
+/// `DownloadManager` that does not inject submits `downloadTask(with:)`,
+/// `resume()` and the abandon-path `cancel()` onto it. MEASURED over 57
+/// de-duplicated full-plan logs, 2026-08-15 … 08-24, THAT COUPLING HAS BITTEN
+/// IN BOTH DIRECTIONS:
 ///
-///     downloadTask(with:) for kkzu-attributed: reached the daemon queue after
-///         its caller had already given up — not started
+///   - INWARD, in the 7 logs before playhead-7wia landed (2026-08-18 23:00):
+///     `ForceQuitResumeTests`' `ep-g2wq-no-blob` parked the queue and this
+///     suite's `kkzu-unattributed` was one of three transfers whose bodies
+///     never ran. It cost no verdict — the arm reading that transfer asserted
+///     an ABSENCE, which a deleted sidecar produces just as well.
+///   - OUTWARD, in 1 of the 44 logs after: 2026-08-23 08:06, this suite's own
+///     `downloadTask(with:) for kkzu-cleared` parked inside `nsurlsessiond`
+///     and held the queue 65 s. Six sibling `downloadTask(with:)` calls
+///     expired behind it inside 17 ms (08:06:01.288–.305) and a seventh,
+///     `kkzu-unattributed`, 10.1 s later. At 08:06:56.63 — when the parked
+///     body returned, 55 s after the six and 45 s after the seventh —
+///     SEVENTEEN submissions covering TWELVE transfers across THREE suites
+///     drained at once, each logging `reached the daemon queue after its
+///     caller had already given up — not started`. ELEVEN tests failed: this
+///     suite's seven, two in `StreamingDownloadTests`, two in
+///     `ForceQuitResumeTests`.
 ///
-/// Their bodies never ran. On that run all seven
-/// `DownloadShowAttributionTests` that construct a manager failed, every one of
-/// them an `Expectation failed:` on the attribution sidecar the refusal had
-/// just deleted.
+/// THE OUTWARD FIVE ARE A DIFFERENT SHAPE FROM THE KKZU SEVEN, and the
+/// seventeen only adds up once you see it. `ambiguous-legacy-siblings`,
+/// `incomplete-background-retry`, `ep-res`, `ep-fresh` and `ep-rotated` carry
+/// TWO of those lines each — a `resume()` and then the abandon-path `cancel
+/// unstarted transfer` — and their `downloadTask(with:)` HAD been answered:
+/// the log says `was created but not resumed`. Seven + five + five = 17. The
+/// park cost those five a STARTED transfer, not a refused one.
 ///
-/// THE BENEFIT POINTS OUTWARD, AND THAT IS THE OPPOSITE OF HOW IT READS.
-/// The parked call was this suite's OWN, so what a private queue takes away on
-/// that run is this suite's ability to refuse OTHER people's transfers. The
-/// run failed ELEVEN tests, not seven: four of them are
-/// `StreamingDownloadTests` (`ambiguous-legacy-siblings`,
-/// `incomplete-background-retry`) and `ForceQuitResumeTests` (`ep-res`,
-/// `ep-fresh`, `ep-rotated`), five transfers whose bodies never ran at all —
-/// an "already given up" line each — and those four are the ones a private
-/// queue would have saved outright.
+/// WHETHER A PRIVATE QUEUE WOULD HAVE SAVED ANY OF THE ELEVEN IS UNPROVEN and
+/// that log argues both ways. AGAINST: fourteen `allTasks` calls, already on
+/// per-manager private queues, blew the same 10 s bound inside
+/// 08:06:01–08:06:12 with their bodies having RUN. FOR: the one rail in the
+/// plan whose pass depends on `nsurlsessiond` genuinely answering —
+/// `BackgroundDownloadDropLedgerTests.aHealthyDownloadWritesNothing`, on a
+/// private queue — PASSED, logging `Queued background download for ep-healthy`
+/// at 08:05:52.60, 1.3 s after the shared queue stopped draining anything and
+/// 64 s before it resumed. DO NOT compress that into "one `Queued background
+/// download` line in 14 MB, so the daemon was answering nobody": that window's
+/// download tests are dominated by `neverAnswers` / `refusesCallsLabelled`
+/// seams DESIGNED never to log it, so the count is a success rate over a
+/// population selected to fail.
 ///
-/// ITS OWN SEVEN ARE THE ONES IT PROBABLY WOULD NOT HAVE, and the same log
-/// says so. In the same window FOURTEEN `allTasks` calls, already on private
-/// per-manager queues, blew the same 10 s bound with their bodies having RUN,
-/// and the whole 14 MB log carries exactly ONE `Queued background download`
-/// line. `nsurlsessiond` was answering nobody, and no dispatch queue is a
-/// remedy for that. So do not read a green `DownloadShowAttributionTests` as
-/// evidence that this helper worked; read it as evidence the daemon answered.
+/// So read a green `DownloadShowAttributionTests` as evidence the daemon
+/// answered, not as evidence this helper worked. What the helper buys needs no
+/// counterfactual: this suite can no longer refuse twelve transfers it has
+/// nothing to do with, and can no longer be refused by somebody else's park.
+/// The hazard is not cleared — 120 of the 144 `DownloadManager(` constructions
+/// in `PlayheadTests` still take the default `.shared` (`DownloadManagerTests`
+/// 43, `ForceQuitResumeTests` 19, `StreamingDownloadTests` 18,
+/// `PlaceholderAssetUpgradeTests` 11) — this suite just stops being one.
 ///
-/// HOW OFTEN, over the same 57: 49 of them carry exactly ONE "already given
-/// up" line and it is `BackgroundSessionIOTests`' own 0.2 s `starved:` probe.
-/// Genuine head-of-line blocking appears in 7 logs BEFORE playhead-7wia landed
-/// (2026-08-18 23:00) and in ONE of the 44 after it — this one. Nor is the
-/// hazard cleared: about 121 of the 145 `DownloadManager(` constructions in
-/// `PlayheadTests` still take the default `.shared`, so the queue keeps every
-/// other participant it had. This suite stops being one of them. That is the
-/// whole of what changed, and it is worth having for its own sake — a suite
-/// that cannot park a process-wide queue cannot cost eleven tests in three
-/// files again — but it is not a reason to expect these seven tests to stop
-/// failing.
-///
-/// WHAT A PRIVATE QUEUE REMOVES IS THE CROSS-SUITE AMPLIFICATION, AND ONLY
-/// THAT. One parked call can no longer refuse twelve transfers it has nothing
-/// to do with. Three things it does NOT do, each measured rather than argued:
+/// Three things it does NOT do, each measured rather than argued:
 ///
 ///   - It does not make a call immune to a slow daemon. `allTasks for …` has
-///     run on a per-manager PRIVATE queue since playhead-rouw (`enumerationIO`,
-///     built by `onItsOwnQueue`) and still blows the same 10 s bound 137 times
-///     across 35 of these 57 logs. READ 137 AND NOT 138. There are 138
-///     `allTasks` expiry lines in that population; the 138th names a THIRTY
-///     second bound and belongs to
-///     `BackgroundDownloadDropLedgerTests.answeringIO()`, a test double that
-///     widens it on purpose. An earlier round of this bead "corrected" 137 to
-///     138 by counting expiries instead of counting expiries OF THIS BOUND,
-///     which is the standing defect class committed inside a commit whose
-///     subject line was about miscounts. Not one of the 138 carries an
-///     "already given up" line either way, so not one of them is a queue
-///     holding a body back: `nsurlsessiond` was simply slower than the bound.
-///     A private queue is not a shorter answer, only an unshared wait.
+///     run on a per-manager PRIVATE queue since playhead-rouw
+///     (`enumerationIO`, built by `onItsOwnQueue`) and still blows the 10 s
+///     bound 137 times across 35 of these 57 logs — with ZERO "already given
+///     up" lines anywhere in the 57, so no queue was holding those bodies
+///     back. COUNT EXPIRIES OF THIS BOUND: there are 138 `allTasks` expiry
+///     lines and the 138th reads `within 30.000000s`, from
+///     `BackgroundDownloadDropLedgerTests.answeringIO()`, a double that widens
+///     it on purpose. A private queue is not a shorter answer, only an
+///     unshared wait.
 ///   - It does not separate two calls made by the SAME manager: they share one
 ///     `BackgroundSessionIO` instance and therefore one queue.
 ///   - It is not what playhead-3rql's EXP2 measured. That run set

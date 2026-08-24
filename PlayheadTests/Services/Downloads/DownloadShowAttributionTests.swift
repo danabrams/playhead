@@ -15,39 +15,22 @@
 // worthless if the assertion would hold for an attributed one too. Each rail
 // below drives BOTH arms through the same harness.
 //
-// playhead-et2d: EVERY `DownloadManager` HERE IS BUILT BY `makeManager`,
-// which injects `unsharedSessionIO()` and asserts the queue it got is not the
-// shared one. The reason is one measurement rather than tidiness. The default
-// `BackgroundSessionIO.shared` is a process-wide singleton with ONE serial
-// queue. On the full-plan run of 2026-08-23 08:06 THIS SUITE'S OWN
-// `downloadTask(with:) for kkzu-cleared` parked inside `nsurlsessiond` and
-// held that queue for 65 seconds; seventeen later submissions — twelve
-// distinct transfers across THREE suites (this one, `StreamingDownloadTests`,
-// `ForceQuitResumeTests`) — then arrived on one thread, microseconds apart, in
-// submission order, logging "reached the daemon queue after its caller had
-// already given up — not started". All seven tests in this file that build a
-// manager failed together — and so did four more in `StreamingDownloadTests`
-// and `ForceQuitResumeTests`, whose five transfers this suite's park had
-// refused. They failed as ASSERTIONS, which is why the seven baseline entries
-// were recorded that way, and why the recorded KIND said nothing about the
-// cause: every refusal branch in `backgroundDownload` DELETES the attribution
-// sidecar, so this suite reads a missing show and blames the code that writes
-// it.
+// playhead-et2d: EVERY `DownloadManager` HERE IS BUILT BY `makeManager`, which
+// injects `unsharedSessionIO()` and proves the queue it got is private. The
+// default `BackgroundSessionIO.shared` is a process-wide singleton with ONE
+// serial queue, and over 57 de-duplicated full-plan logs that coupling cost
+// this suite in both directions — blocked by `ForceQuitResumeTests` in 7 logs,
+// and on 2026-08-23 blocking twelve transfers across three suites, eleven
+// tests, with its own `kkzu-cleared`. ``unsharedSessionIO`` carries the whole
+// measurement, what a private queue does NOT buy, and why a green run in this
+// file is weak evidence that it worked.
 //
-// READ THE BENEFIT AS OUTWARD. The four in the other two files are the ones a
-// private queue would have saved; these seven probably not, because the same
-// log has fourteen `allTasks` calls blowing the same 10 s bound on queues that
-// were ALREADY private and exactly one `Queued background download` line in
-// 14 MB. Genuine head-of-line blocking appears in ONE of the 44 qualifying
-// full-plan logs since playhead-7wia landed. See `unsharedSessionIO` for the
-// numbers and for what this does not buy.
-//
-// The helper keeps the real daemon and the production bound and changes only
-// the queue label — see `unsharedSessionIO` for what that does and does not
-// claim; in particular it does NOT make a call immune to a slow daemon.
-// `.neverAnswers` (playhead-7wia's fix for the other three victims) cannot be
-// used here: these tests need a genuinely ADMITTED transfer, because the
-// sidecar they assert on is what a refusal destroys.
+// WHY THOSE FAILURES ARE RECORDED AS ASSERTIONS, which is what made the cause
+// unreadable from the baseline file: all three no-answer branches of
+// `backgroundDownload` DELETE the attribution sidecar, so this suite reads a
+// missing show and blames the code that writes it. Same reason `.neverAnswers`
+// (playhead-7wia's fix for the other three victims) cannot be reused here —
+// these tests need a genuinely ADMITTED transfer.
 
 import Foundation
 import Testing
@@ -61,32 +44,33 @@ struct DownloadShowAttributionTests {
     /// Builds this suite's `DownloadManager` and PROVES, before handing it
     /// back, that it is not on the process-wide `BackgroundSessionIO` queue.
     ///
-    /// playhead-et2d. The injection is the whole fix, and without this rail
-    /// the only thing standing between "every manager here has its own queue"
-    /// and "one of them quietly went back to `.shared`" would be eight
-    /// identical argument lists nobody re-reads. A construction is a cheap
-    /// thing to copy-paste wrongly, and the consequence — a test that fails
-    /// only under a full plan's own concurrency, and only when some OTHER
-    /// suite parks the daemon — is the most expensive kind to diagnose: it
-    /// reads as this file's defect and it is not.
+    /// playhead-et2d. The injection is the whole fix; without a rail, the only
+    /// thing between "every manager here has its own queue" and "one quietly
+    /// went back to `.shared`" is eight identical argument lists nobody
+    /// re-reads. Getting one wrong fails only under a full plan's concurrency,
+    /// and only when some suite parks the daemon — so it reads as this file's
+    /// defect and is not.
     ///
-    /// WHAT IT CANNOT SEE, so a green run is read for what it is worth. The
-    /// first check compares ONE label against ONE constant, so on its own it
-    /// says nothing about (a) a `DownloadManager` built anywhere in this file
-    /// WITHOUT this helper — nothing enforces that route; (b) a custom label
-    /// that is nevertheless SHARED between managers; or (c) two calls made
-    /// through ONE manager, which share that manager's single queue by
-    /// construction and are unaffected by any of this.
+    /// TWO CHECKS, because the first cannot see the likeliest regression. It
+    /// compares ONE label against ONE constant, so a helper that MEMOIZES —
+    /// hands the same `BackgroundSessionIO`, hence the same serial queue, to
+    /// all eight managers — keeps a non-default label and stays green while the
+    /// suite is back in exactly the state this bead removed. "Memoize the
+    /// factory" is the ordinary shape of a future tidy-up, so the second check
+    /// asks the helper for another instance and requires a different label. It
+    /// costs one throwaway `BackgroundSessionIO` per manager, whose `init`
+    /// builds two dispatch queues, touches no daemon, and is released with the
+    /// expression.
     ///
-    /// (b) IS THE ONE WORTH CLOSING, AND THE SECOND CHECK CLOSES IT
-    /// (review r2). "Memoize the factory" is the ordinary shape of a future
-    /// tidy-up; it keeps a non-default label, so the first check stays green
-    /// while all eight managers go back onto ONE queue — which is exactly the
-    /// state this bead exists to leave. Asking the helper for a SECOND
-    /// instance and requiring a different label is what turns that from a
-    /// documented limit into a caught one. It costs one throwaway
-    /// `BackgroundSessionIO` per manager; its `init` builds two dispatch
-    /// queues and touches no daemon. (a) and (c) stay open by construction.
+    /// The label is a PROXY for queue identity, sound only in the safe
+    /// direction: `init` builds the queue FROM the label, so different labels
+    /// mean different queues, while two instances sharing a label still own two
+    /// queues. This check can cry wolf; it cannot miss a shared queue.
+    ///
+    /// STILL OPEN: (a) nothing enforces the `makeManager` route — mutant E10
+    /// measures that by bypassing it; (b) two calls through ONE manager share
+    /// that manager's single queue, which no mutant can measure because it is a
+    /// property of `DownloadManager.init` rather than a regression.
     ///
     /// `#function` is evaluated at the CALL SITE, so each manager's queue is
     /// still labelled with the test that built it.
@@ -107,9 +91,10 @@ struct DownloadShowAttributionTests {
             (\(io.queueLabel)) — so its downloadTask(with:) can be refused by \
             any parked call in the plan AND can itself park that queue for \
             every other suite on it, which is the coupling playhead-et2d \
-            removed. Measured, the second direction is the one that bit: on \
-            2026-08-23 08:06 this suite's own kkzu-cleared held the queue 65 s \
-            and eleven tests in three files failed
+            removed. Both directions are measured over 57 full-plan logs: \
+            this suite was blocked by ForceQuitResumeTests in 7 of them, and \
+            on 2026-08-23 its own kkzu-cleared held the queue 65 s and eleven \
+            tests in three files failed
             """,
             sourceLocation: sourceLocation
         )
@@ -233,37 +218,26 @@ struct DownloadShowAttributionTests {
         // a harness that hard-codes a podcastId somewhere.
         //
         // playhead-et2d: THE SIDECAR IS WRITTEN DIRECTLY, not through
-        // `backgroundDownload`, and this arm is the only one in the file that
-        // needs that. `forceQuitResumeRecoversTheShow` below already uses the
-        // idiom; here the reason is that this arm ASSERTS AN ABSENCE and a
-        // refused transfer produces the same absence. All three no-answer
-        // branches of `backgroundDownload` delete the sidecar, and a completion
-        // that finds none defaults to `.unattributed(.resumeWithoutRecordedShow)`
-        // — byte-identical to the context this arm passes. So
-        // `unattributedJob?.podcastId == nil` reads the same whether the
-        // download was admitted or never started: this repo's standing defect
-        // class sitting inside the assertion.
+        // `backgroundDownload` — the idiom `forceQuitResumeRecoversTheShow`
+        // below already uses. This arm ASSERTS AN ABSENCE, and a refused
+        // transfer produces the same absence: all three no-answer branches
+        // delete the sidecar, and a completion that finds none defaults to
+        // `.unattributed(.resumeWithoutRecordedShow)`, byte-identical to the
+        // context passed here. So `podcastId == nil` below used to read the
+        // same whether the download was admitted or never started — this
+        // repo's standing defect class, sitting inside the assertion.
         //
-        // MEASURED, which is why the arm was moved off the daemon rather than
-        // given a witness: over the 57 de-duplicated full-plan logs of
-        // 2026-08-15 … 08-24 (08-13 is a carried-over date; nothing in the
-        // population is older than 08-15), `Background download for
-        // kkzu-unattributed NOT started: the background transfer daemon did
-        // not answer` appears in
-        // 54, and `Queued background download for kkzu-unattributed` in 3. It
-        // WAS the eighth and last `downloadTask(with:)` this suite issued.
-        // The gap to the other seven is ~1.6 s, not the ~1.3 s an earlier
-        // round of this bead wrote: measured on the 51 of the 57 logs that
-        // carry both anchors, median 1.573 s, mean 1.601 s, range
-        // 0.404–3.309 s, and only 10 of the 51 are at or under 1.3 s. By then
-        // seven live transfers to a non-resolving host had `nsurlsessiond`
-        // busy — those seven are queued successfully in 56 of the 57. A
-        // private queue does not change that (see `unsharedSessionIO`), so a
-        // witness here would have failed 54 runs out of 57. Written directly,
-        // the record is present by construction, the assertion below is
-        // sensitive to the CONTEXT, and the suite stops issuing a call that
-        // was refused in 54 of 57 runs by an arm that could not see the
-        // difference.
+        // MEASURED, and it is why the arm moved off the daemon instead of
+        // getting a witness: over 57 de-duplicated full-plan logs, 2026-08-15
+        // … 08-24, `kkzu-unattributed` was refused in 54 and queued in 3, so a
+        // witness on the OLD arm would have failed 54 runs of 57. It was the
+        // eighth and last `downloadTask(with:)` this suite issued, a median
+        // 1.573 s after the other seven (mean 1.601, range 0.404–3.309, over
+        // the 51 logs carrying both anchors), by which time seven live
+        // transfers to a non-resolving host had `nsurlsessiond` busy — and
+        // those seven queue successfully in 56 of the 57. Written directly, the
+        // record is present by construction and the assertion below is
+        // sensitive to the CONTEXT.
         let unattributed = "kkzu-unattributed"
         await manager.persistDownloadAttribution(
             episodeId: unattributed,
@@ -276,9 +250,9 @@ struct DownloadShowAttributionTests {
             await manager.loadDownloadAttribution(episodeId: unattributed)
                 != nil,
             """
-            no unattributed record reached the completion — its \
-            podcastId == nil below would be reporting a MISSING sidecar \
-            rather than a recorded absence of a show
+            the unattributed record was not written, so podcastId == nil \
+            below would be reporting a MISSING sidecar rather than a \
+            recorded absence of a show
             """
         )
         let unattributedJob = try await completeBackgroundDownload(
