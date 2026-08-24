@@ -1048,6 +1048,18 @@ func daemonSilentSessionIO(
 /// failed, every one of them an `Expectation failed:` on the attribution
 /// sidecar the refusal had just deleted.
 ///
+/// THE QUEUE IS THE VARIABLE, AND THE SERIALIZED PLAN PROVES IT. Across the
+/// same 57 logs, `downloadTask(with:) for kkzu-unattributed` blows its bound
+/// in 52 of them — it is the ONLY production-labelled call in the whole fast
+/// plan that does so on a normal run, the other timeouts all being
+/// `BackgroundSessionIOTests`' own 0.2 s doubles. On playhead-3rql's EXP2,
+/// the one full plan ever run with `"parallelizable": false`, it does not
+/// time out at all and its test passes in **0.102 s** — against 154 s of
+/// enqueue-to-completion, with a 10 s expiry inside it, on the parallel plan.
+/// Same code, same daemon, same box; the only thing removed was concurrent
+/// traffic on the one queue. So the daemon answers this call in tens of
+/// milliseconds and what it was waiting on was other tests.
+///
 /// NOT CLAIMED: that this makes a test immune to the daemon. If the daemon
 /// parks on THIS manager's own call it still expires at `defaultTimeout` —
 /// that is the production hazard `BackgroundSessionIO` exists to bound, and
