@@ -1017,8 +1017,11 @@ func makeShard(
 /// count is this repo's standing defect class, so give both the same filter or
 /// name the filter. `kkzu-unattributed` no longer issues a
 /// `downloadTask(with:)` at all, and `DownloadShowAttributionTests`' other
-/// seven — on this queue the whole time, and missing from the list only
-/// because they were being QUEUED rather than expiring — are private now.
+/// seven — on the SHARED queue the whole time, and missing from the list only
+/// because they were being QUEUED rather than expiring — are private now. Read
+/// "this queue" carefully anywhere near this helper: the subject of THIS doc is
+/// the private `7wia.test.*` queue, and the sentence above is about
+/// `BackgroundSessionIO.shared`.
 func daemonSilentSessionIO(
     labelledFor test: String = #function
 ) -> BackgroundSessionIO {
@@ -1046,10 +1049,12 @@ func daemonSilentSessionIO(
 /// that at 60 s these calls are still queued, so a wider bound trades an
 /// assertion failure for a timeout. `makeManager` PINS `io.timeout` at the
 /// call site (review r3, mutant E11), because until then both headers asserted
-/// the bound and nothing enforced it; `behavior` is not pinnable —
-/// ``BackgroundSessionIO/Behavior`` is not `Equatable` and the only separating
-/// observation is a `perform`, i.e. a real daemon call — so mutant E3 measures
-/// it instead. The ONLY difference from `BackgroundSessionIO.shared` is
+/// the bound and nothing enforced it. `makeManager` PINS `behavior` too
+/// (review r5, mutant E12): this header used to say it was not pinnable
+/// because ``BackgroundSessionIO/Behavior`` is not `Equatable`, which rules
+/// out `==` and not observation — `behavior` is a stored `let` and `if case`
+/// separates the production case without a `perform` and therefore without a
+/// daemon call. The ONLY difference from `BackgroundSessionIO.shared` is
 /// `queueLabel`: which serial queue the call is submitted to.
 ///
 /// `.shared` is a process-wide singleton with ONE serial queue, and every
@@ -1058,7 +1063,9 @@ func daemonSilentSessionIO(
 /// de-duplicated full-plan logs, 2026-08-15 … 08-24, THAT COUPLING HAS BITTEN
 /// IN BOTH DIRECTIONS:
 ///
-///   - INWARD, in the 7 logs before playhead-7wia landed (2026-08-18 23:00):
+///   - INWARD, in 7 of the 13 logs before playhead-7wia landed (2026-08-18
+///     23:00) — the numerator and the denominator, because the r4 note 50
+///     lines above this one exists to forbid writing it as "the 7 logs":
 ///     `ForceQuitResumeTests`' `ep-g2wq-no-blob` parked the queue and this
 ///     suite's `kkzu-unattributed` was one of three transfers whose bodies
 ///     never ran. It cost no verdict — the arm reading that transfer asserted
@@ -1075,8 +1082,14 @@ func daemonSilentSessionIO(
 ///     suite's seven, two in `StreamingDownloadTests`, two in
 ///     `ForceQuitResumeTests`.
 ///
-/// THE OUTWARD FIVE ARE A DIFFERENT SHAPE FROM THE KKZU SEVEN, and the
-/// seventeen only adds up once you see it. `ambiguous-legacy-siblings`,
+/// THE OUTWARD FIVE ARE A DIFFERENT SHAPE FROM THE SEVEN KKZU SUBMISSIONS,
+/// and the seventeen only adds up once you see it. Those seven submissions are
+/// NOT the seven failing tests named just above, though both sets have seven
+/// members: `kkzu-attributed` and `kkzu-unattributed` were both issued by
+/// `backgroundDownloadEnqueuesWithPodcastId`, so the seven submissions come
+/// from SIX tests, and the seventh failing test is `clearCacheReapsAttribution`
+/// — whose `kkzu-cleared` is the parked call and is therefore not among the
+/// seventeen at all. `ambiguous-legacy-siblings`,
 /// `incomplete-background-retry`, `ep-res`, `ep-fresh` and `ep-rotated` carry
 /// TWO of those lines each — a `resume()` and then the abandon-path `cancel
 /// unstarted transfer` — and their `downloadTask(with:)` HAD been answered:
@@ -1087,49 +1100,83 @@ func daemonSilentSessionIO(
 /// that log argues both ways. AGAINST: fourteen `allTasks` calls, already on
 /// per-manager private queues, blew the same 10 s bound inside
 /// 08:06:01–08:06:12 with their bodies having RUN. FOR: the one rail in the
-/// plan whose pass depends on `nsurlsessiond` genuinely answering —
-/// `BackgroundDownloadDropLedgerTests.aHealthyDownloadWritesNothing`, on a
-/// private queue — PASSED, logging `Queued background download for ep-healthy`
+/// plan ON A PRIVATE QUEUE whose pass depends on `nsurlsessiond` genuinely
+/// answering — `BackgroundDownloadDropLedgerTests.aHealthyDownloadWritesNothing`
+/// — PASSED, logging `Queued background download for ep-healthy`
 /// at 08:05:52.60, 1.3 s after the shared queue stopped draining anything and
 /// 64 s before it resumed. DO NOT compress that into "one `Queued background
 /// download` line in 14 MB, so the daemon was answering nobody": that window's
 /// download tests are dominated by `neverAnswers` / `refusesCallsLabelled`
 /// seams DESIGNED never to log it, so the count is a success rate over a
-/// population selected to fail.
+/// population selected to fail. THE QUALIFIER "ON A PRIVATE QUEUE" IS THE
+/// WHOLE CLAIM: `DownloadShowAttributionTests` has four rails of its own whose
+/// pass depends on the daemon answering (each asserts the sidecar is present
+/// after `backgroundDownload`, and every no-answer branch deletes it), and all
+/// four FAILED on that run. Without the qualifier the sentence is false and
+/// the FOR half reads stronger than the evidence.
 ///
 /// So read a green `DownloadShowAttributionTests` as evidence the daemon
 /// answered, not as evidence this helper worked. What the helper buys needs no
-/// counterfactual: this suite can no longer refuse twelve transfers it has
-/// nothing to do with, and can no longer be refused by somebody else's park.
+/// counterfactual: this suite can no longer refuse the FIVE transfers it has
+/// nothing to do with — five of the twelve that drained, the other seven being
+/// its own `kkzu-*` submissions — and can no longer be refused by somebody
+/// else's park.
 /// The hazard is not cleared — 118 of the 142 `DownloadManager(` constructions
 /// in `PlayheadTests` still take the default `.shared` (`DownloadManagerTests`
 /// 43, `ForceQuitResumeTests` 19, `StreamingDownloadTests` 18,
 /// `PlaceholderAssetUpgradeTests` 10) — this suite just stops being one.
-/// IT IS 142 AND NOT 144 (review r4): a pattern over `DownloadManager(` also
-/// matches DOC COMMENTS, and two of the 144 are prose rather than code — one
-/// in `PlaceholderAssetUpgradeTests` and one THIS VERY SENTENCE, which counted
-/// itself as a construction on the shared queue. Both earlier readings had it:
-/// 145 was a grep LINE count (one line a function NAME), 144 dropped the
-/// function name and kept the comments.
+/// IT IS 142 AND NOT 146, AND HERE IS THE WHOLE RECONCILIATION (review r5).
+/// `git grep -c 'DownloadManager(' HEAD -- 'PlayheadTests/*'` — the literal
+/// string, no whitespace class — gives 146 lines. One is a suffix of a
+/// FUNCTION NAME (`RuntimeShutdownLifecycleTests`'
+/// `cancelledCacheTaskRejectsEntryBeforeDownloadManager()`), and THREE are doc
+/// comments: one in `PlaceholderAssetUpgradeTests` and TWO IN THIS VERY
+/// COMMENT, which count themselves as constructions on the shared queue.
+/// 146 − 1 − 3 = 142. (A pattern that allows a space, `DownloadManager\s*\(`,
+/// finds a fourth comment — a `// MARK:` in `FileProtectionTests` — and reads
+/// 147, so quote the pattern with the count.) Every earlier reading was one of
+/// these off: 145 counted lines and dropped nothing, 144 dropped the function
+/// name and kept the comments, and r4's own correction ADDED a third comment
+/// occurrence while claiming there were two — the miscount recurring inside
+/// the sentence that corrects it.
 ///
-/// Three things it does NOT do, each measured rather than argued:
+/// Four things it does NOT do, each measured rather than argued:
 ///
 ///   - It does not make a call immune to a slow daemon. `allTasks for …` has
 ///     run on a per-manager PRIVATE queue since playhead-rouw
 ///     (`enumerationIO`, built by `onItsOwnQueue`) and still blows the 10 s
 ///     bound 137 times across 35 of these 57 logs — with ZERO "already given
-///     up" lines anywhere in the 57, so no queue was holding those bodies
-///     back. COUNT EXPIRIES OF THIS BOUND: there are 138 `allTasks` expiry
+///     up" lines FOR `allTasks` anywhere in the 57, so no queue was holding
+///     those bodies back. The qualifier is load-bearing and was missing until
+///     r5: there are plenty of "already given up" lines in these logs —
+///     seventeen of them on 2026-08-23 alone, named twenty lines above — and
+///     the inference only follows for the `allTasks` submissions. COUNT EXPIRIES OF THIS BOUND: there are 138 `allTasks` expiry
 ///     lines and the 138th reads `within 30.000000s`, from
 ///     `BackgroundDownloadDropLedgerTests.answeringIO()`, a double that widens
 ///     it on purpose. A private queue is not a shorter answer, only an
 ///     unshared wait.
-///   - It does not separate two calls made by the SAME manager: they share one
-///     `BackgroundSessionIO` instance and therefore one queue.
+///   - It does not separate two calls made by the same manager THROUGH
+///     `sessionIO`: those share one instance and therefore one queue. A
+///     manager owns THREE — `DownloadManager.init` also builds
+///     `enumerationIO` and `sessionCreationIO` via `onItsOwnQueue`, which is
+///     why the bullet above can say `allTasks` was already private. The
+///     unstated good news: both derived labels are built FROM
+///     `sessionIO.queueLabel`, so injecting here privatises all three of a
+///     manager's queues at once.
+///   - It does not reduce load on the daemon, and may raise it. The shared
+///     queue was SERIAL, so it was also serialising this suite's own
+///     submissions; with a queue each, all seven surviving transfers can be
+///     inside `nsurlsessiond` at once. That is the same mechanism the arm
+///     rewrite blames for `kkzu-unattributed` ("seven live transfers to a
+///     non-resolving host had `nsurlsessiond` busy"), so it belongs in a list
+///     of what this helper does NOT buy rather than being left for a reader to
+///     notice.
 ///   - It is not what playhead-3rql's EXP2 measured. That run set
 ///     `"parallelizable": false`, which removes the whole plan's concurrency —
-///     including the seven live transfers `DownloadShowAttributionTests` itself
-///     starts against a non-resolving host — so it cannot isolate the queue.
+///     including the EIGHT live transfers `DownloadShowAttributionTests`
+///     started against a non-resolving host on the tree EXP2 ran (it is seven
+///     only after this change moved the contrast arm off the daemon) — so it
+///     cannot isolate the queue.
 ///     Nor is its `passed after 0.102 seconds` comparable to a parallel run's
 ///     figure: on a parallel plan that number is enqueue-to-completion, and
 ///     ~90 % of PASSING tests report over 60 s (CLAUDE.md).

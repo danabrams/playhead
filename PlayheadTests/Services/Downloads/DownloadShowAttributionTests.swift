@@ -19,9 +19,12 @@
 // injects `unsharedSessionIO()` and proves the queue it got is private. The
 // default `BackgroundSessionIO.shared` is a process-wide singleton with ONE
 // serial queue, and over 57 de-duplicated full-plan logs that coupling cost
-// this suite in both directions — blocked by `ForceQuitResumeTests` in 7 logs,
-// and on 2026-08-23 blocking twelve transfers across three suites, eleven
-// tests, with its own `kkzu-cleared`. ``unsharedSessionIO`` carries the whole
+// this suite in both directions — blocked by `ForceQuitResumeTests` in 7 of
+// the 13 logs before playhead-7wia, and on 2026-08-23 parking the queue with
+// its own `kkzu-cleared` while twelve transfers drained late across three
+// suites and eleven tests failed. Seven of those twelve and seven of those
+// eleven are ITS OWN; the traffic it cost other people is five transfers and
+// four tests. ``unsharedSessionIO`` carries the whole
 // measurement, what a private queue does NOT buy, and why a green run in this
 // file is weak evidence that it worked.
 //
@@ -71,16 +74,42 @@ struct DownloadShowAttributionTests {
     /// nothing enforced it: widening `unsharedSessionIO`'s `timeout` would
     /// trade this suite's assertion failure for a time-limit failure — 7wia
     /// measured that at 60 s these calls are still QUEUED — and no rail in the
-    /// tree would have reported it. `behavior` is NOT pinned and cannot be:
-    /// `BackgroundSessionIO.Behavior` is not `Equatable`, and the one
-    /// observation that separates `.dedicatedThread` from a refusing seam is a
-    /// `perform`, which would make a real daemon call from a helper. Mutant E3
-    /// measures it instead.
+    /// tree would have reported it.
+    ///
+    /// A FOURTH CHECK PINS THE BEHAVIOUR, and it exists because this comment
+    /// used to say it could not. The withdrawn sentence read: "`behavior` is
+    /// NOT pinned and cannot be: `BackgroundSessionIO.Behavior` is not
+    /// `Equatable`, and the one observation that separates `.dedicatedThread`
+    /// from a refusing seam is a `perform`, which would make a real daemon
+    /// call from a helper." NOT `Equatable` rules out `==`; it does not make
+    /// an enum unobservable. `behavior` is a stored `let`
+    /// (`BackgroundSessionIO.swift:141`) and `if case .dedicatedThread =`
+    /// separates the production case from all three seams with no `perform`,
+    /// no queue submission and no daemon call. A rail left out on the strength
+    /// of an impossibility that is not one is the same shape as the bound the
+    /// paragraph above describes: asserted by two headers, enforced by nothing.
+    ///
+    /// WHAT IT CATCHES THAT NOTHING ELSE CAN. Mutant E3 (`.neverAnswers`) was
+    /// the evidence offered for leaving it out, and E3 cannot serve: it kills
+    /// through the ASSERTIONS, because a refused transfer deletes the sidecar,
+    /// so it reports the same seven victims with or without a rail. The mutant
+    /// that separates them is E12 —
+    /// `.refusesCallsLabelled("<a marker no call label contains>")`. `perform`
+    /// matches that marker with `label.contains(marker)`
+    /// (`BackgroundSessionIO.swift:240`), so it refuses NOTHING and is
+    /// behaviourally identical to `.dedicatedThread` on every call this suite
+    /// makes. It is invisible to the three checks above and to every
+    /// assertion in the file, and it SURVIVED the battery until this check
+    /// existed.
     ///
     /// STILL OPEN: (a) nothing enforces the `makeManager` route — mutant E10
-    /// measures that by bypassing it; (b) two calls through ONE manager share
-    /// that manager's single queue, which no mutant can measure because it is a
-    /// property of `DownloadManager.init` rather than a regression.
+    /// measures that by bypassing it; (b) two calls through ONE manager's
+    /// `sessionIO` share one queue, which no mutant can measure because it is a
+    /// property of `DownloadManager.init` rather than a regression. Note (b)
+    /// is about `sessionIO` and not about the manager: `init` builds THREE
+    /// `BackgroundSessionIO`s, adding `enumerationIO` and `sessionCreationIO`
+    /// through `onItsOwnQueue`. Both take their labels FROM
+    /// `sessionIO.queueLabel`, so one injection privatises all three.
     ///
     /// `#function` is evaluated at the CALL SITE, so each manager's queue is
     /// still labelled with the test that built it.
@@ -131,6 +160,26 @@ struct DownloadShowAttributionTests {
             and it is wrong here: playhead-7wia measured that at 60 s these \
             calls are still QUEUED, so widening trades this suite's assertion \
             failure for a time-limit failure and hides the queue entirely
+            """,
+            sourceLocation: sourceLocation
+        )
+        let behaviourIsProduction: Bool
+        if case .dedicatedThread = io.behavior {
+            behaviourIsProduction = true
+        } else {
+            behaviourIsProduction = false
+        }
+        #expect(
+            behaviourIsProduction,
+            """
+            unsharedSessionIO is no longer on the production BEHAVIOUR. Every \
+            other case of BackgroundSessionIO.Behavior is a #if DEBUG test \
+            seam that refuses calls, and a seam whose marker matches no call \
+            label refuses nothing at all — so it reads exactly like \
+            .dedicatedThread here while making this helper a double of \
+            something other than production. The queue, the bound and the \
+            label checks above cannot see it, and neither can any assertion \
+            in this file
             """,
             sourceLocation: sourceLocation
         )
@@ -245,7 +294,13 @@ struct DownloadShowAttributionTests {
         //
         // playhead-et2d: THE SIDECAR IS WRITTEN DIRECTLY, not through
         // `backgroundDownload` — the idiom `forceQuitResumeRecoversTheShow`
-        // below already uses. This arm ASSERTS AN ABSENCE, and a refused
+        // below already uses. WHAT THAT GIVES UP, stated rather than left to
+        // be discovered: this was the only place in the tree that drove an
+        // `.unattributed` context THROUGH `backgroundDownload` to the sidecar
+        // and back, so nothing now covers `backgroundDownload`'s own write of
+        // an unattributed record. It was never asserted coverage — mutant E8P
+        // proves it, surviving against the pre-bead file on a run that DID
+        // admit the transfer — but it was reachable, and it is not any more. This arm ASSERTS AN ABSENCE, and a refused
         // transfer produces the same absence: all three no-answer branches
         // delete the sidecar, and a completion that finds none defaults to
         // `.unattributed(.resumeWithoutRecordedShow)`, byte-identical to the
@@ -255,21 +310,38 @@ struct DownloadShowAttributionTests {
         //
         // MEASURED, and it is why the arm moved off the daemon instead of
         // getting a witness: over 57 de-duplicated full-plan logs, 2026-08-15
-        // … 08-24, `kkzu-unattributed` was refused in 54 and queued in 3, so a
-        // witness on the OLD arm would have failed 54 runs of 57. It was the
-        // eighth and last `downloadTask(with:)` this suite issued, a median
-        // 1.573 s after the other seven (mean 1.601, range 0.404–3.309, over
-        // the 51 logs carrying both anchors), by which time seven live
-        // transfers to a non-resolving host had `nsurlsessiond` busy — and
-        // those seven queue successfully in 56 of the 57. Written directly, the
-        // record is present by construction and the assertion below is
-        // sensitive to the CONTEXT.
+        // … 08-24, `kkzu-unattributed`'s `downloadTask(with:)` EXPIRED in 54
+        // and was queued in 3, so a witness on the OLD arm would have failed
+        // 54 runs of 57. "Expired", not "refused": `.dedicatedThread` submits
+        // the call and reports `did not answer within 10s`; "refused" is what
+        // the `.neverAnswers` / `.refusesCallsLabelled` seams do, and the two
+        // are different events. It was the eighth and last `downloadTask(with:)`
+        // this suite issued, a median 1.573 s after the other seven (mean
+        // 1.601, range 0.404–3.309, over the 51 logs carrying both anchors),
+        // by which time seven live transfers to a non-resolving host had
+        // `nsurlsessiond` busy — and those seven queue successfully in 56 of
+        // the 57. EVERY ONE OF THOSE 57 IS PRE-FIX, measured while this suite
+        // was on the SHARED queue; what the rate would be on a private queue
+        // is unmeasured, and ``unsharedSessionIO`` says why that is not
+        // knowable from these logs.
+        //
+        // THE WRITTEN CONTEXT IS DELIBERATELY NOT THE FALLBACK (review r5).
+        // Writing `isExplicitDownload: false` would have reproduced the
+        // defect one level up: the sidecar would then be byte-identical to
+        // `handleBackgroundDownloadComplete`'s own default, so `podcastId ==
+        // nil` below still could not tell "the completion READ the record"
+        // from "the completion ignored it and fell back". `true` makes the
+        // record observable — `AnalysisWorkScheduler.enqueue` computes
+        // `priority = userInitiated ? 20 : (isExplicitDownload ? 10 : 0)`, and
+        // no user intent is marked here — so the `priority == 10` expectation
+        // below fails if the fallback is what reached the scheduler. Without
+        // it this arm asserts only that a sidecar EXISTED.
         let unattributed = "kkzu-unattributed"
         await manager.persistDownloadAttribution(
             episodeId: unattributed,
             context: .unattributed(
                 reason: .resumeWithoutRecordedShow,
-                isExplicitDownload: false
+                isExplicitDownload: true
             )
         )
         #expect(
@@ -290,6 +362,18 @@ struct DownloadShowAttributionTests {
             "the contrast arm must enqueue too, or it proves nothing"
         )
         #expect(unattributedJob?.podcastId == nil)
+        #expect(
+            unattributedJob?.priority == 10,
+            """
+            the enqueued job did not carry the isExplicitDownload:true this \
+            arm wrote to the sidecar (priority \
+            \(unattributedJob?.priority.description ?? "nil") vs 10), so the \
+            completion used its own .unattributed(.resumeWithoutRecordedShow, \
+            isExplicitDownload: false) fallback instead of reading the \
+            record. podcastId == nil above cannot see that, because the \
+            fallback's podcastId is nil too
+            """
+        )
     }
 
     // MARK: - R2: the attribution survives a process restart
