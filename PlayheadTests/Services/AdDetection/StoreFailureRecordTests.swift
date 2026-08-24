@@ -767,3 +767,53 @@ final class StoreFailureRecordSourceCanaryTests: XCTestCase {
         )
     }
 }
+
+// MARK: - TEMPORARY MEASUREMENT PROBE (playhead-s34ux) — NOT FOR COMMIT
+//
+// Samples THIS process's open file-descriptor count for the length of a
+// full-plan run and prints its own RLIMIT_NOFILE. `libproc.h` is absent from
+// the iPhoneSimulator SDK, so `proc_pidinfo(PROC_PIDLISTFDS)` is unavailable
+// here and the count is taken by probing each descriptor number with
+// `fcntl(F_GETFD)`. The scan is CAPPED and reports the cap, because a count
+// that silently stops at its own bound is a value that names one thing read
+// as though it named another.
+
+@Suite("playhead-s34ux fd probe")
+struct S34uxFileDescriptorProbe {
+
+    private static let scanCap: Int32 = 70_000
+
+    private static func openDescriptors() -> (count: Int, maxFD: Int32, hitCap: Bool) {
+        var count = 0
+        var maxFD: Int32 = -1
+        var fd: Int32 = 0
+        while fd < scanCap {
+            if fcntl(fd, F_GETFD) != -1 {
+                count += 1
+                maxFD = fd
+            }
+            fd += 1
+        }
+        return (count, maxFD, maxFD >= scanCap - 1)
+    }
+
+    @Test("playhead-s34ux: open-fd series for this test host")
+    func openDescriptorSeries() async throws {
+        var limit = rlimit()
+        let read = getrlimit(RLIMIT_NOFILE, &limit)
+        print("[s34ux-fd] pid=\(getpid()) getrlimit_rc=\(read) "
+              + "RLIMIT_NOFILE soft=\(limit.rlim_cur) hard=\(limit.rlim_max) "
+              + "scanCap=\(Self.scanCap)")
+        let start = ContinuousClock.now
+        var elapsed = Duration.zero
+        while elapsed < .seconds(300) {
+            let sample = Self.openDescriptors()
+            print("[s34ux-fd] t=\(elapsed.components.seconds)s "
+                  + "fds=\(sample.count) maxfd=\(sample.maxFD) hitCap=\(sample.hitCap)")
+            try await Task.sleep(for: .seconds(2))
+            elapsed = start.duration(to: .now)
+        }
+        print("[s34ux-fd] probe finished")
+        #expect(Bool(true))
+    }
+}
