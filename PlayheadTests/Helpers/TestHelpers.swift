@@ -1063,6 +1063,28 @@ func daemonSilentSessionIO(
 /// de-duplicated full-plan logs, 2026-08-15 … 08-24, THAT COUPLING HAS BITTEN
 /// IN BOTH DIRECTIONS:
 ///
+/// BEFORE YOU RE-DERIVE ANY NUMBER BELOW, KNOW WHAT THE 57 ARE (r5c). 76 logs
+/// qualify — non-selective on `-only-testing:` WITH the colon, >11,000 tests
+/// STARTED, <100 lost verdicts, over `/private/tmp`, `$TMPDIR`,
+/// `/Users/dabrams/playhead`, `/Users/dabrams/.claude` and
+/// `/Users/dabrams/playhead-gate-artifacts`, parsed by
+/// `gate_baseline.parse_run`. They de-duplicate to 57 on
+/// `(started count, frozenset of failing keys)`, and FOUR of those groups have
+/// members whose CONTENT differs — same test outcomes, different daemon
+/// traffic. So several figures here are properties of the REPRESENTATIVE, not
+/// of the population: taking `sorted(paths)[0]` reproduces every number in
+/// this comment, and across other choices the `allTasks` expiry count ranges
+/// 133–141 over 33–37 logs. The 54/3 partition is representative-dependent
+/// too: `3rql/RUN2-baseline-unmodified-20260820-130346.log` carries BOTH
+/// anchors, because it spans a host restart (one process refused, the next
+/// queued), while its de-dup twin carries only the refusal. Say which
+/// representative you took, or quote the range.
+///
+/// One parsing trap that silently shrinks the population: three sibling
+/// `Queued` lines carry a leading U+200B ZERO-WIDTH SPACE before the
+/// timestamp, so a `^`-anchored timestamp regex drops those logs entirely and
+/// moves every statistic.
+///
 ///   - INWARD, in 7 of the 13 logs before playhead-7wia landed (2026-08-18
 ///     23:00) — the numerator and the denominator, because the r4 note 50
 ///     lines above this one exists to forbid writing it as "the 7 logs":
