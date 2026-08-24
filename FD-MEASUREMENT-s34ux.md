@@ -281,3 +281,41 @@ still wrong — the error was one denominator, chosen by reaching for the number
 that was easy to read from outside the process instead of the number that binds
 inside it. The line that settles it was printed by this bead's own probe, in the
 log the whole time, and no one grepped for it.
+
+## What holds them: arithmetic, not a leak
+
+| | |
+|---|---|
+| descriptors per open WAL store | **3.00**, measured — 20 stores in one process took it from 4 fds to 64, and every one came back on close |
+| store-creating call sites in `PlayheadTests` | **2,799** across 322 files (2 further mentions are in comments) |
+| demand if all are in flight at once | **~8,397** |
+| `RLIMIT_NOFILE` soft | **2,560** |
+| | **3.28× over** |
+
+**Say what that numerator is and is not.** It counts CALL SITES, not tests: some
+tests open more than one store, and some call sites live in helpers several
+tests share. So 8,397 is the demand if every store-opening path were in flight
+at once, not a per-test figure. Swift Testing does start essentially every test
+at once — 11,000–11,400 in flight against 11,794 `@Test` annotations — so the
+shape holds even though the exact number does not.
+
+**The plan needs ~3.3× more descriptors than the process is allowed, and
+completes at all only because stores are released faster than new ones open.**
+Every run is therefore a race, and that is the whole explanation:
+
+- the victims **rotate** — whoever is opening when the table fills is denied;
+- the count is unstable (7, 8, 56 across three runs);
+- it **never reproduces scoped**, where a few dozen stores are in flight;
+- the failure is one sharp burst — all 63 denials inside four seconds of a
+  7.5-minute run — not a steady rate.
+
+There is no leaked handle to find. `AnalysisStore.deinit` closes correctly and a
+closed store returns all three descriptors.
+
+**The four options and their costs are on `playhead-vk68m`, and choosing between
+them is Dan's call** — it is "how every test opens its store" and "bounding
+Swift Testing's concurrency", which the bead brief reserves explicitly. In
+short: `parallelizable: false` is the only real fix and its **5.08×** cost is
+already measured (playhead-blsh); raising the soft limit is a **mitigation that
+moves the cliff**, recorded because the number is now known, and deliberately
+not presented as a fix.
