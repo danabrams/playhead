@@ -1037,8 +1037,9 @@ func daemonSilentSessionIO(
 /// `cancel()` onto it. MEASURED across 57 de-duplicated full-plan logs
 /// (2026-08-13 … 08-24): on ONE of them, 2026-08-23 08:06,
 /// `downloadTask(with:) for kkzu-cleared` parked inside `nsurlsessiond` and
-/// held the queue for 65 s. Seven sibling `downloadTask(with:)` calls expired
-/// within 33 ms of each other behind it; 55 s later SEVENTEEN submissions —
+/// held the queue for 65 s. SIX sibling `downloadTask(with:)` calls expired
+/// behind it inside 17 ms (08:06:01.288–.305) and a seventh, `kkzu-unattributed`,
+/// 10.1 s later; 55 s after that, SEVENTEEN submissions —
 /// twelve distinct transfers across THREE suites — arrived on a single thread,
 /// microseconds apart, in submission order, logging
 ///
@@ -1056,8 +1057,8 @@ func daemonSilentSessionIO(
 ///
 ///   - It does not make a call immune to a slow daemon. `allTasks for …` has
 ///     run on a per-manager PRIVATE queue since playhead-rouw (`enumerationIO`,
-///     built by `onItsOwnQueue`) and still blows the same 10 s bound 137 times
-///     across 35 of these 57 logs. Not one of those 137 carries an "already
+///     built by `onItsOwnQueue`) and still blows the same 10 s bound 138 times
+///     across 35 of these 57 logs. Not one of those 138 carries an "already
 ///     given up" line, so not one of them is a queue holding a body back:
 ///     `nsurlsessiond` was simply slower than the bound. A private queue is not
 ///     a shorter answer, only an unshared wait.
