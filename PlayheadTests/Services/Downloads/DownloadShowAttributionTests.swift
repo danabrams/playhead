@@ -67,6 +67,16 @@ struct DownloadShowAttributionTests {
     /// mean different queues, while two instances sharing a label still own two
     /// queues. This check can cry wolf; it cannot miss a shared queue.
     ///
+    /// A THIRD CHECK PINS THE BOUND, because the two headers assert it and
+    /// nothing enforced it: widening `unsharedSessionIO`'s `timeout` would
+    /// trade this suite's assertion failure for a time-limit failure — 7wia
+    /// measured that at 60 s these calls are still QUEUED — and no rail in the
+    /// tree would have reported it. `behavior` is NOT pinned and cannot be:
+    /// `BackgroundSessionIO.Behavior` is not `Equatable`, and the one
+    /// observation that separates `.dedicatedThread` from a refusing seam is a
+    /// `perform`, which would make a real daemon call from a helper. Mutant E3
+    /// measures it instead.
+    ///
     /// STILL OPEN: (a) nothing enforces the `makeManager` route — mutant E10
     /// measures that by bypassing it; (b) two calls through ONE manager share
     /// that manager's single queue, which no mutant can measure because it is a
@@ -105,6 +115,19 @@ struct DownloadShowAttributionTests {
             manager in this file shares one serial queue again — the label is \
             not the default, so the check above cannot see it, and the suite \
             is back in the state playhead-et2d removed
+            """,
+            sourceLocation: sourceLocation
+        )
+        #expect(
+            io.timeout == BackgroundSessionIO.defaultTimeout,
+            """
+            unsharedSessionIO is no longer on the production bound \
+            (\(io.timeout)s vs \(BackgroundSessionIO.defaultTimeout)s). A \
+            widened bound is legitimate in a double that needs the daemon to \
+            answer under load (BackgroundDownloadDropLedgerTests.answeringIO), \
+            and it is wrong here: playhead-7wia measured that at 60 s these \
+            calls are still QUEUED, so widening trades this suite's assertion \
+            failure for a time-limit failure and hides the queue entirely
             """,
             sourceLocation: sourceLocation
         )
