@@ -166,3 +166,57 @@ and each is worth more than the number:
   that proves nothing, and it reads as a coverage hole. **Read the EDIT, not the
   description of the edit** — which is the third time that sentence has had to
   be written in this bead, after the `MV1` mislabel and the `RD10` false credit.
+
+---
+
+## R1 — the adversarial review round: RD22..RD42
+
+Written before the run, in the same format and for the same reason. Measured
+against the WHOLE 332-test suite under each mutant, on a clean `git archive` of
+`19978659`, not against the named tests alone.
+
+**Headline for the final tree: 168 mutations, 166 killed, 1 survived, 0 error,
+control OK-SURVIVED.** The survivor is `R21`, which is pre-existing on
+`105efd5f` and filed as `playhead-5c006`. (The R1 round opened at 168 / 164 / 3;
+the two extra survivors were `RD06`, a proven equivalent, and `RD34`, a mutant
+whose edit did not do what its description said. Both closed — see `19978659`.)
+
+| id | PREDICTED victims | OBSERVED | verdict |
+|----|-------------------|----------|---------|
+| RD22 | ApplyBundles: SURVIVES_apply_bundles + NOT_reported_as_crashed + does_NOT_cover + conservation | the same 4 | exact |
+| RD23 | PASSES_CLEARS + FAILS_outranks + BUNDLE_overrules | the first 2 | OVER-PREDICTED |
+| RD24 | restart_and_denial_BOTH | + ONE_spelling | under-predicted |
+| RD25 | blamed_and_denial_BOTH | the same 1 | exact |
+| RD26 | census_and_denial_BOTH | the same 1 | exact |
+| RD27 | restart_BOTH + blamed_BOTH | + ONE_spelling | under-predicted |
+| RD28 | ONE_spelling | the same 1 | exact |
+| RD29 | denied_run_does_NOT_demote | the same 1 | exact |
+| RD30 | genuinely_reported_is_STILL_demoted | + 5 pre-existing census rails | under-predicted |
+| RD31 | denied_entry_does_not_HARD_FAIL | the same 1 | exact |
+| RD32 | genuine_recovery_reads_as_removal_candidate | + ArmedCensus.NEVER_STARTED | under-predicted |
+| RD33 | REPORTED_AGAIN_names_the_DENIAL | the same 1 | exact |
+| RD34 | block_NAMES_the_measured_limit | the same 1 | exact (after the mutant was rewritten) |
+| RD35 | block_no_longer_claims_RULED_OUT | the same 1 | exact |
+| RD36 | NESTED_assertion_vetoes | + Bundle.real_assertion_alongside | under-predicted |
+| RD37 | NESTED_denial_does_not_PROMOTE | the same 1 | exact |
+| RD38 | DENIAL_ONLY_announces + listing_NAMES_which_cause | the first only | OVER-PREDICTED |
+| RD39 | MIXED_counts_BOTH_causes | + the other 2 announcement rails | under-predicted |
+| RD40 | listing_NAMES_which_cause | the same 1 | exact |
+| RD41 | DENIAL_ONLY_says_a_resource_was_denied | the same 1 | exact |
+| RD42 | EBADF_names_the_CEILING | the same 1 | exact |
+
+**Zero false credits: every DECLARED victim actually failed, checked
+mechanically over all 25 declared ids.** Thirteen predictions were exact, six
+under-predicted (the mutant reached rails I had not thought of, which is
+evidence those rails are live rather than a problem), and two OVER-predicted —
+both worth reading, because an over-prediction is the half that looks like a
+coverage hole and is not:
+
+- **RD23** does not reach `test_the_BUNDLE_still_overrules_the_consoles_reading`
+  because that rail applies ONE bundle, and the discard loop RD23 mutates only
+  runs when a LATER bundle re-judges a key an earlier one saw. The rail is
+  about the console/bundle precedence, not about bundle-to-bundle precedence.
+- **RD38** does not reach `test_the_listing_NAMES_which_cause_protected_each_entry`
+  because that rail's fixture is a MIXED run, which has casualties, so the
+  block RD38 re-nests under `if no_verdict:` still prints. The one rail that
+  can see RD38 is the DENIAL-ONLY one, which is exactly the case the defect was.
