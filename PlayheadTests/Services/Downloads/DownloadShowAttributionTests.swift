@@ -111,10 +111,13 @@ struct DownloadShowAttributionTests {
         #expect(
             unsharedSessionIO(labelledFor: test).queueLabel != io.queueLabel,
             """
-            unsharedSessionIO handed back the SAME instance twice, so every \
-            manager in this file shares one serial queue again — the label is \
-            not the default, so the check above cannot see it, and the suite \
-            is back in the state playhead-et2d removed
+            unsharedSessionIO returned two instances with the SAME queue \
+            label (\(io.queueLabel)). Either it now MEMOIZES — one serial \
+            queue for all eight managers, the state playhead-et2d removed, \
+            invisible to the check above because the label is not the \
+            default — or its label stopped being unique per call, which gives \
+            two DISTINCT queues one name and is a false alarm this rail \
+            cannot tell apart. Only the first is the regression
             """,
             sourceLocation: sourceLocation
         )
