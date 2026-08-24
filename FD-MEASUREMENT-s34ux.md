@@ -319,3 +319,50 @@ short: `parallelizable: false` is the only real fix and its **5.08×** cost is
 already measured (playhead-blsh); raising the soft limit is a **mitigation that
 moves the cliff**, recorded because the number is now known, and deliberately
 not presented as a fix.
+
+## The EBADF witness was evidence FOR exhaustion, not against it
+
+The correction above still left one argument standing against exhaustion, and it
+was mine, and it was wrong. It read:
+
+> **`EBADF` (9) is not `EMFILE` (24).** Exhaustion fails an `open()` and reports
+> "Too many open files"; EBADF is an operation on a descriptor that WAS obtained
+> and then became invalid.
+
+**That is what POSIX documents. It is not what this box does.** Measured with a
+15-line C program — no Python, no ctypes, no Foundation, `errno` read on the
+line after the failing call:
+
+```
+inherited soft=1048576 hard=9223372036854775807
+opened 61, highest fd = 63 (soft-1 = 63)
+failing open: errno = 9 (Bad file descriptor)   [EMFILE=24 EBADF=9]
+```
+
+Lower `RLIMIT_NOFILE` to 64, open until it refuses, and the refusing `open(2)`
+sets **errno 9**. Not 24. Reproduced identically through three independent
+paths: Python's `os.open`, a raw `libc.open` through ctypes, and the C program
+above.
+
+So `NSPOSIXErrorDomain Code=9 "Bad file descriptor"` on the
+`AdDetectionService.swift` read — the witness this bead was handed as the thing
+"no database explanation covers" — **is exactly what a process at its descriptor
+ceiling produces on this platform.** It was never evidence of an over-close. It
+was the ceiling, reported in the spelling this kernel uses.
+
+Two further consequences worth stating plainly:
+
+- **The hand-audit of every raw `Darwin.close` site was looking for something
+  that was never there.** It came back clean because it was clean.
+- **The classifier's errno table is right for the wrong reason.** `EBADF (9)`
+  was admitted because of the observed witness, on the theory that it meant a
+  descriptor closed underneath a caller. It turns out to be *the* exhaustion
+  errno here, and `EMFILE (24)` may never appear on this box at all. The table
+  is unchanged and correct; the reasoning recorded beside it was not.
+
+**The method failure, since it is the third instance in one bead.** I reasoned
+from the errno POSIX documents instead of the errno this kernel returns —
+a value that names one thing read as though it named another, one layer below
+`kern.maxfilesperproc` vs `RLIMIT_NOFILE`. Both were settled in under a minute
+by an experiment, and both had gone unmeasured because the documented answer was
+easier to reach for than the measured one.
