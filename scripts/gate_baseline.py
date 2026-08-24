@@ -1545,19 +1545,33 @@ def _collect_case(node, bundle, suite, run, raw):
         run.resource_causes.pop(key, None)
         return
     resource = _bundle_resource(node)
-    if resource is not None:
+    if resource is not None and key not in run.failures:
         # Same treatment as a crash and for the same reason: NOT recorded in
         # `raw`, so a same-named passing twin cannot promote it to `passed`.
+        #
+        # `key not in run.failures` is the half a crash does NOT need, and it
+        # is the whole difference between the two categories (mutation RD10,
+        # which SURVIVED the first draft of this rule and was right to). Two
+        # same-named tests share one key. For a CRASH, resolving toward the
+        # casualty is resolving toward the worse news — the host died and
+        # nothing was judged. For a DENIAL it is not: a genuine assertion
+        # failure NAMES A DEFECT and a denial names the box, so a rule that
+        # let the denial win would swallow the very failure the UNANIMITY rule
+        # protects one level down. Without this clause a real regression
+        # sharing a display name with a denied test left the NEW column
+        # silently — the one outcome this whole change exists to prevent.
         run.resource_causes.setdefault(key, resource[0])
         run.resource.setdefault(key, resource[1])
-        run.failures.pop(key, None)
         return
     raw.setdefault(key, set()).add(result)
     if key in run.resource:
-        # A same-named twin that ran fine is not evidence about the one that
-        # was denied a descriptor. Resolve toward the worse news, exactly as
-        # the crash rule above does.
-        return
+        if result != XCRESULT_FAILED:
+            # A twin that PASSED or was SKIPPED is not evidence about the one
+            # that was denied a file. Keep the denial.
+            return
+        # …and the mirror: a genuine failure outranks it, so the denial yields.
+        run.resource.pop(key, None)
+        run.resource_causes.pop(key, None)
     if key in run.crashed:
         # Two same-named tests, one of which the host killed. The survivor's
         # verdict is not evidence about the casualty, and resolving toward the

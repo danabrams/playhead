@@ -1509,13 +1509,25 @@ MUTATIONS = [
         "a denied test to PASSED — resolving toward the better news, which is "
         "the direction this module never resolves",
         """    if key in run.resource:
-        # A same-named twin that ran fine is not evidence about the one that
-        # was denied a descriptor. Resolve toward the worse news, exactly as
-        # the crash rule above does.
-        return
+        if result != XCRESULT_FAILED:
+            # A twin that PASSED or was SKIPPED is not evidence about the one
+            # that was denied a file. Keep the denial.
+            return
+        # \u2026and the mirror: a genuine failure outranks it, so the denial yields.
+        run.resource.pop(key, None)
+        run.resource_causes.pop(key, None)
 """,
         "",
-        [DB + "test_a_passing_same_named_twin_cannot_launder_a_resource_casualty"],
+        [DB + "test_a_SKIPPED_twin_does_not_displace_a_denied_twin"],
+    ),
+    (
+        "RD10b", GB,
+        "a DENIAL outranks a genuine failure on a shared display name, so a "
+        "real regression leaves the NEW column silently — the defect RD10 "
+        "found by surviving, and the reason a denial is not a crash",
+        "    if resource is not None and key not in run.failures:",
+        "    if resource is not None:",
+        [DB + "test_a_GENUINELY_FAILING_twin_outranks_a_denied_twin_in_BOTH_orders"],
     ),
     (
         "RD11", GB,

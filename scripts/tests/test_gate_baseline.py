@@ -4325,6 +4325,34 @@ class ResourceBundleParseTests(unittest.TestCase):
             self.assertEqual(set(run.resource), {gb.st_key("t")}, order)
             self.assertNotIn(gb.st_key("t"), run.passed)
 
+    def test_a_GENUINELY_FAILING_twin_outranks_a_denied_twin_in_BOTH_orders(self):
+        """Found by mutation RD10, which SURVIVED the first draft of the
+        collision rule and was right to.
+
+        Two same-named tests share one key. Copying the crash rule wholesale
+        made the DENIAL win, which swallows a real regression that happens to
+        share a display name with a denied test — the exact outcome this whole
+        change exists to prevent. A crash outranks everything because nothing
+        was judged; a denial does not, because an assertion failure NAMES A
+        DEFECT and a denial names the box."""
+        denied = st_case("t", result="Failed", messages=[CANTOPEN], func="a()")
+        broken = st_case("t", result="Failed",
+                         messages=["Expectation failed: a == b"], func="b()")
+        for order in ((denied, broken), (broken, denied)):
+            run = gb.parse_xcresult(bundle_payload(*order))
+            self.assertEqual(set(run.failures), {gb.st_key("t")}, order)
+            self.assertEqual(set(run.resource), set(), order)
+
+    def test_a_SKIPPED_twin_does_not_displace_a_denied_twin(self):
+        """The mirror. A twin that was skipped says nothing about the one that
+        was denied a file, so the denial must stand."""
+        denied = st_case("t", result="Failed", messages=[CANTOPEN], func="a()")
+        skipped = st_case("t", result="Skipped", func="b()")
+        for order in ((denied, skipped), (skipped, denied)):
+            run = gb.parse_xcresult(bundle_payload(*order))
+            self.assertEqual(set(run.resource), {gb.st_key("t")}, order)
+            self.assertNotIn(gb.st_key("t"), run.skipped, order)
+
     def test_a_crashed_twin_outranks_a_denied_twin_in_BOTH_orders(self):
         """Two same-named tests, one killed by the host and one denied a file.
         The host death owns the key: it got no verdict AT ALL, and the census —
