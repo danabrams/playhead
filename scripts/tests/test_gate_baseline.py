@@ -4838,12 +4838,31 @@ class ResourceMeasuredCauseTests(unittest.TestCase):
 
 
 class ResourceNestedVetoTests(unittest.TestCase):
-    """The unanimity VETO reaches descendants; the classification does not.
+    """Classification AND veto both read every depth — and the version of this
+    class that said otherwise was refuted by a real bundle.
 
-    Measured across five preserved full-plan bundles: a `Test Case` node's
-    children are flat and there are ZERO grandchildren, so this guards a shape
-    Xcode does not emit today. It is admitted anyway because widening a veto is
-    only ever the loud direction, and both directions are pinned below.
+    IT USED TO READ: "the unanimity VETO reaches descendants; the
+    classification does not … measured across five preserved full-plan bundles,
+    a `Test Case` node's children are flat and there are ZERO grandchildren, so
+    this guards a shape Xcode does not emit today."
+
+    **Xcode emits it for every PARAMETERISED test that fails.** Such a node's
+    children are `Arguments`, and the `Failure Message` hangs off those — so
+    with classification restricted to direct children, a parameterised denial
+    was invisible and went out as a NEW FAILURE. Measured on the merge gate
+    that caught it: of the 16 tests whose every recorded issue was `unable to
+    open database file`, the 10 classified were all non-parameterised and the 5
+    left as NEW were all parameterised. The node shape is confirmed straight
+    from a captured bundle.
+
+    The "zero grandchildren" measurement was true of those five bundles and was
+    never a property of the population — not one of them contained a FAILING
+    parameterised test, which is the only thing that emits the shape. A sample
+    read as a population, which is the defect class this whole bead is made of.
+
+    Widening classification is safe in the direction that matters because the
+    veto already reached every depth: a node is classified only if EVERY
+    `Failure Message` beneath it names a denied resource.
     """
 
     def _node(self, direct, nested):
@@ -4861,15 +4880,52 @@ class ResourceNestedVetoTests(unittest.TestCase):
         self.assertEqual(set(), set(run.resource))
         self.assertIn(gb.st_key("t"), run.failures)
 
-    def test_a_NESTED_denial_does_not_PROMOTE_a_message_less_failure(self):
-        """The mirror, and the direction that must stay shut: a nested denial
-        beneath a node with no failure message of its own is not evidence the
-        test was denied anything, and routing it here would be the quiet
-        direction this whole change exists to avoid."""
+    def test_a_NESTED_denial_with_no_direct_message_IS_classified(self):
+        """THIS RAIL WAS THE OPPOSITE ASSERTION AND IT WAS WRONG.
+
+        It read `test_a_NESTED_denial_does_not_PROMOTE_a_message_less_failure`
+        and called this "the direction that must stay shut". It is the exact
+        shape a FAILING PARAMETERISED TEST has in a real bundle — no direct
+        `Failure Message`, the denial nested under `Arguments` — so keeping it
+        shut is what reported five healthy tests as regressions on the merge
+        gate. Reversed deliberately, with the evidence in the class docstring;
+        the veto rails above are unchanged and still hold."""
         run = gb.parse_xcresult(bundle_payload(
             self._node([], [RESOURCE_BUNDLE_MESSAGE])))
+        self.assertEqual({gb.st_key("t")}, set(run.resource))
+        self.assertNotIn(gb.st_key("t"), run.failures)
+
+    def test_a_message_less_FAILURE_is_still_never_classified(self):
+        """The guard that has to survive the reversal: silence is still not
+        evidence. A FAILED node with no `Failure Message` at ANY depth stays a
+        FAILURE — that is the property the old rail was reaching for, and it is
+        pinned here where it is actually true."""
+        node = st_case("t", result="Failed", func="t()")
+        node["children"] = [{"nodeType": "Arguments", "name": "n: 1"}]
+        run = gb.parse_xcresult(bundle_payload(node))
         self.assertEqual(set(), set(run.resource))
         self.assertIn(gb.st_key("t"), run.failures)
+
+    def test_the_real_PARAMETERISED_shape_from_a_captured_bundle(self):
+        """Byte-faithful to what `xcresulttool` emitted for
+        `BannerPlayheadBiconditionalTests` — two `Arguments` children and no
+        direct `Failure Message` — so this is a test of the log rather than of
+        my memory of it."""
+        node = st_case("THE PROPERTY: at every observation, the bannered set IS "
+                       "the entered set", result="Failed", func="theProperty()")
+        node["children"] = [
+            {"nodeType": "Arguments", "name": "tier: auto-skip (playhead-bwxi)",
+             "children": [{"nodeType": "Failure Message",
+                           "name": "Caught error: Migration failed: unable to "
+                                   "open database file (SQL: BEGIN IMMEDIATE)"}]},
+            {"nodeType": "Arguments", "name": "tier: suggest (playhead-d3g0/isp5)",
+             "children": [{"nodeType": "Failure Message",
+                           "name": "Caught error: SQLite open failed (14): "
+                                   "unable to open database file"}]},
+        ]
+        run = gb.parse_xcresult(bundle_payload(node))
+        self.assertEqual(1, len(run.resource))
+        self.assertEqual({}, run.failures)
 
     def test_a_flat_denial_is_STILL_a_denial(self):
         run = gb.parse_xcresult(bundle_payload(

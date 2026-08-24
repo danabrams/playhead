@@ -1376,34 +1376,46 @@ def _bundle_resource(node):
     """
     if node.get("result") != XCRESULT_FAILED:
         return None
-    # The CLASSIFICATION is the first DIRECT `Failure Message` that names a
-    # denied resource. This loop does NOT veto — see below.
+    # THE CLASSIFICATION READS EVERY DEPTH, NOT JUST DIRECT CHILDREN
+    # (playhead-s34ux, found by the merge gate). It read direct children only,
+    # and a PARAMETERISED test does not put its failure there: the bundle gives
+    # such a `Test Case` node `Arguments` children and hangs the
+    # `Failure Message` off THOSE. So every parameterised test was invisible to
+    # this function — `found` stayed None and the denial was reported NEW.
+    #
+    # The correlation on the gate that caught it is total: of the 16 tests whose
+    # every recorded issue was `unable to open database file`, the 10 that were
+    # classified are all non-parameterised and the 5 left as NEW FAILURES are
+    # all parameterised (the 16th was a genuine assertion, correctly kept). The
+    # node shape is confirmed straight from a bundle — a parameterised case's
+    # children are `Arguments`, a plain one's are `Failure Message`.
+    #
+    # An earlier round split classification (direct) from veto (any depth),
+    # reasoning that promoting a nested message would be the quiet direction,
+    # and measured ZERO grandchildren across five preserved bundles. That was
+    # true of those five and is not a property of the population: not one of
+    # them had a FAILING parameterised test, which is the only thing that emits
+    # the shape. A sample read as a population.
+    #
+    # Unifying them is safe in the direction that matters, because the veto
+    # already reached every depth: a node is classified only if EVERY
+    # `Failure Message` anywhere beneath it names a denied resource, so one
+    # nested assertion still keeps the whole test a FAILURE.
     found = None
-    for child in node.get("children") or []:
-        if child.get("nodeType") != _NODE_FAILURE_MESSAGE:
-            continue
-        message = (child.get("name") or "").strip()
-        cause = resource_cause(message)
-        if cause is not None and found is None:
-            found = (cause, message)
-    if found is None:
-        # A FAILED case with no message naming a denied resource says nothing
-        # this category may act on, and silence is never routed here. It stays
-        # a FAILURE.
-        return None
-    # THE VETO IS ONE RULE IN ONE PLACE, and it reads EVERY `Failure Message`
-    # under this node — the direct ones included. The first draft vetoed in the
-    # loop above AND swept here, which made the loop's half redundant: mutation
-    # RD06 survived deleting it, and was right to. Unanimity is a property of
-    # the whole node, so it is decided in one pass over the whole node.
     stack = list(node.get("children") or [])
     while stack:
         child = stack.pop()
         stack.extend(child.get("children") or [])
         if child.get("nodeType") != _NODE_FAILURE_MESSAGE:
             continue
-        if resource_cause((child.get("name") or "").strip()) is None:
+        message = (child.get("name") or "").strip()
+        cause = resource_cause(message)
+        if cause is None:
             return None
+        if found is None:
+            found = (cause, message)
+    # A FAILED case with no message anywhere beneath it says nothing this
+    # category may act on, and silence is never routed here. It stays a FAILURE.
     return found
 
 

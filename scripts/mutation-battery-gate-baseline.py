@@ -91,6 +91,7 @@ DK = SUITE + ".ResourceConsoleParseTests."
 DB = SUITE + ".ResourceBundleParseTests."
 DV = SUITE + ".ResourceVerdictTests."
 DA = SUITE + ".ResourceAcceptTests."
+DNV = SUITE + ".ResourceNestedVetoTests."
 # playhead-s34ux R1 — the adversarial review round.
 DT = SUITE + ".ResourceThroughApplyBundlesTests."
 DH = SUITE + ".ResourceHeadlineRidesAlongTests."
@@ -1918,6 +1919,35 @@ MUTATIONS = [
         '''    "9": "EBADF — this platform's errno at the RLIMIT_NOFILE ceiling",''',
         '''    "9": "EBADF — a descriptor that was obtained and then went bad",''',
         [DW + "test_the_EBADF_cause_names_the_CEILING_not_a_stale_descriptor"],
+    ),
+    (
+        "RD43", GB,
+        "the classification goes back to reading DIRECT children only, so every "
+        "PARAMETERISED test's denial is invisible again — the defect the merge "
+        "gate caught, where 5 of 5 parameterised denials went out as NEW "
+        "FAILURES while 10 of 10 flat ones classified",
+        """    found = None
+    stack = list(node.get("children") or [])
+    while stack:
+        child = stack.pop()
+        stack.extend(child.get("children") or [])""",
+        """    found = None
+    stack = list(node.get("children") or [])
+    while stack:
+        child = stack.pop()""",
+        [DNV + "test_a_NESTED_denial_with_no_direct_message_IS_classified",
+         DNV + "test_the_real_PARAMETERISED_shape_from_a_captured_bundle"],
+    ),
+    (
+        "RD44", GB,
+        "silence starts being classified: a FAILED node with no message at any "
+        "depth is routed to RESOURCE, which is the one inference this whole "
+        "category refuses to make",
+        """    # A FAILED case with no message anywhere beneath it says nothing this
+    # category may act on, and silence is never routed here. It stays a FAILURE.
+    return found""",
+        """    return found or ("resource failure", "")""",
+        [DNV + "test_a_message_less_FAILURE_is_still_never_classified"],
     ),
     (
         "R99", GB,
