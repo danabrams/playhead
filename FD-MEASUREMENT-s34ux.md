@@ -509,3 +509,37 @@ final climb is the tail of store-opening tests arriving on top of it.
 **Quote 695/702 rather than 8,397/2,560.** Both say the same thing, but the
 first is measured concurrency and the second is an upper bound assembled from a
 count of source lines.
+
+## A separate finding the series contains and nobody had read: ~429 descriptors are never given back
+
+Everything above treats the peak as transient — stores opened, used, released.
+Most of it is. But the series also shows a floor that moves and does not come
+back, on the **same process** (`testhost_pid` is `10985` for all 46 samples, so
+this is not a restarted host):
+
+| | vnodes open |
+|---|---|
+| before the ramp, host alive, test phase not yet loaded (02:40:36) | **27** |
+| after the test phase, flat for 22 consecutive samples over 220 s | **449** |
+
+**429 file descriptors are acquired during the run and never released** — about
+**16.8 % of the 2,560 budget, permanently**, before a single store-opening test
+in the next plan has run. At 3.00 descriptors per WAL store that would be ~143
+stores that were never closed, though they need not be stores at all.
+
+**Stated as an observation, because the cause is NOT established:**
+
+- the tail is sampled while xcodebuild is still collecting results, so the host
+  is idle but not shut down, and some of those files may belong to that;
+- the sampler records descriptors by KIND, not by PATH, so nothing here names
+  a single one of the 449;
+- 429 does not explain the peak. The peak is `2,539 − 453 = 2,086` of transient
+  store pressure on top of this floor. This is a **sixth of the table gone
+  before the race starts**, not the race itself.
+
+**The one-line diagnostic that would settle it** is `lsof -p <testhost_pid>`
+taken at the tail, which names every one of the 449. It is not in this bead
+because the bead's remaining budget is owed to the gate's honesty, and it is
+recorded on `playhead-vk68m` as the concrete next step — it is the cheapest
+unexplored lead in the whole picture, and unlike the rest of it, it may well be
+a genuine leak with a genuine fix.
