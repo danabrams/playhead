@@ -258,3 +258,85 @@ class MemoryReporting(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FileDescriptorReporting(unittest.TestCase):
+    """playhead-s34ux — a column nobody prints is a column nobody reads.
+
+    That bead's whole cost was that the number was never taken: gates were
+    failing 56 tests on denied file opens while every printed quantity said the
+    box was healthy. The peak is now on the verdict of EVERY run, with its
+    denominator, because a count without one is this repo's standing defect
+    class.
+    """
+
+    def _fixed_ceiling(self, value):
+        saved = gmv.max_files_per_proc
+        gmv.max_files_per_proc = lambda: value
+        self.addCleanup(lambda: setattr(gmv, "max_files_per_proc", saved))
+
+    def test_the_peak_is_printed_WITH_its_denominator(self):
+        self._fixed_ceiling(61440)
+        path = series([sample(log_bytes=10, testhost_fds=100),
+                       sample(log_bytes=20, testhost_fds=2539)])
+        _, out = run(log(summary=False), rc=137, series_path=path)
+        self.assertIn("peak open fds 2539", out)
+        self.assertIn("kern.maxfilesperproc 61440", out)
+        self.assertIn("4.1 %", out)
+
+    def test_a_series_with_NO_fd_column_says_NOT_RECORDED_never_zero(self):
+        """An older sampler wrote no column. `peak open fds 0` would claim the
+        host held no descriptors, which is a refutation nobody measured."""
+        path = series([sample(log_bytes=10)])
+        _, out = run(log(summary=False), rc=137, series_path=path)
+        self.assertIn("NOT RECORDED", out)
+        self.assertNotIn("peak open fds 0", out)
+
+    def test_a_column_of_only_FAILED_reads_is_NOT_RECORDED_too(self):
+        """-1 is what `fd_sample` writes when the table could not be read at
+        all. A run of nothing but -1 measured nothing, and must not report a
+        peak of -1 as though it were a count."""
+        path = series([sample(log_bytes=10, testhost_fds=-1),
+                       sample(log_bytes=20, testhost_fds=-1)])
+        _, out = run(log(summary=False), rc=137, series_path=path)
+        self.assertIn("NOT RECORDED", out)
+        self.assertNotIn("peak open fds -1", out)
+
+    def test_a_FAILED_read_does_not_drag_the_peak_down(self):
+        """A mid-run -1 is a failed read, not a moment with fewer descriptors.
+        Averaging or min-ing it in would be the same defect one layer along."""
+        self._fixed_ceiling(61440)
+        path = series([sample(log_bytes=10, testhost_fds=2539),
+                       sample(log_bytes=20, testhost_fds=-1)])
+        _, out = run(log(summary=False), rc=137, series_path=path)
+        self.assertIn("peak open fds 2539", out)
+
+    def test_the_system_file_table_is_reported_beside_the_per_process_one(self):
+        """ENFILE and EMFILE are different bugs with different remedies, and
+        only the pair can tell them apart."""
+        self._fixed_ceiling(61440)
+        path = series([sample(log_bytes=10, testhost_fds=2539,
+                              sys_num_files=7791, sys_max_files=122880)])
+        _, out = run(log(summary=False), rc=137, series_path=path)
+        self.assertIn("system-wide 7791", out)
+        self.assertIn("kern.maxfiles 122880", out)
+
+    def test_it_is_reported_on_a_COMPLETE_run_as_well(self):
+        """The reading that most needs its instrument named is the quiet one:
+        s34ux's gates completed, restarted no host, and sat comfortably inside
+        the box's memory while failing 56 tests on denied opens."""
+        self._fixed_ceiling(61440)
+        path = series([sample(log_bytes=10, testhost_fds=2539)])
+        _, out = run(log(summary=True), rc=0, series_path=path)
+        self.assertIn("reached a verdict", out)
+        self.assertIn("peak open fds 2539", out)
+
+    def test_an_unreadable_ceiling_still_prints_the_peak_and_says_unknown(self):
+        """sysctl can fail. The peak is still the measurement; what is missing
+        is the denominator, and the line must say which of the two it lost."""
+        self._fixed_ceiling(-1)
+        path = series([sample(log_bytes=10, testhost_fds=2539)])
+        _, out = run(log(summary=False), rc=137, series_path=path)
+        self.assertIn("peak open fds 2539", out)
+        self.assertIn("unknown", out)
+        self.assertNotIn("% of it", out)

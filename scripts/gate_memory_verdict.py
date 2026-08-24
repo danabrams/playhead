@@ -121,6 +121,48 @@ def inflight_at_end(text: str) -> tuple[int, int]:
 # reading the box
 # --------------------------------------------------------------------------
 
+def max_files_per_proc() -> int:
+    """`kern.maxfilesperproc`, or -1. The PER-PROCESS ceiling.
+
+    Reported next to the peak because the peak alone means nothing: playhead-
+    s34ux was filed on the belief that the test host was exhausting descriptors
+    and the measurement read 2,539 against 61,440 — 4.1 %. A count without its
+    denominator is this repo's standing defect class, so the two are printed
+    together or not at all.
+
+    NOTE what this is NOT: it is the kernel's per-process cap, not the process's
+    own `RLIMIT_NOFILE` soft limit, which is what actually binds and cannot be
+    read from outside the process on macOS. So this is an UPPER bound on the
+    ceiling. A peak far below it is evidence; a peak near it is a reason to go
+    and measure the soft limit from inside the host.
+    """
+    out = subprocess.run(
+        ["sysctl", "-n", "kern.maxfilesperproc"],
+        capture_output=True, text=True, check=False,
+    ).stdout.strip()
+    try:
+        return int(out)
+    except ValueError:
+        return -1
+
+
+def fd_line(stats: dict[str, int]) -> str:
+    """One line about descriptors, or a line saying nobody measured them."""
+    if not stats.get("has_fds") or stats.get("host_fds_peak", -1) < 0:
+        return ("gate-memory: test host open file descriptors NOT RECORDED — this "
+                "run says nothing about descriptor exhaustion")
+    ceiling = max_files_per_proc()
+    share = ("" if ceiling <= 0
+             else f" ({100.0 * stats['host_fds_peak'] / ceiling:.1f} % of it)")
+    limit = ("unknown" if ceiling <= 0 else str(ceiling))
+    line = (f"gate-memory: test host peak open fds {stats['host_fds_peak']} of "
+            f"kern.maxfilesperproc {limit}{share}")
+    if stats.get("sys_files_peak", -1) >= 0 and stats.get("sys_files_limit", -1) >= 0:
+        line += (f"; system-wide {stats['sys_files_peak']} of "
+                 f"kern.maxfiles {stats['sys_files_limit']}")
+    return line
+
+
 def ram_mib() -> int:
     try:
         out = subprocess.run(
@@ -219,6 +261,15 @@ def summarise_series(rows: list[dict[str, str]]) -> dict[str, int]:
         "host_footprint_peak": max([f for f in col("testhost_footprint_mib") if f >= 0] or [-1]),
         "host_rss_peak": max(col("testhost_mib")),
         "distinct_host_pids": len(set(pids)),
+        # playhead-s34ux. A column nobody prints is a column nobody reads, and
+        # the whole cost of that bead was that the number was never taken.
+        # -1 means NOT RECORDED throughout: an older sampler wrote no column,
+        # or every read failed. It is never 0, because a printed zero would
+        # claim the host held no descriptors.
+        "has_fds": has("testhost_fds"),
+        "host_fds_peak": max([f for f in col("testhost_fds") if f >= 0] or [-1]),
+        "sys_files_peak": max([f for f in col("sys_num_files") if f >= 0] or [-1]),
+        "sys_files_limit": max([f for f in col("sys_max_files") if f >= 0] or [-1]),
     }
 
 
@@ -282,6 +333,12 @@ def report(log_path: str, rc: int, series_path: str, out=sys.stdout) -> int:
                 f" {stats['swap_peak'] / 1024:.1f} GiB."
             )
         print(line, file=out)
+        # On a COMPLETE run too, and deliberately: the reading that most needs
+        # its instrument named is the quiet one. playhead-s34ux's gates were
+        # `** TEST SUCCEEDED **`-adjacent — 0 host restarts, memory comfortably
+        # inside the box — and were failing 56 tests on denied file opens.
+        if stats:
+            print(fd_line(stats), file=out)
         return 0
 
     print("", file=out)
@@ -352,6 +409,7 @@ def report(log_path: str, rc: int, series_path: str, out=sys.stdout) -> int:
         f" footprint {footprint}, {pidcount}",
         file=out,
     )
+    print(fd_line(stats), file=out)
     if stats["demand_peak_during_run"] > ram:
         print(
             f"gate-memory: DEMAND EXCEEDED RAM by"
