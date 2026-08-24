@@ -981,13 +981,6 @@ func makeShard(
 ///     downloadTask(with:) for ep-stage-failure  … did not answer within 10s
 ///     downloadTask(with:) for kkzu-unattributed … did not answer within 10s
 ///
-/// READ "ALWAYS THE SAME FOUR" AS DATED (playhead-et2d). It holds for the 7
-/// pre-7wia logs of the 57-log window measured under ``unsharedSessionIO``,
-/// and for none of the 44 after it. `kkzu-unattributed` no longer issues a
-/// `downloadTask(with:)` at all, and `DownloadShowAttributionTests`' other
-/// seven — on this queue the whole time, and missing from the list only
-/// because they were being QUEUED rather than expiring — are private now.
-///
 /// and then, 50–63 SECONDS LATER, three of the four arrive on one thread
 /// microseconds apart, in submission order:
 ///
@@ -1009,6 +1002,13 @@ func makeShard(
 /// no crash report. This is the DOUBLE. `timeout` is stated as the production
 /// default rather than some large number precisely so that nobody reads this
 /// helper as a widened bound — `.neverAnswers` never arms it.
+///
+/// READ "ALWAYS THE SAME FOUR" AS DATED (playhead-et2d). It holds for the 7
+/// pre-7wia logs of the 57-log window measured under ``unsharedSessionIO``,
+/// and for none of the 44 after it. `kkzu-unattributed` no longer issues a
+/// `downloadTask(with:)` at all, and `DownloadShowAttributionTests`' other
+/// seven — on this queue the whole time, and missing from the list only
+/// because they were being QUEUED rather than expiring — are private now.
 func daemonSilentSessionIO(
     labelledFor test: String = #function
 ) -> BackgroundSessionIO {
