@@ -306,9 +306,9 @@ log the whole time, and no one grepped for it.
 |---|---|
 | descriptors per open WAL store | **3.00**, measured — 20 stores in one process took it from 4 fds to 64, and every one came back on close |
 | store-creating call sites in `PlayheadTests` | **2,799** across 322 files (2 further mentions are in comments) |
-| demand if all are in flight at once | **~8,397** |
+| demand if all are in flight at once — an UPPER BOUND, not the operative figure | **~8,397** |
 | `RLIMIT_NOFILE` soft | **2,560** |
-| | **3.28× over** |
+| | **3.28× over** — see the correction below: the measured concurrency is ~695, not 2,799, and 695/702 is the figure that predicts the run actually observed |
 
 **Say what that numerator is and is not.** It counts CALL SITES, not tests: some
 tests open more than one store, and some call sites live in helpers several
