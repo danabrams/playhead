@@ -1039,9 +1039,11 @@ func daemonSilentSessionIO(
 /// `downloadTask(with:) for kkzu-cleared` parked inside `nsurlsessiond` and
 /// held the queue for 65 s. SIX sibling `downloadTask(with:)` calls expired
 /// behind it inside 17 ms (08:06:01.288–.305) and a seventh, `kkzu-unattributed`,
-/// 10.1 s later; 55 s after that, SEVENTEEN submissions —
-/// twelve distinct transfers across THREE suites — arrived on a single thread,
-/// microseconds apart, in submission order, logging
+/// 10.1 s later. At 08:06:56.63 — the moment the parked body finally returned,
+/// 55 s after the six and 45 s after the seventh, and the anchor is named
+/// because "55 s after that" read against the nearer antecedent is 45 —
+/// SEVENTEEN submissions, twelve distinct transfers across THREE suites,
+/// arrived on a single thread, microseconds apart, in submission order, logging
 ///
 ///     downloadTask(with:) for kkzu-attributed: reached the daemon queue after
 ///         its caller had already given up — not started
@@ -1057,11 +1059,18 @@ func daemonSilentSessionIO(
 ///
 ///   - It does not make a call immune to a slow daemon. `allTasks for …` has
 ///     run on a per-manager PRIVATE queue since playhead-rouw (`enumerationIO`,
-///     built by `onItsOwnQueue`) and still blows the same 10 s bound 138 times
-///     across 35 of these 57 logs. Not one of those 138 carries an "already
-///     given up" line, so not one of them is a queue holding a body back:
-///     `nsurlsessiond` was simply slower than the bound. A private queue is not
-///     a shorter answer, only an unshared wait.
+///     built by `onItsOwnQueue`) and still blows the same 10 s bound 137 times
+///     across 35 of these 57 logs. READ 137 AND NOT 138. There are 138
+///     `allTasks` expiry lines in that population; the 138th names a THIRTY
+///     second bound and belongs to
+///     `BackgroundDownloadDropLedgerTests.answeringIO()`, a test double that
+///     widens it on purpose. An earlier round of this bead "corrected" 137 to
+///     138 by counting expiries instead of counting expiries OF THIS BOUND,
+///     which is the standing defect class committed inside a commit whose
+///     subject line was about miscounts. Not one of the 138 carries an
+///     "already given up" line either way, so not one of them is a queue
+///     holding a body back: `nsurlsessiond` was simply slower than the bound.
+///     A private queue is not a shorter answer, only an unshared wait.
 ///   - It does not separate two calls made by the SAME manager: they share one
 ///     `BackgroundSessionIO` instance and therefore one queue.
 ///   - It is not what playhead-3rql's EXP2 measured. That run set

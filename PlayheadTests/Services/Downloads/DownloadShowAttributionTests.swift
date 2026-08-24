@@ -217,14 +217,19 @@ struct DownloadShowAttributionTests {
         // 2026-08-13 … 08-24, `Background download for kkzu-unattributed NOT
         // started: the background transfer daemon did not answer` appears in
         // 54, and `Queued background download for kkzu-unattributed` in 3. It
-        // WAS the eighth and last `downloadTask(with:)` this suite issued,
-        // ~1.3 s after the other seven, by which time seven live transfers to a
-        // non-resolving host had `nsurlsessiond` busy — those seven are queued
-        // successfully in 56 of the 57. A private queue does not change that
-        // (see `unsharedSessionIO`), so a witness here would have failed 54
-        // runs out of 57. Written directly, the record is present by
-        // construction, the assertion below is sensitive to the CONTEXT, and
-        // the suite stops issuing the one call that stalls every merge gate.
+        // WAS the eighth and last `downloadTask(with:)` this suite issued.
+        // The gap to the other seven is ~1.6 s, not the ~1.3 s an earlier
+        // round of this bead wrote: measured on the 51 of the 57 logs that
+        // carry both anchors, median 1.573 s, mean 1.601 s, range
+        // 0.404–3.309 s, and only 10 of the 51 are at or under 1.3 s. By then
+        // seven live transfers to a non-resolving host had `nsurlsessiond`
+        // busy — those seven are queued successfully in 56 of the 57. A
+        // private queue does not change that (see `unsharedSessionIO`), so a
+        // witness here would have failed 54 runs out of 57. Written directly,
+        // the record is present by construction, the assertion below is
+        // sensitive to the CONTEXT, and the suite stops issuing a call that
+        // was refused in 54 of 57 runs by an arm that could not see the
+        // difference.
         let unattributed = "kkzu-unattributed"
         await manager.persistDownloadAttribution(
             episodeId: unattributed,
