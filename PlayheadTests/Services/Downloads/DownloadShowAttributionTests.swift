@@ -246,8 +246,10 @@ struct DownloadShowAttributionTests {
         //
         // MEASURED, which is why the arm was moved off the daemon rather than
         // given a witness: over the 57 de-duplicated full-plan logs of
-        // 2026-08-13 … 08-24, `Background download for kkzu-unattributed NOT
-        // started: the background transfer daemon did not answer` appears in
+        // 2026-08-15 … 08-24 (08-13 is a carried-over date; nothing in the
+        // population is older than 08-15), `Background download for
+        // kkzu-unattributed NOT started: the background transfer daemon did
+        // not answer` appears in
         // 54, and `Queued background download for kkzu-unattributed` in 3. It
         // WAS the eighth and last `downloadTask(with:)` this suite issued.
         // The gap to the other seven is ~1.6 s, not the ~1.3 s an earlier

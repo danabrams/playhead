@@ -1043,7 +1043,8 @@ func daemonSilentSessionIO(
 /// singleton with ONE serial queue, and every `DownloadManager` that does not
 /// inject submits `downloadTask(with:)`, `resume()` and the abandon-path
 /// `cancel()` onto it. MEASURED across 57 de-duplicated full-plan logs
-/// (2026-08-13 … 08-24): on ONE of them, 2026-08-23 08:06,
+/// (2026-08-15 … 08-24 — 08-13 was a carried-over date, no log in the
+/// population is older than 08-15): on ONE of them, 2026-08-23 08:06,
 /// `downloadTask(with:) for kkzu-cleared` parked inside `nsurlsessiond` and
 /// held the queue for 65 s. SIX sibling `downloadTask(with:)` calls expired
 /// behind it inside 17 ms (08:06:01.288–.305) and a seventh, `kkzu-unattributed`,
@@ -1079,7 +1080,7 @@ func daemonSilentSessionIO(
 /// remedy for that. So do not read a green `DownloadShowAttributionTests` as
 /// evidence that this helper worked; read it as evidence the daemon answered.
 ///
-/// HOW OFTEN, over the same 57: 47 of them carry exactly ONE "already given
+/// HOW OFTEN, over the same 57: 49 of them carry exactly ONE "already given
 /// up" line and it is `BackgroundSessionIOTests`' own 0.2 s `starved:` probe.
 /// Genuine head-of-line blocking appears in 7 logs BEFORE playhead-7wia landed
 /// (2026-08-18 23:00) and in ONE of the 44 after it — this one. Nor is the
