@@ -596,3 +596,45 @@ If it holds it widens the picture considerably: the descriptor ceiling would sto
 being an explanation for `CANTOPEN` in a rotating set of suites and become a
 candidate explanation for the **void merge gates this repo has been treating as a
 memory problem**. Recorded on `playhead-vk68m`.
+
+## Limit L-2: a denial surfaces somewhere else as an ASSERTION, and no classifier can see that
+
+The merge gate that validated this change reported **6 NEW failures**. Five were
+parameterised denials the classifier could not yet see (fixed — see the
+commit). The sixth is the interesting one:
+
+    ✘ Test "the persisted choice is what a later trust lookup reads back"
+      ShowSkipModeControlTests.swift:567:9:
+      Expectation failed: resolved.mode == .auto
+
+That is a behavioural assertion, not a denied file, so the classifier correctly
+left it in the NEW column. But it is almost certainly the same bug:
+
+- **it passes scoped, 3/3** — `ShowSkipModeWriteTests`, 7 tests, `Test run …
+  passed`, three consecutive runs, and this test passing by name in all three;
+- **the same suite recorded a denial in the same full run** —
+  `ShowSkipModeControlTests.swift:591:6: Caught error`, alongside the two
+  `Expectation failed` lines at 567 and 568;
+- the run carried **1,280 app-side denial log lines**, so opens were failing
+  continuously while it ran;
+- it appears in **none** of the four earlier preserved logs and is not in the
+  118-entry baseline;
+- and nothing in this bead's diff touches trust scoring or skip modes.
+
+The mechanism that fits: `setShowSkipMode` writes, the write is denied a file,
+nothing checks that write's return, and the later `resolveMode` reads back the
+old value. **The denial happens in one place and the failure appears in
+another, with no `CANTOPEN` anywhere near the assertion.**
+
+**So the classifier removes the denials it can NAME; it cannot remove their
+CONSEQUENCES.** No message-based rule ever could — by the time the assertion
+fails, the only evidence is a value that is wrong. This is worth stating next to
+the CLAUDE.md observation that of 269 historically-failing names, **93 have only
+ever failed an EXPECTATION and never a time limit**: some unknown fraction of
+that population may be this, rather than starvation.
+
+**Not fixed here, and deliberately not.** Fixing it means either making the
+write path report a denial its caller must handle (a product change well outside
+this bead) or removing the exhaustion (`playhead-vk68m`, Dan's call). Masking it
+with a retry is exactly what the brief forbids. It is recorded on
+`playhead-vk68m` as the first known instance of the class.
