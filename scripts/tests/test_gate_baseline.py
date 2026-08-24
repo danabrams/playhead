@@ -4876,3 +4876,119 @@ class ResourceNestedVetoTests(unittest.TestCase):
             st_case("t", result="Failed", func="t()",
                     messages=[RESOURCE_BUNDLE_MESSAGE])))
         self.assertEqual({gb.st_key("t")}, set(run.resource))
+
+
+class ResourceAcceptAnnouncementTests(unittest.TestCase):
+    """THE PROTECTION MUST SAY SO — the sixth silent event, and the last one.
+
+    `merge()` protects `run.no_verdict | set(run.resource)` from the prune, and
+    the `CARRIED FORWARD:` announcement was nested under `if no_verdict:` and
+    recomputed its set from `no_verdict` alone. So a denial-only accept kept an
+    entry a healthy run would have pruned and printed nothing but `(membership
+    unchanged; counts updated)`, and a mixed accept carried two while printing
+    one. RD15 asserts on `merge()`'s RETURN VALUE, so no rail and no mutant
+    could reach the line — `a mutant can only ever interrogate a line that
+    already exists`, playhead-o89d R5.
+    """
+
+    def _accept(self, base_tests, run_log):
+        import contextlib
+        import io
+        with tempfile.TemporaryDirectory() as d:
+            d = pathlib.Path(d)
+            (d / "run.log").write_text(run_log, encoding="utf-8")
+            gb.save_baseline(d / "b.json", baseline(base_tests))
+            buffer = io.StringIO()
+            with contextlib.redirect_stdout(buffer):
+                rc = gb.main(["accept", "--log", str(d / "run.log"),
+                              "--baseline", str(d / "b.json")])
+            return rc, buffer.getvalue(), gb.load_baseline(d / "b.json")
+
+    ENTRIES = {
+        gb.st_key("denied"): (3, ["timeout"]),
+        gb.st_key("lost"): (3, ["timeout"]),
+        gb.st_key("s1"): (3, ["timeout"]),
+        gb.st_key("s2"): (3, ["timeout"]),
+        gb.st_key("s3"): (3, ["timeout"]),
+    }
+
+    STILL_FAILING = (st_fail_timeout("s1"), st_fail_timeout("s2"),
+                     st_fail_timeout("s3"))
+
+    def test_a_DENIAL_ONLY_accept_announces_what_it_carried_forward(self):
+        """No crash anywhere in the run, so the crash-nested block never fired
+        and the operator was told nothing at all."""
+        rc, out, merged = self._accept(self.ENTRIES, log(
+            st_fail_message("denied", CANTOPEN), *self.STILL_FAILING))
+        self.assertEqual(0, rc)
+        self.assertIn(gb.st_key("denied"), merged["tests"])
+        self.assertIn("CARRIED FORWARD: 1 recorded entry was kept unchanged", out)
+
+    def test_a_DENIAL_ONLY_accept_says_a_resource_was_denied(self):
+        rc, out, _merged = self._accept(self.ENTRIES, log(
+            st_fail_message("denied", CANTOPEN), *self.STILL_FAILING))
+        self.assertIn("RESOURCE DENIED: 1 test(s)", out)
+
+    def test_a_MIXED_accept_counts_BOTH_causes(self):
+        """The count class CLAUDE.md records being wrong five times, once
+        more: `merge` carried two and the line said one."""
+        rc, out, merged = self._accept(self.ENTRIES, log(
+            st_fail_message("denied", CANTOPEN), st_silent("lost"),
+            *self.STILL_FAILING))
+        self.assertIn(gb.st_key("denied"), merged["tests"])
+        self.assertIn(gb.st_key("lost"), merged["tests"])
+        self.assertIn("CARRIED FORWARD: 2 recorded entries were kept unchanged",
+                      out)
+
+    def test_the_listing_NAMES_which_cause_protected_each_entry(self):
+        """Two different things are protected here and their remedies differ.
+        A bare list makes them one."""
+        _rc, out, _merged = self._accept(self.ENTRIES, log(
+            st_fail_message("denied", CANTOPEN), st_silent("lost"),
+            *self.STILL_FAILING))
+        self.assertIn("= swift-testing::denied  (denied a file it needed)", out)
+        self.assertIn("= swift-testing::lost\n", out)
+
+    def test_a_CLEAN_accept_still_says_NOTHING(self):
+        """The mirror. A protection announced on a run that protected nothing
+        is the printed zero this file refuses everywhere else."""
+        _rc, out, _merged = self._accept(self.ENTRIES, log(
+            st_fail_timeout("denied"), st_fail_timeout("lost"),
+            *self.STILL_FAILING))
+        self.assertNotIn("CARRIED FORWARD", out)
+        self.assertNotIn("RESOURCE DENIED", out)
+
+    def test_a_CRASH_ONLY_accept_is_unchanged_by_this_bead(self):
+        """The other mirror, and a regression guard on the line tl6l shipped."""
+        _rc, out, _merged = self._accept(self.ENTRIES, log(
+            st_silent("lost"), *self.STILL_FAILING))
+        self.assertIn("CARRIED FORWARD: 1 recorded entry was kept unchanged", out)
+        self.assertNotIn("RESOURCE DENIED", out)
+        self.assertNotIn("(denied a file it needed)", out)
+
+
+class ResourceCauseWordingTests(unittest.TestCase):
+    """The per-test cause is what a reader ACTS on.
+
+    `EBADF — a descriptor that was obtained and then went bad` is what POSIX
+    documents and is not what this kernel does: measured in C on this box,
+    lowering `RLIMIT_NOFILE` to 64 and opening until refused sets errno 9, not
+    24. Printing the POSIX meaning sends the next reader hunting an over-close
+    that does not exist — which is exactly the round this bead already spent.
+    """
+
+    def test_the_EBADF_cause_names_the_CEILING_not_a_stale_descriptor(self):
+        cause = gb.resource_cause(EBADF_SOURCE)
+        self.assertIn("RLIMIT_NOFILE", cause)
+        self.assertNotIn("went bad", cause)
+
+    def test_it_is_still_spelled_EBADF_so_the_errno_is_identifiable(self):
+        self.assertTrue(gb.resource_cause(EBADF_SOURCE).startswith("EBADF"))
+
+    def test_the_OTHER_errnos_still_name_themselves(self):
+        """Anti-vacuity: rewording one entry must not flatten the table into
+        one diagnosis. EMFILE and ENOSPC have different remedies."""
+        for code, expected in (("23", "ENFILE"), ("24", "EMFILE"), ("28", "ENOSPC")):
+            cause = gb.resource_cause(
+                'Error Domain=NSPOSIXErrorDomain Code=%s "x"' % code)
+            self.assertTrue(cause.startswith(expected), cause)

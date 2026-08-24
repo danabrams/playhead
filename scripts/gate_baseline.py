@@ -1320,7 +1320,12 @@ _XCRESULT_CRASHED = re.compile(r"^Test crashed\b", re.IGNORECASE)
 _RESOURCE_POSIX = re.compile(r"NSPOSIXErrorDomain\s+Code=(\d+)")
 
 _RESOURCE_ERRNO = {
-    "9": "EBADF — a descriptor that was obtained and then went bad",
+    # playhead-s34ux R1. NOT "a descriptor that was obtained and then went
+    # bad", which is what POSIX documents and is not what this kernel does.
+    # Measured in C on this box: lower RLIMIT_NOFILE to 64, open until refused,
+    # and the refusing open() sets errno 9. The per-test cause is what a reader
+    # ACTS on, so it may not carry a meaning the platform contradicts.
+    "9": "EBADF — this platform's errno at the RLIMIT_NOFILE ceiling",
     "23": "ENFILE — the system file table is full",
     "24": "EMFILE — the per-process descriptor limit",
     "28": "ENOSPC — no space left on the volume",
@@ -3166,8 +3171,20 @@ def main(argv=None):
                 % now.runs_observed
             )
         no_verdict = run.no_verdict
+        # playhead-s34ux R1. THE PROTECTION AND ITS ANNOUNCEMENT ARE NOW
+        # COMPUTED THE SAME WAY, AND THE ANNOUNCEMENT IS NO LONGER NESTED UNDER
+        # THE CRASH. `merge` protects `no_verdict | set(run.resource)`; this
+        # block sat inside `if no_verdict:` and recomputed its set from
+        # `no_verdict` alone, so a denial-only accept carried entries forward
+        # and printed NOTHING AT ALL, and a mixed one printed `CARRIED FORWARD:
+        # 1` while carrying two. A protection nobody is told about is the
+        # silent-loosening shape playhead-o89d R5 spent five rounds on — the
+        # file keeps an entry a healthy run would have pruned and the operator
+        # signs a commit message that cannot mention it. Sixth event, and the
+        # only one left that printed nothing.
+        denied = set(run.resource)
+        protected = sorted((set(no_verdict) | denied) & set(merged["tests"]))
         if no_verdict:
-            protected = sorted(set(no_verdict) & set(merged["tests"]))
             print(
                 "  NO VERDICT: the host died and %d test(s) reported nothing%s. This "
                 "observation says nothing about them."
@@ -3175,17 +3192,27 @@ def main(argv=None):
                    " (xcodebuild restarted the test host %d time(s))" % run.host_restarts
                    if run.host_restarts else "")
             )
-            if protected:
-                print(
-                    "  CARRIED FORWARD: %d recorded entr%s kept unchanged rather than "
-                    "pruned — a crash is not a rename, and dropping them here is how "
-                    "the file would shrink without anyone deciding to shrink it."
-                    % (len(protected), "y was" if len(protected) == 1 else "ies were")
-                )
-                for key in protected[:_MAX_LISTED]:
-                    print("  = %s" % key)
-                if len(protected) > _MAX_LISTED:
-                    print("  = … and %d more" % (len(protected) - _MAX_LISTED))
+        if denied:
+            print(
+                "  RESOURCE DENIED: %d test(s) asked for a file and did not get one. "
+                "This observation says nothing about them either, and none of them is "
+                "written into the file."
+                % len(denied)
+            )
+        if protected:
+            print(
+                "  CARRIED FORWARD: %d recorded entr%s kept unchanged rather than "
+                "pruned — a crash is not a rename, and dropping them here is how "
+                "the file would shrink without anyone deciding to shrink it."
+                % (len(protected), "y was" if len(protected) == 1 else "ies were")
+            )
+            for key in protected[:_MAX_LISTED]:
+                # WHICH cause, per entry. Two different things are protected
+                # here and their remedies differ; a bare list makes them one.
+                print("  = %s%s" % (
+                    key, "  (denied a file it needed)" if key in denied else ""))
+            if len(protected) > _MAX_LISTED:
+                print("  = … and %d more" % (len(protected) - _MAX_LISTED))
         if promoted:
             print(
                 "  ARMED: %d entr%s crossed into DETERMINISTIC — failed in every one "
