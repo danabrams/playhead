@@ -1475,24 +1475,29 @@ MUTATIONS = [
     (
         "RD06", GB,
         "the BUNDLE unanimity rule becomes a search: an unrecognised message "
-        "is skipped instead of vetoing, so a real assertion is swallowed",
-        """        cause = resource_cause(message)
-        if cause is None:
+        "is skipped instead of vetoing, so a real assertion is swallowed. "
+        "MOVED at playhead-s34ux R1: it used to mutate the direct-children "
+        "loop, and once that loop stopped vetoing — the veto is one rule in "
+        "one place now, and the sweep reads the direct children too — the old "
+        "position was a PROVEN EQUIVALENT and survived. Repointed at the live "
+        "veto rather than excused, the RD14 treatment",
+        """        if resource_cause((child.get("name") or "").strip()) is None:
             return None
-        if found is None:""",
-        """        cause = resource_cause(message)
-        if cause is None:
+    return found""",
+        """        if resource_cause((child.get("name") or "").strip()) is None:
             continue
-        if found is None:""",
-        [DB + "test_a_failed_case_with_a_real_assertion_alongside_stays_a_failure"],
+    return found""",
+        [DB + "test_a_failed_case_with_a_real_assertion_alongside_stays_a_failure",
+         DD + "test_a_NESTED_assertion_vetoes_a_denial"],
     ),
     (
         "RD07", GB,
         "a FAILED case with NO messages is classified from SILENCE — exactly "
         "the inference playhead-t53a removed one category along",
         """    if found is None:
-        # A FAILED case with no message of its own says nothing, and silence is
-        # never routed here. It stays a FAILURE.
+        # A FAILED case with no message naming a denied resource says nothing
+        # this category may act on, and silence is never routed here. It stays
+        # a FAILURE.
         return None""",
         """    if found is None:
         return ("resource failure", "")""",
@@ -1797,11 +1802,22 @@ MUTATIONS = [
     (
         "RD34", GB,
         "the block stops naming the measured cause, so the reader is left "
-        "with an observation and no way to tell whether anyone has looked",
-        '''            "  RESOURCE — the measured cause on THIS box is descriptor exhaustion in "
-            "the single test host: RLIMIT_NOFILE soft = 2,560, peak 2,539 open "''',
-        '''            "  RESOURCE — something was short. "
-            "unused: RLIMIT_NOFILE soft = 2,560, peak 2,539 open "''',
+        "with an observation and no way to tell whether anyone has looked. "
+        "THE FIRST VERSION OF THIS MUTANT SURVIVED and the code was innocent: "
+        "its replacement text kept `2,560`, `2,539` and the bead id, which are "
+        "exactly the strings the rail pins, so the edit could not kill the "
+        "test it named. Read the EDIT, not the description of the edit",
+        '''        out.append(
+            "  RESOURCE — the measured cause on THIS box is descriptor exhaustion in "
+            "the single test host: RLIMIT_NOFILE soft = 2,560, peak 2,539 open "
+            "descriptors (99.2%), highest descriptor 2,559 = soft-1, and every "
+            "denial inside one sampling interval of that peak. WHICH tests are "
+            "denied is therefore a race, which is why the set rotates and why none "
+            "of it is about your diff. playhead-vk68m owns the fix and it is not "
+            "yours to apply here."
+        )
+''',
+        "",
         [DM + "test_the_block_NAMES_the_measured_limit_and_the_open_bead"],
     ),
     (
@@ -1836,32 +1852,18 @@ MUTATIONS = [
         "the descendant sweep starts CLASSIFYING as well as vetoing, so a "
         "nested denial promotes a test whose own node said nothing — the "
         "quiet direction, and the mirror of RD36",
-        '''    if found is None:
-        # A FAILED case with no message of its own says nothing, and silence is
-        # never routed here. It stays a FAILURE.
-        return None
-    stack = list(node.get("children") or [])
-    while stack:
-        child = stack.pop()
-        stack.extend(child.get("children") or [])
-        if child.get("nodeType") != _NODE_FAILURE_MESSAGE:
-            continue
-        if resource_cause((child.get("name") or "").strip()) is None:
-            return None
-    return found''',
-        '''    stack = list(node.get("children") or [])
-    while stack:
-        child = stack.pop()
-        stack.extend(child.get("children") or [])
-        if child.get("nodeType") != _NODE_FAILURE_MESSAGE:
-            continue
-        message = (child.get("name") or "").strip()
-        cause = resource_cause(message)
-        if cause is None:
-            return None
-        if found is None:
+        '''        if cause is not None and found is None:
             found = (cause, message)
-    return found''',
+    if found is None:''',
+        '''        if cause is not None and found is None:
+            found = (cause, message)
+    for child in node.get("children") or []:
+        for nested in child.get("children") or []:
+            if nested.get("nodeType") == _NODE_FAILURE_MESSAGE and found is None:
+                nested_cause = resource_cause((nested.get("name") or "").strip())
+                if nested_cause is not None:
+                    found = (nested_cause, (nested.get("name") or "").strip())
+    if found is None:''',
         [DD + "test_a_NESTED_denial_does_not_PROMOTE_a_message_less_failure"],
     ),
     (

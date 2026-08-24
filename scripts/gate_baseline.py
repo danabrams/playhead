@@ -1371,25 +1371,31 @@ def _bundle_resource(node):
     children are flat — `Failure Message`, `Skip Message`, `Arguments`,
     `Runtime Warning` — and there are ZERO grandchildren of any kind, so this
     is a guard against a shape Xcode does not emit today rather than a fix for
-    one it does. It costs nothing: the walk runs only for a node already
-    unanimous on its direct children, i.e. only for a denial.
+    one it does. It costs nothing: the walk runs only for a node that already
+    named a denied resource, i.e. only for a candidate denial.
     """
     if node.get("result") != XCRESULT_FAILED:
         return None
+    # The CLASSIFICATION is the first DIRECT `Failure Message` that names a
+    # denied resource. This loop does NOT veto — see below.
     found = None
     for child in node.get("children") or []:
         if child.get("nodeType") != _NODE_FAILURE_MESSAGE:
             continue
         message = (child.get("name") or "").strip()
         cause = resource_cause(message)
-        if cause is None:
-            return None
-        if found is None:
+        if cause is not None and found is None:
             found = (cause, message)
     if found is None:
-        # A FAILED case with no message of its own says nothing, and silence is
-        # never routed here. It stays a FAILURE.
+        # A FAILED case with no message naming a denied resource says nothing
+        # this category may act on, and silence is never routed here. It stays
+        # a FAILURE.
         return None
+    # THE VETO IS ONE RULE IN ONE PLACE, and it reads EVERY `Failure Message`
+    # under this node — the direct ones included. The first draft vetoed in the
+    # loop above AND swept here, which made the loop's half redundant: mutation
+    # RD06 survived deleting it, and was right to. Unanimity is a property of
+    # the whole node, so it is decided in one pass over the whole node.
     stack = list(node.get("children") or [])
     while stack:
         child = stack.pop()
