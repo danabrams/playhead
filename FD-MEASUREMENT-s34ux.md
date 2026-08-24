@@ -94,3 +94,86 @@ in that window, and it would not reproduce scoped, where sweep timing differs.
 NOT MEASURED. The check is cheap: log every reap with its URL and timestamp,
 log every store open with its directory, and look for a reap preceding a failed
 open on the same path.
+
+## The `TestScratchReaper` lead is REFUTED, statically, and no run was needed
+
+The lead above says a mid-run reap could remove a store's directory and produce
+`CANTOPEN` on the next open. Read against the code and against WHERE the
+failures land, it cannot be what happened here.
+
+Three facts, each checkable without a build:
+
+1. **`sweep()` never touches an UNOWNED entry.** Its first line inside the loop
+   is `guard entry.isOwned else { kept.append(entry); continue }`
+   (`PlayheadTests/Helpers/TestScratch.swift`). `register(_:)` — the path
+   `makeTempDir` takes when no `ownedBy:` is passed — appends
+   `Entry(isOwned: false)`. So a directory with no owner is only ever reclaimed
+   at process exit, which the file's own "honest limit" section states.
+
+2. **Every failing open happens while its directory is still UNOWNED.**
+   `makeTestStoreWithDirectory()` runs `makeTempDir(prefix:)` (no owner),
+   then `AnalysisStore(directory:)`, then `migrate()`, and only then
+   `TestScratchReaper.shared.adopt(dir, owner: store)` — deliberately, so a
+   throw leaves the directory unowned. All 63 recorded errors are thrown from
+   `sqlite3_open_v2` or from the first migration statements
+   (`PRAGMA journal_mode = WAL`, `BEGIN IMMEDIATE`), i.e. strictly BEFORE the
+   `adopt` that would make the directory reapable at all.
+
+3. **The failing directory is at most milliseconds old.** `makeTempDir` mints a
+   fresh `UUID`-named directory and `createDirectory` succeeds (it throws
+   otherwise, which is a different error and is not what any of the 63 carry).
+
+So the reap window the lead describes does not exist for the observed
+population. It remains a real hazard for the shape the lead names — a SECOND
+store opened on a directory whose FIRST store has been released without
+re-adopting — but that is not this, and none of the 11 failing suites reopens a
+store on an existing directory.
+
+**Do not read this as "the reaper is fine".** It is "the reaper cannot explain
+these 63". The refutation is about the ORDER of the operations, not about the
+reaper's own correctness.
+
+## What the evidence still says, and what it does not
+
+The one witness no database explanation covers is still the strongest thing on
+the table, and it is worth restating precisely because it is easy to file under
+SQLite:
+
+    ✘ Test "every SemanticSweepMarkComposer.compose call site passes supportLines"
+      Caught error: NSCocoaErrorDomain Code=256 "The file "AdDetectionService.swift"
+      couldn't be opened."
+      NSUnderlyingError = NSPOSIXErrorDomain Code=9 "Bad file descriptor"
+
+**`EBADF` (9) is not `EMFILE` (24).** Exhaustion fails an `open()` and reports
+"Too many open files"; `EBADF` is an operation on a descriptor that WAS obtained
+and then became invalid. That is consistent with a descriptor being closed by
+someone who did not own it, and it is NOT consistent with the ceiling being
+touched — which is a second, independent reason the fd-exhaustion framing was
+the wrong one, arrived at from the error text rather than from the series.
+
+Two candidate mechanisms remain, and neither is measured:
+
+* **An over-close somewhere in the process** (a descriptor closed twice, its
+  number reassigned to another test's file). This would produce `EBADF` in one
+  victim and `CANTOPEN` in another, would rotate across unrelated suites, and
+  would not reproduce scoped — every observed property. Audited by hand:
+  `PipelineDumpLiveTests.openDirectoryDescriptor` /
+  `openRegularDescriptor`, `CorpusAnnotationTests`, `CorpusAnnotationLoader`,
+  `ChapterPlanQualityEval` — all of the raw `Darwin.close` sites read as
+  correct (guard-close-then-throw, or `defer`-close, never both on one
+  descriptor). So the audit did not find it; that is not the same as it not
+  being there, and the audit covered only raw `Darwin.close`, not
+  `FileHandle(fileDescriptor:closeOnDealloc:)` or anything in a dependency.
+
+* **A sub-10-second exhaustion spike** the 10 s sampler cannot see. The
+  monotonic shape argues against it and the `EBADF` spelling argues against it
+  harder, but neither rules it out.
+
+**THE INSTRUMENT THAT WOULD SETTLE IT IS `sqlite3_system_errno`.** SQLite keeps
+the underlying `errno` from the failed open and `AnalysisStore` throws away —
+`AnalysisStoreError.openFailed` carries `sqlite3_errmsg`, which is the prose
+`unable to open database file` and names no cause. `EMFILE` / `ENFILE` /
+`ENOENT` / `EACCES` / `EBADF` are five different bugs behind one string, and the
+call that distinguishes them is one line. Filed rather than taken here: it is a
+production change on an error path, and this bead's remaining budget is owed to
+making the gate honest.
