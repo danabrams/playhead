@@ -91,3 +91,43 @@ archive` of that commit. Pre-existing coverage hole, filed rather than fixed.
 
 Whole battery on the final tree: **147 mutations, 145 killed, 1 survived (R21,
 pre-existing), 0 error, control R99 OK-SURVIVED.**
+
+---
+
+## Correction: the MV1 row in commit `9ad971cb` is MISLABELLED, not over-broad
+
+That commit records:
+
+> `MV1 fd_line returns ""` — predicted 7 victims, OBSERVED 5 — **PREDICTION WAS
+> OVER-BROAD**: the two NOT-RECORDED rails assert that text, which the mutant
+> makes universal, so they pass.
+
+**Every part of that is wrong except the number 5.** Found by audit, re-measured
+here, and the two mutations are genuinely different:
+
+| edit actually applied | what it does | victims |
+|---|---|---|
+| `if not stats.get("has_fds") … :` → `if True:` | the NOT-RECORDED branch fires **always**, so that text is universal | **the 5 that were observed** |
+| the whole guard **and its return** replaced by `return ""` | `fd_line` emits **nothing at all** | **all 7** — the prediction was right |
+
+The commit ran the first and described the second. So the prediction was not
+over-broad, the reasoning offered for the discrepancy ("the mutant makes the
+text universal") describes the mutation that was RUN rather than the one that
+was NAMED, and calling it a wrong prediction credited the ledger with a
+self-correction it had not made.
+
+Re-measured on today's tree (the suite has since grown from 7 fd rails to 36, so
+the absolute counts move but the split does not): `return ""` kills **12**,
+guard-true kills **10**. Restore verified byte-exact both times.
+
+**Both are kept, as a MIRROR PAIR**, because they interrogate different
+properties — "does the line exist at all" and "does the NOT-RECORDED branch
+discriminate" — and a rail set that only sees one of them has the hole the other
+covers.
+
+**The lesson is the one this bead keeps re-learning at a different scale.** A
+mutation ledger's whole value is that the label and the edit are the same thing.
+Here the label said one edit, the diff said another, the observed victims matched
+the diff, and the discrepancy was then explained away in prose — which is a false
+credit arriving through the back door, in the very table built to prevent them.
+**Read the edit, not the description of the edit.**
