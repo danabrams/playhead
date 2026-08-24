@@ -4325,6 +4325,17 @@ class ResourceBundleParseTests(unittest.TestCase):
             self.assertEqual(set(run.resource), {gb.st_key("t")}, order)
             self.assertNotIn(gb.st_key("t"), run.passed)
 
+    def test_a_crashed_twin_outranks_a_denied_twin_in_BOTH_orders(self):
+        """Two same-named tests, one killed by the host and one denied a file.
+        The host death owns the key: it got no verdict AT ALL, and the census —
+        whose remedy is to re-run the whole plan — is the wider claim."""
+        crashed = st_case("t", result="Failed", messages=[CRASH], func="a()")
+        denied = st_case("t", result="Failed", messages=[CANTOPEN], func="b()")
+        for order in ((crashed, denied), (denied, crashed)):
+            run = gb.parse_xcresult(bundle_payload(*order))
+            self.assertEqual(set(run.crashed), {gb.st_key("t")}, order)
+            self.assertEqual(set(run.resource), set(), order)
+
     def test_the_bundle_REPLACES_the_consoles_reading(self):
         """A test the console read as denied, which the bundle judged PASSED,
         leaves the category — a name is judged by the bundle and nothing else."""

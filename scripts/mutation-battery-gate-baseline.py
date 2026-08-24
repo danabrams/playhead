@@ -85,6 +85,12 @@ XM = SUITE + ".BundleMergeTests."
 XB = SUITE + ".BlamedBlockAgainstTheBundleTests."
 XR = SUITE + ".ResidualCommandTests."
 XG = SUITE + ".FastGateBundleWiringTests."
+# playhead-s34ux — a denied resource is not a failing test.
+DC = SUITE + ".ResourceCauseTests."
+DK = SUITE + ".ResourceConsoleParseTests."
+DB = SUITE + ".ResourceBundleParseTests."
+DV = SUITE + ".ResourceVerdictTests."
+DA = SUITE + ".ResourceAcceptTests."
 
 
 # name, file, description, old, new, expected-to-fail test ids
@@ -1408,6 +1414,223 @@ MUTATIONS = [
         "'ed / absurdly-low value falls back to default\" passed after 118.958 seconds.\\n'",
         "'ed / absurdly-low value falls back to defau1t\" passed after 118.958 seconds.\\n'",
         [GR + "test_the_INLINE_specimens_are_in_the_fixture_BYTE_FOR_BYTE"],
+    ),
+    (
+        "RD01", GB,
+        "the SQLite prose leaves the table, so `unable to open database file` "
+        "— the ONE shape that reaches the log with its errno already thrown "
+        "away — reads as a regression again",
+        '    r"unable to open database file"\n',
+        '    r"unable to open NO SUCH PHRASE"\n',
+        [DC + "test_sqlite_cantopen_prose_is_a_resource"],
+    ),
+    (
+        "RD02", GB,
+        "EBADF leaves the errno table, so the one witness no database "
+        "explanation covers — a SOURCE FILE read failing mid-run — is a NEW "
+        "failure again",
+        '    "9": "EBADF — a descriptor that was obtained and then went bad",\n',
+        "",
+        [DC + "test_ebadf_is_a_resource_even_though_the_sentence_is_generic"],
+    ),
+    (
+        "RD03", GB,
+        "the unrecognised-errno VETO becomes a search for any recognised one, "
+        "so a message carrying ENOENT *and* a recognised phrase is swallowed — "
+        "the direction that hides somebody's bug",
+        """        if any(name is None for name in named):
+            return None
+        return named[0]""",
+        """        for name in named:
+            if name is not None:
+                return name""",
+        [DC + "test_an_unrecognised_errno_VETOES_a_recognised_phrase"],
+    ),
+    (
+        "RD05", GB,
+        "the console UNANIMITY veto is dropped, so one CANTOPEN alongside a "
+        "real assertion takes the whole test out of the NEW column",
+        """        if key in resource_vetoed:
+            continue
+""",
+        "",
+        [DK + "test_UNANIMITY_one_real_assertion_keeps_the_whole_test_a_failure",
+         DK + "test_the_veto_holds_whichever_ORDER_the_issues_arrive_in"],
+    ),
+    (
+        "RD06", GB,
+        "the BUNDLE unanimity rule becomes a search: an unrecognised message "
+        "is skipped instead of vetoing, so a real assertion is swallowed",
+        """        cause = resource_cause(message)
+        if cause is None:
+            return None
+        if found is None:""",
+        """        cause = resource_cause(message)
+        if cause is None:
+            continue
+        if found is None:""",
+        [DB + "test_a_failed_case_with_a_real_assertion_alongside_stays_a_failure"],
+    ),
+    (
+        "RD07", GB,
+        "a FAILED case with NO messages is classified from SILENCE — exactly "
+        "the inference playhead-t53a removed one category along",
+        """        if found is None:
+            found = (cause, message)
+    return found""",
+        """        if found is None:
+            found = (cause, message)
+    return found or ("resource failure", "")""",
+        [DB + "test_a_failed_case_with_NO_messages_stays_a_failure"],
+    ),
+    (
+        "RD08", GB,
+        "`no_verdict` stops subtracting the denied, so a test that REPORTED an "
+        "error is booked as one that said nothing — and the accept writes it "
+        "into the crashed-host census",
+        "        return self.started - self.ran - self.skipped - set(self.resource)",
+        "        return self.started - self.ran - self.skipped",
+        [DK + "test_it_is_NOT_counted_as_a_crashed_host_casualty",
+         DA + "test_a_denied_test_does_not_enter_the_crashed_host_census"],
+    ),
+    (
+        "RD09", GB,
+        "a host death stops outranking a denial, so one key sits in BOTH "
+        "categories and is counted twice",
+        """        run.resource.pop(key, None)
+        run.resource_causes.pop(key, None)
+    for key in run.resource:""",
+        """    for key in run.resource:""",
+        [DB + "test_a_crashed_twin_outranks_a_denied_twin_in_BOTH_orders"],
+    ),
+    (
+        "RD10", GB,
+        "the collision guard goes, so a same-named twin that ran fine promotes "
+        "a denied test to PASSED — resolving toward the better news, which is "
+        "the direction this module never resolves",
+        """    if key in run.resource:
+        # A same-named twin that ran fine is not evidence about the one that
+        # was denied a descriptor. Resolve toward the worse news, exactly as
+        # the crash rule above does.
+        return
+""",
+        "",
+        [DB + "test_a_passing_same_named_twin_cannot_launder_a_resource_casualty"],
+    ),
+    (
+        "RD11", GB,
+        "the headline count is a constant, so twelve denied tests and one read "
+        "identically — a count that does not count",
+        """            return " — %d test%s hit a RESOURCE FAILURE (re-run)" % (
+                len(self.resource), "" if len(self.resource) == 1 else "s",
+            )""",
+        """            return " — %d test%s hit a RESOURCE FAILURE (re-run)" % (
+                1, "" if len(self.resource) == 1 else "s",
+            )""",
+        [DV + "test_the_count_is_the_NUMBER_of_denied_tests"],
+    ),
+    (
+        "RD12", GB,
+        "the resource tail leaves the RED line entirely, so the reclassification "
+        "happens SILENTLY — failures vanish from the NEW column with nothing "
+        "printed, which is the one outcome worse than over-reporting",
+        """        if self.resource:
+            # Standing alone this is the whole reason the run is red, so it
+            # opens the tail rather than trailing a NO VERDICT count.""",
+        """        if False:
+            # Standing alone this is the whole reason the run is red, so it
+            # opens the tail rather than trailing a NO VERDICT count.""",
+        [DV + "test_the_count_rides_on_the_RED_line",
+         DV + "test_the_count_is_the_NUMBER_of_denied_tests"],
+    ),
+    (
+        "RD13", GB,
+        "a denied run exits ZERO, so the gate is QUIETER than before this bead "
+        "— the exact failure this change must not introduce",
+        "                or self.resource):\n            return EXIT_REGRESSION",
+        "                or False):\n            return EXIT_REGRESSION",
+        [DV + "test_it_is_NOT_quieter_than_before_the_exit_code_still_says_re_run"],
+    ),
+    (
+        "RD14", GB,
+        "GREEN becomes reachable while tests were denied a file — the mirror of "
+        "RD13, and it needs its own rail because the two are independent",
+        """        if (self.ok and self.total_failures == 0 and not self.crashed_host
+                and not self.resource):""",
+        """        if (self.ok and self.total_failures == 0 and not self.crashed_host
+                and True):""",
+        [DV + "test_GREEN_is_unreachable_while_a_resource_failure_stands"],
+    ),
+    (
+        "RD15", GB,
+        "the accept stops protecting denied entries, so the known-broken file "
+        "SHRINKS because the box was short — from inside the one command whose "
+        "job is to maintain it",
+        "    protected = run.no_verdict | set(run.resource)",
+        "    protected = run.no_verdict",
+        [DA + "test_a_recorded_entry_denied_this_run_is_NOT_pruned"],
+    ),
+    (
+        "RD16", GB,
+        "BASELINE IS FICTION fires on a denied run, blaming the FILE for a "
+        "short box and inviting an accept that empties it",
+        "    if entries and not run.failures and not run.resource:",
+        "    if entries and not run.failures:",
+        [DV + "test_BASELINE_IS_FICTION_does_not_fire_on_a_denied_run"],
+    ),
+    (
+        "RD17", GB,
+        "an ABSENT baseline member denied a file is reported as a RENAME, "
+        "sending the reader after a rename that did not happen",
+        """            elif key in self.absent_resource:""",
+        """            elif False:""",
+        [DV + "test_an_ABSENT_baseline_member_names_the_denial_not_a_rename"],
+    ),
+    (
+        "RD18", GB,
+        "the console's reading survives a bundle that judged the test PASSED, "
+        "so a name can leave the category without the bundle ever saying so",
+        "    run.resource = dict(bundle.resource)\n    run.resource_causes = dict(bundle.resource_causes)",
+        "    run.resource_causes = dict(bundle.resource_causes)",
+        [DB + "test_the_bundle_REPLACES_the_consoles_reading"],
+    ),
+    (
+        "RD19", GB,
+        "the block names a generic cause instead of the observed one, so "
+        "EMFILE and ENOSPC — different remedies — read identically",
+        """            out.append("  RESOURCE         %s  (%s)" % (
+                key, self.resource_causes.get(key, "resource failure"),
+            ))""",
+        """            out.append("  RESOURCE         %s  (%s)" % (
+                key, "resource failure",
+            ))""",
+        [DV + "test_the_block_NAMES_which_resource_per_test"],
+    ),
+    (
+        "RD20", GB,
+        "the block drops the sentence saying what it does NOT know, and starts "
+        "reading as a diagnosis rather than an observation",
+        """        out.append(
+            "  RESOURCE — this does NOT say whether the box was short or something "
+            "leaked; it says the process asked for a file and did not get one. \"""",
+        """        out.append(
+            "  RESOURCE — re-run the plan. \"""",
+        [DV + "test_the_block_states_what_it_does_NOT_know"],
+    ),
+    (
+        "RD21", GB,
+        "the block prints on EVERY run, so a healthy gate carries a RESOURCE "
+        "heading claiming nothing — the mirror of RD12, and a printed zero is "
+        "a claim",
+        """        if not self.resource:
+            return []
+        out = [
+            "  RESOURCE FAILURE""",
+        """        if False:
+            return []
+        out = [
+            "  RESOURCE FAILURE""",
+        [DV + "test_nothing_is_printed_on_a_healthy_run"],
     ),
     (
         "R99", GB,
