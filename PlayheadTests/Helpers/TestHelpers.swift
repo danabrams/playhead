@@ -1035,37 +1035,41 @@ func daemonSilentSessionIO(
 /// singleton with ONE serial queue, and every `DownloadManager` that does not
 /// inject submits `downloadTask(with:)`, `resume()` and the abandon-path
 /// `cancel()` onto it. MEASURED across 57 de-duplicated full-plan logs
-/// (2026-08-13 … 08-24): on ONE of them, at 08:06:01 on 2026-08-23, eight
-/// `downloadTask(with:)` calls blew their bound together, and 55 seconds later
-/// TWELVE submissions spanning FOUR suites arrived on a single thread,
+/// (2026-08-13 … 08-24): on ONE of them, 2026-08-23 08:06,
+/// `downloadTask(with:) for kkzu-cleared` parked inside `nsurlsessiond` and
+/// held the queue for 65 s. Seven sibling `downloadTask(with:)` calls expired
+/// within 33 ms of each other behind it; 55 s later SEVENTEEN submissions —
+/// twelve distinct transfers across THREE suites — arrived on a single thread,
 /// microseconds apart, in submission order, logging
 ///
 ///     downloadTask(with:) for kkzu-attributed: reached the daemon queue after
 ///         its caller had already given up — not started
 ///
-/// Their bodies never ran; one parked call had held the queue for 65 s. On
-/// that run all seven `DownloadShowAttributionTests` that construct a manager
-/// failed, every one of them an `Expectation failed:` on the attribution
-/// sidecar the refusal had just deleted.
+/// Their bodies never ran. On that run all seven
+/// `DownloadShowAttributionTests` that construct a manager failed, every one of
+/// them an `Expectation failed:` on the attribution sidecar the refusal had
+/// just deleted.
 ///
-/// THE QUEUE IS THE VARIABLE, AND THE SERIALIZED PLAN PROVES IT. Across the
-/// same 57 logs, `downloadTask(with:) for kkzu-unattributed` blows its bound
-/// in 52 of them — it is the ONLY production-labelled call in the whole fast
-/// plan that does so on a normal run, the other timeouts all being
-/// `BackgroundSessionIOTests`' own 0.2 s doubles. On playhead-3rql's EXP2,
-/// the one full plan ever run with `"parallelizable": false`, it does not
-/// time out at all and its test passes in **0.102 s** — against 154 s of
-/// enqueue-to-completion, with a 10 s expiry inside it, on the parallel plan.
-/// Same code, same daemon, same box; the only thing removed was concurrent
-/// traffic on the one queue. So the daemon answers this call in tens of
-/// milliseconds and what it was waiting on was other tests.
+/// WHAT A PRIVATE QUEUE REMOVES IS THE CROSS-SUITE AMPLIFICATION, AND ONLY
+/// THAT. One parked call can no longer refuse twelve transfers it has nothing
+/// to do with. Three things it does NOT do, each measured rather than argued:
 ///
-/// NOT CLAIMED: that this makes a test immune to the daemon. If the daemon
-/// parks on THIS manager's own call it still expires at `defaultTimeout` —
-/// that is the production hazard `BackgroundSessionIO` exists to bound, and
-/// bounding it is not a test's business. What a private queue removes is the
-/// AMPLIFICATION: one parked call can no longer refuse eleven transfers that
-/// never reached the daemon at all.
+///   - It does not make a call immune to a slow daemon. `allTasks for …` has
+///     run on a per-manager PRIVATE queue since playhead-rouw (`enumerationIO`,
+///     built by `onItsOwnQueue`) and still blows the same 10 s bound 137 times
+///     across 35 of these 57 logs. Not one of those 137 carries an "already
+///     given up" line, so not one of them is a queue holding a body back:
+///     `nsurlsessiond` was simply slower than the bound. A private queue is not
+///     a shorter answer, only an unshared wait.
+///   - It does not separate two calls made by the SAME manager: they share one
+///     `BackgroundSessionIO` instance and therefore one queue.
+///   - It is not what playhead-3rql's EXP2 measured. That run set
+///     `"parallelizable": false`, which removes the whole plan's concurrency —
+///     including the seven live transfers `DownloadShowAttributionTests` itself
+///     starts against a non-resolving host — so it cannot isolate the queue.
+///     Nor is its `passed after 0.102 seconds` comparable to a parallel run's
+///     figure: on a parallel plan that number is enqueue-to-completion, and
+///     ~90 % of PASSING tests report over 60 s (CLAUDE.md).
 func unsharedSessionIO(
     labelledFor test: String = #function
 ) -> BackgroundSessionIO {
