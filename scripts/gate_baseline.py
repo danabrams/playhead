@@ -923,6 +923,13 @@ class RunResult(object):
         self.blamed_spellings = set()
         # key -> the bundle's words for a host death under that test.
         self.crashed = {}
+        # playhead-s34ux. key -> the message that says a RESOURCE was denied,
+        # and key -> which resource. Its own category rather than a flavour of
+        # `crashed`: those tests DID report, and the census record is a record
+        # of SILENCE. Folding them in would write names into `no_verdict` that
+        # never lost a verdict at all.
+        self.resource = {}
+        self.resource_causes = {}
 
     @property
     def ran(self):
@@ -948,8 +955,15 @@ class RunResult(object):
         Exact and console-only: both the start line and the outcome line carry
         the same identity, so this needs no mapping between xcodebuild's
         `Suite.function()` spelling and Swift Testing's display names.
+
+        `resource` is SUBTRACTED, and the line matters more than it looks
+        (playhead-s34ux). A resource casualty is removed from `failures`, so
+        without this it would fall out of `ran` and be booked here as a
+        crashed-host casualty — a test that reported an error read as a test
+        that said nothing, and `--accept-baseline` would then write it into the
+        census record as though the host had died under it.
         """
-        return self.started - self.ran - self.skipped
+        return self.started - self.ran - self.skipped - set(self.resource)
 
 
 def last_attempt(text):
@@ -978,6 +992,12 @@ def parse_run(text):
         if key not in failures:
             failures[key] = Failure(key, framework, name)
         return failures[key]
+
+    # playhead-s34ux. Per-key evidence for the resource rule, resolved after
+    # the loop because the rule is UNANIMITY and the last issue line a test
+    # records can withdraw the classification the first one earned.
+    resource_seen = {}
+    resource_vetoed = set()
 
     in_block = False
     # Repair the splice BEFORE anything reads a line. Every pattern below is
@@ -1010,10 +1030,16 @@ def parse_run(text):
         if m:
             name, source, message = m.group(1), m.group(3), m.group(6)
             name = decode_octal_escapes(name)
-            failure = failure_for(st_key(name), FRAMEWORK_SWIFT_TESTING, name)
+            key = st_key(name)
+            failure = failure_for(key, FRAMEWORK_SWIFT_TESTING, name)
             failure.kinds.add(_kind_of_issue(message))
             if source and not failure.source:
                 failure.source = source
+            cause = resource_cause(message)
+            if cause is None:
+                resource_vetoed.add(key)
+            else:
+                resource_seen.setdefault(key, (cause, message))
             continue
 
         m = _ST_FAIL_NAMED.search(line) or _ST_FAIL_FUNC.search(line)
@@ -1095,6 +1121,18 @@ def parse_run(text):
     # cannot be written against a `skipped` set that overlaps `ran`; delete it
     # only together with that guarantee.
     run.skipped -= set(failures) | run.passed
+
+    # playhead-s34ux. Resolve the resource rule LAST, once every issue line a
+    # test recorded has been seen. `resource_vetoed` is the loud direction and
+    # it wins: a test that recorded one CANTOPEN and one real assertion stays a
+    # FAILURE, carrying both kinds, exactly as before this existed.
+    for key, (cause, message) in resource_seen.items():
+        if key in resource_vetoed:
+            continue
+        run.resource_causes[key] = cause
+        run.resource[key] = message
+        failures.pop(key, None)
+
     return run
 
 
@@ -1193,6 +1231,126 @@ _NODE_FAILURE_MESSAGE = "Failure Message"
 # direction: it is reported NEW and named, rather than absorbed as a casualty.
 _XCRESULT_CRASHED = re.compile(r"^Test crashed\b", re.IGNORECASE)
 
+# ---------------------------------------------------------------------------
+# A DENIED RESOURCE IS NOT A FAILING TEST EITHER (playhead-s34ux)
+# ---------------------------------------------------------------------------
+#
+# Full-plan gates on this box fail with `SQLITE_CANTOPEN` in a ROTATING set of
+# suites, and every affected suite passes when run scoped. Three runs on three
+# different trees — one of them main with the candidate diff ABSENT — reported
+# 7, 8 and 56 NEW failures of which essentially every one read
+#
+#     Caught error: Migration failed: unable to open database file
+#     Caught error: SQLite open failed (14): unable to open database file
+#
+# with not one behavioural assertion among them. 56 NEW failures on a tree whose
+# whole diff was a measurement probe and a markdown file is exactly the shape
+# that trains a reader to wave a red gate through — and one `--accept-baseline`
+# on such a run writes healthy tests into the known-broken file, where their
+# next GENUINE failure reads as known.
+#
+# This is the same fix playhead-t53a applied to the crashed-host case one
+# category along, and it is bound by the same three rules:
+#
+#   * IT IS STATED, NOT INFERRED FROM SILENCE. The classification reads the
+#     failure MESSAGE the bundle records (or, without a bundle, the console's
+#     `recorded an issue … : <message>` text). Nothing is routed here for being
+#     absent.
+#   * AN UNRECOGNISED WORDING STAYS A FAILURE. That is the loud direction, and
+#     it is why the discriminator below is an ERRNO rather than the prose. `The
+#     file "X" couldn't be opened` is `NSCocoaErrorDomain Code=256`, which is
+#     generic: a test asserting that a file it wrote is readable fails with the
+#     same string, and swallowing that would hide a real defect. What separates
+#     them is the POSIX code underneath.
+#   * IT IS VISIBLE, WITH A COUNT. The verdict names the category and how many
+#     tests landed in it. A gate that moves failures out of the NEW column
+#     quietly is worse than one that over-reports, because it reads as green.
+#
+# WHICH ERRNOS, AND WHY NOT THE OTHERS. Only codes no product logic can
+# produce:
+#
+#   EBADF  (9)  a descriptor that was obtained and then went bad. The witness
+#               that broke this bead open was a SOURCE FILE read failing this
+#               way (`AdDetectionService.swift`) in the same run as the SQLite
+#               errors — a shape no database explanation covers.
+#   ENFILE (23) the SYSTEM file table is full.
+#   EMFILE (24) the per-process descriptor limit.
+#   ENOSPC (28) the volume is full — the failure playhead-3nfa's preflight
+#               exists to pre-empt, and one a diff cannot cause.
+#
+# Deliberately ABSENT: ENOENT (2) and EACCES (13). "The file is not there" and
+# "you may not read it" are exactly what a product bug looks like, so they stay
+# FAILURES. An errno this table does not name VETOES the classification rather
+# than being ignored — a message carrying an unrecognised code is a failure
+# even if it also carries a phrase this module recognises.
+#
+# THE ONE PROSE MATCH, and why it has to exist. SQLite keeps the underlying
+# errno in `sqlite3_system_errno()` and `AnalysisStore` does not read it, so
+# `unable to open database file` reaches the log with its cause already thrown
+# away. Until that is fixed the prose is the only evidence there is. It is a
+# whole phrase, not a keyword, and it is the exact text SQLite emits for
+# SQLITE_CANTOPEN.
+#
+# THE PER-TEST RULE IS UNANIMITY. A test is a resource casualty only when EVERY
+# issue it recorded names a denied resource. One genuine assertion alongside a
+# CANTOPEN and the whole test stays a FAILURE — because the interesting half of
+# such a test is the assertion, and this must never be a route by which a real
+# failure leaves the NEW column.
+
+_RESOURCE_POSIX = re.compile(r"NSPOSIXErrorDomain\s+Code=(\d+)")
+
+_RESOURCE_ERRNO = {
+    "9": "EBADF — a descriptor that was obtained and then went bad",
+    "23": "ENFILE — the system file table is full",
+    "24": "EMFILE — the per-process descriptor limit",
+    "28": "ENOSPC — no space left on the volume",
+}
+
+_RESOURCE_PROSE = re.compile(
+    r"unable to open database file"
+    r"|[Tt]oo many open files"
+    r"|No space left on device"
+)
+
+
+def resource_cause(message):
+    """Name the resource this message says was denied, or None.
+
+    None means "not recognised", which is always the FAILURE direction. The
+    errno table is consulted first and a code outside it VETOES: a message
+    carrying `NSPOSIXErrorDomain Code=2` is a missing file, and a missing file
+    is somebody's bug even if the sentence around it mentions a database.
+    """
+    if not message:
+        return None
+    codes = _RESOURCE_POSIX.findall(message)
+    if codes:
+        named = [_RESOURCE_ERRNO.get(code) for code in codes]
+        if any(name is None for name in named):
+            return None
+        return named[0]
+    match = _RESOURCE_PROSE.search(message)
+    return match.group(0) if match else None
+
+
+def _bundle_resource(node):
+    """`(cause, message)` when EVERY failure message on this node is a denied
+    resource, else None. Unanimity, per the rule above."""
+    if node.get("result") != XCRESULT_FAILED:
+        return None
+    found = None
+    for child in node.get("children") or []:
+        if child.get("nodeType") != _NODE_FAILURE_MESSAGE:
+            continue
+        message = (child.get("name") or "").strip()
+        cause = resource_cause(message)
+        if cause is None:
+            return None
+        if found is None:
+            found = (cause, message)
+    return found
+
+
 
 class XcresultUnreadable(Exception):
     """The bundle was asked for and could not be read. Never a silent fallback.
@@ -1284,6 +1442,10 @@ class BundleRun(object):
         self.unjudged = {}
         # key -> the bundle's own words for why the host died under this test.
         self.crashed = {}
+        # playhead-s34ux. key -> the message naming a DENIED RESOURCE, and
+        # key -> which resource it named.
+        self.resource = {}
+        self.resource_causes = {}
         # Every test's identity in the ONE spelling xcodebuild's `Failing
         # tests:` block uses — `Suite.function()`. The console cannot produce
         # this for a Swift Testing test with a display name, which is the whole
@@ -1337,6 +1499,15 @@ def parse_xcresult(payload):
         run.skipped.discard(key)
         run.failures.pop(key, None)
         run.unjudged.pop(key, None)
+        # A host death outranks a denied resource: the test got no verdict at
+        # all, so the census — not this category — owns it.
+        run.resource.pop(key, None)
+        run.resource_causes.pop(key, None)
+    for key in run.resource:
+        run.passed.discard(key)
+        run.skipped.discard(key)
+        run.failures.pop(key, None)
+        run.unjudged.pop(key, None)
     return run
 
 
@@ -1370,8 +1541,23 @@ def _collect_case(node, bundle, suite, run, raw):
         # all — that is the whole point of routing it here.
         run.crashed.setdefault(key, crash)
         run.failures.pop(key, None)
+        run.resource.pop(key, None)
+        run.resource_causes.pop(key, None)
+        return
+    resource = _bundle_resource(node)
+    if resource is not None:
+        # Same treatment as a crash and for the same reason: NOT recorded in
+        # `raw`, so a same-named passing twin cannot promote it to `passed`.
+        run.resource_causes.setdefault(key, resource[0])
+        run.resource.setdefault(key, resource[1])
+        run.failures.pop(key, None)
         return
     raw.setdefault(key, set()).add(result)
+    if key in run.resource:
+        # A same-named twin that ran fine is not evidence about the one that
+        # was denied a descriptor. Resolve toward the worse news, exactly as
+        # the crash rule above does.
+        return
     if key in run.crashed:
         # Two same-named tests, one of which the host killed. The survivor's
         # verdict is not evidence about the casualty, and resolving toward the
@@ -1458,6 +1644,11 @@ def with_xcresult_verdicts(run, bundle):
     run.targets = dict(bundle.targets)
     run.blamed_spellings = set(bundle.blamed_spellings)
     run.crashed = dict(bundle.crashed)
+    # playhead-s34ux: REPLACED, not unioned, for the same reason as `crashed`.
+    # The bundle is what judges a test; the console's reading of the same
+    # failure is a fallback for when there is no bundle at all.
+    run.resource = dict(bundle.resource)
+    run.resource_causes = dict(bundle.resource_causes)
 
     for key, failure in run.failures.items():
         if not failure.source:
@@ -1853,7 +2044,11 @@ def merge(baseline, run, plan):
     # every recorded entry it took down with it, quietly, from inside the one
     # command whose job is to maintain the file. Carry those forward untouched:
     # unchanged counts, no observation credited, still on the list.
-    protected = run.no_verdict
+    # playhead-s34ux: a denied resource is not a rename either. Without this a
+    # baseline member that hit a CANTOPEN this run would be DELETED from the
+    # file by the accept — the file shrinking because the box was short, from
+    # inside the command whose job is to maintain it.
+    protected = run.no_verdict | set(run.resource)
     for key in sorted(set(old) | set(run.failures)):
         previous = old.get(key)
         failure = run.failures.get(key)
@@ -1938,6 +2133,10 @@ class Verdict(object):
         self.verdict_source = VERDICT_SOURCE_CONSOLE
         self.unjudged = {}
         self.crashed = {}
+        # playhead-s34ux — tests that were denied a file, not tests that failed.
+        self.resource = {}
+        self.resource_causes = {}
+        self.absent_resource = set()
 
     @property
     def ok(self):
@@ -1979,9 +2178,15 @@ class Verdict(object):
                 unrecorded = ", %d not yet recorded" % len(self.new_casualties)
             else:
                 unrecorded = ""
-            return " — %d test%s got NO VERDICT (crashed host)%s" % (
+            return " — %d test%s got NO VERDICT (crashed host)%s%s" % (
                 len(self.no_verdict), "" if len(self.no_verdict) == 1 else "s",
-                unrecorded,
+                unrecorded, self._resource_tail,
+            )
+        if self.resource:
+            # Standing alone this is the whole reason the run is red, so it
+            # opens the tail rather than trailing a NO VERDICT count.
+            return " — %d test%s hit a RESOURCE FAILURE (re-run)" % (
+                len(self.resource), "" if len(self.resource) == 1 else "s",
             )
         if self.host_restarts:
             return " — the test host CRASHED and was restarted"
@@ -1990,6 +2195,23 @@ class Verdict(object):
                 len(self.blamed_unmatched),
             )
         return ""
+
+    @property
+    def _resource_tail(self):
+        """The RESOURCE count, spelled the same way wherever it appears.
+
+        Capitals because this is a shout: N tests were never given the file
+        they asked for, so the run did not judge them and the remedy is to run
+        it again. A count of zero renders NOTHING rather than `0 RESOURCE
+        FAILURES` — a printed zero is a claim, and on a healthy run the claim
+        would be true but useless, while on a run with no bundle it would be a
+        claim this cannot support.
+        """
+        if not self.resource:
+            return ""
+        return ", %d RESOURCE FAILURE%s (re-run)" % (
+            len(self.resource), "" if len(self.resource) == 1 else "S",
+        )
 
     @property
     def exit_code(self):
@@ -2035,7 +2257,16 @@ class Verdict(object):
         if (self.new_failures or self.kind_changed or self.deterministic_passed
                 or self.absent or self.baseline_fiction
                 or (self.new_casualties and self.census_armed)
-                or self.census_now_reports):
+                or self.census_now_reports
+                # playhead-s34ux. NOT a quieter gate: these tests exit 65 today
+                # as NEW FAILURES, and they exit 65 after this as resource
+                # casualties. What changes is the DIAGNOSIS — the reader is
+                # sent to re-run rather than to triage N regressions against a
+                # diff that cannot have caused them, and `--accept-baseline`
+                # can no longer write them into the known-broken file. A run
+                # that did not judge part of the plan is not a verdict about
+                # the plan, whichever category ate the verdict.
+                or self.resource):
             return EXIT_REGRESSION
         return EXIT_OK
 
@@ -2066,7 +2297,8 @@ class Verdict(object):
         # that executed no tests has zero failures too, and calling that GREEN is
         # how a broken run reads as a clean sweep. A run that lost part of the
         # plan to a dead host is the same claim with the same answer.
-        if self.ok and self.total_failures == 0 and not self.crashed_host:
+        if (self.ok and self.total_failures == 0 and not self.crashed_host
+                and not self.resource):
             out.append("gate-baseline: GREEN (%s)" % headline)
         else:
             out.append("gate-baseline: RED (%s)%s" % (headline, tail))
@@ -2078,6 +2310,7 @@ class Verdict(object):
         # directions — was the reading that never named its instrument.
         out.extend(self._render_verdict_source())
         out.extend(self._render_no_verdict())
+        out.extend(self._render_resource())
 
         for key in self.new_failures:
             out.append("  NEW FAILURE      %s" % key)
@@ -2096,9 +2329,17 @@ class Verdict(object):
             # The CAUSE, not a guess at it. Before playhead-tl6l every absent
             # member was reported as a rename, which sent the reader looking for
             # a rename that had not happened.
-            cause = ("no verdict — the host died mid-test"
-                     if key in self.absent_crashed
-                     else "renamed, deleted or newly skipped")
+            if key in self.absent_crashed:
+                cause = "no verdict — the host died mid-test"
+            elif key in self.absent_resource:
+                # playhead-s34ux. Without this the reader is sent hunting a
+                # rename that did not happen — the same wrong cause tl6l
+                # removed for the crashed case, one category along.
+                cause = "no verdict — denied a file it needed (%s)" % (
+                    self.resource_causes.get(key, "resource failure"),
+                )
+            else:
+                cause = "renamed, deleted or newly skipped"
             out.append("  DID NOT RUN      %s  (%s)" % (key, cause))
         if len(self.absent) > _MAX_LISTED:
             out.append("  DID NOT RUN      … and %d more"
@@ -2132,6 +2373,45 @@ class Verdict(object):
             )
             out.append("a reason.")
         return "\n".join(out)
+
+    def _render_resource(self):
+        """The denied-resource block. Its own category, because its CAUSE is.
+
+        Three properties, each of which is the mirror of how this class of fix
+        goes wrong:
+
+          * it NAMES the count, so nobody can discover later that failures
+            left the NEW column quietly;
+          * it names the RESOURCE, so `EMFILE` and `ENOSPC` are not one
+            diagnosis. They have different remedies and the message says which
+            was observed rather than which was assumed;
+          * it says what it does NOT know. This category cannot tell a box that
+            was short from a test that leaked, and printing a remedy as though
+            it could would be the reassurance this whole mechanism exists to
+            withhold.
+        """
+        if not self.resource:
+            return []
+        out = [
+            "  RESOURCE FAILURE — %d test(s) were denied a file they asked for, so "
+            "this run did not judge them. Nothing here is triageable against your "
+            "diff: re-run the plan." % len(self.resource),
+        ]
+        for key in sorted(self.resource)[:_MAX_LISTED]:
+            out.append("  RESOURCE         %s  (%s)" % (
+                key, self.resource_causes.get(key, "resource failure"),
+            ))
+        if len(self.resource) > _MAX_LISTED:
+            out.append("  RESOURCE         … and %d more"
+                       % (len(self.resource) - _MAX_LISTED))
+        out.append(
+            "  RESOURCE — this does NOT say whether the box was short or something "
+            "leaked; it says the process asked for a file and did not get one. "
+            "playhead-s34ux measured the test host's peak open descriptors at 2,539 "
+            "against a 61,440 ceiling, so exhaustion is not the explanation on this "
+            "box and the cause is open."
+        )
+        return out
 
     def _render_no_verdict(self):
         """The crashed-host block. Its own category, because its REMEDY differs.
@@ -2397,6 +2677,10 @@ def verdict(baseline, run, plan=None):
     result.verdict_source = run.verdict_source
     result.unjudged = dict(run.unjudged)
     result.crashed = dict(run.crashed)
+    # playhead-s34ux. Computed here, before the baseline comparison, so the
+    # ABSENT arm below can name this cause too.
+    result.resource = dict(run.resource)
+    result.resource_causes = dict(run.resource_causes)
     # playhead-buvn. The DIFF against the recorded census, computed exactly the
     # way `new_failures` is: a name nobody recorded is a regression, and a
     # recorded name that came back is reported as good news but is not fatal —
@@ -2462,8 +2746,15 @@ def verdict(baseline, run, plan=None):
             result.absent.append(key)
             if key in no_verdict:
                 result.absent_crashed.add(key)
+            elif key in run.resource:
+                result.absent_resource.add(key)
 
-    if entries and not run.failures:
+    # playhead-s34ux: `not run.failures` is also true of a run whose every
+    # failure was a denied resource, and calling that "the baseline is fiction"
+    # would blame the FILE for the box being short — and invite an accept that
+    # empties it. A run that could not judge part of the plan makes no claim
+    # about whether the recorded entries still fail.
+    if entries and not run.failures and not run.resource:
         result.baseline_fiction = True
 
     return result
