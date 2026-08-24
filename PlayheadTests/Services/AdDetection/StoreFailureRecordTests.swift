@@ -768,19 +768,47 @@ final class StoreFailureRecordSourceCanaryTests: XCTestCase {
     }
 }
 
-// MARK: - TEMPORARY MEASUREMENT PROBE (playhead-s34ux) — NOT FOR COMMIT
-//
-// Samples THIS process's open file-descriptor count for the length of a
-// full-plan run and prints its own RLIMIT_NOFILE. `libproc.h` is absent from
-// the iPhoneSimulator SDK, so `proc_pidinfo(PROC_PIDLISTFDS)` is unavailable
-// here and the count is taken by probing each descriptor number with
-// `fcntl(F_GETFD)`. The scan is CAPPED and reports the cap, because a count
-// that silently stops at its own bound is a value that names one thing read
-// as though it named another.
+// MARK: - The descriptor ceiling this host actually runs under (playhead-s34ux)
 
-@Suite("playhead-s34ux fd probe")
-struct S34uxFileDescriptorProbe {
+/// Prints the test host's own `RLIMIT_NOFILE` into every gate log, once.
+///
+/// THIS EXISTS BECAUSE THE NUMBER WAS MISSING AND ITS ABSENCE COST A WEEK.
+/// `playhead-s34ux` was filed on `SQLITE_CANTOPEN` in a rotating set of suites.
+/// The descriptor count was measured from OUTSIDE the process — 2,539 peak —
+/// compared against `kern.maxfilesperproc` (61,440), read as 4.1 % of the
+/// ceiling, and the hypothesis was written up as REFUTED. It was not.
+/// **`kern.maxfilesperproc` is not the limit that binds.** This host's
+/// `RLIMIT_NOFILE` soft limit is 2,560, so the true reading was 99.2 % — at the
+/// ceiling — and the same run's `maxfd` of 2,559 (soft − 1) says the table was
+/// completely full, because `open()` hands out the lowest free descriptor.
+///
+/// **macOS cannot report another process's `RLIMIT_NOFILE`**, so no external
+/// sampler can ever supply this and `scripts/gate-memory-sample.py` deliberately
+/// does not pretend to. A test inside the host is the only instrument that can,
+/// which is why this is a test and not a script.
+///
+/// ## Why it is one shot and not a series
+///
+/// The bead's own probe looped for 300 s at a 2 s interval, scanning 70,000
+/// descriptor numbers each time — ~35,000 syscalls a second, on every gate,
+/// forever, and it extended every run to its own 300 s floor. The SERIES is
+/// expensive and is already collected from outside by the memory sampler. The
+/// LIMIT is free, it never changes within a run, and it is the half that was
+/// missing. So this prints once and returns.
+///
+/// `libproc.h` is absent from the iPhoneSimulator SDK, so
+/// `proc_pidinfo(PROC_PIDLISTFDS)` is unavailable here and the live count is
+/// taken by probing descriptor numbers with `fcntl(F_GETFD)`. That scan is
+/// CAPPED, and it reports whether it hit the cap, because a count that silently
+/// stops at its own bound is a value that names one thing read as though it
+/// named another — the defect class this whole bead is made of.
+@Suite("the test host's descriptor ceiling is on the record (playhead-s34ux)")
+struct TestHostDescriptorCeilingTests {
 
+    /// Bounded so a host with a huge soft limit cannot turn one reading into a
+    /// million syscalls. Above every soft limit observed on this box (2,560)
+    /// and above `kern.maxfilesperproc` (61,440), so on this box it cannot
+    /// truncate — and it says so when it does.
     private static let scanCap: Int32 = 70_000
 
     private static func openDescriptors() -> (count: Int, maxFD: Int32, hitCap: Bool) {
@@ -797,23 +825,29 @@ struct S34uxFileDescriptorProbe {
         return (count, maxFD, maxFD >= scanCap - 1)
     }
 
-    @Test("playhead-s34ux: open-fd series for this test host")
-    func openDescriptorSeries() async throws {
+    @Test("the host's RLIMIT_NOFILE is printed into the log")
+    func theDescriptorCeilingIsOnTheRecord() throws {
         var limit = rlimit()
-        let read = getrlimit(RLIMIT_NOFILE, &limit)
-        print("[s34ux-fd] pid=\(getpid()) getrlimit_rc=\(read) "
-              + "RLIMIT_NOFILE soft=\(limit.rlim_cur) hard=\(limit.rlim_max) "
-              + "scanCap=\(Self.scanCap)")
-        let start = ContinuousClock.now
-        var elapsed = Duration.zero
-        while elapsed < .seconds(300) {
-            let sample = Self.openDescriptors()
-            print("[s34ux-fd] t=\(elapsed.components.seconds)s "
-                  + "fds=\(sample.count) maxfd=\(sample.maxFD) hitCap=\(sample.hitCap)")
-            try await Task.sleep(for: .seconds(2))
-            elapsed = start.duration(to: .now)
+        let code = getrlimit(RLIMIT_NOFILE, &limit)
+        // A FAILED read must not be printed as a limit. `getrlimit` returning
+        // non-zero leaves `limit` untouched, and printing whatever it happened
+        // to contain would put a fabricated ceiling in the log — which is
+        // exactly the reading that started this bead.
+        guard code == 0 else {
+            print("[s34ux-fd] pid=\(getpid()) RLIMIT_NOFILE UNREADABLE "
+                  + "(getrlimit rc=\(code), errno=\(errno)) — this run says "
+                  + "NOTHING about the descriptor ceiling")
+            #expect(Bool(true), "an unreadable limit is reported, never invented")
+            return
         }
-        print("[s34ux-fd] probe finished")
-        #expect(Bool(true))
+        let sample = Self.openDescriptors()
+        print("[s34ux-fd] pid=\(getpid()) RLIMIT_NOFILE soft=\(limit.rlim_cur) "
+              + "hard=\(limit.rlim_max) fds=\(sample.count) maxfd=\(sample.maxFD) "
+              + "hitCap=\(sample.hitCap) scanCap=\(Self.scanCap)")
+        // The reading is the point; the assertion only pins that a limit was
+        // obtained at all. A soft limit of zero would mean the host cannot open
+        // anything, which is not a state any test could have reached.
+        #expect(limit.rlim_cur > 0, "a soft limit of 0 is not a limit, it is a failed read")
+        #expect(sample.count > 0, "a host running a test holds at least stdin/stdout/stderr")
     }
 }

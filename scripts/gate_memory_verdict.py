@@ -146,17 +146,57 @@ def max_files_per_proc() -> int:
         return -1
 
 
-def fd_line(stats: dict[str, int]) -> str:
-    """One line about descriptors, or a line saying nobody measured them."""
+_SOFT_LIMIT = re.compile(r"\[s34ux-fd\][^\n]*RLIMIT_NOFILE soft=(\d+)")
+
+
+def soft_limit_from_log(text: str) -> int:
+    """The test host's OWN `RLIMIT_NOFILE` soft limit, printed by the host.
+
+    macOS cannot report another process's rlimit, so this is the only route to
+    the number that actually binds — `TestHostDescriptorCeilingTests` prints it
+    into every gate log for exactly this reason. -1 when the log does not carry
+    it (an older run, or a build that never reached the test phase).
+    """
+    match = _SOFT_LIMIT.search(text)
+    if match is None:
+        return -1
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return -1
+
+
+def fd_line(stats: dict[str, int], soft: int = -1) -> str:
+    """One line about descriptors, or a line saying nobody measured them.
+
+    THE DENOMINATOR IS THE WHOLE POINT AND IT IS EASY TO GET WRONG. playhead-
+    s34ux read a peak of 2,539 against `kern.maxfilesperproc` 61,440, called it
+    4.1 % and wrote the hypothesis up as refuted. The limit that BINDS is the
+    process's own `RLIMIT_NOFILE` soft limit, 2,560 on this host, which makes
+    the same peak 99.2 % — at the ceiling. So the soft limit is preferred
+    whenever the log carries it, the sysctl is the fallback, and the line always
+    NAMES WHICH ONE IT USED, because the two differ by 24x here and a reader
+    cannot tell them apart from a percentage.
+    """
     if not stats.get("has_fds") or stats.get("host_fds_peak", -1) < 0:
         return ("gate-memory: test host open file descriptors NOT RECORDED — this "
                 "run says nothing about descriptor exhaustion")
-    ceiling = max_files_per_proc()
-    share = ("" if ceiling <= 0
-             else f" ({100.0 * stats['host_fds_peak'] / ceiling:.1f} % of it)")
-    limit = ("unknown" if ceiling <= 0 else str(ceiling))
-    line = (f"gate-memory: test host peak open fds {stats['host_fds_peak']} of "
-            f"kern.maxfilesperproc {limit}{share}")
+    peak = stats["host_fds_peak"]
+    if soft > 0:
+        ceiling, name = soft, "RLIMIT_NOFILE soft"
+    else:
+        ceiling, name = max_files_per_proc(), "kern.maxfilesperproc"
+    share = "" if ceiling <= 0 else f" ({100.0 * peak / ceiling:.1f} % of it)"
+    limit = "unknown" if ceiling <= 0 else str(ceiling)
+    line = f"gate-memory: test host peak open fds {peak} of {name} {limit}{share}"
+    if soft <= 0:
+        # Never let the fallback pass for the real thing. A percentage against
+        # the wrong denominator reads exactly like a percentage against the
+        # right one.
+        line += ("  [the BINDING soft limit is not in this log — "
+                 "this share is against the kernel cap and OVERSTATES the headroom]")
+    elif ceiling > 0 and peak >= ceiling * 0.9:
+        line += "  *** AT THE CEILING — see playhead-vk68m ***"
     if stats.get("sys_files_peak", -1) >= 0 and stats.get("sys_files_limit", -1) >= 0:
         line += (f"; system-wide {stats['sys_files_peak']} of "
                  f"kern.maxfiles {stats['sys_files_limit']}")
@@ -338,7 +378,7 @@ def report(log_path: str, rc: int, series_path: str, out=sys.stdout) -> int:
         # `** TEST SUCCEEDED **`-adjacent — 0 host restarts, memory comfortably
         # inside the box — and were failing 56 tests on denied file opens.
         if stats:
-            print(fd_line(stats), file=out)
+            print(fd_line(stats, soft_limit_from_log(text)), file=out)
         return 0
 
     print("", file=out)
@@ -409,7 +449,7 @@ def report(log_path: str, rc: int, series_path: str, out=sys.stdout) -> int:
         f" footprint {footprint}, {pidcount}",
         file=out,
     )
-    print(fd_line(stats), file=out)
+    print(fd_line(stats, soft_limit_from_log(text)), file=out)
     if stats["demand_peak_during_run"] > ram:
         print(
             f"gate-memory: DEMAND EXCEEDED RAM by"

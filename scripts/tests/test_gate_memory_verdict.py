@@ -340,3 +340,86 @@ class FileDescriptorReporting(unittest.TestCase):
         self.assertIn("peak open fds 2539", out)
         self.assertIn("unknown", out)
         self.assertNotIn("% of it", out)
+
+
+PROBE = ("[s34ux-fd] pid=10985 RLIMIT_NOFILE soft=2560 "
+         "hard=9223372036854775807 fds=1789 maxfd=1788 hitCap=false scanCap=70000\n")
+
+
+class BindingSoftLimitTests(unittest.TestCase):
+    """The DENOMINATOR, which is what playhead-s34ux got wrong for a day.
+
+    A peak of 2,539 is 4.1 % of `kern.maxfilesperproc` and 99.2 % of the soft
+    limit that binds. The two differ by 24x here and a reader cannot tell them
+    apart from a percentage, so the line has to name which one it used.
+    """
+
+    def _fixed_ceiling(self, value):
+        saved = gmv.max_files_per_proc
+        gmv.max_files_per_proc = lambda: value
+        self.addCleanup(lambda: setattr(gmv, "max_files_per_proc", saved))
+
+    def test_the_soft_limit_is_READ_from_the_log(self):
+        self.assertEqual(gmv.soft_limit_from_log(PROBE), 2560)
+
+    def test_a_log_without_the_probe_line_yields_MINUS_ONE_not_a_guess(self):
+        self.assertEqual(gmv.soft_limit_from_log(log(summary=False)), -1)
+
+    def test_the_soft_limit_is_PREFERRED_over_the_sysctl(self):
+        """The whole correction, in one rail: same peak, right denominator."""
+        self._fixed_ceiling(61440)
+        path = series([sample(log_bytes=10, testhost_fds=2539)])
+        _, out = run(log(summary=False) + PROBE, rc=137, series_path=path)
+        self.assertIn("RLIMIT_NOFILE soft 2560", out)
+        self.assertIn("99.2 %", out)
+        self.assertNotIn("4.1 %", out)
+
+    def test_the_line_NAMES_which_limit_it_used(self):
+        """A percentage against the wrong denominator reads exactly like a
+        percentage against the right one. The name is what separates them."""
+        self._fixed_ceiling(61440)
+        path = series([sample(log_bytes=10, testhost_fds=2539)])
+        _, without = run(log(summary=False), rc=137, series_path=path)
+        _, with_probe = run(log(summary=False) + PROBE, rc=137, series_path=path)
+        self.assertIn("kern.maxfilesperproc", without)
+        self.assertIn("RLIMIT_NOFILE soft", with_probe)
+
+    def test_the_FALLBACK_says_it_overstates_the_headroom(self):
+        """Without the probe line the share is against the kernel cap, which is
+        24x too large here. Printing it unqualified is the reading that was
+        published as a refutation."""
+        self._fixed_ceiling(61440)
+        path = series([sample(log_bytes=10, testhost_fds=2539)])
+        _, out = run(log(summary=False), rc=137, series_path=path)
+        self.assertIn("OVERSTATES the headroom", out)
+
+    def test_the_real_reading_does_NOT_carry_the_fallback_caveat(self):
+        """The mirror — a qualification printed on a reading that does not need
+        it teaches the reader to skip it."""
+        self._fixed_ceiling(61440)
+        path = series([sample(log_bytes=10, testhost_fds=2539)])
+        _, out = run(log(summary=False) + PROBE, rc=137, series_path=path)
+        self.assertNotIn("OVERSTATES", out)
+
+    def test_at_the_ceiling_is_SHOUTED_and_names_the_bead(self):
+        self._fixed_ceiling(61440)
+        path = series([sample(log_bytes=10, testhost_fds=2539)])
+        _, out = run(log(summary=False) + PROBE, rc=137, series_path=path)
+        self.assertIn("AT THE CEILING", out)
+        self.assertIn("playhead-vk68m", out)
+
+    def test_a_comfortable_run_is_NOT_shouted_at(self):
+        """The mirror. A warning that fires on a healthy run is a warning
+        nobody reads."""
+        self._fixed_ceiling(61440)
+        path = series([sample(log_bytes=10, testhost_fds=400)])
+        _, out = run(log(summary=False) + PROBE, rc=137, series_path=path)
+        self.assertIn("RLIMIT_NOFILE soft 2560", out)
+        self.assertNotIn("AT THE CEILING", out)
+
+    def test_an_UNREADABLE_limit_line_is_not_parsed_as_a_limit(self):
+        """The probe prints a different line when `getrlimit` fails, and it
+        carries no `soft=`. Matching it loosely would invent a ceiling."""
+        unreadable = ("[s34ux-fd] pid=1 RLIMIT_NOFILE UNREADABLE "
+                      "(getrlimit rc=-1, errno=22) — this run says NOTHING\n")
+        self.assertEqual(gmv.soft_limit_from_log(unreadable), -1)
