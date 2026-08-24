@@ -366,3 +366,24 @@ a value that names one thing read as though it named another, one layer below
 `kern.maxfilesperproc` vs `RLIMIT_NOFILE`. Both were settled in under a minute
 by an experiment, and both had gone unmeasured because the documented answer was
 easier to reach for than the measured one.
+
+## A named limit of the classifier, created by the confirmed diagnosis
+
+**L-1: a genuine over-close in PRODUCT code would now be classified as the box.**
+`EBADF (9)` routes to the RESOURCE category, and on this platform that errno is
+what a full descriptor table produces — which is why it is in the table. But it
+is also what a real double-close produces, and the classifier cannot tell them
+apart from the message alone.
+
+The trade is deliberate and it is not close. Treating `EBADF` as a failure puts
+~60 healthy tests back in the NEW column on every affected run, which is the
+defect this whole change exists to remove; and a descriptor closed twice in
+product code is not a thing a unit test asserts on, so the population that would
+be lost is close to empty. But it is a hole in the loud direction and it should
+be stated rather than discovered.
+
+**What would close it** is `playhead-enzva` — capturing `sqlite3_system_errno`
+— plus the same idea one layer out: an error that carries the *count of open
+descriptors at the moment it was raised* is self-classifying, and the process
+can read its own count in microseconds. Nobody has built that and it is not in
+this bead.
