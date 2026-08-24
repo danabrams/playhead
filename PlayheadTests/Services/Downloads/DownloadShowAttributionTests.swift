@@ -70,14 +70,23 @@ struct DownloadShowAttributionTests {
     /// suite parks the daemon — is the most expensive kind to diagnose: it
     /// reads as this file's defect and it is not.
     ///
-    /// WHAT IT CANNOT SEE, so a green run is read for what it is worth. It
-    /// checks ONE label against ONE constant, so it says nothing about (a) a
-    /// `DownloadManager` built anywhere in this file WITHOUT this helper —
-    /// nothing enforces that route; (b) a custom label that is nevertheless
-    /// SHARED between managers, which `unsharedSessionIO`'s `UUID` rules out
-    /// today but this assertion would not notice; or (c) two calls made
+    /// WHAT IT CANNOT SEE, so a green run is read for what it is worth. The
+    /// first check compares ONE label against ONE constant, so on its own it
+    /// says nothing about (a) a `DownloadManager` built anywhere in this file
+    /// WITHOUT this helper — nothing enforces that route; (b) a custom label
+    /// that is nevertheless SHARED between managers; or (c) two calls made
     /// through ONE manager, which share that manager's single queue by
     /// construction and are unaffected by any of this.
+    ///
+    /// (b) IS THE ONE WORTH CLOSING, AND THE SECOND CHECK CLOSES IT
+    /// (review r2). "Memoize the factory" is the ordinary shape of a future
+    /// tidy-up; it keeps a non-default label, so the first check stays green
+    /// while all eight managers go back onto ONE queue — which is exactly the
+    /// state this bead exists to leave. Asking the helper for a SECOND
+    /// instance and requiring a different label is what turns that from a
+    /// documented limit into a caught one. It costs one throwaway
+    /// `BackgroundSessionIO` per manager; its `init` builds two dispatch
+    /// queues and touches no daemon. (a) and (c) stay open by construction.
     ///
     /// `#function` is evaluated at the CALL SITE, so each manager's queue is
     /// still labelled with the test that built it.
@@ -101,6 +110,16 @@ struct DownloadShowAttributionTests {
             removed. Measured, the second direction is the one that bit: on \
             2026-08-23 08:06 this suite's own kkzu-cleared held the queue 65 s \
             and eleven tests in three files failed
+            """,
+            sourceLocation: sourceLocation
+        )
+        #expect(
+            unsharedSessionIO(labelledFor: test).queueLabel != io.queueLabel,
+            """
+            unsharedSessionIO handed back the SAME instance twice, so every \
+            manager in this file shares one serial queue again — the label is \
+            not the default, so the check above cannot see it, and the suite \
+            is back in the state playhead-et2d removed
             """,
             sourceLocation: sourceLocation
         )
