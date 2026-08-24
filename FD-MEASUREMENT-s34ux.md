@@ -177,3 +177,13 @@ the underlying `errno` from the failed open and `AnalysisStore` throws away —
 call that distinguishes them is one line. Filed rather than taken here: it is a
 production change on an error path, and this bead's remaining budget is owed to
 making the gate honest.
+
+## Where the rest of this went
+
+* **`playhead-vk68m`** — the root cause, still open. fd exhaustion refuted;
+  EBADF-not-EMFILE is the live lead; `TestScratchReaper` ruled out statically.
+* **`playhead-enzva`** — `AnalysisStore` throws `sqlite3_system_errno()` away,
+  which is why five different bugs share one string and why the classifier has
+  to match that one phrase as prose rather than as an errno.
+* **`playhead-5c006`** — mutant `R21` survives, and survives on `105efd5f` too.
+  Pre-existing coverage hole in the gate's own rails, filed not fixed.
