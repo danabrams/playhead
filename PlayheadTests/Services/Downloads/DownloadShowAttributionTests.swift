@@ -15,8 +15,9 @@
 // worthless if the assertion would hold for an attributed one too. Each rail
 // below drives BOTH arms through the same harness.
 //
-// playhead-et2d: EVERY `DownloadManager` HERE INJECTS `unsharedSessionIO()`,
-// and the reason is one measurement rather than tidiness. The default
+// playhead-et2d: EVERY `DownloadManager` HERE IS BUILT BY `makeManager`,
+// which injects `unsharedSessionIO()` and asserts the queue it got is not the
+// shared one. The reason is one measurement rather than tidiness. The default
 // `BackgroundSessionIO.shared` is a process-wide singleton with ONE serial
 // queue; on the full-plan run of 2026-08-23 08:06 a single parked
 // `downloadTask(with:)` held that queue for 65 seconds, twelve submissions
@@ -42,6 +43,43 @@ import Testing
 struct DownloadShowAttributionTests {
 
     private static let showId = "https://feeds.example.com/diary.xml"
+
+    /// Builds this suite's `DownloadManager` and PROVES, before handing it
+    /// back, that it is not on the process-wide `BackgroundSessionIO` queue.
+    ///
+    /// playhead-et2d. The injection is the whole fix, and without this rail
+    /// the only thing standing between "every manager here has its own queue"
+    /// and "one of them quietly went back to `.shared`" would be eight
+    /// identical argument lists nobody re-reads. A construction is a cheap
+    /// thing to copy-paste wrongly, and the consequence — a test that fails
+    /// only under a full plan's own concurrency, and only when some OTHER
+    /// suite parks the daemon — is the most expensive kind to diagnose: it
+    /// reads as this file's defect and it is not.
+    ///
+    /// `#function` is evaluated at the CALL SITE, so each manager's queue is
+    /// still labelled with the test that built it.
+    private func makeManager(
+        cacheDirectory dir: URL,
+        labelledFor test: String = #function,
+        sourceLocation: SourceLocation = #_sourceLocation
+    ) async -> DownloadManager {
+        let manager = DownloadManager(
+            cacheDirectory: dir,
+            sessionIO: unsharedSessionIO(labelledFor: test)
+        )
+        let io = await manager.sessionIO
+        #expect(
+            io.queueLabel != BackgroundSessionIO.defaultQueueLabel,
+            """
+            this manager is on the process-wide BackgroundSessionIO queue \
+            (\(io.queueLabel)) — every assertion below is one parked \
+            downloadTask(with:) in an unrelated suite away from failing, \
+            which is what playhead-et2d fixed
+            """,
+            sourceLocation: sourceLocation
+        )
+        return manager
+    }
 
     private func makeScheduler(store: AnalysisStore) -> AnalysisWorkScheduler {
         let speechService = SpeechService(recognizer: StubSpeechRecognizer())
@@ -114,9 +152,7 @@ struct DownloadShowAttributionTests {
         let dir = try makeTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
         let store = try await makeTestStore()
-        let manager = DownloadManager(
-            cacheDirectory: dir, sessionIO: unsharedSessionIO()
-        )
+        let manager = await makeManager(cacheDirectory: dir)
         await manager.setAnalysisWorkScheduler(makeScheduler(store: store))
         try await manager.bootstrap()
 
@@ -212,9 +248,7 @@ struct DownloadShowAttributionTests {
         defer { try? FileManager.default.removeItem(at: dir) }
         let store = try await makeTestStore()
 
-        let queueing = DownloadManager(
-            cacheDirectory: dir, sessionIO: unsharedSessionIO()
-        )
+        let queueing = await makeManager(cacheDirectory: dir)
         try await queueing.bootstrap()
         let episodeId = "kkzu-restart"
         await queueing.backgroundDownload(
@@ -226,9 +260,7 @@ struct DownloadShowAttributionTests {
         )
 
         // A brand-new manager: nothing carries over but the filesystem.
-        let relaunched = DownloadManager(
-            cacheDirectory: dir, sessionIO: unsharedSessionIO()
-        )
+        let relaunched = await makeManager(cacheDirectory: dir)
         await relaunched.setAnalysisWorkScheduler(makeScheduler(store: store))
         try await relaunched.bootstrap()
         #expect(
@@ -260,9 +292,7 @@ struct DownloadShowAttributionTests {
         let dir = try makeTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
         let store = try await makeTestStore()
-        let manager = DownloadManager(
-            cacheDirectory: dir, sessionIO: unsharedSessionIO()
-        )
+        let manager = await makeManager(cacheDirectory: dir)
         await manager.setAnalysisWorkScheduler(makeScheduler(store: store))
         try await manager.bootstrap()
 
@@ -301,9 +331,7 @@ struct DownloadShowAttributionTests {
     func resumeBlobDeletionPreservesAttribution() async throws {
         let dir = try makeTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
-        let manager = DownloadManager(
-            cacheDirectory: dir, sessionIO: unsharedSessionIO()
-        )
+        let manager = await makeManager(cacheDirectory: dir)
         try await manager.bootstrap()
 
         let episodeId = "kkzu-suspended"
@@ -343,9 +371,7 @@ struct DownloadShowAttributionTests {
     func forceQuitResumeRecoversTheShow() async throws {
         let dir = try makeTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
-        let manager = DownloadManager(
-            cacheDirectory: dir, sessionIO: unsharedSessionIO()
-        )
+        let manager = await makeManager(cacheDirectory: dir)
         try await manager.bootstrap()
 
         let episodeId = "kkzu-force-quit"
@@ -397,9 +423,7 @@ struct DownloadShowAttributionTests {
     func cancelReapsAttribution() async throws {
         let dir = try makeTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
-        let manager = DownloadManager(
-            cacheDirectory: dir, sessionIO: unsharedSessionIO()
-        )
+        let manager = await makeManager(cacheDirectory: dir)
         try await manager.bootstrap()
 
         let episodeId = "kkzu-cancelled"
@@ -427,9 +451,7 @@ struct DownloadShowAttributionTests {
     func clearCacheReapsAttribution() async throws {
         let dir = try makeTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
-        let manager = DownloadManager(
-            cacheDirectory: dir, sessionIO: unsharedSessionIO()
-        )
+        let manager = await makeManager(cacheDirectory: dir)
         try await manager.bootstrap()
 
         let episodeId = "kkzu-cleared"
