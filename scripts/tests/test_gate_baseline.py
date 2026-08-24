@@ -4532,3 +4532,347 @@ class ResourceAcceptTests(unittest.TestCase):
         run = gb.parse_run(log(st_fail_message("t", CANTOPEN)))
         with self.assertRaises(gb.CannotEvaluate):
             gb.merge(baseline({}), run, "PlayheadFastTests")
+
+
+# ---------------------------------------------------------------------------
+# playhead-s34ux R1 — the adversarial review round.
+# ---------------------------------------------------------------------------
+#
+# Five defects, one critical. Every rail below FAILS against the classifier as
+# it was first shipped (commit 013c21b8), and each of the four that could go
+# the other way carries its MIRROR, because a guard that only fires in one
+# direction is the shape playhead-o89d R5 spent five rounds on.
+
+RESOURCE_BUNDLE_MESSAGE = "Caught error: Migration failed: unable to open database file"
+
+
+class ResourceThroughApplyBundlesTests(unittest.TestCase):
+    """THE CRITICAL ONE. `_apply_bundles` is the only path the gate uses.
+
+    `fast-gate.sh` passes `--xcresult` whenever the bundle exists, so every
+    real gate run goes through here. `_apply_bundles` folded `passed`,
+    `skipped`, `failures`, `unjudged` and `crashed` into a fresh `BundleRun`
+    and NOT `resource` — and `with_xcresult_verdicts` then REPLACES the run's
+    dict with that empty one. So the whole classifier did nothing on the
+    shipped path, and did it silently: `parse_xcresult` has already taken the
+    denied key out of `failures`, so with nothing in `resource` to subtract it
+    fell out of `ran` and was reported as a CRASHED-HOST CASUALTY. That is a
+    test which REPORTED AN ERROR read as one that said nothing — the precise
+    misreading `RunResult.no_verdict`'s docstring exists to prevent — and one
+    `--accept-baseline` would have written it into the census as a host death
+    that never happened.
+
+    Every measurement in the bead was taken console-only, which is the one
+    path that worked, which is why this was invisible there.
+    """
+
+    def _run(self, *payloads):
+        run = gb.parse_run(log(st_fail_message("t", CANTOPEN)))
+        parts = list(payloads)
+        return gb._apply_bundles(
+            run, list(range(len(parts))), reader=lambda i: parts[i])
+
+    def test_a_denial_in_the_bundle_SURVIVES_apply_bundles(self):
+        run = self._run(bundle_payload(
+            st_case("t", result="Failed", func="t()",
+                    messages=[RESOURCE_BUNDLE_MESSAGE])))
+        self.assertEqual({gb.st_key("t")}, set(run.resource))
+        self.assertIn("unable to open database file",
+                      run.resource[gb.st_key("t")])
+
+    def test_it_is_NOT_reported_as_a_crashed_host_casualty(self):
+        """The quiet half. Without the fix this set has the denied test in it
+        and the verdict prints `1 test got NO VERDICT (crashed host)`."""
+        run = self._run(bundle_payload(
+            st_case("t", result="Failed", func="t()",
+                    messages=[RESOURCE_BUNDLE_MESSAGE])))
+        self.assertEqual(set(), run.no_verdict)
+        rendered = gb.verdict(baseline({}), run, "PlayheadFastTests").render()
+        self.assertNotIn("NO VERDICT", rendered)
+        self.assertIn("RESOURCE FAILURE", rendered)
+
+    def test_a_second_bundle_that_PASSES_a_denied_test_CLEARS_it(self):
+        """The mirror, and it is what the discard half of the loop buys. The
+        residual re-run is newer evidence about exactly those tests."""
+        run = self._run(
+            bundle_payload(st_case("t", result="Failed", func="t()",
+                                   messages=[RESOURCE_BUNDLE_MESSAGE])),
+            bundle_payload(st_case("t", result="Passed", func="t()")),
+        )
+        self.assertEqual(set(), set(run.resource))
+        self.assertIn(gb.st_key("t"), run.passed)
+
+    def test_a_second_bundle_that_does_NOT_cover_it_leaves_the_denial(self):
+        """Nothing is ever removed for having gone unmentioned — the same rule
+        the crashed set follows one category along."""
+        run = self._run(
+            bundle_payload(st_case("t", result="Failed", func="t()",
+                                   messages=[RESOURCE_BUNDLE_MESSAGE])),
+            bundle_payload(st_case("other", result="Passed", func="other()")),
+        )
+        self.assertEqual({gb.st_key("t")}, set(run.resource))
+
+    def test_a_second_bundle_that_FAILS_it_for_real_outranks_the_denial(self):
+        run = self._run(
+            bundle_payload(st_case("t", result="Failed", func="t()",
+                                   messages=[RESOURCE_BUNDLE_MESSAGE])),
+            bundle_payload(st_case("t", result="Failed", func="t()",
+                                   messages=["Expectation failed: a == b"])),
+        )
+        self.assertEqual(set(), set(run.resource))
+        self.assertIn(gb.st_key("t"), run.failures)
+
+    def test_the_BUNDLE_still_overrules_the_consoles_reading(self):
+        """Anti-fabrication in the other direction: the console called this a
+        denial and the bundle says it is a real failure. The bundle wins, and
+        the failure is reported NEW rather than absorbed."""
+        run = gb._apply_bundles(
+            gb.parse_run(log(st_fail_message("t", CANTOPEN))),
+            ["b"],
+            reader=lambda _p: bundle_payload(
+                st_case("t", result="Failed", func="t()",
+                        messages=["Expectation failed: a == b"])),
+        )
+        self.assertEqual(set(), set(run.resource))
+        result = gb.verdict(baseline({}), run, "PlayheadFastTests")
+        self.assertEqual([gb.st_key("t")], result.new_failures)
+
+    def test_every_started_test_lands_in_EXACTLY_one_category(self):
+        """The conservation property the whole accounting rests on: nothing
+        may fall out of the run's books in both directions at once."""
+        run = gb._apply_bundles(
+            gb.parse_run(log(
+                st_fail_message("denied", CANTOPEN),
+                st_fail_expect("broken"),
+                st_pass("fine"),
+                st_silent("lost"),
+            )),
+            ["b"],
+            reader=lambda _p: bundle_payload(
+                st_case("denied", result="Failed", func="denied()",
+                        messages=[RESOURCE_BUNDLE_MESSAGE]),
+                st_case("broken", result="Failed", func="broken()",
+                        messages=["Expectation failed: a == b"]),
+                st_case("fine", result="Passed", func="fine()"),
+                st_case("skippy", result="Skipped", func="skippy()"),
+            ),
+        )
+        buckets = [run.ran, run.skipped, run.no_verdict, set(run.resource)]
+        for key in run.started:
+            hits = [b for b in buckets if key in b]
+            self.assertEqual(1, len(hits), "%s landed in %d categories" % (key, len(hits)))
+        self.assertEqual({gb.st_key("lost")}, run.no_verdict)
+        self.assertEqual({gb.st_key("denied")}, set(run.resource))
+        self.assertEqual({gb.st_key("broken")}, set(run.failures))
+
+
+class ResourceHeadlineRidesAlongTests(unittest.TestCase):
+    """RESOURCE never DISPLACES a louder fact.
+
+    `headline_tail` is a chain of `if ... return`, so a branch inserted in the
+    middle does not add a fact — it replaces the one below it. The RESOURCE
+    branch went in between `no_verdict` and `host_restarts`, and a run that
+    both restarted its host AND hit denials stopped saying the host had
+    crashed. That is the one fact this module's own collision rule says
+    outranks everything, because nothing under it was judged.
+    """
+
+    def _tail(self, **kw):
+        result = gb.Verdict()
+        for key, value in kw.items():
+            setattr(result, key, value)
+        return result.headline_tail
+
+    DENIAL = {"swift-testing::t": "unable to open database file"}
+
+    def test_a_host_restart_and_a_denial_BOTH_reach_the_headline(self):
+        tail = self._tail(host_restarts=1, resource=self.DENIAL)
+        self.assertIn("the test host CRASHED and was restarted", tail)
+        self.assertIn("RESOURCE FAILURE", tail)
+
+    def test_an_unmatched_blamed_name_and_a_denial_BOTH_reach_it(self):
+        tail = self._tail(blamed_unmatched=["Foo.bar()"], resource=self.DENIAL)
+        self.assertIn("matched no console result", tail)
+        self.assertIn("RESOURCE FAILURE", tail)
+
+    def test_a_crashed_host_census_and_a_denial_BOTH_reach_it(self):
+        """Exercised by the real 7dgx log and, until now, pinned by nothing."""
+        tail = self._tail(no_verdict=["swift-testing::gone"], resource=self.DENIAL)
+        self.assertIn("NO VERDICT (crashed host)", tail)
+        self.assertIn("RESOURCE FAILURE", tail)
+
+    def test_a_host_restart_ALONE_is_unchanged_by_this_bead(self):
+        self.assertEqual(" — the test host CRASHED and was restarted",
+                         self._tail(host_restarts=1))
+
+    def test_a_blamed_name_ALONE_is_unchanged_by_this_bead(self):
+        self.assertEqual(
+            " — 1 name(s) in `Failing tests:` matched no console result",
+            self._tail(blamed_unmatched=["Foo.bar()"]))
+
+    def test_a_healthy_run_says_NOTHING(self):
+        """A printed zero is a claim. There is nothing to claim here."""
+        self.assertEqual("", self._tail())
+
+    def test_the_resource_fact_has_ONE_spelling_wherever_it_appears(self):
+        """Two spellings of one fact means a reader grepping for either finds
+        half the runs. What varies by position is punctuation, not words."""
+        alone = self._tail(resource=self.DENIAL)
+        riding = self._tail(host_restarts=1, resource=self.DENIAL)
+        self.assertTrue(alone.startswith(" — "), alone)
+        self.assertEqual(alone[3:], riding.split(", ", 1)[1])
+
+
+class ResourceCensusTests(unittest.TestCase):
+    """A DENIED RUN MUST NOT TEACH THE CENSUS ANYTHING EITHER.
+
+    `merge()` protects a denied key from the `tests` prune. The census had no
+    equivalent: a denied test is in `run.started` and — because `no_verdict`
+    subtracts `resource` — not in `lost`, so it fell into the "started and
+    reported" arm, took `seen + 1` with `lost` unchanged, and DEMOTED a
+    deterministic entry out of the one tier whose licence can be revoked. That
+    is the fifth way this file can be made LOOSER, reached from a run the whole
+    bead says makes no claim about the plan.
+    """
+
+    KEY = "swift-testing::a casualty"
+
+    def _run(self, chunk):
+        return gb.parse_run(log(chunk, st_pass("ok")))
+
+    def _prior(self, lost=None):
+        return gb.recorded_census(baseline(
+            {}, no_verdict=[self.KEY], census_runs=5, census_lost=lost))
+
+    def test_a_denied_run_does_NOT_demote_a_deterministic_entry(self):
+        prior = self._prior()
+        self.assertEqual(gb.TIER_DETERMINISTIC, prior.tier(self.KEY))
+        merged = gb.merge_census(
+            prior, self._run(st_fail_message("a casualty", CANTOPEN)))
+        self.assertEqual(gb.TIER_DETERMINISTIC, merged.tier(self.KEY))
+        self.assertEqual(prior.tests[self.KEY], merged.tests[self.KEY],
+                         "a denied run must credit NO observation")
+
+    def test_a_genuinely_reported_entry_is_STILL_demoted(self):
+        """The mirror. The protection must not switch the demotion off for
+        everybody — that is what keeps a union from ossifying into a licence
+        nobody can revoke."""
+        prior = self._prior()
+        merged = gb.merge_census(prior, self._run(st_pass("a casualty")))
+        self.assertEqual(gb.TIER_LOAD_SENSITIVE, merged.tier(self.KEY))
+        self.assertEqual(6, merged.tests[self.KEY]["seen_runs"])
+
+    def test_a_denied_entry_does_not_HARD_FAIL_the_gate(self):
+        """`census_now_reports` exits 65 saying the record's licence has
+        rotted — "it loses its verdict every observation and this run watched
+        it report". A denied test did not report; it was refused."""
+        run = self._run(st_fail_message("a casualty", CANTOPEN))
+        result = gb.verdict(
+            baseline({}, no_verdict=[self.KEY], census_runs=5), run,
+            "PlayheadFastTests")
+        self.assertEqual([], result.census_now_reports)
+
+    def test_a_genuinely_recovered_entry_STILL_hard_fails(self):
+        """The mirror, and the reason the arm exists at all."""
+        run = self._run(st_pass("a casualty"))
+        result = gb.verdict(
+            baseline({}, no_verdict=[self.KEY], census_runs=5), run,
+            "PlayheadFastTests")
+        self.assertEqual([self.KEY], result.census_now_reports)
+        self.assertEqual(gb.EXIT_REGRESSION, result.exit_code)
+
+    def test_the_REPORTED_AGAIN_line_names_the_DENIAL_as_the_cause(self):
+        """There are three causes, not two: reported, never started, denied.
+        Calling a denied test a removal candidate that `reported again` sends
+        the reader to shrink the record on evidence that is not evidence."""
+        run = self._run(st_fail_message("a casualty", CANTOPEN))
+        rendered = gb.verdict(
+            baseline({}, no_verdict=[self.KEY], census_runs=5,
+                     census_lost={self.KEY: 2}),
+            run, "PlayheadFastTests").render()
+        self.assertIn("DENIED a file it needed", rendered)
+        self.assertNotIn("reported again — removal candidate", rendered)
+
+    def test_a_genuine_recovery_still_reads_as_a_removal_candidate(self):
+        run = self._run(st_pass("a casualty"))
+        rendered = gb.verdict(
+            baseline({}, no_verdict=[self.KEY], census_runs=5,
+                     census_lost={self.KEY: 2}),
+            run, "PlayheadFastTests").render()
+        self.assertIn("reported again — removal candidate", rendered)
+        self.assertNotIn("DENIED a file it needed", rendered)
+
+
+class ResourceMeasuredCauseTests(unittest.TestCase):
+    """The block printed a claim that was FALSE on every denied run.
+
+    "peak open descriptors at 2,539 against a 61,440 ceiling, so exhaustion is
+    not the explanation" read `kern.maxfilesperproc` as the limit that binds.
+    It is not. `gate-s34ux-fdmeasure.log:37295` records `RLIMIT_NOFILE
+    soft=2560` for pid 10985 — the `testhost_pid` in `fd-series-s34ux.csv` —
+    where `testhost_fds` peaks at 2,539 and `testhost_fd_max` reads 2,559,
+    which is soft minus one. The standing defect class one more time: a value
+    that names one thing read as though it named another.
+    """
+
+    def _rendered(self):
+        return gb.verdict(
+            baseline({}), gb.parse_run(log(st_fail_message("t", CANTOPEN))),
+            "PlayheadFastTests").render()
+
+    def test_the_block_NAMES_the_measured_limit_and_the_open_bead(self):
+        rendered = self._rendered()
+        self.assertIn("2,560", rendered)
+        self.assertIn("2,539", rendered)
+        self.assertIn("playhead-vk68m", rendered)
+
+    def test_the_block_no_longer_claims_exhaustion_is_RULED_OUT(self):
+        rendered = self._rendered()
+        self.assertNotIn("61,440", rendered)
+        self.assertNotIn("exhaustion is not the explanation", rendered)
+
+    def test_the_disclaimer_SURVIVES_the_new_cause(self):
+        """Naming a cause must not delete the honest half: this category still
+        cannot tell a box that was short from a test that leaked."""
+        self.assertIn("does NOT say whether the box was short", self._rendered())
+
+
+class ResourceNestedVetoTests(unittest.TestCase):
+    """The unanimity VETO reaches descendants; the classification does not.
+
+    Measured across five preserved full-plan bundles: a `Test Case` node's
+    children are flat and there are ZERO grandchildren, so this guards a shape
+    Xcode does not emit today. It is admitted anyway because widening a veto is
+    only ever the loud direction, and both directions are pinned below.
+    """
+
+    def _node(self, direct, nested):
+        node = st_case("t", result="Failed", func="t()", messages=direct)
+        node.setdefault("children", []).append({
+            "nodeType": "Arguments", "name": "n: 1",
+            "children": [{"nodeType": "Failure Message", "name": m}
+                         for m in nested],
+        })
+        return node
+
+    def test_a_NESTED_assertion_vetoes_a_denial(self):
+        run = gb.parse_xcresult(bundle_payload(
+            self._node([RESOURCE_BUNDLE_MESSAGE], ["Expectation failed: a == b"])))
+        self.assertEqual(set(), set(run.resource))
+        self.assertIn(gb.st_key("t"), run.failures)
+
+    def test_a_NESTED_denial_does_not_PROMOTE_a_message_less_failure(self):
+        """The mirror, and the direction that must stay shut: a nested denial
+        beneath a node with no failure message of its own is not evidence the
+        test was denied anything, and routing it here would be the quiet
+        direction this whole change exists to avoid."""
+        run = gb.parse_xcresult(bundle_payload(
+            self._node([], [RESOURCE_BUNDLE_MESSAGE])))
+        self.assertEqual(set(), set(run.resource))
+        self.assertIn(gb.st_key("t"), run.failures)
+
+    def test_a_flat_denial_is_STILL_a_denial(self):
+        run = gb.parse_xcresult(bundle_payload(
+            st_case("t", result="Failed", func="t()",
+                    messages=[RESOURCE_BUNDLE_MESSAGE])))
+        self.assertEqual({gb.st_key("t")}, set(run.resource))
