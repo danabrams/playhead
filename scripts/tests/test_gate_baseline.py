@@ -4125,3 +4125,363 @@ class OctalEscapedConsoleNames(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+# ---------------------------------------------------------------------------
+# playhead-s34ux — A DENIED RESOURCE IS NOT A FAILING TEST
+# ---------------------------------------------------------------------------
+#
+# Every rail below is written so that it FAILS against the parser as it stood
+# before this bead, and six of them are anti-fabrication guards that must hold
+# in BOTH directions — a classifier that swallows a real assertion is strictly
+# worse than one that reports a resource failure as NEW, because the second is
+# noisy and the first is silent.
+
+CANTOPEN = "Migration failed: unable to open database file (SQL: PRAGMA journal_mode = WAL)"
+CANTOPEN_OPEN = "SQLite open failed (14): unable to open database file"
+
+# The witness that broke the bead open, byte-faithful from
+# gate-7dgx-verify.log line 61831 — a SOURCE FILE read failing EBADF in the
+# same run as the SQLite errors.
+EBADF_SOURCE = (
+    'Caught error: Error Domain=NSCocoaErrorDomain Code=256 "The file '
+    '“AdDetectionService.swift” couldn’t be opened." '
+    "UserInfo={NSFilePath=/Users/dabrams/playhead/.worktrees/7dgx/Playhead/"
+    "Services/AdDetection/AdDetectionService.swift, "
+    "NSUnderlyingError=0x705ca8eb20 {Error Domain=NSPOSIXErrorDomain Code=9 "
+    '"Bad file descriptor"}}'
+)
+
+# The SAME sentence, with the errno that means the product is broken. This is
+# the pair the whole design rests on: the prose is identical and only the code
+# differs, so a classifier written on the prose cannot tell them apart.
+ENOENT_SOURCE = EBADF_SOURCE.replace(
+    'Code=9 "Bad file descriptor"', 'Code=2 "No such file or directory"'
+)
+
+
+def st_fail_message(name, message, source="FooTests.swift", line=42,
+                    seconds="0.031"):
+    """A Swift Testing test that recorded ONE issue carrying `message`."""
+    return (
+        '◇ Test "%s" started.\n'
+        '✘ Test "%s" recorded an issue at %s:%d:6: %s\n'
+        '✘ Test "%s" failed after %s seconds with 1 issue.\n'
+        % (name, name, source, line, message, name, seconds)
+    )
+
+
+class ResourceCauseTests(unittest.TestCase):
+    """The discriminator itself, in isolation. An errno table, not a keyword."""
+
+    def test_sqlite_cantopen_prose_is_a_resource(self):
+        self.assertIsNotNone(gb.resource_cause(CANTOPEN))
+        self.assertIsNotNone(gb.resource_cause(CANTOPEN_OPEN))
+
+    def test_ebadf_is_a_resource_even_though_the_sentence_is_generic(self):
+        cause = gb.resource_cause(EBADF_SOURCE)
+        self.assertIsNotNone(cause)
+        self.assertIn("EBADF", cause)
+
+    def test_the_identical_sentence_with_enoent_is_NOT_a_resource(self):
+        """THE anti-fabrication rail. Same prose, different errno, and 'the
+        file is not there' is somebody's bug."""
+        self.assertIsNone(gb.resource_cause(ENOENT_SOURCE))
+
+    def test_eacces_is_not_a_resource(self):
+        self.assertIsNone(gb.resource_cause(
+            'Error Domain=NSPOSIXErrorDomain Code=13 "Permission denied"'
+        ))
+
+    def test_emfile_enfile_enospc_are_resources_and_are_named_apart(self):
+        for code, expected in (("23", "ENFILE"), ("24", "EMFILE"), ("28", "ENOSPC")):
+            cause = gb.resource_cause(
+                'Error Domain=NSPOSIXErrorDomain Code=%s "x"' % code
+            )
+            self.assertIsNotNone(cause, code)
+            self.assertIn(expected, cause)
+
+    def test_an_unrecognised_errno_VETOES_a_recognised_phrase(self):
+        """A message can carry both. The unrecognised code wins, because the
+        direction that must never be silent is the one that hides a defect."""
+        self.assertIsNone(gb.resource_cause(
+            "unable to open database file "
+            '(Error Domain=NSPOSIXErrorDomain Code=2 "No such file or directory")'
+        ))
+
+    def test_an_expectation_failure_is_not_a_resource(self):
+        self.assertIsNone(gb.resource_cause("Expectation failed: a == b"))
+
+    def test_a_time_limit_is_not_a_resource(self):
+        self.assertIsNone(gb.resource_cause("Time limit was exceeded: 60.000 seconds"))
+
+    def test_an_empty_message_is_not_a_resource(self):
+        self.assertIsNone(gb.resource_cause(""))
+        self.assertIsNone(gb.resource_cause(None))
+
+
+class ResourceConsoleParseTests(unittest.TestCase):
+    """The console fallback — the path taken when there is no bundle."""
+
+    def test_a_cantopen_leaves_failures_and_lands_in_resource(self):
+        run = gb.parse_run(log(st_fail_message("t", CANTOPEN)))
+        self.assertEqual(set(run.failures), set())
+        self.assertEqual(set(run.resource), {gb.st_key("t")})
+
+    def test_it_is_NOT_counted_as_a_crashed_host_casualty(self):
+        """The line that keeps two categories two categories. Without the
+        subtraction in `no_verdict` a test that REPORTED an error reads as one
+        that said nothing — and `--accept-baseline` writes it into the census."""
+        run = gb.parse_run(log(st_fail_message("t", CANTOPEN)))
+        self.assertEqual(run.no_verdict, set())
+
+    def test_an_expectation_failure_is_untouched(self):
+        run = gb.parse_run(log(st_fail_expect("t")))
+        self.assertEqual(set(run.failures), {gb.st_key("t")})
+        self.assertEqual(set(run.resource), set())
+
+    def test_UNANIMITY_one_real_assertion_keeps_the_whole_test_a_failure(self):
+        """Two issues, one CANTOPEN and one expectation. The test stays a
+        FAILURE and keeps both kinds — this must never be a route by which a
+        real failure leaves the NEW column."""
+        chunk = (
+            '◇ Test "t" started.\n'
+            '✘ Test "t" recorded an issue at F.swift:1:6: %s\n'
+            '✘ Test "t" recorded an issue at F.swift:2:6: Expectation failed: a == b\n'
+            '✘ Test "t" failed after 0.1 seconds with 2 issues.\n' % CANTOPEN
+        )
+        run = gb.parse_run(log(chunk))
+        self.assertEqual(set(run.failures), {gb.st_key("t")})
+        self.assertEqual(set(run.resource), set())
+
+    def test_the_veto_holds_whichever_ORDER_the_issues_arrive_in(self):
+        chunk = (
+            '◇ Test "t" started.\n'
+            '✘ Test "t" recorded an issue at F.swift:1:6: Expectation failed: a == b\n'
+            '✘ Test "t" recorded an issue at F.swift:2:6: %s\n'
+            '✘ Test "t" failed after 0.1 seconds with 2 issues.\n' % CANTOPEN
+        )
+        run = gb.parse_run(log(chunk))
+        self.assertEqual(set(run.failures), {gb.st_key("t")})
+        self.assertEqual(set(run.resource), set())
+
+    def test_the_ebadf_source_read_is_classified_from_the_console_too(self):
+        run = gb.parse_run(log(st_fail_message("canary", EBADF_SOURCE)))
+        self.assertEqual(set(run.resource), {gb.st_key("canary")})
+
+    def test_the_enoent_twin_stays_a_failure_from_the_console_too(self):
+        run = gb.parse_run(log(st_fail_message("canary", ENOENT_SOURCE)))
+        self.assertEqual(set(run.failures), {gb.st_key("canary")})
+        self.assertEqual(set(run.resource), set())
+
+    def test_an_xctest_failure_is_never_classified_as_a_resource(self):
+        """The console prints no message for an XCTest failure, so there is no
+        evidence — and no evidence is the FAILURE direction."""
+        run = gb.parse_run(log(xc_fail("SomeTests", "testThing")))
+        self.assertEqual(len(run.failures), 1)
+        self.assertEqual(set(run.resource), set())
+
+
+class ResourceBundleParseTests(unittest.TestCase):
+    """The bundle — the authoritative source since playhead-t53a."""
+
+    def test_a_failed_case_whose_only_message_is_cantopen(self):
+        run = gb.parse_xcresult(bundle_payload(
+            st_case("t", result="Failed", messages=[CANTOPEN]),
+        ))
+        self.assertEqual(set(run.failures), set())
+        self.assertEqual(set(run.resource), {gb.st_key("t")})
+
+    def test_a_failed_case_with_a_real_assertion_alongside_stays_a_failure(self):
+        run = gb.parse_xcresult(bundle_payload(
+            st_case("t", result="Failed",
+                    messages=[CANTOPEN, "Expectation failed: a == b"]),
+        ))
+        self.assertEqual(set(run.failures), {gb.st_key("t")})
+        self.assertEqual(set(run.resource), set())
+
+    def test_a_failed_case_with_NO_messages_stays_a_failure(self):
+        """Silence is not evidence of a resource failure. The whole design
+        rule of playhead-t53a, applied to the new category."""
+        run = gb.parse_xcresult(bundle_payload(
+            st_case("t", result="Failed"),
+        ))
+        self.assertEqual(set(run.failures), {gb.st_key("t")})
+        self.assertEqual(set(run.resource), set())
+
+    def test_a_crash_outranks_a_resource_denial(self):
+        run = gb.parse_xcresult(bundle_payload(
+            st_case("t", result="Failed", messages=[CRASH]),
+        ))
+        self.assertEqual(set(run.crashed), {gb.st_key("t")})
+        self.assertEqual(set(run.resource), set())
+
+    def test_a_passing_same_named_twin_cannot_launder_a_resource_casualty(self):
+        """Resolve toward the worse news, in BOTH node orders."""
+        denied = st_case("t", result="Failed", messages=[CANTOPEN], func="a()")
+        healthy = st_case("t", result="Passed", func="b()")
+        for order in ((denied, healthy), (healthy, denied)):
+            run = gb.parse_xcresult(bundle_payload(*order))
+            self.assertEqual(set(run.resource), {gb.st_key("t")}, order)
+            self.assertNotIn(gb.st_key("t"), run.passed)
+
+    def test_the_bundle_REPLACES_the_consoles_reading(self):
+        """A test the console read as denied, which the bundle judged PASSED,
+        leaves the category — a name is judged by the bundle and nothing else."""
+        run = gb.parse_run(log(st_fail_message("t", CANTOPEN)))
+        self.assertEqual(set(run.resource), {gb.st_key("t")})
+        bundle = gb.parse_xcresult(bundle_payload(st_case("t", result="Passed")))
+        merged = gb.with_xcresult_verdicts(run, bundle)
+        self.assertEqual(set(merged.resource), set())
+        self.assertIn(gb.st_key("t"), merged.passed)
+
+
+class ResourceVerdictTests(unittest.TestCase):
+    """What a reader SEES. A count that is not printed is a count nobody has."""
+
+    def _verdict(self, chunks, tests=None, **kw):
+        return gb.verdict(
+            baseline(tests if tests is not None else {}, **kw),
+            gb.parse_run(log(*chunks)),
+        )
+
+    def test_the_count_rides_on_the_RED_line(self):
+        verdict = self._verdict([st_fail_message("t", CANTOPEN)])
+        rendered = verdict.render()
+        self.assertIn("RED", rendered.splitlines()[0])
+        self.assertIn("RESOURCE FAILURE", rendered.splitlines()[0])
+        self.assertIn("1 test", rendered.splitlines()[0])
+
+    def test_the_count_is_the_NUMBER_of_denied_tests(self):
+        verdict = self._verdict([
+            st_fail_message("a", CANTOPEN),
+            st_fail_message("b", CANTOPEN_OPEN),
+            st_fail_message("c", EBADF_SOURCE),
+        ])
+        self.assertIn("3 tests hit a RESOURCE FAILURE", verdict.render().splitlines()[0])
+
+    def test_they_are_NOT_reported_as_NEW(self):
+        verdict = self._verdict([st_fail_message("t", CANTOPEN)])
+        self.assertEqual(verdict.new_failures, [])
+        self.assertNotIn("NEW FAILURE", verdict.render())
+
+    def test_a_real_regression_alongside_is_STILL_reported_as_NEW(self):
+        """The property that makes this safe to ship: the classifier removes
+        one category and cannot remove the other."""
+        verdict = self._verdict([
+            st_fail_message("denied", CANTOPEN),
+            st_fail_expect("broken"),
+        ])
+        self.assertEqual(verdict.new_failures, [gb.st_key("broken")])
+        self.assertIn("NEW FAILURE", verdict.render())
+        self.assertIn("RESOURCE FAILURE", verdict.render())
+
+    def test_it_is_NOT_quieter_than_before_the_exit_code_still_says_re_run(self):
+        verdict = self._verdict([st_fail_message("t", CANTOPEN)])
+        self.assertEqual(verdict.exit_code, gb.EXIT_REGRESSION)
+
+    def test_GREEN_is_unreachable_while_a_resource_failure_stands(self):
+        verdict = self._verdict([st_pass("ok"), st_fail_message("t", CANTOPEN)])
+        self.assertNotIn("GREEN", verdict.render())
+
+    def test_the_block_NAMES_which_resource_per_test(self):
+        rendered = self._verdict([st_fail_message("t", EBADF_SOURCE)]).render()
+        self.assertIn("EBADF", rendered)
+
+    def test_the_block_states_what_it_does_NOT_know(self):
+        """A remedy printed as though the cause were known is the reassurance
+        this mechanism exists to withhold."""
+        rendered = self._verdict([st_fail_message("t", CANTOPEN)]).render()
+        self.assertIn("does NOT say whether the box was short", rendered)
+
+    def test_nothing_is_printed_on_a_healthy_run(self):
+        """A printed zero is a claim. This one would be true and useless on a
+        clean run and unsupportable on a run with no bundle."""
+        rendered = self._verdict([st_pass("ok")]).render()
+        self.assertNotIn("RESOURCE", rendered)
+
+    def test_BASELINE_IS_FICTION_does_not_fire_on_a_denied_run(self):
+        """`not run.failures` is also true of a run whose every failure was a
+        denial, and blaming the FILE for a short box invites an accept that
+        empties it."""
+        verdict = self._verdict(
+            [st_fail_message("t", CANTOPEN)],
+            tests={"swift-testing::known": (3, ["timeout"])},
+        )
+        self.assertFalse(verdict.baseline_fiction)
+        self.assertNotIn("BASELINE IS FICTION", verdict.render())
+
+    def test_BASELINE_IS_FICTION_still_fires_on_a_genuinely_clean_run(self):
+        """The mirror. The guard above must not disable the arm outright."""
+        verdict = self._verdict(
+            [st_pass("ok")],
+            tests={"swift-testing::known": (3, ["timeout"])},
+        )
+        self.assertTrue(verdict.baseline_fiction)
+
+    def test_an_ABSENT_baseline_member_names_the_denial_not_a_rename(self):
+        verdict = self._verdict(
+            [st_fail_message("known", CANTOPEN)],
+            tests={gb.st_key("known"): (3, ["timeout"])},
+        )
+        rendered = verdict.render()
+        self.assertIn("DID NOT RUN", rendered)
+        self.assertIn("denied a file it needed", rendered)
+        self.assertNotIn("renamed, deleted or newly skipped", rendered)
+
+
+class ResourceAcceptTests(unittest.TestCase):
+    """`--accept-baseline` must not learn anything from a denied run.
+
+    Every fixture here carries a real outcome alongside the denial, because a
+    run whose ONLY outcome is a denial has an empty `ran` and `merge` refuses
+    it outright — which is itself correct, and is the rail below.
+    """
+
+    def test_a_denied_test_is_NOT_written_into_the_known_broken_file(self):
+        run = gb.parse_run(log(st_fail_message("t", CANTOPEN), st_pass("ok")))
+        merged = gb.merge(baseline({}), run, "PlayheadFastTests")
+        self.assertNotIn(gb.st_key("t"), merged["tests"])
+
+    def test_a_recorded_entry_denied_this_run_is_NOT_pruned(self):
+        """Without the protection the file SHRINKS because the box was short,
+        from inside the one command whose job is to maintain it."""
+        prior = baseline({
+            gb.st_key("denied"): (3, ["timeout"]),
+            gb.st_key("still"): (3, ["timeout"]),
+        })
+        run = gb.parse_run(log(
+            st_fail_message("denied", CANTOPEN), st_fail_timeout("still"),
+        ))
+        merged = gb.merge(prior, run, "PlayheadFastTests")
+        self.assertIn(gb.st_key("denied"), merged["tests"])
+        self.assertEqual(
+            merged["tests"][gb.st_key("denied")]["seen_runs"],
+            prior["tests"][gb.st_key("denied")]["seen_runs"],
+            "a denied run must credit NO observation",
+        )
+
+    def test_a_genuinely_renamed_entry_is_STILL_pruned(self):
+        """The mirror of the rail above — the protection must not turn the
+        prune off for everybody."""
+        prior = baseline({
+            gb.st_key("gone"): (3, ["timeout"]),
+            gb.st_key("still"): (3, ["timeout"]),
+        })
+        run = gb.parse_run(log(st_fail_timeout("still"), st_pass("other")))
+        merged = gb.merge(prior, run, "PlayheadFastTests")
+        self.assertNotIn(gb.st_key("gone"), merged["tests"])
+        self.assertIn(gb.st_key("still"), merged["tests"])
+
+    def test_a_denied_test_does_not_enter_the_crashed_host_census(self):
+        run = gb.parse_run(log(st_fail_message("t", CANTOPEN), st_pass("ok")))
+        merged = gb.merge(baseline({}), run, "PlayheadFastTests")
+        census = gb.recorded_census(merged)
+        self.assertNotIn(gb.st_key("t"), census.names)
+
+    def test_a_run_whose_ONLY_outcome_was_a_denial_is_REFUSED(self):
+        """`ran` excludes a denied test, so such a run has no results at all
+        and the accept must refuse rather than write an empty file."""
+        run = gb.parse_run(log(st_fail_message("t", CANTOPEN)))
+        with self.assertRaises(gb.CannotEvaluate):
+            gb.merge(baseline({}), run, "PlayheadFastTests")
