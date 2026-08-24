@@ -121,6 +121,88 @@ def inflight_at_end(text: str) -> tuple[int, int]:
 # reading the box
 # --------------------------------------------------------------------------
 
+def max_files_per_proc() -> int:
+    """`kern.maxfilesperproc`, or -1. The PER-PROCESS ceiling.
+
+    Reported next to the peak because the peak alone means nothing: playhead-
+    s34ux was filed on the belief that the test host was exhausting descriptors
+    and the measurement read 2,539 against 61,440 — 4.1 %. A count without its
+    denominator is this repo's standing defect class, so the two are printed
+    together or not at all.
+
+    NOTE what this is NOT: it is the kernel's per-process cap, not the process's
+    own `RLIMIT_NOFILE` soft limit, which is what actually binds and cannot be
+    read from outside the process on macOS. So this is an UPPER bound on the
+    ceiling. A peak far below it is evidence; a peak near it is a reason to go
+    and measure the soft limit from inside the host.
+    """
+    out = subprocess.run(
+        ["sysctl", "-n", "kern.maxfilesperproc"],
+        capture_output=True, text=True, check=False,
+    ).stdout.strip()
+    try:
+        return int(out)
+    except ValueError:
+        return -1
+
+
+_SOFT_LIMIT = re.compile(r"\[s34ux-fd\][^\n]*RLIMIT_NOFILE soft=(\d+)")
+
+
+def soft_limit_from_log(text: str) -> int:
+    """The test host's OWN `RLIMIT_NOFILE` soft limit, printed by the host.
+
+    macOS cannot report another process's rlimit, so this is the only route to
+    the number that actually binds — `TestHostDescriptorCeilingTests` prints it
+    into every gate log for exactly this reason. -1 when the log does not carry
+    it (an older run, or a build that never reached the test phase).
+    """
+    match = _SOFT_LIMIT.search(text)
+    if match is None:
+        return -1
+    try:
+        return int(match.group(1))
+    except ValueError:
+        return -1
+
+
+def fd_line(stats: dict[str, int], soft: int = -1) -> str:
+    """One line about descriptors, or a line saying nobody measured them.
+
+    THE DENOMINATOR IS THE WHOLE POINT AND IT IS EASY TO GET WRONG. playhead-
+    s34ux read a peak of 2,539 against `kern.maxfilesperproc` 61,440, called it
+    4.1 % and wrote the hypothesis up as refuted. The limit that BINDS is the
+    process's own `RLIMIT_NOFILE` soft limit, 2,560 on this host, which makes
+    the same peak 99.2 % — at the ceiling. So the soft limit is preferred
+    whenever the log carries it, the sysctl is the fallback, and the line always
+    NAMES WHICH ONE IT USED, because the two differ by 24x here and a reader
+    cannot tell them apart from a percentage.
+    """
+    if not stats.get("has_fds") or stats.get("host_fds_peak", -1) < 0:
+        return ("gate-memory: test host open file descriptors NOT RECORDED — this "
+                "run says nothing about descriptor exhaustion")
+    peak = stats["host_fds_peak"]
+    if soft > 0:
+        ceiling, name = soft, "RLIMIT_NOFILE soft"
+    else:
+        ceiling, name = max_files_per_proc(), "kern.maxfilesperproc"
+    share = "" if ceiling <= 0 else f" ({100.0 * peak / ceiling:.1f} % of it)"
+    limit = "unknown" if ceiling <= 0 else str(ceiling)
+    line = f"gate-memory: test host peak open fds {peak} of {name} {limit}{share}"
+    if soft <= 0:
+        # Never let the fallback pass for the real thing. A percentage against
+        # the wrong denominator reads exactly like a percentage against the
+        # right one.
+        line += ("  [the BINDING soft limit is not in this log — "
+                 "this share is against the kernel cap and OVERSTATES the headroom]")
+    elif ceiling > 0 and peak >= ceiling * 0.9:
+        line += "  *** AT THE CEILING — see playhead-vk68m ***"
+    if stats.get("sys_files_peak", -1) >= 0 and stats.get("sys_files_limit", -1) >= 0:
+        line += (f"; system-wide {stats['sys_files_peak']} of "
+                 f"kern.maxfiles {stats['sys_files_limit']}")
+    return line
+
+
 def ram_mib() -> int:
     try:
         out = subprocess.run(
@@ -219,6 +301,15 @@ def summarise_series(rows: list[dict[str, str]]) -> dict[str, int]:
         "host_footprint_peak": max([f for f in col("testhost_footprint_mib") if f >= 0] or [-1]),
         "host_rss_peak": max(col("testhost_mib")),
         "distinct_host_pids": len(set(pids)),
+        # playhead-s34ux. A column nobody prints is a column nobody reads, and
+        # the whole cost of that bead was that the number was never taken.
+        # -1 means NOT RECORDED throughout: an older sampler wrote no column,
+        # or every read failed. It is never 0, because a printed zero would
+        # claim the host held no descriptors.
+        "has_fds": has("testhost_fds"),
+        "host_fds_peak": max([f for f in col("testhost_fds") if f >= 0] or [-1]),
+        "sys_files_peak": max([f for f in col("sys_num_files") if f >= 0] or [-1]),
+        "sys_files_limit": max([f for f in col("sys_max_files") if f >= 0] or [-1]),
     }
 
 
@@ -282,6 +373,12 @@ def report(log_path: str, rc: int, series_path: str, out=sys.stdout) -> int:
                 f" {stats['swap_peak'] / 1024:.1f} GiB."
             )
         print(line, file=out)
+        # On a COMPLETE run too, and deliberately: the reading that most needs
+        # its instrument named is the quiet one. playhead-s34ux's gates were
+        # `** TEST SUCCEEDED **`-adjacent — 0 host restarts, memory comfortably
+        # inside the box — and were failing 56 tests on denied file opens.
+        if stats:
+            print(fd_line(stats, soft_limit_from_log(text)), file=out)
         return 0
 
     print("", file=out)
@@ -352,6 +449,7 @@ def report(log_path: str, rc: int, series_path: str, out=sys.stdout) -> int:
         f" footprint {footprint}, {pidcount}",
         file=out,
     )
+    print(fd_line(stats, soft_limit_from_log(text)), file=out)
     if stats["demand_peak_during_run"] > ram:
         print(
             f"gate-memory: DEMAND EXCEEDED RAM by"

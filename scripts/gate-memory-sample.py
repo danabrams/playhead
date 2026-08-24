@@ -31,6 +31,7 @@ series against the log byte offset a run dies at.
 from __future__ import annotations
 
 import argparse
+import ctypes
 import os
 import re
 import signal
@@ -72,6 +73,133 @@ def vm_stat_sample() -> dict[str, int]:
     sample = {k: v * page // MIB for k, v in pages.items()}
     sample.update(counters)
     return sample
+
+
+# ---------------------------------------------------------------------------
+# playhead-s34ux: the test host's OPEN FILE DESCRIPTORS.
+# ---------------------------------------------------------------------------
+# Full-plan gates were failing with `SQLITE_CANTOPEN` in a ROTATING set of
+# suites, and one run failed to open a `.swift` SOURCE file in the same
+# breath -- a shape no database explanation covers. The hypothesis was
+# descriptor exhaustion in the single test host, and it was UNMEASURED: the
+# bead named `lsof -p <pid> | wc -l` as the cheap thing to do.
+#
+# Two corrections to that recipe, both measured here rather than assumed,
+# and both this repo's standing defect class (a value that names one thing
+# read as though it named another):
+#
+#   * `lsof -p PID | wc -l` IS NOT THE OPEN-FD COUNT. lsof also lists `cwd`,
+#     `rtd`, `txt` and every mapped dylib, none of which occupy a descriptor.
+#     Measured on a python process holding 3 descriptors, lsof printed 16
+#     lines; after opening 100 files it printed 116 and the real count was
+#     103. So the lsof figure over-reports by a constant ~13 here and by
+#     however many images a 400-dylib test host has mapped -- which is
+#     exactly the direction that would manufacture a false "exhausted".
+#
+#   * `proc_pidinfo(PROC_PIDLISTFDS)` CALLED WITH A NULL BUFFER RETURNS THE
+#     TABLE'S CAPACITY, NOT THE LIVE COUNT. Measured: 3 fds -> reported 45;
+#     open 100 -> reported 148; close all 100 -> STILL reported 148. It is a
+#     high-water allocation and it never falls, so reading it as "open fds"
+#     would report a leak on a process that has none.
+#
+# So the count is taken the only way that is accurate: PROC_PIDLISTFDS with a
+# real buffer, counting the entries the kernel actually fills in. That is one
+# syscall, measured at 1-17 us, cheap enough to sit on the default path.
+#
+# A read that FAILS records -1, never 0. A printed zero would read as "the
+# host had no descriptors open", i.e. it would invent a refutation of the
+# very hypothesis this column exists to test.
+
+_LIBC = ctypes.CDLL(None, use_errno=True)
+PROC_PIDLISTFDS = 1
+
+# `proc_fdtype` values from <sys/proc_info.h>. Only the ones a test host is
+# expected to hold in bulk are named; anything else lands in `other`, because
+# a bucket that silently absorbs an unknown type is a bucket that cannot
+# report a surprise.
+PROX_FDTYPE_VNODE = 1
+PROX_FDTYPE_SOCKET = 2
+PROX_FDTYPE_KQUEUE = 5
+PROX_FDTYPE_PIPE = 6
+
+
+class _ProcFDInfo(ctypes.Structure):
+    _fields_ = [("proc_fd", ctypes.c_int32), ("proc_fdtype", ctypes.c_uint32)]
+
+
+_FDINFO_SIZE = ctypes.sizeof(_ProcFDInfo)
+
+
+def fd_sample(pid: int) -> dict[str, int]:
+    """Open descriptors held by `pid`, by kind, plus the highest fd number.
+
+    Every value is -1 when the table could not be read at all (no pid, the
+    process exited, EPERM across a uid boundary). -1 is `not recorded`; 0 is
+    a claim.
+
+    `max_fd` is worth having next to `count`: descriptor numbers are handed
+    out lowest-free-first, so `max_fd` tracks the high-water mark while
+    `count` tracks what is held right now. count low + max_fd high means
+    descriptors ARE being closed; the two rising together is accumulation.
+    """
+    unknown = {
+        "count": -1, "vnode": -1, "socket": -1,
+        "kqueue": -1, "pipe": -1, "other": -1, "max_fd": -1, "capacity": -1,
+    }
+    if pid <= 0:
+        return unknown
+    capacity = _LIBC.proc_pidinfo(
+        ctypes.c_int(pid), ctypes.c_int(PROC_PIDLISTFDS),
+        ctypes.c_uint64(0), None, ctypes.c_int(0),
+    )
+    if capacity <= 0:
+        return unknown
+    # Head-room: the table can grow between the sizing call and the read, and
+    # a short buffer silently TRUNCATES (proc_pidinfo returns what it wrote,
+    # with no error), which would under-report a host that is filling up.
+    capacity += _FDINFO_SIZE * 256
+    buffer = (_ProcFDInfo * (capacity // _FDINFO_SIZE))()
+    written = _LIBC.proc_pidinfo(
+        ctypes.c_int(pid), ctypes.c_int(PROC_PIDLISTFDS),
+        ctypes.c_uint64(0), ctypes.byref(buffer), ctypes.c_int(capacity),
+    )
+    if written <= 0:
+        return unknown
+    entries = written // _FDINFO_SIZE
+    sample = {
+        "count": entries, "vnode": 0, "socket": 0,
+        "kqueue": 0, "pipe": 0, "other": 0, "max_fd": -1,
+        "capacity": capacity // _FDINFO_SIZE,
+    }
+    kinds = {
+        PROX_FDTYPE_VNODE: "vnode", PROX_FDTYPE_SOCKET: "socket",
+        PROX_FDTYPE_KQUEUE: "kqueue", PROX_FDTYPE_PIPE: "pipe",
+    }
+    for index in range(entries):
+        entry = buffer[index]
+        sample[kinds.get(entry.proc_fdtype, "other")] += 1
+        if entry.proc_fd > sample["max_fd"]:
+            sample["max_fd"] = entry.proc_fd
+    return sample
+
+
+def system_file_table() -> tuple[int, int]:
+    """(kern.num_files, kern.maxfiles), or (-1, -1).
+
+    The per-process ceiling is not the only one. A SYSTEM-wide file table that
+    is full fails an open with ENFILE, which surfaces identically to the
+    per-process EMFILE at every layer above it -- and this box runs a ~300
+    process simulator alongside the host. Sampling both is what makes the two
+    distinguishable after the fact instead of arguable.
+    """
+    out = subprocess.run(
+        ["sysctl", "-n", "kern.num_files", "kern.maxfiles"],
+        capture_output=True, text=True, check=False,
+    ).stdout.split()
+    try:
+        return int(out[0]), int(out[1])
+    except (IndexError, ValueError):
+        return -1, -1
 
 
 def disk_free_mib(path: str = "/System/Volumes/Data") -> int:
@@ -184,6 +312,16 @@ COLUMNS = [
     "testhost_footprint_mib",
     "testhost_pid",
     "disk_free_mib",
+    "testhost_fds",
+    "testhost_fd_vnode",
+    "testhost_fd_socket",
+    "testhost_fd_kqueue",
+    "testhost_fd_pipe",
+    "testhost_fd_other",
+    "testhost_fd_max",
+    "testhost_fd_capacity",
+    "sys_num_files",
+    "sys_max_files",
 ]
 
 
@@ -226,6 +364,8 @@ def main() -> int:
             available = (
                 vm["free"] + vm["inactive"] + vm["speculative"] + vm["purgeable"]
             )
+            fds = fd_sample(host_pid)
+            num_files, max_files = system_file_table()
             row = [
                 int(now),
                 round(now - start, 1),
@@ -248,6 +388,16 @@ def main() -> int:
                 footprint_mib(host_pid) if args.footprint else -1,
                 host_pid,
                 disk_free_mib(),
+                fds["count"],
+                fds["vnode"],
+                fds["socket"],
+                fds["kqueue"],
+                fds["pipe"],
+                fds["other"],
+                fds["max_fd"],
+                fds["capacity"],
+                num_files,
+                max_files,
             ]
             csv.write(",".join(str(v) for v in row) + "\n")
             top.write(

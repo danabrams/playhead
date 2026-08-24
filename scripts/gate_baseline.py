@@ -923,6 +923,13 @@ class RunResult(object):
         self.blamed_spellings = set()
         # key -> the bundle's words for a host death under that test.
         self.crashed = {}
+        # playhead-s34ux. key -> the message that says a RESOURCE was denied,
+        # and key -> which resource. Its own category rather than a flavour of
+        # `crashed`: those tests DID report, and the census record is a record
+        # of SILENCE. Folding them in would write names into `no_verdict` that
+        # never lost a verdict at all.
+        self.resource = {}
+        self.resource_causes = {}
 
     @property
     def ran(self):
@@ -948,8 +955,15 @@ class RunResult(object):
         Exact and console-only: both the start line and the outcome line carry
         the same identity, so this needs no mapping between xcodebuild's
         `Suite.function()` spelling and Swift Testing's display names.
+
+        `resource` is SUBTRACTED, and the line matters more than it looks
+        (playhead-s34ux). A resource casualty is removed from `failures`, so
+        without this it would fall out of `ran` and be booked here as a
+        crashed-host casualty — a test that reported an error read as a test
+        that said nothing, and `--accept-baseline` would then write it into the
+        census record as though the host had died under it.
         """
-        return self.started - self.ran - self.skipped
+        return self.started - self.ran - self.skipped - set(self.resource)
 
 
 def last_attempt(text):
@@ -978,6 +992,12 @@ def parse_run(text):
         if key not in failures:
             failures[key] = Failure(key, framework, name)
         return failures[key]
+
+    # playhead-s34ux. Per-key evidence for the resource rule, resolved after
+    # the loop because the rule is UNANIMITY and the last issue line a test
+    # records can withdraw the classification the first one earned.
+    resource_seen = {}
+    resource_vetoed = set()
 
     in_block = False
     # Repair the splice BEFORE anything reads a line. Every pattern below is
@@ -1010,10 +1030,16 @@ def parse_run(text):
         if m:
             name, source, message = m.group(1), m.group(3), m.group(6)
             name = decode_octal_escapes(name)
-            failure = failure_for(st_key(name), FRAMEWORK_SWIFT_TESTING, name)
+            key = st_key(name)
+            failure = failure_for(key, FRAMEWORK_SWIFT_TESTING, name)
             failure.kinds.add(_kind_of_issue(message))
             if source and not failure.source:
                 failure.source = source
+            cause = resource_cause(message)
+            if cause is None:
+                resource_vetoed.add(key)
+            else:
+                resource_seen.setdefault(key, (cause, message))
             continue
 
         m = _ST_FAIL_NAMED.search(line) or _ST_FAIL_FUNC.search(line)
@@ -1095,6 +1121,18 @@ def parse_run(text):
     # cannot be written against a `skipped` set that overlaps `ran`; delete it
     # only together with that guarantee.
     run.skipped -= set(failures) | run.passed
+
+    # playhead-s34ux. Resolve the resource rule LAST, once every issue line a
+    # test recorded has been seen. `resource_vetoed` is the loud direction and
+    # it wins: a test that recorded one CANTOPEN and one real assertion stays a
+    # FAILURE, carrying both kinds, exactly as before this existed.
+    for key, (cause, message) in resource_seen.items():
+        if key in resource_vetoed:
+            continue
+        run.resource_causes[key] = cause
+        run.resource[key] = message
+        failures.pop(key, None)
+
     return run
 
 
@@ -1193,6 +1231,194 @@ _NODE_FAILURE_MESSAGE = "Failure Message"
 # direction: it is reported NEW and named, rather than absorbed as a casualty.
 _XCRESULT_CRASHED = re.compile(r"^Test crashed\b", re.IGNORECASE)
 
+# ---------------------------------------------------------------------------
+# A DENIED RESOURCE IS NOT A FAILING TEST EITHER (playhead-s34ux)
+# ---------------------------------------------------------------------------
+#
+# Full-plan gates on this box fail with `SQLITE_CANTOPEN` in a ROTATING set of
+# suites, and every affected suite passes when run scoped. Three runs on three
+# different trees — one of them main with the candidate diff ABSENT — reported
+# 7, 8 and 56 NEW failures of which essentially every one read
+#
+#     Caught error: Migration failed: unable to open database file
+#     Caught error: SQLite open failed (14): unable to open database file
+#
+# with not one behavioural assertion among them. 56 NEW failures on a tree whose
+# whole diff was a measurement probe and a markdown file is exactly the shape
+# that trains a reader to wave a red gate through — and one `--accept-baseline`
+# on such a run writes healthy tests into the known-broken file, where their
+# next GENUINE failure reads as known.
+#
+# This is the same fix playhead-t53a applied to the crashed-host case one
+# category along, and it is bound by the same three rules:
+#
+#   * IT IS STATED, NOT INFERRED FROM SILENCE. The classification reads the
+#     failure MESSAGE the bundle records (or, without a bundle, the console's
+#     `recorded an issue … : <message>` text). Nothing is routed here for being
+#     absent.
+#   * AN UNRECOGNISED WORDING STAYS A FAILURE. That is the loud direction, and
+#     it is why the discriminator below is an ERRNO rather than the prose. `The
+#     file "X" couldn't be opened` is `NSCocoaErrorDomain Code=256`, which is
+#     generic: a test asserting that a file it wrote is readable fails with the
+#     same string, and swallowing that would hide a real defect. What separates
+#     them is the POSIX code underneath.
+#   * IT IS VISIBLE, WITH A COUNT. The verdict names the category and how many
+#     tests landed in it. A gate that moves failures out of the NEW column
+#     quietly is worse than one that over-reports, because it reads as green.
+#
+# WHICH ERRNOS, AND WHY NOT THE OTHERS. Only codes no product logic can
+# produce:
+#
+#   EBADF  (9)  THE ERRNO THIS PLATFORM RETURNS AT THE `RLIMIT_NOFILE`
+#               CEILING, measured rather than looked up. POSIX documents EBADF
+#               as "a descriptor that was obtained and then went bad", and this
+#               comment said exactly that for one draft — which would have sent
+#               the next reader hunting an over-close that does not exist.
+#               Reproduced in C on this box (lower the soft limit to 64, open
+#               until refused): `soft=64, opened 61, highest fd=63, failing
+#               open() errno=9`, NOT 24. The witness that broke the bead open
+#               is the same shape one layer up — a SOURCE FILE read failing
+#               `Code=9` (`AdDetectionService.swift`) in the same run as the
+#               SQLite errors, on a host whose `RLIMIT_NOFILE` soft limit is
+#               2,560 and whose peak was 2,539 with a highest descriptor of
+#               2,559. Reason from the errno the kernel RETURNS, not the one
+#               the manual documents.
+#   ENFILE (23) the SYSTEM file table is full.
+#   EMFILE (24) the per-process descriptor limit. Kept even though this box
+#               does not produce it, because it is what POSIX specifies and
+#               another box may well return it.
+#   ENOSPC (28) the volume is full — the failure playhead-3nfa's preflight
+#               exists to pre-empt, and one a diff cannot cause.
+#
+# LIMIT L-1, stated rather than hidden: a genuine DOUBLE CLOSE in product code
+# raises EBADF too, and this table classifies it as the box. That is a real
+# trade and it is taken deliberately — on this platform EBADF is the only
+# signature descriptor exhaustion has, so refusing it would leave the whole
+# category unable to see the failure it was built for. The unanimity rule is
+# what bounds the cost: a double-close that any assertion in the same test
+# notices is still a FAILURE.
+#
+# Deliberately ABSENT: ENOENT (2) and EACCES (13). "The file is not there" and
+# "you may not read it" are exactly what a product bug looks like, so they stay
+# FAILURES. An errno this table does not name VETOES the classification rather
+# than being ignored — a message carrying an unrecognised code is a failure
+# even if it also carries a phrase this module recognises.
+#
+# THE ONE PROSE MATCH, and why it has to exist. SQLite keeps the underlying
+# errno in `sqlite3_system_errno()` and `AnalysisStore` does not read it, so
+# `unable to open database file` reaches the log with its cause already thrown
+# away. Until that is fixed the prose is the only evidence there is. It is a
+# whole phrase, not a keyword, and it is the exact text SQLite emits for
+# SQLITE_CANTOPEN.
+#
+# THE PER-TEST RULE IS UNANIMITY. A test is a resource casualty only when EVERY
+# issue it recorded names a denied resource. One genuine assertion alongside a
+# CANTOPEN and the whole test stays a FAILURE — because the interesting half of
+# such a test is the assertion, and this must never be a route by which a real
+# failure leaves the NEW column.
+
+_RESOURCE_POSIX = re.compile(r"NSPOSIXErrorDomain\s+Code=(\d+)")
+
+_RESOURCE_ERRNO = {
+    # playhead-s34ux R1. NOT "a descriptor that was obtained and then went
+    # bad", which is what POSIX documents and is not what this kernel does.
+    # Measured in C on this box: lower RLIMIT_NOFILE to 64, open until refused,
+    # and the refusing open() sets errno 9. The per-test cause is what a reader
+    # ACTS on, so it may not carry a meaning the platform contradicts.
+    "9": "EBADF — this platform's errno at the RLIMIT_NOFILE ceiling",
+    "23": "ENFILE — the system file table is full",
+    "24": "EMFILE — the per-process descriptor limit",
+    "28": "ENOSPC — no space left on the volume",
+}
+
+_RESOURCE_PROSE = re.compile(
+    r"unable to open database file"
+    r"|[Tt]oo many open files"
+    r"|No space left on device"
+)
+
+
+def resource_cause(message):
+    """Name the resource this message says was denied, or None.
+
+    None means "not recognised", which is always the FAILURE direction. The
+    errno table is consulted first and a code outside it VETOES: a message
+    carrying `NSPOSIXErrorDomain Code=2` is a missing file, and a missing file
+    is somebody's bug even if the sentence around it mentions a database.
+    """
+    if not message:
+        return None
+    codes = _RESOURCE_POSIX.findall(message)
+    if codes:
+        named = [_RESOURCE_ERRNO.get(code) for code in codes]
+        if any(name is None for name in named):
+            return None
+        return named[0]
+    match = _RESOURCE_PROSE.search(message)
+    return match.group(0) if match else None
+
+
+def _bundle_resource(node):
+    """`(cause, message)` when EVERY failure message on this node is a denied
+    resource, else None. Unanimity, per the rule above.
+
+    THE VETO REACHES DESCENDANTS; THE CLASSIFICATION DOES NOT (playhead-s34ux
+    R1). A direct `Failure Message` child is what can make this a denial —
+    unchanged, because promoting a nested message would be the quiet direction
+    and nothing has ever been seen there. But a `Failure Message` at ANY depth
+    can VETO, which is only ever the loud one. Measured across five preserved
+    full-plan bundles (blsh, 3rql, 81ig, 1e86, gpdb): a `Test Case` node's
+    children are flat — `Failure Message`, `Skip Message`, `Arguments`,
+    `Runtime Warning` — and there are ZERO grandchildren of any kind, so this
+    is a guard against a shape Xcode does not emit today rather than a fix for
+    one it does. It costs nothing: the walk runs only for a node that already
+    named a denied resource, i.e. only for a candidate denial.
+    """
+    if node.get("result") != XCRESULT_FAILED:
+        return None
+    # THE CLASSIFICATION READS EVERY DEPTH, NOT JUST DIRECT CHILDREN
+    # (playhead-s34ux, found by the merge gate). It read direct children only,
+    # and a PARAMETERISED test does not put its failure there: the bundle gives
+    # such a `Test Case` node `Arguments` children and hangs the
+    # `Failure Message` off THOSE. So every parameterised test was invisible to
+    # this function — `found` stayed None and the denial was reported NEW.
+    #
+    # The correlation on the gate that caught it is total: of the 16 tests whose
+    # every recorded issue was `unable to open database file`, the 10 that were
+    # classified are all non-parameterised and the 5 left as NEW FAILURES are
+    # all parameterised (the 16th was a genuine assertion, correctly kept). The
+    # node shape is confirmed straight from a bundle — a parameterised case's
+    # children are `Arguments`, a plain one's are `Failure Message`.
+    #
+    # An earlier round split classification (direct) from veto (any depth),
+    # reasoning that promoting a nested message would be the quiet direction,
+    # and measured ZERO grandchildren across five preserved bundles. That was
+    # true of those five and is not a property of the population: not one of
+    # them had a FAILING parameterised test, which is the only thing that emits
+    # the shape. A sample read as a population.
+    #
+    # Unifying them is safe in the direction that matters, because the veto
+    # already reached every depth: a node is classified only if EVERY
+    # `Failure Message` anywhere beneath it names a denied resource, so one
+    # nested assertion still keeps the whole test a FAILURE.
+    found = None
+    stack = list(node.get("children") or [])
+    while stack:
+        child = stack.pop()
+        stack.extend(child.get("children") or [])
+        if child.get("nodeType") != _NODE_FAILURE_MESSAGE:
+            continue
+        message = (child.get("name") or "").strip()
+        cause = resource_cause(message)
+        if cause is None:
+            return None
+        if found is None:
+            found = (cause, message)
+    # A FAILED case with no message anywhere beneath it says nothing this
+    # category may act on, and silence is never routed here. It stays a FAILURE.
+    return found
+
+
 
 class XcresultUnreadable(Exception):
     """The bundle was asked for and could not be read. Never a silent fallback.
@@ -1284,6 +1510,10 @@ class BundleRun(object):
         self.unjudged = {}
         # key -> the bundle's own words for why the host died under this test.
         self.crashed = {}
+        # playhead-s34ux. key -> the message naming a DENIED RESOURCE, and
+        # key -> which resource it named.
+        self.resource = {}
+        self.resource_causes = {}
         # Every test's identity in the ONE spelling xcodebuild's `Failing
         # tests:` block uses — `Suite.function()`. The console cannot produce
         # this for a Swift Testing test with a display name, which is the whole
@@ -1337,6 +1567,15 @@ def parse_xcresult(payload):
         run.skipped.discard(key)
         run.failures.pop(key, None)
         run.unjudged.pop(key, None)
+        # A host death outranks a denied resource: the test got no verdict at
+        # all, so the census — not this category — owns it.
+        run.resource.pop(key, None)
+        run.resource_causes.pop(key, None)
+    for key in run.resource:
+        run.passed.discard(key)
+        run.skipped.discard(key)
+        run.failures.pop(key, None)
+        run.unjudged.pop(key, None)
     return run
 
 
@@ -1370,8 +1609,39 @@ def _collect_case(node, bundle, suite, run, raw):
         # all — that is the whole point of routing it here.
         run.crashed.setdefault(key, crash)
         run.failures.pop(key, None)
+        run.resource.pop(key, None)
+        run.resource_causes.pop(key, None)
+        return
+    resource = _bundle_resource(node)
+    if resource is not None and key not in run.failures:
+        # Same treatment as a crash and for the same reason: NOT recorded in
+        # `raw`, so a same-named passing twin cannot promote it to `passed`.
+        #
+        # `key not in run.failures` is the half a crash does NOT need, and it
+        # is the whole difference between the two categories (mutation RD10,
+        # which SURVIVED the first draft of this rule and was right to). Two
+        # same-named tests share one key. For a CRASH, resolving toward the
+        # casualty is resolving toward the worse news — the host died and
+        # nothing was judged. For a DENIAL it is not: a genuine assertion
+        # failure NAMES A DEFECT and a denial names the box, so a rule that
+        # let the denial win would swallow the very failure the UNANIMITY rule
+        # protects one level down. Without this clause a real regression
+        # sharing a display name with a denied test left the NEW column
+        # silently — the one outcome this whole change exists to prevent.
+        run.resource_causes.setdefault(key, resource[0])
+        run.resource.setdefault(key, resource[1])
         return
     raw.setdefault(key, set()).add(result)
+    if result == XCRESULT_FAILED and key in run.resource:
+        # The other half of RD10's asymmetry, and the only half that is live: a
+        # genuine failure on a shared display name outranks a denial, so the
+        # denial yields and the FAILURE is recorded. A twin that PASSED or was
+        # SKIPPED needs no clause at all — the resolution loop at the end of
+        # `parse_xcresult` already discards a denied key from both sets, and a
+        # branch that only re-states that is dead code pretending to be a
+        # guard. (Mutation RD10 survived it, which is how it was found.)
+        run.resource.pop(key, None)
+        run.resource_causes.pop(key, None)
     if key in run.crashed:
         # Two same-named tests, one of which the host killed. The survivor's
         # verdict is not evidence about the casualty, and resolving toward the
@@ -1458,6 +1728,11 @@ def with_xcresult_verdicts(run, bundle):
     run.targets = dict(bundle.targets)
     run.blamed_spellings = set(bundle.blamed_spellings)
     run.crashed = dict(bundle.crashed)
+    # playhead-s34ux: REPLACED, not unioned, for the same reason as `crashed`.
+    # The bundle is what judges a test; the console's reading of the same
+    # failure is a fallback for when there is no bundle at all.
+    run.resource = dict(bundle.resource)
+    run.resource_causes = dict(bundle.resource_causes)
 
     for key, failure in run.failures.items():
         if not failure.source:
@@ -1717,6 +1992,20 @@ def merge_census(prior, run):
     # run and disable the prune entirely — the record would then never shrink
     # for a rename, which is the other half of what makes a union affordable.
     crashed = bool(run.host_restarts or lost)
+    # playhead-s34ux R1. A DENIED RESOURCE IS NOT A REPORT, EITHER.
+    #
+    # `merge()` protects a denied key from the `tests` prune and this did not
+    # protect it from the census, which is the SAME event pointed the other
+    # way: a denied test is in `run.started` and — because `no_verdict`
+    # subtracts `resource` — is not in `lost`, so it fell into the
+    # "started and reported" arm, took `seen + 1` with `lost` unchanged, and
+    # DEMOTED a deterministic entry out of the one tier whose licence can ever
+    # be revoked. That is the fifth way this file can be made LOOSER, arrived
+    # at from a run the whole bead says makes no claim about the plan. A test
+    # the box refused a file is evidence about the box; carry the entry
+    # forward at its original counts and credit no observation, exactly as a
+    # crashed run does.
+    denied = set(getattr(run, "resource", None) or ())
     tests = {}
     for key in sorted(set(prior.tests) | lost):
         previous = prior.tests.get(key)
@@ -1725,6 +2014,8 @@ def merge_census(prior, run):
         elif key in lost:
             tests[key] = {"seen_runs": previous["seen_runs"] + 1,
                           "lost_runs": previous["lost_runs"] + 1}
+        elif key in denied:
+            tests[key] = dict(previous)
         elif key in run.started:
             tests[key] = {"seen_runs": previous["seen_runs"] + 1,
                           "lost_runs": previous["lost_runs"]}
@@ -1853,7 +2144,11 @@ def merge(baseline, run, plan):
     # every recorded entry it took down with it, quietly, from inside the one
     # command whose job is to maintain the file. Carry those forward untouched:
     # unchanged counts, no observation credited, still on the list.
-    protected = run.no_verdict
+    # playhead-s34ux: a denied resource is not a rename either. Without this a
+    # baseline member that hit a CANTOPEN this run would be DELETED from the
+    # file by the accept — the file shrinking because the box was short, from
+    # inside the command whose job is to maintain it.
+    protected = run.no_verdict | set(run.resource)
     for key in sorted(set(old) | set(run.failures)):
         previous = old.get(key)
         failure = run.failures.get(key)
@@ -1928,6 +2223,11 @@ class Verdict(object):
         # Recorded names this run demonstrably STARTED — the only ones about
         # which a recovery is evidence rather than an absence.
         self.census_started = set()
+        # playhead-s34ux R1. Recorded names this run DENIED a file. They
+        # started, so `census_started` holds them too, and without this the
+        # diff below calls them a removal candidate that "reported again" —
+        # which they did not.
+        self.census_denied = set()
         self.absent_crashed = set()
         self.host_restarts = 0
         self.restart_evidence = None
@@ -1938,6 +2238,10 @@ class Verdict(object):
         self.verdict_source = VERDICT_SOURCE_CONSOLE
         self.unjudged = {}
         self.crashed = {}
+        # playhead-s34ux — tests that were denied a file, not tests that failed.
+        self.resource = {}
+        self.resource_causes = {}
+        self.absent_resource = set()
 
     @property
     def ok(self):
@@ -1979,17 +2283,54 @@ class Verdict(object):
                 unrecorded = ", %d not yet recorded" % len(self.new_casualties)
             else:
                 unrecorded = ""
-            return " — %d test%s got NO VERDICT (crashed host)%s" % (
+            return " — %d test%s got NO VERDICT (crashed host)%s%s" % (
                 len(self.no_verdict), "" if len(self.no_verdict) == 1 else "s",
-                unrecorded,
+                unrecorded, self._resource_tail(", "),
             )
+        # playhead-s34ux R1. RESOURCE RIDES ALONG; IT NEVER DISPLACES.
+        #
+        # The first draft put this branch between `no_verdict` and
+        # `host_restarts`, and a chain of `if … return` means an inserted
+        # branch does not add a fact, it REPLACES the one below it: a run that
+        # both restarted its host AND hit denials printed only the denials, and
+        # `the test host CRASHED and was restarted` vanished from the headline.
+        # That is the loud direction lost — a host restart is the more serious
+        # fact, and it is the one this module's own collision rule says
+        # outranks everything, because nothing under it was judged. So every
+        # branch carries the resource fragment and the standalone form is LAST:
+        # it can only ever be reached when there is nothing louder to say.
         if self.host_restarts:
-            return " — the test host CRASHED and was restarted"
+            return (" — the test host CRASHED and was restarted"
+                    + self._resource_tail(", "))
         if self.blamed_unmatched:
-            return " — %d name(s) in `Failing tests:` matched no console result" % (
-                len(self.blamed_unmatched),
-            )
+            return (" — %d name(s) in `Failing tests:` matched no console result"
+                    % (len(self.blamed_unmatched),)) + self._resource_tail(", ")
+        if self.resource:
+            return self._resource_tail(" — ")
         return ""
+
+    def _resource_tail(self, separator):
+        """The RESOURCE fact, in ONE spelling, with the separator supplied.
+
+        One sentence rather than two, because `8 RESOURCE FAILURES (re-run)`
+        riding on a NO VERDICT line and `8 tests hit a RESOURCE FAILURE
+        (re-run)` standing alone were two spellings of one fact, and a reader
+        grepping for either found only half the runs. What varies between the
+        two positions is punctuation, which is not a claim; the words are not.
+
+        Capitals because this is a shout: N tests were never given the file
+        they asked for, so the run did not judge them and the remedy is to run
+        it again. A count of zero renders NOTHING rather than `0 RESOURCE
+        FAILURES` — a printed zero is a claim, and on a healthy run the claim
+        would be true but useless, while on a run with no bundle it would be a
+        claim this cannot support.
+        """
+        if not self.resource:
+            return ""
+        return "%s%d test%s hit a RESOURCE FAILURE (re-run)" % (
+            separator, len(self.resource),
+            "" if len(self.resource) == 1 else "s",
+        )
 
     @property
     def exit_code(self):
@@ -2035,7 +2376,16 @@ class Verdict(object):
         if (self.new_failures or self.kind_changed or self.deterministic_passed
                 or self.absent or self.baseline_fiction
                 or (self.new_casualties and self.census_armed)
-                or self.census_now_reports):
+                or self.census_now_reports
+                # playhead-s34ux. NOT a quieter gate: these tests exit 65 today
+                # as NEW FAILURES, and they exit 65 after this as resource
+                # casualties. What changes is the DIAGNOSIS — the reader is
+                # sent to re-run rather than to triage N regressions against a
+                # diff that cannot have caused them, and `--accept-baseline`
+                # can no longer write them into the known-broken file. A run
+                # that did not judge part of the plan is not a verdict about
+                # the plan, whichever category ate the verdict.
+                or self.resource):
             return EXIT_REGRESSION
         return EXIT_OK
 
@@ -2066,7 +2416,16 @@ class Verdict(object):
         # that executed no tests has zero failures too, and calling that GREEN is
         # how a broken run reads as a clean sweep. A run that lost part of the
         # plan to a dead host is the same claim with the same answer.
-        if self.ok and self.total_failures == 0 and not self.crashed_host:
+        # `not self.resource` here is UNREACHABLE TODAY and is kept as an
+        # invariant, exactly as `run.skipped -= …` is kept above: `self.ok`
+        # already reads False while a denial stands, because `exit_code` arms
+        # on `self.resource`. Mutation RD14 proves it — removing this clause
+        # changes no output. It stays so that a reader who ever relaxes the
+        # exit code cannot leave a GREEN condition that ignores a run which did
+        # not judge part of the plan; delete it only together with that
+        # guarantee.
+        if (self.ok and self.total_failures == 0 and not self.crashed_host
+                and not self.resource):
             out.append("gate-baseline: GREEN (%s)" % headline)
         else:
             out.append("gate-baseline: RED (%s)%s" % (headline, tail))
@@ -2078,6 +2437,7 @@ class Verdict(object):
         # directions — was the reading that never named its instrument.
         out.extend(self._render_verdict_source())
         out.extend(self._render_no_verdict())
+        out.extend(self._render_resource())
 
         for key in self.new_failures:
             out.append("  NEW FAILURE      %s" % key)
@@ -2096,9 +2456,17 @@ class Verdict(object):
             # The CAUSE, not a guess at it. Before playhead-tl6l every absent
             # member was reported as a rename, which sent the reader looking for
             # a rename that had not happened.
-            cause = ("no verdict — the host died mid-test"
-                     if key in self.absent_crashed
-                     else "renamed, deleted or newly skipped")
+            if key in self.absent_crashed:
+                cause = "no verdict — the host died mid-test"
+            elif key in self.absent_resource:
+                # playhead-s34ux. Without this the reader is sent hunting a
+                # rename that did not happen — the same wrong cause tl6l
+                # removed for the crashed case, one category along.
+                cause = "no verdict — denied a file it needed (%s)" % (
+                    self.resource_causes.get(key, "resource failure"),
+                )
+            else:
+                cause = "renamed, deleted or newly skipped"
             out.append("  DID NOT RUN      %s  (%s)" % (key, cause))
         if len(self.absent) > _MAX_LISTED:
             out.append("  DID NOT RUN      … and %d more"
@@ -2132,6 +2500,51 @@ class Verdict(object):
             )
             out.append("a reason.")
         return "\n".join(out)
+
+    def _render_resource(self):
+        """The denied-resource block. Its own category, because its CAUSE is.
+
+        Three properties, each of which is the mirror of how this class of fix
+        goes wrong:
+
+          * it NAMES the count, so nobody can discover later that failures
+            left the NEW column quietly;
+          * it names the RESOURCE, so `EMFILE` and `ENOSPC` are not one
+            diagnosis. They have different remedies and the message says which
+            was observed rather than which was assumed;
+          * it says what it does NOT know. This category cannot tell a box that
+            was short from a test that leaked, and printing a remedy as though
+            it could would be the reassurance this whole mechanism exists to
+            withhold.
+        """
+        if not self.resource:
+            return []
+        out = [
+            "  RESOURCE FAILURE — %d test(s) were denied a file they asked for, so "
+            "this run did not judge them. Nothing here is triageable against your "
+            "diff: re-run the plan." % len(self.resource),
+        ]
+        for key in sorted(self.resource)[:_MAX_LISTED]:
+            out.append("  RESOURCE         %s  (%s)" % (
+                key, self.resource_causes.get(key, "resource failure"),
+            ))
+        if len(self.resource) > _MAX_LISTED:
+            out.append("  RESOURCE         … and %d more"
+                       % (len(self.resource) - _MAX_LISTED))
+        out.append(
+            "  RESOURCE — this does NOT say whether the box was short or something "
+            "leaked; it says the process asked for a file and did not get one."
+        )
+        out.append(
+            "  RESOURCE — the measured cause on THIS box is descriptor exhaustion in "
+            "the single test host: RLIMIT_NOFILE soft = 2,560, peak 2,539 open "
+            "descriptors (99.2%), highest descriptor 2,559 = soft-1, and every "
+            "denial inside one sampling interval of that peak. WHICH tests are "
+            "denied is therefore a race, which is why the set rotates and why none "
+            "of it is about your diff. playhead-vk68m owns the fix and it is not "
+            "yours to apply here."
+        )
+        return out
 
     def _render_no_verdict(self):
         """The crashed-host block. Its own category, because its REMEDY differs.
@@ -2313,10 +2726,19 @@ class Verdict(object):
             # positive evidence; a name that never started at all is a rename,
             # a deletion, or a host that died before it got there — three
             # things this module cannot tell apart, so it never arms on them.
-            cause = ("recorded as losing its verdict; reported again — removal "
-                     "candidate" if key in self.census_started
-                     else "recorded as losing its verdict; did not start at all this "
-                          "run, so this says nothing either way")
+            if key in self.census_denied:
+                # playhead-s34ux R1. A third cause, because there are three.
+                # Neither of the two below is true of a denied test: it did not
+                # report, and it did not fail to start.
+                cause = ("recorded as losing its verdict; DENIED a file it "
+                         "needed this run (%s), so this says nothing either way"
+                         % self.resource_causes.get(key, "resource failure"))
+            elif key in self.census_started:
+                cause = ("recorded as losing its verdict; reported again — "
+                         "removal candidate")
+            else:
+                cause = ("recorded as losing its verdict; did not start at all "
+                         "this run, so this says nothing either way")
             out.append("  REPORTED AGAIN   %s  (%s)" % (key, cause))
         if len(rest) > _MAX_LISTED:
             out.append("  REPORTED AGAIN   … and %d more" % (len(rest) - _MAX_LISTED))
@@ -2397,6 +2819,10 @@ def verdict(baseline, run, plan=None):
     result.verdict_source = run.verdict_source
     result.unjudged = dict(run.unjudged)
     result.crashed = dict(run.crashed)
+    # playhead-s34ux. Computed here, before the baseline comparison, so the
+    # ABSENT arm below can name this cause too.
+    result.resource = dict(run.resource)
+    result.resource_causes = dict(run.resource_causes)
     # playhead-buvn. The DIFF against the recorded census, computed exactly the
     # way `new_failures` is: a name nobody recorded is a regression, and a
     # recorded name that came back is reported as good news but is not fatal —
@@ -2420,8 +2846,16 @@ def verdict(baseline, run, plan=None):
         result.census_now_reports = sorted(
             key for key in result.recovered_casualties
             if key in result.census_started
+            # playhead-s34ux R1. A test that was DENIED A FILE did not report;
+            # it was refused. Without this the gate exits 65 accusing a
+            # recorded casualty of having a rotted licence — "it lost its
+            # verdict in every observation and this run watched it report" —
+            # on the evidence of a run that never judged it. The arm fires only
+            # on POSITIVE evidence, and a denial is not any.
+            and key not in run.resource
             and census.tier(key) == TIER_DETERMINISTIC
         )
+        result.census_denied = recorded & set(run.resource)
 
     blamed = run.blamed
     result.blamed_entry_count = len(run.blamed_entries)
@@ -2462,8 +2896,15 @@ def verdict(baseline, run, plan=None):
             result.absent.append(key)
             if key in no_verdict:
                 result.absent_crashed.add(key)
+            elif key in run.resource:
+                result.absent_resource.add(key)
 
-    if entries and not run.failures:
+    # playhead-s34ux: `not run.failures` is also true of a run whose every
+    # failure was a denied resource, and calling that "the baseline is fiction"
+    # would blame the FILE for the box being short — and invite an accept that
+    # empties it. A run that could not judge part of the plan makes no claim
+    # about whether the recorded entries still fail.
+    if entries and not run.failures and not run.resource:
         result.baseline_fiction = True
 
     return result
@@ -2508,11 +2949,27 @@ def _apply_bundles(run, paths, reader=None):
             merged.failures.pop(key, None)
             merged.unjudged.pop(key, None)
             merged.crashed.pop(key, None)
+            # playhead-s34ux R1. `resource` MUST be folded here like every
+            # other outcome, and it was not. `merged` is a fresh BundleRun, so
+            # a `resource` this loop never writes stays empty, and
+            # `with_xcresult_verdicts` REPLACES the run's dict with it — which
+            # made the whole classifier INERT on the only path the gate uses
+            # (`fast-gate.sh` passes `--xcresult` whenever the bundle exists).
+            # Worse than inert: `parse_xcresult` has already removed the denied
+            # key from `failures`, so with nothing in `resource` to subtract it
+            # fell out of `ran` and was reported as a CRASHED-HOST CASUALTY —
+            # the exact misreading `RunResult.no_verdict`'s docstring exists to
+            # prevent, and one an `--accept-baseline` would have written into
+            # the census record as a host death that never happened.
+            merged.resource.pop(key, None)
+            merged.resource_causes.pop(key, None)
         merged.passed |= part.passed
         merged.skipped |= part.skipped
         merged.failures.update(part.failures)
         merged.unjudged.update(part.unjudged)
         merged.crashed.update(part.crashed)
+        merged.resource.update(part.resource)
+        merged.resource_causes.update(part.resource_causes)
     return with_xcresult_verdicts(run, merged)
 
 
@@ -2732,8 +3189,20 @@ def main(argv=None):
                 % now.runs_observed
             )
         no_verdict = run.no_verdict
+        # playhead-s34ux R1. THE PROTECTION AND ITS ANNOUNCEMENT ARE NOW
+        # COMPUTED THE SAME WAY, AND THE ANNOUNCEMENT IS NO LONGER NESTED UNDER
+        # THE CRASH. `merge` protects `no_verdict | set(run.resource)`; this
+        # block sat inside `if no_verdict:` and recomputed its set from
+        # `no_verdict` alone, so a denial-only accept carried entries forward
+        # and printed NOTHING AT ALL, and a mixed one printed `CARRIED FORWARD:
+        # 1` while carrying two. A protection nobody is told about is the
+        # silent-loosening shape playhead-o89d R5 spent five rounds on — the
+        # file keeps an entry a healthy run would have pruned and the operator
+        # signs a commit message that cannot mention it. Sixth event, and the
+        # only one left that printed nothing.
+        denied = set(run.resource)
+        protected = sorted((set(no_verdict) | denied) & set(merged["tests"]))
         if no_verdict:
-            protected = sorted(set(no_verdict) & set(merged["tests"]))
             print(
                 "  NO VERDICT: the host died and %d test(s) reported nothing%s. This "
                 "observation says nothing about them."
@@ -2741,17 +3210,27 @@ def main(argv=None):
                    " (xcodebuild restarted the test host %d time(s))" % run.host_restarts
                    if run.host_restarts else "")
             )
-            if protected:
-                print(
-                    "  CARRIED FORWARD: %d recorded entr%s kept unchanged rather than "
-                    "pruned — a crash is not a rename, and dropping them here is how "
-                    "the file would shrink without anyone deciding to shrink it."
-                    % (len(protected), "y was" if len(protected) == 1 else "ies were")
-                )
-                for key in protected[:_MAX_LISTED]:
-                    print("  = %s" % key)
-                if len(protected) > _MAX_LISTED:
-                    print("  = … and %d more" % (len(protected) - _MAX_LISTED))
+        if denied:
+            print(
+                "  RESOURCE DENIED: %d test(s) asked for a file and did not get one. "
+                "This observation says nothing about them either, and none of them is "
+                "written into the file."
+                % len(denied)
+            )
+        if protected:
+            print(
+                "  CARRIED FORWARD: %d recorded entr%s kept unchanged rather than "
+                "pruned — a crash is not a rename, and dropping them here is how "
+                "the file would shrink without anyone deciding to shrink it."
+                % (len(protected), "y was" if len(protected) == 1 else "ies were")
+            )
+            for key in protected[:_MAX_LISTED]:
+                # WHICH cause, per entry. Two different things are protected
+                # here and their remedies differ; a bare list makes them one.
+                print("  = %s%s" % (
+                    key, "  (denied a file it needed)" if key in denied else ""))
+            if len(protected) > _MAX_LISTED:
+                print("  = … and %d more" % (len(protected) - _MAX_LISTED))
         if promoted:
             print(
                 "  ARMED: %d entr%s crossed into DETERMINISTIC — failed in every one "

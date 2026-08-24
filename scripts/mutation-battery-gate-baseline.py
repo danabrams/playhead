@@ -85,6 +85,21 @@ XM = SUITE + ".BundleMergeTests."
 XB = SUITE + ".BlamedBlockAgainstTheBundleTests."
 XR = SUITE + ".ResidualCommandTests."
 XG = SUITE + ".FastGateBundleWiringTests."
+# playhead-s34ux — a denied resource is not a failing test.
+DC = SUITE + ".ResourceCauseTests."
+DK = SUITE + ".ResourceConsoleParseTests."
+DB = SUITE + ".ResourceBundleParseTests."
+DV = SUITE + ".ResourceVerdictTests."
+DA = SUITE + ".ResourceAcceptTests."
+DNV = SUITE + ".ResourceNestedVetoTests."
+# playhead-s34ux R1 — the adversarial review round.
+DT = SUITE + ".ResourceThroughApplyBundlesTests."
+DH = SUITE + ".ResourceHeadlineRidesAlongTests."
+DN = SUITE + ".ResourceCensusTests."
+DM = SUITE + ".ResourceMeasuredCauseTests."
+DD = SUITE + ".ResourceNestedVetoTests."
+DE = SUITE + ".ResourceAcceptAnnouncementTests."
+DW = SUITE + ".ResourceCauseWordingTests."
 
 
 # name, file, description, old, new, expected-to-fail test ids
@@ -241,7 +256,9 @@ MUTATIONS = [
     (
         "R17", GB,
         "a fully green run against a non-empty baseline is accepted as normal",
-        "    if entries and not run.failures:",
+        # RE-ANCHORED at playhead-s34ux, which added `and not run.resource` to
+        # this condition so a DENIED run cannot be blamed on the file.
+        "    if entries and not run.failures and not run.resource:",
         "    if False:",
         [V + "test_a_fully_GREEN_run_against_a_nonempty_baseline_is_FICTION"],
     ),
@@ -333,7 +350,10 @@ MUTATIONS = [
         "— zero failures is not zero problems",
         # RE-ANCHORED at R2 review, same cause as R06 and R14: tl6l added
         # `and not self.crashed_host` to this condition.
-        "        if self.ok and self.total_failures == 0 and not self.crashed_host:",
+        # RE-ANCHORED again at playhead-s34ux, which added `and not
+        # self.resource` for the same reason tl6l added `crashed_host`.
+        """        if (self.ok and self.total_failures == 0 and not self.crashed_host
+                and not self.resource):""",
         "        if self.total_failures == 0:",
         [V + "test_a_run_that_executed_NOTHING_is_never_called_GREEN"],
     ),
@@ -502,8 +522,10 @@ MUTATIONS = [
         "a crash that is genuinely fixed stays recorded forever and the gate "
         "never speaks about those names again — R2's whole objection to a "
         "union, left unanswered",
-        "                or self.census_now_reports):",
-        "                or False):",
+        # RE-ANCHORED at playhead-s34ux: `or self.resource` now follows this
+        # line, so the trailing `):` moved off it.
+        "                or self.census_now_reports\n",
+        "                or False and self.census_now_reports\n",
         [AC + "test_a_DETERMINISTIC_entry_that_REPORTS_AGAIN_fails_the_gate"],
     ),
     (
@@ -853,8 +875,8 @@ MUTATIONS = [
         "entries it protected, so an accept that carried one entry through a "
         "twelve-test crash reports twelve — RA27's defect pointed the other way, "
         "and the fifth time this number class has been wrong",
-        '                    % (len(protected), "y was" if len(protected) == 1 else "ies were")',
-        '                    % (len(no_verdict), "y was" if len(protected) == 1 else "ies were")',
+        '                % (len(protected), "y was" if len(protected) == 1 else "ies were")',
+        '                % (len(no_verdict), "y was" if len(protected) == 1 else "ies were")',
         [T + "test_an_accept_ANNOUNCES_what_it_carried_forward"],
     ),
     (
@@ -881,9 +903,9 @@ MUTATIONS = [
         "and keeping the entries is what makes the file grow — recommending the "
         "prune the line exists to forbid",
         '"pruned — a crash is not a rename, and dropping them here is how "\n'
-        '                    "the file would shrink without anyone deciding to shrink it."',
+        '                "the file would shrink without anyone deciding to shrink it."',
         '"pruned — a crash IS a rename, and keeping them here is how "\n'
-        '                    "the file would grow without anyone deciding to grow it."',
+        '                "the file would grow without anyone deciding to grow it."',
         [T + "test_an_accept_ANNOUNCES_what_it_carried_forward"],
     ),
     (
@@ -921,8 +943,8 @@ MUTATIONS = [
         "told there are twelve more — the count class CLAUDE.md records being "
         "wrong four times, in the one place it cannot be checked without "
         "counting the lines above it",
-        '                    print("  = … and %d more" % (len(protected) - _MAX_LISTED))',
-        '                    print("  = … and %d more" % len(protected))',
+        '                print("  = … and %d more" % (len(protected) - _MAX_LISTED))',
+        '                print("  = … and %d more" % len(protected))',
         [T + "test_the_TRUNCATED_listings_report_the_REMAINDER_not_the_whole_set"],
     ),
     (
@@ -1408,6 +1430,498 @@ MUTATIONS = [
         "'ed / absurdly-low value falls back to default\" passed after 118.958 seconds.\\n'",
         "'ed / absurdly-low value falls back to defau1t\" passed after 118.958 seconds.\\n'",
         [GR + "test_the_INLINE_specimens_are_in_the_fixture_BYTE_FOR_BYTE"],
+    ),
+    (
+        "RD01", GB,
+        "the SQLite prose leaves the table, so `unable to open database file` "
+        "— the ONE shape that reaches the log with its errno already thrown "
+        "away — reads as a regression again",
+        '    r"unable to open database file"\n',
+        '    r"unable to open NO SUCH PHRASE"\n',
+        [DC + "test_sqlite_cantopen_prose_is_a_resource"],
+    ),
+    (
+        "RD02", GB,
+        "EBADF leaves the errno table, so the one witness no database "
+        "explanation covers — a SOURCE FILE read failing mid-run — is a NEW "
+        "failure again",
+        '    "9": "EBADF — this platform\'s errno at the RLIMIT_NOFILE ceiling",\n',
+        "",
+        [DC + "test_ebadf_is_a_resource_even_though_the_sentence_is_generic"],
+    ),
+    (
+        "RD03", GB,
+        "the unrecognised-errno VETO becomes a search for any recognised one, "
+        "so a message carrying ENOENT *and* a recognised phrase is swallowed — "
+        "the direction that hides somebody's bug",
+        """        if any(name is None for name in named):
+            return None
+        return named[0]""",
+        """        for name in named:
+            if name is not None:
+                return name""",
+        [DC + "test_an_unrecognised_errno_VETOES_a_recognised_phrase"],
+    ),
+    (
+        "RD05", GB,
+        "the console UNANIMITY veto is dropped, so one CANTOPEN alongside a "
+        "real assertion takes the whole test out of the NEW column",
+        """        if key in resource_vetoed:
+            continue
+""",
+        "",
+        [DK + "test_UNANIMITY_one_real_assertion_keeps_the_whole_test_a_failure",
+         DK + "test_the_veto_holds_whichever_ORDER_the_issues_arrive_in"],
+    ),
+    (
+        "RD06", GB,
+        "the unanimity VETO becomes a search: an unrecognised message is "
+        "skipped instead of vetoing, so a real assertion beside a denial is "
+        "swallowed. RE-ANCHORED TWICE. It first mutated the direct-children "
+        "loop; review round 1 moved the veto out of that loop and the old "
+        "position became a PROVEN EQUIVALENT, so it was repointed at the sweep. "
+        "The parameterised-test fix then merged classification and veto into "
+        "ONE walk, which is where it lives now — and where the property has "
+        "been the whole time",
+        """        cause = resource_cause(message)
+        if cause is None:
+            return None
+        if found is None:""",
+        """        cause = resource_cause(message)
+        if cause is None:
+            continue
+        if found is None:""",
+        [DB + "test_a_failed_case_with_a_real_assertion_alongside_stays_a_failure",
+         DD + "test_a_NESTED_assertion_vetoes_a_denial"],
+    ),
+    (
+        "RD07", GB,
+        "a FAILED case with NO message at any depth is classified from "
+        "SILENCE — exactly the inference playhead-t53a removed one category "
+        "along, and the one this category refuses to make. ABSORBS the "
+        "short-lived RD44, which was the identical edit written against the "
+        "same line before these anchors were reconciled: two mutants with one "
+        "edit is a duplicate, not two rails",
+        """    # A FAILED case with no message anywhere beneath it says nothing this
+    # category may act on, and silence is never routed here. It stays a FAILURE.
+    return found""",
+        """    return found or ("resource failure", "")""",
+        [DB + "test_a_failed_case_with_NO_messages_stays_a_failure",
+         DNV + "test_a_message_less_FAILURE_is_still_never_classified"],
+    ),
+    (
+        "RD08", GB,
+        "`no_verdict` stops subtracting the denied, so a test that REPORTED an "
+        "error is booked as one that said nothing — and the accept writes it "
+        "into the crashed-host census",
+        "        return self.started - self.ran - self.skipped - set(self.resource)",
+        "        return self.started - self.ran - self.skipped",
+        [DK + "test_it_is_NOT_counted_as_a_crashed_host_casualty",
+         DA + "test_a_denied_test_does_not_enter_the_crashed_host_census"],
+    ),
+    (
+        "RD09", GB,
+        "a host death stops outranking a denial, so one key sits in BOTH "
+        "categories and is counted twice",
+        """        run.resource.pop(key, None)
+        run.resource_causes.pop(key, None)
+    for key in run.resource:""",
+        """    for key in run.resource:""",
+        [DB + "test_a_crashed_twin_outranks_a_denied_twin_in_BOTH_orders"],
+    ),
+    (
+        "RD10", GB,
+        "a DENIAL swallows a genuine failure that shares its display name, in "
+        "the denied-first node order — a real regression leaving the NEW column "
+        "silently, which is the one outcome this whole change exists to prevent",
+        """    if result == XCRESULT_FAILED and key in run.resource:""",
+        """    if False and key in run.resource:""",
+        [DB + "test_a_GENUINELY_FAILING_twin_outranks_a_denied_twin_in_BOTH_orders"],
+    ),
+    (
+        "RD10b", GB,
+        "the same swallow in the OTHER node order — the mirror, and it needs "
+        "its own rail because the two clauses are independent",
+        "    if resource is not None and key not in run.failures:",
+        "    if resource is not None:",
+        [DB + "test_a_GENUINELY_FAILING_twin_outranks_a_denied_twin_in_BOTH_orders"],
+    ),
+    (
+        "RD10c", GB,
+        "a SKIPPED twin displaces a denied one, so a denial is laundered by a "
+        "test that said nothing about it",
+        """    for key in run.resource:
+        run.passed.discard(key)
+        run.skipped.discard(key)""",
+        """    for key in run.resource:
+        run.passed.discard(key)""",
+        [DB + "test_a_SKIPPED_twin_does_not_displace_a_denied_twin"],
+    ),
+    (
+        "RD11", GB,
+        "the headline count is a constant, so twelve denied tests and one read "
+        "identically — a count that does not count",
+        """        return "%s%d test%s hit a RESOURCE FAILURE (re-run)" % (
+            separator, len(self.resource),""",
+        """        return "%s%d test%s hit a RESOURCE FAILURE (re-run)" % (
+            separator, 1,""",
+        [DV + "test_the_count_is_the_NUMBER_of_denied_tests"],
+    ),
+    (
+        "RD12", GB,
+        "the resource tail leaves the RED line entirely, so the reclassification "
+        "happens SILENTLY — failures vanish from the NEW column with nothing "
+        "printed, which is the one outcome worse than over-reporting",
+        """        if not self.resource:
+            return ""
+        return "%s%d test%s hit a RESOURCE FAILURE (re-run)" % (""",
+        """        if True:
+            return ""
+        return "%s%d test%s hit a RESOURCE FAILURE (re-run)" % (""",
+        [DV + "test_the_count_rides_on_the_RED_line",
+         DV + "test_the_count_is_the_NUMBER_of_denied_tests"],
+    ),
+    (
+        "RD13", GB,
+        "a denied run exits ZERO, so the gate is QUIETER than before this bead "
+        "— the exact failure this change must not introduce",
+        "                or self.resource):\n            return EXIT_REGRESSION",
+        "                or False):\n            return EXIT_REGRESSION",
+        [DV + "test_it_is_NOT_quieter_than_before_the_exit_code_still_says_re_run"],
+    ),
+    (
+        "RD14", GB,
+        "the block stops saying it TRUNCATED, so a reader who sees ten names "
+        "has no way to know there were sixty — a list that does not say it is "
+        "a list is the same defect as a count that does not count. "
+        "(This slot held the GREEN-guard mutant, which mutation proved an "
+        "EQUIVALENT: `self.ok` is already False while a denial stands, so "
+        "removing `and not self.resource` from the GREEN line changes no "
+        "output. The clause is kept in source as a stated invariant.)",
+        """        if len(self.resource) > _MAX_LISTED:
+            out.append("  RESOURCE         … and %d more"
+                       % (len(self.resource) - _MAX_LISTED))
+""",
+        "",
+        [DV + "test_a_long_denied_list_SAYS_that_it_was_truncated"],
+    ),
+    (
+        "RD15", GB,
+        "the accept stops protecting denied entries, so the known-broken file "
+        "SHRINKS because the box was short — from inside the one command whose "
+        "job is to maintain it",
+        "    protected = run.no_verdict | set(run.resource)",
+        "    protected = run.no_verdict",
+        [DA + "test_a_recorded_entry_denied_this_run_is_NOT_pruned"],
+    ),
+    (
+        "RD16", GB,
+        "BASELINE IS FICTION fires on a denied run, blaming the FILE for a "
+        "short box and inviting an accept that empties it",
+        "    if entries and not run.failures and not run.resource:",
+        "    if entries and not run.failures:",
+        [DV + "test_BASELINE_IS_FICTION_does_not_fire_on_a_denied_run"],
+    ),
+    (
+        "RD17", GB,
+        "an ABSENT baseline member denied a file is reported as a RENAME, "
+        "sending the reader after a rename that did not happen",
+        """            elif key in self.absent_resource:""",
+        """            elif False:""",
+        [DV + "test_an_ABSENT_baseline_member_names_the_denial_not_a_rename"],
+    ),
+    (
+        "RD18", GB,
+        "the console's reading survives a bundle that judged the test PASSED, "
+        "so a name can leave the category without the bundle ever saying so",
+        "    run.resource = dict(bundle.resource)\n    run.resource_causes = dict(bundle.resource_causes)",
+        "    run.resource_causes = dict(bundle.resource_causes)",
+        [DB + "test_the_bundle_REPLACES_the_consoles_reading"],
+    ),
+    (
+        "RD19", GB,
+        "the block names a generic cause instead of the observed one, so "
+        "EMFILE and ENOSPC — different remedies — read identically",
+        """            out.append("  RESOURCE         %s  (%s)" % (
+                key, self.resource_causes.get(key, "resource failure"),
+            ))""",
+        """            out.append("  RESOURCE         %s  (%s)" % (
+                key, "resource failure",
+            ))""",
+        [DV + "test_the_block_NAMES_which_resource_per_test"],
+    ),
+    (
+        "RD20", GB,
+        "the block drops the sentence saying what it does NOT know, and starts "
+        "reading as a diagnosis rather than an observation",
+        """        out.append(
+            "  RESOURCE — this does NOT say whether the box was short or something "
+            "leaked; it says the process asked for a file and did not get one."
+        )""",
+        """        out.append(
+            "  RESOURCE — re-run the plan."
+        )""",
+        [DV + "test_the_block_states_what_it_does_NOT_know"],
+    ),
+    (
+        "RD21", GB,
+        "the block prints on EVERY run, so a healthy gate carries a RESOURCE "
+        "heading claiming nothing — the mirror of RD12, and a printed zero is "
+        "a claim",
+        """        if not self.resource:
+            return []
+        out = [
+            "  RESOURCE FAILURE""",
+        """        if False:
+            return []
+        out = [
+            "  RESOURCE FAILURE""",
+        [DV + "test_nothing_is_printed_on_a_healthy_run"],
+    ),
+    # -----------------------------------------------------------------
+    # playhead-s34ux R1 — the adversarial review round. RD22..RD42.
+    # Each victim was PREDICTED before the run and compared against the WHOLE
+    # 332-test suite under the mutant, not only against the named tests: the
+    # battery runs what it is told to and cannot see a false credit on its own.
+    # -----------------------------------------------------------------
+    (
+        "RD22", GB,
+        "THE BEAD'S OWN CRITICAL DEFECT, restored: `_apply_bundles` stops "
+        "folding the bundle's denials into its merged run, so the classifier "
+        "is INERT on the only path the gate uses — and the denied tests, "
+        "already removed from `failures`, are reported as CRASHED-HOST "
+        "CASUALTIES instead",
+        "        merged.resource.update(part.resource)\n",
+        "",
+        [DT + "test_a_denial_in_the_bundle_SURVIVES_apply_bundles",
+         DT + "test_it_is_NOT_reported_as_a_crashed_host_casualty",
+         DT + "test_every_started_test_lands_in_EXACTLY_one_category"],
+    ),
+    (
+        "RD23", GB,
+        "an earlier bundle's denial survives a LATER bundle that judged the "
+        "same test, so the residual re-run can never clear one and a name "
+        "sits in two categories at once",
+        "            merged.resource.pop(key, None)\n            merged.resource_causes.pop(key, None)\n",
+        "",
+        [DT + "test_a_second_bundle_that_PASSES_a_denied_test_CLEARS_it",
+         DT + "test_a_second_bundle_that_FAILS_it_for_real_outranks_the_denial"],
+    ),
+    (
+        "RD24", GB,
+        "a host restart stops carrying the resource count, so a run that both "
+        "crashed and was denied under-reports one of the two",
+        '''        if self.host_restarts:
+            return (" — the test host CRASHED and was restarted"
+                    + self._resource_tail(", "))''',
+        '''        if self.host_restarts:
+            return " — the test host CRASHED and was restarted"''',
+        [DH + "test_a_host_restart_and_a_denial_BOTH_reach_the_headline"],
+    ),
+    (
+        "RD25", GB,
+        "the same on the `Failing tests:` branch, which is the arm nobody "
+        "checks because it fires least often",
+        '''                    % (len(self.blamed_unmatched),)) + self._resource_tail(", ")''',
+        '''                    % (len(self.blamed_unmatched),))''',
+        [DH + "test_an_unmatched_blamed_name_and_a_denial_BOTH_reach_it"],
+    ),
+    (
+        "RD26", GB,
+        "the NO VERDICT headline drops the resource count, which is the "
+        "combination the real 7dgx log produces and the one nothing pinned",
+        '''                unrecorded, self._resource_tail(", "),''',
+        '''                unrecorded, "",''',
+        [DH + "test_a_crashed_host_census_and_a_denial_BOTH_reach_it"],
+    ),
+    (
+        "RD27", GB,
+        "RESOURCE goes back ABOVE the crash branch and DISPLACES it — the "
+        "shipped defect: `the test host CRASHED and was restarted` vanishes "
+        "from a run that both crashed and was denied",
+        '''        if self.host_restarts:
+            return (" — the test host CRASHED and was restarted"''',
+        '''        if self.resource:
+            return self._resource_tail(" — ")
+        if self.host_restarts:
+            return (" — the test host CRASHED and was restarted"''',
+        [DH + "test_a_host_restart_and_a_denial_BOTH_reach_the_headline",
+         DH + "test_an_unmatched_blamed_name_and_a_denial_BOTH_reach_it"],
+    ),
+    (
+        "RD28", GB,
+        "one fact gets two spellings again, so a reader grepping for either "
+        "finds half the runs",
+        '''        return "%s%d test%s hit a RESOURCE FAILURE (re-run)" % (
+            separator, len(self.resource),''',
+        '''        if separator != " — ":
+            return ", %d RESOURCE FAILURES (re-run)" % len(self.resource)
+        return "%s%d test%s hit a RESOURCE FAILURE (re-run)" % (
+            separator, len(self.resource),''',
+        [DH + "test_the_resource_fact_has_ONE_spelling_wherever_it_appears"],
+    ),
+    (
+        "RD29", GB,
+        "the census learns from a denied run again: a denied test reads as "
+        "`started and reported`, which DEMOTES a deterministic entry out of "
+        "the one tier whose licence can ever be revoked",
+        "        elif key in denied:\n            tests[key] = dict(previous)\n",
+        "",
+        [DN + "test_a_denied_run_does_NOT_demote_a_deterministic_entry"],
+    ),
+    (
+        "RD30", GB,
+        "the protection swallows EVERY started key, so no census entry can "
+        "ever be demoted and the union ossifies into a licence nobody can "
+        "revoke — the mirror of RD29",
+        '    denied = set(getattr(run, "resource", None) or ())',
+        "    denied = set(run.started)",
+        [DN + "test_a_genuinely_reported_entry_is_STILL_demoted"],
+    ),
+    (
+        "RD31", GB,
+        "the pass-direction arm fires on a DENIED test, so the gate exits 65 "
+        "accusing a recorded casualty of a rotted licence on the evidence of "
+        "a run that never judged it",
+        "            and key not in run.resource\n",
+        "",
+        [DN + "test_a_denied_entry_does_not_HARD_FAIL_the_gate"],
+    ),
+    (
+        "RD32", GB,
+        "every recorded name reads as DENIED, so a genuine recovery stops "
+        "being reported as a removal candidate — the mirror of RD31, and the "
+        "direction that would freeze the record",
+        "        result.census_denied = recorded & set(run.resource)",
+        "        result.census_denied = set(recorded)",
+        [DN + "test_a_genuine_recovery_still_reads_as_a_removal_candidate"],
+    ),
+    (
+        "RD33", GB,
+        "the REPORTED AGAIN line loses its third cause, so a denied test is "
+        "called a removal candidate that `reported again` — sending the "
+        "reader to shrink the record on evidence that is not evidence",
+        "            if key in self.census_denied:",
+        "            if False:",
+        [DN + "test_the_REPORTED_AGAIN_line_names_the_DENIAL_as_the_cause"],
+    ),
+    (
+        "RD34", GB,
+        "the block stops naming the measured cause, so the reader is left "
+        "with an observation and no way to tell whether anyone has looked. "
+        "THE FIRST VERSION OF THIS MUTANT SURVIVED and the code was innocent: "
+        "its replacement text kept `2,560`, `2,539` and the bead id, which are "
+        "exactly the strings the rail pins, so the edit could not kill the "
+        "test it named. Read the EDIT, not the description of the edit",
+        '''        out.append(
+            "  RESOURCE — the measured cause on THIS box is descriptor exhaustion in "
+            "the single test host: RLIMIT_NOFILE soft = 2,560, peak 2,539 open "
+            "descriptors (99.2%), highest descriptor 2,559 = soft-1, and every "
+            "denial inside one sampling interval of that peak. WHICH tests are "
+            "denied is therefore a race, which is why the set rotates and why none "
+            "of it is about your diff. playhead-vk68m owns the fix and it is not "
+            "yours to apply here."
+        )
+''',
+        "",
+        [DM + "test_the_block_NAMES_the_measured_limit_and_the_open_bead"],
+    ),
+    (
+        "RD35", GB,
+        "the FALSE claim is restored — `2,539 against a 61,440 ceiling, so "
+        "exhaustion is not the explanation` — which reads "
+        "`kern.maxfilesperproc` as the limit that binds when the binding one "
+        "is RLIMIT_NOFILE soft 2,560",
+        '''            "denial inside one sampling interval of that peak. WHICH tests are "''',
+        '''            "denial inside one sampling interval of that peak. Peak 2,539 against a "
+            "61,440 ceiling, so exhaustion is not the explanation. WHICH tests are "''',
+        [DM + "test_the_block_no_longer_claims_exhaustion_is_RULED_OUT"],
+    ),
+    (
+        "RD36", GB,
+        "the walk stops DESCENDING, so it reads direct children only. That "
+        "breaks the veto (a nested assertion beside a denial no longer stops "
+        "the classification) AND the classification (a PARAMETERISED test's "
+        "failure lives under `Arguments`, so it becomes invisible again — the "
+        "defect the merge gate caught, 5 of 5 parameterised denials reported "
+        "as NEW while 10 of 10 flat ones classified). ABSORBS the short-lived "
+        "RD43, the identical edit",
+        """    stack = list(node.get("children") or [])
+    while stack:
+        child = stack.pop()
+        stack.extend(child.get("children") or [])""",
+        """    stack = list(node.get("children") or [])
+    while stack:
+        child = stack.pop()""",
+        [DD + "test_a_NESTED_assertion_vetoes_a_denial",
+         DNV + "test_a_NESTED_denial_with_no_direct_message_IS_classified",
+         DNV + "test_the_real_PARAMETERISED_shape_from_a_captured_bundle"],
+    ),
+    # RD37 IS DELETED, NOT RE-ANCHORED, AND THAT IS THE POINT.
+    #
+    # It pinned "the descendant sweep must not CLASSIFY, only veto" — the
+    # direction round 1 called "the quiet direction". A real .xcresult refuted
+    # it: a FAILING PARAMETERISED test has no direct `Failure Message` at all,
+    # its denial hangs under `Arguments`, and refusing to classify that is what
+    # reported five healthy tests as regressions on the merge gate. The property
+    # is gone because it was WRONG, not because it became inconvenient, and its
+    # rail was reversed in the same commit with the evidence recorded beside it.
+    #
+    # A mutant deleted for any other reason is a rail being relaxed. This one is
+    # left as a comment so the next reader can check that claim rather than
+    # taking it.
+    (
+        "RD38", GB,
+        "the CARRIED FORWARD announcement goes back inside `if no_verdict:`, "
+        "so a denial-only accept protects an entry and prints NOTHING — the "
+        "sixth silent event, and the one no mutant could reach because there "
+        "was no line",
+        '''        if protected:
+            print(
+                "  CARRIED FORWARD:''',
+        '''        if protected and no_verdict:
+            print(
+                "  CARRIED FORWARD:''',
+        [DE + "test_a_DENIAL_ONLY_accept_announces_what_it_carried_forward"],
+    ),
+    (
+        "RD39", GB,
+        "the announcement recomputes its set from the casualties alone while "
+        "`merge` protects both, so a mixed accept carries two and says one",
+        '        protected = sorted((set(no_verdict) | denied) & set(merged["tests"]))',
+        '        protected = sorted(set(no_verdict) & set(merged["tests"]))',
+        [DE + "test_a_MIXED_accept_counts_BOTH_causes"],
+    ),
+    (
+        "RD40", GB,
+        "the listing drops the per-entry cause, so a crash and a denial — two "
+        "protections with different remedies — read as one",
+        '''                print("  = %s%s" % (
+                    key, "  (denied a file it needed)" if key in denied else ""))''',
+        '''                print("  = %s" % key)''',
+        [DE + "test_the_listing_NAMES_which_cause_protected_each_entry"],
+    ),
+    (
+        "RD41", GB,
+        "the accept stops saying a resource was denied at all, so the "
+        "operator signs a commit message about an observation that never "
+        "mentions the part of the plan it did not judge",
+        '''        if denied:
+            print(
+                "  RESOURCE DENIED:''',
+        '''        if False:
+            print(
+                "  RESOURCE DENIED:''',
+        [DE + "test_a_DENIAL_ONLY_accept_says_a_resource_was_denied"],
+    ),
+    (
+        "RD42", GB,
+        "the per-test cause reverts to POSIX's meaning of EBADF, which this "
+        "platform contradicts — the string a reader ACTS on, sending them "
+        "after an over-close that does not exist",
+        '''    "9": "EBADF — this platform's errno at the RLIMIT_NOFILE ceiling",''',
+        '''    "9": "EBADF — a descriptor that was obtained and then went bad",''',
+        [DW + "test_the_EBADF_cause_names_the_CEILING_not_a_stale_descriptor"],
     ),
     (
         "R99", GB,
