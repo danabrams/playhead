@@ -1003,9 +1003,19 @@ func makeShard(
 /// default rather than some large number precisely so that nobody reads this
 /// helper as a widened bound — `.neverAnswers` never arms it.
 ///
-/// READ "ALWAYS THE SAME FOUR" AS DATED (playhead-et2d). It holds for the 7
-/// pre-7wia logs of the 57-log window measured under ``unsharedSessionIO``,
-/// and for none of the 44 after it. `kkzu-unattributed` no longer issues a
+/// READ "ALWAYS THE SAME FOUR" AS DATED, AND COUNT THE RIGHT EVENT
+/// (playhead-et2d, review r4). Over the 57-log window measured under
+/// ``unsharedSessionIO``, all four names expire together in EIGHT logs, every
+/// one of them between 2026-08-15 21:28 and 2026-08-18 14:26, and in NONE of
+/// the 49 from 2026-08-18 22:11 onward — 40 of those carry
+/// `kkzu-unattributed` alone and no other name. DO NOT write that as "the 7
+/// pre-7wia logs": 7 is how many logs carry a HEAD-OF-LINE BLOCKING event (a
+/// `reached the daemon queue after its caller had already given up` line),
+/// which is a different event from these four expiries and happens in 7 of
+/// those 8; and by the cut this bead states — 7wia's verification run — there
+/// are 13 logs before it, not 7. A filtered count set beside a population
+/// count is this repo's standing defect class, so give both the same filter or
+/// name the filter. `kkzu-unattributed` no longer issues a
 /// `downloadTask(with:)` at all, and `DownloadShowAttributionTests`' other
 /// seven — on this queue the whole time, and missing from the list only
 /// because they were being QUEUED rather than expiring — are private now.
@@ -1091,10 +1101,16 @@ func daemonSilentSessionIO(
 /// answered, not as evidence this helper worked. What the helper buys needs no
 /// counterfactual: this suite can no longer refuse twelve transfers it has
 /// nothing to do with, and can no longer be refused by somebody else's park.
-/// The hazard is not cleared — 120 of the 144 `DownloadManager(` constructions
+/// The hazard is not cleared — 118 of the 142 `DownloadManager(` constructions
 /// in `PlayheadTests` still take the default `.shared` (`DownloadManagerTests`
 /// 43, `ForceQuitResumeTests` 19, `StreamingDownloadTests` 18,
-/// `PlaceholderAssetUpgradeTests` 11) — this suite just stops being one.
+/// `PlaceholderAssetUpgradeTests` 10) — this suite just stops being one.
+/// IT IS 142 AND NOT 144 (review r4): a pattern over `DownloadManager(` also
+/// matches DOC COMMENTS, and two of the 144 are prose rather than code — one
+/// in `PlaceholderAssetUpgradeTests` and one THIS VERY SENTENCE, which counted
+/// itself as a construction on the shared queue. Both earlier readings had it:
+/// 145 was a grep LINE count (one line a function NAME), 144 dropped the
+/// function name and kept the comments.
 ///
 /// Three things it does NOT do, each measured rather than argued:
 ///
