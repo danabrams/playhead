@@ -310,14 +310,28 @@ struct DownloadShowAttributionTests {
         //
         // MEASURED, and it is why the arm moved off the daemon instead of
         // getting a witness: over 57 de-duplicated full-plan logs, 2026-08-15
-        // … 08-24, `kkzu-unattributed`'s `downloadTask(with:)` EXPIRED in 54
-        // and was queued in 3, so a witness on the OLD arm would have failed
-        // 54 runs of 57. "Expired", not "refused": `.dedicatedThread` submits
-        // the call and reports `did not answer within 10s`; "refused" is what
-        // the `.neverAnswers` / `.refusesCallsLabelled` seams do, and the two
-        // are different events. It was the eighth and last `downloadTask(with:)`
+        // … 08-24, `kkzu-unattributed`'s background download was NOT STARTED
+        // in 54 and was queued in 3, so a witness on the OLD arm would have
+        // failed 54 runs of 57. COUNT THE LINE YOU MEAN (r5b): 54 is
+        // `DownloadManager`'s own `Background download for kkzu-unattributed
+        // NOT started: the background transfer daemon did not answer`, and it
+        // partitions the 57 exactly against the 3 `Queued` runs. The
+        // `BackgroundSessionIO` EXPIRY line one layer down —
+        // `downloadTask(with:) … did not answer within 10.000000s` — appears
+        // in only 52, the other two having been severed by an xcodebuild
+        // splice that `gate_baseline.rejoin_spliced_lines` does not repair.
+        // Neither number is "refused": `.dedicatedThread` submits the call and
+        // reports an expiry, while "refused" is what the `.neverAnswers` /
+        // `.refusesCallsLabelled` seams do, and those emit a different line
+        // again. It was the eighth and last `downloadTask(with:)`
         // this suite issued, a median 1.573 s after the other seven (mean
-        // 1.601, range 0.404–3.309, over the 51 logs carrying both anchors),
+        // 1.601, range 0.404–3.309, over the 51 logs carrying both anchors —
+        // anchor A the LAST of the seven siblings' `Queued background
+        // download` lines, anchor B this call's expiry timestamp MINUS the
+        // 10 s bound, i.e. its reconstructed submission; the two are
+        // asymmetric, A being a completion and B a submission, so read the
+        // figure as submission-minus-completion rather than as a gap between
+        // two submissions),
         // by which time seven live transfers to a non-resolving host had
         // `nsurlsessiond` busy — and those seven queue successfully in 56 of
         // the 57. EVERY ONE OF THOSE 57 IS PRE-FIX, measured while this suite

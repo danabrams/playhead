@@ -1125,20 +1125,32 @@ func daemonSilentSessionIO(
 /// in `PlayheadTests` still take the default `.shared` (`DownloadManagerTests`
 /// 43, `ForceQuitResumeTests` 19, `StreamingDownloadTests` 18,
 /// `PlaceholderAssetUpgradeTests` 10) — this suite just stops being one.
-/// IT IS 142 AND NOT 146, AND HERE IS THE WHOLE RECONCILIATION (review r5).
-/// `git grep -c 'DownloadManager(' HEAD -- 'PlayheadTests/*'` — the literal
-/// string, no whitespace class — gives 146 lines. One is a suffix of a
-/// FUNCTION NAME (`RuntimeShutdownLifecycleTests`'
-/// `cancelledCacheTaskRejectsEntryBeforeDownloadManager()`), and THREE are doc
-/// comments: one in `PlaceholderAssetUpgradeTests` and TWO IN THIS VERY
-/// COMMENT, which count themselves as constructions on the shared queue.
-/// 146 − 1 − 3 = 142. (A pattern that allows a space, `DownloadManager\s*\(`,
-/// finds a fourth comment — a `// MARK:` in `FileProtectionTests` — and reads
-/// 147, so quote the pattern with the count.) Every earlier reading was one of
-/// these off: 145 counted lines and dropped nothing, 144 dropped the function
-/// name and kept the comments, and r4's own correction ADDED a third comment
-/// occurrence while claiming there were two — the miscount recurring inside
-/// the sentence that corrects it.
+/// HOW 142 IS COUNTED, AND WHY NO RAW GREP TOTAL IS QUOTED BESIDE IT (r5b).
+/// Strip line comments and string literals, then match
+/// `(?<![A-Za-z0-9_])DownloadManager\(` — a word boundary, so a name ENDING in
+/// `DownloadManager(` is not a construction. That recipe is reproducible and,
+/// crucially, its answer does not move when somebody edits this comment.
+///
+/// A RAW `git grep -c` TOTAL DOES MOVE, WHICH IS WHY THREE CONSECUTIVE ROUNDS
+/// GOT IT WRONG IN THE SAME DIRECTION. Each round wrote the reconciliation
+/// down, and the act of writing it added another line containing the pattern,
+/// so the total the NEXT reader measures is larger than the one printed.
+/// r4 said "two of the 144 are prose" while adding a third; r5 said 146 with
+/// three comment lines while its own text made it 147 with four — and the
+/// fourth is r5's own mention of
+/// `cancelledCacheTaskRejectsEntryBeforeDownloadManager()`, a FUNCTION NAME
+/// quoted inside a comment, which is both excluded categories at once. The
+/// count that stayed correct through all of it is 142, because it is the one
+/// measured after the comments are removed. A self-referential count is not a
+/// harder sum; it is a quantity that includes the observer, and the fix is to
+/// stop quoting it rather than to get it right once more.
+///
+/// Two further traps if you do reach for grep: `git grep -E` is POSIX ERE and
+/// does NOT understand `\s`, so `DownloadManager\s*\(` silently degrades to
+/// the literal there and agrees with it for the wrong reason; in Python the
+/// same pattern finds one more line than the literal does — a `// MARK: -
+/// DownloadManager (audio cache)` in `FileProtectionTests`, which has a space
+/// and is not a construction.
 ///
 /// Four things it does NOT do, each measured rather than argued:
 ///
