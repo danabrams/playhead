@@ -1564,12 +1564,14 @@ def _collect_case(node, bundle, suite, run, raw):
         run.resource.setdefault(key, resource[1])
         return
     raw.setdefault(key, set()).add(result)
-    if key in run.resource:
-        if result != XCRESULT_FAILED:
-            # A twin that PASSED or was SKIPPED is not evidence about the one
-            # that was denied a file. Keep the denial.
-            return
-        # …and the mirror: a genuine failure outranks it, so the denial yields.
+    if result == XCRESULT_FAILED and key in run.resource:
+        # The other half of RD10's asymmetry, and the only half that is live: a
+        # genuine failure on a shared display name outranks a denial, so the
+        # denial yields and the FAILURE is recorded. A twin that PASSED or was
+        # SKIPPED needs no clause at all — the resolution loop at the end of
+        # `parse_xcresult` already discards a denied key from both sets, and a
+        # branch that only re-states that is dead code pretending to be a
+        # guard. (Mutation RD10 survived it, which is how it was found.)
         run.resource.pop(key, None)
         run.resource_causes.pop(key, None)
     if key in run.crashed:
@@ -2311,6 +2313,14 @@ class Verdict(object):
         # that executed no tests has zero failures too, and calling that GREEN is
         # how a broken run reads as a clean sweep. A run that lost part of the
         # plan to a dead host is the same claim with the same answer.
+        # `not self.resource` here is UNREACHABLE TODAY and is kept as an
+        # invariant, exactly as `run.skipped -= …` is kept above: `self.ok`
+        # already reads False while a denial stands, because `exit_code` arms
+        # on `self.resource`. Mutation RD14 proves it — removing this clause
+        # changes no output. It stays so that a reader who ever relaxes the
+        # exit code cannot leave a GREEN condition that ignores a run which did
+        # not judge part of the plan; delete it only together with that
+        # guarantee.
         if (self.ok and self.total_failures == 0 and not self.crashed_host
                 and not self.resource):
             out.append("gate-baseline: GREEN (%s)" % headline)

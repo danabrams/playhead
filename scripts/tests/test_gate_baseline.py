@@ -4433,6 +4433,14 @@ class ResourceVerdictTests(unittest.TestCase):
         rendered = self._verdict([st_fail_message("t", CANTOPEN)]).render()
         self.assertIn("does NOT say whether the box was short", rendered)
 
+    def test_a_long_denied_list_SAYS_that_it_was_truncated(self):
+        """A list that does not say it is a list is the same defect as a count
+        that does not count: the real run had 60, and a reader who sees ten
+        names with no `and N more` has been told the wrong number."""
+        chunks = [st_fail_message("denied-%02d" % n, CANTOPEN) for n in range(30)]
+        rendered = self._verdict(chunks).render()
+        self.assertIn("and %d more" % (30 - gb._MAX_LISTED), rendered)
+
     def test_nothing_is_printed_on_a_healthy_run(self):
         """A printed zero is a claim. This one would be true and useless on a
         clean run and unsupportable on a run with no bundle."""

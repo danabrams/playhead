@@ -247,7 +247,9 @@ MUTATIONS = [
     (
         "R17", GB,
         "a fully green run against a non-empty baseline is accepted as normal",
-        "    if entries and not run.failures:",
+        # RE-ANCHORED at playhead-s34ux, which added `and not run.resource` to
+        # this condition so a DENIED run cannot be blamed on the file.
+        "    if entries and not run.failures and not run.resource:",
         "    if False:",
         [V + "test_a_fully_GREEN_run_against_a_nonempty_baseline_is_FICTION"],
     ),
@@ -339,7 +341,10 @@ MUTATIONS = [
         "— zero failures is not zero problems",
         # RE-ANCHORED at R2 review, same cause as R06 and R14: tl6l added
         # `and not self.crashed_host` to this condition.
-        "        if self.ok and self.total_failures == 0 and not self.crashed_host:",
+        # RE-ANCHORED again at playhead-s34ux, which added `and not
+        # self.resource` for the same reason tl6l added `crashed_host`.
+        """        if (self.ok and self.total_failures == 0 and not self.crashed_host
+                and not self.resource):""",
         "        if self.total_failures == 0:",
         [V + "test_a_run_that_executed_NOTHING_is_never_called_GREEN"],
     ),
@@ -508,8 +513,10 @@ MUTATIONS = [
         "a crash that is genuinely fixed stays recorded forever and the gate "
         "never speaks about those names again — R2's whole objection to a "
         "union, left unanswered",
-        "                or self.census_now_reports):",
-        "                or False):",
+        # RE-ANCHORED at playhead-s34ux: `or self.resource` now follows this
+        # line, so the trailing `):` moved off it.
+        "                or self.census_now_reports\n",
+        "                or False and self.census_now_reports\n",
         [AC + "test_a_DETERMINISTIC_entry_that_REPORTS_AGAIN_fails_the_gate"],
     ),
     (
@@ -1505,29 +1512,31 @@ MUTATIONS = [
     ),
     (
         "RD10", GB,
-        "the collision guard goes, so a same-named twin that ran fine promotes "
-        "a denied test to PASSED — resolving toward the better news, which is "
-        "the direction this module never resolves",
-        """    if key in run.resource:
-        if result != XCRESULT_FAILED:
-            # A twin that PASSED or was SKIPPED is not evidence about the one
-            # that was denied a file. Keep the denial.
-            return
-        # \u2026and the mirror: a genuine failure outranks it, so the denial yields.
-        run.resource.pop(key, None)
-        run.resource_causes.pop(key, None)
-""",
-        "",
-        [DB + "test_a_SKIPPED_twin_does_not_displace_a_denied_twin"],
+        "a DENIAL swallows a genuine failure that shares its display name, in "
+        "the denied-first node order — a real regression leaving the NEW column "
+        "silently, which is the one outcome this whole change exists to prevent",
+        """    if result == XCRESULT_FAILED and key in run.resource:""",
+        """    if False and key in run.resource:""",
+        [DB + "test_a_GENUINELY_FAILING_twin_outranks_a_denied_twin_in_BOTH_orders"],
     ),
     (
         "RD10b", GB,
-        "a DENIAL outranks a genuine failure on a shared display name, so a "
-        "real regression leaves the NEW column silently — the defect RD10 "
-        "found by surviving, and the reason a denial is not a crash",
+        "the same swallow in the OTHER node order — the mirror, and it needs "
+        "its own rail because the two clauses are independent",
         "    if resource is not None and key not in run.failures:",
         "    if resource is not None:",
         [DB + "test_a_GENUINELY_FAILING_twin_outranks_a_denied_twin_in_BOTH_orders"],
+    ),
+    (
+        "RD10c", GB,
+        "a SKIPPED twin displaces a denied one, so a denial is laundered by a "
+        "test that said nothing about it",
+        """    for key in run.resource:
+        run.passed.discard(key)
+        run.skipped.discard(key)""",
+        """    for key in run.resource:
+        run.passed.discard(key)""",
+        [DB + "test_a_SKIPPED_twin_does_not_displace_a_denied_twin"],
     ),
     (
         "RD11", GB,
@@ -1565,13 +1574,19 @@ MUTATIONS = [
     ),
     (
         "RD14", GB,
-        "GREEN becomes reachable while tests were denied a file — the mirror of "
-        "RD13, and it needs its own rail because the two are independent",
-        """        if (self.ok and self.total_failures == 0 and not self.crashed_host
-                and not self.resource):""",
-        """        if (self.ok and self.total_failures == 0 and not self.crashed_host
-                and True):""",
-        [DV + "test_GREEN_is_unreachable_while_a_resource_failure_stands"],
+        "the block stops saying it TRUNCATED, so a reader who sees ten names "
+        "has no way to know there were sixty — a list that does not say it is "
+        "a list is the same defect as a count that does not count. "
+        "(This slot held the GREEN-guard mutant, which mutation proved an "
+        "EQUIVALENT: `self.ok` is already False while a denial stands, so "
+        "removing `and not self.resource` from the GREEN line changes no "
+        "output. The clause is kept in source as a stated invariant.)",
+        """        if len(self.resource) > _MAX_LISTED:
+            out.append("  RESOURCE         … and %d more"
+                       % (len(self.resource) - _MAX_LISTED))
+""",
+        "",
+        [DV + "test_a_long_denied_list_SAYS_that_it_was_truncated"],
     ),
     (
         "RD15", GB,
