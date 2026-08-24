@@ -89,8 +89,13 @@ credit — the predicted victim died in every case.
 `105efd5f` as well, verified by running the battery against a clean `git
 archive` of that commit. Pre-existing coverage hole, filed rather than fixed.
 
-Whole battery on the final tree: **147 mutations, 145 killed, 1 survived (R21,
-pre-existing), 0 error, control R99 OK-SURVIVED.**
+Whole battery at the time of writing: **147 mutations, 145 killed, 1 survived
+(R21, pre-existing), 0 error, control R99 OK-SURVIVED** — measured at `d8f4e7e4`.
+**That sentence used to say "on the final tree" and it was wrong twice over:**
+review round 1 added 21 more mutants and moved four anchors, after which the
+battery REFUSED TO START on the very tree the sentence claimed. See the stamped
+figure at the end of this file, and stamp any figure you add — a headline that
+names a tree it was not measured on is this bead's own subject.
 
 ---
 
@@ -131,3 +136,33 @@ Here the label said one edit, the diff said another, the observed victims matche
 the diff, and the discrepancy was then explained away in prose — which is a false
 credit arriving through the back door, in the very table built to prevent them.
 **Read the edit, not the description of the edit.**
+
+
+---
+
+# The battery, on the tree that is being merged
+
+Run against a **clean `git archive`** of `19978659` in a scratch directory — not in
+the worktree, so no uncommitted edit can contribute:
+
+    168 mutation(s): 166 killed, 1 survived, 0 error, control OK-SURVIVED
+
+The single survivor is **`R21`**, which survives on `105efd5f` too (verified
+against a clean archive of that commit) and is filed as `playhead-5c006`. It
+predates this bead and this bead does not touch its subject.
+
+**Two of round 1's own mutants had to be closed before this number was true**,
+and each is worth more than the number:
+
+- **`RD06` was a PROVEN EQUIVALENT created by the review's own strengthening.**
+  Round 1 added a second, deeper unanimity veto to `_bundle_resource` whose
+  stack starts from the node's own children — so it re-covers the direct ones,
+  and the original mutant (first loop's `return None` → `continue`) stopped
+  changing anything observable. Good news about the code, stale news about the
+  ledger. Re-pointed, exactly as `RD14` was.
+- **`RD34` SURVIVED and the code was innocent.** Its replacement text kept
+  `2,560`, `2,539` and the bead id — the exact strings its rail pins — so the
+  edit could not kill the test it named. A mutant that cannot fail is a mutant
+  that proves nothing, and it reads as a coverage hole. **Read the EDIT, not the
+  description of the edit** — which is the third time that sentence has had to
+  be written in this bead, after the `MV1` mislabel and the `RD10` false credit.
