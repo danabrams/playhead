@@ -1012,6 +1012,58 @@ func daemonSilentSessionIO(
     )
 }
 
+/// A `DownloadManager.sessionIO` double that keeps the REAL daemon and the
+/// production bound, and takes only the shared QUEUE away.
+///
+/// Use this — rather than ``daemonSilentSessionIO`` — for a test whose subject
+/// needs a genuinely ADMITTED transfer. `.neverAnswers` cannot serve those:
+/// every refusal branch in `backgroundDownload` releases the reservation and
+/// DELETES the attribution sidecar, which is the very record such a test reads.
+///
+/// ─────────────────────────────────────────────────────────────────────────
+/// WHAT IT CHANGES AND WHAT IT DELIBERATELY DOES NOT (playhead-et2d)
+/// ─────────────────────────────────────────────────────────────────────────
+/// `behavior` and `timeout` are the production values, stated rather than
+/// defaulted so nobody can read this helper as a widened bound — widening is
+/// what playhead-nsjn / playhead-gpdb / playhead-ola7 own, and 7wia measured
+/// that at 60 s these calls are still queued, so a wider bound trades an
+/// assertion failure for a timeout. The ONLY difference from
+/// `BackgroundSessionIO.shared` is `queueLabel`, i.e. which serial queue the
+/// call is submitted to.
+///
+/// That one difference is the whole mechanism. `.shared` is a process-wide
+/// singleton with ONE serial queue, and every `DownloadManager` that does not
+/// inject submits `downloadTask(with:)`, `resume()` and the abandon-path
+/// `cancel()` onto it. MEASURED across 57 de-duplicated full-plan logs
+/// (2026-08-13 … 08-24): on ONE of them, at 08:06:01 on 2026-08-23, eight
+/// `downloadTask(with:)` calls blew their bound together, and 55 seconds later
+/// TWELVE submissions spanning FOUR suites arrived on a single thread,
+/// microseconds apart, in submission order, logging
+///
+///     downloadTask(with:) for kkzu-attributed: reached the daemon queue after
+///         its caller had already given up — not started
+///
+/// Their bodies never ran; one parked call had held the queue for 65 s. On
+/// that run all seven `DownloadShowAttributionTests` that construct a manager
+/// failed, every one of them an `Expectation failed:` on the attribution
+/// sidecar the refusal had just deleted.
+///
+/// NOT CLAIMED: that this makes a test immune to the daemon. If the daemon
+/// parks on THIS manager's own call it still expires at `defaultTimeout` —
+/// that is the production hazard `BackgroundSessionIO` exists to bound, and
+/// bounding it is not a test's business. What a private queue removes is the
+/// AMPLIFICATION: one parked call can no longer refuse eleven transfers that
+/// never reached the daemon at all.
+func unsharedSessionIO(
+    labelledFor test: String = #function
+) -> BackgroundSessionIO {
+    BackgroundSessionIO(
+        behavior: .dedicatedThread,
+        timeout: BackgroundSessionIO.defaultTimeout,
+        queueLabel: "et2d.test.\(test).\(UUID().uuidString)"
+    )
+}
+
 /// Collects what a `DownloadManager` wrote to the surface-status invariant
 /// stream. In production that closure is
 /// `SurfaceStatusInvariantLogger.invariantViolated`.

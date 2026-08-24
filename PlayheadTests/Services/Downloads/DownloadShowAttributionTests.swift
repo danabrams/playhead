@@ -14,6 +14,25 @@
 // written at all, and "podcastId is nil for an unattributed download" is
 // worthless if the assertion would hold for an attributed one too. Each rail
 // below drives BOTH arms through the same harness.
+//
+// playhead-et2d: EVERY `DownloadManager` HERE INJECTS `unsharedSessionIO()`,
+// and the reason is one measurement rather than tidiness. The default
+// `BackgroundSessionIO.shared` is a process-wide singleton with ONE serial
+// queue; on the full-plan run of 2026-08-23 08:06 a single parked
+// `downloadTask(with:)` held that queue for 65 seconds, twelve submissions
+// across four suites arrived on one thread afterwards logging "reached the
+// daemon queue after its caller had already given up — not started", and all
+// seven tests in this file that build a manager failed together. They failed
+// as ASSERTIONS, which is why the seven baseline entries were recorded that
+// way, and why the recorded KIND said nothing about the cause: every refusal
+// branch in `backgroundDownload` DELETES the attribution sidecar, so this
+// suite reads a missing show and blames the code that writes it.
+//
+// The helper keeps the real daemon and the production bound and changes only
+// the queue label — see `unsharedSessionIO` for what that does and does not
+// claim. `.neverAnswers` (playhead-7wia's fix for the other three victims)
+// cannot be used here: these tests need a genuinely ADMITTED transfer,
+// because the sidecar they assert on is what a refusal destroys.
 
 import Foundation
 import Testing
@@ -95,7 +114,9 @@ struct DownloadShowAttributionTests {
         let dir = try makeTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
         let store = try await makeTestStore()
-        let manager = DownloadManager(cacheDirectory: dir)
+        let manager = DownloadManager(
+            cacheDirectory: dir, sessionIO: unsharedSessionIO()
+        )
         await manager.setAnalysisWorkScheduler(makeScheduler(store: store))
         try await manager.bootstrap()
 
@@ -138,6 +159,33 @@ struct DownloadShowAttributionTests {
                 isExplicitDownload: false
             )
         )
+        // playhead-et2d: THE ONLY ARM IN THIS SUITE THAT A REFUSED TRANSFER
+        // CANNOT REACH, so it is the only one that needs this line.
+        //
+        // Every other test here asserts a podcastId, and a refusal is visible
+        // to all of them: `backgroundDownload` releases the reservation and
+        // DELETES the sidecar on both of its no-answer paths, so the show goes
+        // missing. This arm asserts the ABSENCE of a show — and a refused
+        // transfer produces exactly that absence, from a sidecar that was
+        // deleted rather than one that recorded a null identity. `#expect(
+        // unattributedJob?.podcastId == nil)` therefore reads the same whether
+        // the download was admitted or never started, which is this repo's
+        // standing defect class sitting inside the assertion: a value that
+        // names one thing read as though it named another.
+        //
+        // NOT HYPOTHETICAL. `downloadTask(with:) for kkzu-unattributed … did
+        // not answer within 10.000000s` appears in 56 of the 57 preserved
+        // full-plan logs, and this test PASSED on every one of them. The
+        // sidecar is written for an unattributed context too (podcastId nil,
+        // reason recorded), so its presence here is the positive witness that
+        // the transfer was genuinely admitted.
+        #expect(
+            await manager.loadDownloadAttribution(episodeId: unattributed)
+                != nil,
+            "the contrast arm's transfer was refused, not queued — its \
+            podcastId == nil below would be reporting the refusal rather \
+            than the unattributed context"
+        )
         let unattributedJob = try await completeBackgroundDownload(
             manager: manager, store: store,
             episodeId: unattributed, cacheDir: dir
@@ -164,7 +212,9 @@ struct DownloadShowAttributionTests {
         defer { try? FileManager.default.removeItem(at: dir) }
         let store = try await makeTestStore()
 
-        let queueing = DownloadManager(cacheDirectory: dir)
+        let queueing = DownloadManager(
+            cacheDirectory: dir, sessionIO: unsharedSessionIO()
+        )
         try await queueing.bootstrap()
         let episodeId = "kkzu-restart"
         await queueing.backgroundDownload(
@@ -176,7 +226,9 @@ struct DownloadShowAttributionTests {
         )
 
         // A brand-new manager: nothing carries over but the filesystem.
-        let relaunched = DownloadManager(cacheDirectory: dir)
+        let relaunched = DownloadManager(
+            cacheDirectory: dir, sessionIO: unsharedSessionIO()
+        )
         await relaunched.setAnalysisWorkScheduler(makeScheduler(store: store))
         try await relaunched.bootstrap()
         #expect(
@@ -208,7 +260,9 @@ struct DownloadShowAttributionTests {
         let dir = try makeTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
         let store = try await makeTestStore()
-        let manager = DownloadManager(cacheDirectory: dir)
+        let manager = DownloadManager(
+            cacheDirectory: dir, sessionIO: unsharedSessionIO()
+        )
         await manager.setAnalysisWorkScheduler(makeScheduler(store: store))
         try await manager.bootstrap()
 
@@ -247,7 +301,9 @@ struct DownloadShowAttributionTests {
     func resumeBlobDeletionPreservesAttribution() async throws {
         let dir = try makeTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
-        let manager = DownloadManager(cacheDirectory: dir)
+        let manager = DownloadManager(
+            cacheDirectory: dir, sessionIO: unsharedSessionIO()
+        )
         try await manager.bootstrap()
 
         let episodeId = "kkzu-suspended"
@@ -287,7 +343,9 @@ struct DownloadShowAttributionTests {
     func forceQuitResumeRecoversTheShow() async throws {
         let dir = try makeTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
-        let manager = DownloadManager(cacheDirectory: dir)
+        let manager = DownloadManager(
+            cacheDirectory: dir, sessionIO: unsharedSessionIO()
+        )
         try await manager.bootstrap()
 
         let episodeId = "kkzu-force-quit"
@@ -339,7 +397,9 @@ struct DownloadShowAttributionTests {
     func cancelReapsAttribution() async throws {
         let dir = try makeTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
-        let manager = DownloadManager(cacheDirectory: dir)
+        let manager = DownloadManager(
+            cacheDirectory: dir, sessionIO: unsharedSessionIO()
+        )
         try await manager.bootstrap()
 
         let episodeId = "kkzu-cancelled"
@@ -367,7 +427,9 @@ struct DownloadShowAttributionTests {
     func clearCacheReapsAttribution() async throws {
         let dir = try makeTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
-        let manager = DownloadManager(cacheDirectory: dir)
+        let manager = DownloadManager(
+            cacheDirectory: dir, sessionIO: unsharedSessionIO()
+        )
         try await manager.bootstrap()
 
         let episodeId = "kkzu-cleared"
