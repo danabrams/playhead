@@ -327,3 +327,57 @@ did not disappear; it MOVED to the seam, because the receipt is now written
 unconditionally and the only thing standing between one skip and two surfaces is
 the removal inside `acknowledgeAutoSkippedBannerDelivery`. That is what it
 mutates now, and its four observed victims are its four predicted ones.
+
+### CORRECTION: MS02 would NOT have been "scored as a kill". Here is what would actually have happened.
+
+An earlier paragraph in this file says MS02, run unchanged, "would have been an
+EQUIVALENT MUTANT scored as a kill". Asked to state what the equivalence WAS so
+a reader could check it, the check falsified the claim. The mechanism matters
+more than the label, so both are recorded.
+
+**What MS02's old body did.** It inserted a receipt write immediately above
+`emitBannerItem`'s attachment guard:
+
+    missedAutoSkipReceiptsByWindowId[adWindow.id] = MissedAutoSkipReceipt(
+        item: item,
+        playheadTimeAtSkip: currentPlayheadTime,
+        occurredAt: Date()
+    )
+    guard hasAttachedHost else {
+        // playhead-2d6i: nobody is listening, and the caller has already
+
+Under playhead-2d6i that was a real defect: the guard's `else` arm was the ONLY
+receipt write, so injecting one above it meant a window that got a card also got
+a row — one skip, two surfaces.
+
+**Three measured facts about what it would do now.**
+
+1. Its anchor no longer exists. The two-line anchor above matches HEAD **0
+   times** — the guard is now `guard hasAttachedHost else { return }` and the
+   comment block moved above the write. So the battery would have reported
+   `ERROR — anchor did not apply`, exactly as it did for MS99's second anchor
+   earlier in this session. That is the loud path, and it is what actually
+   protects here.
+2. Had the anchor still matched — and it nearly did, because the guard's comment
+   block was mine to keep or move — the injected line would have been a SECOND
+   write of the same key, `emitBannerItem` having already written it before the
+   guard (verified: the write's index precedes the guard's in the shipped body).
+3. The two writes differ in exactly one field, `occurredAt: Date()`, and
+   **nothing observes it** — no test in the tree asserts on a receipt's
+   `occurredAt`, and the list surface deliberately shows the episode span
+   instead. So the mutation would have been behaviourally inert.
+
+**So the verdict it would have produced is SURVIVED, not KILLED.** That is a
+different failure and a milder one: a survivor is reported as a coverage hole,
+which sends a reader to strengthen `THE EXTENDED PROPERTY` — a rail that is
+already correct — rather than crediting a rail that is not. Wasted rounds, not a
+false green.
+
+**What the episode is actually evidence for**, and it is worth more than the
+original claim: a mutant is written against a SHAPE OF CODE, and a bead that
+restructures that shape silently invalidates it in one of three ways — the
+anchor stops matching (loud), the edit becomes inert (a false SURVIVED), or the
+edit becomes the shipped behaviour (a false KILLED). Only the first is
+self-announcing. That is why every MS mutant this bead touched was re-read
+against the new source rather than re-anchored mechanically, and why MS02 was
+given a new body instead of a new anchor.
