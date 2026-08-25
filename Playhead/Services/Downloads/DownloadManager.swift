@@ -1011,6 +1011,37 @@ actor DownloadManager {
         self.analysisWorkScheduler = scheduler
     }
 
+    /// playhead-882eg: drop everything `PlayheadRuntime` injected, at the
+    /// runtime's terminal owner boundary.
+    ///
+    /// `analysisWorkScheduler` is a strong stored reference to an actor that
+    /// holds this manager strongly right back (`AnalysisWorkScheduler`'s own
+    /// `downloadManager` is a `let`), so `setAnalysisWorkScheduler` creates a
+    /// permanent two-object cycle. Neither side can ever be released — and both
+    /// are hubs: the scheduler reaches `AnalysisStore`, the job runner and the
+    /// capabilities service, and this manager reaches the store again through
+    /// its work-journal, DAI-stitch and drop recorders and reaches the
+    /// `SurfaceStatusInvariantLogger` through its `invariantRecorder` closure.
+    /// One cycle, and the whole service graph is immortal: measured, 19 of 22
+    /// runtime-owned objects were still alive after the owning runtime had
+    /// deallocated, holding ~5 production-store file descriptors per runtime
+    /// constructed.
+    ///
+    /// This is a CLEAR rather than a `weak` back-pointer on purpose. `weak`
+    /// would be the ownership-correct shape, but three tests
+    /// (`DownloadShowAttributionTests`, `BackgroundDownloadCompletionTests`)
+    /// hand this setter a scheduler they do not keep a reference to, so the
+    /// manager owning it is load-bearing today. Changing who owns the scheduler
+    /// is a design decision, not a teardown fix; this is the teardown fix.
+    ///
+    /// Called from `PlayheadRuntime.shutdown()`, which has no production
+    /// caller, so nothing about a running app changes.
+    func detachRuntimeInjectedDependencies() {
+        analysisWorkScheduler = nil
+        daiStitchRecorder = nil
+        backgroundDownloadCompletionObserver = nil
+    }
+
     /// playhead-xsdz.71 (Signal 1): inject the DAI-stitch redirect-chain
     /// recorder. Wired once by `PlayheadRuntime`; left `nil` in tests so the
     /// download path stays byte-identical.

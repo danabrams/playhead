@@ -4000,6 +4000,14 @@ final class PlayheadRuntime {
         await analysisCoordinator.stopCapabilityObserver()
         await episodeSummaryBackfillCoordinator?.stop()
         await capabilitiesService.stopObserving()
+        // playhead-882eg: UNWIRE what init WIRED. Cancelling the loops above is
+        // necessary and measurably not sufficient — with all four stopped, 19 of
+        // 22 runtime-owned objects were still alive, because
+        // `downloadManager.setAnalysisWorkScheduler(...)` and
+        // `AnalysisWorkScheduler`'s own `let downloadManager` point at each
+        // other. A two-object strong cycle between two hubs pins the whole
+        // service graph, with no Task involved at all.
+        await downloadManager.detachRuntimeInjectedDependencies()
     }
 
     @MainActor
