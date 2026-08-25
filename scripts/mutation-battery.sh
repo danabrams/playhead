@@ -14270,16 +14270,21 @@ EOF
     patch "$file" "$OLD" "$NEW" ;;
 
 
+  # The table name is IN the anchor: the 7dgx arming writer's SQL is otherwise
+  # byte-identical, so the narrower spelling matched twice and the battery
+  # refused (`anchor matched 2 times`) rather than mutating the wrong table.
   DW37)
     snippet OLD <<'EOF'
+            INSERT INTO download_work_journal_arming
+            (id, armedLaunches, writeFailures, firstArmedAt, lastArmedAt,
+             installedAt)
             VALUES (1, 1, 0, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                armedLaunches = armedLaunches + 1,
 EOF
     snippet NEW <<'EOF'
+            INSERT INTO download_work_journal_arming
+            (id, armedLaunches, writeFailures, firstArmedAt, lastArmedAt,
+             installedAt)
             VALUES (1, 0, 0, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                armedLaunches = armedLaunches + 1,
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
