@@ -90,6 +90,19 @@ opens no file, so it is very unlikely to move a descriptor count — but "very
 unlikely to matter" is a judgement, and the sentence it replaced asserted there
 was nothing to judge.
 
+**AND `c17fdc48` IS NOW WITHDRAWN, SO NEITHER RUN'S TREE IS HEAD'S (R3).**
+`b1c958ca` reverted all 117 production lines and deleted the six rails; four
+different rails replace them (`SQLiteSystemErrnoPlatformProbeTests`). So run 1's
+`Playhead/` equals `18a7423c`'s, run 2's carries a capture that no longer
+exists, and HEAD's equals `18a7423c`'s plus four test cases — three different
+populations, of which the `11,785` and `11,791` cells below are the first two
+and HEAD is neither. This does not move any conclusion in this section (the
+withdrawal takes run 2's tree TOWARDS run 1's, and the argument was always that
+a failure-path errno read cannot open a descriptor), and it is recorded because
+"the tree moved by more than one line" is the sentence R2 had to write, and a
+reader re-deriving these counts against HEAD would otherwise find a third
+number and no explanation.
+
 | quantity | PARALLEL (M0) | SERIALIZED | change |
 |---|---|---|---|
 | tests / suites | 11,785 / 1,441 | **11,791 / 1,442** | +6 — `c17fdc48`'s six new rails; see the paragraph above for the rest of that commit |
@@ -568,8 +581,13 @@ does not need re-examining; the POSIX-documented answer does.
 0, and SQLite records nothing there for failures that never reached the OS. So a
 captured 0 means *the VFS recorded no OS error for this failure* and must be
 rendered as such — never as an errno, and never as success. This is the standing
-defect class waiting to happen and the reason the rendering says
+defect class waiting to happen, and it was the reason the rendering said
 `(none recorded)` rather than printing a bare number.
+
+**THAT RENDERER NO LONGER EXISTS (R3).** `SQLiteSystemErrno.render` and its
+`suffix` went with the rest of the capture in `b1c958ca`; `git diff 18a7423c --
+Playhead/` is empty. Read the sentence above as the requirement any FUTURE
+capture would have to meet, not as a description of code in the tree. See M3c.
 
 Repro: `artifacts/sqlite-errno-probe.py` — which covers the **exhaustion row
 only** (it lowers `RLIMIT_NOFILE` to 96, fills the table, and opens both an
@@ -614,13 +632,19 @@ not describe the app. Three consequences:
   descriptor table inside a shared test host would take the host down with it.
   Three unrelated causes all report 0 through the same VFS hook, so 0 is the
   expectation — an expectation, not a measurement, and it is labelled as one.
-* The call is **kept anyway**: it costs one call, renders 0 as `none recorded`
-  rather than as an errno, and the two sites playhead-s34ux actually observed —
-  `openSQLiteHandle` and `exec` — now carry the field in every gate log. Nobody
-  has to re-derive this, and a future SDK that populates it will simply start
-  showing the value. `prepare`/`step`/`nextRow` are deliberately NOT wired: on
-  this platform the value is 0 at every site, so three more one-line changes
-  would buy three more consumer interactions to verify and no information.
+* The call was **kept at first — and this bullet is the argument that LOST.**
+  **It is preserved in the past tense rather than deleted, because M3c is the
+  record of pricing it, and a bullet that reads as current is how a withdrawn
+  change gets re-attempted (R3: it still read "the call is kept anyway … now
+  carry the field in every gate log" two commits after the withdrawal, three
+  paragraphs above the section that withdrew it).** It argued: one call, 0
+  rendered as `none recorded` rather than as an errno, and the two sites
+  playhead-s34ux actually observed — `openSQLiteHandle` and `exec` — carrying
+  the field in every gate log, with `prepare`/`step`/`nextRow` deliberately NOT
+  wired because the value is 0 at every site anyway. What it left out is the two
+  CONSUMERS of that message. **Nothing in `Playhead/` carries the field today**
+  — `git diff 18a7423c -- Playhead/` is empty — and what re-measures the
+  platform on every run is `SQLiteSystemErrnoPlatformProbeTests`. See M3c.
 
 ---
 
@@ -651,9 +675,76 @@ It also pins the two properties other machinery depends on: that SQLite still
 emits the exact prose `scripts/gate_baseline.py` matches, and that the durable
 health `detail` still survives.
 
+### M3d. THE PROBE SUITE DOES NOT CATCH THE REGRESSION IT IS SAID TO PIN — R3, reported not fixed
+
+**Re-applying `c17fdc48` in full leaves all four `@Test`s GREEN.** That is the
+one claim the withdrawal rests on ("the header carries the whole withdrawal so
+nobody re-attempts it blind" — `b1c958ca`; "it also pins … that the durable
+health `detail` still survives" — the paragraph above), and it is the one thing
+the suite does not do. Established by reading the three artefacts together
+rather than by re-running anything, because each half is exact:
+
+* `c17fdc48` appends `SQLiteSystemErrno.suffix(...)` to `AnalysisStoreError`'s
+  `message` at `openSQLiteHandle` and to `.migrationFailed` at `exec`.
+* `theStoreSurfacesTheProse`'s first assertion is
+  `described.contains("unable to open database file")`. `contains` is a
+  SUBSTRING test, so `…database file [errno=0 none recorded]` satisfies it.
+* Its second assertion is
+  `AnalysisStoreHealthDetail.sanitize("unable to open database file") == "unable
+  to open database file"` — a **LITERAL**, not the message the store just
+  produced. The literal is inside `DiagnosticTextSanitizer`'s allowlist by
+  construction and passes however `AnalysisStore` spells its error. Nothing in
+  the test connects `thrown` to `sanitize`.
+
+So the field the withdrawn capture was silently emptying is asserted about a
+string that could never have been emptied. **The test's own comment two lines
+up — "the field the withdrawn capture was silently emptying" — names the
+property; the expression below it does not test it.** The standing defect class,
+in the rail written to close an instance of it.
+
+**THE FIX, which is small and exact.** The scoped log records the real error:
+`[enzva] store message: Optional(SQLite open failed (14): unable to open
+database file)`, i.e. `AnalysisStoreError.openFailed(code: 14, message: "unable
+to open database file")`. Bind that payload and sanitize IT:
+
+```swift
+guard case .openFailed(_, let message)? = thrown as? AnalysisStoreError else {
+    Issue.record("expected .openFailed, got \(described)"); return
+}
+#expect(message == "unable to open database file")          // no decoration
+#expect(AnalysisStoreHealthDetail.sanitize(message) == message)  // survives
+```
+
+`== message` rather than `!= nil` is deliberate: a future `sanitize` that
+STRIPPED a decoration (which is what round 1's withdrawn fix did) would satisfy
+`!= nil` while the store still emitted the decoration, so the non-nil form
+would go green on the half-fixed state too.
+
+**A SECOND, SEPARATE HOLE in `thePlatformCannotTellThemApart`: `reported.count
+== 1` is the DEFAULT outcome of a degenerate setup.** If the three conditions
+ever collapsed into one — `setAttributes([.posixPermissions: 0])` silently
+no-opping, say — the assertion would still pass, and the suite has no control
+proving the host can tell them apart. It is only the SQLite log lines in the
+scoped run (`(20) … Not a directory`, `(13) … Permission denied`, `(21) … Is a
+directory`) that establish the three conditions are genuinely distinct, and
+nothing asserts them. The control the suite is missing is a raw `Darwin.open` on
+the same three paths, expecting **three different `errno` values** — which is
+also the sharper statement of M3b's finding: the host discriminates, SQLite's
+two public APIs do not.
+
+Both are **reported and not fixed here**: they are edits to a Swift test, this
+round is forbidden from compiling, and an uncompiled assertion is worth less
+than a written-down one. `scoped-revert.log` is the pin for the numbers above.
+
 ---
 
-## M6. OPTION A MAKES THE MERGE GATE PERMANENTLY RED, AND `--accept-baseline` CANNOT CLEAR IT
+## M7. OPTION A MAKES THE MERGE GATE PERMANENTLY RED, AND `--accept-baseline` CANNOT CLEAR IT
+
+**THIS SECTION WAS NUMBERED `M6` FOR TWO COMMITS AND THERE WAS ALREADY AN `M6`
+(REVIEW ROUND 2, BELOW). Renumbered at R3.** M6c three sections down records
+fixing exactly this — "two `## M4.` sections" — which is the correction being
+re-committed by the next commit after it. If you cited this section as M6
+between `5cf1feb3` and R3, it is M7.
 
 **REPORTED, NOT FIXED.** This is a baseline decision and the brief reserves it.
 
@@ -675,6 +766,41 @@ entry only when `failed_runs == 0`, which an entry already in the file can never
 reach. Driven directly rather than reasoned about: an all-pass run reports
 fiction and exits 1; one accept leaves 118 entries at `runs_observed: 12`; a
 second identical run reports fiction again; a second accept still leaves 118.
+
+**REPRODUCED INDEPENDENTLY AT R3, against a scratch COPY of the baseline file,
+and every figure above holds to the digit.** The committed file reads 118
+entries / 0 deterministic / `runs_observed: 11`, and **all 118 carry
+`failed_runs >= 1`**, which is the mechanical reason the `failed_runs == 0`
+prune can never fire on one of them. A synthetic all-pass run of exactly those
+118 names gives `RED (0 known / 0 new)` + `BASELINE IS FICTION`, exit **1**;
+accept #1 → 118 entries at `runs_observed: 12`, `(membership unchanged; counts
+updated)`; the identical run again → fiction, exit 1; accept #2 → 118 entries at
+`runs_observed: 13`. The real `scripts/gate-baseline.PlayheadFastTests.json` was
+not touched.
+
+**TWO THINGS THE ORIGINAL WRITE-UP DID NOT SAY, BOTH FOUND BY DRIVING IT.**
+
+* **Accepting to try to clear the fiction ARMS THE CRASHED-HOST CENSUS, and
+  that is not reversible by another accept.** The committed record is
+  `no_verdict: {runs_observed: 2, tests: {}}` — PROVISIONAL, so an unrecorded
+  casualty is named and not fatal. The first accept takes it to **3**, and the
+  accept says so out loud: `CENSUS RECORD ARMED: 3 observations recorded. From
+  this accept on, a test that loses its verdict and is NOT in the record fails
+  the gate.` The recorded census is EMPTY, so from that accept on **any** test
+  that loses its verdict fails the gate. That is the arm working as designed —
+  but it is a second, permanent consequence of an accept run for an unrelated
+  reason, and whoever signs the accept should be signing for it too.
+* **The `BASELINE IS FICTION` line prints a CONSTANT ZERO.** It renders
+  `len(self.known_failures)` — the baseline entries that failed THIS run — into
+  the sentence "the run had zero failures while **%d** are recorded as
+  known-broken", and `baseline_fiction` can only be true when `run.failures` is
+  empty, so `known_failures` is necessarily empty too. On the drive above, with
+  118 entries in the file, it printed `while 0 are recorded as known-broken`.
+  The quantity the sentence means is `len(entries)` = 118. **It is the standing
+  defect class, it is PRE-EXISTING on `18a7423c` (byte-identical there), and it
+  is deliberately NOT fixed on this branch** — `scripts/gate_baseline.py`'s only
+  change here is comment text (AST-identical to base) and this bead is not the
+  place to change the gate's behaviour. File it.
 
 **M4's serialized run escaped this by one test.** It had exactly one failure —
 `AnalyticsCounterStoreTests."The shared store is volatile under XCTest"` — and
@@ -881,3 +1007,75 @@ Rails: **80 tests over the two scripts (was 76), ~2.6 s, no build.** Nineteen
 mutants run at R2, eighteen killed with the predicted victim, one proven
 equivalent (`(\d+) tests? hit a RESOURCE` with `re.I` — it reads 27 on the real
 log, same as shipped), control survives.
+
+---
+
+## M8. REVIEW ROUND 3 (FINAL) — the withdrawal was exact in CODE and stale in PROSE
+
+R3's brief was the unreviewed tail: the withdrawal commits, the new probe suite,
+M3c and the new baseline-fiction section. It ran no build (forbidden) and no
+mutation battery; everything below is either driven, or read off two artefacts
+that pin each other.
+
+**WHAT IS CLEAN, verified rather than assumed.**
+
+* `git diff 18a7423c..HEAD -- Playhead/` is **empty**. The revert is exact.
+* **No orphan reference to the deleted type survives in any tracked file.**
+  `git grep -c SQLiteSystemErrno` is `.beads/issues.jsonl` 1, `project.pbxproj`
+  4, the new probe test 2, this file, and one comment block in
+  `gate_baseline.py`. The four pbxproj hits are the four the new test file needs
+  (`PBXBuildFile`, `PBXFileReference`, the group, the Sources phase) and the
+  whole pbxproj diff from base is exactly those four lines — the deleted
+  production file and the deleted old test file leave nothing behind, because
+  both were added and removed inside this branch. The only stale spellings on
+  disk are under `.derivedData/`, which is gitignored build cache.
+* `scripts/gate_baseline.py`'s change is **comment-only, proven mechanically**:
+  `ast.dump(ast.parse(base)) == ast.dump(ast.parse(head))` is True, which also
+  rules out a docstring edit. `scripts/mutation-battery-gate-baseline.py` was
+  **not touched at all on this branch** (`git log 18a7423c..HEAD --` on it is
+  empty) — if a brief says it had comment-only edits, that is the brief being
+  wrong, not a missing commit.
+* Rails: **497 tests green** — `test_gate_fd_paths` 57, `test_fd_ceiling_sweep`
+  23, `test_gate_baseline` **334**, `test_gate_memory_verdict` 36,
+  `test_disk_preflight` 47; two skips, both pre-existing and both stating that
+  the 7.2 MB source logs are not on this machine. `scripts/lint.sh` clean,
+  singleton-slot preflight clean (6 actor slots, all 6 allowlisted).
+* `b1c958ca`'s verification claim reproduces from the committed artefact:
+  `artifacts/scoped-revert.log` carries `Test run with 57 tests in 5 suites
+  passed after 0.637 seconds.` **and** `** TEST SUCCEEDED **`, both formats.
+
+**WHAT R3 FIXED, all of it prose, none of it code.** Every one is the same
+shape — the withdrawal was applied to the tree and not to the sentences about
+the tree:
+
+1. **M3b's third consequence bullet still shipped the capture.** "The call is
+   **kept anyway** … the two sites … now carry the field in every gate log",
+   in the present tense, three paragraphs above the section that withdrew it.
+   Rewritten as the argument that lost.
+2. **M3's `0 IS NOT AN ERRNO` still described a renderer that is deleted** ("the
+   reason the rendering says `(none recorded)`"). Marked as the requirement a
+   future capture would inherit.
+3. **Two `## M6.` sections.** The new baseline-fiction section is M7 now. M6c —
+   four sections down, in this same file — records R2 fixing "two `## M4.`
+   sections"; the next commit after it re-committed the identical defect.
+4. **M4 compared two trees, and now neither of them is HEAD's.** `c17fdc48` is
+   withdrawn, so run 2 carries 117 production lines that no longer exist and six
+   rails that are now four different ones. Recorded in place.
+5. **CLAUDE.md said Option C "is not in the tree" and gave 5.08x as its cost**,
+   and said the gate's one prose match survives "because `AnalysisStore` throws
+   `sqlite3_system_errno()` away" — i.e. as a TODO this bead has now closed in
+   the opposite direction. Both corrected there, with 10.56x and with the
+   platform finding. **If the `parallelizable` line does not ship, revert that
+   CLAUDE.md edit with it.**
+
+**WHAT R3 FOUND AND DID NOT FIX.** M3d above (the probe suite does not catch its
+own regression, plus the missing host-discriminates control) — both are Swift
+test edits and this round could not compile. The `BASELINE IS FICTION` line's
+constant zero — pre-existing on `18a7423c`, and a behaviour change to a script
+whose only change here is comment text. Both are written down where the next
+round will find them, with the exact fix, rather than left in a report.
+
+**VERDICT: the branch is coherent.** The production surface is
+`TestPlans/PlayheadFastTests.xctestplan` `+1` and nothing else; the four pbxproj
+lines and the new test file are its test-side surface; everything else is
+scripts, rails and this measurement record.
