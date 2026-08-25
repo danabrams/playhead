@@ -2296,6 +2296,31 @@ actor AnalysisStore {
     /// Shared failure tail: close the handle and reset `db` so a subsequent
     /// `ensureOpen()` retries from the top rather than reusing a handle
     /// whose initialisation threw.
+    /// playhead-882eg: return the SQLite descriptors NOW, without waiting for
+    /// deallocation.
+    ///
+    /// `deinit` closes correctly and is not the problem — the problem is that
+    /// deallocation does not happen. Measured on this bead: a `PlayheadRuntime`
+    /// deallocates every time and its service graph does not, so one open
+    /// connection to the app's real `analysis.sqlite` accumulates per runtime
+    /// ever constructed. A WAL connection is three descriptors, and the test
+    /// host reaches 93-99 % of `RLIMIT_NOFILE` soft 2560 and has lost its host
+    /// there; 179 of the 499 descriptors it still held after the last test
+    /// finished were on this one file.
+    ///
+    /// Idempotent, and deliberately NOT terminal: `didOpen` returns to `false`,
+    /// so the next call to any SQL surface re-opens through `ensureOpen()`
+    /// exactly as the first one did, schema ladder and all. That is what makes
+    /// it safe to call at an owner's teardown without auditing every reader —
+    /// a use-after-close reopens rather than misusing a stale handle.
+    func close() {
+        if let handle = db {
+            sqlite3_close_v2(handle)
+            db = nil
+        }
+        didOpen = false
+    }
+
     private func closeHandleAfterFailedOpen() {
         if let h = self.db {
             sqlite3_close_v2(h)

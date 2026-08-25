@@ -233,6 +233,13 @@ final class PlayheadRuntime {
     /// `episode_id_hash` values across the pair.
     let surfaceStatusLogger: SurfaceStatusInvariantLogger
 
+    /// playhead-882eg: the on-device ad catalog. It used to be a LOCAL in
+    /// `init`, handed to `SkipOrchestrator` and `AdDetectionService` and held
+    /// by nothing else the runtime could name — which is why nothing could
+    /// close it. 168 of the 499 descriptors the test host still held after a
+    /// full plan's last test were this file, 84 open connections to it.
+    let adCatalogStore: AdCatalogStore?
+
     /// playhead-4nt1: Live evaluator threaded into
     /// `EpisodeSurfaceStatusObserver` so its eligibility verdict
     /// surfaces the real `hardwareSupported` / `regionSupported`
@@ -1276,6 +1283,7 @@ final class PlayheadRuntime {
                 .warning("AdCatalogStore init failed — catalog disabled: \(error.localizedDescription, privacy: .public)")
             adCatalogStore = nil
         }
+        self.adCatalogStore = adCatalogStore
 
         // playhead-43ed / playhead-o4qr: build the per-show recurrence
         // service before SkipOrchestrator so both durable recurrence stores
@@ -4008,6 +4016,24 @@ final class PlayheadRuntime {
         // other. A two-object strong cycle between two hubs pins the whole
         // service graph, with no Task involved at all.
         await downloadManager.detachRuntimeInjectedDependencies()
+
+        // playhead-882eg: RELEASE THE DESCRIPTORS EXPLICITLY.
+        //
+        // Everything above frees the graph if the graph is freeable. Measured,
+        // it is not: with all four loops stopped, the bootstrap chain joined and
+        // the one stored-property cycle cut, 19 of 22 runtime-owned objects were
+        // still alive after the runtime itself had deallocated. Something in
+        // ~2,500 lines of init wiring holds them and this bead did not find it
+        // (filed separately, with the measurement).
+        //
+        // The descriptors do not have to wait for that. A file handle belongs to
+        // whoever opened it, and this is the moment its owner is finished with
+        // it — so the three stores are closed here rather than left to a
+        // deallocation that may never come. All three closes are IDEMPOTENT and
+        // NON-TERMINAL: each reopens on next use, so this cannot strand a reader.
+        await analysisStore.close()
+        await adCatalogStore?.close()
+        surfaceStatusLogger.close()
     }
 
     @MainActor
