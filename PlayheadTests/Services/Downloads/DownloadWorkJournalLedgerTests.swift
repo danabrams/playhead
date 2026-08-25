@@ -18,6 +18,19 @@
 // itself — the part no runtime test in this tree can see, because
 // `PlayheadRuntime.init` is unreachable from a unit test — is
 // `DownloadWorkJournalWiringSourceCanaryTests`.
+//
+// EVERY `@Test` DISPLAY NAME IN THIS FILE AND ITS MIGRATION SIBLING IS UNIQUE
+// ACROSS THE TREE, DELIBERATELY. Two instruments key on the display name and
+// nothing else — `gate_baseline.py`'s crashed-host census (CLAUDE.md names the
+// collision as a known blind spot) and `mutation-battery.sh`, which scores a
+// mutant by grepping the failing set for the expected name. A duplicate name
+// therefore lets one suite's test be credited for another's, which is this
+// repo's standing defect class arriving through a test title. Three names here
+// collided with `BackgroundDownloadDropsV62MigrationTests` /
+// `BackgroundDownloadDropLedgerTests` on the first draft — the neighbouring
+// suites this one is modelled on, which is exactly where collisions come from —
+// and were renamed. **The TREE still holds 59 such duplicates, measured; that
+// is playhead-4wk9 and not this bead.**
 
 import Foundation
 import Testing
@@ -162,7 +175,7 @@ struct DownloadWorkJournalLedgerTests {
     /// directory — the closest a unit test gets to "the app was killed and
     /// relaunched", and strictly stronger than reading back through the writer,
     /// which an in-memory cache would also satisfy.
-    @Test("the rows are on disk, not in memory — a second store on the same file reads them")
+    @Test("the download-journal rows are on disk, not in memory — a second store on the same file reads them")
     func theRowsSurviveTheProcessThatWroteThem() async throws {
         let (writer, dir) = try await Self.freshStore(prefix: "4xmzDurable")
         let recorder = AnalysisStoreDownloadWorkJournalRecorder(store: writer)
@@ -223,7 +236,7 @@ struct DownloadWorkJournalLedgerTests {
         #expect(try await store.fetchDownloadWorkJournal().rows.isEmpty)
     }
 
-    @Test("arming counts a launch, and a second launch counts again without moving firstArmedAt")
+    @Test("the download journal's arming counts a launch, and a second counts again without moving firstArmedAt")
     func armingCountsEachLaunch() async throws {
         let (store, _) = try await Self.freshStore(prefix: "4xmzArming")
         let recorder = AnalysisStoreDownloadWorkJournalRecorder(store: store)

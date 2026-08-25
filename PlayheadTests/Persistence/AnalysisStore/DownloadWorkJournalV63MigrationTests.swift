@@ -210,7 +210,7 @@ struct DownloadWorkJournalV63MigrationTests {
 
     // MARK: - 4. A fresh install lands on the same shape
 
-    @Test("a fresh store is at head with both tables and a seeded arming row")
+    @Test("a fresh store is at head with both DOWNLOAD-JOURNAL tables and a seeded arming row")
     func aFreshStoreIsAtHead() async throws {
         let (store, dir) = try await makeHeadStore(prefix: "V63Fresh")
         #expect(try await store.schemaVersion() == AnalysisStore.currentSchemaVersion)
@@ -227,7 +227,7 @@ struct DownloadWorkJournalV63MigrationTests {
     /// `createTables()` runs unconditionally on every open, which is what
     /// repairs it. Without this rail, removing the `createTables()` call is
     /// invisible to every runtime test in the tree.
-    @Test("a store STAMPED at head but missing the tables gets them back on the next open")
+    @Test("a store STAMPED at head but missing the DOWNLOAD-JOURNAL tables gets them back on the next open")
     func aStampedHeadStoreRepairsMissingTables() async throws {
         let (_, dir) = try await makeHeadStore(prefix: "V63StampedHead")
 
@@ -263,7 +263,7 @@ struct DownloadWorkJournalV63MigrationTests {
     /// tables and a working arming row while reading 38. The fixture is the V40
     /// and V62 suites', verbatim: two assets colliding on one fingerprint plus
     /// a trigger that aborts the delete V39 needs.
-    @Test("the tables exist BELOW the V39 rollback floor, so presence and not the stamp is the discriminator")
+    @Test("the DOWNLOAD-JOURNAL tables exist BELOW the V39 rollback floor, so presence and not the stamp is the discriminator")
     func theTablesExistBelowTheV39RollbackFloor() async throws {
         let (_, dir) = try await makeHeadStore(prefix: "V63BelowFloor")
 
