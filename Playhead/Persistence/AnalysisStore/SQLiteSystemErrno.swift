@@ -73,12 +73,44 @@ enum SQLiteSystemErrno {
     /// - Important: read this BEFORE `sqlite3_close_v2`. Closing the handle
     ///   discards the value.
     static func suffix(_ handle: OpaquePointer?) -> String {
-        guard let handle else { return " [sqlite3_system_errno: no handle]" }
-        let code = sqlite3_system_errno(handle)
-        guard code != 0 else { return " [sqlite3_system_errno=0 none recorded]" }
-        guard let name = name(of: code) else { return " [sqlite3_system_errno=\(code)]" }
-        return " [sqlite3_system_errno=\(code) \(name)]"
+        guard let handle else { return render(.noHandle) }
+        return render(.code(sqlite3_system_errno(handle)))
     }
+
+    /// What `suffix` found, so the RENDERING can be exercised without a live
+    /// SQLite handle carrying an arbitrary errno.
+    ///
+    /// This exists because the rail that matters most —
+    /// "appending the errno cannot change how the message classifies" — has to
+    /// try every code the table knows, and there is no way to make a real
+    /// handle report `EROFS` on demand. Written the obvious way, that rail
+    /// built the decorated string BY HAND and so proved a property of the test
+    /// file rather than of the shipped renderer: a `suffix` changed to splice
+    /// `strerror` prose in would have passed it (playhead-vk68m review).
+    enum Reading: Equatable {
+        case noHandle
+        case code(Int32)
+    }
+
+    /// The one place the rendering is written. Everything else calls this.
+    static func render(_ reading: Reading) -> String {
+        switch reading {
+        case .noHandle:
+            return "\(detailMarker): no handle]"
+        case .code(let code):
+            guard code != 0 else { return "\(detailMarker)=0 none recorded]" }
+            guard let name = name(of: code) else { return "\(detailMarker)=\(code)]" }
+            return "\(detailMarker)=\(code) \(name)]"
+        }
+    }
+
+    /// The opening of every rendering, and the token
+    /// ``AnalysisStoreHealthDetail/sanitize(_:)`` strips on.
+    ///
+    /// Shared rather than spelled twice: the strip and the renderer must agree
+    /// exactly, and a clause the strip cannot find deletes the whole `detail`
+    /// field rather than degrading it — see that function for why.
+    static let detailMarker = " [sqlite3_system_errno"
 
     /// The symbolic name for an errno, or nil when this table does not know it.
     ///

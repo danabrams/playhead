@@ -13,11 +13,21 @@
 //   the path itself IS a directory           -> rc 14, extended 14, errno 0
 //   control: a path that opens fine          -> rc  0, extended  0, errno 0
 //
-// The same three conditions against the MAC's `/usr/lib/libsqlite3.dylib`
-// (SQLite 3.54.0, the same version string the SDK reports) return 20 (ENOTDIR)
-// and 13 (EACCES). So the value exists on the host and not in the app, and
-// measuring the host library and reading the result as a claim about the app is
-// this repo's standing defect class — committed here first, corrected here.
+// Against the MAC's `/usr/lib/libsqlite3.dylib` the FIRST TWO of those return
+// 20 (ENOTDIR) and 13 (EACCES). Three things that sentence is careful about,
+// because an earlier draft was not: only two of the three conditions were run
+// on the Mac (the third Mac row in `artifacts/MEASUREMENTS.md` M3 is descriptor
+// EXHAUSTION, which is a different condition); `EISDIR` is what one would
+// EXPECT on the host for the third and it has never been measured there; and
+// both libraries report `sqlite3_libversion() == "3.54.0"` — MEASURED, printed
+// by this suite on every run rather than assumed, and it makes the finding
+// sharper rather than softer: the SAME version string answers the SAME two
+// conditions differently, so this is a build or configuration difference and
+// not a version skew anyone can wait out.
+//
+// So the value exists on the host and not in the app, and measuring the host
+// library and reading the result as a claim about the app is this repo's
+// standing defect class — committed here first, corrected here.
 //
 // WHY THE CALL IS KEPT ANYWAY. It costs one call, it renders 0 as
 // `none recorded` rather than as an errno, and it is now the thing that keeps
@@ -87,8 +97,12 @@ struct SQLiteSystemErrnoTests {
             let causes: [(String, String)] = [
                 ("parent is a FILE (ENOTDIR on the host)", blocker.appendingPathComponent("a.sqlite").path),
                 ("parent dir mode 000 (EACCES on the host)", noPerm.appendingPathComponent("a.sqlite").path),
-                ("the path IS a directory (EISDIR on the host)", asDirectory.path),
+                ("the path IS a directory (EISDIR expected on the host; NOT measured there)",
+                 asDirectory.path),
             ]
+            print("[enzva] simulator SQLite version: "
+                  + String(cString: sqlite3_libversion())
+                  + " (the Mac's /usr/lib/libsqlite3.dylib measured 3.54.0)")
             var messages: Set<String> = []
             for (label, path) in causes {
                 let opened = Self.rawOpen(path)
@@ -146,23 +160,72 @@ struct SQLiteSystemErrnoTests {
     /// descriptor problem as `.readOnly` and change what escalates toward the
     /// destructive prompt. So the renderer emits symbolic names only, and this
     /// proves it for every code the table knows.
+    /// Every rendering the shipped code can produce, for every code and for the
+    /// two handle-less cases. `SQLiteSystemErrno.render` is the SAME function
+    /// `suffix` calls, which is the point: an earlier version of this rail built
+    /// the decorated string by hand and therefore proved a property of this file
+    /// rather than of the renderer — a `suffix` changed to splice `strerror`
+    /// prose in would have passed it.
+    private static var everyRendering: [String] {
+        var all = [SQLiteSystemErrno.render(.noHandle)]
+        for code in Int32(0)...Int32(100) {
+            all.append(SQLiteSystemErrno.render(.code(code)))
+        }
+        return all
+    }
+
     @Test("appending the errno cannot change how the message classifies")
     func theSuffixIsInertToTheClassifier() {
         let base = "unable to open database file"
         #expect(AnalysisStoreFailureClass.classify(message: base) == .accessDenied)
-        for code in Int32(0)...Int32(100) {
-            guard let name = SQLiteSystemErrno.name(of: code) else { continue }
-            let decorated = "\(base) [sqlite3_system_errno=\(code) \(name)]"
+        for rendering in Self.everyRendering {
             #expect(
-                AnalysisStoreFailureClass.classify(message: decorated) == .accessDenied,
-                "\(name) changed the classification"
+                AnalysisStoreFailureClass.classify(message: base + rendering) == .accessDenied,
+                "\(rendering) changed the classification"
             )
         }
-        // and the two renderings that carry no name at all
-        #expect(AnalysisStoreFailureClass.classify(
-            message: base + SQLiteSystemErrno.suffix(nil)) == .accessDenied)
-        #expect(AnalysisStoreFailureClass.classify(
-            message: base + " [sqlite3_system_errno=0 none recorded]") == .accessDenied)
+        // and the renderer really is what `suffix` uses, so the loop above is
+        // about the shipped string rather than a copy of it
+        #expect(SQLiteSystemErrno.suffix(nil) == SQLiteSystemErrno.render(.noHandle))
+    }
+
+    /// THE REGRESSION THIS SUITE SHIPPED AND THE REVIEW CAUGHT.
+    ///
+    /// `AnalysisStoreHealthDetail.sanitize` admits a message only if EVERY
+    /// character is in `DiagnosticTextSanitizer.allowedCharacters`, which has no
+    /// `[`, `]`, `=` or `:`. Appending the errno therefore turned the durable
+    /// on-device `detail` field from `unable to open database file` into
+    /// **nothing at all**, for every store open and every migration failure —
+    /// silently, with `failureClass` unchanged so nothing else moved. The clause
+    /// is stripped now, exactly as ` (SQL: …)` already was.
+    @Test("the errno clause cannot delete the durable health `detail` field")
+    func theDurableDetailSurvivesTheSuffix() {
+        let base = "unable to open database file"
+        #expect(AnalysisStoreHealthDetail.sanitize(base) == base)
+        for rendering in Self.everyRendering {
+            #expect(
+                AnalysisStoreHealthDetail.sanitize(base + rendering) == base,
+                "\(rendering) changed what the durable record keeps"
+            )
+        }
+        // exec's real shape: message, errno clause, then the SQL tail
+        #expect(AnalysisStoreHealthDetail.sanitize(
+            base + SQLiteSystemErrno.render(.code(24)) + " (SQL: SELECT 1)") == base)
+        // A LONG message must be unaffected too, and the rail has to build one
+        // that sanitize accepts on its own. The obvious candidate — a real
+        // `UNIQUE constraint failed: table.column, table.column` — is REJECTED
+        // before the errno is anywhere near it, because `:` and `,` are not in
+        // the allowlist either; measured when this rail first went red. So the
+        // fixture is allowlist-clean by construction and sized just under the
+        // cap: the errno clause is ~38 characters against `maxLength` 96, so a
+        // strip that failed to match would reject on LENGTH rather than on a
+        // character — a different symptom, the same lost field.
+        let long = "unable to open database file " + String(repeating: "x", count: 60)
+        #expect(long.count == 89)
+        #expect(AnalysisStoreHealthDetail.sanitize(long) == long)
+        #expect(long.count + SQLiteSystemErrno.render(.code(9)).count > 96)
+        #expect(AnalysisStoreHealthDetail.sanitize(
+            long + SQLiteSystemErrno.render(.code(9))) == long)
     }
 
     /// The wiring, not the value: whatever the platform reports, a store open
