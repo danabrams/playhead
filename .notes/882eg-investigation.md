@@ -441,3 +441,50 @@ catalog's assertion was entered on the ANALYSIS store's observation, and
 `isOpen` is `db != nil` — what a never-opened store reports — so a catalog
 mutant could have "survived" for a reason that had nothing to do with the code.
 A mutant is only evidence about a rail that can fail.
+
+## M9 — MERGE GATE, the tree as committed (2026-08-25)
+
+Artifacts: `/Users/dabrams/playhead-gate-artifacts/882eg/merge/`. This is the
+first full-plan exercise of the rails as committed — the AFTER run in M5 was
+taken with the pre-load-robustness rails.
+
+```
+11,789 tests   270.9 s   ONE test-host pid (38825)   0 restarts   GATE_EXIT=65
+gate-baseline: RED (0 known / 1 NEW)
+gate-memory:   test host peak open fds 2238 of RLIMIT_NOFILE soft 2560 (87.4 %)
+2 issues in the whole run, one of which is a warning
+```
+
+* **0 RESOURCE failures, 0 NO VERDICT, 0 DID NOT RUN, 0 host restarts.**
+* The single NEW is `AnalyticsCounterStoreTests` — "The shared store is volatile
+  under XCTest" — which failed on the BEFORE run of this same branch as well, so
+  it is not this change's doing. It is playhead-vhffu's shape one layer along: a
+  simulator container shared across runs where one leaked
+  `UserDefaults.standard` write fails the assertion permanently.
+* **All four new rails and the canary PASSED under full-plan load**, which the
+  M5 run is not evidence for.
+
+**FLOOR 206 TOTAL descriptors**, flat for the last ten consecutive samples:
+`… 2205 2488 838 215 206 206 206 206 206 206 206`.
+
+| path family | BEFORE | MERGE GATE |
+|---|---|---|
+| production `analysis.sqlite` | 179 (89 db + 89 -wal + 1 -shm) | 81 (68 + 12 + 1) |
+| production `ad_catalog.sqlite` | 168 (84 + 83 + 1) | 61 (58 + 2 + 1) |
+| `Caches/Diagnostics/surface-status-*.jsonl` | 89 distinct files | **2** |
+| `Documents/bg-task-log.jsonl` | 8 | 7 |
+| `tmp/PlayheadTestScratch/*` | 39 | 39 |
+| SwiftData `Playhead.store` | 3 | 3 |
+| other / infrastructure | 13 | 13 |
+| **total** | **499** | **206** |
+
+**−293 descriptors, 59 %. 19.5 % of `RLIMIT_NOFILE` → 8.0 %.**
+
+**THE PEAK: SAY WHICH INSTRUMENT, BECAUSE THEY DISAGREE.** The gate's own
+sampler read **2,238** on this run against 2,474 on the BEFORE; the fd-paths
+watcher, sampling at the same 10 s interval but a different phase, read **2,488**
+against 2,454. Two instruments, one quantity, 250 apart — which is the honest
+statement about a transient that 10 s sampling cannot bound, and exactly the
+caveat playhead-s34ux attached to its own peak. **Do not quote a peak reduction
+from this pair.** What this bead moved is the FLOOR, and the floor is measured on
+ten flat samples rather than on one spike.
