@@ -40,12 +40,25 @@
 // WHERE IT IS WIRED, exactly, because "every denial" would overstate it:
 // `openSQLiteHandle` and `exec`. Those are the two sites playhead-s34ux
 // actually observed (`SQLite open failed (14): …` and `Migration failed: …`).
-// `prepare`, `step` and `nextRow` still reach the log as bare CANTOPEN prose,
-// and under exhaustion `sqlite3_step` can return CANTOPEN when SQLite opens a
-// -wal/-shm/temp file mid-statement. Adding them is three one-line changes and
-// is deliberately NOT done: on this platform the value is 0 at every site, so
-// it would buy three more consumer interactions to verify in exchange for no
-// information. Revisit if a platform ever populates the field.
+//
+// THE UNWIRED REMAINDER IS FIFTEEN SITES, NOT THREE — counted rather than
+// named, because the first version of this paragraph named the three HELPERS
+// and read that as the whole remainder (playhead-vk68m R2). `grep -c
+// sqlite3_errmsg AnalysisStore.swift` is 16: ONE is `openSQLiteHandle` above,
+// THREE are the `prepare` / `step` / `nextRow` helpers, and TWELVE are inline
+// `sqlite3_step` error paths that reach no helper at all and each throw a
+// `queryFailed(String(cString: sqlite3_errmsg(db)))` of their own. (`exec` is
+// the second WIRED site and is absent from that count — it reads
+// `sqlite3_exec`'s own `errMsg` rather than `sqlite3_errmsg`.) All fifteen
+// still reach the log as bare CANTOPEN prose, and under exhaustion
+// `sqlite3_step` can return CANTOPEN when SQLite opens a -wal/-shm/temp file
+// mid-statement.
+//
+// Wiring them is deliberately NOT done, and the corrected count does not move
+// that decision: on this platform the value is MEASURED to be 0 at every site,
+// so fifteen more one-line changes would buy fifteen more consumer
+// interactions to verify in exchange for no information. Revisit if a platform
+// ever populates the field.
 //
 // EBADF rather than EMFILE, above, is not a typo: measured in C on this box
 // (playhead-vk68m), fill the table to `RLIMIT_NOFILE` and the refusing

@@ -583,8 +583,21 @@ enum AnalysisStoreHealthDetail {
     /// spelling would push a long SQLite message over the cap and drop the
     /// field for a DIFFERENT reason. Stripping is the only remedy that is
     /// provably behaviour-preserving in both directions: the durable record is
-    /// byte-identical to what it held before the errno existed, and the errno
-    /// lives where it was always going to be read — the log line.
+    /// byte-identical to what it held before the errno existed.
+    ///
+    /// WHERE THE ERRNO IS ACTUALLY READ INSTEAD — an earlier version of this
+    /// paragraph said "the log line", and on a device there is no such line
+    /// (playhead-vk68m R2). It is read in the TEST-RUN console, where the
+    /// harness prints `Caught error: \(error)` — `String(describing:)`, i.e.
+    /// ``AnalysisStoreError``'s `description` — and that is exactly the
+    /// population `scripts/gate_baseline.py` parses for `playhead-s34ux`. It
+    /// does NOT reach the app's own os_log: `AnalysisStoreRecoveryCoordinator`
+    /// is the only place a store OPEN failure is logged on device and it
+    /// interpolates `error.localizedDescription`, while ``AnalysisStoreError``
+    /// conforms to `CustomStringConvertible` but NOT to `LocalizedError` — so
+    /// Foundation renders its placeholder and the message, errno and all, never
+    /// appears. Putting it in front of a device reader is a change to that
+    /// coordinator, and it is not made here.
     ///
     /// Note the ORDER. `AnalysisStore.exec` builds
     /// `msg + errnoClause + " (SQL: …)"`, so the SQL marker is found first and

@@ -36,10 +36,28 @@
 // appears. What it does NOT do is let `scripts/gate_baseline.py` retire its one
 // prose match — that is a standing limit on this platform, not a TODO.
 //
-// The assertions below deliberately pin the RENDERING, which is ours and is
-// platform-independent, and NOT the platform's answer — a rail asserting
-// `== 0` would go red on a device that behaves like the Mac, which is the good
-// outcome, reported as a failure.
+// THE SUITE HOLDS THREE KINDS OF RAIL, and an earlier version of this
+// paragraph said it held only the first (playhead-vk68m R2).
+//
+// FIVE pin the RENDERING, which is ours and is platform-independent —
+// `zeroIsNotAnErrno`, `aMissingHandleMakesNoClaim`, `unknownCodeKeepsTheFact`,
+// `theSuffixIsInertToTheClassifier`, `theDurableDetailSurvivesTheSuffix`. None
+// asserts what the platform reported, so none of them goes red on a platform
+// that starts reporting something.
+//
+// ONE is a MEASUREMENT rail — `thePlatformCannotTellThemApart` — and it DOES
+// pin the platform's answer: `rc == SQLITE_CANTOPEN`, one message for all
+// three causes, and the prose prefix. That is deliberate; it is the one place
+// the table above is re-taken rather than trusted. Read the consequence
+// honestly, though: on a platform that populates `sqlite3_extended_errcode`
+// (the Mac sets `SQLITE_CANTOPEN_ISDIR` and friends) the three causes stop
+// collapsing into one string and this rail goes RED for the GOOD outcome.
+// What it deliberately does NOT assert is `system_errno == 0` — the specific
+// over-pin that would make good news unreadable as anything else.
+//
+// ONE is a WIRING rail — `theStoreWiresItUp` — and it leans on the platform's
+// prose too (`contains("unable to open database file")`), for the same reason
+// and with the same failure direction.
 
 import Foundation
 import SQLite3
@@ -113,6 +131,15 @@ struct SQLiteSystemErrnoTests {
                 print("[enzva] \(label): rc=\(opened.rc) extended=\(extended) "
                       + "system_errno=\(sysErrno) msg=\(message)")
                 #expect(opened.rc == SQLITE_CANTOPEN, "\(label)")
+                // AND `suffix` must go through the shared renderer on the LIVE
+                // HANDLE branch — the branch that runs on every real failure.
+                // `theSuffixIsInertToTheClassifier` pins only `.noHandle`, and
+                // pinning only that leaves `suffix` free to splice `strerror`
+                // prose in here, which is the exact defect that rail exists to
+                // close, surviving in the half nobody was looking at
+                // (playhead-vk68m R2).
+                #expect(SQLiteSystemErrno.suffix(opened.handle)
+                        == SQLiteSystemErrno.render(.code(sysErrno)))
                 messages.insert("\(message)|\(extended)")
             }
             // The defect, stated as an assertion: three different bugs, one string.
@@ -132,6 +159,13 @@ struct SQLiteSystemErrnoTests {
             #expect(rendered.contains("none recorded"))
             // A bare `=0` with nothing after it would read as errno 0.
             #expect(!rendered.hasSuffix("=0]"))
+            // The success branch of `suffix` goes through `render` too. Stated
+            // as an equality rather than a `contains`, because a mutant that
+            // APPENDS to the rendering still contains everything the two
+            // assertions above look for.
+            let handle = try #require(opened.handle)
+            #expect(rendered
+                    == SQLiteSystemErrno.render(.code(sqlite3_system_errno(handle))))
         }
     }
 
