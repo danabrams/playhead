@@ -283,7 +283,9 @@
 //     same budget under a wedged daemon; and the failure COUNTING survives —
 //     a thrown migrate rolls `didOpen` back, so
 //     `AnalysisStoreRecoveryCoordinator.openAtLaunch` still runs, still fails,
-//     and still counts. Nobody has measured the ladder's cost on a device.
+//     and still counts. Nobody has measured the ladder's cost on a device —
+//     filed as playhead-16xkq together with L-6, because they are one
+//     measurement and one decision.
 //
 // L-6 THE FINALIZED WRITE IS A STORE WRITE INSIDE THE IN-FLIGHT RESERVATION,
 //     which is the cost playhead-7dgx declined to pay for an attempt counter
@@ -295,14 +297,16 @@
 //     `ensureOpen()`, which runs the whole migration ladder on first touch. It
 //     also postpones `touchAccess`, `deleteResumeData`, `evictIfNeeded` and the
 //     day-0 rediff seam `notifyBackgroundDownloadCompleted` by one store
-//     round-trip. Before this bead that await was a no-op.
+//     round-trip. Before this bead that await was a no-op. Filed as
+//     playhead-16xkq: the decision is Dan's, and the measurement comes first.
 //
 //     WHY IT IS PAID ANYWAY: the reservation is per-EPISODE, not global, so it
 //     delays a re-download of the same episode and nothing else; and moving the
 //     write into a detached task would re-open the hazard L-5's neighbour
 //     describes — the ownership re-check runs AFTER the await, so an unawaited
 //     write can outlive the deletion that revoked it. Nobody has measured the
-//     round-trip on a device.
+//     round-trip on a device; filed as playhead-16xkq, and the decision it
+//     carries is Dan's.
 //
 //
 // L-7 A CANCELLED FINALIZATION IS NOT ALWAYS A DELETED ARTIFACT, in two ways,
@@ -322,7 +326,10 @@
 //         the cache directory from a detached Task WITHOUT entering the
 //         `DownloadManager` actor, so nothing is retired and a `finalized` row
 //         can outlive its bytes. Routing it through `downloadManager` is an
-//         architecture change and is FILED rather than taken here.
+//         architecture change and is FILED as playhead-86sfq rather than taken
+//         here — read that bead before assuming the row is the only thing that
+//         path loses; it also skips the ownership bump, the transfer
+//         cancellation and three in-memory indexes.
 //
 
 import Foundation
