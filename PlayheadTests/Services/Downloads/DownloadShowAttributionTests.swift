@@ -14,6 +14,26 @@
 // written at all, and "podcastId is nil for an unattributed download" is
 // worthless if the assertion would hold for an attributed one too. Each rail
 // below drives BOTH arms through the same harness.
+//
+// playhead-et2d: EVERY `DownloadManager` HERE IS BUILT BY `makeManager`, which
+// injects `unsharedSessionIO()` and proves the queue it got is private. The
+// default `BackgroundSessionIO.shared` is a process-wide singleton with ONE
+// serial queue, and over 57 de-duplicated full-plan logs that coupling cost
+// this suite in both directions — blocked by `ForceQuitResumeTests` in 7 of
+// the 13 logs before playhead-7wia, and on 2026-08-23 parking the queue with
+// its own `kkzu-cleared` while twelve transfers drained late across three
+// suites and eleven tests failed. Seven of those twelve and seven of those
+// eleven are ITS OWN; the traffic it cost other people is five transfers and
+// four tests. ``unsharedSessionIO`` carries the whole
+// measurement, what a private queue does NOT buy, and why a green run in this
+// file is weak evidence that it worked.
+//
+// WHY THOSE FAILURES ARE RECORDED AS ASSERTIONS, which is what made the cause
+// unreadable from the baseline file: all three no-answer branches of
+// `backgroundDownload` DELETE the attribution sidecar, so this suite reads a
+// missing show and blames the code that writes it. Same reason `.neverAnswers`
+// (playhead-7wia's fix for the other three victims) cannot be reused here —
+// these tests need a genuinely ADMITTED transfer.
 
 import Foundation
 import Testing
@@ -23,6 +43,148 @@ import Testing
 struct DownloadShowAttributionTests {
 
     private static let showId = "https://feeds.example.com/diary.xml"
+
+    /// Builds this suite's `DownloadManager` and PROVES, before handing it
+    /// back, that it is not on the process-wide `BackgroundSessionIO` queue.
+    ///
+    /// playhead-et2d. The injection is the whole fix; without a rail, the only
+    /// thing between "every manager here has its own queue" and "one quietly
+    /// went back to `.shared`" is eight identical argument lists nobody
+    /// re-reads. Getting one wrong fails only under a full plan's concurrency,
+    /// and only when some suite parks the daemon — so it reads as this file's
+    /// defect and is not.
+    ///
+    /// TWO CHECKS, because the first cannot see the likeliest regression. It
+    /// compares ONE label against ONE constant, so a helper that MEMOIZES —
+    /// hands the same `BackgroundSessionIO`, hence the same serial queue, to
+    /// all eight managers — keeps a non-default label and stays green while the
+    /// suite is back in exactly the state this bead removed. "Memoize the
+    /// factory" is the ordinary shape of a future tidy-up, so the second check
+    /// asks the helper for another instance and requires a different label. It
+    /// costs one throwaway `BackgroundSessionIO` per manager, whose `init`
+    /// builds two dispatch queues, touches no daemon, and is released with the
+    /// expression.
+    ///
+    /// The label is a PROXY for queue identity, sound only in the safe
+    /// direction: `init` builds the queue FROM the label, so different labels
+    /// mean different queues, while two instances sharing a label still own two
+    /// queues. This check can cry wolf; it cannot miss a shared queue.
+    ///
+    /// A THIRD CHECK PINS THE BOUND, because the two headers assert it and
+    /// nothing enforced it: widening `unsharedSessionIO`'s `timeout` would
+    /// trade this suite's assertion failure for a time-limit failure — 7wia
+    /// measured that at 60 s these calls are still QUEUED — and no rail in the
+    /// tree would have reported it.
+    ///
+    /// A FOURTH CHECK PINS THE BEHAVIOUR, and it exists because this comment
+    /// used to say it could not. The withdrawn sentence read: "`behavior` is
+    /// NOT pinned and cannot be: `BackgroundSessionIO.Behavior` is not
+    /// `Equatable`, and the one observation that separates `.dedicatedThread`
+    /// from a refusing seam is a `perform`, which would make a real daemon
+    /// call from a helper." NOT `Equatable` rules out `==`; it does not make
+    /// an enum unobservable. `behavior` is a stored `let`
+    /// (`BackgroundSessionIO.swift:141`) and `if case .dedicatedThread =`
+    /// separates the production case from all three seams with no `perform`,
+    /// no queue submission and no daemon call. A rail left out on the strength
+    /// of an impossibility that is not one is the same shape as the bound the
+    /// paragraph above describes: asserted by two headers, enforced by nothing.
+    ///
+    /// WHAT IT CATCHES THAT NOTHING ELSE CAN. Mutant E3 (`.neverAnswers`) was
+    /// the evidence offered for leaving it out, and E3 cannot serve: it kills
+    /// through the ASSERTIONS, because a refused transfer deletes the sidecar,
+    /// so it reports the same seven victims with or without a rail. The mutant
+    /// that separates them is E12 —
+    /// `.refusesCallsLabelled("<a marker no call label contains>")`. `perform`
+    /// matches that marker with `label.contains(marker)`
+    /// (`BackgroundSessionIO.swift:240`), so it refuses NOTHING and is
+    /// behaviourally identical to `.dedicatedThread` on every call this suite
+    /// makes. It is invisible to the three checks above and to every
+    /// assertion in the file, and it SURVIVED the battery until this check
+    /// existed.
+    ///
+    /// STILL OPEN: (a) nothing enforces the `makeManager` route — mutant E10
+    /// measures that by bypassing it; (b) two calls through ONE manager's
+    /// `sessionIO` share one queue, which no mutant can measure because it is a
+    /// property of `DownloadManager.init` rather than a regression. Note (b)
+    /// is about `sessionIO` and not about the manager: `init` builds THREE
+    /// `BackgroundSessionIO`s, adding `enumerationIO` and `sessionCreationIO`
+    /// through `onItsOwnQueue`. Both take their labels FROM
+    /// `sessionIO.queueLabel`, so one injection privatises all three.
+    ///
+    /// `#function` is evaluated at the CALL SITE, so each manager's queue is
+    /// still labelled with the test that built it.
+    private func makeManager(
+        cacheDirectory dir: URL,
+        labelledFor test: String = #function,
+        sourceLocation: SourceLocation = #_sourceLocation
+    ) async -> DownloadManager {
+        let manager = DownloadManager(
+            cacheDirectory: dir,
+            sessionIO: unsharedSessionIO(labelledFor: test)
+        )
+        let io = await manager.sessionIO
+        #expect(
+            io.queueLabel != BackgroundSessionIO.defaultQueueLabel,
+            """
+            this manager is on the process-wide BackgroundSessionIO queue \
+            (\(io.queueLabel)) — so its downloadTask(with:) can be refused by \
+            any parked call in the plan AND can itself park that queue for \
+            every other suite on it, which is the coupling playhead-et2d \
+            removed. Both directions are measured over 57 full-plan logs: \
+            this suite was blocked by ForceQuitResumeTests in 7 of them, and \
+            on 2026-08-23 its own kkzu-cleared held the queue 65 s and eleven \
+            tests in three files failed
+            """,
+            sourceLocation: sourceLocation
+        )
+        #expect(
+            unsharedSessionIO(labelledFor: test).queueLabel != io.queueLabel,
+            """
+            unsharedSessionIO returned two instances with the SAME queue \
+            label (\(io.queueLabel)). Either it now MEMOIZES — one serial \
+            queue for all eight managers, the state playhead-et2d removed, \
+            invisible to the check above because the label is not the \
+            default — or its label stopped being unique per call, which gives \
+            two DISTINCT queues one name and is a false alarm this rail \
+            cannot tell apart. Only the first is the regression
+            """,
+            sourceLocation: sourceLocation
+        )
+        #expect(
+            io.timeout == BackgroundSessionIO.defaultTimeout,
+            """
+            unsharedSessionIO is no longer on the production bound \
+            (\(io.timeout)s vs \(BackgroundSessionIO.defaultTimeout)s). A \
+            widened bound is legitimate in a double that needs the daemon to \
+            answer under load (BackgroundDownloadDropLedgerTests.answeringIO), \
+            and it is wrong here: playhead-7wia measured that at 60 s these \
+            calls are still QUEUED, so widening trades this suite's assertion \
+            failure for a time-limit failure and hides the queue entirely
+            """,
+            sourceLocation: sourceLocation
+        )
+        let behaviourIsProduction: Bool
+        if case .dedicatedThread = io.behavior {
+            behaviourIsProduction = true
+        } else {
+            behaviourIsProduction = false
+        }
+        #expect(
+            behaviourIsProduction,
+            """
+            unsharedSessionIO is no longer on the production BEHAVIOUR. Every \
+            other case of BackgroundSessionIO.Behavior is a #if DEBUG test \
+            seam that refuses calls, and a seam whose marker matches no call \
+            label refuses nothing at all — so it reads exactly like \
+            .dedicatedThread here while making this helper a double of \
+            something other than production. The queue, the bound and the \
+            label checks above cannot see it, and neither can any assertion \
+            in this file
+            """,
+            sourceLocation: sourceLocation
+        )
+        return manager
+    }
 
     private func makeScheduler(store: AnalysisStore) -> AnalysisWorkScheduler {
         let speechService = SpeechService(recognizer: StubSpeechRecognizer())
@@ -95,7 +257,7 @@ struct DownloadShowAttributionTests {
         let dir = try makeTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
         let store = try await makeTestStore()
-        let manager = DownloadManager(cacheDirectory: dir)
+        let manager = await makeManager(cacheDirectory: dir)
         await manager.setAnalysisWorkScheduler(makeScheduler(store: store))
         try await manager.bootstrap()
 
@@ -126,17 +288,89 @@ struct DownloadShowAttributionTests {
         )
         #expect(attributedJob?.podcastId?.isEmpty == false)
 
-        // Contrast arm, same harness: an UNATTRIBUTED download still
-        // enqueues, and still records no show. Without this the rail above
-        // could pass on a harness that hard-codes a podcastId somewhere.
+        // Contrast arm, same harness: an UNATTRIBUTED context still enqueues,
+        // and still records no show. Without this the rail above could pass on
+        // a harness that hard-codes a podcastId somewhere.
+        //
+        // playhead-et2d: THE SIDECAR IS WRITTEN DIRECTLY, not through
+        // `backgroundDownload` — the idiom `forceQuitResumeRecoversTheShow`
+        // below already uses. WHAT THAT GIVES UP, stated rather than left to
+        // be discovered: this was the only place in the tree that drove an
+        // `.unattributed` context THROUGH `backgroundDownload` to the sidecar
+        // and back, so nothing now covers `backgroundDownload`'s own write of
+        // an unattributed record. It was never asserted coverage — mutant E8P
+        // proves it, surviving against the pre-bead file on a run that DID
+        // admit the transfer — but it was reachable, and it is not any more.
+        //
+        // This arm ASSERTS AN ABSENCE, and a refused
+        // transfer produces the same absence: all three no-answer branches
+        // delete the sidecar, and a completion that finds none defaults to
+        // `.unattributed(.resumeWithoutRecordedShow)`, byte-identical to the
+        // `isExplicitDownload: false` context this arm USED TO pass — see THE
+        // WRITTEN CONTEXT IS DELIBERATELY NOT THE FALLBACK below, which is
+        // why it passes `true` now and why the two are no longer identical.
+        // So `podcastId == nil` below used to read the
+        // same whether the download was admitted or never started — this
+        // repo's standing defect class, sitting inside the assertion.
+        //
+        // MEASURED, and it is why the arm moved off the daemon instead of
+        // getting a witness: over 57 de-duplicated full-plan logs, 2026-08-15
+        // … 08-24, `kkzu-unattributed`'s background download was NOT STARTED
+        // in 54 and was queued in 3, so a witness on the OLD arm would have
+        // failed 54 runs of 57. COUNT THE LINE YOU MEAN (r5b): 54 is
+        // `DownloadManager`'s own `Background download for kkzu-unattributed
+        // NOT started: the background transfer daemon did not answer`, and it
+        // partitions the 57 exactly against the 3 `Queued` runs. The
+        // `BackgroundSessionIO` EXPIRY line one layer down —
+        // `downloadTask(with:) … did not answer within 10.000000s` — appears
+        // in only 52, the other two having been severed by an xcodebuild
+        // splice that `gate_baseline.rejoin_spliced_lines` does not repair.
+        // Neither number is "refused": `.dedicatedThread` submits the call and
+        // reports an expiry, while "refused" is what the `.neverAnswers` /
+        // `.refusesCallsLabelled` seams do, and those emit a different line
+        // again. It was the eighth and last `downloadTask(with:)`
+        // this suite issued, a median 1.573 s after the other seven (mean
+        // 1.601, range 0.404–3.309, over the 51 logs carrying both anchors —
+        // anchor A the LAST of the seven siblings' `Queued background
+        // download` lines, anchor B this call's expiry timestamp MINUS the
+        // 10 s bound, i.e. its reconstructed submission; the two are
+        // asymmetric, A being a completion and B a submission, so read the
+        // figure as submission-minus-completion rather than as a gap between
+        // two submissions),
+        // by which time seven live transfers to a non-resolving host had
+        // `nsurlsessiond` busy — and those seven queue successfully in 56 of
+        // the 57. EVERY ONE OF THOSE 57 IS PRE-FIX, measured while this suite
+        // was on the SHARED queue; what the rate would be on a private queue
+        // is unmeasured, and ``unsharedSessionIO`` says why that is not
+        // knowable from these logs.
+        //
+        // THE WRITTEN CONTEXT IS DELIBERATELY NOT THE FALLBACK (review r5).
+        // Writing `isExplicitDownload: false` would have reproduced the
+        // defect one level up: the sidecar would then be byte-identical to
+        // `handleBackgroundDownloadComplete`'s own default, so `podcastId ==
+        // nil` below still could not tell "the completion READ the record"
+        // from "the completion ignored it and fell back". `true` makes the
+        // record observable — `AnalysisWorkScheduler.enqueue` computes
+        // `priority = userInitiated ? 20 : (isExplicitDownload ? 10 : 0)`, and
+        // no user intent is marked here — so the `priority == 10` expectation
+        // below fails if the fallback is what reached the scheduler. Without
+        // it this arm asserts only that a sidecar EXISTED.
         let unattributed = "kkzu-unattributed"
-        await manager.backgroundDownload(
+        await manager.persistDownloadAttribution(
             episodeId: unattributed,
-            from: URL(string: "https://cdn.example.com/\(unattributed).mp3")!,
             context: .unattributed(
                 reason: .resumeWithoutRecordedShow,
-                isExplicitDownload: false
+                isExplicitDownload: true
             )
+        )
+        #expect(
+            await manager.loadDownloadAttribution(episodeId: unattributed)
+                != nil,
+            """
+            the unattributed record was not written, so podcastId == nil \
+            below would be reporting a MISSING sidecar rather than a \
+            recorded absence of a show
+            """
         )
         let unattributedJob = try await completeBackgroundDownload(
             manager: manager, store: store,
@@ -147,6 +381,18 @@ struct DownloadShowAttributionTests {
             "the contrast arm must enqueue too, or it proves nothing"
         )
         #expect(unattributedJob?.podcastId == nil)
+        #expect(
+            unattributedJob?.priority == 10,
+            """
+            the enqueued job did not carry the isExplicitDownload:true this \
+            arm wrote to the sidecar (priority \
+            \(unattributedJob?.priority.description ?? "nil") vs 10), so the \
+            completion used its own .unattributed(.resumeWithoutRecordedShow, \
+            isExplicitDownload: false) fallback instead of reading the \
+            record. podcastId == nil above cannot see that, because the \
+            fallback's podcastId is nil too
+            """
+        )
     }
 
     // MARK: - R2: the attribution survives a process restart
@@ -164,7 +410,7 @@ struct DownloadShowAttributionTests {
         defer { try? FileManager.default.removeItem(at: dir) }
         let store = try await makeTestStore()
 
-        let queueing = DownloadManager(cacheDirectory: dir)
+        let queueing = await makeManager(cacheDirectory: dir)
         try await queueing.bootstrap()
         let episodeId = "kkzu-restart"
         await queueing.backgroundDownload(
@@ -176,7 +422,7 @@ struct DownloadShowAttributionTests {
         )
 
         // A brand-new manager: nothing carries over but the filesystem.
-        let relaunched = DownloadManager(cacheDirectory: dir)
+        let relaunched = await makeManager(cacheDirectory: dir)
         await relaunched.setAnalysisWorkScheduler(makeScheduler(store: store))
         try await relaunched.bootstrap()
         #expect(
@@ -208,7 +454,7 @@ struct DownloadShowAttributionTests {
         let dir = try makeTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
         let store = try await makeTestStore()
-        let manager = DownloadManager(cacheDirectory: dir)
+        let manager = await makeManager(cacheDirectory: dir)
         await manager.setAnalysisWorkScheduler(makeScheduler(store: store))
         try await manager.bootstrap()
 
@@ -247,7 +493,7 @@ struct DownloadShowAttributionTests {
     func resumeBlobDeletionPreservesAttribution() async throws {
         let dir = try makeTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
-        let manager = DownloadManager(cacheDirectory: dir)
+        let manager = await makeManager(cacheDirectory: dir)
         try await manager.bootstrap()
 
         let episodeId = "kkzu-suspended"
@@ -287,7 +533,7 @@ struct DownloadShowAttributionTests {
     func forceQuitResumeRecoversTheShow() async throws {
         let dir = try makeTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
-        let manager = DownloadManager(cacheDirectory: dir)
+        let manager = await makeManager(cacheDirectory: dir)
         try await manager.bootstrap()
 
         let episodeId = "kkzu-force-quit"
@@ -339,7 +585,7 @@ struct DownloadShowAttributionTests {
     func cancelReapsAttribution() async throws {
         let dir = try makeTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
-        let manager = DownloadManager(cacheDirectory: dir)
+        let manager = await makeManager(cacheDirectory: dir)
         try await manager.bootstrap()
 
         let episodeId = "kkzu-cancelled"
@@ -367,7 +613,7 @@ struct DownloadShowAttributionTests {
     func clearCacheReapsAttribution() async throws {
         let dir = try makeTempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
-        let manager = DownloadManager(cacheDirectory: dir)
+        let manager = await makeManager(cacheDirectory: dir)
         try await manager.bootstrap()
 
         let episodeId = "kkzu-cleared"
