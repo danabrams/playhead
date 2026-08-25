@@ -2275,14 +2275,9 @@ actor AnalysisStore {
         let flags = SQLITE_OPEN_CREATE | SQLITE_OPEN_READWRITE | SQLITE_OPEN_NOMUTEX
         let rc = sqlite3_open_v2(sqliteOpenPath, &handle, flags, nil)
         guard rc == SQLITE_OK, let handle else {
-            // playhead-enzva: read the OS errno BEFORE the close below — closing
-            // the handle discards it — and append it to the message. SQLITE_CANTOPEN
-            // says "unable to open database file" for ENOTDIR, EACCES and a full
-            // descriptor table alike, and only this call separates them.
             let msg = handle.flatMap { String(cString: sqlite3_errmsg($0)) } ?? "unknown"
-            let systemErrno = SQLiteSystemErrno.suffix(handle)
             if let handle { sqlite3_close_v2(handle) }
-            throw AnalysisStoreError.openFailed(code: rc, message: msg + systemErrno)
+            throw AnalysisStoreError.openFailed(code: rc, message: msg)
         }
         self.db = handle
 
@@ -23020,15 +23015,9 @@ actor AnalysisStore {
         var errMsg: UnsafeMutablePointer<CChar>?
         let rc = sqlite3_exec(db, sql, nil, nil, &errMsg)
         if rc != SQLITE_OK {
-            // playhead-enzva: the migration path reaches the log as
-            // `Migration failed: unable to open database file` just as often as
-            // the open path does — opening the database can succeed and creating
-            // its -wal sidecar still be refused — so it carries the errno too.
             let msg = errMsg.map { String(cString: $0) } ?? "unknown error"
             sqlite3_free(errMsg)
-            let systemErrno = SQLiteSystemErrno.suffix(db)
-            throw AnalysisStoreError.migrationFailed(
-                "\(msg)\(systemErrno) (SQL: \(sql.prefix(120)))")
+            throw AnalysisStoreError.migrationFailed("\(msg) (SQL: \(sql.prefix(120)))")
         }
     }
 

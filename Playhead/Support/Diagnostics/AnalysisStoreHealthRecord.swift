@@ -562,56 +562,18 @@ enum AnalysisStoreHealthDetail {
     /// string; far too short for prose.
     static let maxLength = 96
 
-    /// Drop `AnalysisStore.exec`'s ` (SQL: …)` suffix and
-    /// `SQLiteSystemErrno`'s ` [sqlite3_system_errno…]` clause, trim, and admit
+    /// Drop `AnalysisStore.exec`'s ` (SQL: …)` suffix, trim, and admit
     /// the remainder only if it passes the shared character allowlist.
     ///
     /// Rejection yields `nil` — the field is omitted, never
     /// truncated-and-kept. A truncated leak is still a leak, and
     /// `failureClass` already carries the diagnosis, so there is nothing
     /// to trade away by being strict here.
-    ///
-    /// THE ERRNO CLAUSE IS STRIPPED BECAUSE IT WOULD OTHERWISE DELETE THIS
-    /// FIELD ENTIRELY (playhead-vk68m review). `sqlite3_system_errno`'s
-    /// rendering contains `[`, `]` and `=` or `:`, none of which is in
-    /// ``DiagnosticTextSanitizer/allowedCharacters`` — so adding it to the
-    /// message turned `sanitize` from "admit `unable to open database file`"
-    /// into "return nil", silently, for **every** store open and migration
-    /// failure, which is the whole population `playhead-s34ux` and
-    /// `playhead-vk68m` exist to make readable from a device pull. It is also
-    /// ~38 characters against a ``maxLength`` of 96, so even an allowlist-clean
-    /// spelling would push a long SQLite message over the cap and drop the
-    /// field for a DIFFERENT reason. Stripping is the only remedy that is
-    /// provably behaviour-preserving in both directions: the durable record is
-    /// byte-identical to what it held before the errno existed.
-    ///
-    /// WHERE THE ERRNO IS ACTUALLY READ INSTEAD — an earlier version of this
-    /// paragraph said "the log line", and on a device there is no such line
-    /// (playhead-vk68m R2). It is read in the TEST-RUN console, where the
-    /// harness prints `Caught error: \(error)` — `String(describing:)`, i.e.
-    /// ``AnalysisStoreError``'s `description` — and that is exactly the
-    /// population `scripts/gate_baseline.py` parses for `playhead-s34ux`. It
-    /// does NOT reach the app's own os_log: `AnalysisStoreRecoveryCoordinator`
-    /// is the only place a store OPEN failure is logged on device and it
-    /// interpolates `error.localizedDescription`, while ``AnalysisStoreError``
-    /// conforms to `CustomStringConvertible` but NOT to `LocalizedError` — so
-    /// Foundation renders its placeholder and the message, errno and all, never
-    /// appears. Putting it in front of a device reader is a change to that
-    /// coordinator, and it is not made here.
-    ///
-    /// Note the ORDER. `AnalysisStore.exec` builds
-    /// `msg + errnoClause + " (SQL: …)"`, so the SQL marker is found first and
-    /// the errno clause is what remains to be removed. Both strips run
-    /// unconditionally and the length check happens after, so a message that
-    /// fitted before still fits.
     static func sanitize(_ raw: String?) -> String? {
         guard let raw else { return nil }
         var text = raw
         if let sqlMarker = text.range(of: " (SQL: ") {
             text = String(text[text.startIndex..<sqlMarker.lowerBound])
-        }
-        if let errnoMarker = text.range(of: SQLiteSystemErrno.detailMarker) {
-            text = String(text[text.startIndex..<errnoMarker.lowerBound])
         }
         text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard text.count <= maxLength, DiagnosticTextSanitizer.isAllowed(text) else {
