@@ -2,42 +2,37 @@ import Foundation
 import Testing
 @testable import Playhead
 
-/// playhead-882eg PROBE (temporary; not a rail yet).
+/// playhead-882eg PROBE (temporary measurement scaffolding).
 ///
 /// The test host holds a descriptor FLOOR of ~453 for the whole tail of every
-/// full-plan run, of which 163 are on the PRODUCTION `analysis.sqlite`, 153 on
-/// the production `ad_catalog.sqlite` and 81 on distinct
-/// `surface-status-*.jsonl` files. This probe asks the one question the fd
-/// dump cannot answer: WHICH object is retained — the `PlayheadRuntime`, or a
-/// store that outlives it?
-enum FDProbe {
-    /// Count open descriptors whose `F_GETPATH` contains `needle`.
-    static func count(containing needle: String) -> Int {
-        var found = 0
-        let table = Int32(getdtablesize())
-        var buf = [CChar](repeating: 0, count: Int(PATH_MAX))
-        for fd in 0..<table {
-            let rc = buf.withUnsafeMutableBufferPointer { p -> Int32 in
-                fcntl(fd, F_GETPATH, p.baseAddress)
-            }
-            guard rc != -1 else { continue }
-            let path = String(cString: buf)
-            if path.contains(needle) { found += 1 }
-        }
-        return found
+/// full-plan run — 163 on the PRODUCTION `analysis.sqlite`, 153 on the
+/// production `ad_catalog.sqlite`, 81 on distinct `surface-status-*.jsonl`
+/// files. The fd dump names the FILES; it cannot say which OBJECT holds them.
+/// `PlayheadRuntime` and its stores have different lifetimes — the stores are
+/// captured strongly by an uncancellable bootstrap `Task` and installed into
+/// long-lived service actors — so "the runtime is retained" and "the store is
+/// retained" are two different claims. This separates them.
+///
+/// Descriptor COUNTS are deliberately NOT taken here: Swift cannot call the
+/// variadic `fcntl`, and the by-path census belongs to `scripts/gate-fd-paths.py`
+/// running against the whole plan. What this file measures is OBJECT LIFETIME.
+private final class WeakBox<T: AnyObject> {
+    weak var value: T?
+    let label: String
+    init(_ value: T, _ label: String) {
+        self.value = value
+        self.label = label
     }
-
-    static func total() -> Int {
-        var found = 0
-        let table = Int32(getdtablesize())
-        for fd in 0..<table where fcntl(fd, F_GETFD) != -1 { found += 1 }
-        return found
-    }
+    var state: String { value == nil ? "released" : "RETAINED" }
 }
 
 @MainActor
 @Suite("playhead-882eg probe: what survives a dropped PlayheadRuntime", .serialized)
 struct RuntimeGraphRetentionProbeTests {
+    /// Suspend for real (so the main queue can idle and drain) rather than
+    /// spinning `Task.yield()`, which keeps the MainActor busy and starves the
+    /// very drain being waited on — the mistake `playhead-vsot` documents in
+    /// `RuntimeShutdownLifecycleTests`.
     private func drain(_ seconds: Double) async {
         let deadline = Date().addingTimeInterval(seconds)
         while Date() < deadline {
@@ -45,105 +40,81 @@ struct RuntimeGraphRetentionProbeTests {
         }
     }
 
+    private func report(_ name: String, _ boxes: [WeakBox<AnyObject>]) {
+        let body = boxes.map { "\($0.label)=\($0.state)" }.joined(separator: " ")
+        print("[882eg-probe] \(name) \(body)")
+    }
+
     @Test("preview runtime, no shutdown", .timeLimit(.minutes(2)))
     func previewNoShutdown() async throws {
-        let before = (
-            fds: FDProbe.total(),
-            analysis: FDProbe.count(containing: "AnalysisStore/analysis.sqlite"),
-            catalog: FDProbe.count(containing: "ad_catalog.sqlite"),
-            surface: FDProbe.count(containing: "surface-status-")
-        )
-        weak var weakRuntime: PlayheadRuntime?
-        weak var weakStore: AnalysisStore?
-        weak var weakSurface: SurfaceStatusInvariantLogger?
+        var boxes: [WeakBox<AnyObject>] = []
         await {
             let runtime = PlayheadRuntime(isPreviewRuntime: true)
-            weakRuntime = runtime
-            weakStore = runtime.analysisStore
-            weakSurface = runtime.surfaceStatusLogger
+            boxes = [
+                WeakBox<AnyObject>(runtime, "runtime"),
+                WeakBox<AnyObject>(runtime.analysisStore, "analysisStore"),
+                WeakBox<AnyObject>(runtime.surfaceStatusLogger, "surfaceLogger"),
+                WeakBox<AnyObject>(runtime.analysisWorkScheduler, "workScheduler"),
+                WeakBox<AnyObject>(runtime.analysisCoordinator, "analysisCoordinator"),
+                WeakBox<AnyObject>(runtime.entitlementManager, "entitlementManager")
+            ]
         }()
-        await drain(6)
-        let after = (
-            fds: FDProbe.total(),
-            analysis: FDProbe.count(containing: "AnalysisStore/analysis.sqlite"),
-            catalog: FDProbe.count(containing: "ad_catalog.sqlite"),
-            surface: FDProbe.count(containing: "surface-status-")
-        )
-        print("""
-        [882eg-probe] previewNoShutdown \
-        runtime=\(weakRuntime == nil ? "released" : "RETAINED") \
-        analysisStore=\(weakStore == nil ? "released" : "RETAINED") \
-        surfaceLogger=\(weakSurface == nil ? "released" : "RETAINED") \
-        fds \(before.fds)->\(after.fds) \
-        analysis \(before.analysis)->\(after.analysis) \
-        catalog \(before.catalog)->\(after.catalog) \
-        surface \(before.surface)->\(after.surface)
-        """)
+        await drain(8)
+        report("previewNoShutdown", boxes)
     }
 
     @Test("preview runtime, WITH shutdown", .timeLimit(.minutes(2)))
     func previewWithShutdown() async throws {
-        let before = (
-            fds: FDProbe.total(),
-            analysis: FDProbe.count(containing: "AnalysisStore/analysis.sqlite"),
-            catalog: FDProbe.count(containing: "ad_catalog.sqlite"),
-            surface: FDProbe.count(containing: "surface-status-")
-        )
-        weak var weakRuntime: PlayheadRuntime?
-        weak var weakStore: AnalysisStore?
-        weak var weakSurface: SurfaceStatusInvariantLogger?
+        var boxes: [WeakBox<AnyObject>] = []
         await {
             let runtime = PlayheadRuntime(isPreviewRuntime: true)
-            weakRuntime = runtime
-            weakStore = runtime.analysisStore
-            weakSurface = runtime.surfaceStatusLogger
+            boxes = [
+                WeakBox<AnyObject>(runtime, "runtime"),
+                WeakBox<AnyObject>(runtime.analysisStore, "analysisStore"),
+                WeakBox<AnyObject>(runtime.surfaceStatusLogger, "surfaceLogger"),
+                WeakBox<AnyObject>(runtime.analysisWorkScheduler, "workScheduler"),
+                WeakBox<AnyObject>(runtime.analysisCoordinator, "analysisCoordinator"),
+                WeakBox<AnyObject>(runtime.entitlementManager, "entitlementManager")
+            ]
             await runtime.shutdown()
         }()
-        await drain(6)
-        let after = (
-            fds: FDProbe.total(),
-            analysis: FDProbe.count(containing: "AnalysisStore/analysis.sqlite"),
-            catalog: FDProbe.count(containing: "ad_catalog.sqlite"),
-            surface: FDProbe.count(containing: "surface-status-")
-        )
-        print("""
-        [882eg-probe] previewWithShutdown \
-        runtime=\(weakRuntime == nil ? "released" : "RETAINED") \
-        analysisStore=\(weakStore == nil ? "released" : "RETAINED") \
-        surfaceLogger=\(weakSurface == nil ? "released" : "RETAINED") \
-        fds \(before.fds)->\(after.fds) \
-        analysis \(before.analysis)->\(after.analysis) \
-        catalog \(before.catalog)->\(after.catalog) \
-        surface \(before.surface)->\(after.surface)
-        """)
+        await drain(8)
+        report("previewWithShutdown", boxes)
     }
 
-    @Test("five preview runtimes in a row", .timeLimit(.minutes(3)))
+    @Test("non-preview runtime, WITH shutdown", .timeLimit(.minutes(2)))
+    func nonPreviewWithShutdown() async throws {
+        var boxes: [WeakBox<AnyObject>] = []
+        await {
+            let runtime = PlayheadRuntime(isPreviewRuntime: false)
+            boxes = [
+                WeakBox<AnyObject>(runtime, "runtime"),
+                WeakBox<AnyObject>(runtime.analysisStore, "analysisStore"),
+                WeakBox<AnyObject>(runtime.surfaceStatusLogger, "surfaceLogger"),
+                WeakBox<AnyObject>(runtime.analysisWorkScheduler, "workScheduler"),
+                WeakBox<AnyObject>(runtime.analysisCoordinator, "analysisCoordinator"),
+                WeakBox<AnyObject>(runtime.entitlementManager, "entitlementManager")
+            ]
+            await runtime.shutdown()
+        }()
+        await drain(8)
+        report("nonPreviewWithShutdown", boxes)
+    }
+
+    @Test("five preview runtimes, none shut down", .timeLimit(.minutes(3)))
     func fivePreviewRuntimes() async throws {
-        let before = (
-            fds: FDProbe.total(),
-            analysis: FDProbe.count(containing: "AnalysisStore/analysis.sqlite"),
-            catalog: FDProbe.count(containing: "ad_catalog.sqlite"),
-            surface: FDProbe.count(containing: "surface-status-")
-        )
-        for _ in 0..<5 {
+        var runtimes: [WeakBox<AnyObject>] = []
+        var stores: [WeakBox<AnyObject>] = []
+        for index in 0..<5 {
             await {
-                _ = PlayheadRuntime(isPreviewRuntime: true)
+                let runtime = PlayheadRuntime(isPreviewRuntime: true)
+                runtimes.append(WeakBox<AnyObject>(runtime, "r\(index)"))
+                stores.append(WeakBox<AnyObject>(runtime.analysisStore, "s\(index)"))
             }()
         }
-        await drain(8)
-        let after = (
-            fds: FDProbe.total(),
-            analysis: FDProbe.count(containing: "AnalysisStore/analysis.sqlite"),
-            catalog: FDProbe.count(containing: "ad_catalog.sqlite"),
-            surface: FDProbe.count(containing: "surface-status-")
-        )
-        print("""
-        [882eg-probe] fivePreviewRuntimes \
-        fds \(before.fds)->\(after.fds) \
-        analysis \(before.analysis)->\(after.analysis) \
-        catalog \(before.catalog)->\(after.catalog) \
-        surface \(before.surface)->\(after.surface)
-        """)
+        await drain(10)
+        let liveRuntimes = runtimes.filter { $0.value != nil }.count
+        let liveStores = stores.filter { $0.value != nil }.count
+        print("[882eg-probe] fivePreviewRuntimes liveRuntimes=\(liveRuntimes)/5 liveStores=\(liveStores)/5")
     }
 }
