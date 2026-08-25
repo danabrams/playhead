@@ -160,3 +160,61 @@ not 81.
 
 `shutdown()` is called from **nowhere in `Playhead/`** — it is a test-only
 teardown path today, which is what makes strengthening it safe.
+
+## M3 — BEFORE, full plan, this branch (2026-08-25)
+
+Artifacts: `/Users/dabrams/playhead-gate-artifacts/882eg/before2/`
+(`fullplan.log`, `fd-series.jsonl`, `last.json`, `peak.json`, `watcher.log`).
+Command: `scripts/gate-fd-paths.py --watch --interval 10 --deadline 90` started
+before `scripts/fast-gate.sh`, both under `PLAYHEAD_SIM_ID` so the trim applies
+(`simulator processes after trim: 97`).
+
+Run health: **11,789 tests, 267.3 s, ONE test-host pid (9302), 0 restarts,
+`** TEST FAILED **`, `GATE_EXIT=65`** — expected on a full plan. Baseline verdict
+`RED (0 known / 1 NEW)`, 11 RESOURCE FAILURES (descriptor denials, vk68m's), 1
+DID NOT RUN behind one of those. Peak fds **2,474 / 2,560 = 96.6 %**.
+
+An earlier attempt (`before/`) is **VOID** and kept as evidence for a different
+reason: it LOST ITS HOST (5693 → 6523, `Restarting after unexpected exit`,
+12,214 started / 9,422 finished) at a peak of **2,460** descriptors — the
+correlation playhead-vk68m named as a lead, observed again.
+
+**The FLOOR is 499 TOTAL descriptors** (`PROC_PIDLISTFDS` totals — the same
+column as the peak and as `testhost_fds`; not a vnode count), flat for the last
+**six consecutive samples** (60 s) on a host that never restarted. Series tail:
+`… 2161 2314 2454 1653 612 502 499 499 499 499 499 499`.
+
+```
+   179  production .../Application Support/Playhead/AnalysisStore/analysis.sqlite   (89 db + 89 -wal + 1 -shm, 3 distinct paths)
+   168  production .../Application Support/AdCatalog/ad_catalog.sqlite              (84 + 83 + 1, 3 distinct paths)
+    89  Library/Caches/Diagnostics/surface-status-*.jsonl                           (89 DISTINCT files)
+     8  Documents/bg-task-log.jsonl                                                 (ONE file, 8 descriptors)
+    39  tmp/PlayheadTestScratch/*                                                   (39 distinct)
+     3  Library/Application Support/Playhead.store  (SwiftData, db + -wal + -shm)
+    13  other / infrastructure
+   ---
+   499
+```
+
+**499 rather than the bead's 453, and the difference is the measurement's own
+weight.** The bead read 81 runtimes; this reads **89**, and this branch adds
+exactly **8 runtime constructions** — the probe suite's 1 + 1 + 1 + 5. So the
+floor really is ~5 descriptors per constructed runtime, and the probe raised it
+by the predicted amount. That is a stronger corroboration of the per-runtime
+arithmetic than the original count was, and it is also the warning: **the probe
+must not ship as-is.**
+
+Peak dump, for the contrast that says which half is which: at 2,454 the same
+host held **2,196 descriptors on 2,195 DISTINCT `PlayheadTestScratch` paths**
+and only 51 + 43 on the two production stores. The PEAK is scratch-store
+concurrency (playhead-vk68m's problem); the FLOOR is retained production stores
+(this bead's).
+
+Noted, not chased: the run reports one NEW failure,
+`AnalyticsCounterStoreTests.sharedStoreIsTestIsolated` ("The shared store is
+volatile under XCTest"), which asserts `UserDefaults.standard` has no
+`playhead.analytics.aggregate.v1`. The simulator container is shared across
+runs, so a single leftover write fails it permanently — the same shape as this
+bead's second concern, one layer along. Whether this branch caused it is
+answerable by whether it reproduces on the AFTER run; it is not in the committed
+baseline and the baseline is not mine to touch.
