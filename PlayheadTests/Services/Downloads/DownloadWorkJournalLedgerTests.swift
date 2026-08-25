@@ -14,7 +14,10 @@
 //
 // What these rails assert instead is that the PRODUCTION conformer puts a row
 // on DISK, that the row says what happened, and that the three states a device
-// pull must tell apart are all reachable and distinguishable. The wiring
+// pull must tell apart are all reachable and distinguishable. (How MANY there
+// are is deliberately not stated here or anywhere but the ledger header's list —
+// see the note on `installedButNeverArmedIsItsOwnState`. This line said THREE
+// for five review rounds.) The wiring
 // itself — the part no runtime test in this tree can see, because
 // `PlayheadRuntime.init` is unreachable from a unit test — is
 // `DownloadWorkJournalWiringSourceCanaryTests`.
@@ -37,17 +40,20 @@
 // `BackgroundDownloadDropLedgerTests` on the first draft — the neighbouring
 // suites this one is modelled on, which is exactly where collisions come from —
 // and were renamed. **The tree still holds duplicates, and there are two
-// different counts, MEASURED at base `64078664` and re-measured at review 2
-// after this branch's renames — say which you mean:**
+// different counts — say which you mean:**
 //
-//     names appearing in MORE THAN ONE FILE   base 56  ->  this branch 56
-//     names occurring more than once at all   base 64  ->  this branch 64
+//     names appearing in MORE THAN ONE FILE   base 55  ->  this branch 55
+//     names occurring more than once at all   base 63  ->  this branch 63
 //
-// (An earlier version of this paragraph said 59/56, taking the pre-rename
-// figure as the base — it was measured on THIS BRANCH before the renames, not
-// on base, so it counted this branch's own three collisions as pre-existing.
-// The base numbers are 56 and 64, and the branch returns to them.) That is
-// playhead-0dsti and not this bead.**
+// **MEASURE THEM WITH A PARSER THAT HANDLES `@Test("""`.** A naive
+// `@Test("…")` regex collapses the tree's 30 triple-quoted display names into
+// one empty key and reports 56/64 — which is what this paragraph said for two
+// rounds, and what playhead-0dsti's title said until review 7 corrected it. An
+// even earlier version said 59/56, taking a figure measured on THIS BRANCH
+// before its own renames and quoting it as the base. Three values for one
+// quantity, and the third is not obviously the last — which is why the
+// CONCLUSION is the thing to carry: this branch adds none, under every parse.
+// That is playhead-0dsti and not this bead.**
 
 import Foundation
 import Testing

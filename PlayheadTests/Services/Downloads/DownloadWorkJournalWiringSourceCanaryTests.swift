@@ -326,6 +326,73 @@ final class DownloadWorkJournalWiringSourceCanaryTests: XCTestCase {
         )
     }
 
+    /// THE SAFETY ARGUMENT ROUND 6 ADDED, PINNED RATHER THAN ASSERTED.
+    ///
+    /// `evictIfNeeded` unlinks a completed episode's audio and its pin and
+    /// enters no retire, so the delete-vs-finalization race is closed there by
+    /// something else entirely: it SKIPS `bgInFlightEpisodes`, and
+    /// `finishBackgroundTransfer` — which removes the episode from that set —
+    /// runs AFTER `await journalTask.value`. Both halves are properties of
+    /// other functions.
+    ///
+    /// Round 5's whole fix for the previous wrong version of this claim was to
+    /// make this file count call sites so "the next reader gets a number rather
+    /// than a sentence"; round 6 then added a new population claim to the same
+    /// file AS A SENTENCE, and round 7 found it unpinned. This is the number.
+    func testEvictionCannotRaceAJournalFinalization() throws {
+        let manager = try code(Self.managerPath)
+        let production = try Self.productionSources()
+        let evictSites = production.values.reduce(0) { total, source in
+            total + SwiftSourceInspector.regexOccurrences(
+                of: #"(?<!func )\bevictIfNeeded\s*\("#, in: source
+            )
+        }
+        XCTAssertEqual(
+            evictSites, 3,
+            "playhead-4xmz: THREE production eviction sites — foreground completion, "
+            + "streaming completion, and the background deposit. A fourth is a fourth place "
+            + "a completed artifact is unlinked without retiring a journal finalization, and "
+            + "limit L-7 has to name it."
+        )
+        let evictBody = try XCTUnwrap(
+            SwiftSourceInspector.firstBody(in: manager, after: "func evictIfNeeded() async throws"),
+            "could not isolate evictIfNeeded's body — this canary's anchor has drifted"
+        )
+        XCTAssertGreaterThanOrEqual(
+            SwiftSourceInspector.regexOccurrences(
+                of: #"\bbgInFlightEpisodes\b"#, in: evictBody
+            ),
+            1,
+            "playhead-4xmz: eviction must skip episodes whose background transfer is still "
+            + "in flight. That skip is the ONLY thing standing between an LRU eviction and a "
+            + "`finalized` row written for bytes it just unlinked."
+        )
+
+        // …AND THE ORDER THAT MAKES THE SKIP MEAN ANYTHING. The episode leaves
+        // `bgInFlightEpisodes` in `finishBackgroundTransfer`; if that ran
+        // BEFORE the journal await, the protection would end while the write
+        // was still in flight. Source order is the only place this is visible.
+        let completeBody = try XCTUnwrap(
+            SwiftSourceInspector.firstBody(
+                in: manager, after: "func handleBackgroundDownloadComplete("
+            ),
+            "could not isolate handleBackgroundDownloadComplete's body — anchor drifted"
+        )
+        let awaitIndex = try XCTUnwrap(
+            completeBody.range(of: "await journalTask.value")?.lowerBound,
+            "could not find the journal await"
+        )
+        let releaseIndex = try XCTUnwrap(
+            completeBody.range(
+                of: "finishBackgroundTransfer(", range: awaitIndex..<completeBody.endIndex
+            )?.lowerBound,
+            "playhead-4xmz: `finishBackgroundTransfer` must appear AFTER `await "
+            + "journalTask.value`. Before it, the episode leaves `bgInFlightEpisodes` while "
+            + "the journal write is still in flight and eviction stops skipping it."
+        )
+        XCTAssertTrue(releaseIndex > awaitIndex)
+    }
+
     // MARK: - 7. Not `work_journal`
 
     /// The reason this bead is not a one-line fix, pinned where the decision

@@ -323,10 +323,14 @@
 #   declared expectation was resolved through the `T_*` table and compared
 #   against the failing set its own batch produced. The only declared victim
 #   not observed is DW99's, which is the required outcome for a control.
-#   Collateral is present and expected (DW10/DW11/DW13 also redden the
-#   cross-rung V62/V40 ladder observers; DW09 also reddens the event-vocabulary
-#   canary) and cannot manufacture a kill, because the scorer requires the
-#   DECLARED set to fail.
+#   UNDECLARED COLLATERAL, re-derived mechanically rather than recalled — SIX
+#   mutants have it and the first version of this line named the wrong ones:
+#   DW11 41 (V42/V53/V55/V56/V57/V58/V60/H11/C6/R29/narl.2/fn0 — the whole
+#   "reaches head" population, not just the V62/V40 pair), DW10 16, DW13 6,
+#   DW23 2, DW20 1, DW35 1. DW09 has ZERO — its `testEveryEventTypeIsProducedBySomeSite`
+#   is DECLARED, and calling a declared victim collateral is the same defect
+#   this file exists to catch. None of it can manufacture a kill: the scorer
+#   requires the DECLARED set to fail.
 #
 #   FIVE OPERATIONAL FAULTS, none about a mutation, all worth knowing because
 #   four of them are this file's own guards doing their job:
@@ -3382,8 +3386,10 @@ T_7DGX_C6_FRESH="C6: fresh DB migrate() reaches currentSchemaVersion with all ex
 # one be credited for the other — a FALSE KILL, the one verdict shape that is
 # silent and looks exactly like success. Three of these collided with the
 # neighbouring 7dgx suites on their first draft and were renamed. (The tree
-# tree holds 56 names in more than one file and 64 occurring more than once,
-# measured at base AND on this branch — this branch adds none: playhead-0dsti.)
+# holds 55 names in more than one file and 63 occurring more than once,
+# measured at base AND on this branch with a parser that handles `@Test("""` —
+# the naive one collapses 30 triple-quoted names into one empty key and reports
+# 56/64. This branch adds none under either parse: playhead-0dsti.)
 T_DW_EVENTS="each of the four requirements appends a row carrying its event, cause and metadata"
 T_DW_REPEAT="a repeated failure for one episode is two rows, not one"
 T_DW_DURABLE="the download-journal rows are on disk, not in memory — a second store on the same file reads them"
@@ -3415,8 +3421,11 @@ T_DW_C_RETIRE="$DWC/testTheRetireChainIsDormantAndItsOneCallerWouldDelete"
 T_DW_DELETE_RACE="cache deletion during journal finalization revokes the stale finalized tail"
 T_DW_ARM_MISSING="a write failure on a store with NO arming row creates one WITHOUT inventing an arming"
 T_DW_ARM_CREATE="an arming on a store with NO arming row creates one and counts the launch"
-# THREE RAILS HERE DELIBERATELY HAVE NO MUTANT, and all three are stated rather
-# than left as gaps. (It said TWO while naming three, for a round.) `an unbounded limit returns everything instead of trapping`
+# FOUR RAILS HERE DELIBERATELY HAVE NO MUTANT, and all four are stated rather
+# than left as gaps — the fourth being `a V62-shaped store genuinely lacks both
+# tables`, a fixture property no production edit can redden. (This count said
+# TWO while naming three, then THREE while naming four. Count the sentences.)
+# `an unbounded download-journal limit returns everything instead of trapping`
 # guards a TRAP: its mutant kills the host, and this battery scores a test with
 # no verdict as a PASS (playhead-gjlp0), so the verdict would be about log
 # flushing rather than about the code. `the ANALYSIS recorder really would
