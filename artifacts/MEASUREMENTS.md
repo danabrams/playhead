@@ -506,7 +506,14 @@ by grouping the JSONL.
   `gone_since` variable covered both, so with the default `--deadline 0` a
   watcher started BEFORE the gate — the only order in which it can catch the
   ramp — exited on its second cycle having measured nothing and said nothing
-  about it.
+  about it. **Corroborated live while this review was running:**
+  `artifacts/run2/watcher.log` holds two interleaved invocations, and one of
+  them ends `gate-fd-paths: 0 samples` while the other reports 244. The two
+  wrote to one path at independent offsets, so the arguments of the invocation
+  that measured nothing are not recorded and this is corroboration rather than
+  proof — but a watcher exiting with zero samples on a run whose host held
+  descriptors for twenty minutes is the shape, and it happened on the shipped
+  code.
 * **The interloper `--peak` file was not a high-water file.** Every non-pinned
   sample was written straight over the scoped path, so a file whose own comment
   called it a high-water mark held that process's LAST sample. The standing
