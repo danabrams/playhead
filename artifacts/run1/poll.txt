@@ -1,0 +1,12 @@
+21:13:55 count 929 max_fd 2556 {'kqueue': 1, 'socket': 3, 'vnode': 925}
+21:14:12 count 468 max_fd 2556 {'kqueue': 1, 'socket': 3, 'vnode': 464}
+21:14:30 count 456 max_fd 2556 {'kqueue': 1, 'socket': 3, 'vnode': 452}
+21:14:49 count 456 max_fd 2556 {'kqueue': 1, 'socket': 3, 'vnode': 452}
+21:15:15 count 453 max_fd 2556 {'kqueue': 1, 'socket': 3, 'vnode': 449}
+21:15:38 count 453 max_fd 2556 {'kqueue': 1, 'socket': 3, 'vnode': 449}
+21:15:56 count 453 max_fd 2556 {'kqueue': 1, 'socket': 3, 'vnode': 449}
+21:16:12 count 453 max_fd 2556 {'kqueue': 1, 'socket': 3, 'vnode': 449}
+21:16:28 count 453 max_fd 2556 {'kqueue': 1, 'socket': 3, 'vnode': 449}
+21:16:43 count 453 max_fd 2556 {'kqueue': 1, 'socket': 3, 'vnode': 449}
+21:16:58 count 453 max_fd 2556 {'kqueue': 1, 'socket': 3, 'vnode': 449}
+21:17:13 count 453 max_fd 2556 {'kqueue': 1, 'socket': 3, 'vnode': 449}
