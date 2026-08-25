@@ -641,7 +641,7 @@ class PinDecisionRails(unittest.TestCase):
     def test_run1s_LEFTOVER_loses_the_pin_to_the_real_host(self):
         """The measured case: 62 samples of a 20-descriptor leftover first.
 
-        `artifacts/run1/full/sample-0001-00020.json.gz` .. `-0062-00020.json.gz`
+        `artifacts/run1/cited/sample-0001-00020.json.gz` .. `-0062-00020.json.gz`
         are all pid 58651 holding exactly twenty descriptors; the test host
         (71372) appears at sample 63 and climbs to 2,402. First-seen-wins would
         have written the leftover's twenty into `peak.json`.

@@ -2,6 +2,25 @@
 
 Written as each measurement lands, because an agent's context is not storage.
 
+## HOW TO READ THIS FILE
+
+**The section numbers are HISTORICAL — they were assigned as measurements landed,
+not in reading order — and they are not renumbered because other files and beads
+cite them.** Read in this order:
+
+| order | section | what it answers |
+|---|---|---|
+| 1 | **M0** | the PARALLEL-regime baseline every other number is compared against |
+| 2 | **M1a** | is the ~449-descriptor FLOOR reproducible? (five runs) |
+| 3 | **M1b** | WHAT the 449 are, by path — the bead's headline question |
+| 4 | **M2** | do runs that lose their host reach the ceiling? (contingency table) |
+| 5 | **M3** / **M3b** | can `sqlite3_system_errno` name the cause? (Mac: yes. App: no) |
+| 6 | **M3c** / **M3d** | the capture was shipped, withdrawn, and the withdrawal railed |
+| 7 | **M4** | OPTION A measured — parallel vs serialized, one line apart |
+| 8 | **M7** | the operational consequence of Option A, for Dan |
+| 9 | **M9** | the final merge gate |
+| — | **M5, M6, M8** | what review rounds 1-3 found, kept as the record of how |
+
 ---
 
 ## M0. THE PARALLEL-REGIME BASELINE — every number below was taken under it
@@ -333,7 +352,7 @@ simulator app satisfies it too. So after the host exited, `last.json` was
 rewritten with **twelve descriptors belonging to a different process** — a file
 named for this run's tail, holding something else's. The analysis above was
 taken from the correct sample while the host was alive, and the canonical dump
-is now recovered from the per-sample archive (`artifacts/run1/full/
+is now recovered from the per-sample archive (`artifacts/run1/cited/
 sample-0094-00453.json.gz`, pid 71372, count 453) and committed as
 `artifacts/run1/TAIL-453.json`; it reproduces the table above exactly. The
 watcher now PINS the first host it sees, reports `HOST CHANGED`, and writes any
@@ -891,6 +910,56 @@ papered over.
 
 ---
 
+## M9. THE FINAL MERGE GATE — the intervention, on the merged tree
+
+`scripts/fast-gate.sh`, `PlayheadFastTests` (serialized), iPhone 17 simulator,
+trimmed, 2026-08-25. Log preserved at
+`playhead-gate-artifacts/vk68m/vk68m-run3-MERGEGATE-serialized.log`.
+
+| | |
+|---|---|
+| Swift Testing | **`Test run with 11789 tests in 1442 suites passed after 2718.831 seconds`** |
+| xcodebuild | **`** TEST SUCCEEDED **`, exit 0** |
+| `Testing started completed` | **2,809.398 s** |
+| failures | **0** |
+| host restarts / `NO VERDICT` / RESOURCE casualties | **0 / 0 / 0** |
+| test-host peak open fds | **459 of `RLIMIT_NOFILE` soft 2,560 — 17.9 %**, no ceiling banner |
+| highest descriptor handed out (`max_fd`) | **466** |
+| tail FLOOR (median of 20 plateau samples) | **450 (447 vnode)** |
+| peak demand / swap | 12.9 GiB of 16.0 GiB / 1.7 GiB |
+| `gate-baseline` | **RED (0 known / 0 new)** + **`BASELINE IS FICTION`** → exit 65 |
+
+**Both formats read**, per the 2026-07-31 rule: Swift Testing says `passed` and
+xcodebuild says `** TEST SUCCEEDED **`. `RESOURCE FAILURE`, `NO VERDICT` and
+`Restarting after unexpected` appear **zero** times in 
+the whole log.
+
+**The RED is M7, arriving exactly as predicted and for the reason predicted.**
+A clean serialized full plan has zero failures and zero resource casualties
+against a 118-entry baseline, so `baseline_fiction` fires and the gate exits 65
+with nothing wrong. Note the banner's own text — `the run had zero failures
+while **0** are recorded as known-broken` — against a file holding 118: that is
+the pre-existing constant-zero defect, filed, and this run is the first time it
+has been printed where anyone would read it.
+
+**Three numbers worth putting beside M4's**, because this is a third full plan
+on a third tree and the agreement is the point:
+
+| | run 1 (parallel) | run 2 (serialized) | run 3 (serialized, merged) |
+|---|---|---|---|
+| fd peak | 2,439 = 95.3 % | 457 = 17.9 % | **459 = 17.9 %** |
+| tail floor, vnodes | 449 | 449 | **447** |
+| RESOURCE casualties | 27 | 0 | **0** |
+| Swift Testing phase | 252.8 s | 2,668.5 s | **2,718.8 s** |
+
+The floor is 447-449 vnodes across all three, in both regimes. The 2.0 % spread
+between the two serialized test phases is the load-sensitivity playhead-blsh
+already recorded for a serialized phase, and it is far smaller than the 673 s
+that bead saw — one more reason to quote **~46 minutes**, measured twice, rather
+than a multiplier.
+
+---
+
 ## M5. REVIEW ROUND 1 — what the instrument got wrong about ITSELF
 
 Six defects in the two scripts, found by driving them rather than by re-reading
@@ -1228,7 +1297,7 @@ the tree:
    platform finding. **If the `parallelizable` line does not ship, revert that
    CLAUDE.md edit with it.**
 
-**FOUR CLAIMS THAT ARE WRONG IN COMMIT MESSAGES ONLY, recorded here because a
+**5 CLAIMS THAT ARE WRONG IN COMMIT MESSAGES ONLY, recorded here because a
 commit message cannot be edited and this file is where the record lives.** Each
 was checked against the tree; in every case the ARTIFACT is already right, so
 nothing downstream moves.
@@ -1253,12 +1322,19 @@ nothing downstream moves.
   is the TAIL sample's highest, the run's is 2558, and `92c941f9` corrected
   exactly that reading in M1b while the message stands.
 
-**WHAT R3 FOUND AND DID NOT FIX.** M3d above (the probe suite does not catch its
-own regression, plus the missing host-discriminates control) — both are Swift
-test edits and this round could not compile. The `BASELINE IS FICTION` line's
-constant zero — pre-existing on `18a7423c`, and a behaviour change to a script
-whose only change here is comment text. Both are written down where the next
-round will find them, with the exact fix, rather than left in a report.
+**WHAT R3 FOUND AND DID NOT FIX — AND WHAT HAPPENED TO IT SINCE.** R3 could not
+compile, so it wrote three things down rather than fixing them. Their status now:
+
+* **The probe suite did not catch its own regression** — FIXED, and
+  mutation-proved: see M3d. Re-applying the withdrawn capture now fails
+  `theStoreSurfacesTheProse` on both assertions, and the three platform rails
+  survive, exactly as predicted.
+* **The missing host-discriminates control** in `thePlatformCannotTellThemApart`
+  — still open, and FILED rather than left in prose (`playhead-ej1mt`).
+* **`BASELINE IS FICTION`'s constant zero** — pre-existing on `18a7423c`, out of
+  scope for a branch whose only `gate_baseline.py` change is comment text, and
+  FILED as `playhead-xk7el`. It printed `while 0 are recorded as known-broken` on this branch's own
+  merge gate against a 118-entry file, so it is no longer hypothetical.
 
 **VERDICT: the branch is coherent.** The production surface is
 `TestPlans/PlayheadFastTests.xctestplan` `+1` and nothing else; the four pbxproj

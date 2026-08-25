@@ -545,7 +545,7 @@ def pin_decision(pinned: int, high_water: dict[int, int], pid: int, count: int) 
     is measured in this bead's own archive rather than inferred: on run 1 the
     watcher was started before a cold build, and the first `/Playhead.app/`
     process it saw was a LEFTOVER holding exactly 20 descriptors, unchanged,
-    for 62 consecutive samples — `artifacts/run1/full/sample-0001-00020.json.gz`
+    for 62 consecutive samples — `artifacts/run1/cited/sample-0001-00020.json.gz`
     through `-0062-00020.json.gz`, all pid 58651 — while the real test host
     (pid 71372, peak 2,402) first appeared at sample 63. Pinned first-seen,
     `peak.json` for that run would have held the leftover's twenty.

@@ -67,12 +67,26 @@ import Testing
 @Suite("SQLITE_CANTOPEN carries no cause on this platform")
 struct SQLiteSystemErrnoPlatformProbeTests {
 
-    /// A scratch directory removed however the test leaves.
+    /// A scratch directory removed however the test leaves — through
+    /// `TestScratchReaper.forceRemove`, which is not decoration here.
+    ///
+    /// This suite deliberately creates a directory at mode `0o000` to provoke
+    /// `EACCES`, and playhead-cgka is the record of what that costs when a
+    /// removal is naive: `simctl erase` does not delete a device's data, it
+    /// MOVES it to `$TMPDIR/Deleting-<uuid>/` and reaps it asynchronously, and
+    /// the reaper dies on any directory it cannot READ — leaving the bytes
+    /// forever while the erase reports success. Seven orphaned devices had
+    /// accumulated 15 GiB that way, every one stuck on a single unreadable
+    /// test directory. `try? removeItem` fails with EACCES on exactly the
+    /// directory that needs repairing; `forceRemove` repairs permissions and
+    /// retries. Host deaths are routine on this box, so the `defer` that
+    /// restores the mode is not by itself enough.
     private static func withScratch<T>(_ body: (URL) throws -> T) throws -> T {
         let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("PlayheadTestScratch", isDirectory: true)
             .appendingPathComponent("enzva-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: dir) }
+        defer { TestScratchReaper.forceRemove(dir) }
         return try body(dir)
     }
 
@@ -170,9 +184,10 @@ struct SQLiteSystemErrnoPlatformProbeTests {
     @Test("AnalysisStore surfaces SQLite's prose unchanged")
     func theStoreSurfacesTheProse() async throws {
         let dir = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("PlayheadTestScratch", isDirectory: true)
             .appendingPathComponent("enzva-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: dir) }
+        defer { TestScratchReaper.forceRemove(dir) }
 
         let blocker = dir.appendingPathComponent("iAmAFile")
         try Data("x".utf8).write(to: blocker)

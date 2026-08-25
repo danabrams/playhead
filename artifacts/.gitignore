@@ -1,13 +1,26 @@
-# Full-plan logs are 14-17 MB each and are preserved outside the worktree
-# (/Users/dabrams/playhead-gate-artifacts/vk68m/) because the canonical bead-close
-# sequence removes this directory. The fd DUMPS are small and ARE committed —
-# they are the evidence for M1b and M4 and nothing else on disk carries them.
+# WHAT IS COMMITTED HERE, AND WHY IT IS NOT EVERYTHING (playhead-vk68m R4).
+#
+# Full-plan logs are 13-17 MB each and the per-sample descriptor dumps ran to
+# 345 files / 7 MiB, of which exactly ONE was ever cited. Committing them
+# established a second in-tree artifact convention competing with
+# ~/playhead-gate-artifacts/, which this repo already uses — so the bulk lives
+# there (`vk68m-run{1,2,3}-fd-samples.tar.gz`, and the three preserved gate
+# logs), and what is committed here is what the write-up actually reads:
+#
+#   * MEASUREMENTS.md            — the write-up itself
+#   * run*/summary.jsonl         — the per-sample time series every number
+#                                  in M1a/M4/M9 is derived from (small)
+#   * run*/last.json, peak.json  — the tail and peak snapshots
+#   * run1/TAIL-453.json         — the dump M1b's table decomposes, in full
+#   * run1/cited/               — the three individual samples cited BY NAME
+#                                  in source or prose (0001 and 0062 bound the
+#                                  leftover-app span in pin_decision's
+#                                  docstring; 0094 is the tail)
+#   * fd-ceiling-sweep.csv       — M2's table, regenerable by the sweep
+#
+# The rest is reproducible from the archives, and `git worktree remove` is why
+# they live outside the worktree at all: the canonical bead-close sequence
+# deletes this directory.
 *.log
 wait*.txt
-
-# EXCEPT the watcher logs, which are ~100 bytes and are CITED EVIDENCE:
-# artifacts/run2/watcher.log is the whole basis of the never-seen/gone finding
-# in M5b (two interleaved invocations, one ending `0 samples`). A gitignored
-# witness for a committed claim dies with the worktree, which is the failure
-# this file's first paragraph exists to prevent.
-!**/watcher.log
+run*/full/
