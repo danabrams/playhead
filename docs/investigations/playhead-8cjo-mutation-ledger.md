@@ -135,3 +135,42 @@ alone: the batch's own xcodebuild log (kept under
 actually RAN, i.e. a Swift Testing summary line with a test count in the tens.
 If the control ever dies, every KILLED above it is void, because they would all
 have been scored against a tree that fails for a reason unrelated to the mutant.
+
+## AK17 — the bypass a reviewer DEMONSTRATED, and why AK11 cannot settle it
+
+Review produced working code that reintroduces this bead's defect and passes
+every assertion of the delegation canary as first written. The canary forbade
+the literal `queue.enqueue(`; the bypass renames the parameter:
+
+    func observeBanners(from: …, into bannerQueue: AdBannerQueue, …)
+        …
+        bannerQueue.enqueue(item, hostGeneration: hostGeneration)
+
+`bannerQueue.enqueue(` contains `Queue.enqueue(` with a CAPITAL Q, so the
+lowercase forbidden substring does not match. One character of case is the
+entire bypass. The auto tier is then never acknowledged, every receipt becomes a
+permanent row for cards that WERE shown, and every behavioural suite stays green
+because they drive `BannerHostDelivery.forward` directly.
+
+**AK11 cannot prove the fix for this, and that is the part worth recording.**
+AK11's replacement body keeps the parameter named `queue`, so it is killed by
+exactly the substring the bypass renames. A canary strengthened against the
+bypass would report green under AK11 without ever exercising the property it now
+guards — a LOST rail rather than a passing one, which is the same shape as the
+previous bead's `FD06` v1 (an edit that removed the check instead of
+reintroducing the defect, scored as a survivor and re-aimed).
+
+So the canary is scoped to `observeBanners`' own brace-balanced body and forbids
+`.enqueue(` on the SELECTOR, and **AK17 re-creates the bypass verbatim, rename
+included**. The two mutants are kept distinct because their victim sets differ,
+and the difference IS the strengthening:
+
+| mutant | body keeps a `forward(` call? | predicted victims |
+|---|---|---|
+| AK11 | no — the whole call is replaced | DELEGATES **and** NOCOPY |
+| AK17 | yes, in an `else` branch for retirements | **NOCOPY only** |
+
+If AK17 SURVIVES, the strengthening is not real and that is the finding to
+report rather than a green row. The most likely way it survives is a brace scan
+that starts at the wrong `{` and returns the whole file — which would re-create
+the file-wide check under a new name and pass for the same wrong reason.
