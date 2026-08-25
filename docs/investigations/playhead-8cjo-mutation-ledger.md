@@ -499,3 +499,55 @@ VERIFY: (playhead-2d6i's own MS99 run) sits in /private/tmp to this day, and
 VERIFY: reading it as today's control is the exact substitution this bead is about.
 exit=1
 ```
+
+## The fix round — AK13–AK18, and the one that earned its keep
+
+Run after review's findings landed, one mutant per invocation as before.
+
+| mutant | predicted | observed | verdict |
+|---|---|---|---|
+| AK13 the delivered-record removal at the write site | REANNOUNCE (1) | **REANNOUNCE, exactly** | KILLED |
+| AK14 the retire arm of the forwarding rule | RETIRE (1) | **RETIRE, exactly** | KILLED |
+| AK15 the suggest acknowledgement deleted | SUGGEST, ACKAUTO (2) | **ACKAUTO only** | **SURVIVED** → re-aimed → KILLED |
+| AK16 a `default:` arm on the tier switch | EXHAUSTIVE (1) | **EXHAUSTIVE, exactly** | KILLED |
+| **AK17 the demonstrated bypass, rename included** | **NOCOPY only** | **NOCOPY, exactly** | **KILLED** |
+| AK11 re-run against the strengthened canary | DELEGATES, NOCOPY (2) | **the same 2** | KILLED |
+| AK18 the suggest ack escapes the guard | SUGGEST, GUARD (2) | **the same 2** | KILLED |
+| AK99 control, on the FIXED tree | MUST SURVIVE | 0 failures | **SURVIVED** |
+
+### AK17 settles the question it was written for
+
+`AK11 -> {DELEGATES, NOCOPY}` and `AK17 -> {NOCOPY}`, both exactly as predicted.
+The difference between those two victim sets IS the strengthening: AK17 keeps a
+`BannerHostDelivery.forward(` call in an else branch, so the POSITIVE check
+passes and only the body-scoped forbidden check can see it. Had the canary still
+been file-wide on `queue.enqueue(`, AK17 would have SURVIVED — the rename to
+`bannerQueue` puts a capital Q in the way of the lowercase substring. It did not
+survive. **The strengthening is real, and it is now the thing that would catch
+the bypass a reviewer wrote out by hand.**
+
+### AK15 SURVIVED first, and the survivor was right
+
+Its expectation named `A refused SUGGEST item is not acknowledged, so it
+survives for the next host`. AK15 DELETES the suggest acknowledgement — and a
+test asserting that nothing was acknowledged is satisfied perfectly by there
+being no acknowledgement at all. **An absence claim satisfied by a total
+absence**, which is this bead's own defect class living on the tier this bead
+did not touch. Nothing anywhere asserted the POSITIVE direction.
+
+The remedy was the battery's own instruction — *write the test that rejects it,
+do not relax the expectation*. `An ACCEPTED suggest item IS acknowledged` is
+that test; without it, a regression that stopped acknowledging accepted
+suggestions would have `replayPendingSuggestBanners` hand the same span to every
+host that attaches, asking the listener about it again and again, with every
+suite green. AK18 is its mirror so the refusal direction is proven too, and it
+is deliberately NOT "delete the guard" — that is AK02, which unguards both tiers
+and therefore cannot isolate the suggest one.
+
+### Final tally
+
+**25 distinct mutants: 23 KILLED, 2 SURVIVED — and the 2 are the vacuity
+controls.** Every kill reddened exactly the tests its prediction named. One
+mutant (AK15) survived on its first run, and the coverage hole it exposed was
+closed with a new rail rather than by re-aiming the expectation at something
+already green.
