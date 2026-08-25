@@ -27,9 +27,9 @@ because `restore_and_verify` re-hashes every mutable file between runs and
 | AK05 | the seam stops checking the PLAYBACK GENERATION | SEAM (1) | **SEAM, exactly** | KILLED |
 | AK06 | the seam stops checking the MATERIAL TOKEN | SEAM (1) | **SEAM, exactly** | KILLED |
 | AK07 | the delivered record is written BEFORE the guard, so the seam manufactures a card for a window nothing announced | SEAM (1) | **SEAM, exactly** | KILLED |
-| AK08 | endEpisode stops clearing the delivered-card record | CLEARS (1) | *running* | |
-| AK09 | beginEpisode stops clearing it | CLEARS (1) | | |
-| AK10 | the emit path stops gating on a subscriber | PARTITION, **ATTACH** (2) | | |
+| AK08 | endEpisode stops clearing the delivered-card record | CLEARS (1) | **CLEARS, exactly** | KILLED |
+| AK09 | beginEpisode stops clearing it | CLEARS (1) | **CLEARS, exactly** | KILLED |
+| AK10 | the emit path stops gating on a subscriber | PARTITION, **ATTACH** (2) | *running* | |
 | AK11 | the view model keeps its own copy of the forwarding rule | DELEGATES, NOCOPY (2) | | |
 | AK12 | the acknowledgement records no delivery | ACCEPTED, PARTITION, WALK, SEAM, CLEARS (5) | | |
 | AK99 | **VACUITY CONTROL** — the seam's receipt binding renamed, nothing else | **MUST SURVIVE, 0 failures** | | |
