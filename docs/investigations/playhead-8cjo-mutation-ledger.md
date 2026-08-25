@@ -34,6 +34,8 @@ because `restore_and_verify` re-hashes every mutable file between runs and
 | AK12 | the acknowledgement records no delivery | ACCEPTED, PARTITION, WALK, SEAM, CLEARS (5) | **the same 5, exactly** | KILLED |
 | AK99 | **VACUITY CONTROL** — the seam's receipt binding renamed, nothing else | **MUST SURVIVE, 0 failures** | | |
 
+MS01 verdict: **KILLED, and its eighteen observed victims are the eighteen predicted ones — set equality, no extras and no misses.** It is the widest prediction in the series and the one most able to be sloppy.
+
 Re-aimed from playhead-2d6i in the same change: MS01 (re-anchored, and widened
 from "the unattached arm records nothing" to "an announced skip records nothing
 at all"), MS02 (**re-aimed** — its old body is now the shipped behaviour, so it
@@ -273,3 +275,32 @@ tail -4` rendered a directory holding sixteen files as `(empty)`. Shell output
 here passes through a summarising proxy; `/bin/ls` and `rtk proxy <cmd>` are the
 ways around it, and an ABSENCE claim taken from a summarised listing is not
 evidence.)
+
+### Could any verdict recorded EARLIER in this session have read a stale log? No — stated plainly.
+
+The freshness floor went in after twelve behavioural verdicts had already been
+recorded, so the question has to be answered rather than left inferable.
+
+**No verdict in this session was ever accepted on batch-log evidence at all.**
+Every one of the thirteen recorded so far (AK01–AK12, MS01) is evidenced by the
+battery's own `observed failures:` block, written into `mutation-run.log` by the
+run that produced it, and compared name-for-name against a prediction committed
+beforehand. The batch-log checker exists solely for the SURVIVED direction and
+has not yet been used to accept anything: its only two invocations were
+self-tests, and it REFUSED both — once on a live mid-run batch (no outcome line
+yet) and once on the deliberately planted Aug-22 log.
+
+**And the hazard only runs one way, which is why this is fine rather than
+merely unaudited.** A KILLED verdict is evidenced by PRESENCE — a named test
+that went red — so a stale log cannot manufacture one; at worst it could fail to
+corroborate a kill that the run's own failure list already proves. A SURVIVED
+verdict is evidenced by ABSENCE, and absence is exactly what a stale or missing
+log fabricates. The two vacuity controls are the only verdicts in this series
+that depend on the absence direction, and they are the only ones the floor has to
+protect. It is in place before either has run.
+
+Filed onward rather than left here: the finding is a `bd comment` on
+**playhead-gjlp0**, the open bead for the battery scoring a NO-VERDICT test as a
+PASS. Anyone fixing that bead will build this same checker, and they need to know
+the work directory is per-INVOCATION rather than per-bead, that `KEEP_WORK=1` on
+failure paths has left 38 of them on this box, and that batch numbers repeat.
