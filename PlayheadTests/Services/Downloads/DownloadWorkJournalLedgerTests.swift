@@ -597,12 +597,18 @@ struct DownloadWorkJournalLedgerTests {
             occurredAt: 1.0,
             metadataJSON: "{}"
         )
+        // `catch { error is CancellationError }` rather than
+        // `catch is CancellationError`: the narrow form leaves the closure
+        // throwing, which makes this a `Task<Bool, Error>` whose `.value` needs
+        // its own `try` — and a `try` here would report a store error as this
+        // rail's own failure rather than as the WRONG error kind. The broad
+        // catch says which error arrived.
         let task = Task { () -> Bool in
             do {
                 try await store.insertDownloadWorkJournalEntryUnlessCancelled(record)
                 return false
-            } catch is CancellationError {
-                return true
+            } catch {
+                return error is CancellationError
             }
         }
         task.cancel()
