@@ -9419,7 +9419,9 @@ actor AnalysisStore {
     // `download_work_journal_arming` is the claim that anybody was counting.
     // Without it "no download ever failed" and "nobody was recording" are the
     // same empty table — which is the state this bead found, and the reason it
-    // took four months to find. Three cells of a truth table, not a ladder:
+    // took four months to find. FOUR cells of a truth table, not a ladder —
+    // four rather than V62's three, because the fourth (`writeFailures > 0`) is
+    // what V63 adds and it is the one that INVERTS the third:
     //
     //   * no `download_work_journal` TABLE  — build predates the instrument;
     //   * table present, `armedLaunches = 0` — nobody was counting;

@@ -3164,7 +3164,17 @@ actor DownloadManager {
             cancelled = true
         }
 
-        if await retireBackgroundTransfers(episodeId: episodeId) {
+        // `retiringJournalFinalizations: false` — an explicit cancel does NOT
+        // delete the artifact, so a transfer that has already finalized keeps
+        // its bytes and must keep its `download_work_journal` row. Retiring the
+        // finalization here would drop a `finalized` row for an artifact that
+        // is canonically placed, strongly pinned and already enqueued for
+        // analysis — silently, and out of the one column that makes
+        // `finalized`/`failed` a real split.
+        if await retireBackgroundTransfers(
+            episodeId: episodeId,
+            retiringJournalFinalizations: false
+        ) {
             cancelled = true
         }
 
@@ -3278,16 +3288,30 @@ actor DownloadManager {
     /// hop. All three known session identifiers are instantiated here
     /// deliberately: explicit deletion is not latency-sensitive like the
     /// launch scan, and must find tasks retained by an older process.
+    /// `retiringJournalFinalizations` HAS NO DEFAULT, and that is the point
+    /// (playhead-4xmz review 2). Cancelling a finalization DESTROYS the
+    /// `download_work_journal` row for a transfer that completed, so only a
+    /// caller that is about to UNLINK THE BYTES may ask for it — the row would
+    /// then be claiming an artifact that is gone. `clearCache` deletes and
+    /// passes `true`; `cancelDownload` deletes nothing and passes `false`.
+    ///
+    /// It shipped as an unconditional cancel and the hazard was invisible,
+    /// because the recorder was a NO-OP: a defect this whole bead is about,
+    /// arriving from the other side. `DownloadWorkJournalWiringSourceCanaryTests`
+    /// pins which caller passes which, because nothing at runtime can see it.
     @discardableResult
     private func retireBackgroundTransfers(
-        episodeId: String?
+        episodeId: String?,
+        retiringJournalFinalizations: Bool
     ) async -> Bool {
-        if let episodeId {
-            backgroundJournalFinalizations[episodeId]?.task.cancel()
-        } else {
-            for finalization in
-                backgroundJournalFinalizations.values {
-                finalization.task.cancel()
+        if retiringJournalFinalizations {
+            if let episodeId {
+                backgroundJournalFinalizations[episodeId]?.task.cancel()
+            } else {
+                for finalization in
+                    backgroundJournalFinalizations.values {
+                    finalization.task.cancel()
+                }
             }
         }
         let roles: [BackgroundSessionRole] = [
@@ -4315,7 +4339,13 @@ actor DownloadManager {
             task.cancel()
         }
         activeDownloads.removeAll()
-        _ = await retireBackgroundTransfers(episodeId: nil)
+        // `retiringJournalFinalizations: true` — this path UNLINKS THE BYTES a
+        // few lines below, so a finalization suspended mid-append must not go
+        // on to publish a row for an artifact that no longer exists.
+        _ = await retireBackgroundTransfers(
+            episodeId: nil,
+            retiringJournalFinalizations: true
+        )
         try clearCache(
             enumerating: { directory in
                 try FileManager.default.contentsOfDirectory(

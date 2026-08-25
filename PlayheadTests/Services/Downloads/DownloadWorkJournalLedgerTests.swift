@@ -20,7 +20,14 @@
 // `DownloadWorkJournalWiringSourceCanaryTests`.
 //
 // EVERY `@Test` DISPLAY NAME IN THIS FILE AND ITS MIGRATION SIBLING IS UNIQUE
-// ACROSS THE TREE, DELIBERATELY. Two instruments key on the display name and
+// ACROSS THE TREE, DELIBERATELY — AND THE FIRST FIX ROUND BROKE IT, WHICH IS
+// WHY THIS PARAGRAPH IS LONGER THAN IT LOOKS LIKE IT NEEDS TO BE. A rail added
+// to close one of round 1's findings was named `an unbounded limit returns
+// everything instead of trapping`, byte-identical to a test in
+// `BackgroundDownloadDropLedgerTests` — the neighbouring suite this one is
+// modelled on, again — under a header that claims in capitals that no such
+// collision exists. Caught at review 2. Re-check this whenever a rail is added
+// here; the claim is only as good as its last measurement. Two instruments key on the display name and
 // nothing else — `gate_baseline.py`'s crashed-host census (CLAUDE.md names the
 // collision as a known blind spot) and `mutation-battery.sh`, which scores a
 // mutant by grepping the failing set for the expected name. A duplicate name
@@ -29,12 +36,18 @@
 // collided with `BackgroundDownloadDropsV62MigrationTests` /
 // `BackgroundDownloadDropLedgerTests` on the first draft — the neighbouring
 // suites this one is modelled on, which is exactly where collisions come from —
-// and were renamed. **The tree still holds duplicates, measured on this branch:
-// 59 names appeared in more than one file BEFORE these three renames and 56
-// after, and 64 names occur more than once if you count repeats within a file
-// too. Say which of the three you mean — they are three different questions and
-// the first two differ by exactly this branch's own fix. That is playhead-0dsti
-// and not this bead.**
+// and were renamed. **The tree still holds duplicates, and there are two
+// different counts, MEASURED at base `64078664` and re-measured at review 2
+// after this branch's renames — say which you mean:**
+//
+//     names appearing in MORE THAN ONE FILE   base 56  ->  this branch 56
+//     names occurring more than once at all   base 64  ->  this branch 64
+//
+// (An earlier version of this paragraph said 59/56, taking the pre-rename
+// figure as the base — it was measured on THIS BRANCH before the renames, not
+// on base, so it counted this branch's own three collisions as pre-existing.
+// The base numbers are 56 and 64, and the branch returns to them.) That is
+// playhead-0dsti and not this bead.**
 
 import Foundation
 import Testing
@@ -133,6 +146,23 @@ struct DownloadWorkJournalLedgerTests {
         #expect(quit.eventType == .preempted)
         #expect(quit.cause == .appForceQuitRequiresRelaunch)
         #expect(quit.metadataJSON.contains("forceQuitResumeScan.resumable"))
+
+        // `occurredAt` IS THE ONLY TIMESTAMP ON THE TABLE and the sole ordering
+        // key, and until review 2 nothing asserted the value the RECORDER
+        // writes — every other assertion here is on a record the test itself
+        // constructed with a literal. A recorder hardcoding 0 would have
+        // survived: `ORDER BY occurredAt DESC, rowid DESC` degenerates to
+        // `rowid DESC`, which is the order the truncation rail already expects.
+        let now = Date().timeIntervalSince1970
+        for row in page.rows {
+            #expect(
+                row.occurredAt > now - 300 && row.occurredAt <= now + 5,
+                """
+                the recorder must stamp the row with the wall clock, not a
+                constant and not a value derived from the record's own contents
+                """
+            )
+        }
     }
 
     /// Append-only: two failures for one episode are two rows, because a
@@ -443,7 +473,7 @@ struct DownloadWorkJournalLedgerTests {
     /// (playhead-gjlp0). Sharing one test with the `+ 1` probe made that
     /// mutant's verdict depend on whether the failure line flushed before the
     /// crash. Two tests, two independent verdicts.
-    @Test("an unbounded limit returns everything instead of trapping")
+    @Test("an unbounded download-journal limit returns everything instead of trapping")
     func anUnboundedLimitDoesNotTrap() async throws {
         let (store, _) = try await Self.freshStore(prefix: "4xmzUnbounded")
         let recorder = AnalysisStoreDownloadWorkJournalRecorder(store: store)
@@ -659,7 +689,7 @@ struct DownloadWorkJournalLedgerTests {
     /// cannot currently fail.
     @Test("the ANALYSIS recorder really would write a work_journal row under the job generation")
     func theHazardTheSeparateTableAvoidsIsReal() async throws {
-        let (store, dir) = try await Self.freshStore(prefix: "4xmzHazard")
+        let (store, _) = try await Self.freshStore(prefix: "4xmzHazard")
         let generation = UUID().uuidString
         try await store.insertJob(makeAnalysisJob(
             jobId: "job-hazard",
@@ -696,7 +726,6 @@ struct DownloadWorkJournalLedgerTests {
             {episode, generation} of a job whose lease expired and takes this arm
             """
         )
-        _ = dir
     }
 
     /// The same fixture, the recorder this bead actually wires. The download

@@ -2726,15 +2726,6 @@ FOCUSED_SUITES=(
   -only-testing:PlayheadTests/BackgroundDownloadDropLedgerTests
   -only-testing:PlayheadTests/BackgroundDownloadDropsV62MigrationTests
   -only-testing:PlayheadTests/BackgroundDownloadDropWiringSourceCanaryTests
-
-  # playhead-4xmz (DW series): the DOWNLOAD half of the work journal. Three
-  # suites, because the claim spans three layers no one of which can observe
-  # another — the recorder's rows on disk, the V63 rung, and the WIRING, which
-  # is the layer the bead's defect actually lived in and which no runtime test
-  # in this tree can reach (`PlayheadRuntime.init` is unreachable from one).
-  -only-testing:PlayheadTests/DownloadWorkJournalLedgerTests
-  -only-testing:PlayheadTests/DownloadWorkJournalV63MigrationTests
-  -only-testing:PlayheadTests/DownloadWorkJournalWiringSourceCanaryTests
   # And two suites that are NOT this bead's and are here because the V62 rung
   # moves `currentSchemaVersion`: they are the cross-rung "reaches head"
   # observers, and the V60 note in `migrateOnlyForTesting` records that a rung
@@ -2745,6 +2736,20 @@ FOCUSED_SUITES=(
   # this list, above, and a second declaration of the same fact is one that can
   # drift.
   -only-testing:PlayheadTests/MergedChildRowDedupeV40MigrationTests
+
+  # playhead-4xmz (DW series): the DOWNLOAD half of the work journal. Three
+  # suites, because the claim spans three layers no one of which can observe
+  # another — the recorder's rows on disk, the V63 rung, and the WIRING, which
+  # is the layer the bead's defect actually lived in and which no runtime test
+  # in this tree can reach (`PlayheadRuntime.init` is unreachable from one).
+  -only-testing:PlayheadTests/DownloadWorkJournalLedgerTests
+  -only-testing:PlayheadTests/DownloadWorkJournalV63MigrationTests
+  -only-testing:PlayheadTests/DownloadWorkJournalWiringSourceCanaryTests
+  # The two cross-rung observers above serve V63 as well — a V63 rung missing
+  # from one ladder is invisible to every DW rail for the same reason it was
+  # invisible to every BD one. The DW block sits BELOW them rather than above
+  # because it used to sit above, where it read as though the 'NOT this bead's'
+  # paragraph was describing the DW suites (review 2).
 )
 
 # Named to match the `/private/tmp/playhead-*` pattern `scripts/disk-cleanup.sh`
@@ -3334,6 +3339,8 @@ T_DW_UNTOUCHED="the DOWNLOAD recorder writes no work_journal row even when a job
 T_DW_CANCEL_FIN="a finalization cancelled before it runs writes no row and counts no write failure"
 T_DW_CANCEL_STORE="the store's UnlessCancelled append refuses inside the actor, not just at the caller"
 T_DW_CANCEL_FAIL="a cancelled FAILURE is still recorded — the asymmetry is deliberate"
+DWC="DownloadWorkJournalWiringSourceCanaryTests"
+T_DW_C_RETIRE="$DWC/testOnlyTheDeletingCallerRetiresAJournalFinalization"
 # TWO RAILS HERE DELIBERATELY HAVE NO MUTANT, and both are stated rather than
 # left as gaps. `an unbounded limit returns everything instead of trapping`
 # guards a TRAP: its mutant kills the host, and this battery scores a test with
@@ -3353,7 +3360,6 @@ T_DW_CANCEL_FAIL="a cancelled FAILURE is still recorded — the asymmetry is del
 # that one — so the bare spelling would let a BD mutant be credited for a DW
 # rail and vice versa. Same false-kill hazard as the display names above, one
 # naming system along.
-DWC="DownloadWorkJournalWiringSourceCanaryTests"
 T_DW_C_LADDER="$DWC/testV63IsRegisteredInBothLaddersExactlyOnceEach"
 T_DW_C_DDL="$DWC/testTheDDLIsSharedRatherThanCopied"
 T_DW_C_WIRING="$DWC/testProductionWiresTheStoreBackedWorkJournalRecorder"
@@ -12272,8 +12278,35 @@ MUTATIONS=(
   "DW28|1505|DWJ|$T_DW_UNTOUCHED"
 
   # DW29 collapses the row key onto {episode, event}, so a REPEATED failure —
-  # the most interesting thing this table can show — overwrites itself.
+  # the most interesting thing this table can show — is REFUSED by the PRIMARY
+  # KEY and counted into `writeFailures`. It does NOT overwrite: the insert is a
+  # plain `INSERT`, and a reader triaging a survivor should not go looking for
+  # an upsert that does not exist.
   "DW29|1506|DWJ|$T_DW_REPEAT"
+
+  # DW31 is the MIRROR of DW25, and it is the direction review 2 found unrailed:
+  # a FAILURE that starts honouring cancellation is dropped whenever an
+  # enclosing task was cancelled — losing exactly the record this bead creates.
+  # Both directions of the asymmetry now have a mutant.
+  "DW31|1507|DWJ|$T_DW_CANCEL_FAIL"
+
+  # DW32 stamps every row with a CONSTANT. `occurredAt` is the table's only
+  # timestamp and its sole ordering key, and until review 2 nothing asserted the
+  # value the RECORDER writes — `ORDER BY occurredAt DESC, rowid DESC`
+  # degenerates to `rowid DESC`, which is the order the truncation rail already
+  # expects, so this survived.
+  "DW32|1508|DWJ|$T_DW_EVENTS"
+
+  # DW33 drops the surface-status recorder from the production construction. It
+  # defaults to nil, so the residual medium L-2 and L-3 rest on goes dark with
+  # every runtime rail green — the bead's own defect shape, one argument along.
+  "DW33|1509|RT|$T_DW_C_WIRING"
+
+  # DW34 lets `cancelDownload` retire a journal finalization. It deletes no
+  # bytes, so a transfer that finalized while the user cancelled loses its row
+  # for an artifact still on disk. THIS WAS THE SHIPPED STATE until review 2,
+  # licensed by a comment asserting the opposite.
+  "DW34|1510|DLMGR|$T_DW_C_RETIRE"
 
   "DW99|1500|DWJ|$T_DW_WRITEFAIL"
 )
@@ -12677,7 +12710,11 @@ describe_mutation() {
     DW26) echo "a CANCELLED write is booked as a FAILED one, so writeFailures claims the store could not hold a row" ;;
     DW27) echo "the recorder slot goes back to being a var — one line from a post-init setter" ;;
     DW28) echo "THE HAZARD AT THE RECORDER — the download recorder ALSO forwards to the ANALYSIS one, so a transfer failure lands in work_journal under the live job generation" ;;
-    DW29) echo "the row key collapses onto {episode, event}, so a repeated failure overwrites itself" ;;
+    DW29) echo "the row key collapses onto {episode, event}, so a repeated failure is REFUSED by the PRIMARY KEY and counted into writeFailures (it does not upsert — there is no upsert here)" ;;
+    DW31) echo "a FAILURE starts honouring cancellation, so a cancelled enclosing task drops the record this bead exists to create" ;;
+    DW32) echo "every row is stamped with a CONSTANT occurredAt — the table's only timestamp and its sole ordering key" ;;
+    DW33) echo "production stops passing the surface-status recorder, so the residual medium goes dark with every rail green" ;;
+    DW34) echo "cancelDownload retires a journal finalization again, dropping a finalized row for an artifact still on disk" ;;
     DW99) echo "VACUITY CONTROL — the parameter BINDING inside noteWriteFailure is renamed; the label and the call site are untouched. MUST SURVIVE" ;;
     IW01) echo "THE SHIPPED DEFECT VERBATIM — the coarse gate is gone, so a runner hardcode reads as the model's grade" ;;
     IW02) echo "the gate opens for anything that is NOT permissive, so UNKNOWN licenses the band — the backfill defect in the reader" ;;
@@ -13889,6 +13926,14 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  # DW18 drops ONLY the `+ 1`. Its first cut wrote `let probe = ceiling`, which
+  # ALSO removed the `Int32` clamp — and `bind(_:_:Int)` goes through the
+  # TRAPPING `Int32(_:)`, so the `limit: .max` rail in the same suite killed the
+  # HOST. Measured: 19 host restarts and 38 fatal errors in one batch, and a
+  # test with no verdict is scored a PASS (playhead-gjlp0), so the declared
+  # victim's verdict became a question about log flushing. The clamp is left
+  # alone here and is deliberately unmutated — see the note beside the
+  # expectation variables.
   DW18)
     snippet OLD <<'EOF'
         let probe = ceiling >= Int(Int32.max) ? Int(Int32.max) : ceiling + 1
@@ -13896,7 +13941,7 @@ EOF
             SELECT id, episodeId, eventType, cause, occurredAt, metadata
 EOF
     snippet NEW <<'EOF'
-        let probe = ceiling
+        let probe = ceiling >= Int(Int32.max) ? Int(Int32.max) : ceiling
         let stmt = try prepare("""
             SELECT id, episodeId, eventType, cause, occurredAt, metadata
 EOF
@@ -14043,6 +14088,63 @@ EOF
         let record = DownloadWorkJournalRecord(
             id: "\(episodeId)|\(eventType.rawValue)",
             episodeId: episodeId,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW31)
+    snippet OLD <<'EOF'
+            eventType: .failed,
+            cause: cause,
+            metadataJSON: metadataJSON,
+            honoringCancellation: false
+EOF
+    snippet NEW <<'EOF'
+            eventType: .failed,
+            cause: cause,
+            metadataJSON: metadataJSON,
+            honoringCancellation: true
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW32)
+    snippet OLD <<'EOF'
+            occurredAt: now,
+            metadataJSON: metadataJSON
+        )
+EOF
+    snippet NEW <<'EOF'
+            occurredAt: 0,
+            metadataJSON: metadataJSON
+        )
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW33)
+    snippet OLD <<'EOF'
+        let downloadWorkJournalRecorder = AnalysisStoreDownloadWorkJournalRecorder(
+            store: analysisStore,
+            invariantRecorder: { [surfaceStatusLogger] code, description in
+                surfaceStatusLogger.invariantViolated(
+                    code: code, description: description
+                )
+            }
+        )
+EOF
+    snippet NEW <<'EOF'
+        let downloadWorkJournalRecorder = AnalysisStoreDownloadWorkJournalRecorder(
+            store: analysisStore
+        )
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW34)
+    snippet OLD <<'EOF'
+            retiringJournalFinalizations: false
+        ) {
+EOF
+    snippet NEW <<'EOF'
+            retiringJournalFinalizations: true
+        ) {
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -29633,7 +29735,7 @@ fi
 # because a control is named after its series. That is true of `--series DW` and
 # false of every shorter-than-the-whole-prefix spelling, which is what makes it
 # worth a check rather than a comment.
-if [ -n "$ONLY_SERIES" ]; then
+if [ -n "$ONLY_SERIES" ] || [ -n "$ONLY_BATCH" ]; then
   for rec in "${MUTATIONS[@]}"; do
     ctl_name="$(rec_name "$rec")"
     case "$ctl_name" in
@@ -29653,9 +29755,10 @@ if [ -n "$ONLY_SERIES" ]; then
       [ "$sel_name" = "$ctl_name" ] && holds_control=1
     done
     if [ "$touches" -eq 1 ] && [ "$holds_control" -eq 0 ]; then
-      echo "mutation-battery: --series '$ONLY_SERIES' selects part of the $ctl_series series but NOT its vacuity control $ctl_name." >&2
+      echo "mutation-battery: this selection covers part of the $ctl_series series but NOT its vacuity control $ctl_name." >&2
       echo "  A run without the control cannot distinguish 'every mutant died' from 'the suites fail on anything'," >&2
       echo "  and it exits 0 where the whole series exits 1. Use --series $ctl_series, or --only $ctl_name to drive one." >&2
+      echo "  (--batch is covered too: every DW mutant has its own batch, so --batch alone would drop the control.)" >&2
       exit 2
     fi
   done

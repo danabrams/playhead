@@ -143,6 +143,20 @@ final class DownloadWorkJournalWiringSourceCanaryTests: XCTestCase {
             + "`workJournalRecorder`, by the same identifier that is armed below. Nothing at "
             + "runtime can see that those two are the same object."
         )
+        // The residual medium L-2 and L-3 rest on. The recorder's
+        // `invariantRecorder` DEFAULTS TO NIL, so dropping this one argument
+        // turns off the only report of an event that neither the row nor the
+        // failure counter could hold — with every runtime rail still green.
+        XCTAssertEqual(
+            SwiftSourceInspector.regexOccurrences(
+                of: #"AnalysisStoreDownloadWorkJournalRecorder\(\s*store:\s*analysisStore,\s*invariantRecorder:"#,
+                in: runtime
+            ),
+            1,
+            "playhead-4xmz: production must pass the surface-status recorder as well as the "
+            + "store. It defaults to nil, so omitting it is silent — and it is the only "
+            + "medium left when both durable writes fail."
+        )
         XCTAssertEqual(
             SwiftSourceInspector.regexOccurrences(
                 of: #"\bNoopWorkJournalRecorder\b"#, in: runtime
@@ -338,13 +352,77 @@ final class DownloadWorkJournalWiringSourceCanaryTests: XCTestCase {
             + "that quietly became `{}` is this bead's defect one layer in, and it would pass "
             + "every test that does not happen to drive that particular overload."
         )
+        // TWO write spellings since review 1, and the count has to name both.
+        // The pattern above ends in `\(`, so it happens not to match
+        // `…EntryUnlessCancelled(` — the count was right BY ACCIDENT while the
+        // message said "exactly one write path", which is the shape this file
+        // exists to catch.
+        let plainWrites = SwiftSourceInspector.regexOccurrences(
+            of: #"\bstore\.insertDownloadWorkJournalEntry\("#, in: recorderBody
+        )
+        let cancellableWrites = SwiftSourceInspector.regexOccurrences(
+            of: #"\bstore\.insertDownloadWorkJournalEntryUnlessCancelled\("#,
+            in: recorderBody
+        )
+        XCTAssertEqual(
+            plainWrites, 1,
+            "playhead-4xmz: exactly one PLAIN write, so every non-finalized event goes "
+            + "through the same failure handling."
+        )
+        XCTAssertEqual(
+            cancellableWrites, 1,
+            "playhead-4xmz: exactly one CANCELLATION-HONOURING write. The in-actor check is "
+            + "the only one that can see a cancellation landing during the hop; a second "
+            + "spelling here would mean some event bypasses it."
+        )
         XCTAssertEqual(
             SwiftSourceInspector.regexOccurrences(
-                of: #"\bstore\.insertDownloadWorkJournalEntry\("#, in: recorderBody
+                of: #"honoringCancellation:\s*true"#, in: ledger
             ),
             1,
-            "playhead-4xmz: exactly one write path, so every event goes through the same "
-            + "failure handling."
+            "playhead-4xmz: exactly ONE requirement honours cancellation — `finalized`. "
+            + "Dropping a FAILURE because an enclosing task was cancelled would lose the "
+            + "record this bead exists to create, which is the opposite trade."
+        )
+    }
+
+    // MARK: - 7. Only a caller that DELETES the bytes may retire a finalization
+
+    /// Cancelling a finalization DESTROYS the `download_work_journal` row for a
+    /// transfer that completed. That is correct only when the bytes are about
+    /// to be unlinked — otherwise the row would have been true.
+    ///
+    /// It shipped as an unconditional cancel and the hazard was invisible
+    /// because the recorder was a no-op; `cancelDownload` retires and deletes
+    /// nothing. Nothing at runtime can see which caller asked for which, and
+    /// the parameter deliberately has NO DEFAULT so both must say.
+    func testOnlyTheDeletingCallerRetiresAJournalFinalization() throws {
+        let manager = try code(Self.managerPath)
+        XCTAssertEqual(
+            SwiftSourceInspector.regexOccurrences(
+                of: #"retiringJournalFinalizations:\s*true"#, in: manager
+            ),
+            1,
+            "playhead-4xmz: exactly one caller may retire a finalization, and it is the one "
+            + "that unlinks the bytes (`clearCache`). A second `true` is a `finalized` row "
+            + "dropped for an artifact still on disk."
+        )
+        XCTAssertEqual(
+            SwiftSourceInspector.regexOccurrences(
+                of: #"retiringJournalFinalizations:\s*false"#, in: manager
+            ),
+            1,
+            "playhead-4xmz: …and exactly one passes false — `cancelDownload`, which deletes "
+            + "nothing."
+        )
+        XCTAssertEqual(
+            SwiftSourceInspector.regexOccurrences(
+                of: #"retiringJournalFinalizations:\s*Bool\s*=\s*"#, in: manager
+            ),
+            0,
+            "playhead-4xmz: NO DEFAULT. A default is how this decision gets made silently at "
+            + "a call site nobody read — which is the shape of the defect this whole bead is "
+            + "about."
         )
     }
 

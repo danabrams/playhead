@@ -101,8 +101,11 @@
 //   * `writeFailures > 0`
 //         — events happened and this database could not hold them.
 //
-// THREE CELLS OF A TRUTH TABLE, NOT A LADDER. `armedLaunches = 0` beside real
-// rows is reachable — an event before the launch Task arms, or an arming write
+// FOUR CELLS OF A TRUTH TABLE, NOT A LADDER — four, because V63 adds the
+// `writeFailures` counter that V62's three-cell version did not have, and it is
+// the one that can INVERT the positive claim. This paragraph said "three" while
+// listing four bullets, which sends a reader who follows the V62 recipe past
+// the number that matters. `armedLaunches = 0` beside real rows is reachable — an event before the launch Task arms, or an arming write
 // that itself failed — and means "these rows are real and the denominator is
 // missing". Read all of the numbers, every time.
 //
@@ -129,15 +132,33 @@
 // is a real completion-versus-failure split for the download half, which is
 // the question 7dgx's ledger could only ever answer half of.
 //
-// NAME THE POPULATION BEFORE QUOTING A RATE FROM IT. This is a split over
-// transfers that reached a TERMINAL DELEGATE CALLBACK, and it excludes two
-// things: the three pre-start abandonments in `backgroundDownload`, which are
-// `background_download_drops` rows and never reach a callback at all; and any
-// transfer that vanishes with neither a callback nor a resume blob for the
-// force-quit scan to find. `finalized / (finalized + failed)` is therefore a
-// success rate for a population narrower than "downloads attempted", and
-// reading it as the wider one is the thing this file's own "WHAT WOULD THIS
-// READ IF…" paragraph is about.
+// NAME THE POPULATION BEFORE QUOTING A RATE FROM IT — and the `failed` bucket
+// has THREE WRITERS, not one. An earlier version of this paragraph said the
+// split was "over transfers that reached a terminal delegate callback", which
+// is true of `finalized` and of only ONE of the three `failed` writers:
+//
+//   * `DownloadManager.recordBackgroundFailure` — a terminal delegate
+//     callback, and the only one that is a transfer OUTCOME;
+//   * `ForceQuitResumeScan.scanForSuspendedTransfers`, corrupted-blob branch —
+//     cold-launch blob HYGIENE, no callback, `stage=forceQuitResumeScan.corrupted`;
+//   * `ForceQuitResumeScan.resumeSuspendedTransfer`, empty-blob branch — a
+//     user-initiated RESUME attempt, no callback,
+//     `stage=forceQuitResumeScan.resume.corrupted`.
+//
+// So a bare `finalized / (finalized + failed)` is depressed by two event
+// classes that are not transfer outcomes, and one of them can fire for an
+// episode that goes on to finalize anyway — counting the same transfer twice.
+// Split on the stage the blob carries:
+//
+//     SELECT eventType, count(*) FROM download_work_journal
+//     WHERE json_extract(metadata, '$.stage') NOT LIKE 'forceQuitResumeScan%'
+//     GROUP BY eventType
+//
+// It also excludes, in both spellings: the three pre-start abandonments in
+// `backgroundDownload` (those are `background_download_drops` rows and reach no
+// callback at all), and any transfer that vanishes with neither a callback nor
+// a resume blob. Reading the narrow population as the wide one is exactly the
+// thing this file's own "WHAT WOULD THIS READ IF…" paragraph is about.
 //
 // ─────────────────────────────────────────────────────────────────────────
 // LIMITS, NAMED
@@ -190,6 +211,11 @@
 //     The consequence is that the CALLER cannot tell a live recorder from the
 //     no-op; `DownloadWorkJournalWiringSourceCanaryTests` and `armedLaunches`
 //     are what cover that, in source and on disk respectively.
+// L-4 A `quarantineAndRebuild` "start fresh" moves the whole history aside into
+//     a sibling `AnalysisStore-quarantined-<stamp>-*` whose `armedLaunches` is
+//     0 and whose `installedAt` dates the REBUILD. List those siblings before
+//     concluding "never armed", and take them in the pull.
+
 // L-5 THE FORCE-QUIT SCAN NOW AWAITS A STORE WRITE, INSIDE A 2 s SLA.
 //     `PlayheadAppDelegate.didFinishLaunchingWithOptions` fires
 //     `scanForSuspendedTransfers()` and logs an error if it exceeds 2 s. Its
@@ -214,11 +240,6 @@
 //     a thrown migrate rolls `didOpen` back, so
 //     `AnalysisStoreRecoveryCoordinator.openAtLaunch` still runs, still fails,
 //     and still counts. Nobody has measured the ladder's cost on a device.
-//
-// L-4 A `quarantineAndRebuild` "start fresh" moves the whole history aside into
-//     a sibling `AnalysisStore-quarantined-<stamp>-*` whose `armedLaunches` is
-//     0 and whose `installedAt` dates the REBUILD. List those siblings before
-//     concluding "never armed", and take them in the pull.
 
 import Foundation
 import OSLog
@@ -350,8 +371,15 @@ struct DownloadWorkJournalPage: Sendable, Equatable {
     /// while meaning "this is what fitted".
     let truncated: Bool
 
-    /// Every row this page could read AND could not read. The honest
-    /// denominator for any per-event share taken off `rows`.
+    /// Every row this page could read AND could not read **OVER THIS WINDOW**,
+    /// which is the honest denominator for a per-event share taken off `rows`
+    /// and is NOT a table statistic.
+    ///
+    /// When `truncated` is true this equals `limit` exactly — the loop stops at
+    /// `seen > ceiling` — so at the default 500 and L-1's 20 events a day it
+    /// stops describing the table after about 25 days. The table's own totals
+    /// come from SQL. The word "window" is on the property rather than only in
+    /// a note beside the query because this property is what a caller reads.
     var totalRowsSeen: Int {
         rows.count + unrecognizedEventTypeRows
     }
@@ -585,7 +613,15 @@ struct AnalysisStoreDownloadWorkJournalRecorder: WorkJournalRecording {
         metadataJSON: String,
         honoringCancellation: Bool
     ) async {
-        if honoringCancellation, Task.isCancelled { return }
+        // NO CHEAP `Task.isCancelled` PRE-CHECK HERE, deliberately, and this is
+        // the second time this bead has had to choose between a cheap guard and
+        // a testable one. A pre-hop read would satisfy every test that cancels
+        // BEFORE calling — which is every test one can write deterministically
+        // — and the in-actor check, the only one that can see a cancellation
+        // landing DURING the hop, would then have no rail at all. Its mutant
+        // would SURVIVE, or worse, would be killed or not depending on task
+        // scheduling. The hop costs a suspension on a cancelled finalization
+        // and nothing else.
         let now = Date().timeIntervalSince1970
         let record = DownloadWorkJournalRecord(
             episodeId: episodeId,
@@ -606,10 +642,19 @@ struct AnalysisStoreDownloadWorkJournalRecorder: WorkJournalRecording {
         } catch is CancellationError {
             // A CANCELLED WRITE IS NOT A FAILED WRITE. Counting it into
             // `writeFailures` would say this database could not hold a row,
-            // which is a claim about the STORE — and it is the one reading
-            // that counter exists to make. Nothing is lost that anybody asked
-            // to keep: the only cancelling caller is the manager retiring a
-            // finalization whose bytes it is about to delete.
+            // which is a claim about the STORE — and it is the one reading that
+            // counter exists to make.
+            //
+            // AND NOTHING IS LOST THAT ANYBODY ASKED TO KEEP — but only because
+            // `DownloadManager.retireBackgroundTransfers` now takes
+            // `retiringJournalFinalizations` and the ONLY caller that passes
+            // `true` is `clearCache`, which unlinks the bytes. This comment
+            // used to assert that as a fact about the code and it was FALSE:
+            // `cancelDownload` retired finalizations too and deletes nothing,
+            // so a transfer that finalized while the user cancelled lost its
+            // row for an artifact still on disk. Found at review 2. If a third
+            // caller ever passes `true`, this sentence stops being true again —
+            // which is why a source canary pins the two call sites.
             return
         } catch {
             logger.error(
