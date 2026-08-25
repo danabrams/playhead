@@ -3225,6 +3225,9 @@ T_8CJO_NOCOPY="the view model does not enqueue or acknowledge on its own"
 T_8CJO_ACKAUTO="the forwarding rule acknowledges the AUTO tier"
 T_8CJO_GUARD="no acknowledgement is reachable without the queue's acceptance"
 T_8CJO_EXHAUSTIVE="the tier switch is exhaustive — a new tier cannot inherit a seam"
+T_8CJO_REANNOUNCE="A re-announced window leaves the delivered-card record, so it is never on both surfaces"
+T_8CJO_RETIRE="A retirement forwarded to the queue pulls the card the orchestrator invalidated"
+T_8CJO_LIMIT="STATED LIMIT: a card queued behind another and discarded unseen is still booked delivered"
 
 T_IW7Q_PERMISSIVE="a PERMISSIVE coarse row is ungraded — the runner wrote that .strong"
 T_IW7Q_UNKNOWN="an UNKNOWN coarse row is ungraded too — silence is not a licence"
@@ -11726,6 +11729,37 @@ MUTATIONS=(
   # rewrite. Its expectation is deliberately NON-EMPTY (an empty one is
   # trivially satisfied) and names the rail those two kill, so a KILLED verdict
   # here would mean a rename changed behaviour.
+  # AK13 — the delivered-record removal at the receipt WRITE site. A same-id
+  # producer revision un-spends the window's one chance, so it is re-announced
+  # while the id is still recorded as delivered: cards ∩ list ≠ ∅ mid-episode.
+  "AK13|1433|ORCH|$T_8CJO_REANNOUNCE"
+
+  # AK14 — the RETIRE arm of the forwarding rule, which had no behavioural rail
+  # at all until this round. AK11 deletes it as a side effect and was expected
+  # to redden only the canaries.
+  "AK14|1434|BHD|$T_8CJO_RETIRE"
+
+  # AK15 — the SUGGEST acknowledgement, the tier this bead did not change. An
+  # acknowledged suggestion stops being replayed to the next host, so the
+  # listener is asked nothing about a span they are about to hear.
+  "AK15|1435|BHD|$T_8CJO_SUGGEST;$T_8CJO_ACKAUTO"
+
+  # AK16 — a `default:` arm on the tier switch, so a tier added later inherits
+  # whichever acknowledgement was written first instead of being made to choose.
+  # `.autoSkipped` still reaches the same body, so every behavioural rail stays
+  # GREEN and the exhaustiveness canary is the only thing standing there.
+  "AK16|1436|BHD|$T_8CJO_EXHAUSTIVE"
+
+  # AK17 — THE BYPASS A REVIEWER DEMONSTRATED, verbatim, rename included.
+  # `bannerQueue.enqueue(` contains `Queue.enqueue(` with a CAPITAL Q, so the
+  # canary's old lowercase `queue.enqueue(` did not match it. AK11 keeps the
+  # name `queue` and therefore dies on the very substring the bypass renames —
+  # it cannot prove the strengthening, which is a LOST rail rather than a
+  # passing one. The body keeps a `forward(` call in its else branch, so the
+  # POSITIVE check still passes and only the forbidden check can see it: AK11
+  # -> {DELEGATES, NOCOPY}, AK17 -> {NOCOPY}, and the difference IS the fix.
+  "AK17|1437|NPVM|$T_8CJO_NOCOPY"
+
   "AK99|1432|ORCH|$T_8CJO_SEAM"
 
   # ---- playhead-7dgx, the BD series: a dropped background download leaves a
@@ -12292,6 +12326,11 @@ describe_mutation() {
     AK10) echo "8cjo: the emit path stops gating on a subscriber, so a window nobody was listening for enters the YIELD set" ;;
     AK11) echo "8cjo: observeBanners keeps its own copy of the forwarding rule and never acknowledges — every behavioural suite stays green" ;;
     AK12) echo "8cjo: the acknowledgement removes the row and records nothing, so a card the listener saw looks like a skip nobody announced" ;;
+    AK13) echo "8cjo: the delivered record is not cleared when a window is re-announced, so a producer revision puts one window on BOTH surfaces" ;;
+    AK14) echo "8cjo: the RETIRE arm of the forwarding rule is deleted, so an invalidated card can still collect an answer" ;;
+    AK15) echo "8cjo: the SUGGEST acknowledgement is deleted, so a delivered suggestion is replayed to the next host and asked twice" ;;
+    AK16) echo "8cjo: a default: arm on the tier switch, so a tier added later inherits an acknowledgement nobody chose for it" ;;
+    AK17) echo "8cjo THE DEMONSTRATED BYPASS: the inline enqueue written with the parameter RENAMED, which the file-wide canary could not see" ;;
     AK99) echo "VACUITY CONTROL — the local the acknowledgement seam binds its receipt to is renamed and nothing else is. MUST SURVIVE" ;;
     YX99) echo "VACUITY CONTROL — the band in buildFMLedgerEntries is bound through a renamed intermediate on the line YX01 rewrites; nothing else changes. MUST SURVIVE" ;;
     NY01) echo "AdDetectionService.hotPathCandidates sorts the RAW array — the shipped defect: runBackfill canonicalized and the hot path did not" ;;
@@ -28303,6 +28342,105 @@ EOF
 EOF
     snippet NEW <<'EOF'
         missedAutoSkipReceiptsByWindowId.removeValue(forKey: windowId)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # AK13 — the delivered-record removal at the receipt write site.
+  AK13)
+    snippet OLD <<'EOF'
+        deliveredAutoSkipCardWindowIds.remove(adWindow.id)
+EOF
+    snippet NEW <<'EOF'
+        _ = adWindow.id
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # AK14 — the RETIRE arm of the forwarding rule.
+  AK14)
+    snippet OLD <<'EOF'
+        case let .retireWindow(retirement):
+            _ = await MainActor.run {
+                queue.retireWindow(
+                    retirement,
+                    hostGeneration: hostGeneration
+                )
+            }
+EOF
+    snippet NEW <<'EOF'
+        case .retireWindow:
+            break
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # AK15 — the SUGGEST acknowledgement.
+  AK15)
+    snippet OLD <<'EOF'
+            case .suggest:
+                await orchestrator.acknowledgeSuggestedBannerDelivery(
+                    windowId: item.windowId,
+                    episodeId: item.episodeId,
+                    playbackLifecycleGeneration:
+                        item.playbackLifecycleGeneration,
+                    suggestionRevisionToken:
+                        item.suggestionRevisionToken
+                )
+EOF
+    snippet NEW <<'EOF'
+            case .suggest:
+                break
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # AK16 — a `default:` arm on the tier switch.
+  AK16)
+    snippet OLD <<'EOF'
+            case .autoSkipped:
+                await orchestrator.acknowledgeAutoSkippedBannerDelivery(
+EOF
+    snippet NEW <<'EOF'
+            default:
+                await orchestrator.acknowledgeAutoSkippedBannerDelivery(
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # AK17 — THE DEMONSTRATED BYPASS. Two sites: the parameter is renamed so the
+  # old file-wide `queue.enqueue(` ban cannot see it, and a `forward(` call is
+  # KEPT in an else branch so the positive check still passes.
+  AK17)
+    snippet OLD <<'EOF'
+        into queue: AdBannerQueue,
+        hostGeneration: UInt64
+    ) {
+        bannerObservationTask?.cancel()
+EOF
+    snippet NEW <<'EOF'
+        into bannerQueue: AdBannerQueue,
+        hostGeneration: UInt64
+    ) {
+        bannerObservationTask?.cancel()
+EOF
+    patch "$file" "$OLD" "$NEW" || return $?
+    snippet OLD <<'EOF'
+                await BannerHostDelivery.forward(
+                    event,
+                    from: orchestrator,
+                    into: queue,
+                    hostGeneration: hostGeneration
+                )
+EOF
+    snippet NEW <<'EOF'
+                if case let .present(item) = event {
+                    _ = await MainActor.run {
+                        bannerQueue.enqueue(item, hostGeneration: hostGeneration)
+                    }
+                } else {
+                    await BannerHostDelivery.forward(
+                        event,
+                        from: orchestrator,
+                        into: bannerQueue,
+                        hostGeneration: hostGeneration
+                    )
+                }
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
