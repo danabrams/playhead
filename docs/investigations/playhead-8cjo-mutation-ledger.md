@@ -311,9 +311,9 @@ failure paths has left 38 of them on this box, and that batch numbers repeat.
 |---|---|---|---|---|
 | MS01 | an announced auto-skip records nothing at all | 18 names | **the same 18, set equality** | KILLED |
 | MS02 | **RE-AIMED**: the acknowledgement does not remove the receipt, so one skip becomes a card AND a row | PARTITION, ACCEPTED, WALK, SEAM (4) | **the same 4, exactly** | KILLED |
-| MS06 | endEpisode stops clearing the receipts | ENDEP (1) | *running* | |
-| MS15 | beginEpisode stops clearing them | REPLAY (1) | | |
-| MS07 | the receipt records the SPAN START as where the skip fired | POSITION (1) | | |
+| MS06 | endEpisode stops clearing the receipts | ENDEP (1) | **ENDEP, exactly** | KILLED |
+| MS15 | beginEpisode stops clearing them | REPLAY (1) | **REPLAY, exactly** | KILLED |
+| MS07 | the receipt records the SPAN START as where the skip fired | POSITION (1) | **POSITION, exactly** | KILLED |
 | MS99 | **VACUITY CONTROL** — the attachment-test local renamed | **MUST SURVIVE** | | |
 
 **MS02 is the one that needed re-aiming rather than re-anchoring, and the
