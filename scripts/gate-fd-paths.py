@@ -416,25 +416,39 @@ def summarise(snap: dict) -> dict:
 # host discovery
 # --------------------------------------------------------------------------
 
-def find_test_host() -> int:
+def find_test_host(younger_than: float = -1.0) -> int:
     """The simulator test host's pid, or 0.
 
     Same predicate as `gate-memory-sample.py` — the test host IS the app;
     `PlayheadTests.xctest` is injected into it — so the two instruments cannot
     disagree about which process they are describing.
+
+    `younger_than` IS THE WHOLE DIFFERENCE AND IT IS NOT AN OPTIMISATION. The
+    predicate above is satisfied by any `/Playhead.app/` process, including one a
+    PREVIOUS run left booted in the simulator. Measured on this bead: a watcher
+    started before the build pinned a leftover app 20 minutes older than itself,
+    and the run's real host would then have read as an interloper. Passing the
+    watcher's own elapsed time restricts candidates to processes that started
+    AFTER it — the run's host always did, a stale one never can. -1 disables the
+    restriction (used by a one-shot `--pid`-less snapshot, where there is no
+    "after me" to speak of).
     """
     out = subprocess.run(
-        ["ps", "-Ao", "pid=,rss=,comm="], capture_output=True, text=True, check=False
+        ["ps", "-Ao", "pid=,rss=,etimes=,comm="],
+        capture_output=True, text=True, check=False,
     ).stdout
     best_pid, best_rss = 0, -1
     for line in out.splitlines():
-        parts = line.strip().split(None, 2)
-        if len(parts) < 3 or not parts[0].isdigit() or not parts[1].isdigit():
+        parts = line.strip().split(None, 3)
+        if len(parts) < 4 or not all(p.isdigit() for p in parts[:3]):
             continue
-        if "/Playhead.app/" in parts[2]:
-            rss = int(parts[1])
-            if rss > best_rss:
-                best_rss, best_pid = rss, int(parts[0])
+        if "/Playhead.app/" not in parts[3]:
+            continue
+        if younger_than >= 0 and int(parts[2]) > younger_than:
+            continue
+        rss = int(parts[1])
+        if rss > best_rss:
+            best_rss, best_pid = rss, int(parts[0])
     return best_pid
 
 
@@ -495,7 +509,8 @@ def main() -> int:
         os.makedirs(args.full_dir, exist_ok=True)
 
     while not stop["now"]:
-        pid = args.pid or find_test_host()
+        pid = args.pid or find_test_host(
+            younger_than=(time.time() - started) if args.watch else -1.0)
         snap = snapshot(pid) if pid else None
         if snap is not None:
             if pinned["pid"] == 0:

@@ -280,6 +280,27 @@ class HostDiscoveryRails(unittest.TestCase):
         self.assertIsInstance(found, int)
         self.assertGreaterEqual(found, 0)
 
+    def test_an_age_bound_of_zero_can_match_nothing(self):
+        """No process on the box started less than 0 seconds ago.
+
+        The bound is what stops a leftover simulator app — one a PREVIOUS run
+        left booted — from being pinned as this run's host. A rail that only
+        ever ran with the bound disabled would not know whether it was wired up,
+        so this drives the restricting branch.
+        """
+        self.assertEqual(gfp.find_test_host(younger_than=0.0), 0)
+
+    def test_the_default_applies_NO_bound(self):
+        """-1 means `no restriction`, which a one-shot snapshot needs.
+
+        Asserted through the shape of the call rather than a live process,
+        because whether any `/Playhead.app/` exists on this box is not
+        something a unit test may depend on.
+        """
+        import inspect
+        signature = inspect.signature(gfp.find_test_host)
+        self.assertEqual(signature.parameters["younger_than"].default, -1.0)
+
 
 if __name__ == "__main__":
     unittest.main()
