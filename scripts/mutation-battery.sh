@@ -138,6 +138,8 @@
 #   scripts/mutation-battery.sh              # whole battery
 #   scripts/mutation-battery.sh --list       # print the battery, run nothing
 #   scripts/mutation-battery.sh --only M07   # one mutation, alone
+#   scripts/mutation-battery.sh --series DW  # every mutation whose name starts DW,
+#                                            # control included, on ONE baseline
 #   scripts/mutation-battery.sh --batch 3    # one batch
 #   scripts/mutation-battery.sh --dry-run    # apply + diffstat + restore, no build
 #
@@ -309,6 +311,50 @@
 #       <udid>`), not derivedData and not `$TMPDIR/Deleting-*`, which was empty.
 #       A shutdown + erase took it to 17 MiB and the volume from 12 to 22 GiB.
 #       Nothing was deleted by the refusal itself, as its own text says.
+#
+#   PARTIAL RE-RUN 2026-08-25 (playhead-4xmz). Batches 1477-1513 only, added by
+#   this bead: DW01-DW29, DW31-DW37 plus the DW99 control, one batch each — 37
+#   records, 37 batches, 38 builds, 105m17s wall clock, driven as
+#   `--series DW` (the flag this bead added). FINAL 36 KILLED / 0 SURVIVED /
+#   0 ERROR, plus DW99 SURVIVED as required. Baseline GREEN before any
+#   mutation. Batches 1-1476 were NOT re-run and carry the verdicts above.
+#
+#   PREDICTED vs OBSERVED was checked MECHANICALLY, not by eye: every record's
+#   declared expectation was resolved through the `T_*` table and compared
+#   against the failing set its own batch produced. The only declared victim
+#   not observed is DW99's, which is the required outcome for a control.
+#   Collateral is present and expected (DW10/DW11/DW13 also redden the
+#   cross-rung V62/V40 ladder observers; DW09 also reddens the event-vocabulary
+#   canary) and cannot manufacture a kill, because the scorer requires the
+#   DECLARED set to fail.
+#
+#   FIVE OPERATIONAL FAULTS, none about a mutation, all worth knowing because
+#   four of them are this file's own guards doing their job:
+#     • An `--only DW37` dry run reported `anchor did not apply`: the V62
+#       arming SQL is byte-identical to V63's, so the narrow anchor matched
+#       TWICE and `patch()` refused rather than mutating the wrong table. The
+#       anchor now names the table. THE SAME COLLISION BROKE SIX playhead-7dgx
+#       ANCHORS IN THE OTHER DIRECTION (BD05/BD07 1->0, BD10/BD27/BD37/BD40
+#       1->2) and nothing on this branch would have surfaced it — a `--dry-run
+#       --series BD` is now part of this bead's close checklist, and should be
+#       part of every schema bead's.
+#     • The pre-run expectation check caught a renamed canary method
+#       (`T_DW_C_RETIRE`) before spending a build: "an expectation names a test
+#       that never ran … every one of them would otherwise print SURVIVED
+#       against a working rail."
+#     • DW26's anchor was 30 lines of PROSE inside the arm it mutates and had
+#       to be re-cut four times, once per review round that edited the comment.
+#       It is one line of code now. An anchor whose stability depends on nobody
+#       editing a paragraph is not an anchor.
+#     • DW18's first cut dropped the `Int32` clamp as well as the `+ 1`, and
+#       `bind(_:_:Int)` TRAPS — measured, one batch produced 19 host restarts
+#       and 38 fatal errors, and a test with no verdict scores as a PASS
+#       (playhead-gjlp0), so the declared victim's verdict had become a
+#       question about log flushing.
+#     • A whole suite was added to FOCUSED_SUITES and had to be narrowed to one
+#       test: its sibling is in the committed gate baseline at 5/10 `timeout`,
+#       and a RED focused baseline exits 2 having run NO mutants, for every
+#       series.
 #
 #   WHY KG03 AND KG04 ARE BOTH HERE, since a reviewer will ask whether one
 #   would do: `scored` takes the `min` over the backing rows' grades, and a
@@ -1488,6 +1534,8 @@ SEGAGG="Playhead/Services/AdDetection/SegmentAggregator.swift"
 # could and were dropping it.
 DLMGR="Playhead/Services/Downloads/DownloadManager.swift"
 LEDGER="Playhead/Services/Downloads/BackgroundDownloadDropLedger.swift"
+# playhead-4xmz: the DOWNLOAD-path work journal (the DW series).
+DWJ="Playhead/Services/Downloads/DownloadWorkJournalLedger.swift"
 FQSCAN="Playhead/Services/Downloads/ForceQuitResumeScan.swift"
 BGFEED="Playhead/Services/PodcastFeed/BackgroundFeedRefreshService.swift"
 EPPREP="Playhead/Services/Downloads/EpisodePreparationCoordinator.swift"
@@ -1587,7 +1635,7 @@ MUTABLE_FILES=(
   "$FUSION" "$DSPAN" "$EXTENT" "$RSLOT" "$ATOMEV"
   "$EVCAT" "$PROJ" "$TWNARR"
   "$DETCLS" "$DETLED" "$SPLIT" "$HOTGATE" "$UGCEN" "$POLICY" "$SEGAGG"
-  "$DLMGR" "$LEDGER" "$FQSCAN" "$BGFEED" "$EPPREP" "$SCHED"
+  "$DLMGR" "$LEDGER" "$DWJ" "$FQSCAN" "$BGFEED" "$EPPREP" "$SCHED"
   "$CLAIM" "$RECON" "$ATOM" "$AJRUN" "$ACOORD" "$ESUMBF" "$MPTRENG" "$MPTRIDX"
   "$BEXP" "$SPSHD" "$FMSHD" "$TCANON" "$SPLAN"
   "$BGPS" "$GRANT" "$LEASE"
@@ -2732,6 +2780,37 @@ FOCUSED_SUITES=(
   # this list, above, and a second declaration of the same fact is one that can
   # drift.
   -only-testing:PlayheadTests/MergedChildRowDedupeV40MigrationTests
+
+  # playhead-4xmz (DW series): the DOWNLOAD half of the work journal. Three
+  # suites, because the claim spans three layers no one of which can observe
+  # another — the recorder's rows on disk, the V63 rung, and the WIRING, which
+  # is the layer the bead's defect actually lived in and which no runtime test
+  # in this tree can reach (`PlayheadRuntime.init` is unreachable from one).
+  -only-testing:PlayheadTests/DownloadWorkJournalLedgerTests
+  -only-testing:PlayheadTests/DownloadWorkJournalV63MigrationTests
+  -only-testing:PlayheadTests/DownloadWorkJournalWiringSourceCanaryTests
+  # NOT this bead's suite, and NARROWED TO ONE TEST on purpose. It carries
+  # `cache deletion during journal finalization revokes the stale finalized
+  # tail`, the only BEHAVIOURAL rail for a delete racing a journal write —
+  # review 2's repair reddened it while every DW rail stayed green, because the
+  # battery could not see it.
+  #
+  # THE WHOLE SUITE MUST NOT GO IN. Its sibling `cache deletion while background
+  # analysis enqueue is blocked leaves no resurrected artifacts` is in
+  # `scripts/gate-baseline.PlayheadFastTests.json` at 5 failed / 10 seen, kind
+  # `timeout` — and a RED baseline is FATAL here: the run prints "the focused
+  # suites are RED before any mutation" and exits 2 having run no mutants at
+  # all, for EVERY series, not just this one. Importing a committed
+  # load-sensitive flake into the population every mutant runs is how a shared
+  # instrument stops being runnable (review 4).
+  # QUOTED because the per-test Swift Testing form ends in `()`, which bash
+  # reads as a subshell inside an array literal.
+  '-only-testing:PlayheadTests/BackgroundDownloadCompletionTests/cacheDeletionRacingFinalizationDoesNotJournalSuccess()'
+  # The two cross-rung observers above serve V63 as well — a V63 rung missing
+  # from one ladder is invisible to every DW rail for the same reason it was
+  # invisible to every BD one. The DW block sits BELOW them rather than above
+  # because it used to sit above, where it read as though the 'NOT this bead's'
+  # paragraph was describing the DW suites (review 2).
 )
 
 # Named to match the `/private/tmp/playhead-*` pattern `scripts/disk-cleanup.sh`
@@ -3281,7 +3360,12 @@ T_7DGX_FRESH="a fresh store is at head with both tables and a seeded arming row"
 T_7DGX_STAMPED="a store STAMPED at head but missing the tables gets them back on the next open"
 # XCTest source canaries, by method name.
 T_7DGX_C_LADDER="testV62IsRegisteredInBothLaddersExactlyOnceEach"
-T_7DGX_C_DDL="testTheDDLIsSharedRatherThanCopied"
+# CLASS-QUALIFIED by playhead-4xmz (review 5): its canary adds a second method
+# of this exact name, and `extract_failures` emits the bare form too — so the
+# unqualified spelling would let a DW failure be credited to BD07, which is
+# the false-KILL shape this file calls silent and indistinguishable from
+# success. The DW side was qualified when it was written; the mirror was not.
+T_7DGX_C_DDL="BackgroundDownloadDropWiringSourceCanaryTests/testTheDDLIsSharedRatherThanCopied"
 T_7DGX_C_WIRING="testProductionWiresTheStoreBackedDropRecorder"
 T_7DGX_C_BOUND="testEachDropSiteRecordsTheBoundThatActuallyExpired"
 T_7DGX_C_PAIR="testEveryAttributionDeletionInBackgroundDownloadOwesARow"
@@ -3290,6 +3374,78 @@ T_7DGX_C_REASONS="testTheThreeDropSitesUseThreeDistinctReasons"
 # rung short reddens.
 T_7DGX_V40_NOSTEP="V40 does NOT step over a rolled-back V39 — a database left at 38 stays retryable"
 T_7DGX_C6_FRESH="C6: fresh DB migrate() reaches currentSchemaVersion with all expected shape"
+# playhead-4xmz — the DW series: the DOWNLOAD half of the work journal.
+#
+# EVERY NAME HERE IS UNIQUE ACROSS THE WHOLE TEST TREE, and that is load-
+# bearing rather than tidy: this script scores a mutant by grepping the run's
+# FAILING list for the expected DISPLAY NAME, so two tests sharing a name let
+# one be credited for the other — a FALSE KILL, the one verdict shape that is
+# silent and looks exactly like success. Three of these collided with the
+# neighbouring 7dgx suites on their first draft and were renamed. (The tree
+# tree holds 56 names in more than one file and 64 occurring more than once,
+# measured at base AND on this branch — this branch adds none: playhead-0dsti.)
+T_DW_EVENTS="each of the four requirements appends a row carrying its event, cause and metadata"
+T_DW_REPEAT="a repeated failure for one episode is two rows, not one"
+T_DW_DURABLE="the download-journal rows are on disk, not in memory — a second store on the same file reads them"
+T_DW_NEVER_ARMED="a fresh store reads INSTALLED BUT NEVER ARMED, which is not the same as no instrument"
+T_DW_ARMS="the download journal arming counts a launch, and a second counts again without moving firstArmedAt"
+T_DW_WRITEFAIL="an event whose row cannot be written increments writeFailures instead of vanishing"
+T_DW_RESIDUAL="when BOTH durable writes fail, the loss is raised on the surface-status stream"
+T_DW_ARMFAIL="an arming that cannot be written says so on the second medium"
+T_DW_UNKNOWN_EVENT="a row with an unrecognized eventType is counted, not folded into failed"
+T_DW_UNKNOWN_CAUSE="an unrecognized cause round-trips as .unknown rather than becoming nil"
+T_DW_TRUNCATE="a window that hits its limit reports truncated, and most-recent-first"
+T_DW_E2E="the force-quit resume scan preempted event reaches the store through DownloadManager"
+T_DW_LADDER="a V62 store climbs to head through the ladder-only seam and gains both tables"
+T_DW_FROM_V61="a store seeded two rungs back still reaches head, so V63 does not depend on running alone"
+T_DW_IDEMPOTENT="re-running the rung preserves armedLaunches, the stamps, and the rows"
+T_DW_FRESH="a fresh store is at head with both DOWNLOAD-JOURNAL tables and a seeded arming row"
+T_DW_STAMPED="a store STAMPED at head but missing the DOWNLOAD-JOURNAL tables gets them back on the next open"
+T_DW_BELOW_FLOOR="the DOWNLOAD-JOURNAL tables exist BELOW the V39 rollback floor, so presence and not the stamp is the discriminator"
+T_DW_UNTOUCHED="the DOWNLOAD recorder writes no work_journal row even when a job EXISTS"
+T_DW_CANCEL_FIN="a finalization cancelled before it runs writes no row and counts no write failure"
+T_DW_CANCEL_STORE="the store's UnlessCancelled append refuses inside the actor, not just at the caller"
+T_DW_CANCEL_FAIL="a cancelled FAILURE is still recorded — the asymmetry is deliberate"
+DWC="DownloadWorkJournalWiringSourceCanaryTests"
+T_DW_C_RETIRE="$DWC/testTheRetireChainIsDormantAndItsOneCallerWouldDelete"
+# NOT this bead's suite: the on-point BEHAVIOURAL rail for a cache delete
+# racing a journal finalization. It predates this bead and was the thing that
+# caught review 2's repair; `BackgroundDownloadCompletionTests` is in
+# FOCUSED_SUITES from review 3 onward so the battery can see it.
+T_DW_DELETE_RACE="cache deletion during journal finalization revokes the stale finalized tail"
+T_DW_ARM_MISSING="a write failure on a store with NO arming row creates one WITHOUT inventing an arming"
+T_DW_ARM_CREATE="an arming on a store with NO arming row creates one and counts the launch"
+# THREE RAILS HERE DELIBERATELY HAVE NO MUTANT, and all three are stated rather
+# than left as gaps. (It said TWO while naming three, for a round.) `an unbounded limit returns everything instead of trapping`
+# guards a TRAP: its mutant kills the host, and this battery scores a test with
+# no verdict as a PASS (playhead-gjlp0), so the verdict would be about log
+# flushing rather than about the code. `the ANALYSIS recorder really would
+# write a work_journal row under the job generation` demonstrates EXISTING
+# behaviour that this bead did not write — it is the premise the design rests
+# on, and a mutant of it would be a mutant of playhead-uzdq's recorder. And
+# `the DEFAULT recorder writes nothing, which is what makes armedLaunches
+# readable` drives `NoopWorkJournalRecorder`, whose only possible mutant is
+# "make the no-op write", which is not a defect anybody would introduce.
+# `aV62StoreGenuinelyLacksTheTables` deliberately has NO mutant and therefore no
+# variable, on the V62 suite's own precedent: it asserts that a table the suite
+# itself dropped is dropped — a vacuity guard for the rails around it, and a
+# property of the FIXTURE rather than of the code.
+# XCTest source canaries, CLASS-QUALIFIED. `extract_failures` emits both the
+# bare method name and `Class/method`, and the qualified form is the one to use
+# here: `testTheDDLIsSharedRatherThanCopied` is ALSO a method on
+# `BackgroundDownloadDropWiringSourceCanaryTests` — this file is modelled on
+# that one — so the bare spelling would let a BD mutant be credited for a DW
+# rail and vice versa. Same false-kill hazard as the display names above, one
+# naming system along.
+T_DW_C_LADDER="$DWC/testV63IsRegisteredInBothLaddersExactlyOnceEach"
+T_DW_C_DDL="$DWC/testTheDDLIsSharedRatherThanCopied"
+T_DW_C_WIRING="$DWC/testProductionWiresTheStoreBackedWorkJournalRecorder"
+T_DW_C_LET="$DWC/testTheRecorderSlotCannotBeReassignedAfterInit"
+T_DW_C_ARMSITE="$DWC/testTheJournalIsArmedOnceOnTheInjectedInstanceAfterTheStoreIsKnownOpen"
+T_DW_C_NOTANALYSIS="$DWC/testTheDownloadPathDoesNotWriteTheAnalysisWorkJournal"
+T_DW_C_APPENDS="$DWC/testEveryProtocolMethodOnTheStoreBackedRecorderAppends"
+T_DW_C_EVENTS="$DWC/testEveryEventTypeIsProducedBySomeSite"
+
 T_IW7Q_MONOTONE="the gate can only ever DEDUCT — no provenance raises a band"
 T_IW7Q_BYTES="the two rows that used to be identical now differ IN THE BYTES"
 T_IW7Q_NULL="an UNKNOWN provenance writes SQL NULL, not 0"
@@ -12037,6 +12193,231 @@ MUTATIONS=(
   # worthless) and it names the rail BD01 kills, so a KILLED verdict here would
   # mean a rename changed behaviour.
   "BD99|1438|DLMGR|$T_7DGX_SESSION"
+
+  # ---- playhead-4xmz, the DW series: the DOWNLOAD half of the work journal
+  #      stops being a no-op ---------------------------------------------------
+  #
+  # `DownloadManager.workJournalRecorder` took a `NoopWorkJournalRecorder()`
+  # default and PRODUCTION NEVER REPLACED IT — four months, one construction
+  # site, five emission sites, zero rows. So the series' first layer is the
+  # WIRING, which is the layer the defect lived in and which no runtime test in
+  # this tree can reach.
+  #
+  # FIVE layers, and each is invisible from the others:
+  #   WIRING            DW01-DW03, DW21, DW27, DW28, DW33
+  #   RECORDER          DW04-DW09, DW25, DW26, DW29, DW31, DW32
+  #   SCHEMA            DW10-DW14, DW23, DW24, DW36, DW37
+  #   SQL               DW15-DW20, DW22
+  #   THE DELETE RACE   DW34, DW35
+  # (Re-derive this against the array when you add one. It dropped DW28 and
+  # filed DW27 under the delete race for a round — review 4.)
+  # DW99 is the vacuity control. (DW30 was never assigned: the clamp mutant it
+  # would have been kills the HOST rather than an expectation, and a test with
+  # no verdict is scored a PASS — see the note beside the expectation
+  # variables. The gap is deliberate and is recorded here rather than left as a
+  # number a reader has to wonder about.)
+  #
+  # THE SERIES' CENTRAL CLAIM IS DW21, not DW01. Reverting the wiring to the
+  # no-op is the defect coming back; handing the download path the ANALYSIS
+  # recorder is the defect coming back WORSE, because `work_journal.event_type`
+  # is what `AnalysisCoordinator.recoverOrphans` routes on and a transfer
+  # failure written there terminates an analysis generation. DW21 is the mutant
+  # that says the tidying-two-recorders-into-one refactor cannot land quietly.
+
+  # DW01 is THE SHIPPED DEFECT VERBATIM: the argument goes away and the default
+  # no-op comes back. Nothing at runtime can see it, which is the whole point.
+  "DW01|1477|RT|$T_DW_C_WIRING"
+
+  # DW02 arms a FRESHLY CONSTRUCTED recorder instead of the injected one.
+  # READ ITS VICTIM CAREFULLY: on today's code `armedLaunches` would be
+  # IDENTICAL — the recorder is a struct over the shared store actor — so this
+  # is killed by the SOURCE canary and not by any count, and its worth is the
+  # shape rather than a present consequence. The one present consequence is
+  # that the second instance carries no `invariantRecorder`, so a FAILED arming
+  # goes unreported. Review 3 found all three copies of this comment asserting
+  # the arithmetic version as fact.
+  "DW02|1478|RT|$T_DW_C_WIRING;$T_DW_C_ARMSITE"
+
+  # DW03 arms on the DEGRADED launch too. `armedLaunches` then counts launches
+  # on which the store never opened, so a run of unopenable ones reads as
+  # evidence that no download ever failed.
+  "DW03|1479|RT|$T_DW_C_ARMSITE"
+
+  # DW04 collapses `preempted` into `failed`. A force-quit that can be RESUMED
+  # and a transfer that is over are different facts with different remedies.
+  "DW04|1480|DWJ|$T_DW_EVENTS;$T_DW_E2E;$T_DW_C_EVENTS"
+
+  # DW05 gives a SUCCESSFUL transfer a miss cause — a reason in the one column
+  # whose entire job is to carry one.
+  "DW05|1481|DWJ|$T_DW_EVENTS"
+
+  # DW06 is playhead-1nl6's defect verbatim, at the conformer this time: the
+  # `SliceMetadata` blob is dropped and `{}` is written in its place.
+  "DW06|1482|DWJ|$T_DW_EVENTS;$T_DW_DURABLE"
+
+  # DW07 stops counting a row that could not be written. `armedLaunches > 0`
+  # beside zero rows then becomes reachable by silence, which is byte-identical
+  # to this journal's strongest positive claim.
+  "DW07|1483|DWJ|$T_DW_WRITEFAIL;$T_DW_RESIDUAL"
+
+  # DW08 swallows a failed ARMING. The denominator has the same hole the
+  # numerator does and it is closed the same way.
+  "DW08|1484|DWJ|$T_DW_ARMFAIL"
+
+  # DW09 is THIS BEAD'S OWN DEFECT ONE LAYER IN: the wiring is intact and one
+  # protocol requirement's body is empty again.
+  "DW09|1485|DWJ|$T_DW_EVENTS;$T_DW_C_APPENDS;$T_DW_C_EVENTS"
+
+  # DW10 is THE V60 MISTAKE REPEATED: the rung is in the production ladder and
+  # not in `migrateOnlyForTesting`, so every fixture-driven test stops one rung
+  # short while `currentSchemaVersion` assertions still pass.
+  "DW10|1486|STORE|$T_DW_C_LADDER;$T_DW_LADDER;$T_DW_FROM_V61;$T_DW_IDEMPOTENT"
+
+  # DW11 is the mirror: registered in the test seam and not in production. The
+  # tables still appear (`createTables()` is unconditional) and the STAMP never
+  # moves. It reddens the V62 suite too, which is the cross-rung observer.
+  "DW11|1487|STORE|$T_DW_C_LADDER;$T_DW_FRESH;$T_DW_STAMPED;$T_7DGX_FRESH;$T_7DGX_STAMPED"
+
+  # DW12 takes the DDL out of `createTables()`, so a store stamped at head with
+  # the tables missing can never repair — the instrument is dead on that
+  # install forever, because every rung is gated out.
+  "DW12|1488|STORE|$T_DW_C_DDL;$T_DW_STAMPED;$T_DW_BELOW_FLOOR"
+
+  # DW13 lets the rung STEP OVER A ROLLED-BACK V39. The stamp then climbs to 63
+  # on a database that never built the unique asset-identity index, and every
+  # rung gated on the version can never be retried.
+  "DW13|1489|STORE|$T_DW_BELOW_FLOOR;$T_7DGX_BELOW_FLOOR"
+
+  # DW14 makes the arming seed an `INSERT OR REPLACE`. `createTables()` runs on
+  # every open, so the counter would then report "launches since the last open"
+  # while being read as "launches ever".
+  "DW14|1490|STORE|$T_DW_IDEMPOTENT;$T_DW_DURABLE"
+
+  # DW15 hardcodes the persisted event, so every row reads `failed` — including
+  # the finalized ones that are this table's denominator.
+  "DW15|1491|STORE|$T_DW_EVENTS;$T_DW_E2E"
+
+  # DW16 coerces a row this build cannot decode into `failed` instead of
+  # counting it. A wider-vocabulary build's row would silently inflate exactly
+  # the population a reader is counting.
+  "DW16|1492|STORE|$T_DW_UNKNOWN_EVENT"
+
+  # DW17 reads an unrecognized cause as nil — which says "this event had no
+  # reason", the opposite of what the row records.
+  "DW17|1493|STORE|$T_DW_UNKNOWN_CAUSE"
+
+  # DW18 drops the `+ 1` from the probe, so the page can never SEE the row that
+  # tells it the window truncated.
+  "DW18|1494|STORE|$T_DW_TRUNCATE"
+
+  # DW19 reads the forensic tail from the wrong end.
+  "DW19|1495|STORE|$T_DW_TRUNCATE"
+
+  # DW20 degenerates `firstArmedAt` into a second `lastArmedAt` — the exact
+  # defect that column's own doc comment warns about.
+  "DW20|1496|STORE|$T_DW_ARMS"
+
+  # DW21 IS THE SERIES' CENTRAL CLAIM: the download path is handed the ANALYSIS
+  # work-journal recorder. It compiles, every runtime rail is green, and a
+  # background transfer failure now writes a `work_journal` row under the
+  # latest analysis job's generation — which `recoverOrphans` reads as
+  # `terminalNoRequeue`. playhead-rqgr's shipped defect, from a new writer.
+  "DW21|1497|RT|$T_DW_C_WIRING;$T_DW_C_NOTANALYSIS"
+
+  # DW22 counts a write FAILURE as an arming, so the denominator inflates on
+  # exactly the runs where the numerator was lost.
+  "DW22|1498|STORE|$T_DW_WRITEFAIL"
+
+  # DW23 stops SEEDING the arming row, so "installed but never armed" collapses
+  # back into "no instrument at all" — the two states this bead exists to keep
+  # apart.
+  "DW23|1499|STORE|$T_DW_NEVER_ARMED;$T_DW_LADDER;$T_DW_FRESH;$T_DW_STAMPED"
+
+  # DW99 — VACUITY CONTROL, and it MUST SURVIVE. It renames the parameter
+  # BINDING inside `noteWriteFailure` — the argument LABEL and the call site are
+  # untouched. Its expectation is deliberately NON-EMPTY (playhead-ngsm: an
+  # entry with an empty expectation is scored KILLED, which makes a control
+  # expressed that way worthless) and it names the rail DW07 kills, so a KILLED
+  # verdict here would mean a rename changed behaviour.
+  # DW24 removes the check that has to happen INSIDE the actor. An `await` onto
+  # an actor is not a cancellation point, so the caller's pre-hop
+  # `Task.isCancelled` cannot see a cancellation that lands during the hop —
+  # and that window is now however long the store is busy.
+  "DW24|1501|STORE|$T_DW_CANCEL_STORE;$T_DW_CANCEL_FIN"
+
+  # DW25 routes the FINALIZED event through the plain insert, so a finalization
+  # the manager retired before deleting the bytes publishes a row claiming an
+  # artifact that is gone.
+  "DW25|1502|DWJ|$T_DW_CANCEL_FIN;$T_DW_C_APPENDS"
+
+  # DW26 books a CANCELLED write as a FAILED one. `writeFailures` then says this
+  # database could not hold a row — a claim about the store, and the one reading
+  # that counter exists to make.
+  "DW26|1503|DWJ|$T_DW_CANCEL_FIN"
+
+  # DW27 makes the recorder slot a `var` again. Nothing at runtime can see it;
+  # a `var` is one line from a post-init setter, which is the shape that does
+  # not run on a sceneless launch.
+  "DW27|1504|DLMGR|$T_DW_C_LET"
+
+  # DW28 IS THE HAZARD ITSELF, at the recorder rather than at the wiring: the
+  # download recorder ALSO forwards to the analysis one. Every download-journal
+  # rail stays green and a `work_journal` row appears under the live job's
+  # generation, which `recoverOrphans` reads as terminalNoRequeue.
+  "DW28|1505|DWJ|$T_DW_UNTOUCHED"
+
+  # DW29 collapses the row key onto {episode, event}, so a REPEATED failure —
+  # the most interesting thing this table can show — is REFUSED by the PRIMARY
+  # KEY and counted into `writeFailures`. It does NOT overwrite: the insert is a
+  # plain `INSERT`, and a reader triaging a survivor should not go looking for
+  # an upsert that does not exist.
+  "DW29|1506|DWJ|$T_DW_REPEAT"
+
+  # DW31 is the MIRROR of DW25, and it is the direction review 2 found unrailed:
+  # a FAILURE that starts honouring cancellation is dropped whenever an
+  # enclosing task was cancelled — losing exactly the record this bead creates.
+  # Both directions of the asymmetry now have a mutant.
+  "DW31|1507|DWJ|$T_DW_CANCEL_FAIL;$T_DW_C_APPENDS"
+
+  # DW32 stamps every row with a CONSTANT. `occurredAt` is the table's only
+  # timestamp and its sole ordering key, and until review 2 nothing asserted the
+  # value the RECORDER writes — `ORDER BY occurredAt DESC, rowid DESC`
+  # degenerates to `rowid DESC`, which is the order the truncation rail already
+  # expects, so this survived.
+  "DW32|1508|DWJ|$T_DW_EVENTS"
+
+  # DW33 drops the surface-status recorder from the production construction. It
+  # defaults to nil, so the residual medium L-2 and L-3 rest on goes dark with
+  # every runtime rail green — the bead's own defect shape, one argument along.
+  "DW33|1509|RT|$T_DW_C_WIRING"
+
+  # DW34 stops `retireBackgroundTransfers` cancelling the journal finalization
+  # at all, so a cache DELETE racing a finalization publishes a `finalized` row
+  # for bytes that are already unlinked. ONE victim, and it is the BEHAVIOURAL
+  # rail — review 3 re-aimed the edit and APPENDED that rail to the source
+  # canary instead of REPLACING it, and this engine scores SURVIVED when ANY
+  # listed rail stays green (see the note at the top of this file). The canary
+  # cannot see this edit at all, so the two-victim spelling made the mutant
+  # report SURVIVED and the whole series exit 1. Review 4 caught it.
+  "DW34|1510|DLMGR|$T_DW_DELETE_RACE"
+
+  # DW35 REMOVES the `cancelDownload` call from `removeCache`, so the
+  # per-episode delete stops retiring background transfers at all. The shape
+  # canary is what sees it — nothing at runtime counts production call sites,
+  # which is the property review 3 said had to replace a literal spelling.
+  "DW35|1511|DLMGR|$T_DW_C_RETIRE"
+
+  # DW36 makes a write-failure count as an ARMING on the row-CREATING branch —
+  # the branch review 3 found no test ever executes. `armedLaunches` would then
+  # be manufactured by the very failure that proves nothing was recorded.
+  "DW36|1512|STORE|$T_DW_ARM_MISSING"
+
+  # DW37 is DW36's MIRROR, on the writer review 3 railed and did not mutate:
+  # the ARMING writer's row-CREATING branch stops counting the launch it was
+  # called for, so a store whose arming row went missing reports 0 forever.
+  "DW37|1513|STORE|$T_DW_ARM_CREATE"
+
+  "DW99|1500|DWJ|$T_DW_WRITEFAIL"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -12410,6 +12791,43 @@ describe_mutation() {
     BD39) echo "every SUCCESSFUL drop raises the loss invariant, so the line stops meaning anything" ;;
     BD40) echo "lastArmedAt degenerates into a second firstArmedAt" ;;
     BD99) echo "VACUITY CONTROL — the parameter BINDING inside recordBackgroundDownloadDrop is renamed; the label and every call site are untouched. MUST SURVIVE" ;;
+    DW01) echo "THE SHIPPED DEFECT VERBATIM — the workJournalRecorder argument goes away and the no-op default comes back" ;;
+    DW02) echo "the arming goes to a FRESHLY CONSTRUCTED recorder, so armedLaunches counts launches for an instrument nobody injected" ;;
+    DW03) echo "the journal is armed on the DEGRADED launch too, so the denominator counts launches on which the store never opened" ;;
+    DW04) echo "preempted collapses into failed — a resumable force-quit reported as a transfer that is over" ;;
+    DW05) echo "a SUCCESSFUL transfer is given a miss cause" ;;
+    DW06) echo "playhead-1nl6 AT THE CONFORMER — the SliceMetadata blob is dropped and {} written in its place" ;;
+    DW07) echo "a row that could not be written stops being counted, so armed-and-silent becomes reachable by silence" ;;
+    DW08) echo "a failed ARMING is swallowed — the denominator's own silent failure" ;;
+    DW09) echo "THIS BEAD'S DEFECT ONE LAYER IN — the wiring is intact and one protocol requirement's body is empty again" ;;
+    DW10) echo "THE V60 MISTAKE REPEATED — the V63 rung is missing from migrateOnlyForTesting" ;;
+    DW11) echo "the mirror of DW10 — the V63 rung is missing from the production ladder, so the stamp never moves" ;;
+    DW12) echo "createTables() stops carrying the DDL, so a store stamped at head with the tables missing can never repair" ;;
+    DW13) echo "the V63 rung STEPS OVER a rolled-back V39 and stamps 63 onto a database that never built the V39 index" ;;
+    DW14) echo "the arming seed becomes INSERT OR REPLACE, so every store OPEN resets the launch counter" ;;
+    DW15) echo "the persisted eventType is hardcoded, so every row reads failed — including the denominator" ;;
+    DW16) echo "an unrecognized eventType is coerced into failed instead of being counted" ;;
+    DW17) echo "an unrecognized cause reads as nil, which says the event had no reason" ;;
+    DW18) echo "the probe drops the + 1, so the page can never SEE the row that says it truncated" ;;
+    DW19) echo "the forensic tail is read from the wrong end" ;;
+    DW20) echo "firstArmedAt follows the LATEST arming — a second lastArmedAt under a name that says the opposite" ;;
+    DW21) echo "THE SERIES' CENTRAL CLAIM — the download path is handed the ANALYSIS work-journal recorder, so a transfer failure writes a work_journal row that recoverOrphans reads as terminalNoRequeue" ;;
+    DW22) echo "a write FAILURE is counted as an arming, inflating the denominator on exactly the runs where the numerator was lost" ;;
+    DW23) echo "the arming row is no longer SEEDED, so \"installed but never armed\" collapses into \"no instrument at all\"" ;;
+    DW24) echo "the cancellation check INSIDE the actor is removed, so a cancellation landing during the hop is invisible" ;;
+    DW25) echo "the FINALIZED event stops honouring cancellation, so a retired finalization publishes a row for deleted bytes" ;;
+    DW26) echo "a CANCELLED write is booked as a FAILED one, so writeFailures claims the store could not hold a row" ;;
+    DW27) echo "the recorder slot goes back to being a var — one line from a post-init setter" ;;
+    DW28) echo "THE HAZARD AT THE RECORDER — the download recorder ALSO forwards to the ANALYSIS one, so a transfer failure lands in work_journal under the live job generation" ;;
+    DW29) echo "the row key collapses onto {episode, event}, so a repeated failure is REFUSED by the PRIMARY KEY and counted into writeFailures (it does not upsert — there is no upsert here)" ;;
+    DW31) echo "a FAILURE starts honouring cancellation, so a cancelled enclosing task drops the record this bead exists to create" ;;
+    DW32) echo "every row is stamped with a CONSTANT occurredAt — the table's only timestamp and its sole ordering key" ;;
+    DW33) echo "production stops passing the surface-status recorder, so the residual medium goes dark with every rail green" ;;
+    DW34) echo "retireBackgroundTransfers stops cancelling the journal finalization, so a cache DELETE racing one publishes a finalized row for unlinked bytes" ;;
+    DW35) echo "the per-episode delete stops retiring background transfers at all" ;;
+    DW36) echo "a write FAILURE manufactures an arming on the row-creating branch — a denominator invented by the failure that proves nothing was recorded" ;;
+    DW37) echo "the arming writer's row-CREATING branch stops counting the launch, so a store whose arming row went missing reports 0 forever" ;;
+    DW99) echo "VACUITY CONTROL — the parameter BINDING inside noteWriteFailure is renamed; the label and the call site are untouched. MUST SURVIVE" ;;
     IW01) echo "THE SHIPPED DEFECT VERBATIM — the coarse gate is gone, so a runner hardcode reads as the model's grade" ;;
     IW02) echo "the gate opens for anything that is NOT permissive, so UNKNOWN licenses the band — the backfill defect in the reader" ;;
     IW03) echo "the coarse branch bypasses the gate at the CALL SITE instead of inside PersistedCertainty" ;;
@@ -13247,15 +13665,17 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  # ANCHOR WIDENED BY playhead-4xmz (review 5). V63 added a rung and a
+  # near-identical arming table, so this anchor matched 0 or 2 times and the
+  # battery refused — a LOST RAIL for playhead-7dgx on every future run. The
+  # mutation is unchanged; only the context that makes it unambiguous is.
   BD05)
     snippet OLD <<'EOF'
         try migrateBackgroundDownloadDropsV62IfNeeded()
-    }
-    #endif
+        // playhead-4xmz (v63): two brand-new tables, same shape of rung as
 EOF
     snippet NEW <<'EOF'
-    }
-    #endif
+        // playhead-4xmz (v63): two brand-new tables, same shape of rung as
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -13267,13 +13687,19 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  # ANCHOR WIDENED BY playhead-4xmz (review 5). V63 added a rung and a
+  # near-identical arming table, so this anchor matched 0 or 2 times and the
+  # battery refused — a LOST RAIL for playhead-7dgx on every future run. The
+  # mutation is unchanged; only the context that makes it unambiguous is.
   BD07)
     snippet OLD <<'EOF'
         try createBackgroundDownloadDropTables()
-    }
+
+        // playhead-4xmz: the download-path work journal and its arming row.
 EOF
     snippet NEW <<'EOF'
-    }
+
+        // playhead-4xmz: the download-path work journal and its arming row.
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -13306,12 +13732,20 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  # ANCHOR WIDENED BY playhead-4xmz (review 5). V63 added a rung and a
+  # near-identical arming table, so this anchor matched 0 or 2 times and the
+  # battery refused — a LOST RAIL for playhead-7dgx on every future run. The
+  # mutation is unchanged; only the context that makes it unambiguous is.
   BD10)
     snippet OLD <<'EOF'
                 armedLaunches = armedLaunches + 1,
+                firstArmedAt = CASE
+                    WHEN background_download_drop_arming.armedLaunches = 0
 EOF
     snippet NEW <<'EOF'
                 armedLaunches = 1,
+                firstArmedAt = CASE
+                    WHEN background_download_drop_arming.armedLaunches = 0
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -13394,6 +13828,516 @@ EOF
     snippet NEW <<'EOF'
         occurredAt: Double = Date().timeIntervalSince1970,
         id: String = "background-download-drop"
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW01)
+    snippet OLD <<'EOF'
+        self.downloadManager = DownloadManager(
+            workJournalRecorder: downloadWorkJournalRecorder,
+EOF
+    snippet NEW <<'EOF'
+        self.downloadManager = DownloadManager(
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW02)
+    snippet OLD <<'EOF'
+            await downloadWorkJournalRecorder.recordInstrumentArmed(
+                at: Date().timeIntervalSince1970
+            )
+EOF
+    snippet NEW <<'EOF'
+            await AnalysisStoreDownloadWorkJournalRecorder(
+                store: analysisStore
+            ).recordInstrumentArmed(
+                at: Date().timeIntervalSince1970
+            )
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW03)
+    snippet OLD <<'EOF'
+            guard storeOutcome.isOpen else {
+                return  // Degraded launch: playback works, analysis does not.
+            }
+EOF
+    snippet NEW <<'EOF'
+            guard storeOutcome.isOpen else {
+                await downloadWorkJournalRecorder.recordInstrumentArmed(
+                    at: Date().timeIntervalSince1970
+                )
+                return  // Degraded launch: playback works, analysis does not.
+            }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW04)
+    snippet OLD <<'EOF'
+            eventType: .preempted,
+EOF
+    snippet NEW <<'EOF'
+            eventType: .failed,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW05)
+    snippet OLD <<'EOF'
+            eventType: .finalized,
+            cause: nil,
+EOF
+    snippet NEW <<'EOF'
+            eventType: .finalized,
+            cause: .userCancelled,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW06)
+    snippet OLD <<'EOF'
+            eventType: .failed,
+            cause: cause,
+            metadataJSON: metadataJSON,
+            honoringCancellation: false
+        )
+    }
+
+    /// Persists the blob, same decision and same reason as above.
+EOF
+    snippet NEW <<'EOF'
+            eventType: .failed,
+            cause: cause,
+            metadataJSON: "{}",
+            honoringCancellation: false
+        )
+    }
+
+    /// Persists the blob, same decision and same reason as above.
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW07)
+    snippet OLD <<'EOF'
+            await noteWriteFailure(
+                episodeId: episodeId,
+                eventType: eventType,
+                cause: cause,
+                at: now,
+                rowError: error
+            )
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW08)
+    snippet OLD <<'EOF'
+            invariantRecorder?(
+                .downloadWorkJournalNotRecorded,
+                "arming=failed — this launch had a live download work-journal "
+                + "recorder and download_work_journal_arming.armedLaunches did "
+                + "not move, so any row it goes on to write has no launch in "
+                + "the denominator: \(String(describing: error))"
+            )
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW09)
+    snippet OLD <<'EOF'
+    func recordFailed(episodeId: String, cause: InternalMissCause) async {
+        await append(
+            episodeId: episodeId,
+            eventType: .failed,
+            cause: cause,
+            metadataJSON: "{}",
+            honoringCancellation: false
+        )
+    }
+EOF
+    snippet NEW <<'EOF'
+    func recordFailed(episodeId: String, cause: InternalMissCause) async {}
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW10)
+    snippet OLD <<'EOF'
+        try migrateDownloadWorkJournalV63IfNeeded()
+    }
+    #endif
+EOF
+    snippet NEW <<'EOF'
+    }
+    #endif
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW11)
+    snippet OLD <<'EOF'
+            try migrateDownloadWorkJournalV63IfNeeded()
+            try exec("COMMIT")
+EOF
+    snippet NEW <<'EOF'
+            try exec("COMMIT")
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW12)
+    snippet OLD <<'EOF'
+        // playhead-4xmz: the download-path work journal and its arming row.
+        // Declared here AND in `migrateDownloadWorkJournalV63IfNeeded` for the
+        // same V49 house rule, through the same single shared helper.
+        try createDownloadWorkJournalTables()
+EOF
+    snippet NEW <<'EOF'
+        // playhead-4xmz: the download-path work journal and its arming row.
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW13)
+    snippet OLD <<'EOF'
+        guard observed < 63 else { return }
+        // DO NOT STEP OVER A ROLLED-BACK V39 — same rationale as V40–V62.
+        guard observed >= 62 else { return }
+EOF
+    snippet NEW <<'EOF'
+        guard observed < 63 else { return }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW14)
+    snippet OLD <<'EOF'
+            INSERT OR IGNORE INTO download_work_journal_arming
+EOF
+    snippet NEW <<'EOF'
+            INSERT OR REPLACE INTO download_work_journal_arming
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW15)
+    snippet OLD <<'EOF'
+        bind(stmt, 3, record.eventType.rawValue)
+EOF
+    snippet NEW <<'EOF'
+        bind(stmt, 3, DownloadWorkJournalEventType.failed.rawValue)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW16)
+    snippet OLD <<'EOF'
+            let rawEvent = text(stmt, 2)
+            guard let eventType = DownloadWorkJournalEventType(
+                rawValue: rawEvent
+            ) else {
+                unrecognizedEventType += 1
+                continue
+            }
+EOF
+    snippet NEW <<'EOF'
+            let rawEvent = text(stmt, 2)
+            let eventType = DownloadWorkJournalEventType(
+                rawValue: rawEvent
+            ) ?? .failed
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW17)
+    snippet OLD <<'EOF'
+                cause: rawCause.map {
+                    InternalMissCause(rawValue: $0) ?? .unknown($0)
+                },
+EOF
+    snippet NEW <<'EOF'
+                cause: rawCause.flatMap {
+                    InternalMissCause(rawValue: $0)
+                },
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DW18 drops ONLY the `+ 1`. Its first cut wrote `let probe = ceiling`, which
+  # ALSO removed the `Int32` clamp — and `bind(_:_:Int)` goes through the
+  # TRAPPING `Int32(_:)`, so the `limit: .max` rail in the same suite killed the
+  # HOST. Measured: 19 host restarts and 38 fatal errors in one batch, and a
+  # test with no verdict is scored a PASS (playhead-gjlp0), so the declared
+  # victim's verdict became a question about log flushing. The clamp is left
+  # alone here and is deliberately unmutated — see the note beside the
+  # expectation variables.
+  DW18)
+    snippet OLD <<'EOF'
+        let probe = ceiling >= Int(Int32.max) ? Int(Int32.max) : ceiling + 1
+        let stmt = try prepare("""
+            SELECT id, episodeId, eventType, cause, occurredAt, metadata
+EOF
+    snippet NEW <<'EOF'
+        let probe = ceiling >= Int(Int32.max) ? Int(Int32.max) : ceiling
+        let stmt = try prepare("""
+            SELECT id, episodeId, eventType, cause, occurredAt, metadata
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW19)
+    snippet OLD <<'EOF'
+            ORDER BY occurredAt DESC, rowid DESC
+            LIMIT ?
+EOF
+    snippet NEW <<'EOF'
+            ORDER BY occurredAt ASC, rowid ASC
+            LIMIT ?
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW20)
+    snippet OLD <<'EOF'
+                firstArmedAt = CASE
+                    WHEN download_work_journal_arming.armedLaunches = 0
+                    THEN excluded.firstArmedAt
+                    ELSE download_work_journal_arming.firstArmedAt
+                END,
+EOF
+    snippet NEW <<'EOF'
+                firstArmedAt = excluded.firstArmedAt,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW21)
+    snippet OLD <<'EOF'
+            workJournalRecorder: downloadWorkJournalRecorder,
+EOF
+    snippet NEW <<'EOF'
+            workJournalRecorder: AnalysisStoreWorkJournalRecorder(store: analysisStore),
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW22)
+    snippet OLD <<'EOF'
+            ON CONFLICT(id) DO UPDATE SET
+                writeFailures = writeFailures + 1
+EOF
+    snippet NEW <<'EOF'
+            ON CONFLICT(id) DO UPDATE SET
+                writeFailures = writeFailures + 1,
+                armedLaunches = armedLaunches + 1
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW23)
+    snippet OLD <<'EOF'
+        let stmt = try prepare("""
+            INSERT OR IGNORE INTO download_work_journal_arming
+            (id, armedLaunches, writeFailures, firstArmedAt, lastArmedAt,
+             installedAt)
+            VALUES (1, 0, 0, NULL, NULL, ?)
+            """)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, Date().timeIntervalSince1970)
+        try step(stmt, expecting: SQLITE_DONE)
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW24)
+    snippet OLD <<'EOF'
+    ) throws {
+        try Task.checkCancellation()
+        try insertDownloadWorkJournalEntry(record)
+    }
+EOF
+    snippet NEW <<'EOF'
+    ) throws {
+        try insertDownloadWorkJournalEntry(record)
+    }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW25)
+    snippet OLD <<'EOF'
+            eventType: .finalized,
+            cause: nil,
+            metadataJSON: "{}",
+            honoringCancellation: true
+EOF
+    snippet NEW <<'EOF'
+            eventType: .finalized,
+            cause: nil,
+            metadataJSON: "{}",
+            honoringCancellation: false
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # THE ANCHOR IS THE CODE, NOT THE PROSE. This was re-cut FOUR times on this
+  # branch — once per review round that edited the comment inside the arm —
+  # each time reported as `anchor did not apply`. An anchor whose stability
+  # depends on nobody editing a paragraph is not an anchor (review 5). The edit
+  # is the same in effect: the arm stops catching `CancellationError`, which
+  # then falls through to the generic `catch` and is booked as a FAILED write.
+  # `DecodingError` is a stdlib type nothing on this path throws, so the arm
+  # compiles and is unreachable — a deleted arm in every sense that matters.
+  DW26)
+    snippet OLD <<'EOF'
+        } catch is CancellationError {
+EOF
+    snippet NEW <<'EOF'
+        } catch is DecodingError {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW27)
+    snippet OLD <<'EOF'
+    internal let workJournalRecorder: WorkJournalRecording
+EOF
+    snippet NEW <<'EOF'
+    internal var workJournalRecorder: WorkJournalRecording
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW28)
+    snippet OLD <<'EOF'
+        do {
+            if honoringCancellation {
+EOF
+    snippet NEW <<'EOF'
+        do {
+            await AnalysisStoreWorkJournalRecorder(store: store).recordFailed(
+                episodeId: episodeId,
+                cause: cause ?? .pipelineError,
+                metadataJSON: metadataJSON
+            )
+            if honoringCancellation {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW29)
+    snippet OLD <<'EOF'
+        let record = DownloadWorkJournalRecord(
+            episodeId: episodeId,
+EOF
+    snippet NEW <<'EOF'
+        let record = DownloadWorkJournalRecord(
+            id: "\(episodeId)|\(eventType.rawValue)",
+            episodeId: episodeId,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW31)
+    snippet OLD <<'EOF'
+            eventType: .failed,
+            cause: cause,
+            metadataJSON: metadataJSON,
+            honoringCancellation: false
+EOF
+    snippet NEW <<'EOF'
+            eventType: .failed,
+            cause: cause,
+            metadataJSON: metadataJSON,
+            honoringCancellation: true
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW32)
+    snippet OLD <<'EOF'
+            occurredAt: now,
+            metadataJSON: metadataJSON
+        )
+EOF
+    snippet NEW <<'EOF'
+            occurredAt: 0,
+            metadataJSON: metadataJSON
+        )
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW33)
+    snippet OLD <<'EOF'
+        let downloadWorkJournalRecorder = AnalysisStoreDownloadWorkJournalRecorder(
+            store: analysisStore,
+            invariantRecorder: { [surfaceStatusLogger] code, description in
+                surfaceStatusLogger.invariantViolated(
+                    code: code, description: description
+                )
+            }
+        )
+EOF
+    snippet NEW <<'EOF'
+        let downloadWorkJournalRecorder = AnalysisStoreDownloadWorkJournalRecorder(
+            store: analysisStore
+        )
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW34)
+    snippet OLD <<'EOF'
+        if let episodeId {
+            backgroundJournalFinalizations[episodeId]?.task.cancel()
+        } else {
+            for finalization in
+                backgroundJournalFinalizations.values {
+                finalization.task.cancel()
+            }
+        }
+EOF
+    snippet NEW <<'EOF'
+        _ = episodeId
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW35)
+    snippet OLD <<'EOF'
+        await cancelDownload(episodeId: episodeId)
+        let fm = FileManager.default
+EOF
+    snippet NEW <<'EOF'
+        let fm = FileManager.default
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW36)
+    snippet OLD <<'EOF'
+            VALUES (1, 0, 1, NULL, NULL, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                writeFailures = writeFailures + 1
+EOF
+    snippet NEW <<'EOF'
+            VALUES (1, 1, 1, NULL, NULL, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                writeFailures = writeFailures + 1
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+
+  # The table name is IN the anchor: the 7dgx arming writer's SQL is otherwise
+  # byte-identical, so the narrower spelling matched twice and the battery
+  # refused (`anchor matched 2 times`) rather than mutating the wrong table.
+  DW37)
+    snippet OLD <<'EOF'
+            INSERT INTO download_work_journal_arming
+            (id, armedLaunches, writeFailures, firstArmedAt, lastArmedAt,
+             installedAt)
+            VALUES (1, 1, 0, ?, ?, ?)
+EOF
+    snippet NEW <<'EOF'
+            INSERT INTO download_work_journal_arming
+            (id, armedLaunches, writeFailures, firstArmedAt, lastArmedAt,
+             installedAt)
+            VALUES (1, 0, 0, ?, ?, ?)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW99)
+    snippet OLD <<'EOF'
+        at now: Double,
+        rowError: Error
+    ) async {
+        do {
+            try await store.noteDownloadWorkJournalWriteFailure(at: now)
+EOF
+    snippet NEW <<'EOF'
+        at stamp: Double,
+        rowError: Error
+    ) async {
+        let now = stamp
+        do {
+            try await store.noteDownloadWorkJournalWriteFailure(at: now)
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -13581,17 +14525,23 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  # ANCHOR WIDENED BY playhead-4xmz (review 5). V63 added a rung and a
+  # near-identical arming table, so this anchor matched 0 or 2 times and the
+  # battery refused — a LOST RAIL for playhead-7dgx on every future run. The
+  # mutation is unchanged; only the context that makes it unambiguous is.
   BD27)
     snippet OLD <<'EOF'
             if seen > ceiling {
                 truncated = true
                 break
             }
+            switch readBackgroundDownloadDropRow(stmt) {
 EOF
     snippet NEW <<'EOF'
             if seen > ceiling {
                 break
             }
+            switch readBackgroundDownloadDropRow(stmt) {
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -13727,12 +14677,22 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  # ANCHOR WIDENED BY playhead-4xmz (review 5). V63 added a rung and a
+  # near-identical arming table, so this anchor matched 0 or 2 times and the
+  # battery refused — a LOST RAIL for playhead-7dgx on every future run. The
+  # mutation is unchanged; only the context that makes it unambiguous is.
   BD37)
     snippet OLD <<'EOF'
         let probe = ceiling >= Int(Int32.max) ? Int(Int32.max) : ceiling + 1
+        let stmt = try prepare(
+            "\(Self.backgroundDownloadDropSelectColumns) ORDER BY occurredAt DESC LIMIT ?"
+        )
 EOF
     snippet NEW <<'EOF'
         let probe = ceiling
+        let stmt = try prepare(
+            "\(Self.backgroundDownloadDropSelectColumns) ORDER BY occurredAt DESC LIMIT ?"
+        )
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -13770,11 +14730,19 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  # ANCHOR WIDENED BY playhead-4xmz (review 5). V63 added a rung and a
+  # near-identical arming table, so this anchor matched 0 or 2 times and the
+  # battery refused — a LOST RAIL for playhead-7dgx on every future run. The
+  # mutation is unchanged; only the context that makes it unambiguous is.
   BD40)
     snippet OLD <<'EOF'
+                    ELSE background_download_drop_arming.firstArmedAt
+                END,
                 lastArmedAt = excluded.lastArmedAt
 EOF
     snippet NEW <<'EOF'
+                    ELSE background_download_drop_arming.firstArmedAt
+                END,
                 lastArmedAt = CASE
                     WHEN background_download_drop_arming.armedLaunches = 0
                     THEN excluded.lastArmedAt
@@ -28588,6 +29556,7 @@ rec_file()   {
     SEGAGG) printf '%s' "$SEGAGG" ;;
     DLMGR) printf '%s' "$DLMGR" ;;
     LEDGER) printf '%s' "$LEDGER" ;;
+    DWJ)   printf '%s' "$DWJ" ;;
     FQSCAN) printf '%s' "$FQSCAN" ;;
     BGFEED) printf '%s' "$BGFEED" ;;
     EPPREP) printf '%s' "$EPPREP" ;;
@@ -28806,6 +29775,7 @@ run_focused() {
 # Main
 # ---------------------------------------------------------------------------
 ONLY=""
+ONLY_SERIES=""
 ONLY_BATCH=""
 LIST_ONLY=0
 DRY_RUN=0
@@ -28818,6 +29788,15 @@ while [ $# -gt 0 ]; do
     --list)    LIST_ONLY=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     --only)  ONLY="$2"; shift 2 ;;
+    --series)
+      # An EXPLICIT empty string must not read as "no filter". `set -u` catches
+      # a MISSING value; it cannot catch `--series ""`, which would silently
+      # select the entire battery — about 1,500 batches — instead of refusing.
+      if [ -z "$2" ]; then
+        echo "mutation-battery: --series needs a non-empty prefix" >&2
+        exit 2
+      fi
+      ONLY_SERIES="$2"; shift 2 ;;
     --batch) ONLY_BATCH="$2"; shift 2 ;;
     -h|--help)
       # Print the whole header block and stop at the first non-comment line.
@@ -28917,12 +29896,77 @@ for rec in "${MUTATIONS[@]}"; do
   name="$(rec_name "$rec")"
   batch="$(rec_batch "$rec")"
   if [ -n "$ONLY" ] && [ "$name" != "$ONLY" ]; then continue; fi
+  # playhead-4xmz: `--series DW` selects every mutation whose NAME starts with
+  # the prefix. It exists because `--only` is exact and the baseline is re-run
+  # on EVERY invocation — a 24-mutant series driven one `--only` at a time pays
+  # ~3 minutes of redundant baseline per mutant, which was 72 minutes of the
+  # first attempt at this bead's ledger.
+  #
+  # IT CANNOT DROP A SERIES' VACUITY CONTROL — but NOT "by construction", which
+  # is what this comment claimed on its first cut and is false: `--series DW0`
+  # selects DW01…DW09 and not DW99, and such a run exits 0 where the whole
+  # series exits 1, because the control legitimately survives. Dropping a
+  # control turns a red run GREEN. What actually stops it is the explicit
+  # refusal below the SELECTED loop.
+  if [ -n "$ONLY_SERIES" ]; then
+    case "$name" in
+      "$ONLY_SERIES"*) : ;;
+      *) continue ;;
+    esac
+  fi
   if [ -n "$ONLY_BATCH" ] && [ "$batch" != "$ONLY_BATCH" ]; then continue; fi
   SELECTED+=("$rec")
 done
 if [ "${#SELECTED[@]}" -eq 0 ]; then
   echo "mutation-battery: nothing selected" >&2
   exit 2
+fi
+
+# playhead-4xmz: A SELECTION THAT WOULD DROP A SERIES' VACUITY CONTROL GETS THE
+# CONTROL APPENDED, rather than being refused.
+#
+# WHY IT MATTERS AT ALL: a run without the control cannot distinguish "every
+# mutant died" from "the focused suites fail on anything", and — the direction
+# that bites — it exits 0 where the whole series exits 1, because a control
+# legitimately SURVIVES. `--series DW0` selects DW01..DW09 and not DW99;
+# `--batch 1477` and `--only DW07` each select one mutant and no control.
+# DROPPING A CONTROL TURNS A RED RUN GREEN. CLAUDE.md records the R-engine
+# batteries closing exactly this hole (playhead-o89d R5).
+#
+# WHY APPEND RATHER THAN REFUSE, which is what R1 shipped and R3 measured: a
+# refusal made `--batch <id>` exit 2 for 303 of 805 batch ids across 24 series
+# that never asked for it, deleting the per-batch re-run recipe this script's
+# own USAGE documents. Appending preserves every existing invocation and costs
+# one extra batch. It is also what the R engine does.
+#
+# The first cut of this claimed the property held "by construction" because a
+# control is named after its series. That is true of `--series DW` and false of
+# every other spelling, which is the whole reason this block exists.
+if [ -n "$ONLY" ] || [ -n "$ONLY_SERIES" ] || [ -n "$ONLY_BATCH" ]; then
+  for rec in "${MUTATIONS[@]}"; do
+    ctl_name="$(rec_name "$rec")"
+    case "$ctl_name" in
+      *99) ;;
+      *) continue ;;
+    esac
+    ctl_series="${ctl_name%99}"
+    touches=0
+    holds_control=0
+    for sel in "${SELECTED[@]}"; do
+      sel_name="$(rec_name "$sel")"
+      case "$sel_name" in
+        "$ctl_series"*) touches=1 ;;
+      esac
+      [ "$sel_name" = "$ctl_name" ] && holds_control=1
+    done
+    if [ "$touches" -eq 1 ] && [ "$holds_control" -eq 0 ]; then
+      echo "mutation-battery: this selection covers part of the $ctl_series series without its"
+      echo "  vacuity control $ctl_name, so $ctl_name is APPENDED. A run without it cannot tell"
+      echo "  'every mutant died' from 'the suites fail on anything', and it exits 0 where the"
+      echo "  whole series exits 1."
+      SELECTED+=("$rec")
+    fi
+  done
 fi
 
 # Batch ids, in first-seen order

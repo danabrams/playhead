@@ -463,6 +463,21 @@ actor DownloadManager {
     /// Cancellable journal tails for placed background artifacts. Cache
     /// deletion retires these before unlinking bytes so a recorder suspended
     /// before its durable append cannot publish a stale `.finalized` row.
+    ///
+    /// **THE WINDOW THIS PROTECTS WAS ~0 UNTIL playhead-4xmz AND IS NOW A STORE
+    /// ROUND-TRIP.** `workJournalRecorder` was a no-op in production, so the
+    /// tail returned immediately and the cancellation had nothing to race; it
+    /// now writes `download_work_journal` and can be suspended for as long as
+    /// the `AnalysisStore` actor is busy. NO production path retires today —
+    /// `removeCache` and `clearCache()` both have zero callers outside tests.
+    /// The paths that DO unlink bytes never enter this actor's retire at all —
+    /// Settings' bulk clear, and LRU `evictIfNeeded`, which is safe from this
+    /// race only because it skips `bgInFlightEpisodes` (limit L-7 in
+    /// `DownloadWorkJournalLedger.swift`, filed as playhead-86sfq). The
+    /// behavioural rail for the race, exercised by tests, is
+    /// `BackgroundDownloadCompletionTests`'
+    /// `cacheDeletionRacingFinalizationDoesNotJournalSuccess`, which review 3
+    /// found is the only thing that catches a repair aimed at the wrong half.
     private struct BackgroundJournalFinalization {
         let id: UUID
         let task: Task<Void, Never>
@@ -604,14 +619,31 @@ actor DownloadManager {
     /// flip it without reaching into UserDefaults.
     private var useDualBackgroundSessions: Bool
 
-    /// Recorder injected by playhead-uzdq (or any test double) to emit
-    /// WorkJournal events from the download delegate callbacks. Defaults
-    /// to a no-op so 24cm can ship before uzdq lands.
+    /// Recorder for the work-journal events this actor and the force-quit
+    /// scan emit. Production passes
+    /// ``AnalysisStoreDownloadWorkJournalRecorder``, which writes
+    /// `download_work_journal`.
     ///
     /// Visibility is `internal` (not `private`) so the playhead-hyht
     /// force-quit scan extension in `ForceQuitResumeScan.swift` can emit
     /// preempted/failed rows without re-entering DownloadManager.swift.
-    internal var workJournalRecorder: WorkJournalRecording
+    ///
+    /// **THE DEFAULT IS STILL A NO-OP, AND FOR FOUR MONTHS PRODUCTION HELD IT**
+    /// (playhead-4xmz). `PlayheadRuntime` passed `invariantRecorder:` and later
+    /// `dropRecorder:` and never this, so every `recordFailed` /
+    /// `recordPreempted` / `recordFinalized` below went to a method whose body
+    /// is `{}` — the very state `NoopBackgroundDownloadDropRecorder`'s doc
+    /// comment names by example. A default no-op plus an intention is not a
+    /// mechanism. What stops it now is
+    /// `DownloadWorkJournalWiringSourceCanaryTests` plus
+    /// `download_work_journal_arming`, which makes the state visible on a
+    /// device pull rather than only in source.
+    ///
+    /// `let`, not `var`: no production or test site has ever assigned it after
+    /// init, and a post-init setter is precisely what does not run on the
+    /// sceneless relaunch these records matter most on — the same reason
+    /// ``dropRecorder`` and ``invariantRecorder`` are injected at construction.
+    internal let workJournalRecorder: WorkJournalRecording
 
     /// Delegate for background sessions. A single delegate instance
     /// serves all three identifier lanes — the session identifier is
@@ -729,12 +761,14 @@ actor DownloadManager {
     /// not run there.
     ///
     /// **A production manager holding the no-op is a defect.** It is not
-    /// hypothetical — ``workJournalRecorder`` above is in exactly that state:
-    /// its default is never replaced by `PlayheadRuntime`, so every
-    /// `recordFailed` this actor makes goes nowhere. What stops that here is
-    /// `BackgroundDownloadDropWiringSourceCanaryTests` plus the arming row the
-    /// ledger keeps, which makes the state visible on a device pull rather
-    /// than only in source.
+    /// hypothetical — ``workJournalRecorder`` above WAS in exactly that state
+    /// for four months: its default was never replaced by `PlayheadRuntime`,
+    /// so every `recordFailed` this actor made went nowhere. That is fixed
+    /// (playhead-4xmz) and the sentence is kept in the past tense rather than
+    /// deleted, because the argument for injecting at construction rests on it
+    /// having actually happened here. What stops it, in both cases, is a source
+    /// canary plus an arming row that makes the state visible on a device pull
+    /// rather than only in source.
     internal let dropRecorder: BackgroundDownloadDropRecording
 
     // MARK: - Streams
@@ -3131,6 +3165,17 @@ actor DownloadManager {
     // MARK: - Cancel
 
     /// Cancels an active download for the given episode.
+    ///
+    /// **ITS ONLY CALLER IS `removeCache(for:)`, WHICH ITSELF HAS NO PRODUCTION
+    /// CALLER** — measured over `Playhead/**` at playhead-4xmz review 5, so
+    /// this whole chain is reachable only from tests today. It retires
+    /// background transfers, which cancels any in-flight
+    /// `download_work_journal` finalization — correct only because
+    /// `removeCache` unlinks the artifact three lines after calling here. A
+    /// caller that does NOT delete would silently drop a `finalized` row for an
+    /// artifact still on disk, out of the column that makes `finalized`/`failed`
+    /// a real split. `DownloadWorkJournalWiringSourceCanaryTests` pins the
+    /// call-site counts, because nothing at runtime can see them.
     func cancelDownload(episodeId: String) async {
         var cancelled = false
 
@@ -3259,6 +3304,31 @@ actor DownloadManager {
     /// hop. All three known session identifiers are instantiated here
     /// deliberately: explicit deletion is not latency-sensitive like the
     /// launch scan, and must find tasks retained by an older process.
+    /// CANCELLING A FINALIZATION DESTROYS A `download_work_journal` ROW for a
+    /// transfer that completed, so it is correct only where the bytes are about
+    /// to be unlinked — otherwise the row would have been true.
+    ///
+    /// **NOTHING IN PRODUCTION REACHES HERE TODAY.** Measured over
+    /// `Playhead/**` at playhead-4xmz review 5: the two callers are
+    /// `cancelDownload(episodeId:)` and ``clearCache()``; `cancelDownload`'s
+    /// only caller is `removeCache(for:)`; and `removeCache(for:)` and
+    /// ``clearCache()`` both have ZERO callers outside `PlayheadTests/`. There
+    /// is no per-episode delete affordance in the UI, and the bulk clear
+    /// (Settings' "Clear Cached Audio") never enters this actor. So this
+    /// mechanism is DORMANT in shipping builds and is exercised only by tests.
+    ///
+    /// It is kept, and kept correct, because the moment a delete is wired to
+    /// `removeCache` the race is live and the row must not survive the bytes.
+    ///
+    /// THREE REVIEW ROUNDS DESCRIBED THIS AS "THE ONE PRODUCTION PATH", each
+    /// one call frame further out. Review 2 made the cancel conditional, which
+    /// disarmed the per-episode delete and reddened
+    /// `cacheDeletionRacingFinalizationDoesNotJournalSuccess`; review 3
+    /// reverted that and wrote "two deleting callers"; review 4 found one of
+    /// the two has no caller; review 5 found the other has none either. So
+    /// `DownloadWorkJournalWiringSourceCanaryTests` pins the tree-wide
+    /// call-site COUNT of all three, and the next reader gets a number rather
+    /// than a sentence.
     @discardableResult
     private func retireBackgroundTransfers(
         episodeId: String?

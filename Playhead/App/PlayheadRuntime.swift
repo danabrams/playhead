@@ -190,6 +190,25 @@ final class PlayheadRuntime {
     /// download itself recorded.
     let dayZeroKickoffEpisodeFactsBox = DayZeroKickoffEpisodeFactsBox()
     let downloadManager: DownloadManager
+
+    /// playhead-4xmz: the SAME instance injected into ``downloadManager`` as
+    /// its `workJournalRecorder`, held so the launch Task can ARM it.
+    ///
+    /// Held rather than reconstructed at the arming site on purpose — and the
+    /// reason is the SHAPE, not today's arithmetic. A second instance built at
+    /// the arming site would write the same `download_work_journal_arming` row,
+    /// because this recorder is a struct whose only durable state is the shared
+    /// store actor, so `armedLaunches` would be byte-identical today. What
+    /// differs even today is that the second instance carries no
+    /// `invariantRecorder`, so a FAILED arming would go unreported; and the
+    /// moment the recorder acquires any per-instance state, "the thing that was
+    /// armed" and "the thing that was injected" stop being the same claim. That
+    /// is the shape this bead exists to remove, so it is closed here rather
+    /// than after it bites. `DownloadWorkJournalWiringSourceCanaryTests` pins
+    /// the identity in source, because nothing at runtime can see it.
+    private let downloadWorkJournalRecorder:
+        AnalysisStoreDownloadWorkJournalRecorder
+
     let analysisJobRunner: AnalysisJobRunner
     let analysisWorkScheduler: AnalysisWorkScheduler
     /// playhead-3xtw: user-intent "Download & Analyze on demand" trigger.
@@ -1541,7 +1560,38 @@ final class PlayheadRuntime {
         // whole. Injected at construction for the same reason the recorder
         // above is — the sceneless relaunch is where this matters and a
         // deferred hop does not run there.
+        // playhead-4xmz: and the DOWNLOAD half of the work journal, which was
+        // a NO-OP IN PRODUCTION for four months. `workJournalRecorder`
+        // defaulted to `NoopWorkJournalRecorder` and this — the app's only
+        // `DownloadManager` construction — never replaced it, so every
+        // `recordFailed` / `recordPreempted` / `recordFinalized` the download
+        // path emitted went to a method whose body is `{}`.
+        //
+        // NOT `AnalysisStoreWorkJournalRecorder`, which is the obvious
+        // one-liner and is wrong twice over: it returns early when the episode
+        // has no `analysis_jobs` row (the state a failed auto-download is
+        // exactly in), and the rows it does write land in `work_journal`, whose
+        // `event_type` is a cold-launch input to
+        // `AnalysisCoordinator.recoverOrphans` — so a DOWNLOAD failure written
+        // under the ANALYSIS generation would tell recovery the ANALYSIS work
+        // is terminal. See `DownloadWorkJournalLedger.swift`.
+        //
+        // Injected at construction for the same reason as the two recorders
+        // above: the sceneless relaunch is where these records matter and a
+        // deferred hop does not run there. It is held in a `let` here as well
+        // because the launch Task ARMS THE SAME INSTANCE — an arming taken on
+        // a second instance would be a claim about a recorder nobody injected.
+        let downloadWorkJournalRecorder = AnalysisStoreDownloadWorkJournalRecorder(
+            store: analysisStore,
+            invariantRecorder: { [surfaceStatusLogger] code, description in
+                surfaceStatusLogger.invariantViolated(
+                    code: code, description: description
+                )
+            }
+        )
+        self.downloadWorkJournalRecorder = downloadWorkJournalRecorder
         self.downloadManager = DownloadManager(
+            workJournalRecorder: downloadWorkJournalRecorder,
             invariantRecorder: { [surfaceStatusLogger] code, description in
                 surfaceStatusLogger.invariantViolated(
                     code: code, description: description
@@ -2506,6 +2556,24 @@ final class PlayheadRuntime {
             // bring the store up outside the thing that counts consecutive
             // failures and decides whether to offer a rebuild.
             await downloadManager.armDropLedger()
+
+            // playhead-4xmz: ARM the download work journal, and arm it HERE,
+            // for the identical reason. `armedLaunches` is the denominator
+            // that lets zero rows be read as a positive claim rather than as
+            // silence, so it must count launches on which a row COULD have
+            // been written — i.e. launches on which the store actually opened.
+            // Above the guard it would count degraded launches, where analysis
+            // is off and nothing could ever be recorded, and a run of those
+            // would then read as evidence that no download ever failed.
+            //
+            // It arms the SAME recorder instance that was injected into
+            // `downloadManager` at construction. Constructing a second one
+            // here would count launches for a recorder nobody installed —
+            // an arming row that names one thing while measuring another,
+            // which is the shape this bead exists to remove.
+            await downloadWorkJournalRecorder.recordInstrumentArmed(
+                at: Date().timeIntervalSince1970
+            )
 
             // playhead-dgly: REPORT every persisted terminal state that is no
             // longer true, BEFORE this launch repairs any of it. Repairs

@@ -120,7 +120,13 @@ struct SpecialistScanResultsV31MigrationTests {
         // and no backfill (every drop before this build deleted its own evidence,
         // so there is nothing recoverable to seed). It names nothing this rung
         // asserts, so no assertion here moves.
-        #expect(AnalysisStore.currentSchemaVersion == 62)
+        // 62 -> 63 read for this rung (playhead-4xmz): V63 CREATES TWO NEW TABLES —
+        // `download_work_journal` and its single-row arming companion — and touches no
+        // existing table, column or row: no ALTER, no UPDATE, no DELETE and no backfill
+        // (every download event before this build went to a no-op recorder and left no
+        // trace, so there is nothing recoverable to seed). It names nothing this rung
+        // asserts, so no assertion here moves.
+        #expect(AnalysisStore.currentSchemaVersion == 63)
         #expect(try probeTableExists(in: dir, table: "specialist_scan_results"))
     }
 
