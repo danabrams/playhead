@@ -480,6 +480,18 @@ actor CapabilitiesService {
         refreshSnapshot()
     }
 
+    /// playhead-882eg: teardown counterpart to ``startObserving()``.
+    ///
+    /// The observers themselves are `[weak self]` with stored tokens, so they
+    /// never retained this actor — but they were never removed either, and one
+    /// set of three accumulated in `NotificationCenter` per constructed
+    /// ``PlayheadRuntime``. ``startObserving()`` already calls
+    /// ``removeObservers()`` for the double-call case; this exposes the same
+    /// operation to the runtime's terminal owner boundary.
+    func stopObserving() {
+        removeObservers()
+    }
+
     /// Remove all registered notification observers and clear the token list.
     private func removeObservers() {
         let center = NotificationCenter.default

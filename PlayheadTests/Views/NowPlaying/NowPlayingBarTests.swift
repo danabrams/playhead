@@ -11,32 +11,34 @@ final class NowPlayingBarTests: XCTestCase {
 
     // MARK: - Play/Pause Toggle
 
-    func testHandlePlayPauseTapEmitsHapticAndToggles() {
-        let runtime = PlayheadRuntime(isPreviewRuntime: true)
-        let vm = NowPlayingViewModel(runtime: runtime)
-        let recorder = RecordingHapticPlayer()
+    func testHandlePlayPauseTapEmitsHapticAndToggles() async {
+        await withTestRuntime(isPreviewRuntime: true) { runtime in
+            let vm = NowPlayingViewModel(runtime: runtime)
+            let recorder = RecordingHapticPlayer()
 
-        let bar = NowPlayingBar(viewModel: vm, hapticPlayer: recorder)
+            let bar = NowPlayingBar(viewModel: vm, hapticPlayer: recorder)
 
-        bar.handlePlayPauseTap()
+            bar.handlePlayPauseTap()
 
-        XCTAssertEqual(recorder.played, [.control],
-            "Play/pause tap must emit .control haptic")
+            XCTAssertEqual(recorder.played, [.control],
+                "Play/pause tap must emit .control haptic")
+        }
     }
 
-    func testMultipleTapsEmitMultipleHaptics() {
-        let runtime = PlayheadRuntime(isPreviewRuntime: true)
-        let vm = NowPlayingViewModel(runtime: runtime)
-        let recorder = RecordingHapticPlayer()
+    func testMultipleTapsEmitMultipleHaptics() async {
+        await withTestRuntime(isPreviewRuntime: true) { runtime in
+            let vm = NowPlayingViewModel(runtime: runtime)
+            let recorder = RecordingHapticPlayer()
 
-        let bar = NowPlayingBar(viewModel: vm, hapticPlayer: recorder)
+            let bar = NowPlayingBar(viewModel: vm, hapticPlayer: recorder)
 
-        bar.handlePlayPauseTap()
-        bar.handlePlayPauseTap()
-        bar.handlePlayPauseTap()
+            bar.handlePlayPauseTap()
+            bar.handlePlayPauseTap()
+            bar.handlePlayPauseTap()
 
-        XCTAssertEqual(recorder.played, [.control, .control, .control],
-            "Each tap must emit exactly one .control haptic")
+            XCTAssertEqual(recorder.played, [.control, .control, .control],
+                "Each tap must emit exactly one .control haptic")
+        }
     }
 
 }

@@ -10,24 +10,26 @@ import XCTest
 @MainActor
 final class NowPlayingBarHapticTests: XCTestCase {
 
-    func testPlayPauseTapRecordsControlEvent() {
-        let runtime = PlayheadRuntime(isPreviewRuntime: true)
-        let viewModel = NowPlayingViewModel(runtime: runtime)
-        let recorder = RecordingHapticPlayer()
+    func testPlayPauseTapRecordsControlEvent() async {
+        await withTestRuntime(isPreviewRuntime: true) { runtime in
+            let viewModel = NowPlayingViewModel(runtime: runtime)
+            let recorder = RecordingHapticPlayer()
 
-        let bar = NowPlayingBar(viewModel: viewModel, hapticPlayer: recorder)
-        bar.handlePlayPauseTap()
+            let bar = NowPlayingBar(viewModel: viewModel, hapticPlayer: recorder)
+            bar.handlePlayPauseTap()
 
-        XCTAssertEqual(recorder.played, [.control],
-            "Play/pause tap must emit exactly one .control haptic event via the injected player")
+            XCTAssertEqual(recorder.played, [.control],
+                "Play/pause tap must emit exactly one .control haptic event via the injected player")
+        }
     }
 
-    func testDefaultHapticPlayerIsSystemPlayer() {
-        let runtime = PlayheadRuntime(isPreviewRuntime: true)
-        let viewModel = NowPlayingViewModel(runtime: runtime)
-        let bar = NowPlayingBar(viewModel: viewModel)
-        // Type check: the default should be SystemHapticPlayer.
-        XCTAssertTrue(bar.hapticPlayer is SystemHapticPlayer,
-            "NowPlayingBar default hapticPlayer should be SystemHapticPlayer")
+    func testDefaultHapticPlayerIsSystemPlayer() async {
+        await withTestRuntime(isPreviewRuntime: true) { runtime in
+            let viewModel = NowPlayingViewModel(runtime: runtime)
+            let bar = NowPlayingBar(viewModel: viewModel)
+            // Type check: the default should be SystemHapticPlayer.
+            XCTAssertTrue(bar.hapticPlayer is SystemHapticPlayer,
+                "NowPlayingBar default hapticPlayer should be SystemHapticPlayer")
+        }
     }
 }

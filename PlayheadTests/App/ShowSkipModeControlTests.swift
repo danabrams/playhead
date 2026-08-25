@@ -425,26 +425,26 @@ struct NowPlayingSkipModeSubscriptionTests {
                 mode: "auto", trustScore: 0.9, observations: 10
             )
         )
-        let viewModel = NowPlayingViewModel(
-            runtime: PlayheadRuntime(isPreviewRuntime: true)
-        )
+        await withTestRuntime(isPreviewRuntime: true) { runtime in
+            let viewModel = NowPlayingViewModel(runtime: runtime)
 
-        await Self.attachAndAwaitSubscription(viewModel, to: orchestrator)
-        #expect(viewModel.skipModeResolution == .noActiveEpisode,
-                "precondition: the screen must be subscribed BEFORE the episode begins")
+            await Self.attachAndAwaitSubscription(viewModel, to: orchestrator)
+            #expect(viewModel.skipModeResolution == .noActiveEpisode,
+                    "precondition: the screen must be subscribed BEFORE the episode begins")
 
-        await orchestrator.beginEpisode(
-            analysisAssetId: Self.assetId,
-            episodeId: Self.episodeId,
-            podcastId: "podcast-1"
-        )
+            await orchestrator.beginEpisode(
+                analysisAssetId: Self.assetId,
+                episodeId: Self.episodeId,
+                podcastId: "podcast-1"
+            )
 
-        for _ in 0..<200 where viewModel.skipModeResolution != .showTrustProfile {
-            try? await Task.sleep(for: .milliseconds(5))
+            for _ in 0..<200 where viewModel.skipModeResolution != .showTrustProfile {
+                try? await Task.sleep(for: .milliseconds(5))
+            }
+            viewModel.stopObservingSkipMode()
+            #expect(viewModel.activeSkipMode == .auto)
+            #expect(viewModel.skipModeResolution == .showTrustProfile)
         }
-        viewModel.stopObservingSkipMode()
-        #expect(viewModel.activeSkipMode == .auto)
-        #expect(viewModel.skipModeResolution == .showTrustProfile)
     }
 
     /// And the pill it drives is therefore selectable — which is the whole point
@@ -463,30 +463,30 @@ struct NowPlayingSkipModeSubscriptionTests {
                 mode: "auto", trustScore: 0.9, observations: 10
             )
         )
-        let viewModel = NowPlayingViewModel(
-            runtime: PlayheadRuntime(isPreviewRuntime: true)
-        )
+        await withTestRuntime(isPreviewRuntime: true) { runtime in
+            let viewModel = NowPlayingViewModel(runtime: runtime)
 
-        await Self.attachAndAwaitSubscription(viewModel, to: orchestrator)
-        #expect(viewModel.skipModeResolution == .noActiveEpisode,
-                "precondition: the screen must be subscribed BEFORE the episode begins")
+            await Self.attachAndAwaitSubscription(viewModel, to: orchestrator)
+            #expect(viewModel.skipModeResolution == .noActiveEpisode,
+                    "precondition: the screen must be subscribed BEFORE the episode begins")
 
-        await orchestrator.beginEpisode(
-            analysisAssetId: Self.assetId,
-            episodeId: Self.episodeId,
-            podcastId: "podcast-1"
-        )
-        for _ in 0..<200 where viewModel.skipModeResolution != .showTrustProfile {
-            try? await Task.sleep(for: .milliseconds(5))
+            await orchestrator.beginEpisode(
+                analysisAssetId: Self.assetId,
+                episodeId: Self.episodeId,
+                podcastId: "podcast-1"
+            )
+            for _ in 0..<200 where viewModel.skipModeResolution != .showTrustProfile {
+                try? await Task.sleep(for: .milliseconds(5))
+            }
+            viewModel.stopObservingSkipMode()
+
+            let presentation = SkipModePillPresentation(
+                mode: viewModel.activeSkipMode,
+                resolution: viewModel.skipModeResolution
+            )
+            #expect(presentation.isModeSelectable)
+            #expect(presentation.label == "Auto")
         }
-        viewModel.stopObservingSkipMode()
-
-        let presentation = SkipModePillPresentation(
-            mode: viewModel.activeSkipMode,
-            resolution: viewModel.skipModeResolution
-        )
-        #expect(presentation.isModeSelectable)
-        #expect(presentation.label == "Auto")
     }
 }
 
@@ -501,27 +501,29 @@ struct ShowSkipModeWriteTests {
 
     @Test("a session with no show REFUSES the write instead of skipping it")
     func aShowlessSessionRefusesTheWrite() async {
-        let runtime = PlayheadRuntime(isPreviewRuntime: true)
-        runtime._setUserMarkPlaybackContextForTesting(
-            analysisAssetId: "a", episodeId: "ep-usn1-refuse", podcastId: nil
-        )
-        let outcome = await runtime.setShowSkipMode(
-            .auto, orchestrator: runtime.skipOrchestrator
-        )
-        #expect(outcome == .refusedNoShowIdentity)
+        await withTestRuntime(isPreviewRuntime: true) { runtime in
+            runtime._setUserMarkPlaybackContextForTesting(
+                analysisAssetId: "a", episodeId: "ep-usn1-refuse", podcastId: nil
+            )
+            let outcome = await runtime.setShowSkipMode(
+                .auto, orchestrator: runtime.skipOrchestrator
+            )
+            #expect(outcome == .refusedNoShowIdentity)
+        }
     }
 
     @Test("a refused write is counted")
     func aRefusedWriteIsCounted() async {
-        let runtime = PlayheadRuntime(isPreviewRuntime: true)
-        runtime._setUserMarkPlaybackContextForTesting(
-            analysisAssetId: "a", episodeId: "ep-usn1-count", podcastId: nil
-        )
-        let before = runtime.refusedShowSkipModeWriteCount
-        _ = await runtime.setShowSkipMode(
-            .auto, orchestrator: runtime.skipOrchestrator
-        )
-        #expect(runtime.refusedShowSkipModeWriteCount == before + 1)
+        await withTestRuntime(isPreviewRuntime: true) { runtime in
+            runtime._setUserMarkPlaybackContextForTesting(
+                analysisAssetId: "a", episodeId: "ep-usn1-count", podcastId: nil
+            )
+            let before = runtime.refusedShowSkipModeWriteCount
+            _ = await runtime.setShowSkipMode(
+                .auto, orchestrator: runtime.skipOrchestrator
+            )
+            #expect(runtime.refusedShowSkipModeWriteCount == before + 1)
+        }
     }
 
     /// A refusal that still moved the session mode would be the same lie in a
@@ -529,60 +531,64 @@ struct ShowSkipModeWriteTests {
     /// vanishes at the next episode with nothing stored anywhere.
     @Test("a refused write does not change the session mode either")
     func aRefusedWriteLeavesTheSessionModeAlone() async {
-        let runtime = PlayheadRuntime(isPreviewRuntime: true)
-        runtime._setUserMarkPlaybackContextForTesting(
-            analysisAssetId: "a", episodeId: "ep-usn1-session", podcastId: nil
-        )
-        let before = await runtime.skipOrchestrator.currentSkipMode()
-        _ = await runtime.setShowSkipMode(
-            .auto, orchestrator: runtime.skipOrchestrator
-        )
-        #expect(await runtime.skipOrchestrator.currentSkipMode() == before)
+        await withTestRuntime(isPreviewRuntime: true) { runtime in
+            runtime._setUserMarkPlaybackContextForTesting(
+                analysisAssetId: "a", episodeId: "ep-usn1-session", podcastId: nil
+            )
+            let before = await runtime.skipOrchestrator.currentSkipMode()
+            _ = await runtime.setShowSkipMode(
+                .auto, orchestrator: runtime.skipOrchestrator
+            )
+            #expect(await runtime.skipOrchestrator.currentSkipMode() == before)
+        }
     }
 
     @Test("a resolved show persists the choice and says so")
     func aResolvedShowPersistsTheChoice() async {
-        let runtime = PlayheadRuntime(isPreviewRuntime: true)
-        let podcastId = Fx.uniquePodcastId()
-        runtime._setUserMarkPlaybackContextForTesting(
-            analysisAssetId: "a", episodeId: "ep-usn1-ok", podcastId: podcastId
-        )
-        let outcome = await runtime.setShowSkipMode(
-            .auto, orchestrator: runtime.skipOrchestrator
-        )
-        #expect(outcome == .persisted(podcastId: podcastId))
+        await withTestRuntime(isPreviewRuntime: true) { runtime in
+            let podcastId = Fx.uniquePodcastId()
+            runtime._setUserMarkPlaybackContextForTesting(
+                analysisAssetId: "a", episodeId: "ep-usn1-ok", podcastId: podcastId
+            )
+            let outcome = await runtime.setShowSkipMode(
+                .auto, orchestrator: runtime.skipOrchestrator
+            )
+            #expect(outcome == .persisted(podcastId: podcastId))
+        }
     }
 
     @Test("the persisted choice is what a later trust lookup reads back")
     func thePersistedChoiceIsReadBack() async {
-        let runtime = PlayheadRuntime(isPreviewRuntime: true)
-        let podcastId = Fx.uniquePodcastId()
-        runtime._setUserMarkPlaybackContextForTesting(
-            analysisAssetId: "a", episodeId: "ep-usn1-read", podcastId: podcastId
-        )
-        _ = await runtime.setShowSkipMode(
-            .auto, orchestrator: runtime.skipOrchestrator
-        )
-        let resolved = await runtime.trustService.resolveMode(podcastId: podcastId)
-        #expect(resolved.mode == .auto)
-        #expect(resolved.resolution == .showTrustProfile)
+        await withTestRuntime(isPreviewRuntime: true) { runtime in
+            let podcastId = Fx.uniquePodcastId()
+            runtime._setUserMarkPlaybackContextForTesting(
+                analysisAssetId: "a", episodeId: "ep-usn1-read", podcastId: podcastId
+            )
+            _ = await runtime.setShowSkipMode(
+                .auto, orchestrator: runtime.skipOrchestrator
+            )
+            let resolved = await runtime.trustService.resolveMode(podcastId: podcastId)
+            #expect(resolved.mode == .auto)
+            #expect(resolved.resolution == .showTrustProfile)
+        }
     }
 
     /// The negative control. A refusal counter that also ticked on success would
     /// make every "the refusal happened" assertion vacuous.
     @Test("a successful write is not counted as a refusal")
     func aSuccessfulWriteIsNotCounted() async {
-        let runtime = PlayheadRuntime(isPreviewRuntime: true)
-        runtime._setUserMarkPlaybackContextForTesting(
-            analysisAssetId: "a",
-            episodeId: "ep-usn1-neg",
-            podcastId: Fx.uniquePodcastId()
-        )
-        let before = runtime.refusedShowSkipModeWriteCount
-        _ = await runtime.setShowSkipMode(
-            .manual, orchestrator: runtime.skipOrchestrator
-        )
-        #expect(runtime.refusedShowSkipModeWriteCount == before)
+        await withTestRuntime(isPreviewRuntime: true) { runtime in
+            runtime._setUserMarkPlaybackContextForTesting(
+                analysisAssetId: "a",
+                episodeId: "ep-usn1-neg",
+                podcastId: Fx.uniquePodcastId()
+            )
+            let before = runtime.refusedShowSkipModeWriteCount
+            _ = await runtime.setShowSkipMode(
+                .manual, orchestrator: runtime.skipOrchestrator
+            )
+            #expect(runtime.refusedShowSkipModeWriteCount == before)
+        }
     }
 
     /// "Persists across relaunch", proved where the claim actually lives: a
@@ -618,21 +624,22 @@ struct RefusedSkipModeSelectionTests {
     /// reports the listener's choice back to them while nothing has stored it.
     @Test("a refused write restores the pill to what it said before the tap")
     func aRefusedWriteRestoresThePill() async {
-        let runtime = PlayheadRuntime(isPreviewRuntime: true)
-        runtime._setUserMarkPlaybackContextForTesting(
-            analysisAssetId: "a", episodeId: "ep-usn1-vm-refuse", podcastId: nil
-        )
-        let viewModel = NowPlayingViewModel(runtime: runtime)
-        viewModel.activeSkipMode = .shadow
-        viewModel.skipModeResolution = .unresolvedShowIdentity
+        await withTestRuntime(isPreviewRuntime: true) { runtime in
+            runtime._setUserMarkPlaybackContextForTesting(
+                analysisAssetId: "a", episodeId: "ep-usn1-vm-refuse", podcastId: nil
+            )
+            let viewModel = NowPlayingViewModel(runtime: runtime)
+            viewModel.activeSkipMode = .shadow
+            viewModel.skipModeResolution = .unresolvedShowIdentity
 
-        viewModel.setSkipMode(.auto, orchestrator: runtime.skipOrchestrator)
+            viewModel.setSkipMode(.auto, orchestrator: runtime.skipOrchestrator)
 
-        for _ in 0..<200 where viewModel.skipModeResolution == .sessionOverride {
-            try? await Task.sleep(for: .milliseconds(5))
+            for _ in 0..<200 where viewModel.skipModeResolution == .sessionOverride {
+                try? await Task.sleep(for: .milliseconds(5))
+            }
+            #expect(viewModel.skipModeResolution == .unresolvedShowIdentity)
+            #expect(viewModel.activeSkipMode == .shadow)
         }
-        #expect(viewModel.skipModeResolution == .unresolvedShowIdentity)
-        #expect(viewModel.activeSkipMode == .shadow)
     }
 }
 
@@ -652,72 +659,75 @@ struct RecoveredShowIdentityAdoptionTests {
     /// control to avoid; carrying the value back closes it instead.
     @Test("the runtime adopts an identity only the orchestrator could recover")
     func theRuntimeAdoptsTheRecoveredIdentity() async {
-        let runtime = PlayheadRuntime(isPreviewRuntime: true)
-        let episodeId = "ep-usn1-adopt-\(UUID().uuidString)"
-        let assetId = "asset-\(UUID().uuidString)"
-        let podcastId = Fx.uniquePodcastId()
-        await runtime.skipOrchestrator.beginEpisode(
-            analysisAssetId: assetId,
-            episodeId: episodeId,
-            podcastId: podcastId
-        )
-        let generation = runtime._setUserMarkPlaybackContextForTesting(
-            analysisAssetId: assetId, episodeId: episodeId, podcastId: nil
-        )
-        #expect(runtime.currentPodcastId == nil, "the runtime must start showless")
+        await withTestRuntime(isPreviewRuntime: true) { runtime in
+            let episodeId = "ep-usn1-adopt-\(UUID().uuidString)"
+            let assetId = "asset-\(UUID().uuidString)"
+            let podcastId = Fx.uniquePodcastId()
+            await runtime.skipOrchestrator.beginEpisode(
+                analysisAssetId: assetId,
+                episodeId: episodeId,
+                podcastId: podcastId
+            )
+            let generation = runtime._setUserMarkPlaybackContextForTesting(
+                analysisAssetId: assetId, episodeId: episodeId, podcastId: nil
+            )
+            #expect(runtime.currentPodcastId == nil, "the runtime must start showless")
 
-        await runtime.adoptRecoveredShowIdentity(
-            generation: generation, episodeId: episodeId
-        )
-        #expect(runtime.currentPodcastId == podcastId)
+            await runtime.adoptRecoveredShowIdentity(
+                generation: generation, episodeId: episodeId
+            )
+            #expect(runtime.currentPodcastId == podcastId)
+        }
     }
 
     /// The caller's value always wins. Adoption only ever widens.
     @Test("adoption never overwrites an identity the runtime already has")
     func adoptionNeverOverwrites() async {
-        let runtime = PlayheadRuntime(isPreviewRuntime: true)
-        let episodeId = "ep-usn1-keep-\(UUID().uuidString)"
-        let assetId = "asset-\(UUID().uuidString)"
-        let runtimeShow = Fx.uniquePodcastId()
-        await runtime.skipOrchestrator.beginEpisode(
-            analysisAssetId: assetId,
-            episodeId: episodeId,
-            podcastId: Fx.uniquePodcastId()
-        )
-        let generation = runtime._setUserMarkPlaybackContextForTesting(
-            analysisAssetId: assetId, episodeId: episodeId, podcastId: runtimeShow
-        )
+        await withTestRuntime(isPreviewRuntime: true) { runtime in
+            let episodeId = "ep-usn1-keep-\(UUID().uuidString)"
+            let assetId = "asset-\(UUID().uuidString)"
+            let runtimeShow = Fx.uniquePodcastId()
+            await runtime.skipOrchestrator.beginEpisode(
+                analysisAssetId: assetId,
+                episodeId: episodeId,
+                podcastId: Fx.uniquePodcastId()
+            )
+            let generation = runtime._setUserMarkPlaybackContextForTesting(
+                analysisAssetId: assetId, episodeId: episodeId, podcastId: runtimeShow
+            )
 
-        await runtime.adoptRecoveredShowIdentity(
-            generation: generation, episodeId: episodeId
-        )
-        #expect(runtime.currentPodcastId == runtimeShow)
+            await runtime.adoptRecoveredShowIdentity(
+                generation: generation, episodeId: episodeId
+            )
+            #expect(runtime.currentPodcastId == runtimeShow)
+        }
     }
 
     /// A superseded playback request must not write its show onto the session
     /// that replaced it.
     @Test("a superseded play request does not adopt")
     func aSupersededRequestDoesNotAdopt() async {
-        let runtime = PlayheadRuntime(isPreviewRuntime: true)
-        let episodeId = "ep-usn1-stale-\(UUID().uuidString)"
-        let assetId = "asset-\(UUID().uuidString)"
-        await runtime.skipOrchestrator.beginEpisode(
-            analysisAssetId: assetId,
-            episodeId: episodeId,
-            podcastId: Fx.uniquePodcastId()
-        )
-        let staleGeneration = runtime._setUserMarkPlaybackContextForTesting(
-            analysisAssetId: assetId, episodeId: episodeId, podcastId: nil
-        )
-        // A newer play request supersedes it.
-        runtime._setUserMarkPlaybackContextForTesting(
-            analysisAssetId: assetId, episodeId: episodeId, podcastId: nil
-        )
+        await withTestRuntime(isPreviewRuntime: true) { runtime in
+            let episodeId = "ep-usn1-stale-\(UUID().uuidString)"
+            let assetId = "asset-\(UUID().uuidString)"
+            await runtime.skipOrchestrator.beginEpisode(
+                analysisAssetId: assetId,
+                episodeId: episodeId,
+                podcastId: Fx.uniquePodcastId()
+            )
+            let staleGeneration = runtime._setUserMarkPlaybackContextForTesting(
+                analysisAssetId: assetId, episodeId: episodeId, podcastId: nil
+            )
+            // A newer play request supersedes it.
+            runtime._setUserMarkPlaybackContextForTesting(
+                analysisAssetId: assetId, episodeId: episodeId, podcastId: nil
+            )
 
-        await runtime.adoptRecoveredShowIdentity(
-            generation: staleGeneration, episodeId: episodeId
-        )
-        #expect(runtime.currentPodcastId == nil)
+            await runtime.adoptRecoveredShowIdentity(
+                generation: staleGeneration, episodeId: episodeId
+            )
+            #expect(runtime.currentPodcastId == nil)
+        }
     }
 }
 
@@ -775,17 +785,18 @@ struct RefusedShowSkipModeWriteDiagnosticsTests {
     /// collapse djl0 spent a bead undoing, one layer over.
     @Test("a refused write is recorded under its own code")
     func aRefusedWriteIsRecorded() async {
-        let runtime = PlayheadRuntime(isPreviewRuntime: true)
-        runtime._setUserMarkPlaybackContextForTesting(
-            analysisAssetId: "a", episodeId: "ep-usn1-log", podcastId: nil
-        )
-        _ = await runtime.setShowSkipMode(
-            .auto, orchestrator: runtime.skipOrchestrator
-        )
-        let codes = drainRuntimeInvariantCodes(
-            runtime.surfaceStatusLogger,
-            untilSentinel: "usn1-sentinel-\(UUID().uuidString)"
-        )
-        #expect(codes.contains(.skipModeWriteRefusedNoShowIdentity))
+        await withTestRuntime(isPreviewRuntime: true) { runtime in
+            runtime._setUserMarkPlaybackContextForTesting(
+                analysisAssetId: "a", episodeId: "ep-usn1-log", podcastId: nil
+            )
+            _ = await runtime.setShowSkipMode(
+                .auto, orchestrator: runtime.skipOrchestrator
+            )
+            let codes = drainRuntimeInvariantCodes(
+                runtime.surfaceStatusLogger,
+                untilSentinel: "usn1-sentinel-\(UUID().uuidString)"
+            )
+            #expect(codes.contains(.skipModeWriteRefusedNoShowIdentity))
+        }
     }
 }
