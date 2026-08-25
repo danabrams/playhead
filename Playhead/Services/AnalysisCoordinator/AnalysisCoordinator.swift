@@ -504,6 +504,25 @@ actor AnalysisCoordinator {
         logger.info("AnalysisCoordinator started")
     }
 
+    /// playhead-882eg: cancel the capability observer, for TEARDOWN only.
+    ///
+    /// ``stop()`` deliberately leaves the observer running and that is right
+    /// for a stop/start cycle — see its own doc comment, and the two callers in
+    /// ``BackgroundProcessingService`` that depend on it. It is wrong for the
+    /// terminal owner boundary: the observer's task binds `self` strongly for
+    /// the whole of an unbounded `for await`, so this coordinator — and with it
+    /// its ``AnalysisStore``, its ``AdDetectionService`` (and that service's
+    /// ``AdCatalogStore``) and its ``SkipOrchestrator`` (and that
+    /// orchestrator's ``SurfaceStatusInvariantLogger``) — can never be released
+    /// while it runs. Measured: one leaked copy of each per constructed
+    /// ``PlayheadRuntime``.
+    ///
+    /// Called from ``PlayheadRuntime/shutdown()`` and nowhere else.
+    func stopCapabilityObserver() {
+        capabilityObserverTask?.cancel()
+        capabilityObserverTask = nil
+    }
+
     /// Stop all active work and clean up pipeline state.
     ///
     /// The capability observer started by ``startCapabilityObserver()``

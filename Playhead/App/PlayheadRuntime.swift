@@ -609,6 +609,33 @@ final class PlayheadRuntime {
     private let playbackStateObserverHookForTesting =
         OSAllocatedUnfairLock<(@Sendable () async -> Void)?>(initialState: nil)
 
+    /// playhead-882eg: handles for the three `init`-time Tasks that had none.
+    ///
+    /// A running `Task` is retained by the concurrency runtime whether or not
+    /// anyone holds its handle, so a fire-and-forget `Task` whose body never
+    /// returns is unreachable for cancellation FOREVER — and everything in its
+    /// capture list goes with it. `repeatedAdCacheKillSwitchObserverTask` above
+    /// is the same defect already fixed once (playhead-43ed M1); these three
+    /// were its siblings and were missed.
+    ///
+    /// MEASURED on this bead, one runtime at a time: the `PlayheadRuntime`
+    /// itself always deallocates, and its `AnalysisStore`, `AdCatalogStore` and
+    /// `SurfaceStatusInvariantLogger` never did — five of five live after five
+    /// constructions, ~5 descriptors each, which is the ~453 descriptor FLOOR
+    /// (17.7 % of `RLIMIT_NOFILE` soft 2560) the test host carried into every
+    /// run.
+    @ObservationIgnored
+    private var capabilityEligibilitySubscriptionTask: Task<Void, Never>?
+    /// The deferred bootstrap chain. It strongly captures `analysisStore`,
+    /// `adCatalogStore` and `surfaceStatusLogger` for its whole duration AND it
+    /// is what starts the scheduler loop, so `shutdown()` must JOIN it before
+    /// stopping anything — otherwise a chain still in flight starts a loop
+    /// after the stop that was supposed to catch it.
+    @ObservationIgnored
+    private var bootstrapTask: Task<Void, Never>?
+    @ObservationIgnored
+    private var dayZeroKickoffInstallTask: Task<Void, Never>?
+
     /// True when an episode is actively loaded for playback.
     var isPlayingEpisode: Bool {
         currentEpisodeId != nil
@@ -2285,7 +2312,7 @@ final class PlayheadRuntime {
         // production read also seeds the cache lazily inside the
         // observer's `eligibilityProvider` closure (see init), so this
         // Task is purely about staying current.
-        Task { [eligibilityCache = surfaceStatusEligibilityCache, evaluator = analysisEligibilityEvaluator, capabilitiesService] in
+        capabilityEligibilitySubscriptionTask = Task { [eligibilityCache = surfaceStatusEligibilityCache, evaluator = analysisEligibilityEvaluator, capabilitiesService] in
             let initial = await capabilitiesService.currentSnapshot
             eligibilityCache.set(initial)
             evaluator.invalidate()
@@ -2363,7 +2390,7 @@ final class PlayheadRuntime {
         // — it's now constructed before AdDetectionService and passed via
         // init, so there's no race with the first backfill/hot-path run.
 
-        Task { [weak self, analysisStore, analysisStoreRecovery, downloadManager, analysisWorkScheduler, analysisJobReconciler, backgroundProcessingService, lanePreemptionCoordinator, analysisCoordinator, shadowCaptureCoordinator, adCatalogStore, negativeFingerprintBank, skipOrchestrator, feedbackStore, surfaceStatusLogger, preBuiltDecisionLogger, preBuiltShadowGateLogger, lifecycleLogger, bgTaskTelemetry, episodeSummaryBackfillCoordinator, finalPassRetranscriptionRunner, episodePodcastIdResolverBox, episodePodcastIdBatchResolverBox, backgroundTaskRunLedger, processLaunchTimestamp, shadowRetryObserver, finalPassThermalRecoveryObserver, finalPassSweepInFlightFlag] in
+        bootstrapTask = Task { [weak self, analysisStore, analysisStoreRecovery, downloadManager, analysisWorkScheduler, analysisJobReconciler, backgroundProcessingService, lanePreemptionCoordinator, analysisCoordinator, shadowCaptureCoordinator, adCatalogStore, negativeFingerprintBank, skipOrchestrator, feedbackStore, surfaceStatusLogger, preBuiltDecisionLogger, preBuiltShadowGateLogger, lifecycleLogger, bgTaskTelemetry, episodeSummaryBackfillCoordinator, finalPassRetranscriptionRunner, episodePodcastIdResolverBox, episodePodcastIdBatchResolverBox, backgroundTaskRunLedger, processLaunchTimestamp, shadowRetryObserver, finalPassThermalRecoveryObserver, finalPassSweepInFlightFlag] in
             // skeptical-review-cycle-9 L-4: pin the implicit MainActor
             // isolation that cycle-8 M1 relies on. PlayheadRuntime is
             // declared `@MainActor` (file:line 19), and an unannotated
@@ -3248,7 +3275,7 @@ final class PlayheadRuntime {
             let kickoffFacts = dayZeroKickoffEpisodeFactsBox
             let kickoffReporter = dayZeroKickoffViolationReporter
             let kickoffHasher = surfaceStatusHasher
-            Task {
+            dayZeroKickoffInstallTask = Task {
                 await Self.installDayZeroBackgroundDownloadKickoff(
                     downloads: kickoffDownloads,
                     coordinator: dayZeroKickoffCoordinator,
@@ -3931,6 +3958,48 @@ final class PlayheadRuntime {
         }
         await shadowRetryObserver?.stop()
         await finalPassThermalRecoveryObserver?.stop()
+
+        // playhead-882eg: the RUNTIME-SCOPED PERPETUAL LOOPS.
+        //
+        // Everything above this line cancels a task the runtime itself holds a
+        // handle for. What follows is the half that had no handle at all, and
+        // it is the half that held the descriptors. Four services start a loop
+        // shaped
+        //
+        //     someTask = Task { [weak self] in
+        //         guard let self else { return }   // strong for the WHOLE task
+        //         await self.runLoop()             // never returns
+        //     }
+        //
+        // in which `[weak self]` is defeated by `guard let self`: the strong
+        // binding lives in the task frame for the entire unbounded loop, so
+        // `owner -> Task -> owner` is a cycle only CANCELLATION can break.
+        // Every one of the four has a `stop()`, and until this bead not one of
+        // them had a caller anywhere in `Playhead/`.
+        //
+        // The join comes FIRST and is not optional. The bootstrap chain is what
+        // calls `analysisWorkScheduler.startSchedulerLoop()`; stopping the
+        // scheduler while that chain is still in flight would be a stop the
+        // chain then undoes.
+        let pendingBootstrapTask = bootstrapTask
+        pendingBootstrapTask?.cancel()
+        bootstrapTask = nil
+        capabilityEligibilitySubscriptionTask?.cancel()
+        capabilityEligibilitySubscriptionTask = nil
+        let pendingDayZeroKickoffInstallTask = dayZeroKickoffInstallTask
+        pendingDayZeroKickoffInstallTask?.cancel()
+        dayZeroKickoffInstallTask = nil
+        await pendingBootstrapTask?.value
+        await pendingDayZeroKickoffInstallTask?.value
+        await analysisWorkScheduler.stop()
+        await backgroundProcessingService.stop()
+        // NOT `analysisCoordinator.stop()`: that one deliberately leaves the
+        // capability observer running so a thermal/battery recovery need not
+        // re-arm it, and it has two production callers that rely on exactly
+        // that. Teardown is the one caller for which it is wrong.
+        await analysisCoordinator.stopCapabilityObserver()
+        await episodeSummaryBackfillCoordinator?.stop()
+        await capabilitiesService.stopObserving()
     }
 
     @MainActor
