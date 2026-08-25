@@ -61,6 +61,80 @@ this diff; they are named in the log and carried into the comparison below.
 
 ---
 
+## M4. OPTION A MEASURED — the ceiling is GONE, the floor is NOT, and the cost is 10.6x
+
+Same worktree, same simulator, same trim, same instruments, one line changed
+(`"parallelizable" : false` on the PlayheadTests target in PlayheadFastTests).
+Run 2's log is preserved beside run 1's.
+
+| quantity | PARALLEL (M0) | SERIALIZED | change |
+|---|---|---|---|
+| tests / suites | 11,785 / 1,441 | **11,791 / 1,442** | +6 — this branch's six new rails, nothing else |
+| Swift Testing phase | 252.792 s | **2,668.459 s** | **10.56x** |
+| xcodebuild `Testing started completed` | 359.741 s | **2,766.389 s** | **7.69x** |
+| test-host peak open fds (gate sampler) | 2,439 = **95.3 %** of soft 2,560 | **457 = 17.9 %** | −81 % |
+| `*** AT THE CEILING ***` banner | printed | **absent** | — |
+| highest descriptor ever handed out (`max_fd`) | 2,558 = soft − 2 | **466** | −2,092 |
+| peak vnodes (fd-paths watcher) | 2,399 | **463** | — |
+| tail FLOOR (median of 20 plateau samples) | 453 (449 vnode) | **452 (449 vnode)** | **unchanged** |
+| implied concurrent WAL stores at the peak | ~650 | **~5** | −99 % |
+| RESOURCE casualties | 27 | **0** | **−27** |
+| gate-baseline | RED (5 known / 3 NEW) | **RED (0 known / 1 NEW)** | — |
+| host restarts / lost verdicts | 0 / 0 | **0 / 0** | — |
+| peak demand / swap | 13.9 GiB / 1.5 GiB | **14.2 GiB / 1.8 GiB** | +0.3 / +0.3 |
+
+### Every prediction stated before the run held, including the one that mattered
+
+The prediction was committed in `a59281fb`, before the run, precisely so this
+could be read as a test of it:
+
+* **The peak collapses.** ~650 concurrent stores to **~5**; the fd peak from
+  95.3 % of the binding limit to 17.9 %. ✅
+* **The FLOOR does not move.** 453 → **452**, and the vnode component is **449
+  in both**. That is the sharpest confirmation available that the floor is
+  `playhead-882eg`'s ~81 retained `PlayheadRuntime` graphs and not concurrency:
+  retained objects accumulate whether or not tests overlap. It also means the
+  floor is now **98 % of everything the host holds**, and it is the half that
+  grows with every new runtime-constructing test. ✅
+* **RESOURCE casualties go to zero.** 27 → **0**. ✅
+* **`playhead-sip2`'s four `SkipOrchestratorRevertTests` do not fail.** They do
+  not appear anywhere in run 2's failures; that fix landed in `96a4fc81` and
+  holds under the regime it was written for. ✅
+
+The floor accrues LATE and gradually rather than at once — 129 descriptors at
+1,700 tests, 194 at 4,300, 371 at 9,900, 450 at 11,000 — which is what one
+should expect if it is one leak per runtime-constructing test rather than a
+constant.
+
+### THE COST IS 10.6x, NOT 5.08x — do not quote playhead-blsh's figure for this
+
+`playhead-blsh` measured 5.08x on a different tree and CLAUDE.md already warns
+its two serialized phases differed by 673 s at near-identical memory, so its
+number is a floor rather than a price. **Measured here it is 10.56x on the Swift
+Testing phase and 7.69x on the whole test operation** — roughly double blsh's,
+and it turns a ~6 minute merge gate into a ~46 minute one. That is the honest
+number for this box today and it should be the one quoted.
+
+**And memory got very slightly WORSE, not better** (13.9 → 14.2 GiB peak demand,
+1.5 → 1.8 GiB swap). blsh's case for C was partly that it lowers the test host's
+rss; whatever it saves there, whole-box demand did not fall, and a run that lasts
+ten times as long simply has ten times as many chances to be sampled at a high
+point. Serialization bought descriptors here, not memory.
+
+### The one NEW failure is NOT a serialization casualty, and it is not this diff
+
+`AnalyticsCounterStoreTests."The shared store is volatile under XCTest"` fails in
+**both** regimes — it is one of run 1's three NEW as well — and it fails on other
+branches' preserved logs (`et2d/fullgate-r5-run3.log`, `gate-462-verify.log`).
+It is diagnosed and fixed separately; see M5.
+
+The other two NEW from the parallel run — `a download the daemon answers writes
+NO row…` and `a transfer created but never resumed leaves a row naming THAT
+bound` — **passed** serialized. Both are in the load-sensitive families CLAUDE.md
+already names, so serialization removed them along with the denials.
+
+---
+
 ## M1a. The ~449 FLOOR is REPRODUCIBLE — five runs, 447-459
 
 The bead recorded the floor from ONE run (449 vnodes flat for 22 samples).
