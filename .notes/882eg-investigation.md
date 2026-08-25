@@ -418,3 +418,26 @@ run reported **11 RESOURCE FAILURES** (tests denied a file — the descriptor
 denials playhead-s34ux traced to the ceiling) and the AFTER run reported
 **none**. That population is known to rotate run to run, so a single pair is
 suggestive rather than a measurement of a rate.
+
+## M8 — MUTATION LEDGER, ROUND 2 (after review round 1's fixes)
+
+Review round 1 rewrote the canary's scanner (it was silently swallowing 1,336
+lines of the tree) and un-vacuumed the ad-catalog arm, so the three affected
+mutants were re-run against the code as committed, and FD07 was added for the
+line no mutant covered.
+
+| mutant | PREDICTED | OBSERVED | verdict |
+|---|---|---|---|
+| FD07 `await adCatalogStore?.close()` deleted | `shutdown() closes …` alone | exactly that | KILLED, exact |
+| FD05 (re-run vs the new scanner) | the canary | the canary | KILLED, exact |
+| FD06 (re-run vs the new scanner) | the canary | the canary | KILLED, exact |
+
+**Ten battery invocations in total across both rounds, `baseline green` on every
+one, zero survivors in the shipped set, and no mutant killed a test other than
+the one predicted.** Tree byte-exactly restored every time.
+
+FD07 is the entry review round 1's finding made possible: before its fix the
+catalog's assertion was entered on the ANALYSIS store's observation, and
+`isOpen` is `db != nil` — what a never-opened store reports — so a catalog
+mutant could have "survived" for a reason that had nothing to do with the code.
+A mutant is only evidence about a rail that can fail.
