@@ -31,7 +31,7 @@ because `restore_and_verify` re-hashes every mutable file between runs and
 | AK09 | beginEpisode stops clearing it | CLEARS (1) | **CLEARS, exactly** | KILLED |
 | AK10 | the emit path stops gating on a subscriber | PARTITION, **ATTACH** (2) | **the same 2, exactly — including the widened half** | KILLED |
 | AK11 | the view model keeps its own copy of the forwarding rule | DELEGATES, NOCOPY (2) | **the same 2, exactly** | KILLED |
-| AK12 | the acknowledgement records no delivery | ACCEPTED, PARTITION, WALK, SEAM, CLEARS (5) | *running* | |
+| AK12 | the acknowledgement records no delivery | ACCEPTED, PARTITION, WALK, SEAM, CLEARS (5) | **the same 5, exactly** | KILLED |
 | AK99 | **VACUITY CONTROL** — the seam's receipt binding renamed, nothing else | **MUST SURVIVE, 0 failures** | | |
 
 Re-aimed from playhead-2d6i in the same change: MS01 (re-anchored, and widened
@@ -202,3 +202,41 @@ it is what makes the check possible at all.
 independently hit this and said so; the first pass of this validation scanned
 the working tree and read AK11's mutant as the shipped code. `git show HEAD:<path>`
 is the whole remedy.
+
+### All twelve behavioural AK mutants are in, and every observed set is the predicted set
+
+AK01–AK12: twelve mutants, twelve KILLED, and in every single case the tests
+that went red are exactly the tests the prediction named — no mutant killed a
+test it did not name, and none failed to kill one it did. The victim counts run
+6, 5, 3, 1, 1, 1, 1, 1, 1, 2, 2, 5; the four single-victim ones (AK04–AK07) are
+the seam's identity clauses, which no behavioural suite can reach.
+
+One observed failure across the whole series was NOT predicted, and it is not
+this bead's: AK02's run also reddened `closing the session log is non-terminal —
+a later write reopens the SAME file`
+(`PlayheadTests/Services/Diagnostics/RuntimeStoreTeardownTests.swift:220`), a
+playhead-882eg suite that constructs a whole `PlayheadRuntime` and touches the
+filesystem. It appeared once in nineteen runs, on a mutation of the banner
+delivery path that cannot reach it, and not on AK01's run (which carried a green
+baseline). Re-verified scoped before the merge gate.
+
+### How the vacuity controls will be verified, and why the table is not enough
+
+`scripts/mutation-battery.sh` deletes its per-batch xcodebuild logs on a
+successful run (`KEEP_WORK=1` is set only on failure paths), so a SURVIVED
+verdict would ordinarily leave NO evidence that the suites ran at all — and the
+battery scores a NO-VERDICT test as a PASS, so a crash-looping batch prints
+SURVIVED with zero observed failures, which is indistinguishable on the results
+table from a genuine control.
+
+So the logs are mirrored out while they are being written, and
+`verify-survived.sh <batch>` reads the control's own log for four independent
+signals: the number of `◇ Test … started` lines, the Swift Testing summary, the
+`** TEST SUCCEEDED **` outcome, and the absence of `Restarting after unexpected
+exit` / `Killed: 9` / `Test crashed with signal`. It **fails closed** — a
+missing log, a missing summary, or an absent outcome all report SUSPECT rather
+than OK. Self-tested against a live batch mid-run, where it correctly refused.
+
+Useful number that fell out of the self-test: `FOCUSED_SUITES` is **2,577 tests
+in 251 suites**, not the handful this bead added. That is the population every
+KILLED verdict above was measured against.
