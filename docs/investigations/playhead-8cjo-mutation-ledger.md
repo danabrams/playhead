@@ -587,3 +587,25 @@ repo's measured 3.00 fds/store) could tip a host already measured at 2,539 of
 2,560. The observed peak on this run is **2,454 — 85 BELOW that earlier
 measurement**, so the addition did not move the ceiling. The suite is at 95.9 %
 of the soft limit either way, and that is playhead-vk68m's to fix.
+
+## Filed, not fixed
+
+* **playhead-pzojm (P1)** — "the queue ACCEPTED it" is not "the listener saw
+  it". An ad pod queues the second card behind the first; leaving Now Playing
+  inside the 8 s dwell has `discardAllNeutrally` destroy it unseen, already
+  acknowledged, leaving no row. `AutoSkipCardDeliveryAgainstTheQueueTests
+  .aQueuedCardDiscardedUnseenIsStillBookedDelivered` drives that path and
+  asserts today's behaviour, so it FLIPS when the bead is fixed.
+* **playhead-hwpy2 (P3)** — nothing executes `NowPlayingViewModel.observeBanners`; the
+  production hop is pinned only by a source canary. The canary is real (AK17
+  kills the demonstrated bypass), but it cannot see WHICH `hostGeneration` the
+  view passes, and a change there would make the `didAccept` guard inert with
+  every rail green.
+* A `bd comment` on **playhead-gjlp0** recording that a SURVIVED verdict's batch
+  log must be pinned to the RUN rather than the batch number.
+
+## Recorded as unreachable-by-type, not fixed
+A reviewer proposed adding `receipt.item.analysisAssetId != nil` to
+`missedAutoSkipReceipts()`'s filter. `AdWindow.analysisAssetId` is a
+non-optional `String`, so no auto-tier item can carry nil and the clause would
+be a branch no input can enter.

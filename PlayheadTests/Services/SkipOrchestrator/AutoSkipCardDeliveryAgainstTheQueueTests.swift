@@ -794,7 +794,8 @@ struct AutoSkipCardDeliveryAgainstTheQueueTests {
     /// `AdBannerQueue.recordBannerShown(for:)`, whose own comment says
     /// "Queue-current is not the same as user-visible".
     ///
-    /// **This test asserts what the code does TODAY and names the follow-up.**
+    /// **This test asserts what the code does TODAY, and the follow-up is
+    /// playhead-pzojm.**
     /// When the acknowledgement moves to the display edge it will FAIL, and it
     /// is meant to — a limit that drifts silently is how a known gap becomes an
     /// unknown one.
