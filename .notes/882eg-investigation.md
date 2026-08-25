@@ -347,3 +347,35 @@ a rail written by the bead that filed it.
 `AnalyticsCounterStoreTests.sharedStoreIsTestIsolated` failed on the BEFORE run
 AND on the AFTER run, so it is not this branch's doing — the same conclusion the
 BEFORE note said the AFTER run would settle.
+
+## M6 — MUTATION LEDGER (FD series, `scripts/mutation-battery.sh`)
+
+Seven invocations, each with its own unmutated baseline run as the vacuity
+control. Logs: `/Users/dabrams/playhead-gate-artifacts/882eg/mut/`.
+
+| mutant | PREDICTED victim set | OBSERVED | verdict |
+|---|---|---|---|
+| FD01 `await analysisStore.close()` deleted | `shutdown() closes …` alone | `shutdown() closes …` | KILLED, exact |
+| FD02 `surfaceStatusLogger.close()` deleted | `shutdown() closes …` + `session log … SAME file` | both, and only those | KILLED, exact |
+| FD03 `close()` frees the handle but keeps `didOpen` | `shutdown() closes …` + `analysis store … reopens` | both, and only those | KILLED, exact |
+| FD04 logger stops reusing `currentSessionFileURL` | `session log … SAME file` ALONE | exactly that one | KILLED, exact |
+| FD05 allowlist entry naming a file that constructs nothing | the canary | the canary | KILLED, exact |
+| FD06 v1 — the allowlist's shutdown CHECK deleted | the canary | **nothing** | **SURVIVED** |
+| FD06 v2 — an allowlisted FILE made non-compliant | the canary | the canary | KILLED, exact |
+
+**Vacuity control: `baseline green` on all seven runs**, i.e. the focused suites
+pass on unmutated sources every time, so no KILL is a pre-existing red. No
+mutation killed a test other than the one predicted, so there is no false credit
+in this ledger. Tree byte-exactly restored after every run (`git status
+--porcelain` clean).
+
+**FD06's survivor was correct and is worth keeping in the record.** The first
+edit deleted the canary's own "an allowlisted file must contain `.shutdown()`"
+check, so the offender list was never populated and the assertion passed.
+Nothing anywhere asserts that a particular assertion EXISTS, so that mutation can
+only ever survive — scoring it as a coverage hole would have fabricated one. The
+edit was re-aimed at the defect the entry names (an allowlisted file that
+constructs a runtime and never tears it down), which is the one rewrite this
+script's header permits. FD04 is the mirror of the same discipline in the other
+direction: it changes NO descriptor accounting at all, and it must therefore kill
+the same-file rail and nothing else — which is exactly what it did.
