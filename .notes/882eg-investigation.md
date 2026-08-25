@@ -379,3 +379,32 @@ constructs a runtime and never tears it down), which is the one rewrite this
 script's header permits. FD04 is the mirror of the same discipline in the other
 direction: it changes NO descriptor accounting at all, and it must therefore kill
 the same-file rail and nothing else — which is exactly what it did.
+
+## M7 — THE PEAK IS A DIFFERENT POPULATION, AND SAYING SO MATTERS
+
+The gate's own line, both runs:
+
+```
+BEFORE  test host peak open fds 2474 of RLIMIT_NOFILE soft 2560 (96.6 %)
+AFTER   test host peak open fds 2462 of RLIMIT_NOFILE soft 2560 (96.2 %)
+```
+
+and the fd watcher's own peak sample, 2,454 → 2,374.
+
+**Do not read −285 on the floor as −285 on the peak, and do not read the peak
+barely moving as the fix not working.** They are different populations, and the
+peak dump says which: at 2,454 the host held **2,196 descriptors on 2,195
+DISTINCT `PlayheadTestScratch` paths** and only 51 + 43 on the two production
+stores. The PEAK is transient scratch-store concurrency — how many test stores
+are open at once — which is playhead-vk68m's arithmetic and is untouched here.
+The FLOOR is retained production stores, which is this bead's, and it fell 57 %.
+The floor does sit UNDER the peak, so 285 fewer descriptors is 285 more headroom
+at the moment of the burst; what the burst then does with that headroom is set by
+how many scratch stores are in flight, which is why the observed peak moved by
+12–80 rather than by 285.
+
+**One observation each, and it is worth recording but not over-read:** the BEFORE
+run reported **11 RESOURCE FAILURES** (tests denied a file — the descriptor
+denials playhead-s34ux traced to the ceiling) and the AFTER run reported
+**none**. That population is known to rotate run to run, so a single pair is
+suggestive rather than a measurement of a rate.
