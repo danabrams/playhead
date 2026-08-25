@@ -1572,10 +1572,14 @@ OWNG="Playhead/Services/AdDetection/OwnershipGraph.swift"
 EMPRO="Playhead/Services/AdDetection/EpisodeMetadataProvider.swift"
 MCEX="Playhead/Services/AdDetection/MetadataCueExtractor.swift"
 PAPP="Playhead/App/PlayheadApp.swift"
+# playhead-8cjo: the host's half of the banner delivery contract — the one
+# place that knows what `AdBannerQueue.enqueue` did with an item.
+BHD="Playhead/Views/NowPlaying/BannerHostDelivery.swift"
 MUTABLE_FILES=(
   "$FPRUN"
   "$OWNG" "$EMPRO" "$MCEX" "$PAPP" "$FPARSE" "$PDISC"
   "$ORCH" "$STORE" "$CTRL" "$VIEW" "$TRIG" "$RSVC" "$TRUST" "$NPV" "$NPVM" "$TPEEK" "$MSR"
+  "$BHD"
   "$BWPOL" "$KICK" "$KCOORD" "$SEAMS" "$ACT" "$ADSVC" "$PODC"
   "$THROT" "$FMREF" "$UMF" "$SFR" "$DTR" "$RUNNER" "$FMCLS" "$PROBE" "$PERMC" "$RT" "$MODEL" "$INGO" "$INVF"
   "$FMDL" "$FMCP"
@@ -1647,6 +1651,21 @@ FOCUSED_SUITES=(
   -only-testing:PlayheadTests/BannerPlayheadBiconditionalTests
   -only-testing:PlayheadTests/MissedAutoSkipReceiptListTests
   -only-testing:PlayheadTests/MissedAutoSkipListWiringSourceCanaryTests
+  # playhead-8cjo: "a host is attached" is not "a card was shown" (AK series).
+  # TWO more suites, and neither can see the other's half.
+  #
+  # `AutoSkipCardDeliveryAgainstTheQueueTests` is the only thing that drives a
+  # real `AdBannerQueue` — the partition above is asserted at the ORCHESTRATOR
+  # boundary and its own header says it cannot see the queue, which is exactly
+  # where `enqueue` returns false and bins the card.
+  #
+  # `BannerHostDeliveryWiringSourceCanaryTests` is the only thing that can see
+  # that `NowPlayingViewModel.observeBanners` CALLS the forwarding rule rather
+  # than keeping a second copy of it. Without that line every assertion in the
+  # queue suite is a property of a type production never runs — MS11's shape,
+  # one layer over.
+  -only-testing:PlayheadTests/AutoSkipCardDeliveryAgainstTheQueueTests
+  -only-testing:PlayheadTests/BannerHostDeliveryWiringSourceCanaryTests
   # And `ViewLayerCorrectionAttributionCaptureCanaryTests`, which is NOT this
   # bead's suite and is here for one reason: MS16's whole claim is that it stays
   # GREEN while the sheet lists another episode's rows. That canary owns the
@@ -3191,6 +3210,25 @@ T_2D6I_CAPTURE="the provider filters rows against the sheet's own captured trans
 T_2D6I_CLOSURE="the list's veto IS the card's veto closure, not a second seam"
 T_2D6I_NOYES="the list offers NO confirmation — a skip nobody saw cannot be confirmed"
 T_2D6I_GATED="the section renders only when there is something to show"
+
+# playhead-8cjo — the AK series.
+T_8CJO_ACCEPTED="The queue accepts, so the skip is a card and leaves no row"
+T_8CJO_REFUSED="A rejected enqueue leaves a list row, not a card"
+T_8CJO_UNFORWARDED="An event nobody forwards leaves a list row — silence is not a delivery"
+T_8CJO_QVETO="A row created by a refused enqueue still reaches the card's own veto"
+T_8CJO_WALK="THE PARTITION AGAINST THE QUEUE: cards before the reattach, rows after"
+T_8CJO_SUGGEST="A refused SUGGEST item is not acknowledged, so it survives for the next host"
+T_8CJO_SEAM="The acknowledgement seam refuses an identity that is not the announced card's"
+T_8CJO_CLEARS="Both episode boundaries clear the record of which cards were delivered"
+T_8CJO_DELEGATES="observeBanners routes every event through BannerHostDelivery"
+T_8CJO_NOCOPY="the view model does not enqueue or acknowledge on its own"
+T_8CJO_ACKAUTO="the forwarding rule acknowledges the AUTO tier"
+T_8CJO_GUARD="no acknowledgement is reachable without the queue's acceptance"
+T_8CJO_EXHAUSTIVE="the tier switch is exhaustive — a new tier cannot inherit a seam"
+T_8CJO_REANNOUNCE="A re-announced window leaves the delivered-card record, so it is never on both surfaces"
+T_8CJO_RETIRE="A retirement forwarded to the queue pulls the card the orchestrator invalidated"
+T_8CJO_LIMIT="STATED LIMIT: a card queued behind another and discarded unseen is still booked delivered"
+T_8CJO_SUGGESTACK="An ACCEPTED suggest item IS acknowledged, so the next host is not asked again"
 
 T_IW7Q_PERMISSIVE="a PERMISSIVE coarse row is ungraded — the runner wrote that .strong"
 T_IW7Q_UNKNOWN="an UNKNOWN coarse row is ungraded too — silence is not a licence"
@@ -11524,13 +11562,13 @@ MUTATIONS=(
   # MS01 IS THE SHIPPED DEFECT VERBATIM: the unattached arm records nothing, so
   # the skip leaves no trace. Own batch — it removes the whole feature at once,
   # so a batched partner would be credited off it.
-  "MS01|1400|ORCH|$T_2D6I_PARTITION;$T_2D6I_ATTACH;$T_2D6I_VETO;$T_2D6I_ANSWERED;$T_2D6I_WITHHELD;$T_2D6I_POSITION;$T_2D6I_NOCONFIRM;$T_2D6I_ENDEP;$T_2D6I_REPLAY;$T_2D6I_ORDER;$T_2D6I_COPY"
+  "MS01|1400|ORCH|$T_2D6I_PARTITION;$T_2D6I_ATTACH;$T_2D6I_VETO;$T_2D6I_ANSWERED;$T_2D6I_WITHHELD;$T_2D6I_POSITION;$T_2D6I_NOCONFIRM;$T_2D6I_ENDEP;$T_2D6I_REPLAY;$T_2D6I_ORDER;$T_2D6I_COPY;$T_8CJO_SEAM;$T_8CJO_CLEARS;$T_8CJO_ACCEPTED;$T_8CJO_REFUSED;$T_8CJO_UNFORWARDED;$T_8CJO_QVETO;$T_8CJO_WALK"
 
   # MS02 IS THE DOUBLE-DELIVERY DIRECTION NOBODY LOOKS AT: the receipt is
   # recorded UNCONDITIONALLY, so a skip that got its card also accumulates a row
   # asking the listener to judge it a second time. Every "the list is right"
   # assertion passes under this mutant; only the partition sees it.
-  "MS02|1401|ORCH|$T_2D6I_PARTITION"
+  "MS02|1401|ORCH|$T_2D6I_PARTITION;$T_8CJO_ACCEPTED;$T_8CJO_WALK;$T_8CJO_SEAM"
 
   # MS03 IS THE WRONG FIX, and it is the one a reader who skimmed
   # `replayPendingSuggestBanners` would write: the missed receipt is yielded to
@@ -11624,6 +11662,115 @@ MUTATIONS=(
   # MS02 both kill, so a KILLED verdict here would mean a rename changed
   # behaviour.
   "MS99|1414|ORCH|$T_2D6I_PARTITION"
+
+  # ---- playhead-8cjo, the AK series --------------------------------------
+  #
+  # "A host is attached" is not "a card was shown". Every mutation below is a
+  # way of reading one of those as the other, and the two that matter most are
+  # AK01 (the shipped defect of playhead-2d6i, which this bead is one layer up
+  # from) and AK02 (the acknowledgement that ignores the queue's answer, which
+  # is the same defect with a seam bolted on).
+
+  # AK01 IS playhead-2d6i's SHIPPED BEHAVIOUR, restored: the receipt is written
+  # only when NOBODY IS SUBSCRIBED. Every skip whose card the queue later binned
+  # is then booked as delivered and leaves no row, which is the whole bead.
+  "AK01|1420|ORCH|$T_2D6I_PARTITION;$T_8CJO_ACCEPTED;$T_8CJO_REFUSED;$T_8CJO_UNFORWARDED;$T_8CJO_QVETO;$T_8CJO_WALK"
+
+  # AK02 IS THE SEAM THAT DOES NOT LISTEN: the `didAccept` guard is pushed down
+  # into the SUGGEST arm, so the auto tier acknowledges whatever the queue said.
+  # Note which rail sees it and which does not — the canary's "no call above the
+  # guard" is satisfied by this and the ORDER check is what catches it, which is
+  # why that assertion exists at all.
+  "AK02|1421|BHD|$T_8CJO_REFUSED;$T_8CJO_WALK;$T_8CJO_QVETO;$T_8CJO_GUARD"
+
+  # AK03 — the auto tier's acknowledgement is deleted. The mirror of AK02: the
+  # queue's answer is heard and thrown away rather than ignored, so every
+  # accepted card also accumulates a row.
+  "AK03|1422|BHD|$T_8CJO_ACCEPTED;$T_8CJO_WALK;$T_8CJO_ACKAUTO"
+
+  # AK04/AK05/AK06 are the seam's three identity clauses. Each admits an
+  # acknowledgement about a DIFFERENT card and takes away the listener's only
+  # correction, and no behavioural suite can see any of them — the production
+  # caller always passes the announced card's own fields, which is exactly why
+  # the seam's contract has to be pinned directly.
+  "AK04|1423|ORCH|$T_8CJO_SEAM"
+  "AK05|1424|ORCH|$T_8CJO_SEAM"
+  "AK06|1425|ORCH|$T_8CJO_SEAM"
+
+  # AK07 — the delivered record is written BEFORE the guard, so the seam can
+  # manufacture a card for a window nothing ever announced. That is the
+  # `cards ⊆ yielded` direction, and it is the one an acknowledgement seam makes
+  # newly reachable.
+  "AK07|1426|ORCH|$T_8CJO_SEAM"
+
+  # AK08/AK09 — the two per-episode clears of the delivered record. Separate
+  # because they are separate lines and MS06 is the record of what happens when
+  # two clears mask each other.
+  "AK08|1427|ORCH|$T_8CJO_CLEARS"
+  "AK09|1428|ORCH|$T_8CJO_CLEARS"
+
+  # AK10 — the emit path stops gating on a subscriber, so a window with nobody
+  # listening enters the YIELD set. Nothing user-visible changes; what breaks is
+  # the distinction the whole bead rests on, which is why the partition's
+  # unattached arm asserts on the yield set as well as on the cards.
+  "AK10|1429|ORCH|$T_2D6I_PARTITION;$T_2D6I_ATTACH"
+
+  # AK11 — the view model keeps its OWN copy of the forwarding rule and never
+  # acknowledges. Every behavioural suite stays green, because they drive
+  # `BannerHostDelivery.forward` directly; only the canary can see it.
+  "AK11|1430|NPVM|$T_8CJO_DELEGATES;$T_8CJO_NOCOPY"
+
+  # AK12 — the acknowledgement removes the row and records nothing, so a card
+  # the listener saw is indistinguishable from a skip that was never announced.
+  # The mirror of MS02.
+  "AK12|1431|ORCH|$T_8CJO_ACCEPTED;$T_2D6I_PARTITION;$T_8CJO_WALK;$T_8CJO_SEAM;$T_8CJO_CLEARS"
+
+  # AK99 — VACUITY CONTROL, and it MUST SURVIVE. It renames the local the seam
+  # binds its receipt to and NOTHING else — the same two lines AK04 and AK06
+  # rewrite. Its expectation is deliberately NON-EMPTY (an empty one is
+  # trivially satisfied) and names the rail those two kill, so a KILLED verdict
+  # here would mean a rename changed behaviour.
+  # AK13 — the delivered-record removal at the receipt WRITE site. A same-id
+  # producer revision un-spends the window's one chance, so it is re-announced
+  # while the id is still recorded as delivered: cards ∩ list ≠ ∅ mid-episode.
+  "AK13|1433|ORCH|$T_8CJO_REANNOUNCE"
+
+  # AK14 — the RETIRE arm of the forwarding rule, which had no behavioural rail
+  # at all until this round. AK11 deletes it as a side effect and was expected
+  # to redden only the canaries.
+  "AK14|1434|BHD|$T_8CJO_RETIRE"
+
+  # AK15 — the SUGGEST acknowledgement, the tier this bead did not change. An
+  # acknowledged suggestion stops being replayed to the next host, so the
+  # listener is asked nothing about a span they are about to hear.
+  # AK15 SURVIVED on its first run and the survivor was RIGHT: its expectation
+  # named `A refused SUGGEST item is not acknowledged`, which DELETING the
+  # acknowledgement satisfies perfectly. Nothing asserted the positive
+  # direction. The expectation now names the rail written to close that hole,
+  # not the one that could never fall.
+  "AK15|1435|BHD|$T_8CJO_SUGGESTACK;$T_8CJO_ACKAUTO"
+
+  # AK18 — the MIRROR, so the refusal direction is proven too: the suggest
+  # acknowledgement fires regardless of what the queue said.
+  "AK18|1438|BHD|$T_8CJO_SUGGEST;$T_8CJO_GUARD"
+
+  # AK16 — a `default:` arm on the tier switch, so a tier added later inherits
+  # whichever acknowledgement was written first instead of being made to choose.
+  # `.autoSkipped` still reaches the same body, so every behavioural rail stays
+  # GREEN and the exhaustiveness canary is the only thing standing there.
+  "AK16|1436|BHD|$T_8CJO_EXHAUSTIVE"
+
+  # AK17 — THE BYPASS A REVIEWER DEMONSTRATED, verbatim, rename included.
+  # `bannerQueue.enqueue(` contains `Queue.enqueue(` with a CAPITAL Q, so the
+  # canary's old lowercase `queue.enqueue(` did not match it. AK11 keeps the
+  # name `queue` and therefore dies on the very substring the bypass renames —
+  # it cannot prove the strengthening, which is a LOST rail rather than a
+  # passing one. The body keeps a `forward(` call in its else branch, so the
+  # POSITIVE check still passes and only the forbidden check can see it: AK11
+  # -> {DELEGATES, NOCOPY}, AK17 -> {NOCOPY}, and the difference IS the fix.
+  "AK17|1437|NPVM|$T_8CJO_NOCOPY"
+
+  "AK99|1432|ORCH|$T_8CJO_SEAM"
 
   # ---- playhead-7dgx, the BD series: a dropped background download leaves a
   #      DURABLE, COUNTABLE row -----------------------------------------------
@@ -12160,8 +12307,8 @@ describe_mutation() {
     NQ19) echo "nqwr: the Settings toggle binds a LITERAL key that has drifted from the seam's — the switch writes a key nobody reads" ;;
     NQ20) echo "nqwr: the toggle spells the key as a literal that is correct TODAY — two spellings, from which a rename moves one and not the other" ;;
     NQ99) echo "VACUITY CONTROL — the request-instant local in playAdSkipCue is renamed and nothing else is. MUST SURVIVE" ;;
-    MS01) echo "2d6i THE SHIPPED DEFECT: an auto-skip with no host attached records nothing — the listener gets the skip and can never say No to it" ;;
-    MS02) echo "2d6i DOUBLE DELIVERY: the receipt is recorded even when a card fired, so one skip becomes a card AND a row" ;;
+    MS01) echo "2d6i THE SHIPPED DEFECT: an announced auto-skip records nothing at all — the listener gets the skip and can never say No to it" ;;
+    MS02) echo "2d6i/8cjo DOUBLE DELIVERY: the acknowledgement does not remove the receipt, so one skip becomes a card AND a row" ;;
     MS03) echo "2d6i THE WRONG FIX: the missed receipt is replayed to a newly attached host as a CARD — a skip affordance for audio already gone" ;;
     MS04) echo "2d6i: the read-time filter stops checking the decision state, so an already-answered row keeps being offered" ;;
     MS05) echo "2d6i: the read-time filter stops checking the material token, so a row the seam would refuse on its token is offered anyway" ;;
@@ -12177,6 +12324,25 @@ describe_mutation() {
     MS13) echo "2d6i: the render gate is inverted — the section appears only when there is nothing to show" ;;
     MS14) echo "2d6i: the transcript surface gains a Yes, which writes bannerAutoSkipConfirmed for audio the listener never heard" ;;
     MS99) echo "VACUITY CONTROL — the attachment-test local in emitBannerItem is renamed and nothing else is. MUST SURVIVE" ;;
+    AK01) echo "8cjo THE SHIPPED DEFECT (2d6i verbatim): the receipt is written only when NOBODY IS SUBSCRIBED, so a card the queue binned leaves no row" ;;
+    AK02) echo "8cjo THE SEAM THAT DOES NOT LISTEN: the didAccept guard is pushed into the suggest arm, so the auto tier acknowledges an item the queue refused" ;;
+    AK03) echo "8cjo: the AUTO tier's acknowledgement is deleted, so every card the listener saw also accumulates a passive-list row" ;;
+    AK04) echo "8cjo: the seam stops checking the EPISODE, so an acknowledgement from another episode removes this one's row" ;;
+    AK05) echo "8cjo: the seam stops checking the PLAYBACK GENERATION, so an acknowledgement from a previous transaction removes this one's row" ;;
+    AK06) echo "8cjo: the seam stops checking the MATERIAL TOKEN, so an acknowledgement for a different emission of the same window removes the row" ;;
+    AK07) echo "8cjo: the delivered record is written before the guard, so the seam manufactures a card for a window nothing ever announced" ;;
+    AK08) echo "8cjo: endEpisode stops clearing the delivered-card record, so the next episode credits this one's card for a reused window id" ;;
+    AK09) echo "8cjo: beginEpisode stops clearing the delivered-card record, so a same-asset REPLAY inherits the previous transaction's deliveries" ;;
+    AK10) echo "8cjo: the emit path stops gating on a subscriber, so a window nobody was listening for enters the YIELD set" ;;
+    AK11) echo "8cjo: observeBanners keeps its own copy of the forwarding rule and never acknowledges — every behavioural suite stays green" ;;
+    AK12) echo "8cjo: the acknowledgement removes the row and records nothing, so a card the listener saw looks like a skip nobody announced" ;;
+    AK13) echo "8cjo: the delivered record is not cleared when a window is re-announced, so a producer revision puts one window on BOTH surfaces" ;;
+    AK14) echo "8cjo: the RETIRE arm of the forwarding rule is deleted, so an invalidated card can still collect an answer" ;;
+    AK15) echo "8cjo: the SUGGEST acknowledgement is deleted, so a delivered suggestion is replayed to the next host and asked twice" ;;
+    AK16) echo "8cjo: a default: arm on the tier switch, so a tier added later inherits an acknowledgement nobody chose for it" ;;
+    AK18) echo "8cjo: the SUGGEST acknowledgement fires regardless of the queue verdict, so a refused suggestion is never replayed to the next host" ;;
+    AK17) echo "8cjo THE DEMONSTRATED BYPASS: the inline enqueue written with the parameter RENAMED, which the file-wide canary could not see" ;;
+    AK99) echo "VACUITY CONTROL — the local the acknowledgement seam binds its receipt to is renamed and nothing else is. MUST SURVIVE" ;;
     YX99) echo "VACUITY CONTROL — the band in buildFMLedgerEntries is bound through a renamed intermediate on the line YX01 rewrites; nothing else changes. MUST SURVIVE" ;;
     NY01) echo "AdDetectionService.hotPathCandidates sorts the RAW array — the shipped defect: runBackfill canonicalized and the hot path did not" ;;
     SU01) echo "THE SHIPPED DEFECT VERBATIM — stage 6 deleted, so a mark is its SCAN WINDOW again" ;;
@@ -27632,30 +27798,27 @@ EOF
   # and drops it on the floor, exactly as the early `return` did.
   MS01)
     snippet OLD <<'EOF'
-            missedAutoSkipReceiptsByWindowId[adWindow.id] =
-                MissedAutoSkipReceipt(
+        missedAutoSkipReceiptsByWindowId[adWindow.id] =
+            MissedAutoSkipReceipt(
 EOF
     snippet NEW <<'EOF'
-            _ = adWindow.id
-            _ = MissedAutoSkipReceipt(
+        _ = adWindow.id
+        _ = MissedAutoSkipReceipt(
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
-  # MS02 — recorded in BOTH arms. The card still fires; the list gains a row
-  # for it as well.
+  # MS02 — the acknowledgement books the card and LEAVES the row. The listener
+  # sees the card and is then asked to judge the same skip again from the
+  # passive list. playhead-8cjo moved this direction from `emitBannerItem` to
+  # the seam: since the receipt is now written for EVERY announced skip, the
+  # only thing standing between one skip and two surfaces is this removal.
   MS02)
     snippet OLD <<'EOF'
-        guard hasAttachedHost else {
-            // playhead-2d6i: nobody is listening, and the caller has already
+        missedAutoSkipReceiptsByWindowId.removeValue(forKey: windowId)
+        deliveredAutoSkipCardWindowIds.insert(windowId)
 EOF
     snippet NEW <<'EOF'
-        missedAutoSkipReceiptsByWindowId[adWindow.id] = MissedAutoSkipReceipt(
-            item: item,
-            playheadTimeAtSkip: currentPlayheadTime,
-            occurredAt: Date()
-        )
-        guard hasAttachedHost else {
-            // playhead-2d6i: nobody is listening, and the caller has already
+        deliveredAutoSkipCardWindowIds.insert(windowId)
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -27730,6 +27893,12 @@ EOF
         // clear has to be here too: a leak that is invisible is still a leak,
         // and the next episode could legitimately reuse a window id.
         missedAutoSkipReceiptsByWindowId.removeAll()
+        // playhead-8cjo: and so is the record of which cards a host ACCEPTED.
+        // It is read only by the partition rails, so a leak here is invisible
+        // in production and lethal to the one thing that can see this bead's
+        // defect: the next episode's partition would credit a card this episode
+        // delivered, and window ids are not unique across episodes.
+        deliveredAutoSkipCardWindowIds.removeAll()
         suggestBanneredWindowIds.removeAll()
 EOF
     snippet NEW <<'EOF'
@@ -27740,6 +27909,12 @@ EOF
         // leak here would present the previous episode's receipt against the
         // next episode's playhead.
         armedAutoSkipBannerWindowIds.removeAll()
+        // playhead-8cjo: and so is the record of which cards a host ACCEPTED.
+        // It is read only by the partition rails, so a leak here is invisible
+        // in production and lethal to the one thing that can see this bead's
+        // defect: the next episode's partition would credit a card this episode
+        // delivered, and window ids are not unique across episodes.
+        deliveredAutoSkipCardWindowIds.removeAll()
         suggestBanneredWindowIds.removeAll()
 EOF
     patch "$file" "$OLD" "$NEW" ;;
@@ -27764,6 +27939,12 @@ EOF
         // clear has to be here too: a leak that is invisible is still a leak,
         // and the next episode could legitimately reuse a window id.
         missedAutoSkipReceiptsByWindowId.removeAll()
+        // playhead-8cjo: and so is the record of which cards a host ACCEPTED.
+        // It is read only by the partition rails, so a leak here is invisible
+        // in production and lethal to the one thing that can see this bead's
+        // defect: the next episode's partition would credit a card this episode
+        // delivered, and window ids are not unique across episodes.
+        deliveredAutoSkipCardWindowIds.removeAll()
         suggestBanneredWindowIds.removeAll()
 EOF
     snippet NEW <<'EOF'
@@ -27774,6 +27955,12 @@ EOF
         // leak here would present the previous episode's receipt against the
         // next episode's playhead.
         armedAutoSkipBannerWindowIds.removeAll()
+        // playhead-8cjo: and so is the record of which cards a host ACCEPTED.
+        // It is read only by the partition rails, so a leak here is invisible
+        // in production and lethal to the one thing that can see this bead's
+        // defect: the next episode's partition would credit a card this episode
+        // delivered, and window ids are not unique across episodes.
+        deliveredAutoSkipCardWindowIds.removeAll()
         suggestBanneredWindowIds.removeAll()
 EOF
     patch "$file" "$OLD" "$NEW" ;;
@@ -27781,10 +27968,10 @@ EOF
   # MS07 — the position at which the skip fired becomes the SPAN's own start.
   MS07)
     snippet OLD <<'EOF'
-                    playheadTimeAtSkip: currentPlayheadTime,
+                playheadTimeAtSkip: currentPlayheadTime,
 EOF
     snippet NEW <<'EOF'
-                    playheadTimeAtSkip: managed.snappedStart,
+                playheadTimeAtSkip: managed.snappedStart,
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -27923,10 +28110,392 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW"
     snippet OLD <<'EOF'
-        guard hasAttachedHost else {
+        guard hasAttachedHost else { return }
 EOF
     snippet NEW <<'EOF'
-        guard hostIsAttached else {
+        guard hostIsAttached else { return }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+
+  # ---- playhead-8cjo, the AK series ---------------------------------------
+
+  # AK01 — playhead-2d6i's shipped behaviour restored: the receipt is written
+  # only when nobody is subscribed.
+  AK01)
+    snippet OLD <<'EOF'
+        missedAutoSkipReceiptsByWindowId[adWindow.id] =
+            MissedAutoSkipReceipt(
+EOF
+    snippet NEW <<'EOF'
+        missedAutoSkipReceiptsByWindowId[adWindow.id] =
+            hasAttachedHost ? nil : MissedAutoSkipReceipt(
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # AK02 — the `didAccept` guard is pushed into the SUGGEST arm, so the auto
+  # tier acknowledges whatever the queue said.
+  AK02)
+    snippet OLD <<'EOF'
+            guard didAccept else { return }
+            switch item.tier {
+            case .suggest:
+EOF
+    snippet NEW <<'EOF'
+            switch item.tier {
+            case .suggest:
+                guard didAccept else { return }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # AK03 — the auto tier's acknowledgement is deleted.
+  AK03)
+    snippet OLD <<'EOF'
+            case .autoSkipped:
+                await orchestrator.acknowledgeAutoSkippedBannerDelivery(
+                    windowId: item.windowId,
+                    episodeId: item.episodeId,
+                    playbackLifecycleGeneration:
+                        item.playbackLifecycleGeneration,
+                    windowMaterialRevisionToken:
+                        item.windowMaterialRevisionToken
+                )
+EOF
+    snippet NEW <<'EOF'
+            case .autoSkipped:
+                break
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # AK04 — the seam's EPISODE clause.
+  AK04)
+    snippet OLD <<'EOF'
+        guard activeEpisodeId == episodeId,
+              activePlaybackLifecycleGeneration
+                == playbackLifecycleGeneration,
+              let receipt = missedAutoSkipReceiptsByWindowId[windowId],
+EOF
+    snippet NEW <<'EOF'
+        guard activePlaybackLifecycleGeneration
+                == playbackLifecycleGeneration,
+              let receipt = missedAutoSkipReceiptsByWindowId[windowId],
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # AK05 — the seam's PLAYBACK GENERATION clause.
+  AK05)
+    snippet OLD <<'EOF'
+        guard activeEpisodeId == episodeId,
+              activePlaybackLifecycleGeneration
+                == playbackLifecycleGeneration,
+              let receipt = missedAutoSkipReceiptsByWindowId[windowId],
+EOF
+    snippet NEW <<'EOF'
+        guard activeEpisodeId == episodeId,
+              let receipt = missedAutoSkipReceiptsByWindowId[windowId],
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # AK06 — the seam's MATERIAL TOKEN clause.
+  AK06)
+    snippet OLD <<'EOF'
+              let receipt = missedAutoSkipReceiptsByWindowId[windowId],
+              receipt.item.windowMaterialRevisionToken
+                == windowMaterialRevisionToken
+        else {
+EOF
+    snippet NEW <<'EOF'
+              missedAutoSkipReceiptsByWindowId[windowId] != nil
+        else {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # AK07 — the delivered record is written before the guard.
+  AK07)
+    snippet OLD <<'EOF'
+        windowMaterialRevisionToken: String?
+    ) {
+        guard activeEpisodeId == episodeId,
+EOF
+    snippet NEW <<'EOF'
+        windowMaterialRevisionToken: String?
+    ) {
+        deliveredAutoSkipCardWindowIds.insert(windowId)
+        guard activeEpisodeId == episodeId,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # AK08 — the endEpisode clear of the delivered record. Anchored through
+  # `latestUserSeekOperationGeneration = 0`, which is what distinguishes
+  # endEpisode's block from beginEpisode's byte-identical one.
+  AK08)
+    snippet OLD <<'EOF'
+        latestUserSeekOperationGeneration = 0
+        banneredWindowIds.removeAll()
+        emittedAutoSkipBannerWindowIds.removeAll()
+        // playhead-bwxi: an armed auto-skip banner is per-episode state, and a
+        // leak here would present the previous episode's receipt against the
+        // next episode's playhead.
+        armedAutoSkipBannerWindowIds.removeAll()
+        // playhead-2d6i: so is a MISSED receipt. A leak here would offer the
+        // previous episode's uncorrected skip against the next episode's
+        // windows — and `denyAutoSkippedBanner` would refuse it, leaving a row
+        // whose only possible action does nothing. The `windows`-derived filter
+        // in `missedAutoSkipReceipts()` would hide it, which is exactly why the
+        // clear has to be here too: a leak that is invisible is still a leak,
+        // and the next episode could legitimately reuse a window id.
+        missedAutoSkipReceiptsByWindowId.removeAll()
+        // playhead-8cjo: and so is the record of which cards a host ACCEPTED.
+        // It is read only by the partition rails, so a leak here is invisible
+        // in production and lethal to the one thing that can see this bead's
+        // defect: the next episode's partition would credit a card this episode
+        // delivered, and window ids are not unique across episodes.
+        deliveredAutoSkipCardWindowIds.removeAll()
+EOF
+    snippet NEW <<'EOF'
+        latestUserSeekOperationGeneration = 0
+        banneredWindowIds.removeAll()
+        emittedAutoSkipBannerWindowIds.removeAll()
+        // playhead-bwxi: an armed auto-skip banner is per-episode state, and a
+        // leak here would present the previous episode's receipt against the
+        // next episode's playhead.
+        armedAutoSkipBannerWindowIds.removeAll()
+        // playhead-2d6i: so is a MISSED receipt. A leak here would offer the
+        // previous episode's uncorrected skip against the next episode's
+        // windows — and `denyAutoSkippedBanner` would refuse it, leaving a row
+        // whose only possible action does nothing. The `windows`-derived filter
+        // in `missedAutoSkipReceipts()` would hide it, which is exactly why the
+        // clear has to be here too: a leak that is invisible is still a leak,
+        // and the next episode could legitimately reuse a window id.
+        missedAutoSkipReceiptsByWindowId.removeAll()
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # AK09 — the beginEpisode clear of the delivered record. Anchored through
+  # `decisionLog.removeAll()`.
+  AK09)
+    snippet OLD <<'EOF'
+        decisionLog.removeAll()
+        banneredWindowIds.removeAll()
+        emittedAutoSkipBannerWindowIds.removeAll()
+        // playhead-bwxi: an armed auto-skip banner is per-episode state, and a
+        // leak here would present the previous episode's receipt against the
+        // next episode's playhead.
+        armedAutoSkipBannerWindowIds.removeAll()
+        // playhead-2d6i: so is a MISSED receipt. A leak here would offer the
+        // previous episode's uncorrected skip against the next episode's
+        // windows — and `denyAutoSkippedBanner` would refuse it, leaving a row
+        // whose only possible action does nothing. The `windows`-derived filter
+        // in `missedAutoSkipReceipts()` would hide it, which is exactly why the
+        // clear has to be here too: a leak that is invisible is still a leak,
+        // and the next episode could legitimately reuse a window id.
+        missedAutoSkipReceiptsByWindowId.removeAll()
+        // playhead-8cjo: and so is the record of which cards a host ACCEPTED.
+        // It is read only by the partition rails, so a leak here is invisible
+        // in production and lethal to the one thing that can see this bead's
+        // defect: the next episode's partition would credit a card this episode
+        // delivered, and window ids are not unique across episodes.
+        deliveredAutoSkipCardWindowIds.removeAll()
+EOF
+    snippet NEW <<'EOF'
+        decisionLog.removeAll()
+        banneredWindowIds.removeAll()
+        emittedAutoSkipBannerWindowIds.removeAll()
+        // playhead-bwxi: an armed auto-skip banner is per-episode state, and a
+        // leak here would present the previous episode's receipt against the
+        // next episode's playhead.
+        armedAutoSkipBannerWindowIds.removeAll()
+        // playhead-2d6i: so is a MISSED receipt. A leak here would offer the
+        // previous episode's uncorrected skip against the next episode's
+        // windows — and `denyAutoSkippedBanner` would refuse it, leaving a row
+        // whose only possible action does nothing. The `windows`-derived filter
+        // in `missedAutoSkipReceipts()` would hide it, which is exactly why the
+        // clear has to be here too: a leak that is invisible is still a leak,
+        // and the next episode could legitimately reuse a window id.
+        missedAutoSkipReceiptsByWindowId.removeAll()
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # AK10 — the emit path stops gating on a subscriber.
+  AK10)
+    snippet OLD <<'EOF'
+        guard hasAttachedHost else { return }
+EOF
+    snippet NEW <<'EOF'
+        _ = hasAttachedHost
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # AK11 — the view model keeps its own copy of the forwarding rule.
+  AK11)
+    snippet OLD <<'EOF'
+                await BannerHostDelivery.forward(
+                    event,
+                    from: orchestrator,
+                    into: queue,
+                    hostGeneration: hostGeneration
+                )
+EOF
+    snippet NEW <<'EOF'
+                if case let .present(item) = event {
+                    _ = await MainActor.run {
+                        queue.enqueue(item, hostGeneration: hostGeneration)
+                    }
+                }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # AK12 — the acknowledgement records no delivery.
+  AK12)
+    snippet OLD <<'EOF'
+        missedAutoSkipReceiptsByWindowId.removeValue(forKey: windowId)
+        deliveredAutoSkipCardWindowIds.insert(windowId)
+EOF
+    snippet NEW <<'EOF'
+        missedAutoSkipReceiptsByWindowId.removeValue(forKey: windowId)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # AK13 — the delivered-record removal at the receipt write site.
+  AK13)
+    snippet OLD <<'EOF'
+        deliveredAutoSkipCardWindowIds.remove(adWindow.id)
+EOF
+    snippet NEW <<'EOF'
+        _ = adWindow.id
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # AK14 — the RETIRE arm of the forwarding rule.
+  AK14)
+    snippet OLD <<'EOF'
+        case let .retireWindow(retirement):
+            _ = await MainActor.run {
+                queue.retireWindow(
+                    retirement,
+                    hostGeneration: hostGeneration
+                )
+            }
+EOF
+    snippet NEW <<'EOF'
+        case .retireWindow:
+            break
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # AK15 — the SUGGEST acknowledgement.
+  AK15)
+    snippet OLD <<'EOF'
+            case .suggest:
+                await orchestrator.acknowledgeSuggestedBannerDelivery(
+                    windowId: item.windowId,
+                    episodeId: item.episodeId,
+                    playbackLifecycleGeneration:
+                        item.playbackLifecycleGeneration,
+                    suggestionRevisionToken:
+                        item.suggestionRevisionToken
+                )
+EOF
+    snippet NEW <<'EOF'
+            case .suggest:
+                break
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # AK16 — a `default:` arm on the tier switch.
+  AK16)
+    snippet OLD <<'EOF'
+            case .autoSkipped:
+                await orchestrator.acknowledgeAutoSkippedBannerDelivery(
+EOF
+    snippet NEW <<'EOF'
+            default:
+                await orchestrator.acknowledgeAutoSkippedBannerDelivery(
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # AK18 — the SUGGEST acknowledgement escapes the didAccept guard while the
+  # AUTO one stays behind it. Deliberately NOT "delete the guard": that is AK02
+  # and it unguards both tiers, so its victim set could not isolate the suggest
+  # direction. Here only the suggest tier reports a delivery the queue refused.
+  AK18)
+    snippet OLD <<'EOF'
+            guard didAccept else { return }
+            switch item.tier {
+            case .suggest:
+                await orchestrator.acknowledgeSuggestedBannerDelivery(
+EOF
+    snippet NEW <<'EOF'
+            if item.tier == .suggest {
+                await orchestrator.acknowledgeSuggestedBannerDelivery(
+                    windowId: item.windowId,
+                    episodeId: item.episodeId,
+                    playbackLifecycleGeneration:
+                        item.playbackLifecycleGeneration,
+                    suggestionRevisionToken:
+                        item.suggestionRevisionToken
+                )
+            }
+            guard didAccept else { return }
+            switch item.tier {
+            case .suggest:
+                await orchestrator.acknowledgeSuggestedBannerDelivery(
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # AK17 — THE DEMONSTRATED BYPASS. Two sites: the parameter is renamed so the
+  # old file-wide `queue.enqueue(` ban cannot see it, and a `forward(` call is
+  # KEPT in an else branch so the positive check still passes.
+  AK17)
+    snippet OLD <<'EOF'
+        into queue: AdBannerQueue,
+        hostGeneration: UInt64
+    ) {
+        bannerObservationTask?.cancel()
+EOF
+    snippet NEW <<'EOF'
+        into bannerQueue: AdBannerQueue,
+        hostGeneration: UInt64
+    ) {
+        bannerObservationTask?.cancel()
+EOF
+    patch "$file" "$OLD" "$NEW" || return $?
+    snippet OLD <<'EOF'
+                await BannerHostDelivery.forward(
+                    event,
+                    from: orchestrator,
+                    into: queue,
+                    hostGeneration: hostGeneration
+                )
+EOF
+    snippet NEW <<'EOF'
+                if case let .present(item) = event {
+                    _ = await MainActor.run {
+                        bannerQueue.enqueue(item, hostGeneration: hostGeneration)
+                    }
+                } else {
+                    await BannerHostDelivery.forward(
+                        event,
+                        from: orchestrator,
+                        into: bannerQueue,
+                        hostGeneration: hostGeneration
+                    )
+                }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # AK99 — VACUITY CONTROL. The seam's receipt binding is renamed and nothing
+  # else is; both uses are inside the one anchor, so this compiles.
+  AK99)
+    snippet OLD <<'EOF'
+              let receipt = missedAutoSkipReceiptsByWindowId[windowId],
+              receipt.item.windowMaterialRevisionToken
+                == windowMaterialRevisionToken
+EOF
+    snippet NEW <<'EOF'
+              let announced = missedAutoSkipReceiptsByWindowId[windowId],
+              announced.item.windowMaterialRevisionToken
+                == windowMaterialRevisionToken
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -27960,6 +28529,7 @@ rec_file()   {
     TRUST) printf '%s' "$TRUST" ;;
     NPV)   printf '%s' "$NPV" ;;
     NPVM)  printf '%s' "$NPVM" ;;
+    BHD)   printf '%s' "$BHD" ;;
     TPEEK) printf '%s' "$TPEEK" ;;
     MSR)   printf '%s' "$MSR" ;;
     BWPOL) printf '%s' "$BWPOL" ;;

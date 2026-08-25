@@ -133,6 +133,14 @@ final class NowPlayingViewModel {
 
     /// Begin observing banner items from a SkipOrchestrator.
     /// Each item is enqueued into the provided AdBannerQueue on the MainActor.
+    ///
+    /// playhead-8cjo: the per-event rule lives in `BannerHostDelivery`, which
+    /// took nothing from this view model but the three values below. It is out
+    /// here because it is the only place that knows what the QUEUE did with an
+    /// item, and neither an orchestrator test nor a queue test can see that
+    /// hop — so the rule has to be drivable on its own against a real queue.
+    /// Do not re-inline it: a second copy is how the auto tier came to have no
+    /// acknowledgement while the suggest tier had one.
     func observeBanners(
         from orchestrator: SkipOrchestrator,
         into queue: AdBannerQueue,
@@ -143,29 +151,12 @@ final class NowPlayingViewModel {
             let stream = await orchestrator.bannerEventStream()
             for await event in stream {
                 guard !Task.isCancelled else { return }
-                switch event {
-                case let .present(item):
-                    let didAccept = await MainActor.run {
-                        queue.enqueue(item, hostGeneration: hostGeneration)
-                    }
-                    if didAccept, item.tier == .suggest {
-                        await orchestrator.acknowledgeSuggestedBannerDelivery(
-                            windowId: item.windowId,
-                            episodeId: item.episodeId,
-                            playbackLifecycleGeneration:
-                                item.playbackLifecycleGeneration,
-                            suggestionRevisionToken:
-                                item.suggestionRevisionToken
-                        )
-                    }
-                case let .retireWindow(retirement):
-                    _ = await MainActor.run {
-                        queue.retireWindow(
-                            retirement,
-                            hostGeneration: hostGeneration
-                        )
-                    }
-                }
+                await BannerHostDelivery.forward(
+                    event,
+                    from: orchestrator,
+                    into: queue,
+                    hostGeneration: hostGeneration
+                )
             }
         }
     }

@@ -754,14 +754,45 @@ actor SkipOrchestrator {
     /// `armedSuggestWindowIds`, and bounded by the episode's window count.
     private var armedAutoSkipBannerWindowIds: Set<String> = []
 
-    /// playhead-2d6i: auto-skips that fired while NO banner host was attached,
+    /// playhead-2d6i: auto-skips the listener has NOT been shown a card for,
     /// keyed by window id.
     ///
-    /// THE ASYMMETRY THIS CLOSES. `emitBannerItem` used to return without
-    /// yielding when both continuation dictionaries were empty — and both the
-    /// pre- and post-bwxi paths consume the window's one chance BEFORE that
-    /// check (`banneredWindowIds.insert` in `evaluateAndPush`, then
-    /// `armedAutoSkipBannerWindowIds.remove` in
+    /// **playhead-8cjo REDEFINED WHEN A ROW LEAVES THIS DICTIONARY, and the
+    /// membership rule is now the whole point.** 2d6i wrote a row only when
+    /// both continuation dictionaries were empty, i.e. when "nobody is
+    /// SUBSCRIBED". A subscriber is not a presentation:
+    /// `NowPlayingViewModel.observeBanners` forwards each `.present(item)` to
+    /// `AdBannerQueue.enqueue(_:hostGeneration:)`, which returns `false` and
+    /// DROPS the item across the reattach window in
+    /// `NowPlayingView.onChange(of: bannerPlaybackContext)`, after
+    /// `discardAllOnHostDisappear`, or on an episode / lifecycle mismatch — and
+    /// the observation `Task` can also be cancelled between the yield and the
+    /// enqueue, in which case nothing reaches the queue at all. In every one of
+    /// those the skip produced NEITHER a card the listener saw NOR a row.
+    ///
+    /// So a row is written for EVERY announced auto-skip, attached or not, and
+    /// the only thing that removes it is
+    /// `acknowledgeAutoSkippedBannerDelivery` — a host reporting that the
+    /// QUEUE ACCEPTED the card. The bound on "no acknowledgement" is therefore
+    /// ZERO rather than a grace period, which is why this needs no clock: the
+    /// conservative answer is the state it is already in. Ask the question this
+    /// repo's standing defect class demands — *what does this read if the
+    /// acknowledgement path never runs at all?* — and the answer is "every skip
+    /// is a correctable row", never "a skip nobody can see was booked as shown".
+    ///
+    /// ONE INTERVAL EXISTS IN THE OTHER DIRECTION, and it is deliberate: the
+    /// row is written before the yield and removed two actor hops later, so a
+    /// surface that reads the list in between sees a row for a card that is at
+    /// that moment being presented. It is milliseconds, it self-corrects, and
+    /// the alternative — writing the row only after a refusal is reported —
+    /// is the design this bead exists to reject, because the commonest loss is
+    /// an observation task cancelled before anything is reported at all.
+    ///
+    /// THE ASYMMETRY 2d6i CLOSED, kept because it is why the dictionary exists.
+    /// `emitBannerItem` used to return without yielding when both continuation
+    /// dictionaries were empty — and both the pre- and post-bwxi paths consume
+    /// the window's one chance BEFORE that check (`banneredWindowIds.insert` in
+    /// `evaluateAndPush`, then `armedAutoSkipBannerWindowIds.remove` in
     /// `emitAutoSkipBannersOnPlayheadEntry`). So an auto-skip that fired from
     /// the lock screen, from CarPlay, from a widget start, or during any locked
     /// stretch left no receipt at all and could never be corrected. The suggest
@@ -786,6 +817,38 @@ actor SkipOrchestrator {
     /// window count and cleared at both episode boundaries.
     private var missedAutoSkipReceiptsByWindowId:
         [String: MissedAutoSkipReceipt] = [:]
+
+    /// playhead-8cjo: window IDs whose auto-skip card a host reported the
+    /// BANNER QUEUE ACCEPTED — which is NOT the same as "a card was shown",
+    /// and the gap is stated here rather than discovered later.
+    ///
+    /// `AdBannerQueue.enqueue` returns `true` the moment the item is admitted
+    /// to the lane. A card queued BEHIND another (an ad pod: two adjacent
+    /// windows, entered a tick apart, which `canCoalesce` refuses to merge
+    /// because their ids differ) is admitted and not yet presented, and
+    /// `discardAllOnHostDisappear` destroys the pending lane. That card was
+    /// acknowledged, so it leaves no row. The boundary that would close it is
+    /// `AdBannerQueue.recordBannerShown(for:)`, whose own comment says
+    /// "Queue-current is not the same as user-visible"; moving the seam there
+    /// is a view-layer change and is filed rather than taken here.
+    ///
+    /// **NOT THE SAME SET AS `emittedAutoSkipBannerWindowIds`, and confusing
+    /// the two is this bead.** That one means "reached the
+    /// yield-to-subscriber path" — it is written the moment a continuation
+    /// exists, which is precisely the claim that turned out not to be a
+    /// presentation. This one is written only when the host comes back and
+    /// says the queue took it, so `delivered ⊆ emitted` and the gap between
+    /// them is exactly the population that used to vanish.
+    ///
+    /// **TEST-ONLY OBSERVABILITY, exactly like its sibling.** Production logic
+    /// does not read it; the seam's own behaviour is the receipt REMOVAL.
+    /// `deliveredAutoSkipCardWindowIDs()` is the only reader, and it exists so
+    /// the partition rails can name a positive fact instead of deriving one
+    /// (`entered \ list` would be unfalsifiable — it cannot distinguish a card
+    /// from a receipt somebody forgot to write). Cleared at both episode
+    /// boundaries: a leak would let the next episode's partition credit this
+    /// episode's card, and window ids are not unique across episodes.
+    private var deliveredAutoSkipCardWindowIds: Set<String> = []
 
     /// playhead-bwxi: has ANY position observation arrived for this episode?
     ///
@@ -1317,22 +1380,32 @@ actor SkipOrchestrator {
         activeEvidenceCatalog = catalog
     }
 
-    /// Emit a banner item for the given managed window to all banner listeners,
-    /// or — when no host is attached — record it as a missed receipt.
+    /// Announce an auto-skip: record its receipt, and offer it to every banner
+    /// listener.
     ///
-    /// playhead-2d6i: THIS BRANCH IS THE WHOLE INVARIANT, WRITTEN ONCE.
+    /// playhead-2d6i: THIS IS THE WHOLE INVARIANT, WRITTEN ONCE.
     ///
-    ///     a CARD  iff  the playhead is inside the window AND a host is
-    ///                  attached;
+    ///     a CARD  iff  the playhead is inside the window AND the banner queue
+    ///                  ACCEPTED it;
     ///     otherwise exactly one LIST ENTRY.
     ///
     /// The containment half is the caller's
-    /// (`emitAutoSkipBannersOnPlayheadEntry`, which is the only caller). The
-    /// attachment half is here, and it is an `if/else` rather than two
-    /// independent tests precisely so the two outcomes cannot both happen and
-    /// cannot both fail to happen. Before this bead the `else` was a bare
-    /// `return`: the window's one chance had already been consumed by the
-    /// caller, so the skip left no receipt at all.
+    /// (`emitAutoSkipBannersOnPlayheadEntry`, which is the only caller).
+    ///
+    /// **playhead-8cjo MOVED THE OTHER HALF OUT OF THIS FUNCTION, and that is
+    /// the fix.** 2d6i wrote the second clause as `hasAttachedHost` — an
+    /// `if/else` on whether any continuation existed — which reads "somebody is
+    /// SUBSCRIBED" as "a card was PRESENTED". `AdBannerQueue.enqueue` can
+    /// refuse the item after the yield (a stale host generation, an episode or
+    /// lifecycle mismatch), and the observation `Task` can be cancelled before
+    /// the enqueue happens at all; in that window the skip left neither card
+    /// nor row, which is 2d6i's own defect one layer up.
+    ///
+    /// So there is no `else` any more: the receipt is written for EVERY
+    /// announced skip, and `acknowledgeAutoSkippedBannerDelivery` is the only
+    /// thing that takes it away. The branch that remains is about
+    /// `emittedAutoSkipBannerWindowIds` and the yields, both of which are
+    /// genuinely about a subscriber existing and nothing more.
     private func emitBannerItem(for managed: ManagedWindow) {
         let hasAttachedHost = !bannerContinuations.isEmpty
             || !bannerEventContinuations.isEmpty
@@ -1358,29 +1431,46 @@ actor SkipOrchestrator {
             evidenceCatalogEntries: entries,
             tier: .autoSkipped
         )
-        guard hasAttachedHost else {
-            // playhead-2d6i: nobody is listening, and the caller has already
-            // spent this window's one chance. Keep the receipt so the listener
-            // can still say No to a skip they never saw.
-            //
-            // Deliberately BEFORE the `emittedAutoSkipBannerWindowIds` insert:
-            // that set means "reached the yield-to-subscriber path" and is read
-            // by `SkipOrchestratorPreloadTests` as exactly that. A missed
-            // receipt is the opposite of an emission and must not enter it.
-            missedAutoSkipReceiptsByWindowId[adWindow.id] =
-                MissedAutoSkipReceipt(
-                    item: item,
-                    // Safe to read directly rather than through
-                    // `observedPlayheadTimeForCorrection`: the only caller is
-                    // `emitAutoSkipBannersOnPlayheadEntry`, reached only from
-                    // `updatePlayheadTime`, which sets both fields before
-                    // calling. An unobserved playhead cannot reach this line —
-                    // `armedAutoSkipBannerWindowIds` would still hold the id.
-                    playheadTimeAtSkip: currentPlayheadTime,
-                    occurredAt: Date()
-                )
-            return
-        }
+        // playhead-2d6i / playhead-8cjo: THE RECEIPT IS THE DEFAULT STATE OF
+        // EVERY AUTO-SKIP, and the caller has already spent this window's one
+        // chance. Keep it so the listener can still say No to a skip they never
+        // saw; `acknowledgeAutoSkippedBannerDelivery` removes it if and only if
+        // a host reports that the banner queue accepted the card.
+        //
+        // Deliberately BEFORE the `emittedAutoSkipBannerWindowIds` insert:
+        // that set means "reached the yield-to-subscriber path" and is read
+        // by `SkipOrchestratorPreloadTests` as exactly that. A missed
+        // receipt is the opposite of an emission and must not enter it.
+        missedAutoSkipReceiptsByWindowId[adWindow.id] =
+            MissedAutoSkipReceipt(
+                item: item,
+                // Safe to read directly rather than through
+                // `observedPlayheadTimeForCorrection`: the only caller is
+                // `emitAutoSkipBannersOnPlayheadEntry`, reached only from
+                // `updatePlayheadTime`, which sets both fields before
+                // calling. An unobserved playhead cannot reach this line —
+                // `armedAutoSkipBannerWindowIds` would still hold the id.
+                playheadTimeAtSkip: currentPlayheadTime,
+                occurredAt: Date()
+            )
+        // playhead-8cjo: A NEW ANNOUNCEMENT SUPERSEDES THE OLD DELIVERY RECORD,
+        // and without this line the partition breaks MID-EPISODE.
+        //
+        // `removeNonRevertedManagedWindowIfPresent` does
+        // `banneredWindowIds.remove(windowId)` when a producer revision replaces
+        // a window's material, which UN-SPENDS that window's one chance: it is
+        // re-promoted, re-armed, and announced again with a new material token.
+        // The id would then sit in BOTH sets — a card the listener saw for the
+        // OLD material, and a row for the NEW one — and `cards ∩ list == ∅`,
+        // which the partition rails assert at every observation, would be false
+        // for as long as the episode lasted.
+        //
+        // Removing it HERE rather than at each retirement site makes the
+        // disjointness a property of the write, the same move playhead-2d6i made
+        // for "one row per window" by keying the dictionary. A retirement site
+        // nobody remembered is exactly how these two sets would drift apart.
+        deliveredAutoSkipCardWindowIds.remove(adWindow.id)
+        guard hasAttachedHost else { return }
         // Cycle-26 L-1 / Cycle-27 L-2: this insert is consumed by
         // `emittedAutoSkipBannersSnapshot()` from canary tests. The
         // production gate that prevents re-fires is `banneredWindowIds`
@@ -1887,6 +1977,51 @@ actor SkipOrchestrator {
         suggestBanneredWindowIds.insert(windowId)
     }
 
+    /// playhead-8cjo: the AUTO tier's twin of the seam above, and the ONLY
+    /// thing that turns a missed-skip receipt into a card.
+    ///
+    /// THE ASYMMETRY THIS CLOSES. The suggest tier has been able to tell
+    /// "subscribed" from "presented" since its acknowledgement landed —
+    /// `observeBanners` calls it only `if didAccept`, so its delivery gate is
+    /// driven by the QUEUE. The auto tier had no seam at all, so
+    /// `emitBannerItem` had to guess from the continuation dictionaries, and
+    /// `AdBannerQueue.enqueue` binning the item afterwards left a skip with
+    /// neither a card the listener saw nor a row they could correct.
+    ///
+    /// WHY IT ONLY EVER SUBTRACTS. A receipt is written for every announced
+    /// skip, so this call has nothing to create and cannot invent a card: the
+    /// `missedAutoSkipReceiptsByWindowId` lookup below is what makes
+    /// `delivered ⊆ announced` true by construction. An acknowledgement for a
+    /// window nobody announced, or for one already acknowledged, is a no-op.
+    ///
+    /// THE PRECONDITIONS ARE THE SUGGEST SEAM'S, plus the auto tier's own
+    /// identity. Episode and playback generation reject an acknowledgement
+    /// buffered across a transition; the material token rejects one for a
+    /// DIFFERENT emission of the same window id — it is compared against the
+    /// token on the receipt rather than against the window's current material,
+    /// because the question is "did the host take the card I announced", not
+    /// "is that card still current". A refusal leaves the row exactly where it
+    /// was, which is the conservative direction: the listener keeps a
+    /// correction they may not need, rather than losing one they do.
+    func acknowledgeAutoSkippedBannerDelivery(
+        windowId: String,
+        episodeId: String?,
+        playbackLifecycleGeneration: UInt64?,
+        windowMaterialRevisionToken: String?
+    ) {
+        guard activeEpisodeId == episodeId,
+              activePlaybackLifecycleGeneration
+                == playbackLifecycleGeneration,
+              let receipt = missedAutoSkipReceiptsByWindowId[windowId],
+              receipt.item.windowMaterialRevisionToken
+                == windowMaterialRevisionToken
+        else {
+            return
+        }
+        missedAutoSkipReceiptsByWindowId.removeValue(forKey: windowId)
+        deliveredAutoSkipCardWindowIds.insert(windowId)
+    }
+
     /// The catalog entries a banner for `[start, end]` may carry as evidence,
     /// each located on the mention that window can actually hear.
     /// Returns an empty array when no catalog is available or none are in range.
@@ -2136,6 +2271,12 @@ actor SkipOrchestrator {
         // clear has to be here too: a leak that is invisible is still a leak,
         // and the next episode could legitimately reuse a window id.
         missedAutoSkipReceiptsByWindowId.removeAll()
+        // playhead-8cjo: and so is the record of which cards a host ACCEPTED.
+        // It is read only by the partition rails, so a leak here is invisible
+        // in production and lethal to the one thing that can see this bead's
+        // defect: the next episode's partition would credit a card this episode
+        // delivered, and window ids are not unique across episodes.
+        deliveredAutoSkipCardWindowIds.removeAll()
         suggestBanneredWindowIds.removeAll()
         suggestWindows.removeAll()
         armedSuggestWindowIds.removeAll()
@@ -2753,6 +2894,12 @@ actor SkipOrchestrator {
         // clear has to be here too: a leak that is invisible is still a leak,
         // and the next episode could legitimately reuse a window id.
         missedAutoSkipReceiptsByWindowId.removeAll()
+        // playhead-8cjo: and so is the record of which cards a host ACCEPTED.
+        // It is read only by the partition rails, so a leak here is invisible
+        // in production and lethal to the one thing that can see this bead's
+        // defect: the next episode's partition would credit a card this episode
+        // delivered, and window ids are not unique across episodes.
+        deliveredAutoSkipCardWindowIds.removeAll()
         suggestBanneredWindowIds.removeAll()
         suggestWindows.removeAll()
         armedSuggestWindowIds.removeAll()
@@ -7206,6 +7353,22 @@ actor SkipOrchestrator {
     /// of preload state.
     func emittedAutoSkipBannersSnapshot() -> Set<String> {
         emittedAutoSkipBannerWindowIds
+    }
+
+    /// playhead-8cjo: snapshot of window IDs whose auto-skip card a host
+    /// reported the BANNER QUEUE ACCEPTED.
+    ///
+    /// **This is the honest "the QUEUE TOOK IT", and the snapshot above is
+    /// not even that.** `emittedAutoSkipBannersSnapshot()` says the item reached the
+    /// yield-to-subscriber path, which is what this bead's defect read as a
+    /// presentation: `AdBannerQueue.enqueue` can refuse the item afterwards,
+    /// and the observation `Task` can be cancelled before the enqueue happens
+    /// at all. `delivered ⊆ emitted` always, and the difference between the
+    /// two is exactly the population that used to leave no trace anywhere.
+    ///
+    /// Test-only observability, like its sibling. Production reads neither.
+    func deliveredAutoSkipCardWindowIDs() -> Set<String> {
+        deliveredAutoSkipCardWindowIds
     }
 
     // MARK: - Core Skip Policy
