@@ -853,6 +853,44 @@ runs of observation in one step, and it is Dan's call, not an implementer's.
 
 ---
 
+## M3d. THE WITHDRAWAL IS NOW PINNED BY A RAIL THAT BITES — mutation-proved
+
+Review round 3 found the probe suite VACUOUS with respect to the withdrawal:
+re-applying the capture in full left all four tests GREEN, while the suite's own
+header claimed it pinned "that the durable health `detail` still survives". Two
+mistakes, both the difference between a rail and a rail-shaped thing:
+
+* `described.contains("unable to open database file")` — a SUBSTRING test, which
+  `…database file [sqlite3_system_errno=0 none recorded]` satisfies;
+* `AnalysisStoreHealthDetail.sanitize("unable to open database file")` — a
+  LITERAL this file wrote, inside the allowlist by construction, with nothing
+  connecting it to the message the store had just produced.
+
+Both closed: the test binds `.openFailed`'s payload, asserts the message EQUALS
+SQLite's prose, and sanitizes THAT MESSAGE rather than a literal.
+
+**MUTATION PROOF, run rather than argued.** The withdrawn capture was
+re-applied at `openSQLiteHandle` (message-only) and the suite re-run scoped.
+
+| | predicted | observed |
+|---|---|---|
+| `theStoreSurfacesTheProse` | KILLED, on BOTH assertions | ✅ `message == "unable to open database file"` and `sanitize(message) == message` both failed |
+| the three platform rails | SURVIVE (they never touch `AnalysisStore`) | ✅ all three passed |
+| verdict | `** TEST FAILED **`, rc 65 | ✅ |
+
+The second assertion failing is the direct proof that the F1 regression — the
+durable on-device `detail` being silently emptied — is now caught by a test
+instead of by a reviewer. Source restored byte-exactly afterwards, verified by
+sha256 (`138ff4a8…` before and after). Log preserved at
+`playhead-gate-artifacts/vk68m/mutant-recapture.log`.
+
+The three platform rails remain deliberately un-killable by any production
+change: they measure the PLATFORM, and their failure direction is a platform
+that starts discriminating. That is stated in the suite header rather than
+papered over.
+
+---
+
 ## M5. REVIEW ROUND 1 — what the instrument got wrong about ITSELF
 
 Six defects in the two scripts, found by driving them rather than by re-reading

@@ -180,12 +180,30 @@ struct SQLiteSystemErrnoPlatformProbeTests {
         var thrown: Error?
         do { try await store.migrate() } catch { thrown = error }
 
-        let described = String(describing: thrown)
-        print("[enzva] store message: \(described)")
-        #expect(described.contains("unable to open database file"))
-        // and the durable health record still keeps it — the field the
-        // withdrawn capture was silently emptying
-        #expect(AnalysisStoreHealthDetail.sanitize("unable to open database file")
-                == "unable to open database file")
+        print("[enzva] store message: \(String(describing: thrown))")
+
+        // THE PAYLOAD, NOT THE DESCRIPTION, AND EQUALITY, NOT `contains`.
+        // Both of those are the difference between a rail and a rail-shaped
+        // thing (playhead-vk68m review round 3). `contains` is satisfied by
+        // `…database file [sqlite3_system_errno=0 none recorded]`, and handing
+        // `sanitize` a LITERAL tests a string this file wrote rather than the
+        // one the store produced — so with both mistakes in place, re-applying
+        // the withdrawn capture left this test GREEN, which is precisely the
+        // thing it exists to stop.
+        guard case .openFailed(let code, let message)? = thrown as? AnalysisStoreError else {
+            Issue.record("expected .openFailed, got \(String(describing: thrown))")
+            return
+        }
+        #expect(code == SQLITE_CANTOPEN)
+        #expect(message == "unable to open database file")
+
+        // And the DURABLE record keeps that exact message. This is the field
+        // the withdrawn capture was silently emptying: `sanitize` admits a
+        // message only if every character is in
+        // `DiagnosticTextSanitizer.allowedCharacters`, and rejection OMITS the
+        // field rather than truncating it. Sanitizing the message the store
+        // just produced — not a literal — is what makes re-applying the capture
+        // turn this red.
+        #expect(AnalysisStoreHealthDetail.sanitize(message) == message)
     }
 }
