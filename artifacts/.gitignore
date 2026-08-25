@@ -1,0 +1,6 @@
+# Full-plan logs are 17 MB each and are preserved outside the worktree
+# (/Users/dabrams/playhead-gate-artifacts/vk68m/) because the canonical bead-close
+# sequence removes this directory. The fd DUMPS are small and ARE committed —
+# they are the evidence for M1b and nothing else on disk carries them.
+*.log
+wait*.txt

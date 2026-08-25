@@ -195,7 +195,7 @@ expect if the band is 93-100 % of a limit that is being hit either way.
 
 ---
 
-## M3. `sqlite3_system_errno` separates three different bugs behind one string
+## M3. `sqlite3_system_errno` separates three different bugs behind one string — ON THE MAC. **IT IS INERT IN THE APP.**
 
 Measured 2026-08-24 against `/usr/lib/libsqlite3.dylib` (**SQLite 3.54.0**, the
 same version the iOS SDK ships), via `ctypes`, on this box.
@@ -229,3 +229,42 @@ defect class waiting to happen and the reason the rendering says
 `(none recorded)` rather than printing a bare number.
 
 Repro: `artifacts/sqlite-errno-probe.py`.
+
+### M3b. THE CORRECTION, AND IT IS THE STANDING DEFECT CLASS IN MY OWN MEASUREMENT
+
+Everything above was measured against `/usr/lib/libsqlite3.dylib` — the MAC's
+SQLite. The app runs against the iOS SDK's. **Reading a measurement of one
+library as a claim about another is exactly "a value that names one thing read
+as though it named another",** and it took a rail written from the host figure,
+failing on the simulator, to catch it.
+
+Measured on the **iOS 27 simulator**, in the real test host, through the same
+`sqlite3_open_v2` flags `AnalysisStore` uses:
+
+| condition | rc | `sqlite3_extended_errcode` | `sqlite3_system_errno` | message |
+|---|---|---|---|---|
+| parent path component is a regular file | 14 | **14** | **0** | unable to open database file |
+| parent directory mode `0o000` | 14 | **14** | **0** | unable to open database file |
+| the path itself IS a directory | 14 | **14** | **0** | unable to open database file |
+| *(control)* a path that opens fine | 0 | 0 | 0 | not an error |
+
+**NEITHER of SQLite's two discriminators carries the cause on this platform** —
+not the system errno and not the extended result code — while SQLite's own log
+line in the same run reads `os_unix.c:52971: (20) open(...) - Not a directory`.
+The cause is known to the library and is not exposed through either API here.
+
+**So `playhead-enzva`'s premise is refuted for the platform that matters.** It is
+a correct description of the Mac and of SQLite's documented contract, and it does
+not describe the app. Three consequences:
+
+* `scripts/gate_baseline.py`'s ONE prose match on `unable to open database file`
+  **cannot be retired in favour of an errno.** That is a standing limit on this
+  platform, not a piece of unfinished work.
+* The **exhaustion** case is NOT measured on the simulator. Forcing a full
+  descriptor table inside a shared test host would take the host down with it.
+  Three unrelated causes all report 0 through the same VFS hook, so 0 is the
+  expectation — an expectation, not a measurement, and it is labelled as one.
+* The call is **kept anyway**: it costs one call, renders 0 as `none recorded`
+  rather than as an errno, and now every denial in every gate log carries the
+  field. Nobody has to re-derive this, and a future SDK that populates it will
+  simply start showing the value.

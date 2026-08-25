@@ -1014,6 +1014,7 @@
 		B207E4E99DCDD802EFE1CF0B /* PipelineVersionsTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0744D500E4D5EDFAA8027A5B /* PipelineVersionsTests.swift */; };
 		B26426AC1F3925DFD3D4FB39 /* AppConfigurationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 438253FD0DA4BE633C7159C6 /* AppConfigurationTests.swift */; };
 		B276D8EF431C8E1F10DA1262 /* PodcastKeepFullMusicSchemaTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 3D45ED7285303C98A166290F /* PodcastKeepFullMusicSchemaTests.swift */; };
+		B2A57262E5202FEEFC7FA7CE /* SQLiteSystemErrno.swift in Sources */ = {isa = PBXBuildFile; fileRef = 9882E208D832C41B174321D4 /* SQLiteSystemErrno.swift */; };
 		B2B9C2EA0D55FA1670620A5D /* CorpusAnnotationTypes.swift in Sources */ = {isa = PBXBuildFile; fileRef = F4F834AF5018C5ACAF7F32CE /* CorpusAnnotationTypes.swift */; };
 		B2D8BBFA2E579B749E1B27B1 /* SpectralShift.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7F19B235A4BA456A8E4C9272 /* SpectralShift.swift */; };
 		B2ECE49107E92780BABA30B8 /* PlayheadRuntimeLoggerLazinessTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E9D64089FF0225D3FF0ABFE /* PlayheadRuntimeLoggerLazinessTests.swift */; };
@@ -1111,6 +1112,7 @@
 		C1D7295F0F137274BAD86255 /* PlaybackQueueEnvironment.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0BAA2B2EBC566FE2D86D6536 /* PlaybackQueueEnvironment.swift */; };
 		C216969C03C4B1436849D19D /* BackgroundSessionIdentifier.swift in Sources */ = {isa = PBXBuildFile; fileRef = 1C17F3BB4B74D58A84B0BD9F /* BackgroundSessionIdentifier.swift */; };
 		C29651F66974061F757989A8 /* DuplicateSpanTextChunkV53MigrationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 4B1636B9094EBA2667E13513 /* DuplicateSpanTextChunkV53MigrationTests.swift */; };
+		C2986206C8E747DA377CEEF9 /* SQLiteSystemErrnoTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = E33250AC30B46E6B84F6CB60 /* SQLiteSystemErrnoTests.swift */; };
 		C2C7744623BABEB363D33CB8 /* ChapterGenerationPhaseParallelLabelingTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7AD58CC67281761645F720BD /* ChapterGenerationPhaseParallelLabelingTests.swift */; };
 		C2F256ABD1424A2D44DE71BF /* LivePlaybackSignalProviderTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = EF4E705BA85904B0FA0E07DC /* LivePlaybackSignalProviderTests.swift */; };
 		C2F68C8604191758CF2318D7 /* StorageBudget.swift in Sources */ = {isa = PBXBuildFile; fileRef = 83574070976A90F0EA63F279 /* StorageBudget.swift */; };
@@ -2324,6 +2326,7 @@
 		983640A5BACC420B2C3534C2 /* BackfillSchedulerBoundingTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackfillSchedulerBoundingTests.swift; sourceTree = "<group>"; };
 		984C08FF44101A6D5239439B /* ForegroundAssistHandoff.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ForegroundAssistHandoff.swift; sourceTree = "<group>"; };
 		9873CD94CA5D32BC28C628CD /* SpliceSlotOwnershipCorrectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SpliceSlotOwnershipCorrectionTests.swift; sourceTree = "<group>"; };
+		9882E208D832C41B174321D4 /* SQLiteSystemErrno.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SQLiteSystemErrno.swift; sourceTree = "<group>"; };
 		98C8FC376788DF3455C4CFF1 /* CoreServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CoreServiceTests.swift; sourceTree = "<group>"; };
 		98E66DA21C558BB4F278F626 /* RetentionBucketTrackerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RetentionBucketTrackerTests.swift; sourceTree = "<group>"; };
 		98F68F50E5CF409710F9132C /* CorrectionNormalizer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CorrectionNormalizer.swift; sourceTree = "<group>"; };
@@ -2717,6 +2720,7 @@
 		E2B6BF9DB8CAD1A8C8D4B08F /* BGTaskTelemetryLoggerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BGTaskTelemetryLoggerTests.swift; sourceTree = "<group>"; };
 		E2F79151A67870CFB2123090 /* ShadowRetryCanonicalReplayTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShadowRetryCanonicalReplayTests.swift; sourceTree = "<group>"; };
 		E3150112F48F50917A495A58 /* BackgroundProcessingServiceTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BackgroundProcessingServiceTests.swift; sourceTree = "<group>"; };
+		E33250AC30B46E6B84F6CB60 /* SQLiteSystemErrnoTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SQLiteSystemErrnoTests.swift; sourceTree = "<group>"; };
 		E33A2D454476025B362D0135 /* LiveShadowWindowSource.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveShadowWindowSource.swift; sourceTree = "<group>"; };
 		E37F8734F33D5DFF863E1D4A /* RediffDayZeroAutoSkipPromotionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = RediffDayZeroAutoSkipPromotionTests.swift; sourceTree = "<group>"; };
 		E3D7ABC1EC0D754DAF2264C3 /* DebugEpisodeExportService.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DebugEpisodeExportService.swift; sourceTree = "<group>"; };
@@ -3448,6 +3452,7 @@
 				9A4623267945522187811563 /* AnalysisStore+CrossUserSharing.swift */,
 				424DE55AF6544944EAFB690A /* AnalysisStoreRecoveryCoordinator.swift */,
 				BD0743D1B5F633B35E8DC8BA /* CoverageQuantities.swift */,
+				9882E208D832C41B174321D4 /* SQLiteSystemErrno.swift */,
 			);
 			path = AnalysisStore;
 			sourceTree = "<group>";
@@ -4085,6 +4090,7 @@
 				58302A3D656751CD4E1B0FC5 /* SemanticScanRunAttributionTests.swift */,
 				73BEB53003F9A7136CDC6B6C /* SemanticScanVerdictProvenanceV61MigrationTests.swift */,
 				62CE11440429F6E4F8E23F3D /* SpecialistScanResultsV31MigrationTests.swift */,
+				E33250AC30B46E6B84F6CB60 /* SQLiteSystemErrnoTests.swift */,
 				CB824A7C4A6A03DDE4973F50 /* TerminalReasonPersistenceTests.swift */,
 				B58EDEB0510AC63D1448E1C0 /* TrainingExamplePersistenceTests.swift */,
 				04BF377B7D664855D2A09C54 /* TraitProfileEpisodeCountV57MigrationTests.swift */,
@@ -5908,6 +5914,7 @@
 				1796911820CAA8E93BAF0609 /* SLI.swift in Sources */,
 				62528527F328888CE275D055 /* SLICohortAxes.swift in Sources */,
 				ACECC12547DE52486DABE39B /* SLICohortMeaningfulness.swift in Sources */,
+				B2A57262E5202FEEFC7FA7CE /* SQLiteSystemErrno.swift in Sources */,
 				11BE895390539C8D364BF5CD /* ScanCohort.swift in Sources */,
 				6E906BAB8B54BE1F072AC15F /* ScarcityReprioritizer.swift in Sources */,
 				AE121566062C2AD3297F4351 /* ScoreCalibrationProfile.swift in Sources */,
@@ -6721,6 +6728,7 @@
 				F262A400E9D3D33B36933E9F /* RuntimeTeardownTests.swift in Sources */,
 				E5EDF12755023034232EC3BB /* SLICohortMeaningfulnessTests.swift in Sources */,
 				9C77B4F8888EA8DE99845FD8 /* SLIThresholdsTests.swift in Sources */,
+				C2986206C8E747DA377CEEF9 /* SQLiteSystemErrnoTests.swift in Sources */,
 				CB44360B175222A0FA730F28 /* ScarcityReprioritizerTests.swift in Sources */,
 				B18C86ACE04DB19906B655B0 /* SchedulerLaneUILintTests.swift in Sources */,
 				CD254B06BD2126F7FF20D3D1 /* SchedulerReconcilerRegressionTests.swift in Sources */,
