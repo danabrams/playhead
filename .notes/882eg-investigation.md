@@ -74,3 +74,89 @@ are two different claims and the fd dump cannot tell them apart.
 separates them: weak refs to the runtime, its `AnalysisStore` and its
 `SurfaceStatusInvariantLogger`, plus in-process `F_GETPATH` descriptor counts on
 the three production paths, before and after the owning scope ends.
+
+## M1 — WHAT IS RETAINED IS NOT THE RUNTIME (measured, probe2, 2026-08-25)
+
+Scoped run, `-only-testing:PlayheadTests/RuntimeGraphRetentionProbeTests`,
+`** TEST SUCCEEDED **`, 4 tests, 34.2 s. Log:
+`/Users/dabrams/playhead-gate-artifacts/882eg/probe2.log`.
+
+```
+previewNoShutdown      runtime=released  analysisStore=RETAINED surfaceLogger=RETAINED workScheduler=RETAINED analysisCoordinator=RETAINED entitlementManager=released
+previewWithShutdown    runtime=released  analysisStore=RETAINED surfaceLogger=RETAINED workScheduler=RETAINED analysisCoordinator=RETAINED entitlementManager=released
+nonPreviewWithShutdown runtime=released  analysisStore=RETAINED surfaceLogger=RETAINED workScheduler=RETAINED analysisCoordinator=RETAINED entitlementManager=released
+fivePreviewRuntimes    liveRuntimes=0/5  liveStores=5/5
+```
+
+Four things this settles, and the first one corrects the bead:
+
+1. **`PlayheadRuntime` DEALLOCATES. Every time — preview or not, shutdown or
+   not, 0 of 5 alive.** The bead's description says "~81 `PlayheadRuntime`
+   object graphs are still alive 220 seconds after the last test finished" and
+   that is the standing defect class one more time: the fd dump names FILES the
+   runtime's init opened, and it was read as naming live runtimes. The existing
+   rail `deinitReleasesRuntimeWithoutCycleWhenShutdownSkipped` was right all
+   along.
+2. **The stores outlive it, one per construction, exactly.** 5 runtimes → 5 live
+   `AnalysisStore`s. That is the ~5-descriptors-per-runtime accumulation the
+   bead measured, and it is a **store** lifetime, not a runtime lifetime.
+3. **`shutdown()` DOES NOT HELP.** `previewWithShutdown` and
+   `nonPreviewWithShutdown` are byte-identical to `previewNoShutdown`. So
+   routing the 33 non-`shutdown()` test sites through `withTestRuntime` would,
+   TODAY, have fixed **nothing** — the obvious candidate in the brief is
+   necessary but not sufficient, and on its own it is not even necessary-first.
+4. **The probe is not vacuous**: `entitlementManager` releases in all three,
+   from the same measurement, in the same object graph.
+
+## M2 — WHAT RETAINS THEM: a self-retaining perpetual loop, four of them
+
+The shape, and it is the same shape four times:
+
+```swift
+someTask = Task { [weak self] in
+    guard let self else { return }      // <- promotes to STRONG for the task's whole life
+    await self.runLoop()                //    `while !Task.isCancelled { … }` — never returns
+}
+```
+
+`[weak self]` is defeated by `guard let self`: the strong binding lives in the
+task frame for the entire unbounded loop, so `owner -> Task -> owner` is a cycle
+that only cancellation can break. A running `Task` is retained by the runtime
+system whether or not anyone holds its handle, so dropping the handle does not
+help either.
+
+| # | owner / task | file:line | started from | reaches |
+|---|---|---|---|---|
+| 1 | `AnalysisWorkScheduler.schedulerTask` | `AnalysisWorkScheduler.swift:3389-3396`, loop at `:3624` | `PlayheadRuntime.swift:2957`, in the bootstrap Task — **no `isPreviewRuntime` guard**, so EVERY runtime | `store: AnalysisStore`, `jobRunner`, `downloadManager` |
+| 2 | `AnalysisCoordinator.capabilityObserverTask` | `AnalysisCoordinator.swift:491-504` | `BackgroundProcessingService.start()` ← `PlayheadRuntime.swift:3344`, **below** the `guard !isPreviewRuntime` at `:3159` | `store`, `adDetectionService` → `adCatalogStore`, `skipOrchestrator` → `surfaceStatusLogger` |
+| 3 | `BackgroundProcessingService.capabilityObserverTask` | `BackgroundProcessingService.swift:1178-1186` | same | `coordinator` → all of #2 |
+| 4 | `EpisodeSummaryBackfillCoordinator.loopTask` | `EpisodeSummaryBackfillCoordinator.swift:290-295`, loop at `:381` | `PlayheadRuntime.swift:2526` (nil in preview) | `store: AnalysisStore` |
+
+Each owner has a `stop()` that cancels its task (`:3549`, `:516`\*, `:1213`,
+`:298`) and **not one of them has a single caller anywhere in `Playhead/`**.
+`PlayheadRuntime.shutdown()` cancels six task handles and calls none of these
+four.
+
+\* `AnalysisCoordinator.stop()` is the exception that matters: it **deliberately
+leaves `capabilityObserverTask` running**, documented at `:508-515`. So even
+calling it would not close #2.
+
+Three further Tasks in `init` have **no stored handle at all** and so cannot be
+cancelled by anything: the bootstrap Task at `:2366` (strongly captures
+`analysisStore`, `adCatalogStore`, `surfaceStatusLogger` for its whole
+duration), the capability-subscription loop at `:2288` (a `for await` that never
+ends, strongly capturing `capabilitiesService` — the sibling at `:2321` WAS
+given a handle by playhead-43ed M1 and this one was missed), and the day-zero
+kickoff installer at `:3251`.
+
+Ruled OUT by search, so nobody re-treads them: no `static`/`.shared` collection
+accumulates these objects; every `NotificationCenter.addObserver(forName:)`
+block in `Playhead/` is `[weak self]` with a stored token; no
+`objc_setAssociatedObject`, global `Timer`, `DispatchSourceTimer` or
+`CADisplayLink` reaches them; `BGTaskScheduler` registrations are once-guarded
+AND `[weak self]`. `DownloadManager._shared` is a single strong slot (its doc
+comment claims "stored weakly" and is wrong) — that is **one** extra instance,
+not 81.
+
+`shutdown()` is called from **nowhere in `Playhead/`** — it is a test-only
+teardown path today, which is what makes strengthening it safe.
