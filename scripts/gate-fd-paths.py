@@ -301,6 +301,15 @@ def lsof_cross_check(pid: int) -> dict:
         ).stdout
     except (OSError, subprocess.TimeoutExpired) as exc:
         return {"ok": False, "error": str(exc)}
+    return parse_lsof_fields(out)
+
+
+def parse_lsof_fields(out: str) -> dict:
+    """Split `lsof -F ftn` output into DESCRIPTORS and everything else.
+
+    Separated from the subprocess call so the split — the whole correction this
+    cross-check exists for — can be tested without lsof on the box.
+    """
     numeric: list[tuple[int, str]] = []
     non_numeric: dict[str, int] = {}
     cur_fd: str | None = None
