@@ -910,7 +910,37 @@ papered over.
 
 ---
 
-## M9. THE FINAL MERGE GATE — the intervention, on the merged tree
+## M9. THE MERGE GATE — run TWICE, because the tree changed after the first
+
+`run3` was the gate on the merged tree; `run4` is the gate on the actual merge
+candidate, re-run because review round 4 changed two Swift test files after
+run3 had already passed. **Both are reported**, because a gate that is quoted
+for a tree it did not test is the defect this whole file is about.
+
+| | run 3 (merged tree) | **run 4 (MERGE CANDIDATE)** |
+|---|---|---|
+| Swift Testing | 11,789 / 1,442 **passed**, 2,718.831 s | **11,789 / 1,442 passed, 2,897.293 s** |
+| xcodebuild | `** TEST SUCCEEDED **`, exit 0 | **`** TEST SUCCEEDED **`, exit 0** |
+| `Testing started completed` | 2,809.398 s | **2,994.472 s (~50 min)** |
+| failures | 0 | **0** |
+| restarts / `NO VERDICT` / RESOURCE | 0 / 0 / 0 | **0 / 0 / 0** |
+| peak open fds | 459 = 17.9 % | **464 of soft 2,560 = 18.1 %**, no ceiling banner |
+| peak demand / swap | 12.9 / 1.7 GiB | **13.4 / 1.7 GiB** |
+| `gate-baseline` | RED (0/0) + `BASELINE IS FICTION` | **RED (0/0) + `BASELINE IS FICTION`** |
+
+The two agree on everything that matters and differ by 6.6 % on the test phase,
+which is the load-sensitivity a serialized phase already had on record. Logs:
+`playhead-gate-artifacts/vk68m/vk68m-run{3,4}-*-serialized.log`.
+
+**The RED is M7 in both**, arriving exactly as predicted and for the predicted
+reason: zero failures and zero resource casualties against a 118-entry baseline.
+Note the banner's own text — `the run had zero failures while **0** are recorded
+as known-broken` — against a file holding 118. That is `playhead-xk7el`, filed,
+and these two runs are the first time it has been printed where anyone reads it.
+
+### run 3's detail, kept because it is the first of the two
+
+#### THE FINAL MERGE GATE — the intervention, on the merged tree
 
 `scripts/fast-gate.sh`, `PlayheadFastTests` (serialized), iPhone 17 simulator,
 trimmed, 2026-08-25. Log preserved at
