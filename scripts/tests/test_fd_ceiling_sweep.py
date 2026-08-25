@@ -38,14 +38,20 @@ VERDICT = "** TEST FAILED **\n"
 
 
 def log(peak=2539, denominator="RLIMIT_NOFILE soft", ceiling=2560, probe=True,
-        pids=("111",), verdict=True, signal_line="", invocations=1):
+        pids=("111",), verdict=True, signal_line="", invocations=1,
+        started=0, denied=None):
     body = BANNER * invocations
     if probe:
         body += PROBE
     for pid in pids:
         body += f"Playhead[{pid}:12345] some app output\n"
+    for i in range(started):
+        body += f'◇ Test "a test number {i}" started.\n'
     body += (f"gate-memory: test host peak open fds {peak} of {denominator} "
              f"{ceiling} (99.2 % of it)\n")
+    if denied is not None:
+        body += (f"gate-baseline: RED (5 known / 3 NEW) — {denied} tests hit a "
+                 f"RESOURCE FAILURE (re-run)\n")
     if signal_line:
         body += signal_line + "\n"
     if verdict:
@@ -142,6 +148,80 @@ class CollectionRails(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="vk68m-collect-") as tmp:
             self._write(tmp, "big.log", "y" * (200 * 1024))
             self.assertEqual(sweep.collect([tmp]), [])
+
+
+class DenialCountRails(unittest.TestCase):
+    """The gate's OWN casualty count, not a count of lines saying `RESOURCE`.
+
+    The field this replaces was `len(re.findall("RESOURCE", tail, re.I))`. It
+    was never printed and never written to the CSV, and on the run1 log it
+    counts the gate's explanatory prose — dozens of lines — against a real
+    casualty figure of 27. A number that names one thing and would be read as
+    another is this repo's standing defect class, so it is now the figure the
+    gate itself prints, and -1 when the gate never printed one.
+    """
+
+    def test_the_casualty_count_is_the_gates_own_number(self):
+        self.assertEqual(sweep.classify_run(log(denied=27))["resource_casualties"], 27)
+
+    def test_a_run_that_never_printed_the_line_is_MINUS_ONE_not_zero(self):
+        """A restarted run never reaches the verdict block. 0 would claim it was clean."""
+        self.assertEqual(sweep.classify_run(log())["resource_casualties"], -1)
+
+    def test_the_word_RESOURCE_elsewhere_is_not_a_casualty_count(self):
+        text = log() + ("  RESOURCE — this does NOT say whether the box was short\n"
+                        "  RESOURCE         swift-testing::something (unable to open)\n")
+        self.assertEqual(sweep.classify_run(text)["resource_casualties"], -1)
+
+    def test_a_single_casualty_is_spelled_test_and_still_parses(self):
+        text = log().replace("** TEST FAILED **",
+                             "1 test hit a RESOURCE FAILURE (re-run)\n** TEST FAILED **")
+        self.assertEqual(sweep.classify_run(text)["resource_casualties"], 1)
+
+
+class StartedCountRails(unittest.TestCase):
+
+    def test_started_counts_the_tests_the_last_invocation_announced(self):
+        self.assertEqual(sweep.classify_run(log(started=7))["started"], 7)
+        self.assertEqual(sweep.classify_run(log())["started"], 0)
+
+
+class ContingencyRails(unittest.TestCase):
+    """The 2x2 the whole sweep exists to build."""
+
+    @staticmethod
+    def _row(share_pct, fate):
+        # `share()` reads peak / probe_soft, so a row is built by choosing a peak.
+        return {"peak": int(round(share_pct * 2560 / 100.0)), "denominator":
+                "RLIMIT_NOFILE soft", "ceiling": 2560, "probe_soft": 2560,
+                "fate": fate}
+
+    def test_the_four_cells_are_filled_by_share_and_by_fate(self):
+        rows = [self._row(99.0, "COMPLETE"), self._row(99.0, "RESTARTED"),
+                self._row(50.0, "COMPLETE"), self._row(50.0, "NO-VERDICT")]
+        table = sweep.contingency(rows, 90.0)
+        self.assertEqual(table[(True, False)], 1)
+        self.assertEqual(table[(True, True)], 1)
+        self.assertEqual(table[(False, False)], 1)
+        self.assertEqual(table[(False, True)], 1)
+
+    def test_a_run_EXACTLY_at_the_threshold_is_AT_the_ceiling(self):
+        """`>=`, not `>`: the threshold names the band the run is in."""
+        row = {"peak": 2304, "denominator": "RLIMIT_NOFILE soft", "ceiling": 2560,
+               "probe_soft": 2560, "fate": "COMPLETE"}
+        self.assertAlmostEqual(sweep.share(row), 90.0, places=6)
+        self.assertEqual(sweep.contingency([row], 90.0), {(True, False): 1})
+        self.assertEqual(sweep.contingency([row], 90.1), {(False, False): 1})
+
+    def test_a_row_with_no_binding_limit_is_ABSENT_rather_than_counted(self):
+        row = sweep.classify_run(
+            log(denominator="kern.maxfilesperproc", ceiling=61440, probe=False))
+        self.assertEqual(sweep.contingency([row], 90.0), {})
+
+    def test_only_COMPLETE_counts_as_keeping_the_host(self):
+        for fate in ("RESTARTED", "NO-VERDICT"):
+            table = sweep.contingency([self._row(99.0, fate)], 90.0)
+            self.assertEqual(table, {(True, True): 1}, fate)
 
 
 if __name__ == "__main__":

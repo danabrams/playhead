@@ -28,7 +28,7 @@ cold build, 2026-08-24. Log preserved at
 | implied concurrent WAL stores at the peak | **~650** — (2,399 − 449) / 3.00 |
 | RESOURCE casualties | **27** |
 | gate-baseline | **RED (5 known / 3 NEW)** |
-| host restarts / lost verdicts | **0 / 0** — "every test that started reported an outcome" |
+| host restarts / crashed-host census | **0 / 0** — but read the next paragraph before quoting it |
 | peak demand / swap | 13.9 GiB of 16.0 GiB / 1.5 GiB |
 | xcodebuild exit | 65 (`** TEST FAILED **`) |
 
@@ -37,6 +37,23 @@ disagreement: the gate's sampler and the fd-paths watcher both take a 10 s
 snapshot, so both UNDER-report a transient — `max_fd` is the durable witness,
 and 2,558 means descriptors 0..2,557 were all in use at once, because `open()`
 returns the lowest free number.
+
+**THE `0 / 0` WAS A HALF-QUOTE, AND THE HALF IT DROPPED REVERSES IT (review).**
+The gate's own line reads, in full:
+
+```
+NO VERDICT — every test that started reported an outcome, but the evidence
+below says part of this run was still lost. Read it before reading the split
+above.
+```
+
+and the evidence below it is `DID NOT RUN — 2 of 118 recorded tests were never
+reached` plus two `BLAMED, UNMATCHED` entries. So the crashed-host census is
+genuinely zero and the run still lost things: both `DID NOT RUN` names carry
+`(no verdict — denied a file it needed)`, i.e. they are two of the 27 denials
+already in the row above, not a separate loss. Cutting the sentence at the comma
+turns "no test died silently" into "nothing was lost", which is the standing
+defect class applied to a sentence rather than to a number.
 
 The **3 NEW** are on a tree whose only production change is the
 `sqlite3_system_errno` suffix, so they are the standing rotation rather than
@@ -55,20 +72,36 @@ one, using `testhost_fds` from the series rather than any fresh regex:
 | `fd-series-s34ux.csv`     | 46 | 3 | 2539 | 2559 | **453** | 19 |
 | `merge-mem2.csv`          | 36 | 3 | 2557 | 2556 | **453** | 10 |
 | `merge-mem3.csv`          | 37 | 3 | 2529 | 2543 | **459** | 11 |
-| `fd-462.csv`              | 30 | 3 | 2470 | 2559 | **455** |  1 |
+| `fd-462.csv`              | 30 | 3 | 2470 | 2559 | **455** |  5 |
 | `fd-series-461-verify.csv`| 38 | 3 | 2441 | 2556 | **447** | 14 |
 | `merge-mem.csv` (RESTARTED) | 30 | 3 | 2537 | 2537 | 23 | 3 |
 
 **mean 453.4, range 447-459, spread 12** — i.e. **17.5-17.9 % of the 2,560
 budget**, held at the tail of every run that reached one. The restarted run is
 the exception that proves the reading: its host was REPLACED, and the
-replacement holds 23, which is the pre-ramp number, not the floor.
+replacement holds 23 — the value a freshly-launched host sits at for its first
+several samples, well short of the floor. (Re-derived at review: the `pre-ramp`
+column above is the FIRST reading of each series, which is 3 on all six; 23 is
+the short plateau that follows it. Two different early numbers, and the earlier
+wording called 23 "the pre-ramp number" while the table beside it said 3.)
 
 Two further things the series says and the bead did not quote:
 
-* **`max_fd` reaches 2,543-2,559 on five of six runs** — repeatedly within 1-17
-  of `soft - 1`. The saturation witness is not one observation either.
+* **`max_fd` reaches 2,543-2,559 on five of six runs** — within **1-17 of the
+  soft limit itself (2,560)**, which is **0-16 of `soft - 1`**, the highest
+  number the kernel can hand out. Two of the five land exactly on `soft - 1`.
+  (The earlier wording said "within 1-17 of `soft - 1`", which is the right
+  spread against the wrong anchor and understates the two exact hits.) The
+  saturation witness is not one observation either.
 * Every run starts at **3** descriptors. The floor is acquired DURING the run.
+
+**Re-derived at review** from the same six CSVs, with `flat samples` defined as
+the longest run of consecutive identical `testhost_fds` readings at the tail and
+`samples` as the rows carrying a reading (`testhost_fds >= 0`): every cell above
+reproduces except `fd-462.csv`, whose tail plateau of 455 is **5** samples and
+was recorded as 1. Its series ends `... 455 455 455 455 455, -1, 6` — the `-1`
+(not recorded) and the `6` (a fresh process) are after the plateau, so a count
+that stops at the last row reads 1 where the plateau is 5.
 
 ---
 
@@ -90,8 +123,17 @@ tail dump was taken **while the host was still alive**.
 | 11 + 11 + 11 | 7.3 % | `tmp/PlayheadTestScratch/PlayheadTestStore-<uuid>/analysis.sqlite{,-wal,-shm}` |
 | 7 | 1.5 % | `Documents/bg-task-log.jsonl` — **ONE file, seven descriptors** |
 | 2 | 0.4 % | the two production `-shm` files (one each) |
-| 3 + 3 + 3 | 2.0 % | SwiftData `Playhead.store{,-wal,-shm}`, `/dev/*`, `/var/run/*` |
+| 3 + 3 + 3 | 2.0 % | SwiftData `Playhead.store{,-wal,-shm}` (one each), `/dev/*`, `/var/run/*` |
+| 3 | 0.7 % | `/System/Volumes/Preboot/Cryptexes/{OS/System/Library/dyld, OS, Rosetta}` |
 | 3 + 1 | 0.9 % | sockets, kqueue |
+
+**The rows above sum to 453 — check them.** `81+81+81+76+76 = 395`, `+33` scratch
+`= 428`, `+7` bg-task-log `= 435`, `+2` production `-shm` `= 437`, `+9` (SwiftData
+3, `/dev/*` 3, `/var/run/*` 3) `= 446`, `+3` Cryptexes `= 449`, `+4` sockets and
+kqueue `= 453`. The three Cryptexes descriptors were missing from the first
+version of this table, which therefore summed to 450 against a stated 453 and
+said nothing about the gap. `artifacts/run1/TAIL-grouped.txt` is the unabridged
+listing and always had them.
 
 **WHAT WAS COUNTED AND WHAT WAS EXCLUDED.** The population is the process's file
 descriptor TABLE, enumerated with `proc_pidinfo(PROC_PIDLISTFDS)` into a real
@@ -138,21 +180,55 @@ Playhead/App/PlayheadRuntime.swift:1153  let surfaceStatusLogger = SurfaceStatus
 Playhead/App/PlayheadRuntime.swift:1246  adCatalogStore = try AdCatalogStore(directoryURL: dir)
 ```
 
-and the arithmetic closes: **~81 live runtimes x (2 analysis + 2 ad_catalog + 1
-surface-status) = ~405**, plus the three `-shm` singletons, the 33 scratch
-stores and ~16 of infrastructure = **453**. `AdCatalogStore` is 76 rather than 81
-because its construction sits behind a conditional, so five graphs lack one.
+and the arithmetic closes — **stated as an identity at review, because the first
+version of it did not add up**:
 
-**Each of the three holds its descriptor for its OWN lifetime and closes
-correctly when deallocated** — `AnalysisStore.deinit` and `AdCatalogStore.deinit`
-call `sqlite3_close_v2`, every statement in the store is finalized under a
+```
+162   81 runtimes x (analysis.sqlite + -wal)
+152   76 runtimes x (ad_catalog.sqlite + -wal)
+ 81   81 runtimes x one surface-status jsonl
+ 33   11 PlayheadTestScratch stores x (db + -wal + -shm)
+  7   bg-task-log.jsonl, ONE file, seven descriptors
+  3   the -shm singletons (analysis, ad_catalog, Playhead.store)
+  2   SwiftData Playhead.store + -wal
+ 13   3 /dev/*, 3 /var/run/*, 3 Cryptexes, 3 sockets, 1 kqueue
+----
+453
+```
+
+The earlier wording — "~81 live runtimes x 5 = ~405, plus the three `-shm`
+singletons, the 33 scratch stores and ~16 of infrastructure = 453" — is 457, and
+using the measured 76 rather than 81 for `ad_catalog` it is 447. Neither is 453,
+and the residual it was silently absorbing is the 7 bg-task-log descriptors plus
+the 3 Cryptexes.
+
+`AdCatalogStore` is 76 rather than 81 because its construction is inside a
+`do`/`catch` (`PlayheadRuntime.swift:1244-1252`) that logs and sets the store to
+`nil` on failure — so five graphs lack one. **WHY those five failed is not
+established**, and one candidate is uncomfortable: a run at the descriptor
+ceiling is exactly where an `AdCatalogStore` open would be DENIED, which would
+make the 76/81 gap a symptom of the thing being measured rather than a
+conditional taking its other branch. It is 5 descriptors either way; it is
+flagged rather than explained.
+
+**Each of the three holds its descriptor for its OWN lifetime and releases it
+when deallocated** — `AnalysisStore.deinit` calls `sqlite3_close_v2`
+(`AnalysisStore.swift:11455`), `AdCatalogStore.deinit` calls **`sqlite3_close`**
+(`AdCatalogStore.swift:406`), every statement in the store is finalized under a
 `defer`, and `SurfaceStatusInvariantLogger`'s `FileHandle` is released with the
-object. So this is not a missing `close()`. **It is ~81 `PlayheadRuntime` object
-graphs that are never deallocated**, built by 61 construction sites across 10
-test files (`ShowSkipModeControlTests` 13, `NowPlayingViewModelTests` 13,
+object. (The first version of this line said both call `sqlite3_close_v2`. They
+do not, and the difference is not cosmetic: `sqlite3_close` returns
+`SQLITE_BUSY` and leaves the connection — and its descriptors — OPEN when any
+statement is unfinalized, where `sqlite3_close_v2` always releases. For the
+population measured here it does not matter, because the graphs are never
+deallocated at all and neither `deinit` runs.) So this is not a missing
+`close()`. **It is ~81 `PlayheadRuntime` object graphs that are never
+deallocated**, built by 61 construction sites across 10 test files
+(`ShowSkipModeControlTests` 13, `NowPlayingViewModelTests` 13,
 `RuntimeShutdownLifecycleTests` 20, ...). `PlayheadRuntime.deinit` exists and its
 own comment records that `shutdown()` is mandatory and that `withTestRuntime`
-enforces it — 34 uses against 61 sites.
+enforces it — 34 uses against 61 sites. (61 / 10 / 13 / 13 / 20 / 34 all
+re-counted at review and all reproduce.)
 
 **WHY THIS IS NOT FIXED HERE.** Making those graphs release is not a `close()`
 call — it is finding what retains a whole app runtime and changing how ~61 test
@@ -168,10 +244,18 @@ store" case, so it is written up and filed rather than attempted.
   whether or not tests run concurrently, so A collapses the PEAK and leaves the
   FLOOR exactly where it is — and the floor is the half that keeps growing.
 * **It is the only lever that REDUCES DEMAND.** A lowers concurrency, B raises
-  supply; releasing the runtimes returns ~437 descriptors outright. It is not
-  sufficient on its own — the peak is ~2,100 ABOVE this floor — but it is a
-  genuine defect independently of the ceiling, and it is the one thing here that
-  is neither a cost trade nor a moved cliff.
+  supply; releasing the runtimes returns the **395** descriptors the retained
+  graphs hold, or **404** counting the 7 bg-task-log and 2 production `-shm`
+  descriptors that belong to them too — i.e. 15.4-15.8 % of the budget. (The
+  earlier figure, ~437, was `453 - 16` and so also claimed back the 33
+  `PlayheadTestScratch` descriptors that this same section identifies as the
+  per-store population *behaving correctly*.) It is not sufficient on its own —
+  the peak sits **1,949 above this floor** by the watcher's own count (2,402),
+  or **2,103** if you measure it by the highest descriptor NUMBER (`max_fd`
+  2,556); those are two different quantities and the earlier "~2,100" quoted the
+  second while the sentence was about the first. But it is a genuine defect
+  independently of the ceiling, and it is the one thing here that is neither a
+  cost trade nor a moved cliff.
 
 ---
 
@@ -180,6 +264,15 @@ store" case, so it is written up and filed rather than attempted.
 `scripts/fd_ceiling_sweep.py`, over `/private/tmp`, `$TMPDIR`,
 `/Users/dabrams/playhead`, `/Users/dabrams/.claude` and
 `/Users/dabrams/playhead-gate-artifacts`, de-duplicated by content sha256.
+
+**THE COUNTS BELOW ARE A MOMENT, AND `artifacts/fd-ceiling-sweep.csv` IS THE
+PIN.** The sweep walks whatever logs are on disk when it runs, so its `n` grows
+as runs accumulate — re-run at review it reports **44 logs / 9 full-plan
+(2 lost / 7 completed)**, and the ninth is this bead's own M0 run, whose log had
+not been preserved when the table below was taken. That is the population
+growing, not the reading changing: every row of the committed CSV is still
+present, unchanged, and the table stays degenerate. Read the CSV, not the
+sentence, if the number matters.
 
 **40 logs carry a `peak open fds` line. 32 of them are scoped or mutation runs**
 whose peaks are 6-32 and which carry NO binding soft limit, because the Swift
@@ -222,6 +315,17 @@ immediately before the restart marker. Counted across all eight:
 | merge-gate        | RESTARTED |  244 |  0 | 228 | — |
 | fullgate-r5       | RESTARTED |  330 |  9 |   9 | — |
 
+All twenty-four cells re-derived at review by `grep -c` against the eight
+preserved logs, and all twenty-four reproduce. The `RESOURCE casualties` column
+is the gate's own `N tests hit a RESOURCE FAILURE` figure and is now produced by
+`fd_ceiling_sweep.py` itself rather than by hand: it is the `resource_casualties`
+column of `artifacts/fd-ceiling-sweep.csv`, `-1` where the gate never printed the
+line, which is why the two RESTARTED runs read `—`. That CSV was regenerated at
+review over the session scratchpad alone — the identical 40-log population,
+byte-identical in every column it already had — so the table above is now
+checkable from a committed file. The `lockfile` / `unable to open` /
+`Bad file descriptor` columns are still hand greps over the log text.
+
 **Apple's frameworks fail to open files ~1,250 times in every run that finishes
 normally.** The signature the lead was built on is not specific to host death —
 it is the steady state of a run at the ceiling. The two runs that DID lose their
@@ -247,12 +351,20 @@ counts are measuring the same thing and the extraction is sound. **There is no
 measurable dose-response inside the at-ceiling band** — which is what one would
 expect if the band is 93-100 % of a limit that is being hit either way.
 
+All three coefficients recomputed at review from the table above (tied ranks
+handled as midranks, Pearson over the ranks): **-0.2029, +0.2000, +0.8407**.
+They reproduce to the digits quoted.
+
 ---
 
 ## M3. `sqlite3_system_errno` separates three different bugs behind one string — ON THE MAC. **IT IS INERT IN THE APP.**
 
-Measured 2026-08-24 against `/usr/lib/libsqlite3.dylib` (**SQLite 3.54.0**, the
-same version the iOS SDK ships), via `ctypes`, on this box.
+Measured 2026-08-24 against `/usr/lib/libsqlite3.dylib` via `ctypes`, on this
+box. `sqlite3_libversion()` on that library reads **3.54.0** (re-read at review).
+An earlier version of this line added "the same version the iOS SDK ships" —
+**that was never measured**, nothing in the simulator run records a version, and
+M3b below is the finding that the two libraries behave differently, so the
+parenthetical was an inference doing the work of a control. It is withdrawn.
 
 Every one of these returns `rc=14` (`SQLITE_CANTOPEN`) with
 `sqlite3_errmsg` = **`unable to open database file`** — the identical sentence:
@@ -282,7 +394,14 @@ rendered as such — never as an errno, and never as success. This is the standi
 defect class waiting to happen and the reason the rendering says
 `(none recorded)` rather than printing a bare number.
 
-Repro: `artifacts/sqlite-errno-probe.py`.
+Repro: `artifacts/sqlite-errno-probe.py` — which covers the **exhaustion row
+only** (it lowers `RLIMIT_NOFILE` to 96, fills the table, and opens both an
+existing and a brand-new database). Re-run at review it prints
+`table full after 92 hogs; open() errno=9`, then `rc=14 system_errno=9` for both
+opens: the row reproduces exactly. The ENOTDIR (20), EACCES (13) and control (0)
+rows are NOT in the committed script; re-derived by hand at review against the
+same library they also reproduce exactly, but the artifact does not carry them,
+so "Repro:" was over-claiming for three of the four rows.
 
 ### M3b. THE CORRECTION, AND IT IS THE STANDING DEFECT CLASS IN MY OWN MEASUREMENT
 
@@ -322,3 +441,102 @@ not describe the app. Three consequences:
   rather than as an errno, and now every denial in every gate log carries the
   field. Nobody has to re-derive this, and a future SDK that populates it will
   simply start showing the value.
+
+---
+
+## M4. REVIEW ROUND — what the instrument got wrong about ITSELF
+
+Six defects in the two scripts, found by driving them rather than by re-reading
+them, plus a mutation battery over the rails that found three of the rails
+unable to fail. Every fix is in `scripts/gate-fd-paths.py`,
+`scripts/fd_ceiling_sweep.py` and their two test files; nothing in the
+measurements above changes as a result, because the run they were taken from
+pre-dates the pin entirely.
+
+### M4a. THE PIN WOULD HAVE PINNED THE WRONG PROCESS ON RUN 1 — measured, in run 1's own archive
+
+`b49a8c76` added the pin because a stale simulator app clobbered `--last` AFTER
+the host exited (twelve descriptors, pid 85292). `47c7e052` then tried to stop
+the pin landing on a LEFTOVER app, and `dddf0f2e` withdrew that as "a hazard
+that was inferred rather than measured". **The hazard is measured, and the
+evidence was already committed.** Group `artifacts/run1/summary.jsonl` by pid:
+
+| pid | samples | peak | what it is |
+|---|---|---|---|
+| **58651** | **62** | **20** | a LEFTOVER app: an identical 20-descriptor table for ~620 s across the cold build, gone before the host starts |
+| 71372 | 32 | **2,402** | the test host — first sample is `count 3`, ramps to 2,402, settles at 453 |
+| 77131 | 3 | 23 | after the host exits |
+| 79998 | 2 | 10 | after the host exits |
+| 85292 | 2 | 12 | the process that clobbered `last.json` |
+
+The watcher was started before a cold build, so the FIRST `/Playhead.app/`
+process it saw was 58651. Pinned first-seen, `peak.json` for that run holds
+**twenty** descriptors and the real host's 2,402 goes to `peak.pid71372.json` —
+the identical defect the pin exists to prevent, with the direction reversed.
+(Run 1's dumps were taken before the pin existed, which is why the committed
+`peak.json` is in fact pid 71372's; the ordering above is what the shipped code
+would do with the same input.)
+
+`pin_decision()` now promotes any process holding MORE descriptors than the
+pinned one has EVER held. That discriminator needs no clock — the withdrawn age
+bound asked macOS `ps` for the Linux keyword `etimes` and silently returned 0
+forever — and it is monotone, so it cannot oscillate. It keeps the case the pin
+was built for excluded: 12 is not more than 2,402. A watch now also ends by
+printing a census of every process it saw with its sample count and its peak, so
+"which process is `peak.json` about" is answerable from the log rather than only
+by grouping the JSONL.
+
+### M4b. Five more, each of the same shape: a failure returned as a value
+
+* **`lsof_cross_check` took `.stdout` off a `check=False` run.** An lsof that
+  could not run at all parsed to `descriptor_rows: 0` and printed `0` beside a
+  kernel count of 2,539 — which reads as two instruments disagreeing rather than
+  as one not having run. Exactly the `etimes` shape, in the same file, in the
+  function whose entire job is to validate the count. It now reports the exit
+  status and the stderr, and a non-zero exit that STILL listed descriptors is
+  still believed (lsof exits 1 over a single file it could not stat).
+* **`list_fds` could not tell a truncated read from a complete one.**
+  `proc_pidinfo` writes `min(actual, buffersize)` and returns what it wrote, so
+  a buffer the kernel filled exactly is a SHORT COUNT wearing the shape of a
+  real one — and it can only happen while the table is growing fastest, i.e. at
+  the peak, the one number this instrument exists to produce. The read is now
+  retried with a larger buffer while it comes back full, and returns `None`
+  ("not recorded") rather than a count that is quietly too small.
+* **`--watch` could not tell "never appeared" from "gone away".** One
+  `gone_since` variable covered both, so with the default `--deadline 0` a
+  watcher started BEFORE the gate — the only order in which it can catch the
+  ramp — exited on its second cycle having measured nothing and said nothing
+  about it.
+* **The interloper `--peak` file was not a high-water file.** Every non-pinned
+  sample was written straight over the scoped path, so a file whose own comment
+  called it a high-water mark held that process's LAST sample. The standing
+  defect class in the instrument's own bookkeeping.
+* **`fd_ceiling_sweep.py` carried a `resource_lines` field that named nothing.**
+  It counted lines matching `RESOURCE` case-insensitively — on the M0 log that
+  is the gate's own explanatory prose, dozens of lines, against a real casualty
+  figure of 27. It was never printed and never written to the CSV, so nobody had
+  yet read it as the casualty count; it is now `resource_casualties`, the gate's
+  own number, `-1` when the gate never printed one.
+
+### M4c. Three rails could not fail, proven by mutation
+
+40 mutants over the two scripts, each with its victim predicted before the run;
+**40 killed, 0 survived, and a docstring-only control survives.** Three of them
+survived the FIRST pass and all three were rails naming a property they did not
+test:
+
+* `max_fd is the highest number not the count` asserted
+  `max_fd == max(r["fd"] for r in rows)` — which is the expression `snapshot`
+  itself evaluates — and `max_fd >= count - 1`. In a quiet Python process the
+  table is contiguous, so `max_fd = len(rows) - 1` passes both. It now opens a
+  descriptor at fd 900 first, which is the field shape too (`max_fd 2559`
+  against a count of 2,539).
+* `no reader can see a half-written dump` passed against a plain
+  `open(path, "w")`. Atomicity is only observable when a write FAILS PART WAY,
+  so the rail now interrupts a `json.dump` and requires the previous dump to
+  survive.
+* `PinnedHostRails` tested `_scoped()`'s string splicing and nothing about the
+  pinning DECISION — removing the pin entirely left every rail green.
+
+Rails: **76 tests over the two scripts (was 40), ~1.2 s, no build.**
+`python3 -m unittest scripts.tests.test_gate_fd_paths scripts.tests.test_fd_ceiling_sweep`

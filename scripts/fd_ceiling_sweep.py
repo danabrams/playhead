@@ -61,11 +61,28 @@ _FD_LINE = re.compile(
 # the fallback denominator, so it is a second route to the same number.
 _PROBE_SOFT = re.compile(r"\[s34ux-fd\][^\n]*RLIMIT_NOFILE soft=(\d+)")
 _STARTED = re.compile(r"◇ Test [\"']")
-_RESOURCE = re.compile(r"RESOURCE", re.I)
+# `gate-baseline: RED (5 known / 3 NEW) — ... 27 tests hit a RESOURCE FAILURE`
+# The gate's own count of tests DENIED A FILE. This replaces a `re.I` count of
+# lines containing the word RESOURCE, which was never printed, never written to
+# the CSV, and named nothing: on the run1 log that count is the gate's own
+# explanatory prose (dozens of lines) while the casualty figure is 27, so a
+# reader who took one for the other would have been out by more than 3x. -1 is
+# `not recorded` — a restarted run never reaches the line at all, and 0 there
+# would claim a clean run.
+_RESOURCE_CASUALTIES = re.compile(r"(\d+) tests? hit a RESOURCE FAILURE")
 
 
 def classify_run(text: str) -> dict:
-    """One row: the fd peak, the denominator it was measured against, the fate."""
+    """One row: the fd peak, the denominator it was measured against, the fate.
+
+    The fd and probe lines fall back to the WHOLE text when the last invocation
+    does not carry them. `fast-gate.sh` prints the `peak open fds` line once, at
+    the very end, so in practice it is always inside the last invocation; the
+    Swift probe line is printed by the test host mid-run and a residual re-run
+    can leave it in an earlier one, which is what the fallback is for. Both are
+    properties of the RUN rather than of an invocation, so unioning them is
+    sound where unioning host pids (below) is not.
+    """
     tail, invocations = gmv.last_invocation(text)
     match = _FD_LINE.search(tail) or _FD_LINE.search(text)
     if match is None:
@@ -78,6 +95,7 @@ def classify_run(text: str) -> dict:
         ceiling = -1
     probe = _PROBE_SOFT.search(tail) or _PROBE_SOFT.search(text)
     soft = int(probe.group(1)) if probe else -1
+    casualties = _RESOURCE_CASUALTIES.search(tail) or _RESOURCE_CASUALTIES.search(text)
     pids = gmv.host_pids(tail)
     verdict = gmv.reached_a_verdict(tail)
     signal_death = gmv.killed_by_signal(tail)
@@ -98,8 +116,26 @@ def classify_run(text: str) -> dict:
         "fate": fate,
         "invocations": invocations,
         "started": len(_STARTED.findall(tail)),
-        "resource_lines": len(_RESOURCE.findall(tail)),
+        "resource_casualties": int(casualties.group(1)) if casualties else -1,
     }
+
+
+def contingency(rows: list[dict], ceiling_pct: float) -> dict[tuple[bool, bool], int]:
+    """{(at_ceiling, lost_the_host): n} over rows that carry a BINDING limit.
+
+    `at` is `share >= ceiling_pct`, not `>`: the threshold names the band a run
+    is IN, so a run at exactly the threshold is at the ceiling. Rows with no
+    binding soft limit are absent from the table entirely — never folded in
+    against `kern.maxfilesperproc`, which is 24x larger.
+    """
+    table: dict[tuple[bool, bool], int] = {}
+    for row in rows:
+        pct = share(row)
+        if pct < 0:
+            continue
+        key = (pct >= ceiling_pct, row["fate"] != "COMPLETE")
+        table[key] = table.get(key, 0) + 1
+    return table
 
 
 def share(row: dict) -> float:
@@ -163,25 +199,25 @@ def main(argv=None) -> int:
     rows.sort(key=lambda item: item[1]["peak"], reverse=True)
 
     print(f"logs carrying a `peak open fds` line, de-duplicated by content: {len(rows)}\n")
-    header = f"{'peak':>6} {'share':>7} {'fate':<11} {'pids':>4} {'started':>8} {'inv':>3}  log"
+    header = (f"{'peak':>6} {'share':>7} {'fate':<11} {'pids':>4} {'started':>8} "
+              f"{'denied':>7} {'inv':>3}  log")
     print(header)
     print("-" * len(header))
     for path, row in rows:
         pct = share(row)
         share_text = "   n/a " if pct < 0 else f"{pct:6.1f}%"
+        denied = row["resource_casualties"]
+        denied_text = "      -" if denied < 0 else f"{denied:>7}"
         print(f"{row['peak']:>6} {share_text} {row['fate']:<11} {row['host_pids']:>4} "
-              f"{row['started']:>8} {row['invocations']:>3}  {os.path.basename(path)}")
+              f"{row['started']:>8} {denied_text} {row['invocations']:>3}  "
+              f"{os.path.basename(path)}")
 
     measurable = [(p, r) for p, r in rows if share(r) >= 0]
     unmeasurable = len(rows) - len(measurable)
     print(f"\n{unmeasurable} log(s) carry no BINDING soft limit and are EXCLUDED from "
           f"the table rather than folded in against the kernel cap.\n")
 
-    table = {}
-    for _path, row in measurable:
-        at = share(row) >= args.ceiling_pct
-        lost = row["fate"] != "COMPLETE"
-        table[(at, lost)] = table.get((at, lost), 0) + 1
+    table = contingency([r for _p, r in measurable], args.ceiling_pct)
     n = sum(table.values())
     print(f"CONTINGENCY TABLE, n = {n}  (ceiling = >= {args.ceiling_pct:.0f} % of the binding soft limit)")
     print(f"{'':<22}{'lost the host':>15}{'completed':>12}")
@@ -191,13 +227,18 @@ def main(argv=None) -> int:
 
     if args.csv:
         with open(args.csv, "w") as fh:
+            # `share_pct` and `binding_soft` are -1 when the log carries no
+            # binding limit, and `resource_casualties` is -1 when the gate never
+            # printed its RESOURCE line. -1 is `not recorded`; 0 in any of the
+            # three would be a claim about the run.
             fh.write("log,peak,share_pct,denominator,binding_soft,fate,host_pids,"
-                     "reached_verdict,signal,started,invocations\n")
+                     "reached_verdict,signal,started,resource_casualties,"
+                     "invocations\n")
             for path, row in rows:
                 fh.write(f"{path},{row['peak']},{share(row):.2f},{row['denominator']},"
                          f"{row['probe_soft']},{row['fate']},{row['host_pids']},"
                          f"{row['reached_verdict']},{row['signal']},{row['started']},"
-                         f"{row['invocations']}\n")
+                         f"{row['resource_casualties']},{row['invocations']}\n")
         print(f"\nwrote {args.csv}")
     return 0
 

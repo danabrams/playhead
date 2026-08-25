@@ -7,12 +7,16 @@ kqueue, pipe — which was enough to establish that the test host reaches its
 them are, and that is the question playhead-vk68m exists to answer:
 
   * the PEAK is transient (3 -> 2,539 -> 453), and
-  * the FLOOR is not: 27 vnodes before the ramp, 449 vnodes flat for 22 samples
-    over 220 s after the test phase, in the SAME process with no restart.
+  * the FLOOR is not: 20-27 vnodes before the ramp, 449 vnodes flat for 19
+    samples over ~190 s after the test phase, in the SAME process with no
+    restart.
 
-~429 descriptors acquired during a run and never released is 16.8 % of the
-budget gone before the next plan opens a single store. Nothing in the by-kind
-series names one of them. This does.
+Re-derived from `fd-series-s34ux.csv` at review: the pre-ramp plateau is 20
+vnodes over five samples with a single reading of 27 immediately before the
+climb, and the tail plateau of 449 is 19 consecutive samples, not 22. So the
+descriptors acquired during a run and never released are ~422-429 — 16.5-16.8 %
+of the budget gone before the next plan opens a single store. Nothing in the
+by-kind series names one of them. This does.
 
 --------------------------------------------------------------------------
 WHAT THIS COUNTS, AND WHAT IT EXCLUDES — read this before quoting a number
@@ -28,10 +32,12 @@ about what is counted here:
     comparable to `testhost_fds` in the memory series.
   * `lsof -p PID | wc -l` is NOT that number. lsof also prints `cwd`, `rtd`,
     `txt` and every mapped dylib, none of which occupies a descriptor. When
-    `--cross-check` is passed, lsof is run in the same instant and ONLY its rows
-    whose FD column is a NUMBER (`12u`, `13r`, …) are compared; `cwd`/`rtd`/
-    `txt`/`mem`/`NOFD` rows are counted separately and reported as EXCLUDED, so
-    the exclusion is visible rather than assumed.
+    `--cross-check` is passed, lsof is run immediately after the snapshot (two
+    calls cannot share an instant) and ONLY its rows whose FD column is a
+    NUMBER (`12u`, `13r`, …) are compared; `cwd`/`rtd`/`txt`/`mem`/`NOFD` rows
+    are counted separately and reported as EXCLUDED, so the exclusion is
+    visible rather than assumed. An lsof that FAILS is reported as a failure,
+    never as zero descriptors.
   * A path is read per descriptor with `proc_pidfdinfo(PROC_PIDFDVNODEPATHINFO)`.
     That flavour exists only for VNODE descriptors. Sockets, kqueues and pipes
     have no path and are reported as `<socket>`, `<kqueue>`, `<pipe>` — they are
@@ -217,31 +223,54 @@ def self_test() -> tuple[bool, str]:
     return True, f"ok (vnode_fdinfowithpath = {_VNODE_PATH_SIZE} bytes)"
 
 
+_LIST_FDS_HEADROOM = 256      # descriptors of slack on the first attempt
+_LIST_FDS_ATTEMPTS = 4        # each further attempt quadruples the slack
+
+
 def list_fds(pid: int) -> list[tuple[int, int]] | None:
     """[(fd, fdtype)] for `pid`, or None when the table could not be read.
 
     None is `not recorded`; an empty list is a claim. Same buffer discipline as
     `gate-memory-sample.py`: size, then read with head-room, because a short
     buffer TRUNCATES silently and would under-report a host that is filling up.
+
+    A BUFFER THE KERNEL FILLED EXACTLY IS A TRUNCATED READ, and the head-room
+    alone does not detect one. `proc_pidinfo` writes `min(actual, buffersize)`
+    and returns what it wrote, so a full buffer is a SHORT COUNT wearing the
+    shape of a complete one — and it can only happen while the table is growing
+    fastest, which is exactly the sample this instrument exists to take. So a
+    read that comes back full is retried with four times the slack, and one that
+    is still full after `_LIST_FDS_ATTEMPTS` returns None. A number that is
+    quietly too small is worse than no number: `-1`/`None` says "not recorded",
+    while an under-count says "there is head-room" and refutes the bead.
     """
     if pid <= 0:
         return None
-    capacity = _LIBC.proc_pidinfo(
+    sized = _LIBC.proc_pidinfo(
         ctypes.c_int(pid), ctypes.c_int(PROC_PIDLISTFDS),
         ctypes.c_uint64(0), None, ctypes.c_int(0),
     )
-    if capacity <= 0:
+    if sized <= 0:
         return None
-    capacity += _FDINFO_SIZE * 256
-    buffer = (_ProcFDInfo * (capacity // _FDINFO_SIZE))()
-    written = _LIBC.proc_pidinfo(
-        ctypes.c_int(pid), ctypes.c_int(PROC_PIDLISTFDS),
-        ctypes.c_uint64(0), ctypes.byref(buffer), ctypes.c_int(capacity),
-    )
-    if written <= 0:
-        return None
-    return [(buffer[i].proc_fd, buffer[i].proc_fdtype)
-            for i in range(written // _FDINFO_SIZE)]
+    slack = _LIST_FDS_HEADROOM
+    for _ in range(_LIST_FDS_ATTEMPTS):
+        # Slots rather than bytes, so the buffer is never SMALLER than the size
+        # handed to the kernel — that direction is a write past the end.
+        slots = sized // _FDINFO_SIZE + slack
+        capacity = slots * _FDINFO_SIZE
+        buffer = (_ProcFDInfo * slots)()
+        written = _LIBC.proc_pidinfo(
+            ctypes.c_int(pid), ctypes.c_int(PROC_PIDLISTFDS),
+            ctypes.c_uint64(0), ctypes.byref(buffer), ctypes.c_int(capacity),
+        )
+        if written <= 0:
+            return None
+        if written >= capacity:
+            slack *= 4
+            continue
+        return [(buffer[i].proc_fd, buffer[i].proc_fdtype)
+                for i in range(written // _FDINFO_SIZE)]
+    return None
 
 
 def snapshot(pid: int) -> dict | None:
@@ -279,12 +308,27 @@ def snapshot(pid: int) -> dict | None:
 def lsof_cross_check(pid: int) -> dict:
     """lsof's view, split into DESCRIPTORS and the rows that are not.
 
-    `-F pftn` gives one field per line: `p<pid>`, then per file `f<fd>`,
-    `t<type>`, `n<name>`. The FD field is a NUMBER for a real descriptor and a
-    word (`cwd`, `rtd`, `txt`, `mem`, `NOFD`, `DEL`) otherwise. Splitting on
-    that is the whole correction — an unsplit `wc -l` over-reports by however
-    many images the host has mapped, which on a 400-dylib test host is the
-    direction that manufactures a false `exhausted`.
+    `-F ftn` gives one field per line: `p<pid>` (lsof emits the process field
+    whether or not it is asked for), then per file `f<fd>`, `t<type>`,
+    `n<name>`. The FD field is a NUMBER for a real descriptor and a word
+    (`cwd`, `rtd`, `txt`, `mem`, `NOFD`, `DEL`) otherwise. Splitting on that is
+    the whole correction — an unsplit `wc -l` over-reports by however many
+    images the host has mapped, which on a 400-dylib test host is the direction
+    that manufactures a false `exhausted`.
+
+    lsof is run immediately AFTER the snapshot, not atomically with it: two
+    calls cannot share an instant, and over a churning table the two readings
+    will differ by whatever moved in between. That difference is worth seeing;
+    it is not a layout error, and it is why the two counts are printed side by
+    side rather than compared with an assertion.
+
+    A FAILING `lsof` IS REPORTED, NOT RETURNED AS ZERO ROWS. Before the review
+    round of playhead-vk68m this call took `.stdout` off a `check=False` run
+    and never looked at the exit status — so an lsof that could not run at all
+    parsed to `descriptor_rows: 0` and printed `0` beside a kernel count of
+    2,539, which reads as a disagreement between two instruments rather than as
+    one instrument not having run. That is the same shape, in the same file, as
+    the `etimes` defect in `find_test_host()` below.
 
     VALIDATED, 2026-08-24, on a process holding 100 known descriptors: lsof's
     numeric-FD set and `PROC_PIDLISTFDS` agreed EXACTLY (nothing in the
@@ -295,13 +339,19 @@ def lsof_cross_check(pid: int) -> dict:
     re-derived as a discrepancy.
     """
     try:
-        out = subprocess.run(
+        proc = subprocess.run(
             ["/usr/sbin/lsof", "-p", str(pid), "-n", "-P", "-F", "ftn"],
             capture_output=True, text=True, check=False, timeout=180,
-        ).stdout
+        )
     except (OSError, subprocess.TimeoutExpired) as exc:
         return {"ok": False, "error": str(exc)}
-    return parse_lsof_fields(out)
+    parsed = parse_lsof_fields(proc.stdout)
+    if proc.returncode != 0 and parsed["descriptor_rows"] == 0:
+        return {"ok": False, "returncode": proc.returncode,
+                "error": f"lsof exited {proc.returncode} and reported no "
+                         f"descriptors: {proc.stderr.strip()[:200]}"}
+    parsed["returncode"] = proc.returncode
+    return parsed
 
 
 def parse_lsof_fields(out: str) -> dict:
@@ -453,6 +503,46 @@ def find_test_host() -> int:
     return best_pid
 
 
+def pin_decision(pinned: int, high_water: dict[int, int], pid: int, count: int) -> str:
+    """`pin` | `keep` | `promote` — who owns the UN-SUFFIXED dump files.
+
+    `pin` for the first process seen. `promote` when `pid` is holding MORE
+    descriptors than the pinned process has EVER held. `keep` otherwise.
+
+    WHY A PROMOTION RULE AND NOT FIRST-SEEN-WINS. The pin exists because
+    `find_test_host()` picks the largest-RSS process under `/Playhead.app/`,
+    which is right during a run and wrong the instant it ends: after the host
+    exited, `--last` was rewritten with twelve descriptors belonging to a stale
+    simulator app (pid 85292), so the file named for this run's tail held
+    something else's. First-seen-wins fixes that and BREAKS ITS MIRROR, which
+    is measured in this bead's own archive rather than inferred: on run 1 the
+    watcher was started before a cold build, and the first `/Playhead.app/`
+    process it saw was a LEFTOVER holding exactly 20 descriptors, unchanged,
+    for 62 consecutive samples — `artifacts/run1/full/sample-0001-00020.json.gz`
+    through `-0062-00020.json.gz`, all pid 58651 — while the real test host
+    (pid 71372, peak 2,402) first appeared at sample 63. Pinned first-seen,
+    `peak.json` for that run would have held the leftover's twenty.
+
+    A process holding more descriptors than the pinned one has EVER held cannot
+    be a stale remnant of it. That is the whole discriminator, it needs no
+    clock (the `etimes` age bound this replaces asked macOS `ps` for a Linux
+    keyword and silently returned 0 forever), and it is monotone, so it cannot
+    oscillate between two live processes. The twelve-descriptor clobber stays
+    excluded because 12 is not more than 2,402.
+
+    What it does NOT do: bound the watcher to one RUN. A watcher left running
+    across two gates will promote the second run's host once it passes the
+    first's peak — correctly, by this rule's own definition of the subject.
+    `--deadline` is what ends a watch, and `--full-dir` keeps every sample
+    regardless, so no reading is lost either way.
+    """
+    if pinned == 0:
+        return "pin"
+    if pid != pinned and count > high_water.get(pinned, -1):
+        return "promote"
+    return "keep"
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     ap.add_argument("--pid", type=int, default=0,
@@ -467,13 +557,18 @@ def main() -> int:
                          "diagnostic run is to keep all of it: ~40 KB per sample.")
     ap.add_argument("--peak", default="",
                     help="full dump of the HIGHEST-count sample seen so far, rewritten "
-                         "whenever a new high is reached. The floor and the peak are "
+                         "only when a new high is reached — per process, so an "
+                         "interloper's `*.pid<N>.*` file is a high-water mark too and "
+                         "not merely its last sample. The floor and the peak are "
                          "different populations and only one of them is at the tail.")
     ap.add_argument("--interval", type=float, default=10.0)
     ap.add_argument("--watch", action="store_true",
                     help="sample until the host exits and --deadline passes")
     ap.add_argument("--deadline", type=float, default=0.0,
-                    help="stop this many seconds after the host disappears (0 = at once)")
+                    help="stop this many seconds after the host DISAPPEARS (0 = at "
+                         "once). It does not run before the host has ever been seen: "
+                         "a watcher started ahead of the gate waits, bounded only by "
+                         "--max-minutes.")
     ap.add_argument("--max-minutes", type=float, default=60.0)
     ap.add_argument("--cross-check", action="store_true",
                     help="also run lsof on the same pid and report the difference")
@@ -491,21 +586,23 @@ def main() -> int:
 
     # THE PINNED HOST. `find_test_host()` picks the largest-RSS process whose
     # executable is inside `/Playhead.app/`, which is right DURING a run and
-    # wrong the moment the run ends: a stale simulator app, or the next run's
-    # host, satisfies the same predicate. Left unpinned, `--last` gets rewritten
-    # with a DIFFERENT process's descriptors and the file that is supposed to
-    # hold the tail of THIS run holds twelve descriptors belonging to something
-    # else — measured, on this bead's own first run, which is why the pin
-    # exists. So the first pid observed is the subject; a different one is
-    # REPORTED and written to its own `--last`/`--peak` files rather than
-    # silently replacing the subject's.
+    # wrong at both ends of it: a leftover app from the previous run satisfies
+    # the same predicate BEFORE the host launches, and a stale one satisfies it
+    # AFTER the host exits. Both were observed on this bead's own run 1. So one
+    # process owns the un-suffixed `--last`/`--peak` files and everyone else is
+    # written to `*.pid<N>.*`; `pin_decision` above is the rule and carries the
+    # evidence for it.
     pinned = {"pid": 0}
+    high_water: dict[int, int] = {}
+    samples_by_pid: dict[int, int] = {}
+    peak_snap: dict[int, dict] = {}
+    last_snap: dict[int, dict] = {}
 
     out_fh = open(args.out, "a", buffering=1) if args.out else None
     started = time.time()
     gone_since = 0.0
     samples = 0
-    peak_count = -1
+    waiting_announced = False
     if args.full_dir:
         os.makedirs(args.full_dir, exist_ok=True)
 
@@ -513,23 +610,56 @@ def main() -> int:
         pid = args.pid or find_test_host()
         snap = snapshot(pid) if pid else None
         if snap is not None:
-            if pinned["pid"] == 0:
+            count = snap["count"]
+            decision = pin_decision(pinned["pid"], high_water, pid, count)
+            if decision == "pin":
                 pinned["pid"] = pid
                 # The COUNT is printed with the pid because that is what makes a
                 # wrong pin visible: a leftover app holds a couple of dozen
                 # descriptors and a test host holds hundreds, and the number is
                 # the only thing in this line that can tell them apart.
                 print(f"gate-fd-paths: pinned host pid {pid} "
-                      f"(holding {snap['count']} descriptors)", file=sys.stderr)
-            elif pid != pinned["pid"]:
-                print(f"gate-fd-paths: HOST CHANGED {pinned['pid']} -> {pid}; "
-                      f"its dumps go to *.pid{pid}.* and the pinned host's are "
-                      f"left as they stand", file=sys.stderr)
+                      f"(holding {count} descriptors)", file=sys.stderr)
+            elif decision == "promote":
+                previous = pinned["pid"]
+                print(f"gate-fd-paths: HOST REPINNED {previous} (never held more "
+                      f"than {high_water.get(previous, 0)}) -> {pid} (holding "
+                      f"{count}); the earlier subject's dumps move to "
+                      f"*.pid{previous}.* and keep their readings",
+                      file=sys.stderr)
+                pinned["pid"] = pid
+                # The demoted subject keeps its evidence, under its own name.
+                if args.peak and previous in peak_snap:
+                    _atomic_json(_scoped(args.peak, previous, pid), peak_snap[previous])
+                if args.last and previous in last_snap:
+                    _atomic_json(_scoped(args.last, previous, pid), last_snap[previous])
+                if args.peak:
+                    _atomic_json(args.peak, peak_snap.get(pid, snap))
+            elif pid != pinned["pid"] and pid not in samples_by_pid:
+                print(f"gate-fd-paths: OTHER /Playhead.app/ process {pid} "
+                      f"(holding {count}); its dumps go to *.pid{pid}.* and the "
+                      f"pinned host's are left as they stand", file=sys.stderr)
+            high_water[pid] = max(high_water.get(pid, -1), count)
+            samples_by_pid[pid] = samples_by_pid.get(pid, 0) + 1
         if snap is None:
             if not args.watch:
                 print(f"gate-fd-paths: no readable fd table for pid {pid}", file=sys.stderr)
+                if out_fh:
+                    out_fh.close()
                 return 4
-            if gone_since == 0.0:
+            if samples == 0:
+                # NEVER SEEN IS NOT GONE. `--deadline` says how long to keep
+                # sampling AFTER the subject disappears; starting its clock
+                # before the subject has ever appeared makes a watcher launched
+                # ahead of the gate — the only order in which it can catch the
+                # ramp — exit on its second cycle at the default deadline of 0,
+                # having measured nothing and claimed nothing about it.
+                if not waiting_announced:
+                    print("gate-fd-paths: no /Playhead.app/ process yet — waiting "
+                          f"(bounded by --max-minutes {args.max_minutes:g})",
+                          file=sys.stderr)
+                    waiting_announced = True
+            elif gone_since == 0.0:
                 gone_since = time.time()
             elif time.time() - gone_since >= args.deadline:
                 break
@@ -537,13 +667,14 @@ def main() -> int:
             gone_since = 0.0
             samples += 1
             summary = summarise(snap)
-            if args.cross_check:
+            cross = lsof_cross_check(pid) if args.cross_check else None
+            if cross is not None:
                 summary["lsof"] = {
-                    k: v for k, v in lsof_cross_check(pid).items()
-                    if k not in ("fds", "names")
+                    k: v for k, v in cross.items() if k not in ("fds", "names")
                 }
             if out_fh:
                 out_fh.write(json.dumps(summary, sort_keys=True) + "\n")
+            last_snap[pid] = snap
             if args.last:
                 _atomic_json(_scoped(args.last, pid, pinned["pid"]), snap)
             if args.full_dir:
@@ -554,15 +685,12 @@ def main() -> int:
                 with gzip.open(tmp, "wt") as fh:
                     json.dump(snap, fh, sort_keys=True)
                 os.replace(tmp, name)
-            if args.peak and pid == pinned["pid"] and snap["count"] > peak_count:
-                peak_count = snap["count"]
-                _atomic_json(args.peak, snap)
-            elif args.peak and pid != pinned["pid"]:
-                # An interloper gets its own high-water file, never the
-                # subject's: a peak is only meaningful within one process.
+            if record_peak(peak_snap, pid, snap) and args.peak:
                 _atomic_json(_scoped(args.peak, pid, pinned["pid"]), snap)
             if not args.watch:
-                report(snap, args)
+                report(snap, args, cross)
+                if out_fh:
+                    out_fh.close()
                 return 0
         if time.time() - started > args.max_minutes * 60:
             break
@@ -572,8 +700,45 @@ def main() -> int:
 
     if out_fh:
         out_fh.close()
-    print(f"gate-fd-paths: {samples} samples", file=sys.stderr)
+    for line in census_lines(samples, samples_by_pid, high_water, pinned["pid"]):
+        print(line, file=sys.stderr)
     return 0
+
+
+def record_peak(peak_snap: dict[int, dict], pid: int, snap: dict) -> bool:
+    """Keep `pid`'s HIGHEST-count snapshot; True when this one replaced it.
+
+    A high-water file PER PROCESS. The previous revision wrote every non-pinned
+    sample straight over the scoped path, so a file whose own comment called it
+    "an interloper's high-water file" actually held that process's LAST sample —
+    the standing defect class in this instrument's own bookkeeping. It is a
+    function rather than three lines inside the sampling loop because a
+    predicate buried in `main()` is one a mutation battery cannot reach: the
+    version that overwrote unconditionally survived every rail in this file.
+    """
+    if snap["count"] > peak_snap.get(pid, {}).get("count", -1):
+        peak_snap[pid] = snap
+        return True
+    return False
+
+
+def census_lines(samples: int, samples_by_pid: dict[int, int],
+                 high_water: dict[int, int], pinned: int) -> list[str]:
+    """Every process this watch saw, with its sample count and its peak.
+
+    A watch that printed only `N samples` could not be read afterwards: the
+    JSONL carries a `pid` per row and nothing summarises it, so "which process
+    is `peak.json` about" was a question only a reader who went and grouped the
+    file could answer — and on run 1, where the first 62 samples belong to a
+    leftover holding 20 descriptors, it is the question that matters.
+    """
+    lines = [f"gate-fd-paths: {samples} sample(s) over "
+             f"{len(samples_by_pid)} process(es)"]
+    for pid in sorted(samples_by_pid, key=lambda p: -high_water.get(p, -1)):
+        mark = "  <- PINNED, owns the un-suffixed dumps" if pid == pinned else ""
+        lines.append(f"gate-fd-paths:   pid {pid}  {samples_by_pid[pid]:>4} samples  "
+                     f"peak {high_water.get(pid, -1)}{mark}")
+    return lines
 
 
 def _scoped(path: str, pid: int, pinned: int) -> str:
@@ -581,13 +746,18 @@ def _scoped(path: str, pid: int, pinned: int) -> str:
 
     Splices before the extension so `last.json` -> `last.pid482.json` rather
     than `last.json.pid482`, which reads as a partial file.
+
+    The split is on the BASENAME, not the whole path. Splitting the whole path
+    on its last dot turns `artifacts/run.1/last` into `artifacts/run.pid9.1/last`
+    — a directory that does not exist, so the write fails rather than landing
+    somewhere wrong, but it fails for a reason nobody would find.
     """
     if pid == pinned:
         return path
-    root, dot, extension = path.rpartition(".")
-    if not dot:
-        return f"{path}.pid{pid}"
-    return f"{root}.pid{pid}.{extension}"
+    directory, name = os.path.split(path)
+    root, dot, extension = name.rpartition(".")
+    scoped = f"{name}.pid{pid}" if not dot else f"{root}.pid{pid}.{extension}"
+    return os.path.join(directory, scoped) if directory else scoped
 
 
 def _atomic_json(path: str, payload: dict) -> None:
@@ -603,7 +773,7 @@ def _atomic_json(path: str, payload: dict) -> None:
     os.replace(tmp, path)
 
 
-def report(snap: dict, args) -> None:
+def report(snap: dict, args, cross: dict | None = None) -> None:
     summary = summarise(snap)
     print(f"pid {snap['pid']}  count {snap['count']}  max_fd {snap['max_fd']}")
     print("\nBY KIND")
@@ -616,7 +786,10 @@ def report(snap: dict, args) -> None:
     for fam, n in sorted(summary["by_family"].items(), key=lambda kv: -kv[1])[:args.top]:
         print(f"  {n:6d}  {fam}")
     if args.cross_check:
-        cc = lsof_cross_check(snap["pid"])
+        # The caller's reading, not a second one: two lsof runs a second apart
+        # describe two different tables, and printing the later one beside the
+        # earlier snapshot invents a discrepancy.
+        cc = cross if cross is not None else lsof_cross_check(snap["pid"])
         print("\nLSOF CROSS-CHECK")
         if not cc.get("ok"):
             print(f"  lsof failed: {cc.get('error')}")
