@@ -280,26 +280,52 @@ class HostDiscoveryRails(unittest.TestCase):
         self.assertIsInstance(found, int)
         self.assertGreaterEqual(found, 0)
 
-    def test_an_age_bound_of_zero_can_match_nothing(self):
-        """No process on the box started less than 0 seconds ago.
+    def test_the_ps_invocation_this_box_ACTUALLY_ACCEPTS(self):
+        """The rail that would have caught `etimes`.
 
-        The bound is what stops a leftover simulator app — one a PREVIOUS run
-        left booted — from being pinned as this run's host. A rail that only
-        ever ran with the bound disabled would not know whether it was wired up,
-        so this drives the restricting branch.
+        A revision of this function asked macOS `ps` for `etimes`, a Linux
+        keyword it rejects: `ps` printed a usage error, wrote nothing to stdout,
+        and discovery returned 0 forever without saying so. Every other rail
+        here passed, because "no host found" is indistinguishable from "no host
+        exists". So the rail is on the COMMAND: run exactly what the function
+        runs and require rc 0 and a populated stdout.
         """
-        self.assertEqual(gfp.find_test_host(younger_than=0.0), 0)
+        import subprocess
+        result = subprocess.run(
+            ["ps", "-Ao", "pid=,rss=,comm="],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertGreater(len(result.stdout.splitlines()), 10)
+        # and every line the parser accepts must really parse
+        parsed = 0
+        for line in result.stdout.splitlines():
+            parts = line.strip().split(None, 2)
+            if len(parts) == 3 and parts[0].isdigit() and parts[1].isdigit():
+                parsed += 1
+        self.assertGreater(parsed, 10, "the ps FORMAT changed under the parser")
 
-    def test_the_default_applies_NO_bound(self):
-        """-1 means `no restriction`, which a one-shot snapshot needs.
+    def test_a_ps_failure_is_reported_rather_than_returned_as_zero(self):
+        """0 must mean `no match`, never `the instrument did not run`."""
+        import io
+        import subprocess
+        from contextlib import redirect_stderr
 
-        Asserted through the shape of the call rather than a live process,
-        because whether any `/Playhead.app/` exists on this box is not
-        something a unit test may depend on.
-        """
-        import inspect
-        signature = inspect.signature(gfp.find_test_host)
-        self.assertEqual(signature.parameters["younger_than"].default, -1.0)
+        class _Failed:
+            returncode = 1
+            stdout = ""
+            stderr = "ps: nope: keyword not found"
+
+        original = subprocess.run
+        captured = io.StringIO()
+        try:
+            subprocess.run = lambda *a, **k: _Failed()
+            with redirect_stderr(captured):
+                self.assertEqual(gfp.find_test_host(), 0)
+        finally:
+            subprocess.run = original
+        self.assertIn("`ps` FAILED", captured.getvalue())
+        self.assertIn("keyword not found", captured.getvalue())
 
 
 if __name__ == "__main__":
