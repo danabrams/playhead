@@ -1249,6 +1249,20 @@ MPTRENG="Playhead/Services/TranscriptEngine/TranscriptEngineService.swift"
 # readiness cache guard.
 THROT="Playhead/Services/AdDetection/FMDaemonThrottle.swift"
 SSR="Playhead/Services/AdDetection/SemanticScanResult.swift"
+
+# playhead-882eg (FD series): the descriptor FLOOR. The test host carried 499
+# open descriptors into every full-plan run, 89 connections to the app's real
+# `analysis.sqlite`, 84 to `ad_catalog.sqlite` and one `surface-status-*.jsonl`
+# per runtime — about five per `PlayheadRuntime` any test had ever constructed,
+# on a host that reaches 93-99 % of `RLIMIT_NOFILE` soft 2560 and has lost its
+# host there. FOUR files because the claim spans four layers that cannot see
+# each other: `$RT` owns the teardown that closes; `$SSIL` owns the logger's
+# close AND the reopen-the-SAME-file property that makes closing safe; `$STORE`
+# owns `AnalysisStore.close()`'s non-terminality; and `$TRTC` is the canary that
+# keeps every test-side runtime routed through the one helper that shuts down —
+# without it the closes exist and 33 test sites still never call them.
+SSIL="Playhead/SurfaceStatus/SurfaceStatusInvariantLogger.swift"
+TRTC="PlayheadTests/Design/TestRuntimeTeardownCanaryTests.swift"
 # playhead-e75l: the daemon-refusal CLASS — kvs8's throttle plus the metadata
 # stall — and the per-kind tokens and log events that keep the two countable
 # apart in a device pull. Added for the DR series.
@@ -1570,6 +1584,7 @@ MUTABLE_FILES=(
   "$ELV" "$BSB"
   "$UZWIRE" "$UZPROV" "$UZHLTH"
   "$SSR"
+  "$SSIL" "$TRTC"
 )
 # playhead-6r4z R1 review: `$MPTRIDX` was MISSING from the list above from the
 # moment playhead-mptr added the K2 series, and it is the target of NINE of the
@@ -1632,6 +1647,15 @@ FOCUSED_SUITES=(
   # merge gate on this bead's first provider. A mirror asserted in a comment and
   # not run is not a mirror, so it runs.
   -only-testing:PlayheadTests/ViewLayerCorrectionAttributionCaptureCanaryTests
+  # playhead-882eg (FD series): TWO suites, and the split is the point.
+  # `RuntimeStoreTeardownTests` can see whether shutdown() CLOSES the handles;
+  # it cannot see whether anybody calls shutdown(). `TestRuntimeTeardownCanaryTests`
+  # can see the second and nothing about the first. A fix with only the closes
+  # leaves 33 test sites never calling them; a fix with only the canary routes
+  # 33 sites into a shutdown that returns no descriptors. Neither suite fails
+  # when the other one's half regresses.
+  -only-testing:PlayheadTests/RuntimeStoreTeardownTests
+  -only-testing:PlayheadTests/TestRuntimeTeardownCanaryTests
   # playhead-tktr / playhead-ph2d: the V60 downgrade of three unearned
   # `repeated_ad_cache` grades (TK series). ONE suite, and one is right here:
   # the rung is eleven directions over a single migration, and every direction
@@ -4828,6 +4852,16 @@ T_PK_SHADOW="RegionShadowPhase gets the profile of the very show it is told abou
 T_TK_THREE="V60 downgrades the three unearned grades to consumedAutoSkip/consumed"
 T_TK_ONLYGRADE="V60 moves the grade and NOTHING else on the row"
 T_TK_PREROLL="the PRE-ROLL grade survives: he heard that one and meant that tap"
+
+# playhead-882eg (FD series) — EXACT `@Test` display names and the XCTest
+# method name. Checked against the source with `grep '@Test("'`; note the
+# battery SPLITS the expectation field on ';', so none of these may contain a
+# semicolon.
+T_FD_CLOSES="shutdown() closes the analysis store, the ad catalog and the session log"
+T_FD_STAYS="without shutdown() the stores stay open — the rail above discriminates"
+T_FD_REOPEN="closing the analysis store is non-terminal — a later read reopens it"
+T_FD_SAMEFILE="closing the session log is non-terminal — a later write reopens the SAME file"
+T_FD_CANARY="testEveryTestSideRuntimeConstructionIsTornDown"
 T_TK_RECEIPTS="V60 deletes no correction_events row: the spans were genuine ads"
 T_TK_THIRTEEN="the other thirteen explicitConfirmation rows keep their grade"
 T_TK_TOMBSTONE="V60 writes no revocation: a tombstone is permanent and is the wrong instrument"
@@ -4838,6 +4872,55 @@ T_TK_WINDOWS="the ad_windows the downgraded rows were learned from survive"
 T_TK_TABLE="the downgrade table names the three unearned grades and not the pre-roll"
 
 MUTATIONS=(
+  # ---- playhead-882eg (FD series): the descriptor FLOOR ----
+  #
+  # PREDICTED VICTIM SETS ARE PART OF THE ENTRY, not an afterthought: a mutant
+  # that kills a DIFFERENT test than the one named is a false credit, and this
+  # battery's 4th field is what makes that visible.
+
+  # Batch 1470 — FD01, the analysis store is never closed. This is the single
+  # largest line of the floor: 179 of 499 descriptors, 89 connections to ONE
+  # production file. Predicted to redden BOTH the close rail and the
+  # non-terminality rail, because the latter's precondition is that the store
+  # was closed at all — and NOT the logger rail and NOT the canary.
+  "FD01|1470|RT|$T_FD_CLOSES;$T_FD_REOPEN"
+
+  # Batch 1471 — FD02, the session log is never closed. 89 DISTINCT files, one
+  # per runtime. Predicted to redden the close rail and the same-file rail, and
+  # neither of the analysis-store rails: the two stores are closed by two
+  # independent lines and a battery that cannot tell them apart is not testing
+  # either.
+  "FD02|1471|RT|$T_FD_CLOSES;$T_FD_SAMEFILE"
+
+  # Batch 1472 — FD03, `AnalysisStore.close()` frees the handle but leaves
+  # `didOpen` true. This is the mutation that makes the fix LOOK right and be
+  # wrong: the descriptor is genuinely returned, and the store then reports
+  # itself open while holding no handle, so the next reader passes its
+  # `ensureOpen()` short-circuit and runs SQL on a nil connection. The rails see
+  # it as `isOpen` never going false.
+  "FD03|1472|STORE|$T_FD_CLOSES;$T_FD_REOPEN"
+
+  # Batch 1473 — FD04, the logger's close stops reusing `currentSessionFileURL`,
+  # so a write after close forks a SECOND file under the same `sessionId`. The
+  # descriptor accounting is unaffected — one handle either way — which is
+  # exactly why it needs its own rail: the floor would look fixed while a
+  # session's entries were being split across two files and burning two slots of
+  # the eviction window. Predicted to redden the same-file rail ALONE.
+  "FD04|1473|SSIL|$T_FD_SAMEFILE"
+
+  # Batch 1474 — FD05, an allowlist entry that names a file which no longer
+  # constructs a runtime. The canary is CLOSED IN BOTH DIRECTIONS on purpose: a
+  # licence for a file nobody can find was renamed or moved, and whatever
+  # inherits the name inherits the amnesty. Predicted to redden the canary and
+  # nothing else — the closes are untouched, so all four store rails stay green.
+  "FD05|1474|TRTC|$T_FD_CANARY"
+
+  # Batch 1475 — FD06, the shutdown obligation is dropped from the allowlist
+  # check, so a listed file may construct a runtime and never tear it down. That
+  # is the difference between a licence and an amnesty, and it is the direction
+  # a reviewer is least likely to test.
+  "FD06|1475|TRTC|$T_FD_CANARY"
+
   # ---- playhead-tktr / playhead-ph2d (TK series): the V60 DOWNGRADE ----
   #
   # READ THE HISTORY FIRST. This bead was opened, authorised and BUILT as a
@@ -12819,6 +12902,79 @@ snippet() { IFS= read -r -d '' "$1" || true; }
 apply_mutation() {
   local name="$1" file="$2" OLD NEW
   case "$name" in
+
+  # ---- playhead-882eg: the descriptor FLOOR (FD series) ----
+
+  FD01)
+    snippet OLD <<'EOF'
+        await analysisStore.close()
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  FD02)
+    snippet OLD <<'EOF'
+        surfaceStatusLogger.close()
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  FD03)
+    snippet OLD <<'EOF'
+        if let handle = db {
+            sqlite3_close_v2(handle)
+            db = nil
+        }
+        didOpen = false
+    }
+EOF
+    snippet NEW <<'EOF'
+        if let handle = db {
+            sqlite3_close_v2(handle)
+            db = nil
+        }
+    }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  FD04)
+    snippet OLD <<'EOF'
+        if let existing = currentSessionFileURL,
+           let reopened = try? FileHandle(forWritingTo: existing) {
+            try reopened.seekToEnd()
+            self.currentFileHandle = reopened
+            return reopened
+        }
+
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  FD05)
+    snippet OLD <<'EOF'
+        "RuntimeStoreTeardownTests.swift":
+            "its subject IS what shutdown() closes, including the arm that must NOT shut down first",
+EOF
+    snippet NEW <<'EOF'
+        "RuntimeStoreTeardownTests.swift":
+            "its subject IS what shutdown() closes, including the arm that must NOT shut down first",
+        "ThisFileWasRenamedOrNeverExisted.swift":
+            "playhead-882eg FD05: a licence for a file nobody can find",
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  FD06)
+    snippet OLD <<'EOF'
+            if !stripped.contains(".shutdown()") {
+                allowlistedWithoutShutdown.append(name)
+            }
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
 
   # ---- playhead-7dgx: the dropped-background-download ledger (BD series) ----
 
@@ -27735,6 +27891,8 @@ rec_file()   {
     UZPROV) printf '%s' "$UZPROV" ;;
     UZHLTH) printf '%s' "$UZHLTH" ;;
     STORE) printf '%s' "$STORE" ;;
+    SSIL)  printf '%s' "$SSIL" ;;
+    TRTC)  printf '%s' "$TRTC" ;;
     CTRL)  printf '%s' "$CTRL" ;;
     VIEW)  printf '%s' "$VIEW" ;;
     TRIG)  printf '%s' "$TRIG" ;;
