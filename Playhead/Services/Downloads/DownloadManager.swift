@@ -468,11 +468,11 @@ actor DownloadManager {
     /// ROUND-TRIP.** `workJournalRecorder` was a no-op in production, so the
     /// tail returned immediately and the cancellation had nothing to race; it
     /// now writes `download_work_journal` and can be suspended for as long as
-    /// the `AnalysisStore` actor is busy. ONE production path retires —
-    /// `removeCache` through `cancelDownload`. `clearCache()` also retires and
-    /// has NO production caller, and Settings' bulk clear never enters this
-    /// actor at all: both are limit L-7 in `DownloadWorkJournalLedger.swift`.
-    /// The behavioural rail for the race that IS covered is
+    /// the `AnalysisStore` actor is busy. NO production path retires today —
+    /// `removeCache` and `clearCache()` both have zero callers outside tests,
+    /// and Settings' bulk clear never enters this actor at all (limit L-7 in
+    /// `DownloadWorkJournalLedger.swift`, filed as playhead-86sfq). The
+    /// behavioural rail for the race, exercised by tests, is
     /// `BackgroundDownloadCompletionTests`'
     /// `cacheDeletionRacingFinalizationDoesNotJournalSuccess`, which review 3
     /// found is the only thing that catches a repair aimed at the wrong half.
@@ -3164,16 +3164,16 @@ actor DownloadManager {
 
     /// Cancels an active download for the given episode.
     ///
-    /// **ITS ONLY PRODUCTION CALLER IS `removeCache(for:)`, AND THAT IS LOAD-
-    /// BEARING** — this is the ONLY production chain that retires a journal
-    /// finalization at all (playhead-4xmz). It retires background transfers, which
-    /// cancels any in-flight `download_work_journal` finalization — correct
-    /// only because `removeCache` unlinks the artifact three lines after
-    /// calling here. A second production caller that does NOT delete would
-    /// silently drop a `finalized` row for an artifact still on disk, out of
-    /// the column that makes `finalized`/`failed` a real split.
-    /// `DownloadWorkJournalWiringSourceCanaryTests` pins the call-site count,
-    /// because nothing at runtime can see it.
+    /// **ITS ONLY CALLER IS `removeCache(for:)`, WHICH ITSELF HAS NO PRODUCTION
+    /// CALLER** — measured over `Playhead/**` at playhead-4xmz review 5, so
+    /// this whole chain is reachable only from tests today. It retires
+    /// background transfers, which cancels any in-flight
+    /// `download_work_journal` finalization — correct only because
+    /// `removeCache` unlinks the artifact three lines after calling here. A
+    /// caller that does NOT delete would silently drop a `finalized` row for an
+    /// artifact still on disk, out of the column that makes `finalized`/`failed`
+    /// a real split. `DownloadWorkJournalWiringSourceCanaryTests` pins the
+    /// call-site counts, because nothing at runtime can see them.
     func cancelDownload(episodeId: String) async {
         var cancelled = false
 
@@ -3303,24 +3303,30 @@ actor DownloadManager {
     /// deliberately: explicit deletion is not latency-sensitive like the
     /// launch scan, and must find tasks retained by an older process.
     /// CANCELLING A FINALIZATION DESTROYS A `download_work_journal` ROW for a
-    /// transfer that completed, so it is correct only when the bytes are about
-    /// to be unlinked — otherwise the row would have been true. Both callers
-    /// qualify, and the SECOND one only through its own caller:
+    /// transfer that completed, so it is correct only where the bytes are about
+    /// to be unlinked — otherwise the row would have been true.
     ///
-    ///   * `clearCache()` unlinks everything, a few lines below its call;
-    ///   * `cancelDownload(episodeId:)` unlinks nothing itself — and its ONLY
-    ///     production caller is `removeCache(for:)`, which calls
-    ///     `removeAllAudioArtifacts` three lines later.
+    /// **NOTHING IN PRODUCTION REACHES HERE TODAY.** Measured over
+    /// `Playhead/**` at playhead-4xmz review 5: the two callers are
+    /// `cancelDownload(episodeId:)` and ``clearCache()``; `cancelDownload`'s
+    /// only caller is `removeCache(for:)`; and `removeCache(for:)` and
+    /// ``clearCache()`` both have ZERO callers outside `PlayheadTests/`. There
+    /// is no per-episode delete affordance in the UI, and the bulk clear
+    /// (Settings' "Clear Cached Audio") never enters this actor. So this
+    /// mechanism is DORMANT in shipping builds and is exercised only by tests.
     ///
-    /// playhead-4xmz review 2 read that as a defect and review 3 found the
-    /// repair WAS one: a `retiringJournalFinalizations` parameter passing
-    /// `false` from `cancelDownload` disarmed the per-episode DELETE path and
-    /// reddened `cacheDeletionRacingFinalizationDoesNotJournalSuccess`, which
-    /// is the on-point behavioural rail for exactly this race. Reverted. The
-    /// property that actually holds is the SHAPE of the call graph above, so
-    /// `DownloadWorkJournalWiringSourceCanaryTests` pins that
-    /// `cancelDownload` has one production call site and that it is inside
-    /// `removeCache` — a claim no runtime test can make.
+    /// It is kept, and kept correct, because the moment a delete is wired to
+    /// `removeCache` the race is live and the row must not survive the bytes.
+    ///
+    /// THREE REVIEW ROUNDS DESCRIBED THIS AS "THE ONE PRODUCTION PATH", each
+    /// one call frame further out. Review 2 made the cancel conditional, which
+    /// disarmed the per-episode delete and reddened
+    /// `cacheDeletionRacingFinalizationDoesNotJournalSuccess`; review 3
+    /// reverted that and wrote "two deleting callers"; review 4 found one of
+    /// the two has no caller; review 5 found the other has none either. So
+    /// `DownloadWorkJournalWiringSourceCanaryTests` pins the tree-wide
+    /// call-site COUNT of all three, and the next reader gets a number rather
+    /// than a sentence.
     @discardableResult
     private func retireBackgroundTransfers(
         episodeId: String?

@@ -80,6 +80,32 @@ struct DownloadWorkJournalLedgerTests {
         return db
     }
 
+    /// A one-shot gate the test opens AFTER cancelling, so a cancellation is
+    /// OBSERVED by the recorder rather than raced against it.
+    ///
+    /// `Task { … }; task.cancel()` has no synchronisation between the child
+    /// starting and the cancel landing: the child can reach the in-actor
+    /// `Task.checkCancellation()` first, write the row, and fail the rail. In
+    /// practice the parent wins by a wide margin — which is exactly the shape
+    /// that produced this tree's 269-name load-sensitive population, and
+    /// neither rail's name is in the committed gate baseline, so a loss reads
+    /// as a NEW failure. Waiting here costs nothing and removes the race.
+    private actor CancellationGate {
+        private var continuation: CheckedContinuation<Void, Never>?
+        private var opened = false
+
+        func wait() async {
+            if opened { return }
+            await withCheckedContinuation { continuation = $0 }
+        }
+
+        func open() {
+            opened = true
+            continuation?.resume()
+            continuation = nil
+        }
+    }
+
     // MARK: - 1. Every protocol requirement lands a row that says what happened
 
     /// All FOUR `WorkJournalRecording` requirements, including the
@@ -661,10 +687,16 @@ struct DownloadWorkJournalLedgerTests {
             store: store, invariantRecorder: spy.recorder
         )
 
+        // The gate is what makes this DETERMINISTIC rather than a race — see
+        // `CancellationGate`. The body cannot reach the recorder until after
+        // `cancel()` has returned.
+        let gate = CancellationGate()
         let task = Task {
+            await gate.wait()
             await recorder.recordFinalized(episodeId: "ep-cancelled")
         }
         task.cancel()
+        await gate.open()
         await task.value
 
         #expect(try await store.fetchDownloadWorkJournal().rows.isEmpty)
@@ -701,7 +733,9 @@ struct DownloadWorkJournalLedgerTests {
         // its own `try` — and a `try` here would report a store error as this
         // rail's own failure rather than as the WRONG error kind. The broad
         // catch says which error arrived.
+        let gate = CancellationGate()
         let task = Task { () -> Bool in
+            await gate.wait()
             do {
                 try await store.insertDownloadWorkJournalEntryUnlessCancelled(record)
                 return false
@@ -710,6 +744,7 @@ struct DownloadWorkJournalLedgerTests {
             }
         }
         task.cancel()
+        await gate.open()
         let threw = await task.value
         #expect(threw, "the store method must THROW CancellationError, not swallow it")
         #expect(try await store.fetchDownloadWorkJournal().rows.isEmpty)
@@ -724,7 +759,9 @@ struct DownloadWorkJournalLedgerTests {
         let (store, _) = try await Self.freshStore(prefix: "4xmzCancelFail")
         let recorder = AnalysisStoreDownloadWorkJournalRecorder(store: store)
 
+        let gate = CancellationGate()
         let task = Task {
+            await gate.wait()
             await recorder.recordFailed(
                 episodeId: "ep-still-recorded",
                 cause: .taskExpired,
@@ -732,6 +769,7 @@ struct DownloadWorkJournalLedgerTests {
             )
         }
         task.cancel()
+        await gate.open()
         await task.value
 
         let page = try await store.fetchDownloadWorkJournal()

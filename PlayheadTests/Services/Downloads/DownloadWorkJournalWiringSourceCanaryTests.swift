@@ -60,7 +60,8 @@ final class DownloadWorkJournalWiringSourceCanaryTests: XCTestCase {
 
     /// Every `Playhead/**` Swift source, comments and string contents stripped.
     ///
-    /// Cached across the test methods in this class: the tree is ~470 files and
+    /// Cached across the test methods in this class: the tree is 483 files /
+    /// 12.75 MB measured, and
     /// re-reading it per assertion is the difference between a rail people run
     /// and one they route around.
     private static let productionSourceCache = ProductionSources()
@@ -399,7 +400,10 @@ final class DownloadWorkJournalWiringSourceCanaryTests: XCTestCase {
             ),
             "could not isolate the recorder — this canary's anchor has drifted"
         )
-        // Four protocol requirements plus `append`'s own declaration.
+        // FOUR, and the four are the protocol requirements. `append`'s own
+        // declaration is `private func append(` and does NOT match this
+        // pattern — an earlier gloss said it did, adding a fifth thing to a
+        // count of four.
         XCTAssertEqual(
             SwiftSourceInspector.regexOccurrences(of: #"\bawait append\("#, in: recorderBody), 4,
             "playhead-4xmz: all FOUR `WorkJournalRecording` requirements must append. A body "
@@ -485,13 +489,15 @@ final class DownloadWorkJournalWiringSourceCanaryTests: XCTestCase {
     /// nothing itself but has exactly one production caller — `removeCache`,
     /// which unlinks three lines later.
     ///
-    /// Review 2 read `cancelDownload` in isolation, called that a lost row,
-    /// and had the cancel made conditional; review 3 found the repair disarmed
-    /// the per-episode DELETE path and reddened
-    /// `cacheDeletionRacingFinalizationDoesNotJournalSuccess`. So the property
-    /// worth pinning is not a spelling at a call site — it is the SHAPE, and
-    /// the shape is a count no runtime test can take.
-    func testCancelDownloadHasOneProductionCallerAndItDeletes() throws {
+    /// **AND TODAY NOTHING IN PRODUCTION TAKES THAT CHAIN**: `removeCache(for:)`
+    /// has no caller outside `PlayheadTests/` either, so the whole retire
+    /// mechanism is dormant in shipping builds. Three review rounds each wrote
+    /// "the one production path" one call frame further out, so this rail pins
+    /// COUNTS for all three — `cancelDownload`, `removeCache` and
+    /// `clearCache()` — and every number below is a measurement rather than a
+    /// sentence. A caller appearing is not a failure to bump past: it makes the
+    /// race live, and L-7 has to be re-read.
+    func testTheRetireChainIsDormantAndItsOneCallerWouldDelete() throws {
         let manager = try code(Self.managerPath)
         // TREE-WIDE, not one file. `cancelDownload` is `internal`, so a caller
         // in `PlayheadRuntime`, a view model or any other app file is invisible
@@ -500,9 +506,21 @@ final class DownloadWorkJournalWiringSourceCanaryTests: XCTestCase {
         // cannot support. Found at review 4, one round after the same blindness
         // let `clearCache()` be described as a live caller when it has none.
         let production = try Self.productionSources()
+        // POSITIVE CONTROL on the walk itself. Every assertion below counts
+        // occurrences and passes on ZERO, so a walk that collapsed — a bad
+        // root, an exception swallowed, `strippingCommentsAndStrings` blanking
+        // a file (playhead-kf3b6) — would report "no callers" and read as the
+        // strongest possible pass. 483 files measured; the floor is loose on
+        // purpose so it survives ordinary growth and still catches a collapse.
+        XCTAssertGreaterThan(
+            production.count, 400,
+            "playhead-4xmz: the production walk found \(production.count) Swift files, which is "
+            + "too few to be the tree. Every count below passes on zero, so a collapsed walk "
+            + "reads as a clean result — this is the control that stops it."
+        )
         let callSites = production.values.reduce(0) { total, source in
             total + SwiftSourceInspector.regexOccurrences(
-                of: #"\bcancelDownload\(episodeId:"#, in: source
+                of: #"\bcancelDownload\(\s*episodeId\s*:"#, in: source
             )
         }
         XCTAssertEqual(
@@ -523,6 +541,26 @@ final class DownloadWorkJournalWiringSourceCanaryTests: XCTestCase {
             "playhead-4xmz: no `self.`-qualified spelling, which the count above cannot see. "
             + "It is idiomatic inside a closure and would be an invisible second call site."
         )
+        // AND `removeCache(for:)`'s OWN COUNT. Review 4 established that
+        // `clearCache()` has no production caller and then described
+        // `removeCache` as "the one production path"; review 5 found it has
+        // none either. ONE occurrence = the declaration and no caller.
+        let removeCacheCalls = production.reduce(into: [String]()) { hits, entry in
+            let (path, source) = entry
+            let count = SwiftSourceInspector.regexOccurrences(
+                of: #"(?<!func )\bremoveCache\(\s*for\s*:"#, in: source
+            )
+            if count > 0 { hits.append("\(path) x\(count)") }
+        }
+        XCTAssertEqual(
+            removeCacheCalls, [],
+            "playhead-4xmz: `removeCache(for:)` has NO production caller, so the retire chain "
+            + "it heads is DORMANT in shipping builds. This is not a number to bump: a caller "
+            + "appearing makes the delete-vs-finalization race live, and limit L-7 plus the "
+            + "test-only marker on the header's cancellation state both have to be re-read. "
+            + "Found: \(removeCacheCalls)"
+        )
+
         // AND `clearCache()`'s OWN COUNT, because for one review round three
         // comments and this file described it as the second deleting caller. It
         // has none: Settings' bulk clear enumerates the cache directory from a
@@ -537,7 +575,7 @@ final class DownloadWorkJournalWiringSourceCanaryTests: XCTestCase {
         let clearCacheCalls = production.reduce(into: [String]()) { hits, entry in
             let (path, source) = entry
             let count = SwiftSourceInspector.regexOccurrences(
-                of: #"(?<!func )(?<!Probe\.)\bclearCache\(\)"#, in: source
+                of: #"(?<!func )(?<!Probe\.)\bclearCache\s*\(\s*\)"#, in: source
             )
             if count > 0 { hits.append("\(path) x\(count)") }
         }

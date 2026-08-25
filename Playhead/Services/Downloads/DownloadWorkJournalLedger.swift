@@ -104,7 +104,9 @@
 // TWO MORE REACHABLE STATES THE FOUR BULLETS DO NOT NAME, both found at review
 // 3, and both are ways a row can be MISSING with every counter healthy:
 //
-//   * A FINALIZED EVENT DISCARDED BY CANCELLATION leaves no row and moves no
+//   * A FINALIZED EVENT DISCARDED BY CANCELLATION — **TEST-ONLY TODAY**, because
+//     nothing in production reaches `retireBackgroundTransfers` (measured at
+//     review 5; see the `catch is CancellationError` arm). It leaves no row and moves no
 //     counter — that is exactly what the `catch is CancellationError` arm is
 //     for. So `armedLaunches = N > 0, rows = 0, writeFailures = 0` — the
 //     POSITIVE CLAIM — is reachable on an install where finalized events
@@ -121,9 +123,13 @@
 //     reader glances past as 0. `SELECT count(*) FROM
 //     download_work_journal_arming` first, exactly as at V62.
 //
-// SIX STATES THEN, NOT FOUR AND NOT A LADDER — and the count has now been
-// wrong twice in this file, which is the argument for reading the list rather
-// than the number. `armedLaunches = 0` beside real rows is reachable — an event before the launch Task arms, or an arming write
+// READ THE LIST, NOT A NUMBER. This paragraph has carried a count three times
+// and it has been wrong all three — "three" while listing four, then "four"
+// while listing six, then "six" while introducing a seventh in the very
+// sentence that recorded the first two errors. The number is deleted rather
+// than incremented, which is what the file's own advice has said each time.
+// One more reading, and it is the one the bullets above do not cover:
+// `armedLaunches = 0` beside real rows is reachable — an event before the launch Task arms, or an arming write
 // that itself failed — and means "these rows are real and the denominator is
 // missing". Read all of the numbers, every time.
 //
@@ -314,22 +320,28 @@
 //     survive — with `writeFailures = 0` and `armedLaunches` healthy, so the
 //     six-state list above reads it as the POSITIVE CLAIM.
 //
-//       * THE DELETE CAN THROW AFTER THE CANCEL. `removeCache` cancels through
-//         `cancelDownload` and then calls `removeAllAudioArtifacts`, which
-//         genuinely throws — from `removeItem` and from its own post-condition
-//         guard. `DownloadManager.clearCache()` has the same shape and is
-//         deliberately fail-closed. Moving the retire after a SUCCESSFUL unlink
-//         would re-open the race the retire exists to close, so this is
+//       * THE DELETE CAN THROW AFTER THE CANCEL — on a DORMANT path.
+//         `removeCache` cancels through `cancelDownload` and then calls
+//         `removeAllAudioArtifacts`, which genuinely throws, from `removeItem`
+//         and from its own post-condition guard; `clearCache()` has the same
+//         shape and is deliberately fail-closed. Both are reachable only from
+//         tests today (measured at review 5: neither has a caller outside
+//         `PlayheadTests/`), so this is a property of the mechanism rather than
+//         of any shipping behaviour. Moving the retire after a SUCCESSFUL
+//         unlink would re-open the race the retire exists to close, so it is
 //         documented rather than fixed.
-//       * AND THE CONVERSE, on the path a user actually reaches: Settings'
-//         "Clear Cached Audio" (`SettingsViewModel.clearAudioCache`) unlinks
-//         the cache directory from a detached Task WITHOUT entering the
-//         `DownloadManager` actor, so nothing is retired and a `finalized` row
-//         can outlive its bytes. Routing it through `downloadManager` is an
-//         architecture change and is FILED as playhead-86sfq rather than taken
-//         here — read that bead before assuming the row is the only thing that
-//         path loses; it also skips the ownership bump, the transfer
-//         cancellation and three in-memory indexes.
+//       * AND THE ONLY DELETION PATH THAT ACTUALLY RUNS DOES NOT CANCEL AT
+//         ALL: Settings' "Clear Cached Audio"
+//         (`SettingsViewModel.clearAudioCache`) unlinks the cache directory
+//         from a detached Task WITHOUT entering the `DownloadManager` actor,
+//         so nothing is retired and a `finalized` row can outlive its bytes.
+//         This was "the converse" for a round, which read as though it were the
+//         smaller half; it is the only half that ships. Routing it through
+//         `downloadManager` is an architecture change and is FILED as
+//         playhead-86sfq rather than taken here — read that bead before
+//         assuming the row is the only thing that path loses; it also skips the
+//         ownership bump, the transfer cancellation and three in-memory
+//         indexes.
 //
 
 import Foundation
@@ -743,37 +755,44 @@ struct AnalysisStoreDownloadWorkJournalRecorder: WorkJournalRecording {
             // which is a claim about the STORE — and it is the one reading that
             // counter exists to make.
             //
-            // AND NOTHING IS LOST THAT ANYBODY ASKED TO KEEP — ON THE ONE
-            // PRODUCTION PATH THAT CANCELS. That qualification took three
-            // review rounds and each round shortened it wrongly.
-            // `retireBackgroundTransfers` is what cancels, and in PRODUCTION it
-            // has exactly ONE chain reaching it: `removeCache(for:)` →
-            // `cancelDownload(episodeId:)` → here, and `removeCache` calls
-            // `removeAllAudioArtifacts` three lines later. Its other caller,
-            // `DownloadManager.clearCache()`, HAS NO PRODUCTION CALLER AT ALL
-            // (measured at review 4 — every hit is a test seam or a doc
-            // comment), so a comment that named it as one of "two deleting
-            // callers" was describing a shape that does not run.
+            // NOTHING IS LOST THAT ANYBODY ASKED TO KEEP, AND THE HONEST
+            // REASON IS THAT NOTHING IN PRODUCTION CANCELS AT ALL TODAY.
+            // MEASURED over `Playhead/**`: `retireBackgroundTransfers` has two
+            // callers, `cancelDownload(episodeId:)` and `clearCache()`;
+            // `cancelDownload`'s only caller is `removeCache(for:)`; and
+            // `removeCache(for:)` and `clearCache()` BOTH have zero callers
+            // outside `PlayheadTests/`. The retire/cancel mechanism is DORMANT
+            // in shipping builds and is exercised only by tests.
+            //
+            // THREE REVIEW ROUNDS SHORTENED THAT SENTENCE WRONGLY, EACH ONE
+            // FRAME FURTHER OUT, and the pattern is worth more than any of the
+            // fixes. Review 2 read `cancelDownload` in isolation, concluded it
+            // deleted nothing, and made the cancel conditional — which disarmed
+            // the per-episode DELETE path and reddened
+            // `cacheDeletionRacingFinalizationDoesNotJournalSuccess`. Review 3
+            // caught that and wrote "two deleting callers". Review 4 found one
+            // of the two has no production caller and wrote "ONE production
+            // path retires". Review 5 found the other one has none either. Each
+            // round tightened the PROSE while the instrument that would have
+            // refuted it was pointed one call frame away — so the canary now
+            // pins the tree-wide call-site COUNTS of all three, and every one
+            // of them is a number rather than a claim.
+            //
+            // WHAT THAT MEANS FOR THE CANCELLATION HANDLING BELOW: it defends a
+            // path nothing currently takes, which is why it is worth having
+            // rather than worth removing — the moment a delete affordance is
+            // wired to `removeCache` (there is no per-episode delete in the UI
+            // today), the race is live and the row must not survive the bytes.
+            // It is also why the fifth state in this file's header is marked
+            // TEST-ONLY.
             //
             // AND THE BULK DELETE A USER ACTUALLY REACHES DOES NOT COME THROUGH
-            // HERE. Settings' "Clear Cached Audio" is
+            // HERE AT ALL. Settings' "Clear Cached Audio" is
             // `SettingsViewModel.clearAudioCache`, which enumerates
             // `DownloadManager.defaultCacheDirectory()` from a DETACHED TASK
-            // and unlinks its contents without entering this actor — so no
-            // finalization is retired and a `finalized` row CAN outlive its
-            // bytes there. That is limit L-7; the routing fix is filed, not
-            // taken here.
-            //
-            // Review 2 read `cancelDownload` in isolation, concluded it deleted
-            // nothing, and had the cancel made conditional — which disarmed the
-            // per-episode DELETE path and reddened
-            // `cacheDeletionRacingFinalizationDoesNotJournalSuccess`, the
-            // on-point rail for that race. Review 3 caught that and then wrote
-            // the "two callers" sentence above. Review 4 caught THAT. The
-            // pattern is worth more than the fix: each round tightened the
-            // PROSE and left the instrument aimed somewhere else, so the canary
-            // now pins the call-site COUNTS — including `clearCache()`'s, which
-            // is zero — rather than any sentence.
+            // and unlinks its contents without entering this actor — so a
+            // `finalized` row CAN outlive its bytes there, and that is the only
+            // deletion path that runs. Limit L-7; filed as playhead-86sfq.
             return
         } catch {
             logger.error(

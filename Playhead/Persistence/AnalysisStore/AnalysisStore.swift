@@ -9421,7 +9421,8 @@ actor AnalysisStore {
     // same empty table — which is the state this bead found, and the reason it
     // took four months to find.
     //
-    // THE FULL READING IS SIX STATES AND IT IS ENUMERATED IN ONE PLACE ONLY:
+    // THE FULL READING IS ENUMERATED IN ONE PLACE ONLY, AND IT CARRIES NO
+    // COUNT — the count has been wrong three times:
     // `DownloadWorkJournalLedger.swift`'s header. It is deliberately NOT
     // restated here — this comment carried a four-state copy that went stale
     // the moment review 3 added two more, which is exactly how the V62 recipe

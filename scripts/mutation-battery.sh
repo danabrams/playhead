@@ -3316,7 +3316,12 @@ T_7DGX_FRESH="a fresh store is at head with both tables and a seeded arming row"
 T_7DGX_STAMPED="a store STAMPED at head but missing the tables gets them back on the next open"
 # XCTest source canaries, by method name.
 T_7DGX_C_LADDER="testV62IsRegisteredInBothLaddersExactlyOnceEach"
-T_7DGX_C_DDL="testTheDDLIsSharedRatherThanCopied"
+# CLASS-QUALIFIED by playhead-4xmz (review 5): its canary adds a second method
+# of this exact name, and `extract_failures` emits the bare form too — so the
+# unqualified spelling would let a DW failure be credited to BD07, which is
+# the false-KILL shape this file calls silent and indistinguishable from
+# success. The DW side was qualified when it was written; the mirror was not.
+T_7DGX_C_DDL="BackgroundDownloadDropWiringSourceCanaryTests/testTheDDLIsSharedRatherThanCopied"
 T_7DGX_C_WIRING="testProductionWiresTheStoreBackedDropRecorder"
 T_7DGX_C_BOUND="testEachDropSiteRecordsTheBoundThatActuallyExpired"
 T_7DGX_C_PAIR="testEveryAttributionDeletionInBackgroundDownloadOwesARow"
@@ -12217,7 +12222,7 @@ MUTATIONS=(
 
   # DW09 is THIS BEAD'S OWN DEFECT ONE LAYER IN: the wiring is intact and one
   # protocol requirement's body is empty again.
-  "DW09|1485|DWJ|$T_DW_EVENTS;$T_DW_C_APPENDS"
+  "DW09|1485|DWJ|$T_DW_EVENTS;$T_DW_C_APPENDS;$T_DW_C_EVENTS"
 
   # DW10 is THE V60 MISTAKE REPEATED: the rung is in the production ladder and
   # not in `migrateOnlyForTesting`, so every fixture-driven test stops one rung
@@ -12294,12 +12299,12 @@ MUTATIONS=(
   # an actor is not a cancellation point, so the caller's pre-hop
   # `Task.isCancelled` cannot see a cancellation that lands during the hop —
   # and that window is now however long the store is busy.
-  "DW24|1501|STORE|$T_DW_CANCEL_STORE"
+  "DW24|1501|STORE|$T_DW_CANCEL_STORE;$T_DW_CANCEL_FIN"
 
   # DW25 routes the FINALIZED event through the plain insert, so a finalization
   # the manager retired before deleting the bytes publishes a row claiming an
   # artifact that is gone.
-  "DW25|1502|DWJ|$T_DW_CANCEL_FIN"
+  "DW25|1502|DWJ|$T_DW_CANCEL_FIN;$T_DW_C_APPENDS"
 
   # DW26 books a CANCELLED write as a FAILED one. `writeFailures` then says this
   # database could not hold a row — a claim about the store, and the one reading
@@ -12328,7 +12333,7 @@ MUTATIONS=(
   # a FAILURE that starts honouring cancellation is dropped whenever an
   # enclosing task was cancelled — losing exactly the record this bead creates.
   # Both directions of the asymmetry now have a mutant.
-  "DW31|1507|DWJ|$T_DW_CANCEL_FAIL"
+  "DW31|1507|DWJ|$T_DW_CANCEL_FAIL;$T_DW_C_APPENDS"
 
   # DW32 stamps every row with a CONSTANT. `occurredAt` is the table's only
   # timestamp and its sole ordering key, and until review 2 nothing asserted the
@@ -13616,15 +13621,17 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  # ANCHOR WIDENED BY playhead-4xmz (review 5). V63 added a rung and a
+  # near-identical arming table, so this anchor matched 0 or 2 times and the
+  # battery refused — a LOST RAIL for playhead-7dgx on every future run. The
+  # mutation is unchanged; only the context that makes it unambiguous is.
   BD05)
     snippet OLD <<'EOF'
         try migrateBackgroundDownloadDropsV62IfNeeded()
-    }
-    #endif
+        // playhead-4xmz (v63): two brand-new tables, same shape of rung as
 EOF
     snippet NEW <<'EOF'
-    }
-    #endif
+        // playhead-4xmz (v63): two brand-new tables, same shape of rung as
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -13636,13 +13643,19 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  # ANCHOR WIDENED BY playhead-4xmz (review 5). V63 added a rung and a
+  # near-identical arming table, so this anchor matched 0 or 2 times and the
+  # battery refused — a LOST RAIL for playhead-7dgx on every future run. The
+  # mutation is unchanged; only the context that makes it unambiguous is.
   BD07)
     snippet OLD <<'EOF'
         try createBackgroundDownloadDropTables()
-    }
+
+        // playhead-4xmz: the download-path work journal and its arming row.
 EOF
     snippet NEW <<'EOF'
-    }
+
+        // playhead-4xmz: the download-path work journal and its arming row.
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -13675,12 +13688,20 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  # ANCHOR WIDENED BY playhead-4xmz (review 5). V63 added a rung and a
+  # near-identical arming table, so this anchor matched 0 or 2 times and the
+  # battery refused — a LOST RAIL for playhead-7dgx on every future run. The
+  # mutation is unchanged; only the context that makes it unambiguous is.
   BD10)
     snippet OLD <<'EOF'
                 armedLaunches = armedLaunches + 1,
+                firstArmedAt = CASE
+                    WHEN background_download_drop_arming.armedLaunches = 0
 EOF
     snippet NEW <<'EOF'
                 armedLaunches = 1,
+                firstArmedAt = CASE
+                    WHEN background_download_drop_arming.armedLaunches = 0
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -14100,50 +14121,20 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  # THE ANCHOR IS THE CODE, NOT THE PROSE. This was re-cut FOUR times on this
+  # branch — once per review round that edited the comment inside the arm —
+  # each time reported as `anchor did not apply`. An anchor whose stability
+  # depends on nobody editing a paragraph is not an anchor (review 5). The edit
+  # is the same in effect: the arm stops catching `CancellationError`, which
+  # then falls through to the generic `catch` and is booked as a FAILED write.
+  # `DecodingError` is a stdlib type nothing on this path throws, so the arm
+  # compiles and is unreachable — a deleted arm in every sense that matters.
   DW26)
     snippet OLD <<'EOF'
         } catch is CancellationError {
-            // A CANCELLED WRITE IS NOT A FAILED WRITE. Counting it into
-            // `writeFailures` would say this database could not hold a row,
-            // which is a claim about the STORE — and it is the one reading that
-            // counter exists to make.
-            //
-            // AND NOTHING IS LOST THAT ANYBODY ASKED TO KEEP — ON THE ONE
-            // PRODUCTION PATH THAT CANCELS. That qualification took three
-            // review rounds and each round shortened it wrongly.
-            // `retireBackgroundTransfers` is what cancels, and in PRODUCTION it
-            // has exactly ONE chain reaching it: `removeCache(for:)` →
-            // `cancelDownload(episodeId:)` → here, and `removeCache` calls
-            // `removeAllAudioArtifacts` three lines later. Its other caller,
-            // `DownloadManager.clearCache()`, HAS NO PRODUCTION CALLER AT ALL
-            // (measured at review 4 — every hit is a test seam or a doc
-            // comment), so a comment that named it as one of "two deleting
-            // callers" was describing a shape that does not run.
-            //
-            // AND THE BULK DELETE A USER ACTUALLY REACHES DOES NOT COME THROUGH
-            // HERE. Settings' "Clear Cached Audio" is
-            // `SettingsViewModel.clearAudioCache`, which enumerates
-            // `DownloadManager.defaultCacheDirectory()` from a DETACHED TASK
-            // and unlinks its contents without entering this actor — so no
-            // finalization is retired and a `finalized` row CAN outlive its
-            // bytes there. That is limit L-7; the routing fix is filed, not
-            // taken here.
-            //
-            // Review 2 read `cancelDownload` in isolation, concluded it deleted
-            // nothing, and had the cancel made conditional — which disarmed the
-            // per-episode DELETE path and reddened
-            // `cacheDeletionRacingFinalizationDoesNotJournalSuccess`, the
-            // on-point rail for that race. Review 3 caught that and then wrote
-            // the "two callers" sentence above. Review 4 caught THAT. The
-            // pattern is worth more than the fix: each round tightened the
-            // PROSE and left the instrument aimed somewhere else, so the canary
-            // now pins the call-site COUNTS — including `clearCache()`'s, which
-            // is zero — rather than any sentence.
-            return
-        } catch {
 EOF
     snippet NEW <<'EOF'
-        } catch {
+        } catch is DecodingError {
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -14490,17 +14481,23 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  # ANCHOR WIDENED BY playhead-4xmz (review 5). V63 added a rung and a
+  # near-identical arming table, so this anchor matched 0 or 2 times and the
+  # battery refused — a LOST RAIL for playhead-7dgx on every future run. The
+  # mutation is unchanged; only the context that makes it unambiguous is.
   BD27)
     snippet OLD <<'EOF'
             if seen > ceiling {
                 truncated = true
                 break
             }
+            switch readBackgroundDownloadDropRow(stmt) {
 EOF
     snippet NEW <<'EOF'
             if seen > ceiling {
                 break
             }
+            switch readBackgroundDownloadDropRow(stmt) {
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -14636,12 +14633,22 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  # ANCHOR WIDENED BY playhead-4xmz (review 5). V63 added a rung and a
+  # near-identical arming table, so this anchor matched 0 or 2 times and the
+  # battery refused — a LOST RAIL for playhead-7dgx on every future run. The
+  # mutation is unchanged; only the context that makes it unambiguous is.
   BD37)
     snippet OLD <<'EOF'
         let probe = ceiling >= Int(Int32.max) ? Int(Int32.max) : ceiling + 1
+        let stmt = try prepare(
+            "\(Self.backgroundDownloadDropSelectColumns) ORDER BY occurredAt DESC LIMIT ?"
+        )
 EOF
     snippet NEW <<'EOF'
         let probe = ceiling
+        let stmt = try prepare(
+            "\(Self.backgroundDownloadDropSelectColumns) ORDER BY occurredAt DESC LIMIT ?"
+        )
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -14679,11 +14686,19 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  # ANCHOR WIDENED BY playhead-4xmz (review 5). V63 added a rung and a
+  # near-identical arming table, so this anchor matched 0 or 2 times and the
+  # battery refused — a LOST RAIL for playhead-7dgx on every future run. The
+  # mutation is unchanged; only the context that makes it unambiguous is.
   BD40)
     snippet OLD <<'EOF'
+                    ELSE background_download_drop_arming.firstArmedAt
+                END,
                 lastArmedAt = excluded.lastArmedAt
 EOF
     snippet NEW <<'EOF'
+                    ELSE background_download_drop_arming.firstArmedAt
+                END,
                 lastArmedAt = CASE
                     WHEN background_download_drop_arming.armedLaunches = 0
                     THEN excluded.lastArmedAt
