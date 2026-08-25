@@ -338,11 +338,21 @@ terminal ("sealed") close would settle it and probably capture most of the
 remaining 148, but it converts every use-after-teardown from a silent reopen into
 a thrown error — a design decision with real reach, not a teardown fix.
 
-**Two of this branch's own rails were RED on this run and are fixed** (see the
-commit after this one): they called `awaitReady()` on the app's REAL
+**Two of this branch's own rails were RED on this run and are fixed** (`ab6636c4`,
+the commit immediately BEFORE this one — the fix was committed first and this
+note written 23 s later): they called `awaitReady()` on the app's REAL
 `analysis.sqlite` and came back `.migrationFailed("database is locked")` under
 11,789 concurrent tests, while passing 4/4 scoped. That is playhead-vhffu biting
 a rail written by the bead that filed it.
+
+**SO THIS RUN WAS TAKEN WITH THE PRE-FIX RAILS, AND THE RAILS AS COMMITTED HAVE
+NEVER BEEN THROUGH A FULL PLAN.** The 499 -> 214 figure is unaffected — it is a
+descriptor census taken from outside the process by
+`scripts/gate-fd-paths.py`, and it does not depend on which assertions the
+rails made. What has no full-plan observation is the rails' own behaviour under
+11,789 concurrent tests, and the merge gate will be the first. Read a new-suite
+red there as "this suite has not been load-tested" before reading it as a
+regression.
 
 `AnalyticsCounterStoreTests.sharedStoreIsTestIsolated` failed on the BEFORE run
 AND on the AFTER run, so it is not this branch's doing — the same conclusion the
