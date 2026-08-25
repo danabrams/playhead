@@ -463,6 +463,17 @@ actor DownloadManager {
     /// Cancellable journal tails for placed background artifacts. Cache
     /// deletion retires these before unlinking bytes so a recorder suspended
     /// before its durable append cannot publish a stale `.finalized` row.
+    ///
+    /// **THE WINDOW THIS PROTECTS WAS ~0 UNTIL playhead-4xmz AND IS NOW A STORE
+    /// ROUND-TRIP.** `workJournalRecorder` was a no-op in production, so the
+    /// tail returned immediately and the cancellation had nothing to race; it
+    /// now writes `download_work_journal` and can be suspended for as long as
+    /// the `AnalysisStore` actor is busy. BOTH deleting paths are covered —
+    /// `clearCache` retires directly, and `removeCache` retires through
+    /// `cancelDownload` — and the behavioural rail for the race is
+    /// `BackgroundDownloadCompletionTests`'
+    /// `cacheDeletionRacingFinalizationDoesNotJournalSuccess`, which review 3
+    /// found is the only thing that catches a repair aimed at the wrong half.
     private struct BackgroundJournalFinalization {
         let id: UUID
         let task: Task<Void, Never>

@@ -150,8 +150,16 @@ protocol WorkJournalRecording: Sendable {
     ) async
 }
 
-/// Default no-op binding used until playhead-uzdq wires a real recorder.
-/// Kept `final` + `Sendable` so it can be stored in an actor.
+/// Records nothing. Kept `final` + `Sendable` so it can be stored in an actor.
+///
+/// This said "used until playhead-uzdq wires a real recorder" for four months
+/// while PRODUCTION HELD IT — the defect playhead-4xmz fixes, asserted as a
+/// temporary state in the doc comment of the thing that made it permanent. It
+/// is now the default for TESTS AND PREVIEWS only: production takes
+/// `AnalysisStoreDownloadWorkJournalRecorder`
+/// (`DownloadWorkJournalLedger.swift`), and
+/// `DownloadWorkJournalWiringSourceCanaryTests` fails if this type is ever
+/// named in the composition root again.
 final class NoopWorkJournalRecorder: WorkJournalRecording, Sendable {
     func recordFinalized(episodeId: String) async {}
     func recordFailed(episodeId: String, cause: InternalMissCause) async {}

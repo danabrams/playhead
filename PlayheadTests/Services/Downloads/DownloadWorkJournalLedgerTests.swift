@@ -223,8 +223,11 @@ struct DownloadWorkJournalLedgerTests {
 
     // MARK: - 3. Empty-because-nothing-happened vs empty-because-nobody-recorded
 
-    /// The three-state truth table, all of it on disk, and this rail is the
-    /// reason the bead is not "wire the recorder and stop". An instrument whose
+    /// The truth table, all of it on disk, and this rail is the reason the bead
+    /// is not "wire the recorder and stop". The header of
+    /// `DownloadWorkJournalLedger.swift` enumerates SIX reachable states — the
+    /// count has been wrong twice in that file, so read the list rather than
+    /// the number. An instrument whose
     /// silence cannot be distinguished from its absence is the defect, not the
     /// fix.
     @Test("a fresh store reads INSTALLED BUT NEVER ARMED, which is not the same as no instrument")
@@ -276,7 +279,8 @@ struct DownloadWorkJournalLedgerTests {
         #expect(afterTwo.lastArmedAt == 200.0)
     }
 
-    /// The third cell. Without it, `armedLaunches > 0` beside zero rows is
+    /// The cell that INVERTS the positive claim. Without it, `armedLaunches > 0`
+    /// beside zero rows is
     /// reachable by a store that simply could not be written to, and that
     /// state is byte-identical to this journal's strongest positive claim.
     @Test("an event whose row cannot be written increments writeFailures instead of vanishing")
@@ -374,6 +378,70 @@ struct DownloadWorkJournalLedgerTests {
         let lines = spy.descriptions(of: .downloadWorkJournalNotRecorded)
         #expect(lines.count == 1)
         #expect(try #require(lines.first).contains("arming=failed"))
+    }
+
+    /// The row-CREATING branch of the write-failure writer, which review 3
+    /// found NO test executed: `aLostRowIsCountedRatherThanSilent` arms first
+    /// so the row exists, and `theResidualReachesTheSecondMedium` drops the
+    /// table so neither branch runs. Its doc makes an explicit claim — "a
+    /// failure is not an arming, and inventing one here would manufacture the
+    /// very claim this column exists to withhold" — and changing the literal
+    /// `0` to `1` survived everything.
+    @Test("a write failure on a store with NO arming row creates one WITHOUT inventing an arming")
+    func aWriteFailureOnAStorelessOfItsArmingRowInventsNoArming() async throws {
+        let (store, dir) = try await Self.freshStore(prefix: "4xmzArmMissing")
+        // The state a hand-edited fixture or a partially-rolled-back rung is
+        // in: the tables exist and the seeded row does not.
+        let db = try Self.openRawReadWrite(dir)
+        #expect(
+            sqlite3_exec(db, "DELETE FROM download_work_journal_arming", nil, nil, nil)
+                == SQLITE_OK
+        )
+        sqlite3_close_v2(db)
+        #expect(try await store.fetchDownloadWorkJournalArming() == nil)
+
+        try await store.noteDownloadWorkJournalWriteFailure(at: 77.0)
+
+        let arming = try #require(try await store.fetchDownloadWorkJournalArming())
+        #expect(arming.writeFailures == 1)
+        #expect(
+            arming.armedLaunches == 0,
+            """
+            a FAILURE is not an ARMING. Counting one here would manufacture the
+            denominator out of the very event that proves nothing was recorded.
+            """
+        )
+        #expect(arming.firstArmedAt == nil)
+        #expect(arming.lastArmedAt == nil)
+        #expect(
+            arming.installedAt == 77.0,
+            """
+            and on this path installedAt dates the FAILURE, which is the third
+            writer that stamp can have — read it as "the earliest moment this
+            install is known to have carried the instrument"
+            """
+        )
+    }
+
+    /// The mirror: the arming writer's own row-CREATING branch, equally
+    /// unexercised until review 3.
+    @Test("an arming on a store with NO arming row creates one and counts the launch")
+    func anArmingOnAStorelessOfItsArmingRowCreatesIt() async throws {
+        let (store, dir) = try await Self.freshStore(prefix: "4xmzArmCreate")
+        let db = try Self.openRawReadWrite(dir)
+        #expect(
+            sqlite3_exec(db, "DELETE FROM download_work_journal_arming", nil, nil, nil)
+                == SQLITE_OK
+        )
+        sqlite3_close_v2(db)
+
+        try await store.noteDownloadWorkJournalInstrumentArmed(at: 88.0)
+
+        let arming = try #require(try await store.fetchDownloadWorkJournalArming())
+        #expect(arming.armedLaunches == 1)
+        #expect(arming.firstArmedAt == 88.0)
+        #expect(arming.lastArmedAt == 88.0)
+        #expect(arming.writeFailures == 0)
     }
 
     // MARK: - 4. The reader does not over-report

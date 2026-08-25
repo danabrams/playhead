@@ -11,8 +11,9 @@
 // anything failing?** Without this file, yes — silently, in one line of a
 // refactor.
 //
-// Six properties, and each is here because a behavioural test genuinely cannot
-// reach it:
+// SEVEN properties, in nine tests. The count was "six" for two review rounds
+// after the sixth was added, which is the same drift this file exists to catch
+// living in its own header — re-derive it when you add a rail:
 //
 //   1. THE LADDER REGISTRATION. A rung called from `runSchemaMigration` but not
 //      from `migrateOnlyForTesting` leaves every fixture-driven test one rung
@@ -32,7 +33,13 @@
 //   5. WHERE THE ARMING SITS relative to the degraded-launch guard. Armed above
 //      it, the denominator counts launches on which the store never opened, and
 //      a run of those reads as evidence that no download ever failed.
-//   6. THAT THE DOWNLOAD PATH DOES NOT WRITE `work_journal`. That table's
+//   6. THAT CANCELLING A JOURNAL FINALIZATION ONLY EVER HAPPENS ON A PATH THAT
+//      UNLINKS THE BYTES — which is a property of the CALL GRAPH
+//      (`retireBackgroundTransfers` <- `clearCache` | `cancelDownload` <-
+//      `removeCache`) and not of any one call site. Review 2 tried to make it a
+//      flag and the flag disarmed the delete path; review 3 caught that with a
+//      behavioural rail this file cannot replace.
+//   7. THAT THE DOWNLOAD PATH DOES NOT WRITE `work_journal`. That table's
 //      `event_type` is an input to `AnalysisCoordinator.recoverOrphans`, so a
 //      download failure written under an analysis generation would tell
 //      cold-launch recovery the ANALYSIS work is terminal. Nothing at runtime
@@ -132,7 +139,10 @@ final class DownloadWorkJournalWiringSourceCanaryTests: XCTestCase {
             "playhead-4xmz: PlayheadRuntime must construct exactly one store-backed download "
             + "work-journal recorder. Zero is the four-month defect this bead fixes — the table "
             + "exists, the migration runs, every test passes, and the device records nothing. "
-            + "Two means the instance that gets ARMED may not be the instance that gets INJECTED."
+            + "Two means the instance that gets ARMED is not the instance that gets INJECTED — "
+            + "which today writes the same row, and stops doing so the moment this recorder "
+            + "acquires any per-instance state. The second instance already differs in one way: "
+            + "it carries no invariantRecorder, so a failed arming goes unreported."
         )
         XCTAssertEqual(
             SwiftSourceInspector.regexOccurrences(

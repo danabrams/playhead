@@ -1,15 +1,23 @@
 // DownloadWorkJournalV63MigrationTests.swift
-// playhead-4xmz — the V63 rung, and the three-state reading a device pull makes.
+// playhead-4xmz — the V63 rung, and the SCHEMA half of the reading a device
+// pull makes.
 //
-// THE READING THIS RUNG EXISTS TO MAKE POSSIBLE, and every rail below pins one
-// cell of it:
+// THE FULL READING IS SIX STATES AND IT IS ENUMERATED IN ONE PLACE ONLY:
+// `DownloadWorkJournalLedger.swift`'s header. This file's rails pin the three
+// that are properties of the SCHEMA — the other three are properties of the
+// RECORDER and live in `DownloadWorkJournalLedgerTests`. An earlier version of
+// this header restated the table as three states and dropped `writeFailures`
+// entirely, which is exactly the reading the ledger header warns about: a
+// reader who follows the V62 recipe checks three numbers and skips the one
+// that inverts the positive claim.
 //
 //   * `download_work_journal` ABSENT     -> the build predates the instrument.
 //                                           Zero events says NOTHING.
 //   * present, `armedLaunches = 0`       -> the instrument shipped and no
 //                                           launch armed it. Still nothing.
-//   * `armedLaunches = N > 0`, zero rows,
-//     `writeFailures = 0`                -> a POSITIVE CLAIM.
+//   * table present, arming ROW absent   -> `sqlite3` prints a BLANK LINE, one
+//                                           glance from a zero. `SELECT
+//                                           count(*)` it first.
 //
 // The first cell is why `aV62StoreGenuinelyLacksTheTables` exists. Without it,
 // "the table is always there" is an assumption, and an assumption is exactly
@@ -110,7 +118,7 @@ struct DownloadWorkJournalV63MigrationTests {
 
     /// If this ever passes vacuously — because something else creates the
     /// tables — then "the table is absent" stops being evidence that a build
-    /// predates the instrument, and the three-state reading collapses to two.
+    /// predates the instrument, and the whole reading loses its first cell.
     @Test("a V62-shaped store genuinely lacks both tables, which is what makes ABSENT readable")
     func aV62StoreGenuinelyLacksTheTables() async throws {
         let (_, dir) = try await makeHeadStore(prefix: "V63Absent")

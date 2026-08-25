@@ -194,12 +194,18 @@ final class PlayheadRuntime {
     /// playhead-4xmz: the SAME instance injected into ``downloadManager`` as
     /// its `workJournalRecorder`, held so the launch Task can ARM it.
     ///
-    /// Held rather than reconstructed at the arming site on purpose: an arming
-    /// taken on a freshly-built second recorder would count launches for a
-    /// recorder nobody injected, which is precisely the "an instrument that
-    /// looks installed at the call site and reaches nothing" shape this bead
-    /// exists to remove. `DownloadWorkJournalWiringSourceCanaryTests` pins the
-    /// identity in source, because nothing at runtime can see it.
+    /// Held rather than reconstructed at the arming site on purpose — and the
+    /// reason is the SHAPE, not today's arithmetic. A second instance built at
+    /// the arming site would write the same `download_work_journal_arming` row,
+    /// because this recorder is a struct whose only durable state is the shared
+    /// store actor, so `armedLaunches` would be byte-identical today. What
+    /// differs even today is that the second instance carries no
+    /// `invariantRecorder`, so a FAILED arming would go unreported; and the
+    /// moment the recorder acquires any per-instance state, "the thing that was
+    /// armed" and "the thing that was injected" stop being the same claim. That
+    /// is the shape this bead exists to remove, so it is closed here rather
+    /// than after it bites. `DownloadWorkJournalWiringSourceCanaryTests` pins
+    /// the identity in source, because nothing at runtime can see it.
     private let downloadWorkJournalRecorder:
         AnalysisStoreDownloadWorkJournalRecorder
 

@@ -12161,11 +12161,14 @@ MUTATIONS=(
   # no-op comes back. Nothing at runtime can see it, which is the whole point.
   "DW01|1477|RT|$T_DW_C_WIRING"
 
-  # DW02 arms a FRESHLY CONSTRUCTED recorder instead of the injected one. Every
-  # row still lands and every runtime rail stays green — but `armedLaunches`
-  # would then count launches for an instrument nobody installed, which is the
-  # "a value that names one thing read as though it named another" shape in the
-  # denominator rather than the numerator.
+  # DW02 arms a FRESHLY CONSTRUCTED recorder instead of the injected one.
+  # READ ITS VICTIM CAREFULLY: on today's code `armedLaunches` would be
+  # IDENTICAL — the recorder is a struct over the shared store actor — so this
+  # is killed by the SOURCE canary and not by any count, and its worth is the
+  # shape rather than a present consequence. The one present consequence is
+  # that the second instance carries no `invariantRecorder`, so a FAILED arming
+  # goes unreported. Review 3 found all three copies of this comment asserting
+  # the arithmetic version as fact.
   "DW02|1478|RT|$T_DW_C_WIRING;$T_DW_C_ARMSITE"
 
   # DW03 arms on the DEGRADED launch too. `armedLaunches` then counts launches

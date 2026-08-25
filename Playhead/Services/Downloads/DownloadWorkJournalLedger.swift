@@ -188,13 +188,22 @@
 //     unlike `background_download_drops` this table has a non-rare writer.
 //
 //     MEASURED rather than reasoned, because the arithmetic here was wrong by
-//     3x on the first cut and the two things it omitted are the reason. Below:
-//     7,300 `finalized` rows (`metadata` literally `{}`), the shipped DDL
-//     verbatim, `VACUUM`ed — so every figure is a FLOOR, since a live WAL
-//     database is larger. `epLen` is the length of `episodeId`, which is
-//     `Episode.makeCanonicalKey` = `feedURL.absoluteString + "::" +
-//     feedItemGUID` — a long compound key, NOT a short id, so ~88 is the
-//     realistic column and 16 is not a case that occurs.
+//     3x on the first cut and the two things it omitted are the reason. Recipe,
+//     so it can be re-run: 7,300 `finalized` rows with DISTINCT `episodeId`s,
+//     `metadata` literally `{}`, `cause` NULL, the shipped DDL verbatim,
+//     `VACUUM`ed, file size ÷ rows, sqlite3 3.54.0. Every figure is a FLOOR —
+//     a live WAL database is larger — and they move by a few bytes per row
+//     across sqlite builds: review 3 measured 127/140/170 at epLen 16 on its
+//     own, against 123/134/162 here. The conclusion is the same to two
+//     significant figures and the recipe is what to re-run, not the digits.
+//
+//     `epLen` is the length of `episodeId`, which on this path is
+//     `Episode.canonicalEpisodeKey` = `feedURL.absoluteString + "::" +
+//     feedItemGUID` — a long compound key, NOT a short id. MEASURED on the
+//     2026-08-21 device pull (review 3): n = 29, min 75, median 77, mean 79.8,
+//     max 91. 88 is kept as the highlighted column because it is conservative
+//     against that distribution; 16 is not a case that occurs and is here only
+//     to show the shape.
 //
 //         epLen   table B/row   +occurred idx   +episode idx   MB/yr @ 20/day
 //            16           123             134            162             1.18
