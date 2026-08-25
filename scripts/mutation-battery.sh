@@ -3363,7 +3363,7 @@ T_DW_CANCEL_FIN="a finalization cancelled before it runs writes no row and count
 T_DW_CANCEL_STORE="the store's UnlessCancelled append refuses inside the actor, not just at the caller"
 T_DW_CANCEL_FAIL="a cancelled FAILURE is still recorded — the asymmetry is deliberate"
 DWC="DownloadWorkJournalWiringSourceCanaryTests"
-T_DW_C_RETIRE="$DWC/testCancelDownloadHasOneProductionCallerAndItDeletes"
+T_DW_C_RETIRE="$DWC/testTheRetireChainIsDormantAndItsOneCallerWouldDelete"
 # NOT this bead's suite: the on-point BEHAVIOURAL rail for a cache delete
 # racing a journal finalization. It predates this bead and was the thing that
 # caught review 2's repair; `BackgroundDownloadCompletionTests` is in
