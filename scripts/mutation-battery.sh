@@ -1488,6 +1488,8 @@ SEGAGG="Playhead/Services/AdDetection/SegmentAggregator.swift"
 # could and were dropping it.
 DLMGR="Playhead/Services/Downloads/DownloadManager.swift"
 LEDGER="Playhead/Services/Downloads/BackgroundDownloadDropLedger.swift"
+# playhead-4xmz: the DOWNLOAD-path work journal (the DW series).
+DWJ="Playhead/Services/Downloads/DownloadWorkJournalLedger.swift"
 FQSCAN="Playhead/Services/Downloads/ForceQuitResumeScan.swift"
 BGFEED="Playhead/Services/PodcastFeed/BackgroundFeedRefreshService.swift"
 EPPREP="Playhead/Services/Downloads/EpisodePreparationCoordinator.swift"
@@ -1587,7 +1589,7 @@ MUTABLE_FILES=(
   "$FUSION" "$DSPAN" "$EXTENT" "$RSLOT" "$ATOMEV"
   "$EVCAT" "$PROJ" "$TWNARR"
   "$DETCLS" "$DETLED" "$SPLIT" "$HOTGATE" "$UGCEN" "$POLICY" "$SEGAGG"
-  "$DLMGR" "$LEDGER" "$FQSCAN" "$BGFEED" "$EPPREP" "$SCHED"
+  "$DLMGR" "$LEDGER" "$DWJ" "$FQSCAN" "$BGFEED" "$EPPREP" "$SCHED"
   "$CLAIM" "$RECON" "$ATOM" "$AJRUN" "$ACOORD" "$ESUMBF" "$MPTRENG" "$MPTRIDX"
   "$BEXP" "$SPSHD" "$FMSHD" "$TCANON" "$SPLAN"
   "$BGPS" "$GRANT" "$LEASE"
@@ -2722,6 +2724,15 @@ FOCUSED_SUITES=(
   -only-testing:PlayheadTests/BackgroundDownloadDropLedgerTests
   -only-testing:PlayheadTests/BackgroundDownloadDropsV62MigrationTests
   -only-testing:PlayheadTests/BackgroundDownloadDropWiringSourceCanaryTests
+
+  # playhead-4xmz (DW series): the DOWNLOAD half of the work journal. Three
+  # suites, because the claim spans three layers no one of which can observe
+  # another — the recorder's rows on disk, the V63 rung, and the WIRING, which
+  # is the layer the bead's defect actually lived in and which no runtime test
+  # in this tree can reach (`PlayheadRuntime.init` is unreachable from one).
+  -only-testing:PlayheadTests/DownloadWorkJournalLedgerTests
+  -only-testing:PlayheadTests/DownloadWorkJournalV63MigrationTests
+  -only-testing:PlayheadTests/DownloadWorkJournalWiringSourceCanaryTests
   # And two suites that are NOT this bead's and are here because the V62 rung
   # moves `currentSchemaVersion`: they are the cross-rung "reaches head"
   # observers, and the V60 note in `migrateOnlyForTesting` records that a rung
@@ -3290,6 +3301,56 @@ T_7DGX_C_REASONS="testTheThreeDropSitesUseThreeDistinctReasons"
 # rung short reddens.
 T_7DGX_V40_NOSTEP="V40 does NOT step over a rolled-back V39 — a database left at 38 stays retryable"
 T_7DGX_C6_FRESH="C6: fresh DB migrate() reaches currentSchemaVersion with all expected shape"
+# playhead-4xmz — the DW series: the DOWNLOAD half of the work journal.
+#
+# EVERY NAME HERE IS UNIQUE ACROSS THE WHOLE TEST TREE, and that is load-
+# bearing rather than tidy: this script scores a mutant by grepping the run's
+# FAILING list for the expected DISPLAY NAME, so two tests sharing a name let
+# one be credited for the other — a FALSE KILL, the one verdict shape that is
+# silent and looks exactly like success. Three of these collided with the
+# neighbouring 7dgx suites on their first draft and were renamed. (The tree
+# still holds 59 duplicates, measured: playhead-0dsti.)
+T_DW_EVENTS="each of the four requirements appends a row carrying its event, cause and metadata"
+T_DW_REPEAT="a repeated failure for one episode is two rows, not one"
+T_DW_DURABLE="the download-journal rows are on disk, not in memory — a second store on the same file reads them"
+T_DW_NEVER_ARMED="a fresh store reads INSTALLED BUT NEVER ARMED, which is not the same as no instrument"
+T_DW_ARMS="the download journal'"'"'s arming counts a launch, and a second counts again without moving firstArmedAt"
+T_DW_WRITEFAIL="an event whose row cannot be written increments writeFailures instead of vanishing"
+T_DW_RESIDUAL="when BOTH durable writes fail, the loss is raised on the surface-status stream"
+T_DW_ARMFAIL="an arming that cannot be written says so on the second medium"
+T_DW_UNKNOWN_EVENT="a row with an unrecognized eventType is counted, not folded into failed"
+T_DW_UNKNOWN_CAUSE="an unrecognized cause round-trips as .unknown rather than becoming nil"
+T_DW_TRUNCATE="a window that hits its limit reports truncated, and most-recent-first"
+T_DW_E2E="the force-quit scan'"'"'s preempted event reaches the store through DownloadManager"
+T_DW_DEFAULT_NOOP="the DEFAULT recorder still writes nothing, which is what makes armedLaunches readable"
+T_DW_LADDER="a V62 store climbs to head through the ladder-only seam and gains both tables"
+T_DW_FROM_V61="a store seeded two rungs back still reaches head, so V63 does not depend on running alone"
+T_DW_IDEMPOTENT="re-running the rung preserves armedLaunches, the stamps, and the rows"
+T_DW_FRESH="a fresh store is at head with both DOWNLOAD-JOURNAL tables and a seeded arming row"
+T_DW_STAMPED="a store STAMPED at head but missing the DOWNLOAD-JOURNAL tables gets them back on the next open"
+T_DW_BELOW_FLOOR="the DOWNLOAD-JOURNAL tables exist BELOW the V39 rollback floor, so presence and not the stamp is the discriminator"
+T_DW_UNTOUCHED="the download journal writes leave work_journal untouched"
+# `aV62StoreGenuinelyLacksTheTables` deliberately has NO mutant and therefore no
+# variable, on the V62 suite'"'"'s own precedent: it asserts that a table the suite
+# itself dropped is dropped — a vacuity guard for the rails around it, and a
+# property of the FIXTURE rather than of the code.
+# XCTest source canaries, CLASS-QUALIFIED. `extract_failures` emits both the
+# bare method name and `Class/method`, and the qualified form is the one to use
+# here: `testTheDDLIsSharedRatherThanCopied` is ALSO a method on
+# `BackgroundDownloadDropWiringSourceCanaryTests` — this file is modelled on
+# that one — so the bare spelling would let a BD mutant be credited for a DW
+# rail and vice versa. Same false-kill hazard as the display names above, one
+# naming system along.
+DWC="DownloadWorkJournalWiringSourceCanaryTests"
+T_DW_C_LADDER="$DWC/testV63IsRegisteredInBothLaddersExactlyOnceEach"
+T_DW_C_DDL="$DWC/testTheDDLIsSharedRatherThanCopied"
+T_DW_C_WIRING="$DWC/testProductionWiresTheStoreBackedWorkJournalRecorder"
+T_DW_C_LET="$DWC/testTheRecorderSlotCannotBeReassignedAfterInit"
+T_DW_C_ARMSITE="$DWC/testTheJournalIsArmedOnceOnTheInjectedInstanceAfterTheStoreIsKnownOpen"
+T_DW_C_NOTANALYSIS="$DWC/testTheDownloadPathDoesNotWriteTheAnalysisWorkJournal"
+T_DW_C_APPENDS="$DWC/testEveryProtocolMethodOnTheStoreBackedRecorderAppends"
+T_DW_C_EVENTS="$DWC/testEveryEventTypeIsProducedBySomeSite"
+
 T_IW7Q_MONOTONE="the gate can only ever DEDUCT — no provenance raises a band"
 T_IW7Q_BYTES="the two rows that used to be identical now differ IN THE BYTES"
 T_IW7Q_NULL="an UNKNOWN provenance writes SQL NULL, not 0"
@@ -12037,6 +12098,141 @@ MUTATIONS=(
   # worthless) and it names the rail BD01 kills, so a KILLED verdict here would
   # mean a rename changed behaviour.
   "BD99|1438|DLMGR|$T_7DGX_SESSION"
+
+  # ---- playhead-4xmz, the DW series: the DOWNLOAD half of the work journal
+  #      stops being a no-op ---------------------------------------------------
+  #
+  # `DownloadManager.workJournalRecorder` took a `NoopWorkJournalRecorder()`
+  # default and PRODUCTION NEVER REPLACED IT — four months, one construction
+  # site, five emission sites, zero rows. So the series' first layer is the
+  # WIRING, which is the layer the defect lived in and which no runtime test in
+  # this tree can reach.
+  #
+  # Four layers, and each is invisible from the others: the WIRING (DW01-DW03,
+  # DW21), the RECORDER (DW04-DW09), the SCHEMA (DW10-DW14, DW23), and the SQL
+  # the store actually runs on the way in and out (DW15-DW20, DW22). DW99 is
+  # the vacuity control.
+  #
+  # THE SERIES' CENTRAL CLAIM IS DW21, not DW01. Reverting the wiring to the
+  # no-op is the defect coming back; handing the download path the ANALYSIS
+  # recorder is the defect coming back WORSE, because `work_journal.event_type`
+  # is what `AnalysisCoordinator.recoverOrphans` routes on and a transfer
+  # failure written there terminates an analysis generation. DW21 is the mutant
+  # that says the tidying-two-recorders-into-one refactor cannot land quietly.
+
+  # DW01 is THE SHIPPED DEFECT VERBATIM: the argument goes away and the default
+  # no-op comes back. Nothing at runtime can see it, which is the whole point.
+  "DW01|1477|RT|$T_DW_C_WIRING"
+
+  # DW02 arms a FRESHLY CONSTRUCTED recorder instead of the injected one. Every
+  # row still lands and every runtime rail stays green — but `armedLaunches`
+  # would then count launches for an instrument nobody installed, which is the
+  # "a value that names one thing read as though it named another" shape in the
+  # denominator rather than the numerator.
+  "DW02|1478|RT|$T_DW_C_WIRING;$T_DW_C_ARMSITE"
+
+  # DW03 arms on the DEGRADED launch too. `armedLaunches` then counts launches
+  # on which the store never opened, so a run of unopenable ones reads as
+  # evidence that no download ever failed.
+  "DW03|1479|RT|$T_DW_C_ARMSITE"
+
+  # DW04 collapses `preempted` into `failed`. A force-quit that can be RESUMED
+  # and a transfer that is over are different facts with different remedies.
+  "DW04|1480|DWJ|$T_DW_EVENTS;$T_DW_E2E;$T_DW_C_EVENTS"
+
+  # DW05 gives a SUCCESSFUL transfer a miss cause — a reason in the one column
+  # whose entire job is to carry one.
+  "DW05|1481|DWJ|$T_DW_EVENTS"
+
+  # DW06 is playhead-1nl6's defect verbatim, at the conformer this time: the
+  # `SliceMetadata` blob is dropped and `{}` is written in its place.
+  "DW06|1482|DWJ|$T_DW_EVENTS;$T_DW_DURABLE"
+
+  # DW07 stops counting a row that could not be written. `armedLaunches > 0`
+  # beside zero rows then becomes reachable by silence, which is byte-identical
+  # to this journal's strongest positive claim.
+  "DW07|1483|DWJ|$T_DW_WRITEFAIL;$T_DW_RESIDUAL"
+
+  # DW08 swallows a failed ARMING. The denominator has the same hole the
+  # numerator does and it is closed the same way.
+  "DW08|1484|DWJ|$T_DW_ARMFAIL"
+
+  # DW09 is THIS BEAD'S OWN DEFECT ONE LAYER IN: the wiring is intact and one
+  # protocol requirement's body is empty again.
+  "DW09|1485|DWJ|$T_DW_EVENTS;$T_DW_C_APPENDS"
+
+  # DW10 is THE V60 MISTAKE REPEATED: the rung is in the production ladder and
+  # not in `migrateOnlyForTesting`, so every fixture-driven test stops one rung
+  # short while `currentSchemaVersion` assertions still pass.
+  "DW10|1486|STORE|$T_DW_C_LADDER;$T_DW_LADDER;$T_DW_FROM_V61;$T_DW_IDEMPOTENT"
+
+  # DW11 is the mirror: registered in the test seam and not in production. The
+  # tables still appear (`createTables()` is unconditional) and the STAMP never
+  # moves. It reddens the V62 suite too, which is the cross-rung observer.
+  "DW11|1487|STORE|$T_DW_C_LADDER;$T_DW_FRESH;$T_DW_STAMPED;$T_7DGX_FRESH;$T_7DGX_STAMPED"
+
+  # DW12 takes the DDL out of `createTables()`, so a store stamped at head with
+  # the tables missing can never repair — the instrument is dead on that
+  # install forever, because every rung is gated out.
+  "DW12|1488|STORE|$T_DW_C_DDL;$T_DW_STAMPED;$T_DW_BELOW_FLOOR"
+
+  # DW13 lets the rung STEP OVER A ROLLED-BACK V39. The stamp then climbs to 63
+  # on a database that never built the unique asset-identity index, and every
+  # rung gated on the version can never be retried.
+  "DW13|1489|STORE|$T_DW_BELOW_FLOOR;$T_7DGX_BELOW_FLOOR"
+
+  # DW14 makes the arming seed an `INSERT OR REPLACE`. `createTables()` runs on
+  # every open, so the counter would then report "launches since the last open"
+  # while being read as "launches ever".
+  "DW14|1490|STORE|$T_DW_IDEMPOTENT;$T_DW_DURABLE"
+
+  # DW15 hardcodes the persisted event, so every row reads `failed` — including
+  # the finalized ones that are this table's denominator.
+  "DW15|1491|STORE|$T_DW_EVENTS;$T_DW_E2E"
+
+  # DW16 coerces a row this build cannot decode into `failed` instead of
+  # counting it. A wider-vocabulary build's row would silently inflate exactly
+  # the population a reader is counting.
+  "DW16|1492|STORE|$T_DW_UNKNOWN_EVENT"
+
+  # DW17 reads an unrecognized cause as nil — which says "this event had no
+  # reason", the opposite of what the row records.
+  "DW17|1493|STORE|$T_DW_UNKNOWN_CAUSE"
+
+  # DW18 drops the `+ 1` from the probe, so the page can never SEE the row that
+  # tells it the window truncated.
+  "DW18|1494|STORE|$T_DW_TRUNCATE"
+
+  # DW19 reads the forensic tail from the wrong end.
+  "DW19|1495|STORE|$T_DW_TRUNCATE"
+
+  # DW20 degenerates `firstArmedAt` into a second `lastArmedAt` — the exact
+  # defect that column's own doc comment warns about.
+  "DW20|1496|STORE|$T_DW_ARMS"
+
+  # DW21 IS THE SERIES' CENTRAL CLAIM: the download path is handed the ANALYSIS
+  # work-journal recorder. It compiles, every runtime rail is green, and a
+  # background transfer failure now writes a `work_journal` row under the
+  # latest analysis job's generation — which `recoverOrphans` reads as
+  # `terminalNoRequeue`. playhead-rqgr's shipped defect, from a new writer.
+  "DW21|1497|RT|$T_DW_C_WIRING;$T_DW_C_NOTANALYSIS"
+
+  # DW22 counts a write FAILURE as an arming, so the denominator inflates on
+  # exactly the runs where the numerator was lost.
+  "DW22|1498|STORE|$T_DW_WRITEFAIL"
+
+  # DW23 stops SEEDING the arming row, so "installed but never armed" collapses
+  # back into "no instrument at all" — the two states this bead exists to keep
+  # apart.
+  "DW23|1499|STORE|$T_DW_NEVER_ARMED;$T_DW_LADDER;$T_DW_FRESH;$T_DW_STAMPED"
+
+  # DW99 — VACUITY CONTROL, and it MUST SURVIVE. It renames the parameter
+  # BINDING inside `noteWriteFailure` — the argument LABEL and the call site are
+  # untouched. Its expectation is deliberately NON-EMPTY (playhead-ngsm: an
+  # entry with an empty expectation is scored KILLED, which makes a control
+  # expressed that way worthless) and it names the rail DW07 kills, so a KILLED
+  # verdict here would mean a rename changed behaviour.
+  "DW99|1500|DWJ|$T_DW_WRITEFAIL"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -12410,6 +12606,30 @@ describe_mutation() {
     BD39) echo "every SUCCESSFUL drop raises the loss invariant, so the line stops meaning anything" ;;
     BD40) echo "lastArmedAt degenerates into a second firstArmedAt" ;;
     BD99) echo "VACUITY CONTROL — the parameter BINDING inside recordBackgroundDownloadDrop is renamed; the label and every call site are untouched. MUST SURVIVE" ;;
+    DW01) echo "THE SHIPPED DEFECT VERBATIM — the workJournalRecorder argument goes away and the no-op default comes back" ;;
+    DW02) echo "the arming goes to a FRESHLY CONSTRUCTED recorder, so armedLaunches counts launches for an instrument nobody injected" ;;
+    DW03) echo "the journal is armed on the DEGRADED launch too, so the denominator counts launches on which the store never opened" ;;
+    DW04) echo "preempted collapses into failed — a resumable force-quit reported as a transfer that is over" ;;
+    DW05) echo "a SUCCESSFUL transfer is given a miss cause" ;;
+    DW06) echo "playhead-1nl6 AT THE CONFORMER — the SliceMetadata blob is dropped and {} written in its place" ;;
+    DW07) echo "a row that could not be written stops being counted, so armed-and-silent becomes reachable by silence" ;;
+    DW08) echo "a failed ARMING is swallowed — the denominator's own silent failure" ;;
+    DW09) echo "THIS BEAD'S DEFECT ONE LAYER IN — the wiring is intact and one protocol requirement's body is empty again" ;;
+    DW10) echo "THE V60 MISTAKE REPEATED — the V63 rung is missing from migrateOnlyForTesting" ;;
+    DW11) echo "the mirror of DW10 — the V63 rung is missing from the production ladder, so the stamp never moves" ;;
+    DW12) echo "createTables() stops carrying the DDL, so a store stamped at head with the tables missing can never repair" ;;
+    DW13) echo "the V63 rung STEPS OVER a rolled-back V39 and stamps 63 onto a database that never built the V39 index" ;;
+    DW14) echo "the arming seed becomes INSERT OR REPLACE, so every store OPEN resets the launch counter" ;;
+    DW15) echo "the persisted eventType is hardcoded, so every row reads failed — including the denominator" ;;
+    DW16) echo "an unrecognized eventType is coerced into failed instead of being counted" ;;
+    DW17) echo "an unrecognized cause reads as nil, which says the event had no reason" ;;
+    DW18) echo "the probe drops the + 1, so the page can never SEE the row that says it truncated" ;;
+    DW19) echo "the forensic tail is read from the wrong end" ;;
+    DW20) echo "firstArmedAt follows the LATEST arming — a second lastArmedAt under a name that says the opposite" ;;
+    DW21) echo "THE SERIES' CENTRAL CLAIM — the download path is handed the ANALYSIS work-journal recorder, so a transfer failure writes a work_journal row that recoverOrphans reads as terminalNoRequeue" ;;
+    DW22) echo "a write FAILURE is counted as an arming, inflating the denominator on exactly the runs where the numerator was lost" ;;
+    DW23) echo "the arming row is no longer SEEDED, so \"installed but never armed\" collapses into \"no instrument at all\"" ;;
+    DW99) echo "VACUITY CONTROL — the parameter BINDING inside noteWriteFailure is renamed; the label and the call site are untouched. MUST SURVIVE" ;;
     IW01) echo "THE SHIPPED DEFECT VERBATIM — the coarse gate is gone, so a runner hardcode reads as the model's grade" ;;
     IW02) echo "the gate opens for anything that is NOT permissive, so UNKNOWN licenses the band — the backfill defect in the reader" ;;
     IW03) echo "the coarse branch bypasses the gate at the CALL SITE instead of inside PersistedCertainty" ;;
@@ -13394,6 +13614,318 @@ EOF
     snippet NEW <<'EOF'
         occurredAt: Double = Date().timeIntervalSince1970,
         id: String = "background-download-drop"
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW01)
+    snippet OLD <<'EOF'
+        self.downloadManager = DownloadManager(
+            workJournalRecorder: downloadWorkJournalRecorder,
+EOF
+    snippet NEW <<'EOF'
+        self.downloadManager = DownloadManager(
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW02)
+    snippet OLD <<'EOF'
+            await downloadWorkJournalRecorder.recordInstrumentArmed(
+                at: Date().timeIntervalSince1970
+            )
+EOF
+    snippet NEW <<'EOF'
+            await AnalysisStoreDownloadWorkJournalRecorder(
+                store: analysisStore
+            ).recordInstrumentArmed(
+                at: Date().timeIntervalSince1970
+            )
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW03)
+    snippet OLD <<'EOF'
+            guard storeOutcome.isOpen else {
+                return  // Degraded launch: playback works, analysis does not.
+            }
+EOF
+    snippet NEW <<'EOF'
+            guard storeOutcome.isOpen else {
+                await downloadWorkJournalRecorder.recordInstrumentArmed(
+                    at: Date().timeIntervalSince1970
+                )
+                return  // Degraded launch: playback works, analysis does not.
+            }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW04)
+    snippet OLD <<'EOF'
+            eventType: .preempted,
+EOF
+    snippet NEW <<'EOF'
+            eventType: .failed,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW05)
+    snippet OLD <<'EOF'
+            eventType: .finalized,
+            cause: nil,
+EOF
+    snippet NEW <<'EOF'
+            eventType: .finalized,
+            cause: .userCancelled,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW06)
+    snippet OLD <<'EOF'
+            eventType: .failed,
+            cause: cause,
+            metadataJSON: metadataJSON
+        )
+    }
+
+    /// Persists the blob, same decision and same reason as above.
+EOF
+    snippet NEW <<'EOF'
+            eventType: .failed,
+            cause: cause,
+            metadataJSON: "{}"
+        )
+    }
+
+    /// Persists the blob, same decision and same reason as above.
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW07)
+    snippet OLD <<'EOF'
+            await noteWriteFailure(
+                episodeId: episodeId,
+                eventType: eventType,
+                cause: cause,
+                at: now,
+                rowError: error
+            )
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW08)
+    snippet OLD <<'EOF'
+            invariantRecorder?(
+                .downloadWorkJournalNotRecorded,
+                "arming=failed — this launch had a live download work-journal "
+                + "recorder and download_work_journal_arming.armedLaunches did "
+                + "not move, so any row it goes on to write has no launch in "
+                + "the denominator: \(String(describing: error))"
+            )
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW09)
+    snippet OLD <<'EOF'
+    func recordFailed(episodeId: String, cause: InternalMissCause) async {
+        await append(
+            episodeId: episodeId,
+            eventType: .failed,
+            cause: cause,
+            metadataJSON: "{}"
+        )
+    }
+EOF
+    snippet NEW <<'EOF'
+    func recordFailed(episodeId: String, cause: InternalMissCause) async {}
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW10)
+    snippet OLD <<'EOF'
+        try migrateDownloadWorkJournalV63IfNeeded()
+    }
+    #endif
+EOF
+    snippet NEW <<'EOF'
+    }
+    #endif
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW11)
+    snippet OLD <<'EOF'
+            try migrateDownloadWorkJournalV63IfNeeded()
+            try exec("COMMIT")
+EOF
+    snippet NEW <<'EOF'
+            try exec("COMMIT")
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW12)
+    snippet OLD <<'EOF'
+        // playhead-4xmz: the download-path work journal and its arming row.
+        // Declared here AND in `migrateDownloadWorkJournalV63IfNeeded` for the
+        // same V49 house rule, through the same single shared helper.
+        try createDownloadWorkJournalTables()
+EOF
+    snippet NEW <<'EOF'
+        // playhead-4xmz: the download-path work journal and its arming row.
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW13)
+    snippet OLD <<'EOF'
+        guard observed < 63 else { return }
+        // DO NOT STEP OVER A ROLLED-BACK V39 — same rationale as V40–V62.
+        guard observed >= 62 else { return }
+EOF
+    snippet NEW <<'EOF'
+        guard observed < 63 else { return }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW14)
+    snippet OLD <<'EOF'
+            INSERT OR IGNORE INTO download_work_journal_arming
+EOF
+    snippet NEW <<'EOF'
+            INSERT OR REPLACE INTO download_work_journal_arming
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW15)
+    snippet OLD <<'EOF'
+        bind(stmt, 3, record.eventType.rawValue)
+EOF
+    snippet NEW <<'EOF'
+        bind(stmt, 3, DownloadWorkJournalEventType.failed.rawValue)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW16)
+    snippet OLD <<'EOF'
+            let rawEvent = text(stmt, 2)
+            guard let eventType = DownloadWorkJournalEventType(
+                rawValue: rawEvent
+            ) else {
+                unrecognizedEventType += 1
+                continue
+            }
+EOF
+    snippet NEW <<'EOF'
+            let rawEvent = text(stmt, 2)
+            let eventType = DownloadWorkJournalEventType(
+                rawValue: rawEvent
+            ) ?? .failed
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW17)
+    snippet OLD <<'EOF'
+                cause: rawCause.map {
+                    InternalMissCause(rawValue: $0) ?? .unknown($0)
+                },
+EOF
+    snippet NEW <<'EOF'
+                cause: rawCause.flatMap {
+                    InternalMissCause(rawValue: $0)
+                },
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW18)
+    snippet OLD <<'EOF'
+        let probe = ceiling >= Int(Int32.max) ? Int(Int32.max) : ceiling + 1
+        let stmt = try prepare("""
+            SELECT id, episodeId, eventType, cause, occurredAt, metadata
+EOF
+    snippet NEW <<'EOF'
+        let probe = ceiling
+        let stmt = try prepare("""
+            SELECT id, episodeId, eventType, cause, occurredAt, metadata
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW19)
+    snippet OLD <<'EOF'
+            FROM download_work_journal
+            ORDER BY occurredAt DESC
+EOF
+    snippet NEW <<'EOF'
+            FROM download_work_journal
+            ORDER BY occurredAt ASC
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW20)
+    snippet OLD <<'EOF'
+                firstArmedAt = CASE
+                    WHEN download_work_journal_arming.armedLaunches = 0
+                    THEN excluded.firstArmedAt
+                    ELSE download_work_journal_arming.firstArmedAt
+                END,
+EOF
+    snippet NEW <<'EOF'
+                firstArmedAt = excluded.firstArmedAt,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW21)
+    snippet OLD <<'EOF'
+            workJournalRecorder: downloadWorkJournalRecorder,
+EOF
+    snippet NEW <<'EOF'
+            workJournalRecorder: AnalysisStoreWorkJournalRecorder(store: analysisStore),
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW22)
+    snippet OLD <<'EOF'
+            ON CONFLICT(id) DO UPDATE SET
+                writeFailures = writeFailures + 1
+EOF
+    snippet NEW <<'EOF'
+            ON CONFLICT(id) DO UPDATE SET
+                writeFailures = writeFailures + 1,
+                armedLaunches = armedLaunches + 1
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW23)
+    snippet OLD <<'EOF'
+        let stmt = try prepare("""
+            INSERT OR IGNORE INTO download_work_journal_arming
+            (id, armedLaunches, writeFailures, firstArmedAt, lastArmedAt,
+             installedAt)
+            VALUES (1, 0, 0, NULL, NULL, ?)
+            """)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, Date().timeIntervalSince1970)
+        try step(stmt, expecting: SQLITE_DONE)
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW99)
+    snippet OLD <<'EOF'
+        at now: Double,
+        rowError: Error
+    ) async {
+        do {
+            try await store.noteDownloadWorkJournalWriteFailure(at: now)
+EOF
+    snippet NEW <<'EOF'
+        at stamp: Double,
+        rowError: Error
+    ) async {
+        let now = stamp
+        do {
+            try await store.noteDownloadWorkJournalWriteFailure(at: now)
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
