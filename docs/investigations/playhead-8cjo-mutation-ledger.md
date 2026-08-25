@@ -32,7 +32,7 @@ because `restore_and_verify` re-hashes every mutable file between runs and
 | AK10 | the emit path stops gating on a subscriber | PARTITION, **ATTACH** (2) | **the same 2, exactly — including the widened half** | KILLED |
 | AK11 | the view model keeps its own copy of the forwarding rule | DELEGATES, NOCOPY (2) | **the same 2, exactly** | KILLED |
 | AK12 | the acknowledgement records no delivery | ACCEPTED, PARTITION, WALK, SEAM, CLEARS (5) | **the same 5, exactly** | KILLED |
-| AK99 | **VACUITY CONTROL** — the seam's receipt binding renamed, nothing else | **MUST SURVIVE, 0 failures** | | |
+| AK99 | **VACUITY CONTROL** — the seam's receipt binding renamed, nothing else | **MUST SURVIVE, 0 failures** | **0 failures, 2577 tests passed, TEST SUCCEEDED** | **SURVIVED** |
 
 MS01 verdict: **KILLED, and its eighteen observed victims are the eighteen predicted ones — set equality, no extras and no misses.** It is the widest prediction in the series and the one most able to be sloppy.
 
@@ -314,7 +314,7 @@ failure paths has left 38 of them on this box, and that batch numbers repeat.
 | MS06 | endEpisode stops clearing the receipts | ENDEP (1) | **ENDEP, exactly** | KILLED |
 | MS15 | beginEpisode stops clearing them | REPLAY (1) | **REPLAY, exactly** | KILLED |
 | MS07 | the receipt records the SPAN START as where the skip fired | POSITION (1) | **POSITION, exactly** | KILLED |
-| MS99 | **VACUITY CONTROL** — the attachment-test local renamed | **MUST SURVIVE** | | |
+| MS99 | **VACUITY CONTROL** — the attachment-test local renamed | **MUST SURVIVE** | **0 failures, 2577 tests passed, TEST SUCCEEDED** | **SURVIVED** |
 
 **MS02 is the one that needed re-aiming rather than re-anchoring, and the
 distinction matters.** Its old body added a receipt write in BOTH arms of
@@ -433,3 +433,69 @@ and the battery prints `ERROR — anchor did not apply`. That happened twice in
 this session (MS99's second anchor, and MS02's would have) and cost minutes each
 time. A mutation battery that can only fail loudly is the cheap case; the work
 is in the three above.
+
+## THE TWO VACUITY CONTROLS — both SURVIVED, demonstrated rather than asserted
+
+17 KILLED, 2 SURVIVED, 19/19 recorded. Neither control died, so nothing above
+them is void. Their evidence is captured here because a demonstration that
+only ever existed in an agent's context is an assertion to everyone who reads
+the branch later.
+
+#### AK99 (batch 1432)
+
+```
+--- the battery's verdict line ---
+AK99   SURVIVED  VACUITY CONTROL — the local the acknowledgement seam binds its receipt to is renamed and nothing else is. MUST SURVIVE
+--- observed failures block (must be EMPTY for a control) ---
+(none — no test failed under this mutation)
+
+--- host health, read from the batch's OWN xcodebuild log ---
+VERIFY: log /Users/dabrams/playhead-gate-artifacts/8cjo/batchlogs//batch-1432.log (4841576 bytes, 2026-08-25 08:54)
+VERIFY: tests started   : 2771
+VERIFY: swift summary   : Test run with 2577 tests in 251 suites passed
+VERIFY: xcodebuild out  : ** TEST SUCCEEDED **
+VERIFY: failure lines   : 0
+VERIFY: crash markers   : 0
+VERIFY: OK
+```
+
+#### MS99 (batch 1414)
+
+```
+--- the battery's verdict line ---
+MS99   SURVIVED  VACUITY CONTROL — the attachment-test local in emitBannerItem is renamed and nothing else is. MUST SURVIVE
+--- observed failures block (must be EMPTY for a control) ---
+(none — no test failed under this mutation)
+
+--- host health, read from the batch's OWN xcodebuild log ---
+VERIFY: log /Users/dabrams/playhead-gate-artifacts/8cjo/batchlogs//batch-1414.log (4828578 bytes, 2026-08-25 08:59)
+VERIFY: tests started   : 2772
+VERIFY: swift summary   : Test run with 2577 tests in 251 suites passed
+VERIFY: xcodebuild out  : ** TEST SUCCEEDED **
+VERIFY: failure lines   : 0
+VERIFY: crash markers   : 0
+VERIFY: OK
+```
+
+#### The freshness gate, proven by making it refuse
+
+MS99 is batch **1414**, and a `batch-1414.log` from **playhead-2d6i's own MS99
+run three days ago** is still on this box. A checker that searched
+`/private/tmp/playhead-mutation-battery.*` would have read that one. Both files
+exist right now:
+
+```
+today's  (accepted): 2026-08-25 08:59  4828578 bytes
+Aug-22's (refused) : 2026-08-22 17:44  4646131 bytes
+RUN_FLOOR          : 2026-08-25 07:50
+```
+
+And the checker refusing the stale one, run against it deliberately:
+
+```
+VERIFY: FAIL — /private/tmp/claude-501/-Users-dabrams-playhead/stalebl//batch-1414.log predates this run (2026-08-22 17:44).
+VERIFY: batch numbers are REUSED across beads: a batch-1414.log from 2026-08-22
+VERIFY: (playhead-2d6i's own MS99 run) sits in /private/tmp to this day, and
+VERIFY: reading it as today's control is the exact substitution this bead is about.
+exit=1
+```
