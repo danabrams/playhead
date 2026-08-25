@@ -624,6 +624,71 @@ not describe the app. Three consequences:
 
 ---
 
+## M3c. THE CAPTURE WAS IMPLEMENTED AND THEN WITHDRAWN — two regressions for a value of zero
+
+M3b established that `sqlite3_system_errno` reports nothing on this platform.
+The capture was nevertheless shipped for a while, on the argument that it costs
+one call and keeps measuring itself. Two review rounds priced that argument and
+it does not hold. **The production diff from `playhead-enzva` is now empty.**
+
+| consumer | what the clause did |
+|---|---|
+| `AnalysisStoreHealthDetail.sanitize` | admits a message only if EVERY character is in `DiagnosticTextSanitizer.allowedCharacters` (`A-Za-z0-9_.$+-()` and space). Every rendering carries `[` and `]`; two carry `=` or `:`. **Rejection OMITS the field**, so the durable on-device `detail` went from `unable to open database file` to nothing at all for 100 % of store open and migration failures — silently, since `failureClass` is computed from the RAW message. |
+| `PersistedStateInvariantEvaluator.sanitize` | keeps `.prefix(80)`, and its output is embedded verbatim in the diagnostics archive a user can mail. A 39-character clause displaced the `(SQL: …)` tail that was the field's only content, and was cut mid-word. |
+
+Round 1 fixed the first by teaching `sanitize` to strip the clause. Fixing the
+second the same way would thread a log-only decoration through two privacy
+sanitizers in two unrelated subsystems — and the **fifteen** other
+`sqlite3_errmsg` sites in `AnalysisStore.swift` would each need it too. That is
+not "one call and one interpolation".
+
+What ships instead is the measurement as a standing test,
+`SQLiteSystemErrnoPlatformProbeTests`. Note its failure direction, which is
+deliberately asymmetric: it pins the **defect** — one message, one extended
+code, one errno for three unrelated causes — and NOT `errno == 0`. A platform
+that starts discriminating turns it RED, which is how it asks to be revisited.
+It also pins the two properties other machinery depends on: that SQLite still
+emits the exact prose `scripts/gate_baseline.py` matches, and that the durable
+health `detail` still survives.
+
+---
+
+## M6. OPTION A MAKES THE MERGE GATE PERMANENTLY RED, AND `--accept-baseline` CANNOT CLEAR IT
+
+**REPORTED, NOT FIXED.** This is a baseline decision and the brief reserves it.
+
+`scripts/gate-baseline.PlayheadFastTests.json` holds **118 entries, 0
+deterministic, `runs_observed: 11`** — every one measured under the PARALLEL
+regime, and every one a starvation flake or a resource denial that regime
+produced. Serialized, they pass. `gate_baseline.py` reads a run with **zero
+failures and zero resource casualties against a non-empty baseline** as
+`BASELINE IS FICTION`:
+
+```python
+if entries and not run.failures and not run.resource:
+    result.baseline_fiction = True
+```
+
+and `baseline_fiction` is one of the conditions that makes the verdict RED and
+the gate exit 65. **`--accept-baseline` does not clear it**: `merge()` drops an
+entry only when `failed_runs == 0`, which an entry already in the file can never
+reach. Driven directly rather than reasoned about: an all-pass run reports
+fiction and exits 1; one accept leaves 118 entries at `runs_observed: 12`; a
+second identical run reports fiction again; a second accept still leaves 118.
+
+**M4's serialized run escaped this by one test.** It had exactly one failure —
+`AnalyticsCounterStoreTests."The shared store is volatile under XCTest"` — and
+this branch fixes that test. So the next clean serialized full plan is expected
+to report `BASELINE IS FICTION` and exit 65 with nothing wrong.
+
+The remedy is a decision, not a command. Emptying `tests` in the baseline file
+is defensible on this bead's own evidence — those 118 names record a regime
+this change abolishes, and the gate's whole doctrine is that the file is a
+record of what is known-broken rather than a ceiling — but it discards eleven
+runs of observation in one step, and it is Dan's call, not an implementer's.
+
+---
+
 ## M5. REVIEW ROUND 1 — what the instrument got wrong about ITSELF
 
 Six defects in the two scripts, found by driving them rather than by re-reading
