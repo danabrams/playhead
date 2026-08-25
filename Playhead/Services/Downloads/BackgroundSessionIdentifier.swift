@@ -92,8 +92,12 @@ extension InternalMissCause {
 /// types (which land on a parallel branch).
 ///
 /// The default in-process binding (`NoopWorkJournalRecorder`) swallows
-/// events; uzdq wires a real recorder by passing it to
-/// `DownloadManager(workJournalRecorder:)` at construction time.
+/// events. **PRODUCTION HELD THAT DEFAULT FOR FOUR MONTHS** — the sentence
+/// here used to say uzdq wires a real recorder at construction, and nothing
+/// ever did. playhead-4xmz wires one: `AnalysisStoreDownloadWorkJournalRecorder`
+/// in `DownloadWorkJournalLedger.swift`, which writes `download_work_journal`
+/// and NOT the `work_journal` table uzdq owns — see that file's header for why
+/// the two must not be the same table.
 protocol WorkJournalRecording: Sendable {
     /// Record that the background transfer for `episodeId` finished
     /// successfully and its artifact is in place.

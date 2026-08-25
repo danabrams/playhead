@@ -3324,14 +3324,24 @@ T_DW_UNKNOWN_EVENT="a row with an unrecognized eventType is counted, not folded 
 T_DW_UNKNOWN_CAUSE="an unrecognized cause round-trips as .unknown rather than becoming nil"
 T_DW_TRUNCATE="a window that hits its limit reports truncated, and most-recent-first"
 T_DW_E2E="the force-quit resume scan preempted event reaches the store through DownloadManager"
-T_DW_DEFAULT_NOOP="the DEFAULT recorder still writes nothing, which is what makes armedLaunches readable"
 T_DW_LADDER="a V62 store climbs to head through the ladder-only seam and gains both tables"
 T_DW_FROM_V61="a store seeded two rungs back still reaches head, so V63 does not depend on running alone"
 T_DW_IDEMPOTENT="re-running the rung preserves armedLaunches, the stamps, and the rows"
 T_DW_FRESH="a fresh store is at head with both DOWNLOAD-JOURNAL tables and a seeded arming row"
 T_DW_STAMPED="a store STAMPED at head but missing the DOWNLOAD-JOURNAL tables gets them back on the next open"
 T_DW_BELOW_FLOOR="the DOWNLOAD-JOURNAL tables exist BELOW the V39 rollback floor, so presence and not the stamp is the discriminator"
-T_DW_UNTOUCHED="the download journal writes leave work_journal untouched"
+T_DW_UNTOUCHED="the DOWNLOAD recorder writes no work_journal row even when a job EXISTS"
+T_DW_CANCEL_FIN="a finalization cancelled before it runs writes no row and counts no write failure"
+T_DW_CANCEL_STORE="the store's UnlessCancelled append refuses inside the actor, not just at the caller"
+T_DW_CANCEL_FAIL="a cancelled FAILURE is still recorded — the asymmetry is deliberate"
+# TWO RAILS HERE DELIBERATELY HAVE NO MUTANT, and both are stated rather than
+# left as gaps. `an unbounded limit returns everything instead of trapping`
+# guards a TRAP: its mutant kills the host, and this battery scores a test with
+# no verdict as a PASS (playhead-gjlp0), so the verdict would be about log
+# flushing rather than about the code. `the ANALYSIS recorder really would
+# write a work_journal row under the job generation` demonstrates EXISTING
+# behaviour that this bead did not write — it is the premise the design rests
+# on, and a mutant of it would be a mutant of playhead-uzdq's recorder.
 # `aV62StoreGenuinelyLacksTheTables` deliberately has NO mutant and therefore no
 # variable, on the V62 suite's own precedent: it asserts that a table the suite
 # itself dropped is dropped — a vacuity guard for the rails around it, and a
@@ -12234,6 +12244,37 @@ MUTATIONS=(
   # entry with an empty expectation is scored KILLED, which makes a control
   # expressed that way worthless) and it names the rail DW07 kills, so a KILLED
   # verdict here would mean a rename changed behaviour.
+  # DW24 removes the check that has to happen INSIDE the actor. An `await` onto
+  # an actor is not a cancellation point, so the caller's pre-hop
+  # `Task.isCancelled` cannot see a cancellation that lands during the hop —
+  # and that window is now however long the store is busy.
+  "DW24|1501|STORE|$T_DW_CANCEL_STORE"
+
+  # DW25 routes the FINALIZED event through the plain insert, so a finalization
+  # the manager retired before deleting the bytes publishes a row claiming an
+  # artifact that is gone.
+  "DW25|1502|DWJ|$T_DW_CANCEL_FIN"
+
+  # DW26 books a CANCELLED write as a FAILED one. `writeFailures` then says this
+  # database could not hold a row — a claim about the store, and the one reading
+  # that counter exists to make.
+  "DW26|1503|DWJ|$T_DW_CANCEL_FIN"
+
+  # DW27 makes the recorder slot a `var` again. Nothing at runtime can see it;
+  # a `var` is one line from a post-init setter, which is the shape that does
+  # not run on a sceneless launch.
+  "DW27|1504|DLMGR|$T_DW_C_LET"
+
+  # DW28 IS THE HAZARD ITSELF, at the recorder rather than at the wiring: the
+  # download recorder ALSO forwards to the analysis one. Every download-journal
+  # rail stays green and a `work_journal` row appears under the live job's
+  # generation, which `recoverOrphans` reads as terminalNoRequeue.
+  "DW28|1505|DWJ|$T_DW_UNTOUCHED"
+
+  # DW29 collapses the row key onto {episode, event}, so a REPEATED failure —
+  # the most interesting thing this table can show — overwrites itself.
+  "DW29|1506|DWJ|$T_DW_REPEAT"
+
   "DW99|1500|DWJ|$T_DW_WRITEFAIL"
 )
 
@@ -12631,6 +12672,12 @@ describe_mutation() {
     DW21) echo "THE SERIES' CENTRAL CLAIM — the download path is handed the ANALYSIS work-journal recorder, so a transfer failure writes a work_journal row that recoverOrphans reads as terminalNoRequeue" ;;
     DW22) echo "a write FAILURE is counted as an arming, inflating the denominator on exactly the runs where the numerator was lost" ;;
     DW23) echo "the arming row is no longer SEEDED, so \"installed but never armed\" collapses into \"no instrument at all\"" ;;
+    DW24) echo "the cancellation check INSIDE the actor is removed, so a cancellation landing during the hop is invisible" ;;
+    DW25) echo "the FINALIZED event stops honouring cancellation, so a retired finalization publishes a row for deleted bytes" ;;
+    DW26) echo "a CANCELLED write is booked as a FAILED one, so writeFailures claims the store could not hold a row" ;;
+    DW27) echo "the recorder slot goes back to being a var — one line from a post-init setter" ;;
+    DW28) echo "THE HAZARD AT THE RECORDER — the download recorder ALSO forwards to the ANALYSIS one, so a transfer failure lands in work_journal under the live job generation" ;;
+    DW29) echo "the row key collapses onto {episode, event}, so a repeated failure overwrites itself" ;;
     DW99) echo "VACUITY CONTROL — the parameter BINDING inside noteWriteFailure is renamed; the label and the call site are untouched. MUST SURVIVE" ;;
     IW01) echo "THE SHIPPED DEFECT VERBATIM — the coarse gate is gone, so a runner hardcode reads as the model's grade" ;;
     IW02) echo "the gate opens for anything that is NOT permissive, so UNKNOWN licenses the band — the backfill defect in the reader" ;;
@@ -13910,6 +13957,89 @@ EOF
         try step(stmt, expecting: SQLITE_DONE)
 EOF
     snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW24)
+    snippet OLD <<'EOF'
+    ) throws {
+        try Task.checkCancellation()
+        try insertDownloadWorkJournalEntry(record)
+    }
+EOF
+    snippet NEW <<'EOF'
+    ) throws {
+        try insertDownloadWorkJournalEntry(record)
+    }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW25)
+    snippet OLD <<'EOF'
+            eventType: .finalized,
+            cause: nil,
+            metadataJSON: "{}",
+            honoringCancellation: true
+EOF
+    snippet NEW <<'EOF'
+            eventType: .finalized,
+            cause: nil,
+            metadataJSON: "{}",
+            honoringCancellation: false
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW26)
+    snippet OLD <<'EOF'
+        } catch is CancellationError {
+            // A CANCELLED WRITE IS NOT A FAILED WRITE. Counting it into
+            // `writeFailures` would say this database could not hold a row,
+            // which is a claim about the STORE — and it is the one reading
+            // that counter exists to make. Nothing is lost that anybody asked
+            // to keep: the only cancelling caller is the manager retiring a
+            // finalization whose bytes it is about to delete.
+            return
+        } catch {
+EOF
+    snippet NEW <<'EOF'
+        } catch {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW27)
+    snippet OLD <<'EOF'
+    internal let workJournalRecorder: WorkJournalRecording
+EOF
+    snippet NEW <<'EOF'
+    internal var workJournalRecorder: WorkJournalRecording
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW28)
+    snippet OLD <<'EOF'
+        do {
+            if honoringCancellation {
+EOF
+    snippet NEW <<'EOF'
+        do {
+            await AnalysisStoreWorkJournalRecorder(store: store).recordFailed(
+                episodeId: episodeId,
+                cause: cause ?? .pipelineError,
+                metadataJSON: metadataJSON
+            )
+            if honoringCancellation {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW29)
+    snippet OLD <<'EOF'
+        let record = DownloadWorkJournalRecord(
+            episodeId: episodeId,
+EOF
+    snippet NEW <<'EOF'
+        let record = DownloadWorkJournalRecord(
+            id: "\(episodeId)|\(eventType.rawValue)",
+            episodeId: episodeId,
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -29354,7 +29484,15 @@ while [ $# -gt 0 ]; do
     --list)    LIST_ONLY=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     --only)  ONLY="$2"; shift 2 ;;
-    --series) ONLY_SERIES="$2"; shift 2 ;;
+    --series)
+      # An EXPLICIT empty string must not read as "no filter". `set -u` catches
+      # a MISSING value; it cannot catch `--series ""`, which would silently
+      # select the entire battery — about 1,500 batches — instead of refusing.
+      if [ -z "$2" ]; then
+        echo "mutation-battery: --series needs a non-empty prefix" >&2
+        exit 2
+      fi
+      ONLY_SERIES="$2"; shift 2 ;;
     --batch) ONLY_BATCH="$2"; shift 2 ;;
     -h|--help)
       # Print the whole header block and stop at the first non-comment line.
@@ -29460,12 +29598,12 @@ for rec in "${MUTATIONS[@]}"; do
   # ~3 minutes of redundant baseline per mutant, which was 72 minutes of the
   # first attempt at this bead's ledger.
   #
-  # IT CANNOT DROP A SERIES' VACUITY CONTROL, and that is by construction
-  # rather than by a special case: a control is named after its series
-  # (`BD99`, `DW99`), so any prefix that selects the series selects the
-  # control too. That is the hole the R-engine batteries had to close
-  # explicitly (playhead-o89d R5), and the reason it is stated here is that
-  # "by construction" is only true while controls keep that naming convention.
+  # IT CANNOT DROP A SERIES' VACUITY CONTROL — but NOT "by construction", which
+  # is what this comment claimed on its first cut and is false: `--series DW0`
+  # selects DW01…DW09 and not DW99, and such a run exits 0 where the whole
+  # series exits 1, because the control legitimately survives. Dropping a
+  # control turns a red run GREEN. What actually stops it is the explicit
+  # refusal below the SELECTED loop.
   if [ -n "$ONLY_SERIES" ]; then
     case "$name" in
       "$ONLY_SERIES"*) : ;;
@@ -29478,6 +29616,46 @@ done
 if [ "${#SELECTED[@]}" -eq 0 ]; then
   echo "mutation-battery: nothing selected" >&2
   exit 2
+fi
+
+# playhead-4xmz REVIEW R1: A SELECTION THAT DROPS A SERIES' VACUITY CONTROL IS
+# REFUSED, and it is refused rather than repaired because the failure it
+# produces is the dangerous direction. `--series DW0` selects DW01…DW09 and NOT
+# DW99: the run then exits 0 printing "All mutations killed", where the full
+# series exits 1 because the control legitimately SURVIVES. Dropping the control
+# turns a red run green — the exact hole `playhead-o89d` R5 had to close in the
+# R-engine batteries, arriving here through a new flag.
+#
+# The first cut of `--series` asserted this could not happen "by construction",
+# because a control is named after its series. That is true of `--series DW` and
+# false of every shorter-than-the-whole-prefix spelling, which is what makes it
+# worth a check rather than a comment.
+if [ -n "$ONLY_SERIES" ]; then
+  for rec in "${MUTATIONS[@]}"; do
+    ctl_name="$(rec_name "$rec")"
+    case "$ctl_name" in
+      *99) ;;
+      *) continue ;;
+    esac
+    ctl_series="${ctl_name%99}"
+    # Does this selection touch that series at all? If it does, the control
+    # must be in it.
+    touches=0
+    holds_control=0
+    for sel in "${SELECTED[@]}"; do
+      sel_name="$(rec_name "$sel")"
+      case "$sel_name" in
+        "$ctl_series"*) touches=1 ;;
+      esac
+      [ "$sel_name" = "$ctl_name" ] && holds_control=1
+    done
+    if [ "$touches" -eq 1 ] && [ "$holds_control" -eq 0 ]; then
+      echo "mutation-battery: --series '$ONLY_SERIES' selects part of the $ctl_series series but NOT its vacuity control $ctl_name." >&2
+      echo "  A run without the control cannot distinguish 'every mutant died' from 'the suites fail on anything'," >&2
+      echo "  and it exits 0 where the whole series exits 1. Use --series $ctl_series, or --only $ctl_name to drive one." >&2
+      exit 2
+    fi
+  done
 fi
 
 # Batch ids, in first-seen order

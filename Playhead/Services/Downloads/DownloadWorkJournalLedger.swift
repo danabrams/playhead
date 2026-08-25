@@ -129,17 +129,53 @@
 // is a real completion-versus-failure split for the download half, which is
 // the question 7dgx's ledger could only ever answer half of.
 //
+// NAME THE POPULATION BEFORE QUOTING A RATE FROM IT. This is a split over
+// transfers that reached a TERMINAL DELEGATE CALLBACK, and it excludes two
+// things: the three pre-start abandonments in `backgroundDownload`, which are
+// `background_download_drops` rows and never reach a callback at all; and any
+// transfer that vanishes with neither a callback nor a resume blob for the
+// force-quit scan to find. `finalized / (finalized + failed)` is therefore a
+// success rate for a population narrower than "downloads attempted", and
+// reading it as the wider one is the thing this file's own "WHAT WOULD THIS
+// READ IF…" paragraph is about.
+//
 // ─────────────────────────────────────────────────────────────────────────
 // LIMITS, NAMED
 // ─────────────────────────────────────────────────────────────────────────
 // L-1 UNBOUNDED. `finalized` fires on every successful background download, so
-//     unlike `background_download_drops` this table has a non-rare writer. A
-//     finalized row's `metadata` is literally `{}`, so a row is ~120 bytes:
-//     ~0.9 MB/year at 20 auto-downloads a day. It is NOT pruned, on
-//     `work_journal`'s and `background_download_drops`' own precedent. A
-//     newest-N ring was considered and REJECTED: it evicts the rare
-//     `failed`/`preempted` rows preferentially, i.e. it destroys exactly the
-//     population the table exists for while leaving the common one intact.
+//     unlike `background_download_drops` this table has a non-rare writer.
+//
+//     MEASURED rather than reasoned, because the arithmetic here was wrong by
+//     3x on the first cut and the two things it omitted are the reason. Below:
+//     7,300 `finalized` rows (`metadata` literally `{}`), the shipped DDL
+//     verbatim, `VACUUM`ed — so every figure is a FLOOR, since a live WAL
+//     database is larger. `epLen` is the length of `episodeId`, which is
+//     `Episode.makeCanonicalKey` = `feedURL.absoluteString + "::" +
+//     feedItemGUID` — a long compound key, NOT a short id, so ~88 is the
+//     realistic column and 16 is not a case that occurs.
+//
+//         epLen   table B/row   +occurred idx   +episode idx   MB/yr @ 20/day
+//            16           123             134            162             1.18
+//            36           144             154            203             1.48
+//        ** 88 **         198             209        ** 312 **       ** 2.28 **
+//           160           274             284            463             3.38
+//
+//     The two omissions: `id TEXT PRIMARY KEY` builds an implicit
+//     `sqlite_autoindex`, so the 36-char UUID is stored TWICE; and the two
+//     explicit indexes store the long `episodeId` again. At epLen 88 the
+//     indexes are 114 of the 312 bytes — 37 %, and `idx_..._episode` alone is
+//     103 of them, on the one table whose only named limit is growth. It is
+//     kept anyway, deliberately: the reader this table is for runs raw
+//     `sqlite3` against a pulled file, `WHERE episodeId = ?` is the query they
+//     will write, and `idx_background_download_drops_episode` is equally
+//     unqueried from Swift for the same reason. Named here rather than left to
+//     be discovered.
+//
+//     ~2.3 MB/year is small enough that it is NOT pruned, on `work_journal`'s
+//     and `background_download_drops`' own precedent. A newest-N ring was
+//     considered and REJECTED: it evicts the rare `failed`/`preempted` rows
+//     preferentially, i.e. it destroys exactly the population the table exists
+//     for while leaving the common one intact.
 // L-2 The residual line goes to the surface-status JSON Lines stream, which
 //     playhead-dyvh2 MEASURED is not an independent medium — the app sets no
 //     data-protection entitlement, so it takes the same
@@ -154,6 +190,31 @@
 //     The consequence is that the CALLER cannot tell a live recorder from the
 //     no-op; `DownloadWorkJournalWiringSourceCanaryTests` and `armedLaunches`
 //     are what cover that, in source and on disk respectively.
+// L-5 THE FORCE-QUIT SCAN NOW AWAITS A STORE WRITE, INSIDE A 2 s SLA.
+//     `PlayheadAppDelegate.didFinishLaunchingWithOptions` fires
+//     `scanForSuspendedTransfers()` and logs an error if it exceeds 2 s. Its
+//     two recorder calls were no-ops before this bead; they are
+//     `AnalysisStore` writes now, and `insertDownloadWorkJournalEntry` reaches
+//     `ensureOpen()`, which runs the whole migration ladder. So on the first
+//     launch of a build carrying a new rung the scan can serialize behind it —
+//     and it makes the download path an UNMANAGED opener of `analysis.sqlite`,
+//     which is the hazard `PlayheadRuntime` names as the reason `armDropLedger`
+//     was moved OUT of `DownloadManager.bootstrap()`.
+//
+//     GATING ON `store.isOpen` DOES NOT FIX IT and was rejected for that
+//     reason, not for taste: reading `isOpen` is itself an actor hop, so it
+//     serializes behind the very migration it is trying to avoid waiting for.
+//     What it would buy is the unmanaged-open half at the cost of losing the
+//     cold-launch rows entirely — on the launch they are about.
+//
+//     What bounds the harm, stated so nobody reads this as free: the SLA is an
+//     `os_log` error line and nothing acts on it; the scan ALREADY carries a
+//     10 s bounded `enumerationIO` crossing (playhead-rouw) that can blow the
+//     same budget under a wedged daemon; and the failure COUNTING survives —
+//     a thrown migrate rolls `didOpen` back, so
+//     `AnalysisStoreRecoveryCoordinator.openAtLaunch` still runs, still fails,
+//     and still counts. Nobody has measured the ladder's cost on a device.
+//
 // L-4 A `quarantineAndRebuild` "start fresh" moves the whole history aside into
 //     a sibling `AnalysisStore-quarantined-<stamp>-*` whose `armedLaunches` is
 //     0 and whose `installedAt` dates the REBUILD. List those siblings before
@@ -180,7 +241,11 @@ import OSLog
 /// the values here: this table is read by a human on a device pull and by
 /// nothing else in the app. Sharing the type would have said otherwise in the
 /// one place a reader looks.
-enum DownloadWorkJournalEventType: String, Sendable, Codable, Equatable, CaseIterable {
+// `Codable` is deliberately absent: nothing encodes or decodes this type —
+// persistence goes through `rawValue` explicitly, on both sides — and a
+// conformance nobody exercises is a claim about the type that no test can
+// check. `Sendable`/`Equatable`/`CaseIterable` are all used.
+enum DownloadWorkJournalEventType: String, Sendable, Equatable, CaseIterable {
     /// The background transfer completed and its artifact is in place.
     /// The DENOMINATOR — see this file's header for why it is recorded.
     case finalized
@@ -216,6 +281,16 @@ struct DownloadWorkJournalRecord: Sendable, Equatable {
     /// Why, when there is a why. `nil` exactly for ``DownloadWorkJournalEventType/finalized``:
     /// a successful transfer has no miss cause, and inventing one would put a
     /// value in a column whose whole job is to carry a reason.
+    ///
+    /// **THAT BICONDITIONAL IS A CONVENTION, NOT A CONSTRAINT, and the
+    /// direction that is enforced is the one that has a writer.** No `CHECK`
+    /// backs it and `insertDownloadWorkJournalEntry` accepts any combination.
+    /// A `CHECK ((eventType = 'finalized') = (cause IS NULL))` was considered
+    /// and rejected: it would reject a future wider `eventType` at INSERT time
+    /// — turning a vocabulary extension into a store that cannot be written
+    /// to — which is a worse failure than a mislabelled column. What is
+    /// covered is `finalized` → nil (a rail and a mutant); `failed`/`preempted`
+    /// → non-nil is the writer's discipline and nothing checks it.
     let cause: InternalMissCause?
 
     /// Unix epoch seconds at the moment the event was recorded.
@@ -385,12 +460,27 @@ struct AnalysisStoreDownloadWorkJournalRecorder: WorkJournalRecording {
 
     // MARK: WorkJournalRecording
 
+    /// HONOURS CANCELLATION, and it is the only one of the four that does.
+    ///
+    /// `DownloadManager.retireBackgroundTransfers` CANCELS the finalization
+    /// `Task` this runs inside, and its contract (see
+    /// ``DownloadManager/backgroundJournalFinalizations``) is that "a recorder
+    /// suspended before its durable append cannot publish a stale `.finalized`
+    /// row" — the cache deletion retires these before unlinking the bytes.
+    /// Before this bead that held for free, because the recorder returned
+    /// immediately; now the window is however long the `AnalysisStore` actor is
+    /// busy, so it has to be honoured explicitly. `Task.isCancelled` read HERE
+    /// is not enough on its own: an actor hop is not a cancellation point, so
+    /// the check has to happen again INSIDE the actor, which is what
+    /// `insertDownloadWorkJournalEntryUnlessCancelled` is for — the same
+    /// two-place shape `AnalysisStoreWorkJournalRecorder` uses.
     func recordFinalized(episodeId: String) async {
         await append(
             episodeId: episodeId,
             eventType: .finalized,
             cause: nil,
-            metadataJSON: "{}"
+            metadataJSON: "{}",
+            honoringCancellation: true
         )
     }
 
@@ -402,7 +492,8 @@ struct AnalysisStoreDownloadWorkJournalRecorder: WorkJournalRecording {
             episodeId: episodeId,
             eventType: .failed,
             cause: cause,
-            metadataJSON: "{}"
+            metadataJSON: "{}",
+            honoringCancellation: false
         )
     }
 
@@ -418,7 +509,8 @@ struct AnalysisStoreDownloadWorkJournalRecorder: WorkJournalRecording {
             episodeId: episodeId,
             eventType: .failed,
             cause: cause,
-            metadataJSON: metadataJSON
+            metadataJSON: metadataJSON,
+            honoringCancellation: false
         )
     }
 
@@ -432,7 +524,8 @@ struct AnalysisStoreDownloadWorkJournalRecorder: WorkJournalRecording {
             episodeId: episodeId,
             eventType: .preempted,
             cause: cause,
-            metadataJSON: metadataJSON
+            metadataJSON: metadataJSON,
+            honoringCancellation: false
         )
     }
 
@@ -475,12 +568,24 @@ struct AnalysisStoreDownloadWorkJournalRecorder: WorkJournalRecording {
 
     // MARK: Private
 
+    /// `honoringCancellation` is a DECISION STATED AT THE CONFORMER, which is
+    /// what playhead-1nl6 requires of anything a recorder chooses to swallow.
+    ///
+    /// `true` only for `finalized`, and the asymmetry is the point. A finalized
+    /// row is published from a `Task` the manager CANCELS when it deletes the
+    /// bytes, so honouring cancellation is what stops a row claiming an
+    /// artifact that is gone. The other three are awaited INLINE on the
+    /// recovery path of a failure that has already happened — dropping one of
+    /// those because an enclosing task was cancelled would lose exactly the
+    /// record this bead exists to create, which is the opposite trade.
     private func append(
         episodeId: String,
         eventType: DownloadWorkJournalEventType,
         cause: InternalMissCause?,
-        metadataJSON: String
+        metadataJSON: String,
+        honoringCancellation: Bool
     ) async {
+        if honoringCancellation, Task.isCancelled { return }
         let now = Date().timeIntervalSince1970
         let record = DownloadWorkJournalRecord(
             episodeId: episodeId,
@@ -490,7 +595,21 @@ struct AnalysisStoreDownloadWorkJournalRecorder: WorkJournalRecording {
             metadataJSON: metadataJSON
         )
         do {
-            try await store.insertDownloadWorkJournalEntry(record)
+            if honoringCancellation {
+                try await store.insertDownloadWorkJournalEntryUnlessCancelled(
+                    record
+                )
+            } else {
+                try await store.insertDownloadWorkJournalEntry(record)
+            }
+            return
+        } catch is CancellationError {
+            // A CANCELLED WRITE IS NOT A FAILED WRITE. Counting it into
+            // `writeFailures` would say this database could not hold a row,
+            // which is a claim about the STORE — and it is the one reading
+            // that counter exists to make. Nothing is lost that anybody asked
+            // to keep: the only cancelling caller is the manager retiring a
+            // finalization whose bytes it is about to delete.
             return
         } catch {
             logger.error(

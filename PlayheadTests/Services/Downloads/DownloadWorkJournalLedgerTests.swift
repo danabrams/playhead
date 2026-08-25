@@ -29,8 +29,12 @@
 // collided with `BackgroundDownloadDropsV62MigrationTests` /
 // `BackgroundDownloadDropLedgerTests` on the first draft — the neighbouring
 // suites this one is modelled on, which is exactly where collisions come from —
-// and were renamed. **The TREE still holds 59 such duplicates, measured; that
-// is playhead-4wk9 and not this bead.**
+// and were renamed. **The tree still holds duplicates, measured on this branch:
+// 59 names appeared in more than one file BEFORE these three renames and 56
+// after, and 64 names occur more than once if you count repeats within a file
+// too. Say which of the three you mean — they are three different questions and
+// the first two differ by exactly this branch's own fix. That is playhead-0dsti
+// and not this bead.**
 
 import Foundation
 import Testing
@@ -61,27 +65,6 @@ struct DownloadWorkJournalLedgerTests {
         }
         sqlite3_busy_timeout(db, 3000)
         return db
-    }
-
-    /// Collects the surface-status lines the recorder raises, so the residual
-    /// — "both durable writes failed" — is observable rather than inferred.
-    private final class InvariantSpy: @unchecked Sendable {
-        private let lock = NSLock()
-        private var lines: [(InvariantViolation.Code, String)] = []
-
-        var recorder: @Sendable (InvariantViolation.Code, String) -> Void {
-            { [self] code, description in
-                lock.lock()
-                lines.append((code, description))
-                lock.unlock()
-            }
-        }
-
-        func descriptions(of code: InvariantViolation.Code) -> [String] {
-            lock.lock()
-            defer { lock.unlock() }
-            return lines.filter { $0.0 == code }.map(\.1)
-        }
     }
 
     // MARK: - 1. Every protocol requirement lands a row that says what happened
@@ -269,7 +252,7 @@ struct DownloadWorkJournalLedgerTests {
     @Test("an event whose row cannot be written increments writeFailures instead of vanishing")
     func aLostRowIsCountedRatherThanSilent() async throws {
         let (store, dir) = try await Self.freshStore(prefix: "4xmzWriteFail")
-        let spy = InvariantSpy()
+        let spy = RecordedInvariantViolations()
         let recorder = AnalysisStoreDownloadWorkJournalRecorder(
             store: store, invariantRecorder: spy.recorder
         )
@@ -311,7 +294,7 @@ struct DownloadWorkJournalLedgerTests {
     @Test("when BOTH durable writes fail, the loss is raised on the surface-status stream")
     func theResidualReachesTheSecondMedium() async throws {
         let (store, dir) = try await Self.freshStore(prefix: "4xmzResidual")
-        let spy = InvariantSpy()
+        let spy = RecordedInvariantViolations()
         let recorder = AnalysisStoreDownloadWorkJournalRecorder(
             store: store, invariantRecorder: spy.recorder
         )
@@ -345,7 +328,7 @@ struct DownloadWorkJournalLedgerTests {
     @Test("an arming that cannot be written says so on the second medium")
     func aLostArmingIsRaisedToo() async throws {
         let (store, dir) = try await Self.freshStore(prefix: "4xmzArmFail")
-        let spy = InvariantSpy()
+        let spy = RecordedInvariantViolations()
         let recorder = AnalysisStoreDownloadWorkJournalRecorder(
             store: store, invariantRecorder: spy.recorder
         )
@@ -426,14 +409,16 @@ struct DownloadWorkJournalLedgerTests {
     func aTruncatedWindowSaysSo() async throws {
         let (store, _) = try await Self.freshStore(prefix: "4xmzTruncate")
         let recorder = AnalysisStoreDownloadWorkJournalRecorder(store: store)
+        // NO SLEEP BETWEEN THESE, deliberately. An earlier cut inserted 2 ms so
+        // two rows could not share an `occurredAt` — a test masking a defect in
+        // the query it is testing. `ORDER BY occurredAt DESC, rowid DESC` makes
+        // the order total, so writing these as fast as the machine allows is
+        // now the STRONGER fixture: it is exactly the case that used to be
+        // arbitrary.
         for index in 0..<4 {
             await recorder.recordFailed(
                 episodeId: "ep-\(index)", cause: .noNetwork, metadataJSON: "{}"
             )
-            // The rows carry `Date()`; without a gap two of them can share a
-            // timestamp and the ORDER assertion below would be measuring the
-            // clock's resolution rather than the query's ORDER BY.
-            try await Task.sleep(nanoseconds: 2_000_000)
         }
 
         let full = try await store.fetchDownloadWorkJournal()
@@ -449,9 +434,24 @@ struct DownloadWorkJournalLedgerTests {
         #expect(capped.truncated)
         #expect(capped.rows.map(\.episodeId) == ["ep-3", "ep-2"])
 
-        // The clamp exists because `bind(_:_:Int)` goes through the TRAPPING
-        // `Int32(_:)`, and `limit: .max` is the spelling a later reader is most
-        // likely to write for "everything". It must return rows, not crash.
+    }
+
+    /// SEPARATE FROM THE TRUNCATION RAIL ON PURPOSE. `bind(_:_:Int)` goes
+    /// through the TRAPPING `Int32(_:)`, so a mutant that removes the clamp
+    /// KILLS THE HOST rather than failing an expectation — and
+    /// `mutation-battery.sh` scores a test with no verdict as a PASS
+    /// (playhead-gjlp0). Sharing one test with the `+ 1` probe made that
+    /// mutant's verdict depend on whether the failure line flushed before the
+    /// crash. Two tests, two independent verdicts.
+    @Test("an unbounded limit returns everything instead of trapping")
+    func anUnboundedLimitDoesNotTrap() async throws {
+        let (store, _) = try await Self.freshStore(prefix: "4xmzUnbounded")
+        let recorder = AnalysisStoreDownloadWorkJournalRecorder(store: store)
+        for index in 0..<4 {
+            await recorder.recordFailed(
+                episodeId: "ep-\(index)", cause: .noNetwork, metadataJSON: "{}"
+            )
+        }
         let everything = try await store.fetchDownloadWorkJournal(limit: .max)
         #expect(everything.rows.count == 4)
         #expect(everything.truncated == false)
@@ -506,31 +506,229 @@ struct DownloadWorkJournalLedgerTests {
         #expect(arming.writeFailures == 0)
     }
 
-    /// The default is still a no-op, and it must stay one: it is what every
-    /// test and preview gets. This rail pins that the no-op really records
-    /// nothing, so `armedLaunches = 0` beside an empty table keeps meaning
-    /// "nobody was recording" rather than "nothing happened".
-    @Test("the DEFAULT recorder still writes nothing, which is what makes armedLaunches readable")
+    /// The default recorder writes nothing, driven DIRECTLY.
+    ///
+    /// An earlier cut of this rail built `DownloadManager(cacheDirectory:)`,
+    /// drove the scan, and asserted an unrelated store was empty — which is a
+    /// TAUTOLOGY: `DownloadManager` holds no store reference at all, so that
+    /// store was never reachable from it and the assertion held whatever
+    /// `NoopWorkJournalRecorder`'s bodies did. It would have passed if the
+    /// no-op had been changed to write rows, which is the one thing it exists
+    /// to deny. Driving the conformer against the store directly is the honest
+    /// version.
+    @Test("the DEFAULT recorder writes nothing, which is what makes armedLaunches readable")
     func theDefaultRemainsANoop() async throws {
         let (store, _) = try await Self.freshStore(prefix: "4xmzDefaultNoop")
-        let cache = try makeTempDir(prefix: "4xmzDefaultNoopCache")
-        defer { try? FileManager.default.removeItem(at: cache) }
+        let noop: WorkJournalRecording = NoopWorkJournalRecorder()
 
-        // No `workJournalRecorder:` argument — the state production was in.
-        let manager = DownloadManager(cacheDirectory: cache)
-        try await manager.bootstrap()
-        try await manager.persistResumeData(episodeId: "ep-noop", data: Data([0x09]))
-        _ = try await manager.scanForSuspendedTransfers()
+        await noop.recordFinalized(episodeId: "ep-noop")
+        await noop.recordFailed(episodeId: "ep-noop", cause: .noNetwork)
+        await noop.recordFailed(
+            episodeId: "ep-noop", cause: .noNetwork, metadataJSON: "{}"
+        )
+        await noop.recordPreempted(
+            episodeId: "ep-noop",
+            cause: .appForceQuitRequiresRelaunch,
+            metadataJSON: "{}"
+        )
 
         #expect(try await store.fetchDownloadWorkJournal().rows.isEmpty)
         let arming = try #require(try await store.fetchDownloadWorkJournalArming())
         #expect(
             arming.armedLaunches == 0,
             """
-            and THIS is the pair a device pull sees on an unwired build: an empty table beside
-            a zero denominator. It is not the same reading as an empty table beside
-            armedLaunches = 37, and telling those two apart is the whole point of the row.
+            and THIS is the pair a device pull sees on an unwired build: an empty
+            table beside a zero denominator. It is not the same reading as an
+            empty table beside armedLaunches = 37, and telling those two apart is
+            the whole point of the row.
             """
         )
+    }
+
+    // MARK: - 6. Cancellation
+
+    /// A CANCELLED FINALIZATION MUST NOT PUBLISH A ROW.
+    ///
+    /// `DownloadManager.retireBackgroundTransfers` cancels the finalization
+    /// `Task` before the cache deletion unlinks the bytes, and
+    /// `backgroundJournalFinalizations`' own doc says that is what stops a
+    /// recorder "suspended before its durable append" claiming an artifact
+    /// that is gone. Before this bead the window was ~0 because the recorder
+    /// returned immediately; it is now however long the store actor is busy.
+    @Test("a finalization cancelled before it runs writes no row and counts no write failure")
+    func aCancelledFinalizationPublishesNothing() async throws {
+        let (store, _) = try await Self.freshStore(prefix: "4xmzCancelFin")
+        let spy = RecordedInvariantViolations()
+        let recorder = AnalysisStoreDownloadWorkJournalRecorder(
+            store: store, invariantRecorder: spy.recorder
+        )
+
+        let task = Task {
+            await recorder.recordFinalized(episodeId: "ep-cancelled")
+        }
+        task.cancel()
+        await task.value
+
+        #expect(try await store.fetchDownloadWorkJournal().rows.isEmpty)
+        // The counter is the SUBJECT here, not decoration. A cancelled write
+        // routed into `writeFailures` would say this database could not hold a
+        // row — a claim about the STORE, and the one reading that counter
+        // exists to make.
+        let arming = try #require(try await store.fetchDownloadWorkJournalArming())
+        #expect(arming.writeFailures == 0)
+        #expect(spy.descriptions(of: .downloadWorkJournalNotRecorded).isEmpty)
+    }
+
+    /// The check that has to happen INSIDE the actor, tested where it lives.
+    ///
+    /// `Task.isCancelled` read before an `await` onto an actor cannot see a
+    /// cancellation that lands DURING the hop, because an actor hop is not a
+    /// cancellation point. This is the `appendWorkJournalEntryUnlessCancelled`
+    /// shape one table over, and it needs its own rail because the recorder's
+    /// pre-hop guard would mask a missing post-hop check in every test that
+    /// cancels before calling.
+    @Test("the store's UnlessCancelled append refuses inside the actor, not just at the caller")
+    func theStoreRefusesACancelledAppend() async throws {
+        let (store, _) = try await Self.freshStore(prefix: "4xmzCancelStore")
+        let record = DownloadWorkJournalRecord(
+            episodeId: "ep-inside",
+            eventType: .finalized,
+            cause: nil,
+            occurredAt: 1.0,
+            metadataJSON: "{}"
+        )
+        let task = Task { () -> Bool in
+            do {
+                try await store.insertDownloadWorkJournalEntryUnlessCancelled(record)
+                return false
+            } catch is CancellationError {
+                return true
+            }
+        }
+        task.cancel()
+        let threw = await task.value
+        #expect(threw, "the store method must THROW CancellationError, not swallow it")
+        #expect(try await store.fetchDownloadWorkJournal().rows.isEmpty)
+    }
+
+    /// The mirror, and it is what stops the rail above from being satisfied by
+    /// a recorder that simply drops everything: a FAILURE is recorded even
+    /// when the enclosing task is cancelled. Losing one of those is exactly
+    /// the record this bead exists to create.
+    @Test("a cancelled FAILURE is still recorded — the asymmetry is deliberate")
+    func aCancelledFailureIsStillRecorded() async throws {
+        let (store, _) = try await Self.freshStore(prefix: "4xmzCancelFail")
+        let recorder = AnalysisStoreDownloadWorkJournalRecorder(store: store)
+
+        let task = Task {
+            await recorder.recordFailed(
+                episodeId: "ep-still-recorded",
+                cause: .taskExpired,
+                metadataJSON: "{}"
+            )
+        }
+        task.cancel()
+        await task.value
+
+        let page = try await store.fetchDownloadWorkJournal()
+        #expect(page.rows.count == 1)
+        #expect(page.rows.first?.eventType == .failed)
+    }
+
+    // MARK: - 7. The hazard the separate table exists to avoid
+
+    /// **THE PREMISE OF THE WHOLE DESIGN, DEMONSTRATED RATHER THAN ASSERTED.**
+    ///
+    /// The one-line fix for this bead is to hand `DownloadManager` the
+    /// ANALYSIS recorder. This rail shows what that does: with an
+    /// `analysis_jobs` row present, a DOWNLOAD failure written through
+    /// `AnalysisStoreWorkJournalRecorder` lands in `work_journal` carrying THAT
+    /// JOB'S generation and epoch — and `work_journal.event_type` is the input
+    /// `AnalysisCoordinator.recoverOrphans` routes on, where `.failed` means
+    /// `terminalNoRequeue` (pinned by `ZeroCoverageRecoveryRoutingTests`). So
+    /// the transfer failure would tell cold-launch recovery that the ANALYSIS
+    /// work is over.
+    ///
+    /// Without this rail the claim lives only in prose and in two regexes that
+    /// cannot currently fail.
+    @Test("the ANALYSIS recorder really would write a work_journal row under the job generation")
+    func theHazardTheSeparateTableAvoidsIsReal() async throws {
+        let (store, dir) = try await Self.freshStore(prefix: "4xmzHazard")
+        let generation = UUID().uuidString
+        try await store.insertJob(makeAnalysisJob(
+            jobId: "job-hazard",
+            episodeId: "ep-hazard",
+            leaseOwner: "worker-1",
+            leaseExpiresAt: 1.0,
+            generationID: generation,
+            schedulerEpoch: 1
+        ))
+
+        let analysisRecorder = AnalysisStoreWorkJournalRecorder(store: store)
+        await analysisRecorder.recordFailed(
+            episodeId: "ep-hazard",
+            cause: .taskExpired,
+            metadataJSON: #"{"stage":"backgroundTransfer"}"#
+        )
+
+        let row = try #require(
+            try await store.fetchLastWorkJournalEntry(
+                episodeId: "ep-hazard", generationID: generation
+            ),
+            """
+            if this is nil the premise is refuted and the whole separate-table
+            argument has to be re-derived — say so loudly rather than deleting
+            the rail
+            """
+        )
+        #expect(row.eventType == .failed)
+        #expect(row.generationID.uuidString == generation)
+        #expect(
+            row.eventType.orphanRecoveryRouting == .terminalNoRequeue,
+            """
+            …and this is why it matters: recoverOrphans reads the LAST row for
+            {episode, generation} of a job whose lease expired and takes this arm
+            """
+        )
+        _ = dir
+    }
+
+    /// The same fixture, the recorder this bead actually wires. The download
+    /// event lands in `download_work_journal` and `work_journal` stays EMPTY —
+    /// which is only a meaningful claim because the rail above proves the other
+    /// recorder would have written one here.
+    @Test("the DOWNLOAD recorder writes no work_journal row even when a job EXISTS")
+    func theDownloadRecorderLeavesTheAnalysisJournalAlone() async throws {
+        let (store, _) = try await Self.freshStore(prefix: "4xmzNoHazard")
+        let generation = UUID().uuidString
+        try await store.insertJob(makeAnalysisJob(
+            jobId: "job-safe",
+            episodeId: "ep-safe",
+            leaseOwner: "worker-1",
+            leaseExpiresAt: 1.0,
+            generationID: generation,
+            schedulerEpoch: 1
+        ))
+
+        let recorder = AnalysisStoreDownloadWorkJournalRecorder(store: store)
+        await recorder.recordFailed(
+            episodeId: "ep-safe",
+            cause: .taskExpired,
+            metadataJSON: #"{"stage":"backgroundTransfer"}"#
+        )
+
+        #expect(
+            try await store.fetchLastWorkJournalEntry(
+                episodeId: "ep-safe", generationID: generation
+            ) == nil,
+            """
+            a download event in work_journal would terminate this generation at
+            the next cold launch, for a reason that has nothing to do with
+            analysis
+            """
+        )
+        let page = try await store.fetchDownloadWorkJournal()
+        #expect(page.rows.count == 1)
+        #expect(page.rows.first?.episodeId == "ep-safe")
     }
 }

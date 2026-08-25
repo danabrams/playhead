@@ -301,51 +301,21 @@ struct DownloadWorkJournalV63MigrationTests {
     }
 
     // MARK: - 5. The rung touches nothing else
-
-    /// V63 CREATES TWO NEW TABLES and touches no existing one — no column, no
-    /// UPDATE, no DELETE, and no backfill. Nothing could be backfilled: every
-    /// download event before this build went to a no-op recorder and left no
-    /// trace, so the absence of pre-V63 rows is honest.
-    ///
-    /// The rail is the `work_journal` table specifically, because that is the
-    /// one a careless implementation of this bead would have written into —
-    /// and a row there is not merely misfiled, it is an input to
-    /// `AnalysisCoordinator.recoverOrphans`.
-    @Test("the download journal writes leave work_journal untouched")
-    func theAnalysisJournalIsNotTouched() async throws {
-        let (store, dir) = try await makeHeadStore(prefix: "V63Untouched")
-        let recorder = AnalysisStoreDownloadWorkJournalRecorder(store: store)
-
-        await recorder.recordFinalized(episodeId: "ep-x")
-        await recorder.recordFailed(episodeId: "ep-x", cause: .noNetwork, metadataJSON: "{}")
-        await recorder.recordPreempted(
-            episodeId: "ep-x", cause: .appForceQuitRequiresRelaunch, metadataJSON: "{}"
-        )
-
-        let db = try openRawReadWrite(dir)
-        defer { sqlite3_close_v2(db) }
-        var stmt: OpaquePointer?
-        let prepared: Int32 = sqlite3_prepare_v2(
-            db, "SELECT count(*) FROM work_journal", -1, &stmt, nil
-        )
-        #expect(prepared == SQLITE_OK)
-        defer { sqlite3_finalize(stmt) }
-        let stepped: Int32 = sqlite3_step(stmt)
-        #expect(stepped == SQLITE_ROW)
-        // Hoisted into a typed local rather than inlined into the `#expect`:
-        // the macro expands its argument twice and the C-interop overloads
-        // made the combined expression time the type-checker out.
-        let analysisJournalRows: Int64 = sqlite3_column_int64(stmt, 0)
-        #expect(
-            analysisJournalRows == 0,
-            """
-            a download event must never land in `work_journal`: its `event_type` is what
-            `AnalysisCoordinator.recoverOrphans` routes on, and `.failed`/`.finalized` there
-            mean \"clear the lease and do not requeue\" — so a transfer failure written into
-            it would terminate an ANALYSIS generation for a reason that has nothing to do
-            with analysis
-            """
-        )
-        #expect(try await store.fetchDownloadWorkJournal().rows.count == 3)
-    }
+    //
+    // V63 CREATES TWO NEW TABLES and touches no existing one — no column, no
+    // UPDATE, no DELETE, and no backfill. Nothing could be backfilled: every
+    // download event before this build went to a no-op recorder and left no
+    // trace, so the absence of pre-V63 rows is honest.
+    //
+    // THE RAIL FOR THAT USED TO LIVE HERE AND WAS VACUOUS. It wrote three
+    // download events and asserted `work_journal` held zero rows — but with no
+    // `analysis_jobs` row present the ANALYSIS recorder would have written
+    // nothing either, so the test could not tell the two recorders apart, which
+    // is the only thing it was for. It now lives in
+    // `DownloadWorkJournalLedgerTests` as a PAIR: one rail seeds a job and
+    // DEMONSTRATES that the analysis recorder really does write a row under
+    // that job's generation, and the second shows the download recorder does
+    // not. Deleted rather than moved, because a weaker duplicate of a rail is
+    // worse than no duplicate — it reports green for the property the strong
+    // one owns.
 }

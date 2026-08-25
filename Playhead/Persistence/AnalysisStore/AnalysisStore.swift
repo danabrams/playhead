@@ -9577,6 +9577,26 @@ actor AnalysisStore {
         try step(stmt, expecting: SQLITE_DONE)
     }
 
+    /// Append one download-path event, UNLESS the calling task has been
+    /// cancelled.
+    ///
+    /// The check has to happen HERE, inside the actor, and not only at the
+    /// caller: an `await` onto an actor is not a cancellation point, so a
+    /// `Task.isCancelled` read before the hop cannot see a cancellation that
+    /// lands during it. That window is however long this actor is busy — a
+    /// whole migration ladder, on the launch after an upgrade.
+    ///
+    /// `AnalysisStore.appendWorkJournalEntryUnlessCancelled` is the same
+    /// mechanism one table over, and it exists for the same reason: the
+    /// download manager RETIRES a finalization task before unlinking the
+    /// bytes, so a row that lands afterwards claims an artifact that is gone.
+    func insertDownloadWorkJournalEntryUnlessCancelled(
+        _ record: DownloadWorkJournalRecord
+    ) throws {
+        try Task.checkCancellation()
+        try insertDownloadWorkJournalEntry(record)
+    }
+
     /// Every recorded download-path event, most recent first, with what the
     /// caller needs in order not to over-read the array.
     ///
@@ -9601,7 +9621,11 @@ actor AnalysisStore {
         let stmt = try prepare("""
             SELECT id, episodeId, eventType, cause, occurredAt, metadata
             FROM download_work_journal
-            ORDER BY occurredAt DESC
+            -- `rowid DESC` is the TIEBREAKER, on `fetchLastWorkJournalEntry`'s
+            -- precedent. `occurredAt` comes from `Date()`, so two events inside
+            -- the same clock tick order arbitrarily without it — and at a
+            -- truncation boundary that changes WHICH row the window drops.
+            ORDER BY occurredAt DESC, rowid DESC
             LIMIT ?
             """)
         defer { sqlite3_finalize(stmt) }
