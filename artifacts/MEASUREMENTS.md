@@ -4,6 +4,46 @@ Written as each measurement lands, because an agent's context is not storage.
 
 ---
 
+## M0. THE PARALLEL-REGIME BASELINE — every number below was taken under it
+
+Dan chose option A (`parallelizable: false`) after this run. It is recorded
+first, and separately, because the whole value of having measured today's regime
+is being able to say what serialization changes. Anything compared against these
+figures must have been taken the same way.
+
+`scripts/fast-gate.sh`, `PlayheadFastTests`, iPhone 17 simulator, **trimmed**
+(`fast-gate: simulator processes after trim` present in the log), fresh worktree,
+cold build, 2026-08-24. Log preserved at
+`/Users/dabrams/playhead-gate-artifacts/vk68m/vk68m-run1-fullplan.log`.
+
+| quantity | parallel (this run) |
+|---|---|
+| tests / suites | **11,785 / 1,441** |
+| Swift Testing phase | **252.792 s** |
+| xcodebuild `Testing started completed` | **359.741 s** |
+| test-host peak open fds (gate sampler, 10 s) | **2,439 of RLIMIT_NOFILE soft 2,560 — 95.3 %** |
+| highest descriptor number ever seen (`max_fd`) | **2,558 = soft − 2** |
+| peak vnodes (fd-paths watcher, 10 s) | **2,399** |
+| tail FLOOR | **453 (449 vnode, 3 socket, 1 kqueue)** |
+| implied concurrent WAL stores at the peak | **~650** — (2,399 − 449) / 3.00 |
+| RESOURCE casualties | **27** |
+| gate-baseline | **RED (5 known / 3 NEW)** |
+| host restarts / lost verdicts | **0 / 0** — "every test that started reported an outcome" |
+| peak demand / swap | 13.9 GiB of 16.0 GiB / 1.5 GiB |
+| xcodebuild exit | 65 (`** TEST FAILED **`) |
+
+Two readings of the peak, and they are different instruments rather than a
+disagreement: the gate's sampler and the fd-paths watcher both take a 10 s
+snapshot, so both UNDER-report a transient — `max_fd` is the durable witness,
+and 2,558 means descriptors 0..2,557 were all in use at once, because `open()`
+returns the lowest free number.
+
+The **3 NEW** are on a tree whose only production change is the
+`sqlite3_system_errno` suffix, so they are the standing rotation rather than
+this diff; they are named in the log and carried into the comparison below.
+
+---
+
 ## M1a. The ~449 FLOOR is REPRODUCIBLE — five runs, 447-459
 
 The bead recorded the floor from ONE run (449 vnodes flat for 22 samples).
