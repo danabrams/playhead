@@ -93,3 +93,45 @@ depth while being dead code.
 
 Recorded as **unreachable-by-type**, not as fixed. If `AdWindow.analysisAssetId`
 is ever made optional, this paragraph is the thing that has to be re-read.
+
+## Pre-run audit: does any remaining mutant delete the CHECK instead of the DEFECT?
+
+A mutant that removes the thing that DETECTS a defect, rather than re-creating
+the defect, proves nothing — it can only ever kill the test that was watching it.
+The previous bead lost a round to exactly that (`FD06` v1 survived and had to be
+re-aimed), so the ten mutants still to run were audited against the shape
+**before** their verdicts landed, not after.
+
+| mutant | mutates | re-creates a defect, or deletes a check? |
+|---|---|---|
+| AK10 | production `guard hasAttachedHost else { return }` | a defect — but see the caveat below |
+| AK11 | production `observeBanners` body | a defect: the view model enqueues and never acknowledges, which is the auto tier's original state |
+| AK12 | the seam's `deliveredAutoSkipCardWindowIds.insert` | a defect: a card the listener saw becomes indistinguishable from a skip nobody announced |
+| MS01 | the receipt write | a defect: playhead-2d6i verbatim |
+| MS02 | the seam's receipt REMOVAL | a defect: one skip on two surfaces |
+| MS06 / MS15 | the two per-episode clears | a defect: a leak into the next episode |
+| MS07 | `playheadTimeAtSkip: currentPlayheadTime` | a defect: the SPAN's start substituted for the listener's position — the standing class |
+| AK99 / MS99 | a local rename | neither: vacuity controls, MUST SURVIVE |
+
+**The caveat on AK10, stated rather than buried.** It mutates a production line,
+so it is not the FD06 shape — but that line's only observable effect is on
+`emittedAutoSkipBannerWindowIds`, which is test-only observability, and the two
+`for … in continuations` loops it also guards iterate zero times when nobody is
+subscribed. So AK10 is a rail on an OBSERVABILITY invariant, not on behaviour a
+listener could notice. That is a weaker claim than the other eleven make, and it
+is worth having anyway: the yield set is what
+`cards.isSubset(of: yielded)` and the `.subscribedButNeverAcknowledging`
+non-vacuity check are measured against, so a yield set that lies makes those two
+rails lie with it.
+
+## How a SURVIVED verdict is verified
+
+`scripts/mutation-battery.sh` reads a test with NO VERDICT as a PASS
+(`playhead-gjlp0`, open), so a crash-looping batch prints a FALSE SURVIVED and
+zero observed failures — indistinguishable on the results table from a genuine
+vacuity control. A SURVIVED verdict is therefore not accepted on the table
+alone: the batch's own xcodebuild log (kept under
+`/private/tmp/playhead-mutation-battery.*`) must show the focused suites
+actually RAN, i.e. a Swift Testing summary line with a test count in the tens.
+If the control ever dies, every KILLED above it is void, because they would all
+have been scored against a tree that fails for a reason unrelated to the mutant.
