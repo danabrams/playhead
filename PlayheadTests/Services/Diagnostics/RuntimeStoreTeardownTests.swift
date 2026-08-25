@@ -71,18 +71,42 @@ struct RuntimeStoreTeardownTests {
     ///
     /// The session log is `Caches/Diagnostics/`, one file per logger instance,
     /// so it has no contention and is the arm that is decisive under any load.
-    /// Returns whether the analysis store was observed OPEN, so a caller can
-    /// say which of its assertions it was able to make.
+    /// Returns which of the two stores was observed OPEN, so a caller can say
+    /// which of its assertions it was able to make.
+    ///
+    /// TWO FACTS AND NOT ONE, because they are two stores closed by two
+    /// independent lines of `shutdown()`. The first version of this helper
+    /// waited on `analysisStore` alone and returned one `Bool`, and the ad
+    /// catalog's assertion was then made under the ANALYSIS store's guard —
+    /// so it fired whether or not the catalog had ever opened. `isOpen` is
+    /// `db != nil`, which is exactly what a store nobody ever opened reports,
+    /// so an ad-catalog arm entered on somebody else's evidence could only
+    /// ever have PASSED, vacuously, and the catalog is 168 of the 499-descriptor
+    /// floor — the second-largest line in it.
     @discardableResult
-    private func openLogAndAwaitStore(_ runtime: PlayheadRuntime) async -> Bool {
+    private func openLogAndAwaitStore(
+        _ runtime: PlayheadRuntime
+    ) async -> (analysisStore: Bool, adCatalog: Bool) {
         runtime.surfaceStatusLogger.migrate()
         runtime.surfaceStatusLogger.record(Self.probeEntry())
         runtime.surfaceStatusLogger.flushForTesting()
+        let adCatalog = runtime.adCatalogStore
+        var storeOpen = false
+        var catalogOpen = false
         for _ in 0..<40 {
-            if await runtime.analysisStore.isOpen { return true }
+            storeOpen = await runtime.analysisStore.isOpen
+            if let adCatalog {
+                catalogOpen = await adCatalog.isOpen
+            }
+            // Nothing left to wait for once the store is open and the catalog
+            // is either open or ABSENT. Absent is a third state and is kept
+            // distinct from closed on purpose: `AdCatalogStore.init` can throw,
+            // in which case the runtime holds `nil`, and a store that does not
+            // exist is not a store that will open in another 50 ms.
+            if storeOpen && (catalogOpen || adCatalog == nil) { break }
             try? await Task.sleep(for: .milliseconds(50))
         }
-        return await runtime.analysisStore.isOpen
+        return (analysisStore: storeOpen, adCatalog: catalogOpen)
     }
 
     /// One entry, written only so the logger's lazily-opened session file
@@ -108,7 +132,7 @@ struct RuntimeStoreTeardownTests {
           .timeLimit(.minutes(3)))
     func shutdownClosesTheStores() async throws {
         let runtime = PlayheadRuntime(isPreviewRuntime: true)
-        let storeWasOpen = await openLogAndAwaitStore(runtime)
+        let opened = await openLogAndAwaitStore(runtime)
 
         #expect(runtime.surfaceStatusLogger.hasOpenSessionFileForTesting,
                 "precondition: the session file must be OPEN before a rail about closing it means anything")
@@ -125,15 +149,24 @@ struct RuntimeStoreTeardownTests {
         // only condition under which a KILL means anything — it is open every
         // time. Under a full plan it may not be, and the alternative to saying so
         // is a rail that is RED on every merge gate for a reason nobody can act on.
-        if storeWasOpen {
+        //
+        // EACH STORE IS GUARDED BY ITS OWN OBSERVATION. `isOpen == false` is
+        // what a CLOSED store reports and equally what a NEVER-OPENED one
+        // reports, so an arm entered on the other store's evidence asserts
+        // nothing — which is what the ad-catalog arm did before this, since the
+        // helper only ever waited on the analysis store.
+        if opened.analysisStore {
             #expect(await runtime.analysisStore.isOpen == false,
                     "shutdown() must return the analysis store's descriptors — 179 of the test host's 499-descriptor floor were this one file")
-            if let catalog = runtime.adCatalogStore {
-                #expect(await catalog.isOpen == false,
-                        "shutdown() must return the ad catalog's descriptors — 168 of the floor were this one file")
-            }
         } else {
-            print("[882eg] analysis store never opened under load — the store arm of this rail made no claim this run; the session-log arm above still did")
+            print("[882eg] analysis store never opened under load — the analysis-store arm of this rail made no claim this run; the session-log arm above still did")
+        }
+
+        if opened.adCatalog, let catalog = runtime.adCatalogStore {
+            #expect(await catalog.isOpen == false,
+                    "shutdown() must return the ad catalog's descriptors — 168 of the floor were this one file, 84 open connections to it")
+        } else {
+            print("[882eg] ad catalog never opened under load (or the runtime has none) — the ad-catalog arm of this rail made no claim this run")
         }
     }
 
