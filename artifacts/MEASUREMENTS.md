@@ -1076,6 +1076,17 @@ that pin each other.
   `count` field 453, 453 rows, pid 71372**. Its `max_fd` is **2556**, which is
   exactly what M1b's own R2 correction says it is (the TAIL sample's highest,
   not the run's 2558).
+* **M0's and M4's headline rows re-derive from the two preserved full-plan
+  logs.** Run 1: `Test run with 11785 tests in 1441 suites failed after 252.792
+  seconds`, `gate-baseline: RED (5 known / 3 NEW) — 2 name(s) in `Failing
+  tests:` matched no console result, 27 tests hit a RESOURCE FAILURE (re-run)`,
+  `fast-gate: simulator processes after trim: 106` (so it WAS trimmed, per
+  playhead-81ig), and **zero occurrences of `sqlite3_system_errno` and zero
+  `[enzva]` lines** — which is M0's own R2 correction, confirmed from the bytes.
+  Run 2: `11791 tests in 1442 suites failed after 2668.459 seconds`,
+  `gate-baseline: RED (0 known / 1 NEW)`. 2668.459 / 252.792 = **10.556**, the
+  10.56x M4 quotes. The three NEW of run 1 and the one NEW of run 2 are named in
+  the logs exactly as M4 describes them.
 * **M3's `Repro:` re-runs and reproduces to the digit.** `python3
   artifacts/sqlite-errno-probe.py` prints `table full after 92 hogs; open()
   errno=9 (Bad file descriptor)` and then `rc=14 system_errno=9 msg='unable to
