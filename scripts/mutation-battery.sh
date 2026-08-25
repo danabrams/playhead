@@ -13731,7 +13731,8 @@ EOF
     snippet OLD <<'EOF'
             eventType: .failed,
             cause: cause,
-            metadataJSON: metadataJSON
+            metadataJSON: metadataJSON,
+            honoringCancellation: false
         )
     }
 
@@ -13740,7 +13741,8 @@ EOF
     snippet NEW <<'EOF'
             eventType: .failed,
             cause: cause,
-            metadataJSON: "{}"
+            metadataJSON: "{}",
+            honoringCancellation: false
         )
     }
 
@@ -13783,7 +13785,8 @@ EOF
             episodeId: episodeId,
             eventType: .failed,
             cause: cause,
-            metadataJSON: "{}"
+            metadataJSON: "{}",
+            honoringCancellation: false
         )
     }
 EOF
@@ -13901,12 +13904,12 @@ EOF
 
   DW19)
     snippet OLD <<'EOF'
-            FROM download_work_journal
-            ORDER BY occurredAt DESC
+            ORDER BY occurredAt DESC, rowid DESC
+            LIMIT ?
 EOF
     snippet NEW <<'EOF'
-            FROM download_work_journal
-            ORDER BY occurredAt ASC
+            ORDER BY occurredAt ASC, rowid ASC
+            LIMIT ?
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
