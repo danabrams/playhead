@@ -178,6 +178,29 @@ class DenialCountRails(unittest.TestCase):
                              "1 test hit a RESOURCE FAILURE (re-run)\n** TEST FAILED **")
         self.assertEqual(sweep.classify_run(text)["resource_casualties"], 1)
 
+    def test_a_DIFFERENT_quantity_that_also_counts_TESTS_is_not_the_casualty_count(self):
+        """Anti-vacuity, and the rail above could not see this.
+
+        `test_the_word_RESOURCE_elsewhere_is_not_a_casualty_count` guards the
+        word RESOURCE appearing in prose. It does NOT guard the pattern latching
+        onto a different quantity that is also spelled `<n> tests`, which is the
+        defect class this field was renamed for in the first place — and every
+        real log carries several. Measured: relaxing `_RESOURCE_CASUALTIES` to
+        `(\\d+) tests?` survives all 76 rails as they stood and reports **1**
+        against run 1's real figure of **27**, because the first match in the
+        tail is `Test run with 11785 tests in 1441 suites`.
+
+        So the fixture carries the two sentences a full-plan tail always has —
+        Swift Testing's own summary and the `Failing tests:` block — around the
+        one that is the answer.
+        """
+        text = log(denied=27).replace(
+            "gate-memory: test host peak open fds",
+            "✘ Test run with 11785 tests in 1441 suites failed after 252.792 seconds.\n"
+            "Failing tests:\n\t1 test crashed\n"
+            "gate-memory: test host peak open fds")
+        self.assertEqual(sweep.classify_run(text)["resource_casualties"], 27)
+
 
 class StartedCountRails(unittest.TestCase):
 

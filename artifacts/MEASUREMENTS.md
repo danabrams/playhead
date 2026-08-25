@@ -55,28 +55,51 @@ already in the row above, not a separate loss. Cutting the sentence at the comma
 turns "no test died silently" into "nothing was lost", which is the standing
 defect class applied to a sentence rather than to a number.
 
-The **3 NEW** are on a tree whose only production change is the
-`sqlite3_system_errno` suffix, so they are the standing rotation rather than
-this diff; they are named in the log and carried into the comparison below.
+**THE 3 NEW ARE ON A TREE WITH NO PRODUCTION CHANGE AT ALL, WHICH IS NOT WHAT
+THIS PARAGRAPH SAID (R2).** It said they were "on a tree whose only production
+change is the `sqlite3_system_errno` suffix". That suffix landed in `c17fdc48`
+at 21:36; run 1's test phase ran 21:10-21:16 and its 16.6 MB log contains
+**zero** occurrences of `sqlite3_system_errno` and zero `[enzva]` lines. So run
+1's `Playhead/` was byte-identical to the base commit `18a7423c`. The conclusion
+— that the three are the standing rotation rather than this diff — survives and
+is in fact stronger, but it was resting on a change that was not in the build:
+a value that names one thing read as though it named another, in the sentence
+whose whole job was to say what the tree contained. They are named in the log
+and carried into the comparison below.
 
 ---
 
 ## M4. OPTION A MEASURED — the ceiling is GONE, the floor is NOT, and the cost is 10.6x
 
-Same worktree, same simulator, same trim, same instruments, one line changed
-(`"parallelizable" : false` on the PlayheadTests target in PlayheadFastTests).
-Run 2's log is preserved beside run 1's.
+Same worktree, same simulator, same trim, same instruments. Run 2's log is
+preserved beside run 1's, as
+`/Users/dabrams/playhead-gate-artifacts/vk68m/vk68m-run2-fullplan-serialized.log`,
+and run 2's fd dumps are committed under `artifacts/run2/` exactly as run 1's
+are. (Both of those were true only after R2: the sentence claimed a preserved
+log that was not there and `artifacts/run2/` was UNTRACKED, so every number in
+this section would have died with the worktree at bead close.)
+
+**THE TREE MOVED BY MORE THAN ONE LINE, AND R2 CORRECTED THIS SENTENCE (it read
+"one line changed").** The intervention is one line —
+`"parallelizable" : false` on the PlayheadTests target in PlayheadFastTests,
+`a59281fb`. It is not the whole diff between the two runs. `c17fdc48` also
+landed in between: `SQLiteSystemErrno.swift` (+117 production lines), a 15-line
+change to `AnalysisStore.swift`, and the six new rails the `+6` row below
+counts. The errno read is `sqlite3_system_errno(handle)` on failure paths and
+opens no file, so it is very unlikely to move a descriptor count — but "very
+unlikely to matter" is a judgement, and the sentence it replaced asserted there
+was nothing to judge.
 
 | quantity | PARALLEL (M0) | SERIALIZED | change |
 |---|---|---|---|
-| tests / suites | 11,785 / 1,441 | **11,791 / 1,442** | +6 — this branch's six new rails, nothing else |
+| tests / suites | 11,785 / 1,441 | **11,791 / 1,442** | +6 — `c17fdc48`'s six new rails; see the paragraph above for the rest of that commit |
 | Swift Testing phase | 252.792 s | **2,668.459 s** | **10.56x** |
 | xcodebuild `Testing started completed` | 359.741 s | **2,766.389 s** | **7.69x** |
 | test-host peak open fds (gate sampler) | 2,439 = **95.3 %** of soft 2,560 | **457 = 17.9 %** | −81 % |
 | `*** AT THE CEILING ***` banner | printed | **absent** | — |
-| highest descriptor ever handed out (`max_fd`) | 2,558 = soft − 2 | **466** | −2,092 |
+| highest descriptor number ever SEEN (`max_fd`, a 10 s sample) | 2,558 = soft − 2 | **466** | −2,092 |
 | peak vnodes (fd-paths watcher) | 2,399 | **463** | — |
-| tail FLOOR (median of 20 plateau samples) | 453 (449 vnode) | **452 (449 vnode)** | **unchanged** |
+| tail FLOOR (see note) | 453 (449 vnode) | **452 (449 vnode)** | **unchanged** |
 | implied concurrent WAL stores at the peak | ~650 | **~5** | −99 % |
 | RESOURCE casualties | 27 | **0** | **−27** |
 | gate-baseline | RED (5 known / 3 NEW) | **RED (0 known / 1 NEW)** | — |
@@ -97,14 +120,32 @@ could be read as a test of it:
   floor is now **98 % of everything the host holds**, and it is the half that
   grows with every new runtime-constructing test. ✅
 * **RESOURCE casualties go to zero.** 27 → **0**. ✅
-* **`playhead-sip2`'s four `SkipOrchestratorRevertTests` do not fail.** They do
-  not appear anywhere in run 2's failures; that fix landed in `96a4fc81` and
-  holds under the regime it was written for. ✅
+* **`playhead-sip2`'s four `SkipOrchestratorRevertTests` do not fail.** ✅ —
+  and the check is stronger than "absent from the failures", which is trivially
+  true of a run with one failure. All **six** `@Test`s in that suite RAN and
+  PASSED in run 2, by name: the Listen revert, the managed-loop and suggest-loop
+  time-range reverts, the anonymous time-range revert, the suggest-only revert,
+  the suggest Yes and the banner No. That fix landed in `96a4fc81` and holds
+  under the regime it was written for.
 
-The floor accrues LATE and gradually rather than at once — 129 descriptors at
-1,700 tests, 194 at 4,300, 371 at 9,900, 450 at 11,000 — which is what one
-should expect if it is one leak per runtime-constructing test rather than a
-constant.
+The floor accrues LATE and gradually rather than at once. Read straight off
+`artifacts/run2/progress.txt`, which is the only file pairing a descriptor count
+with a STARTED-test count: **132 at 1,725 · 194 at 4,264 · 371 at 9,931 · 450 at
+10,979**. That is what one should expect if it is one leak per
+runtime-constructing test rather than a constant. (The first pair read "129 at
+1,700" until R2. 129 is a real reading in `summary.jsonl` about forty seconds
+earlier, i.e. before the test phase began, so it was a pre-ramp value quoted
+against a test count it does not belong to. The other three reproduce exactly.)
+
+**The two FLOOR cells are not derived the same way, and the row label said they
+were** ("median of 20 plateau samples", corrected at R2). The serialized figure
+is that: the last twenty watcher samples of run 2 have median 452, vnode median
+449, over a tail that oscillates 447-456. Run 1 has no twenty-sample plateau —
+its watcher series ends `456 456 453 453 453 453 453`, a FIVE-sample flat run,
+and the median of its last twenty is **798** because the ramp is still in the
+window. 453 is run 1's tail SAMPLE (449 vnode + 3 socket + 1 kqueue), which is
+also what `artifacts/run1/TAIL-453.json` holds. The comparison the row is making
+— 449 vnodes in both — is unaffected; the derivation is not one method.
 
 ### THE COST IS 10.6x, NOT 5.08x — do not quote playhead-blsh's figure for this
 
@@ -126,12 +167,29 @@ point. Serialization bought descriptors here, not memory.
 `AnalyticsCounterStoreTests."The shared store is volatile under XCTest"` fails in
 **both** regimes — it is one of run 1's three NEW as well — and it fails on other
 branches' preserved logs (`et2d/fullgate-r5-run3.log`, `gate-462-verify.log`).
-It is diagnosed and fixed separately; see M5.
+It is diagnosed and fixed in `f846e1a3`: the assertion read
+`UserDefaults.standard.data(forKey:) == nil`, a property of the DEVICE's whole
+history rather than of the code under test, and it fails identically on other
+branches' preserved logs (`et2d/fullgate-r5-run3.log` at 117.179 s,
+`gate-462-verify.log` at 128.110 s — both re-checked at R2). It asserts a DELTA
+now. (This sentence said "see M5", and there was no M5; the section numbered M4
+at the bottom of this file is now M5.)
 
 The other two NEW from the parallel run — `a download the daemon answers writes
 NO row…` and `a transfer created but never resumed leaves a row naming THAT
-bound` — **passed** serialized. Both are in the load-sensitive families CLAUDE.md
-already names, so serialization removed them along with the denials.
+bound` — **passed** serialized, at 0.418 s and 0.140 s.
+
+**WHY they passed is NOT established, and the first version of this line said it
+was (R2).** It read "Both are in the load-sensitive families CLAUDE.md already
+names, so serialization removed them along with the denials." Both live in
+`BackgroundDownloadDropLedgerTests`, which appears **zero** times in CLAUDE.md
+and in **none** of the 118 entries of `scripts/gate-baseline.PlayheadFastTests.json`;
+and both failed on EXPECTATIONS in run 1
+(`_backgroundDownloadAdmissionCountForTesting() == 1`), not on a time limit,
+which is the kind CLAUDE.md explicitly says is *not* the starvation signature.
+The starvation reading is a reasonable hypothesis — a starved async admission is
+exactly what that assertion would report — but it is one observation each way on
+one run, and it was stated as a family membership that does not exist.
 
 ---
 
@@ -183,9 +241,15 @@ that stops at the last row reads 1 where the plateau is 5.
 
 Full plan, iPhone 17 simulator, trimmed, 2026-08-24, `scripts/gate-fd-paths.py`
 sampling the host every 10 s and keeping every sample's complete descriptor list.
-The run saturated (`max_fd` 2556 = soft-4, so descriptors 0..2555 were all in
-use) and settled to **453** — the same floor as the five preserved runs — and the
-tail dump was taken **while the host was still alive**.
+The run saturated and settled to **453** — the same floor as the five preserved
+runs — and the tail dump was taken **while the host was still alive**. Its
+saturation witness is `max_fd` **2,558**, at sample 22 (count 2,127), which is
+`soft - 2` and is the figure M0's table quotes: descriptors 0..2,557 were all in
+use at the moment 2,558 was handed out, because `open()` returns the lowest free
+number. (This paragraph said **2556 = soft-4** until R2. 2,556 is the TAIL
+sample's highest open descriptor — the value in `TAIL-453.json` — not the run's
+highest, and quoting one for the other inside the section that corrects two
+other quantities for exactly that reason is the standing defect class at home.)
 
 | n | share | what |
 |---|---|---|
@@ -325,9 +389,10 @@ store" case, so it is written up and filed rather than attempted.
   `PlayheadTestScratch` descriptors that this same section identifies as the
   per-store population *behaving correctly*.) It is not sufficient on its own —
   the peak sits **1,949 above this floor** by the watcher's own count (2,402),
-  or **2,103** if you measure it by the highest descriptor NUMBER (`max_fd`
-  2,556); those are two different quantities and the earlier "~2,100" quoted the
-  second while the sentence was about the first. But it is a genuine defect
+  or **2,105** if you measure it by the highest descriptor NUMBER (`max_fd`
+  2,558); those are two different quantities and the earlier "~2,100" quoted the
+  second while the sentence was about the first. (2,105 was 2,103 until R2, off
+  the tail sample's `max_fd` rather than the run's — see the paragraph above.) But it is a genuine defect
   independently of the ceiling, and it is the one thing here that is neither a
   cost trade nor a moved cliff.
 
@@ -341,12 +406,36 @@ store" case, so it is written up and filed rather than attempted.
 
 **THE COUNTS BELOW ARE A MOMENT, AND `artifacts/fd-ceiling-sweep.csv` IS THE
 PIN.** The sweep walks whatever logs are on disk when it runs, so its `n` grows
-as runs accumulate — re-run at review it reports **44 logs / 9 full-plan
-(2 lost / 7 completed)**, and the ninth is this bead's own M0 run, whose log had
-not been preserved when the table below was taken. That is the population
-growing, not the reading changing: every row of the committed CSV is still
-present, unchanged, and the table stays degenerate. Read the CSV, not the
-sentence, if the number matters.
+as runs accumulate. Re-run at R1 it reported **44 logs / 9 full-plan (2 lost /
+7 completed)**, the ninth being this bead's own M0 run. Re-run again at **R2 it
+reports 47 logs / 10 full-plan (2 lost / 8 completed)**. Every row of the
+committed CSV is still present and unchanged in both re-runs; read the CSV, not
+the sentence, if a specific number matters.
+
+**THE TABLE IS NO LONGER DEGENERATE, AND THE RUN THAT BROKE THE DEGENERACY IS
+M4's (R2).** Everything below this line was written when every full-plan run
+ever measured sat between 93.6 % and 99.9 % of the soft limit, and it concluded
+"there is no unexposed arm, so no association can be estimated". Serializing
+produced one: **run 2 is a full-plan run at 17.9 % that COMPLETED**, and the
+sweep now fills the empty cell —
+
+```
+CONTINGENCY TABLE, n = 10  (ceiling = >= 90 % of the binding soft limit)
+                     lost the host     completed
+  AT the ceiling                 2             8
+  below the ceiling              0             1
+```
+
+Three things about that single cell before anyone reads a p-value into it. It is
+**n = 1**, and 2-of-10 at the ceiling is a rate this cell cannot distinguish
+from. It is an **INTERVENTION** rather than an observation — the one row in this
+table where the exposure was set rather than found — which is what makes one
+observation worth more here than one more at-ceiling run, and still not much.
+And the intervention changed the whole regime, not just the descriptor count, so
+"below the ceiling" and "serialized" are perfectly confounded in it. What the
+row does establish is that the exposure is now VARIABLE, which is the thing the
+paragraph below correctly said it was not. Read the rest of this section in the
+past tense, as the record of a nine-run population with one arm.
 
 **40 logs carry a `peak open fds` line. 32 of them are scoped or mutation runs**
 whose peaks are 6-32 and which carry NO binding soft limit, because the Swift
@@ -362,11 +451,13 @@ CONTINGENCY TABLE, n = 8   (ceiling = >= 90 % of the binding soft limit)
   below the ceiling              0             0
 ```
 
-Every full-plan run ever measured on this box sits at **93.6 % - 99.9 %** of the
-soft limit. **There is no unexposed arm, so no association can be estimated.**
-That is a finding about the exposure, not about the outcome: reaching the
-descriptor ceiling is not a property of a bad run, it is a property of running
-the plan at all.
+Every full-plan run measured on this box **under the parallel plan** sits at
+**93.6 % - 99.9 %** of the soft limit. **In that population there is no unexposed
+arm, so no association can be estimated.** That is a finding about the exposure,
+not about the outcome: under the parallel plan, reaching the descriptor ceiling
+is not a property of a bad run, it is a property of running the plan at all.
+(The words "under the parallel plan" were added at R2 — without them the
+sentence is falsified by M4's own run, which is in the same file.)
 
 **The peak of a run that DIED is a censored observation.** A host that is lost
 stops accumulating, so a restarted run's measured peak is biased DOWNWARD. The
@@ -434,11 +525,23 @@ They reproduce to the digits quoted.
 ## M3. `sqlite3_system_errno` separates three different bugs behind one string — ON THE MAC. **IT IS INERT IN THE APP.**
 
 Measured 2026-08-24 against `/usr/lib/libsqlite3.dylib` via `ctypes`, on this
-box. `sqlite3_libversion()` on that library reads **3.54.0** (re-read at review).
-An earlier version of this line added "the same version the iOS SDK ships" —
-**that was never measured**, nothing in the simulator run records a version, and
-M3b below is the finding that the two libraries behave differently, so the
-parenthetical was an inference doing the work of a control. It is withdrawn.
+box. `sqlite3_libversion()` on that library reads **3.54.0** (re-read at R1 and
+again at R2).
+
+**THE VERSION CLAIM WAS WITHDRAWN AND HAS SINCE BEEN MEASURED — this paragraph
+said "withdrawn" for two commits after that stopped being true (R2).** The
+withdrawal was right when it was written: "the same version the iOS SDK ships"
+was an inference doing the work of a control, and nothing in the simulator run
+recorded a version. `f846e1a3` settled it instead of leaving it withdrawn — the
+suite prints the simulator's own reading on every run, and the preserved log
+`/Users/dabrams/playhead-gate-artifacts/vk68m/vk68m-scoped-round1fix3.log`
+carries it: `[enzva] simulator SQLite version: 3.54.0 (the Mac's
+/usr/lib/libsqlite3.dylib measured 3.54.0)`. So **both libraries report 3.54.0**,
+which makes M3b SHARPER rather than weaker: the same version string answers the
+same three conditions differently, so it is a build or configuration difference
+and not a version skew anyone can wait out. Note what is still not measured —
+the two libraries' BUILD OPTIONS, which is the thing that would actually explain
+it.
 
 Every one of these returns `rc=14` (`SQLITE_CANTOPEN`) with
 `sqlite3_errmsg` = **`unable to open database file`** — the identical sentence:
@@ -521,7 +624,7 @@ not describe the app. Three consequences:
 
 ---
 
-## M4. REVIEW ROUND — what the instrument got wrong about ITSELF
+## M5. REVIEW ROUND 1 — what the instrument got wrong about ITSELF
 
 Six defects in the two scripts, found by driving them rather than by re-reading
 them, plus a mutation battery over the rails that found three of the rails
@@ -530,7 +633,7 @@ unable to fail. Every fix is in `scripts/gate-fd-paths.py`,
 measurements above changes as a result, because the run they were taken from
 pre-dates the pin entirely.
 
-### M4a. THE PIN WOULD HAVE PINNED THE WRONG PROCESS ON RUN 1 — measured, in run 1's own archive
+### M5a. THE PIN WOULD HAVE PINNED THE WRONG PROCESS ON RUN 1 — measured, in run 1's own archive
 
 `b49a8c76` added the pin because a stale simulator app clobbered `--last` AFTER
 the host exited (twelve descriptors, pid 85292). `47c7e052` then tried to stop
@@ -563,7 +666,7 @@ printing a census of every process it saw with its sample count and its peak, so
 "which process is `peak.json` about" is answerable from the log rather than only
 by grouping the JSONL.
 
-### M4b. Five more, each of the same shape: a failure returned as a value
+### M5b. Five more, each of the same shape: a failure returned as a value
 
 * **`lsof_cross_check` took `.stdout` off a `check=False` run.** An lsof that
   could not run at all parsed to `descriptor_rows: 0` and printed `0` beside a
@@ -602,7 +705,7 @@ by grouping the JSONL.
   yet read it as the casualty count; it is now `resource_casualties`, the gate's
   own number, `-1` when the gate never printed one.
 
-### M4c. Three rails could not fail, proven by mutation
+### M5c. Three rails could not fail, proven by mutation
 
 40 mutants over the two scripts, each with its victim predicted before the run;
 **40 killed, 0 survived, and a docstring-only control survives.** Three of them
@@ -624,3 +727,92 @@ test:
 
 Rails: **76 tests over the two scripts (was 40), ~1.2 s, no build.**
 `python3 -m unittest scripts.tests.test_gate_fd_paths scripts.tests.test_fd_ceiling_sweep`
+
+---
+
+## M6. REVIEW ROUND 2 — the evidence was UNCOMMITTED, and two sections of this file contradicted each other
+
+R2 verified R1's seven fixes by driving them, re-derived every number in M0-M4
+against the artifacts, and spot-checked R1's mutation ledger. **R1's fixes are
+real.** Fifteen mutants over the two scripts, each with its victim predicted
+before the run: **thirteen killed exactly the predicted test**, one is a proven
+equivalent (`(\d+) tests? hit a RESOURCE` with `re.I`, which reads 27 on the
+real log exactly as shipped does), and **one SURVIVED and is the rail hole in
+M6d**. The thirteen cover `pin_decision`'s `>` and its promote branch,
+`lsof_cross_check`'s exit status, `list_fds`'s truncation retry, the
+never-seen/gone split, `record_peak`'s high-water, `_scoped`'s basename split,
+`_atomic_json`'s rename, `max_fd`, the end-of-watch census, `find_test_host`'s
+`ps` check, `fd_path`'s short-write refusal, and both directions of the
+`resource_casualties` rename. The docstring-only control survived. Nothing R1
+CLAIMED was found to be untrue; what follows is what it did not reach.
+
+(That paragraph said "fifteen mutants … and every single-victim mutant killed
+exactly the predicted test", which the same section's own M6d contradicts. A
+count of what was RUN read as a count of what was KILLED — the standing defect
+class, in the sentence certifying that a review looked for it.) What R2 adds:
+
+### M6a. THE M4 EVIDENCE WAS NOT COMMITTED AND ITS LOG WAS NOT PRESERVED — HIGH
+
+`git status` read `?? artifacts/run2/`. Every M4 figure comes from
+`artifacts/run2/{summary.jsonl,peak.json,last.json,progress.txt,full/}`, none of
+which was tracked, and M4's own sentence "Run 2's log is preserved beside run
+1's" was false — `/Users/dabrams/playhead-gate-artifacts/vk68m/` held run 1's
+log and one scoped log, and nothing else. The canonical bead-close sequence runs
+`git worktree remove`, so at close every number in the newest section of this
+file would have become unverifiable, while the section it is compared against
+(M1b) had its dumps committed for exactly that reason. `artifacts/.gitignore`'s
+own first paragraph is the statement of this rule. Fixed: the dumps are
+committed, `gate.log` is preserved as `vk68m-run2-fullplan-serialized.log`, the
+scoped verification log for `f846e1a3` is preserved as
+`vk68m-scoped-round1fix3.log`, and `watcher.log` — 128 bytes, and the ONLY
+witness for M5b's never-seen/gone finding — is exempted from the `*.log` ignore
+rather than left to die with the worktree.
+
+### M6b. M2 SAID THERE WAS NO UNEXPOSED ARM AND M4 CREATED ONE
+
+Both sections are in this file and neither mentioned the other. Corrected in
+place, in M2, with the new contingency table and with what a single
+INTERVENTION row does and does not license.
+
+### M6c. Four numbers that named the wrong quantity
+
+Each is the standing defect class and each is corrected above rather than here:
+M0's attribution of the 3 NEW to a production change that was **not in run 1's
+build** (zero `sqlite3_system_errno` lines in 16.6 MB); M4's "one line changed",
+which omits `c17fdc48`'s 117 production lines; M1b's `max_fd` **2,556**, which
+is the tail sample's highest open descriptor rather than the run's **2,558**;
+and M4's "129 descriptors at 1,700 tests", which is a pre-ramp reading —
+`progress.txt` says **132 at 1,725**. Also corrected: M4's floor row claimed one
+derivation ("median of 20 plateau samples") for two columns derived differently,
+M4's "both are in the load-sensitive families CLAUDE.md already names" for a
+suite CLAUDE.md never names, M3's withdrawal of a version claim that `f846e1a3`
+had since measured, a dangling `see M5`, and two `## M4.` sections.
+
+### M6d. ONE RAIL HOLE AND ONE RESIDUAL DEFECT, both found by mutation
+
+* **`fd_ceiling_sweep.py`'s casualty pattern was under-guarded.** Relaxing
+  `_RESOURCE_CASUALTIES` to `(\d+) tests?` **survived all 76 rails** and reports
+  **1** against run 1's real figure of **27**, because the first `<n> tests` in
+  a full-plan tail is `Test run with 11785 tests in 1441 suites`. The existing
+  anti-vacuity rail guarded the word RESOURCE in prose and not the pattern
+  latching onto a different quantity — which is the defect class the field was
+  renamed for. New rail; the mutant now dies.
+* **The never-seen/gone fix closes half the conflation, and the other half is
+  now NAMED as LIMIT-1.** The guard is `samples == 0` — has ANY `/Playhead.app/`
+  process been sampled — not "has the HOST been sampled", which
+  `find_test_host` cannot answer. Driven through `main()`: a leftover sampled
+  twice, gone for two cycles, then the real host, and the watcher exits with
+  `2 sample(s) over 1 process(es)` and `peak.json` holding the leftover's
+  **twenty**. That is run 1's own timeline (pid 58651 for 62 samples, then pid
+  71372, `artifacts/run1/summary.jsonl`), and it survived only because those two
+  were ADJACENT samples. It is not closed — the discriminator does not exist
+  here, and the withdrawn `etimes` age bound was the last attempt — so it is
+  pinned by a rail, described in `main()`, and made visible two ways: the watch
+  now prints **why** it ended, and every invocation prints its **pid and argv**
+  (which is precisely what M5b lacked when it had to settle for "corroboration
+  rather than proof" off two interleaved watchers in one log).
+
+Rails: **80 tests over the two scripts (was 76), ~2.6 s, no build.** Nineteen
+mutants run at R2, eighteen killed with the predicted victim, one proven
+equivalent (`(\d+) tests? hit a RESOURCE` with `re.I` — it reads 27 on the real
+log, same as shipped), control survives.

@@ -565,16 +565,25 @@ def main() -> int:
     ap.add_argument("--watch", action="store_true",
                     help="sample until the host exits and --deadline passes")
     ap.add_argument("--deadline", type=float, default=0.0,
-                    help="stop this many seconds after the host DISAPPEARS (0 = at "
-                         "once). It does not run before the host has ever been seen: "
-                         "a watcher started ahead of the gate waits, bounded only by "
-                         "--max-minutes.")
+                    help="stop this many seconds after the subject DISAPPEARS (0 = at "
+                         "once). Its clock does not run before ANY /Playhead.app/ "
+                         "process has been sampled, so a watcher started ahead of the "
+                         "gate waits, bounded only by --max-minutes. READ THAT "
+                         "LITERALLY: `any`, not `the host` — see LIMIT-1 in main().")
     ap.add_argument("--max-minutes", type=float, default=60.0)
     ap.add_argument("--cross-check", action="store_true",
                     help="also run lsof on the same pid and report the difference")
     ap.add_argument("--top", type=int, default=40)
     args = ap.parse_args()
 
+    # WHO AM I, AND WHAT WAS I ASKED FOR. Two invocations appending to one
+    # --out or one redirected log are indistinguishable without this, which is
+    # exactly why playhead-vk68m's own never-seen/gone finding (M5b) had to be
+    # recorded as "corroboration rather than proof": `artifacts/run2/watcher.log`
+    # holds two interleaved runs, one ending `0 samples`, and the argv of the
+    # one that measured nothing did not survive. It does now.
+    print(f"gate-fd-paths: pid {os.getpid()} argv {' '.join(sys.argv[1:])!r}",
+          file=sys.stderr)
     ok, detail = self_test()
     print(f"gate-fd-paths: self-test {detail}", file=sys.stderr)
     if not ok:
@@ -583,6 +592,13 @@ def main() -> int:
     stop = {"now": False}
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda *_: stop.__setitem__("now", True))
+    # WHY THE WATCH ENDED. A census that reports only `N sample(s)` cannot be
+    # told apart from a watch that ended before its subject started (LIMIT-1
+    # below), and "it ran and found little" reads exactly like "it stopped
+    # early". Three exits, three sentences, and the default is the one that
+    # says nobody set it — the same reason `-1` is `not recorded` everywhere
+    # else in this file.
+    ended = "ended without recording a reason"
 
     # THE PINNED HOST. `find_test_host()` picks the largest-RSS process whose
     # executable is inside `/Playhead.app/`, which is right DURING a run and
@@ -650,10 +666,29 @@ def main() -> int:
             if samples == 0:
                 # NEVER SEEN IS NOT GONE. `--deadline` says how long to keep
                 # sampling AFTER the subject disappears; starting its clock
-                # before the subject has ever appeared makes a watcher launched
+                # before anything has ever appeared makes a watcher launched
                 # ahead of the gate — the only order in which it can catch the
                 # ramp — exit on its second cycle at the default deadline of 0,
                 # having measured nothing and claimed nothing about it.
+                #
+                # LIMIT-1, STATED BECAUSE IT IS HALF OF THE SAME CONFLATION AND
+                # IS NOT CLOSED. The condition is `samples == 0` — has ANY
+                # `/Playhead.app/` process been sampled — not "has the HOST been
+                # sampled", which is not a question this predicate can answer
+                # (`find_test_host` cannot tell a leftover from a host; that is
+                # why `pin_decision` exists). So a LEFTOVER app that is sampled,
+                # exits, and is followed two cycles later by the real host still
+                # ends the watch at `--deadline 0`, leaving `peak.json` holding
+                # the leftover's couple of dozen descriptors. That is run 1's
+                # own process timeline (pid 58651 for 62 samples, then pid
+                # 71372) and it survived only because the two were ADJACENT
+                # samples. Driven through `main()` in
+                # `WatchStartupRails.test_LIMIT_a_leftover_that_exits_before_the_host_ENDS_the_watch`.
+                # Two things keep it from reading as a completed measurement:
+                # the census prints every pid with its peak, and the watch now
+                # prints WHY it ended. Closing it properly needs a discriminator
+                # that does not exist here (the withdrawn `etimes` age bound was
+                # the last attempt), so it is named rather than papered over.
                 if not waiting_announced:
                     print("gate-fd-paths: no /Playhead.app/ process yet — waiting "
                           f"(bounded by --max-minutes {args.max_minutes:g})",
@@ -662,6 +697,8 @@ def main() -> int:
             elif gone_since == 0.0:
                 gone_since = time.time()
             elif time.time() - gone_since >= args.deadline:
+                ended = (f"the subject went away and --deadline "
+                         f"{args.deadline:g}s expired")
                 break
         else:
             gone_since = 0.0
@@ -693,13 +730,17 @@ def main() -> int:
                     out_fh.close()
                 return 0
         if time.time() - started > args.max_minutes * 60:
+            ended = f"--max-minutes {args.max_minutes:g} reached"
             break
         deadline = time.time() + args.interval
         while not stop["now"] and time.time() < deadline:
             time.sleep(0.2)
+        if stop["now"]:
+            ended = "signalled (SIGINT/SIGTERM)"
 
     if out_fh:
         out_fh.close()
+    print(f"gate-fd-paths: watch {ended}", file=sys.stderr)
     for line in census_lines(samples, samples_by_pid, high_water, pinned["pid"]):
         print(line, file=sys.stderr)
     return 0

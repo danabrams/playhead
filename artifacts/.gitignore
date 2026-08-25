@@ -1,6 +1,13 @@
-# Full-plan logs are 17 MB each and are preserved outside the worktree
+# Full-plan logs are 14-17 MB each and are preserved outside the worktree
 # (/Users/dabrams/playhead-gate-artifacts/vk68m/) because the canonical bead-close
 # sequence removes this directory. The fd DUMPS are small and ARE committed —
-# they are the evidence for M1b and nothing else on disk carries them.
+# they are the evidence for M1b and M4 and nothing else on disk carries them.
 *.log
 wait*.txt
+
+# EXCEPT the watcher logs, which are ~100 bytes and are CITED EVIDENCE:
+# artifacts/run2/watcher.log is the whole basis of the never-seen/gone finding
+# in M5b (two interleaved invocations, one ending `0 samples`). A gitignored
+# witness for a committed claim dies with the worktree, which is the failure
+# this file's first paragraph exists to prevent.
+!**/watcher.log

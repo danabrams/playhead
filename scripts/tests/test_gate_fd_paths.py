@@ -676,10 +676,83 @@ class WatchStartupRails(unittest.TestCase):
         self.assertGreater(elapsed, 0.15, "it gave up instead of waiting")
         self.assertIn("0 sample(s)", err)
 
+    def test_the_invocation_NAMES_ITSELF_so_two_watchers_can_be_told_apart(self):
+        """`artifacts/run2/watcher.log` holds two interleaved invocations, one
+        ending `0 samples`, and M5b could only call that CORROBORATION because
+        the argv of the one that measured nothing did not survive. A log line
+        that cannot say which run wrote it is a log line about nobody.
+        """
+        _rc, err = self._run_main(
+            ["--pid", "2147483632", "--watch", "--interval", "0.05",
+             "--max-minutes", "0.004"])
+        self.assertIn(f"gate-fd-paths: pid {os.getpid()} argv ", err)
+        self.assertIn("'--pid 2147483632 --watch", err)
+
+    def test_LIMIT_a_leftover_that_exits_before_the_host_ENDS_the_watch(self):
+        """LIMIT-1, pinned so it cannot be re-discovered as a surprise.
+
+        The never-seen/gone fix keys on `samples == 0` — has ANY /Playhead.app/
+        process been sampled — which is not the same question as "has the HOST
+        been sampled" and cannot be, because `find_test_host` cannot tell a
+        leftover from a host. So a leftover that is sampled, exits, and is
+        followed two cycles later by the real host still ends the watch at the
+        default `--deadline 0`, with `peak.json` holding the leftover's twenty.
+
+        That is run 1's own timeline (pid 58651 for 62 samples, then pid 71372)
+        and it survived only because the two were ADJACENT samples. This rail
+        asserts the CURRENT behaviour, and the two lines that keep it from
+        reading as a completed measurement: the end reason and the census.
+        """
+        timeline = [(58651, 20)] * 2 + [None] * 3 + [(71372, 2402)] * 2
+        seq = list(timeline)
+        state: dict = {}
+
+        def host():
+            state["cur"] = seq.pop(0) if seq else None
+            return state["cur"][0] if state["cur"] else 0
+
+        def snapshot(pid):
+            cur = state.get("cur")
+            if not cur or cur[0] != pid:
+                return None
+            return {"pid": cur[0], "count": cur[1], "max_fd": cur[1] + 100,
+                    "epoch": 0.0,
+                    "rows": [{"fd": i, "kind": "vnode", "path": "/a/x.sqlite"}
+                             for i in range(cur[1])]}
+
+        originals = (gfp.find_test_host, gfp.snapshot)
+        gfp.find_test_host, gfp.snapshot = host, snapshot
+        try:
+            with tempfile.TemporaryDirectory(prefix="vk68m-limit1-") as tmp:
+                peak = os.path.join(tmp, "peak.json")
+                rc, err = self._run_main(
+                    ["--watch", "--interval", "0.01", "--max-minutes", "0.05",
+                     "--peak", peak])
+                with open(peak) as fh:
+                    self.assertEqual(json.load(fh)["count"], 20,
+                                     "LIMIT-1 has changed — update the comment in main()")
+        finally:
+            gfp.find_test_host, gfp.snapshot = originals
+        self.assertEqual(rc, 0)
+        self.assertIn("the subject went away and --deadline 0s expired", err)
+        self.assertIn("2 sample(s) over 1 process(es)", err)
+        self.assertIn("peak 20", err)
+        self.assertNotIn("71372", err)
+
     def test_a_one_shot_run_against_an_unreadable_pid_still_reports_and_exits(self):
         rc, err = self._run_main(["--pid", "2147483632"])
         self.assertEqual(rc, 4)
         self.assertIn("no readable fd table", err)
+
+    def test_the_watch_says_WHY_it_ended_when_it_ran_out_of_minutes(self):
+        """`N sample(s)` alone cannot be told apart from a watch that stopped
+        early (LIMIT-1). The default reason names nobody, deliberately.
+        """
+        _rc, err = self._run_main(
+            ["--pid", "2147483632", "--watch", "--interval", "0.05",
+             "--max-minutes", "0.004"])
+        self.assertIn("gate-fd-paths: watch --max-minutes 0.004 reached", err)
+        self.assertNotIn("ended without recording a reason", err)
 
     def test_peak_json_holds_the_PEAK_and_last_json_holds_the_LAST(self):
         """The two files are different questions and the loop must not conflate them.
