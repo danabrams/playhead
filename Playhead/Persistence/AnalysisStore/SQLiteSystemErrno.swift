@@ -34,8 +34,18 @@
 //     0 is the expectation; it is an expectation, not a measurement.
 //
 // The call is kept because it costs nothing, renders 0 as `none recorded`
-// rather than as an errno, and keeps measuring this on every denial in every
-// gate log — so if a future SDK starts populating it, the value simply appears.
+// rather than as an errno, and keeps measuring this — so if a future SDK starts
+// populating it, the value simply appears.
+//
+// WHERE IT IS WIRED, exactly, because "every denial" would overstate it:
+// `openSQLiteHandle` and `exec`. Those are the two sites playhead-s34ux
+// actually observed (`SQLite open failed (14): …` and `Migration failed: …`).
+// `prepare`, `step` and `nextRow` still reach the log as bare CANTOPEN prose,
+// and under exhaustion `sqlite3_step` can return CANTOPEN when SQLite opens a
+// -wal/-shm/temp file mid-statement. Adding them is three one-line changes and
+// is deliberately NOT done: on this platform the value is 0 at every site, so
+// it would buy three more consumer interactions to verify in exchange for no
+// information. Revisit if a platform ever populates the field.
 //
 // EBADF rather than EMFILE, above, is not a typo: measured in C on this box
 // (playhead-vk68m), fill the table to `RLIMIT_NOFILE` and the refusing

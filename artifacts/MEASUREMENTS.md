@@ -512,9 +512,12 @@ not describe the app. Three consequences:
   Three unrelated causes all report 0 through the same VFS hook, so 0 is the
   expectation — an expectation, not a measurement, and it is labelled as one.
 * The call is **kept anyway**: it costs one call, renders 0 as `none recorded`
-  rather than as an errno, and now every denial in every gate log carries the
-  field. Nobody has to re-derive this, and a future SDK that populates it will
-  simply start showing the value.
+  rather than as an errno, and the two sites playhead-s34ux actually observed —
+  `openSQLiteHandle` and `exec` — now carry the field in every gate log. Nobody
+  has to re-derive this, and a future SDK that populates it will simply start
+  showing the value. `prepare`/`step`/`nextRow` are deliberately NOT wired: on
+  this platform the value is 0 at every site, so three more one-line changes
+  would buy three more consumer interactions to verify and no information.
 
 ---
 
