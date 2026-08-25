@@ -11709,7 +11709,7 @@ MUTATIONS=(
   # listening enters the YIELD set. Nothing user-visible changes; what breaks is
   # the distinction the whole bead rests on, which is why the partition's
   # unattached arm asserts on the yield set as well as on the cards.
-  "AK10|1429|ORCH|$T_2D6I_PARTITION"
+  "AK10|1429|ORCH|$T_2D6I_PARTITION;$T_2D6I_ATTACH"
 
   # AK11 — the view model keeps its OWN copy of the forwarding rule and never
   # acknowledges. Every behavioural suite stays green, because they drive
