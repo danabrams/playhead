@@ -304,3 +304,26 @@ Filed onward rather than left here: the finding is a `bd comment` on
 PASS. Anyone fixing that bead will build this same checker, and they need to know
 the work directory is per-INVOCATION rather than per-bead, that `KEEP_WORK=1` on
 failure paths has left 38 of them on this box, and that batch numbers repeat.
+
+## The MS re-aims — playhead-2d6i's mutants, moved by this bead's restructuring
+
+| mutant | what it re-introduces | predicted | observed | verdict |
+|---|---|---|---|---|
+| MS01 | an announced auto-skip records nothing at all | 18 names | **the same 18, set equality** | KILLED |
+| MS02 | **RE-AIMED**: the acknowledgement does not remove the receipt, so one skip becomes a card AND a row | PARTITION, ACCEPTED, WALK, SEAM (4) | **the same 4, exactly** | KILLED |
+| MS06 | endEpisode stops clearing the receipts | ENDEP (1) | *running* | |
+| MS15 | beginEpisode stops clearing them | REPLAY (1) | | |
+| MS07 | the receipt records the SPAN START as where the skip fired | POSITION (1) | | |
+| MS99 | **VACUITY CONTROL** — the attachment-test local renamed | **MUST SURVIVE** | | |
+
+**MS02 is the one that needed re-aiming rather than re-anchoring, and the
+distinction matters.** Its old body added a receipt write in BOTH arms of
+`emitBannerItem`'s attachment branch — which, after this bead, is what the
+shipped code does. Run unchanged it would have been an EQUIVALENT MUTANT scored
+as a kill: the tests would have gone red for a change that introduced no defect,
+and the ledger would have carried a green row for a rail proving nothing. The
+direction MS02 has always owned — double delivery, one skip on two surfaces —
+did not disappear; it MOVED to the seam, because the receipt is now written
+unconditionally and the only thing standing between one skip and two surfaces is
+the removal inside `acknowledgeAutoSkippedBannerDelivery`. That is what it
+mutates now, and its four observed victims are its four predicted ones.
