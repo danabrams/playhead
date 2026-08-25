@@ -174,3 +174,31 @@ If AK17 SURVIVES, the strengthening is not real and that is the finding to
 report rather than a green row. The most likely way it survives is a brace scan
 that starts at the wrong `{` and returns the whole file — which would re-create
 the file-wide check under a new name and pass for the same wrong reason.
+
+### The brace scan was validated before it was written, in both directions
+
+The ledger names one way AK17 could survive: a scan that starts at the wrong
+`{` and silently returns the whole file, re-creating the file-wide check under a
+new name. That risk was measured rather than reasoned about — the algorithm was
+run over the REAL `NowPlayingViewModel.swift` in both states, which the battery
+made available for free by having AK11 applied at the time:
+
+| tree state | body extracted | `BannerHostDelivery.forward(` in body | `.enqueue(` in body |
+|---|---|---|---|
+| HEAD, unmutated | 627 chars of a 14,309-char file | **yes** | no |
+| AK11 applied | 623 chars of a 14,305-char file | **no** | **yes** |
+
+So the scan discriminates, and the canary passes on the real code and fails on
+the real defect.
+
+**It also turned up a defect in the drafted fix, which is why it was worth
+running.** At HEAD the FILE contains both `.enqueue(` and `acknowledge` outside
+`observeBanners` — in `observeBanners`' own doc comment and elsewhere in the
+type. A file-wide ban on those two spellings would have been RED on correct
+code from the first commit. Body-scoping is not a refinement of the check here;
+it is what makes the check possible at all.
+
+**Read HEAD, not the working tree, while a battery is running.** Both reviewers
+independently hit this and said so; the first pass of this validation scanned
+the working tree and read AK11's mutant as the shipped code. `git show HEAD:<path>`
+is the whole remedy.
