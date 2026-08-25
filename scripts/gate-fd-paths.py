@@ -516,6 +516,20 @@ def find_test_host() -> int:
     return best_pid
 
 
+def record_high_water(high_water: dict[int, int], pid: int, count: int) -> None:
+    """Remember the MOST this pid has ever held — not the last.
+
+    `pin_decision`'s entire discriminator is "more than the pinned process has
+    EVER held", and this is the only thing that makes `ever` true. Written as a
+    plain assignment it degrades silently to "more than it LAST held", which
+    lets a shrinking host lose the pin to a leftover — the defect the pin
+    exists to prevent. It is a separate function only so a rail can reach it:
+    inline in the sampling loop it survived every mutation
+    (playhead-vk68m review round 4).
+    """
+    high_water[pid] = max(high_water.get(pid, -1), count)
+
+
 def pin_decision(pinned: int, high_water: dict[int, int], pid: int, count: int) -> str:
     """`pin` | `keep` | `promote` — who owns the UN-SUFFIXED dump files.
 
@@ -537,11 +551,28 @@ def pin_decision(pinned: int, high_water: dict[int, int], pid: int, count: int) 
     `peak.json` for that run would have held the leftover's twenty.
 
     A process holding more descriptors than the pinned one has EVER held cannot
-    be a stale remnant of it. That is the whole discriminator, it needs no
-    clock (the `etimes` age bound this replaces asked macOS `ps` for a Linux
-    keyword and silently returned 0 forever), and it is monotone, so it cannot
-    oscillate between two live processes. The twelve-descriptor clobber stays
-    excluded because 12 is not more than 2,402.
+    be a stale remnant of it. That is the whole discriminator, and it needs no
+    clock — the `etimes` age bound this replaces asked macOS `ps` for a Linux
+    keyword and silently returned 0 forever. The twelve-descriptor clobber
+    stays excluded because 12 is not more than 2,402.
+
+    IT IS NOT OSCILLATION-PROOF, AND AN EARLIER VERSION OF THIS PARAGRAPH SAID
+    IT WAS (playhead-vk68m review round 4). "Monotone, so it cannot oscillate
+    between two live processes" is false, and driving it shows why in four
+    lines: two hosts BOTH growing hand the pin back and forth forever, because
+    each one's next sample exceeds the other's high-water mark —
+
+        pid 1 @ 100 -> pin       pid 2 @ 150 -> promote
+        pid 1 @ 200 -> promote   pid 2 @ 250 -> promote   ...
+
+    What is monotone is the THRESHOLD, not the pin. Every rail below tested a
+    single transition, so nothing saw it. The rule is kept because the case it
+    was built for is real and measured and the oscillating case is not: this
+    gate runs ONE test host at a time, and `--full-dir` keeps every sample with
+    its pid, so even an oscillating watch loses no reading — only the
+    un-suffixed `peak.json`/`last.json` change owner. Said plainly: this is a
+    heuristic that makes a wrong pin VISIBLE (the census, the pid in every
+    line), not one that makes it impossible.
 
     What it does NOT do: bound the watcher to one RUN. A watcher left running
     across two gates will promote the second run's host once it passes the
@@ -558,8 +589,12 @@ def pin_decision(pinned: int, high_water: dict[int, int], pid: int, count: int) 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("--pid", type=int, default=0,
-                    help="target pid; default is to discover the simulator test host")
+    ap.add_argument("--pid", type=int, default=None,
+                    help="target pid; omit to discover the simulator test host. "
+                         "Default is None rather than 0 because `--pid 0` used to be "
+                         "indistinguishable from `no --pid` and silently discovered "
+                         "instead — a sentinel a caller can also type is not a "
+                         "sentinel (playhead-vk68m review round 4).")
     ap.add_argument("--out", default="",
                     help="JSONL of per-sample SUMMARIES (one line per sample)")
     ap.add_argument("--last", default="",
@@ -636,7 +671,7 @@ def main() -> int:
         os.makedirs(args.full_dir, exist_ok=True)
 
     while not stop["now"]:
-        pid = args.pid or find_test_host()
+        pid = args.pid if args.pid is not None else find_test_host()
         snap = snapshot(pid) if pid else None
         if snap is not None:
             count = snap["count"]
@@ -668,7 +703,7 @@ def main() -> int:
                 print(f"gate-fd-paths: OTHER /Playhead.app/ process {pid} "
                       f"(holding {count}); its dumps go to *.pid{pid}.* and the "
                       f"pinned host's are left as they stand", file=sys.stderr)
-            high_water[pid] = max(high_water.get(pid, -1), count)
+            record_high_water(high_water, pid, count)
             samples_by_pid[pid] = samples_by_pid.get(pid, 0) + 1
         if snap is None:
             if not args.watch:

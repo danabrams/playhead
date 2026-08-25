@@ -119,6 +119,63 @@ class InvocationCutRails(unittest.TestCase):
         self.assertEqual(row["fate"], "COMPLETE")
 
 
+class ContingencyArmRails(unittest.TestCase):
+    """The 2x2 table is this sweep's whole deliverable and had no rail on the
+    PRINT at all — swapping its two columns left every test green
+    (playhead-vk68m review round 4)."""
+
+    def _row(self, fate, peak):
+        # Every key `report` reads. -1 is this module's `not recorded`.
+        return {"fate": fate, "peak": peak, "probe_soft": 2560,
+                "denominator": "RLIMIT_NOFILE soft", "ceiling": 2560,
+                "host_pids": 1, "started": 0, "resource_casualties": -1,
+                "invocations": 1, "reached_verdict": True, "signal": ""}
+
+    def test_only_a_RESTART_counts_as_losing_the_host(self):
+        """NO-VERDICT is the `Killed: 9` MEMORY signature on this box.
+
+        Counting it as host loss would answer a question about DESCRIPTORS with
+        the other resource's failures.
+        """
+        table = sweep.contingency(
+            [self._row("RESTARTED", 2500), self._row("COMPLETE", 2500),
+             self._row("NO-VERDICT", 2500)], 90.0)
+        self.assertEqual(table.get((True, True)), 1)
+        self.assertEqual(table.get((True, False)), 1)
+        self.assertEqual(table.get(("no-verdict", True)), 1)
+
+    def test_a_row_with_no_binding_limit_is_in_no_cell(self):
+        row = self._row("COMPLETE", 2500)
+        row["probe_soft"] = -1
+        row["denominator"] = "kern.maxfilesperproc"
+        row["ceiling"] = 61440
+        self.assertEqual(sweep.contingency([row], 90.0), {})
+
+    def test_the_threshold_names_the_band_a_run_is_IN(self):
+        exactly = self._row("COMPLETE", int(2560 * 0.90))
+        self.assertEqual(sweep.contingency([exactly], 90.0), {(True, False): 1})
+
+    def test_the_printed_table_puts_each_count_under_the_RIGHT_heading(self):
+        """The columns are `lost the host` then `completed`, in that order.
+
+        Swapping them is invisible to every other rail here, and the table is
+        the only thing this tool exists to produce.
+        """
+        import io
+        from contextlib import redirect_stdout
+        rows = [(f"/l{i}.log", r) for i, r in enumerate(
+            [self._row("RESTARTED", 2500), self._row("COMPLETE", 2500),
+             self._row("COMPLETE", 2500), self._row("COMPLETE", 100)])]
+        buffer = io.StringIO()
+        with redirect_stdout(buffer):
+            sweep.report(rows, 90.0, 0)
+        lines = [line for line in buffer.getvalue().splitlines() if "ceiling" in line]
+        at = next(line for line in lines if line.strip().startswith("AT the"))
+        below = next(line for line in lines if line.strip().startswith("below the"))
+        self.assertEqual(at.split()[-2:], ["1", "2"], at)
+        self.assertEqual(below.split()[-2:], ["0", "1"], below)
+
+
 class CollectionRails(unittest.TestCase):
 
     def _write(self, directory, name, body):
@@ -133,21 +190,21 @@ class CollectionRails(unittest.TestCase):
         with tempfile.TemporaryDirectory(prefix="vk68m-collect-") as tmp:
             self._write(tmp, "a/gate.log", body)
             self._write(tmp, "b/gate-copy.log", body)
-            rows = sweep.collect([tmp])
+            rows, _unparsed = sweep.collect([tmp])
         self.assertEqual(len(rows), 1)
 
     def test_a_log_under_the_size_floor_is_skipped(self):
         with tempfile.TemporaryDirectory(prefix="vk68m-collect-") as tmp:
             self._write(tmp, "small.log", log())
-            self.assertEqual(sweep.collect([tmp]), [])
+            self.assertEqual(sweep.collect([tmp]), ([], 0))
 
     def test_a_missing_root_is_skipped_rather_than_raising(self):
-        self.assertEqual(sweep.collect(["/no/such/root/anywhere"]), [])
+        self.assertEqual(sweep.collect(["/no/such/root/anywhere"]), ([], 0))
 
     def test_a_big_log_without_the_marker_is_not_read_as_a_run(self):
         with tempfile.TemporaryDirectory(prefix="vk68m-collect-") as tmp:
             self._write(tmp, "big.log", "y" * (200 * 1024))
-            self.assertEqual(sweep.collect([tmp]), [])
+            self.assertEqual(sweep.collect([tmp]), ([], 0))
 
 
 class DenialCountRails(unittest.TestCase):
@@ -221,7 +278,7 @@ class ContingencyRails(unittest.TestCase):
 
     def test_the_four_cells_are_filled_by_share_and_by_fate(self):
         rows = [self._row(99.0, "COMPLETE"), self._row(99.0, "RESTARTED"),
-                self._row(50.0, "COMPLETE"), self._row(50.0, "NO-VERDICT")]
+                self._row(50.0, "COMPLETE"), self._row(50.0, "RESTARTED")]
         table = sweep.contingency(rows, 90.0)
         self.assertEqual(table[(True, False)], 1)
         self.assertEqual(table[(True, True)], 1)
@@ -241,10 +298,22 @@ class ContingencyRails(unittest.TestCase):
             log(denominator="kern.maxfilesperproc", ceiling=61440, probe=False))
         self.assertEqual(sweep.contingency([row], 90.0), {})
 
-    def test_only_COMPLETE_counts_as_keeping_the_host(self):
-        for fate in ("RESTARTED", "NO-VERDICT"):
-            table = sweep.contingency([self._row(99.0, fate)], 90.0)
-            self.assertEqual(table, {(True, True): 1}, fate)
+    def test_only_a_RESTART_is_HOST_LOSS_and_NO_VERDICT_is_neither_arm(self):
+        """Changed deliberately at playhead-vk68m review round 4.
+
+        This rail used to require NO-VERDICT to land in the host-loss cell
+        alongside RESTARTED. On this box NO-VERDICT is the `Killed: 9` /
+        exit-137 signature playhead-3rql attributed to MEMORY — a booted
+        simulator costs 10-13 GiB of a 16 GiB box — so counting it here would
+        answer a question about DESCRIPTORS with the other resource's deaths.
+        It now gets its own key and `report` names it as neither arm.
+        """
+        self.assertEqual(sweep.contingency([self._row(99.0, "RESTARTED")], 90.0),
+                         {(True, True): 1})
+        self.assertEqual(sweep.contingency([self._row(99.0, "NO-VERDICT")], 90.0),
+                         {("no-verdict", True): 1})
+        self.assertEqual(sweep.contingency([self._row(50.0, "NO-VERDICT")], 90.0),
+                         {("no-verdict", False): 1})
 
 
 if __name__ == "__main__":

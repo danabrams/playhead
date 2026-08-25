@@ -330,6 +330,59 @@ class PinnedHostRails(unittest.TestCase):
         self.assertEqual(gfp._scoped("/last.json", 9, 7), "/last.pid9.json")
 
 
+class HighWaterRails(unittest.TestCase):
+    """`ever held`, not `last held` — `pin_decision`'s whole discriminator."""
+
+    def test_a_FALLING_count_does_not_lower_the_mark(self):
+        marks: dict[int, int] = {}
+        for count in (100, 2402, 453, 12):
+            gfp.record_high_water(marks, 7, count)
+        self.assertEqual(marks[7], 2402)
+
+    def test_a_shrinking_host_keeps_the_pin_against_a_leftover(self):
+        """The end-to-end consequence, and the reason the mark must be `ever`.
+
+        A host that peaked at 2,402 and has settled to its 453-descriptor floor
+        must not lose the pin to a 20-descriptor leftover. With `= count` it
+        would, because 20 is more than nothing but the comparison would be
+        against 453 — and against a host that had fallen below 20 it is exactly
+        the clobber the pin exists to stop.
+        """
+        marks: dict[int, int] = {}
+        gfp.record_high_water(marks, 71372, 2402)
+        gfp.record_high_water(marks, 71372, 453)
+        self.assertEqual(gfp.pin_decision(71372, marks, 58651, 20), "keep")
+
+    def test_the_first_reading_is_recorded_even_when_it_is_zero(self):
+        marks: dict[int, int] = {}
+        gfp.record_high_water(marks, 7, 0)
+        self.assertEqual(marks[7], 0, "-1 default must not swallow a real zero")
+
+
+class PinOscillationRails(unittest.TestCase):
+    """The pin is NOT oscillation-proof, and the docstring used to say it was.
+
+    Kept as a rail rather than a fix: this gate runs one test host at a time,
+    `--full-dir` keeps every sample with its pid, and the alternative discarded
+    the measured case the rule exists for. The rail exists so the property is
+    recorded as KNOWN rather than re-discovered as a surprise.
+    """
+
+    def test_two_GROWING_hosts_hand_the_pin_back_and_forth(self):
+        marks: dict[int, int] = {}
+        pinned = 0
+        decisions = []
+        for pid, count in ((1, 100), (2, 150), (1, 200), (2, 250), (1, 300)):
+            decision = gfp.pin_decision(pinned, marks, pid, count)
+            if decision in ("pin", "promote"):
+                pinned = pid
+            gfp.record_high_water(marks, pid, count)
+            decisions.append(decision)
+        self.assertEqual(decisions,
+                         ["pin", "promote", "promote", "promote", "promote"])
+        self.assertEqual(pinned, 1)
+
+
 class HostDiscoveryRails(unittest.TestCase):
 
     def test_discovery_returns_a_pid_or_zero_and_never_raises(self):
@@ -338,23 +391,44 @@ class HostDiscoveryRails(unittest.TestCase):
         self.assertGreaterEqual(found, 0)
 
     def test_the_ps_invocation_this_box_ACTUALLY_ACCEPTS(self):
-        """The rail that would have caught `etimes`.
+        """The rail that was written to catch `etimes` — and could not.
 
-        A revision of this function asked macOS `ps` for `etimes`, a Linux
+        A revision of `find_test_host` asked macOS `ps` for `etimes`, a Linux
         keyword it rejects: `ps` printed a usage error, wrote nothing to stdout,
-        and discovery returned 0 forever without saying so. Every other rail
-        here passed, because "no host found" is indistinguishable from "no host
-        exists". So the rail is on the COMMAND: run exactly what the function
-        runs and require rc 0 and a populated stdout.
+        and discovery returned 0 forever without saying so. The rail added to
+        catch that RE-TYPED THE ARGV AS A LITERAL HERE and ran it through
+        `subprocess.run` directly, so it tested a string this file wrote and
+        never called `find_test_host` at all — restoring the exact historical
+        defect left it green (playhead-vk68m review round 4). Fourth instance of
+        the standing defect class on this branch, and the first one that lived
+        inside the rail written to close an instance of it.
+
+        So: capture the argv the PRODUCTION call site passes, then require the
+        real `ps` on this box to accept THAT.
         """
         import subprocess
-        result = subprocess.run(
-            ["ps", "-Ao", "pid=,rss=,comm="],
-            capture_output=True, text=True, check=False,
-        )
-        self.assertEqual(result.returncode, 0, result.stderr)
+
+        seen = {}
+        original = subprocess.run
+
+        def _capture(argv, *args, **kwargs):
+            seen["argv"] = argv
+            return original(argv, *args, **kwargs)
+
+        try:
+            subprocess.run = _capture
+            gfp.find_test_host()
+        finally:
+            subprocess.run = original
+
+        argv = seen.get("argv")
+        self.assertIsNotNone(argv, "find_test_host did not shell out at all")
+        result = original(argv, capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0,
+                         f"this box rejects {argv}: {result.stderr.strip()}")
         self.assertGreater(len(result.stdout.splitlines()), 10)
-        # and every line the parser accepts must really parse
+        # ...and every line the parser accepts must really parse, so a FORMAT
+        # change (rather than a rejected keyword) is caught too.
         parsed = 0
         for line in result.stdout.splitlines():
             parts = line.strip().split(None, 2)

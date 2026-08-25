@@ -60,7 +60,17 @@ _FD_LINE = re.compile(
 # The Swift-side probe prints the soft limit even on runs whose gate line used
 # the fallback denominator, so it is a second route to the same number.
 _PROBE_SOFT = re.compile(r"\[s34ux-fd\][^\n]*RLIMIT_NOFILE soft=(\d+)")
-_STARTED = re.compile(r"◇ Test [\"']")
+# COUNT EVERY STARTED TEST, NOT ONLY THE NAMED ONES (playhead-vk68m review R4).
+# This was `◇ Test ["\']`, which requires a quoted DISPLAY NAME — and a `@Test`
+# with no display name prints `◇ Test sendDiagnosticsPerformsNoNetworkIO()
+# started.` with no quote at all. Measured on one preserved log: `◇ Test `
+# appears 12,208 times and only 11,533 carry a quote, so the pattern dropped
+# **674 real tests** in order to exclude the ONE `◇ Test run started.` banner it
+# was presumably aimed at. It also put this column 674 apart from
+# `gate_memory_verdict.inflight_at_end`, which counts the same event on the same
+# log with the unquoted pattern — two instruments, one quantity, no agreement.
+# The banner is excluded by name instead.
+_STARTED = re.compile(r"◇ Test (?!run started\.)")
 # `gate-baseline: RED (5 known / 3 NEW) — ... 27 tests hit a RESOURCE FAILURE`
 # The gate's own count of tests DENIED A FILE. This replaces a `re.I` count of
 # lines containing the word RESOURCE, which was never printed, never written to
@@ -127,13 +137,32 @@ def contingency(rows: list[dict], ceiling_pct: float) -> dict[tuple[bool, bool],
     is IN, so a run at exactly the threshold is at the ceiling. Rows with no
     binding soft limit are absent from the table entirely — never folded in
     against `kern.maxfilesperproc`, which is 24x larger.
+
+    ONLY `RESTARTED` COUNTS AS LOSING THE HOST, AND THE REASON IS THIS TABLE'S
+    WHOLE SUBJECT (playhead-vk68m review round 4). The predicate used to be
+    `fate != "COMPLETE"`, which folds `NO-VERDICT` in beside `RESTARTED` — and
+    on this box `NO-VERDICT` is the `Killed: 9` / exit-137 signature that
+    playhead-3rql measured and attributed to MEMORY: a booted simulator costs
+    10-13 GiB of a 16 GiB box, and one full plan in three was killed regardless
+    of which tests ran. Counting a memory death as evidence in a table built to
+    ask whether the DESCRIPTOR ceiling kills hosts would answer the question
+    with the other resource's failures. It does not bite on today's population —
+    no row is NO-VERDICT — which is exactly why it had to be fixed before one
+    is, rather than after.
+
+    A NO-VERDICT row is not silently dropped either: it is returned under its
+    own key so `main` can report it as neither arm.
     """
     table: dict[tuple[bool, bool], int] = {}
     for row in rows:
         pct = share(row)
         if pct < 0:
             continue
-        key = (pct >= ceiling_pct, row["fate"] != "COMPLETE")
+        if row["fate"] == "NO-VERDICT":
+            table[("no-verdict", pct >= ceiling_pct)] = (
+                table.get(("no-verdict", pct >= ceiling_pct), 0) + 1)
+            continue
+        key = (pct >= ceiling_pct, row["fate"] == "RESTARTED")
         table[key] = table.get(key, 0) + 1
     return table
 
@@ -152,9 +181,11 @@ def share(row: dict) -> float:
     return 100.0 * row["peak"] / ceiling
 
 
-def collect(roots: list[str]) -> list[tuple[str, dict]]:
+def collect(roots: list[str]) -> tuple[list[tuple[str, dict]], int]:
+    """`(rows, unparsed)` — see `main`'s headline for why the second exists."""
     seen: dict[str, str] = {}
     rows: list[tuple[str, dict]] = []
+    unparsed = 0
     for root in roots:
         if not os.path.isdir(root):
             continue
@@ -179,26 +210,31 @@ def collect(roots: list[str]) -> list[tuple[str, dict]]:
                 row = classify_run(raw.decode("utf-8", "replace"))
                 if row:
                     rows.append((path, row))
-    return rows
+                else:
+                    unparsed += 1
+    return rows, unparsed
 
 
-def main(argv=None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
-    ap.add_argument("roots", nargs="*", default=[
-        "/private/tmp", "/Users/dabrams/playhead",
-        "/Users/dabrams/.claude", "/Users/dabrams/playhead-gate-artifacts",
-        os.environ.get("TMPDIR", "/tmp"),
-    ])
-    ap.add_argument("--ceiling-pct", type=float, default=90.0,
-                    help="a run is AT THE CEILING at or above this share of the "
-                         "BINDING soft limit (default 90, the gate's own threshold)")
-    ap.add_argument("--csv", default="")
-    args = ap.parse_args(argv)
+def report(rows: list[tuple[str, dict]], ceiling_pct: float, unparsed: int) -> None:
+    """Print the listing and the contingency table.
 
-    rows = collect(args.roots)
-    rows.sort(key=lambda item: item[1]["peak"], reverse=True)
-
-    print(f"logs carrying a `peak open fds` line, de-duplicated by content: {len(rows)}\n")
+    Split out of `main` so the TABLE — the only thing this tool exists to
+    produce — can be driven by a rail. It could not be: `main` was one
+    unbroken function, so swapping the two columns of the table left every
+    test green (playhead-vk68m review round 4).
+    """
+    # NAME WHAT WAS COUNTED. `rows` holds logs whose fd line the REGEX parsed;
+    # the sha256 pre-filter admits any log carrying the literal `peak open fds`.
+    # A log that carries the literal in a wording `_FD_LINE` does not know is
+    # dropped silently, and the old headline called `len(rows)` "logs carrying a
+    # `peak open fds` line", which is the pre-filter's population, not this one
+    # (playhead-vk68m review R4). Both numbers are printed so a gap is visible.
+    print(f"logs whose `peak open fds` line PARSED, de-duplicated by content: "
+          f"{len(rows)}")
+    if unparsed:
+        print(f"  ...and {unparsed} log(s) carried the literal `peak open fds` "
+              f"in a wording this parser does not know — NOT counted anywhere else")
+    print()
     header = (f"{'peak':>6} {'share':>7} {'fate':<11} {'pids':>4} {'started':>8} "
               f"{'denied':>7} {'inv':>3}  log")
     print(header)
@@ -217,13 +253,37 @@ def main(argv=None) -> int:
     print(f"\n{unmeasurable} log(s) carry no BINDING soft limit and are EXCLUDED from "
           f"the table rather than folded in against the kernel cap.\n")
 
-    table = contingency([r for _p, r in measurable], args.ceiling_pct)
+    table = contingency([r for _p, r in measurable], ceiling_pct)
     n = sum(table.values())
-    print(f"CONTINGENCY TABLE, n = {n}  (ceiling = >= {args.ceiling_pct:.0f} % of the binding soft limit)")
+    print(f"CONTINGENCY TABLE, n = {n}  (ceiling = >= {ceiling_pct:.0f} % of the binding soft limit)")
     print(f"{'':<22}{'lost the host':>15}{'completed':>12}")
     for at in (True, False):
         label = "AT the ceiling" if at else "below the ceiling"
         print(f"  {label:<20}{table.get((at, True), 0):>15}{table.get((at, False), 0):>12}")
+    voided = sum(v for k, v in table.items() if k[0] == "no-verdict")
+    if voided:
+        print(f"\n  {voided} run(s) reached NO VERDICT and are in NEITHER arm: on this "
+              f"box that is the `Killed: 9` MEMORY signature (playhead-3rql), and a "
+              f"memory death is not evidence about the descriptor ceiling.")
+
+
+def main(argv=None) -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("roots", nargs="*", default=[
+        "/private/tmp", "/Users/dabrams/playhead",
+        "/Users/dabrams/.claude", "/Users/dabrams/playhead-gate-artifacts",
+        os.environ.get("TMPDIR", "/tmp"),
+    ])
+    ap.add_argument("--ceiling-pct", type=float, default=90.0,
+                    help="a run is AT THE CEILING at or above this share of the "
+                         "BINDING soft limit (default 90, the gate's own threshold)")
+    ap.add_argument("--csv", default="")
+    args = ap.parse_args(argv)
+
+    rows, unparsed = collect(args.roots)
+    rows.sort(key=lambda item: item[1]["peak"], reverse=True)
+
+    report(rows, args.ceiling_pct, unparsed)
 
     if args.csv:
         with open(args.csv, "w") as fh:
