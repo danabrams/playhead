@@ -68,6 +68,20 @@ report anything, because a wrong offset returns a plausible string rather than
 an error. Sockets, kqueues and pipes have no path and are reported as
 `<socket>`/`<kqueue>`/`<pipe>` rather than dropped.
 
+**A DEFECT IN THIS INSTRUMENT, FOUND WHILE WRITING THIS UP, AND IT IS THE SAME
+CLASS.** The watcher's `--last` file is "the most recent sample", and the target
+is rediscovered every cycle as the largest-RSS process under `/Playhead.app/`.
+That predicate is right DURING a run and wrong the instant it ends: a stale
+simulator app satisfies it too. So after the host exited, `last.json` was
+rewritten with **twelve descriptors belonging to a different process** — a file
+named for this run's tail, holding something else's. The analysis above was
+taken from the correct sample while the host was alive, and the canonical dump
+is now recovered from the per-sample archive (`artifacts/run1/full/
+sample-0094-00453.json.gz`, pid 71372, count 453) and committed as
+`artifacts/run1/TAIL-453.json`; it reproduces the table above exactly. The
+watcher now PINS the first host it sees, reports `HOST CHANGED`, and writes any
+other process's dumps to `*.pid<N>.*` rather than over the subject's.
+
 ### The shape is the finding: it is not many stores, it is ~81 RETAINED APP RUNTIMES
 
 Read the three big rows together. **81 descriptors on ONE database file. 76 on

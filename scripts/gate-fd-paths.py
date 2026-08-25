@@ -474,6 +474,18 @@ def main() -> int:
     for sig in (signal.SIGINT, signal.SIGTERM):
         signal.signal(sig, lambda *_: stop.__setitem__("now", True))
 
+    # THE PINNED HOST. `find_test_host()` picks the largest-RSS process whose
+    # executable is inside `/Playhead.app/`, which is right DURING a run and
+    # wrong the moment the run ends: a stale simulator app, or the next run's
+    # host, satisfies the same predicate. Left unpinned, `--last` gets rewritten
+    # with a DIFFERENT process's descriptors and the file that is supposed to
+    # hold the tail of THIS run holds twelve descriptors belonging to something
+    # else — measured, on this bead's own first run, which is why the pin
+    # exists. So the first pid observed is the subject; a different one is
+    # REPORTED and written to its own `--last`/`--peak` files rather than
+    # silently replacing the subject's.
+    pinned = {"pid": 0}
+
     out_fh = open(args.out, "a", buffering=1) if args.out else None
     started = time.time()
     gone_since = 0.0
@@ -485,6 +497,14 @@ def main() -> int:
     while not stop["now"]:
         pid = args.pid or find_test_host()
         snap = snapshot(pid) if pid else None
+        if snap is not None:
+            if pinned["pid"] == 0:
+                pinned["pid"] = pid
+                print(f"gate-fd-paths: pinned host pid {pid}", file=sys.stderr)
+            elif pid != pinned["pid"]:
+                print(f"gate-fd-paths: HOST CHANGED {pinned['pid']} -> {pid}; "
+                      f"its dumps go to *.pid{pid}.* and the pinned host's are "
+                      f"left as they stand", file=sys.stderr)
         if snap is None:
             if not args.watch:
                 print(f"gate-fd-paths: no readable fd table for pid {pid}", file=sys.stderr)
@@ -505,7 +525,7 @@ def main() -> int:
             if out_fh:
                 out_fh.write(json.dumps(summary, sort_keys=True) + "\n")
             if args.last:
-                _atomic_json(args.last, snap)
+                _atomic_json(_scoped(args.last, pid, pinned["pid"]), snap)
             if args.full_dir:
                 name = os.path.join(
                     args.full_dir,
@@ -514,9 +534,13 @@ def main() -> int:
                 with gzip.open(tmp, "wt") as fh:
                     json.dump(snap, fh, sort_keys=True)
                 os.replace(tmp, name)
-            if args.peak and snap["count"] > peak_count:
+            if args.peak and pid == pinned["pid"] and snap["count"] > peak_count:
                 peak_count = snap["count"]
                 _atomic_json(args.peak, snap)
+            elif args.peak and pid != pinned["pid"]:
+                # An interloper gets its own high-water file, never the
+                # subject's: a peak is only meaningful within one process.
+                _atomic_json(_scoped(args.peak, pid, pinned["pid"]), snap)
             if not args.watch:
                 report(snap, args)
                 return 0
@@ -530,6 +554,20 @@ def main() -> int:
         out_fh.close()
     print(f"gate-fd-paths: {samples} samples", file=sys.stderr)
     return 0
+
+
+def _scoped(path: str, pid: int, pinned: int) -> str:
+    """`path` for the pinned host, `path` with `.pid<N>` spliced in for anyone else.
+
+    Splices before the extension so `last.json` -> `last.pid482.json` rather
+    than `last.json.pid482`, which reads as a partial file.
+    """
+    if pid == pinned:
+        return path
+    root, dot, extension = path.rpartition(".")
+    if not dot:
+        return f"{path}.pid{pid}"
+    return f"{root}.pid{pid}.{extension}"
 
 
 def _atomic_json(path: str, payload: dict) -> None:

@@ -246,6 +246,33 @@ class AtomicWriteRails(unittest.TestCase):
                 self.assertEqual(json.load(fh)["count"], 2539)
 
 
+class PinnedHostRails(unittest.TestCase):
+    """`--last` must not be rewritten by a DIFFERENT process.
+
+    `find_test_host()` picks the largest-RSS process under `/Playhead.app/`,
+    which is right during a run and wrong the instant it ends — a stale
+    simulator app satisfies the same predicate. On this bead's own first run
+    that clobbered the tail dump with twelve descriptors belonging to something
+    else, and the file that names the run's tail held another process's.
+    """
+
+    def test_the_pinned_host_writes_to_the_plain_path(self):
+        self.assertEqual(gfp._scoped("/a/last.json", 7, 7), "/a/last.json")
+
+    def test_an_interloper_gets_its_own_file_and_keeps_the_extension(self):
+        self.assertEqual(gfp._scoped("/a/last.json", 9, 7), "/a/last.pid9.json")
+        self.assertEqual(gfp._scoped("/a/peak.json", 42, 7), "/a/peak.pid42.json")
+
+    def test_a_suffixless_path_is_still_distinguished(self):
+        self.assertEqual(gfp._scoped("/a/last", 9, 7), "/a/last.pid9")
+
+    def test_the_splice_lands_BEFORE_the_extension(self):
+        """`last.json.pid9` reads as a partial file; `last.pid9.json` does not."""
+        scoped = gfp._scoped("/a/last.json", 9, 7)
+        self.assertTrue(scoped.endswith(".json"))
+        self.assertNotIn(".json.", scoped)
+
+
 class HostDiscoveryRails(unittest.TestCase):
 
     def test_discovery_returns_a_pid_or_zero_and_never_raises(self):
