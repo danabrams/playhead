@@ -1086,8 +1086,9 @@ func daemonSilentSessionIO(
 /// moves every statistic.
 ///
 ///   - INWARD, in 7 of the 13 logs before playhead-7wia landed (2026-08-18
-///     23:00) — the numerator and the denominator, because the r4 note 50
-///     lines above this one exists to forbid writing it as "the 7 logs":
+///     23:00) — the numerator and the denominator, because the
+///     READ "ALWAYS THE SAME FOUR" AS DATED note above exists to forbid
+///     writing it as "the 7 logs":
 ///     `ForceQuitResumeTests`' `ep-g2wq-no-blob` parked the queue and this
 ///     suite's `kkzu-unattributed` was one of three transfers whose bodies
 ///     never ran. It cost no verdict — the arm reading that transfer asserted
@@ -1122,9 +1123,10 @@ func daemonSilentSessionIO(
 /// that log argues both ways. AGAINST: fourteen `allTasks` calls, already on
 /// per-manager private queues, blew the same 10 s bound inside
 /// 08:06:01–08:06:12 with their bodies having RUN. FOR: the one rail in the
-/// plan ON A PRIVATE QUEUE whose pass depends on `nsurlsessiond` genuinely
-/// answering — `BackgroundDownloadDropLedgerTests.aHealthyDownloadWritesNothing`
-/// — PASSED, logging `Queued background download for ep-healthy`
+/// plan ON A PRIVATE QUEUE that I COULD FIND whose pass depends on
+/// `nsurlsessiond` genuinely answering —
+/// `BackgroundDownloadDropLedgerTests.aHealthyDownloadWritesNothing` — PASSED,
+/// logging `Queued background download for ep-healthy`
 /// at 08:05:52.60, 1.3 s after the shared queue stopped draining anything and
 /// 64 s before it resumed. DO NOT compress that into "one `Queued background
 /// download` line in 14 MB, so the daemon was answering nobody": that window's
@@ -1135,7 +1137,14 @@ func daemonSilentSessionIO(
 /// pass depends on the daemon answering (each asserts the sidecar is present
 /// after `backgroundDownload`, and every no-answer branch deletes it), and all
 /// four FAILED on that run. Without the qualifier the sentence is false and
-/// the FOR half reads stronger than the evidence.
+/// the FOR half reads stronger than the evidence. "THAT I COULD FIND" IS ALSO
+/// LOAD-BEARING (r6): "the one rail in an 11,784-test plan" is a universal
+/// with no enumeration behind it, and the AGAINST half of this paragraph IS
+/// enumerated, so the two halves are not the same kind of claim. Two other
+/// tests in that same suite failed on that run; I could not establish that
+/// they need the daemon to ANSWER rather than merely to be asked, so I could
+/// not falsify the sentence either — which is exactly why it is softened
+/// rather than defended.
 ///
 /// So read a green `DownloadShowAttributionTests` as evidence the daemon
 /// answered, not as evidence this helper worked. What the helper buys needs no
@@ -1167,12 +1176,22 @@ func daemonSilentSessionIO(
 /// harder sum; it is a quantity that includes the observer, and the fix is to
 /// stop quoting it rather than to get it right once more.
 ///
-/// Two further traps if you do reach for grep: `git grep -E` is POSIX ERE and
-/// does NOT understand `\s`, so `DownloadManager\s*\(` silently degrades to
-/// the literal there and agrees with it for the wrong reason; in Python the
-/// same pattern finds one more line than the literal does — a `// MARK: -
-/// DownloadManager (audio cache)` in `FileProtectionTests`, which has a space
-/// and is not a construction.
+/// Two further traps if you do reach for grep. `git grep -E` is POSIX ERE and
+/// does NOT understand `\s`, so `DownloadManager\s*\(` degrades there (to
+/// `DownloadManagers*\(`) and happens to agree with the literal because no
+/// line contains `DownloadManagers(` — the right answer for the wrong reason.
+/// And a whitespace-tolerant pattern ALSO matches `DownloadManager` followed
+/// by a SPACE and a paren, which is prose, not a construction: there is at
+/// least one such `// MARK:` in `FileProtectionTests`, and this very sentence
+/// is another.
+///
+/// HOW MANY MORE IT FINDS IS NOT QUOTED, AND THAT IS THE PARAGRAPH ABOVE
+/// APPLIED TO ITSELF (r6). The first draft of this trap said "one more line",
+/// which was true when it was measured and false in the commit that shipped
+/// it, because writing the sentence added the second one. Fourth round, same
+/// error, same direction — and this time inside the paragraph whose thesis is
+/// that a self-referential count includes the observer. The delta is a
+/// self-referential count too. Only the comment-stripped 142 is not.
 ///
 /// Four things it does NOT do, each measured rather than argued:
 ///
@@ -1183,12 +1202,19 @@ func daemonSilentSessionIO(
 ///     up" lines FOR `allTasks` anywhere in the 57, so no queue was holding
 ///     those bodies back. The qualifier is load-bearing and was missing until
 ///     r5: there are plenty of "already given up" lines in these logs —
-///     seventeen of them on 2026-08-23 alone, named twenty lines above — and
-///     the inference only follows for the `allTasks` submissions. COUNT EXPIRIES OF THIS BOUND: there are 138 `allTasks` expiry
-///     lines and the 138th reads `within 30.000000s`, from
+///     seventeen in ONE DRAIN on 2026-08-23, in the SEVENTEEN submissions
+///     paragraph above — and the inference only follows for the `allTasks`
+///     submissions. (Seventeen is the drain, not the day: that log carries an
+///     eighteenth at 08:05:50.399799, labelled `starved`, which is
+///     `BackgroundSessionIOTests`' own synthetic seam a minute earlier and
+///     nothing to do with the park. Attaching a drain count to a DATE is the
+///     filtered-numerator move one more time — r6.)
+///     COUNT EXPIRIES OF THIS BOUND: there are 138 `allTasks` expiry lines
+///     and EXACTLY ONE of them reads `within 30.000000s`, from
 ///     `BackgroundDownloadDropLedgerTests.answeringIO()`, a double that widens
-///     it on purpose. A private queue is not a shorter answer, only an
-///     unshared wait.
+///     it on purpose. ("The 138th" is what this used to say, and an ordinal
+///     needs an ordering nobody stated.) A private queue is not a shorter
+///     answer, only an unshared wait.
 ///   - It does not separate two calls made by the same manager THROUGH
 ///     `sessionIO`: those share one instance and therefore one queue. A
 ///     manager owns THREE — `DownloadManager.init` also builds

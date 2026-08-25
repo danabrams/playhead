@@ -300,11 +300,16 @@ struct DownloadShowAttributionTests {
         // and back, so nothing now covers `backgroundDownload`'s own write of
         // an unattributed record. It was never asserted coverage — mutant E8P
         // proves it, surviving against the pre-bead file on a run that DID
-        // admit the transfer — but it was reachable, and it is not any more. This arm ASSERTS AN ABSENCE, and a refused
+        // admit the transfer — but it was reachable, and it is not any more.
+        //
+        // This arm ASSERTS AN ABSENCE, and a refused
         // transfer produces the same absence: all three no-answer branches
         // delete the sidecar, and a completion that finds none defaults to
         // `.unattributed(.resumeWithoutRecordedShow)`, byte-identical to the
-        // context passed here. So `podcastId == nil` below used to read the
+        // `isExplicitDownload: false` context this arm USED TO pass — see THE
+        // WRITTEN CONTEXT IS DELIBERATELY NOT THE FALLBACK below, which is
+        // why it passes `true` now and why the two are no longer identical.
+        // So `podcastId == nil` below used to read the
         // same whether the download was admitted or never started — this
         // repo's standing defect class, sitting inside the assertion.
         //
