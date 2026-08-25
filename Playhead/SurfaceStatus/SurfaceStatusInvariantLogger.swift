@@ -131,11 +131,6 @@ final class SurfaceStatusInvariantLogger: @unchecked Sendable {
         state.close()
     }
 
-    /// playhead-882eg: whether a session-file descriptor is currently held.
-    /// Reads the `FileHandle` itself, not a flag.
-    var hasOpenSessionFileForTesting: Bool {
-        state.hasOpenSessionFile
-    }
 
     // MARK: - Public API
 
@@ -243,6 +238,18 @@ final class SurfaceStatusInvariantLogger: @unchecked Sendable {
     // MARK: - Test-only introspection
 
     #if DEBUG
+    /// playhead-882eg: whether a session-file descriptor is currently held.
+    /// Reads the `FileHandle` itself, not a flag — a rail that pins `close()`
+    /// against a boolean somebody else maintains is pinning the boolean.
+    ///
+    /// Inside `#if DEBUG` with its neighbours: it exists for
+    /// `RuntimeStoreTeardownTests` and has no production reader, and a
+    /// test-only accessor that ships in release is dead code with an
+    /// `internal` door on it.
+    var hasOpenSessionFileForTesting: Bool {
+        state.hasOpenSessionFile
+    }
+
     /// Test hook: synchronously drain pending writes. Use after
     /// `record(_:)` to ensure the file reflects every emitted entry
     /// before reading it back.

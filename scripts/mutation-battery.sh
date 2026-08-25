@@ -4917,6 +4917,17 @@ MUTATIONS=(
   # the eviction window. Predicted to redden the same-file rail ALONE.
   "FD04|1473|SSIL|$T_FD_SAMEFILE"
 
+  # Batch 1476 — FD07, the AD CATALOG is never closed. It needs its own entry
+  # for the reason review round 1 found: the catalog's assertion used to be
+  # guarded by the ANALYSIS store's observation, and `isOpen` is `db != nil` —
+  # exactly what a store nobody ever opened reports — so an arm entered on
+  # somebody else's evidence could only ever pass. With each arm on its own
+  # observation the prediction is clean, and it is the same shape as FD01
+  # because it is the sibling line of the same teardown: the closes rail alone.
+  # 168 of the 499-descriptor floor was this one file, the second-largest line
+  # in it.
+  "FD07|1476|RT|$T_FD_CLOSES"
+
   # Batch 1474 — FD05, an allowlist entry that names a file which no longer
   # constructs a runtime. The canary is CLOSED IN BOTH DIRECTIONS on purpose: a
   # licence for a file nobody can find was renamed or moved, and whatever
@@ -12965,6 +12976,14 @@ EOF
             return reopened
         }
 
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  FD07)
+    snippet OLD <<'EOF'
+        await adCatalogStore?.close()
 EOF
     snippet NEW <<'EOF'
 EOF
