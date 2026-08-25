@@ -1070,9 +1070,14 @@ that pin each other.
 * `scripts/gate_baseline.py`'s change is **comment-only, proven mechanically**:
   `ast.dump(ast.parse(base)) == ast.dump(ast.parse(head))` is True, which also
   rules out a docstring edit. `scripts/mutation-battery-gate-baseline.py` was
-  **not touched at all on this branch** (`git log 18a7423c..HEAD --` on it is
-  empty) — if a brief says it had comment-only edits, that is the brief being
-  wrong, not a missing commit.
+  **not touched by any of the 25 commits before R3** (`git log 18a7423c..5cf1feb3
+  --` on it is empty) — so if a brief says it had comment-only edits alongside
+  `gate_baseline.py`, that is the brief being wrong, not a missing commit. **R3
+  itself then changed exactly one string constant in it** (item 7 below), so the
+  sentence "never touched on this branch", true when R3's first commit made it,
+  is false at HEAD and is corrected here rather than left standing — which is
+  the same staleness this whole section is about, committed by the section
+  reporting it.
 * Rails: **497 tests green** — `test_gate_fd_paths` 57, `test_fd_ceiling_sweep`
   23, `test_gate_baseline` **334**, `test_gate_memory_verdict` 36,
   `test_disk_preflight` 47; two skips, both pre-existing and both stating that
