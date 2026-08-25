@@ -1263,6 +1263,13 @@ SSR="Playhead/Services/AdDetection/SemanticScanResult.swift"
 # without it the closes exist and 33 test sites still never call them.
 SSIL="Playhead/SurfaceStatus/SurfaceStatusInvariantLogger.swift"
 TRTC="PlayheadTests/Design/TestRuntimeTeardownCanaryTests.swift"
+# playhead-882eg FD06's target. It is ALLOWLISTED by the canary and it is
+# `PerfGate`d, so it is in no focused suite — which is what makes it the right
+# mutation site: the canary reads test SOURCES from disk at run time, so this
+# file's text can be made to violate the rule without changing what any running
+# test does. A mutant that deleted the canary's own check instead SURVIVED, and
+# rightly: deleting an assertion's producer is not the defect the entry names.
+MAFT="PlayheadTests/Services/Diagnostics/MainActorFreedomTests.swift"
 # playhead-e75l: the daemon-refusal CLASS — kvs8's throttle plus the metadata
 # stall — and the per-kind tokens and log events that keep the two countable
 # apart in a device pull. Added for the DR series.
@@ -1584,7 +1591,7 @@ MUTABLE_FILES=(
   "$ELV" "$BSB"
   "$UZWIRE" "$UZPROV" "$UZHLTH"
   "$SSR"
-  "$SSIL" "$TRTC"
+  "$SSIL" "$TRTC" "$MAFT"
 )
 # playhead-6r4z R1 review: `$MPTRIDX` was MISSING from the list above from the
 # moment playhead-mptr added the K2 series, and it is the target of NINE of the
@@ -4917,11 +4924,19 @@ MUTATIONS=(
   # nothing else — the closes are untouched, so all four store rails stay green.
   "FD05|1474|TRTC|$T_FD_CANARY"
 
-  # Batch 1475 — FD06, the shutdown obligation is dropped from the allowlist
-  # check, so a listed file may construct a runtime and never tear it down. That
-  # is the difference between a licence and an amnesty, and it is the direction
-  # a reviewer is least likely to test.
-  "FD06|1475|TRTC|$T_FD_CANARY"
+  # Batch 1475 — FD06, AN ALLOWLISTED FILE THAT CONSTRUCTS A RUNTIME AND NEVER
+  # TEARS IT DOWN. That is the difference between a licence and an amnesty, and
+  # it is the direction a reviewer is least likely to test.
+  #
+  # THE FIRST VERSION OF THIS MUTANT DELETED THE CANARY'S OWN CHECK AND SURVIVED,
+  # and the survivor was right. Deleting the producer of an assertion is not the
+  # defect this entry names — nothing anywhere asserts that a particular
+  # assertion EXISTS, so that mutation can only ever survive, and scoring it as a
+  # coverage hole would have been a fabricated one. The edit was rewritten (which
+  # is the one exception this script's header allows) to make a REAL FILE violate
+  # the rule: `MainActorFreedomTests` is allowlisted and `PerfGate`d, so its text
+  # can be made non-compliant without changing what any running test does.
+  "FD06|1475|MAFT|$T_FD_CANARY"
 
   # ---- playhead-tktr / playhead-ph2d (TK series): the V60 DOWNGRADE ----
   #
@@ -12969,12 +12984,35 @@ EOF
     patch "$file" "$OLD" "$NEW" ;;
 
   FD06)
+    # THREE patches, because the canary asks whether the file contains the token
+    # AT ALL and one surviving spelling would leave it compliant. Every patch but
+    # the last takes `|| return $?` per this script's own rule about
+    # half-applied mutations. The replacement still compiles — it is the same
+    # call with a space inside the parens — so the only thing that changes is
+    # whether the file matches the literal the canary greps for.
     snippet OLD <<'EOF'
-            if !stripped.contains(".shutdown()") {
-                allowlistedWithoutShutdown.append(name)
-            }
+        await warmupRuntime.shutdown()
 EOF
     snippet NEW <<'EOF'
+        await warmupRuntime.shutdown( )
+EOF
+    patch "$file" "$OLD" "$NEW" || return $?
+    snippet OLD <<'EOF'
+            await runtime.shutdown()
+            return
+EOF
+    snippet NEW <<'EOF'
+            await runtime.shutdown( )
+            return
+EOF
+    patch "$file" "$OLD" "$NEW" || return $?
+    snippet OLD <<'EOF'
+        await runtime.shutdown()
+    }
+EOF
+    snippet NEW <<'EOF'
+        await runtime.shutdown( )
+    }
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -27895,6 +27933,7 @@ rec_file()   {
     STORE) printf '%s' "$STORE" ;;
     SSIL)  printf '%s' "$SSIL" ;;
     TRTC)  printf '%s' "$TRTC" ;;
+    MAFT)  printf '%s' "$MAFT" ;;
     CTRL)  printf '%s' "$CTRL" ;;
     VIEW)  printf '%s' "$VIEW" ;;
     TRIG)  printf '%s' "$TRIG" ;;
