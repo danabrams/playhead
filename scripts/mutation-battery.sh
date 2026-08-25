@@ -14042,10 +14042,19 @@ EOF
         } catch is CancellationError {
             // A CANCELLED WRITE IS NOT A FAILED WRITE. Counting it into
             // `writeFailures` would say this database could not hold a row,
-            // which is a claim about the STORE — and it is the one reading
-            // that counter exists to make. Nothing is lost that anybody asked
-            // to keep: the only cancelling caller is the manager retiring a
-            // finalization whose bytes it is about to delete.
+            // which is a claim about the STORE — and it is the one reading that
+            // counter exists to make.
+            //
+            // AND NOTHING IS LOST THAT ANYBODY ASKED TO KEEP — but only because
+            // `DownloadManager.retireBackgroundTransfers` now takes
+            // `retiringJournalFinalizations` and the ONLY caller that passes
+            // `true` is `clearCache`, which unlinks the bytes. This comment
+            // used to assert that as a fact about the code and it was FALSE:
+            // `cancelDownload` retired finalizations too and deletes nothing,
+            // so a transfer that finalized while the user cancelled lost its
+            // row for an artifact still on disk. Found at review 2. If a third
+            // caller ever passes `true`, this sentence stops being true again —
+            // which is why a source canary pins the two call sites.
             return
         } catch {
 EOF
