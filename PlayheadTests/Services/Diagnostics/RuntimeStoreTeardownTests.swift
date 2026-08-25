@@ -38,7 +38,24 @@ import Testing
 @testable import Playhead
 
 @MainActor
-@Suite("playhead-882eg: shutdown() returns the descriptors the runtime opened")
+/// THREE MINUTES, AGAINST A MEASUREMENT RATHER THAN TASTE, and copied from the
+/// suite that already does this exact work. `RuntimeShutdownLifecycleTests`
+/// records that "in a full `PlayheadFastTests` run on this box (2026-07-28)
+/// tests carrying a 60 s limit blew it at 119-134 s elapsed, on
+/// `main@89bf541a` as well as on this branch", and chose 3 minutes so that a
+/// trip means a real hang rather than a busy machine. These tests construct a
+/// `PlayheadRuntime` and shut it down — the same population, plus a bounded
+/// 2 s poll, plus a JOIN of the bootstrap chain that migrates the app's real
+/// `analysis.sqlite` under whatever contention the plan is producing. A 2 min
+/// limit sits INSIDE that measured band, so it would have read ordinary
+/// full-plan load as a failure in a brand-new suite — and a new suite's first
+/// red is exactly the one that gets absorbed into the gate baseline.
+///
+/// The suite-level trait arms tests added later; each test also carries the
+/// trait explicitly so the coverage is greppable rather than inherited-and-
+/// assumed. Same two-place discipline, and the same reason, as the sibling.
+@Suite("playhead-882eg: shutdown() returns the descriptors the runtime opened",
+       .timeLimit(.minutes(3)))
 struct RuntimeStoreTeardownTests {
 
     /// Open the SESSION LOG, and wait — bounded — for the runtime's own
@@ -88,7 +105,7 @@ struct RuntimeStoreTeardownTests {
     }
 
     @Test("shutdown() closes the analysis store, the ad catalog and the session log",
-          .timeLimit(.minutes(2)))
+          .timeLimit(.minutes(3)))
     func shutdownClosesTheStores() async throws {
         let runtime = PlayheadRuntime(isPreviewRuntime: true)
         let storeWasOpen = await openLogAndAwaitStore(runtime)
@@ -127,7 +144,7 @@ struct RuntimeStoreTeardownTests {
     /// leaves no descriptors behind. That last step matters: a rail about a
     /// descriptor floor that raises the floor is its own counterexample.
     @Test("without shutdown() the session log stays open — the rail above discriminates",
-          .timeLimit(.minutes(2)))
+          .timeLimit(.minutes(3)))
     func withoutShutdownTheStoresStayOpen() async throws {
         let runtime = PlayheadRuntime(isPreviewRuntime: true)
         await openLogAndAwaitStore(runtime)
@@ -147,7 +164,7 @@ struct RuntimeStoreTeardownTests {
     /// claim is about `close()`'s semantics, and running it against the shared
     /// production database would make it a claim about lock contention instead.
     @Test("closing an analysis store is non-terminal — a later read reopens it",
-          .timeLimit(.minutes(2)))
+          .timeLimit(.minutes(3)))
     func analysisStoreReopensAfterClose() async throws {
         let directory = try makeTempDir(prefix: "882eg-reopen")
         let store = try AnalysisStore(directory: directory)
@@ -168,7 +185,7 @@ struct RuntimeStoreTeardownTests {
     /// write appends to THAT file. Two files carrying one `sessionId` would
     /// split a session's entries and burn two slots of the eviction window.
     @Test("closing the session log is non-terminal — a later write reopens the SAME file",
-          .timeLimit(.minutes(2)))
+          .timeLimit(.minutes(3)))
     func sessionLogReopensTheSameFile() async throws {
         let runtime = PlayheadRuntime(isPreviewRuntime: true)
         await openLogAndAwaitStore(runtime)
