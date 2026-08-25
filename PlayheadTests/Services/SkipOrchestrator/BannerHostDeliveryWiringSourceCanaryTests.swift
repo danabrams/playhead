@@ -116,14 +116,15 @@ struct BannerHostDeliveryWiringSourceCanaryTests {
             text.contains(guardLine),
             "the forwarding rule does not guard on `didAccept`"
         )
-        let acknowledgements = ["acknowledgeSuggestedBannerDelivery(",
-                                "acknowledgeAutoSkippedBannerDelivery("]
         guard let guardIndex = text.range(of: guardLine)?.upperBound else {
             Issue.record("`\(guardLine)` is absent; nothing to order against")
             return
         }
-        for call in acknowledgements {
-            let before = text[text.startIndex..<guardIndex]
+        let before = text[text.startIndex..<guardIndex]
+        for call in [
+            "acknowledgeSuggestedBannerDelivery(",
+            "acknowledgeAutoSkippedBannerDelivery(",
+        ] {
             #expect(
                 !before.contains(call),
                 """
@@ -133,6 +134,23 @@ struct BannerHostDeliveryWiringSourceCanaryTests {
                 """
             )
         }
+        // AND IT IS DECIDED BEFORE THE TIER IS, which "no call above the
+        // guard" does not say. Push the guard down into one arm of the tier
+        // switch and the other arm acknowledges unconditionally while every
+        // ordering check above still passes — the queue's verdict has to bind
+        // both tiers or it binds whichever one the next reader forgets.
+        guard let switchIndex = text.range(of: "switch item.tier {")?.lowerBound
+        else {
+            Issue.record("the tier switch is gone; nothing to order against")
+            return
+        }
+        #expect(
+            guardIndex < switchIndex,
+            """
+            the `didAccept` guard is inside the tier switch rather than ahead \
+            of it, so at least one tier acknowledges an item the queue refused.
+            """
+        )
     }
 
     /// The tier switch is exhaustive on purpose: a third banner tier must be
