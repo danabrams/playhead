@@ -167,4 +167,44 @@ struct RuntimeGraphRetentionProbeTests {
         let liveStores = stores.filter { $0.value != nil }.count
         print("[882eg-probe] fivePreviewRuntimes liveRuntimes=\(liveRuntimes)/5 liveStores=\(liveStores)/5")
     }
+
+    /// Which services leak WITHOUT a `PlayheadRuntime` at all.
+    ///
+    /// The wide probe reports 19 of 22 runtime-owned objects retained, and they
+    /// are mutually referencing — so one immortal member holds the whole
+    /// cluster and the cluster cannot say which member that is. Constructing
+    /// each in isolation can: an object that fails to release with nothing but
+    /// the test holding it is a ROOT, and an object that releases fine here is
+    /// a passenger.
+    @Test("standalone services, constructed with no runtime", .timeLimit(.minutes(2)))
+    func standaloneServices() async throws {
+        var boxes: [WeakBox<AnyObject>] = []
+        await {
+            let playback = PlaybackService()
+            boxes.append(WeakBox<AnyObject>(playback, "PlaybackService"))
+        }()
+        await {
+            let capabilities = CapabilitiesService()
+            boxes.append(WeakBox<AnyObject>(capabilities, "CapabilitiesService"))
+        }()
+        await {
+            let audio = AnalysisAudioService()
+            boxes.append(WeakBox<AnyObject>(audio, "AnalysisAudioService"))
+        }()
+        await {
+            let logger = SurfaceStatusInvariantLogger()
+            boxes.append(WeakBox<AnyObject>(logger, "SurfaceStatusInvariantLogger"))
+        }()
+        await {
+            let downloads = DownloadManager()
+            boxes.append(WeakBox<AnyObject>(downloads, "DownloadManager"))
+        }()
+        if let store = try? AnalysisStore() {
+            await {
+                boxes.append(WeakBox<AnyObject>(store, "AnalysisStore"))
+            }()
+        }
+        await drain(8)
+        report("standaloneServices", boxes)
+    }
 }
