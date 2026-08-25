@@ -240,3 +240,36 @@ than OK. Self-tested against a live batch mid-run, where it correctly refused.
 Useful number that fell out of the self-test: `FOCUSED_SUITES` is **2,577 tests
 in 251 suites**, not the handful this bead added. That is the population every
 KILLED verdict above was measured against.
+
+### The verifier itself had the defect it was built to catch
+
+The first version of `verify-survived.sh` located a batch log by searching every
+`/private/tmp/playhead-mutation-battery.*` directory for `batch-<N>.log`. That is
+wrong, and it is wrong in this repo's standing way — a value that names one thing
+read as though it named another.
+
+**Batch numbers are reused across beads, and the old directories survive.** The
+battery keeps its work directory whenever it exits on a failure path
+(`KEEP_WORK=1`), so this box carries **38** such directories from other agents'
+runs on 2026-08-22 and 08-23. Among them:
+
+    batch-1414.log   2026-08-22 17:44   <- MS99's batch number, playhead-2d6i's own run
+    batch-1405.log   2026-08-22 17:27   <- MS06's batch number
+
+MS99 is one of the two vacuity controls this bead has to verify. Asked to
+verify today's control, the first version would have found a three-day-old log
+belonging to a different bead's run of the same-numbered batch and reported OK —
+a control whose survival is "confirmed" by evidence from another investigation.
+
+Closed by a freshness floor: the copier mirrors only files newer than the run's
+start, preserving mtimes, and the verifier REFUSES any log older than that floor
+by name. **Proven by making it fire** rather than by reading a green result: the
+Aug-22 `batch-1414.log` was deliberately placed where the verifier would find it,
+and it reported FAIL with the date. A rule that has never been observed to fire
+is indistinguishable from a rule whose pattern never matches.
+
+(Also worth recording for whoever reads a listing on this box: `ls -1 <dir> |
+tail -4` rendered a directory holding sixteen files as `(empty)`. Shell output
+here passes through a summarising proxy; `/bin/ls` and `rtk proxy <cmd>` are the
+ways around it, and an ABSENCE claim taken from a summarised listing is not
+evidence.)
