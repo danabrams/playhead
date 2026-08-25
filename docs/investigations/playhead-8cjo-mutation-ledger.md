@@ -551,3 +551,39 @@ controls.** Every kill reddened exactly the tests its prediction named. One
 mutant (AK15) survived on its first run, and the coverage hole it exposed was
 closed with a new rail rather than by re-aiming the expectation at something
 already green.
+
+## The merge-candidate full-plan gate
+
+`scripts/fast-gate.sh`, `PlayheadFastTests`, 2026-08-25.
+
+```
+11,806 tests in 1,444 suites · 276.5 s · ** TEST FAILED ** · GATE_EXIT=65
+gate-baseline: RED (4 known / 1 NEW) — 3 tests hit a RESOURCE FAILURE (re-run)
+host restarts: 0 · NO VERDICT: 0
+gate-memory: test host peak open fds 2454 of RLIMIT_NOFILE soft 2560 (95.9 %)
+```
+
+**The 1 NEW is not this diff's**, and it is the one named in advance:
+`AnalyticsCounterStoreTests` / `The shared store is volatile under XCTest`
+(`UserDefaults.standard.data(forKey:) == nil` — process-global state under
+XCTest). It has failed on other trees carrying none of this work.
+
+**The 3 RESOURCE denials are not this diff's either**, and the gate says so
+itself: all three are `AdWindowIngestAuditTests`, all three are `unable to open
+database file`, and the gate's own diagnosis is descriptor exhaustion in the
+single test host — playhead-vk68m, which owns the fix. A RESOURCE failure means
+the test was never judged, so it is not triageable against any diff.
+
+**Every test this bead adds or changes RAN and PASSED in that run** — checked by
+name, including both parameterised tests' three cases each. (The first pass of
+that check reported two of eighteen as unclean and was wrong: Swift Testing
+prints a parameterised pass as `… with 3 test cases passed`, which a pattern
+expecting `" passed` cannot match. The tests were fine; the checker was not —
+which is the same reading error this bead is about, in the verification of it.)
+
+**One number worth recording against a review concern.** A reviewer predicted
+that ~12 new concurrent `AnalysisStore` instances (≈36 descriptors at the
+repo's measured 3.00 fds/store) could tip a host already measured at 2,539 of
+2,560. The observed peak on this run is **2,454 — 85 BELOW that earlier
+measurement**, so the addition did not move the ceiling. The suite is at 95.9 %
+of the soft limit either way, and that is playhead-vk68m's to fix.
