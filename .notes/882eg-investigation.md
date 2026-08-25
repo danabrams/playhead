@@ -289,3 +289,61 @@ that makes it safe to do at a teardown without auditing every reader:
 The loop cancellations and the cycle cut are kept. They are correct on their own
 terms — they stop runaway background work at teardown, which nothing did before —
 and they are what makes the closed stores stay closed.
+
+## M5 — AFTER, full plan, floor 499 → 214 (2026-08-25)
+
+Artifacts: `/Users/dabrams/playhead-gate-artifacts/882eg/after/`. Same protocol
+as the BEFORE: watcher started before the gate, `PLAYHEAD_SIM_ID` set so the trim
+applies (`simulator processes after trim: 102`).
+
+Run health: **11,789 tests, 264.4 s, ONE test-host pid (44432), 0 restarts,
+`** TEST FAILED **`, `GATE_EXIT=65`.** Peak fds 2,462 / 2,560 (96.2 %). The test
+population is byte-identical to the BEFORE run (11,789 both times), which is what
+makes the two floors comparable.
+
+**FLOOR 214 TOTAL descriptors** (same column as the BEFORE's 499 and as both
+peaks), flat for the last **eight consecutive samples**:
+`… 2063 2374 2146 852 226 214 214 214 214 214 214 214`.
+
+| path family | BEFORE | AFTER | |
+|---|---|---|---|
+| production `analysis.sqlite` | **179** (89 db + 89 -wal + 1 -shm) | **84** (69 + 14 + 1) | −95 |
+| production `ad_catalog.sqlite` | **168** (84 + 83 + 1) | **64** (59 + 4 + 1) | −104 |
+| `Caches/Diagnostics/surface-status-*.jsonl` | **89** distinct files | **4** distinct files | **−85, 96 %** |
+| `Documents/bg-task-log.jsonl` | 8 (one file) | 7 (one file) | −1 |
+| `tmp/PlayheadTestScratch/*` | 39 | 39 | 0 |
+| SwiftData `Playhead.store` | 3 | 3 | 0 |
+| other / infrastructure | 13 | 13 | 0 |
+| **total** | **499** | **214** | **−285, 57 %** |
+
+`RLIMIT_NOFILE` soft is 2,560, so the floor falls from **19.5 %** of the budget
+to **8.4 %**.
+
+**WHAT STILL HOLDS THE REMAINDER, stated as what is measured and what is
+inferred.** 148 of the 214 are still the two production SQLite files — 69
+`analysis.sqlite` and 59 `ad_catalog.sqlite` connections. Measured: the
+`surface-status` line, closed by the LAST statement in `shutdown()`, fell 89 → 4,
+so `shutdown()` itself ran to completion for essentially every runtime and the
+close path is reached. Two readings of the residual are consistent with that and
+this bead does not separate them:
+
+* the leaked service graph (playhead-panpc) touches a store after `shutdown()`
+  closed it, and `close()` is deliberately NON-TERMINAL, so the touch REOPENS it;
+* or some connections are not closed at all and the `-wal` counts (89 → 14,
+  83 → 4) are an artefact of `F_GETPATH` on a WAL file that another connection's
+  checkpoint-on-close has already unlinked.
+
+The db/-wal asymmetry is the clue and it is recorded rather than resolved. A
+terminal ("sealed") close would settle it and probably capture most of the
+remaining 148, but it converts every use-after-teardown from a silent reopen into
+a thrown error — a design decision with real reach, not a teardown fix.
+
+**Two of this branch's own rails were RED on this run and are fixed** (see the
+commit after this one): they called `awaitReady()` on the app's REAL
+`analysis.sqlite` and came back `.migrationFailed("database is locked")` under
+11,789 concurrent tests, while passing 4/4 scoped. That is playhead-vhffu biting
+a rail written by the bead that filed it.
+
+`AnalyticsCounterStoreTests.sharedStoreIsTestIsolated` failed on the BEFORE run
+AND on the AFTER run, so it is not this branch's doing — the same conclusion the
+BEFORE note said the AFTER run would settle.
