@@ -381,3 +381,55 @@ edit becomes the shipped behaviour (a false KILLED). Only the first is
 self-announcing. That is why every MS mutant this bead touched was re-read
 against the new source rather than re-anchored mechanically, and why MS02 was
 given a new body instead of a new anchor.
+
+## Three ways a mutant stops being evidence, and they are NOT the same failure
+
+This branch hit two of them, and an earlier version of this file described the
+second as if it were the third. Naming all three is what stops that recurring,
+because the three differ in the direction they fail and only one of them is
+silent in the direction that looks like success.
+
+**1. THE LOST RAIL — the mutant is killed, but not by the property you think.**
+`AK11` re-creates this bead's defect in `observeBanners` and is correctly
+KILLED. It cannot, however, prove the delegation canary's *strengthening*,
+because it keeps the parameter named `queue` and therefore dies on the very
+substring the demonstrated bypass renames (`bannerQueue.enqueue(` contains no
+lowercase `queue.enqueue(`). A canary hardened against the bypass would report
+green under AK11 having never exercised the new property.
+*Verdict shown:* KILLED. *Failure direction:* a rail believed proven that is
+not. **Silent, and green.** This is the shape the previous bead's `FD06` v1 had.
+*Remedy:* `AK17`, which re-creates the bypass verbatim, rename included.
+
+**2. THE INERT MUTANT — the edit no longer changes behaviour.**
+`MS02`'s old body injected a receipt write above the attachment guard. Under
+playhead-2d6i that was the whole defect; under this bead the receipt is already
+written unconditionally above that guard, so the injection would have been a
+second write of the same key differing only in `occurredAt`, which nothing
+observes.
+*Verdict shown:* SURVIVED. *Failure direction:* a coverage gap reported where
+none exists — a reader goes hunting for a missing rail on `THE EXTENDED
+PROPERTY`, a rail that is already correct and already killed by five other
+mutants. **Loud, but misdirecting.** Wasted rounds, not a false green.
+*Remedy:* re-aim, which is what MS02 got — the DIRECTION it owns (one skip, two
+surfaces) moved to the seam, so that is what it mutates now.
+
+**3. THE FALSE KILL — the edit becomes the shipped behaviour.**
+A mutant whose "defect" is what the code now does turns the suites red for a
+change that introduced nothing, and the battery credits the rails that went red.
+*Verdict shown:* KILLED. *Failure direction:* a rail credited for catching a
+defect that was never injected. **Silent, and it looks exactly like success.**
+
+**Which one MS02 was.** The withdrawn sentence in this file called it (3). It is
+(2). The distinction is not pedantry: (3) would mean a rail in this bead is
+credited on nothing and the ledger's KILLED column is corrupt; (2) means a
+mutant would have wasted a round pointing at a gap that is not there. Only (3)
+would invalidate anything already recorded, and it did not happen — verified,
+because MS02's old anchor matches HEAD zero times and would have errored before
+running at all.
+
+**And a fourth case that is not a failure, because it announces itself.** Anchor
+drift: the source moved and the anchor matches 0 or 2+ times, so `patch` refuses
+and the battery prints `ERROR — anchor did not apply`. That happened twice in
+this session (MS99's second anchor, and MS02's would have) and cost minutes each
+time. A mutation battery that can only fail loudly is the cheap case; the work
+is in the three above.
