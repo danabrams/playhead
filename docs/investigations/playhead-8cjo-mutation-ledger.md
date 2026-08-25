@@ -30,8 +30,8 @@ because `restore_and_verify` re-hashes every mutable file between runs and
 | AK08 | endEpisode stops clearing the delivered-card record | CLEARS (1) | **CLEARS, exactly** | KILLED |
 | AK09 | beginEpisode stops clearing it | CLEARS (1) | **CLEARS, exactly** | KILLED |
 | AK10 | the emit path stops gating on a subscriber | PARTITION, **ATTACH** (2) | **the same 2, exactly — including the widened half** | KILLED |
-| AK11 | the view model keeps its own copy of the forwarding rule | DELEGATES, NOCOPY (2) | *running* | |
-| AK12 | the acknowledgement records no delivery | ACCEPTED, PARTITION, WALK, SEAM, CLEARS (5) | | |
+| AK11 | the view model keeps its own copy of the forwarding rule | DELEGATES, NOCOPY (2) | **the same 2, exactly** | KILLED |
+| AK12 | the acknowledgement records no delivery | ACCEPTED, PARTITION, WALK, SEAM, CLEARS (5) | *running* | |
 | AK99 | **VACUITY CONTROL** — the seam's receipt binding renamed, nothing else | **MUST SURVIVE, 0 failures** | | |
 
 Re-aimed from playhead-2d6i in the same change: MS01 (re-anchored, and widened
