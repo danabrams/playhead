@@ -48,6 +48,21 @@ import OSLog
 
 /// Production binding of `WorkJournalRecording` for the analysis pipeline.
 ///
+/// **DO NOT WIRE THIS INTO `DownloadManager` (playhead-4xmz).** It is the
+/// obvious one-line fix for that bead and it is the wrong one, twice over.
+/// `persist` below returns early when the episode has no `analysis_jobs` row,
+/// which is precisely the state a failed auto-download is in — so the download
+/// path would still record nothing. And worse: the rows it DOES write carry
+/// the latest analysis job's `generationID` into `work_journal`, whose
+/// `event_type` is a COLD-LAUNCH RECOVERY INPUT.
+/// `AnalysisCoordinator.recoverOrphans` reads the last row for a
+/// `{episode, generation}` and routes `.failed`/`.finalized` to
+/// `terminalNoRequeue`, so a row saying THE DOWNLOAD failed would tell
+/// recovery that the ANALYSIS work is over — playhead-rqgr's defect from a new
+/// writer. The download half has its own table and its own recorder:
+/// `AnalysisStoreDownloadWorkJournalRecorder` in
+/// `Playhead/Services/Downloads/DownloadWorkJournalLedger.swift`.
+///
 /// Looks up the live `{generationID, schedulerEpoch}` for an episode
 /// at write time and persists a `WorkJournalEntry` row via
 /// `AnalysisStore.appendWorkJournalEntry`. Best-effort: store errors

@@ -71,9 +71,13 @@
 //      recorder below is an injected dependency whose default is a NO-OP
 //      (see `NoopBackgroundDownloadDropRecorder`), and this repo has
 //      already shipped exactly that hole once: `DownloadManager`'s
-//      `workJournalRecorder` defaults to `NoopWorkJournalRecorder` and
-//      production never replaces it, so every `recordFailed` it makes goes
-//      nowhere. A default no-op plus an intention is not a mechanism.
+//      `workJournalRecorder` defaulted to `NoopWorkJournalRecorder` and
+//      production never replaced it, so every `recordFailed` it made went
+//      nowhere — for four months. A default no-op plus an intention is not a
+//      mechanism. (Fixed in playhead-4xmz, which this bead's own reasoning
+//      found; see `DownloadWorkJournalLedger.swift`. Kept in the past tense
+//      rather than deleted, because it is the shipped instance this argument
+//      rests on.)
 //      `background_download_drop_arming` is the mechanism: one row, whose
 //      `armedLaunches` is incremented once per launch from
 //      ``DownloadManager/armDropLedger()`` — see below for exactly what that
@@ -519,10 +523,11 @@ protocol BackgroundDownloadDropRecording: Sendable {
 /// visible decision.
 ///
 /// **A production `DownloadManager` holding one of these is a defect**, and
-/// it is not a hypothetical — `workJournalRecorder` is in exactly that
-/// state today. `BackgroundDownloadDropWiringSourceCanaryTests` is what
-/// stops it happening here, and `armedLaunches` is what would show it on a
-/// device pull if the canary were ever out-spelled.
+/// it is not a hypothetical — `workJournalRecorder` was in exactly that
+/// state for four months (playhead-4xmz, since fixed).
+/// `BackgroundDownloadDropWiringSourceCanaryTests` is what stops it happening
+/// here, and `armedLaunches` is what would show it on a device pull if the
+/// canary were ever out-spelled.
 struct NoopBackgroundDownloadDropRecorder: BackgroundDownloadDropRecording {
     /// `.notRecording`, and specifically NOT `.writeFailed`: nothing was
     /// attempted, so a caller must not go on to report a database that could

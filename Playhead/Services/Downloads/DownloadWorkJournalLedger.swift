@@ -1,0 +1,539 @@
+// DownloadWorkJournalLedger.swift
+// playhead-4xmz — the DOWNLOAD half of the work journal stops being a no-op.
+//
+// ─────────────────────────────────────────────────────────────────────────
+// WHAT WAS WRONG
+// ─────────────────────────────────────────────────────────────────────────
+// `DownloadManager.init` takes `workJournalRecorder: WorkJournalRecording =
+// NoopWorkJournalRecorder()`, and NOTHING IN PRODUCTION EVER REPLACED IT.
+// `PlayheadRuntime` builds exactly one `DownloadManager` and passed
+// `invariantRecorder:` and `dropRecorder:` and nothing else, so every event
+// the download path emitted went to a method whose body is `{}`:
+//
+//   * `DownloadManager.recordBackgroundFailure`   — a terminal background
+//     transfer failure, carrying the `SliceMetadata` blob
+//     `SliceCompletionInstrumentation` built for it;
+//   * `DownloadManager.finalizeBackgroundDownload` — a transfer that landed;
+//   * `ForceQuitResumeScan.scanForSuspendedTransfers` — the cold-launch
+//     preempted/corrupted rows;
+//   * `ForceQuitResumeScan.resumeSuspendedTransfer` — a corrupt resume blob.
+//
+// A default no-op plus an intention is not a mechanism. It is the shape
+// `playhead-1nl6` removed the protocol DEFAULTS to prevent — a conformer must
+// DECIDE to swallow — and the default argument made that decision silently at
+// the one call site that matters.
+//
+// ─────────────────────────────────────────────────────────────────────────
+// WHY THE ONE-LINE FIX WOULD HAVE BEEN WORSE THAN THE BUG
+// ─────────────────────────────────────────────────────────────────────────
+// A real `WorkJournalRecording` conformer already exists and is wired:
+// `AnalysisStoreWorkJournalRecorder`, on `AnalysisWorkScheduler`. Passing it
+// to `DownloadManager` is one line and it is the WRONG one, for two reasons.
+//
+// The first is the one the bead predicted. `AnalysisStoreWorkJournalRecorder`
+// resolves `{generationID, schedulerEpoch}` from
+// `store.fetchLatestJobForEpisode(episodeId)` and RETURNS EARLY when there is
+// no `analysis_jobs` row. A background download that fails before any analysis
+// job exists — the common case for an auto-download — logs a warning and
+// writes nothing. Wiring alone reproduces the defect with extra steps.
+//
+// The second was found while establishing the first, and it is the reason this
+// file exists rather than a widened `work_journal` insert.
+// **`work_journal.event_type` IS A COLD-LAUNCH RECOVERY INPUT, NOT AN
+// OBSERVABILITY FIELD** (`WorkJournalEntry.EventType`, playhead-rqgr).
+// `AnalysisCoordinator.recoverOrphans` reads the LAST `work_journal` row for
+// the `{episode_id, generation_id}` of every job whose lease has expired and
+// routes it through `EventType.orphanRecoveryRouting`, where `.failed` and
+// `.finalized` both mean `terminalNoRequeue` — clear the lease slot, do NOT
+// requeue. So a row saying THE DOWNLOAD FAILED, written under the ANALYSIS
+// job's generation, tells cold-launch recovery that the ANALYSIS work is over.
+// That is playhead-rqgr's shipped defect re-created from a new writer, and it
+// is this repo's standing class exactly: a value that names one thing (a
+// transfer died) read as though it named another (this generation is
+// terminal).
+//
+// The download half therefore MUST NOT write into `work_journal`. Not "should
+// not" — a wiring that did would trade a silent instrument for a live bug.
+//
+// ─────────────────────────────────────────────────────────────────────────
+// WHAT THE ROW KEYS ON, AND THE PRECEDENT IT FOLLOWS
+// ─────────────────────────────────────────────────────────────────────────
+// `download_work_journal` is keyed on the EPISODE and is deliberately NOT
+// foreign-keyed, which is `rediff_day_zero_kickoffs`' answer to the identical
+// problem (see the V41 block comment in `AnalysisStore.swift`). There, the
+// give-up worth recording was precisely the one where no `analysis_assets` row
+// had ever been registered, so an FK would have rejected every insert that
+// mattered. Here the event worth recording is precisely the one where no
+// `analysis_jobs` row exists, and the only identity the download path holds is
+// an episode id.
+//
+// THERE IS NO `generationID` COLUMN, and its absence is a decision rather than
+// an omission. Capturing one would cost a store READ on the download
+// completion path for a join nobody has asked for, and — worse — a nullable
+// generation column beside an `eventType` spelled `failed` is the exact shape
+// that invites a later reader to join these rows back into orphan recovery,
+// which is the hazard above.
+//
+// `DownloadWorkJournalEventType` is its own enum rather than a reuse of
+// `WorkJournalEntry.EventType` for the same reason. That type's central
+// documented property is `orphanRecoveryRouting`, and it is FALSE of every row
+// in this table: nothing routes on these. A type whose defining property does
+// not apply to the values it is carrying is the same defect one layer up.
+//
+// ─────────────────────────────────────────────────────────────────────────
+// AN EMPTY JOURNAL AND AN UNRECORDED ONE ARE DIFFERENT FACTS
+// ─────────────────────────────────────────────────────────────────────────
+// Ask of any instrument: WHAT WOULD THIS READ IF THE THING IT CLAIMS TO RECORD
+// HAD NEVER HAPPENED? For four months the answer for `workJournalRecorder` was
+// "exactly what it reads today", which is why nobody noticed. So the arming
+// row from playhead-7dgx is repeated here rather than admired:
+//
+//   * no `download_work_journal` TABLE
+//         — this build predates the instrument. Zero says NOTHING.
+//         READ THE TABLE, NOT `_meta.schema_version`: `createTables()` runs
+//         unconditionally and BEFORE the migration ladder, so a store parked
+//         below the V39 rollback floor carries both tables and real rows at a
+//         stamp of 38.
+//   * table present, `armedLaunches = 0`
+//         — no launch armed it. NOBODY WAS COUNTING.
+//   * `armedLaunches = N > 0`, zero rows, `writeFailures = 0`
+//         — a POSITIVE CLAIM: N launches carried a live recorder.
+//   * `writeFailures > 0`
+//         — events happened and this database could not hold them.
+//
+// THREE CELLS OF A TRUTH TABLE, NOT A LADDER. `armedLaunches = 0` beside real
+// rows is reachable — an event before the launch Task arms, or an arming write
+// that itself failed — and means "these rows are real and the denominator is
+// missing". Read all of the numbers, every time.
+//
+// `armedLaunches` IS NOT AN ATTEMPT COUNT. It counts LAUNCHES ON WHICH THE
+// STORE OPENED AND THE RECORDER WAS LIVE, incremented from one production site
+// in `PlayheadRuntime`'s launch Task immediately after
+// `AnalysisStoreRecoveryCoordinator.openAtLaunch` reports the store OPEN. It is
+// a LOWER BOUND in every direction — a degraded launch is deliberately not
+// counted, and neither is a launch that dies before the Task runs, even though
+// the recorder was live from the moment `DownloadManager` was constructed.
+//
+// ─────────────────────────────────────────────────────────────────────────
+// THE DENOMINATOR THIS TABLE HAS AND `background_download_drops` DOES NOT
+// ─────────────────────────────────────────────────────────────────────────
+// `finalized` IS RECORDED, on purpose. playhead-7dgx had to say "no drop RATE
+// can be computed from `armedLaunches`" because counting download ATTEMPTS
+// would have put a store write on the hot path and a suspension point inside
+// the reservation region playhead-nsjn / -gpdb / -7l6n built. This site is not
+// that site: `recordFinalized` runs after canonical placement, the strong pin
+// and the analysis enqueue, and it already awaits a journal `Task`. So
+//
+//     SELECT eventType, count(*) FROM download_work_journal GROUP BY eventType
+//
+// is a real completion-versus-failure split for the download half, which is
+// the question 7dgx's ledger could only ever answer half of.
+//
+// ─────────────────────────────────────────────────────────────────────────
+// LIMITS, NAMED
+// ─────────────────────────────────────────────────────────────────────────
+// L-1 UNBOUNDED. `finalized` fires on every successful background download, so
+//     unlike `background_download_drops` this table has a non-rare writer. A
+//     finalized row's `metadata` is literally `{}`, so a row is ~120 bytes:
+//     ~0.9 MB/year at 20 auto-downloads a day. It is NOT pruned, on
+//     `work_journal`'s and `background_download_drops`' own precedent. A
+//     newest-N ring was considered and REJECTED: it evicts the rare
+//     `failed`/`preempted` rows preferentially, i.e. it destroys exactly the
+//     population the table exists for while leaving the common one intact.
+// L-2 The residual line goes to the surface-status JSON Lines stream, which
+//     playhead-dyvh2 MEASURED is not an independent medium — the app sets no
+//     data-protection entitlement, so it takes the same
+//     `completeUntilFirstUserAuthentication` class `analysis.sqlite` sets
+//     explicitly, and a pre-first-unlock background relaunch silences both. It
+//     covers a failure LOCAL TO THIS DATABASE and nothing wider. Read it as
+//     that.
+// L-3 `WorkJournalRecording` is void-returning and is shared with
+//     `AnalysisWorkScheduler`, whose contract this bead may not change, so this
+//     recorder reports its own write failure rather than returning an outcome
+//     the caller inspects (the shape `BackgroundDownloadDropRecording` uses).
+//     The consequence is that the CALLER cannot tell a live recorder from the
+//     no-op; `DownloadWorkJournalWiringSourceCanaryTests` and `armedLaunches`
+//     are what cover that, in source and on disk respectively.
+// L-4 A `quarantineAndRebuild` "start fresh" moves the whole history aside into
+//     a sibling `AnalysisStore-quarantined-<stamp>-*` whose `armedLaunches` is
+//     0 and whose `installedAt` dates the REBUILD. List those siblings before
+//     concluding "never armed", and take them in the pull.
+
+import Foundation
+import OSLog
+
+// MARK: - DownloadWorkJournalEventType
+
+/// What the download path is reporting about one episode's transfer.
+///
+/// Three cases because the download path emits three, and no more: a
+/// vocabulary wider than its emitters is a vocabulary whose extra cases nobody
+/// can ever produce.
+///
+/// A raw value is written to disk, so these strings are a schema and renaming
+/// one is a migration.
+///
+/// **These are NOT `WorkJournalEntry.EventType`, and the difference is not
+/// cosmetic.** That enum's defining property is `orphanRecoveryRouting` —
+/// which arm of `AnalysisCoordinator.recoverOrphans` a job takes when one of
+/// its values is the last row for a `{episode, generation}`. NOTHING routes on
+/// the values here: this table is read by a human on a device pull and by
+/// nothing else in the app. Sharing the type would have said otherwise in the
+/// one place a reader looks.
+enum DownloadWorkJournalEventType: String, Sendable, Codable, Equatable, CaseIterable {
+    /// The background transfer completed and its artifact is in place.
+    /// The DENOMINATOR — see this file's header for why it is recorded.
+    case finalized
+
+    /// The background transfer ended terminally, or a persisted resume blob
+    /// was unusable. `cause` carries which.
+    case failed
+
+    /// The transfer was cut short and may be resumed later — in practice the
+    /// force-quit / cold-launch scan finding a live resume blob.
+    case preempted
+}
+
+// MARK: - DownloadWorkJournalRecord
+
+/// One download-path work-journal event, as it lands on disk.
+struct DownloadWorkJournalRecord: Sendable, Equatable {
+
+    /// Row identity. A UUID rather than `(episodeId, eventType)` because a
+    /// repeated failure for one episode is among the most interesting things
+    /// this table can show, and a key that collapsed it would hide the
+    /// population worth sizing.
+    let id: String
+
+    /// The episode whose transfer this event is about. The ONLY identity the
+    /// download path holds, and deliberately not foreign-keyed — see the
+    /// header.
+    let episodeId: String
+
+    /// What happened.
+    let eventType: DownloadWorkJournalEventType
+
+    /// Why, when there is a why. `nil` exactly for ``DownloadWorkJournalEventType/finalized``:
+    /// a successful transfer has no miss cause, and inventing one would put a
+    /// value in a column whose whole job is to carry a reason.
+    let cause: InternalMissCause?
+
+    /// Unix epoch seconds at the moment the event was recorded.
+    let occurredAt: Double
+
+    /// The `SliceMetadata` JSON blob the emission site built — stage, error
+    /// text, bytes written, device class. Opaque here: this type does not
+    /// parse it, and neither does the store.
+    ///
+    /// It is the payload playhead-1nl6 removed the protocol default for,
+    /// having found a default that forwarded to the metadata-less overload and
+    /// silently dropped it. Persisting it is this conformer's explicit
+    /// decision, made visible at the conformer as that bead requires.
+    let metadataJSON: String
+
+    init(
+        id: String = UUID().uuidString,
+        episodeId: String,
+        eventType: DownloadWorkJournalEventType,
+        cause: InternalMissCause?,
+        occurredAt: Double,
+        metadataJSON: String
+    ) {
+        self.id = id
+        self.episodeId = episodeId
+        self.eventType = eventType
+        self.cause = cause
+        self.occurredAt = occurredAt
+        self.metadataJSON = metadataJSON
+    }
+}
+
+// MARK: - DownloadWorkJournalPage
+
+/// One read of `download_work_journal`, with everything a caller needs in
+/// order not to over-read the array it is handed.
+struct DownloadWorkJournalPage: Sendable, Equatable {
+
+    /// The decoded rows, most recent first.
+    let rows: [DownloadWorkJournalRecord]
+
+    /// Rows whose `eventType` this build cannot decode — written by a build
+    /// with a wider vocabulary. They are NOT in `rows` and they are NOT lost.
+    ///
+    /// They are DROPPED rather than folded into a default case for the reason
+    /// playhead-7dgx gives one table over: a wider build's row collapsed into
+    /// `failed` would silently inflate that population, and an inflated
+    /// population is worse than a counted absence.
+    ///
+    /// The `cause` column needs no such counter — `InternalMissCause` carries
+    /// a forward-compat `.unknown(String)` case for exactly this, so an
+    /// unrecognized cause round-trips verbatim instead of being lost.
+    let unrecognizedEventTypeRows: Int
+
+    /// `true` when more rows exist than the `limit` allowed back. Without it a
+    /// window that stops at its own ceiling reports "this is what happened"
+    /// while meaning "this is what fitted".
+    let truncated: Bool
+
+    /// Every row this page could read AND could not read. The honest
+    /// denominator for any per-event share taken off `rows`.
+    var totalRowsSeen: Int {
+        rows.count + unrecognizedEventTypeRows
+    }
+}
+
+// MARK: - DownloadWorkJournalArming
+
+/// The single `download_work_journal_arming` row: the positive claim that
+/// somebody was counting.
+///
+/// Read `armedLaunches == 0` as NOBODY WAS COUNTING, not as "no launches" —
+/// the row is seeded by the V63 migration precisely so that "instrument
+/// installed, never armed" is expressible rather than indistinguishable from
+/// an empty table.
+struct DownloadWorkJournalArming: Sendable, Equatable {
+
+    /// Launches on which the analysis store opened and the recorder was live.
+    /// A LOWER BOUND, and NOT a count of download attempts — see the header.
+    let armedLaunches: Int
+
+    /// Events whose durable row could NOT be written.
+    ///
+    /// This is what stops "armed, and zero rows" from being reachable by
+    /// silence. Read `armedLaunches > 0 && rows == 0 && writeFailures == 0` as
+    /// the positive claim; the same pair with `writeFailures > 0` says the
+    /// opposite.
+    let writeFailures: Int
+
+    /// When the first arming happened. `nil` while `armedLaunches` is 0, and
+    /// `nil` is the whole point: a zero here would date an arming that never
+    /// occurred.
+    let firstArmedAt: Double?
+
+    /// When the most recent one happened. `nil` while `armedLaunches` is 0.
+    let lastArmedAt: Double?
+
+    /// The earliest moment this install is known to have carried the
+    /// instrument.
+    ///
+    /// Usually the V63 migration. NOT ALWAYS: both
+    /// `noteDownloadWorkJournalInstrumentArmed` and
+    /// `noteDownloadWorkJournalWriteFailure` re-create the row if it is
+    /// missing — deliberately, so a hand-edited or partially-rolled-back store
+    /// still counts — and on those paths this stamps the ARM or the FAILURE
+    /// instead. Read it as the sentence above, which is true on all three
+    /// paths, rather than as the migration's own timestamp.
+    let installedAt: Double
+}
+
+// MARK: - NoopWorkJournalRecorder, and why it is not redefined here
+
+// `NoopWorkJournalRecorder` lives in `BackgroundSessionIdentifier.swift`
+// alongside the protocol and is unchanged. It remains the right default for
+// tests and previews. What changes with this bead is that PRODUCTION no longer
+// holds one — see `AnalysisStoreDownloadWorkJournalRecorder` below and
+// `DownloadWorkJournalWiringSourceCanaryTests`, which is what makes the wiring
+// impossible to revert silently.
+
+// MARK: - AnalysisStoreDownloadWorkJournalRecorder
+
+/// Production binding of `WorkJournalRecording` for the DOWNLOAD path: writes
+/// into `analysis.sqlite`, which is the file a device pull copies whole.
+///
+/// A `struct` over an immutable `AnalysisStore` reference — the shape
+/// `AnalysisStoreBackgroundDownloadDropRecorder` and
+/// `AnalysisStoreBackgroundTaskRunLedger` already use — so `Sendable` needs no
+/// argument.
+///
+/// **Deliberately NOT `AnalysisStoreWorkJournalRecorder`.** That type writes
+/// `work_journal`, whose `event_type` column is an input to cold-launch orphan
+/// recovery; see this file's header for why routing download events there is a
+/// live defect rather than an inert one.
+///
+/// Best-effort by design, on the `AnalysisStoreBackgroundDownloadDropRecorder`
+/// precedent: a store error is logged, counted, and swallowed. Every caller is
+/// on the recovery path of a failure it has already handled, and throwing here
+/// would turn a recorded loss into an unrecorded one.
+struct AnalysisStoreDownloadWorkJournalRecorder: WorkJournalRecording {
+
+    private let store: AnalysisStore
+
+    /// The surface-status stream, for the residual: an event whose row AND
+    /// whose failure counter both failed to write. Optional because tests
+    /// construct this without one; production always passes it.
+    ///
+    /// Read L-2 in this file's header before treating it as a second failure
+    /// domain — it is a different FILE, not a different domain.
+    private let invariantRecorder: (
+        @Sendable (InvariantViolation.Code, String) -> Void
+    )?
+
+    private let logger = Logger(
+        subsystem: "com.playhead",
+        category: "DownloadWorkJournal"
+    )
+
+    init(
+        store: AnalysisStore,
+        invariantRecorder: (
+            @Sendable (InvariantViolation.Code, String) -> Void
+        )? = nil
+    ) {
+        self.store = store
+        self.invariantRecorder = invariantRecorder
+    }
+
+    // MARK: WorkJournalRecording
+
+    func recordFinalized(episodeId: String) async {
+        await append(
+            episodeId: episodeId,
+            eventType: .finalized,
+            cause: nil,
+            metadataJSON: "{}"
+        )
+    }
+
+    /// The metadata-less overload. No download-path site calls it today; it is
+    /// implemented rather than trapped because a protocol requirement whose
+    /// body is `fatalError` is a crash waiting for the first new caller.
+    func recordFailed(episodeId: String, cause: InternalMissCause) async {
+        await append(
+            episodeId: episodeId,
+            eventType: .failed,
+            cause: cause,
+            metadataJSON: "{}"
+        )
+    }
+
+    /// Persists the blob. Stated here at the conformer, as playhead-1nl6
+    /// requires: this recorder's decision is to KEEP the `SliceMetadata` JSON,
+    /// not to drop it.
+    func recordFailed(
+        episodeId: String,
+        cause: InternalMissCause,
+        metadataJSON: String
+    ) async {
+        await append(
+            episodeId: episodeId,
+            eventType: .failed,
+            cause: cause,
+            metadataJSON: metadataJSON
+        )
+    }
+
+    /// Persists the blob, same decision and same reason as above.
+    func recordPreempted(
+        episodeId: String,
+        cause: InternalMissCause,
+        metadataJSON: String
+    ) async {
+        await append(
+            episodeId: episodeId,
+            eventType: .preempted,
+            cause: cause,
+            metadataJSON: metadataJSON
+        )
+    }
+
+    // MARK: Arming
+
+    /// Record that this launch carried a LIVE download work-journal recorder,
+    /// so that zero rows can be read as a positive claim instead of as
+    /// silence.
+    ///
+    /// NOT a `WorkJournalRecording` requirement, and that is deliberate:
+    /// adding one would oblige every conformer of a protocol shared with
+    /// `AnalysisWorkScheduler` — including seven test doubles — to answer a
+    /// question only the download half asks. `PlayheadRuntime` calls it on the
+    /// SAME INSTANCE it injected into `DownloadManager`, and
+    /// `DownloadWorkJournalWiringSourceCanaryTests` is what pins that identity,
+    /// because nothing at runtime can see it.
+    ///
+    /// Idempotence is the CALLER's: this counts every call it receives.
+    func recordInstrumentArmed(at now: Double) async {
+        do {
+            try await store.noteDownloadWorkJournalInstrumentArmed(at: now)
+        } catch {
+            logger.error(
+                "download work journal NOT armed for this launch: \(String(describing: error), privacy: .public)"
+            )
+            // The DENOMINATOR's own silent failure. A launch whose arming write
+            // failed is byte-identical on disk to a launch that never ran, and
+            // it is one of the two things that make `armedLaunches = 0` beside
+            // real rows reachable — so it is said out loud rather than left to
+            // be inferred from a number that did not move.
+            invariantRecorder?(
+                .downloadWorkJournalNotRecorded,
+                "arming=failed — this launch had a live download work-journal "
+                + "recorder and download_work_journal_arming.armedLaunches did "
+                + "not move, so any row it goes on to write has no launch in "
+                + "the denominator: \(String(describing: error))"
+            )
+        }
+    }
+
+    // MARK: Private
+
+    private func append(
+        episodeId: String,
+        eventType: DownloadWorkJournalEventType,
+        cause: InternalMissCause?,
+        metadataJSON: String
+    ) async {
+        let now = Date().timeIntervalSince1970
+        let record = DownloadWorkJournalRecord(
+            episodeId: episodeId,
+            eventType: eventType,
+            cause: cause,
+            occurredAt: now,
+            metadataJSON: metadataJSON
+        )
+        do {
+            try await store.insertDownloadWorkJournalEntry(record)
+            return
+        } catch {
+            logger.error(
+                "download work journal row NOT written for episode=\(episodeId, privacy: .public) event=\(eventType.rawValue, privacy: .public): \(String(describing: error), privacy: .public)"
+            )
+            await noteWriteFailure(
+                episodeId: episodeId,
+                eventType: eventType,
+                cause: cause,
+                at: now,
+                rowError: error
+            )
+        }
+    }
+
+    /// A second, independent durable write, so that a pull holding only this
+    /// database can still tell "no events" from "events this store could not
+    /// hold". It can fail too — that residual is what reaches the
+    /// surface-status stream.
+    private func noteWriteFailure(
+        episodeId: String,
+        eventType: DownloadWorkJournalEventType,
+        cause: InternalMissCause?,
+        at now: Double,
+        rowError: Error
+    ) async {
+        do {
+            try await store.noteDownloadWorkJournalWriteFailure(at: now)
+            return
+        } catch {
+            logger.error(
+                "download work journal write-failure counter ALSO failed: \(String(describing: error), privacy: .public)"
+            )
+        }
+        // Both durable writes failed, so nothing in this database records the
+        // event at all. The description carries everything the lost row would
+        // have, so the loss is recoverable from this line alone.
+        invariantRecorder?(
+            .downloadWorkJournalNotRecorded,
+            "row=failed counter=failed episode=\(episodeId) "
+            + "event=\(eventType.rawValue) "
+            + "cause=\(cause?.rawValue ?? "none") "
+            + "at=\(now) error=\(String(describing: rowError))"
+        )
+    }
+}

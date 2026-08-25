@@ -604,14 +604,31 @@ actor DownloadManager {
     /// flip it without reaching into UserDefaults.
     private var useDualBackgroundSessions: Bool
 
-    /// Recorder injected by playhead-uzdq (or any test double) to emit
-    /// WorkJournal events from the download delegate callbacks. Defaults
-    /// to a no-op so 24cm can ship before uzdq lands.
+    /// Recorder for the work-journal events this actor and the force-quit
+    /// scan emit. Production passes
+    /// ``AnalysisStoreDownloadWorkJournalRecorder``, which writes
+    /// `download_work_journal`.
     ///
     /// Visibility is `internal` (not `private`) so the playhead-hyht
     /// force-quit scan extension in `ForceQuitResumeScan.swift` can emit
     /// preempted/failed rows without re-entering DownloadManager.swift.
-    internal var workJournalRecorder: WorkJournalRecording
+    ///
+    /// **THE DEFAULT IS STILL A NO-OP, AND FOR FOUR MONTHS PRODUCTION HELD IT**
+    /// (playhead-4xmz). `PlayheadRuntime` passed `invariantRecorder:` and later
+    /// `dropRecorder:` and never this, so every `recordFailed` /
+    /// `recordPreempted` / `recordFinalized` below went to a method whose body
+    /// is `{}` — the very state `NoopBackgroundDownloadDropRecorder`'s doc
+    /// comment names by example. A default no-op plus an intention is not a
+    /// mechanism. What stops it now is
+    /// `DownloadWorkJournalWiringSourceCanaryTests` plus
+    /// `download_work_journal_arming`, which makes the state visible on a
+    /// device pull rather than only in source.
+    ///
+    /// `let`, not `var`: no production or test site has ever assigned it after
+    /// init, and a post-init setter is precisely what does not run on the
+    /// sceneless relaunch these records matter most on — the same reason
+    /// ``dropRecorder`` and ``invariantRecorder`` are injected at construction.
+    internal let workJournalRecorder: WorkJournalRecording
 
     /// Delegate for background sessions. A single delegate instance
     /// serves all three identifier lanes — the session identifier is
@@ -729,12 +746,14 @@ actor DownloadManager {
     /// not run there.
     ///
     /// **A production manager holding the no-op is a defect.** It is not
-    /// hypothetical — ``workJournalRecorder`` above is in exactly that state:
-    /// its default is never replaced by `PlayheadRuntime`, so every
-    /// `recordFailed` this actor makes goes nowhere. What stops that here is
-    /// `BackgroundDownloadDropWiringSourceCanaryTests` plus the arming row the
-    /// ledger keeps, which makes the state visible on a device pull rather
-    /// than only in source.
+    /// hypothetical — ``workJournalRecorder`` above WAS in exactly that state
+    /// for four months: its default was never replaced by `PlayheadRuntime`,
+    /// so every `recordFailed` this actor made went nowhere. That is fixed
+    /// (playhead-4xmz) and the sentence is kept in the past tense rather than
+    /// deleted, because the argument for injecting at construction rests on it
+    /// having actually happened here. What stops it, in both cases, is a source
+    /// canary plus an arming row that makes the state visible on a device pull
+    /// rather than only in source.
     internal let dropRecorder: BackgroundDownloadDropRecording
 
     // MARK: - Streams

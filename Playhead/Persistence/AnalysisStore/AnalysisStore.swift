@@ -1971,7 +1971,7 @@ actor AnalysisStore {
     /// assertions automatically follow the production constant — hardcoding
     /// the integer in tests has been a recurring source of stale-assertion
     /// flakes whenever the schema bumps.
-    nonisolated static let currentSchemaVersion = 62
+    nonisolated static let currentSchemaVersion = 63
 
     /// H1: minimum age (in seconds) a `backfill_jobs` / `final_pass_jobs`
     /// row stuck in `status='running'` must reach before the launch-time
@@ -2980,6 +2980,15 @@ actor AnalysisStore {
             // arming row seeded at zero so "nobody was counting" stays
             // distinguishable from "counted, and there were none".
             try migrateBackgroundDownloadDropsV62IfNeeded()
+            // playhead-4xmz: the DOWNLOAD half of the work journal gets a
+            // table it can actually write to. Episode-keyed and deliberately
+            // NOT foreign-keyed, because the event worth recording is the one
+            // where no `analysis_jobs` row exists — and a SEPARATE table from
+            // `work_journal`, because that table's `event_type` is an input to
+            // cold-launch orphan recovery and a download failure written there
+            // would tell recovery the ANALYSIS work is terminal. Nothing
+            // backfilled; an arming row seeded at zero.
+            try migrateDownloadWorkJournalV63IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -3428,6 +3437,16 @@ actor AnalysisStore {
         // `BackgroundDownloadDropLadderSourceCanaryTests` now checks this
         // mechanically, on the V58 canary's precedent.
         try migrateBackgroundDownloadDropsV62IfNeeded()
+        // playhead-4xmz (v63): two brand-new tables, same shape of rung as
+        // V62 — `CREATE TABLE IF NOT EXISTS` plus an `INSERT OR IGNORE` arming
+        // row, so a fixture already carrying the V63 shape still reaches v63.
+        //
+        // READ THE V60 NOTE ABOVE BEFORE ADDING A RUNG. A rung added to one
+        // ladder and not the other is invisible to any test written for that
+        // rung, and it cost V60 a commit.
+        // `DownloadWorkJournalWiringSourceCanaryTests` checks this pairing
+        // mechanically, on the V62 canary's precedent.
+        try migrateDownloadWorkJournalV63IfNeeded()
     }
     #endif
 
@@ -8943,10 +8962,13 @@ actor AnalysisStore {
     // is the numerator. `background_download_drop_arming` is the claim that
     // anybody was counting: the recorder is an INJECTED dependency whose
     // default is a no-op, and this repo has already shipped that hole once —
-    // `DownloadManager.workJournalRecorder` defaults to
-    // `NoopWorkJournalRecorder` and production never replaces it. Without an
+    // `DownloadManager.workJournalRecorder` defaulted to
+    // `NoopWorkJournalRecorder` and production never replaced it. Without an
     // arming row, "zero drops" and "the recorder was never installed" are the
-    // same empty table.
+    // same empty table. (That `workJournalRecorder` hole is FIXED — see the
+    // V63 rung below, which is the bead this paragraph's own reasoning found —
+    // and the sentence is kept in the past tense because it is the shipped
+    // instance the argument rests on.)
     //
     // So the reader gets a three-state ladder, all of it on disk:
     //   * no `background_download_drops` TABLE
@@ -9343,6 +9365,371 @@ actor AnalysisStore {
         return BackgroundDownloadDropArming(
             armedLaunches: Int(sqlite3_column_int64(stmt, 0)),
             dropWriteFailures: Int(sqlite3_column_int64(stmt, 1)),
+            firstArmedAt: optionalDouble(stmt, 2),
+            lastArmedAt: optionalDouble(stmt, 3),
+            installedAt: sqlite3_column_double(stmt, 4)
+        )
+    }
+
+    // MARK: V63 — the DOWNLOAD half of the work journal gets a table it can
+    //             write to (playhead-4xmz)
+    //
+    // `DownloadManager.workJournalRecorder` defaulted to
+    // `NoopWorkJournalRecorder` and PRODUCTION NEVER REPLACED IT, so every
+    // event the download path emitted — a terminal background transfer
+    // failure, a finalized transfer, the force-quit scan's preempted and
+    // corrupted rows — went to a method whose body is `{}`. Four months, one
+    // production construction site, zero rows anywhere.
+    //
+    // WHY NOT `work_journal`, WHICH ALREADY EXISTS AND HAS A LIVE RECORDER.
+    // Two reasons, and the second is the one that makes the one-line fix
+    // dangerous rather than merely inert.
+    //
+    //   1. IDENTITY. `AnalysisStoreWorkJournalRecorder.persist` resolves
+    //      `{generationID, schedulerEpoch}` from `fetchLatestJobForEpisode`
+    //      and RETURNS EARLY when there is no `analysis_jobs` row. A
+    //      background download that fails before any analysis job exists —
+    //      the common case for an auto-download — would log a warning and
+    //      write nothing even with the recorder wired.
+    //
+    //   2. `work_journal.event_type` IS A COLD-LAUNCH RECOVERY INPUT
+    //      (playhead-rqgr). `AnalysisCoordinator.recoverOrphans` reads the
+    //      LAST row for the `{episode_id, generation_id}` of every job whose
+    //      lease expired and routes `.failed`/`.finalized` to
+    //      `terminalNoRequeue` — clear the lease, do NOT requeue. A row saying
+    //      the DOWNLOAD failed, written under the ANALYSIS job's generation,
+    //      therefore tells recovery the ANALYSIS work is over. That is
+    //      playhead-rqgr's shipped defect re-created from a new writer.
+    //
+    // SO: A SIBLING TABLE, EPISODE-KEYED AND DELIBERATELY NOT FOREIGN-KEYED,
+    // which is `rediff_day_zero_kickoffs`' answer to the identical problem —
+    // see the V41 block comment above. There, the give-up worth recording was
+    // exactly the one where no `analysis_assets` row existed, so an FK would
+    // have rejected every insert that mattered; here it is exactly the one
+    // where no `analysis_jobs` row exists, and an episode id is the only
+    // identity the download path holds.
+    //
+    // NO `generationID` COLUMN, on purpose. It would cost a store READ on the
+    // download completion path for a join nobody has asked for, and a nullable
+    // generation beside an `eventType` spelled `failed` is precisely the shape
+    // that invites a later reader to join these rows back into orphan
+    // recovery — the hazard in (2).
+    //
+    // TWO TABLES, AND THE SECOND ONE IS THE POINT, exactly as at V62.
+    // `download_work_journal_arming` is the claim that anybody was counting.
+    // Without it "no download ever failed" and "nobody was recording" are the
+    // same empty table — which is the state this bead found, and the reason it
+    // took four months to find. Three cells of a truth table, not a ladder:
+    //
+    //   * no `download_work_journal` TABLE  — build predates the instrument;
+    //   * table present, `armedLaunches = 0` — nobody was counting;
+    //   * `armedLaunches = N > 0`, zero rows, `writeFailures = 0`
+    //         — a POSITIVE CLAIM;
+    //   * `writeFailures > 0` — events happened and this store could not hold
+    //         them.
+    //
+    // DO NOT USE `_meta.schema_version < 63` AS THE DISCRIMINATOR, for the
+    // reason V62 states above: `createTables()` is unconditional and runs
+    // BEFORE the ladder, so a store parked below the V39 rollback floor
+    // carries both tables and real rows at a stamp of 38. READ THE TABLE.
+    //
+    // NOTHING IS BACKFILLED and nothing could be: every download event before
+    // this build went to a no-op and left no trace. The absence of pre-V63
+    // rows is honest.
+    //
+    // Idempotent: `CREATE TABLE IF NOT EXISTS` + `CREATE INDEX IF NOT EXISTS`
+    // + `INSERT OR IGNORE` on a single-row table, so it needs no SAVEPOINT and
+    // a second pass changes nothing.
+
+    /// V63 migration (playhead-4xmz) — the download-path work journal and its
+    /// arming row.
+    private func migrateDownloadWorkJournalV63IfNeeded() throws {
+        let observed = (try schemaVersion() ?? 1)
+        guard observed < 63 else { return }
+        // DO NOT STEP OVER A ROLLED-BACK V39 — same rationale as V40–V62.
+        guard observed >= 62 else { return }
+        try createDownloadWorkJournalTables()
+        try setSchemaVersion(63)
+    }
+
+    /// The V63 DDL, shared verbatim by `createTables()` and the rung above so
+    /// a fresh install and an upgrade converge on the same shape. Both callers
+    /// are idempotent.
+    ///
+    /// `installedAt` is stamped when the arming row is first created. It is
+    /// NOT NULL because it is always knowable; `firstArmedAt`/`lastArmedAt`
+    /// are nullable because "never armed" is a state that must not be spelled
+    /// as a date at the epoch.
+    private func createDownloadWorkJournalTables() throws {
+        try exec("""
+            CREATE TABLE IF NOT EXISTS download_work_journal (
+                -- playhead-4xmz. INSIDE the parentheses on purpose: SQLite
+                -- stores this statement from the CREATE keyword on, so a
+                -- comment ABOVE it is discarded and never reaches a pulled
+                -- file (measured at V62).
+                --
+                -- THIS IS NOT `work_journal` AND MUST NEVER BE JOINED INTO
+                -- ORPHAN RECOVERY. `work_journal.event_type` routes
+                -- `AnalysisCoordinator.recoverOrphans`; nothing routes on the
+                -- rows here, which exist for a human reading a device pull.
+                -- The two tables answer different questions about different
+                -- halves of the pipeline and share only a word in their names.
+                --
+                -- READ THE TABLE, NOT `_meta.schema_version`, to decide
+                -- whether this build carried the instrument: these tables are
+                -- created before the migration ladder and can exist at an
+                -- older stamp. Always read `download_work_journal_arming`
+                -- alongside these rows — a count here means nothing without
+                -- the denominator, and `armedLaunches` is not an attempt
+                -- count. And prefer RAW SQL for totals: the Swift reader
+                -- `fetchDownloadWorkJournal` SKIPS a row whose `eventType` it
+                -- cannot decode and counts it into `unrecognizedEventTypeRows`,
+                -- whereas `GROUP BY eventType` returns every raw value.
+                id          TEXT PRIMARY KEY,
+                -- The ONLY identity the download path holds, and deliberately
+                -- NOT `REFERENCES analysis_jobs(...)`: the event this table
+                -- exists for is the one where no job row was ever created.
+                episodeId   TEXT NOT NULL,
+                -- finalized | failed | preempted. A raw value on disk, so
+                -- these strings are a schema and renaming one is a migration.
+                eventType   TEXT NOT NULL,
+                -- NULL exactly for `finalized`. A successful transfer has no
+                -- miss cause and inventing one would put a value in a column
+                -- whose whole job is to carry a reason.
+                cause       TEXT,
+                occurredAt  REAL NOT NULL,
+                -- The SliceMetadata JSON blob the emission site built: stage,
+                -- error text, bytes written, device class. playhead-1nl6
+                -- removed the protocol default that silently dropped it.
+                metadata    TEXT NOT NULL DEFAULT '{}'
+            );
+        """)
+        try exec("CREATE INDEX IF NOT EXISTS idx_download_work_journal_occurred ON download_work_journal(occurredAt DESC);")
+        try exec("CREATE INDEX IF NOT EXISTS idx_download_work_journal_episode ON download_work_journal(episodeId, occurredAt DESC);")
+        try exec("""
+            CREATE TABLE IF NOT EXISTS download_work_journal_arming (
+                id            INTEGER PRIMARY KEY CHECK (id = 1),
+                -- LAUNCHES on which the analysis store opened and the download
+                -- work-journal recorder was live. NOT a count of download
+                -- ATTEMPTS, and no rate can be computed from it. Read it as
+                -- "was anyone recording, and for how long". A LOWER BOUND: a
+                -- degraded launch is deliberately not counted, and neither is
+                -- one that dies before the launch Task runs.
+                armedLaunches INTEGER NOT NULL DEFAULT 0,
+                -- Events whose row could not be written. Without this,
+                -- `armedLaunches > 0` with zero rows is reachable by a store
+                -- that simply could not be written to, and that state is
+                -- byte-identical to this journal's strongest positive claim.
+                writeFailures INTEGER NOT NULL DEFAULT 0,
+                firstArmedAt  REAL,
+                lastArmedAt   REAL,
+                installedAt   REAL NOT NULL
+            );
+        """)
+        // EVERY COLUMN THAT COMES LATER MUST BE RE-ADDED HERE with
+        // `addColumnIfNeeded`, for the reason V62's helper spells out at
+        // length: `CREATE TABLE IF NOT EXISTS` is a NO-OP on a table that
+        // already exists in an OLDER SHAPE, the seed below would then name a
+        // column that is not there, `createTables()` would throw, and the
+        // store would fail to OPEN — taking the whole analysis pipeline with
+        // it, not just this journal. There are no such columns yet; this
+        // comment is the obligation, and it sits where the shape is declared
+        // because the rung's version guard cannot help (this helper runs from
+        // `createTables()`, which is unconditional and runs BEFORE the ladder).
+        //
+        // Seeded at zero so that "installed but never armed" is a row a pull
+        // can read, rather than an absence indistinguishable from a build that
+        // never had the instrument at all.
+        let stmt = try prepare("""
+            INSERT OR IGNORE INTO download_work_journal_arming
+            (id, armedLaunches, writeFailures, firstArmedAt, lastArmedAt,
+             installedAt)
+            VALUES (1, 0, 0, NULL, NULL, ?)
+            """)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, Date().timeIntervalSince1970)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    // MARK: - Download-path work journal (playhead-4xmz, schema v63)
+
+    /// Append one download-path work-journal event.
+    ///
+    /// The sole writer. Append-only on purpose: a repeated failure for the
+    /// same episode is among the most interesting things this table can show,
+    /// so nothing here upserts or coalesces.
+    func insertDownloadWorkJournalEntry(
+        _ record: DownloadWorkJournalRecord
+    ) throws {
+        let sql = """
+            INSERT INTO download_work_journal
+            (id, episodeId, eventType, cause, occurredAt, metadata)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, record.id)
+        bind(stmt, 2, record.episodeId)
+        bind(stmt, 3, record.eventType.rawValue)
+        bind(stmt, 4, record.cause?.rawValue)
+        bind(stmt, 5, record.occurredAt)
+        bind(stmt, 6, record.metadataJSON)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// Every recorded download-path event, most recent first, with what the
+    /// caller needs in order not to over-read the array.
+    ///
+    /// A row whose `eventType` this build cannot decode is DROPPED and COUNTED
+    /// rather than folded into a default case: a wider-vocabulary build's row
+    /// collapsed into `failed` would silently inflate that population, which
+    /// is this repo's standing defect class. The `cause` column needs no such
+    /// treatment — `InternalMissCause` carries a forward-compat
+    /// `.unknown(String)` case, so an unrecognized cause round-trips verbatim.
+    func fetchDownloadWorkJournal(
+        limit: Int = 500
+    ) throws -> DownloadWorkJournalPage {
+        // `limit + 1` rows are asked for and at most `limit` are returned: the
+        // extra one is how the page knows it TRUNCATED. The clamp at
+        // `Int32.max` is because `bind(_:_:Int)` goes through the TRAPPING
+        // `Int32(_:)` — see `fetchBackgroundDownloadDrops`, where a guard
+        // written to prevent an overflow caused a crash instead. At or above
+        // that value the probe equals the ceiling and `truncated` is hard-wired
+        // false; it needs 2^31 rows to reach and the alternative is a trap.
+        let ceiling = max(0, limit)
+        let probe = ceiling >= Int(Int32.max) ? Int(Int32.max) : ceiling + 1
+        let stmt = try prepare("""
+            SELECT id, episodeId, eventType, cause, occurredAt, metadata
+            FROM download_work_journal
+            ORDER BY occurredAt DESC
+            LIMIT ?
+            """)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, probe)
+        var rows: [DownloadWorkJournalRecord] = []
+        var unrecognizedEventType = 0
+        var seen = 0
+        var truncated = false
+        // `nextRow` rather than a bare step comparison: an I/O or corruption
+        // error must not be reported as an empty journal, which in this table
+        // is a claim rather than an absence of information.
+        while try nextRow(stmt) {
+            seen += 1
+            if seen > ceiling {
+                truncated = true
+                break
+            }
+            let rawEvent = text(stmt, 2)
+            guard let eventType = DownloadWorkJournalEventType(
+                rawValue: rawEvent
+            ) else {
+                unrecognizedEventType += 1
+                continue
+            }
+            let rawCause = optionalText(stmt, 3)
+            rows.append(DownloadWorkJournalRecord(
+                id: text(stmt, 0),
+                episodeId: text(stmt, 1),
+                eventType: eventType,
+                cause: rawCause.map {
+                    InternalMissCause(rawValue: $0) ?? .unknown($0)
+                },
+                occurredAt: sqlite3_column_double(stmt, 4),
+                metadataJSON: text(stmt, 5)
+            ))
+        }
+        return DownloadWorkJournalPage(
+            rows: rows,
+            unrecognizedEventTypeRows: unrecognizedEventType,
+            truncated: truncated
+        )
+        // NOTE for the next reader: every count returned here is over the
+        // WINDOW, not over the table. `truncated` says so; it does not fix it.
+        // The table's own totals come from SQL.
+    }
+
+    /// Record that this process installed a live download work-journal
+    /// recorder.
+    ///
+    /// `firstArmedAt` is written only on the transition out of zero
+    /// (`CASE WHEN armedLaunches = 0`), so it keeps meaning "the first time"
+    /// rather than drifting to mean "the latest time".
+    ///
+    /// The `INSERT … ON CONFLICT` is what makes this work on a store whose
+    /// arming row is somehow missing — a hand-edited fixture, or a rung that
+    /// rolled back — instead of counting into a row that is not there.
+    func noteDownloadWorkJournalInstrumentArmed(at now: Double) throws {
+        let sql = """
+            INSERT INTO download_work_journal_arming
+            (id, armedLaunches, writeFailures, firstArmedAt, lastArmedAt,
+             installedAt)
+            VALUES (1, 1, 0, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                armedLaunches = armedLaunches + 1,
+                firstArmedAt = CASE
+                    WHEN download_work_journal_arming.armedLaunches = 0
+                    THEN excluded.firstArmedAt
+                    ELSE download_work_journal_arming.firstArmedAt
+                END,
+                lastArmedAt = excluded.lastArmedAt
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, now)
+        bind(stmt, 2, now)
+        bind(stmt, 3, now)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// Count one event whose durable row could NOT be written.
+    ///
+    /// A second best-effort write on the failure path of the first, and the
+    /// only thing that stops `armedLaunches > 0` with zero rows from being
+    /// reachable by silence. It THROWS rather than swallowing, because its
+    /// caller has a third medium to fall back on and needs to know.
+    ///
+    /// `armedLaunches` stays 0 when this creates a missing row: a failure is
+    /// not an arming, and inventing one here would manufacture the very claim
+    /// this column exists to withhold. On that path `installedAt` dates the
+    /// FAILURE, which is the third writer that stamp can have.
+    ///
+    /// Takes the clock rather than reading `strftime('%s','now')` in SQL: that
+    /// is whole SECONDS while every other stamp here is sub-second, and a time
+    /// nobody can inject is a time no test can pin.
+    func noteDownloadWorkJournalWriteFailure(at now: Double) throws {
+        let stmt = try prepare("""
+            INSERT INTO download_work_journal_arming
+            (id, armedLaunches, writeFailures, firstArmedAt, lastArmedAt,
+             installedAt)
+            VALUES (1, 0, 1, NULL, NULL, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                writeFailures = writeFailures + 1
+            """)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, now)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// The arming row, or `nil` when the table holds none.
+    ///
+    /// `nil` rather than a zeroed value on purpose: a synthesized
+    /// `armedLaunches = 0` would be indistinguishable from a genuine
+    /// never-armed row, and those are different claims — one says the
+    /// migration ran, the other says nothing at all did.
+    func fetchDownloadWorkJournalArming() throws -> DownloadWorkJournalArming? {
+        let stmt = try prepare("""
+            SELECT armedLaunches, writeFailures, firstArmedAt, lastArmedAt,
+                   installedAt
+            FROM download_work_journal_arming WHERE id = 1
+            """)
+        defer { sqlite3_finalize(stmt) }
+        // `nextRow` rather than a bare `sqlite3_step == SQLITE_ROW`: an I/O or
+        // corruption error must not read as "the table holds no row", which
+        // here is a documented CLAIM rather than an absence of information.
+        guard try nextRow(stmt) else { return nil }
+        return DownloadWorkJournalArming(
+            armedLaunches: Int(sqlite3_column_int64(stmt, 0)),
+            writeFailures: Int(sqlite3_column_int64(stmt, 1)),
             firstArmedAt: optionalDouble(stmt, 2),
             lastArmedAt: optionalDouble(stmt, 3),
             installedAt: sqlite3_column_double(stmt, 4)
@@ -12254,6 +12641,11 @@ actor AnalysisStore {
         // V49 house rule. The two callers share ONE helper rather than two
         // copies of the DDL, because two copies is how they drift.
         try createBackgroundDownloadDropTables()
+
+        // playhead-4xmz: the download-path work journal and its arming row.
+        // Declared here AND in `migrateDownloadWorkJournalV63IfNeeded` for the
+        // same V49 house rule, through the same single shared helper.
+        try createDownloadWorkJournalTables()
     }
 
     // MARK: - CRUD: analysis_assets
