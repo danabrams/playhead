@@ -656,6 +656,180 @@ struct MissedAutoSkipReceiptListTests {
         #expect(anonymous.spanLabel == "Skipped 22:49–25:48")
     }
 
+    // MARK: - 4b. The acknowledgement seam (playhead-8cjo)
+
+    /// THE SEAM'S CONTRACT, stated against the four ways an acknowledgement can
+    /// be about something other than the card that was announced.
+    ///
+    /// `acknowledgeAutoSkippedBannerDelivery` is the ONLY thing that removes a
+    /// row, so every clause it drops is a skip booked as shown on somebody
+    /// else's evidence. The four are separate because they fail for separate
+    /// reasons and a fix that kept one is not a fix:
+    ///
+    ///   * an UNKNOWN window — the seam must not be able to manufacture a
+    ///     delivery for a card nothing ever announced (`delivered ⊆ announced`
+    ///     is what makes the partition's `cards ⊆ yielded` true);
+    ///   * the wrong EPISODE and the wrong PLAYBACK GENERATION — an
+    ///     acknowledgement buffered across a transition, which is exactly the
+    ///     shape `AdBannerQueue`'s own host generation exists to reject;
+    ///   * the wrong MATERIAL TOKEN — an acknowledgement for a DIFFERENT
+    ///     emission of the same window id.
+    ///
+    /// The positive control at the end is what makes the four refusals mean
+    /// anything: the same call with the announced card's own identity really
+    /// does remove the row.
+    @Test("The acknowledgement seam refuses an identity that is not the announced card's")
+    func theSeamRefusesAnIdentityThatIsNotTheAnnouncedCards() async throws {
+        let (orchestrator, store) = try await Self.makeHarness()
+        let window = Self.autoWindow(
+            id: "preroll", start: Self.preRollStart, end: Self.preRollEnd
+        )
+        let receipt = try await Self.makeOneMissedReceipt(
+            orchestrator, store, window: window, observeAt: 40
+        )
+        let item = receipt.item
+        let token = try #require(item.windowMaterialRevisionToken)
+
+        let refusals: [(String, () async -> Void)] = [
+            ("a window nobody announced", {
+                await orchestrator.acknowledgeAutoSkippedBannerDelivery(
+                    windowId: "a-window-that-was-never-announced",
+                    episodeId: item.episodeId,
+                    playbackLifecycleGeneration:
+                        item.playbackLifecycleGeneration,
+                    windowMaterialRevisionToken: token
+                )
+            }),
+            ("another episode", {
+                await orchestrator.acknowledgeAutoSkippedBannerDelivery(
+                    windowId: item.windowId,
+                    episodeId: "a-different-episode",
+                    playbackLifecycleGeneration:
+                        item.playbackLifecycleGeneration,
+                    windowMaterialRevisionToken: token
+                )
+            }),
+            ("another playback generation", {
+                await orchestrator.acknowledgeAutoSkippedBannerDelivery(
+                    windowId: item.windowId,
+                    episodeId: item.episodeId,
+                    playbackLifecycleGeneration:
+                        Self.playbackLifecycleGeneration + 1,
+                    windowMaterialRevisionToken: token
+                )
+            }),
+            ("another emission's material", {
+                await orchestrator.acknowledgeAutoSkippedBannerDelivery(
+                    windowId: item.windowId,
+                    episodeId: item.episodeId,
+                    playbackLifecycleGeneration:
+                        item.playbackLifecycleGeneration,
+                    windowMaterialRevisionToken: "some-other-token"
+                )
+            }),
+        ]
+
+        for (name, refusal) in refusals {
+            await refusal()
+            let listed = await orchestrator.missedAutoSkipReceipts()
+            #expect(
+                listed.map(\.windowId) == ["preroll"],
+                """
+                an acknowledgement naming \(name) removed the row. The seam is \
+                the only thing that can turn a receipt into a card, so a clause \
+                it drops books a skip as shown on somebody else's evidence — \
+                and the listener loses the only correction they had.
+                """
+            )
+            let delivered = await orchestrator.deliveredAutoSkipCardWindowIDs()
+            #expect(
+                delivered.isEmpty,
+                """
+                an acknowledgement naming \(name) recorded \
+                \(delivered.sorted()) as a card the queue accepted.
+                """
+            )
+        }
+
+        // THE POSITIVE CONTROL. Without it every refusal above is satisfied by
+        // a seam that does nothing at all.
+        await orchestrator.acknowledgeAutoSkippedBannerDelivery(
+            windowId: item.windowId,
+            episodeId: item.episodeId,
+            playbackLifecycleGeneration: item.playbackLifecycleGeneration,
+            windowMaterialRevisionToken: token
+        )
+        #expect(
+            await orchestrator.missedAutoSkipReceipts().isEmpty,
+            """
+            the announced card's own identity did not remove the row, so the \
+            four refusals above prove nothing about identity — only that the \
+            seam is inert.
+            """
+        )
+        #expect(
+            await orchestrator.deliveredAutoSkipCardWindowIDs() == ["preroll"],
+            "the accepted card was not recorded as delivered"
+        )
+    }
+
+    /// The delivered-card record is per-episode, at BOTH boundaries, for the
+    /// same reason the receipts are: window ids are not unique across episodes,
+    /// and a leak would let the next episode's partition credit this episode's
+    /// card — an `emitBannerItem` that stopped recording anything would then
+    /// still read as "delivered" for a reused id.
+    @Test("Both episode boundaries clear the record of which cards were delivered")
+    func bothEpisodeBoundariesClearTheDeliveredCardRecord() async throws {
+        for boundary in ["endEpisode", "beginEpisode"] {
+            let (orchestrator, store) = try await Self.makeHarness()
+            let window = Self.autoWindow(
+                id: "preroll", start: Self.preRollStart, end: Self.preRollEnd
+            )
+            let receipt = try await Self.makeOneMissedReceipt(
+                orchestrator, store, window: window, observeAt: 40
+            )
+            await orchestrator.acknowledgeAutoSkippedBannerDelivery(
+                windowId: receipt.item.windowId,
+                episodeId: receipt.item.episodeId,
+                playbackLifecycleGeneration:
+                    receipt.item.playbackLifecycleGeneration,
+                windowMaterialRevisionToken:
+                    receipt.item.windowMaterialRevisionToken
+            )
+            // NON-VACUITY: the record really is populated before the boundary,
+            // so an empty set afterwards is a clear and not a fixture that
+            // never wrote anything.
+            #expect(
+                await orchestrator.deliveredAutoSkipCardWindowIDs()
+                    == ["preroll"],
+                "\(boundary): the fixture recorded no delivery, so the assertion below proves nothing"
+            )
+
+            if boundary == "endEpisode" {
+                await orchestrator.endEpisode()
+            } else {
+                await orchestrator.beginEpisode(
+                    analysisAssetId: Self.assetId,
+                    episodeId: Self.episodeId,
+                    podcastId: Self.podcastId,
+                    playbackLifecycleGeneration:
+                        Self.playbackLifecycleGeneration + 1
+                )
+            }
+            let after = await orchestrator.deliveredAutoSkipCardWindowIDs()
+            #expect(
+                after.isEmpty,
+                """
+                \(boundary) left \(after.sorted()) in the delivered-card \
+                record. A window id reused by the next episode would then read \
+                as a card the listener saw, and the partition that is supposed \
+                to catch exactly this bead's defect would report it as \
+                delivered.
+                """
+            )
+        }
+    }
+
     // MARK: - 5. The card's own seam, handed a list row
 
     /// The production hop, exercised rather than grepped.
