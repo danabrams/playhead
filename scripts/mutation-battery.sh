@@ -14108,22 +14108,37 @@ EOF
             // which is a claim about the STORE — and it is the one reading that
             // counter exists to make.
             //
-            // AND NOTHING IS LOST THAT ANYBODY ASKED TO KEEP — but that is a
-            // property of the CALL GRAPH, not of this file, and it took two
-            // review rounds to state correctly. `retireBackgroundTransfers` is
-            // what cancels, and it has two callers: `clearCache`, which unlinks
-            // everything a few lines later, and `cancelDownload`, whose ONLY
-            // PRODUCTION CALLER is `removeCache`, which unlinks three lines
-            // later. Both delete; the second only through its caller.
+            // AND NOTHING IS LOST THAT ANYBODY ASKED TO KEEP — ON THE ONE
+            // PRODUCTION PATH THAT CANCELS. That qualification took three
+            // review rounds and each round shortened it wrongly.
+            // `retireBackgroundTransfers` is what cancels, and in PRODUCTION it
+            // has exactly ONE chain reaching it: `removeCache(for:)` →
+            // `cancelDownload(episodeId:)` → here, and `removeCache` calls
+            // `removeAllAudioArtifacts` three lines later. Its other caller,
+            // `DownloadManager.clearCache()`, HAS NO PRODUCTION CALLER AT ALL
+            // (measured at review 4 — every hit is a test seam or a doc
+            // comment), so a comment that named it as one of "two deleting
+            // callers" was describing a shape that does not run.
+            //
+            // AND THE BULK DELETE A USER ACTUALLY REACHES DOES NOT COME THROUGH
+            // HERE. Settings' "Clear Cached Audio" is
+            // `SettingsViewModel.clearAudioCache`, which enumerates
+            // `DownloadManager.defaultCacheDirectory()` from a DETACHED TASK
+            // and unlinks its contents without entering this actor — so no
+            // finalization is retired and a `finalized` row CAN outlive its
+            // bytes there. That is limit L-7; the routing fix is filed, not
+            // taken here.
             //
             // Review 2 read `cancelDownload` in isolation, concluded it deleted
             // nothing, and had the cancel made conditional — which disarmed the
             // per-episode DELETE path and reddened
             // `cacheDeletionRacingFinalizationDoesNotJournalSuccess`, the
-            // on-point rail for that race. Review 3 caught it. A PRODUCTION
-            // caller of `cancelDownload` that does not delete would make this
-            // sentence false again, which is why a source canary pins the
-            // call-site count rather than the wording.
+            // on-point rail for that race. Review 3 caught that and then wrote
+            // the "two callers" sentence above. Review 4 caught THAT. The
+            // pattern is worth more than the fix: each round tightened the
+            // PROSE and left the instrument aimed somewhere else, so the canary
+            // now pins the call-site COUNTS — including `clearCache()`'s, which
+            // is zero — rather than any sentence.
             return
         } catch {
 EOF
