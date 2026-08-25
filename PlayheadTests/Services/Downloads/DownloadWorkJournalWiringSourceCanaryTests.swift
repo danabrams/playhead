@@ -528,17 +528,26 @@ final class DownloadWorkJournalWiringSourceCanaryTests: XCTestCase {
         // has none: Settings' bulk clear enumerates the cache directory from a
         // detached Task without entering the actor (limit L-7). Asserting the
         // zero is what stops that sentence being written again.
+        // `(?<!func )` because the bare token also matches the DECLARATION, and
+        // `(?<!Probe\.)` because `FoundationModelsUsabilityProbe.clearCache()`
+        // is an unrelated method with the same name on a different type — the
+        // first cut of this rail counted it and failed with "2 is not 1",
+        // which is a name matching one thing while standing for another, in the
+        // rail written to catch exactly that.
+        let clearCacheCalls = production.reduce(into: [String]()) { hits, entry in
+            let (path, source) = entry
+            let count = SwiftSourceInspector.regexOccurrences(
+                of: #"(?<!func )(?<!Probe\.)\bclearCache\(\)"#, in: source
+            )
+            if count > 0 { hits.append("\(path) x\(count)") }
+        }
         XCTAssertEqual(
-            production.values.reduce(0) { total, source in
-                total + SwiftSourceInspector.regexOccurrences(
-                    of: #"\bclearCache\(\)"#, in: source
-                )
-            },
-            1,
-            "playhead-4xmz: ONE occurrence tree-wide — the declaration. `clearCache()` has NO "
-            + "production caller, so it must not be described as a deleting path that runs. If "
-            + "this becomes 2, the L-7 limit and three doc comments need re-reading, not this "
-            + "number bumping."
+            clearCacheCalls, [],
+            "playhead-4xmz: `DownloadManager.clearCache()` has NO production caller, so it must "
+            + "not be described as a deleting path that runs — it was, in four places, for a "
+            + "review round. If this list stops being empty, the L-7 limit and three doc "
+            + "comments need re-reading rather than this assertion relaxing. Found: "
+            + "\(clearCacheCalls)"
         )
         let removeCache = try XCTUnwrap(
             SwiftSourceInspector.firstBody(
