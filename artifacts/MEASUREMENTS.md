@@ -191,7 +191,25 @@ It is diagnosed and fixed in `f846e1a3`: the assertion read
 history rather than of the code under test, and it fails identically on other
 branches' preserved logs (`et2d/fullgate-r5-run3.log` at 117.179 s,
 `gate-462-verify.log` at 128.110 s — both re-checked at R2). It asserts a DELTA
-now. (This sentence said "see M5", and there was no M5; the section numbered M4
+now.
+
+**THOSE TWO LOGS LIVE UNDER `/private/tmp`, WHICH IS CLEARED ON REBOOT, so the
+witness is inlined here rather than left as a path (R3).** Byte-exact, and
+identical in both files but for the duration:
+
+```
+✘ Test "The shared store is volatile under XCTest" recorded an issue at
+  AnalyticsCounterStoreTests.swift:149:9: Expectation failed:
+  UserDefaults.standard.data(forKey: "playhead.analytics.aggregate.v1") == nil
+✘ Test "The shared store is volatile under XCTest" failed after 117.179 seconds
+  with 1 issue.            (gate-462-verify.log reads 128.110 seconds)
+  NEW FAILURE      swift-testing::The shared store is volatile under XCTest
+```
+
+The assertion in the quoted issue is the pre-fix one, on two trees that are not
+this branch, which is the whole claim. The logs themselves are 15 MB each and
+belong to other beads, so they are not copied into this bead's preserved
+directory — three lines carry what the citation was for. (This sentence said "see M5", and there was no M5; the section numbered M4
 at the bottom of this file is now M5.)
 
 The other two NEW from the parallel run — `a download the daemon answers writes
@@ -1091,7 +1109,17 @@ the tree:
    450-458 and the VNODE component runs 447-455, and no window from 18 to 28
    samples gives 447-456 for either. Both medians the row asserts (452, vnode
    449) are exact; only the parenthetical range was eyeballed.
-6. **CLAUDE.md said Option C "is not in the tree" and gave 5.08x as its cost**,
+6. **M6a's own rule was broken again by the commit that cites it.** `b1c958ca`
+   verifies itself against `artifacts/scoped-revert.log` — 1.2 MB, matched by
+   `artifacts/.gitignore`'s `*.log`, so **not tracked**, and it was not in
+   `/Users/dabrams/playhead-gate-artifacts/vk68m/` either. The one artefact
+   proving the withdrawal was tested would have died with the worktree at bead
+   close, which is precisely the HIGH finding M6a records for M4. **Copied to
+   `…/playhead-gate-artifacts/vk68m/vk68m-scoped-revert.log` at R3.** Two
+   further citations in M4 pointed at `/private/tmp`, which is cleared on
+   reboot; their three witness lines are inlined above instead of copying 30 MB
+   of another bead's logs.
+7. **CLAUDE.md said Option C "is not in the tree" and gave 5.08x as its cost**,
    and said the gate's one prose match survives "because `AnalysisStore` throws
    `sqlite3_system_errno()` away" — i.e. as a TODO this bead has now closed in
    the opposite direction. Both corrected there, with 10.56x and with the
