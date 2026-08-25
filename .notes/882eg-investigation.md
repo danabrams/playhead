@@ -218,3 +218,74 @@ runs, so a single leftover write fails it permanently — the same shape as this
 bead's second concern, one layer along. Whether this branch caused it is
 answerable by whether it reproduces on the AFTER run; it is not in the committed
 baseline and the baseline is not mine to touch.
+
+## M4 — THE FOUR STOPS ARE NECESSARY AND NOT SUFFICIENT, and what that ruled out
+
+Three scoped measurements after the shutdown fix landed, all
+`** TEST SUCCEEDED **`:
+
+| run | change under test | result |
+|---|---|---|
+| probe3 | `shutdown()` stops the four perpetual loops, joins the bootstrap chain, cancels the three handle-less init Tasks | **byte-identical** to before the fix |
+| probe4 | probe widened from 6 to 22 boxed objects | **19 RETAINED**, 3 released |
+| probe6 | + the `DownloadManager` ↔ `AnalysisWorkScheduler` cycle cut at teardown | **byte-identical again** |
+
+```
+previewNoShutdown      RETAINED[19]: analysisStore surfaceLogger workScheduler analysisCoordinator
+                                     downloadManager bgProcessing jobRunner skipOrchestrator adDetection
+                                     capabilities playbackService trustService surfaceObserver
+                                     lanePreemption jobReconciler transcriptEngine speechService
+                                     audioService silenceCompression
+                       released[3]:  runtime entitlementManager storeRecovery
+previewWithShutdown    ... identical ...
+nonPreviewWithShutdown ... identical ...
+standaloneServices     RETAINED[0]; released[6]: PlaybackService CapabilitiesService AnalysisAudioService
+                                     SurfaceStatusInvariantLogger DownloadManager AnalysisStore
+```
+
+Four things this establishes, and they are the ones worth carrying forward:
+
+1. **The released three are exactly the objects held by NOBODY BUT THE RUNTIME.**
+   `entitlementManager` and `analysisStoreRecovery` release; every object that
+   any other service also references does not. So the retention is a property of
+   the SERVICE GRAPH, not of any one service.
+2. **No service is an independent root.** All six constructed standalone release
+   cleanly, including `DownloadManager`, which was the leading suspect (its
+   background `URLSession`s are never invalidated). The immortality is created by
+   the WIRING, not by any constructor.
+3. **`analysisStoreRecovery` releasing proves the bootstrap Task completed** — it
+   is in that Task's capture list and nothing else's. So the uncancellable
+   bootstrap chain is not the holder either.
+4. **There is exactly ONE stored-property cycle in the graph, and cutting it
+   changes nothing.** Scanned mechanically across the 19 types with protocol
+   conformances resolved (so `any DownloadProviding` counts as `DownloadManager`):
+   the only cycle is `AnalysisWorkScheduler ↔ DownloadManager`, created for every
+   runtime by `downloadManager.setAnalysisWorkScheduler(...)` against the
+   scheduler's own `let downloadManager`. It is cut at teardown now and the
+   retained set did not move by one name.
+
+So the holder is a CLOSURE capture or a Task capture that a stored-property scan
+cannot see, somewhere in ~2,500 lines of `init` wiring. **It is not identified,
+and this bead stops looking**: each experiment costs a ~7-minute scoped gate, the
+bead's harm is descriptors, and descriptors do not need the objects to die.
+
+## THE FIX THAT FOLLOWS FROM THAT
+
+`shutdown()` closes the three stores explicitly. A file handle belongs to
+whoever opened it, and `shutdown()` is where that owner is finished with it — so
+the descriptor is returned there rather than waiting on a deallocation that may
+never come. Every close is IDEMPOTENT and NON-TERMINAL, which is the property
+that makes it safe to do at a teardown without auditing every reader:
+
+* `AnalysisStore.close()` resets `didOpen`, so the next SQL surface re-opens
+  through `ensureOpen()` exactly as the first one did (rail:
+  `analysisStoreReopensAfterClose`).
+* `AdCatalogStore.close()` already existed for this exact reason.
+* `SurfaceStatusInvariantLogger.close()` keeps `currentSessionFileURL` and
+  `ensureSessionFileLocked` now REOPENS that file, so a later write appends to
+  the same session rather than forking a second file under one `sessionId`
+  (rail: `sessionLogReopensTheSameFile`).
+
+The loop cancellations and the cycle cut are kept. They are correct on their own
+terms — they stop runaway background work at teardown, which nothing did before —
+and they are what makes the closed stores stay closed.
