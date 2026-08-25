@@ -2293,9 +2293,6 @@ actor AnalysisStore {
         }
     }
 
-    /// Shared failure tail: close the handle and reset `db` so a subsequent
-    /// `ensureOpen()` retries from the top rather than reusing a handle
-    /// whose initialisation threw.
     /// playhead-882eg: return the SQLite descriptors NOW, without waiting for
     /// deallocation.
     ///
@@ -2321,6 +2318,9 @@ actor AnalysisStore {
         didOpen = false
     }
 
+    /// Shared failure tail: close the handle and reset `db` so a subsequent
+    /// `ensureOpen()` retries from the top rather than reusing a handle
+    /// whose initialisation threw.
     private func closeHandleAfterFailedOpen() {
         if let h = self.db {
             sqlite3_close_v2(h)
