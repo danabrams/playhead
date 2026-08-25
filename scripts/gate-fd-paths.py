@@ -284,6 +284,14 @@ def lsof_cross_check(pid: int) -> dict:
     that is the whole correction — an unsplit `wc -l` over-reports by however
     many images the host has mapped, which on a 400-dylib test host is the
     direction that manufactures a false `exhausted`.
+
+    VALIDATED, 2026-08-24, on a process holding 100 known descriptors: lsof's
+    numeric-FD set and `PROC_PIDLISTFDS` agreed EXACTLY (nothing in the
+    kernel's set that lsof missed), with 18 rows excluded as `cwd`/`txt`. The
+    only two extra fds lsof reported were the pipes `subprocess.run` had just
+    opened to read lsof's OWN output — an artefact of a process measuring
+    ITSELF, impossible against a foreign target, and named here so it is not
+    re-derived as a discrepancy.
     """
     try:
         out = subprocess.run(
