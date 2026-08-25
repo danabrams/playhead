@@ -14079,16 +14079,22 @@ EOF
             // which is a claim about the STORE — and it is the one reading that
             // counter exists to make.
             //
-            // AND NOTHING IS LOST THAT ANYBODY ASKED TO KEEP — but only because
-            // `DownloadManager.retireBackgroundTransfers` now takes
-            // `retiringJournalFinalizations` and the ONLY caller that passes
-            // `true` is `clearCache`, which unlinks the bytes. This comment
-            // used to assert that as a fact about the code and it was FALSE:
-            // `cancelDownload` retired finalizations too and deletes nothing,
-            // so a transfer that finalized while the user cancelled lost its
-            // row for an artifact still on disk. Found at review 2. If a third
-            // caller ever passes `true`, this sentence stops being true again —
-            // which is why a source canary pins the two call sites.
+            // AND NOTHING IS LOST THAT ANYBODY ASKED TO KEEP — but that is a
+            // property of the CALL GRAPH, not of this file, and it took two
+            // review rounds to state correctly. `retireBackgroundTransfers` is
+            // what cancels, and it has two callers: `clearCache`, which unlinks
+            // everything a few lines later, and `cancelDownload`, whose ONLY
+            // PRODUCTION CALLER is `removeCache`, which unlinks three lines
+            // later. Both delete; the second only through its caller.
+            //
+            // Review 2 read `cancelDownload` in isolation, concluded it deleted
+            // nothing, and had the cancel made conditional — which disarmed the
+            // per-episode DELETE path and reddened
+            // `cacheDeletionRacingFinalizationDoesNotJournalSuccess`, the
+            // on-point rail for that race. Review 3 caught it. A PRODUCTION
+            // caller of `cancelDownload` that does not delete would make this
+            // sentence false again, which is why a source canary pins the
+            // call-site count rather than the wording.
             return
         } catch {
 EOF
