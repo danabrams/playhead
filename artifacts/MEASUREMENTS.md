@@ -153,7 +153,13 @@ against a test count it does not belong to. The other three reproduce exactly.)
 **The two FLOOR cells are not derived the same way, and the row label said they
 were** ("median of 20 plateau samples", corrected at R2). The serialized figure
 is that: the last twenty watcher samples of run 2 have median 452, vnode median
-449, over a tail that oscillates 447-456. Run 1 has no twenty-sample plateau —
+449 — both re-derived from `artifacts/run2/summary.jsonl` at R3 and both exact.
+**The range beside them read "a tail that oscillates 447-456" and is neither
+series' range (R3).** Over those same twenty samples the COUNT runs **450-458**
+and the VNODE component runs **447-455**; no tail window from 18 to 28 samples
+produces 447-456 for either. It looks like the vnode floor paired with neither
+maximum. Quote **450-458 (count)** or **447-455 (vnode)** and say which — the
+two medians the row actually asserts are unaffected. Run 1 has no twenty-sample plateau —
 its watcher series ends `456 456 453 453 453 453 453`, a FIVE-sample flat run,
 and the median of its last twenty is **798** because the ramp is still in the
 window. 453 is run 1's tail SAMPLE (449 vnode + 3 socket + 1 kqueue), which is
@@ -1043,6 +1049,25 @@ that pin each other.
 * `b1c958ca`'s verification claim reproduces from the committed artefact:
   `artifacts/scoped-revert.log` carries `Test run with 57 tests in 5 suites
   passed after 0.637 seconds.` **and** `** TEST SUCCEEDED **`, both formats.
+* **M1b's whole 453-row table re-derives from `artifacts/run1/TAIL-453.json`,
+  cell for cell.** Grouped independently at R3: 81 production `analysis.sqlite`
+  + 81 `-wal`, 76 `ad_catalog.sqlite` + 76 `-wal`, 81 surface-status files
+  (**81 distinct paths**, checked as a set), 11 × 3 scratch, 7 descriptors on
+  **1 distinct** `bg-task-log.jsonl`, 2 production `-shm`, 3 SwiftData, 3
+  `/dev/*`, 3 `/var/run/*`, 3 Cryptexes, 3 sockets, 1 kqueue — **sum 453,
+  `count` field 453, 453 rows, pid 71372**. Its `max_fd` is **2556**, which is
+  exactly what M1b's own R2 correction says it is (the TAIL sample's highest,
+  not the run's 2558).
+* **M3's `Repro:` re-runs and reproduces to the digit.** `python3
+  artifacts/sqlite-errno-probe.py` prints `table full after 92 hogs; open()
+  errno=9 (Bad file descriptor)` and then `rc=14 system_errno=9 msg='unable to
+  open database file'` for both the existing-db and the new-db open. Its stated
+  caveat also holds: the script covers the exhaustion row ONLY.
+* `b1c958ca`'s two consumer claims check out in source: the allowlist really is
+  `A-Za-z0-9_.$+-()` and space with no `[`, `]`, `=` or `:`
+  (`DiagnosticTextSanitizer.swift:89-96`), `PersistedStateInvariants.swift:840`
+  really is `.prefix(80)`, and `AnalysisStore.swift` carries **16**
+  `sqlite3_errmsg` sites, i.e. exactly the "fifteen others" M3c names.
 
 **WHAT R3 FIXED, all of it prose, none of it code.** Every one is the same
 shape — the withdrawal was applied to the tree and not to the sentences about
@@ -1061,7 +1086,12 @@ the tree:
 4. **M4 compared two trees, and now neither of them is HEAD's.** `c17fdc48` is
    withdrawn, so run 2 carries 117 production lines that no longer exist and six
    rails that are now four different ones. Recorded in place.
-5. **CLAUDE.md said Option C "is not in the tree" and gave 5.08x as its cost**,
+5. **M4's serialized floor row quoted a range that is neither series'.** "a tail
+   that oscillates 447-456" — over the same last twenty samples the COUNT runs
+   450-458 and the VNODE component runs 447-455, and no window from 18 to 28
+   samples gives 447-456 for either. Both medians the row asserts (452, vnode
+   449) are exact; only the parenthetical range was eyeballed.
+6. **CLAUDE.md said Option C "is not in the tree" and gave 5.08x as its cost**,
    and said the gate's one prose match survives "because `AnalysisStore` throws
    `sqlite3_system_errno()` away" — i.e. as a TODO this bead has now closed in
    the opposite direction. Both corrected there, with 10.56x and with the
