@@ -2745,11 +2745,23 @@ FOCUSED_SUITES=(
   -only-testing:PlayheadTests/DownloadWorkJournalLedgerTests
   -only-testing:PlayheadTests/DownloadWorkJournalV63MigrationTests
   -only-testing:PlayheadTests/DownloadWorkJournalWiringSourceCanaryTests
-  # NOT this bead's suite. It carries `cache deletion during journal
-  # finalization revokes the stale finalized tail`, the only BEHAVIOURAL rail
-  # for a delete racing a journal write — and review 2's repair reddened it
-  # while every DW rail stayed green, because the battery could not see it.
-  -only-testing:PlayheadTests/BackgroundDownloadCompletionTests
+  # NOT this bead's suite, and NARROWED TO ONE TEST on purpose. It carries
+  # `cache deletion during journal finalization revokes the stale finalized
+  # tail`, the only BEHAVIOURAL rail for a delete racing a journal write —
+  # review 2's repair reddened it while every DW rail stayed green, because the
+  # battery could not see it.
+  #
+  # THE WHOLE SUITE MUST NOT GO IN. Its sibling `cache deletion while background
+  # analysis enqueue is blocked leaves no resurrected artifacts` is in
+  # `scripts/gate-baseline.PlayheadFastTests.json` at 5 failed / 10 seen, kind
+  # `timeout` — and a RED baseline is FATAL here: the run prints "the focused
+  # suites are RED before any mutation" and exits 2 having run no mutants at
+  # all, for EVERY series, not just this one. Importing a committed
+  # load-sensitive flake into the population every mutant runs is how a shared
+  # instrument stops being runnable (review 4).
+  # QUOTED because the per-test Swift Testing form ends in `()`, which bash
+  # reads as a subshell inside an array literal.
+  '-only-testing:PlayheadTests/BackgroundDownloadCompletionTests/cacheDeletionRacingFinalizationDoesNotJournalSuccess()'
   # The two cross-rung observers above serve V63 as well — a V63 rung missing
   # from one ladder is invisible to every DW rail for the same reason it was
   # invisible to every BD one. The DW block sits BELOW them rather than above
@@ -3353,14 +3365,18 @@ T_DW_C_RETIRE="$DWC/testCancelDownloadHasOneProductionCallerAndItDeletes"
 # FOCUSED_SUITES from review 3 onward so the battery can see it.
 T_DW_DELETE_RACE="cache deletion during journal finalization revokes the stale finalized tail"
 T_DW_ARM_MISSING="a write failure on a store with NO arming row creates one WITHOUT inventing an arming"
-# TWO RAILS HERE DELIBERATELY HAVE NO MUTANT, and both are stated rather than
-# left as gaps. `an unbounded limit returns everything instead of trapping`
+T_DW_ARM_CREATE="an arming on a store with NO arming row creates one and counts the launch"
+# THREE RAILS HERE DELIBERATELY HAVE NO MUTANT, and all three are stated rather
+# than left as gaps. (It said TWO while naming three, for a round.) `an unbounded limit returns everything instead of trapping`
 # guards a TRAP: its mutant kills the host, and this battery scores a test with
 # no verdict as a PASS (playhead-gjlp0), so the verdict would be about log
 # flushing rather than about the code. `the ANALYSIS recorder really would
 # write a work_journal row under the job generation` demonstrates EXISTING
 # behaviour that this bead did not write — it is the premise the design rests
-# on, and a mutant of it would be a mutant of playhead-uzdq's recorder.
+# on, and a mutant of it would be a mutant of playhead-uzdq's recorder. And
+# `the DEFAULT recorder writes nothing, which is what makes armedLaunches
+# readable` drives `NoopWorkJournalRecorder`, whose only possible mutant is
+# "make the no-op write", which is not a defect anybody would introduce.
 # `aV62StoreGenuinelyLacksTheTables` deliberately has NO mutant and therefore no
 # variable, on the V62 suite's own precedent: it asserts that a table the suite
 # itself dropped is dropped — a vacuity guard for the rails around it, and a
@@ -12139,11 +12155,13 @@ MUTATIONS=(
   # this tree can reach.
   #
   # FIVE layers, and each is invisible from the others:
-  #   WIRING            DW01-DW03, DW21, DW33
+  #   WIRING            DW01-DW03, DW21, DW27, DW28, DW33
   #   RECORDER          DW04-DW09, DW25, DW26, DW29, DW31, DW32
-  #   SCHEMA            DW10-DW14, DW23, DW24, DW36
+  #   SCHEMA            DW10-DW14, DW23, DW24, DW36, DW37
   #   SQL               DW15-DW20, DW22
-  #   THE DELETE RACE   DW27, DW34, DW35
+  #   THE DELETE RACE   DW34, DW35
+  # (Re-derive this against the array when you add one. It dropped DW28 and
+  # filed DW27 under the delete race for a round — review 4.)
   # DW99 is the vacuity control. (DW30 was never assigned: the clamp mutant it
   # would have been kills the HOST rather than an expectation, and a test with
   # no verdict is scored a PASS — see the note beside the expectation
@@ -12326,11 +12344,13 @@ MUTATIONS=(
 
   # DW34 stops `retireBackgroundTransfers` cancelling the journal finalization
   # at all, so a cache DELETE racing a finalization publishes a `finalized` row
-  # for bytes that are already unlinked. Its victim is a BEHAVIOURAL rail that
-  # drives the race with a gated recorder, not a source count — review 3's
-  # point: review 2's version of this mutant was killed only by two literal
-  # spellings, i.e. a LOST RAIL.
-  "DW34|1510|DLMGR|$T_DW_C_RETIRE;$T_DW_DELETE_RACE"
+  # for bytes that are already unlinked. ONE victim, and it is the BEHAVIOURAL
+  # rail — review 3 re-aimed the edit and APPENDED that rail to the source
+  # canary instead of REPLACING it, and this engine scores SURVIVED when ANY
+  # listed rail stays green (see the note at the top of this file). The canary
+  # cannot see this edit at all, so the two-victim spelling made the mutant
+  # report SURVIVED and the whole series exit 1. Review 4 caught it.
+  "DW34|1510|DLMGR|$T_DW_DELETE_RACE"
 
   # DW35 REMOVES the `cancelDownload` call from `removeCache`, so the
   # per-episode delete stops retiring background transfers at all. The shape
@@ -12342,6 +12362,11 @@ MUTATIONS=(
   # the branch review 3 found no test ever executes. `armedLaunches` would then
   # be manufactured by the very failure that proves nothing was recorded.
   "DW36|1512|STORE|$T_DW_ARM_MISSING"
+
+  # DW37 is DW36's MIRROR, on the writer review 3 railed and did not mutate:
+  # the ARMING writer's row-CREATING branch stops counting the launch it was
+  # called for, so a store whose arming row went missing reports 0 forever.
+  "DW37|1513|STORE|$T_DW_ARM_CREATE"
 
   "DW99|1500|DWJ|$T_DW_WRITEFAIL"
 )
@@ -12752,6 +12777,7 @@ describe_mutation() {
     DW34) echo "retireBackgroundTransfers stops cancelling the journal finalization, so a cache DELETE racing one publishes a finalized row for unlinked bytes" ;;
     DW35) echo "the per-episode delete stops retiring background transfers at all" ;;
     DW36) echo "a write FAILURE manufactures an arming on the row-creating branch — a denominator invented by the failure that proves nothing was recorded" ;;
+    DW37) echo "the arming writer's row-CREATING branch stops counting the launch, so a store whose arming row went missing reports 0 forever" ;;
     DW99) echo "VACUITY CONTROL — the parameter BINDING inside noteWriteFailure is renamed; the label and the call site are untouched. MUST SURVIVE" ;;
     IW01) echo "THE SHIPPED DEFECT VERBATIM — the coarse gate is gone, so a runner hardcode reads as the model's grade" ;;
     IW02) echo "the gate opens for anything that is NOT permissive, so UNKNOWN licenses the band — the backfill defect in the reader" ;;
@@ -14228,6 +14254,19 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+
+  DW37)
+    snippet OLD <<'EOF'
+            VALUES (1, 1, 0, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                armedLaunches = armedLaunches + 1,
+EOF
+    snippet NEW <<'EOF'
+            VALUES (1, 0, 0, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                armedLaunches = armedLaunches + 1,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
 
   DW99)
     snippet OLD <<'EOF'
@@ -29816,7 +29855,7 @@ fi
 # batteries closing exactly this hole (playhead-o89d R5).
 #
 # WHY APPEND RATHER THAN REFUSE, which is what R1 shipped and R3 measured: a
-# refusal made `--batch <id>` exit 2 for 301 of 803 batch ids across 24 series
+# refusal made `--batch <id>` exit 2 for 303 of 805 batch ids across 24 series
 # that never asked for it, deleting the per-batch re-run recipe this script's
 # own USAGE documents. Appending preserves every existing invocation and costs
 # one extra batch. It is also what the R engine does.

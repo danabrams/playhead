@@ -58,6 +58,50 @@ final class DownloadWorkJournalWiringSourceCanaryTests: XCTestCase {
     private static let managerPath = "Playhead/Services/Downloads/DownloadManager.swift"
     private static let ledgerPath = "Playhead/Services/Downloads/DownloadWorkJournalLedger.swift"
 
+    /// Every `Playhead/**` Swift source, comments and string contents stripped.
+    ///
+    /// Cached across the test methods in this class: the tree is ~470 files and
+    /// re-reading it per assertion is the difference between a rail people run
+    /// and one they route around.
+    private static let productionSourceCache = ProductionSources()
+
+    private final class ProductionSources: @unchecked Sendable {
+        private let lock = NSLock()
+        private var loaded: [String: String]?
+
+        func load() throws -> [String: String] {
+            lock.lock()
+            defer { lock.unlock() }
+            if let loaded { return loaded }
+            guard let root = SwiftSourceInspector.repositoryRoot(from: #filePath) else {
+                throw NSError(
+                    domain: "DownloadWorkJournalWiringSourceCanary",
+                    code: 1,
+                    userInfo: [
+                        NSLocalizedDescriptionKey:
+                            "could not locate the repository root from \(#filePath)",
+                    ]
+                )
+            }
+            let appRoot = root.appendingPathComponent("Playhead", isDirectory: true)
+            var out: [String: String] = [:]
+            let walker = FileManager.default.enumerator(
+                at: appRoot, includingPropertiesForKeys: nil
+            )
+            while let url = walker?.nextObject() as? URL {
+                guard url.pathExtension == "swift" else { continue }
+                let text = try String(contentsOf: url, encoding: .utf8)
+                out[url.path] = SwiftSourceInspector.strippingCommentsAndStrings(text)
+            }
+            loaded = out
+            return out
+        }
+    }
+
+    private static func productionSources() throws -> [String: String] {
+        try productionSourceCache.load()
+    }
+
     private func code(_ repoRelativePath: String) throws -> String {
         SwiftSourceInspector.strippingCommentsAndStrings(
             try SwiftSourceInspector.loadSource(repoRelativePath: repoRelativePath)
@@ -281,7 +325,7 @@ final class DownloadWorkJournalWiringSourceCanaryTests: XCTestCase {
         )
     }
 
-    // MARK: - 6. Not `work_journal`
+    // MARK: - 7. Not `work_journal`
 
     /// The reason this bead is not a one-line fix, pinned where the decision
     /// lives.
@@ -431,7 +475,7 @@ final class DownloadWorkJournalWiringSourceCanaryTests: XCTestCase {
         )
     }
 
-    // MARK: - 7. Cancelling a finalization is only correct where bytes die
+    // MARK: - 6. Cancelling a finalization is only correct where bytes die
 
     /// `retireBackgroundTransfers` cancels any in-flight
     /// `download_work_journal` finalization, which DESTROYS the row for a
@@ -449,16 +493,52 @@ final class DownloadWorkJournalWiringSourceCanaryTests: XCTestCase {
     /// the shape is a count no runtime test can take.
     func testCancelDownloadHasOneProductionCallerAndItDeletes() throws {
         let manager = try code(Self.managerPath)
+        // TREE-WIDE, not one file. `cancelDownload` is `internal`, so a caller
+        // in `PlayheadRuntime`, a view model or any other app file is invisible
+        // to a check that reads only `DownloadManager.swift` — and the failure
+        // message below makes a claim about PRODUCTION, which a one-file scan
+        // cannot support. Found at review 4, one round after the same blindness
+        // let `clearCache()` be described as a live caller when it has none.
+        let production = try Self.productionSources()
+        let callSites = production.values.reduce(0) { total, source in
+            total + SwiftSourceInspector.regexOccurrences(
+                of: #"\bcancelDownload\(episodeId:"#, in: source
+            )
+        }
         XCTAssertEqual(
-            SwiftSourceInspector.regexOccurrences(
-                of: #"await cancelDownload\("#, in: manager
-            ),
+            callSites, 2,
+            "playhead-4xmz: exactly TWO occurrences tree-wide — the declaration and ONE call "
+            + "site. `cancelDownload` retires background transfers, which cancels an in-flight "
+            + "journal finalization; that is correct only because its caller deletes the bytes. "
+            + "A second caller that does not delete drops a `finalized` row for an artifact "
+            + "still on disk, out of the column that makes finalized/failed a real split."
+        )
+        XCTAssertEqual(
+            production.values.reduce(0) { total, source in
+                total + SwiftSourceInspector.regexOccurrences(
+                    of: #"\bself\.cancelDownload\("#, in: source
+                )
+            },
+            0,
+            "playhead-4xmz: no `self.`-qualified spelling, which the count above cannot see. "
+            + "It is idiomatic inside a closure and would be an invisible second call site."
+        )
+        // AND `clearCache()`'s OWN COUNT, because for one review round three
+        // comments and this file described it as the second deleting caller. It
+        // has none: Settings' bulk clear enumerates the cache directory from a
+        // detached Task without entering the actor (limit L-7). Asserting the
+        // zero is what stops that sentence being written again.
+        XCTAssertEqual(
+            production.values.reduce(0) { total, source in
+                total + SwiftSourceInspector.regexOccurrences(
+                    of: #"\bclearCache\(\)"#, in: source
+                )
+            },
             1,
-            "playhead-4xmz: exactly ONE production call site. `cancelDownload` retires "
-            + "background transfers, which cancels an in-flight journal finalization — "
-            + "correct only because its caller deletes the bytes. A second caller that does "
-            + "not delete drops a `finalized` row for an artifact still on disk, out of the "
-            + "column that makes finalized/failed a real split."
+            "playhead-4xmz: ONE occurrence tree-wide — the declaration. `clearCache()` has NO "
+            + "production caller, so it must not be described as a deleting path that runs. If "
+            + "this becomes 2, the L-7 limit and three doc comments need re-reading, not this "
+            + "number bumping."
         )
         let removeCache = try XCTUnwrap(
             SwiftSourceInspector.firstBody(

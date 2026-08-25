@@ -108,10 +108,13 @@
 //     counter — that is exactly what the `catch is CancellationError` arm is
 //     for. So `armedLaunches = N > 0, rows = 0, writeFailures = 0` — the
 //     POSITIVE CLAIM — is reachable on an install where finalized events
-//     happened and were deliberately dropped because their bytes were being
-//     deleted. Read the claim as "no event this build chose to keep", not as
-//     "no event occurred". It also biases the rate below against `finalized`,
-//     by the population this bead's own cancellation handling creates.
+//     happened and were deliberately dropped. Read the claim as "no event this
+//     build chose to keep", not as "no event occurred". It also biases the
+//     rate below against `finalized`, by the population this bead's own
+//     cancellation handling creates. **AND "DELIBERATELY" IS NOT THE SAME AS
+//     "ITS BYTES WERE DELETED"** — an earlier version of this bullet said it
+//     was: the unlink that follows the cancel can THROW, so a discarded row
+//     can belong to an artifact that is still there. That is L-7.
 //   * TABLE PRESENT, ARMING ROW ABSENT. `fetchDownloadWorkJournalArming`
 //     returns nil for it rather than a synthesized zero, deliberately — but
 //     raw SQL returns NO ROWS, which `sqlite3` prints as a blank line and a
@@ -172,8 +175,19 @@
 // Split on the stage the blob carries:
 //
 //     SELECT eventType, count(*) FROM download_work_journal
-//     WHERE json_extract(metadata, '$.stage') NOT LIKE 'forceQuitResumeScan%'
+//     WHERE COALESCE(json_extract(metadata, '$.stage'), '')
+//           NOT LIKE 'forceQuitResumeScan%'
 //     GROUP BY eventType
+//
+// THE `COALESCE` IS LOAD-BEARING AND ITS ABSENCE COST THIS PARAGRAPH ITS WHOLE
+// POINT. `recordFinalized` writes `metadata = '{}'`, so `json_extract` returns
+// NULL, and `NULL NOT LIKE 'x%'` is NULL, not true — the row is excluded.
+// Measured on sqlite 3.54.0 against a 5-row fixture (1 finalized, 3 failed, 1
+// preempted): the bare `GROUP BY` gives `failed 3 / finalized 1 / preempted 1`;
+// the un-coalesced filter gives `failed 1` and NOTHING ELSE. A recipe offered
+// to correct a mis-stated completion rate produced a 0 % one instead — the
+// standing defect class inside the paragraph written to remove it, and nothing
+// tests the SQL in a comment.
 //
 // It also excludes, in both spellings: the three pre-start abandonments in
 // `backgroundDownload` (those are `background_download_drops` rows and reach no
@@ -246,25 +260,6 @@
 //     0 and whose `installedAt` dates the REBUILD. List those siblings before
 //     concluding "never armed", and take them in the pull.
 
-// L-6 THE FINALIZED WRITE IS A STORE WRITE INSIDE THE IN-FLIGHT RESERVATION,
-//     which is the cost playhead-7dgx declined to pay for an attempt counter
-//     and this bead pays for a denominator. Measured against the code rather
-//     than asserted: `bgInFlightEpisodes` still holds the episode across
-//     `await journalTask.value` — `finishBackgroundTransfer` runs AFTER it — so
-//     the write happens inside the per-episode reservation playhead-nsjn /
-//     -gpdb / -7l6n built, and `insertDownloadWorkJournalEntry` reaches
-//     `ensureOpen()`, which runs the whole migration ladder on first touch. It
-//     also postpones `touchAccess`, `deleteResumeData`, `evictIfNeeded` and the
-//     day-0 rediff seam `notifyBackgroundDownloadCompleted` by one store
-//     round-trip. Before this bead that await was a no-op.
-//
-//     WHY IT IS PAID ANYWAY: the reservation is per-EPISODE, not global, so it
-//     delays a re-download of the same episode and nothing else; and moving the
-//     write into a detached task would re-open the hazard L-5's neighbour
-//     describes — the ownership re-check runs AFTER the await, so an unawaited
-//     write can outlive the deletion that revoked it. Nobody has measured the
-//     round-trip on a device.
-//
 // L-5 THE FORCE-QUIT SCAN NOW AWAITS A STORE WRITE, INSIDE A 2 s SLA.
 //     `PlayheadAppDelegate.didFinishLaunchingWithOptions` fires
 //     `scanForSuspendedTransfers()` and logs an error if it exceeds 2 s. Its
@@ -289,6 +284,46 @@
 //     a thrown migrate rolls `didOpen` back, so
 //     `AnalysisStoreRecoveryCoordinator.openAtLaunch` still runs, still fails,
 //     and still counts. Nobody has measured the ladder's cost on a device.
+//
+// L-6 THE FINALIZED WRITE IS A STORE WRITE INSIDE THE IN-FLIGHT RESERVATION,
+//     which is the cost playhead-7dgx declined to pay for an attempt counter
+//     and this bead pays for a denominator. Measured against the code rather
+//     than asserted: `bgInFlightEpisodes` still holds the episode across
+//     `await journalTask.value` — `finishBackgroundTransfer` runs AFTER it — so
+//     the write happens inside the per-episode reservation playhead-nsjn /
+//     -gpdb / -7l6n built, and `insertDownloadWorkJournalEntry` reaches
+//     `ensureOpen()`, which runs the whole migration ladder on first touch. It
+//     also postpones `touchAccess`, `deleteResumeData`, `evictIfNeeded` and the
+//     day-0 rediff seam `notifyBackgroundDownloadCompleted` by one store
+//     round-trip. Before this bead that await was a no-op.
+//
+//     WHY IT IS PAID ANYWAY: the reservation is per-EPISODE, not global, so it
+//     delays a re-download of the same episode and nothing else; and moving the
+//     write into a detached task would re-open the hazard L-5's neighbour
+//     describes — the ownership re-check runs AFTER the await, so an unawaited
+//     write can outlive the deletion that revoked it. Nobody has measured the
+//     round-trip on a device.
+//
+//
+// L-7 A CANCELLED FINALIZATION IS NOT ALWAYS A DELETED ARTIFACT, in two ways,
+//     both found at review 4 and both leaving a row DESTROYED while the bytes
+//     survive — with `writeFailures = 0` and `armedLaunches` healthy, so the
+//     six-state list above reads it as the POSITIVE CLAIM.
+//
+//       * THE DELETE CAN THROW AFTER THE CANCEL. `removeCache` cancels through
+//         `cancelDownload` and then calls `removeAllAudioArtifacts`, which
+//         genuinely throws — from `removeItem` and from its own post-condition
+//         guard. `DownloadManager.clearCache()` has the same shape and is
+//         deliberately fail-closed. Moving the retire after a SUCCESSFUL unlink
+//         would re-open the race the retire exists to close, so this is
+//         documented rather than fixed.
+//       * AND THE CONVERSE, on the path a user actually reaches: Settings'
+//         "Clear Cached Audio" (`SettingsViewModel.clearAudioCache`) unlinks
+//         the cache directory from a detached Task WITHOUT entering the
+//         `DownloadManager` actor, so nothing is retired and a `finalized` row
+//         can outlive its bytes. Routing it through `downloadManager` is an
+//         architecture change and is FILED rather than taken here.
+//
 
 import Foundation
 import OSLog
@@ -701,22 +736,37 @@ struct AnalysisStoreDownloadWorkJournalRecorder: WorkJournalRecording {
             // which is a claim about the STORE — and it is the one reading that
             // counter exists to make.
             //
-            // AND NOTHING IS LOST THAT ANYBODY ASKED TO KEEP — but that is a
-            // property of the CALL GRAPH, not of this file, and it took two
-            // review rounds to state correctly. `retireBackgroundTransfers` is
-            // what cancels, and it has two callers: `clearCache`, which unlinks
-            // everything a few lines later, and `cancelDownload`, whose ONLY
-            // PRODUCTION CALLER is `removeCache`, which unlinks three lines
-            // later. Both delete; the second only through its caller.
+            // AND NOTHING IS LOST THAT ANYBODY ASKED TO KEEP — ON THE ONE
+            // PRODUCTION PATH THAT CANCELS. That qualification took three
+            // review rounds and each round shortened it wrongly.
+            // `retireBackgroundTransfers` is what cancels, and in PRODUCTION it
+            // has exactly ONE chain reaching it: `removeCache(for:)` →
+            // `cancelDownload(episodeId:)` → here, and `removeCache` calls
+            // `removeAllAudioArtifacts` three lines later. Its other caller,
+            // `DownloadManager.clearCache()`, HAS NO PRODUCTION CALLER AT ALL
+            // (measured at review 4 — every hit is a test seam or a doc
+            // comment), so a comment that named it as one of "two deleting
+            // callers" was describing a shape that does not run.
+            //
+            // AND THE BULK DELETE A USER ACTUALLY REACHES DOES NOT COME THROUGH
+            // HERE. Settings' "Clear Cached Audio" is
+            // `SettingsViewModel.clearAudioCache`, which enumerates
+            // `DownloadManager.defaultCacheDirectory()` from a DETACHED TASK
+            // and unlinks its contents without entering this actor — so no
+            // finalization is retired and a `finalized` row CAN outlive its
+            // bytes there. That is limit L-7; the routing fix is filed, not
+            // taken here.
             //
             // Review 2 read `cancelDownload` in isolation, concluded it deleted
             // nothing, and had the cancel made conditional — which disarmed the
             // per-episode DELETE path and reddened
             // `cacheDeletionRacingFinalizationDoesNotJournalSuccess`, the
-            // on-point rail for that race. Review 3 caught it. A PRODUCTION
-            // caller of `cancelDownload` that does not delete would make this
-            // sentence false again, which is why a source canary pins the
-            // call-site count rather than the wording.
+            // on-point rail for that race. Review 3 caught that and then wrote
+            // the "two callers" sentence above. Review 4 caught THAT. The
+            // pattern is worth more than the fix: each round tightened the
+            // PROSE and left the instrument aimed somewhere else, so the canary
+            // now pins the call-site COUNTS — including `clearCache()`'s, which
+            // is zero — rather than any sentence.
             return
         } catch {
             logger.error(

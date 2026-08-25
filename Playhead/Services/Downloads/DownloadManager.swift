@@ -468,9 +468,11 @@ actor DownloadManager {
     /// ROUND-TRIP.** `workJournalRecorder` was a no-op in production, so the
     /// tail returned immediately and the cancellation had nothing to race; it
     /// now writes `download_work_journal` and can be suspended for as long as
-    /// the `AnalysisStore` actor is busy. BOTH deleting paths are covered —
-    /// `clearCache` retires directly, and `removeCache` retires through
-    /// `cancelDownload` — and the behavioural rail for the race is
+    /// the `AnalysisStore` actor is busy. ONE production path retires —
+    /// `removeCache` through `cancelDownload`. `clearCache()` also retires and
+    /// has NO production caller, and Settings' bulk clear never enters this
+    /// actor at all: both are limit L-7 in `DownloadWorkJournalLedger.swift`.
+    /// The behavioural rail for the race that IS covered is
     /// `BackgroundDownloadCompletionTests`'
     /// `cacheDeletionRacingFinalizationDoesNotJournalSuccess`, which review 3
     /// found is the only thing that catches a repair aimed at the wrong half.
@@ -3163,7 +3165,8 @@ actor DownloadManager {
     /// Cancels an active download for the given episode.
     ///
     /// **ITS ONLY PRODUCTION CALLER IS `removeCache(for:)`, AND THAT IS LOAD-
-    /// BEARING** (playhead-4xmz). This retires background transfers, which
+    /// BEARING** — this is the ONLY production chain that retires a journal
+    /// finalization at all (playhead-4xmz). It retires background transfers, which
     /// cancels any in-flight `download_work_journal` finalization — correct
     /// only because `removeCache` unlinks the artifact three lines after
     /// calling here. A second production caller that does NOT delete would

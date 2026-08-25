@@ -9419,16 +9419,23 @@ actor AnalysisStore {
     // `download_work_journal_arming` is the claim that anybody was counting.
     // Without it "no download ever failed" and "nobody was recording" are the
     // same empty table — which is the state this bead found, and the reason it
-    // took four months to find. FOUR cells of a truth table, not a ladder —
-    // four rather than V62's three, because the fourth (`writeFailures > 0`) is
-    // what V63 adds and it is the one that INVERTS the third:
+    // took four months to find.
+    //
+    // THE FULL READING IS SIX STATES AND IT IS ENUMERATED IN ONE PLACE ONLY:
+    // `DownloadWorkJournalLedger.swift`'s header. It is deliberately NOT
+    // restated here — this comment carried a four-state copy that went stale
+    // the moment review 3 added two more, which is exactly how the V62 recipe
+    // came to be followed against a V63 table. The four the SCHEMA is
+    // responsible for are:
     //
     //   * no `download_work_journal` TABLE  — build predates the instrument;
+    //   * table present, arming ROW absent  — `sqlite3` prints a blank line;
     //   * table present, `armedLaunches = 0` — nobody was counting;
-    //   * `armedLaunches = N > 0`, zero rows, `writeFailures = 0`
-    //         — a POSITIVE CLAIM;
     //   * `writeFailures > 0` — events happened and this store could not hold
     //         them.
+    //
+    // The other two are properties of the RECORDER (a positive claim, and a
+    // finalized event discarded by cancellation) and are stated there.
     //
     // DO NOT USE `_meta.schema_version < 63` AS THE DISCRIMINATOR, for the
     // reason V62 states above: `createTables()` is unconditional and runs
