@@ -131,6 +131,12 @@ final class SurfaceStatusInvariantLogger: @unchecked Sendable {
         state.close()
     }
 
+    /// playhead-882eg: whether a session-file descriptor is currently held.
+    /// Reads the `FileHandle` itself, not a flag.
+    var hasOpenSessionFileForTesting: Bool {
+        state.hasOpenSessionFile
+    }
+
     // MARK: - Public API
 
     /// Append a single state-transition entry to the current session
@@ -342,6 +348,11 @@ private final class LoggerState: @unchecked Sendable {
             try? self.currentFileHandle?.close()
             self.currentFileHandle = nil
         }
+    }
+
+    /// playhead-882eg: whether a session-file descriptor is currently held.
+    var hasOpenSessionFile: Bool {
+        writeQueue.sync { self.currentFileHandle != nil }
     }
 
     /// Must run on `writeQueue`. Resolves (and caches) the diagnostics

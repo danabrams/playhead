@@ -414,6 +414,11 @@ actor AdCatalogStore {
         }
     }
 
+    /// playhead-882eg: whether a SQLite handle is currently held. Reads the
+    /// handle itself rather than a flag, so it cannot drift from the thing it
+    /// describes — which is the point of a rail that pins `close()`.
+    var isOpen: Bool { db != nil }
+
     /// Explicitly close the database. Idempotent. Call this when the
     /// store will be deallocated and you want a deterministic close
     /// before `deinit` (e.g., before deleting the directory in tests).
