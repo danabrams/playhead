@@ -780,6 +780,14 @@ actor SkipOrchestrator {
     /// acknowledgement path never runs at all?* — and the answer is "every skip
     /// is a correctable row", never "a skip nobody can see was booked as shown".
     ///
+    /// ONE INTERVAL EXISTS IN THE OTHER DIRECTION, and it is deliberate: the
+    /// row is written before the yield and removed two actor hops later, so a
+    /// surface that reads the list in between sees a row for a card that is at
+    /// that moment being presented. It is milliseconds, it self-corrects, and
+    /// the alternative — writing the row only after a refusal is reported —
+    /// is the design this bead exists to reject, because the commonest loss is
+    /// an observation task cancelled before anything is reported at all.
+    ///
     /// THE ASYMMETRY 2d6i CLOSED, kept because it is why the dictionary exists.
     /// `emitBannerItem` used to return without yielding when both continuation
     /// dictionaries were empty — and both the pre- and post-bwxi paths consume
@@ -811,7 +819,18 @@ actor SkipOrchestrator {
         [String: MissedAutoSkipReceipt] = [:]
 
     /// playhead-8cjo: window IDs whose auto-skip card a host reported the
-    /// BANNER QUEUE ACCEPTED. The honest reading of "a card was shown".
+    /// BANNER QUEUE ACCEPTED — which is NOT the same as "a card was shown",
+    /// and the gap is stated here rather than discovered later.
+    ///
+    /// `AdBannerQueue.enqueue` returns `true` the moment the item is admitted
+    /// to the lane. A card queued BEHIND another (an ad pod: two adjacent
+    /// windows, entered a tick apart, which `canCoalesce` refuses to merge
+    /// because their ids differ) is admitted and not yet presented, and
+    /// `discardAllOnHostDisappear` destroys the pending lane. That card was
+    /// acknowledged, so it leaves no row. The boundary that would close it is
+    /// `AdBannerQueue.recordBannerShown(for:)`, whose own comment says
+    /// "Queue-current is not the same as user-visible"; moving the seam there
+    /// is a view-layer change and is filed rather than taken here.
     ///
     /// **NOT THE SAME SET AS `emittedAutoSkipBannerWindowIds`, and confusing
     /// the two is this bead.** That one means "reached the
@@ -1434,6 +1453,23 @@ actor SkipOrchestrator {
                 playheadTimeAtSkip: currentPlayheadTime,
                 occurredAt: Date()
             )
+        // playhead-8cjo: A NEW ANNOUNCEMENT SUPERSEDES THE OLD DELIVERY RECORD,
+        // and without this line the partition breaks MID-EPISODE.
+        //
+        // `removeNonRevertedManagedWindowIfPresent` does
+        // `banneredWindowIds.remove(windowId)` when a producer revision replaces
+        // a window's material, which UN-SPENDS that window's one chance: it is
+        // re-promoted, re-armed, and announced again with a new material token.
+        // The id would then sit in BOTH sets — a card the listener saw for the
+        // OLD material, and a row for the NEW one — and `cards ∩ list == ∅`,
+        // which the partition rails assert at every observation, would be false
+        // for as long as the episode lasted.
+        //
+        // Removing it HERE rather than at each retirement site makes the
+        // disjointness a property of the write, the same move playhead-2d6i made
+        // for "one row per window" by keying the dictionary. A retirement site
+        // nobody remembered is exactly how these two sets would drift apart.
+        deliveredAutoSkipCardWindowIds.remove(adWindow.id)
         guard hasAttachedHost else { return }
         // Cycle-26 L-1 / Cycle-27 L-2: this insert is consumed by
         // `emittedAutoSkipBannersSnapshot()` from canary tests. The
@@ -7322,8 +7358,8 @@ actor SkipOrchestrator {
     /// playhead-8cjo: snapshot of window IDs whose auto-skip card a host
     /// reported the BANNER QUEUE ACCEPTED.
     ///
-    /// **This is the honest "a card was shown", and the snapshot above is
-    /// not.** `emittedAutoSkipBannersSnapshot()` says the item reached the
+    /// **This is the honest "the QUEUE TOOK IT", and the snapshot above is
+    /// not even that.** `emittedAutoSkipBannersSnapshot()` says the item reached the
     /// yield-to-subscriber path, which is what this bead's defect read as a
     /// presentation: `AdBannerQueue.enqueue` can refuse the item afterwards,
     /// and the observation `Task` can be cancelled before the enqueue happens

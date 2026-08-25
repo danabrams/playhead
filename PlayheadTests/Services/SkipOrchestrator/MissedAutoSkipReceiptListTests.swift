@@ -2,7 +2,8 @@
 // playhead-2d6i: THE LIST IS ONLY WORTH HAVING IF IT CAN CORRECT.
 //
 // `BannerPlayheadBiconditionalTests` owns the PARTITION — a card iff the
-// playhead is inside the window and a host is attached, otherwise exactly one
+// playhead is inside the window and the banner queue ACCEPTED it (playhead-8cjo
+// corrected that clause from "a host is attached"), otherwise exactly one
 // list entry — and that is deliberately not duplicated here. What this suite
 // owns is everything downstream of a row existing:
 //
@@ -828,6 +829,94 @@ struct MissedAutoSkipReceiptListTests {
                 """
             )
         }
+    }
+
+    /// A PRODUCER REVISION UN-SPENDS THE WINDOW'S ONE CHANCE, and without the
+    /// delivered-record removal at the receipt write site that breaks the
+    /// partition MID-EPISODE.
+    ///
+    /// `removeNonRevertedManagedWindowIfPresent` does
+    /// `banneredWindowIds.remove(windowId)`, so a same-id revision leaves the
+    /// window re-promotable: it is re-armed and announced again with a new
+    /// material token. The id would then be in `deliveredAutoSkipCardWindowIds`
+    /// from the FIRST announcement and in the receipt dictionary from the
+    /// SECOND — `cards ∩ list == ∅`, which every partition rail asserts at
+    /// every observation, false for the rest of the episode.
+    ///
+    /// The sibling test above (`aRowWhoseMaterialWasReplacedIsWithheld`) is the
+    /// witness that this path is real: its own comment records that after a
+    /// revision "the replacement has been armed but no observation has entered
+    /// its span since".
+    @Test("A re-announced window leaves the delivered-card record, so it is never on both surfaces")
+    func aReAnnouncedWindowLeavesTheDeliveredRecord() async throws {
+        let (orchestrator, store) = try await Self.makeHarness()
+        let window = Self.autoWindow(
+            id: "preroll",
+            start: Self.preRollStart,
+            end: Self.preRollEnd,
+            advertiser: "Acme Insurance"
+        )
+        let receipt = try await Self.makeOneMissedReceipt(
+            orchestrator, store, window: window, observeAt: 40
+        )
+        await orchestrator.acknowledgeAutoSkippedBannerDelivery(
+            windowId: receipt.item.windowId,
+            episodeId: receipt.item.episodeId,
+            playbackLifecycleGeneration:
+                receipt.item.playbackLifecycleGeneration,
+            windowMaterialRevisionToken:
+                receipt.item.windowMaterialRevisionToken
+        )
+        // NON-VACUITY: the first announcement really did become a card.
+        #expect(
+            await orchestrator.deliveredAutoSkipCardWindowIDs() == ["preroll"],
+            "the fixture never booked a delivery, so nothing below is about superseding one"
+        )
+        #expect(await orchestrator.missedAutoSkipReceipts().isEmpty)
+
+        // A same-id producer revision with DIFFERENT material.
+        let revised = Self.autoWindow(
+            id: "preroll",
+            start: Self.preRollStart,
+            end: Self.preRollEnd,
+            confidence: 0.91,
+            advertiser: "Acme Insurance Group"
+        )
+        // Not inserted durably: the row already exists under this id, and this
+        // test never calls `denyAutoSkippedBanner`, which is the only thing
+        // that re-reads it. The sibling `aRowWhoseMaterialWasReplacedIsWithheld`
+        // does the same for the same reason.
+        await orchestrator.receiveAdWindows([revised])
+
+        // Leave the span and come back, so the position path announces again.
+        await orchestrator.updatePlayheadTime(2000)
+        await orchestrator.updatePlayheadTime(40)
+
+        let cards = await orchestrator.deliveredAutoSkipCardWindowIDs()
+        let list = Set(await orchestrator.missedAutoSkipReceipts().map(\.windowId))
+        // NON-VACUITY: the revision really was re-announced. Without this an
+        // empty list would satisfy the disjointness below for the wrong reason
+        // — the shape MS06 survived twice on.
+        #expect(
+            list.contains("preroll"),
+            """
+            the revision was never re-announced, so the assertion below is \
+            satisfied by an empty list rather than by the removal it is about. \
+            Re-derive the fixture: the premise is that `banneredWindowIds.remove` \
+            un-spends the window's one chance.
+            """
+        )
+        #expect(
+            cards.intersection(list).isEmpty,
+            """
+            \(cards.intersection(list).sorted()) is on BOTH surfaces: a card the \
+            listener saw for the OLD material and a row for the NEW one. The \
+            delivered record is cleared at the receipt WRITE site precisely so \
+            this disjointness is a property of the write rather than of a \
+            removal call at every retirement site — one of which nobody would \
+            remember.
+            """
+        )
     }
 
     // MARK: - 5. The card's own seam, handed a list row

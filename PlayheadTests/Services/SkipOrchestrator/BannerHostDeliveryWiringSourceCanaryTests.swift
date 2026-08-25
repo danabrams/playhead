@@ -51,37 +51,91 @@ struct BannerHostDeliveryWiringSourceCanaryTests {
     private static let delivery =
         "Playhead/Views/NowPlaying/BannerHostDelivery.swift"
 
+    /// `observeBanners`' OWN body, brace-balanced from its `func` keyword.
+    ///
+    /// SCOPED RATHER THAN FILE-WIDE, and both reasons were found by review with
+    /// working code rather than argued for:
+    ///
+    ///   * a file-wide ban on `queue.enqueue(` is defeated by renaming the
+    ///     parameter — `bannerQueue.enqueue(` contains `Queue.enqueue(` with a
+    ///     CAPITAL Q, so the lowercase substring does not match. One character
+    ///     of case is the entire bypass, and the auto tier is then never
+    ///     acknowledged while every behavioural suite stays green;
+    ///   * a file-wide REQUIREMENT of `BannerHostDelivery.forward(` is satisfied
+    ///     by a doc comment naming it. This file's own doc comment does.
+    ///
+    /// Measured on the real file in both states before this was written: the
+    /// scan extracts a ~625-character body at HEAD (containing the forward call
+    /// and none of the forbidden spellings) and under mutation AK11 (containing
+    /// the inline enqueue and no forward call). At HEAD the FILE contains both
+    /// `.enqueue(` and `acknowledge` outside this function, so a file-wide ban
+    /// would have been red on correct code from the first commit.
+    ///
+    /// LIMIT, stated: it counts braces, so a brace inside a string literal or a
+    /// comment in that body would mis-scope it. There are none today, and the
+    /// failure is loud — an unbalanced scan returns nil and the test fails.
+    private static func observeBannersBody(_ text: String) -> Substring? {
+        guard let start = text.range(of: "func observeBanners(")?.lowerBound
+        else {
+            return nil
+        }
+        var depth = 0
+        var opened = false
+        var index = start
+        while index < text.endIndex {
+            switch text[index] {
+            case "{":
+                depth += 1
+                opened = true
+            case "}":
+                depth -= 1
+                if opened, depth == 0 { return text[start...index] }
+            default:
+                break
+            }
+            index = text.index(after: index)
+        }
+        return nil
+    }
+
     @Test("observeBanners routes every event through BannerHostDelivery")
     func theViewModelDelegatesToTheDeliveryRule() throws {
         let text = try Self.source(Self.viewModel)
+        let body = try #require(
+            Self.observeBannersBody(text),
+            "could not find a brace-balanced `observeBanners` body to scope to"
+        )
         #expect(
-            text.contains("BannerHostDelivery.forward("),
+            body.contains("BannerHostDelivery.forward("),
             """
-            `observeBanners` does not call `BannerHostDelivery.forward`. \
-            Everything `AutoSkipCardDeliveryAgainstTheQueueTests` proves is \
-            then a property of a type production never runs.
+            `observeBanners`' BODY does not call `BannerHostDelivery.forward`. \
+            Everything `AutoSkipCardDeliveryAgainstTheQueueTests` proves is then \
+            a property of a type production never runs. Scoped to the body \
+            because a doc comment naming the function satisfies a file-wide \
+            check — this file has such a comment.
             """
         )
     }
 
-    /// AND IT KEEPS NO SECOND COPY. Delegating and duplicating are not
-    /// mutually exclusive: a view model that calls `forward` for the retire
-    /// case and still enqueues presents itself is exactly how the auto tier
-    /// came to have no acknowledgement while the suggest tier had one.
+    /// AND IT KEEPS NO SECOND COPY. Delegating and duplicating are not mutually
+    /// exclusive: a view model that calls `forward` for retirements and still
+    /// enqueues presentations itself is exactly how the auto tier came to have
+    /// no acknowledgement while the suggest tier had one — and it passes a
+    /// file-wide positive check.
     @Test("the view model does not enqueue or acknowledge on its own")
     func theViewModelKeepsNoSecondCopyOfTheRule() throws {
         let text = try Self.source(Self.viewModel)
-        for forbidden in [
-            "queue.enqueue(",
-            "acknowledgeSuggestedBannerDelivery(",
-            "acknowledgeAutoSkippedBannerDelivery(",
-        ] {
+        let body = try #require(Self.observeBannersBody(text))
+        for forbidden in [".enqueue(", ".retireWindow(", "acknowledge"] {
             #expect(
-                !text.contains(forbidden),
+                !body.contains(forbidden),
                 """
-                `NowPlayingViewModel` still spells `\(forbidden)` itself. There \
-                must be exactly one forwarding rule; two call sites that agree \
-                today is how one of them stops being maintained.
+                `observeBanners`' body spells `\(forbidden)` itself. There must \
+                be exactly one forwarding rule; two call sites that agree today \
+                is how one of them stops being maintained. The check is on the \
+                SELECTOR rather than on `queue.…` because renaming the parameter \
+                defeats the latter — that exact bypass was written out at review \
+                and is re-created verbatim by mutation AK17.
                 """
             )
         }

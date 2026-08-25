@@ -19,7 +19,11 @@
 // rule — `BannerHostDelivery.forward`, the same function
 // `NowPlayingViewModel.observeBanners` runs, not a re-implementation of it. So
 // `queue.currentBanner` and `deliveredAutoSkipCardWindowIDs()` are two
-// independent witnesses to the same event and the tests below assert BOTH: a
+// witnesses and the tests below assert BOTH — independent for a single card
+// into an empty lane, which is what every case here drives, and NOT
+// independent for a card queued behind another (see the stated-limit test at
+// the bottom of this file, which drives exactly that and records what today's
+// code does). The claim they support is: a
 // rejected enqueue must leave the queue empty AND the list holding a row, and
 // an accepted one must show the card AND clear the row. A test that re-spelled
 // the forwarding would only ever prove that two call sites agree today, which
@@ -55,16 +59,35 @@ private struct BannerEventFrameReader {
     }
 
     /// Everything that arrived before the sentinel's own `.present`.
+    ///
+    /// BOUNDED, so a sentinel that never arrives fails with its own name rather
+    /// than on the suite's `.timeLimit`. An unbounded `while let` here would
+    /// turn "the frame boundary stopped being emitted" into a 60 s timeout,
+    /// which in this repo's gate baseline is indistinguishable from one more
+    /// starvation flake — the loud failure would be filed as noise.
     mutating func drain(until sentinel: String) async -> [AdBannerStreamEvent] {
         var collected: [AdBannerStreamEvent] = []
-        while let event = await iterator.next() {
+        for _ in 0..<Self.maxEventsPerFrame {
+            guard let event = await iterator.next() else { return collected }
             if case let .present(item) = event, item.windowId == sentinel {
                 return collected
             }
             collected.append(event)
         }
+        Issue.record(
+            """
+            the sentinel '\(sentinel)' never arrived within \
+            \(Self.maxEventsPerFrame) events. The frame boundary is itself a \
+            suggest banner, so this means the suggest tier stopped emitting — \
+            not that the auto tier under test is wrong.
+            """
+        )
         return collected
     }
+
+    /// Generous: a frame carries at most a handful of events. Large enough that
+    /// it can never bound a healthy run, small enough to fail in milliseconds.
+    private static let maxEventsPerFrame = 64
 }
 
 @Suite(
@@ -273,7 +296,23 @@ struct AutoSkipCardDeliveryAgainstTheQueueTests {
             """
         )
         let delivered = await orchestrator.deliveredAutoSkipCardWindowIDs()
-        #expect(delivered == [Self.preRoll.id])
+        #expect(
+            delivered == [Self.preRoll.id],
+            """
+            the queue accepted the card and the orchestrator recorded \
+            \(delivered.sorted()) as delivered. This is the control every \
+            refusal test in this suite is measured against.
+            """
+        )
+        // The RAW dictionary as well as the filtered read. MS06 survived twice
+        // on an empty filtered read taken as evidence of a removal that had
+        // not happened; `missedAutoSkipReceipts()` filters on `windows[…]`,
+        // `.applied` and a token match, so it can go quiet for reasons that
+        // have nothing to do with the acknowledgement.
+        #expect(
+            await orchestrator._missedAutoSkipReceiptCountForTesting() == 0,
+            "the receipt is still in the dictionary; the filtered read merely hides it"
+        )
         let list = await orchestrator.missedAutoSkipReceipts()
         #expect(
             list.isEmpty,
@@ -288,8 +327,19 @@ struct AutoSkipCardDeliveryAgainstTheQueueTests {
     // MARK: - 2. THE BEAD: the queue refused, three ways
 
     /// A REJECTED ENQUEUE IS A LIST ROW. Parameterised over the three ways
-    /// `AdBannerQueue` refuses an item, because they are three different guards
-    /// and a fix that handled one is not a fix.
+    /// `AdBannerQueue` refuses an item.
+    ///
+    /// TWO OF THE THREE REACH THE SAME CLAUSE, and saying so is more useful
+    /// than the tidier claim this comment used to make. `activateHost` and
+    /// `discardAllOnHostDisappear` BOTH do `hostGeneration &+= 1`, so the
+    /// stale-generation and host-disappeared arms are both refused by the
+    /// generation clause; only the episode-mismatch arm reaches
+    /// `acceptsHostScopedItem`. The `isHostActive` clause is unreachable from
+    /// outside because the bump is atomic with it — a caller cannot obtain the
+    /// post-disappear generation to test it with. The three arms are still
+    /// worth walking: they are three different PRODUCTION MOMENTS, and a
+    /// future change that stopped bumping the generation on disappear would
+    /// leave the second arm as the only thing looking at `isHostActive`.
     ///
     ///   * a stale HOST GENERATION — the reattach window in
     ///     `NowPlayingView.onChange(of: bannerPlaybackContext)`, where the old
@@ -426,8 +476,23 @@ struct AutoSkipCardDeliveryAgainstTheQueueTests {
         ])
         // Drained and DROPPED: the observation task died between the yield and
         // the enqueue.
-        _ = await Self.step(orchestrator, &reader, to: 40, index: 0)
+        let events = await Self.step(orchestrator, &reader, to: 40, index: 0)
 
+        // NON-VACUITY. Without this the test passes when NOTHING was emitted at
+        // all, which is a different situation entirely — and the one where the
+        // fixture, not the code, is broken.
+        #expect(
+            events.contains {
+                if case let .present(item) = $0 {
+                    return item.windowId == Self.preRoll.id
+                }
+                return false
+            },
+            """
+            the skip was never announced, so nothing was there to go unforwarded \
+            and this test says nothing about silence being treated as a delivery.
+            """
+        )
         #expect(queue.currentBanner == nil)
         let delivered = await orchestrator.deliveredAutoSkipCardWindowIDs()
         #expect(delivered.isEmpty)
@@ -638,6 +703,155 @@ struct AutoSkipCardDeliveryAgainstTheQueueTests {
                 "step \(index): rows are \(list.sorted()), expected \(expectedRows.sorted())"
             )
         }
+    }
+
+    // MARK: - 3b. The retire arm, and the limit the accept boundary carries
+
+    /// `BannerHostDelivery.forward` has TWO arms and only the present arm had
+    /// a test. Mutation AK11 deletes retire handling as a side effect and was
+    /// expected to redden only the canaries — nothing behavioural noticed that
+    /// orchestrator retirements had stopped reaching the queue.
+    ///
+    /// THE RETIREMENT IS CONSTRUCTED HERE RATHER THAN DRIVEN OUT OF THE
+    /// ORCHESTRATOR, and the first version of this test got that wrong. It
+    /// vetoed the window and expected a retirement, on the assumption that a
+    /// veto emits one; `denyAutoSkippedBanner` does not — the emitters are the
+    /// producer-side invalidation paths (`retireAllNonRevertedWindowStateIfPresent`
+    /// and `retireManagedWindowIfPresent`). The assumption cost a run and is
+    /// recorded because it is the same shape as the bead itself: a value
+    /// believed to name one event naming another.
+    ///
+    /// The arm's job is to hand a retirement to the queue under the host
+    /// generation it was started with, and that is what is asserted. WHICH
+    /// orchestrator path emits one is a different question with its own rails.
+    @MainActor
+    @Test("A retirement forwarded to the queue pulls the card the orchestrator invalidated")
+    func aForwardedRetirementPullsTheCard() async throws {
+        let (orchestrator, _) = try await Self.makeOrchestrator()
+        var reader = BannerEventFrameReader(
+            await orchestrator.bannerEventStream()
+        )
+        let queue = Self.makeQueue()
+        let hostGeneration = queue.activateHost(
+            for: Self.episodeId,
+            playbackLifecycleGeneration: Self.playbackLifecycleGeneration
+        )
+        await orchestrator.receiveAdWindows([
+            Self.autoWindow(
+                id: Self.preRoll.id,
+                start: Self.preRoll.start,
+                end: Self.preRoll.end
+            )
+        ])
+        await Self.forward(
+            await Self.step(orchestrator, &reader, to: 40, index: 0),
+            orchestrator, queue, hostGeneration: hostGeneration
+        )
+        // NON-VACUITY: there is a card to retire.
+        #expect(
+            queue.currentBanner?.windowId == Self.preRoll.id,
+            "no card was presented, so a retirement below would retire nothing"
+        )
+
+        await BannerHostDelivery.forward(
+            .retireWindow(
+                AdBannerRetirement(
+                    windowId: Self.preRoll.id,
+                    episodeId: Self.episodeId,
+                    playbackLifecycleGeneration:
+                        Self.playbackLifecycleGeneration
+                )
+            ),
+            from: orchestrator,
+            into: queue,
+            hostGeneration: hostGeneration
+        )
+
+        #expect(
+            queue.currentBanner == nil,
+            """
+            a retirement for \(Self.preRoll.id) reached the forwarding rule and \
+            the queue is still showing \
+            \(String(describing: queue.currentBanner?.windowId)). A card whose \
+            window the producer has invalidated can still collect an answer.
+            """
+        )
+    }
+
+    /// STATED LIMIT: "the queue ACCEPTED it" is not "the listener saw it".
+    ///
+    /// An ad POD is two adjacent auto-skip windows. The transport skips the
+    /// first, so the playhead lands at its end — which is the second's start —
+    /// and entry to the second follows within one observer tick. `canCoalesce`
+    /// refuses to merge them (`if a.windowId != b.windowId { return false }`),
+    /// so card A presents and card B is APPENDED behind it. If the listener
+    /// leaves Now Playing inside A's 8 s dwell, `discardAllOnHostDisappear` ->
+    /// `discardAllNeutrally` does `queue.removeAll()` and B is destroyed unseen
+    /// — already acknowledged, so it leaves no row.
+    ///
+    /// This bead's acceptance criterion is acceptance BY THE QUEUE and that is
+    /// what shipped. The stronger boundary the repo already owns is
+    /// `AdBannerQueue.recordBannerShown(for:)`, whose own comment says
+    /// "Queue-current is not the same as user-visible".
+    ///
+    /// **This test asserts what the code does TODAY and names the follow-up.**
+    /// When the acknowledgement moves to the display edge it will FAIL, and it
+    /// is meant to — a limit that drifts silently is how a known gap becomes an
+    /// unknown one.
+    @MainActor
+    @Test("STATED LIMIT: a card queued behind another and discarded unseen is still booked delivered")
+    func aQueuedCardDiscardedUnseenIsStillBookedDelivered() async throws {
+        let (orchestrator, _) = try await Self.makeOrchestrator()
+        var reader = BannerEventFrameReader(
+            await orchestrator.bannerEventStream()
+        )
+        let queue = Self.makeQueue()
+        let hostGeneration = queue.activateHost(
+            for: Self.episodeId,
+            playbackLifecycleGeneration: Self.playbackLifecycleGeneration
+        )
+        // Adjacent, as a pod is: the first ends where the second begins.
+        let first = Self.autoWindow(id: "pod-a", start: 0.0, end: 86.831)
+        let second = Self.autoWindow(id: "pod-b", start: 86.831, end: 140.0)
+        await orchestrator.receiveAdWindows([first, second])
+
+        await Self.forward(
+            await Self.step(orchestrator, &reader, to: 40, index: 0),
+            orchestrator, queue, hostGeneration: hostGeneration
+        )
+        await Self.forward(
+            await Self.step(orchestrator, &reader, to: 100, index: 1),
+            orchestrator, queue, hostGeneration: hostGeneration
+        )
+        // The first is presented; the second is behind it, unseen.
+        #expect(
+            queue.currentBanner?.windowId == "pod-a",
+            "the fixture did not present the first card, so nothing is queued behind it"
+        )
+
+        queue.discardAllOnHostDisappear()
+
+        let cards = await orchestrator.deliveredAutoSkipCardWindowIDs()
+        let list = Set(await orchestrator.missedAutoSkipReceipts().map(\.windowId))
+        #expect(queue.currentBanner == nil)
+        #expect(
+            cards == ["pod-a", "pod-b"],
+            """
+            TODAY's behaviour is that BOTH are booked delivered; got \
+            \(cards.sorted()). If this now reads ["pod-a"], the acknowledgement \
+            has been moved to the display edge — which is the fix this limit is \
+            filed for. Update this test rather than restoring the old boundary.
+            """
+        )
+        #expect(
+            list.isEmpty,
+            """
+            'pod-b' was queued behind a dwelling card and destroyed unseen by \
+            discardAllOnHostDisappear, and it leaves \(list.sorted()) — no row. \
+            That is playhead-8cjo one layer down: acceptance by the queue is not \
+            presentation to the listener. Filed, not fixed here.
+            """
+        )
     }
 
     // MARK: - 4. The suggest tier keeps its own contract

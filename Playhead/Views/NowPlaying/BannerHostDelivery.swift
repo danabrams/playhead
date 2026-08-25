@@ -29,8 +29,6 @@
 // `BannerHostDeliveryWiringSourceCanaryTests` pins that the view model calls
 // this and does not keep a second copy.
 
-import Foundation
-
 /// Forwards orchestrator banner events into a host's `AdBannerQueue` and
 /// reports what the queue did with them.
 enum BannerHostDelivery {
