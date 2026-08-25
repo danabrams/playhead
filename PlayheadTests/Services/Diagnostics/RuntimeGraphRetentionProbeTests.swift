@@ -41,8 +41,10 @@ struct RuntimeGraphRetentionProbeTests {
     }
 
     private func report(_ name: String, _ boxes: [WeakBox<AnyObject>]) {
-        let body = boxes.map { "\($0.label)=\($0.state)" }.joined(separator: " ")
-        print("[882eg-probe] \(name) \(body)")
+        let live = boxes.filter { $0.value != nil }.map(\.label)
+        let dead = boxes.filter { $0.value == nil }.map(\.label)
+        print("[882eg-probe] \(name) RETAINED[\(live.count)]: \(live.joined(separator: " "))")
+        print("[882eg-probe] \(name) released[\(dead.count)]: \(dead.joined(separator: " "))")
     }
 
     @Test("preview runtime, no shutdown", .timeLimit(.minutes(2)))
@@ -56,7 +58,24 @@ struct RuntimeGraphRetentionProbeTests {
                 WeakBox<AnyObject>(runtime.surfaceStatusLogger, "surfaceLogger"),
                 WeakBox<AnyObject>(runtime.analysisWorkScheduler, "workScheduler"),
                 WeakBox<AnyObject>(runtime.analysisCoordinator, "analysisCoordinator"),
-                WeakBox<AnyObject>(runtime.entitlementManager, "entitlementManager")
+                WeakBox<AnyObject>(runtime.entitlementManager, "entitlementManager"),
+                WeakBox<AnyObject>(runtime.downloadManager, "downloadManager"),
+                WeakBox<AnyObject>(runtime.backgroundProcessingService, "bgProcessing"),
+                WeakBox<AnyObject>(runtime.analysisJobRunner, "jobRunner"),
+                WeakBox<AnyObject>(runtime.skipOrchestrator, "skipOrchestrator"),
+                WeakBox<AnyObject>(runtime.adDetectionService, "adDetection"),
+                WeakBox<AnyObject>(runtime.capabilitiesService, "capabilities"),
+                WeakBox<AnyObject>(runtime.playbackService, "playbackService"),
+                WeakBox<AnyObject>(runtime.trustService, "trustService"),
+                WeakBox<AnyObject>(runtime.surfaceStatusObserver, "surfaceObserver"),
+                WeakBox<AnyObject>(runtime.lanePreemptionCoordinator, "lanePreemption"),
+                WeakBox<AnyObject>(runtime.analysisJobReconciler, "jobReconciler"),
+                WeakBox<AnyObject>(runtime.episodePreparationCoordinator, "episodePrep"),
+                WeakBox<AnyObject>(runtime.transcriptEngine, "transcriptEngine"),
+                WeakBox<AnyObject>(runtime.speechService, "speechService"),
+                WeakBox<AnyObject>(runtime.audioService, "audioService"),
+                WeakBox<AnyObject>(runtime.silenceCompressionCoordinator, "silenceCompression"),
+                WeakBox<AnyObject>(runtime.analysisStoreRecovery, "storeRecovery")
             ]
         }()
         await drain(8)
@@ -74,7 +93,24 @@ struct RuntimeGraphRetentionProbeTests {
                 WeakBox<AnyObject>(runtime.surfaceStatusLogger, "surfaceLogger"),
                 WeakBox<AnyObject>(runtime.analysisWorkScheduler, "workScheduler"),
                 WeakBox<AnyObject>(runtime.analysisCoordinator, "analysisCoordinator"),
-                WeakBox<AnyObject>(runtime.entitlementManager, "entitlementManager")
+                WeakBox<AnyObject>(runtime.entitlementManager, "entitlementManager"),
+                WeakBox<AnyObject>(runtime.downloadManager, "downloadManager"),
+                WeakBox<AnyObject>(runtime.backgroundProcessingService, "bgProcessing"),
+                WeakBox<AnyObject>(runtime.analysisJobRunner, "jobRunner"),
+                WeakBox<AnyObject>(runtime.skipOrchestrator, "skipOrchestrator"),
+                WeakBox<AnyObject>(runtime.adDetectionService, "adDetection"),
+                WeakBox<AnyObject>(runtime.capabilitiesService, "capabilities"),
+                WeakBox<AnyObject>(runtime.playbackService, "playbackService"),
+                WeakBox<AnyObject>(runtime.trustService, "trustService"),
+                WeakBox<AnyObject>(runtime.surfaceStatusObserver, "surfaceObserver"),
+                WeakBox<AnyObject>(runtime.lanePreemptionCoordinator, "lanePreemption"),
+                WeakBox<AnyObject>(runtime.analysisJobReconciler, "jobReconciler"),
+                WeakBox<AnyObject>(runtime.episodePreparationCoordinator, "episodePrep"),
+                WeakBox<AnyObject>(runtime.transcriptEngine, "transcriptEngine"),
+                WeakBox<AnyObject>(runtime.speechService, "speechService"),
+                WeakBox<AnyObject>(runtime.audioService, "audioService"),
+                WeakBox<AnyObject>(runtime.silenceCompressionCoordinator, "silenceCompression"),
+                WeakBox<AnyObject>(runtime.analysisStoreRecovery, "storeRecovery")
             ]
             await runtime.shutdown()
         }()
@@ -93,7 +129,24 @@ struct RuntimeGraphRetentionProbeTests {
                 WeakBox<AnyObject>(runtime.surfaceStatusLogger, "surfaceLogger"),
                 WeakBox<AnyObject>(runtime.analysisWorkScheduler, "workScheduler"),
                 WeakBox<AnyObject>(runtime.analysisCoordinator, "analysisCoordinator"),
-                WeakBox<AnyObject>(runtime.entitlementManager, "entitlementManager")
+                WeakBox<AnyObject>(runtime.entitlementManager, "entitlementManager"),
+                WeakBox<AnyObject>(runtime.downloadManager, "downloadManager"),
+                WeakBox<AnyObject>(runtime.backgroundProcessingService, "bgProcessing"),
+                WeakBox<AnyObject>(runtime.analysisJobRunner, "jobRunner"),
+                WeakBox<AnyObject>(runtime.skipOrchestrator, "skipOrchestrator"),
+                WeakBox<AnyObject>(runtime.adDetectionService, "adDetection"),
+                WeakBox<AnyObject>(runtime.capabilitiesService, "capabilities"),
+                WeakBox<AnyObject>(runtime.playbackService, "playbackService"),
+                WeakBox<AnyObject>(runtime.trustService, "trustService"),
+                WeakBox<AnyObject>(runtime.surfaceStatusObserver, "surfaceObserver"),
+                WeakBox<AnyObject>(runtime.lanePreemptionCoordinator, "lanePreemption"),
+                WeakBox<AnyObject>(runtime.analysisJobReconciler, "jobReconciler"),
+                WeakBox<AnyObject>(runtime.episodePreparationCoordinator, "episodePrep"),
+                WeakBox<AnyObject>(runtime.transcriptEngine, "transcriptEngine"),
+                WeakBox<AnyObject>(runtime.speechService, "speechService"),
+                WeakBox<AnyObject>(runtime.audioService, "audioService"),
+                WeakBox<AnyObject>(runtime.silenceCompressionCoordinator, "silenceCompression"),
+                WeakBox<AnyObject>(runtime.analysisStoreRecovery, "storeRecovery")
             ]
             await runtime.shutdown()
         }()
