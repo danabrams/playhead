@@ -3314,14 +3314,14 @@ T_DW_EVENTS="each of the four requirements appends a row carrying its event, cau
 T_DW_REPEAT="a repeated failure for one episode is two rows, not one"
 T_DW_DURABLE="the download-journal rows are on disk, not in memory — a second store on the same file reads them"
 T_DW_NEVER_ARMED="a fresh store reads INSTALLED BUT NEVER ARMED, which is not the same as no instrument"
-T_DW_ARMS="the download journal'"'"'s arming counts a launch, and a second counts again without moving firstArmedAt"
+T_DW_ARMS="the download journal arming counts a launch, and a second counts again without moving firstArmedAt"
 T_DW_WRITEFAIL="an event whose row cannot be written increments writeFailures instead of vanishing"
 T_DW_RESIDUAL="when BOTH durable writes fail, the loss is raised on the surface-status stream"
 T_DW_ARMFAIL="an arming that cannot be written says so on the second medium"
 T_DW_UNKNOWN_EVENT="a row with an unrecognized eventType is counted, not folded into failed"
 T_DW_UNKNOWN_CAUSE="an unrecognized cause round-trips as .unknown rather than becoming nil"
 T_DW_TRUNCATE="a window that hits its limit reports truncated, and most-recent-first"
-T_DW_E2E="the force-quit scan'"'"'s preempted event reaches the store through DownloadManager"
+T_DW_E2E="the force-quit resume scan preempted event reaches the store through DownloadManager"
 T_DW_DEFAULT_NOOP="the DEFAULT recorder still writes nothing, which is what makes armedLaunches readable"
 T_DW_LADDER="a V62 store climbs to head through the ladder-only seam and gains both tables"
 T_DW_FROM_V61="a store seeded two rungs back still reaches head, so V63 does not depend on running alone"
@@ -3331,7 +3331,7 @@ T_DW_STAMPED="a store STAMPED at head but missing the DOWNLOAD-JOURNAL tables ge
 T_DW_BELOW_FLOOR="the DOWNLOAD-JOURNAL tables exist BELOW the V39 rollback floor, so presence and not the stamp is the discriminator"
 T_DW_UNTOUCHED="the download journal writes leave work_journal untouched"
 # `aV62StoreGenuinelyLacksTheTables` deliberately has NO mutant and therefore no
-# variable, on the V62 suite'"'"'s own precedent: it asserts that a table the suite
+# variable, on the V62 suite's own precedent: it asserts that a table the suite
 # itself dropped is dropped — a vacuity guard for the rails around it, and a
 # property of the FIXTURE rather than of the code.
 # XCTest source canaries, CLASS-QUALIFIED. `extract_failures` emits both the
@@ -29120,6 +29120,7 @@ rec_file()   {
     SEGAGG) printf '%s' "$SEGAGG" ;;
     DLMGR) printf '%s' "$DLMGR" ;;
     LEDGER) printf '%s' "$LEDGER" ;;
+    DWJ)   printf '%s' "$DWJ" ;;
     FQSCAN) printf '%s' "$FQSCAN" ;;
     BGFEED) printf '%s' "$BGFEED" ;;
     EPPREP) printf '%s' "$EPPREP" ;;

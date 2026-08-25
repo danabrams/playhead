@@ -236,7 +236,7 @@ struct DownloadWorkJournalLedgerTests {
         #expect(try await store.fetchDownloadWorkJournal().rows.isEmpty)
     }
 
-    @Test("the download journal's arming counts a launch, and a second counts again without moving firstArmedAt")
+    @Test("the download journal arming counts a launch, and a second counts again without moving firstArmedAt")
     func armingCountsEachLaunch() async throws {
         let (store, _) = try await Self.freshStore(prefix: "4xmzArming")
         let recorder = AnalysisStoreDownloadWorkJournalRecorder(store: store)
@@ -466,7 +466,7 @@ struct DownloadWorkJournalLedgerTests {
     /// for the four months production wrote nothing. This is the same drive
     /// with the production conformer behind it, so what it proves is that the
     /// event reaches `analysis.sqlite`, which is the file a device pull copies.
-    @Test("the force-quit scan's preempted event reaches the store through DownloadManager")
+    @Test("the force-quit resume scan preempted event reaches the store through DownloadManager")
     func aRealEmissionSiteReachesTheStore() async throws {
         let (store, _) = try await Self.freshStore(prefix: "4xmzEndToEnd")
         let cache = try makeTempDir(prefix: "4xmzEndToEndCache")
