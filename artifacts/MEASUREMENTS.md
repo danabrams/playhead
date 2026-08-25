@@ -32,6 +32,95 @@ Two further things the series says and the bead did not quote:
 
 ---
 
+## M1b. WHAT THE 449 ARE — one live run, every descriptor read back by PATH
+
+Full plan, iPhone 17 simulator, trimmed, 2026-08-24, `scripts/gate-fd-paths.py`
+sampling the host every 10 s and keeping every sample's complete descriptor list.
+The run saturated (`max_fd` 2556 = soft-4, so descriptors 0..2555 were all in
+use) and settled to **453** — the same floor as the five preserved runs — and the
+tail dump was taken **while the host was still alive**.
+
+| n | share | what |
+|---|---|---|
+| 81 | 17.9 % | production `.../Application Support/Playhead/AnalysisStore/analysis.sqlite` |
+| 81 | 17.9 % | the same file's `-wal` |
+| 81 | 17.9 % | `Library/Caches/Diagnostics/surface-status-<ts>-<uuid>.jsonl` — **81 DISTINCT files** |
+| 76 | 16.8 % | production `.../Application Support/AdCatalog/ad_catalog.sqlite` |
+| 76 | 16.8 % | the same file's `-wal` |
+| 11 + 11 + 11 | 7.3 % | `tmp/PlayheadTestScratch/PlayheadTestStore-<uuid>/analysis.sqlite{,-wal,-shm}` |
+| 7 | 1.5 % | `Documents/bg-task-log.jsonl` — **ONE file, seven descriptors** |
+| 2 | 0.4 % | the two production `-shm` files (one each) |
+| 3 + 3 + 3 | 2.0 % | SwiftData `Playhead.store{,-wal,-shm}`, `/dev/*`, `/var/run/*` |
+| 3 + 1 | 0.9 % | sockets, kqueue |
+
+**WHAT WAS COUNTED AND WHAT WAS EXCLUDED.** The population is the process's file
+descriptor TABLE, enumerated with `proc_pidinfo(PROC_PIDLISTFDS)` into a real
+buffer — the same call, with the same head-room, that `gate-memory-sample.py`
+uses, so the 453 here and `testhost_fds` in the memory series are the same
+quantity. Paths come from `proc_pidfdinfo(PROC_PIDFDVNODEPATHINFO)`, one call per
+descriptor. **Nothing here is an `lsof` row count.** `lsof -p PID | wc -l` also
+lists `cwd`, `rtd`, `txt` and every mapped dylib, none of which occupies a
+descriptor — the cross-check in the tool splits on the FD column and was
+validated separately against a process holding 100 known descriptors (kernel and
+lsof agreed exactly; 18 rows excluded as `cwd`/`txt`). The instrument
+self-tests its ctypes layout against a path this process chose before it will
+report anything, because a wrong offset returns a plausible string rather than
+an error. Sockets, kqueues and pipes have no path and are reported as
+`<socket>`/`<kqueue>`/`<pipe>` rather than dropped.
+
+### The shape is the finding: it is not many stores, it is ~81 RETAINED APP RUNTIMES
+
+Read the three big rows together. **81 descriptors on ONE database file. 76 on
+another. 81 diagnostic files with one descriptor each.** That is not
+"143 stores never closed" — the per-store population is the 33 in
+`PlayheadTestScratch`, and it behaves exactly as the bead predicted, at 3.00
+descriptors per WAL store.
+
+`PlayheadRuntime.init` constructs all three, at the DEFAULT (production) paths:
+
+```
+Playhead/App/PlayheadRuntime.swift:842   let resolvedStore = try! AnalysisStore()          -> .../Playhead/AnalysisStore
+Playhead/App/PlayheadRuntime.swift:1153  let surfaceStatusLogger = SurfaceStatusInvariantLogger()
+Playhead/App/PlayheadRuntime.swift:1246  adCatalogStore = try AdCatalogStore(directoryURL: dir)
+```
+
+and the arithmetic closes: **~81 live runtimes x (2 analysis + 2 ad_catalog + 1
+surface-status) = ~405**, plus the three `-shm` singletons, the 33 scratch
+stores and ~16 of infrastructure = **453**. `AdCatalogStore` is 76 rather than 81
+because its construction sits behind a conditional, so five graphs lack one.
+
+**Each of the three holds its descriptor for its OWN lifetime and closes
+correctly when deallocated** — `AnalysisStore.deinit` and `AdCatalogStore.deinit`
+call `sqlite3_close_v2`, every statement in the store is finalized under a
+`defer`, and `SurfaceStatusInvariantLogger`'s `FileHandle` is released with the
+object. So this is not a missing `close()`. **It is ~81 `PlayheadRuntime` object
+graphs that are never deallocated**, built by 61 construction sites across 10
+test files (`ShowSkipModeControlTests` 13, `NowPlayingViewModelTests` 13,
+`RuntimeShutdownLifecycleTests` 20, ...). `PlayheadRuntime.deinit` exists and its
+own comment records that `shutdown()` is mandatory and that `withTestRuntime`
+enforces it — 34 uses against 61 sites.
+
+**WHY THIS IS NOT FIXED HERE.** Making those graphs release is not a `close()`
+call — it is finding what retains a whole app runtime and changing how ~61 test
+sites build one. That is the "architectural, or touches how every test opens its
+store" case, so it is written up and filed rather than attempted.
+
+### What it changes for the options already on the bead
+
+* **The floor is a FUNCTION OF THE TEST SUITE, not a constant.** It is ~5
+  descriptors per runtime-constructing test that leaks, so it grows with every
+  new one. 17.7 % of the budget today; twice the runtime tests and it is 35 %.
+* **Serializing (option A) does not touch it.** Retained graphs accumulate
+  whether or not tests run concurrently, so A collapses the PEAK and leaves the
+  FLOOR exactly where it is — and the floor is the half that keeps growing.
+* **It is the only lever that REDUCES DEMAND.** A lowers concurrency, B raises
+  supply; releasing the runtimes returns ~437 descriptors outright. It is not
+  sufficient on its own — the peak is ~2,100 ABOVE this floor — but it is a
+  genuine defect independently of the ceiling, and it is the one thing here that
+  is neither a cost trade nor a moved cliff.
+
+---
+
 ## M2. Do the runs that lose their host reach the ceiling? THE QUESTION IS NOT ESTIMABLE FROM THESE LOGS
 
 `scripts/fd_ceiling_sweep.py`, over `/private/tmp`, `$TMPDIR`,
