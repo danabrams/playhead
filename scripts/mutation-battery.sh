@@ -4858,8 +4858,7 @@ T_TK_PREROLL="the PRE-ROLL grade survives: he heard that one and meant that tap"
 # battery SPLITS the expectation field on ';', so none of these may contain a
 # semicolon.
 T_FD_CLOSES="shutdown() closes the analysis store, the ad catalog and the session log"
-T_FD_STAYS="without shutdown() the stores stay open — the rail above discriminates"
-T_FD_REOPEN="closing the analysis store is non-terminal — a later read reopens it"
+T_FD_REOPEN="closing an analysis store is non-terminal — a later read reopens it"
 T_FD_SAMEFILE="closing the session log is non-terminal — a later write reopens the SAME file"
 T_FD_CANARY="testEveryTestSideRuntimeConstructionIsTornDown"
 T_TK_RECEIPTS="V60 deletes no correction_events row: the spans were genuine ads"
@@ -4880,10 +4879,13 @@ MUTATIONS=(
 
   # Batch 1470 — FD01, the analysis store is never closed. This is the single
   # largest line of the floor: 179 of 499 descriptors, 89 connections to ONE
-  # production file. Predicted to redden BOTH the close rail and the
-  # non-terminality rail, because the latter's precondition is that the store
-  # was closed at all — and NOT the logger rail and NOT the canary.
-  "FD01|1470|RT|$T_FD_CLOSES;$T_FD_REOPEN"
+  # production file. Predicted to redden the close rail ALONE: the
+  # non-terminality rail runs against a store it owns in its own temp directory
+  # (it has to — running it against the shared production database made it a
+  # claim about lock contention, and it came back
+  # `.migrationFailed("database is locked")` on a merge gate), so this mutation
+  # cannot reach it. Not the logger rail and not the canary either.
+  "FD01|1470|RT|$T_FD_CLOSES"
 
   # Batch 1471 — FD02, the session log is never closed. 89 DISTINCT files, one
   # per runtime. Predicted to redden the close rail and the same-file rail, and
