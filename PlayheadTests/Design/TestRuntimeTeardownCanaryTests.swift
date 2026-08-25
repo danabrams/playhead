@@ -100,10 +100,30 @@ final class TestRuntimeTeardownCanaryTests: XCTestCase {
             "its subject IS what shutdown() closes, including the arm that must NOT shut down first",
     ]
 
-    /// Assembled rather than written whole so that THIS file does not contain
-    /// the token it scans for. The alternative — allowlisting the canary — would
-    /// hand the scanner an entry it can never justify.
-    private static let constructionToken = "PlayheadRuntime" + "("
+    /// The construction spellings this canary can see, as a pattern rather
+    /// than a literal.
+    ///
+    /// A LITERAL `PlayheadRuntime(` IS OUT-SPELLABLE, and this repo has the
+    /// receipts: `scripts/mutation-battery-untypeable.py`'s inventory preflight
+    /// was written as a grep over type names and was got past three separate
+    /// ways — `TranscribedRegion ()` with a space, `.append(start : …)` with a
+    /// space before the label's colon, and `EpisodeSeconds.init(…)` one round
+    /// earlier. So whitespace and the `.init` spelling are covered here rather
+    /// than left for a fourth round to discover: `PlayheadRuntime .init (…)`
+    /// constructs a runtime exactly as `PlayheadRuntime(…)` does.
+    ///
+    /// Measured before it was widened, over all 893 Swift files under
+    /// `PlayheadTests/`: this pattern and the bare literal select the SAME five
+    /// files, so the widening costs nothing today and closes two spellings.
+    ///
+    /// STATED LIMIT, because it is irreducible rather than an oversight: a
+    /// dot-`.init` whose type comes from the CONTEXT —
+    /// `let r: PlayheadRuntime = .init(isPreviewRuntime: true)` — names no type
+    /// at the call site, so no pattern over the type's name can ever see it.
+    /// That is the same limit `mutation-battery-untypeable.py` records as L-F,
+    /// and the same answer applies: what stops it is a compile-enforced
+    /// obligation, not a better regex. Nothing in the tree writes it today.
+    private static let constructionPattern = "PlayheadRuntime" + #"\s*(\.\s*init\s*)?\("#
 
     func testEveryTestSideRuntimeConstructionIsTornDown() throws {
         let testsRoot = try Self.testSourceRoot()
@@ -129,10 +149,14 @@ final class TestRuntimeTeardownCanaryTests: XCTestCase {
             if stripped.count != source.count {
                 lengthInvariantViolations.append(name)
             }
-            guard stripped.contains(Self.constructionToken) else {
-                if source.contains(Self.constructionToken) {
-                    mentionedOnlyOutsideCode.insert(name)
-                }
+            let constructsInCode = SwiftSourceInspector.regexOccurrences(
+                of: Self.constructionPattern, in: stripped
+            ) > 0
+            guard constructsInCode else {
+                let mentionedAnywhere = SwiftSourceInspector.regexOccurrences(
+                    of: Self.constructionPattern, in: source
+                ) > 0
+                if mentionedAnywhere { mentionedOnlyOutsideCode.insert(name) }
                 continue
             }
             guard Self.lifecycleSubjectFiles[name] != nil else {
@@ -140,6 +164,15 @@ final class TestRuntimeTeardownCanaryTests: XCTestCase {
                 continue
             }
             seenAllowlisted.insert(name)
+            // DELIBERATELY A LITERAL, and deliberately NOT widened the way the
+            // construction pattern above was. The two checks want opposite
+            // tolerances. Missing a construction is a FALSE NEGATIVE — a leak
+            // that ships — so that side must be hard to out-spell. Missing a
+            // teardown that is spelled unusually is a false POSITIVE: loud, and
+            // one line to answer. Widening this one would also disarm mutation
+            // FD06, whose whole edit is to respell these three calls as
+            // `.shutdown( )` in an allowlisted file; a tolerant pattern would
+            // match the mutant and the mutant would survive.
             if !stripped.contains(".shutdown()") {
                 allowlistedWithoutShutdown.append(name)
             }
@@ -210,11 +243,17 @@ final class TestRuntimeTeardownCanaryTests: XCTestCase {
         // appearing is a RED that names the file, rather than a construction
         // site that quietly stopped being scanned.
         let expectedMentionOnly: Set<String> = [
-            // Writes the token in its own header prose, and assembles the
-            // token it scans for so the assembled form never appears.
+            // Writes the spelling in its own header prose, and assembles the
+            // pattern it scans for so the assembled form never appears in code.
             "TestRuntimeTeardownCanaryTests.swift",
             // Names the constructor in a comment; constructs nothing.
             "CoreServiceTests.swift",
+            // `XCTFail("PlayheadRuntime.init(isPreviewRuntime:) signature not
+            // found …")` — a failure MESSAGE naming the initialiser it inspects
+            // by source text. It constructs nothing, and it is the reason the
+            // pattern is matched against the STRIPPED text for the verdict:
+            // a string mention must not make a file an offender.
+            "PermissiveClassifierBoxLazinessTests.swift",
         ]
         XCTAssertEqual(
             mentionedOnlyOutsideCode, expectedMentionOnly,
