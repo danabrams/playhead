@@ -3150,6 +3150,16 @@ actor DownloadManager {
     // MARK: - Cancel
 
     /// Cancels an active download for the given episode.
+    ///
+    /// **ITS ONLY PRODUCTION CALLER IS `removeCache(for:)`, AND THAT IS LOAD-
+    /// BEARING** (playhead-4xmz). This retires background transfers, which
+    /// cancels any in-flight `download_work_journal` finalization — correct
+    /// only because `removeCache` unlinks the artifact three lines after
+    /// calling here. A second production caller that does NOT delete would
+    /// silently drop a `finalized` row for an artifact still on disk, out of
+    /// the column that makes `finalized`/`failed` a real split.
+    /// `DownloadWorkJournalWiringSourceCanaryTests` pins the call-site count,
+    /// because nothing at runtime can see it.
     func cancelDownload(episodeId: String) async {
         var cancelled = false
 
@@ -3164,17 +3174,7 @@ actor DownloadManager {
             cancelled = true
         }
 
-        // `retiringJournalFinalizations: false` — an explicit cancel does NOT
-        // delete the artifact, so a transfer that has already finalized keeps
-        // its bytes and must keep its `download_work_journal` row. Retiring the
-        // finalization here would drop a `finalized` row for an artifact that
-        // is canonically placed, strongly pinned and already enqueued for
-        // analysis — silently, and out of the one column that makes
-        // `finalized`/`failed` a real split.
-        if await retireBackgroundTransfers(
-            episodeId: episodeId,
-            retiringJournalFinalizations: false
-        ) {
+        if await retireBackgroundTransfers(episodeId: episodeId) {
             cancelled = true
         }
 
@@ -3288,30 +3288,35 @@ actor DownloadManager {
     /// hop. All three known session identifiers are instantiated here
     /// deliberately: explicit deletion is not latency-sensitive like the
     /// launch scan, and must find tasks retained by an older process.
-    /// `retiringJournalFinalizations` HAS NO DEFAULT, and that is the point
-    /// (playhead-4xmz review 2). Cancelling a finalization DESTROYS the
-    /// `download_work_journal` row for a transfer that completed, so only a
-    /// caller that is about to UNLINK THE BYTES may ask for it — the row would
-    /// then be claiming an artifact that is gone. `clearCache` deletes and
-    /// passes `true`; `cancelDownload` deletes nothing and passes `false`.
+    /// CANCELLING A FINALIZATION DESTROYS A `download_work_journal` ROW for a
+    /// transfer that completed, so it is correct only when the bytes are about
+    /// to be unlinked — otherwise the row would have been true. Both callers
+    /// qualify, and the SECOND one only through its own caller:
     ///
-    /// It shipped as an unconditional cancel and the hazard was invisible,
-    /// because the recorder was a NO-OP: a defect this whole bead is about,
-    /// arriving from the other side. `DownloadWorkJournalWiringSourceCanaryTests`
-    /// pins which caller passes which, because nothing at runtime can see it.
+    ///   * `clearCache()` unlinks everything, a few lines below its call;
+    ///   * `cancelDownload(episodeId:)` unlinks nothing itself — and its ONLY
+    ///     production caller is `removeCache(for:)`, which calls
+    ///     `removeAllAudioArtifacts` three lines later.
+    ///
+    /// playhead-4xmz review 2 read that as a defect and review 3 found the
+    /// repair WAS one: a `retiringJournalFinalizations` parameter passing
+    /// `false` from `cancelDownload` disarmed the per-episode DELETE path and
+    /// reddened `cacheDeletionRacingFinalizationDoesNotJournalSuccess`, which
+    /// is the on-point behavioural rail for exactly this race. Reverted. The
+    /// property that actually holds is the SHAPE of the call graph above, so
+    /// `DownloadWorkJournalWiringSourceCanaryTests` pins that
+    /// `cancelDownload` has one production call site and that it is inside
+    /// `removeCache` — a claim no runtime test can make.
     @discardableResult
     private func retireBackgroundTransfers(
-        episodeId: String?,
-        retiringJournalFinalizations: Bool
+        episodeId: String?
     ) async -> Bool {
-        if retiringJournalFinalizations {
-            if let episodeId {
-                backgroundJournalFinalizations[episodeId]?.task.cancel()
-            } else {
-                for finalization in
-                    backgroundJournalFinalizations.values {
-                    finalization.task.cancel()
-                }
+        if let episodeId {
+            backgroundJournalFinalizations[episodeId]?.task.cancel()
+        } else {
+            for finalization in
+                backgroundJournalFinalizations.values {
+                finalization.task.cancel()
             }
         }
         let roles: [BackgroundSessionRole] = [
@@ -4339,13 +4344,7 @@ actor DownloadManager {
             task.cancel()
         }
         activeDownloads.removeAll()
-        // `retiringJournalFinalizations: true` — this path UNLINKS THE BYTES a
-        // few lines below, so a finalization suspended mid-append must not go
-        // on to publish a row for an artifact that no longer exists.
-        _ = await retireBackgroundTransfers(
-            episodeId: nil,
-            retiringJournalFinalizations: true
-        )
+        _ = await retireBackgroundTransfers(episodeId: nil)
         try clearCache(
             enumerating: { directory in
                 try FileManager.default.contentsOfDirectory(

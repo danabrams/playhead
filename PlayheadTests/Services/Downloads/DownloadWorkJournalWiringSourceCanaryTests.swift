@@ -386,46 +386,6 @@ final class DownloadWorkJournalWiringSourceCanaryTests: XCTestCase {
         )
     }
 
-    // MARK: - 7. Only a caller that DELETES the bytes may retire a finalization
-
-    /// Cancelling a finalization DESTROYS the `download_work_journal` row for a
-    /// transfer that completed. That is correct only when the bytes are about
-    /// to be unlinked — otherwise the row would have been true.
-    ///
-    /// It shipped as an unconditional cancel and the hazard was invisible
-    /// because the recorder was a no-op; `cancelDownload` retires and deletes
-    /// nothing. Nothing at runtime can see which caller asked for which, and
-    /// the parameter deliberately has NO DEFAULT so both must say.
-    func testOnlyTheDeletingCallerRetiresAJournalFinalization() throws {
-        let manager = try code(Self.managerPath)
-        XCTAssertEqual(
-            SwiftSourceInspector.regexOccurrences(
-                of: #"retiringJournalFinalizations:\s*true"#, in: manager
-            ),
-            1,
-            "playhead-4xmz: exactly one caller may retire a finalization, and it is the one "
-            + "that unlinks the bytes (`clearCache`). A second `true` is a `finalized` row "
-            + "dropped for an artifact still on disk."
-        )
-        XCTAssertEqual(
-            SwiftSourceInspector.regexOccurrences(
-                of: #"retiringJournalFinalizations:\s*false"#, in: manager
-            ),
-            1,
-            "playhead-4xmz: …and exactly one passes false — `cancelDownload`, which deletes "
-            + "nothing."
-        )
-        XCTAssertEqual(
-            SwiftSourceInspector.regexOccurrences(
-                of: #"retiringJournalFinalizations:\s*Bool\s*=\s*"#, in: manager
-            ),
-            0,
-            "playhead-4xmz: NO DEFAULT. A default is how this decision gets made silently at "
-            + "a call site nobody read — which is the shape of the defect this whole bead is "
-            + "about."
-        )
-    }
-
     /// The event vocabulary and the emission sites must stay the same size.
     /// A case with no site can never be produced; a site with no case cannot
     /// compile — so this pins the direction the compiler cannot.
@@ -458,6 +418,80 @@ final class DownloadWorkJournalWiringSourceCanaryTests: XCTestCase {
             "playhead-4xmz: four emission sites — one per protocol requirement. A fifth means a "
             + "site nobody enumerated; a fourth missing means a requirement quietly stopped "
             + "writing."
+        )
+    }
+
+    // MARK: - 7. Cancelling a finalization is only correct where bytes die
+
+    /// `retireBackgroundTransfers` cancels any in-flight
+    /// `download_work_journal` finalization, which DESTROYS the row for a
+    /// transfer that completed. That is correct only when the artifact is
+    /// about to be unlinked, and whether it is depends on the CALL GRAPH:
+    /// `clearCache` unlinks a few lines later, and `cancelDownload` unlinks
+    /// nothing itself but has exactly one production caller — `removeCache`,
+    /// which unlinks three lines later.
+    ///
+    /// Review 2 read `cancelDownload` in isolation, called that a lost row,
+    /// and had the cancel made conditional; review 3 found the repair disarmed
+    /// the per-episode DELETE path and reddened
+    /// `cacheDeletionRacingFinalizationDoesNotJournalSuccess`. So the property
+    /// worth pinning is not a spelling at a call site — it is the SHAPE, and
+    /// the shape is a count no runtime test can take.
+    func testCancelDownloadHasOneProductionCallerAndItDeletes() throws {
+        let manager = try code(Self.managerPath)
+        XCTAssertEqual(
+            SwiftSourceInspector.regexOccurrences(
+                of: #"await cancelDownload\("#, in: manager
+            ),
+            1,
+            "playhead-4xmz: exactly ONE production call site. `cancelDownload` retires "
+            + "background transfers, which cancels an in-flight journal finalization — "
+            + "correct only because its caller deletes the bytes. A second caller that does "
+            + "not delete drops a `finalized` row for an artifact still on disk, out of the "
+            + "column that makes finalized/failed a real split."
+        )
+        let removeCache = try XCTUnwrap(
+            SwiftSourceInspector.firstBody(
+                in: manager, after: "func removeCache(for episodeId: String) async throws"
+            ),
+            "could not isolate removeCache's body — this canary's anchor has drifted"
+        )
+        XCTAssertEqual(
+            SwiftSourceInspector.regexOccurrences(
+                of: #"await cancelDownload\("#, in: removeCache
+            ),
+            1,
+            "playhead-4xmz: …and that one call site is inside `removeCache`."
+        )
+        XCTAssertEqual(
+            SwiftSourceInspector.regexOccurrences(
+                of: #"\bremoveAllAudioArtifacts\("#, in: removeCache
+            ),
+            1,
+            "playhead-4xmz: …and `removeCache` really does unlink the artifact. Without this "
+            + "the count above would be satisfied by a caller that keeps the bytes."
+        )
+        let clearCache = try XCTUnwrap(
+            SwiftSourceInspector.firstBody(
+                in: manager, after: "func clearCache() async throws"
+            ),
+            "could not isolate clearCache's body — this canary's anchor has drifted"
+        )
+        XCTAssertEqual(
+            SwiftSourceInspector.regexOccurrences(
+                of: #"retireBackgroundTransfers\("#, in: clearCache
+            ),
+            1,
+            "playhead-4xmz: the other retiring caller, and it unlinks everything below."
+        )
+        XCTAssertEqual(
+            SwiftSourceInspector.regexOccurrences(
+                of: #"retiringJournalFinalizations"#, in: manager
+            ),
+            0,
+            "playhead-4xmz: NO conditional-retirement parameter. Review 2 added one and it "
+            + "disarmed the delete path; the property is the call graph above, and a flag "
+            + "here would let a caller opt out of it one argument at a time."
         )
     }
 }

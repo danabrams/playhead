@@ -101,11 +101,26 @@
 //   * `writeFailures > 0`
 //         — events happened and this database could not hold them.
 //
-// FOUR CELLS OF A TRUTH TABLE, NOT A LADDER — four, because V63 adds the
-// `writeFailures` counter that V62's three-cell version did not have, and it is
-// the one that can INVERT the positive claim. This paragraph said "three" while
-// listing four bullets, which sends a reader who follows the V62 recipe past
-// the number that matters. `armedLaunches = 0` beside real rows is reachable — an event before the launch Task arms, or an arming write
+// TWO MORE REACHABLE STATES THE FOUR BULLETS DO NOT NAME, both found at review
+// 3, and both are ways a row can be MISSING with every counter healthy:
+//
+//   * A FINALIZED EVENT DISCARDED BY CANCELLATION leaves no row and moves no
+//     counter — that is exactly what the `catch is CancellationError` arm is
+//     for. So `armedLaunches = N > 0, rows = 0, writeFailures = 0` — the
+//     POSITIVE CLAIM — is reachable on an install where finalized events
+//     happened and were deliberately dropped because their bytes were being
+//     deleted. Read the claim as "no event this build chose to keep", not as
+//     "no event occurred". It also biases the rate below against `finalized`,
+//     by the population this bead's own cancellation handling creates.
+//   * TABLE PRESENT, ARMING ROW ABSENT. `fetchDownloadWorkJournalArming`
+//     returns nil for it rather than a synthesized zero, deliberately — but
+//     raw SQL returns NO ROWS, which `sqlite3` prints as a blank line and a
+//     reader glances past as 0. `SELECT count(*) FROM
+//     download_work_journal_arming` first, exactly as at V62.
+//
+// SIX STATES THEN, NOT FOUR AND NOT A LADDER — and the count has now been
+// wrong twice in this file, which is the argument for reading the list rather
+// than the number. `armedLaunches = 0` beside real rows is reachable — an event before the launch Task arms, or an arming write
 // that itself failed — and means "these rows are real and the denominator is
 // missing". Read all of the numbers, every time.
 //
@@ -131,6 +146,12 @@
 //
 // is a real completion-versus-failure split for the download half, which is
 // the question 7dgx's ledger could only ever answer half of.
+//
+// IT IS NOT FREE, AND AN EARLIER VERSION OF THIS PARAGRAPH SAID IT WAS. It
+// claimed `recordFinalized` "is not that site" because it runs after canonical
+// placement and already awaits a journal `Task` — which quotes the EXISTENCE of
+// an `await`, not its cost, and that is the standing defect class. What is
+// actually true is L-6.
 //
 // NAME THE POPULATION BEFORE QUOTING A RATE FROM IT — and the `failed` bucket
 // has THREE WRITERS, not one. An earlier version of this paragraph said the
@@ -216,6 +237,25 @@
 //     0 and whose `installedAt` dates the REBUILD. List those siblings before
 //     concluding "never armed", and take them in the pull.
 
+// L-6 THE FINALIZED WRITE IS A STORE WRITE INSIDE THE IN-FLIGHT RESERVATION,
+//     which is the cost playhead-7dgx declined to pay for an attempt counter
+//     and this bead pays for a denominator. Measured against the code rather
+//     than asserted: `bgInFlightEpisodes` still holds the episode across
+//     `await journalTask.value` — `finishBackgroundTransfer` runs AFTER it — so
+//     the write happens inside the per-episode reservation playhead-nsjn /
+//     -gpdb / -7l6n built, and `insertDownloadWorkJournalEntry` reaches
+//     `ensureOpen()`, which runs the whole migration ladder on first touch. It
+//     also postpones `touchAccess`, `deleteResumeData`, `evictIfNeeded` and the
+//     day-0 rediff seam `notifyBackgroundDownloadCompleted` by one store
+//     round-trip. Before this bead that await was a no-op.
+//
+//     WHY IT IS PAID ANYWAY: the reservation is per-EPISODE, not global, so it
+//     delays a re-download of the same episode and nothing else; and moving the
+//     write into a detached task would re-open the hazard L-5's neighbour
+//     describes — the ownership re-check runs AFTER the await, so an unawaited
+//     write can outlive the deletion that revoked it. Nobody has measured the
+//     round-trip on a device.
+//
 // L-5 THE FORCE-QUIT SCAN NOW AWAITS A STORE WRITE, INSIDE A 2 s SLA.
 //     `PlayheadAppDelegate.didFinishLaunchingWithOptions` fires
 //     `scanForSuspendedTransfers()` and logs an error if it exceeds 2 s. Its
@@ -494,14 +534,21 @@ struct AnalysisStoreDownloadWorkJournalRecorder: WorkJournalRecording {
     /// `Task` this runs inside, and its contract (see
     /// ``DownloadManager/backgroundJournalFinalizations``) is that "a recorder
     /// suspended before its durable append cannot publish a stale `.finalized`
-    /// row" — the cache deletion retires these before unlinking the bytes.
+    /// row" — cache deletion retires these before unlinking the bytes.
     /// Before this bead that held for free, because the recorder returned
     /// immediately; now the window is however long the `AnalysisStore` actor is
-    /// busy, so it has to be honoured explicitly. `Task.isCancelled` read HERE
-    /// is not enough on its own: an actor hop is not a cancellation point, so
-    /// the check has to happen again INSIDE the actor, which is what
-    /// `insertDownloadWorkJournalEntryUnlessCancelled` is for — the same
-    /// two-place shape `AnalysisStoreWorkJournalRecorder` uses.
+    /// busy, so it has to be honoured explicitly.
+    ///
+    /// THE CHECK THAT MATTERS IS THE ONE INSIDE THE ACTOR. An actor hop is not
+    /// a cancellation point, so a `Task.isCancelled` read before it cannot see
+    /// a cancellation landing during it —
+    /// `insertDownloadWorkJournalEntryUnlessCancelled` is where the decision is
+    /// made. `AnalysisStoreWorkJournalRecorder` keeps BOTH a pre-hop read and
+    /// an in-actor one; this recorder deliberately keeps only the in-actor one,
+    /// because a cheap pre-hop guard satisfies every test that can be written
+    /// deterministically and would leave the in-actor check with no rail at
+    /// all. The pre-hop read still exists at the production call site
+    /// (`DownloadManager.finalizeBackgroundDownload`), where it costs nothing.
     func recordFinalized(episodeId: String) async {
         await append(
             episodeId: episodeId,
@@ -645,16 +692,22 @@ struct AnalysisStoreDownloadWorkJournalRecorder: WorkJournalRecording {
             // which is a claim about the STORE — and it is the one reading that
             // counter exists to make.
             //
-            // AND NOTHING IS LOST THAT ANYBODY ASKED TO KEEP — but only because
-            // `DownloadManager.retireBackgroundTransfers` now takes
-            // `retiringJournalFinalizations` and the ONLY caller that passes
-            // `true` is `clearCache`, which unlinks the bytes. This comment
-            // used to assert that as a fact about the code and it was FALSE:
-            // `cancelDownload` retired finalizations too and deletes nothing,
-            // so a transfer that finalized while the user cancelled lost its
-            // row for an artifact still on disk. Found at review 2. If a third
-            // caller ever passes `true`, this sentence stops being true again —
-            // which is why a source canary pins the two call sites.
+            // AND NOTHING IS LOST THAT ANYBODY ASKED TO KEEP — but that is a
+            // property of the CALL GRAPH, not of this file, and it took two
+            // review rounds to state correctly. `retireBackgroundTransfers` is
+            // what cancels, and it has two callers: `clearCache`, which unlinks
+            // everything a few lines later, and `cancelDownload`, whose ONLY
+            // PRODUCTION CALLER is `removeCache`, which unlinks three lines
+            // later. Both delete; the second only through its caller.
+            //
+            // Review 2 read `cancelDownload` in isolation, concluded it deleted
+            // nothing, and had the cancel made conditional — which disarmed the
+            // per-episode DELETE path and reddened
+            // `cacheDeletionRacingFinalizationDoesNotJournalSuccess`, the
+            // on-point rail for that race. Review 3 caught it. A PRODUCTION
+            // caller of `cancelDownload` that does not delete would make this
+            // sentence false again, which is why a source canary pins the
+            // call-site count rather than the wording.
             return
         } catch {
             logger.error(

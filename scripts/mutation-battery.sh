@@ -2745,6 +2745,11 @@ FOCUSED_SUITES=(
   -only-testing:PlayheadTests/DownloadWorkJournalLedgerTests
   -only-testing:PlayheadTests/DownloadWorkJournalV63MigrationTests
   -only-testing:PlayheadTests/DownloadWorkJournalWiringSourceCanaryTests
+  # NOT this bead's suite. It carries `cache deletion during journal
+  # finalization revokes the stale finalized tail`, the only BEHAVIOURAL rail
+  # for a delete racing a journal write — and review 2's repair reddened it
+  # while every DW rail stayed green, because the battery could not see it.
+  -only-testing:PlayheadTests/BackgroundDownloadCompletionTests
   # The two cross-rung observers above serve V63 as well — a V63 rung missing
   # from one ladder is invisible to every DW rail for the same reason it was
   # invisible to every BD one. The DW block sits BELOW them rather than above
@@ -3316,7 +3321,8 @@ T_7DGX_C6_FRESH="C6: fresh DB migrate() reaches currentSchemaVersion with all ex
 # one be credited for the other — a FALSE KILL, the one verdict shape that is
 # silent and looks exactly like success. Three of these collided with the
 # neighbouring 7dgx suites on their first draft and were renamed. (The tree
-# still holds 59 duplicates, measured: playhead-0dsti.)
+# tree holds 56 names in more than one file and 64 occurring more than once,
+# measured at base AND on this branch — this branch adds none: playhead-0dsti.)
 T_DW_EVENTS="each of the four requirements appends a row carrying its event, cause and metadata"
 T_DW_REPEAT="a repeated failure for one episode is two rows, not one"
 T_DW_DURABLE="the download-journal rows are on disk, not in memory — a second store on the same file reads them"
@@ -3340,7 +3346,13 @@ T_DW_CANCEL_FIN="a finalization cancelled before it runs writes no row and count
 T_DW_CANCEL_STORE="the store's UnlessCancelled append refuses inside the actor, not just at the caller"
 T_DW_CANCEL_FAIL="a cancelled FAILURE is still recorded — the asymmetry is deliberate"
 DWC="DownloadWorkJournalWiringSourceCanaryTests"
-T_DW_C_RETIRE="$DWC/testOnlyTheDeletingCallerRetiresAJournalFinalization"
+T_DW_C_RETIRE="$DWC/testCancelDownloadHasOneProductionCallerAndItDeletes"
+# NOT this bead's suite: the on-point BEHAVIOURAL rail for a cache delete
+# racing a journal finalization. It predates this bead and was the thing that
+# caught review 2's repair; `BackgroundDownloadCompletionTests` is in
+# FOCUSED_SUITES from review 3 onward so the battery can see it.
+T_DW_DELETE_RACE="cache deletion during journal finalization revokes the stale finalized tail"
+T_DW_ARM_MISSING="a write failure on a store with NO arming row creates one WITHOUT inventing an arming"
 # TWO RAILS HERE DELIBERATELY HAVE NO MUTANT, and both are stated rather than
 # left as gaps. `an unbounded limit returns everything instead of trapping`
 # guards a TRAP: its mutant kills the host, and this battery scores a test with
@@ -12126,10 +12138,17 @@ MUTATIONS=(
   # WIRING, which is the layer the defect lived in and which no runtime test in
   # this tree can reach.
   #
-  # Four layers, and each is invisible from the others: the WIRING (DW01-DW03,
-  # DW21), the RECORDER (DW04-DW09), the SCHEMA (DW10-DW14, DW23), and the SQL
-  # the store actually runs on the way in and out (DW15-DW20, DW22). DW99 is
-  # the vacuity control.
+  # FIVE layers, and each is invisible from the others:
+  #   WIRING            DW01-DW03, DW21, DW33
+  #   RECORDER          DW04-DW09, DW25, DW26, DW29, DW31, DW32
+  #   SCHEMA            DW10-DW14, DW23, DW24, DW36
+  #   SQL               DW15-DW20, DW22
+  #   THE DELETE RACE   DW27, DW34, DW35
+  # DW99 is the vacuity control. (DW30 was never assigned: the clamp mutant it
+  # would have been kills the HOST rather than an expectation, and a test with
+  # no verdict is scored a PASS — see the note beside the expectation
+  # variables. The gap is deliberate and is recorded here rather than left as a
+  # number a reader has to wonder about.)
   #
   # THE SERIES' CENTRAL CLAIM IS DW21, not DW01. Reverting the wiring to the
   # no-op is the defect coming back; handing the download path the ANALYSIS
@@ -12302,11 +12321,24 @@ MUTATIONS=(
   # every runtime rail green — the bead's own defect shape, one argument along.
   "DW33|1509|RT|$T_DW_C_WIRING"
 
-  # DW34 lets `cancelDownload` retire a journal finalization. It deletes no
-  # bytes, so a transfer that finalized while the user cancelled loses its row
-  # for an artifact still on disk. THIS WAS THE SHIPPED STATE until review 2,
-  # licensed by a comment asserting the opposite.
-  "DW34|1510|DLMGR|$T_DW_C_RETIRE"
+  # DW34 stops `retireBackgroundTransfers` cancelling the journal finalization
+  # at all, so a cache DELETE racing a finalization publishes a `finalized` row
+  # for bytes that are already unlinked. Its victim is a BEHAVIOURAL rail that
+  # drives the race with a gated recorder, not a source count — review 3's
+  # point: review 2's version of this mutant was killed only by two literal
+  # spellings, i.e. a LOST RAIL.
+  "DW34|1510|DLMGR|$T_DW_C_RETIRE;$T_DW_DELETE_RACE"
+
+  # DW35 REMOVES the `cancelDownload` call from `removeCache`, so the
+  # per-episode delete stops retiring background transfers at all. The shape
+  # canary is what sees it — nothing at runtime counts production call sites,
+  # which is the property review 3 said had to replace a literal spelling.
+  "DW35|1511|DLMGR|$T_DW_C_RETIRE"
+
+  # DW36 makes a write-failure count as an ARMING on the row-CREATING branch —
+  # the branch review 3 found no test ever executes. `armedLaunches` would then
+  # be manufactured by the very failure that proves nothing was recorded.
+  "DW36|1512|STORE|$T_DW_ARM_MISSING"
 
   "DW99|1500|DWJ|$T_DW_WRITEFAIL"
 )
@@ -12714,7 +12746,9 @@ describe_mutation() {
     DW31) echo "a FAILURE starts honouring cancellation, so a cancelled enclosing task drops the record this bead exists to create" ;;
     DW32) echo "every row is stamped with a CONSTANT occurredAt — the table's only timestamp and its sole ordering key" ;;
     DW33) echo "production stops passing the surface-status recorder, so the residual medium goes dark with every rail green" ;;
-    DW34) echo "cancelDownload retires a journal finalization again, dropping a finalized row for an artifact still on disk" ;;
+    DW34) echo "retireBackgroundTransfers stops cancelling the journal finalization, so a cache DELETE racing one publishes a finalized row for unlinked bytes" ;;
+    DW35) echo "the per-episode delete stops retiring background transfers at all" ;;
+    DW36) echo "a write FAILURE manufactures an arming on the row-creating branch — a denominator invented by the failure that proves nothing was recorded" ;;
     DW99) echo "VACUITY CONTROL — the parameter BINDING inside noteWriteFailure is renamed; the label and the call site are untouched. MUST SURVIVE" ;;
     IW01) echo "THE SHIPPED DEFECT VERBATIM — the coarse gate is gone, so a runner hardcode reads as the model's grade" ;;
     IW02) echo "the gate opens for anything that is NOT permissive, so UNKNOWN licenses the band — the backfill defect in the reader" ;;
@@ -14148,14 +14182,43 @@ EOF
 
   DW34)
     snippet OLD <<'EOF'
-            retiringJournalFinalizations: false
-        ) {
+        if let episodeId {
+            backgroundJournalFinalizations[episodeId]?.task.cancel()
+        } else {
+            for finalization in
+                backgroundJournalFinalizations.values {
+                finalization.task.cancel()
+            }
+        }
 EOF
     snippet NEW <<'EOF'
-            retiringJournalFinalizations: true
-        ) {
+        _ = episodeId
 EOF
     patch "$file" "$OLD" "$NEW" ;;
+
+  DW35)
+    snippet OLD <<'EOF'
+        await cancelDownload(episodeId: episodeId)
+        let fm = FileManager.default
+EOF
+    snippet NEW <<'EOF'
+        let fm = FileManager.default
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW36)
+    snippet OLD <<'EOF'
+            VALUES (1, 0, 1, NULL, NULL, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                writeFailures = writeFailures + 1
+EOF
+    snippet NEW <<'EOF'
+            VALUES (1, 1, 1, NULL, NULL, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                writeFailures = writeFailures + 1
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
 
   DW99)
     snippet OLD <<'EOF'
@@ -29732,19 +29795,27 @@ if [ "${#SELECTED[@]}" -eq 0 ]; then
   exit 2
 fi
 
-# playhead-4xmz REVIEW R1: A SELECTION THAT DROPS A SERIES' VACUITY CONTROL IS
-# REFUSED, and it is refused rather than repaired because the failure it
-# produces is the dangerous direction. `--series DW0` selects DW01…DW09 and NOT
-# DW99: the run then exits 0 printing "All mutations killed", where the full
-# series exits 1 because the control legitimately SURVIVES. Dropping the control
-# turns a red run green — the exact hole `playhead-o89d` R5 had to close in the
-# R-engine batteries, arriving here through a new flag.
+# playhead-4xmz: A SELECTION THAT WOULD DROP A SERIES' VACUITY CONTROL GETS THE
+# CONTROL APPENDED, rather than being refused.
 #
-# The first cut of `--series` asserted this could not happen "by construction",
-# because a control is named after its series. That is true of `--series DW` and
-# false of every shorter-than-the-whole-prefix spelling, which is what makes it
-# worth a check rather than a comment.
-if [ -n "$ONLY_SERIES" ] || [ -n "$ONLY_BATCH" ]; then
+# WHY IT MATTERS AT ALL: a run without the control cannot distinguish "every
+# mutant died" from "the focused suites fail on anything", and — the direction
+# that bites — it exits 0 where the whole series exits 1, because a control
+# legitimately SURVIVES. `--series DW0` selects DW01..DW09 and not DW99;
+# `--batch 1477` and `--only DW07` each select one mutant and no control.
+# DROPPING A CONTROL TURNS A RED RUN GREEN. CLAUDE.md records the R-engine
+# batteries closing exactly this hole (playhead-o89d R5).
+#
+# WHY APPEND RATHER THAN REFUSE, which is what R1 shipped and R3 measured: a
+# refusal made `--batch <id>` exit 2 for 301 of 803 batch ids across 24 series
+# that never asked for it, deleting the per-batch re-run recipe this script's
+# own USAGE documents. Appending preserves every existing invocation and costs
+# one extra batch. It is also what the R engine does.
+#
+# The first cut of this claimed the property held "by construction" because a
+# control is named after its series. That is true of `--series DW` and false of
+# every other spelling, which is the whole reason this block exists.
+if [ -n "$ONLY" ] || [ -n "$ONLY_SERIES" ] || [ -n "$ONLY_BATCH" ]; then
   for rec in "${MUTATIONS[@]}"; do
     ctl_name="$(rec_name "$rec")"
     case "$ctl_name" in
@@ -29752,8 +29823,6 @@ if [ -n "$ONLY_SERIES" ] || [ -n "$ONLY_BATCH" ]; then
       *) continue ;;
     esac
     ctl_series="${ctl_name%99}"
-    # Does this selection touch that series at all? If it does, the control
-    # must be in it.
     touches=0
     holds_control=0
     for sel in "${SELECTED[@]}"; do
@@ -29764,11 +29833,11 @@ if [ -n "$ONLY_SERIES" ] || [ -n "$ONLY_BATCH" ]; then
       [ "$sel_name" = "$ctl_name" ] && holds_control=1
     done
     if [ "$touches" -eq 1 ] && [ "$holds_control" -eq 0 ]; then
-      echo "mutation-battery: this selection covers part of the $ctl_series series but NOT its vacuity control $ctl_name." >&2
-      echo "  A run without the control cannot distinguish 'every mutant died' from 'the suites fail on anything'," >&2
-      echo "  and it exits 0 where the whole series exits 1. Use --series $ctl_series, or --only $ctl_name to drive one." >&2
-      echo "  (--batch is covered too: every DW mutant has its own batch, so --batch alone would drop the control.)" >&2
-      exit 2
+      echo "mutation-battery: this selection covers part of the $ctl_series series without its"
+      echo "  vacuity control $ctl_name, so $ctl_name is APPENDED. A run without it cannot tell"
+      echo "  'every mutant died' from 'the suites fail on anything', and it exits 0 where the"
+      echo "  whole series exits 1."
+      SELECTED+=("$rec")
     fi
   done
 fi
