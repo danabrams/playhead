@@ -3228,6 +3228,7 @@ T_8CJO_EXHAUSTIVE="the tier switch is exhaustive — a new tier cannot inherit a
 T_8CJO_REANNOUNCE="A re-announced window leaves the delivered-card record, so it is never on both surfaces"
 T_8CJO_RETIRE="A retirement forwarded to the queue pulls the card the orchestrator invalidated"
 T_8CJO_LIMIT="STATED LIMIT: a card queued behind another and discarded unseen is still booked delivered"
+T_8CJO_SUGGESTACK="An ACCEPTED suggest item IS acknowledged, so the next host is not asked again"
 
 T_IW7Q_PERMISSIVE="a PERMISSIVE coarse row is ungraded — the runner wrote that .strong"
 T_IW7Q_UNKNOWN="an UNKNOWN coarse row is ungraded too — silence is not a licence"
@@ -11742,7 +11743,16 @@ MUTATIONS=(
   # AK15 — the SUGGEST acknowledgement, the tier this bead did not change. An
   # acknowledged suggestion stops being replayed to the next host, so the
   # listener is asked nothing about a span they are about to hear.
-  "AK15|1435|BHD|$T_8CJO_SUGGEST;$T_8CJO_ACKAUTO"
+  # AK15 SURVIVED on its first run and the survivor was RIGHT: its expectation
+  # named `A refused SUGGEST item is not acknowledged`, which DELETING the
+  # acknowledgement satisfies perfectly. Nothing asserted the positive
+  # direction. The expectation now names the rail written to close that hole,
+  # not the one that could never fall.
+  "AK15|1435|BHD|$T_8CJO_SUGGESTACK;$T_8CJO_ACKAUTO"
+
+  # AK18 — the MIRROR, so the refusal direction is proven too: the suggest
+  # acknowledgement fires regardless of what the queue said.
+  "AK18|1438|BHD|$T_8CJO_SUGGEST;$T_8CJO_GUARD"
 
   # AK16 — a `default:` arm on the tier switch, so a tier added later inherits
   # whichever acknowledgement was written first instead of being made to choose.
@@ -12330,6 +12340,7 @@ describe_mutation() {
     AK14) echo "8cjo: the RETIRE arm of the forwarding rule is deleted, so an invalidated card can still collect an answer" ;;
     AK15) echo "8cjo: the SUGGEST acknowledgement is deleted, so a delivered suggestion is replayed to the next host and asked twice" ;;
     AK16) echo "8cjo: a default: arm on the tier switch, so a tier added later inherits an acknowledgement nobody chose for it" ;;
+    AK18) echo "8cjo: the SUGGEST acknowledgement fires regardless of the queue verdict, so a refused suggestion is never replayed to the next host" ;;
     AK17) echo "8cjo THE DEMONSTRATED BYPASS: the inline enqueue written with the parameter RENAMED, which the file-wide canary could not see" ;;
     AK99) echo "VACUITY CONTROL — the local the acknowledgement seam binds its receipt to is renamed and nothing else is. MUST SURVIVE" ;;
     YX99) echo "VACUITY CONTROL — the band in buildFMLedgerEntries is bound through a renamed intermediate on the line YX01 rewrites; nothing else changes. MUST SURVIVE" ;;
@@ -28400,6 +28411,35 @@ EOF
     snippet NEW <<'EOF'
             default:
                 await orchestrator.acknowledgeAutoSkippedBannerDelivery(
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # AK18 — the SUGGEST acknowledgement escapes the didAccept guard while the
+  # AUTO one stays behind it. Deliberately NOT "delete the guard": that is AK02
+  # and it unguards both tiers, so its victim set could not isolate the suggest
+  # direction. Here only the suggest tier reports a delivery the queue refused.
+  AK18)
+    snippet OLD <<'EOF'
+            guard didAccept else { return }
+            switch item.tier {
+            case .suggest:
+                await orchestrator.acknowledgeSuggestedBannerDelivery(
+EOF
+    snippet NEW <<'EOF'
+            if item.tier == .suggest {
+                await orchestrator.acknowledgeSuggestedBannerDelivery(
+                    windowId: item.windowId,
+                    episodeId: item.episodeId,
+                    playbackLifecycleGeneration:
+                        item.playbackLifecycleGeneration,
+                    suggestionRevisionToken:
+                        item.suggestionRevisionToken
+                )
+            }
+            guard didAccept else { return }
+            switch item.tier {
+            case .suggest:
+                await orchestrator.acknowledgeSuggestedBannerDelivery(
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 

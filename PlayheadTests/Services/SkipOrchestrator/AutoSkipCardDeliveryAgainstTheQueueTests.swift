@@ -856,6 +856,69 @@ struct AutoSkipCardDeliveryAgainstTheQueueTests {
 
     // MARK: - 4. The suggest tier keeps its own contract
 
+    /// THE POSITIVE DIRECTION, and it existed nowhere until mutation AK15
+    /// surfaced its absence.
+    ///
+    /// `aRefusedSuggestItemIsNotAcknowledged` below asserts only that a REFUSED
+    /// suggestion is not acknowledged — and DELETING the suggest acknowledgement
+    /// altogether satisfies that perfectly. AK15 does exactly that and the test
+    /// stayed green, so nothing behavioural asserted that an ACCEPTED suggestion
+    /// IS acknowledged. That is an absence claim satisfied by a total absence,
+    /// which is this bead's own defect class wearing the other tier's clothes.
+    ///
+    /// The consequence in production, had it regressed: an acknowledged
+    /// suggestion is what stops `replayPendingSuggestBanners` handing the same
+    /// span to the next host, so without the acknowledgement the listener is
+    /// asked about the same suggestion again on every attach.
+    @MainActor
+    @Test("An ACCEPTED suggest item IS acknowledged, so the next host is not asked again")
+    func anAcceptedSuggestItemIsAcknowledged() async throws {
+        let (orchestrator, _) = try await Self.makeOrchestrator()
+        var reader = BannerEventFrameReader(
+            await orchestrator.bannerEventStream()
+        )
+        let queue = Self.makeQueue()
+        let hostGeneration = queue.activateHost(
+            for: Self.episodeId,
+            playbackLifecycleGeneration: Self.playbackLifecycleGeneration
+        )
+
+        let suggestion = Self.sentinelWindow(id: "suggest-accepted")
+        await orchestrator.receiveAdWindows([suggestion])
+        await orchestrator.updatePlayheadTime(Self.sentinelStart + 1)
+        let sentinelId = "8cjo-sentinel-suggest-accept"
+        await orchestrator.receiveAdWindows([
+            Self.sentinelWindow(id: sentinelId)
+        ])
+        await orchestrator.updatePlayheadTime(Self.sentinelStart + 2)
+        let events = await reader.drain(until: sentinelId)
+        // NON-VACUITY: the subject really was presented.
+        #expect(
+            events.contains {
+                if case let .present(item) = $0 {
+                    return item.windowId == "suggest-accepted"
+                }
+                return false
+            },
+            "the suggest subject never presented, so nothing was there to accept"
+        )
+
+        await Self.forward(
+            events, orchestrator, queue, hostGeneration: hostGeneration
+        )
+        let acknowledged = await orchestrator.acknowledgedSuggestWindowIDs()
+        #expect(
+            acknowledged.contains("suggest-accepted"),
+            """
+            the queue ACCEPTED the suggestion and the orchestrator was never \
+            told. `replayPendingSuggestBanners` will hand the same span to the \
+            next host, so the listener is asked about it again on every attach \
+            — and nothing else in the tree notices, because the sibling test \
+            only pins the refusal direction.
+            """
+        )
+    }
+
     /// `BannerHostDelivery` now owns BOTH acknowledgements, so the tier this
     /// bead did not change is pinned here: a suggest item the queue refuses
     /// must NOT be acknowledged, because an acknowledged suggestion stops being
