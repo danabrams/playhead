@@ -459,9 +459,23 @@ sweep now fills the empty cell —
 ```
 CONTINGENCY TABLE, n = 10  (ceiling = >= 90 % of the binding soft limit)
                      lost the host     completed
-  AT the ceiling                 2             8
+  AT the ceiling                 2             7
   below the ceiling              0             1
 ```
+
+**THAT `7` READ `8` UNTIL R3, AND THE TABLE THEREFORE SUMMED TO 11 AGAINST ITS
+OWN STATED `n = 10`.** The 8 is the total of the `completed` COLUMN, correct in
+the sentence above it and wrong in the at-ceiling CELL — the one below-ceiling
+completion (run 2, the whole point of the table) was counted in both rows. It is
+the standing defect class in the one table this section's new conclusion rests
+on, and it is arithmetic anyone could have checked by adding four numbers.
+Derived at R3 from the committed CSV rather than from a re-run: its 8 rows
+carrying a `binding_soft` are **6 COMPLETE and 2 RESTARTED, all 8 between 93.63 %
+and 99.88 %** — which is the degenerate n = 8 table below, exactly. Adding M0's
+run 1 (95.3 %, COMPLETE) gives 2 / 7 at the ceiling, and M4's run 2 (17.9 %,
+COMPLETE) gives 0 / 1 below it. **2 + 7 + 0 + 1 = 10.** Nothing in the reading
+changes — the single below-ceiling cell is still n = 1 and still an
+INTERVENTION, and the three caveats below still govern it.
 
 Three things about that single cell before anyone reads a p-value into it. It is
 **n = 1**, and 2-of-10 at the ceiling is a rate this cell cannot distinguish
@@ -1130,12 +1144,71 @@ the tree:
    further citations in M4 pointed at `/private/tmp`, which is cleared on
    reboot; their three witness lines are inlined above instead of copying 30 MB
    of another bead's logs.
-7. **CLAUDE.md said Option C "is not in the tree" and gave 5.08x as its cost**,
+7. **`5cf1feb3` said it had corrected mutant RD01's rationale and it had not**,
+   because it never touched that file. RD01 still described
+   `unable to open database file` as "the ONE shape that reaches the log with
+   its errno already thrown away" — the pre-enzva reading this bead REFUTED.
+   Fixed at R3: it is the one shape whose cause no public SQLite API reports on
+   this platform. Exactly **one string constant of 987** changed, the mutation's
+   own search/replace patterns are untouched, and `--list` still enumerates it.
+   (`scripts/mutation-battery-gate-baseline.py` is otherwise byte-identical to
+   `18a7423c` — R3's own earlier commit said the file "was never touched on
+   this branch at all", which was true when written and is why this correction
+   is called out rather than folded in.)
+8. **The n = 10 contingency table in M2 summed to ELEVEN.** The at-ceiling
+   `completed` cell held 8, which is the completed COLUMN's total; the one
+   below-ceiling completion — run 2, the entire reason the table stopped being
+   degenerate — was counted in both rows. Corrected to 2 / 7 and 0 / 1, derived
+   from the committed CSV.
+9. **`gate-fd-paths.py`'s `find_test_host` docstring described the `etimes`
+    failure wrongly, in the docstring whose whole subject is that defect
+    class.** It said macOS `ps` "wrote NOTHING to stdout". Measured on this box:
+    `ps -Ao pid=,rss=,etimes=,comm=` exits **1**, prints `ps: etimes: keyword
+    not found` to stderr, **and writes a complete 509-line / 53 KB listing to
+    stdout** with the unknown column silently dropped — plausible output of the
+    wrong SHAPE, which is worse than none and is why the `returncode` check must
+    not be "simplified" away. The conclusion is unchanged (the old code failed
+    twice over) and the fix is docstring-only: AST-identical after stripping
+    docstrings, one string constant of 315 changed, 497 rails still green.
+10. **CLAUDE.md's s34ux paragraph said the floor was "453 flat for 22 samples"
+    — it is 19**, which M1a's own table on this branch already recorded and
+    nobody carried back. Re-measured off `fd-series-s34ux.csv`: `testhost_fds`
+    453 and `testhost_fd_vnode` 449 each hold for **19** consecutive samples,
+    `elapsed_s` 292.3 → 475.0 (**182.7 s**, not 220), and it is the longest run
+    in the series, so no wider reading exists. Corrected there. The 695
+    concurrent stores does not move — it is `(2536 − 453) / 3.00` and never used
+    the sample count.
+11. **CLAUDE.md said Option C "is not in the tree" and gave 5.08x as its cost**,
    and said the gate's one prose match survives "because `AnalysisStore` throws
    `sqlite3_system_errno()` away" — i.e. as a TODO this bead has now closed in
    the opposite direction. Both corrected there, with 10.56x and with the
    platform finding. **If the `parallelizable` line does not ship, revert that
    CLAUDE.md edit with it.**
+
+**FOUR CLAIMS THAT ARE WRONG IN COMMIT MESSAGES ONLY, recorded here because a
+commit message cannot be edited and this file is where the record lives.** Each
+was checked against the tree; in every case the ARTIFACT is already right, so
+nothing downstream moves.
+
+* **`5cf1feb3`**: "The same sentence was duplicated as mutant RD01's rationale
+  and is corrected there too." It was not — that commit touched
+  `artifacts/MEASUREMENTS.md` and `scripts/gate_baseline.py` and nothing else.
+  Fixed at R3 (item 7 above).
+* **`dddf0f2e`**: macOS `ps` "writes NOTHING to stdout". It writes 509 lines.
+  Fixed in the docstring at R3 (item 9 above).
+* **`4b1ebe7a`**: "449 flat for 22 samples over 220 s after the test phase" —
+  it is 19 samples over 182.7 s, which M1a's table records correctly. The same
+  sentence's "27 vnodes before the ramp … ~429 descriptors acquired" mixes
+  anchors: 449 − 27 = 422, and 429 is 449 − 20.
+* **`729c1559`**: "only 244/330 in the two that died". 330 is exact; **243** is
+  the `[BiomeStorage] Failed to open lockfile` count in `merge-gate.log` — 244
+  counts `Failed to open lockfile` WITHOUT the bracket prefix, i.e. one extra
+  spliced line. M2's table reads 244 for that cell and is the same one-line
+  difference; the conclusion (the two that died show FEWER, which is the
+  censoring) is unaffected by one line in 244.
+* **`db4373ab`**: "max_fd 2556 (soft-4: descriptors 0..2555 all in use)" — 2556
+  is the TAIL sample's highest, the run's is 2558, and `92c941f9` corrected
+  exactly that reading in M1b while the message stands.
 
 **WHAT R3 FOUND AND DID NOT FIX.** M3d above (the probe suite does not catch its
 own regression, plus the missing host-discriminates control) — both are Swift

@@ -474,13 +474,26 @@ def find_test_host() -> int:
     disagree about which process they are describing.
 
     A FAILING `ps` IS REPORTED, NOT RETURNED AS ZERO. An earlier revision of
-    this function asked `ps` for `etimes`, which is a Linux keyword that macOS
-    `ps` rejects outright: the command printed a usage error to stderr, wrote
-    NOTHING to stdout, and this function dutifully returned 0 on every call —
-    so the watcher sat through a whole run finding no host and saying nothing.
+    this function asked `ps` for `etimes`, which is a Linux keyword macOS `ps`
+    does not know, and this function dutifully returned 0 on every call — so
+    the watcher sat through a whole run finding no host and saying nothing.
     A guard whose false branch makes no claim is this repo's standing defect
     class, and it is the reason for the `returncode` check below rather than a
     bare `.stdout`.
+
+    **WHAT macOS `ps` ACTUALLY DOES WITH AN UNKNOWN KEYWORD — measured, because
+    the sentence here used to say it "wrote NOTHING to stdout" and that is
+    false, which is this docstring committing the class it is about.** Run
+    `ps -Ao pid=,rss=,etimes=,comm=` on this box: it exits **1**, prints
+    `ps: etimes: keyword not found` to stderr, AND writes a **complete process
+    listing to stdout** — 509 lines, 53 KB — with the unrecognised column
+    silently DROPPED, so every line arrives with three fields where the caller
+    expects four. So the old code failed twice over and either alone was
+    enough: the non-zero exit went unchecked, and had it been ignored the
+    three-field lines would still have failed the four-field parse. Do not
+    "simplify" the `returncode` check away on the theory that a bad keyword
+    produces no output — it produces plausible output of the wrong shape, which
+    is strictly worse.
     """
     result = subprocess.run(
         ["ps", "-Ao", "pid=,rss=,comm="],
