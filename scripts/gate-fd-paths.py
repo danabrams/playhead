@@ -61,6 +61,7 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import gzip
 import json
 import os
 import re
@@ -436,6 +437,14 @@ def main() -> int:
                     help="JSONL of per-sample SUMMARIES (one line per sample)")
     ap.add_argument("--last", default="",
                     help="full dump of the most recent sample, rewritten each time")
+    ap.add_argument("--full-dir", default="",
+                    help="write EVERY sample's full dump, gzipped, into this directory. "
+                         "A run is one shot at a 15-minute question, so the default on a "
+                         "diagnostic run is to keep all of it: ~40 KB per sample.")
+    ap.add_argument("--peak", default="",
+                    help="full dump of the HIGHEST-count sample seen so far, rewritten "
+                         "whenever a new high is reached. The floor and the peak are "
+                         "different populations and only one of them is at the tail.")
     ap.add_argument("--interval", type=float, default=10.0)
     ap.add_argument("--watch", action="store_true",
                     help="sample until the host exits and --deadline passes")
@@ -460,6 +469,9 @@ def main() -> int:
     started = time.time()
     gone_since = 0.0
     samples = 0
+    peak_count = -1
+    if args.full_dir:
+        os.makedirs(args.full_dir, exist_ok=True)
 
     while not stop["now"]:
         pid = args.pid or find_test_host()
@@ -484,10 +496,18 @@ def main() -> int:
             if out_fh:
                 out_fh.write(json.dumps(summary, sort_keys=True) + "\n")
             if args.last:
-                tmp = args.last + ".partial"
-                with open(tmp, "w") as fh:
+                _atomic_json(args.last, snap)
+            if args.full_dir:
+                name = os.path.join(
+                    args.full_dir,
+                    f"sample-{samples:04d}-{snap['count']:05d}.json.gz")
+                tmp = name + ".partial"
+                with gzip.open(tmp, "wt") as fh:
                     json.dump(snap, fh, sort_keys=True)
-                os.replace(tmp, args.last)
+                os.replace(tmp, name)
+            if args.peak and snap["count"] > peak_count:
+                peak_count = snap["count"]
+                _atomic_json(args.peak, snap)
             if not args.watch:
                 report(snap, args)
                 return 0
@@ -501,6 +521,19 @@ def main() -> int:
         out_fh.close()
     print(f"gate-fd-paths: {samples} samples", file=sys.stderr)
     return 0
+
+
+def _atomic_json(path: str, payload: dict) -> None:
+    """Write via a `.partial` rename, so no reader can ever see half a dump.
+
+    The peak and last files are rewritten while a run is live and are read by a
+    human the moment the run ends; a truncated file read as a small one would be
+    a count that names one thing read as another.
+    """
+    tmp = path + ".partial"
+    with open(tmp, "w") as fh:
+        json.dump(payload, fh, sort_keys=True)
+    os.replace(tmp, path)
 
 
 def report(snap: dict, args) -> None:
