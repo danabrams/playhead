@@ -2,10 +2,11 @@
 // playhead-4xmz — the V63 rung, and the SCHEMA half of the reading a device
 // pull makes.
 //
-// THE FULL READING IS SIX STATES AND IT IS ENUMERATED IN ONE PLACE ONLY:
-// `DownloadWorkJournalLedger.swift`'s header. This file's rails pin the three
-// that are properties of the SCHEMA — the other three are properties of the
-// RECORDER and live in `DownloadWorkJournalLedgerTests`. An earlier version of
+// THE FULL READING IS ENUMERATED IN ONE PLACE ONLY AND CARRIES NO COUNT:
+// `DownloadWorkJournalLedger.swift`'s header. This file's rails pin the ones
+// that are properties of the SCHEMA; the rest are properties of the RECORDER
+// and live in `DownloadWorkJournalLedgerTests`. (The count has been wrong four
+// times across these files, which is why there is no longer one to quote.) An earlier version of
 // this header restated the table as three states and dropped `writeFailures`
 // entirely, which is exactly the reading the ledger header warns about: a
 // reader who follows the V62 recipe checks three numbers and skips the one

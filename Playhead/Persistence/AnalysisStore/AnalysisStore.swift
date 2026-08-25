@@ -9422,11 +9422,11 @@ actor AnalysisStore {
     // took four months to find.
     //
     // THE FULL READING IS ENUMERATED IN ONE PLACE ONLY, AND IT CARRIES NO
-    // COUNT — the count has been wrong three times:
+    // COUNT — it has been wrong four times, so there is no number to get right:
     // `DownloadWorkJournalLedger.swift`'s header. It is deliberately NOT
     // restated here — this comment carried a four-state copy that went stale
     // the moment review 3 added two more, which is exactly how the V62 recipe
-    // came to be followed against a V63 table. The four the SCHEMA is
+    // came to be followed against a V63 table. The states the SCHEMA is
     // responsible for are:
     //
     //   * no `download_work_journal` TABLE  — build predates the instrument;
@@ -9435,8 +9435,9 @@ actor AnalysisStore {
     //   * `writeFailures > 0` — events happened and this store could not hold
     //         them.
     //
-    // The other two are properties of the RECORDER (a positive claim, and a
-    // finalized event discarded by cancellation) and are stated there.
+    // The rest are properties of the RECORDER (a positive claim, a finalized
+    // event discarded by cancellation, and a missing denominator beside real
+    // rows) and are stated there.
     //
     // DO NOT USE `_meta.schema_version < 63` AS THE DISCRIMINATOR, for the
     // reason V62 states above: `createTables()` is unconditional and runs

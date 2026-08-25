@@ -469,8 +469,10 @@ actor DownloadManager {
     /// tail returned immediately and the cancellation had nothing to race; it
     /// now writes `download_work_journal` and can be suspended for as long as
     /// the `AnalysisStore` actor is busy. NO production path retires today —
-    /// `removeCache` and `clearCache()` both have zero callers outside tests,
-    /// and Settings' bulk clear never enters this actor at all (limit L-7 in
+    /// `removeCache` and `clearCache()` both have zero callers outside tests.
+    /// The paths that DO unlink bytes never enter this actor's retire at all —
+    /// Settings' bulk clear, and LRU `evictIfNeeded`, which is safe from this
+    /// race only because it skips `bgInFlightEpisodes` (limit L-7 in
     /// `DownloadWorkJournalLedger.swift`, filed as playhead-86sfq). The
     /// behavioural rail for the race, exercised by tests, is
     /// `BackgroundDownloadCompletionTests`'

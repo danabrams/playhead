@@ -508,10 +508,17 @@ final class DownloadWorkJournalWiringSourceCanaryTests: XCTestCase {
         let production = try Self.productionSources()
         // POSITIVE CONTROL on the walk itself. Every assertion below counts
         // occurrences and passes on ZERO, so a walk that collapsed — a bad
-        // root, an exception swallowed, `strippingCommentsAndStrings` blanking
-        // a file (playhead-kf3b6) — would report "no callers" and read as the
-        // strongest possible pass. 483 files measured; the floor is loose on
-        // purpose so it survives ordinary growth and still catches a collapse.
+        // root, an exception swallowed — would report "no callers" and read as
+        // the strongest possible pass. 483 files measured; the floor is loose
+        // on purpose so it survives ordinary growth and still catches a
+        // collapse.
+        //
+        // IT COUNTS FILES, NOT CONTENT, so it does NOT cover
+        // `strippingCommentsAndStrings` blanking a file (playhead-kf3b6):
+        // that leaves the count at 483 and every regex at 0. What covers
+        // content is the `callSites == 2` assertion below, which fails on
+        // zero. Said here because a control read as covering more than it does
+        // is the same defect as no control.
         XCTAssertGreaterThan(
             production.count, 400,
             "playhead-4xmz: the production walk found \(production.count) Swift files, which is "
@@ -544,7 +551,9 @@ final class DownloadWorkJournalWiringSourceCanaryTests: XCTestCase {
         // AND `removeCache(for:)`'s OWN COUNT. Review 4 established that
         // `clearCache()` has no production caller and then described
         // `removeCache` as "the one production path"; review 5 found it has
-        // none either. ONE occurrence = the declaration and no caller.
+        // none either. ZERO occurrences is the pass: the pattern requires the
+        // CALL spelling `for:`, which the declaration `removeCache(for
+        // episodeId:)` does not have, and `(?<!func )` rejects it anyway.
         let removeCacheCalls = production.reduce(into: [String]()) { hits, entry in
             let (path, source) = entry
             let count = SwiftSourceInspector.regexOccurrences(

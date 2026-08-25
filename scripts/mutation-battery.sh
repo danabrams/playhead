@@ -312,6 +312,50 @@
 #       A shutdown + erase took it to 17 MiB and the volume from 12 to 22 GiB.
 #       Nothing was deleted by the refusal itself, as its own text says.
 #
+#   PARTIAL RE-RUN 2026-08-25 (playhead-4xmz). Batches 1477-1513 only, added by
+#   this bead: DW01-DW29, DW31-DW37 plus the DW99 control, one batch each — 37
+#   records, 37 batches, 38 builds, 105m17s wall clock, driven as
+#   `--series DW` (the flag this bead added). FINAL 36 KILLED / 0 SURVIVED /
+#   0 ERROR, plus DW99 SURVIVED as required. Baseline GREEN before any
+#   mutation. Batches 1-1476 were NOT re-run and carry the verdicts above.
+#
+#   PREDICTED vs OBSERVED was checked MECHANICALLY, not by eye: every record's
+#   declared expectation was resolved through the `T_*` table and compared
+#   against the failing set its own batch produced. The only declared victim
+#   not observed is DW99's, which is the required outcome for a control.
+#   Collateral is present and expected (DW10/DW11/DW13 also redden the
+#   cross-rung V62/V40 ladder observers; DW09 also reddens the event-vocabulary
+#   canary) and cannot manufacture a kill, because the scorer requires the
+#   DECLARED set to fail.
+#
+#   FIVE OPERATIONAL FAULTS, none about a mutation, all worth knowing because
+#   four of them are this file's own guards doing their job:
+#     • An `--only DW37` dry run reported `anchor did not apply`: the V62
+#       arming SQL is byte-identical to V63's, so the narrow anchor matched
+#       TWICE and `patch()` refused rather than mutating the wrong table. The
+#       anchor now names the table. THE SAME COLLISION BROKE SIX playhead-7dgx
+#       ANCHORS IN THE OTHER DIRECTION (BD05/BD07 1->0, BD10/BD27/BD37/BD40
+#       1->2) and nothing on this branch would have surfaced it — a `--dry-run
+#       --series BD` is now part of this bead's close checklist, and should be
+#       part of every schema bead's.
+#     • The pre-run expectation check caught a renamed canary method
+#       (`T_DW_C_RETIRE`) before spending a build: "an expectation names a test
+#       that never ran … every one of them would otherwise print SURVIVED
+#       against a working rail."
+#     • DW26's anchor was 30 lines of PROSE inside the arm it mutates and had
+#       to be re-cut four times, once per review round that edited the comment.
+#       It is one line of code now. An anchor whose stability depends on nobody
+#       editing a paragraph is not an anchor.
+#     • DW18's first cut dropped the `Int32` clamp as well as the `+ 1`, and
+#       `bind(_:_:Int)` TRAPS — measured, one batch produced 19 host restarts
+#       and 38 fatal errors, and a test with no verdict scores as a PASS
+#       (playhead-gjlp0), so the declared victim's verdict had become a
+#       question about log flushing.
+#     • A whole suite was added to FOCUSED_SUITES and had to be narrowed to one
+#       test: its sibling is in the committed gate baseline at 5/10 `timeout`,
+#       and a RED focused baseline exits 2 having run NO mutants, for every
+#       series.
+#
 #   WHY KG03 AND KG04 ARE BOTH HERE, since a reviewer will ask whether one
 #   would do: `scored` takes the `min` over the backing rows' grades, and a
 #   `min` of two cohorts can only ever EQUAL one of them. So a fixture that

@@ -251,9 +251,9 @@ struct DownloadWorkJournalLedgerTests {
 
     /// The truth table, all of it on disk, and this rail is the reason the bead
     /// is not "wire the recorder and stop". The header of
-    /// `DownloadWorkJournalLedger.swift` enumerates SIX reachable states — the
-    /// count has been wrong twice in that file, so read the list rather than
-    /// the number. An instrument whose
+    /// `DownloadWorkJournalLedger.swift` enumerates the reachable states and
+    /// deliberately carries no count — it has been wrong four times across
+    /// these files. Read the list. An instrument whose
     /// silence cannot be distinguished from its absence is the defect, not the
     /// fix.
     @Test("a fresh store reads INSTALLED BUT NEVER ARMED, which is not the same as no instrument")

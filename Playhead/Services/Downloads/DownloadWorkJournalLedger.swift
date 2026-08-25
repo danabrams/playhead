@@ -318,7 +318,7 @@
 // L-7 A CANCELLED FINALIZATION IS NOT ALWAYS A DELETED ARTIFACT, in two ways,
 //     both found at review 4 and both leaving a row DESTROYED while the bytes
 //     survive — with `writeFailures = 0` and `armedLaunches` healthy, so the
-//     six-state list above reads it as the POSITIVE CLAIM.
+//     list above reads it as the POSITIVE CLAIM.
 //
 //       * THE DELETE CAN THROW AFTER THE CANCEL — on a DORMANT path.
 //         `removeCache` cancels through `cancelDownload` and then calls
@@ -330,8 +330,26 @@
 //         of any shipping behaviour. Moving the retire after a SUCCESSFUL
 //         unlink would re-open the race the retire exists to close, so it is
 //         documented rather than fixed.
-//       * AND THE ONLY DELETION PATH THAT ACTUALLY RUNS DOES NOT CANCEL AT
-//         ALL: Settings' "Clear Cached Audio"
+//       * AND THE DELETION PATHS THAT ACTUALLY RUN DO NOT CANCEL AT ALL.
+//         There are TWO, not one — an earlier version of this bullet said
+//         "the only", which is the standing defect class in the sentence
+//         written to name a population.
+//
+//         LRU EVICTION IS THE OTHER, and it runs constantly:
+//         `DownloadManager.evictIfNeeded` unlinks a completed episode's audio
+//         AND its pin, from three production sites (foreground completion,
+//         streaming completion, the background deposit). It enters no retire.
+//         The RACE is nonetheless closed there, and by something else
+//         entirely: `evictIfNeeded` skips `bgInFlightEpisodes`, and
+//         `finishBackgroundTransfer` runs AFTER `await journalTask.value`, so
+//         an episode whose finalization is in flight is protected. That is a
+//         guard in another function, not a property of this one — which is why
+//         it is written down here rather than assumed. What it does NOT
+//         protect is a row already written for an episode evicted later, and
+//         nothing could: the row is a record that the transfer finished, not a
+//         claim that the bytes are still there.
+//
+//         THE USER-ACTION ONE is Settings' "Clear Cached Audio"
 //         (`SettingsViewModel.clearAudioCache`) unlinks the cache directory
 //         from a detached Task WITHOUT entering the `DownloadManager` actor,
 //         so nothing is retired and a `finalized` row can outlive its bytes.
