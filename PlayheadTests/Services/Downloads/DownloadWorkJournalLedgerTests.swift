@@ -111,8 +111,10 @@ struct DownloadWorkJournalLedgerTests {
         #expect(done.eventType == .finalized)
         #expect(
             done.cause == nil,
-            "a successful transfer has no miss cause; a value here would put a reason in a "
-            + "column whose entire job is to carry one"
+            """
+            a successful transfer has no miss cause; a value here would put a reason in a
+            column whose entire job is to carry one
+            """
         )
         #expect(done.metadataJSON == "{}")
 
@@ -125,8 +127,10 @@ struct DownloadWorkJournalLedgerTests {
         #expect(blob.cause == .taskExpired)
         #expect(
             blob.metadataJSON.contains("backgroundTransfer"),
-            "the SliceMetadata blob is the payload playhead-1nl6 removed a protocol default for; "
-            + "this conformer's decision is to KEEP it"
+            """
+            the SliceMetadata blob is the payload playhead-1nl6 removed a protocol default for;
+            this conformer's decision is to KEEP it
+            """
         )
 
         let quit = try #require(byEpisode["ep-quit"])
@@ -203,8 +207,10 @@ struct DownloadWorkJournalLedgerTests {
         let fetched = try await store.fetchDownloadWorkJournalArming()
         let arming = try #require(
             fetched,
-            "the V63 rung must SEED the arming row; an ABSENT row and a ZEROED row are different "
-            + "claims — one says the migration ran, the other says nothing at all did"
+            """
+            the V63 rung must SEED the arming row; an ABSENT row and a ZEROED row are different
+            claims — one says the migration ran, the other says nothing at all did
+            """
         )
         #expect(arming.armedLaunches == 0)
         #expect(
@@ -233,8 +239,10 @@ struct DownloadWorkJournalLedgerTests {
         #expect(afterTwo.armedLaunches == 2)
         #expect(
             afterTwo.firstArmedAt == 100.0,
-            "firstArmedAt means THE FIRST TIME; if it follows the latest arming it is a second "
-            + "lastArmedAt under a misleading name"
+            """
+            firstArmedAt means THE FIRST TIME; if it follows the latest arming it is a second
+            lastArmedAt under a misleading name
+            """
         )
         // Pinned to the INJECTED times rather than to an ordering, because
         // `lastArmedAt >= firstArmedAt` holds however the column is written
@@ -266,15 +274,19 @@ struct DownloadWorkJournalLedgerTests {
         let arming = try #require(try await store.fetchDownloadWorkJournalArming())
         #expect(
             arming.writeFailures == 1,
-            "a lost event must move a durable counter; otherwise `armedLaunches > 0` with zero "
-            + "rows is reachable by silence and the positive claim is worthless"
+            """
+            a lost event must move a durable counter; otherwise `armedLaunches > 0` with zero
+            rows is reachable by silence and the positive claim is worthless
+            """
         )
         #expect(arming.armedLaunches == 1, "a failure is not an arming")
         #expect(
             spy.descriptions(of: .downloadWorkJournalNotRecorded).isEmpty,
-            "the surface-status line is the RESIDUAL — for when both durable writes fail. "
-            + "Raising it here would send a reader to diagnose a database that just successfully "
-            + "recorded the loss."
+            """
+            the surface-status line is the RESIDUAL — for when both durable writes fail.
+            Raising it here would send a reader to diagnose a database that just successfully
+            recorded the loss.
+            """
         )
     }
 
@@ -364,8 +376,10 @@ struct DownloadWorkJournalLedgerTests {
         #expect(page.unrecognizedEventTypeRows == 1)
         #expect(
             page.totalRowsSeen == 2,
-            "\"one event\" and \"one event I can read\" are different claims, and the page must "
-            + "be able to state the second"
+            """
+            \"one event\" and \"one event I can read\" are different claims, and the page must
+            be able to state the second
+            """
         )
     }
 
@@ -460,8 +474,10 @@ struct DownloadWorkJournalLedgerTests {
         let page = try await store.fetchDownloadWorkJournal()
         #expect(
             page.rows.count == 1,
-            "before playhead-4xmz this read ZERO on every production device, while this same "
-            + "drive against a test double read one"
+            """
+            before playhead-4xmz this read ZERO on every production device, while this same
+            drive against a test double read one
+            """
         )
         let row = try #require(page.rows.first)
         #expect(row.episodeId == "ep-e2e")
@@ -497,9 +513,11 @@ struct DownloadWorkJournalLedgerTests {
         let arming = try #require(try await store.fetchDownloadWorkJournalArming())
         #expect(
             arming.armedLaunches == 0,
-            "and THIS is the pair a device pull sees on an unwired build: an empty table beside "
-            + "a zero denominator. It is not the same reading as an empty table beside "
-            + "armedLaunches = 37, and telling those two apart is the whole point of the row."
+            """
+            and THIS is the pair a device pull sees on an unwired build: an empty table beside
+            a zero denominator. It is not the same reading as an empty table beside
+            armedLaunches = 37, and telling those two apart is the whole point of the row.
+            """
         )
     }
 }

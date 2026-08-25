@@ -152,13 +152,39 @@ final class DownloadWorkJournalWiringSourceCanaryTests: XCTestCase {
             + "composition root is how an instrument becomes decorative — which is precisely "
             + "what the DEFAULT did here, silently, without ever being named at all."
         )
+        // A post-init setter on the DOWNLOAD recorder is impossible by
+        // construction — `DownloadManager.workJournalRecorder` is a `let`, and
+        // `testTheRecorderSlotCannotBeReassignedAfterInit` pins that. What is
+        // checked here is the thing the compiler cannot: that nobody reaches
+        // for the ANALYSIS scheduler's setter shape against the download
+        // manager. `setWorkJournalRecorder` DOES legitimately exist in this
+        // file — `AnalysisWorkScheduler` takes its recorder that way — so a
+        // bare count of the symbol is not the test, and reading it as one is
+        // how this rail failed its first run.
         XCTAssertEqual(
             SwiftSourceInspector.regexOccurrences(
-                of: #"setWorkJournalRecorder|workJournalRecorder\s*="#, in: runtime
+                of: #"\bsetWorkJournalRecorder\("#, in: runtime
+            ),
+            1,
+            "playhead-4xmz: exactly one setter call in the composition root, and it belongs to "
+            + "AnalysisWorkScheduler. A second one is a download-side setter, which would leave "
+            + "the recorder no-op exactly on the sceneless relaunches this journal exists for."
+        )
+        XCTAssertEqual(
+            SwiftSourceInspector.regexOccurrences(
+                of: #"analysisWorkScheduler\.setWorkJournalRecorder\("#, in: runtime
+            ),
+            1,
+            "playhead-4xmz: …and that one setter's receiver is the SCHEDULER. Without this the "
+            + "count above would be satisfied by a download-side setter that replaced it."
+        )
+        XCTAssertEqual(
+            SwiftSourceInspector.regexOccurrences(
+                of: #"downloadManager\.setWorkJournalRecorder|downloadWorkJournalRecorder\s*=\s*Noop"#,
+                in: runtime
             ),
             0,
-            "playhead-4xmz: inject at construction. A deferred setter would leave the recorder "
-            + "no-op exactly on the sceneless relaunches this journal exists to observe."
+            "playhead-4xmz: inject at construction, and never rebind to the no-op."
         )
     }
 

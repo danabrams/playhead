@@ -325,19 +325,26 @@ struct DownloadWorkJournalV63MigrationTests {
         let db = try openRawReadWrite(dir)
         defer { sqlite3_close_v2(db) }
         var stmt: OpaquePointer?
-        #expect(
-            sqlite3_prepare_v2(db, "SELECT count(*) FROM work_journal", -1, &stmt, nil)
-                == SQLITE_OK
+        let prepared: Int32 = sqlite3_prepare_v2(
+            db, "SELECT count(*) FROM work_journal", -1, &stmt, nil
         )
+        #expect(prepared == SQLITE_OK)
         defer { sqlite3_finalize(stmt) }
-        #expect(sqlite3_step(stmt) == SQLITE_ROW)
+        let stepped: Int32 = sqlite3_step(stmt)
+        #expect(stepped == SQLITE_ROW)
+        // Hoisted into a typed local rather than inlined into the `#expect`:
+        // the macro expands its argument twice and the C-interop overloads
+        // made the combined expression time the type-checker out.
+        let analysisJournalRows: Int64 = sqlite3_column_int64(stmt, 0)
         #expect(
-            sqlite3_column_int64(stmt, 0) == 0,
-            "a download event must never land in `work_journal`: its `event_type` is what "
-            + "`AnalysisCoordinator.recoverOrphans` routes on, and `.failed`/`.finalized` there "
-            + "mean \"clear the lease and do not requeue\" — so a transfer failure written into "
-            + "it would terminate an ANALYSIS generation for a reason that has nothing to do "
-            + "with analysis"
+            analysisJournalRows == 0,
+            """
+            a download event must never land in `work_journal`: its `event_type` is what
+            `AnalysisCoordinator.recoverOrphans` routes on, and `.failed`/`.finalized` there
+            mean \"clear the lease and do not requeue\" — so a transfer failure written into
+            it would terminate an ANALYSIS generation for a reason that has nothing to do
+            with analysis
+            """
         )
         #expect(try await store.fetchDownloadWorkJournal().rows.count == 3)
     }
