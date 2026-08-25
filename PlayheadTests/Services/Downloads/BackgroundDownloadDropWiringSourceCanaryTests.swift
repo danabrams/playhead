@@ -13,10 +13,14 @@
 //   2. THE PRODUCTION WIRING. `PlayheadRuntime.init` is reachable from no unit
 //      test in this tree, and the recorder it injects has a NO-OP default. That
 //      exact shape has already shipped broken once, in the same actor:
-//      `DownloadManager.workJournalRecorder` defaults to
-//      `NoopWorkJournalRecorder` and production never replaces it, so every
-//      `recordFailed` the download path makes goes nowhere. Nothing failed when
-//      that happened, and nothing would fail here either.
+//      `DownloadManager.workJournalRecorder` defaulted to
+//      `NoopWorkJournalRecorder` and production never replaced it, so every
+//      `recordFailed` the download path made went nowhere, for four months.
+//      Nothing failed when that happened, and nothing would fail here either.
+//      (That one is playhead-4xmz and is fixed; `DownloadWorkJournalWiringSourceCanaryTests`
+//      is this file's twin for it. The past tense is deliberate — it is the
+//      shipped instance this argument rests on, so it is kept rather than
+//      deleted.)
 //   3. WHICH BOUND EACH SITE RECORDS. `sessionCreationIO` is built by
 //      `sessionIO.onItsOwnQueue(labelled:)`, which COPIES the timeout — so the
 //      two bounds are numerically equal by construction and no assertion over
@@ -146,7 +150,7 @@ final class BackgroundDownloadDropWiringSourceCanaryTests: XCTestCase {
             "playhead-7dgx: PlayheadRuntime must construct DownloadManager with the "
             + "AnalysisStore-backed drop recorder. Without it the ledger's table exists, the "
             + "migration runs, every test passes, and the device records nothing — which is "
-            + "exactly the state `workJournalRecorder` has been in since it was introduced."
+            + "exactly the state `workJournalRecorder` was in for four months (playhead-4xmz)."
         )
         XCTAssertEqual(
             SwiftSourceInspector.regexOccurrences(

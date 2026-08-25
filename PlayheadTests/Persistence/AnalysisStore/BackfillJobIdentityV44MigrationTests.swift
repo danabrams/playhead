@@ -81,7 +81,13 @@ struct BackfillJobIdentityV44MigrationTests {
         // and no backfill (every drop before this build deleted its own evidence,
         // so there is nothing recoverable to seed). It names nothing this rung
         // asserts, so no assertion here moves.
-        #expect(AnalysisStore.currentSchemaVersion == 62)
+        // 62 -> 63 read for this rung (playhead-4xmz): V63 CREATES TWO NEW TABLES —
+        // `download_work_journal` and its single-row arming companion — and touches no
+        // existing table, column or row: no ALTER, no UPDATE, no DELETE and no backfill
+        // (every download event before this build went to a no-op recorder and left no
+        // trace, so there is nothing recoverable to seed). It names nothing this rung
+        // asserts, so no assertion here moves.
+        #expect(AnalysisStore.currentSchemaVersion == 63)
 
         try await store.insertAsset(makeAsset(id: "asset-fresh"))
         try await store.insertBackfillJob(
@@ -201,7 +207,12 @@ struct BackfillJobIdentityV44MigrationTests {
         // CONSTANT and cannot reach a line that reads the version off the DATABASE.
         // It took the mutation battery's unmutated baseline to surface this one, on
         // a branch whose own scoped run was green.
-        #expect(try await store.schemaVersion() == 62)
+        //
+        // playhead-4xmz: V63 (`download_work_journal` + its arming row). Same move
+        // once more, and this time found BY READING THE PARAGRAPH ABOVE rather than
+        // by a battery — which is the only reason it is worth the eight lines it now
+        // costs. Two new tables, no existing table, column or row touched.
+        #expect(try await store.schemaVersion() == 63)
         #expect(try await store.fetchBackfillJob(byId: "fm-legacy-complete") == nil,
                 "a completed row minted under the old preimage cannot be addressed again")
         #expect(try await store.fetchBackfillJob(byId: "fm-legacy-queued") == nil,
