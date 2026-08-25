@@ -138,6 +138,8 @@
 #   scripts/mutation-battery.sh              # whole battery
 #   scripts/mutation-battery.sh --list       # print the battery, run nothing
 #   scripts/mutation-battery.sh --only M07   # one mutation, alone
+#   scripts/mutation-battery.sh --series DW  # every mutation whose name starts DW,
+#                                            # control included, on ONE baseline
 #   scripts/mutation-battery.sh --batch 3    # one batch
 #   scripts/mutation-battery.sh --dry-run    # apply + diffstat + restore, no build
 #
@@ -29339,6 +29341,7 @@ run_focused() {
 # Main
 # ---------------------------------------------------------------------------
 ONLY=""
+ONLY_SERIES=""
 ONLY_BATCH=""
 LIST_ONLY=0
 DRY_RUN=0
@@ -29351,6 +29354,7 @@ while [ $# -gt 0 ]; do
     --list)    LIST_ONLY=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     --only)  ONLY="$2"; shift 2 ;;
+    --series) ONLY_SERIES="$2"; shift 2 ;;
     --batch) ONLY_BATCH="$2"; shift 2 ;;
     -h|--help)
       # Print the whole header block and stop at the first non-comment line.
@@ -29450,6 +29454,24 @@ for rec in "${MUTATIONS[@]}"; do
   name="$(rec_name "$rec")"
   batch="$(rec_batch "$rec")"
   if [ -n "$ONLY" ] && [ "$name" != "$ONLY" ]; then continue; fi
+  # playhead-4xmz: `--series DW` selects every mutation whose NAME starts with
+  # the prefix. It exists because `--only` is exact and the baseline is re-run
+  # on EVERY invocation — a 24-mutant series driven one `--only` at a time pays
+  # ~3 minutes of redundant baseline per mutant, which was 72 minutes of the
+  # first attempt at this bead's ledger.
+  #
+  # IT CANNOT DROP A SERIES' VACUITY CONTROL, and that is by construction
+  # rather than by a special case: a control is named after its series
+  # (`BD99`, `DW99`), so any prefix that selects the series selects the
+  # control too. That is the hole the R-engine batteries had to close
+  # explicitly (playhead-o89d R5), and the reason it is stated here is that
+  # "by construction" is only true while controls keep that naming convention.
+  if [ -n "$ONLY_SERIES" ]; then
+    case "$name" in
+      "$ONLY_SERIES"*) : ;;
+      *) continue ;;
+    esac
+  fi
   if [ -n "$ONLY_BATCH" ] && [ "$batch" != "$ONLY_BATCH" ]; then continue; fi
   SELECTED+=("$rec")
 done
