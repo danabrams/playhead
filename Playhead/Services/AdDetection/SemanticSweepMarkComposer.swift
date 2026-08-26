@@ -1546,10 +1546,13 @@ enum SemanticSweepMarkComposer {
     /// the four windows that ARE corroborated here are corroborated *only*
     /// across versions.
     ///
-    /// `runCorrelationId` was considered as a "different FM call" spelling and
+    /// `backfillJobId` — the column was spelled `runCorrelationId` when this
+    /// note was written, and playhead-1gu0 renamed it in schema V65 for exactly
+    /// the reason below — was considered as a "different FM call" spelling and
     /// measured out: all five `containsAd` rows over `A9F6DF05` ~4038 s carry
     /// the identical `fm-9330e821aeb36a0d` across four days and five calls, so
-    /// it does not separate re-screenings at all.
+    /// it does not separate re-screenings at all. That is a property of the
+    /// column and not of this pull: a job id is per `(asset, phase, offset)`.
     static func corroborates(
         _ candidate: SemanticScanResult,
         _ row: SemanticScanResult

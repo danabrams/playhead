@@ -328,7 +328,7 @@ struct SemanticScanResult: Sendable, Equatable {
     /// enumeration). It is an INGREDIENT of `reuseKeyHash`, which IS a column,
     /// so it decides row identity without being recoverable from the row. The
     /// value the runner puts here is the `jobId`, and the same `jobId` reaches
-    /// disk as `runCorrelationId` on every path that goes through
+    /// disk as `backfillJobId` on every path that goes through
     /// `BackfillJobRunner.attributed(_:jobId:)` — so "which job wrote this row"
     /// is answerable, just not from this property.
     let reuseScope: String?
@@ -420,8 +420,18 @@ struct SemanticScanResult: Sendable, Equatable {
     ///
     /// `nil` for rows written before V42 and for any writer with no job in
     /// hand. A non-nil value that matches no job joins to nothing, which reads
-    /// as "no run" rather than as a wrong run.
-    let runCorrelationId: String?
+    /// as "no job" rather than as a wrong one.
+    ///
+    /// **THIS IS A JOB ID AND IT IS NOT A RUN ID.** It was called
+    /// `runCorrelationId` — property and column both — until schema V65
+    /// (playhead-1gu0). A `backfill_jobs.jobId` is per `(asset, phase, offset)`,
+    /// so it is ONE value for an asset's whole backfill history: measured on the
+    /// 2026-08-19 device pull, 15 distinct ids for 15 distinct assets, with 176
+    /// rows over four calendar days under a single id. It cannot tell two
+    /// screenings of the same window apart, and anything that needs to should
+    /// read `transcriptVersion` (which separated every replicate on both
+    /// measured pulls) or `latencyMs`.
+    let backfillJobId: String?
     /// playhead-bg2n (schema V55): the wall clock of this row's FIRST write, and
     /// the LICENCE that says ``createdAt`` and ``observedStatuses`` are complete.
     ///
@@ -544,7 +554,7 @@ struct SemanticScanResult: Sendable, Equatable {
         permissiveFallbackReason: String? = nil,
         createdAt: Double? = nil,
         scenePhase: ScanScenePhase? = nil,
-        runCorrelationId: String? = nil,
+        backfillJobId: String? = nil,
         firstAttemptAt: Double? = nil,
         lastAttemptAt: Double? = nil,
         observedStatusesCSV: String? = nil,
@@ -581,7 +591,7 @@ struct SemanticScanResult: Sendable, Equatable {
         self.permissiveFallbackReason = permissiveFallbackReason
         self.createdAt = createdAt
         self.scenePhase = scenePhase
-        self.runCorrelationId = runCorrelationId
+        self.backfillJobId = backfillJobId
         self.firstAttemptAt = firstAttemptAt
         self.lastAttemptAt = lastAttemptAt
         self.observedStatusesCSV = observedStatusesCSV
@@ -753,7 +763,7 @@ struct SemanticScanResult: Sendable, Equatable {
     func attributed(
         createdAt: Double,
         scenePhase: ScanScenePhase?,
-        runCorrelationId: String?
+        backfillJobId: String?
     ) -> SemanticScanResult {
         SemanticScanResult(
             id: id,
@@ -785,7 +795,7 @@ struct SemanticScanResult: Sendable, Equatable {
             permissiveFallbackReason: permissiveFallbackReason,
             createdAt: createdAt,
             scenePhase: scenePhase,
-            runCorrelationId: runCorrelationId,
+            backfillJobId: backfillJobId,
             // playhead-bg2n: the three history fields are carried through
             // UNCHANGED, exactly like geometry and status. They are decided by
             // the STORE, which is the only place that can see the row already on

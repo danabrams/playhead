@@ -13219,7 +13219,7 @@ describe_mutation() {
     T05) echo "insertSemanticScanResult: drop the createdAt backstop clock" ;;
     T06) echo "readSemanticScanResult: read a NULL createdAt through sqlite3_column_double (1970)" ;;
     T07) echo "V42 rung stamps 41 instead of 42 — the ladder stops climbing to head" ;;
-    T08) echo "BackfillJobRunner.attributed: stop stamping runCorrelationId" ;;
+    T08) echo "BackfillJobRunner.attributed: stop stamping backfillJobId" ;;
     T09) echo "BackfillJobRunner.attributed: stop stamping scenePhase" ;;
     T10) echo "BackfillJobRunner.attributed: guess .active when the provider breaks its vocabulary" ;;
     T11) echo "SemanticScanThroughputSplit.isEligible: admit no-work sentinels as throughput" ;;
@@ -18496,10 +18496,10 @@ EOF
   # useless as having no column.
   T08)
     snippet OLD <<'EOF'
-            runCorrelationId: jobId
+            backfillJobId: jobId
 EOF
     snippet NEW <<'EOF'
-            runCorrelationId: nil
+            backfillJobId: nil
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 

@@ -79,7 +79,7 @@ struct MigrationLadderTests {
         // running leaves the columns absent on an upgraded DB while every
         // fresh-install test stays green, since `createTables()` builds the
         // final shape unconditionally.
-        for column in ["createdAt", "scenePhase", "runCorrelationId"] {
+        for column in ["createdAt", "scenePhase", "backfillJobId"] {
             #expect(try probeColumnExists(
                 in: dir,
                 table: "semantic_scan_results",
@@ -87,7 +87,7 @@ struct MigrationLadderTests {
             ))
         }
         #expect(try probeIndexExists(in: dir, indexName: "idx_semantic_scan_results_createdAt"))
-        #expect(try probeIndexExists(in: dir, indexName: "idx_semantic_scan_results_correlation"))
+        #expect(try probeIndexExists(in: dir, indexName: "idx_semantic_scan_results_backfill_job"))
 
         // playhead-bg2n (V55): the attempt-history columns, on an UPGRADED
         // database. This is the direction the fresh-install rails cannot cover —

@@ -90,7 +90,13 @@ struct AdmissionRejectReasonV30MigrationTests {
         // NULL because every candidate default would turn an absence into a
         // launch count. It names nothing this rung asserts, so no assertion here
         // moves.
-        #expect(AnalysisStore.currentSchemaVersion == 64)
+        // 64 -> 65 read for this rung (playhead-1gu0): V65 RENAMES ONE COLUMN —
+        // `semantic_scan_results.runCorrelationId` becomes `backfillJobId`, and its
+        // index moves with it. A pure `ALTER TABLE … RENAME COLUMN`: no row moves, no
+        // value is written, nothing is backfilled and no other table is named. It is
+        // on THIS table, but it names none of the columns this rung asserts, so no
+        // assertion here moves.
+        #expect(AnalysisStore.currentSchemaVersion == 65)
         #expect(try probeColumnExists(in: dir, table: "analysis_jobs", column: "lastRejectReason"))
         #expect(try probeColumnExists(in: dir, table: "analysis_jobs", column: "lastRejectAt"))
     }

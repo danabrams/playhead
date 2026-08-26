@@ -96,7 +96,13 @@ struct BackfillJobIdentityV44MigrationTests {
         // NULL because every candidate default would turn an absence into a
         // launch count. It names nothing this rung asserts, so no assertion here
         // moves.
-        #expect(AnalysisStore.currentSchemaVersion == 64)
+        // 64 -> 65 read for this rung (playhead-1gu0): V65 RENAMES ONE COLUMN —
+        // `semantic_scan_results.runCorrelationId` becomes `backfillJobId`, and its
+        // index moves with it. A pure `ALTER TABLE … RENAME COLUMN`: no row moves, no
+        // value is written, nothing is backfilled and no other table is named. It is
+        // on THIS table, but it names none of the columns this rung asserts, so no
+        // assertion here moves.
+        #expect(AnalysisStore.currentSchemaVersion == 65)
 
         try await store.insertAsset(makeAsset(id: "asset-fresh"))
         try await store.insertBackfillJob(
@@ -221,7 +227,13 @@ struct BackfillJobIdentityV44MigrationTests {
         // once more, and this time found BY READING THE PARAGRAPH ABOVE rather than
         // by a battery — which is the only reason it is worth the eight lines it now
         // costs. Two new tables, no existing table, column or row touched.
-        #expect(try await store.schemaVersion() == 64)
+        //
+        // playhead-1gu0: V65, not 64. Same line, same trap — it reads the version
+        // off the DATABASE, so the sweep that bumps the `currentSchemaVersion`
+        // guards cannot see it. V65 renames `semantic_scan_results.runCorrelationId`
+        // to `backfillJobId`; it touches `backfill_jobs` not at all, and this rung
+        // asserts only on `backfill_jobs`.
+        #expect(try await store.schemaVersion() == 65)
         #expect(try await store.fetchBackfillJob(byId: "fm-legacy-complete") == nil,
                 "a completed row minted under the old preimage cannot be addressed again")
         #expect(try await store.fetchBackfillJob(byId: "fm-legacy-queued") == nil,
