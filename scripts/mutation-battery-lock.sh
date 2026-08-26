@@ -797,6 +797,21 @@ mb_diagnose_no_tests() {
     mb__say "  (exit 28 = POSIX ENOSPC). Nothing was run and nothing was deleted."
     mb__say "  Reclaim with scripts/disk-cleanup.sh, or check \$TMPDIR/Deleting-*"
     mb__say "  — stranded CoreSimulator trash is the biggest reservoir on this box."
+    # AND NAME THE ONE THIS RUN IS SITTING ON (playhead-gjlp0 R4). Since that
+    # bead the battery keeps an `.xcresult` bundle per non-KILL batch inside
+    # `$WORK`, so a long series accumulates hundreds of megabytes DURING the
+    # run — which is the one way this refusal can be the run's own doing. Both
+    # remedies above are useless for it: `disk-cleanup.sh` sweeps
+    # `/private/tmp/playhead-*` at 3 days and this directory is minutes old, so
+    # a reader following the advice reclaims nothing and concludes the box is
+    # short. Guarded on WORK because `mb_diagnose_no_tests` is also called from
+    # the lock rails, where there is no work directory.
+    if [ -n "${WORK:-}" ] && [ -d "${WORK:-}" ]; then
+      mb__say "  THIS RUN is holding $(du -sh "$WORK" 2>/dev/null | awk '{print $1}') in"
+      mb__say "  $WORK ($(find "$WORK" -maxdepth 1 -name '*.xcresult' 2>/dev/null | wc -l | tr -d ' ') .xcresult bundle(s) kept as evidence for the"
+      mb__say "  verdicts above). It is minutes old, so disk-cleanup.sh's 3-day sweep"
+      mb__say "  will NOT touch it: read the verdicts, then remove it by hand."
+    fi
     return 0
   fi
 

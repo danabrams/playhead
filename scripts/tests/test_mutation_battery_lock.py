@@ -665,6 +665,50 @@ class TestDiagnosis(LockTestCase):
         self.assertIn("DISK", self.diagnose("", rc=28))
         self.assertIn("DISK", self.diagnose("No space left on device\n"))
 
+    def test_the_disk_refusal_names_the_work_dir_THIS_RUN_is_holding(self):
+        """playhead-gjlp0 R4.
+
+        Since playhead-gjlp0 the battery keeps an `.xcresult` per non-KILL batch
+        inside `$WORK`, so a long series accumulates hundreds of megabytes DURING
+        the run — the one way a `28` can be the run's own doing. Both remedies
+        this arm printed are useless for it: `disk-cleanup.sh` sweeps
+        `/private/tmp/playhead-*` at THREE DAYS and this directory is minutes
+        old, so a reader who follows the advice reclaims nothing and concludes
+        the box is short.
+        """
+        work = self.repo.dir / "work"
+        (work / "batch-1.xcresult").mkdir(parents=True)
+        (work / "batch-2.xcresult").mkdir(parents=True)
+        (work / "batch-1.log").write_text("x" * 4096)
+        log = self.repo.dir / "run.log"
+        log.write_text("")
+        err = bash('WORK="%s"; mb_diagnose_no_tests "%s" 28 "batch 7"' % (work, log),
+                   self.repo.dir).stderr
+        self.assertIn("THIS RUN is holding", err)
+        self.assertIn(str(work), err)
+        self.assertIn("2 .xcresult bundle(s)", err)
+        self.assertIn("3-day sweep", err)
+        # AND WHAT TO DO, not only why the sweep will not do it. Mutant L4
+        # survived the first cut of this rail by deleting the only sentence
+        # that says the remedy is by hand — the SECOND time in this round a
+        # rail pinned the fact and left the action unpinned (the first was
+        # mutant R4-5 in test_mutation_verdict.py). Ask of every message rail:
+        # does it pin what to DO, or only what happened?
+        self.assertIn("remove it by hand", err)
+
+    def test_the_disk_refusal_claims_no_work_dir_when_there_is_none(self):
+        """The anti-fabrication half, and the reason the clause is guarded.
+
+        `mb_diagnose_no_tests` is called from these rails and from the battery,
+        and only the battery has a `$WORK`. A clause that printed `holding 0
+        bundles` for a directory nobody created would be a measurement of an
+        absence read as a measurement of a thing — which is the defect the bead
+        this clause belongs to exists to remove.
+        """
+        err = self.diagnose("", rc=28)
+        self.assertIn("DISK", err)
+        self.assertNotIn("THIS RUN is holding", err)
+
     def test_an_unrecognised_log_is_called_UNDIAGNOSED_not_a_broken_baseline(self):
         err = self.diagnose("Testing started\nnothing recognisable at all\n" * 3)
         self.assertIn("UNDIAGNOSED", err)
