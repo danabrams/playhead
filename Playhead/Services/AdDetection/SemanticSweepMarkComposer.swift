@@ -476,13 +476,23 @@ enum SemanticSweepMarkComposer {
     /// against (playhead-3gzp's `ground-truth.sqlite`, sha256 `bcad2d09…`,
     /// schema V47) 36 of 125 coarse windows carry more than one `passA` row,
     /// and on four of them `containsAd` is at most HALF of the rows written for
-    /// the window.
+    /// the window. **BOTH OF THOSE COUNTS ARE OVER `passA` AT ANY STATUS** — a
+    /// THIRD population, neither the bullets' below nor this factor's own. It is
+    /// said here rather than only in the **IT NEVER SEPARATED** paragraph below,
+    /// which is where the qualification used to live alone — past the bullets,
+    /// which carry a DIFFERENT population's numbers (playhead-1gu0 review). On
+    /// the EXAMINED population the bullets use, that second count is **0**: no
+    /// window there carries a `containsAd` row its own replicates outvote or tie.
     ///
     /// **WHAT SEPARATES THOSE REPLICATES IS `transcriptVersion` AND `latencyMs`
     /// — NOT `runCorrelationId`. This line cited the id and playhead-1gu0
-    /// measured it out.** SAY WHICH POPULATION, because it is the RE-SCREENING
-    /// one and NOT this factor's own — examined `passA` rows grouped by
-    /// `(analysisAssetId, windowStartTime, windowEndTime)`, with no version
+    /// measured it out.** Over those 36, `transcriptVersion` is all-distinct on
+    /// **36 of 36** and `latencyMs` on **35 of 36** — the exception is a pair of
+    /// `cancelled` rows both reading `latencyMs` 0.0, two rows that examined
+    /// nothing, which is why the examined bullet below reads 25 of 25 and why
+    /// the headline is exact only there. SAY WHICH POPULATION, because it is the
+    /// RE-SCREENING one and NOT this factor's own — examined `passA` rows
+    /// grouped by `(analysisAssetId, windowStartTime, windowEndTime)`, no version
     /// scope. THE INDEPENDENCE paragraph below says what this factor's own
     /// filter adds and why the difference matters:
     ///
@@ -535,12 +545,13 @@ enum SemanticSweepMarkComposer {
     /// quantity is not this one". Nothing about this factor's arithmetic or its
     /// inputs changes.
     ///
-    /// SAY WHICH ROWS THIS FACTOR CAN SEE, because those four are not it. A row
-    /// that did not EXAMINE its window is not a verdict and is skipped below, so
-    /// on the same pull only ONE of the 55 coarse `containsAd` rows has an
-    /// examined dissenter over it, and only 3 of the 22 persisted sweep marks
-    /// are deducted at all. The factor is right; its reach today is small, and
-    /// quoting the wider count as if this read it would overstate it.
+    /// SAY WHICH ROWS THIS FACTOR CAN SEE, because the opening paragraph's four
+    /// are not it. A row that did not EXAMINE its window is not a verdict and is
+    /// skipped below, so on the 2026-08-10 pull only ONE of the 55 coarse
+    /// `containsAd` rows has an examined dissenter over it, and only 3 of the 22
+    /// persisted sweep marks are deducted at all. The factor is right; its reach
+    /// today is small, and quoting the wider count as if this read it would
+    /// overstate it.
     ///
     /// **THOSE TWO FIGURES ARE PRE-kg6i AND THE FIRST OVERSTATES THE REACH —
     /// read them as history (playhead-1gu0 review).** They landed on 2026-08-10
