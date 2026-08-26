@@ -9170,8 +9170,8 @@ actor AnalysisStore {
     /// documentation from 2026-08-10 (`6e9c386f`) until this rung landed on
     /// 2026-08-26 — SIXTEEN days in the tree, of which eleven passed before
     /// `playhead-my33` measured it out. (This line read "eleven days", which is
-    /// the time to DISCOVERY and not the time it shipped: the same two-quantities
-    /// -one-name reading the rename exists to stop.)
+    /// the time to DISCOVERY and not the time it shipped — the same
+    /// two-quantities-one-name reading the rename exists to stop.)
     ///
     /// **WHY NO NEW PER-INVOCATION COLUMN.** Nothing wants one. The only
     /// consumer that ever asked "is this a different FM call" is
@@ -9217,14 +9217,17 @@ actor AnalysisStore {
     /// given open, and which one is a property of the PATH rather than of the
     /// database. In production `createTables()` runs BEFORE the whole
     /// `V*IfNeeded` ladder, so it is always the one that renames — the other two
-    /// then find the new spelling present and decline. They are not therefore
-    /// decoration: each sits immediately above an `addColumnIfNeeded` for
-    /// `backfillJobId`, and without it that call would add an EMPTY new column
-    /// alongside a populated old one. The V65 rung's is the only one
-    /// `migrateOnlyForTesting()` can reach, since that path skips
-    /// `createTables()`; no fixture reaches it with `semantic_scan_results`
-    /// present today, so that call site is currently unexercised — say so rather
-    /// than let a green suite read as coverage.
+    /// then find the new spelling present and decline. The other two are not
+    /// therefore decoration, and they earn their place for DIFFERENT reasons.
+    /// `createTables()`'s call and the V42 rung's each sit immediately above an
+    /// `addColumnIfNeeded` for `backfillJobId`: without the rename first, that
+    /// call adds an EMPTY new column alongside a populated old one, which is
+    /// mutation GU01. The V65 rung's has no `addColumnIfNeeded` under it at all;
+    /// it is there because it is the only call site `migrateOnlyForTesting()`
+    /// can reach, that path skipping `createTables()` entirely. No fixture
+    /// reaches it with `semantic_scan_results` present today, so that third call
+    /// site is currently UNEXERCISED — said out loud rather than left for a
+    /// green suite to read as coverage.
     ///
     /// Idempotent, and it declines rather than guesses in the one ambiguous
     /// state. If BOTH spellings exist the new one wins and the old is left
