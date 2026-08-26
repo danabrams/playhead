@@ -724,6 +724,61 @@ def shell_function(name):
     raise AssertionError("%s() has no closing brace" % name)
 
 
+class StateOfTests(unittest.TestCase):
+    """`state_of` is the shell's reader of the scorer's file — playhead-gjlp0 R1.
+
+    Two readers of one file that disagree is this bead's own defect shape, so
+    the shell reader has to survive everything a Swift Testing display name can
+    legally contain. `awk -v x=VALUE` ESCAPE-PROCESSES VALUE, which is why the
+    name goes through the environment instead.
+    """
+
+    def setUp(self):
+        self.dir = pathlib.Path(tempfile.mkdtemp(prefix="playhead-mv-state."))
+        self.addCleanup(shutil.rmtree, str(self.dir), True)
+        self.out = self.dir / "outcomes.txt"
+
+    def ask(self, lines, want):
+        self.out.write_text("".join(l + "\n" for l in lines), encoding="utf-8")
+        script = ('%s\nstate_of %s "$1" || echo NO-STATE\n'
+                  % (shell_function('state_of'), "'%s'" % self.out))
+        proc = subprocess.run(["bash", "-uo", "pipefail", "-c", script, "_", want],
+                              capture_output=True, text=True)
+        return proc.stdout.strip()
+
+    NAMES = [
+        "plain name",
+        "a\\b name",                      # the one `-v` mangles
+        "100% coverage",
+        "-leading dash",
+        "#hash start",
+        "a | b",
+        "tab\\there is impossible but \\t is not",
+        "cards \u222a list is the entered set, and they never overlap",
+        "V60 downgrades to consumedAutoSkip/consumed",
+        "$WORK and `backticks` and ; and & and (parens)",
+    ]
+
+    def test_every_shape_a_display_name_can_carry_round_trips(self):
+        rows = ["#batch\tOK"] + ["PASSED\t" + n for n in self.NAMES]
+        for name in self.NAMES:
+            self.assertEqual(self.ask(rows, name), "PASSED", repr(name))
+
+    def test_a_name_no_line_mentions_is_NO_STATE_and_not_a_default(self):
+        self.assertEqual(self.ask(["#batch\tOK", "PASSED\tA"], "B"), "NO-STATE")
+
+    def test_a_header_line_can_never_answer_for_a_test(self):
+        # `#failure\t<name>` carries a NAME in column 2. If the header filter
+        # were dropped, an expectation would read the word `#failure` as its
+        # state — the file's own metadata answering a question about a test.
+        rows = ["#batch\tOK", "#failure\tZ"]
+        self.assertEqual(self.ask(rows, "Z"), "NO-STATE")
+
+    def test_the_first_line_wins_and_the_lookup_stops_there(self):
+        rows = ["FAILED\tA", "PASSED\tA"]
+        self.assertEqual(self.ask(rows, "A"), "FAILED")
+
+
 class DropBundleTests(unittest.TestCase):
     """CLAUDE.md's rm -rf rail: the path is PROVED, not assumed.
 

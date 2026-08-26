@@ -29820,9 +29820,18 @@ score_batch() {
 # must decide what to do about an instrument that went quiet, rather than
 # inheriting a default. That is the whole shape of the defect this bead fixes,
 # so the fix must not re-introduce it one layer up.
+# THE NAME GOES THROUGH THE ENVIRONMENT, NOT THROUGH `-v` (playhead-gjlp0 R1).
+# `awk -v x=VALUE` runs VALUE through ESCAPE PROCESSING, so a display name
+# containing a backslash arrives as something else and matches nothing.
+# Measured: `a\b name` is present in the file, `-v` reports NO-STATE for it and
+# `ENVIRON` reports PASSED. NO-STATE lands in the `unjudged` arm, so such an
+# expectation would report VOID on every run for ever — the scorer resolved it
+# perfectly and only this reader could not see it, which is this bead's own
+# defect shape between two readers of one file. No entry in MUTATIONS carries a
+# backslash today; a Swift Testing display name may.
 state_of() {
-  awk -F'\t' -v want="$2" \
-    '$1 !~ /^#/ && $2 == want { print $1; found = 1; exit } END { exit !found }' "$1"
+  MB_WANT="$2" awk -F'\t' \
+    '$1 !~ /^#/ && $2 == ENVIRON["MB_WANT"] { print $1; found = 1; exit } END { exit !found }' "$1"
 }
 
 # One `#`-prefixed header field from the scorer's output file, or "".
