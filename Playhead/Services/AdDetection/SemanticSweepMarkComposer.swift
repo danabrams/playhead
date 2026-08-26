@@ -472,11 +472,49 @@ enum SemanticSweepMarkComposer {
     /// Laplace-smoothed agreement among the PRESENCE-pass replicates that
     /// examined this extent: `(1 + affirming) / (1 + affirming + dissenting)`.
     ///
-    /// The sweep genuinely re-screens: on the device pull 36 of 125 coarse
-    /// windows carry more than one `passA` row, each a separate FM call in a
-    /// separate backfill run (distinct `runCorrelationId`, distinct latency),
+    /// The sweep genuinely re-screens: on the 2026-08-10 pull this was measured
+    /// against (playhead-3gzp's `ground-truth.sqlite`, sha256 `bcad2d09…`,
+    /// schema V47) 36 of 125 coarse windows carry more than one `passA` row,
     /// and on four of them `containsAd` is at most HALF of the rows written for
     /// the window.
+    ///
+    /// **WHAT SEPARATES THOSE REPLICATES IS `transcriptVersion` AND `latencyMs`
+    /// — NOT `runCorrelationId`. This line cited the id and playhead-1gu0
+    /// measured it out.** Over the rows this factor can actually see — examined
+    /// `passA`, keyed by `(analysisAssetId, windowStartTime, windowEndTime)`:
+    ///
+    ///   * **2026-08-10**, 99 windows, **25** with more than one row.
+    ///     `transcriptVersion` distinct across every row of **25 of 25**;
+    ///     `latencyMs` likewise **25 of 25**. `runCorrelationId` distinct on
+    ///     13, and the other 12 windows are entirely NULL — those rows predate
+    ///     the V42 column. It separated **nothing it did not already share**.
+    ///   * **2026-08-19 t4**, 779 windows, **190** with more than one row.
+    ///     `transcriptVersion` **190 of 190**, `latencyMs` **190 of 190**,
+    ///     and `runCorrelationId` **0 of 190** — every one of the 190 carries a
+    ///     single id. The column does not separate re-screenings at all.
+    ///
+    /// IT NEVER COULD HAVE, and the 08-10 reading was a residue rather than a
+    /// property. `semantic_scan_results.backfillJobId` is the
+    /// `backfill_jobs.jobId` (it was spelled `runCorrelationId` until schema
+    /// V65, which is playhead-1gu0's other half), and that id is per
+    /// `(asset, phase, offset)` — one value for an asset's whole backfill
+    /// history. It read as per-screening on 08-10 only because
+    /// `transcriptVersion` was IN the job-id preimage until **playhead-wxsv
+    /// removed it on 2026-08-07**, three days BEFORE this line was written. So
+    /// the pull straddles the change and the claim was already contradicted on
+    /// it: over the 36 replicate windows of the opening paragraph's population
+    /// (`passA`, ANY status), 16 have all-distinct ids, 12 are entirely NULL,
+    /// and **8 carry a single id** — and every row of those 8 was written after
+    /// 2026-08-07. Measured on both pulls, every distinct-id pair is also a
+    /// distinct-version pair and not conversely — the job id is a COARSENING of
+    /// `transcriptVersion` and can never separate two rows the version does not.
+    ///
+    /// **THE INDEPENDENCE IS UNCHANGED; ONLY THE EVIDENCE FOR IT IS.** Two rows
+    /// at different `transcriptVersion`s were screened from different
+    /// transcripts in different FM calls, which is the stronger claim, not the
+    /// weaker one — see ``corroborates(_:_:)``'s "a re-transcription makes the
+    /// second screening MORE independent, not less". Nothing about this
+    /// factor's arithmetic or its inputs changes.
     ///
     /// SAY WHICH ROWS THIS FACTOR CAN SEE, because those four are not it. A row
     /// that did not EXAMINE its window is not a verdict and is skipped below, so
