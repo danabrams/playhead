@@ -866,10 +866,30 @@ struct SemanticSweepConfidenceTests {
     }
 
     /// A REPLICATE THAT DISAGREES IS EVIDENCE. The sweep really does re-screen:
-    /// 36 of 125 coarse windows on the pull carry more than one `passA` row,
-    /// each a separate FM call in a separate run, and on four of them
-    /// `containsAd` is the MINORITY verdict. The composer filtered those rows
-    /// out and never counted them.
+    /// on the 2026-08-10 pull 36 of 125 coarse windows carry more than one
+    /// `passA` row, and on four of them `containsAd` is at most HALF of the rows
+    /// written for the window. The composer filtered those rows out and never
+    /// counted them.
+    ///
+    /// TWO WORDINGS CORRECTED HERE, both shipped by `6e9c386f` alongside the
+    /// composer's own copy of this sentence, and both left standing while that
+    /// copy was corrected (playhead-1gu0 review — a correction applied in one of
+    /// the two places it was wrong is the shape that bead exists to remove).
+    ///
+    ///   * "the MINORITY verdict" overstated it. "At most HALF" admits a TIE,
+    ///     and the four are 4 against the 24 windows that carry a `containsAd`
+    ///     row AT ALL, over `passA` at ANY status — not the population this
+    ///     factor sees.
+    ///   * "each a separate FM call in a separate RUN" was the half of the
+    ///     deleted `runCorrelationId` parenthesis that survived here. That id is
+    ///     a `backfill_jobs.jobId`, ONE value per `(asset, phase, offset)`, and
+    ///     it never separated anything `transcriptVersion` did not; on the
+    ///     08-10 pull it read as per-screening only because the version was in
+    ///     its preimage until 2026-08-07. The re-screening is real and the
+    ///     evidence for it is `transcriptVersion` — 36 of 36 on that pull.
+    ///
+    /// ``SemanticSweepMarkComposer/corroboration(for:in:atTranscriptVersion:)``
+    /// carries the population argument and every figure quoted here.
     @Test("a contradicted verdict is worth less than an uncontradicted one")
     func aContradictedVerdictRanksLower() {
         let marks = Fx.compose(rows: [

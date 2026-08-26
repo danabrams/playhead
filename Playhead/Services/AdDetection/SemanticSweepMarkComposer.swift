@@ -479,13 +479,16 @@ enum SemanticSweepMarkComposer {
     /// replicate population is selected. The independence itself is unchanged
     /// (playhead-1gu0).
     ///
-    /// SAY WHICH ROWS THIS FACTOR CAN SEE, because the four measured at
-    /// ``corroboration(for:in:atTranscriptVersion:)`` are not it. A row that did
-    /// not EXAMINE its window is not a verdict and is skipped below, so on the
-    /// 2026-08-10 pull only ONE of the 55 coarse `containsAd` rows has an
-    /// examined dissenter over it, and only 3 of the 22 persisted sweep marks
-    /// are deducted at all. The factor is right; its reach today is small, and
-    /// quoting the wider count as if this read it would overstate it.
+    /// SAY WHICH ROWS THIS FACTOR CAN SEE, because the four replicate windows
+    /// measured at ``corroboration(for:in:atTranscriptVersion:)`` are not it. A
+    /// row that did not EXAMINE its window is not a verdict and is skipped
+    /// THERE, not here — this function is three lines of arithmetic and filters
+    /// nothing. (It read "skipped below", which has pointed at nothing since
+    /// `6e9c386f`; playhead-1gu0 review.) So on the 2026-08-10 pull only ONE of
+    /// the 55 coarse `containsAd` rows has an examined dissenter over it, and
+    /// only 3 of the 22 persisted sweep marks are deducted at all. The factor is
+    /// right; its reach today is small, and quoting the wider count as if this
+    /// read it would overstate it.
     ///
     /// **THOSE TWO FIGURES ARE PRE-kg6i AND THE FIRST OVERSTATES THE REACH —
     /// read them as history (playhead-1gu0 review).** They landed on 2026-08-10
@@ -1602,9 +1605,12 @@ enum SemanticSweepMarkComposer {
     /// their whole input and replicate only the model's sampling, while two at
     /// different versions share only the audio — which is what the claim is
     /// about. Seconds are version-independent; that is already this file's own
-    /// reading, in ``corroboration(for:in:atTranscriptVersion:)``'s closing note
-    /// ("a stale row's window bounds are still real geometry") and in
-    /// ``clearedSpans(in:)``, which is deliberately not version-scoped either.
+    /// reading, in ``corroboration(for:in:atTranscriptVersion:)``'s
+    /// **WHAT THIS DELIBERATELY DOES NOT DO** note ("a stale row's window bounds
+    /// are still real geometry") and in ``clearedSpans(in:)``, which is
+    /// deliberately not version-scoped either. (This line said "closing note",
+    /// which it was until `59539769` appended the replicate-population argument
+    /// after it — name the note, never its position; playhead-1gu0 review.)
     ///
     /// MEASURED, because the choice decides the bead rather than decorating it:
     /// on the 2026-08-19 t4 pull the 19 `.absent` rows sit at **19 distinct
