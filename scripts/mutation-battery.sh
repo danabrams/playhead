@@ -14222,9 +14222,10 @@ EOF
   DW10)
     snippet OLD <<'EOF'
         try migrateDownloadWorkJournalV63IfNeeded()
+        // playhead-sdis (v64): four ADDED COLUMNS rather than a new table, so
 EOF
     snippet NEW <<'EOF'
-
+        // playhead-sdis (v64): four ADDED COLUMNS rather than a new table, so
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -14709,8 +14710,12 @@ EOF
   SD10)
     snippet OLD <<'EOF'
         try migrateBackgroundDownloadDropLaunchIdentityV64IfNeeded()
+    }
+    #endif
 EOF
     snippet NEW <<'EOF'
+    }
+    #endif
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
