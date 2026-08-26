@@ -117,18 +117,51 @@ final class BackgroundDownloadDropWiringSourceCanaryTests: XCTestCase {
         )
     }
 
-    /// The DDL is written once and called from two places, rather than pasted
-    /// into both. The house rule (V49) is that `createTables()` and the rung
-    /// carry the same `CREATE TABLE`; two literal copies satisfy that on the
-    /// day they are written and drift on the day one of them gains a column.
+    /// The DDL is written once and called from every rung that changes the
+    /// shape, rather than pasted into each. The house rule (V49) is that
+    /// `createTables()` and the rung carry the same `CREATE TABLE`; two literal
+    /// copies satisfy that on the day they are written and drift on the day one
+    /// of them gains a column.
+    ///
+    /// THE COUNT IS ONE PER RUNG PLUS TWO, and it moved at V64 (playhead-sdis).
+    /// The V64 rung adds four columns to these two tables and therefore calls
+    /// the SAME helper — which is the correct design and is what
+    /// `testEveryV64ColumnIsBothDeclaredAndRepaired` below rests on — so the
+    /// occurrence count went 3 -> 4 and this rail went RED. That is the rail
+    /// working: a rung that changed the shape without touching the shared
+    /// helper would have left the count at 3 and said nothing. Any future rung
+    /// over these tables owes the same +1, and a rung that does NOT need one is
+    /// a rung that did not change the shape.
     func testTheDDLIsSharedRatherThanCopied() throws {
         let store = try code(Self.storePath)
         let symbol = #"\bcreateBackgroundDownloadDropTables\b"#
         XCTAssertEqual(
-            SwiftSourceInspector.regexOccurrences(of: symbol, in: store), 3,
-            "playhead-7dgx: the shared DDL helper must appear exactly three times — "
-            + "its declaration, the V62 rung's call, and createTables()'s call."
+            SwiftSourceInspector.regexOccurrences(of: symbol, in: store), 4,
+            "playhead-7dgx/playhead-sdis: the shared DDL helper must appear exactly four times "
+            + "— its declaration, the V62 rung's call, the V64 rung's call, and createTables()'s "
+            + "call. FEWER means a rung that changes the shape pasted its own copy of the DDL, "
+            + "which is the drift this helper exists to prevent; MORE means a call site nobody "
+            + "enumerated."
         )
+        // …and each of the two RUNGS calls it exactly once, which the total
+        // alone cannot show: a V64 rung that called it twice while the V62 rung
+        // called it not at all would still total four.
+        for (rung, bead) in [
+            ("private func migrateBackgroundDownloadDropsV62IfNeeded() throws", "playhead-7dgx"),
+            (
+                "private func migrateBackgroundDownloadDropLaunchIdentityV64IfNeeded() throws",
+                "playhead-sdis"
+            ),
+        ] {
+            let body = try XCTUnwrap(
+                SwiftSourceInspector.firstBody(in: store, after: rung),
+                "could not isolate \(rung) — this canary's anchor has drifted"
+            )
+            XCTAssertEqual(
+                SwiftSourceInspector.regexOccurrences(of: symbol, in: body), 1,
+                "\(bead): the rung must build the shape through the SHARED helper, exactly once."
+            )
+        }
         let createTables = try XCTUnwrap(
             SwiftSourceInspector.firstBody(in: store, after: "private func createTables() throws"),
             "could not isolate createTables()'s body — the canary's anchor has drifted"

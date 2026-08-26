@@ -26,10 +26,15 @@
 // background-session IDENTIFIERS are process-wide constants, so any rail that
 // constructs a real `URLSessionConfiguration.background(withIdentifier:)`
 // shares that resource with three neighbouring suites under the parallel plan.
-// Every rail here refuses or strands the CREATION crossing, so no real session
-// is ever vended — and the one rail that holds the creation queue open still
-// invalidates, because `discardingLateResult` hands a late session back to be
-// cancelled and nothing else would.
+// Every rail here REFUSES the creation crossing — synchronously, or after a
+// suspension the rail itself ends — so no real session is ever vended, and
+// every rail invalidates anyway because `discardingLateResult` is what hands a
+// late session back to be cancelled and nothing else would.
+//
+// AND THERE IS NO CLOCK IN THIS FILE. An earlier version of the join rail
+// stranded the crossing on a held queue and let a 6 s deadline expire, which
+// made it a race between the test's own arrival barrier and that bound. See
+// `suspendingRefusalIO`.
 
 import Foundation
 import Testing
@@ -73,33 +78,32 @@ struct BackgroundDownloadDropOutageIdentityTests {
         )
     }
 
-    /// The bound the JOIN rail strands its crossing behind, and the one number
-    /// in this file that is a clock rather than an event.
+    /// Refuses the session crossing only once `gate` opens — the JOINED-CROSSING
+    /// population, and THE ONLY WAY IT IS REACHABLE.
     ///
-    /// The join can only be exercised while the crossing is IN FLIGHT, and the
-    /// ONLY way `BackgroundSessionIO.perform` produces a refusal that takes any
-    /// time at all is the deadline: `neverAnswers` and `refusesCallsLabelled`
-    /// both short-circuit before the queue is touched and return instantly, so
-    /// neither leaves a window for a second caller to join. So the rail holds
-    /// the creation queue and lets this bound expire.
+    /// The join can only be exercised while the crossing is IN FLIGHT, and
+    /// every OTHER refusing behaviour answers synchronously: `neverAnswers`,
+    /// `refusesCallsLabelled` and `intermittentlyRefusesCallsLabelled` all
+    /// short-circuit before the queue is touched and return instantly, so none
+    /// of them leaves a window for a second caller to arrive in.
     ///
-    /// The window is therefore `[t0, t0 + joinWindowBound]`, and every caller
-    /// that reaches the crossing decision inside it JOINS by construction. What
-    /// has to beat the clock is the BARRIER — three callers arriving — and the
-    /// rail measures how long that took and fails NAMING it, rather than
-    /// reporting a crossing-id mismatch whose cause a reader would have to
-    /// guess. Six seconds against a barrier that costs milliseconds on a quiet
-    /// box; the worst dilation on record for this machine is a 1 ms sleep
-    /// stretching to ~160 ms, so a handful of 2 ms polls has orders of
-    /// magnitude of headroom.
-    private static let joinWindowBound: TimeInterval = 6.0
-
-    /// Reaches the creation queue and STRANDS there until the bound expires.
-    private static func strandingIO() -> BackgroundSessionIO {
+    /// THIS FILE USED TO HOLD THE CREATION QUEUE AND LET A 6 s DEADLINE
+    /// EXPIRE, and that made the rail a RACE between the test's own arrival
+    /// barrier and the bound — the shape the 2026-08-13 merge gate lost. The
+    /// seam removes the clock entirely: the crossing stays in flight until the
+    /// rail opens the gate, so a slow box makes the wait longer and can never
+    /// change the answer. There is now NO wall-clock quantity in this file that
+    /// any assertion depends on.
+    private static func suspendingRefusalIO(
+        gate: SuspendingSeamGate
+    ) -> BackgroundSessionIO {
         BackgroundSessionIO(
-            behavior: .dedicatedThread,
-            timeout: joinWindowBound,
-            queueLabel: "sdis.test.stranded.\(UUID().uuidString)"
+            behavior: .suspendsThenRefusesCallsLabelled(
+                DownloadManager.sessionCreationLabelPrefix,
+                until: { await gate.wait() }
+            ),
+            timeout: 7.5,
+            queueLabel: "sdis.test.joined-crossing.\(UUID().uuidString)"
         )
     }
 
@@ -132,33 +136,6 @@ struct BackgroundDownloadDropOutageIdentityTests {
             from: URL(string: "https://cdn.example.com/\(episodeId).mp3")!,
             context: context()
         )
-    }
-
-    /// Occupies `io`'s serial work queue and returns the semaphore that frees
-    /// it. Returns only once the queue is provably held.
-    ///
-    /// Copied in shape from `BackgroundSessionCreationTests`, which established
-    /// why it is load-bearing: without it the callers DO NOT OVERLAP — caller
-    /// one's crossing completes in microseconds against a healthy simulator
-    /// daemon, so the others find the memo populated and return it, which is
-    /// what a correct implementation AND an implementation with no join both
-    /// do. The label deliberately carries no `" for "`.
-    private static func holdingQueue(
-        of io: BackgroundSessionIO
-    ) async -> DispatchSemaphore {
-        let release = DispatchSemaphore(value: 0)
-        await withCheckedContinuation { (held: CheckedContinuation<Void, Never>) in
-            Task {
-                _ = await io.perform(
-                    label: "sdis.test.occupancy",
-                    running: {
-                        held.resume()
-                        release.wait()
-                    }
-                )
-            }
-        }
-        return release
     }
 
     /// Waits until `condition` holds, and reports whether it ever did. The
@@ -236,7 +213,7 @@ struct BackgroundDownloadDropOutageIdentityTests {
             ("task", Self.taskRefusingIO()),
             ("resume", Self.resumeRefusingIO()),
         ] {
-            let (store, _) = try await makeTestStoreWithDirectory()
+            let (store, dir) = try await makeTestStoreWithDirectory()
             let manager = Self.manager(
                 cacheDirectory: try makeTempDir(prefix: "sdisCrossingNo\(label)"),
                 store: store, sessionIO: io
@@ -249,8 +226,62 @@ struct BackgroundDownloadDropOutageIdentityTests {
             // discriminator is `launchId`, and this is the pairing a device
             // pull has to read together.
             #expect(row.launchId != nil, "\(label): a post-V64 row always names its launch")
+
+            // AND SQL DECLINES TO COUNT THE NULL, which is the half a Swift
+            // read cannot show. A table holding only this row reports ZERO
+            // daemon refusals — the number a reader wants — where a per-row
+            // sentinel would have reported ONE and invented a refusal that
+            // never happened. Same argument as `launchId`'s NULL, one column
+            // along, and the reason `sessionCrossingId` is not "filled in".
+            #expect(
+                try Self.scalar(
+                    dir,
+                    """
+                    SELECT count(DISTINCT sessionCrossingId)
+                    FROM background_download_drops
+                    """
+                ) == 0,
+                "\(label): no session refusal happened here at all, and the file must say zero"
+            )
             await manager.invalidateBackgroundSessionsForTesting()
         }
+    }
+
+    /// One row, one column, as an `Int`, through a SECOND connection — the
+    /// query a device pull runs. Throws rather than defaulting: a zero invented
+    /// from a missing row is exactly the reading this bead exists to refuse.
+    ///
+    /// `SQLITE_OPEN_READWRITE` rather than `READONLY` because `AnalysisStore`
+    /// sets `journal_mode = WAL`, and a WAL database admits a read-only
+    /// connection only while some other connection holds the `-shm` — so a
+    /// read-only probe would pass or fail depending on whether the store's own
+    /// handle happened to still be up.
+    private static func scalar(_ directory: URL, _ sql: String) throws -> Int {
+        let dbURL = directory.appendingPathComponent("analysis.sqlite")
+        var db: OpaquePointer?
+        guard sqlite3_open_v2(dbURL.path, &db, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK else {
+            throw NSError(
+                domain: "SdisScalar", code: 1,
+                userInfo: [NSLocalizedDescriptionKey: "could not open \(dbURL.path)"]
+            )
+        }
+        defer { sqlite3_close_v2(db) }
+        sqlite3_busy_timeout(db, 5000)
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw NSError(
+                domain: "SdisScalar", code: 2,
+                userInfo: [NSLocalizedDescriptionKey: String(cString: sqlite3_errmsg(db))]
+            )
+        }
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_step(stmt) == SQLITE_ROW else {
+            throw NSError(
+                domain: "SdisScalar", code: 3,
+                userInfo: [NSLocalizedDescriptionKey: "`\(sql)` returned no row"]
+            )
+        }
+        return Int(sqlite3_column_int64(stmt, 0))
     }
 
     // MARK: - 2. THE MIRROR RAILS — why `launchId` alone is not enough
@@ -303,53 +334,48 @@ struct BackgroundDownloadDropOutageIdentityTests {
     /// all, which is precisely how `count(*) = 3` came to be read as three
     /// daemon refusals.
     ///
-    /// THREE THINGS MUST BE TRUE AT ONCE or the rail is vacuous, and each is
+    /// TWO THINGS MUST BE TRUE AT ONCE or the rail is vacuous, and both are
     /// asserted rather than assumed:
-    ///   1. the crossing is HELD, so the callers can overlap (`holdingQueue`);
+    ///   1. the crossing is IN FLIGHT while the callers arrive — guaranteed by
+    ///      construction, because the seam does not answer until this rail
+    ///      opens the gate, and the gate is opened only after the barrier;
     ///   2. all three reach the crossing DECISION, which is an event both a
     ///      correct implementation and a join-less one reach
-    ///      (`sessionCrossingArrivalsForTesting == 3`);
-    ///   3. the barrier completes INSIDE the window, since a caller arriving
-    ///      after `joinWindowBound` would legitimately start its own crossing
-    ///      and the rail would be measuring the box.
+    ///      (`sessionCrossingArrivalsForTesting == 3`), so waiting for it is a
+    ///      WAIT rather than a race.
+    ///
+    /// The third condition the earlier version of this rail carried — "the
+    /// barrier completed inside the window" — is GONE, along with the window.
+    /// See `suspendingRefusalIO`.
     @Test("three CONCURRENT joiners of ONE crossing write three rows sharing ONE crossing id")
     func concurrentJoinersOfOneCrossingShareOneCrossingId() async throws {
         let (store, _) = try await makeTestStoreWithDirectory()
         let dir = try makeTempDir(prefix: "sdisJoin")
+        let gate = SuspendingSeamGate()
         let manager = Self.manager(
-            cacheDirectory: dir, store: store, sessionIO: Self.strandingIO()
+            cacheDirectory: dir, store: store,
+            sessionIO: Self.suspendingRefusalIO(gate: gate)
         )
         try await manager.bootstrap()
         await manager.armDropLedger()
         let launchId = await manager.launchId
 
-        let release = await Self.holdingQueue(of: await manager.sessionCreationIO)
-        let started = ContinuousClock.now
         async let first: Void = Self.drive(manager, episodeId: "ep-join-1")
         async let second: Void = Self.drive(manager, episodeId: "ep-join-2")
         async let third: Void = Self.drive(manager, episodeId: "ep-join-3")
 
+        // Read the arrivals while the crossing is STILL HELD, so the number
+        // describes the barrier rather than whatever survived the gate.
         let allArrived = await Self.waited {
             await manager.sessionCrossingArrivalsForTesting == 3
         }
-        let barrier = ContinuousClock.now - started
         let arrivals = await manager.sessionCrossingArrivalsForTesting
+        await gate.open()
         _ = await (first, second, third)
-        release.signal()
 
         #expect(
             allArrived,
             "the rail is vacuous unless all three callers reached the crossing decision: \(arrivals) of 3"
-        )
-        #expect(
-            barrier < .seconds(Self.joinWindowBound),
-            """
-            the barrier took \(barrier) against a \(Self.joinWindowBound)s \
-            window, so a caller may have arrived after the crossing had already \
-            expired and legitimately started its own. This run measured the \
-            box, not the join — re-run it; a crossing-id mismatch below would \
-            be that, not a defect.
-            """
         )
 
         let page = try await store.fetchBackgroundDownloadDrops()
@@ -397,18 +423,29 @@ struct BackgroundDownloadDropOutageIdentityTests {
             try await manager.bootstrap()
             await manager.armDropLedger()
             launchIds.append(await manager.launchId)
-            await Self.drive(manager, episodeId: "ep-launch-\(index)")
+            // TWO episodes each, and the second one is the discriminator: with
+            // one apiece `count(*)`, `count(DISTINCT launchId)` and
+            // `armedLaunches` would all read 2, and the rail could not tell an
+            // EPISODE count from a LAUNCH count — which is the exact confusion
+            // the bead exists to remove.
+            await Self.drive(manager, episodeId: "ep-launch-\(index)-a")
+            await Self.drive(manager, episodeId: "ep-launch-\(index)-b")
             await manager.invalidateBackgroundSessionsForTesting()
         }
 
         #expect(Set(launchIds).count == 2, "two managers must not share one identity")
         let page = try await store.fetchBackgroundDownloadDrops()
-        #expect(Set(page.rows.compactMap(\.launchId)) == Set(launchIds))
+        #expect(page.rows.count == 4, "FOUR episodes were lost…")
+        #expect(Set(page.rows.compactMap(\.launchId)) == Set(launchIds), "…on TWO launches")
         let arming = try #require(try await store.fetchBackgroundDownloadDropArming())
         #expect(arming.armedLaunches == 2)
         #expect(
             Set(page.rows.compactMap(\.launchId)).count == arming.armedLaunches,
-            "two launches armed and two launches dropped: the ratio is finally a ratio"
+            """
+            two launches armed and two launches dropped: the ratio is finally a \
+            ratio. `count(*) / armedLaunches` reads 2.0 on this same fixture and \
+            is episodes-per-launch wearing a rate's name.
+            """
         )
         #expect(
             arming.lastArmedLaunchId == launchIds[1],

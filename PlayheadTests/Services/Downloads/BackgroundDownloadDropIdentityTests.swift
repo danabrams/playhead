@@ -1,24 +1,36 @@
 // BackgroundDownloadDropIdentityTests.swift
-// playhead-sdis — `count(*)` on `background_download_drops` counts EPISODES
-// AFFECTED, and it was being read as a number of daemon OUTAGES. These rails
-// are what make the two separable, and every one of them asserts on the SQL a
-// device pull would actually run rather than on the Swift reader.
+// playhead-sdis — THE QUERIES A DEVICE PULL RUNS, against the FILE.
 //
-// ─────────────────────────────────────────────────────────────────────────
-// WHY THE QUERY AND NOT THE SWIFT PAGE
-// ─────────────────────────────────────────────────────────────────────────
-// `fetchBackgroundDownloadDrops` has NO production caller — playhead-7dgx says
-// so in its own bd comment, and the reason is that a human on a device pull
-// runs raw SQL. The Swift reader is also deliberately LOSSY (it skips rows
-// whose enums it cannot decode and counts them separately), so a rail written
-// only against `page.rows` measures a different population from the one the
-// answer will come from. Section 1 therefore runs
-// `count(DISTINCT sessionCrossingId)` against the file, through a second
-// connection, exactly as `sqlite3 analysis.sqlite` would.
+// `count(*)` on `background_download_drops` counts EPISODES AFFECTED and was
+// being read as a number of daemon OUTAGES. Three suites make the two
+// separable and each owns one layer, so a rail belongs to exactly one of them:
 //
-// The Swift reader is not abandoned: sections 4 and 5 are about IT, because
-// the decode refusal and the page's third unreadable-row counter are
-// properties only it has.
+//   * `BackgroundDownloadDropLaunchIdentityV64MigrationTests` — the SCHEMA.
+//     What the rung adds, what it must not backfill, what must not brick.
+//   * `BackgroundDownloadDropOutageIdentityTests` — the WRITE PATH. What
+//     `DownloadManager` stamps on a row, on each of the three drop sites.
+//   * THIS FILE — the READING. Multi-row populations mixed in ONE table and
+//     told apart by SQL run through a SECOND CONNECTION, exactly as
+//     `sqlite3 analysis.sqlite` would on a pull.
+//
+// WHY THE QUERY AND NOT THE SWIFT PAGE. `fetchBackgroundDownloadDrops` has NO
+// production caller — playhead-7dgx says so in its own bd comment, and the
+// reason is that a human on a device pull runs raw SQL. The Swift reader is
+// also deliberately LOSSY (it skips rows whose enums it cannot decode and
+// counts them separately), so a rail written only against `page.rows` measures
+// a different population from the one the answer will come from. The one
+// exception is section 4's `no_recorder` rail, which is about the reader's
+// VOCABULARY and says so.
+//
+// TEN RAILS WERE DELETED FROM THIS FILE RATHER THAN MERGED, because two rails
+// asserting one property is noise. Everything about a SINGLE row's stamps —
+// which launch, which crossing, which arming state, on which of the three drop
+// sites — lives in the write-path suite; everything about what the rung does
+// to a store lives in the schema suite. What is left here is the set of
+// readings that need MORE THAN ONE ROW to mean anything, plus the two
+// strengthenings folded into their counterparts rather than duplicated (the
+// `count(DISTINCT)`-declines-NULL check, and the episodes-are-not-launches
+// discriminator).
 //
 // ─────────────────────────────────────────────────────────────────────────
 // THE THREE POPULATIONS, AND WHY TWO COLUMNS ARE NEEDED TO SEPARATE THEM
@@ -33,11 +45,10 @@
 //     the FIRST caller's deadline and writes its own row. `sessionCrossingId`
 //     is what those rows share.
 //
-// So the rails come in a matched set: forty rows / one crossing / one launch;
-// forty rows / forty crossings / one launch; forty rows / forty crossings /
-// forty launches. A column that separated only one of the two axes would pass
-// one of the three and fail the others, which is why they are written as three
-// readings of ONE query rather than three different queries.
+// A column that separated only ONE of the two axes would pass a rail built on
+// the other, which is why `mixedPopulationsAreSeparated` builds both shapes
+// into one table and reads them with one `GROUP BY` rather than building each
+// in a table of its own.
 //
 // ─────────────────────────────────────────────────────────────────────────
 // HOW THE JOINED CROSSING IS REACHED AT ALL
@@ -64,12 +75,6 @@ struct BackgroundDownloadDropIdentityTests {
 
     // MARK: - Seams and helpers
 
-    /// The number the bead is written in. Large enough that "forty rows, one
-    /// crossing" and "forty rows, forty crossings" cannot be confused with each
-    /// other or with an off-by-one, and cheap because every one of the forty is
-    /// refused before it reaches `nsurlsessiond`.
-    private static let episodes = 40
-
     /// Deliberately NOT `BackgroundSessionIO.defaultTimeout`: asserting against
     /// the shipped constant compares it with itself. Never waited out — every
     /// seam below refuses rather than expiring.
@@ -90,7 +95,7 @@ struct BackgroundDownloadDropIdentityTests {
     /// Refuses the session crossing only once `gate` opens — the JOINED-CROSSING
     /// population. See the file header.
     private static func heldThenRefusingIO(
-        gate: CrossingGate
+        gate: SuspendingSeamGate
     ) -> BackgroundSessionIO {
         BackgroundSessionIO(
             behavior: .suspendsThenRefusesCallsLabelled(
@@ -100,33 +105,6 @@ struct BackgroundDownloadDropIdentityTests {
             timeout: bound,
             queueLabel: "sdis.test.joined-crossing.\(UUID().uuidString)"
         )
-    }
-
-    /// A one-shot gate the SEAM awaits and the RAIL opens.
-    ///
-    /// An actor rather than a `DispatchSemaphore` because `perform`'s prologue
-    /// runs on the cooperative pool: a semaphore would occupy a pool thread the
-    /// runtime does not replace, for the whole barrier. Waiters resume in the
-    /// order they arrived, and a `wait()` after `open()` returns at once, so no
-    /// caller can be stranded by ordering.
-    private actor CrossingGate {
-        private var opened = false
-        private var waiting: [CheckedContinuation<Void, Never>] = []
-
-        func open() {
-            guard !opened else { return }
-            opened = true
-            let pending = waiting
-            waiting = []
-            for continuation in pending { continuation.resume() }
-        }
-
-        func wait() async {
-            if opened { return }
-            await withCheckedContinuation { continuation in
-                waiting.append(continuation)
-            }
-        }
     }
 
     /// Waits until `condition` holds, and reports whether it ever did.
@@ -149,7 +127,6 @@ struct BackgroundDownloadDropIdentityTests {
     private static func manager(
         store: AnalysisStore?,
         sessionIO: BackgroundSessionIO,
-        invariantRecorder: RecordedInvariantViolations? = nil,
         launchId: String? = nil
     ) throws -> DownloadManager {
         let recorder: any BackgroundDownloadDropRecording
@@ -165,7 +142,6 @@ struct BackgroundDownloadDropIdentityTests {
             return DownloadManager(
                 cacheDirectory: try makeTempDir(prefix: "sdisCache"),
                 sessionIO: sessionIO,
-                invariantRecorder: invariantRecorder?.recorder,
                 dropRecorder: recorder,
                 launchId: launchId
             )
@@ -173,7 +149,6 @@ struct BackgroundDownloadDropIdentityTests {
         return DownloadManager(
             cacheDirectory: try makeTempDir(prefix: "sdisCache"),
             sessionIO: sessionIO,
-            invariantRecorder: invariantRecorder?.recorder,
             dropRecorder: recorder
         )
     }
@@ -322,143 +297,8 @@ struct BackgroundDownloadDropIdentityTests {
 
     // MARK: - 1. The three readings, each from the SAME query
 
-    /// ONE OUTAGE THAT COST FORTY EPISODES.
-    ///
-    /// Forty concurrent callers, one in-flight crossing, one refusal. Before
-    /// this bead the forty rows shared no marker at all and `count(*)` read as
-    /// forty daemon refusals — the number playhead-7dgx's retry recommendation
-    /// rests on, and the number it could not falsify.
-    ///
-    /// THE RAIL IS VACUOUS UNLESS THE FORTY GENUINELY OVERLAP, which is why the
-    /// arrival barrier is asserted before anything else: with a synchronous
-    /// refusal every caller starts its own crossing and this rail would read
-    /// forty crossings while nothing was wrong.
-    @Test("forty episodes lost to ONE daemon refusal: 40 rows, 1 crossing, 1 launch")
-    func oneOutageThatCostFortyEpisodes() async throws {
-        let (store, dir) = try await Self.openedStore()
-        let gate = CrossingGate()
-        let manager = try Self.manager(
-            store: store, sessionIO: Self.heldThenRefusingIO(gate: gate)
-        )
-        try await manager.bootstrap()
-        await manager.armDropLedger()
 
-        let barrier: (arrived: Bool, count: Int) = await withTaskGroup(
-            of: Void.self
-        ) { group in
-            for index in 0..<Self.episodes {
-                group.addTask {
-                    await Self.drive(manager, episodeId: "ep-join-\(index)")
-                }
-            }
-            // THE BARRIER. Every caller reaching the crossing decision is an
-            // event BOTH implementations reach — the one with the join joins
-            // there, one without starts a second crossing there — so waiting
-            // for it is a wait rather than a race. Read while the crossing is
-            // still held, so the number describes the barrier.
-            let arrived = await Self.waited {
-                await manager.sessionCrossingArrivalsForTesting == Self.episodes
-            }
-            let count = await manager.sessionCrossingArrivalsForTesting
-            await gate.open()
-            return (arrived, count)
-        }
 
-        #expect(
-            barrier.arrived,
-            """
-            the rail is vacuous unless all \(Self.episodes) callers reached the \
-            crossing decision while it was held: \(barrier.count) arrived
-            """
-        )
-
-        let reading = try Self.readings(dir)
-        #expect(
-            reading.episodes == Self.episodes,
-            "count(*) is EPISODES AFFECTED and there were \(Self.episodes) of them"
-        )
-        #expect(
-            reading.refusals == 1,
-            """
-            ONE crossing, so ONE daemon refusal. \(reading.refusals) means the \
-            joiners minted ids of their own, which is the reading this column \
-            exists to remove
-            """
-        )
-        #expect(reading.launches == 1, "one process wrote all of them")
-
-        // And the ratio the bead is about, stated as the two quantities rather
-        // than as one number: 40 episodes per 1 refusal.
-        #expect(reading.episodes > reading.refusals)
-    }
-
-    /// FORTY SEPARATE OUTAGES, ONE LAUNCH.
-    ///
-    /// The mirror, and it is not a formality: `launchId` alone reads this case
-    /// and the one above IDENTICALLY (one launch, forty rows), which is the
-    /// whole reason the bead's one-column fix was not enough. A refusal is
-    /// never cached — `sessionCreationRetriesAfterARefusal` is the property —
-    /// so forty sequential requests really are forty crossings.
-    @Test("forty separate refusals in ONE launch: 40 rows, 40 crossings, 1 launch")
-    func fortySeparateOutagesInOneLaunch() async throws {
-        let (store, dir) = try await Self.openedStore()
-        let manager = try Self.manager(
-            store: store, sessionIO: Self.creationRefusingIO()
-        )
-        try await manager.bootstrap()
-        await manager.armDropLedger()
-
-        for index in 0..<Self.episodes {
-            await Self.drive(manager, episodeId: "ep-seq-\(index)")
-        }
-
-        let reading = try Self.readings(dir)
-        #expect(reading.episodes == Self.episodes)
-        #expect(
-            reading.refusals == Self.episodes,
-            """
-            each sequential request crossed on its own — a refusal is never \
-            cached — so these really are \(Self.episodes) daemon refusals
-            """
-        )
-        #expect(
-            reading.launches == 1,
-            "…in ONE launch, which is exactly what launchId alone cannot distinguish from the joined case"
-        )
-    }
-
-    /// FORTY LAUNCHES. The third axis, and the one `sessionCrossingId` alone
-    /// cannot see: it reads this case and the one above identically (forty
-    /// crossings, forty rows).
-    ///
-    /// Fewer managers than `episodes` on purpose — each one is a whole
-    /// `DownloadManager` with its own cache directory, and the property is
-    /// "distinct launches are distinct", not a number.
-    @Test("N launches are N launches: distinct managers mint distinct launch ids")
-    func distinctLaunchesAreDistinguishable() async throws {
-        let (store, dir) = try await Self.openedStore()
-        let launches = 4
-        for index in 0..<launches {
-            let manager = try Self.manager(
-                store: store, sessionIO: Self.creationRefusingIO()
-            )
-            try await manager.bootstrap()
-            await manager.armDropLedger()
-            await Self.drive(manager, episodeId: "ep-launch-\(index)")
-        }
-
-        let reading = try Self.readings(dir)
-        #expect(reading.episodes == launches)
-        #expect(reading.refusals == launches)
-        #expect(
-            reading.launches == launches,
-            """
-            \(launches) processes wrote these rows. A process-wide `static` \
-            launchId — the spelling the column's own docs refuse — would read \
-            1 here while every other assertion in this file still passed
-            """
-        )
-    }
 
     /// ALL THREE POPULATIONS IN ONE TABLE, told apart by ONE `GROUP BY`.
     ///
@@ -472,7 +312,7 @@ struct BackgroundDownloadDropIdentityTests {
         let (store, dir) = try await Self.openedStore()
 
         // Launch one: a joined crossing that cost three episodes.
-        let gate = CrossingGate()
+        let gate = SuspendingSeamGate()
         let joined = try Self.manager(
             store: store,
             sessionIO: Self.heldThenRefusingIO(gate: gate),
@@ -531,117 +371,7 @@ struct BackgroundDownloadDropIdentityTests {
         )
     }
 
-    /// The crossing id on the row is the id of the crossing that was REFUSED,
-    /// and not merely some id.
-    ///
-    /// Every rail above compares the column with ITSELF — equal here, distinct
-    /// there — so all of them would pass against a per-row UUID that had
-    /// nothing to do with any crossing, as long as the joiners happened to
-    /// share it. The refusal record on the surface-status stream carries
-    /// `crossing=<id>` and is written by the caller that STARTED the crossing,
-    /// inside `backgroundSessionRidingCrossing`; the row is written by
-    /// `backgroundDownload` afterwards. Asserting the two are EQUAL is the only
-    /// thing in this file that pins the column to the event it names.
-    @Test("the row's crossing id is the one the REFUSAL record names")
-    func theRowNamesTheCrossingThatWasRefused() async throws {
-        let (store, dir) = try await Self.openedStore()
-        let recording = RecordedInvariantViolations()
-        let manager = try Self.manager(
-            store: store,
-            sessionIO: Self.creationRefusingIO(),
-            invariantRecorder: recording
-        )
-        try await manager.bootstrap()
-        await manager.armDropLedger()
-        await Self.drive(manager, episodeId: "ep-witness")
 
-        let refusals = recording.sessionRefusals(from: "background_download")
-        #expect(refusals.count == 1, "one crossing, one refusal record")
-        let description = try #require(refusals.first)
-        // `crossing=<uuid> ` — the field is followed by a space in the record.
-        let marker = "crossing="
-        let start = try #require(description.range(of: marker)?.upperBound)
-        let recorded = String(
-            description[start...].prefix(while: { !$0.isWhitespace })
-        )
-        #expect(recorded.isEmpty == false, "the refusal record must NAME its crossing")
-
-        let rows = try Self.query(dir, """
-            SELECT sessionCrossingId FROM background_download_drops
-            WHERE episodeId='ep-witness'
-            """)
-        #expect(rows.count == 1)
-        #expect(
-            rows.first?.first == recorded,
-            """
-            the drop row must carry the crossing the refusal record names. \
-            row=\(rows.first?.first ?? "NULL") record=\(recorded). Two different \
-            values mean the column is a fresh UUID wearing a crossing's name, \
-            which every equality rail in this file would still pass
-            """
-        )
-    }
-
-    /// NULL FOR THE OTHER TWO REASONS IS A STATEMENT, NOT A GAP.
-    ///
-    /// `transferTaskNotVended` and `transferNotResumed` each follow one
-    /// `sessionIO.perform` the caller submitted alone, so for them a row IS a
-    /// call. Giving them a per-row UUID would be a column in bijection with the
-    /// primary key — no information, and an invitation to read
-    /// `count(DISTINCT sessionCrossingId)` across all reasons as an outage
-    /// count. This rail is what stops a later diff "filling in the gap".
-    @Test("a reason that rides no crossing records NULL, and count(DISTINCT) declines to count it")
-    func aReasonWithNoCrossingRecordsNull() async throws {
-        let (store, dir) = try await Self.openedStore()
-        let manager = try Self.manager(
-            store: store,
-            sessionIO: BackgroundSessionIO(
-                behavior: .refusesCallsLabelled("downloadTask(with:) for"),
-                timeout: Self.bound,
-                queueLabel: "sdis.test.task-refused.\(UUID().uuidString)"
-            )
-        )
-        try await manager.bootstrap()
-        // BOTH a `defer` and a trailing `await`, on `StreamingDownloadTests`'
-        // precedent: the `defer` covers the throw path, where a trailing call
-        // is skipped by any `try` above it, and the trailing call covers the
-        // pass path, where the `defer`'s unstructured `Task` is awaited by
-        // nothing and can leave a live session on a process-wide background
-        // identifier past the end of the test.
-        defer { Task { await manager.invalidateBackgroundSessionsForTesting() } }
-        await manager.armDropLedger()
-        await Self.drive(manager, episodeId: "ep-task")
-
-        let rows = try Self.query(dir, """
-            SELECT reason, sessionCrossingId, launchId IS NULL
-            FROM background_download_drops
-            """)
-        #expect(rows.count == 1)
-        #expect(rows.first?[0] == "transfer_task_not_vended")
-        #expect(
-            rows.first?[1] == nil,
-            "nothing JOINS a downloadTask submission, so for this reason a row IS a call"
-        )
-        #expect(
-            rows.first?[2] == "0",
-            """
-            …and the row still carries a LAUNCH. `sessionCrossingId IS NULL` \
-            alone cannot tell this row from one that predates V64; the pair of \
-            columns can, which is why the header says to read them together
-            """
-        )
-
-        // Across ALL reasons the crossing count is 1, not 2 — SQL's own
-        // count(DISTINCT) skips the NULL. A sentinel would have made it 2 and
-        // invented a daemon refusal that never happened.
-        #expect(
-            try Self.scalar(dir, """
-                SELECT count(DISTINCT sessionCrossingId) FROM background_download_drops
-                """) == 0,
-            "no session refusal happened here at all, and the table says zero rather than one"
-        )
-        await manager.invalidateBackgroundSessionsForTesting()
-    }
 
     // MARK: - 2. Rows written when NOBODY WAS COUNTING
 
@@ -758,51 +488,6 @@ struct BackgroundDownloadDropIdentityTests {
 
     // MARK: - 3. The arming join — two quantities, finally one unit
 
-    /// `count(DISTINCT launchId)` AGAINST `armedLaunches`, WHICH IS A COUNT OF
-    /// LAUNCHES.
-    ///
-    /// This is the bead's headline claim and it needs the two numbers side by
-    /// side. Before V64 the numerator was EPISODES and the denominator was
-    /// LAUNCHES, so their ratio was not a quantity at all. Two launches that
-    /// both armed and both dropped: the numerator reads 2 and the denominator
-    /// reads 2, and the ratio is 1.0 — a number that means something.
-    @Test("count(DISTINCT launchId) and armedLaunches are in the SAME unit")
-    func theNumeratorAndDenominatorShareAUnit() async throws {
-        let (store, dir) = try await Self.openedStore()
-        for index in 0..<2 {
-            let manager = try Self.manager(
-                store: store,
-                sessionIO: Self.creationRefusingIO(),
-                launchId: "launch-unit-\(index)"
-            )
-            try await manager.bootstrap()
-            await manager.armDropLedger()
-            // Two episodes each, so `count(*)` reads FOUR while both of the
-            // quantities under test read two. Without this the rail could not
-            // tell a launch count from an episode count.
-            await Self.drive(manager, episodeId: "ep-unit-\(index)-a")
-            await Self.drive(manager, episodeId: "ep-unit-\(index)-b")
-        }
-
-        let episodes = try Self.scalar(dir, "SELECT count(*) FROM background_download_drops")
-        let launches = try Self.scalar(
-            dir, "SELECT count(DISTINCT launchId) FROM background_download_drops"
-        )
-        let armed = try Self.scalar(
-            dir, "SELECT armedLaunches FROM background_download_drop_arming"
-        )
-        #expect(episodes == 4, "four episodes were lost")
-        #expect(launches == 2, "…on two launches")
-        #expect(armed == 2, "…and both of them armed the recorder")
-        #expect(
-            launches == armed,
-            """
-            the ratio the bead exists to make computable. `count(*) / \
-            armedLaunches` would read 2.0 here and would be episodes-per-launch \
-            wearing a rate's name
-            """
-        )
-    }
 
     /// AND THE CASE THAT MAKES THE RATIO HONEST: a launch that dropped without
     /// arming pushes the NUMERATOR ABOVE THE DENOMINATOR.
@@ -950,34 +635,6 @@ struct BackgroundDownloadDropIdentityTests {
         )
     }
 
-    /// The write-failure re-create path must NOT name a launch.
-    ///
-    /// `noteBackgroundDownloadDropWriteFailure` re-creates a missing arming row
-    /// so a hand-edited or partially rolled-back store still counts. A write
-    /// FAILURE is not an arming, so that path leaves `armedLaunches` at 0 —
-    /// and, for the identical reason, must leave `lastArmedLaunchId` NULL.
-    /// Naming a launch there would manufacture the very claim the row exists to
-    /// withhold, in the one column a drop row's `launchId` is compared against.
-    @Test("a write failure that re-creates the arming row names NO launch")
-    func aWriteFailureNamesNoLaunch() async throws {
-        let (store, dir) = try await Self.openedStore()
-        try await store.noteBackgroundDownloadDropWriteFailure(at: 99.0)
-        let row = try Self.query(dir, """
-            SELECT armedLaunches, dropWriteFailures, lastArmedLaunchId, lastArmedAt
-            FROM background_download_drop_arming
-            """)
-        #expect(
-            row == [["0", "1", nil, nil]],
-            """
-            armedLaunches stays 0 (the V62 seed's value — nobody armed), \
-            dropWriteFailures goes to 1, and BOTH the launch id and the arming \
-            date stay NULL. A failed write is not an arming, so naming a launch \
-            here would manufacture the very claim this row exists to withhold — \
-            in the one column a drop row's `launchId` is compared against. \
-            Got: \(row)
-            """
-        )
-    }
 
     // MARK: - 4. The arming state is sampled AT THE WRITE, not at construction
 
@@ -1019,45 +676,6 @@ struct BackgroundDownloadDropIdentityTests {
         )
     }
 
-    /// `arming_failed` IS ITS OWN STATE and is not folded into `not_attempted`.
-    ///
-    /// The two are different claims with different futures: `not_attempted` is
-    /// "not yet, and possibly never", while `arming_failed` is "it ran, the
-    /// counter write failed, and this launch will never be in `armedLaunches`"
-    /// — the write is not retried. A reader who could not tell them apart would
-    /// go looking for a race that never happened.
-    @Test("an arming whose counter write FAILED is its own state on every later row")
-    func aFailedArmingIsItsOwnState() async throws {
-        let dir = try makeTempDir(prefix: "sdisArmFailure")
-        AnalysisStore.resetMigratedPathsForTesting()
-        let store = try AnalysisStore(directory: dir)
-        try await store.migrate()
-        TestScratchReaper.shared.adopt(dir, owner: store)
-        _ = try await store.fetchBackgroundDownloadDrops()
-
-        // Break exactly the ARMING table, leaving the drops table writable —
-        // the shape a partial failure has.
-        try Self.writeBehindTheStore(dir, "DROP TABLE background_download_drop_arming")
-
-        let manager = try Self.manager(
-            store: store, sessionIO: Self.creationRefusingIO(), launchId: "launch-arm-failed"
-        )
-        try await manager.bootstrap()
-        await manager.armDropLedger()
-        await Self.drive(manager, episodeId: "ep-arm-failed")
-
-        let rows = try Self.query(dir, """
-            SELECT launchId, launchArmingState FROM background_download_drops
-            """)
-        #expect(
-            rows == [["launch-arm-failed", "arming_failed"]],
-            """
-            the arming RAN and its write failed, so this launch is not in \
-            `armedLaunches` and never will be. Reading it as `not_attempted` \
-            would say the drop merely raced the launch Task. Got: \(rows)
-            """
-        )
-    }
 
     /// `no_recorder` is EXPRESSIBLE, and unreachable on a persisted row.
     ///
@@ -1132,105 +750,7 @@ struct BackgroundDownloadDropIdentityTests {
         )
     }
 
-    // MARK: - 5. What the Swift reader does with a value it cannot decode
 
-    /// THE SAME RULE A THIRD TIME. `reason` and `unattributedReason` are each
-    /// skipped-and-counted when this build cannot decode them; so is
-    /// `launchArmingState`, and it needs its OWN counter.
-    ///
-    /// Coercing an unknown raw value to `.notAttempted` would inflate the
-    /// population that claims "this launch is not in the denominator", which is
-    /// the very claim the column exists to make honestly. Mapping it to nil
-    /// would say the row PREDATES V64, which a row carrying a value
-    /// demonstrably does not.
-    @Test("an unrecognized launchArmingState is counted separately, never coerced")
-    func anUnknownArmingStateIsReportedRatherThanCoerced() async throws {
-        let (store, dir) = try await Self.openedStore()
-        try Self.writeBehindTheStore(dir, """
-            INSERT INTO background_download_drops
-            (id, episodeId, reason, occurredAt, podcastId, unattributedReason,
-             isExplicitDownload, boundSeconds, launchId, sessionCrossingId,
-             launchArmingState)
-            VALUES ('row-2027', 'ep-2027', 'session_not_vended', 1.0, NULL, NULL, 0, 10.0,
-                    'launch-2027', 'crossing-2027', 'an_arming_state_from_2027')
-            """)
-
-        let page = try await store.fetchBackgroundDownloadDrops()
-        #expect(page.rows.isEmpty, "a row whose arming this build cannot read must not be materialized")
-        #expect(page.unrecognizedLaunchArmingStateRows == 1)
-        #expect(page.unrecognizedReasonRows == 0, "the three losses are counted separately")
-        #expect(page.unrecognizedUnattributedReasonRows == 0)
-        #expect(page.totalRowsSeen == 1, "'one drop' and 'one drop I can read' are different claims")
-
-        // And a NULL is NOT counted here: that is a pre-V64 row, a legitimate
-        // absence, returned in `rows` with a nil arming state.
-        try Self.writeBehindTheStore(dir, """
-            INSERT INTO background_download_drops
-            (id, episodeId, reason, occurredAt, podcastId, unattributedReason,
-             isExplicitDownload, boundSeconds)
-            VALUES ('row-legacy', 'ep-legacy', 'session_not_vended', 2.0, NULL, NULL, 0, 10.0)
-            """)
-        let second = try await store.fetchBackgroundDownloadDrops()
-        #expect(second.rows.count == 1)
-        #expect(second.rows.first?.launchArmingState == nil)
-        #expect(second.rows.first?.launchId == nil)
-        #expect(
-            second.unrecognizedLaunchArmingStateRows == 1,
-            "still one — a NULL is an absence this build understands, not a value it cannot read"
-        )
-        #expect(second.totalRowsSeen == 2)
-    }
-
-    /// `ORDER BY occurredAt DESC, id DESC` — the TIEBREAKER, not decoration.
-    ///
-    /// N rows minted by N joiners of one crossing carry `occurredAt` values
-    /// that can be equal to the double's precision. With `occurredAt` alone,
-    /// which of them a `limit` cuts off is whatever SQLite's scan order happens
-    /// to be — so the page's `truncated` flag names an arbitrary set, and two
-    /// reads of the same file can disagree.
-    @Test("rows sharing an occurredAt are ordered by id, so a limit cuts deterministically")
-    func equalStampsAreBrokenByIdDescending() async throws {
-        let (store, dir) = try await Self.openedStore()
-        // Byte-identical stamps, inserted in an order that does NOT match the
-        // required output order — so a query that fell back on rowid would
-        // return them the other way round.
-        try Self.writeBehindTheStore(dir, """
-            INSERT INTO background_download_drops
-            (id, episodeId, reason, occurredAt, podcastId, unattributedReason,
-             isExplicitDownload, boundSeconds, launchId, sessionCrossingId,
-             launchArmingState)
-            VALUES ('id-a', 'ep-a', 'session_not_vended', 500.0, NULL, NULL, 0, 10.0,
-                    'launch-tie', 'crossing-tie', 'armed'),
-                   ('id-c', 'ep-c', 'session_not_vended', 500.0, NULL, NULL, 0, 10.0,
-                    'launch-tie', 'crossing-tie', 'armed'),
-                   ('id-b', 'ep-b', 'session_not_vended', 500.0, NULL, NULL, 0, 10.0,
-                    'launch-tie', 'crossing-tie', 'armed')
-            """)
-
-        let page = try await store.fetchBackgroundDownloadDrops()
-        #expect(
-            page.rows.map(\.id) == ["id-c", "id-b", "id-a"],
-            "descending id breaks the tie: \(page.rows.map(\.id))"
-        )
-        let capped = try await store.fetchBackgroundDownloadDrops(limit: 2)
-        #expect(
-            capped.rows.map(\.id) == ["id-c", "id-b"],
-            """
-            and the LIMIT therefore cuts a stated set rather than an arbitrary \
-            one — `truncated` means nothing if two reads of one file disagree \
-            about which rows fitted. Got: \(capped.rows.map(\.id))
-            """
-        )
-        #expect(capped.truncated)
-        // The three rows really do share a stamp; without this the ordering
-        // above could be `occurredAt DESC` doing all the work.
-        #expect(
-            try Self.scalar(dir, """
-                SELECT count(DISTINCT occurredAt) FROM background_download_drops
-                """) == 1,
-            "the rail is vacuous unless the stamps are genuinely equal"
-        )
-    }
 
     // MARK: - Writing behind the store's back
 

@@ -400,11 +400,16 @@ struct BackgroundDownloadDropLaunchIdentityV64MigrationTests {
         )
     }
 
-    /// A WRITE FAILURE IS NOT AN ARMING, and the re-create path must not claim
-    /// one. `noteBackgroundDownloadDropWriteFailure` re-creates a missing
-    /// arming row; naming a launch there would manufacture exactly the claim
-    /// `armedLaunches = 0` exists to withhold.
-    @Test("a write failure that re-creates the arming row names NO launch")
+    /// A WRITE FAILURE IS NOT AN ARMING, and NEITHER of the two paths through
+    /// `noteBackgroundDownloadDropWriteFailure` may claim one.
+    ///
+    /// It has two, and a rail covering one of them is a rail about one of them:
+    /// it UPDATES the arming row the V62 seed installed, and it RE-CREATES a
+    /// row that has been deleted (a hand-edited or partially rolled-back
+    /// store). Naming a launch on either would manufacture exactly the claim
+    /// `armedLaunches = 0` exists to withhold — in the one column a drop row's
+    /// `launchId` is compared against.
+    @Test("a write failure names NO launch, on the update path and on the re-create path")
     func aWriteFailureNeverNamesALaunch() async throws {
         let dir = try makeTempDir(prefix: "V64FailureNoLaunch")
         AnalysisStore.resetMigratedPathsForTesting()
@@ -412,6 +417,20 @@ struct BackgroundDownloadDropLaunchIdentityV64MigrationTests {
         try await store.migrate()
         TestScratchReaper.shared.adopt(dir, owner: store)
 
+        // PATH ONE: the seeded row is there, so this is an UPDATE.
+        let seeded = try #require(try await store.fetchBackgroundDownloadDropArming())
+        #expect(seeded.armedLaunches == 0, "the V62 seed has never armed")
+        try await store.noteBackgroundDownloadDropWriteFailure(at: 600.0)
+        let updated = try #require(try await store.fetchBackgroundDownloadDropArming())
+        #expect(updated.dropWriteFailures == 1)
+        #expect(updated.armedLaunches == 0)
+        #expect(updated.lastArmedAt == nil, "a failed write is not an arming and does not date one")
+        #expect(
+            updated.lastArmedLaunchId == nil,
+            "…and it does not NAME one either, for the identical reason"
+        )
+
+        // PATH TWO: the row is gone, so this is a RE-CREATE.
         let db = try openRawReadWrite(dir)
         #expect(
             sqlite3_exec(db, "DELETE FROM \(Self.armingTable)", nil, nil, nil) == SQLITE_OK
@@ -511,12 +530,15 @@ struct BackgroundDownloadDropLaunchIdentityV64MigrationTests {
     /// window.
     @Test("rows sharing one timestamp page deterministically, so a limit cuts a stated set")
     func equalTimestampsPageDeterministically() async throws {
-        let (store, _) = try await makeTestStoreWithDirectory()
+        let (store, dir) = try await makeTestStoreWithDirectory()
         let context = DownloadContext(
             podcastId: "show-sdis", isExplicitDownload: false,
             podcastTitle: "Show", episodeTitle: "Episode"
         )
-        for suffix in ["a", "b", "c", "d"] {
+        // Inserted in an order that is neither the required output order nor
+        // its reverse, so a query that fell back on rowid — in either
+        // direction — returns something else.
+        for suffix in ["a", "c", "b", "d"] {
             try await store.insertBackgroundDownloadDrop(
                 BackgroundDownloadDropRecord(
                     episodeId: "ep-\(suffix)",
@@ -531,6 +553,25 @@ struct BackgroundDownloadDropLaunchIdentityV64MigrationTests {
                 )
             )
         }
+        // THE RAIL IS VACUOUS UNLESS THE STAMPS ARE GENUINELY EQUAL — if they
+        // are not, `occurredAt DESC` is doing all the work and the tiebreaker
+        // is never exercised. Read raw, because the Swift row carries a Double
+        // that a reader would have to compare by hand.
+        let db = try openRawReadWrite(dir)
+        var stmt: OpaquePointer?
+        #expect(
+            sqlite3_prepare_v2(
+                db, "SELECT count(DISTINCT occurredAt) FROM \(Self.dropsTable)", -1, &stmt, nil
+            ) == SQLITE_OK
+        )
+        #expect(sqlite3_step(stmt) == SQLITE_ROW)
+        #expect(
+            sqlite3_column_int64(stmt, 0) == 1,
+            "four rows must share ONE stamp, or this rail measures the timestamp and not the tiebreaker"
+        )
+        sqlite3_finalize(stmt)
+        sqlite3_close_v2(db)
+
         let full = try await store.fetchBackgroundDownloadDrops()
         #expect(full.rows.map(\.id) == ["row-d", "row-c", "row-b", "row-a"])
         let capped = try await store.fetchBackgroundDownloadDrops(limit: 2)
