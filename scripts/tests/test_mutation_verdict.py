@@ -715,7 +715,27 @@ class ShellLadderTests(unittest.TestCase):
                                 env=env).stdout
         self.assertEqual(status.strip(), "",
                          "the sandbox kept an injected mutant:\n" + status)
+        self._reap_work_dir(proc)
         return proc
+
+    @staticmethod
+    def _reap_work_dir(proc):
+        """Remove the $WORK the battery kept.
+
+        Every rail here deliberately produces a non-KILL outcome, and the
+        battery sets KEEP_WORK=1 on exactly those — so a full pass leaves a
+        dozen directories under /private/tmp. That is the accumulation
+        playhead-8cjo measured (52 of them, 684 MiB, from four beads), and a
+        rail that adds to it while testing the fix for it is not funny. The path
+        is taken from the battery's OWN line and re-checked against the prefix
+        before anything is removed.
+        """
+        for line in (proc.stdout + proc.stderr).split("\n"):
+            if "logs kept in " not in line:
+                continue
+            kept = line.split("logs kept in ", 1)[1].strip()
+            if kept.startswith("/private/tmp/playhead-mutation-battery."):
+                shutil.rmtree(kept, ignore_errors=True)
 
     def out(self, proc):
         return proc.stdout + "\n" + proc.stderr
