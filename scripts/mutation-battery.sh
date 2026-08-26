@@ -780,9 +780,11 @@
 #   visibly listed two lines above. `extract_ran` matched the marker only at the
 #   START of a line, and this run interleaved `XCTestOutputBarrier` into the
 #   `◇ Test "…" started` line — word characters, so `^\W*` could not skip them.
-#   `extract_failures` had the identical exposure and got lucky. Both now scan
-#   for the marker anywhere in the line; see the note there for why that cannot
-#   manufacture a KILL.
+#   `extract_failures` had the identical exposure and got lucky. Both were made
+#   to scan for the marker anywhere in the line. (Both functions are GONE since
+#   playhead-gjlp0; `gate_baseline.py` searches rather than anchoring, and goes
+#   further — it rejoins verdict lines the app's output severed outright. The
+#   pointer that used to sit here named a note that was deleted with them.)
 #
 #   Composition, stated because it was not one invocation. First pass, batches
 #   120-125: 11 KILLED, 1 SURVIVED. Z02 — delete the orphan-mark reset in
@@ -2229,12 +2231,16 @@ FOCUSED_SUITES=(
   -only-testing:PlayheadTests/AdPodContinuationDayZeroSeedTests
   # playhead-kvs8: the FM daemon throttle (Q01-Q08).
   #
-  # NOT LISTED, and it is not an oversight: `FMDaemonThrottleCanaryTests` is
-  # XCTest, and `extract_ran`/`extract_failures` above parse only Swift
-  # Testing's `◇ Test "…" started` lines. An expectation naming an XCTest case
-  # can never be matched, so it would report ERROR rather than KILLED. The two
-  # source canaries (the streaming sweep and the probe cache guard) are verified
-  # by hand instead — see the kvs8 provenance note.
+  # NOT LISTED. THE REASON RECORDED HERE IS OBSOLETE AND IS KEPT AS HISTORY:
+  # it said `FMDaemonThrottleCanaryTests` is XCTest and the battery's scrapers
+  # "parse only Swift Testing's `◇ Test "…" started` lines", so an XCTest
+  # expectation "can never be matched". playhead-le02 made XCTest matchable and
+  # playhead-gjlp0 moved the reading to `scripts/mutation_verdict.py`, which
+  # takes both frameworks from the .xcresult bundle. The two source canaries
+  # (the streaming sweep and the probe cache guard) are still verified by hand
+  # — see the kvs8 provenance note. ADDING THE SUITE IS NOW POSSIBLE AND IS A
+  # SEPARATE DECISION: it costs the focused run whatever those tests cost, so
+  # it belongs to whoever is measuring that, not to a comment repair.
   -only-testing:PlayheadTests/FMDaemonThrottleClassificationTests
   -only-testing:PlayheadTests/FMThrottledPrologueRunnerTests
   -only-testing:PlayheadTests/FMThrottlePermissiveLaneTests
@@ -2929,10 +2935,13 @@ T_LE02_BYPASS_DECISION="same-ID decision with changed bounds must pass inventory
 T_LE02_DOOR_FOREIGN="ingest for an asset that is NOT the one playing delivers nothing"
 T_LE02_DOOR_NOEPISODE="ingest with no active episode delivers nothing"
 T_LE02_DOOR_VETOED="a user-vetoed row is not resurrected by the mid-session door"
-# These two are XCTest, which this battery could not match until le02 taught
-# `extract_ran`/`extract_failures` to read `Test Case '-[Suite method]'` lines.
-# Written in the QUALIFIED `Suite/method` form the extractors also emit, so a
-# same-named method in another suite cannot manufacture a kill.
+# These two are XCTest, which this battery could not match until le02 taught it
+# to read `Test Case '-[Suite method]'` lines. Written in the QUALIFIED
+# `Suite/method` form — NO module prefix — so a same-named method in another
+# suite cannot manufacture a kill. Since playhead-gjlp0 the reading is
+# `scripts/mutation_verdict.py`; `candidate_keys` matches this spelling as a
+# DOTTED SUFFIX of the bundle's module-qualified key, and R1 of that bead is
+# the record of what happens when it does not.
 T_LE02_PRELOAD_APPLIED="SkipOrchestratorPreloadTests/testPreloadedAppliedWindowDoesNotEmitBanner"
 T_LE02_ENDEPISODE_RESET="SkipOrchestratorPreloadTests/testEndEpisodeResetsEmittedAutoSkipBannersSet"
 T_LISTEN_RACE="A Listen revert whose episode is replaced mid-flight still calibrates the captured show"
@@ -3382,10 +3391,12 @@ T_7DGX_STAMPED="a store STAMPED at head but missing the tables gets them back on
 # XCTest source canaries, by method name.
 T_7DGX_C_LADDER="testV62IsRegisteredInBothLaddersExactlyOnceEach"
 # CLASS-QUALIFIED by playhead-4xmz (review 5): its canary adds a second method
-# of this exact name, and `extract_failures` emits the bare form too — so the
-# unqualified spelling would let a DW failure be credited to BD07, which is
-# the false-KILL shape this file calls silent and indistinguishable from
-# success. The DW side was qualified when it was written; the mirror was not.
+# of this exact name, and a BARE method name resolves against every suite that
+# has one — so the unqualified spelling would let a DW failure be credited to
+# BD07, which is the false-KILL shape this file calls silent and
+# indistinguishable from success. The DW side was qualified when it was
+# written; the mirror was not. (`candidate_keys` in
+# `scripts/mutation_verdict.py` is where both spellings are resolved now.)
 T_7DGX_C_DDL="BackgroundDownloadDropWiringSourceCanaryTests/testTheDDLIsSharedRatherThanCopied"
 T_7DGX_C_WIRING="testProductionWiresTheStoreBackedDropRecorder"
 T_7DGX_C_BOUND="testEachDropSiteRecordsTheBoundThatActuallyExpired"
@@ -3456,9 +3467,9 @@ T_DW_ARM_CREATE="an arming on a store with NO arming row creates one and counts 
 # variable, on the V62 suite's own precedent: it asserts that a table the suite
 # itself dropped is dropped — a vacuity guard for the rails around it, and a
 # property of the FIXTURE rather than of the code.
-# XCTest source canaries, CLASS-QUALIFIED. `extract_failures` emits both the
-# bare method name and `Class/method`, and the qualified form is the one to use
-# here: `testTheDDLIsSharedRatherThanCopied` is ALSO a method on
+# XCTest source canaries, CLASS-QUALIFIED. Both the bare method name and
+# `Class/method` resolve, and the qualified form is the one to use here:
+# `testTheDDLIsSharedRatherThanCopied` is ALSO a method on
 # `BackgroundDownloadDropWiringSourceCanaryTests` — this file is modelled on
 # that one — so the bare spelling would let a BD mutant be credited for a DW
 # rail and vice versa. Same false-kill hazard as the display names above, one
@@ -3918,8 +3929,12 @@ T_26OD_DISCRIMINATORS="a checkpointed row carries the job's own runMode and phas
 T_26OD_FAILED_WRITE="a checkpoint whose write failed does not advance the resume cursor"
 # The XCTest source canary. The battery reads `Test Case '-[Suite method]'` lines, so an
 # XCTest expectation is written Suite/method.
-# NO module prefix: `extract_failures` captures suite and method out of
-# `Test Case '-[PlayheadTests.Suite method]'` and joins them as `Suite/method`.
+# NO module prefix — and this is the convention, not this entry's quirk: 48
+# mutations spell their only expectation this way. xcodebuild prints
+# `Test Case '-[PlayheadTests.Suite method]'` and `gate_baseline` keys it
+# MODULE-QUALIFIED, so `candidate_keys` matches the bare form as a dotted
+# suffix (`.Suite/method`). playhead-gjlp0 R1 is the record of the round where
+# it did not, and every such expectation reported "never ran".
 T_26OD_LEASE_CANARY="FMUnboundedCallCanaryTests/testRunnerPassesAProgressObserverToEveryCoarsePass"
 
 # ---- playhead-fil5: the durable semantic-scan claim (SC series) ----
