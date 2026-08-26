@@ -272,6 +272,21 @@ def candidate_keys(run, want):
     qualified (`SomeTests/testFoo`). `extract_failures` used to register both
     spellings for every XCTest result; this reproduces that, from the run's own
     key space instead of from a second regex.
+
+    THE SUITE IS SPELLED MODULE-QUALIFIED ON ONE SIDE AND BARE ON THE OTHER, AND
+    A FIRST CUT OF THIS FUNCTION COMPARED THEM DIRECTLY. `gate_baseline` keys an
+    XCTest case off the WHOLE bracketed name — `xctest::PlayheadTests.SomeTests/
+    testFoo` — because its `_XC_RESULT` group is greedy over `[A-Za-z0-9_.]+`.
+    The MUTATIONS table spells the same test `SomeTests/testFoo`, because the
+    scraper this module replaced used a NON-greedy prefix and threw the module
+    away. Compared literally, every one of the 48 mutations whose sole
+    expectation is written that way resolved ABSENT — and ABSENT is the arm that
+    exits 2 out of the baseline preflight with "an expectation names a test that
+    never ran", so the XCTest half of the battery refused to run at all. So the
+    bare spelling is matched as a dotted SUFFIX of the key's suite, which is
+    exactly what `gate_baseline._blamed_matches` already does for the
+    `Failing tests:` block's own third spelling. The leading `.` is what keeps
+    it exact: `.SomeTests/testFoo` cannot match `…OtherSomeTests/testFoo`.
     """
     known = (set(run.started) | set(run.passed) | set(run.failures)
              | set(run.skipped) | set(run.crashed) | set(run.resource))
@@ -281,13 +296,17 @@ def candidate_keys(run, want):
     if st in known:
         out.append(st)
 
+    prefix = gb.FRAMEWORK_XCTEST + "::"
     if "/" in want:
         suite, method = want.split("/", 1)
         xc = gb.xc_key(suite, method)
         if xc in known:
             out.append(xc)
+        tail = "." + suite + "/" + method
+        for key in sorted(known):
+            if key.startswith(prefix) and key.endswith(tail):
+                out.append(key)
     else:
-        prefix = gb.FRAMEWORK_XCTEST + "::"
         for key in sorted(known):
             if key.startswith(prefix) and key.rsplit("/", 1)[-1] == want:
                 out.append(key)

@@ -87,7 +87,24 @@ def console(pids=("4001",), tests=(), terminal="** TEST SUCCEEDED **",
     return "\n".join(out) + "\n"
 
 
-def bundle_payload(cases, framework="swift-testing"):
+def xctest_console(suite, method, outcome, module="PlayheadTests", **kw):
+    """XCTest's own console format. The MODULE prefix is the point.
+
+    xcodebuild prints `-[PlayheadTests.SomeTests testFoo]` and the MUTATIONS
+    table spells the same expectation `SomeTests/testFoo`; a resolver that
+    compares those literally finds nothing. Every rail that uses this builder
+    exists because the first cut of `candidate_keys` did exactly that.
+    """
+    bracket = "'-[%s.%s %s]'" % (module, suite, method)
+    lines = ["Test Case %s started." % bracket]
+    if outcome == "passed":
+        lines.append("Test Case %s passed (0.003 seconds)." % bracket)
+    elif outcome == "failed":
+        lines.append("Test Case %s failed (0.003 seconds)." % bracket)
+    return console(extra="\n".join(lines), **kw)
+
+
+def bundle_payload(cases, framework="swift-testing", suite="S"):
     """`xcresulttool get test-results tests` shaped payload. `cases` is
     [(name, result, failure_messages)].
 
@@ -98,7 +115,8 @@ def bundle_payload(cases, framework="swift-testing"):
     """
     nodes = []
     for name, result, messages in cases:
-        ident = "S/%s()" % name if framework == "swift-testing" else "S/%s" % name
+        ident = ("%s/%s()" % (suite, name) if framework == "swift-testing"
+                 else "%s/%s" % (suite, name))
         node = {
             "nodeType": "Test Case",
             "name": name,
@@ -111,8 +129,14 @@ def bundle_payload(cases, framework="swift-testing"):
     return {
         "testNodes": [{
             "nodeType": "Unit test bundle",
-            "name": "PlayheadTests.xctest",
-            "children": [{"nodeType": "Test Suite", "name": "S", "children": nodes}],
+            # `PlayheadTests`, not `PlayheadTests.xctest`. The node name is what
+            # `_collect_case` folds into an XCTest key AND into the
+            # `-only-testing:` target, so the wrong spelling here would make an
+            # XCTest bundle rail agree with a resolver nothing else agrees with.
+            # `test_gate_baseline.py` uses the same name for the same reason.
+            "name": "PlayheadTests",
+            "children": [{"nodeType": "Test Suite", "name": suite,
+                          "children": nodes}],
         }]
     }
 
@@ -244,6 +268,97 @@ class LadderTests(VerdictTestCase):
         reading, states = self.read(log, [name])
         self.assertEqual(states[name], mv.PASSED)
         self.assertEqual(len(reading.run.no_verdict), 0)
+
+
+class XCTestSpellingTests(VerdictTestCase):
+    """The MUTATIONS table's XCTest spelling must resolve — playhead-gjlp0 R1.
+
+    `gate_baseline` keys an XCTest case off the WHOLE bracketed name, module
+    included (`xctest::PlayheadTests.SomeTests/testFoo`), because its
+    `_XC_RESULT` group is greedy over `[A-Za-z0-9_.]+`. The scraper this bead
+    deleted used a NON-greedy prefix and registered `SomeTests/testFoo`, which
+    is the spelling 48 mutations in the table use as their SOLE expectation.
+    Compared literally the two never meet, and the first cut of `candidate_keys`
+    compared them literally: every such expectation resolved ABSENT, which is
+    the arm that exits 2 out of the baseline preflight, so the XCTest half of
+    the battery refused to run at all.
+    """
+
+    def test_the_bare_suite_spelling_resolves_against_a_module_qualified_key(self):
+        log = self.write_log(xctest_console("SomeTests", "testFoo", "passed"))
+        _r, states = self.read(log, ["SomeTests/testFoo"])
+        self.assertEqual(states["SomeTests/testFoo"], mv.PASSED)
+
+    def test_the_bare_suite_spelling_also_carries_a_FAILURE_through(self):
+        # The direction that decides a KILL. A resolver that only fixed the
+        # PASSED arm would turn every XCTest kill into an ERROR.
+        log = self.write_log(xctest_console("SomeTests", "testFoo", "failed",
+                                            terminal="** TEST FAILED **"))
+        _r, states = self.read(log, ["SomeTests/testFoo"])
+        self.assertEqual(states["SomeTests/testFoo"], mv.FAILED)
+
+    def test_the_bare_suite_spelling_resolves_against_the_BUNDLE_too(self):
+        # The bundle is the verdict source on every real run, and it spells the
+        # suite module-qualified as well — from a different code path.
+        log = self.write_log(xctest_console("SomeTests", "testFoo", "passed"))
+        path, reader = fake_bundle(self.dir, bundle_payload(
+            [("testFoo", gb.XCRESULT_PASSED, [])],
+            framework="xctest", suite="SomeTests"))
+        _r, states = self.read(log, ["SomeTests/testFoo"], xcresult=path, reader=reader)
+        self.assertEqual(states["SomeTests/testFoo"], mv.PASSED)
+
+    def test_a_started_only_xctest_is_still_NO_VERDICT_under_the_bare_spelling(self):
+        # The widening must not manufacture a pass out of a roster entry.
+        log = self.write_log(xctest_console("SomeTests", "testFoo", "started"))
+        _r, states = self.read(log, ["SomeTests/testFoo"])
+        self.assertEqual(states["SomeTests/testFoo"], mv.NO_VERDICT)
+
+    def test_the_suffix_match_is_anchored_on_the_dot(self):
+        # `.SomeTests/testFoo` must not match `…OtherSomeTests/testFoo`. Without
+        # the leading dot the widening would resolve one suite's expectation
+        # against another suite's verdict.
+        log = self.write_log(xctest_console("OtherSomeTests", "testFoo", "passed"))
+        _r, states = self.read(log, ["SomeTests/testFoo"])
+        self.assertEqual(states["SomeTests/testFoo"], mv.ABSENT)
+
+    def test_a_swift_testing_display_name_containing_a_slash_still_wins(self):
+        # Several real expectations contain a `/` inside the display name
+        # (`… a fast/final twin`). The XCTest arm must not shadow them.
+        name = "Hot path does not promote a candidate from a fast/final twin"
+        log = self.write_log(console(tests=[(name, "passed")]))
+        _r, states = self.read(log, [name])
+        self.assertEqual(states[name], mv.PASSED)
+
+    def test_the_table_really_still_uses_that_spelling(self):
+        # ANTI-VACUITY. Every rail above is a claim about a shape; this one is
+        # the claim that the shape is still in the battery. If the MUTATIONS
+        # table is ever rewritten to the module-qualified spelling, this fails
+        # and says the rails above have become decoration.
+        listing = subprocess.run(
+            ["bash", str(SCRIPTS / "mutation-battery.sh"), "--list"],
+            cwd=str(ROOT), capture_output=True, text=True, check=True).stdout
+        bare = []
+        for line in listing.split("\n"):
+            if "expects:" not in line:
+                continue
+            for want in line.split("expects:", 1)[1].strip().split(";"):
+                if re.match(r"^[A-Za-z0-9_]+Tests/test[A-Za-z0-9_]+$", want):
+                    bare.append(want)
+        self.assertGreater(len(bare), 40, "the table no longer uses the bare "
+                                          "XCTest spelling; the rails above are dead")
+        # And none of them is ABSENT against a roster spelled the way xcodebuild
+        # spells it — measured over the whole table rather than over one sample.
+        text = console(tests=[], summary=None, terminal=None)
+        for want in sorted(set(bare)):
+            suite, method = want.split("/", 1)
+            text += "Test Case '-[PlayheadTests.%s %s]' passed (0.001 seconds).\n" % (
+                suite, method)
+        text += ("✔ Test run with 1 test in 1 suite passed after 0.6 seconds.\n"
+                 "** TEST SUCCEEDED **\n")
+        log = self.write_log(text, name="table.log")
+        _r, states = self.read(log, sorted(set(bare)))
+        absent = [n for n, s in states.items() if s != mv.PASSED]
+        self.assertEqual(absent, [], "unresolvable expectations: %r" % absent[:5])
 
 
 class PrecedenceTests(VerdictTestCase):
@@ -650,16 +765,24 @@ exit "${MB_STUB_RC:-65}"
 """
 
 
-@unittest.skipUnless(shutil.which("git"), "git is required")
-class ShellLadderTests(unittest.TestCase):
-    """Drives the real `scripts/mutation-battery.sh`. No xcodebuild, no build.
+def tearDownModule():
+    # Module-level rather than per-class: two classes drive the battery and the
+    # sandbox is a ~53 MB copy of the tree. Dropping it in one class's
+    # tearDownClass would make the other rebuild it.
+    drop_sandbox()
 
-    Every rail here is a property the old script could not have satisfied: it
-    had no VOID verdict, no exit code 5, no freshness floor, no evidence line
-    and no baseline check on whether an expectation was JUDGED.
+
+@unittest.skipUnless(shutil.which("git"), "git is required")
+class ShellBatteryHarness(unittest.TestCase):
+    """The machinery for driving the real battery. Carries no rails itself.
+
+    Subclasses set `MUTATION`; `setUpClass` resolves that mutation's expectation
+    FROM THE BATTERY'S OWN `--list` rather than hard-coding it, so a rail that
+    names an expectation the table no longer has fails loudly instead of
+    quietly testing nothing.
     """
 
-    MUTATION = "M05"
+    MUTATION = None
 
     @classmethod
     def setUpClass(cls):
@@ -685,10 +808,6 @@ class ShellLadderTests(unittest.TestCase):
         if ";" in cls.expect:
             raise AssertionError("%s now has several expectations; these rails assume one"
                                  % cls.MUTATION)
-
-    @classmethod
-    def tearDownClass(cls):
-        drop_sandbox()
 
     def setUp(self):
         self.stub = pathlib.Path(tempfile.mkdtemp(prefix="playhead-mb-stub."))
@@ -755,6 +874,17 @@ class ShellLadderTests(unittest.TestCase):
             if m:
                 return m.group(2)
         return None
+
+
+class ShellLadderTests(ShellBatteryHarness):
+    """Drives the real `scripts/mutation-battery.sh`. No xcodebuild, no build.
+
+    Every rail here is a property the old script could not have satisfied: it
+    had no VOID verdict, no exit code 5, no freshness floor, no evidence line
+    and no baseline check on whether an expectation was JUDGED.
+    """
+
+    MUTATION = "M05"
 
     # -- THE DEMONSTRATION -------------------------------------------------
     def test_a_crash_looping_batch_reports_VOID_not_SURVIVED(self):
@@ -889,6 +1019,55 @@ class ShellLadderTests(unittest.TestCase):
                          proc.stdout + proc.stderr)
         self.assertIn("STALE", proc.stderr)
         self.assertIn("batch-1414.log", proc.stderr)
+
+
+class ShellXCTestExpectationTests(ShellBatteryHarness):
+    """The XCTest half of the battery, driven end to end — playhead-gjlp0 R1.
+
+    `ShellLadderTests` drives a mutation whose expectation is a Swift Testing
+    DISPLAY name, and every rail in it passed while the battery could not score
+    a single one of the 48 mutations whose sole expectation is spelled
+    `SomeTests/testFoo`. Those refused at the baseline preflight with "an
+    expectation names a test that never ran" — a loud failure, and a total one:
+    the whole of playhead-le02's XCTest support was unreachable.
+
+    SF04 rather than M05 because SF04's expectation is exactly that shape and
+    its anchor still applies (LE07's does not, which is a separate finding).
+    """
+
+    MUTATION = "SF04"
+
+    def xctest_run(self, outcome):
+        suite, method = self.expect.split("/", 1)
+        return xctest_console(suite, method, outcome,
+                              terminal=("** TEST FAILED **" if outcome == "failed"
+                                        else "** TEST SUCCEEDED **"))
+
+    def test_the_expectation_really_is_the_bare_xctest_spelling(self):
+        # ANTI-VACUITY: if SF04 is ever respelled or retyped, these rails stop
+        # exercising the resolver and this says so.
+        self.assertRegex(self.expect, r"^[A-Za-z0-9_]+Tests/test[A-Za-z0-9_]+$")
+
+    def test_an_xctest_expectation_passes_the_baseline_and_reports_KILLED(self):
+        proc = self.run_battery(self.xctest_run("passed"), self.xctest_run("failed"))
+        out = self.out(proc)
+        self.assertIn("baseline green", out, out[-4000:])
+        self.assertEqual(self.verdict_of(proc), "KILLED", out[-4000:])
+        self.assertEqual(proc.returncode, 0, out[-4000:])
+
+    def test_an_xctest_expectation_that_positively_passes_reports_SURVIVED(self):
+        green = self.xctest_run("passed")
+        proc = self.run_battery(green, green)
+        out = self.out(proc)
+        self.assertEqual(self.verdict_of(proc), "SURVIVED", out[-4000:])
+        self.assertEqual(proc.returncode, 1, out[-4000:])
+
+    def test_an_xctest_expectation_that_never_reports_is_VOID_not_SURVIVED(self):
+        # The bead's own defect, on the XCTest side: started, never judged.
+        proc = self.run_battery(self.xctest_run("passed"), self.xctest_run("started"))
+        out = self.out(proc)
+        self.assertEqual(self.verdict_of(proc), "VOID", out[-4000:])
+        self.assertEqual(proc.returncode, 5, out[-4000:])
 
 
 if __name__ == "__main__":
