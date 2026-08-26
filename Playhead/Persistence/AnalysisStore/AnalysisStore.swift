@@ -3473,14 +3473,22 @@ actor AnalysisStore {
         // that reaches it WITHOUT `createTables()` having renamed first, so it is
         // the path a fixture regressed to the old spelling WOULD take. NONE DOES,
         // and this line said "is exactly the path a fixture … takes" until
-        // playhead-1gu0 review round 6. The two fixtures that reach this seam with
-        // `semantic_scan_results` present (`theLadderOnlySeamReachesV64` and
-        // `aV62StoreClimbsThroughV63ToHead`) already carry the NEW spelling, so the
-        // helper returns on its `hasNew` guard; the rail that exercises the rename,
-        // `v64RowKeepsItsJobIdAcrossTheV65Rename`, goes through `createTables()`.
-        // `renameSemanticScanRunCorrelationIdIfNeeded()`'s own doc was corrected for
-        // exactly this claim at an earlier round and this second copy was left
-        // standing — the one-of-two-places shape this bead exists to remove.
+        // playhead-1gu0 review round 6. TWENTY-THREE fixtures reach this seam with
+        // `semantic_scan_results` present, and they all already carry the NEW
+        // spelling, so the helper returns on its `hasNew` guard; the rail that
+        // exercises the rename, `v64RowKeepsItsJobIdAcrossTheV65Rename`, goes
+        // through `createTables()`.
+        // `renameSemanticScanRunCorrelationIdIfNeeded()`'s own doc carries the
+        // predicate, the census and its limit — read it there rather than
+        // re-deriving a number here.
+        //
+        // THIS LINE NAMED TWO OF THEM — `theLadderOnlySeamReachesV64` and
+        // `aV62StoreClimbsThroughV63ToHead` — AND READ THE PAIR AS THE CENSUS.
+        // That is the identical error the very next commit of the same review
+        // round corrected in the helper's doc and in `scripts/mutation-battery.sh`,
+        // written into a THIRD place by the commit before it. Round 7 found it
+        // here. One claim, three copies, and the number is kept in exactly one of
+        // them now.
         //
         // READ THE V60 NOTE ABOVE BEFORE ADDING A RUNG. A rung added to one
         // ladder and not the other is invisible to any test written for that
@@ -9242,10 +9250,14 @@ actor AnalysisStore {
     /// "the only one of the three that RUNS" (playhead-1gu0 review round 6).**
     /// The V42 rung's call sits behind `if tableExists("semantic_scan_results")`
     /// AND behind `guard observed < 42` / `guard observed >= 41` — so it runs at
-    /// EXACTLY 41 — and **12 of the 23 fixtures that drive that seam to head
+    /// EXACTLY 41 — and **NINE of the 23 fixtures that drive that seam to head
     /// with the table present start below 42**, so they climb through 41 and the
     /// V42 call runs there too. It declines there, like every other call on that
     /// seam, because `createTables()` built `backfillJobId` before the rewind.
+    /// (Round 6 wrote **12** here and round 7 re-derived it off the stamp each
+    /// fixture rewinds to: 28, 29, 30, 32, 34, 38, 38, 38, 39 — nine. Every
+    /// other one of the 23 rewinds to 43 or higher and can never see 41. The
+    /// claim the sentence makes is unchanged; the count was not measured.)
     /// The same line also said "nothing in the tree is seeded at 41", which is
     /// false and was generalised from the `seedSchemaVersion` call sites alone:
     /// `SemanticScanRunAttributionTests.v41RowSurvivesMigrationAndStaysUnattributed`
@@ -9257,13 +9269,15 @@ actor AnalysisStore {
     /// present today" (playhead-1gu0 review).** **TWENTY-THREE do — and the
     /// correction for that draft said "two", which was the pair somebody had in
     /// hand read as a census (playhead-1gu0 review round 6).** Measured over
-    /// `PlayheadTests`, brace-matched bodies: 23 test functions across twelve
-    /// files call `migrate()` (so `createTables()` builds the table), rewind,
-    /// drive `migrateOnlyForTesting()`, and then assert
-    /// `schemaVersion() == currentSchemaVersion`. Only the V65 rung stamps 65,
-    /// so that assertion PROVES this helper ran on that seam. They include
-    /// `theLadderOnlySeamReachesV64`, `aV62StoreClimbsThroughV63ToHead` and
-    /// every `isolatedLadderReaches*`. In all 23 the table IS present and this
+    /// `PlayheadTests`, brace-matched bodies with comments and string literals
+    /// blanked before the braces are counted: **23 test functions across
+    /// THIRTEEN files** call `migrate()` (so `createTables()` builds the table),
+    /// rewind, drive `migrateOnlyForTesting()`, and then assert
+    /// `schemaVersion() == currentSchemaVersion` AFTER that call. Only the V65
+    /// rung stamps 65, so that assertion PROVES this helper ran on that seam.
+    /// They include `theLadderOnlySeamReachesV64`,
+    /// `aV62StoreClimbsThroughV63ToHead` and all six `isolatedLadderReaches*`.
+    /// In all 23 the table IS present and this
     /// helper DOES run. It returns on its `hasNew` guard, because those stores
     /// already carry the new spelling. So the call site is reached and the RENAME
     /// itself is not: nothing seeds `semantic_scan_results` at the OLD spelling
@@ -9271,6 +9285,22 @@ actor AnalysisStore {
     /// (`v64RowKeepsItsJobIdAcrossTheV65Rename`) exercises the rename through
     /// `createTables()` instead. Said out loud rather than left for a green
     /// suite to read as coverage.
+    ///
+    /// **SAY WHETHER A HELPER COUNTS, BECAUSE THE TWO READINGS DIFFER BY A WHOLE
+    /// FILE — and this paragraph said "23 … across twelve files", which no single
+    /// predicate yields (playhead-1gu0 review round 7).** `migrate()` reaches the
+    /// test through a same-file helper in
+    /// `DownloadWorkJournalV63MigrationTests`, whose `makeHeadStore(prefix:)`
+    /// calls it: that file contributes THREE (`theLadderOnlySeamReachesV63`,
+    /// `aV61StoreClimbsThroughV62ToHead`, `theRungIsIdempotentAndNeverErases`)
+    /// and is invisible to any search over the test body's own text. Counting
+    /// helper-mediated calls the census is **23 across thirteen files**; counting
+    /// only a literal `.migrate()` in the test's own body it is **20 across
+    /// twelve**. 23 is the first reading and twelve is the second, so the two
+    /// halves of that sentence came from different searches. The CONCLUSION is
+    /// the same under either: every one of them runs `createTables()` before
+    /// rewinding, so the helper returns on `hasNew` and the rename stays
+    /// unexercised on this seam.
     ///
     /// Idempotent, and it declines rather than guesses in the one ambiguous
     /// state. If BOTH spellings exist the new one wins and the old is left

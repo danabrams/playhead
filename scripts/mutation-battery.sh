@@ -12813,10 +12813,14 @@ MUTATIONS=(
   # `BackgroundDownloadDropLaunchIdentityV64MigrationTests`'s
   # `theLadderOnlySeamReachesV64` and `aV62StoreClimbsThroughV63ToHead`, which
   # was the pair somebody had in hand read as a census. MEASURED: 23 test
-  # functions across twelve files, every `isolatedLadderReaches*` among them —
-  # the helper's own doc carries the predicate. What none of the 23 does is
-  # arrive there at the OLD spelling, which is what the conclusion rests on and
-  # is unchanged. playhead-1gu0 review round 6.)
+  # functions across THIRTEEN files, all six `isolatedLadderReaches*` among them
+  # — the helper's own doc carries the predicate and its limit. (Round 6 wrote
+  # "twelve files" beside the 23 and round 7 could not reproduce the pair: 23 is
+  # the count WITH a `migrate()` reached through a same-file helper, twelve is
+  # the file count WITHOUT one, and without one the count is 20. Two searches,
+  # one sentence.) What none of the 23 does is arrive there at the OLD spelling,
+  # which is what the conclusion rests on and is unchanged. playhead-1gu0 review
+  # rounds 6 and 7.)
   # It is an equivalent over the paths that EXIST, not one by construction: seed
   # that table at the OLD spelling into the ladder-only seam and GU05 becomes a
   # real mutant.
