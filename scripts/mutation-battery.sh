@@ -19,9 +19,23 @@
 # six of them now, not the three this line used to promise), checks the expected
 # tests actually failed, and restores the tree with `git checkout --`.
 #
-#   KILLED   — the expected test(s) failed. The rail works.
+#   KILLED   — the expected test(s) FAILED. The rail works.
 #   SURVIVED — the mutation was applied, the suites ran, and the expected
-#              test(s) still passed.
+#              test(s) POSITIVELY PASSED.
+#   VOID     — nobody judged the expected test, or the batch lost its test
+#              host. NOT a verdict in either direction: run it again.
+#   ERROR    — the mutation could not be evaluated at all (anchor drift, a
+#              build failure, an expectation naming a test that never ran).
+#
+# SURVIVED REQUIRES A POSITIVE PASS, and until playhead-gjlp0 it did not: the
+# verdict was inferred from the ABSENCE of a failure line, so a test whose host
+# died — ten `started` lines and no result at all — scored exactly like a test
+# that ran and passed. Measured on the preserved specimen
+# `/private/tmp/playhead-mutation-battery.F6R3wB`: `BD37 SURVIVED … still
+# green`, on a batch with 2,332 unjudged tests and 10 host replacements, for a
+# mutant that dies deterministically in 0.147 s when applied by hand. Verdicts
+# now come from the batch's own `.xcresult` bundle via
+# `scripts/mutation_verdict.py`, and a batch that lost its host is VOID.
 #
 # A SURVIVOR IS A MISSING TEST, NOT A BROKEN SCRIPT. Do not "fix" a survivor by
 # relaxing its expectation or deleting the entry. A survivor means the codebase
@@ -151,9 +165,16 @@
 #
 #   1  a mutation SURVIVED
 #   2  refused to start (dirty tree, bad selection, a mutation whose file is not
-#      in MUTABLE_FILES, a red baseline, or an unresolved crashed run)
-#   3  a mutation could not be EVALUATED
+#      in MUTABLE_FILES, a red baseline, a baseline that produced no verdict, a
+#      baseline in which any test was DENIED A RESOURCE, or an unresolved
+#      crashed run)
+#   3  a mutation could not be EVALUATED — fix the EDIT
 #   4  the tree was NOT restored byte-exactly — inspect before anything else
+#   5  a batch produced NO VERDICT (playhead-gjlp0) — the mutation was not
+#      evaluated in EITHER direction. USUALLY nothing is wrong with the EDIT or
+#      the rail and the remedy is to run it again, but READ THE ROW: two shapes
+#      never clear on a re-run — a bundle whose result string this parser
+#      cannot read (R4), and an expectation the mutation itself made SKIP (R5)
 #   75 another battery is already running in this worktree (EX_TEMPFAIL)
 #
 # ONE BATTERY PER WORKTREE — ENFORCED SINCE playhead-pu7e
@@ -763,9 +784,11 @@
 #   visibly listed two lines above. `extract_ran` matched the marker only at the
 #   START of a line, and this run interleaved `XCTestOutputBarrier` into the
 #   `◇ Test "…" started` line — word characters, so `^\W*` could not skip them.
-#   `extract_failures` had the identical exposure and got lucky. Both now scan
-#   for the marker anywhere in the line; see the note there for why that cannot
-#   manufacture a KILL.
+#   `extract_failures` had the identical exposure and got lucky. Both were made
+#   to scan for the marker anywhere in the line. (Both functions are GONE since
+#   playhead-gjlp0; `gate_baseline.py` searches rather than anchoring, and goes
+#   further — it rejoins verdict lines the app's output severed outright. The
+#   pointer that used to sit here named a note that was deleted with them.)
 #
 #   Composition, stated because it was not one invocation. First pass, batches
 #   120-125: 11 KILLED, 1 SURVIVED. Z02 — delete the orphan-mark reset in
@@ -2212,12 +2235,16 @@ FOCUSED_SUITES=(
   -only-testing:PlayheadTests/AdPodContinuationDayZeroSeedTests
   # playhead-kvs8: the FM daemon throttle (Q01-Q08).
   #
-  # NOT LISTED, and it is not an oversight: `FMDaemonThrottleCanaryTests` is
-  # XCTest, and `extract_ran`/`extract_failures` above parse only Swift
-  # Testing's `◇ Test "…" started` lines. An expectation naming an XCTest case
-  # can never be matched, so it would report ERROR rather than KILLED. The two
-  # source canaries (the streaming sweep and the probe cache guard) are verified
-  # by hand instead — see the kvs8 provenance note.
+  # NOT LISTED. THE REASON RECORDED HERE IS OBSOLETE AND IS KEPT AS HISTORY:
+  # it said `FMDaemonThrottleCanaryTests` is XCTest and the battery's scrapers
+  # "parse only Swift Testing's `◇ Test "…" started` lines", so an XCTest
+  # expectation "can never be matched". playhead-le02 made XCTest matchable and
+  # playhead-gjlp0 moved the reading to `scripts/mutation_verdict.py`, which
+  # takes both frameworks from the .xcresult bundle. The two source canaries
+  # (the streaming sweep and the probe cache guard) are still verified by hand
+  # — see the kvs8 provenance note. ADDING THE SUITE IS NOW POSSIBLE AND IS A
+  # SEPARATE DECISION: it costs the focused run whatever those tests cost, so
+  # it belongs to whoever is measuring that, not to a comment repair.
   -only-testing:PlayheadTests/FMDaemonThrottleClassificationTests
   -only-testing:PlayheadTests/FMThrottledPrologueRunnerTests
   -only-testing:PlayheadTests/FMThrottlePermissiveLaneTests
@@ -2846,7 +2873,33 @@ on_exit() {
   # interleaving the lock exists to close, reintroduced at the last moment.
   mb_lock_release
   if [ "$KEEP_WORK" -eq 1 ]; then
+    # SAY WHAT IS BEING KEPT AND HOW BIG IT IS (playhead-gjlp0 R4). This line
+    # said "per-batch xcodebuild logs", and it was the whole of what a reader
+    # deciding whether to reclaim had to go on. Since this bead the directory
+    # ALSO holds one `.xcresult` bundle per batch that produced anything other
+    # than a plain KILL — and a bundle is the biggest thing in here: a full-plan
+    # one measures 104-122 MB on this box, and a focused one runs about a
+    # quarter of that (the cost is ~4 KiB per stored object and the object count
+    # tracks the test count; measured, 26,088 objects and 113.9 MiB for 12,603
+    # tests). So on the crash-looping run this bead exists for — where EVERY
+    # batch is VOID and every bundle is kept — the bundles are the majority of
+    # what is left behind, under a line that named only logs. A category where a
+    # measurement belongs is this file's own subject one layer out.
+    local kept_size kept_bundles
     echo "mutation-battery: per-batch xcodebuild logs kept in $WORK" >&2
+    if [ -d "$WORK" ]; then
+      kept_size="$(du -sh "$WORK" 2>/dev/null | awk '{print $1}')"
+      kept_bundles="$(find "$WORK" -maxdepth 1 -name '*.xcresult' 2>/dev/null | wc -l | tr -d ' ')"
+      echo "mutation-battery:   ${kept_size:-?} in it, including $kept_bundles .xcresult bundle(s)." >&2
+      echo "mutation-battery:   scripts/disk-cleanup.sh sweeps it at 3 days; remove it by hand" >&2
+      echo "mutation-battery:   once the verdicts above have been read." >&2
+    else
+      # Never print "0 bundles, ? in it" for a directory that is not there —
+      # a measurement of an absence read as a measurement of a thing, which is
+      # the whole subject of this bead.
+      echo "mutation-battery:   …EXCEPT IT IS NOT THERE. Something removed it under this" >&2
+      echo "mutation-battery:   run; the evidence for every verdict above is gone." >&2
+    fi
   else
     rm -rf "$WORK"
   fi
@@ -2912,10 +2965,13 @@ T_LE02_BYPASS_DECISION="same-ID decision with changed bounds must pass inventory
 T_LE02_DOOR_FOREIGN="ingest for an asset that is NOT the one playing delivers nothing"
 T_LE02_DOOR_NOEPISODE="ingest with no active episode delivers nothing"
 T_LE02_DOOR_VETOED="a user-vetoed row is not resurrected by the mid-session door"
-# These two are XCTest, which this battery could not match until le02 taught
-# `extract_ran`/`extract_failures` to read `Test Case '-[Suite method]'` lines.
-# Written in the QUALIFIED `Suite/method` form the extractors also emit, so a
-# same-named method in another suite cannot manufacture a kill.
+# These two are XCTest, which this battery could not match until le02 taught it
+# to read `Test Case '-[Suite method]'` lines. Written in the QUALIFIED
+# `Suite/method` form — NO module prefix — so a same-named method in another
+# suite cannot manufacture a kill. Since playhead-gjlp0 the reading is
+# `scripts/mutation_verdict.py`; `candidate_keys` matches this spelling as a
+# DOTTED SUFFIX of the bundle's module-qualified key, and R1 of that bead is
+# the record of what happens when it does not.
 T_LE02_PRELOAD_APPLIED="SkipOrchestratorPreloadTests/testPreloadedAppliedWindowDoesNotEmitBanner"
 T_LE02_ENDEPISODE_RESET="SkipOrchestratorPreloadTests/testEndEpisodeResetsEmittedAutoSkipBannersSet"
 T_LISTEN_RACE="A Listen revert whose episode is replaced mid-flight still calibrates the captured show"
@@ -3365,10 +3421,12 @@ T_7DGX_STAMPED="a store STAMPED at head but missing the tables gets them back on
 # XCTest source canaries, by method name.
 T_7DGX_C_LADDER="testV62IsRegisteredInBothLaddersExactlyOnceEach"
 # CLASS-QUALIFIED by playhead-4xmz (review 5): its canary adds a second method
-# of this exact name, and `extract_failures` emits the bare form too — so the
-# unqualified spelling would let a DW failure be credited to BD07, which is
-# the false-KILL shape this file calls silent and indistinguishable from
-# success. The DW side was qualified when it was written; the mirror was not.
+# of this exact name, and a BARE method name resolves against every suite that
+# has one — so the unqualified spelling would let a DW failure be credited to
+# BD07, which is the false-KILL shape this file calls silent and
+# indistinguishable from success. The DW side was qualified when it was
+# written; the mirror was not. (`candidate_keys` in
+# `scripts/mutation_verdict.py` is where both spellings are resolved now.)
 T_7DGX_C_DDL="BackgroundDownloadDropWiringSourceCanaryTests/testTheDDLIsSharedRatherThanCopied"
 T_7DGX_C_WIRING="testProductionWiresTheStoreBackedDropRecorder"
 T_7DGX_C_BOUND="testEachDropSiteRecordsTheBoundThatActuallyExpired"
@@ -3439,9 +3497,9 @@ T_DW_ARM_CREATE="an arming on a store with NO arming row creates one and counts 
 # variable, on the V62 suite's own precedent: it asserts that a table the suite
 # itself dropped is dropped — a vacuity guard for the rails around it, and a
 # property of the FIXTURE rather than of the code.
-# XCTest source canaries, CLASS-QUALIFIED. `extract_failures` emits both the
-# bare method name and `Class/method`, and the qualified form is the one to use
-# here: `testTheDDLIsSharedRatherThanCopied` is ALSO a method on
+# XCTest source canaries, CLASS-QUALIFIED. Both the bare method name and
+# `Class/method` resolve, and the qualified form is the one to use here:
+# `testTheDDLIsSharedRatherThanCopied` is ALSO a method on
 # `BackgroundDownloadDropWiringSourceCanaryTests` — this file is modelled on
 # that one — so the bare spelling would let a BD mutant be credited for a DW
 # rail and vice versa. Same false-kill hazard as the display names above, one
@@ -3901,8 +3959,12 @@ T_26OD_DISCRIMINATORS="a checkpointed row carries the job's own runMode and phas
 T_26OD_FAILED_WRITE="a checkpoint whose write failed does not advance the resume cursor"
 # The XCTest source canary. The battery reads `Test Case '-[Suite method]'` lines, so an
 # XCTest expectation is written Suite/method.
-# NO module prefix: `extract_failures` captures suite and method out of
-# `Test Case '-[PlayheadTests.Suite method]'` and joins them as `Suite/method`.
+# NO module prefix — and this is the convention, not this entry's quirk: 48
+# mutations spell their only expectation this way. xcodebuild prints
+# `Test Case '-[PlayheadTests.Suite method]'` and `gate_baseline` keys it
+# MODULE-QUALIFIED, so `candidate_keys` matches the bare form as a dotted
+# suffix (`.Suite/method`). playhead-gjlp0 R1 is the record of the round where
+# it did not, and every such expectation reported "never ran".
 T_26OD_LEASE_CANARY="FMUnboundedCallCanaryTests/testRunnerPassesAProgressObserverToEveryCoarsePass"
 
 # ---- playhead-fil5: the durable semantic-scan claim (SC series) ----
@@ -29665,17 +29727,71 @@ restore_and_verify() {
 }
 
 # ---------------------------------------------------------------------------
-# Focused run + failure extraction
+# Focused run + VERDICT extraction
 # ---------------------------------------------------------------------------
-# Swift Testing prints `✘ Test "<display name>" failed after …` through
-# xcodebuild.  Function-name form (no display name) is handled too so a future
-# undecorated @Test is not silently invisible here.
+# THE VERDICT IS READ POSITIVELY, NEVER FROM SILENCE (playhead-gjlp0).
+#
+# `extract_failures` and `extract_ran` used to live here: two console scrapers,
+# one for `✘ … failed` and one for `◇ … started`, and the verdict was the
+# arithmetic between them —
+#
+#     not in STARTED -> ERROR "never ran";  not in FAILED -> SURVIVED
+#
+# Both arms read SILENCE, and the second one reads it in the dangerous
+# direction. A test whose host died prints `◇ … started` and then nothing at
+# all, so it scored exactly like a test that ran and passed. MEASURED on this
+# bead's own specimen (`/private/tmp/playhead-mutation-battery.F6R3wB`,
+# preserved): the expected test had TEN start lines and ZERO result lines, the
+# batch had 2,332 tests with no verdict and 11 distinct test-host pids, the log
+# already carried `gate-memory: THE RUN DID NOT REACH A VERDICT — RESTARTED`
+# TEN lines from its end, counting itself (line 24,987 of 24,996) — and the table printed
+# `BD37 SURVIVED … still green`. Applied by hand that mutant dies in 0.147 s.
+# The rail existed and worked; only the reading was wrong.
+#
+# What replaces them is `scripts/mutation_verdict.py`, which requires a STATED
+# outcome — the `.xcresult` bundle's verdict, or a `✔`/`✘` on the console —
+# before a mutation may be called either KILLED or SURVIVED, and reports
+# NO VERDICT / VOID BATCH otherwise. It is not a third scraper: it imports
+# `gate_baseline.py` (both console formats, the spliced-line rejoin, the
+# octal-escaped glyph shards, and the bundle) and `gate_memory_verdict.py` (the
+# host-pid health classifier), so this battery and the merge gate now read a run
+# the same way.
+#
+# WHY IT IS PYTHON AND NOT THREE MORE GREPS. The cheap first cut in the bead was
+# `grep -c 'Restarting after unexpected exit'`, and on the very specimen it was
+# written for that returns 11 while the host was replaced 10 times: the eleventh
+# hit is `gate-memory:`'s own verdict block quoting the message back into the
+# same log. Counting a phrase that the run's own diagnostics also print adds two
+# different quantities together. The pid series says 11 distinct hosts and needs
+# no interpretation.
+
 # `scripts/fast-gate.sh` retries once on a wedged simulator, and BOTH attempts
-# land in the same log. Attempt 1's casualties (tests that were mid-flight when
-# the sim died) would otherwise union with attempt 2's results and credit a
+# land in the same log. Attempt 1's casualties — tests that were mid-flight when
+# the sim died — would otherwise union with attempt 2's results and credit a
 # mutation as KILLED off an infrastructure artefact. Cut everything before the
 # retry banner so only the last attempt is read.
-last_attempt() {
+#
+# `gate_baseline.parse_run` applies the same cut internally, so the scorer does
+# not need this; it survives because the `Test run with` guard below runs BEFORE
+# the scorer and must read the same attempt the scorer will.
+#
+# IT IS A PREDICATE NOW, AND THE COPY IT USED TO WRITE IS GONE (playhead-gjlp0
+# R4). This was `last_attempt "$LOG" >"$LOG.last"` followed by a `grep -q`, and
+# `$LOG.last` had three readers: `extract_ran`, `extract_failures` and that
+# grep. This bead deleted the first two, which left a BYTE-EXACT DUPLICATE of
+# the largest artifact in `$WORK` being written once per batch so one `grep -q`
+# could read it. Measured on a preserved 37-batch run
+# (`/private/tmp/playhead-mutation-battery.9NQnSD`): **178.9 MiB of `.log` beside
+# 178.9 MiB of `.log.last`**, exactly half of that directory. (R5 re-derived it:
+# 187,563,745 bytes over 38 `.log` files — 37 batches plus the baseline — so the
+# figure is `du`'s MiB and was written MB. Right reading, wrong unit.) The duplicate was
+# cheap while `$WORK` held only logs; this bead also started keeping each
+# non-KILL batch's `.xcresult` there, so it is not.
+#
+# The cut and the search happen in ONE pass in one process, so the answer is
+# still a property of the LAST ATTEMPT — which is the whole reason the cut
+# exists — and nothing is written to disk.
+last_attempt_ran_tests() {
   python3 -c '
 import sys
 lines = open(sys.argv[1], encoding="utf-8", errors="replace").readlines()
@@ -29683,101 +29799,214 @@ cut = 0
 for i, line in enumerate(lines):
     if "fast-gate: wedged simulator" in line:
         cut = i + 1
-sys.stdout.writelines(lines[cut:])
+sys.exit(0 if any("Test run with" in line for line in lines[cut:]) else 1)
 ' "$1"
 }
 
-extract_failures() {
-  python3 -c '
-import re, sys
-# playhead-avbn: SEARCH, not match-from-start. xcodebuild interleaves its own
-# output into a line often enough to matter — an observed run prefixed
-# XCTestOutputBarrier onto a started-marker line, and those are WORD characters,
-# so the old ^\W* could not skip them. Widening cannot manufacture a KILL: the
-# anchor is the Swift Testing glyph plus the literal " Test \"", which nothing
-# else in the log emits.
-pat_named = re.compile(r"✘ Test \"(.+?)\" (?:failed|recorded an issue)")
-pat_plain = re.compile(r"✘ Test ([A-Za-z_][A-Za-z0-9_]*\(\)) failed")
-# playhead-le02: XCTest, which this battery could not see at all. Until now an
-# expectation naming an XCTest case reported ERROR ("expected test never ran"),
-# so those rails were "verified by hand" (see the kvs8 note in FOCUSED_SUITES)
-# — i.e. not verified by anything that fails when someone stops doing it.
+# $1 log  $2 where to write the .xcresult bundle
 #
-# The duration heuristic INVERTS for XCTest and that matters here: a Swift
-# Testing failure over ~97 s is a load flake, but an XCTest failure is an
-# ASSERTION and is fast (0.025 s is typical). Nothing in this function times
-# anything, which is correct — a mutation battery wants every failure, flake or
-# not, because the baseline run is the control.
-# `chr(39)` rather than a literal apostrophe: this whole program is inside a
-# single-quoted `python3 -c` argument, so an apostrophe would end it.
-Q = chr(39)
-pat_xctest = re.compile(r"Test Case " + Q + r"-\[[A-Za-z0-9_.]*?([A-Za-z0-9_]+) ([A-Za-z0-9_]+)\]" + Q + r" failed")
-seen = []
-for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
-    x = pat_xctest.search(line)
-    if x:
-        # Both forms, so an expectation may be written bare when the method
-        # name is distinctive or qualified when it is not.
-        for name in (x.group(2), x.group(1) + "/" + x.group(2)):
-            if name not in seen:
-                seen.append(name)
-        continue
-    m = pat_named.search(line) or pat_plain.search(line)
-    if m and m.group(1) not in seen:
-        seen.append(m.group(1))
-# Deliberately not `print("\n".join(...))`: on an empty list that emits a bare
-# newline, which reads downstream as one nameless failure.
-sys.stdout.writelines(name + "\n" for name in seen)
-' "$1"
-}
-
-# Every test that RAN in this attempt, by display name. Companion to
-# `extract_failures`, and the input to the "expected test never ran" check
-# below: an expectation that matches NOTHING in the run is a harness fault
-# (typo, renamed test, suite missing from FOCUSED_SUITES, or a ';' inside a
-# display name colliding with the record separator) — and without this it is
-# indistinguishable from a genuine SURVIVED, which is the failure direction
-# that reads as a coverage hole and sends the next person to write a test that
-# already exists. Measured: playhead-96ot's E04 reported SURVIVED with its
-# expected test visibly failing three lines above, one bead after playhead-d3g0
-# documented the same collision.
-extract_ran() {
-  python3 -c '
-import re, sys
-# playhead-avbn: SEARCH, not match-from-start — see extract_failures. This is
-# the function the interleaving actually defeated, turning a real KILL into a
-# reported ERROR ("expected test never ran") with the failure printed two lines
-# above it. Widening here can only move a verdict ERROR -> KILLED/SURVIVED; the
-# KILL itself comes from extract_failures.
-pat_named = re.compile(r"◇ Test \"(.+?)\" started")
-pat_plain = re.compile(r"◇ Test ([A-Za-z_][A-Za-z0-9_]*\(\)) started")
-# playhead-le02: the XCTest half — see extract_failures for why. Must stay in
-# lockstep with that function: a name this one cannot record is reported as a
-# harness fault no matter what the other one saw, which is exactly the
-# false-ERROR direction the "never ran" check exists to remove.
-Q = chr(39)  # see extract_failures
-pat_xctest = re.compile(r"Test Case " + Q + r"-\[[A-Za-z0-9_.]*?([A-Za-z0-9_]+) ([A-Za-z0-9_]+)\]" + Q + r" started")
-seen = []
-for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
-    x = pat_xctest.search(line)
-    if x:
-        for name in (x.group(2), x.group(1) + "/" + x.group(2)):
-            if name not in seen:
-                seen.append(name)
-        continue
-    m = pat_named.search(line) or pat_plain.search(line)
-    if m and m.group(1) not in seen:
-        seen.append(m.group(1))
-sys.stdout.writelines(name + "\n" for name in seen)
-' "$1"
-}
-
+# THE BUNDLE IS THE VERDICT SOURCE (playhead-gjlp0, following playhead-t53a).
+# `PLAYHEAD_RESULT_BUNDLE` makes fast-gate write it to a path we own instead of
+# to a scratch dir it deletes on exit, which is the only way this script can
+# read it afterwards. The bundle costs disk, so `drop_bundle` removes it again
+# for any batch that produced nothing but KILLs — a bundle is kept exactly when
+# it is EVIDENCE.
 run_focused() {
-  local log="$1"
-  scripts/fast-gate.sh "${FOCUSED_SUITES[@]}" >"$log" 2>&1
+  local log="$1" bundle="${2:-}"
+  if [ -n "$bundle" ]; then
+    PLAYHEAD_RESULT_BUNDLE="$bundle" scripts/fast-gate.sh "${FOCUSED_SUITES[@]}" >"$log" 2>&1
+  else
+    scripts/fast-gate.sh "${FOCUSED_SUITES[@]}" >"$log" 2>&1
+  fi
   # fast-gate.sh already captures PIPESTATUS internally; its exit code is the
   # xcodebuild status.  Deliberately NOT piped here.
   return $?
+}
+
+# Only ever under $WORK, checked rather than trusted. This script is the one
+# place in the repo that both creates and removes directories under
+# /private/tmp, and CLAUDE.md's rm -rf rail says the path is proved, not
+# assumed.
+#
+# TWO CHECKS, BECAUSE `case`'s `*` CROSSES `/`. `"$WORK"/*.xcresult` is matched
+# by `$WORK/../../../etc/x.xcresult` — a glob in a `case` pattern is not a path
+# component. The first check proves the PREFIX and the second proves the
+# REMAINDER IS A BARE NAME, which is the part that cannot climb out. Both
+# callers pass `$WORK/baseline.xcresult` or `$WORK/batch-<digits>.xcresult`
+# (every one of the 1,109 MUTATIONS records carries a numeric batch field, so
+# `$b` cannot smuggle a separator), so this refuses nothing that exists today:
+# it is the rail, not a filter.
+#
+# And it SAYS what it removed. A bundle is evidence; a bundle that vanishes
+# without a line is a reader concluding the run never wrote one.
+drop_bundle() {
+  local path="$1" rest
+  if [ -z "${WORK:-}" ]; then
+    echo "mutation-battery: refusing to remove a bundle with no \$WORK set: $path" >&2
+    return 1
+  fi
+  case "$path" in
+    "$WORK"/*.xcresult) rest="${path#"$WORK"/}" ;;
+    *)
+      echo "mutation-battery: refusing to remove a bundle outside \$WORK: $path" >&2
+      return 1 ;;
+  esac
+  case "$rest" in
+    */*|.*)
+      echo "mutation-battery: refusing to remove a bundle that is not a bare name" >&2
+      echo "                  under \$WORK ($WORK): $path" >&2
+      return 1 ;;
+  esac
+  [ -d "$path" ] || return 0
+  rm -rf "$path"
+  echo "  dropped the .xcresult bundle (nothing here is evidence): $path"
+}
+
+# Score one batch's artifacts. Exit 0 = the batch supports verdicts, 3 = VOID,
+# anything else = the artifacts could not be read at all.
+#
+# $1 log  $2 rc  $3 freshness floor (epoch)  $4 names file  $5 out file  $6 bundle
+score_batch() {
+  local log="$1" rc="$2" since="$3" names="$4" out="$5" bundle="${6:-}"
+  local args=(classify --log "$log" --rc "$rc" --since "$since" --names "$names" --out "$out")
+  if [ -n "$bundle" ] && [ -d "$bundle" ]; then
+    args+=(--xcresult "$bundle")
+  fi
+  python3 scripts/mutation_verdict.py "${args[@]}"
+}
+
+# THE BUNDLE IS ASKED FOR ON EVERY RUN, SO ITS ABSENCE IS A FAULT AND MUST SAY SO
+# (playhead-gjlp0 R2).
+#
+# `score_batch` omits `--xcresult` when the directory is not there. That is the
+# right behaviour — `mutation_verdict.py` treats a bundle that was ASKED FOR and
+# could not be read as a hard error, so handing it a path to nothing would be
+# worse — but on its own it is a guard whose false branch makes no claim, which
+# is exactly the shape that shipped `scripts/sim-trim.sh` INERT for two full
+# plans (playhead-81ig): a trimmed run and an untrimmed run produced identical
+# logs. Here the two runs differ only in one line of the scorer's own census
+# (`verdicts read from: the console log`), which reads as a neutral fact about
+# where a verdict came from rather than as the fault it is in THIS caller.
+#
+# It is not fatal, and deliberately: a console-only SURVIVED still rests on a
+# positive `✔`, which is the whole point of this bead, and refusing would turn a
+# degraded run into no run at all. It is LOUD, and the epilogue stops claiming
+# the bundle when this fired.
+note_bundle_presence() {
+  local bundle="$1" what="$2"
+  if [ -d "$bundle" ]; then
+    return 0
+  fi
+  CONSOLE_ONLY=1
+  # AND WHICH RUNS, not merely that there was one (playhead-gjlp0 R5). One flag
+  # is set by the baseline and by every batch alike, and the SURVIVED epilogue
+  # then said "Those verdicts came off the CONSOLE alone" — false whenever it
+  # was the BASELINE that lost its bundle and the batches kept theirs. R2 fixed
+  # the header of that note to name RUNS and left the verdict sentence claiming
+  # the stronger thing; every console-only rail drops BOTH bundles, so the
+  # population that would have shown it was never driven. The list is what lets
+  # the epilogue be true in both worlds without a second flag.
+  CONSOLE_ONLY_WHICH="${CONSOLE_ONLY_WHICH}${CONSOLE_ONLY_WHICH:+, }$what"
+  echo "  NO .xcresult BUNDLE — $what will be scored off the CONSOLE ALONE."
+  echo "    asked fast-gate for: $bundle"
+  echo "    A console-only reading is the weaker instrument: it cannot see a verdict"
+  echo "    xcodebuild spliced app output through, which is why playhead-t53a moved"
+  echo "    the gate's census onto the bundle. Nothing about this is a property of"
+  echo "    any mutation — either PLAYHEAD_RESULT_BUNDLE is not reaching fast-gate,"
+  echo "    or xcodebuild died before it could write one."
+  return 0
+}
+
+# The state the scorer recorded for one expected test.
+#
+# Prints NOTHING and returns 1 when the scorer wrote no line for that name. An
+# absent line is deliberately NOT spelled the same way as a state: every caller
+# must decide what to do about an instrument that went quiet, rather than
+# inheriting a default. That is the whole shape of the defect this bead fixes,
+# so the fix must not re-introduce it one layer up.
+# THE NAME GOES THROUGH THE ENVIRONMENT, NOT THROUGH `-v` (playhead-gjlp0 R1).
+# `awk -v x=VALUE` runs VALUE through ESCAPE PROCESSING, so a display name
+# containing a backslash arrives as something else and matches nothing.
+# Measured: `a\b name` is present in the file, `-v` reports NO-STATE for it and
+# `ENVIRON` reports PASSED. NO-STATE lands in the `unjudged` arm, so such an
+# expectation would report VOID on every run for ever — the scorer resolved it
+# perfectly and only this reader could not see it, which is this bead's own
+# defect shape between two readers of one file. No entry in MUTATIONS carries a
+# backslash today; a Swift Testing display name may.
+state_of() {
+  MB_WANT="$2" awk -F'\t' \
+    '$1 !~ /^#/ && $2 == ENVIRON["MB_WANT"] { print $1; found = 1; exit } END { exit !found }' "$1"
+}
+
+# One `#`-prefixed header field from the scorer's output file, or "".
+#
+# `-v` here and ENVIRON in `state_of` / `print_evidence`, and the difference is
+# NOT meaningful — which is worth a line, because R1 changed those two after
+# `-v` mangled a display name and a reader finding the third spelling would
+# reasonably conclude something. `-v` escape-processes its value; the values
+# there are TEST NAMES and mutation names, which come from the MUTATIONS table
+# and may legally contain a backslash. The value here is a FIELD NAME, supplied
+# by this script as a literal (`failures`), and there are no others. If a caller
+# ever passes a field name it did not spell itself, this becomes the same bug.
+scored_field() {
+  awk -F'\t' -v key="#$2" '$1 == key { print $2; exit }' "$1"
+}
+
+# Print where THIS mutation's verdict came from. Called for every verdict that
+# is not a plain KILL, because those are the ones somebody comes back to.
+#
+# AND IT SAYS SO WHEN THERE IS NONE. The first cut printed NOTHING for a
+# mutation with no evidence line — every ERROR raised before scoring: an anchor
+# that did not apply, a batch that never built, a batch whose artifacts could
+# not be read. The table is the part that gets quoted (that is why the run stamp
+# is repeated at its foot), so a row with no path under it is a row whose reader
+# has nowhere to go, and a MISSING line and a line saying "none" are two
+# different claims that must not be spelled the same way — which is this whole
+# bead in one function.
+#
+# `MB_EV_NAME` through the environment rather than `awk -v`: see `state_of`.
+# Mutation names are `[A-Z0-9]+` today, so nothing is escaped either way; two
+# spellings of one idiom is how the next reader concludes the difference matters.
+print_evidence() {
+  if MB_EV_NAME="$1" awk -F'\t' '$1 == ENVIRON["MB_EV_NAME"] {
+      printf "%-16s evidence: %s\n", "", $2
+      if ($3 != "" && $3 != "-") printf "%-16s           %s\n", "", $3
+      found = 1
+      exit
+    } END { exit !found }' "$EVIDENCE"; then
+    return 0
+  fi
+  printf '%-16s evidence: NONE — this mutation never reached a scored test run\n' ""
+  printf '%-16s           (the run kept its work dir: %s)\n' "" "$WORK"
+}
+
+# THE RUN-LEVEL BUNDLE FAULT, SAID IN WHICHEVER EPILOGUE IS PRINTING
+# (playhead-gjlp0 R2, extended at R3).
+#
+# R2 attached this to the SURVIVED epilogue, because that was the sentence
+# printed without checking. R3 found the DIRECTION matters more elsewhere. A
+# console-only SURVIVED still rests on a positive `✔` — the weaker instrument
+# making the same claim. A console-only VOID or ERROR may be the instrument
+# INVENTING the silence it reports: playhead-t53a measured 80 of 87 reported
+# casualties across 27 crash-free full-plan logs to be verdicts the console
+# parser could not read, and a severed START line makes a test invisible in
+# both directions. The VOID epilogue was telling a reader to re-run and, if it
+# recurs, to suspect the mutation of killing the test host — the wrong thing to
+# chase on a run whose bundle simply never arrived.
+#
+# The opening line is deliberately identical in all three: it is what a reader
+# greps for, and it is what the R2 rail asserts.
+console_only_note() {
+  [ "$CONSOLE_ONLY" -eq 1 ] || return 0
+  echo "AND AT LEAST ONE RUN BEHIND THIS TABLE HAD NO .xcresult BUNDLE — the block" >&2
+  echo "above names which, and the baseline reaches that arm as well as any batch." >&2
+  # Named here as well as in the block above, because on a run where the fault
+  # is systemic that block is one paragraph per batch and this is the foot of
+  # the output (playhead-gjlp0 R5).
+  echo "    scored off the CONSOLE alone: $CONSOLE_ONLY_WHICH" >&2
+  printf '%s\n' "$1" >&2
+  echo "Find out why the bundle is missing: either PLAYHEAD_RESULT_BUNDLE is not" >&2
+  echo "reaching fast-gate, or xcodebuild died before it could write one." >&2
 }
 
 # ---------------------------------------------------------------------------
@@ -29991,8 +30220,24 @@ done
 
 RESULTS="$WORK/results"
 : >"$RESULTS"
+# name<TAB>log<TAB>bundle — where the evidence for each mutation's verdict is.
+# The table prints it for every verdict that is not a plain KILL, so nobody has
+# to go looking for `batch-<N>.log` under /private/tmp, which is where a
+# checker finds another bead's run of the same batch number (playhead-8cjo).
+EVIDENCE="$WORK/evidence"
+: >"$EVIDENCE"
 BUILD_COUNT=0
 FATAL=0
+# Set when ANY batch in this run was scored without its .xcresult bundle
+# (playhead-gjlp0 R2). See `note_bundle_presence`: the battery asks fast-gate
+# for a bundle on every run, so an absent one is an instrument fault rather
+# than a mode, and the SURVIVED epilogue at the foot of this script used to
+# assert the bundle was the verdict source unconditionally.
+CONSOLE_ONLY=0
+# WHICH runs, in order — "the baseline", "batch 7". The flag alone cannot tell
+# a baseline that lost its bundle from a batch that did, and the SURVIVED
+# epilogue was making a claim that needs exactly that distinction (R5).
+CONSOLE_ONLY_WHICH=""
 # Cleared by `restore_and_verify` and never re-set; see the note at the final
 # restore for why a repaired tree must not un-fail the run.
 RESTORE_OK=1
@@ -30027,11 +30272,27 @@ echo
 if [ "$DRY_RUN" -eq 0 ] && [ "${PLAYHEAD_MB_SKIP_BASELINE:-0}" != "1" ]; then
   echo "=== baseline: focused suites on UNMUTATED sources ==="
   BASE_LOG="$WORK/baseline.log"
-  run_focused "$BASE_LOG"
+  BASE_BUNDLE="$WORK/baseline.xcresult"
+  BASE_NAMES="$WORK/baseline-expect.txt"
+  BASE_OUT="$WORK/baseline-outcomes.txt"
+  : >"$BASE_NAMES"
+  for rec in "${SELECTED[@]}"; do
+    exp="$(rec_expect "$rec")"
+    OLDIFS="$IFS"; IFS=';'
+    for want in $exp; do
+      IFS="$OLDIFS"
+      printf '%s\n' "$want" >>"$BASE_NAMES"
+      IFS=';'
+    done
+    IFS="$OLDIFS"
+  done
+  # The freshness floor. Captured immediately before the run so it is a claim
+  # about THIS INVOCATION, not merely about this run — see mutation_verdict.py.
+  BASE_SINCE="$(date +%s)"
+  run_focused "$BASE_LOG" "$BASE_BUNDLE"
   BASE_RC=$?
   BUILD_COUNT=$((BUILD_COUNT + 1))
-  last_attempt "$BASE_LOG" >"$BASE_LOG.last"
-  if ! grep -q "Test run with" "$BASE_LOG.last"; then
+  if ! last_attempt_ran_tests "$BASE_LOG"; then
     # playhead-pu7e: this used to print "the baseline did not run tests", which
     # is a claim ABOUT THE TREE, and then grep `error:|BUILD FAILED|Killed: 9`.
     # A concurrent battery matches none of those and a wedged simulator matches
@@ -30041,28 +30302,155 @@ if [ "$DRY_RUN" -eq 0 ] && [ "${PLAYHEAD_MB_SKIP_BASELINE:-0}" != "1" ]; then
     KEEP_WORK=1
     exit 2
   fi
-  extract_failures "$BASE_LOG.last" >"$WORK/baseline-failures.txt"
-  if [ -s "$WORK/baseline-failures.txt" ]; then
+
+  note_bundle_presence "$BASE_BUNDLE" "the baseline"
+  score_batch "$BASE_LOG" "$BASE_RC" "$BASE_SINCE" "$BASE_NAMES" "$BASE_OUT" "$BASE_BUNDLE"
+  BASE_SCORE_RC=$?
+  if [ "$BASE_SCORE_RC" -ne 0 ] && [ "$BASE_SCORE_RC" -ne 3 ]; then
+    echo "mutation-battery: the baseline's artifacts could not be READ (see above)." >&2
+    echo "Nothing below this line is a verdict about anything." >&2
+    KEEP_WORK=1
+    exit 2
+  fi
+  if [ "$BASE_SCORE_RC" -eq 3 ]; then
+    # playhead-gjlp0. A baseline batch that lost its host tells you nothing
+    # about whether the suites are green, and a run that proceeds from it
+    # measures every mutation against an unknown. The remedy is to run it
+    # again, so say that rather than implicating the tree.
+    echo "mutation-battery: THE BASELINE BATCH IS VOID — it produced no usable verdict." >&2
+    sed -n 's/^#reason\t/    * /p' "$BASE_OUT" >&2
+    echo "This is not a claim about the tree, the anchors or the expectations." >&2
+    # THE REMEDY DEFERS TO THE REASON ABOVE, and until playhead-gjlp0 R5 it did
+    # not. This arm said "the suites were never judged. Re-run." flat, two lines
+    # under a reason that can read `RE-RUNNING WILL NOT CHANGE IT` — two
+    # contradictory instructions in one output, which is what R2 closed for the
+    # failure count and R4 closed for the BATCH epilogue and left here. Driven:
+    # a baseline bundle carrying an unrecognised result string printed both.
+    # "The suites were never judged" is also false for that reason: they WERE
+    # judged, in a word this parser cannot read.
+    echo "The remedy is USUALLY to run it again — READ THE REASON(S) ABOVE FIRST." >&2
+    echo "One of them states outright that re-running will NOT change it, and no" >&2
+    echo "number of re-runs will: it is gate_baseline.py's XCRESULT_* vocabulary" >&2
+    echo "that needs the new spelling, not the box that needs another try." >&2
+    echo "Where re-running IS the remedy and it recurs, read the log:" >&2
+    echo "    $BASE_LOG" >&2
+    KEEP_WORK=1
+    exit 2
+  fi
+
+  # `scored_field` prints "" both for "the field says zero is not what it says"
+  # and for "there is no such field", and the test below reads `""` as
+  # NOT-ZERO — i.e. as a RED TREE. That is a claim about the codebase produced
+  # by an instrument that went quiet, and its remedy ("fix the tree") is
+  # unactionable because there would be no failures listed under it. So the
+  # ABSENCE gets its own arm, and it names the FILE rather than the tree.
+  BASE_FAILURES="$(scored_field "$BASE_OUT" failures)"
+  case "$BASE_FAILURES" in
+    ''|*[!0-9]*)
+      echo "mutation-battery: the scorer wrote no usable '#failures' count for the" >&2
+      echo "baseline (read: '$BASE_FAILURES'). That is a fault in the INSTRUMENT, not" >&2
+      echo "a finding about the tree — scripts/mutation_verdict.py and this script" >&2
+      echo "disagree about the outcomes-file format. Nothing below would be a verdict." >&2
+      echo "    $BASE_OUT" >&2
+      KEEP_WORK=1
+      exit 2 ;;
+  esac
+  if [ "$BASE_FAILURES" != "0" ]; then
     echo "mutation-battery: the focused suites are RED before any mutation." >&2
-    sed 's/^/    ✘ /' "$WORK/baseline-failures.txt" >&2
+    sed -n 's/^#failure\t/    ✘ /p' "$BASE_OUT" >&2
     echo "Every mutation naming one of those tests would be credited KILLED for" >&2
     echo "a reason that has nothing to do with the mutation. Fix the tree first." >&2
     KEEP_WORK=1
     exit 2
   fi
-  # Every expectation must NAME A TEST THAT ACTUALLY RAN. Checked here, on the
-  # one build that is already being spent, so a mis-typed or mis-split
+
+  # A DENIED RESOURCE IS A RED TEST THAT `#failures` DOES NOT COUNT, AND THIS
+  # BEAD MADE THE BASELINE STOP SEEING IT (playhead-gjlp0 R3).
+  #
+  # `gate_baseline` routes a resource denial out of `failures` and into its own
+  # category, on playhead-s34ux's rule that a denial names the BOX rather than
+  # the code. That rule is right and is kept. What it costs HERE is that the
+  # count above reads 0 for a baseline whose log carries `✘ … failed` lines, so
+  # the run printed `baseline green` and went on to score mutations. DRIVEN,
+  # both ways, on one denied test and one passing expectation:
+  #
+  #   pre-bead (`git show a82e52a9:`)  rc 2, "the focused suites are RED before
+  #                                    any mutation", the test named
+  #   this bead as it stood            "baseline green", then M05 SURVIVED over
+  #                                    `observed failures (ALL of them, 0)`
+  #
+  # It is refused rather than merely reported, because the tolerance is not
+  # symmetric: the per-test rule is UNANIMITY, so a test that records one
+  # CANTOPEN and one genuine assertion stays a FAILURE — on a box that is
+  # denying descriptors to the focused suites, the next mutation's KILL may be
+  # the box rather than the edit, and that is the false-KILL direction this
+  # file calls silent and indistinguishable from success.
+  #
+  # The REMEDY is the thing the pre-bead message got wrong. "Fix the tree
+  # first" is unactionable for a denial; re-running is the honest advice, which
+  # is why this is its own arm rather than a widening of the count above.
+  BASE_DENIED="$(scored_field "$BASE_OUT" resource)"
+  case "$BASE_DENIED" in
+    ''|*[!0-9]*)
+      # Same arm, same reason, as the `#failures` guard above: an absence is
+      # not a reading. A scorer that writes no `#resource` count disagrees with
+      # this script about their shared file format, and the numeric test below
+      # would read "" as NOT ZERO.
+      echo "mutation-battery: the scorer wrote no usable '#resource' count for the" >&2
+      echo "baseline (read: '$BASE_DENIED'). That is a fault in the INSTRUMENT, not" >&2
+      echo "a finding about the tree — scripts/mutation_verdict.py and this script" >&2
+      echo "disagree about the outcomes-file format. Nothing below would be a verdict." >&2
+      echo "    $BASE_OUT" >&2
+      KEEP_WORK=1
+      exit 2 ;;
+  esac
+  if [ "$BASE_DENIED" != "0" ]; then
+    echo "mutation-battery: $BASE_DENIED baseline test(s) were DENIED A RESOURCE." >&2
+    sed -n 's/^#denied\t/    ⚠ /p' "$BASE_OUT" >&2
+    cat >&2 <<'MSG'
+Those tests went RED on the console and are NOT in the failure count, because
+gate_baseline classifies a denied resource as a fact about the BOX rather than
+about the code (playhead-s34ux). That makes them useless as a control: the
+per-test rule is UNANIMITY, so the next batch's genuine-looking failure may be
+one denial plus one assertion, and it would be credited to the mutation.
+This is NOT a claim about the tree, the anchors or the expectations. Re-run.
+MSG
+    KEEP_WORK=1
+    exit 2
+  fi
+
+  # Every expectation must NAME A TEST THAT WAS ACTUALLY JUDGED. Checked here,
+  # on the one build that is already being spent, so a mis-typed or mis-split
   # expectation costs zero mutation builds instead of printing SURVIVED.
-  extract_ran "$BASE_LOG.last" >"$WORK/baseline-ran.txt"
+  #
+  # playhead-gjlp0 widened this from "named a test that STARTED" to "named a
+  # test that PASSED". The old form let a rail that never reports — because its
+  # host dies under it every time — pass the preflight and then score SURVIVED
+  # for every mutation that names it.
+  #
+  # PASSED, not "reached a verdict", and the two are not the same thing — this
+  # comment said the weaker one until playhead-gjlp0 R5 while the `case` below
+  # admitted PASSED alone. A baseline FAILED cannot actually reach here (the
+  # `#failures` guard above exits first, and so do the `#resource` and VOID
+  # guards), so the arm's own message enumerates only the states that CAN:
+  # started-and-never-judged, skipped, denied.
   UNKNOWN=""
+  UNJUDGED=""
   for rec in "${SELECTED[@]}"; do
     exp="$(rec_expect "$rec")"
     OLDIFS="$IFS"; IFS=';'
     for want in $exp; do
       IFS="$OLDIFS"
-      grep -Fxq "$want" "$WORK/baseline-ran.txt" || \
-        UNKNOWN="${UNKNOWN}    $(rec_name "$rec") expects: ${want}
-"
+      base_state="$(state_of "$BASE_OUT" "$want")" || base_state="(the scorer wrote no state for it)"
+      case "$base_state" in
+        PASSED) : ;;
+        ABSENT)
+          UNKNOWN="${UNKNOWN}    $(rec_name "$rec") expects: ${want}
+" ;;
+        *)
+          UNJUDGED="${UNJUDGED}    $(rec_name "$rec") expects: ${want}  [${base_state}]
+" ;;
+      esac
       IFS=';'
     done
     IFS="$OLDIFS"
@@ -30079,6 +30467,23 @@ MSG
     KEEP_WORK=1
     exit 2
   fi
+  if [ -n "$UNJUDGED" ]; then
+    echo "mutation-battery: an expectation names a test that RAN and was never JUDGED." >&2
+    printf '%s' "$UNJUDGED" >&2
+    cat >&2 <<'MSG'
+It started and produced no verdict, or was skipped, or was denied a resource.
+Either way nothing about it is evidence: on the UNMUTATED tree it must PASS
+before a mutation may be scored against it. A rail whose host dies under it
+every time would otherwise be credited SURVIVED for every mutation that names
+it — which is precisely the defect playhead-gjlp0 fixed one layer down.
+MSG
+    KEEP_WORK=1
+    exit 2
+  fi
+  # The baseline is green and every expectation is a test that PASSED. Nothing
+  # here is evidence any more, so the bundle goes; the log stays, because it is
+  # what `mb_diagnose_no_tests` sends a reader to.
+  drop_bundle "$BASE_BUNDLE"
   echo "  baseline green"
   echo
 fi
@@ -30133,62 +30538,246 @@ for b in "${BATCH_IDS[@]}"; do
   fi
 
   LOG="$WORK/batch-$b.log"
+  BUNDLE="$WORK/batch-$b.xcresult"
+  NAMES="$WORK/expect-$b.txt"
+  OUTCOMES="$WORK/outcomes-$b.txt"
+  : >"$NAMES"
+  for rec in "${MEMBERS[@]}"; do
+    exp="$(rec_expect "$rec")"
+    OLDIFS="$IFS"; IFS=';'
+    for want in $exp; do
+      IFS="$OLDIFS"
+      printf '%s\n' "$want" >>"$NAMES"
+      IFS=';'
+    done
+    IFS="$OLDIFS"
+  done
   echo "  running focused suites…"
-  run_focused "$LOG"
+  # See the baseline block: the floor is captured HERE, not at run start.
+  BATCH_SINCE="$(date +%s)"
+  run_focused "$LOG" "$BUNDLE"
   RC=$?
   BUILD_COUNT=$((BUILD_COUNT + 1))
 
-  last_attempt "$LOG" >"$LOG.last"
-  if ! grep -q "Test run with" "$LOG.last"; then
+  if ! last_attempt_ran_tests "$LOG"; then
     # playhead-pu7e: "(build failure?)" was a guess printed as a finding. See
     # the baseline branch above.
     mb_diagnose_no_tests "$LOG" "$RC" "batch $b"
     for rec in "${MEMBERS[@]}"; do
       echo "$(rec_name "$rec")|ERROR|batch did not build/run — see the DIAGNOSIS above" >>"$RESULTS"
+      # The bundle only if it EXISTS, and only THEN — the same conditional the
+      # two arms below already carry. This one hard-coded `-`, so a batch that
+      # reached xcodebuild and wrote a bundle before failing had its evidence
+      # recorded as absent and `print_evidence` could never name it. A line
+      # that says a thing is not there, when it is, is the same defect as a
+      # line that says it is there when it is not (playhead-gjlp0 R1).
+      if [ -d "$BUNDLE" ]; then
+        printf '%s\t%s\t%s\n' "$(rec_name "$rec")" "$LOG" "$BUNDLE" >>"$EVIDENCE"
+      else
+        printf '%s\t%s\t-\n' "$(rec_name "$rec")" "$LOG" >>"$EVIDENCE"
+      fi
     done
     FATAL=1
     restore_and_verify "batch $b" || break
     continue
   fi
 
-  FAILED_LIST="$WORK/failed-$b.txt"
-  RAN_LIST="$WORK/ran-$b.txt"
-  extract_ran "$LOG.last" >"$RAN_LIST"
-  extract_failures "$LOG.last" >"$FAILED_LIST"
-  echo "  observed failures:"
-  if [ -s "$FAILED_LIST" ]; then
-    sed 's/^/    ✘ /' "$FAILED_LIST"
-  else
-    echo "    (none)"
-  fi
+  note_bundle_presence "$BUNDLE" "batch $b"
+  echo "  scoring:"
+  score_batch "$LOG" "$RC" "$BATCH_SINCE" "$NAMES" "$OUTCOMES" "$BUNDLE" | sed 's/^/  /'
+  SCORE_RC="${PIPESTATUS[0]}"
+  BATCH_IS_VOID=0
+  case "$SCORE_RC" in
+    0) : ;;
+    3) BATCH_IS_VOID=1 ;;
+    *)
+      # The artifacts could not be read at all — a stale or missing log, an
+      # unreadable bundle. That is not a verdict about any mutation either, and
+      # it is ERROR rather than VOID because re-running will not fix it.
+      for rec in "${MEMBERS[@]}"; do
+        echo "$(rec_name "$rec")|ERROR|the batch could not be SCORED (see CANNOT EVALUATE above)" >>"$RESULTS"
+        if [ -d "$BUNDLE" ]; then
+          printf '%s\t%s\t%s\n' "$(rec_name "$rec")" "$LOG" "$BUNDLE" >>"$EVIDENCE"
+        else
+          printf '%s\t%s\t-\n' "$(rec_name "$rec")" "$LOG" >>"$EVIDENCE"
+        fi
+      done
+      FATAL=1
+      restore_and_verify "batch $b" || break
+      continue ;;
+  esac
+  BATCH_VOID_WHY="$(sed -n 's/^#reason\t/; /p' "$OUTCOMES" | tr -d '\n' | sed 's/^; //')"
 
+  # EVERY FAILURE THE BATCH PRODUCED, BY NAME — not only the expected ones.
+  #
+  # The pre-playhead-gjlp0 battery printed this block, and the first cut of the
+  # fix dropped it: the scorer reports a COUNT ("3 failed") and names only the
+  # tests some mutation declared. That is a real loss in the direction that
+  # matters most here. `docs/investigations/playhead-8cjo-mutation-ledger.md`
+  # opens with it — "A KILLED column is not evidence… a mutant that reports
+  # KILLED while killing a DIFFERENT set is a false credit" — and the only way
+  # to see that is the list. A mutation that reddens six tests and declares one
+  # is a finding about the mutation; with a count alone it reads as a clean kill.
+  #
+  # The count goes first so the magnitude is visible before the list, which a
+  # crash-looping batch can make long.
+  #
+  # `(none)` IS A MEASUREMENT AND IT IS ONLY EARNED BY A STATED ZERO. If the
+  # scorer wrote no `#failures` field, an empty list means "the instrument said
+  # nothing", which is a different claim and must not be spelled the same way.
+  # The baseline has its own arm for this and refuses; a batch can reach here
+  # with the baseline skipped, so it says so rather than printing `(none)`.
+  BATCH_FAILURES="$(scored_field "$OUTCOMES" failures)"
+  case "$BATCH_FAILURES" in
+    ''|*[!0-9]*)
+      echo "  observed failures: UNKNOWN — the scorer wrote no '#failures' count."
+      echo "    Nothing below is a measurement of this batch. See $OUTCOMES" ;;
+    *)
+      # AND THE COUNT MUST AGREE WITH THE LIST (playhead-gjlp0 R2). R1 armed the
+      # direction where the scorer states no count and the list is empty; this
+      # is its mirror — a stated count of N over an empty list printed `(none)`
+      # under a header saying N, which is two contradictory readings of one file
+      # with nothing to tell a reader which to believe. `(none)` is earned by a
+      # STATED ZERO and by nothing else.
+      BATCH_FAILURE_LINES="$(sed -n 's/^#failure\t.*$/x/p' "$OUTCOMES" | wc -l | tr -d ' ')"
+      echo "  observed failures (ALL of them, $BATCH_FAILURES):"
+      if [ "$BATCH_FAILURE_LINES" != "$BATCH_FAILURES" ]; then
+        echo "    THE COUNT AND THE LIST DISAGREE — '#failures' says $BATCH_FAILURES," >&2
+        echo "    and there are $BATCH_FAILURE_LINES '#failure' line(s). Neither is a" >&2
+        echo "    measurement of this batch: scripts/mutation_verdict.py and this script" >&2
+        echo "    disagree about the outcomes-file format. See $OUTCOMES" >&2
+      fi
+      if [ "$BATCH_FAILURE_LINES" -eq 0 ]; then
+        [ "$BATCH_FAILURES" = "0" ] && echo "    (none)"
+      else
+        sed -n 's/^#failure\t/    ✘ /p' "$OUTCOMES"
+      fi ;;
+  esac
+
+  # AND THE COUNT ABOVE IS NOT EVERY RED TEST (playhead-gjlp0 R3). A denied
+  # resource is `✘ … failed` on the console and is deliberately not a failure
+  # to `gate_baseline` (playhead-s34ux), so a batch that lost five tests to
+  # `SQLITE_CANTOPEN` printed `observed failures (ALL of them, 0)` and then
+  # `(none)`. That is the reading this block exists to prevent, one category
+  # over: the ledger this list feeds — `docs/investigations/
+  # playhead-8cjo-mutation-ledger.md` — is built on the OBSERVED VICTIM SET,
+  # and a mutation that denies a resource somewhere else reads as a clean kill.
+  #
+  # Reported beside the failures rather than folded into them, because the two
+  # are different claims and the remedies differ: a failure is about the EDIT,
+  # a denial is about the BOX and means re-run.
+  BATCH_DENIED="$(scored_field "$OUTCOMES" resource)"
+  case "$BATCH_DENIED" in
+    0) : ;;
+    ''|*[!0-9]*)
+      echo "  denied resources: UNKNOWN — the scorer wrote no '#resource' count."
+      echo "    The failure list above is not a census of the red tests. See $OUTCOMES" ;;
+    *)
+      echo "  ALSO DENIED A RESOURCE ($BATCH_DENIED) — red on the console, and NOT in the"
+      echo "  count above (playhead-s34ux: a denial names the BOX, not the code):"
+      sed -n 's/^#denied\t/    ⚠ /p' "$OUTCOMES" ;;
+  esac
+
+  BATCH_KEEP_EVIDENCE=0
   for rec in "${MEMBERS[@]}"; do
     name="$(rec_name "$rec")"
     expect="$(rec_expect "$rec")"
     missing=""
     never_ran=""
+    unjudged=""
     OLDIFS="$IFS"; IFS=';'
     for want in $expect; do
       IFS="$OLDIFS"
-      if ! grep -Fxq "$want" "$RAN_LIST"; then
-        # Not a survivor — the harness never asked the question. Kept separate
-        # from `missing` so the two are never conflated in the report.
-        never_ran="${never_ran}${never_ran:+ | }${want}"
-      elif ! grep -Fxq "$want" "$FAILED_LIST"; then
-        missing="${missing}${missing:+ | }${want}"
-      fi
+      # THE LADDER. Four arms, and each one is a DIFFERENT claim — the whole
+      # point of playhead-gjlp0 is that the old two-arm form spelled three of
+      # them the same way.
+      st="$(state_of "$OUTCOMES" "$want")" || st="NO-STATE"
+      case "$st" in
+        # A stated failure. The mutation was caught.
+        FAILED) : ;;
+        # A stated pass. THIS is what licences "still green" — nothing else.
+        PASSED) missing="${missing}${missing:+ | }${want}" ;;
+        # The harness never asked the question.
+        ABSENT) never_ran="${never_ran}${never_ran:+ | }${want}" ;;
+        # It ran and nobody judged it: NO-VERDICT, CRASHED, DENIED, SKIPPED —
+        # or NO-STATE, meaning the scorer itself wrote nothing for this name,
+        # which is the same class of silence one layer up and must not default.
+        *) unjudged="${unjudged}${unjudged:+ | }${want} [${st}]" ;;
+      esac
       IFS=';'
     done
     IFS="$OLDIFS"
-    if [ -n "$never_ran" ]; then
+    if [ "$BATCH_IS_VOID" -eq 1 ]; then
+      # THE BATCH OUTRANKS EVERY PER-TEST READING — including a FAILED one and
+      # including an ABSENT one. A host that died mid-batch can redden a test,
+      # and can swallow its `◇ started` line, for reasons that have nothing to
+      # do with the mutation. playhead-4xmz measured exactly that: a mutant
+      # that TRAPPED took the host down, and whether its declared victim's
+      # failure line flushed before the crash became the whole verdict.
+      #
+      # WHY THAT IS RIGHT EVEN WHEN IT THROWS A REAL KILL AWAY (playhead-gjlp0
+      # R5 — four rounds took this arm order on trust, so the argument is
+      # written down rather than waved at).
+      #
+      # The case it costs is CONSTRUCTIBLE, not hypothetical: mutation M
+      # reddens its declared victim deterministically while a BATCH-MATE traps
+      # and takes the host down. M's real kill is discarded, both members
+      # report VOID, and re-running the whole batch reproduces it every time,
+      # because the trapping mutant traps every time. What the operator does is
+      # `--only M`: one build, M in a batch of its own, and the trap is not in
+      # it. (`--series` and `--batch` keep the pair together and will not help.)
+      #
+      # THE REASON IT IS RIGHT IS THE ASYMMETRY, NOT THE FREQUENCY. Discarding
+      # a real kill costs one scoped re-run and announces itself in the table.
+      # Crediting a kill off a batch whose host died is a FALSE KILL — CLAUDE.md
+      # calls that shape silent and indistinguishable from success — and it
+      # lands in the ledger under docs/investigations/ where the next reader
+      # takes it as evidence. The loud error is recoverable and the quiet one
+      # is not, so the order resolves toward the loud one.
+      #
+      # ABSENT loses to VOID for the same reason one step along: the baseline
+      # preflight has ALREADY proved this expectation names a test that PASSED
+      # on the unmutated tree, so on a void batch "no roster mentions it" is far
+      # more likely to be a start line the dead host never printed than a
+      # renamed test — and ERROR's remedy ("fix the EDIT") would send the reader
+      # to change an expectation that is correct.
+      echo "$name|VOID|the batch produced no usable verdict${BATCH_VOID_WHY:+ — $BATCH_VOID_WHY}" >>"$RESULTS"
+      BATCH_KEEP_EVIDENCE=1
+    elif [ -n "$never_ran" ]; then
       echo "$name|ERROR|expected test never ran (';' in the name? renamed? suite not in FOCUSED_SUITES?): $never_ran" >>"$RESULTS"
       FATAL=1
+      BATCH_KEEP_EVIDENCE=1
+    elif [ -n "$unjudged" ]; then
+      echo "$name|VOID|the expected test reached NO VERDICT: $unjudged" >>"$RESULTS"
+      BATCH_KEEP_EVIDENCE=1
     elif [ -z "$missing" ]; then
       echo "$name|KILLED|" >>"$RESULTS"
     else
       echo "$name|SURVIVED|$missing" >>"$RESULTS"
+      BATCH_KEEP_EVIDENCE=1
+    fi
+    # Where the evidence for THIS verdict lives, recorded per mutation so the
+    # results table can print it. A SURVIVED verdict that does not name its own
+    # log sends the next reader searching /private/tmp by batch number, and
+    # batch numbers repeat across beads (playhead-8cjo: a checker verified
+    # today's control against a three-day-old log and reported OK).
+    # The bundle only if it EXISTS. Printing a path to something that is not
+    # there is the same defect one layer up: a line that names a thing, read as
+    # evidence that the thing is there.
+    if [ -d "$BUNDLE" ]; then
+      printf '%s\t%s\t%s\n' "$name" "$LOG" "$BUNDLE" >>"$EVIDENCE"
+    else
+      printf '%s\t%s\t%s\n' "$name" "$LOG" "-" >>"$EVIDENCE"
     fi
   done
+
+  # A batch of nothing but KILLs is not evidence of anything anybody will come
+  # back to, and a focused .xcresult is tens of megabytes on a box whose gate
+  # refuses to start below 13.5 GiB. Keep the bundle exactly when a verdict
+  # might be questioned.
+  if [ "$BATCH_KEEP_EVIDENCE" -eq 0 ]; then
+    drop_bundle "$BUNDLE"
+  fi
 
   restore_and_verify "batch $b" || break
   echo
@@ -30214,24 +30803,34 @@ echo "================================ RESULTS ================================"
 printf '%-6s %-9s %s\n' "NAME" "VERDICT" "MUTATION"
 SURVIVORS=0
 ERRORS=0
+VOIDS=0
 while IFS='|' read -r name verdict detail; do
   printf '%-6s %-9s %s\n' "$name" "$verdict" "$(describe_mutation "$name")"
   case "$verdict" in
     SURVIVED) SURVIVORS=$((SURVIVORS + 1))
-              printf '%-16s still green: %s\n' "" "$detail" ;;
+              printf '%-16s still green: %s\n' "" "$detail"
+              print_evidence "$name" ;;
+    # playhead-gjlp0. NOT a survivor and NOT a kill: nothing judged the test,
+    # so the mutation has not been evaluated in either direction. Spelled with
+    # its own word because the whole defect this fixes was three different
+    # claims sharing one.
+    VOID)     VOIDS=$((VOIDS + 1))
+              printf '%-16s NO VERDICT: %s\n' "" "$detail"
+              print_evidence "$name" ;;
     ERROR)    ERRORS=$((ERRORS + 1))
-              printf '%-16s %s\n' "" "$detail" ;;
+              printf '%-16s %s\n' "" "$detail"
+              print_evidence "$name" ;;
   esac
 done <"$RESULTS"
 echo "-------------------------------------------------------------------------"
-printf 'builds: %d   wall clock: %dm%02ds   survivors: %d   errors: %d\n' \
-  "$BUILD_COUNT" "$((ELAPSED / 60))" "$((ELAPSED % 60))" "$SURVIVORS" "$ERRORS"
+printf 'builds: %d   wall clock: %dm%02ds   survivors: %d   voids: %d   errors: %d\n' \
+  "$BUILD_COUNT" "$((ELAPSED / 60))" "$((ELAPSED % 60))" "$SURVIVORS" "$VOIDS" "$ERRORS"
 # Repeated at the FOOT as well as the head: a collector that tails the table
 # would otherwise never see it, and the table is the part that gets quoted.
 printf 'run started %s   pid %d   argv: %s\n' \
   "$RUN_STARTED_HUMAN" "$$" "${INVOCATION_ARGV:-<none>}"
 
-if [ "$SURVIVORS" -gt 0 ] || [ "$ERRORS" -gt 0 ] || [ "$FATAL" -eq 1 ]; then
+if [ "$SURVIVORS" -gt 0 ] || [ "$VOIDS" -gt 0 ] || [ "$ERRORS" -gt 0 ] || [ "$FATAL" -eq 1 ]; then
   KEEP_WORK=1
 fi
 
@@ -30241,7 +30840,47 @@ if [ "$RESTORE_OK" -eq 0 ]; then
 fi
 if [ "$ERRORS" -gt 0 ] || [ "$FATAL" -eq 1 ]; then
   echo "One or more mutations could not be evaluated. Fix the EDIT, not the expectation." >&2
+  console_only_note "An 'expected test never ran' from such a run may be the instrument rather
+than the table: a START line the console lost makes a test invisible in both
+directions (playhead-t53a). Anchor drift and a build failure are unaffected —
+the DIAGNOSIS beside each row says which of them this was."
   exit 3
+fi
+if [ "$VOIDS" -gt 0 ]; then
+  cat >&2 <<'MSG'
+
+A VOID IS NOT A VERDICT. Either the expected test produced no result at all —
+the host died under it, it was skipped, or it was denied a resource — or the
+BATCH lost its test host, in which case no result from it is evidence about any
+mutation, INCLUDING a failure (playhead-4xmz: a trapping mutant reddens tests
+for reasons that have nothing to do with the mutation). Read the detail beside
+each VOID above for which of the two it was. Either way the mutation was never
+evaluated in EITHER direction: do not record it as KILLED and do not chase it as
+a coverage hole.
+
+The remedy is USUALLY to run that batch again — UNLESS THE ROW SAYS OTHERWISE,
+and TWO shapes do. A batch whose .xcresult used a result string the parser
+cannot read says so on its own reason line and says re-running will not change
+it (playhead-gjlp0 R4). And an expectation whose state reads [SKIPPED] did not
+run at all under the mutation, minutes after the baseline watched that same
+test PASS on the unmutated tree — so the MUTATION is the likeliest reason it
+skipped, and every re-run will skip it again (playhead-gjlp0 R5). That is a
+finding about the PAIRING: this rail cannot answer the question this mutant
+asks, and the fix is a different rail or a different mutant, never another run.
+Read the row before re-running; this paragraph is the general case, not an
+override of a stated reason.
+
+Where re-running IS the remedy: if it recurs, the mutation itself is probably
+killing the test host, which is a real finding about the mutation and not about
+the rail: split it away from the test that reaches the trap and record why the
+remaining rail has no mutant (playhead-4xmz's DW18 is the worked case).
+MSG
+  console_only_note "READ THAT BEFORE RE-RUNNING. A console-only reading is the one that
+MANUFACTURES a NO VERDICT — xcodebuild splices the app's own output through a
+verdict line and the console loses it, which is exactly why playhead-t53a moved
+the gate's census onto the bundle. A VOID from such a run may be the instrument
+rather than the host, and the advice above would send you after the wrong thing."
+  exit 5
 fi
 if [ "$SURVIVORS" -gt 0 ]; then
   cat >&2 <<'MSG'
@@ -30249,7 +30888,21 @@ if [ "$SURVIVORS" -gt 0 ]; then
 A SURVIVOR IS A COVERAGE HOLE. The defect above can be introduced with the
 focused suites still green. Write the test that rejects it — do not relax the
 expectation and do not delete the entry.
+
+Every SURVIVED above rests on a POSITIVE pass verdict for the named test
+(playhead-gjlp0) — the batch's log, and its .xcresult bundle when there is one,
+are printed beside each one. Absence of a failure line is no longer enough.
 MSG
+  # The sentence above used to say "read from the batch's own .xcresult bundle"
+  # unconditionally, and at least one run behind the table may have had none. A
+  # claim about where a verdict came from, printed without checking, in the one
+  # place a reader decides whether to trust a SURVIVED — this bead's own defect
+  # one layer out from the code it fixed.
+  console_only_note "A SURVIVED from any run named above came off the CONSOLE alone: still a
+positive \`✔\` rather than the pre-gjlp0 reading of silence, but the weaker
+instrument. If the only run named is THE BASELINE, the SURVIVED verdicts below
+still rest on their own batch's bundle. Read the batch log beside each SURVIVED
+before acting on it."
   exit 1
 fi
 if [ "$DRY_RUN" -eq 1 ]; then
