@@ -9163,16 +9163,20 @@ actor AnalysisStore {
     /// **THE NAME WAS THE DEFECT.** The places that say what this column HOLDS
     /// already said "the `backfill_jobs.jobId`" — the writer
     /// (`BackfillJobRunner.attributed(_:jobId:)`), the V42 schema note, and
-    /// ``SemanticScanResult/backfillJobId``'s own doc. The places that read its
-    /// NAME instead got it wrong, and BOTH are corrected in this same change
-    /// rather than cited as witnesses: `BackgroundGrantBudget`'s limit paragraph
-    /// called it "an `fm-*` id" without saying whose, and
+    /// ``SemanticScanResult/backfillJobId``'s own doc. Two others are edited in
+    /// this same change rather than cited as witnesses, and they are NOT the
+    /// same kind of wrong.
     /// ``SemanticSweepMarkComposer/corroborationFactor(affirming:dissenting:)``
     /// offered a "distinct `runCorrelationId`" as EVIDENCE that its replicates
-    /// are independent. (An earlier draft of this paragraph claimed EVERY other
-    /// mention already agreed and named `BackgroundGrantBudget` as one of the
-    /// three; it did not agree, and the diff that says so is this one.) A job id
-    /// is per `(asset, phase, offset)`: ONE value for an asset's whole
+    /// are independent — a false claim, and the reason this bead exists.
+    /// `BackgroundGrantBudget`'s limit paragraph called it "an `fm-*` id" and
+    /// said it matches no `runId`, which is TRUE as written and merely does not
+    /// say whose id it is; the diff adds the word "job". **Silence is not
+    /// disagreement, and an earlier draft of this paragraph read it as such** —
+    /// first by claiming every other mention already agreed, then by
+    /// over-correcting to "it did not agree". It said nothing either way.
+    ///
+    /// A job id is per `(asset, phase, offset)`: ONE value for an asset's whole
     /// backfill history. Measured on the 2026-08-19 t4 pull,
     /// `count(DISTINCT runCorrelationId)` and `count(DISTINCT analysisAssetId)`
     /// are both **15**, and `A9F6DF05` carries 176 rows written across four

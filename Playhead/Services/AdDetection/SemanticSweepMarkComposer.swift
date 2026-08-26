@@ -954,10 +954,15 @@ enum SemanticSweepMarkComposer {
     /// it: over the 36 replicate windows of the population measured above
     /// (`passA`, ANY status), 16 have all-distinct ids, 12 are entirely NULL,
     /// and **8 carry a single id** — every row of those 8 was written AFTER
-    /// 2026-08-07, and every one of the 16 has a row from BEFORE it (11 lie
+    /// wxsv's merge, and every one of the 16 has a row from BEFORE it (11 lie
     /// wholly before it, 5 straddle it). Both directions are stated because
     /// only the pair makes "the pull straddles the change" a measurement rather
-    /// than an assertion. Measured on both pulls, every distinct-id pair is
+    /// than an assertion. **THE CUTOFF IS THE MERGE INSTANT, NOT THE CALENDAR
+    /// DAY** — `45f4729b`, 2026-08-07 22:41:09 UTC. Re-derive it at midnight
+    /// instead and the split reads 11 / 4 / **1 wholly after**, because
+    /// `48E903D7` 596.3 s carries an earlier row at 21:03 UTC, 1h38m inside the
+    /// window. A day is not an instant; that substitution is the very defect
+    /// this comment is about. Measured on both pulls, every distinct-id pair is
     /// also a distinct-version pair and not conversely — the job id is a
     /// COARSENING of `transcriptVersion` and can never separate two rows the
     /// version does not.
