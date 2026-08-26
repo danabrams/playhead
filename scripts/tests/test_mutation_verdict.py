@@ -1613,7 +1613,7 @@ class ShellBundleTests(ShellBatteryHarness):
         self.assertEqual(self.verdict_of(proc), "SURVIVED", out[-4000:])
         # ...and the epilogue may claim the bundle, because there was one.
         self.assertNotIn("NO .xcresult BUNDLE", out, out[-4000:])
-        self.assertNotIn("AND AT LEAST ONE BATCH HERE HAD NO", out, out[-4000:])
+        self.assertNotIn("AND AT LEAST ONE RUN BEHIND THIS TABLE HAD NO", out, out[-4000:])
         self.assertEqual(proc.returncode, 1, out[-4000:])
 
     def test_a_bundle_STATED_crash_is_VOID_and_never_a_KILL(self):
@@ -1670,7 +1670,7 @@ class ShellConsoleOnlyTests(ShellBatteryHarness):
         self.assertEqual(self.verdict_of(proc), "SURVIVED", out[-4000:])
         self.assertIn("NO .xcresult BUNDLE — the baseline", out, out[-4000:])
         self.assertIn("NO .xcresult BUNDLE — batch", out, out[-4000:])
-        self.assertIn("AND AT LEAST ONE BATCH HERE HAD NO", out, out[-4000:])
+        self.assertIn("AND AT LEAST ONE RUN BEHIND THIS TABLE HAD NO", out, out[-4000:])
         # The claim it replaced. A reader who trusts this sentence would go
         # looking for a bundle that was never written.
         self.assertNotIn("read\nfrom the batch's own .xcresult bundle", out)

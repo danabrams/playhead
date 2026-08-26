@@ -243,8 +243,6 @@ for log in glob.glob("/private/tmp/playhead-mutation-battery.*/batch-*.log"):
 EOF
 ```
 
-The same paragraph's other half is durable and worth keeping in mind while you read the counts: a SURVIVED row records the expectation it was about, so it can be checked against a log years later, while a KILLED row records nothing and the only re-derivable thing about it is its BATCH's health.
-
 So the fix is not noisy: on everything that can be checked it fires once, on the known false verdict. Do not read that as "rare and therefore cheap" — a SURVIVED verdict is the one that sends the next person to write a test that already exists, and a crash-looping batch produces it for free. And note what makes this audit possible at all: a SURVIVED row records the expectation it was about, so it can be checked against a log years later; a KILLED row records nothing, so the only thing re-derivable about it is its BATCH's health. The MUTATIONS table is also edited constantly, so looking an old row's expectation up in today's table gives you another mutation's answer — measured at review, that route reports 7 of the 20 SURVIVED rows as disagreeing, every one of them an artefact of the lookup.
 
 **The ladder is four words now, and each is a different claim:**

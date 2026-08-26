@@ -29883,6 +29883,15 @@ state_of() {
 }
 
 # One `#`-prefixed header field from the scorer's output file, or "".
+#
+# `-v` here and ENVIRON in `state_of` / `print_evidence`, and the difference is
+# NOT meaningful — which is worth a line, because R1 changed those two after
+# `-v` mangled a display name and a reader finding the third spelling would
+# reasonably conclude something. `-v` escape-processes its value; the values
+# there are TEST NAMES and mutation names, which come from the MUTATIONS table
+# and may legally contain a backslash. The value here is a FIELD NAME, supplied
+# by this script as a literal (`failures`), and there are no others. If a caller
+# ever passes a field name it did not spell itself, this becomes the same bug.
 scored_field() {
   awk -F'\t' -v key="#$2" '$1 == key { print $2; exit }' "$1"
 }
@@ -30658,9 +30667,10 @@ MSG
     # one place a reader decides whether to trust a SURVIVED — this bead's own
     # defect one layer out from the code it fixed.
     cat >&2 <<'MSG'
-AND AT LEAST ONE BATCH HERE HAD NO .xcresult BUNDLE (it said so above): those
-verdicts came off the CONSOLE alone. Still a positive `✔` rather than the
-pre-gjlp0 reading of silence, but the weaker instrument — read the batch log
+AND AT LEAST ONE RUN BEHIND THIS TABLE HAD NO .xcresult BUNDLE — the block
+above names which, and the baseline reaches that arm as well as any batch. Those
+verdicts came off the CONSOLE alone: still a positive `✔` rather than the
+pre-gjlp0 reading of silence, but the weaker instrument. Read the batch log
 before acting on a SURVIVED from this run, and find out why the bundle is
 missing.
 MSG
