@@ -1,0 +1,645 @@
+// BackgroundDownloadDropOutageIdentityTests.swift
+// playhead-sdis — ONE daemon OUTAGE stops being indistinguishable from FORTY
+// EPISODES.
+//
+// playhead-7dgx shipped a table whose only count was `count(*)`, which counts
+// EPISODES AFFECTED. Its own retry recommendation was written against that
+// table claiming a `session_not_vended` refusal is a per-LAUNCH outage whose
+// right retry unit is the launch rather than the episode — and nothing in the
+// table could falsify it. These rails are what the columns bought.
+//
+// WHY `launchId` ALONE IS NOT ENOUGH, which is the finding this suite exists
+// to make measurable rather than argued. A refusal is NEVER CACHED
+// (`_sessionsByRole` is written only on success), so ONE launch holds MANY
+// refusals — `sequentialRefusalsInOneLaunchAreThreeDistinctCrossings` is the
+// rail, and it is deterministic. And ONE refusal mints N rows, because
+// `backgroundSession(for:requestedBy:)` lets concurrent callers JOIN an
+// in-flight crossing — `concurrentJoinersOfOneCrossingShareOneCrossingId` is
+// that rail, and it is the money rail of the bead.
+//
+// THE TWO RAILS ARE MIRRORS AND BOTH ARE NEEDED. One launch / three crossings
+// and one crossing / three episodes are the two readings `count(*)` collapses,
+// and a suite carrying only one of them proves the column is WRITTEN without
+// proving it DISCRIMINATES.
+//
+// SESSION HYGIENE, on `BackgroundDownloadDropLedgerTests`' precedent: the
+// background-session IDENTIFIERS are process-wide constants, so any rail that
+// constructs a real `URLSessionConfiguration.background(withIdentifier:)`
+// shares that resource with three neighbouring suites under the parallel plan.
+// Every rail here refuses or strands the CREATION crossing, so no real session
+// is ever vended — and the one rail that holds the creation queue open still
+// invalidates, because `discardingLateResult` hands a late session back to be
+// cancelled and nothing else would.
+
+import Foundation
+import Testing
+import SQLite3
+@testable import Playhead
+
+@Suite("DownloadManager – one outage is not forty episodes (playhead-sdis)")
+struct BackgroundDownloadDropOutageIdentityTests {
+
+    // MARK: - Seams
+
+    /// Refuses ONLY the session-construction crossing, SYNCHRONOUSLY. Every
+    /// call mints its own crossing, which is exactly what the
+    /// sequential-refusal rail needs.
+    private static func creationRefusingIO() -> BackgroundSessionIO {
+        BackgroundSessionIO(
+            behavior: .refusesCallsLabelled(
+                DownloadManager.sessionCreationLabelPrefix
+            ),
+            timeout: 0.1,
+            queueLabel: "sdis.test.creation-refused.\(UUID().uuidString)"
+        )
+    }
+
+    /// Refuses ONLY `downloadTask(with:)`. Reaches the `transferTaskNotVended`
+    /// path, whose rows must carry NO crossing id.
+    private static func taskRefusingIO() -> BackgroundSessionIO {
+        BackgroundSessionIO(
+            behavior: .refusesCallsLabelled("downloadTask(with:) for"),
+            timeout: 7.5,
+            queueLabel: "sdis.test.task-refused.\(UUID().uuidString)"
+        )
+    }
+
+    /// Refuses ONLY `resume()`. Reaches the `transferNotResumed` path.
+    private static func resumeRefusingIO() -> BackgroundSessionIO {
+        BackgroundSessionIO(
+            behavior: .refusesCallsLabelled("resume() for"),
+            timeout: 7.5,
+            queueLabel: "sdis.test.resume-refused.\(UUID().uuidString)"
+        )
+    }
+
+    /// The bound the JOIN rail strands its crossing behind, and the one number
+    /// in this file that is a clock rather than an event.
+    ///
+    /// The join can only be exercised while the crossing is IN FLIGHT, and the
+    /// ONLY way `BackgroundSessionIO.perform` produces a refusal that takes any
+    /// time at all is the deadline: `neverAnswers` and `refusesCallsLabelled`
+    /// both short-circuit before the queue is touched and return instantly, so
+    /// neither leaves a window for a second caller to join. So the rail holds
+    /// the creation queue and lets this bound expire.
+    ///
+    /// The window is therefore `[t0, t0 + joinWindowBound]`, and every caller
+    /// that reaches the crossing decision inside it JOINS by construction. What
+    /// has to beat the clock is the BARRIER — three callers arriving — and the
+    /// rail measures how long that took and fails NAMING it, rather than
+    /// reporting a crossing-id mismatch whose cause a reader would have to
+    /// guess. Six seconds against a barrier that costs milliseconds on a quiet
+    /// box; the worst dilation on record for this machine is a 1 ms sleep
+    /// stretching to ~160 ms, so a handful of 2 ms polls has orders of
+    /// magnitude of headroom.
+    private static let joinWindowBound: TimeInterval = 6.0
+
+    /// Reaches the creation queue and STRANDS there until the bound expires.
+    private static func strandingIO() -> BackgroundSessionIO {
+        BackgroundSessionIO(
+            behavior: .dedicatedThread,
+            timeout: joinWindowBound,
+            queueLabel: "sdis.test.stranded.\(UUID().uuidString)"
+        )
+    }
+
+    private static func manager(
+        cacheDirectory: URL,
+        store: AnalysisStore,
+        sessionIO: BackgroundSessionIO,
+        invariantRecorder: (@Sendable (InvariantViolation.Code, String) -> Void)? = nil
+    ) -> DownloadManager {
+        DownloadManager(
+            cacheDirectory: cacheDirectory,
+            sessionIO: sessionIO,
+            invariantRecorder: invariantRecorder,
+            dropRecorder: AnalysisStoreBackgroundDownloadDropRecorder(store: store)
+        )
+    }
+
+    private static func context() -> DownloadContext {
+        DownloadContext(
+            podcastId: "show-sdis",
+            isExplicitDownload: false,
+            podcastTitle: "Show",
+            episodeTitle: "Episode"
+        )
+    }
+
+    private static func drive(_ manager: DownloadManager, episodeId: String) async {
+        await manager.backgroundDownload(
+            episodeId: episodeId,
+            from: URL(string: "https://cdn.example.com/\(episodeId).mp3")!,
+            context: context()
+        )
+    }
+
+    /// Occupies `io`'s serial work queue and returns the semaphore that frees
+    /// it. Returns only once the queue is provably held.
+    ///
+    /// Copied in shape from `BackgroundSessionCreationTests`, which established
+    /// why it is load-bearing: without it the callers DO NOT OVERLAP — caller
+    /// one's crossing completes in microseconds against a healthy simulator
+    /// daemon, so the others find the memo populated and return it, which is
+    /// what a correct implementation AND an implementation with no join both
+    /// do. The label deliberately carries no `" for "`.
+    private static func holdingQueue(
+        of io: BackgroundSessionIO
+    ) async -> DispatchSemaphore {
+        let release = DispatchSemaphore(value: 0)
+        await withCheckedContinuation { (held: CheckedContinuation<Void, Never>) in
+            Task {
+                _ = await io.perform(
+                    label: "sdis.test.occupancy",
+                    running: {
+                        held.resume()
+                        release.wait()
+                    }
+                )
+            }
+        }
+        return release
+    }
+
+    /// Waits until `condition` holds, and reports whether it ever did. The
+    /// deadline is a safety net so a broken build fails instead of hanging the
+    /// plan, never an input to an assertion.
+    private static func waited(until condition: () async -> Bool) async -> Bool {
+        let deadline = ContinuousClock.now + .seconds(120)
+        while ContinuousClock.now < deadline {
+            if await condition() { return true }
+            try? await Task.sleep(for: .milliseconds(2))
+        }
+        return await condition()
+    }
+
+    // MARK: - 1. Every row names the process that wrote it
+
+    @Test("every drop row carries THIS manager's launch id, on all three paths")
+    func everyDropRowCarriesTheWritingLaunchId() async throws {
+        for (label, io, reason) in [
+            ("session", Self.creationRefusingIO(), BackgroundDownloadDropReason.sessionNotVended),
+            ("task", Self.taskRefusingIO(), .transferTaskNotVended),
+            ("resume", Self.resumeRefusingIO(), .transferNotResumed),
+        ] {
+            let (store, _) = try await makeTestStoreWithDirectory()
+            let dir = try makeTempDir(prefix: "sdisLaunchId\(label)")
+            let manager = Self.manager(cacheDirectory: dir, store: store, sessionIO: io)
+            try await manager.bootstrap()
+            let launchId = await manager.launchId
+
+            await Self.drive(manager, episodeId: "ep-\(label)")
+
+            let page = try await store.fetchBackgroundDownloadDrops()
+            #expect(page.rows.count == 1, "\(label): exactly one drop")
+            let row = try #require(page.rows.first)
+            #expect(row.reason == reason, "\(label): the drive must land on the path it aimed at")
+            #expect(
+                row.launchId == launchId,
+                """
+                \(label): the row must name the manager that wrote it. A row \
+                whose launchId is anything else makes count(DISTINCT launchId) \
+                a count of something other than launches.
+                """
+            )
+            #expect(!launchId.isEmpty)
+            await manager.invalidateBackgroundSessionsForTesting()
+        }
+    }
+
+    /// The crossing id is NOT stamped on every row, and that asymmetry is a
+    /// statement rather than an oversight. Only `sessionNotVended` rides a
+    /// crossing other callers can join; the other two each follow a
+    /// `sessionIO.perform` this caller submitted alone, so for them a row IS a
+    /// call and `count(*)` already answers "how many bounded calls expired".
+    @Test("only a session refusal carries a crossing id — the other two rows carry NONE")
+    func onlyASessionRefusalCarriesACrossingId() async throws {
+        let (sessionStore, _) = try await makeTestStoreWithDirectory()
+        let sessionManager = Self.manager(
+            cacheDirectory: try makeTempDir(prefix: "sdisCrossingYes"),
+            store: sessionStore, sessionIO: Self.creationRefusingIO()
+        )
+        try await sessionManager.bootstrap()
+        await Self.drive(sessionManager, episodeId: "ep-session")
+        let sessionRow = try #require(
+            try await sessionStore.fetchBackgroundDownloadDrops().rows.first
+        )
+        #expect(sessionRow.reason == .sessionNotVended)
+        let crossing = try #require(
+            sessionRow.sessionCrossingId,
+            "a refusal reaches the drop site only THROUGH the crossing, so this can never be nil"
+        )
+        #expect(!crossing.isEmpty)
+        await sessionManager.invalidateBackgroundSessionsForTesting()
+
+        for (label, io) in [
+            ("task", Self.taskRefusingIO()),
+            ("resume", Self.resumeRefusingIO()),
+        ] {
+            let (store, _) = try await makeTestStoreWithDirectory()
+            let manager = Self.manager(
+                cacheDirectory: try makeTempDir(prefix: "sdisCrossingNo\(label)"),
+                store: store, sessionIO: io
+            )
+            try await manager.bootstrap()
+            await Self.drive(manager, episodeId: "ep-\(label)")
+            let row = try #require(try await store.fetchBackgroundDownloadDrops().rows.first)
+            #expect(row.sessionCrossingId == nil, "\(label): nothing joins this submission")
+            // …and it is NOT nil because the row predates V64. The
+            // discriminator is `launchId`, and this is the pairing a device
+            // pull has to read together.
+            #expect(row.launchId != nil, "\(label): a post-V64 row always names its launch")
+            await manager.invalidateBackgroundSessionsForTesting()
+        }
+    }
+
+    // MARK: - 2. THE MIRROR RAILS — why `launchId` alone is not enough
+
+    /// A REFUSAL IS NEVER CACHED, so one launch holds many refusals.
+    ///
+    /// This is the rail that refutes "a launch id is sufficient". Three drops,
+    /// ONE launch, THREE crossings: `count(DISTINCT launchId)` reports 1 and
+    /// `count(DISTINCT sessionCrossingId)` reports 3, and only the second is
+    /// the number of times the daemon refused. It is fully deterministic —
+    /// `refusesCallsLabelled` refuses synchronously, so the three drives cannot
+    /// overlap and cannot share a crossing.
+    @Test("three SEQUENTIAL refusals in ONE launch are three distinct crossings")
+    func sequentialRefusalsInOneLaunchAreThreeDistinctCrossings() async throws {
+        let (store, _) = try await makeTestStoreWithDirectory()
+        let dir = try makeTempDir(prefix: "sdisSequential")
+        let manager = Self.manager(
+            cacheDirectory: dir, store: store, sessionIO: Self.creationRefusingIO()
+        )
+        try await manager.bootstrap()
+        await manager.armDropLedger()
+        let launchId = await manager.launchId
+
+        for index in 1...3 {
+            await Self.drive(manager, episodeId: "ep-seq-\(index)")
+        }
+
+        let page = try await store.fetchBackgroundDownloadDrops()
+        #expect(page.rows.count == 3, "three episodes")
+        #expect(Set(page.rows.map(\.launchId)) == [launchId], "ONE launch")
+        let crossings = Set(page.rows.compactMap(\.sessionCrossingId))
+        #expect(
+            crossings.count == 3,
+            """
+            THREE refusals, and this is the reading `launchId` alone cannot \
+            produce: one launch that retried three times is not one outage. \
+            Saw \(crossings.count) distinct crossing(s) across 3 rows.
+            """
+        )
+        await manager.invalidateBackgroundSessionsForTesting()
+    }
+
+    /// THE MONEY RAIL. One refusal, three episodes, ONE crossing id.
+    ///
+    /// Three callers reach the crossing decision while the construction is
+    /// stranded on a held queue; two of them JOIN the first one's crossing
+    /// rather than opening a second `URLSession` on the same background
+    /// identifier. All three give up on the FIRST caller's deadline and all
+    /// three write a row — and before this bead those rows shared no marker at
+    /// all, which is precisely how `count(*) = 3` came to be read as three
+    /// daemon refusals.
+    ///
+    /// THREE THINGS MUST BE TRUE AT ONCE or the rail is vacuous, and each is
+    /// asserted rather than assumed:
+    ///   1. the crossing is HELD, so the callers can overlap (`holdingQueue`);
+    ///   2. all three reach the crossing DECISION, which is an event both a
+    ///      correct implementation and a join-less one reach
+    ///      (`sessionCrossingArrivalsForTesting == 3`);
+    ///   3. the barrier completes INSIDE the window, since a caller arriving
+    ///      after `joinWindowBound` would legitimately start its own crossing
+    ///      and the rail would be measuring the box.
+    @Test("three CONCURRENT joiners of ONE crossing write three rows sharing ONE crossing id")
+    func concurrentJoinersOfOneCrossingShareOneCrossingId() async throws {
+        let (store, _) = try await makeTestStoreWithDirectory()
+        let dir = try makeTempDir(prefix: "sdisJoin")
+        let manager = Self.manager(
+            cacheDirectory: dir, store: store, sessionIO: Self.strandingIO()
+        )
+        try await manager.bootstrap()
+        await manager.armDropLedger()
+        let launchId = await manager.launchId
+
+        let release = await Self.holdingQueue(of: await manager.sessionCreationIO)
+        let started = ContinuousClock.now
+        async let first: Void = Self.drive(manager, episodeId: "ep-join-1")
+        async let second: Void = Self.drive(manager, episodeId: "ep-join-2")
+        async let third: Void = Self.drive(manager, episodeId: "ep-join-3")
+
+        let allArrived = await Self.waited {
+            await manager.sessionCrossingArrivalsForTesting == 3
+        }
+        let barrier = ContinuousClock.now - started
+        let arrivals = await manager.sessionCrossingArrivalsForTesting
+        _ = await (first, second, third)
+        release.signal()
+
+        #expect(
+            allArrived,
+            "the rail is vacuous unless all three callers reached the crossing decision: \(arrivals) of 3"
+        )
+        #expect(
+            barrier < .seconds(Self.joinWindowBound),
+            """
+            the barrier took \(barrier) against a \(Self.joinWindowBound)s \
+            window, so a caller may have arrived after the crossing had already \
+            expired and legitimately started its own. This run measured the \
+            box, not the join — re-run it; a crossing-id mismatch below would \
+            be that, not a defect.
+            """
+        )
+
+        let page = try await store.fetchBackgroundDownloadDrops()
+        #expect(page.rows.count == 3, "three episodes were abandoned")
+        #expect(page.rows.allSatisfy { $0.reason == .sessionNotVended })
+        #expect(Set(page.rows.map(\.launchId)) == [launchId])
+        let crossings = Set(page.rows.compactMap(\.sessionCrossingId))
+        #expect(
+            crossings.count == 1,
+            """
+            ONE daemon refusal cost three episodes, so the three rows must \
+            share ONE crossing id. \(crossings.count) distinct value(s) means \
+            each joiner minted its own, and `count(DISTINCT sessionCrossingId)` \
+            goes back to reporting episodes under a name that says outages.
+            """
+        )
+        // AND THE COUNTS DISAGREE, which is the whole point: three episodes,
+        // one outage, one launch.
+        #expect(page.rows.count == 3 && crossings.count == 1)
+        await manager.invalidateBackgroundSessionsForTesting()
+    }
+
+    /// TWO MANAGERS ARE TWO LAUNCHES, which is what puts the numerator in the
+    /// same unit as `armedLaunches`.
+    ///
+    /// A process-wide `static` launch id would pass every rail above and fail
+    /// this one: two independent recorders each arm the ledger, so
+    /// `armedLaunches` reaches 2 while `count(DISTINCT launchId)` would still
+    /// read 1 — a numerator and a denominator that have quietly stopped being
+    /// the same unit, which is the defect this bead exists to remove.
+    @Test("two managers are two launches, and the numerator matches armedLaunches' unit")
+    func twoManagersAreTwoLaunches() async throws {
+        let dir = try makeTempDir(prefix: "sdisTwoLaunches")
+        AnalysisStore.resetMigratedPathsForTesting()
+        let store = try AnalysisStore(directory: dir)
+        try await store.migrate()
+        TestScratchReaper.shared.adopt(dir, owner: store)
+
+        var launchIds: [String] = []
+        for index in 1...2 {
+            let manager = Self.manager(
+                cacheDirectory: try makeTempDir(prefix: "sdisLaunch\(index)"),
+                store: store, sessionIO: Self.creationRefusingIO()
+            )
+            try await manager.bootstrap()
+            await manager.armDropLedger()
+            launchIds.append(await manager.launchId)
+            await Self.drive(manager, episodeId: "ep-launch-\(index)")
+            await manager.invalidateBackgroundSessionsForTesting()
+        }
+
+        #expect(Set(launchIds).count == 2, "two managers must not share one identity")
+        let page = try await store.fetchBackgroundDownloadDrops()
+        #expect(Set(page.rows.compactMap(\.launchId)) == Set(launchIds))
+        let arming = try #require(try await store.fetchBackgroundDownloadDropArming())
+        #expect(arming.armedLaunches == 2)
+        #expect(
+            Set(page.rows.compactMap(\.launchId)).count == arming.armedLaunches,
+            "two launches armed and two launches dropped: the ratio is finally a ratio"
+        )
+        #expect(
+            arming.lastArmedLaunchId == launchIds[1],
+            "the arming row must name the launch that armed most recently, so the two tables share one vocabulary"
+        )
+    }
+
+    // MARK: - 3. A drop on a DEGRADED launch says so
+
+    /// THE READING HAZARD playhead-7dgx DOCUMENTED AND COULD NOT MEASURE.
+    ///
+    /// `AnalysisStore` opens LAZILY, so a launch whose `openAtLaunch` failed
+    /// returns from `PlayheadRuntime`'s launch Task before `armDropLedger()`
+    /// and STILL lands a drop row through `insertBackgroundDownloadDrop`. That
+    /// row's launch is in no denominator, and nothing on disk said which rows
+    /// those were. This is the degraded launch, reproduced by the only property
+    /// that defines it: the arming never ran.
+    @Test("a drop written by a launch that never armed carries not_attempted, and the row is real")
+    func aDropOnAnUnarmedLaunchSaysNotAttempted() async throws {
+        let (store, _) = try await makeTestStoreWithDirectory()
+        let manager = Self.manager(
+            cacheDirectory: try makeTempDir(prefix: "sdisDegraded"),
+            store: store, sessionIO: Self.creationRefusingIO()
+        )
+        try await manager.bootstrap()
+        // NO armDropLedger() — this is the degraded launch.
+        await Self.drive(manager, episodeId: "ep-degraded")
+
+        let row = try #require(try await store.fetchBackgroundDownloadDrops().rows.first)
+        #expect(
+            row.launchArmingState == .notAttempted,
+            "the row must say its launch is NOT in the denominator"
+        )
+        let arming = try #require(try await store.fetchBackgroundDownloadDropArming())
+        #expect(
+            arming.armedLaunches == 0,
+            "and the denominator must agree: a real row beside a zero count is a REACHABLE state, not a contradiction"
+        )
+        #expect(arming.lastArmedLaunchId == nil)
+        await manager.invalidateBackgroundSessionsForTesting()
+    }
+
+    @Test("a drop written after a successful arming carries armed, the only positive value")
+    func aDropAfterArmingSaysArmed() async throws {
+        let (store, _) = try await makeTestStoreWithDirectory()
+        let manager = Self.manager(
+            cacheDirectory: try makeTempDir(prefix: "sdisArmed"),
+            store: store, sessionIO: Self.creationRefusingIO()
+        )
+        try await manager.bootstrap()
+        await manager.armDropLedger()
+        await Self.drive(manager, episodeId: "ep-armed")
+
+        let row = try #require(try await store.fetchBackgroundDownloadDrops().rows.first)
+        #expect(row.launchArmingState == .armed)
+        let arming = try #require(try await store.fetchBackgroundDownloadDropArming())
+        #expect(arming.armedLaunches == 1)
+        #expect(
+            arming.lastArmedLaunchId == row.launchId,
+            "the row and the arming row must name the SAME launch, or the join between the two tables is decorative"
+        )
+        await manager.invalidateBackgroundSessionsForTesting()
+    }
+
+    /// AN ARMING THAT FAILED IS NOT AN ARMING THAT NEVER RAN, and the row must
+    /// not collapse them. `arming_failed` says the launch will NEVER enter the
+    /// denominator; `not_attempted` leaves it open. Reproduced by breaking
+    /// exactly the arming table and leaving the drops table intact — the shape
+    /// a partial write failure has.
+    @Test("a drop written after a FAILED arming carries arming_failed, not not_attempted")
+    func aDropAfterAFailedArmingSaysArmingFailed() async throws {
+        let dir = try makeTempDir(prefix: "sdisArmingFailed")
+        AnalysisStore.resetMigratedPathsForTesting()
+        let store = try AnalysisStore(directory: dir)
+        try await store.migrate()
+        TestScratchReaper.shared.adopt(dir, owner: store)
+
+        let dbURL = dir.appendingPathComponent("analysis.sqlite")
+        var db: OpaquePointer?
+        #expect(sqlite3_open_v2(dbURL.path, &db, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK)
+        sqlite3_busy_timeout(db, 3000)
+        #expect(
+            sqlite3_exec(db, "DROP TABLE background_download_drop_arming", nil, nil, nil) == SQLITE_OK
+        )
+        sqlite3_close_v2(db)
+
+        let recording = RecordedInvariantViolations()
+        let manager = Self.manager(
+            cacheDirectory: try makeTempDir(prefix: "sdisArmingFailedCache"),
+            store: store, sessionIO: Self.creationRefusingIO(),
+            invariantRecorder: recording.recorder
+        )
+        try await manager.bootstrap()
+        await manager.armDropLedger()
+        await Self.drive(manager, episodeId: "ep-arming-failed")
+
+        let row = try #require(try await store.fetchBackgroundDownloadDrops().rows.first)
+        #expect(
+            row.launchArmingState == .armingFailed,
+            "the arming write failed, so this launch is not in armedLaunches and never will be"
+        )
+        #expect(row.launchId != nil, "the row is otherwise complete — only the DENOMINATOR was lost")
+        // And the second medium names the launch, so the two surfaces can be
+        // matched rather than correlated by timestamp.
+        let launchId = await manager.launchId
+        #expect(
+            recording.unrecordedDrops.contains { $0.contains("arming=failed") && $0.contains("launch=\(launchId)") },
+            "the arming failure must NAME the launch whose rows it invalidates: \(recording.unrecordedDrops)"
+        )
+        await manager.invalidateBackgroundSessionsForTesting()
+    }
+
+    // MARK: - 4. The fallback medium carries the identities too
+
+    /// The surface-status stream is reached exactly when the durable row did
+    /// NOT land, so it is the only place the launch and the crossing survive. A
+    /// fallback that dropped them would leave the second medium unable to
+    /// answer the question the first one was extended to answer.
+    @Test("a drop whose row cannot be written raises the launch, the crossing and the arming state")
+    func theFallbackMediumCarriesTheIdentities() async throws {
+        let dir = try makeTempDir(prefix: "sdisFallback")
+        AnalysisStore.resetMigratedPathsForTesting()
+        let store = try AnalysisStore(directory: dir)
+        try await store.migrate()
+        TestScratchReaper.shared.adopt(dir, owner: store)
+
+        // Break exactly the DROPS table, leaving the arming row intact, so the
+        // arming lands and the row cannot.
+        let dbURL = dir.appendingPathComponent("analysis.sqlite")
+        var db: OpaquePointer?
+        #expect(sqlite3_open_v2(dbURL.path, &db, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK)
+        sqlite3_busy_timeout(db, 3000)
+        #expect(
+            sqlite3_exec(db, "DROP TABLE background_download_drops", nil, nil, nil) == SQLITE_OK
+        )
+        sqlite3_close_v2(db)
+
+        let recording = RecordedInvariantViolations()
+        let manager = Self.manager(
+            cacheDirectory: try makeTempDir(prefix: "sdisFallbackCache"),
+            store: store, sessionIO: Self.creationRefusingIO(),
+            invariantRecorder: recording.recorder
+        )
+        try await manager.bootstrap()
+        await manager.armDropLedger()
+        let launchId = await manager.launchId
+        await Self.drive(manager, episodeId: "ep-fallback")
+
+        let raised = try #require(
+            recording.unrecordedDrops.first { $0.contains("episodeId=ep-fallback") },
+            "an unwritable row must reach the second medium: \(recording.unrecordedDrops)"
+        )
+        #expect(raised.contains("launch=\(launchId)"))
+        #expect(raised.contains("arming=armed"))
+        #expect(
+            raised.contains("crossing=") && !raised.contains("crossing=none"),
+            "a session refusal always rides a crossing, so the fallback must NAME it: \(raised)"
+        )
+        await manager.invalidateBackgroundSessionsForTesting()
+    }
+
+    /// AND `crossing=none` IS SPELLED OUT rather than omitted, for the two
+    /// reasons that ride no crossing. An absent field reads as a forgotten one;
+    /// for these rows the absence IS the measurement.
+    @Test("a task-vending drop that cannot be written says crossing=none rather than omitting it")
+    func theFallbackSpellsOutAnAbsentCrossing() async throws {
+        let dir = try makeTempDir(prefix: "sdisFallbackNone")
+        AnalysisStore.resetMigratedPathsForTesting()
+        let store = try AnalysisStore(directory: dir)
+        try await store.migrate()
+        TestScratchReaper.shared.adopt(dir, owner: store)
+
+        let dbURL = dir.appendingPathComponent("analysis.sqlite")
+        var db: OpaquePointer?
+        #expect(sqlite3_open_v2(dbURL.path, &db, SQLITE_OPEN_READWRITE, nil) == SQLITE_OK)
+        sqlite3_busy_timeout(db, 3000)
+        #expect(
+            sqlite3_exec(db, "DROP TABLE background_download_drops", nil, nil, nil) == SQLITE_OK
+        )
+        sqlite3_close_v2(db)
+
+        let recording = RecordedInvariantViolations()
+        let manager = Self.manager(
+            cacheDirectory: try makeTempDir(prefix: "sdisFallbackNoneCache"),
+            store: store, sessionIO: Self.taskRefusingIO(),
+            invariantRecorder: recording.recorder
+        )
+        try await manager.bootstrap()
+        await Self.drive(manager, episodeId: "ep-fallback-none")
+
+        let raised = try #require(
+            recording.unrecordedDrops.first { $0.contains("episodeId=ep-fallback-none") },
+            "an unwritable row must reach the second medium: \(recording.unrecordedDrops)"
+        )
+        #expect(raised.contains("reason=transfer_task_not_vended"))
+        #expect(raised.contains("crossing=none"))
+        #expect(raised.contains("arming=not_attempted"))
+        await manager.invalidateBackgroundSessionsForTesting()
+    }
+
+    // MARK: - 5. The refusal record and the ledger name the SAME crossing
+
+    /// The surface-status refusal record counts REFUSALS — only the caller that
+    /// STARTED the crossing reaches that arm, a joiner returns before it — while
+    /// the table counts EPISODES. The crossing id is what lets the two be
+    /// compared instead of correlated by timestamp, so it has to be the same
+    /// value on both.
+    @Test("the gpdb refusal record and the drop row name ONE crossing")
+    func theRefusalRecordAndTheRowNameOneCrossing() async throws {
+        let (store, _) = try await makeTestStoreWithDirectory()
+        let recording = RecordedInvariantViolations()
+        let manager = Self.manager(
+            cacheDirectory: try makeTempDir(prefix: "sdisTwoSurfaces"),
+            store: store, sessionIO: Self.creationRefusingIO(),
+            invariantRecorder: recording.recorder
+        )
+        try await manager.bootstrap()
+        await Self.drive(manager, episodeId: "ep-two-surfaces")
+
+        let row = try #require(try await store.fetchBackgroundDownloadDrops().rows.first)
+        let crossing = try #require(row.sessionCrossingId)
+        let refusals = recording.sessionRefusals(from: "background_download")
+        #expect(refusals.count == 1, "one refusal, from the caller that started the crossing")
+        #expect(
+            try #require(refusals.first).contains("crossing=\(crossing)"),
+            """
+            the two surfaces must name the same crossing, or a reader holding \
+            both a JSONL and a database has no way to tell how many refusals \
+            the rows came from: \(refusals)
+            """
+        )
+        await manager.invalidateBackgroundSessionsForTesting()
+    }
+}
