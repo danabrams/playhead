@@ -1714,9 +1714,16 @@ struct FastTranscriptCoverageV37MigrationTests {
         // LINE USED IT (playhead-1gu0 review round 8). It read "it names no
         // table this rung asserts on", and the table V65 names is
         // `semantic_scan_results` — the one this file's coverage numerator is
-        // taken over, and the one thirty-seven of its own tests seed. That is the trap
+        // taken over, and the one its own tests seed directly. That is the trap
         // the V53 note above spells out in as many words, and the V61 note
         // above — also a rung on this table — argues from the COLUMN instead.
+        // (That read "thirty-seven of its own tests seed", which is the count of
+        // tests calling `insertSemanticScanResult`: it misses the one test that
+        // seeds only through `seedRawScanRow`'s raw SQL, and it counts the two
+        // whose every insert is REFUSED and which assert `rows.isEmpty`. So it
+        // named neither the tests that write rows nor the tests that try. A
+        // count of test functions decays with the next test written, so it is
+        // dropped rather than restated; playhead-1gu0 review round 9.)
         // So: the claim is made on the RENAME's own shape. A `RENAME COLUMN`
         // preserves every row and every value, and the column it renames is
         // read by nothing here; the numerator is a function of `scanPass`,
