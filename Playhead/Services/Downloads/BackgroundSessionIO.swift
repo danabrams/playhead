@@ -123,6 +123,39 @@ struct BackgroundSessionIO: Sendable {
         case intermittentlyRefusesCallsLabelled(
             String, whileRefusing: @Sendable () -> Bool
         )
+
+        /// Test seam: SUSPEND the calls whose label contains `marker` until
+        /// `until()` returns, then refuse them. Every other call runs normally.
+        ///
+        /// playhead-sdis. Every other refusing seam above answers
+        /// SYNCHRONOUSLY, and a synchronous refusal can never produce a
+        /// JOINER. `DownloadManager.backgroundSessionRidingCrossing` writes its
+        /// in-flight entry, awaits the crossing, and clears the entry — so a
+        /// second caller can only find that entry while the first is
+        /// SUSPENDED. With an instant refusal there is no suspension to arrive
+        /// during, every caller starts its own crossing, and the population
+        /// playhead-sdis exists to make countable — N episodes lost to ONE
+        /// daemon refusal — is unreachable from any test.
+        ///
+        /// It SUSPENDS rather than blocking, and the difference is the whole
+        /// reason this is a new case instead of a blocking closure passed to
+        /// `intermittentlyRefusesCallsLabelled`. `perform` is `nonisolated
+        /// async`, so its prologue runs on the cooperative pool rather than on
+        /// the caller's actor; blocking there occupies a pool thread that the
+        /// runtime will not replace, and a rail that eats a pool thread under
+        /// an 11,000-test parallel plan is a rail that measures the box.
+        ///
+        /// It also costs NO WALL CLOCK, which the obvious alternative does. The
+        /// only other way to make a crossing slow-then-nil with the seams above
+        /// is to occupy the dedicated queue and let the DEADLINE expire — which
+        /// means every run pays the whole bound, and worse, makes the rail a
+        /// race between the barrier and that bound. The 2026-08-13 merge gate
+        /// lost exactly that race with a 10 s bound (see
+        /// `CrossingCounter.heldCrossingBound`). An event the test signals
+        /// cannot be lost to load.
+        case suspendsThenRefusesCallsLabelled(
+            String, until: @Sendable () async -> Void
+        )
         #endif
     }
 
@@ -246,6 +279,17 @@ struct BackgroundSessionIO: Sendable {
             where label.contains(marker) && refusing():
             Self.logger.error(
                 "\(label, privacy: .public): intermittentlyRefusesCallsLabelled(\(marker, privacy: .public)) test seam — reporting the daemon as unavailable"
+            )
+            return nil
+        case .suspendsThenRefusesCallsLabelled(let marker, let until)
+            where label.contains(marker):
+            // The suspension is the point: it is what lets a second caller
+            // reach `_sessionCreationsInFlight` and JOIN this crossing, which
+            // is the population playhead-sdis exists to make countable. See the
+            // case's own docs for why this is not a blocking closure.
+            await until()
+            Self.logger.error(
+                "\(label, privacy: .public): suspendsThenRefusesCallsLabelled(\(marker, privacy: .public)) test seam — reporting the daemon as unavailable"
             )
             return nil
         default:

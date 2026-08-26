@@ -40,6 +40,19 @@
 //      runtime test sees the arming row either way; only the call SITE says
 //      whether an unopened store was armed.
 //
+// FIVE MORE AT V64 (playhead-sdis), same rule, spelled 7a-7e beside the
+// section that carries them:
+//
+//   7a. the V64 rung is registered in BOTH ladders;
+//   7b. production constructs exactly ONE `DownloadManager` and passes it no
+//       `launchId:` — the two halves of the one property that lets the column
+//       be called a LAUNCH identity at all;
+//   7c. every drop site STATES its crossing rather than inheriting a default;
+//   7d. only `armDropLedger()` moves the arming state, so the column really
+//       does report what this process knew about its own arming;
+//   7e. every V64 column owes an `addColumnIfNeeded`, because a column
+//       declared only in the DDL BRICKS a store the previous build created.
+//
 // XCTest rather than Swift Testing, matching every other source canary here:
 // `xctestplan` can only filter XCTest classes, so a canary that might one day
 // need excluding stays XCTest-shaped.
@@ -396,5 +409,358 @@ final class BackgroundDownloadDropWiringSourceCanaryTests: XCTestCase {
             "playhead-7dgx: three reasons, three sites. Adding a case without a site — or a site "
             + "without a case — makes one of the two counts above a lie."
         )
+    }
+
+    // MARK: - 7. The identities (playhead-sdis)
+    //
+    // Three more properties no runtime test can see, and every one of them is
+    // a claim the shipped source already MAKES in a doc comment. A doc comment
+    // that names a canary which does not exist is the standing defect class
+    // wearing a citation, so the three are pinned here rather than asserted in
+    // prose:
+    //
+    //   7a. THE V64 RUNG IS IN BOTH LADDERS. Same argument as V62 above, and
+    //       the V64 comment in `AnalysisStore.swift` says outright that this
+    //       file "checks this pairing mechanically".
+    //   7b. PRODUCTION MINTS ONE LAUNCH ID AND NAMES NONE OF ITS OWN. The
+    //       `launchId` doc comment claims both halves for this canary. A
+    //       `static` slot, or a literal passed at the composition root, would
+    //       make every launch on every device read as ONE launch under
+    //       `count(DISTINCT launchId)` — the exact collapse the column exists
+    //       to prevent, and a runtime test cannot see it because one process
+    //       constructs one manager and any spelling reads the same from inside.
+    //   7c. EVERY DROP SITE STATES ITS CROSSING. `sessionCrossingId` has no
+    //       default, so a fourth abandonment path has to decide; the source is
+    //       the only place that can say all three existing sites decided.
+
+    /// 7a. Exactly like V62, and for the reason V60 cost a commit: a rung
+    /// called from `runSchemaMigration` but not from `migrateOnlyForTesting`
+    /// leaves every fixture-driven test one rung short while every
+    /// `currentSchemaVersion` assertion still passes, because the constant
+    /// moved with it.
+    func testV64IsRegisteredInBothLaddersExactlyOnceEach() throws {
+        let store = try code(Self.storePath)
+        let symbol = #"\bmigrateBackgroundDownloadDropLaunchIdentityV64IfNeeded\b"#
+
+        XCTAssertEqual(
+            SwiftSourceInspector.regexOccurrences(of: symbol, in: store), 3,
+            "playhead-sdis: the V64 rung must appear exactly three times in AnalysisStore.swift — "
+            + "its declaration, the `runSchemaMigration` call and the `migrateOnlyForTesting` "
+            + "call. Fewer means a ladder cannot reach it; more means a call site nobody "
+            + "enumerated."
+        )
+
+        let production = try XCTUnwrap(
+            SwiftSourceInspector.firstBody(in: store, after: "private func runSchemaMigration() throws"),
+            "could not isolate runSchemaMigration's body — the canary's anchor has drifted"
+        )
+        XCTAssertEqual(
+            SwiftSourceInspector.regexOccurrences(of: symbol, in: production), 1,
+            "playhead-sdis: the production ladder must call V64 exactly once."
+        )
+
+        let testing = try XCTUnwrap(
+            SwiftSourceInspector.firstBody(in: store, after: "func migrateOnlyForTesting() throws"),
+            "could not isolate migrateOnlyForTesting's body — the canary's anchor has drifted"
+        )
+        XCTAssertEqual(
+            SwiftSourceInspector.regexOccurrences(of: symbol, in: testing), 1,
+            "playhead-sdis: the ladder-only test seam must call V64 exactly once, or every "
+            + "fixture-driven migration test silently stops one rung short — which is exactly "
+            + "how a rung that adds COLUMNS goes missing, since the fresh-install path builds "
+            + "them anyway through createTables() and nothing looks wrong."
+        )
+    }
+
+    /// 7b, first half: ONE `DownloadManager` in the whole app target.
+    ///
+    /// `launchId` is called a launch id because in production it is one, and
+    /// that is a property of the COMPOSITION ROOT rather than of the manager.
+    /// A second construction site would make one process two "launches",
+    /// double-count `armedLaunches`, and leave `count(DISTINCT launchId)` a
+    /// count of managers wearing a launch counter's name.
+    func testTheAppConstructsExactlyOneDownloadManager() throws {
+        let sources = try Self.productionSources()
+        var sites: [String] = []
+        for (path, text) in sources {
+            // The manager's own file declares the type; `DownloadManager(` there
+            // would be a self-construction and there is none, but excluding it
+            // keeps the count about the COMPOSITION ROOT.
+            if path.hasSuffix("/Services/Downloads/DownloadManager.swift") { continue }
+            let hits = SwiftSourceInspector.regexOccurrences(
+                of: #"\bDownloadManager\("#, in: text
+            )
+            sites.append(contentsOf: Array(repeating: path, count: hits))
+        }
+        XCTAssertEqual(
+            sites.count, 1,
+            "playhead-sdis: exactly one `DownloadManager(...)` in Playhead/**, and it is "
+            + "PlayheadRuntime's. Found: \(sites.sorted()). `launchId` is documented as a LAUNCH "
+            + "identity on the strength of this; a second site makes one process two launches."
+        )
+        XCTAssertTrue(
+            sites.first?.hasSuffix("/App/PlayheadRuntime.swift") == true,
+            "playhead-sdis: the one construction site must be the composition root, not "
+            + "\(sites.first ?? "nowhere")."
+        )
+    }
+
+    /// 7b, second half: production passes NO `launchId:`, and the slot is not
+    /// process-wide.
+    ///
+    /// Both halves are the SAME failure with two spellings — every launch
+    /// reading as one launch — and neither is observable from inside a process
+    /// that only ever has one. A `static let launchId = UUID().uuidString`
+    /// looks per-launch and is per-PROCESS-IMAGE only by accident of when the
+    /// static is initialised; worse, it would be shared by a second manager,
+    /// which is precisely the case the doc comment says must break
+    /// `count(DISTINCT launchId) <= armedLaunches` rather than hide.
+    func testProductionNamesNoLaunchIdAndTheSlotIsPerInstance() throws {
+        let runtime = try code(Self.runtimePath)
+        XCTAssertEqual(
+            SwiftSourceInspector.regexOccurrences(of: #"\blaunchId\s*:"#, in: runtime), 0,
+            "playhead-sdis: the composition root must NOT pass a launchId. A literal there is a "
+            + "constant on every device, and `count(DISTINCT launchId)` would read every launch "
+            + "ever as one."
+        )
+
+        let manager = try code(Self.managerPath)
+        XCTAssertEqual(
+            SwiftSourceInspector.regexOccurrences(
+                of: #"\binternal\s+let\s+launchId\s*:\s*String\b"#, in: manager
+            ),
+            1,
+            "playhead-sdis: `launchId` is one per INSTANCE — an immutable stored property, not a "
+            + "computed one that could mint a fresh id per read."
+        )
+        XCTAssertEqual(
+            SwiftSourceInspector.regexOccurrences(
+                of: #"\bstatic\s+(let|var)\s+launchId\b"#, in: manager
+            ),
+            0,
+            "playhead-sdis: NOT a static. A process-wide slot is shared by a second manager, and "
+            + "two independent recorders arming the ledger twice under one id is the one state "
+            + "`count(DISTINCT launchId) <= armedLaunches` must be allowed to break on."
+        )
+        XCTAssertEqual(
+            SwiftSourceInspector.regexOccurrences(
+                of: #"launchId\s*:\s*String\s*=\s*UUID\(\)\.uuidString"#, in: manager
+            ),
+            1,
+            "playhead-sdis: the DEFAULT is a fresh UUID, so a caller that says nothing gets a "
+            + "distinct launch. The parameter exists only so a test can pin an exact value."
+        )
+    }
+
+    /// 7c. Every drop site STATES its crossing, and the helper supplies no
+    /// default to inherit.
+    ///
+    /// Only `sessionNotVended` rides a crossing other callers can join, so the
+    /// other two sites pass `nil` — and they pass it out loud. A defaulted
+    /// `nil` would let a future joinable refusal be recorded as an isolated
+    /// one, and every rail in this bead would stay green: the column would be
+    /// NULL, which on a post-V64 row is a STATEMENT ("this reason rides no
+    /// crossing") rather than a gap, so nothing downstream could tell the
+    /// forgotten case from the deliberate one.
+    func testEveryDropSiteStatesItsCrossingAndTheHelperHasNoDefault() throws {
+        let manager = try code(Self.managerPath)
+        // The SIGNATURE, sliced out by hand: `firstBody(in:after:)` returns
+        // what is between the braces, and a default lives in the parameter
+        // list. Everything from the declaration to the opening brace.
+        let declaration = "func recordBackgroundDownloadDrop("
+        let start = try XCTUnwrap(
+            manager.range(of: declaration)?.lowerBound,
+            "could not find recordBackgroundDownloadDrop — this canary's anchor has drifted"
+        )
+        let signature = try XCTUnwrap(
+            manager[start...].range(of: ") async {").map { String(manager[start..<$0.upperBound]) },
+            "could not isolate recordBackgroundDownloadDrop's parameter list"
+        )
+        XCTAssertTrue(
+            signature.contains("sessionCrossingId: String?"),
+            "playhead-sdis: the helper must TAKE a crossing id; without the parameter the "
+            + "session-refusal site has nowhere to put the one thing that separates one daemon "
+            + "refusal from forty. Signature was:\n\(signature)"
+        )
+        XCTAssertEqual(
+            SwiftSourceInspector.regexOccurrences(
+                of: #"sessionCrossingId\s*:\s*String\?\s*="#, in: signature
+            ),
+            0,
+            "playhead-sdis: `sessionCrossingId` must be declared WITHOUT a default. `= nil` "
+            + "there is how a fourth abandonment path inherits a claim instead of making one — "
+            + "and on a post-V64 row NULL is a STATEMENT (\"this reason rides no crossing\"), so "
+            + "nothing downstream could tell the inherited nil from the decided one. "
+            + "Signature was:\n\(signature)"
+        )
+
+        let body = try backgroundDownloadBody()
+        XCTAssertEqual(
+            SwiftSourceInspector.regexOccurrences(
+                of: #"sessionCrossingId\s*:\s*sessionCrossingId\b"#, in: body
+            ),
+            1,
+            "playhead-sdis: exactly ONE site records a real crossing id — the session refusal. "
+            + "Two would mean some other reason is claiming a joinable crossing it never rode."
+        )
+        XCTAssertEqual(
+            SwiftSourceInspector.regexOccurrences(
+                of: #"sessionCrossingId\s*:\s*nil\b"#, in: body
+            ),
+            2,
+            "playhead-sdis: the other two sites must pass nil EXPLICITLY. One + two = the three "
+            + "sites section 4 counts, so a fourth site added without a decision fails here "
+            + "rather than defaulting into the wrong population."
+        )
+        XCTAssertEqual(
+            SwiftSourceInspector.regexOccurrences(
+                of: #"\bbackgroundSessionRidingCrossing\("#, in: body
+            ),
+            1,
+            "playhead-sdis: the drop-writing path must take the CROSSING-CARRYING spelling of "
+            + "the session lookup. The plain `backgroundSession(for:requestedBy:)` returns the "
+            + "session and discards the identity, so a site that used it would record NULL for "
+            + "a refusal that really did ride a crossing — indistinguishable, on disk, from a "
+            + "reason that rides none."
+        )
+    }
+
+    // MARK: - 7d. One writer for the arming state
+
+    /// `launchArmingState` claims to be "what this process knew about its own
+    /// arming". That is only true while `armDropLedger()` is the sole writer:
+    /// a second assignment anywhere would make the column report something
+    /// else, and every assertion over the VALUE would still pass.
+    func testOnlyArmDropLedgerMovesTheArmingState() throws {
+        let manager = try code(Self.managerPath)
+        let assignment = #"dropLedgerArming\s*="#
+        let total = SwiftSourceInspector.regexOccurrences(of: assignment, in: manager)
+        let armBody = try XCTUnwrap(
+            SwiftSourceInspector.firstBody(in: manager, after: "func armDropLedger() async"),
+            "could not isolate armDropLedger's body — this canary's anchor has drifted"
+        )
+        let inArm = SwiftSourceInspector.regexOccurrences(of: assignment, in: armBody)
+        XCTAssertEqual(
+            inArm, 3,
+            "playhead-sdis: armDropLedger must set the state on all THREE outcomes. A missing arm "
+            + "leaves a launch reporting the previous value, and `.landed` is as much a fact worth "
+            + "stamping as `.writeFailed` is."
+        )
+        XCTAssertEqual(
+            total, inArm,
+            "playhead-sdis: nothing outside `armDropLedger()` may assign the arming state. Found "
+            + "\(total) assignment(s) in the file and \(inArm) inside the arming method."
+        )
+        // And the drop helper READS it rather than taking it as a parameter —
+        // a parameter would let a caller state an arming this process never had.
+        let recordBody = try XCTUnwrap(
+            SwiftSourceInspector.firstBody(
+                in: manager, after: "private func recordBackgroundDownloadDrop("
+            ),
+            "could not isolate recordBackgroundDownloadDrop's body"
+        )
+        XCTAssertEqual(
+            SwiftSourceInspector.regexOccurrences(
+                of: #"launchArmingState:\s*dropLedgerArming\b"#, in: recordBody
+            ),
+            1,
+            "playhead-sdis: the row's arming state must be READ from the actor at write time."
+        )
+    }
+
+    // MARK: - 7e. Every V64 column owes an `addColumnIfNeeded`
+
+    /// THE BRICKING OBLIGATION, and it is a matched pair rather than a count.
+    ///
+    /// `CREATE TABLE IF NOT EXISTS` is a NO-OP against a table that already
+    /// exists in an older shape, so a column that appears only in the DDL is
+    /// missing on every store the previous build created — and the seed
+    /// `INSERT` beside it then names a column that is not there, `createTables()`
+    /// throws, and THE STORE STOPS OPENING. That is measured, not hypothetical:
+    /// it happened at V62 with `dropWriteFailures` and surfaced as an unrelated
+    /// trust-profile test failing.
+    ///
+    /// A runtime rail covers the four columns that exist today. This is what
+    /// covers the fifth.
+    func testEveryV64ColumnIsBothDeclaredAndRepaired() throws {
+        // Comments stripped, STRINGS KEPT — the DDL lives in a string literal,
+        // so `code()` would delete the very text this checks.
+        let store = try SwiftSourceInspector.strippingComments(
+            SwiftSourceInspector.loadSource(repoRelativePath: Self.storePath)
+        )
+        let helper = try XCTUnwrap(
+            SwiftSourceInspector.firstBody(
+                in: store, after: "private func createBackgroundDownloadDropTables() throws"
+            ),
+            "could not isolate the shared DDL helper — this canary's anchor has drifted"
+        )
+        let repairs = try XCTUnwrap(
+            helper.range(of: "addColumnIfNeeded"),
+            "playhead-sdis: the shared DDL helper must carry the shape repair at all"
+        )
+        let declarationRegion = String(helper[helper.startIndex..<repairs.lowerBound])
+        let repairRegion = String(helper[repairs.lowerBound...])
+
+        for column in ["launchId", "sessionCrossingId", "launchArmingState", "lastArmedLaunchId"] {
+            XCTAssertGreaterThanOrEqual(
+                SwiftSourceInspector.regexOccurrences(
+                    of: #"\b"# + column + #"\b"#, in: declarationRegion
+                ),
+                1,
+                "playhead-sdis: \(column) must be declared in the CREATE TABLE a fresh install builds."
+            )
+            XCTAssertGreaterThanOrEqual(
+                SwiftSourceInspector.regexOccurrences(
+                    of: #"\b"# + column + #"\b"#, in: repairRegion
+                ),
+                1,
+                "playhead-sdis: \(column) must ALSO be re-added with `addColumnIfNeeded`. A column "
+                + "declared only in the DDL is missing on every store the previous build created, "
+                + "and the seed INSERT below then bricks the OPEN — measured at V62."
+            )
+        }
+    }
+
+    /// Every `Playhead/**` Swift source, comments and string contents stripped.
+    /// Cached, on `DownloadWorkJournalWiringSourceCanaryTests`' precedent: the
+    /// tree is ~480 files and re-reading it per assertion is the difference
+    /// between a rail people run and one they route around.
+    private static let productionSourceCache = ProductionSources()
+
+    private final class ProductionSources: @unchecked Sendable {
+        private let lock = NSLock()
+        private var loaded: [String: String]?
+
+        func load() throws -> [String: String] {
+            lock.lock()
+            defer { lock.unlock() }
+            if let loaded { return loaded }
+            guard let root = SwiftSourceInspector.repositoryRoot(from: #filePath) else {
+                throw NSError(
+                    domain: "BackgroundDownloadDropWiringSourceCanary",
+                    code: 1,
+                    userInfo: [
+                        NSLocalizedDescriptionKey:
+                            "could not locate the repository root from \(#filePath)",
+                    ]
+                )
+            }
+            let appRoot = root.appendingPathComponent("Playhead", isDirectory: true)
+            var out: [String: String] = [:]
+            let walker = FileManager.default.enumerator(
+                at: appRoot, includingPropertiesForKeys: nil
+            )
+            while let url = walker?.nextObject() as? URL {
+                guard url.pathExtension == "swift" else { continue }
+                let text = try String(contentsOf: url, encoding: .utf8)
+                out[url.path] = SwiftSourceInspector.strippingCommentsAndStrings(text)
+            }
+            loaded = out
+            return out
+        }
+    }
+
+    private static func productionSources() throws -> [String: String] {
+        try productionSourceCache.load()
     }
 }
