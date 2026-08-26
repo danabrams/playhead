@@ -12759,10 +12759,14 @@ MUTATIONS=(
   # THE FOURTH IS NOT, AND THIS COMMENT SAID "every one of the four" UNTIL ITS
   # OWN RECORD REFUTED IT (playhead-1gu0 review). GU04 drops
   # `setSchemaVersion(65)`, so EVERY store — fresh installs included — finishes
-  # `migrate()` at 64, and the prediction-miss note twenty lines down records
-  # exactly that: 68 observed victims, essentially every "a fresh store reaches
-  # head" rail in the tree. A claim refuted by the measurement printed under it
-  # is the shape this bead exists to remove.
+  # `migrate()` at 64, and GU04's own `PREDICTION MISS, 66 WIDE` note below
+  # records exactly that: 68 observed victims, essentially every "a fresh store
+  # reaches head" rail in the tree. A claim refuted by the measurement printed
+  # under it is the shape this bead exists to remove. (This line used to say
+  # that note sits "twenty lines down", and it was already wrong by more than a
+  # factor of two on the commit that wrote it — the THIRD wrong positional claim
+  # in this block, after the two GU99's comment records. Name the thing, never
+  # the offset; playhead-1gu0 review.)
   #
   # GU01 is the ORDERING property, GU02 the DATA-PRESERVATION property, GU03 the
   # INDEX-NAME property and GU04 the LADDER property.
@@ -12772,9 +12776,16 @@ MUTATIONS=(
   # `createTables()`, GU02 / GU03 / GU99 edit
   # `renameSemanticScanRunCorrelationIdIfNeeded()`, GU04 edits the V65 RUNG, and
   # the helper has THREE call sites rather than one. Only GU02 and GU03
-  # genuinely collide — GU02's whole OLD text is one line of GU03's, so
-  # whichever applied first would destroy the other's anchor. The rest are
-  # one-per-batch because that is how they were RUN, which is the honest reason.
+  # genuinely collide — GU02's whole OLD text is one line of GU03's — and THE
+  # TWO ORDERS FAIL DIFFERENTLY, which this line used to flatten into "whichever
+  # applied first would destroy the other's anchor" (playhead-1gu0 review).
+  # GU02 first REWRITES that line, so GU03's two-line anchor matches nothing and
+  # the battery prints `anchor did not apply` — loud. GU03 first only DELETES
+  # the `DROP INDEX` line above it, so GU02's anchor still matches exactly once
+  # and applies: the batch then runs a COMPOUND mutant that is neither entry,
+  # with no complaint. The conclusion is unchanged and the SILENT order is the
+  # reason for it. The rest are one-per-batch because that is how they were RUN,
+  # which is the honest reason.
   #
   # GU05 is deliberately NOT here: dropping the helper's `CREATE INDEX` can only
   # ever be SURVIVED, and an entry that can only survive trains a reader to
