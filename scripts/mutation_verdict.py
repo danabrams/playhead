@@ -82,7 +82,11 @@ FRESHNESS: A LOG IS EVIDENCE ONLY IF THIS RUN PRODUCED IT
 ---------------------------------------------------------
 `mutation-battery.sh` creates `WORK` per INVOCATION and sets `KEEP_WORK=1` on
 every failure path, so failed runs leave their whole directory behind — 52 of
-them on this box on 2026-08-25, 684 MiB, from four different beads. Batch
+them on this box on 2026-08-25, 684 MiB, carrying EIGHT different mutation
+series. (Read the 52 as a reading taken at one moment: the same afternoon it
+was 56 and then 53, because other worktrees are producing and reaping them
+while you look. Only the directory THIS invocation created is a fixed
+quantity, which is the whole argument below.) Batch
 numbers are assigned per mutant and are NOT unique across beads or across time,
 so a lookup by batch number finds another investigation's evidence: playhead-8cjo
 measured its checker finding a three-day-old `batch-1414.log` from
@@ -254,9 +258,14 @@ def _classify_batch(reading, scoped, rc):
             "line and no `** TEST SUCCEEDED/FAILED **` line"
         )
     if reading.run.crashed:
+        # The KEY, framework prefix stripped. `run.crashed` is keyed, not named
+        # — printing the key raw would put `swift-testing::` in front of a test
+        # name and invite a reader to search for a name that is not spelled
+        # that way anywhere else.
+        example = sorted(reading.run.crashed)[0].split("::", 1)[-1]
         reasons.append(
             "the .xcresult bundle STATES the host died under %d test(s), e.g. %s"
-            % (len(reading.run.crashed), sorted(reading.run.crashed)[0])
+            % (len(reading.run.crashed), example)
         )
     reading.batch_state = BATCH_VOID if reasons else BATCH_OK
 

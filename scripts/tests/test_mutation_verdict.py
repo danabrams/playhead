@@ -514,6 +514,19 @@ class BundleTests(VerdictTestCase):
         reading, _s = self.read(log, ["A"], xcresult=path, reader=reader)
         self.assertEqual(reading.verdict_source, gb.VERDICT_SOURCE_BUNDLE)
 
+    def test_the_crash_reason_names_a_TEST_not_a_KEY(self):
+        # `run.crashed` is keyed `swift-testing::<name>`. Printing the key raw
+        # invites a reader to grep for a spelling that appears nowhere else —
+        # a rendering read as the thing it renders, one more time.
+        log = self.write_log(console(tests=[("A", "started")]))
+        path, reader = self.bundle(bundle_payload(
+            [("A", gb.XCRESULT_FAILED, ["Test crashed with signal trap."])]))
+        reading, _s = self.read(log, ["A"], xcresult=path, reader=reader)
+        reason = [r for r in reading.batch_reasons if "host died" in r]
+        self.assertEqual(len(reason), 1, reading.batch_reasons)
+        self.assertTrue(reason[0].endswith("e.g. A"), reason[0])
+        self.assertNotIn("swift-testing::", reason[0])
+
     def test_the_console_roster_survives_the_bundle(self):
         # UNIONED, not replaced: a test the bundle never mentions is still a
         # casualty if its start line survived.

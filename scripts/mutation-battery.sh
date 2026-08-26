@@ -29699,7 +29699,7 @@ restore_and_verify() {
 # preserved): the expected test had TEN start lines and ZERO result lines, the
 # batch had 2,332 tests with no verdict and 11 distinct test-host pids, the log
 # already carried `gate-memory: THE RUN DID NOT REACH A VERDICT — RESTARTED`
-# twenty-five lines from its end — and the table printed
+# TEN lines from its end (line 24,986 of 24,996) — and the table printed
 # `BD37 SURVIVED … still green`. Applied by hand that mutant dies in 0.147 s.
 # The rail existed and worked; only the reading was wrong.
 #
