@@ -742,7 +742,7 @@ actor AnalysisCoordinator {
     /// - Returns: how many assets the phase DROVE to a non-throwing Stage-4
     ///   return. Not windows banked — those are counted where they are
     ///   durable, in `semantic_scan_results` (each row carries `lastAttemptAt`
-    ///   and a run correlation id — playhead-bg2n: `createdAt` until V55, when
+    ///   and a backfill job id — playhead-bg2n: `createdAt` until V55, when
     ///   it stopped moving on upsert and stopped being the write clock).
     ///   - report: playhead-8ljj. Called with this phase's own account of
     ///     itself: once the moment the candidate census is known, once per

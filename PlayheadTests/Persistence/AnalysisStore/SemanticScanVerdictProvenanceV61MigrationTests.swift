@@ -514,6 +514,10 @@ struct SemanticScanVerdictProvenanceV61MigrationTests {
         // playhead-4xmz: 63, not 62. Same line, same trap, same reason — V63
         // creates two NEW tables (`download_work_journal` and its arming row)
         // and touches no existing column.
-        #expect(try await store.schemaVersion() == 64)
+        // playhead-1gu0: 65, not 64. Same line, same trap, and this time the rung
+        // IS on `semantic_scan_results` — but it RENAMES `runCorrelationId` to
+        // `backfillJobId` and names no other column, so `usedPermissiveFallback`
+        // above is untouched and no value in this suite moves.
+        #expect(try await store.schemaVersion() == 65)
     }
 }

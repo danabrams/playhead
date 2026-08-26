@@ -678,6 +678,11 @@ struct BackgroundDownloadDropLaunchIdentityV64MigrationTests {
         // 63 -> 64 read for this rung (playhead-sdis): V64 ADDS FOUR NULLABLE
         // COLUMNS and only to the two playhead-7dgx tables. No other table, no
         // UPDATE, no DELETE, no DEFAULT and no backfill.
-        #expect(AnalysisStore.currentSchemaVersion == 64)
+        // 64 -> 65 read for this rung (playhead-1gu0): V65 RENAMES ONE COLUMN —
+        // `semantic_scan_results.runCorrelationId` becomes `backfillJobId`, and its
+        // index moves with it. A pure `ALTER TABLE … RENAME COLUMN`: no row moves, no
+        // value is written, nothing is backfilled and no other table is named. It names
+        // nothing this rung asserts, so no assertion here moves.
+        #expect(AnalysisStore.currentSchemaVersion == 65)
     }
 }

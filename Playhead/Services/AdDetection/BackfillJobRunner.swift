@@ -5110,7 +5110,7 @@ actor BackfillJobRunner {
     /// it here costs one `MainActor` hop per persisted row, against FM windows
     /// measured in seconds.
     ///
-    /// `runCorrelationId` is the `backfill_jobs.jobId`, which every
+    /// `backfillJobId` is the `backfill_jobs.jobId`, which every
     /// `SemanticScanResult` factory in this file already receives and already
     /// passes as `reuseScope` — where it was folded into `reuseKeyHash` and then
     /// discarded. The join key was in hand at every write site all along; this
@@ -5132,7 +5132,7 @@ actor BackfillJobRunner {
         return result.attributed(
             createdAt: clock().timeIntervalSince1970,
             scenePhase: phase,
-            runCorrelationId: jobId
+            backfillJobId: jobId
         )
     }
 

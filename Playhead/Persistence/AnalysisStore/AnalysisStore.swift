@@ -1971,7 +1971,7 @@ actor AnalysisStore {
     /// assertions automatically follow the production constant — hardcoding
     /// the integer in tests has been a recurring source of stale-assertion
     /// flakes whenever the schema bumps.
-    nonisolated static let currentSchemaVersion = 64
+    nonisolated static let currentSchemaVersion = 65
 
     /// H1: minimum age (in seconds) a `backfill_jobs` / `final_pass_jobs`
     /// row stuck in `status='running'` must reach before the launch-time
@@ -2996,6 +2996,10 @@ actor AnalysisStore {
             // build that did not know any of it, and every candidate default
             // would turn that absence into a launch count.
             try migrateBackgroundDownloadDropLaunchIdentityV64IfNeeded()
+            // playhead-1gu0: `semantic_scan_results.runCorrelationId` is renamed
+            // `backfillJobId`. A pure RENAME COLUMN — no row moves, no value is
+            // backfilled, and the index moves with it.
+            try migrateSemanticScanBackfillJobIdentityV65IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -3465,6 +3469,33 @@ actor AnalysisStore {
         // `BackgroundDownloadDropWiringSourceCanaryTests` checks this pairing
         // mechanically.
         try migrateBackgroundDownloadDropLaunchIdentityV64IfNeeded()
+        // playhead-1gu0 (v65): a RENAME, not an add — and this ladder is the one
+        // that reaches it WITHOUT `createTables()` having renamed first, so it is
+        // the path a fixture regressed to the old spelling WOULD take. NONE DOES,
+        // and this line said "is exactly the path a fixture … takes" until
+        // playhead-1gu0 review round 6. Every fixture that reaches this seam with
+        // `semantic_scan_results` present already carries the NEW
+        // spelling, so the helper returns on its `hasNew` guard; the rail that
+        // exercises the rename, `v64RowKeepsItsJobIdAcrossTheV65Rename`, goes
+        // through `createTables()`.
+        // `renameSemanticScanRunCorrelationIdIfNeeded()`'s own doc carries the
+        // predicate, the census and its limit — read it there rather than
+        // re-deriving a number here.
+        //
+        // THIS LINE NAMED TWO OF THEM — `theLadderOnlySeamReachesV64` and
+        // `aV62StoreClimbsThroughV63ToHead` — AND READ THE PAIR AS THE CENSUS.
+        // That is the identical error the very next commit of the same review
+        // round corrected in the helper's doc and in `scripts/mutation-battery.sh`,
+        // written into a THIRD place by the commit before it. Round 7 found it
+        // here. THIS LINE THEN CLAIMED "the number is kept in exactly one of them
+        // now" WHILE PRINTING IT — round 10, which is the fourth time one claim's
+        // copies have disagreed on this branch. The count is gone from here; the
+        // argument never needed a cardinality.
+        //
+        // READ THE V60 NOTE ABOVE BEFORE ADDING A RUNG. A rung added to one
+        // ladder and not the other is invisible to any test written for that
+        // rung, and it cost V60 a commit.
+        try migrateSemanticScanBackfillJobIdentityV65IfNeeded()
     }
     #endif
 
@@ -7007,7 +7038,12 @@ actor AnalysisStore {
     //                               already stores, because they come from the
     //                               same helper (playhead-9v09: reuse the
     //                               vocabulary, do not invent a second one).
-    //   * `runCorrelationId` TEXT — the `backfill_jobs.jobId`.
+    //   * `backfillJobId`   TEXT — the `backfill_jobs.jobId`. It was called
+    //                               `runCorrelationId` until V65; playhead-1gu0
+    //                               renamed it because the name said RUN, the
+    //                               writer wrote a JOB, and a job is per
+    //                               `(asset, phase, offset)` — one value for an
+    //                               asset's whole backfill history.
     //
     // WHY NO DEFAULTS, stated plainly: a `DEFAULT 0` on `createdAt` would make
     // every historical row claim 1970 and a `DEFAULT 'active'` on `scenePhase`
@@ -7063,13 +7099,22 @@ actor AnalysisStore {
                 column: "scenePhase",
                 definition: "TEXT"
             )
+            // playhead-1gu0 (V65): this rung adds the column under TODAY'S
+            // spelling, `backfillJobId`, rather than under V42's original
+            // `runCorrelationId`. It has to. `createTables()` runs BEFORE this
+            // ladder and already declares `backfillJobId`, so a rung that added
+            // the old name here would leave a pre-V42 database carrying BOTH — a
+            // populated one and an empty one — and V65's rename would then find
+            // the new name present and decline. The rename helper below is what
+            // repairs a database that really does carry the old spelling.
+            try renameSemanticScanRunCorrelationIdIfNeeded()
             try addColumnIfNeeded(
                 table: "semantic_scan_results",
-                column: "runCorrelationId",
+                column: "backfillJobId",
                 definition: "TEXT"
             )
             try exec("CREATE INDEX IF NOT EXISTS idx_semantic_scan_results_createdAt ON semantic_scan_results(createdAt DESC)")
-            try exec("CREATE INDEX IF NOT EXISTS idx_semantic_scan_results_correlation ON semantic_scan_results(runCorrelationId)")
+            try exec("CREATE INDEX IF NOT EXISTS idx_semantic_scan_results_backfill_job ON semantic_scan_results(backfillJobId)")
         }
         try setSchemaVersion(42)
     }
@@ -7145,12 +7190,14 @@ actor AnalysisStore {
     // NO CONSTRAINT IS VIOLATED BY THE DELETE, and one thing is left DANGLING —
     // say so here rather than let a device pull surprise somebody. Nothing
     // holds a foreign key to `backfill_jobs.jobId`: `final_pass_jobs` is a
-    // sibling with its own id space, and `semantic_scan_results.jobId` /
-    // `.runCorrelationId` are free-text ATTRIBUTIONS, not references. So after
-    // this rung a pull will show scan rows attributed to job ids that no longer
-    // exist. That is correct — those scans really were produced by those jobs —
-    // but a query joining the two will silently return nothing for pre-v44
-    // rows. No in-memory state spans the migration: it runs inside `migrate()`
+    // sibling with its own id space, and `semantic_scan_results.backfillJobId`
+    // is a free-text ATTRIBUTION, not a reference. (This line used to name
+    // `semantic_scan_results.jobId` alongside it. There is no such column and
+    // there never was — playhead-1gu0 removed the name rather than carry it.)
+    // So after this rung a pull will show scan rows attributed to job ids that
+    // no longer exist. That is correct — those scans really were produced by
+    // those jobs — but a query joining the two will silently return nothing for
+    // pre-v44 rows. No in-memory state spans the migration: it runs inside `migrate()`
     // at store open, before any `AdmissionController` or runner exists, and the
     // scheduler keys on `analysis_jobs.workKey` rather than on a backfill id.
 
@@ -9108,6 +9155,222 @@ actor AnalysisStore {
             "playhead-sdis V64: background_download_drops gains launchId, sessionCrossingId and launchArmingState, and background_download_drop_arming gains lastArmedLaunchId. NOTHING IS BACKFILLED and nothing could be — a pre-V64 row was written by a build that knew none of it, and every candidate default would turn that absence into a launch count. A pre-V64 row is exactly one with launchId IS NULL; read count(DISTINCT launchId) as LAUNCHES and count(DISTINCT sessionCrossingId) as DAEMON REFUSALS, never count(*), which is EPISODES."
         )
         try setSchemaVersion(64)
+    }
+
+    /// V65 migration (playhead-1gu0) — `semantic_scan_results.runCorrelationId`
+    /// becomes `backfillJobId`, which is what it has always carried.
+    ///
+    /// **THE NAME WAS THE DEFECT.** The places that say what this column HOLDS
+    /// already said "the `backfill_jobs.jobId`" — the writer
+    /// (`BackfillJobRunner.attributed(_:jobId:)`), the V42 schema note, and
+    /// ``SemanticScanResult/backfillJobId``'s own doc.
+    ///
+    /// **THE SITES THAT SPELLED IT A *RUN* ARE EDITED HERE RATHER THAN CITED AS
+    /// WITNESSES, AND THE COUNT IS GIVEN AS A PREDICATE BECAUSE EVERY BARE
+    /// NUMBER THIS SENTENCE HAS CARRIED HAS BEEN SHORT.** It said TWO, then
+    /// FOUR; each was a handful somebody had in hand read as a census — the
+    /// shape this very paragraph is about, inside it. Re-run it instead of
+    /// re-counting it:
+    ///
+    ///     git grep -niI -e "run correlation" -e "correlation id" 55dd7e6e \
+    ///       -- Playhead PlayheadTests docs scripts
+    ///
+    /// **FIVE hits in FOUR files** at this branch's base, every one edited here:
+    /// `AnalysisCoordinator.runPendingCoarseScans`'s Returns note,
+    /// `SemanticScanAttributionWireInTests` ×2, `SemanticScanRunAttributionTests`
+    /// and `docs/investigations/playhead-hx6n-scan-attribution.md`. That grep is
+    /// deliberately narrower than the whole edit: it catches the PROSE spellings
+    /// and not the sites that wrote the identifier in code font and reasoned
+    /// about it. **NO CARDINAL IS GIVEN FOR THOSE, DELIBERATELY** — round 15
+    /// found that this very clause had said "the two", and missed at least
+    /// ``SemanticSweepMarkComposer/corroborates(_:_:)``'s note, which measures
+    /// the id out over `A9F6DF05`. So the sentence stops counting: the two worth
+    /// reading are `BackgroundGrantBudget` and
+    /// ``SemanticSweepMarkComposer/corroborationFactor(affirming:dissenting:)``,
+    /// and they are named as EXAMPLES rather than as a census. (The grep's own
+    /// FIVE is not one of the short ones — it re-derives exactly. What has been
+    /// short is every count of the sites the grep cannot see.)
+    ///
+    /// They are not the same kind of wrong, and the difference matters. TWO
+    /// asserted something untrue:
+    /// ``SemanticSweepMarkComposer/corroborationFactor(affirming:dissenting:)``
+    /// offered a "distinct `runCorrelationId`" as EVIDENCE that its replicates
+    /// are independent — a false claim, and the reason this bead exists.
+    /// `AnalysisCoordinator`'s Returns note called the value a run correlation
+    /// id in prose, which is the column's own name-defect one layer along. The
+    /// other TWO asserted nothing untrue and were edited for consistency only:
+    /// `BackgroundGrantBudget`'s limit paragraph called it "an `fm-*` id" and
+    /// said it matches no `runId`, which is TRUE as written and merely does not
+    /// say whose id it is (the diff adds the word "job"), and the `hx6n`
+    /// investigation used the column's actual spelling of the day. **Silence is
+    /// not disagreement, and an earlier draft of this paragraph read it as
+    /// such** — first by claiming every other mention already agreed, then by
+    /// over-correcting to "it did not agree". Neither said anything either way.
+    ///
+    /// A job id is per `(asset, phase, offset)`: ONE value for an asset's whole
+    /// backfill history. Measured on the 2026-08-19 t4 pull,
+    /// `count(DISTINCT runCorrelationId)` and `count(DISTINCT analysisAssetId)`
+    /// are both **15**, and `A9F6DF05` carries 176 rows written across four
+    /// calendar days under the single id `fm-9330e821aeb36a0d`.
+    ///
+    /// **WHY A RENAME RATHER THAN A DOC COMMENT.** This column's working reader
+    /// is a person at a `sqlite3` prompt over a device pull, and no doc comment
+    /// reaches there — the column name is the only documentation that travels
+    /// with the data. That is not hypothetical: `playhead-my33` reached for this
+    /// column as a "different FM call" spelling on the strength of its name, and
+    /// the wrong claim that came out of it shipped in
+    /// ``SemanticSweepMarkComposer/corroborationFactor(affirming:dissenting:)``'s
+    /// documentation from 2026-08-10 (`6e9c386f`) until this rung landed on
+    /// 2026-08-26 — SIXTEEN days in the tree, of which eleven passed before
+    /// `playhead-my33` measured it out. (This line read "eleven days", which is
+    /// the time to DISCOVERY and not the time it shipped — the same
+    /// two-quantities-one-name reading the rename exists to stop.)
+    ///
+    /// **WHY NO NEW PER-INVOCATION COLUMN.** Nothing wants one. The only
+    /// consumer that ever asked "is this a different FM call" is
+    /// ``SemanticSweepMarkComposer/corroborates(_:_:)``, and playhead-my33
+    /// settled it on window bounds; ``SemanticSweepMarkComposer/corroboration(for:in:atTranscriptVersion:)``
+    /// scopes by `transcriptVersion`. Both were decided against an id, and
+    /// `transcriptVersion` separates every replicate on both measured pulls. A
+    /// column nobody reads is a standing writer obligation with no reader — which
+    /// is exactly how this one came to mean something nobody checked.
+    ///
+    /// **WHAT IT COSTS, said plainly:** a device pull taken before this rung
+    /// spells the column `runCorrelationId` and one taken after spells it
+    /// `backfillJobId`. Every archived pull under `playhead-gate-artifacts` keeps
+    /// the old spelling forever, so a query that sweeps across pulls must handle
+    /// both. NOTHING IS BACKFILLED and no value moves: `RENAME COLUMN` preserves
+    /// every row, and a NULL stays NULL because a pre-V42 row genuinely has no
+    /// job.
+    ///
+    /// **AND IT IS THE FIRST RUNG ON THIS TABLE THAT AN OLDER BINARY CANNOT
+    /// IGNORE.** Every earlier one left every existing column NAME in place —
+    /// even V52, which DROPPED AND RE-ADDED `prewarmHit` to make it nullable
+    /// (this line said "rebuilt the table", and
+    /// `migrateUnmeasuredPrewarmHitV52IfNeeded` says the opposite in its own
+    /// doc — "the drop is a single statement rather than a table rebuild";
+    /// playhead-1gu0 review) — so the V42 note's "what an older binary sees:
+    /// nothing" held. A rename REMOVES a name that a pre-V65 binary's explicit
+    /// column list still spells. What happens then is not a crash and is worse
+    /// than one: that binary's own `createTables()` puts `runCorrelationId`
+    /// back as an EMPTY column and writes into it. See
+    /// `renameSemanticScanRunCorrelationIdIfNeeded()` for the state that leaves
+    /// behind and why it is left alone.
+    private func migrateSemanticScanBackfillJobIdentityV65IfNeeded() throws {
+        let observed = (try schemaVersion() ?? 1)
+        guard observed < 65 else { return }
+        // DO NOT STEP OVER A ROLLED-BACK V39 — same rationale as V40–V64.
+        guard observed >= 64 else { return }
+        try renameSemanticScanRunCorrelationIdIfNeeded()
+        logger.notice(
+            "playhead-1gu0 V65: semantic_scan_results.runCorrelationId is renamed backfillJobId, which is what it has always held — the backfill_jobs.jobId, one value per (asset, phase, offset). Nothing is backfilled and no value moves. A device pull taken before this rung still spells the column runCorrelationId."
+        )
+        try setSchemaVersion(65)
+    }
+
+    /// The V65 rename, factored out because THREE call sites take it and the
+    /// order between them is the whole safety property: `createTables()`, the
+    /// V42 rung, and the V65 rung. Only ONE of them can ever do the work on a
+    /// given open, and which one is a property of the PATH rather than of the
+    /// database. In production `createTables()` runs BEFORE the whole
+    /// `V*IfNeeded` ladder, so it is always the one that renames — the other two
+    /// then find the new spelling present and decline. The other two are not
+    /// therefore decoration, and they earn their place for DIFFERENT reasons.
+    /// `createTables()`'s call and the V42 rung's each sit immediately above an
+    /// `addColumnIfNeeded` for `backfillJobId`: without the rename first, that
+    /// call adds an EMPTY new column alongside a populated old one, which is
+    /// mutation GU01. The V65 rung's has no `addColumnIfNeeded` under it at all;
+    /// it is there because `migrateOnlyForTesting()` skips `createTables()`
+    /// entirely, so on that seam it is the one that ALWAYS runs.
+    ///
+    /// **THAT IS NOT THE SAME AS BEING THE ONLY ONE, AND THIS PARAGRAPH SAID
+    /// "the only one of the three that RUNS" (playhead-1gu0 review round 6).**
+    /// The V42 rung's call sits behind `if tableExists("semantic_scan_results")`
+    /// AND behind `guard observed < 42` / `guard observed >= 41` — so it runs at
+    /// EXACTLY 41 — and **NINE of the 23 fixtures that drive that seam to head
+    /// with the table present start below 42**, so they climb through 41 and the
+    /// V42 call runs there too. It declines there, like every other call on that
+    /// seam, because `createTables()` built `backfillJobId` before the rewind.
+    /// (Round 6 wrote **12** here and round 7 re-derived it off the stamp each
+    /// fixture rewinds to: 28, 29, 30, 32, 34, 38, 38, 38, 39 — nine. Every
+    /// other one of the 23 rewinds to 43 or higher and can never see 41. The
+    /// claim the sentence makes is unchanged; the count was not measured.)
+    /// The same line also said "nothing in the tree is seeded at 41", which is
+    /// false and was generalised from the `seedSchemaVersion` call sites alone:
+    /// `SemanticScanRunAttributionTests.v41RowSurvivesMigrationAndStaysUnattributed`
+    /// seeds 41 with a raw `UPDATE _meta`. It drives `migrate()`, where
+    /// `createTables()` has already renamed — which is the claim that was wanted.
+    ///
+    /// **REACHED AND EXERCISED ARE DIFFERENT CLAIMS, AND AN EARLIER DRAFT OF
+    /// THIS PARAGRAPH SAID "no fixture reaches it with `semantic_scan_results`
+    /// present today" (playhead-1gu0 review).** **TWENTY-THREE do — and the
+    /// correction for that draft said "two", which was the pair somebody had in
+    /// hand read as a census (playhead-1gu0 review round 6).** Measured over
+    /// `PlayheadTests`, brace-matched bodies with comments and string literals
+    /// blanked before the braces are counted: **23 test functions across
+    /// THIRTEEN files** call `migrate()` (so `createTables()` builds the table),
+    /// rewind, drive `migrateOnlyForTesting()`, and then assert
+    /// `schemaVersion() == currentSchemaVersion` AFTER that call. Only the V65
+    /// rung stamps 65, so that assertion PROVES this helper ran on that seam.
+    /// They include `theLadderOnlySeamReachesV64`,
+    /// `aV62StoreClimbsThroughV63ToHead` and all six `isolatedLadderReaches*`.
+    /// In all 23 the table IS present and this
+    /// helper DOES run. It returns on its `hasNew` guard, because those stores
+    /// already carry the new spelling. So the call site is reached and the RENAME
+    /// itself is not: nothing seeds `semantic_scan_results` at the OLD spelling
+    /// below V65 on the ladder-only path, and the sibling rail
+    /// (`v64RowKeepsItsJobIdAcrossTheV65Rename`) exercises the rename through
+    /// `createTables()` instead. Said out loud rather than left for a green
+    /// suite to read as coverage.
+    ///
+    /// **SAY WHETHER A HELPER COUNTS, BECAUSE THE TWO READINGS DIFFER BY A WHOLE
+    /// FILE — and this paragraph said "23 … across twelve files", which no single
+    /// predicate yields (playhead-1gu0 review round 7).** `migrate()` reaches the
+    /// test through a same-file helper in
+    /// `DownloadWorkJournalV63MigrationTests`, whose `makeHeadStore(prefix:)`
+    /// calls it: that file contributes THREE (`theLadderOnlySeamReachesV63`,
+    /// `aV61StoreClimbsThroughV62ToHead`, `theRungIsIdempotentAndNeverErases`)
+    /// and is invisible to any search over the test body's own text. Counting
+    /// helper-mediated calls the census is **23 across thirteen files**; counting
+    /// only a literal `.migrate()` in the test's own body it is **20 across
+    /// twelve**. 23 is the first reading and twelve is the second, so the two
+    /// halves of that sentence came from different searches. The CONCLUSION is
+    /// the same under either: every one of them runs `createTables()` before
+    /// rewinding, so the helper returns on `hasNew` and the rename stays
+    /// unexercised on this seam.
+    ///
+    /// Idempotent, and it declines rather than guesses in the one ambiguous
+    /// state. If BOTH spellings exist the new one wins and the old is left
+    /// alone: this helper cannot know which holds the real values, and merging
+    /// them would be inventing attribution.
+    ///
+    /// **THAT STATE IS NOT UNREACHABLE, AND AN EARLIER DRAFT OF THIS PARAGRAPH
+    /// SAID IT WAS.** No path in THIS file produces it — every
+    /// `addColumnIfNeeded` for the new spelling is preceded by this call. A
+    /// DOWNGRADE does: a pre-V65 binary opening a V65 database runs its own
+    /// `createTables()`, whose `addColumnIfNeeded` puts `runCorrelationId` back
+    /// as an EMPTY column and then writes its rows into it, while
+    /// `_meta.schema_version` stays 65 and is never lowered. Coming forward
+    /// again, this helper sees the new spelling present and declines, so the
+    /// downgrade era's rows read NULL under `backfillJobId` for ever. Left alone
+    /// deliberately: the two columns hold rows from different eras and
+    /// coalescing them would invent the very attribution this column exists to
+    /// record. The cost is forensic rather than behavioural — nothing in
+    /// production READS this column — and `migrate()` already logs a fault when
+    /// it opens a schema newer than the binary knows.
+    private func renameSemanticScanRunCorrelationIdIfNeeded() throws {
+        guard try tableExists("semantic_scan_results") else { return }
+        let hasNew = try columnExists(table: "semantic_scan_results", column: "backfillJobId")
+        guard !hasNew else { return }
+        guard try columnExists(table: "semantic_scan_results", column: "runCorrelationId") else { return }
+        // Drop the old index first and rebuild it under the new name. SQLite
+        // does rewrite an index definition through a RENAME COLUMN, but it
+        // would keep the index NAME — leaving an index called `_correlation`
+        // over a column called `backfillJobId`, which is the same
+        // name-says-one-thing defect one layer down.
+        try exec("DROP INDEX IF EXISTS idx_semantic_scan_results_correlation")
+        try exec("ALTER TABLE semantic_scan_results RENAME COLUMN runCorrelationId TO backfillJobId")
+        try exec("CREATE INDEX IF NOT EXISTS idx_semantic_scan_results_backfill_job ON semantic_scan_results(backfillJobId)")
     }
 
     /// The V62 DDL, shared verbatim by `createTables()` and the rung above so
@@ -12627,7 +12890,7 @@ actor AnalysisStore {
                 jobPhase TEXT NOT NULL DEFAULT 'shadow',
                 createdAt REAL,
                 scenePhase TEXT,
-                runCorrelationId TEXT,
+                backfillJobId TEXT,
                 suspendingLatencyMs REAL,
                 daemonPeersAtStart INTEGER,
                 -- playhead-bg2n (V55): the row's ATTEMPT HISTORY. All three are
@@ -12696,9 +12959,15 @@ actor AnalysisStore {
             column: "scenePhase",
             definition: "TEXT"
         )
+        // playhead-1gu0 (V65): rename in place BEFORE adding the new column,
+        // so a database carrying V42's `runCorrelationId` does not end up with
+        // both — the same ordering H10 already needed for `needsShadowRetry`,
+        // and for the same reason. `createTables()` runs before the V*IfNeeded
+        // ladder, so this is the FIRST thing that sees an upgraded table.
+        try renameSemanticScanRunCorrelationIdIfNeeded()
         try addColumnIfNeeded(
             table: "semantic_scan_results",
-            column: "runCorrelationId",
+            column: "backfillJobId",
             definition: "TEXT"
         )
         // playhead-bg2n (V55): declared here as well as in
@@ -12754,7 +13023,7 @@ actor AnalysisStore {
         // reader repointed at an unindexed column is a full scan on every
         // background grant.
         try exec("CREATE INDEX IF NOT EXISTS idx_semantic_scan_results_lastAttemptAt ON semantic_scan_results(lastAttemptAt DESC)")
-        try exec("CREATE INDEX IF NOT EXISTS idx_semantic_scan_results_correlation ON semantic_scan_results(runCorrelationId)")
+        try exec("CREATE INDEX IF NOT EXISTS idx_semantic_scan_results_backfill_job ON semantic_scan_results(backfillJobId)")
         try exec("CREATE INDEX IF NOT EXISTS idx_semantic_scan_results_asset_runMode ON semantic_scan_results(analysisAssetId, runMode)")
         try exec("CREATE INDEX IF NOT EXISTS idx_semantic_scan_results_asset_jobPhase ON semantic_scan_results(analysisAssetId, jobPhase)")
         // M1/L3: dropped `idx_semantic_scan_results_reuse` and
@@ -21790,7 +22059,7 @@ actor AnalysisStore {
     /// 4  windowStartTime           13 inputTokenCount      21 jobPhase (Rev3-M6)
     /// 5  windowEndTime             14 outputTokenCount     22 createdAt (V42)
     /// 6  scanPass                  15 latencyMs            23 scenePhase (V42)
-    /// 7  transcriptQuality         16 prewarmHit           24 runCorrelationId (V42)
+    /// 7  transcriptQuality         16 prewarmHit           24 backfillJobId (V42)
     /// 8  disposition
     ///
     /// playhead-exxc (V52): index 16 is unchanged, but the column beneath it is
@@ -21815,7 +22084,7 @@ actor AnalysisStore {
         disposition, spansJSON, status, attemptCount, errorContext,
         inputTokenCount, outputTokenCount, latencyMs, prewarmHit,
         scanCohortJSON, transcriptVersion, reuseKeyHash, runMode, jobPhase,
-        createdAt, scenePhase, runCorrelationId,
+        createdAt, scenePhase, backfillJobId,
         suspendingLatencyMs, daemonPeersAtStart,
         firstAttemptAt, lastAttemptAt, observedStatuses,
         latencyMsTotal, latencyMsMax, latencySampleCount,
@@ -22177,7 +22446,7 @@ actor AnalysisStore {
              disposition, spansJSON, status, attemptCount, errorContext,
              inputTokenCount, outputTokenCount, latencyMs, prewarmHit,
              scanCohortJSON, transcriptVersion, reuseKeyHash, runMode, jobPhase,
-             createdAt, scenePhase, runCorrelationId,
+             createdAt, scenePhase, backfillJobId,
              suspendingLatencyMs, daemonPeersAtStart,
              firstAttemptAt, lastAttemptAt, observedStatuses,
              latencyMsTotal, latencyMsMax, latencySampleCount,
@@ -22213,7 +22482,7 @@ actor AnalysisStore {
         bind(stmt, 21, result.runMode.rawValue)
         bind(stmt, 22, result.jobPhase)
         // playhead-hx6n. `createdAt` falls back to the store's clock (see the
-        // backstop note above). `scenePhase` and `runCorrelationId` do NOT fall
+        // backstop note above). `scenePhase` and `backfillJobId` do NOT fall
         // back to anything: the store has no way to know either, and a store
         // that guessed would be manufacturing the attribution rather than
         // recording it. A caller with nothing to say writes NULL, which is the
@@ -22224,7 +22493,7 @@ actor AnalysisStore {
         // both — that is the whole of "createdAt stops moving".
         bind(stmt, 23, effectiveCreatedAt)
         bind(stmt, 24, result.scenePhase?.rawValue)
-        bind(stmt, 25, result.runCorrelationId)
+        bind(stmt, 25, result.backfillJobId)
         // playhead-rkfp/ezmv (V45). Neither falls back to anything: a NULL
         // means "the producing path did not measure this", and a store that
         // substituted 0 would turn "unmeasured" into "no sleep, no peers" —
@@ -23073,7 +23342,7 @@ actor AnalysisStore {
             // oldest thing in the database.
             createdAt: optionalDouble(stmt, 22),
             scenePhase: scenePhase,
-            runCorrelationId: optionalText(stmt, 24),
+            backfillJobId: optionalText(stmt, 24),
             // playhead-bg2n (V55): columns 27–29. `optionalDouble` /
             // `optionalText` for the same reason as every nullable above — a
             // NULL read as 0.0 would claim a first attempt in 1970, and a NULL

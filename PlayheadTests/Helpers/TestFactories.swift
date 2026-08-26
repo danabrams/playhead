@@ -218,7 +218,7 @@ extension SemanticScanResult {
             permissiveFallbackReason: nil,
             createdAt: stamped,
             scenePhase: scenePhase,
-            runCorrelationId: runCorrelationId,
+            backfillJobId: backfillJobId,
             firstAttemptAt: stamped,
             lastAttemptAt: stamped,
             observedStatusesCSV: SemanticScanResult.encodeObservedStatuses([status]),

@@ -121,7 +121,7 @@ struct SemanticScanAttributionWireInTests {
     ///
     /// Run a real backfill through the real runner, then ask SQLite how many
     /// persisted scan rows fail to resolve to a `backfill_jobs` row through
-    /// `runCorrelationId`. The answer has to be zero — and it is a stronger
+    /// `backfillJobId`. The answer has to be zero — and it is a stronger
     /// statement than "the column is non-null", because an id that names no job
     /// is exactly as useless as no id at all.
     @Test("every row the runner persists carries attribution, and the id resolves to a real job")
@@ -172,7 +172,7 @@ struct SemanticScanAttributionWireInTests {
                 from a pre-V42 row, and it silently shrinks the attributable corpus.
                 """
             )
-            #expect(row.runCorrelationId != nil, "row \(row.id) has no run correlation id")
+            #expect(row.backfillJobId != nil, "row \(row.id) has no backfill job id")
         }
 
         // The id is not merely present — it JOINS.
@@ -180,7 +180,7 @@ struct SemanticScanAttributionWireInTests {
             """
             SELECT COUNT(*)
             FROM semantic_scan_results s
-            LEFT JOIN backfill_jobs j ON j.jobId = s.runCorrelationId
+            LEFT JOIN backfill_jobs j ON j.jobId = s.backfillJobId
             WHERE s.analysisAssetId = '\(assetId)'
               AND j.jobId IS NULL
             """,
@@ -189,8 +189,8 @@ struct SemanticScanAttributionWireInTests {
         #expect(
             orphans == 0,
             """
-            \(orphans) persisted scan row(s) carry a runCorrelationId that names \
-            no backfill_jobs row. A correlation id that joins to nothing is \
+            \(orphans) persisted scan row(s) carry a backfillJobId that names \
+            no backfill_jobs row. A job id that joins to nothing is \
             exactly as useless as no id at all — the measurement is still \
             impossible, it just looks like it should work.
             """
@@ -200,7 +200,7 @@ struct SemanticScanAttributionWireInTests {
             """
             SELECT COUNT(*)
             FROM semantic_scan_results s
-            JOIN backfill_jobs j ON j.jobId = s.runCorrelationId
+            JOIN backfill_jobs j ON j.jobId = s.backfillJobId
             WHERE s.analysisAssetId = '\(assetId)'
             """,
             in: dir
@@ -263,6 +263,6 @@ struct SemanticScanAttributionWireInTests {
         // The rest of the attribution still lands — one broken field does not
         // cost the row its timestamp or its join key.
         #expect(rows.allSatisfy { $0.createdAt == Self.pinnedClock.timeIntervalSince1970 })
-        #expect(rows.allSatisfy { $0.runCorrelationId != nil })
+        #expect(rows.allSatisfy { $0.backfillJobId != nil })
     }
 }

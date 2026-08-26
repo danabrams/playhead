@@ -333,6 +333,36 @@
 #       A shutdown + erase took it to 17 MiB and the volume from 12 to 22 GiB.
 #       Nothing was deleted by the refusal itself, as its own text says.
 #
+#   PARTIAL RE-RUN 2026-08-26 (playhead-1gu0). Batches 1612-1616 only, added by
+#   this bead: GU01-GU04 plus the GU99 control, one batch each, driven as
+#   `--series GU`. FINAL 4 KILLED / 0 SURVIVED / 0 ERROR / 0 VOID, plus GU99
+#   SURVIVED as required, 6 builds, 17m46s wall clock. Batches 1-1611 were NOT
+#   re-run and carry the verdicts above.
+#
+#   RUN TWICE, and the second run is the record. Review round 1 strengthened the
+#   sibling rail `V65: one backfill job id spans re-screenings…` — it had been
+#   taking a `Set` of OPTIONALS, so a column that lost every value read exactly
+#   like one that shares an id — and a changed test invalidates a verdict taken
+#   before it. Re-run: same 4 KILLED / GU99 SURVIVED / 0 VOID / 0 ERROR, 6
+#   builds, 16m11s. Two things the second run measured that the first did not:
+#     • GU02 observed TWO failures rather than one. The second, `closing the
+#       session log is non-terminal — a later write reopens the SAME file`,
+#       cannot be reached by GU02 — that mutant's only live path is a store
+#       carrying the OLD spelling — and it did not fail in the first run, in any
+#       other batch, or in either baseline. Recorded as batch noise, not as an
+#       extra victim. The verdict stands on the EXPECTED test, which failed.
+#     • GU04 observed 69 rather than 68, one more of the same fresh-store
+#       family. The prediction-miss note below quotes 68 from the first run and
+#       is left at 68 deliberately: the point it makes is the SHAPE of the miss.
+#
+#   THE FIRST ATTEMPT WAS DISCARDED AND IT IS WORTH SAYING WHY. Its baseline
+#   came back RED on one test — `the DOWNLOAD-JOURNAL tables exist BELOW the V39
+#   rollback floor` — with `Migration failed: disk I/O error (SQL: BEGIN
+#   IMMEDIATE)`. The script refused to score anything, which is correct: an
+#   environmental failure on a shared suite would have credited a KILLED to
+#   whatever mutation happened to name it. The re-run's baseline was green
+#   (2,788 passed, 0 failed, 0 NO VERDICT, 1 host pid) and is the run above.
+#
 #   PARTIAL RE-RUN 2026-08-25 (playhead-4xmz). Batches 1477-1513 only, added by
 #   this bead: DW01-DW29, DW31-DW37 plus the DW99 control, one batch each — 37
 #   records, 37 batches, 38 builds, 105m17s wall clock, driven as
@@ -3882,6 +3912,15 @@ T_HX6N_EMPTY_CORPUS="an empty corpus reports nil, not zero and not one"
 T_HX6N_INELIGIBLE="throughput excludes no-work sentinels, failures and zero-width windows"
 T_HX6N_SQL_AGREES="the SQL split and the Swift split agree on one fixture"
 T_HX6N_RUNNER_STAMPS="every row the runner persists carries attribution, and the id resolves to a real job"
+# playhead-1gu0 (GU series): the V65 rename of `runCorrelationId` -> `backfillJobId`.
+T_1GU0_RENAME="V65: a pre-V65 row keeps its job id across the runCorrelationId -> backfillJobId rename"
+# There is deliberately NO variable for the sibling rail `V65: one backfill job
+# id spans re-screenings…`. One was defined here and referenced by nothing, which
+# reads as an expectation somebody forgot to wire up. It is not: that rail opens
+# a store at the HEAD shape, where the rename helper returns before its first
+# statement, so no GU mutant can reach it — measured, not assumed (GU02 leaves it
+# green). The rail earns its place by refusing a vacuous assertion, not by being
+# a mutant's victim.
 T_HX6N_FOREGROUND_RUN="a foreground run lands on the foreground side of the same split"
 T_HX6N_BROKEN_PROVIDER="a provider that breaks the vocabulary yields unattributed rows, not guessed ones"
 T_HX6N_LADDER_RAIL="Cycle 4 H1 RAIL: the isolated ladder does NOT run createTables()"
@@ -12713,6 +12752,113 @@ MUTATIONS=(
   # MUST SURVIVE. If it dies, the eleven verdicts above are measuring the
   # suites' fragility rather than the mutations.
   "SD99|1611|DLMGR|$T_SD_ARMED_ROW"
+
+  # ---- playhead-1gu0, the GU series: the V65 rename of
+  #      `semantic_scan_results.runCorrelationId` to `backfillJobId` ---------
+  #
+  # A RENAME has one way to be right and four ways to be quietly wrong, and
+  # THREE of the four are invisible on a FRESH INSTALL — `createTables()` builds
+  # the head shape unconditionally, so a device that never carried the old
+  # spelling passes GU01, GU02 and GU03. That is why the rail
+  # (`$T_1GU0_RENAME`) regresses a live store to the V64 spelling first.
+  #
+  # THE FOURTH IS NOT, AND THIS COMMENT SAID "every one of the four" UNTIL ITS
+  # OWN RECORD REFUTED IT (playhead-1gu0 review). GU04 drops
+  # `setSchemaVersion(65)`, so EVERY store — fresh installs included — finishes
+  # `migrate()` at 64, and GU04's own `PREDICTION MISS, 66 WIDE` note below
+  # records exactly that: 68 observed victims, essentially every "a fresh store
+  # reaches head" rail in the tree. A claim refuted by the measurement printed
+  # under it is the shape this bead exists to remove. (This line used to say
+  # that note sits "twenty lines down", and it was already wrong by more than a
+  # factor of two on the commit that wrote it — the THIRD wrong positional claim
+  # in this block, after the two GU99's comment records. Name the thing, never
+  # the offset; playhead-1gu0 review.)
+  #
+  # GU01 is the ORDERING property, GU02 the DATA-PRESERVATION property, GU03 the
+  # INDEX-NAME property and GU04 the LADDER property.
+  #
+  # ONE BATCH EACH, AND THE STATED REASON WAS WRONG TOO (same round). They do
+  # NOT "all edit the same helper or its single call site": GU01 edits
+  # `createTables()`, GU02 / GU03 / GU99 edit
+  # `renameSemanticScanRunCorrelationIdIfNeeded()`, GU04 edits the V65 RUNG, and
+  # the helper has THREE call sites rather than one. Only GU02 and GU03
+  # genuinely collide — GU02's whole OLD text is one line of GU03's — and THE
+  # TWO ORDERS FAIL DIFFERENTLY, which this line used to flatten into "whichever
+  # applied first would destroy the other's anchor" (playhead-1gu0 review).
+  # GU02 first REWRITES that line, so GU03's two-line anchor matches nothing and
+  # the battery prints `anchor did not apply` — loud. GU03 first only DELETES
+  # the `DROP INDEX` line above it, so GU02's anchor still matches exactly once
+  # and applies: the batch then runs a COMPOUND mutant that is neither entry,
+  # with no complaint. The conclusion is unchanged and the SILENT order is the
+  # reason for it. The rest are one-per-batch because that is how they were RUN,
+  # which is the honest reason.
+  #
+  # GU05 is deliberately NOT here: dropping the helper's `CREATE INDEX` can only
+  # ever be SURVIVED, and an entry that can only survive trains a reader to
+  # discount a survivor.
+  #
+  # SAY THE REASON PRECISELY, THOUGH — "PROVEN EQUIVALENT" IS A STRONGER CLAIM
+  # THAN THE CODE SUPPORTS, and this comment made it (playhead-1gu0 review). TWO
+  # of the helper's three call sites are each followed by their own
+  # `CREATE INDEX IF NOT EXISTS` of the same name — `createTables()` and the V42
+  # rung — so on every path a real device takes the index is rebuilt whatever the
+  # helper does. The THIRD is not: the V65 rung calls the helper and stamps the
+  # version, nothing more. That rung runs WITHOUT `createTables()` only through
+  # `migrateOnlyForTesting()`, and the fixtures that DO reach that seam with
+  # `semantic_scan_results` present all carry the NEW spelling already — they
+  # `migrate()` to head first, so `createTables()` has built `backfillJobId`, and
+  # only then rewind — so the helper returns on its `hasNew` guard and nothing
+  # today can observe the difference. (This paragraph said "no fixture reaches
+  # that seam"; the correction for it then named exactly TWO,
+  # `BackgroundDownloadDropLaunchIdentityV64MigrationTests`'s
+  # `theLadderOnlySeamReachesV64` and `aV62StoreClimbsThroughV63ToHead`, which
+  # was the pair somebody had in hand read as a census. MEASURED: 23 test
+  # functions across THIRTEEN files, all six `isolatedLadderReaches*` among them
+  # — the helper's own doc carries the predicate and its limit. (Round 6 wrote
+  # "twelve files" beside the 23 and round 7 could not reproduce the pair: 23 is
+  # the count WITH a `migrate()` reached through a same-file helper, twelve is
+  # the file count WITHOUT one, and without one the count is 20. Two searches,
+  # one sentence.) What none of the 23 does is arrive there at the OLD spelling,
+  # which is what the conclusion rests on and is unchanged. playhead-1gu0 review
+  # rounds 6 and 7.)
+  # It is an equivalent over the paths that EXIST, not one by construction: seed
+  # that table at the OLD spelling into the ladder-only seam and GU05 becomes a
+  # real mutant.
+  # GU01-GU03 each predicted exactly one victim and observed exactly one: the
+  # rail below. That is the point of rewinding the fixture — the three defects
+  # are indistinguishable from a correct migration everywhere else in the tree.
+  "GU01|1612|STORE|$T_1GU0_RENAME"
+  "GU02|1613|STORE|$T_1GU0_RENAME"
+  "GU03|1614|STORE|$T_1GU0_RENAME"
+
+  # PREDICTION MISS, 66 WIDE, and declared rather than quietly re-fitted:
+  # predicted 2 victims, observed 68. The mechanism was named in the prediction
+  # ("the ladder re-runs the rung on every open") and its REACH was not — with
+  # `setSchemaVersion(65)` gone, EVERY store finishes `migrate()` at 64, so
+  # every migration suite's "a fresh store reaches head" rail fails, in every
+  # rung from C6 to V64. The lesson is the T09 one from the other direction: a
+  # mutation on the version STAMP is not scoped to its own rung, because the
+  # stamp is the one piece of state every other rung's rail reads.
+  #
+  # The expectation is deliberately left at the two names rather than grown to
+  # 68. A 68-name expectation would pass for any mutation that stalls the
+  # ladder anywhere, which is a weaker claim than this entry makes.
+  "GU04|1615|STORE|$T_1GU0_RENAME;$T_HX6N_V41_SURVIVES"
+
+  # Batch 1616 — GU99, VACUITY CONTROL. The `hasNew` local in
+  # `renameSemanticScanRunCorrelationIdIfNeeded()` is bound to a second name —
+  # the helper's FIRST two statements after its `tableExists` guard; nothing
+  # observable changes. (This line said "the very line GU04's guard sits above",
+  # and GU04 is in a DIFFERENT function — the V65 rung — and has no guard. The
+  # correction for THAT then said "the two lines directly above the `DROP INDEX`
+  # / `ALTER` pair GU02 and GU03 mutate", and they are not directly above it: a
+  # `runCorrelationId` `columnExists` guard and a five-line comment sit between.
+  # Two rounds of playhead-1gu0 review, and the second one is why a locational
+  # claim gets checked against the file rather than remembered.) MUST SURVIVE.
+  # Non-empty
+  # expectation on purpose: it names the rail GU01-GU03 kill, so a KILLED
+  # verdict here would mean a local rename can change behaviour.
+  "GU99|1616|STORE|$T_1GU0_RENAME"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -13219,7 +13365,12 @@ describe_mutation() {
     T05) echo "insertSemanticScanResult: drop the createdAt backstop clock" ;;
     T06) echo "readSemanticScanResult: read a NULL createdAt through sqlite3_column_double (1970)" ;;
     T07) echo "V42 rung stamps 41 instead of 42 — the ladder stops climbing to head" ;;
-    T08) echo "BackfillJobRunner.attributed: stop stamping runCorrelationId" ;;
+    T08) echo "BackfillJobRunner.attributed: stop stamping backfillJobId" ;;
+    GU01) echo "V65: createTables() stops renaming BEFORE it adds, so an upgraded DB carries BOTH spellings and every job id is stranded" ;;
+    GU02) echo "V65: the helper ADDS a fresh column instead of renaming — the shape looks right and every attribution is gone" ;;
+    GU03) echo "V65: the old index name survives the rename — idx_..._correlation over a column called backfillJobId" ;;
+    GU04) echo "V65: the rung renames but never stamps the version, so the ladder re-runs the rung on every open forever" ;;
+    GU99) echo "VACUITY CONTROL — the rename helper's hasNew local is renamed and nothing else changes; MUST SURVIVE" ;;
     T09) echo "BackfillJobRunner.attributed: stop stamping scenePhase" ;;
     T10) echo "BackfillJobRunner.attributed: guess .active when the provider breaks its vocabulary" ;;
     T11) echo "SemanticScanThroughputSplit.isEligible: admit no-work sentinels as throughput" ;;
@@ -14748,15 +14899,21 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  # SD10's anchor was RE-DERIVED by playhead-1gu0, which broke it: V65 appended a
+  # rung to the test-only ladder between this call and the `}` / `#endif` the
+  # anchor used to disambiguate it from the PRODUCTION ladder's identical call.
+  # The mutation is unchanged — drop the V64 rung from `migrateOnlyForTesting()`
+  # — and so is every expectation. The new second line does the same
+  # disambiguation the braces used to: an anchor of the call ALONE would match
+  # the production site too, because that site's 12-space indent contains this
+  # one's 8-space text as a substring.
   SD10)
     snippet OLD <<'EOF'
         try migrateBackgroundDownloadDropLaunchIdentityV64IfNeeded()
-    }
-    #endif
+        // playhead-1gu0 (v65): a RENAME, not an add — and this ladder is the one
 EOF
     snippet NEW <<'EOF'
-    }
-    #endif
+        // playhead-1gu0 (v65): a RENAME, not an add — and this ladder is the one
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -18407,6 +18564,86 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  # ---- playhead-1gu0: the V65 rename (GU series) ----
+
+  # GU01 — the ORDERING. `createTables()` runs BEFORE the V*IfNeeded ladder, so
+  # it is the first thing to see an upgraded table. Drop its rename call and the
+  # very next statement adds an EMPTY `backfillJobId` alongside the populated
+  # `runCorrelationId`; the V65 rung then sees the new name present and declines.
+  # Both columns exist, the head shape looks correct, and every job id on the
+  # device is stranded in a column nothing reads.
+  GU01)
+    snippet OLD <<'EOF'
+        try renameSemanticScanRunCorrelationIdIfNeeded()
+        try addColumnIfNeeded(
+            table: "semantic_scan_results",
+            column: "backfillJobId",
+            definition: "TEXT"
+        )
+EOF
+    snippet NEW <<'EOF'
+        try addColumnIfNeeded(
+            table: "semantic_scan_results",
+            column: "backfillJobId",
+            definition: "TEXT"
+        )
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # GU02 — the DATA. An ADD where a RENAME belongs: afterwards the table has
+  # both columns and the new one is entirely NULL. On a fresh install this is
+  # byte-identical to a correct migration, which is the whole reason the rail
+  # rewinds a store instead of asserting on a new one.
+  GU02)
+    snippet OLD <<'EOF'
+        try exec("ALTER TABLE semantic_scan_results RENAME COLUMN runCorrelationId TO backfillJobId")
+EOF
+    snippet NEW <<'EOF'
+        try exec("ALTER TABLE semantic_scan_results ADD COLUMN backfillJobId TEXT")
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # GU03 — the INDEX NAME. SQLite rewrites an index DEFINITION through a
+  # RENAME COLUMN but keeps the index's own NAME, so skipping the drop leaves
+  # `idx_semantic_scan_results_correlation` sitting over a column called
+  # `backfillJobId` — the same name-says-one-thing defect this bead exists to
+  # remove, one layer down and invisible to every query.
+  GU03)
+    snippet OLD <<'EOF'
+        try exec("DROP INDEX IF EXISTS idx_semantic_scan_results_correlation")
+        try exec("ALTER TABLE semantic_scan_results RENAME COLUMN runCorrelationId TO backfillJobId")
+EOF
+    snippet NEW <<'EOF'
+        try exec("ALTER TABLE semantic_scan_results RENAME COLUMN runCorrelationId TO backfillJobId")
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # GU04 — the LADDER. The rung does its work and never stamps the version, so
+  # `schemaVersion()` stays at 64 and the store re-runs the rung on every open
+  # forever. The shape is right, which is what makes it silent.
+  GU04)
+    snippet OLD <<'EOF'
+        try setSchemaVersion(65)
+    }
+EOF
+    snippet NEW <<'EOF'
+    }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # GU99 — VACUITY CONTROL, and it MUST SURVIVE. The rename helper's `hasNew`
+  # local is bound to a second name; nothing else changes.
+  GU99)
+    snippet OLD <<'EOF'
+        let hasNew = try columnExists(table: "semantic_scan_results", column: "backfillJobId")
+        guard !hasNew else { return }
+EOF
+    snippet NEW <<'EOF'
+        let hasNewSpelling = try columnExists(table: "semantic_scan_results", column: "backfillJobId")
+        guard !hasNewSpelling else { return }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
   # ---- playhead-hx6n: scan-row run attribution (T series) ----
 
   # T01 — THE one-line mutation the whole bead reduces to: read a nil scene
@@ -18496,10 +18733,10 @@ EOF
   # useless as having no column.
   T08)
     snippet OLD <<'EOF'
-            runCorrelationId: jobId
+            backfillJobId: jobId
 EOF
     snippet NEW <<'EOF'
-            runCorrelationId: nil
+            backfillJobId: nil
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 

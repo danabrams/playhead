@@ -865,11 +865,35 @@ struct SemanticSweepConfidenceTests {
                 "vetoed=\(vetoed as Any) clean=\(clean as Any)")
     }
 
-    /// A REPLICATE THAT DISAGREES IS EVIDENCE. The sweep really does re-screen:
-    /// 36 of 125 coarse windows on the pull carry more than one `passA` row,
-    /// each a separate FM call in a separate run, and on four of them
-    /// `containsAd` is the MINORITY verdict. The composer filtered those rows
-    /// out and never counted them.
+    /// A REPLICATE THAT DISAGREES IS EVIDENCE, and the sweep really does
+    /// re-screen — the composer filtered those rows out and never counted them.
+    ///
+    /// THIS DOC QUOTES NO FIGURE FROM THE PULL, AND THAT IS THE POINT.
+    /// ``SemanticSweepMarkComposer/corroboration(for:in:atTranscriptVersion:)``
+    /// holds the replicate counts — both pulls, each with the population it is
+    /// over. It is where they are MEASURED, and that is the claim worth making.
+    ///
+    /// **THIS LINE ALSO SAID IT WAS "the ONLY place on this branch that does",
+    /// AND A MONOPOLY CLAIM IS A CLAIM ABOUT EVERY OTHER FILE (playhead-1gu0
+    /// review round 8).** ``SemanticSweepMarkComposer/corroborationFactor(affirming:dissenting:)``
+    /// names "the four replicate windows" in its own doc while pointing at
+    /// `corroboration` for the measurement, and the ids-per-asset figure the
+    /// sibling rail `V65: one backfill job id spans re-screenings…` used to
+    /// carry is not in `corroboration` at all — it is with the COLUMN, at
+    /// ``SemanticScanResult/backfillJobId``. Name the home; do not assert there
+    /// is only one, because the second half of that sentence is unverifiable
+    /// from the file it is written in.
+    ///
+    /// This doc used to carry a second copy, shipped by `6e9c386f`
+    /// alongside the composer's, and it was wrong in two ways the composer's was
+    /// corrected for and this one was not: it called a tie "the MINORITY
+    /// verdict", and it said the replicates were "each a separate FM call in a
+    /// separate RUN" — the surviving half of the deleted `runCorrelationId`
+    /// parenthesis this bead exists to remove. A third round then transcribed a
+    /// contrast out of the composer as a denominator. Three errors, one cause:
+    /// a figure restated in a second place drifts out of step with the first.
+    /// A pointer cannot.
+    ///
     @Test("a contradicted verdict is worth less than an uncontradicted one")
     func aContradictedVerdictRanksLower() {
         let marks = Fx.compose(rows: [

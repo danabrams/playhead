@@ -65,7 +65,8 @@ struct SemanticScanRunAttributionTests {
         errorContext: String? = nil,
         createdAt: Double? = nil,
         scenePhase: ScanScenePhase? = nil,
-        runCorrelationId: String? = nil
+        backfillJobId: String? = nil,
+        transcriptVersion: String = "tv-1"
     ) -> SemanticScanResult {
         SemanticScanResult(
             id: id,
@@ -86,13 +87,13 @@ struct SemanticScanRunAttributionTests {
             latencyMs: latencyMs,
             prewarmHit: false,
             scanCohortJSON: Self.cohort,
-            transcriptVersion: "tv-1",
+            transcriptVersion: transcriptVersion,
             // Distinct per row so `UNIQUE(reuseKeyHash)` never collapses two
             // fixture rows into one and quietly halves a count.
             reuseScope: id,
             createdAt: createdAt,
             scenePhase: scenePhase,
-            runCorrelationId: runCorrelationId
+            backfillJobId: backfillJobId
         )
     }
 
@@ -210,15 +211,22 @@ struct SemanticScanRunAttributionTests {
         // NULL because every candidate default would turn an absence into a
         // launch count. It names nothing this rung asserts, so no assertion here
         // moves.
-        #expect(AnalysisStore.currentSchemaVersion == 64)
-        for column in ["createdAt", "scenePhase", "runCorrelationId"] {
+        // 64 -> 65 read for this rung (playhead-1gu0): V65 RENAMES ONE COLUMN —
+        // `semantic_scan_results.runCorrelationId` becomes `backfillJobId`, and its
+        // index moves with it. A pure `ALTER TABLE … RENAME COLUMN`: no row moves, no
+        // value is written, nothing is backfilled and no other table is named. This rung's OWN
+        // column is the one that moves: it is spelled `backfillJobId` everywhere
+        // below, and the rail proving a database carrying the old spelling comes out
+        // carrying the new one WITH ITS VALUES is `v64RowKeepsItsJobIdAcrossTheV65Rename`.
+        #expect(AnalysisStore.currentSchemaVersion == 65)
+        for column in ["createdAt", "scenePhase", "backfillJobId"] {
             #expect(
                 try probeColumnExists(in: dir, table: "semantic_scan_results", column: column),
                 "V42 must add `\(column)` to semantic_scan_results"
             )
         }
         #expect(try probeIndexExists(in: dir, indexName: "idx_semantic_scan_results_createdAt"))
-        #expect(try probeIndexExists(in: dir, indexName: "idx_semantic_scan_results_correlation"))
+        #expect(try probeIndexExists(in: dir, indexName: "idx_semantic_scan_results_backfill_job"))
     }
 
     /// **The no-backfill proof.**
@@ -239,10 +247,10 @@ struct SemanticScanRunAttributionTests {
         // would have written it.
         try await bootstrap.execForTesting("""
             DROP INDEX IF EXISTS idx_semantic_scan_results_createdAt;
-            DROP INDEX IF EXISTS idx_semantic_scan_results_correlation;
+            DROP INDEX IF EXISTS idx_semantic_scan_results_backfill_job;
             ALTER TABLE semantic_scan_results DROP COLUMN createdAt;
             ALTER TABLE semantic_scan_results DROP COLUMN scenePhase;
-            ALTER TABLE semantic_scan_results DROP COLUMN runCorrelationId;
+            ALTER TABLE semantic_scan_results DROP COLUMN backfillJobId;
             INSERT INTO semantic_scan_results
                 (id, analysisAssetId, windowFirstAtomOrdinal, windowLastAtomOrdinal,
                  windowStartTime, windowEndTime, scanPass, transcriptQuality,
@@ -265,7 +273,7 @@ struct SemanticScanRunAttributionTests {
         try await store.migrate()
 
         #expect(try await store.schemaVersion() == AnalysisStore.currentSchemaVersion)
-        for column in ["createdAt", "scenePhase", "runCorrelationId"] {
+        for column in ["createdAt", "scenePhase", "backfillJobId"] {
             #expect(try probeColumnExists(in: dir, table: "semantic_scan_results", column: column))
         }
 
@@ -294,7 +302,7 @@ struct SemanticScanRunAttributionTests {
             unanswerable, and it must keep saying so rather than pick a side.
             """
         )
-        #expect(legacy.runCorrelationId == nil)
+        #expect(legacy.backfillJobId == nil)
 
         // And the split reports it as unattributed rather than as throughput.
         let split = SemanticScanThroughputSplit.compute(rows: rows)
@@ -304,11 +312,212 @@ struct SemanticScanRunAttributionTests {
         #expect(split.attributedFraction == 0)
     }
 
+    // MARK: - V65: the column is renamed and NOTHING is lost
+
+    /// **The rename rail (playhead-1gu0).**
+    ///
+    /// A database written by a pre-V65 binary carries `runCorrelationId` with
+    /// real job ids in it. After the rename it must carry `backfillJobId` with
+    /// THE SAME job ids — a rename that silently drops its values is
+    /// indistinguishable, on a fresh install, from one that worked.
+    ///
+    /// The fixture regresses a live store to the old spelling and re-opens it,
+    /// which is the only way to exercise the branch: on a fresh install
+    /// `createTables()` has already built the head shape, so the rename helper
+    /// takes its no-op path and proves nothing.
+    @Test("V65: a pre-V65 row keeps its job id across the runCorrelationId -> backfillJobId rename")
+    func v64RowKeepsItsJobIdAcrossTheV65Rename() async throws {
+        let (bootstrap, dir) = try await makeTestStoreWithDirectory()
+        try await bootstrap.insertAsset(makeAsset(id: "asset-v64"))
+
+        // Regress to the V64 spelling and seed two rows through it: one
+        // attributed, one honestly unattributed.
+        try await bootstrap.execForTesting("""
+            DROP INDEX IF EXISTS idx_semantic_scan_results_backfill_job;
+            ALTER TABLE semantic_scan_results RENAME COLUMN backfillJobId TO runCorrelationId;
+            CREATE INDEX IF NOT EXISTS idx_semantic_scan_results_correlation
+                ON semantic_scan_results(runCorrelationId);
+            INSERT INTO semantic_scan_results
+                (id, analysisAssetId, windowFirstAtomOrdinal, windowLastAtomOrdinal,
+                 windowStartTime, windowEndTime, scanPass, transcriptQuality,
+                 disposition, spansJSON, status, attemptCount, errorContext,
+                 inputTokenCount, outputTokenCount, latencyMs, prewarmHit,
+                 scanCohortJSON, transcriptVersion, reuseKeyHash, runMode, jobPhase,
+                 createdAt, scenePhase, runCorrelationId)
+            VALUES
+                ('scan-v64-attributed', 'asset-v64', 0, 5, 0.0, 60.0, 'passA', 'good',
+                 'noAds', '[]', 'success', 1, NULL, NULL, NULL, 30000.0, 0,
+                 '\(Self.cohort)', 'tv-1', 'v64-reuse-key-a', 'shadow', 'shadow',
+                 1700000000.0, 'background', 'fm-9330e821aeb36a0d'),
+                ('scan-v64-unattributed', 'asset-v64', 6, 11, 60.0, 120.0, 'passA', 'good',
+                 'noAds', '[]', 'success', 1, NULL, NULL, NULL, 31000.0, 0,
+                 '\(Self.cohort)', 'tv-1', 'v64-reuse-key-b', 'shadow', 'shadow',
+                 1700000100.0, 'background', NULL);
+            UPDATE _meta SET value = '64' WHERE key = 'schema_version';
+            """)
+        #expect(
+            try probeColumnExists(in: dir, table: "semantic_scan_results", column: "runCorrelationId"),
+            "fixture precondition: the V64 regression must actually restore the old spelling"
+        )
+        #expect(
+            try !probeColumnExists(in: dir, table: "semantic_scan_results", column: "backfillJobId"),
+            "fixture precondition: the new spelling must be gone, or the helper's no-op path is what runs"
+        )
+
+        AnalysisStore.resetMigratedPathsForTesting()
+        let store = try AnalysisStore(directory: dir)
+        try await store.migrate()
+
+        #expect(try await store.schemaVersion() == AnalysisStore.currentSchemaVersion)
+        #expect(try probeColumnExists(in: dir, table: "semantic_scan_results", column: "backfillJobId"))
+        #expect(
+            try !probeColumnExists(in: dir, table: "semantic_scan_results", column: "runCorrelationId"),
+            """
+            Both spellings are present after the migration. That is the failure \
+            the ordering in `createTables()` exists to prevent: an empty \
+            `backfillJobId` added alongside a populated `runCorrelationId`, with \
+            every job id stranded in a column nothing reads.
+            """
+        )
+        #expect(try probeIndexExists(in: dir, indexName: "idx_semantic_scan_results_backfill_job"))
+        #expect(
+            try !probeIndexExists(in: dir, indexName: "idx_semantic_scan_results_correlation"),
+            "an index named for `correlation` over a column named `backfillJobId` is the same defect one layer down"
+        )
+
+        let rows = try await store.fetchSemanticScanResults(analysisAssetId: "asset-v64")
+        let byId = Dictionary(uniqueKeysWithValues: rows.map { ($0.id, $0) })
+        try #require(rows.count == 2)
+        #expect(
+            byId["scan-v64-attributed"]?.backfillJobId == "fm-9330e821aeb36a0d",
+            """
+            The renamed column read back \
+            \(String(describing: byId["scan-v64-attributed"]?.backfillJobId)). \
+            A RENAME COLUMN moves no data, so the value written under the old \
+            spelling must be readable under the new one — a nil here means the \
+            rename dropped the column and re-added it, which loses every \
+            attribution on the device.
+            """
+        )
+        #expect(byId["scan-v64-attributed"]?.createdAt == 1_700_000_000)
+        #expect(byId["scan-v64-attributed"]?.latencyMs == 30000.0, "the rename must not disturb neighbouring fields")
+        #expect(
+            byId["scan-v64-unattributed"]?.backfillJobId == nil,
+            "a NULL stays NULL: nothing may invent a job for a row that never had one"
+        )
+    }
+
+    /// A job id is per `(asset, phase, offset)`, so ONE value spans an asset's
+    /// whole backfill history — which is what the V65 name now says out loud and
+    /// what the old one denied. This is the property `SemanticSweepMarkComposer`
+    /// was documented as relying on and does not: the id cannot separate two
+    /// screenings of the same window, `transcriptVersion` can.
+    ///
+    /// THE FIXTURE BELOW IS THE 2026-08-19 DEVICE PULL'S SHAPE IN MINIATURE, AND
+    /// IT QUOTES NO FIGURE FROM IT. That is the whole of what this doc claims,
+    /// and it is checkable against this comment alone. The two measurements it
+    /// used to carry live in two DIFFERENT places, because they are about two
+    /// different things: the REPLICATE counts (both pulls, each with the
+    /// population it is over) are at
+    /// ``SemanticSweepMarkComposer/corroboration(for:in:atTranscriptVersion:)``,
+    /// and the ids-per-asset count is a property of the COLUMN rather than of
+    /// any replicate population, so it lives with the column rather than there.
+    ///
+    /// **THIS PARAGRAPH SAID `corroboration(for:in:atTranscriptVersion:)` HOLDS
+    /// "every count, both pulls" AND IS "the ONLY place on this branch that
+    /// does" — BOTH HALVES ARE FALSE (playhead-1gu0 review round 8).** That
+    /// function's doc holds no ids-per-asset figure at all, so the pointer did
+    /// not point at one of the two counts this doc had just removed; and the
+    /// figure it does not hold is carried by `SemanticScanResult`, by the V65
+    /// rung and by `docs/investigations/playhead-hx6n-scan-attribution.md`, so
+    /// "the only place" is wrong three times over. A monopoly claim is a claim
+    /// about every OTHER file, which is exactly the kind this bead keeps
+    /// catching — name the home, never assert there is one home.
+    ///
+    /// One reading really did leave the tree with these figures and nothing
+    /// records it: the `passA`-at-ANY-status replicate count for the 2026-08-19
+    /// pull. `corroboration`'s bullets are the EXAMINED population and its
+    /// any-status paragraph is the 2026-08-10 pull only. Dropped deliberately —
+    /// it existed to disambiguate a denominator this doc no longer quotes — and
+    /// said out loud so nobody hunts for it there.
+    ///
+    /// Seven review rounds of playhead-1gu0 produced one defect class and almost
+    /// nothing else: a figure restated in a second place and then corrected in
+    /// only one of them. This doc was two of those — it carried the pull's counts
+    /// under a population label that belonged to a different function, and the
+    /// composer's copy was fixed while this one stood. A pointer cannot drift out
+    /// of step with the thing it points at, so this is a pointer.
+    // The name deliberately carries no semicolon: `mutation-battery.sh` SPLITS its
+    // expectation field on ';', so a test whose display name contains one can
+    // never be matched and every mutant naming it reports `expected test never
+    // ran` instead of a verdict.
+    @Test("V65: one backfill job id spans re-screenings, and transcriptVersion is what separates them")
+    func oneJobIdSpansReScreeningsAndVersionsDoNot() async throws {
+        let (store, _) = try await makeTestStoreWithDirectory()
+        try await store.insertAsset(makeAsset(id: "asset-rescan"))
+
+        for (index, version) in ["tv-1", "tv-2", "tv-3"].enumerated() {
+            try await store.insertSemanticScanResult(
+                makeScan(
+                    id: "scan-rescan-\(index)",
+                    assetId: "asset-rescan",
+                    start: 600,
+                    end: 690,
+                    latencyMs: Double(3_000 + index * 1_000),
+                    createdAt: 1_700_000_000 + Double(index) * 86_400,
+                    scenePhase: .background,
+                    backfillJobId: "fm-9330e821aeb36a0d",
+                    transcriptVersion: version
+                )
+            )
+        }
+
+        let rows = try await store.fetchSemanticScanResults(analysisAssetId: "asset-rescan")
+        try #require(rows.count == 3)
+        // THE SET IS TAKEN OVER NON-NIL IDS, AND "they are all present" IS ITS OWN
+        // ASSERTION. `Set([nil, nil, nil]).count` is 1, so a bare distinct-count
+        // reads a column that lost every value exactly like a column that shares
+        // one — the standing defect class, inside the rail written to remove an
+        // instance of it.
+        //
+        // NO MUTANT IN THE GU SERIES DEMONSTRATES IT, and an earlier version of
+        // this note claimed one did ("GU02, an ADD where the RENAME belongs, is
+        // precisely the mutation that empties this column"). Measured: GU02
+        // leaves this rail GREEN, because the rail opens a store at the HEAD
+        // shape, where `backfillJobId` already exists and the rename helper
+        // returns before its first statement. GU02 can only empty a column on a
+        // store carrying the OLD spelling, which is the sibling rail's fixture
+        // and not this one. The assertion stays — a vacuous rail is a defect
+        // whether or not a mutant in this series happens to reach it — but the
+        // reach was asserted rather than measured, which is the thing this bead
+        // is about.
+        #expect(
+            rows.allSatisfy { $0.backfillJobId != nil },
+            """
+            \(rows.filter { $0.backfillJobId == nil }.count) of \(rows.count) rows \
+            came back with NO job id. An absent column and a shared one are \
+            indistinguishable to a distinct-count, so this is asserted separately.
+            """
+        )
+        #expect(
+            Set(rows.compactMap(\.backfillJobId)) == ["fm-9330e821aeb36a0d"],
+            """
+            Three screenings of one window across three days produced \
+            \(Set(rows.compactMap(\.backfillJobId)).sorted()) — it must be exactly \
+            the one id they were written under: a backfill job is keyed on \
+            (asset, phase, offset) and outlives every re-screening, which is \
+            precisely why this column cannot be read as "a different FM call".
+            """
+        )
+        #expect(Set(rows.map(\.transcriptVersion)).count == 3)
+        #expect(Set(rows.map(\.latencyMs)).count == 3)
+    }
+
     // MARK: - The join, demonstrated
 
     /// **The join, run for real.**
     ///
-    /// Three tables, one fixture: a scan row carries `runCorrelationId =
+    /// Three tables, one fixture: a scan row carries `backfillJobId =
     /// backfill_jobs.jobId`, and its `createdAt` falls inside a
     /// `background_task_runs` window. The chain scan -> job -> BGTask run is
     /// resolved by SQLite, not asserted by inspection.
@@ -354,7 +563,7 @@ struct SemanticScanRunAttributionTests {
                 latencyMs: 30_000,
                 createdAt: runStart + 120,
                 scenePhase: .background,
-                runCorrelationId: "job-bg"
+                backfillJobId: "job-bg"
             )
         )
         try await store.insertSemanticScanResult(
@@ -366,7 +575,7 @@ struct SemanticScanRunAttributionTests {
                 latencyMs: 20_000,
                 createdAt: runEnd + 2_000,
                 scenePhase: .active,
-                runCorrelationId: "job-fg"
+                backfillJobId: "job-fg"
             )
         )
 
@@ -375,11 +584,11 @@ struct SemanticScanRunAttributionTests {
             SELECT s.id, j.jobId, j.phase, r.runId, r.entryPoint, r.scenePhase
             FROM semantic_scan_results s
             JOIN backfill_jobs j
-              ON j.jobId = s.runCorrelationId
+              ON j.jobId = s.backfillJobId
             LEFT JOIN background_task_runs r
               ON s.createdAt >= r.startedAt
              AND s.createdAt <= COALESCE(r.finishedAt, 9e18)
-            WHERE s.runCorrelationId IS NOT NULL
+            WHERE s.backfillJobId IS NOT NULL
             ORDER BY s.createdAt ASC
             """,
             in: dir
@@ -389,9 +598,9 @@ struct SemanticScanRunAttributionTests {
             joined.count == 2,
             """
             The scan -> job join resolved \(joined.count) row(s), not 2. Both \
-            scans carry a runCorrelationId that names a real backfill_jobs row, \
+            scans carry a backfillJobId that names a real backfill_jobs row, \
             so an INNER JOIN must return both — a missing row means the \
-            correlation id does not actually join, which is the failure mode \
+            job id does not actually join, which is the failure mode \
             this bead was filed against.
             """
         )
@@ -451,7 +660,7 @@ struct SemanticScanRunAttributionTests {
             none is NULL.
             """
         )
-        #expect(rows[0].runCorrelationId == nil)
+        #expect(rows[0].backfillJobId == nil)
     }
 
     @Test("V42: a caller-supplied createdAt wins over the store's clock")
@@ -491,7 +700,7 @@ struct SemanticScanRunAttributionTests {
                     latencyMs: 1_000,
                     createdAt: 1_700_000_000 + Double(index),
                     scenePhase: phase,
-                    runCorrelationId: "job-\(phase.rawValue)"
+                    backfillJobId: "job-\(phase.rawValue)"
                 )
             )
         }
@@ -531,7 +740,7 @@ struct SemanticScanRunAttributionTests {
                  disposition, spansJSON, status, attemptCount, errorContext,
                  inputTokenCount, outputTokenCount, latencyMs, prewarmHit,
                  scanCohortJSON, transcriptVersion, reuseKeyHash, runMode, jobPhase,
-                 createdAt, scenePhase, runCorrelationId)
+                 createdAt, scenePhase, backfillJobId)
             VALUES
                 ('scan-future', 'asset-future', 0, 5, 0.0, 60.0, 'passA', 'good',
                  'noAds', '[]', 'success', 1, NULL, NULL, NULL, 30000.0, 0,
@@ -545,7 +754,7 @@ struct SemanticScanRunAttributionTests {
         // The rest of the row still decodes — one unrecognised cosmetic field
         // must never abort a whole-asset read.
         #expect(rows[0].createdAt == 1_700_000_000)
-        #expect(rows[0].runCorrelationId == "job-future")
+        #expect(rows[0].backfillJobId == "job-future")
 
         let split = SemanticScanThroughputSplit.compute(rows: rows)
         #expect(split.unattributed.scanCount == 1)
@@ -740,13 +949,13 @@ struct SemanticScanRunAttributionTests {
 
         let rows = [
             makeScan(id: "s-fg", assetId: "asset-agree", start: 0, end: 60,
-                     latencyMs: 30_000, scenePhase: .active, runCorrelationId: "j1"),
+                     latencyMs: 30_000, scenePhase: .active, backfillJobId: "j1"),
             makeScan(id: "s-fg2", assetId: "asset-agree", start: 60, end: 120,
-                     latencyMs: 45_000, scenePhase: .inactive, runCorrelationId: "j1"),
+                     latencyMs: 45_000, scenePhase: .inactive, backfillJobId: "j1"),
             makeScan(id: "s-bg", assetId: "asset-agree", start: 120, end: 180,
-                     latencyMs: 150_000, scenePhase: .background, runCorrelationId: "j2"),
+                     latencyMs: 150_000, scenePhase: .background, backfillJobId: "j2"),
             makeScan(id: "s-unk", assetId: "asset-agree", start: 180, end: 240,
-                     latencyMs: 90_000, scenePhase: .unknown, runCorrelationId: "j2"),
+                     latencyMs: 90_000, scenePhase: .unknown, backfillJobId: "j2"),
             makeScan(id: "s-null", assetId: "asset-agree", start: 240, end: 300, latencyMs: 600_000),
             makeScan(id: "s-sentinel", assetId: "asset-agree", start: 0, end: 1_800, latencyMs: 0,
                      errorContext: "\(SemanticScanResult.noWorkSentinelErrorContextPrefix)x",
