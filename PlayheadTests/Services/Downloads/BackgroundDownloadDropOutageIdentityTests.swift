@@ -26,15 +26,24 @@
 // background-session IDENTIFIERS are process-wide constants, so any rail that
 // constructs a real `URLSessionConfiguration.background(withIdentifier:)`
 // shares that resource with three neighbouring suites under the parallel plan.
-// Every rail here REFUSES the creation crossing — synchronously, or after a
-// suspension the rail itself ends — so no real session is ever vended, and
-// every rail invalidates anyway because `discardingLateResult` is what hands a
-// late session back to be cancelled and nothing else would.
 //
-// AND THERE IS NO CLOCK IN THIS FILE. An earlier version of the join rail
-// stranded the crossing on a held queue and let a 6 s deadline expire, which
-// made it a race between the test's own arrival barrier and that bound. See
-// `suspendingRefusalIO`.
+// AND TWO OF THE FOUR SEAMS REALLY DO CONSTRUCT ONE. Say it plainly, because
+// an earlier version of this paragraph claimed "every rail here refuses the
+// CREATION crossing, so no real session is ever vended" and that has never
+// been true: `taskRefusingIO` and `resumeRefusingIO` refuse a DOWNSTREAM call
+// and let the creation succeed, by construction — a rail that reaches
+// `transferTaskNotVended` has to get past the session first. That is exactly
+// why every rail here calls `invalidateBackgroundSessionsForTesting()`:
+// `discardingLateResult` is what hands a late session back to be cancelled,
+// and a live session left registered on that identifier is what the next
+// construction collides with.
+//
+// ONE CLOCK REMAINS AND IT IS `downstreamBound`. The join rail's clock is gone
+// (an earlier version stranded the crossing on a held queue and let a 6 s
+// deadline expire, making it a race against the test's own arrival barrier —
+// see `suspendingRefusalIO`). What is left is the bound the two downstream
+// seams give the calls that must SUCCEED, and the 2026-08-26 merge gate is why
+// it is no longer 7.5 s.
 
 import Foundation
 import Testing
@@ -59,12 +68,35 @@ struct BackgroundDownloadDropOutageIdentityTests {
         )
     }
 
+    /// The bound the two DOWNSTREAM seams give the calls that must SUCCEED.
+    ///
+    /// IT IS NEVER WAITED OUT. `refusesCallsLabelled` short-circuits before the
+    /// queue is touched and returns instantly, so the refused call never
+    /// approaches it. What this number actually bounds is the calls the rail
+    /// needs to GET PAST — a real
+    /// `URLSessionConfiguration.background(withIdentifier:)` plus
+    /// `URLSession.init` for both seams, and a real `downloadTask(with:)` for
+    /// the resume seam — which is why raising it costs no wall clock on a
+    /// healthy run and everything on a saturated one.
+    ///
+    /// MEASURED, on the 2026-08-26 merge gate: at 7.5 s the resume rail's
+    /// `downloadTask(with:)` missed this bound under the full plan (11,866
+    /// tests, fd at 94.6 % of `RLIMIT_NOFILE`, 31 tests denied a file), so the
+    /// drive landed on `transferTaskNotVended` and never reached `resume()`.
+    /// The rail did not report a wrong answer — `row.reason == reason` caught
+    /// it and said `resume: the drive must land on the path it aimed at` — but
+    /// a rail whose aimed-at path depends on real system calls beating a
+    /// wall-clock deadline while ~11,000 tests saturate the box is measuring
+    /// the box. This is the quantity to raise, and it is the ONLY clock left in
+    /// this file.
+    private static let downstreamBound: TimeInterval = 120.0
+
     /// Refuses ONLY `downloadTask(with:)`. Reaches the `transferTaskNotVended`
     /// path, whose rows must carry NO crossing id.
     private static func taskRefusingIO() -> BackgroundSessionIO {
         BackgroundSessionIO(
             behavior: .refusesCallsLabelled("downloadTask(with:) for"),
-            timeout: 7.5,
+            timeout: downstreamBound,
             queueLabel: "sdis.test.task-refused.\(UUID().uuidString)"
         )
     }
@@ -73,7 +105,7 @@ struct BackgroundDownloadDropOutageIdentityTests {
     private static func resumeRefusingIO() -> BackgroundSessionIO {
         BackgroundSessionIO(
             behavior: .refusesCallsLabelled("resume() for"),
-            timeout: 7.5,
+            timeout: downstreamBound,
             queueLabel: "sdis.test.resume-refused.\(UUID().uuidString)"
         )
     }
