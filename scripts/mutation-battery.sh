@@ -29720,6 +29720,27 @@ restore_and_verify() {
 # different quantities together. The pid series says 11 distinct hosts and needs
 # no interpretation.
 
+# `scripts/fast-gate.sh` retries once on a wedged simulator, and BOTH attempts
+# land in the same log. Attempt 1's casualties — tests that were mid-flight when
+# the sim died — would otherwise union with attempt 2's results and credit a
+# mutation as KILLED off an infrastructure artefact. Cut everything before the
+# retry banner so only the last attempt is read.
+#
+# `gate_baseline.parse_run` applies the same cut internally, so the scorer does
+# not need this; it survives because the `Test run with` guard below runs BEFORE
+# the scorer and must read the same attempt the scorer will.
+last_attempt() {
+  python3 -c '
+import sys
+lines = open(sys.argv[1], encoding="utf-8", errors="replace").readlines()
+cut = 0
+for i, line in enumerate(lines):
+    if "fast-gate: wedged simulator" in line:
+        cut = i + 1
+sys.stdout.writelines(lines[cut:])
+' "$1"
+}
+
 # $1 log  $2 where to write the .xcresult bundle
 #
 # THE BUNDLE IS THE VERDICT SOURCE (playhead-gjlp0, following playhead-t53a).
@@ -30329,7 +30350,14 @@ for b in "${BATCH_IDS[@]}"; do
     # log sends the next reader searching /private/tmp by batch number, and
     # batch numbers repeat across beads (playhead-8cjo: a checker verified
     # today's control against a three-day-old log and reported OK).
-    printf '%s\t%s\t%s\n' "$name" "$LOG" "$BUNDLE" >>"$EVIDENCE"
+    # The bundle only if it EXISTS. Printing a path to something that is not
+    # there is the same defect one layer up: a line that names a thing, read as
+    # evidence that the thing is there.
+    if [ -d "$BUNDLE" ]; then
+      printf '%s\t%s\t%s\n' "$name" "$LOG" "$BUNDLE" >>"$EVIDENCE"
+    else
+      printf '%s\t%s\t%s\n' "$name" "$LOG" "-" >>"$EVIDENCE"
+    fi
   done
 
   # A batch of nothing but KILLs is not evidence of anything anybody will come
