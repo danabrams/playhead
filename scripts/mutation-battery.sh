@@ -333,6 +333,20 @@
 #       A shutdown + erase took it to 17 MiB and the volume from 12 to 22 GiB.
 #       Nothing was deleted by the refusal itself, as its own text says.
 #
+#   PARTIAL RE-RUN 2026-08-26 (playhead-1gu0). Batches 1612-1616 only, added by
+#   this bead: GU01-GU04 plus the GU99 control, one batch each, driven as
+#   `--series GU`. FINAL 4 KILLED / 0 SURVIVED / 0 ERROR / 0 VOID, plus GU99
+#   SURVIVED as required, 6 builds, 17m46s wall clock. Batches 1-1611 were NOT
+#   re-run and carry the verdicts above.
+#
+#   THE FIRST ATTEMPT WAS DISCARDED AND IT IS WORTH SAYING WHY. Its baseline
+#   came back RED on one test — `the DOWNLOAD-JOURNAL tables exist BELOW the V39
+#   rollback floor` — with `Migration failed: disk I/O error (SQL: BEGIN
+#   IMMEDIATE)`. The script refused to score anything, which is correct: an
+#   environmental failure on a shared suite would have credited a KILLED to
+#   whatever mutation happened to name it. The re-run's baseline was green
+#   (2,788 passed, 0 failed, 0 NO VERDICT, 1 host pid) and is the run above.
+#
 #   PARTIAL RE-RUN 2026-08-25 (playhead-4xmz). Batches 1477-1513 only, added by
 #   this bead: DW01-DW29, DW31-DW37 plus the DW99 control, one batch each — 37
 #   records, 37 batches, 38 builds, 105m17s wall clock, driven as
@@ -12734,9 +12748,25 @@ MUTATIONS=(
   # `createTables()` re-creates the same index by name a few hundred lines later
   # on every open. An entry for it would be permanently SURVIVED and would train
   # a reader to discount a survivor.
+  # GU01-GU03 each predicted exactly one victim and observed exactly one: the
+  # rail below. That is the point of rewinding the fixture — the three defects
+  # are indistinguishable from a correct migration everywhere else in the tree.
   "GU01|1612|STORE|$T_1GU0_RENAME"
   "GU02|1613|STORE|$T_1GU0_RENAME"
   "GU03|1614|STORE|$T_1GU0_RENAME"
+
+  # PREDICTION MISS, 66 WIDE, and declared rather than quietly re-fitted:
+  # predicted 2 victims, observed 68. The mechanism was named in the prediction
+  # ("the ladder re-runs the rung on every open") and its REACH was not — with
+  # `setSchemaVersion(65)` gone, EVERY store finishes `migrate()` at 64, so
+  # every migration suite's "a fresh store reaches head" rail fails, in every
+  # rung from C6 to V64. The lesson is the T09 one from the other direction: a
+  # mutation on the version STAMP is not scoped to its own rung, because the
+  # stamp is the one piece of state every other rung's rail reads.
+  #
+  # The expectation is deliberately left at the two names rather than grown to
+  # 68. A 68-name expectation would pass for any mutation that stalls the
+  # ladder anywhere, which is a weaker claim than this entry makes.
   "GU04|1615|STORE|$T_1GU0_RENAME;$T_HX6N_V41_SURVIVES"
 
   # Batch 1616 — GU99, VACUITY CONTROL. The helper's `hasNew` local is renamed
