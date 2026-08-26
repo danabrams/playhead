@@ -480,8 +480,11 @@ enum SemanticSweepMarkComposer {
     ///
     /// **WHAT SEPARATES THOSE REPLICATES IS `transcriptVersion` AND `latencyMs`
     /// — NOT `runCorrelationId`. This line cited the id and playhead-1gu0
-    /// measured it out.** Over the rows this factor can actually see — examined
-    /// `passA`, keyed by `(analysisAssetId, windowStartTime, windowEndTime)`:
+    /// measured it out.** SAY WHICH POPULATION, because it is the RE-SCREENING
+    /// one and NOT this factor's own — examined `passA` rows grouped by
+    /// `(analysisAssetId, windowStartTime, windowEndTime)`, with no version
+    /// scope. The paragraph after the bullets says what this factor's own
+    /// filter adds and why it matters here:
     ///
     ///   * **2026-08-10**, 99 windows, **25** with more than one row.
     ///     `transcriptVersion` distinct across every row of **25 of 25**;
@@ -498,7 +501,8 @@ enum SemanticSweepMarkComposer {
     ///
     /// **IT NEVER SEPARATED ANYTHING `transcriptVersion` DID NOT** — read the 13
     /// above as the id AGREEING with the version, never as an independent
-    /// signal — and the 08-10 reading was a residue rather than a property. `semantic_scan_results.backfillJobId` is the
+    /// signal — and the 08-10 reading was a residue rather than a property.
+    /// `semantic_scan_results.backfillJobId` is the
     /// `backfill_jobs.jobId` (it was spelled `runCorrelationId` until schema
     /// V65, which is playhead-1gu0's other half), and that id is per
     /// `(asset, phase, offset)` — one value for an asset's whole backfill
@@ -513,12 +517,23 @@ enum SemanticSweepMarkComposer {
     /// distinct-version pair and not conversely — the job id is a COARSENING of
     /// `transcriptVersion` and can never separate two rows the version does not.
     ///
-    /// **THE INDEPENDENCE IS UNCHANGED; ONLY THE EVIDENCE FOR IT IS.** Two rows
-    /// at different `transcriptVersion`s were screened from different
-    /// transcripts in different FM calls, which is the stronger claim, not the
-    /// weaker one — see ``corroborates(_:_:)``'s "a re-transcription makes the
-    /// second screening MORE independent, not less". Nothing about this
-    /// factor's arithmetic or its inputs changes.
+    /// **THE INDEPENDENCE IS UNCHANGED; ONLY THE EVIDENCE FOR IT IS — AND THE
+    /// EVIDENCE IS ABOUT THE SWEEP, NOT ABOUT THE PAIRS THIS FACTOR COUNTS.**
+    /// Two rows at different `transcriptVersion`s were screened from different
+    /// transcripts in different FM calls, so the SWEEP really does re-screen
+    /// independently; that is what the bullets establish and it is what the
+    /// deleted parenthesis was reaching for. It is NOT a statement about the
+    /// pairs that reach `affirming`/`dissenting`, because
+    /// ``corroboration(for:in:atTranscriptVersion:)`` counts only rows AT ONE
+    /// VERSION (playhead-kg6i) — so every pair this arithmetic sees shares a
+    /// `transcriptVersion` by construction, and INSIDE that population the
+    /// column separates nothing. Do not close the gap with
+    /// ``corroborates(_:_:)``'s "a re-transcription makes the second screening
+    /// MORE independent, not less": that note governs a bound-equality
+    /// MEMBERSHIP test that is deliberately NOT version-scoped, and it says so
+    /// itself — "kg6i … was right about the quantity it governs — but that
+    /// quantity is not this one". Nothing about this factor's arithmetic or its
+    /// inputs changes.
     ///
     /// SAY WHICH ROWS THIS FACTOR CAN SEE, because those four are not it. A row
     /// that did not EXAMINE its window is not a verdict and is skipped below, so
@@ -526,6 +541,21 @@ enum SemanticSweepMarkComposer {
     /// examined dissenter over it, and only 3 of the 22 persisted sweep marks
     /// are deducted at all. The factor is right; its reach today is small, and
     /// quoting the wider count as if this read it would overstate it.
+    ///
+    /// **THOSE TWO FIGURES ARE PRE-kg6i AND THEY OVERSTATE THE REACH — read
+    /// them as history (playhead-1gu0 review).** They landed on 2026-08-10
+    /// (`6e9c386f`) and kg6i scoped the count to one `transcriptVersion` on
+    /// 2026-08-21 (`0f0e9cb1`). Re-derived on the same pull with the same
+    /// predicate — an examined presence-pass row overlapping the row's own
+    /// window — the un-scoped query reproduces **55** and **1** exactly, and
+    /// adding kg6i's version scope takes the 1 to **0**: on the 08-10 pull
+    /// there is not one pair of examined presence-pass rows that overlaps AND
+    /// shares a version, so `dissenting` is 0 everywhere and this factor is
+    /// 1.0 on every row of it. (The 08-19 t4 pull has **22** such pairs, none
+    /// of them at identical bounds.) The "3 of the 22 marks deducted" figure is
+    /// from the same pre-kg6i run and has NOT been re-derived; do not quote it
+    /// as current. Correcting the marks figure needs a composer run rather than
+    /// a query, so it is left for the bead that re-measures the sweep.
     ///
     /// IT CAN ONLY DEDUCT, AND THAT IS THE POINT. The smoothing means
     /// unanimity returns exactly 1.0 whether the window was screened once or
