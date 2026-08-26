@@ -12744,10 +12744,20 @@ MUTATIONS=(
   #
   # GU01 is the ORDERING property, GU02 the DATA-PRESERVATION property, GU03 the
   # INDEX-NAME property and GU04 the LADDER property. GU05 is deliberately NOT
-  # here: dropping the helper's `CREATE INDEX` is a PROVEN EQUIVALENT, because
-  # `createTables()` re-creates the same index by name a few hundred lines later
-  # on every open. An entry for it would be permanently SURVIVED and would train
-  # a reader to discount a survivor.
+  # here: dropping the helper's `CREATE INDEX` can only ever be SURVIVED, and an
+  # entry that can only survive trains a reader to discount a survivor.
+  #
+  # SAY THE REASON PRECISELY, THOUGH — "PROVEN EQUIVALENT" IS A STRONGER CLAIM
+  # THAN THE CODE SUPPORTS, and this comment made it (playhead-1gu0 review). TWO
+  # of the helper's three call sites are each followed by their own
+  # `CREATE INDEX IF NOT EXISTS` of the same name — `createTables()` and the V42
+  # rung — so on every path a real device takes the index is rebuilt whatever the
+  # helper does. The THIRD is not: the V65 rung calls the helper and stamps the
+  # version, nothing more. That rung runs WITHOUT `createTables()` only through
+  # `migrateOnlyForTesting()`, and no fixture reaches that seam with
+  # `semantic_scan_results` present, so nothing today can observe the difference.
+  # It is an equivalent over the paths that EXIST, not one by construction: seed
+  # that table into the ladder-only seam and GU05 becomes a real mutant.
   # GU01-GU03 each predicted exactly one victim and observed exactly one: the
   # rail below. That is the point of rewinding the fixture — the three defects
   # are indistinguishable from a correct migration everywhere else in the tree.
