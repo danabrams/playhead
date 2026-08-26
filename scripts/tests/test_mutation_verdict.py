@@ -1311,6 +1311,23 @@ class ShellInstrumentFaultTests(ShellBatteryHarness):
         self.assertRegex(out, r"evidence: \S*batch-\d+\.log")
         self.assertEqual(proc.returncode, 3, out[-4000:])
 
+    def test_a_batch_with_no_failure_count_says_UNKNOWN_not_none(self):
+        # `(none)` is a measurement and is earned only by a STATED zero. With
+        # the baseline skipped, a batch can reach the observed-failures block
+        # with no `#failures` field, and printing `(none)` there would be an
+        # absence dressed as a reading.
+        scorer = self.root / "scripts" / "mutation_verdict.py"
+        original = scorer.read_bytes()
+        self.addCleanup(scorer.write_bytes, original)
+        scorer.write_text(STUB_SCORER, encoding="utf-8")
+        green = console(tests=[(self.expect, "passed")])
+        proc = self.run_battery(green, green,
+                                args=["--only", self.MUTATION],
+                                env={"PLAYHEAD_MB_SKIP_BASELINE": "1"})
+        out = self.out(proc)
+        self.assertIn("observed failures: UNKNOWN", out, out[-4000:])
+        self.assertNotIn("(none)", out, out[-4000:])
+
     def test_the_same_stub_WITH_the_count_gets_through_the_guard(self):
         # ANTI-FABRICATION: the rail above must fail for the MISSING FIELD and
         # not merely because the scorer was replaced. Same stub plus the one

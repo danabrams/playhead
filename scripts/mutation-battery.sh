@@ -30400,12 +30400,25 @@ for b in "${BATCH_IDS[@]}"; do
   #
   # The count goes first so the magnitude is visible before the list, which a
   # crash-looping batch can make long.
-  echo "  observed failures (ALL of them, $(scored_field "$OUTCOMES" failures)):"
-  if grep -q '^#failure\t' "$OUTCOMES"; then
-    sed -n 's/^#failure\t/    ✘ /p' "$OUTCOMES"
-  else
-    echo "    (none)"
-  fi
+  #
+  # `(none)` IS A MEASUREMENT AND IT IS ONLY EARNED BY A STATED ZERO. If the
+  # scorer wrote no `#failures` field, an empty list means "the instrument said
+  # nothing", which is a different claim and must not be spelled the same way.
+  # The baseline has its own arm for this and refuses; a batch can reach here
+  # with the baseline skipped, so it says so rather than printing `(none)`.
+  BATCH_FAILURES="$(scored_field "$OUTCOMES" failures)"
+  case "$BATCH_FAILURES" in
+    ''|*[!0-9]*)
+      echo "  observed failures: UNKNOWN — the scorer wrote no '#failures' count."
+      echo "    Nothing below is a measurement of this batch. See $OUTCOMES" ;;
+    *)
+      echo "  observed failures (ALL of them, $BATCH_FAILURES):"
+      if grep -q '^#failure\t' "$OUTCOMES"; then
+        sed -n 's/^#failure\t/    ✘ /p' "$OUTCOMES"
+      else
+        echo "    (none)"
+      fi ;;
+  esac
 
   BATCH_KEEP_EVIDENCE=0
   for rec in "${MEMBERS[@]}"; do
