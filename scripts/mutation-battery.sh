@@ -12805,13 +12805,18 @@ MUTATIONS=(
   # helper does. The THIRD is not: the V65 rung calls the helper and stamps the
   # version, nothing more. That rung runs WITHOUT `createTables()` only through
   # `migrateOnlyForTesting()`, and the fixtures that DO reach that seam with
-  # `semantic_scan_results` present all carry the NEW spelling already
-  # (`BackgroundDownloadDropLaunchIdentityV64MigrationTests`'s
-  # `theLadderOnlySeamReachesV64` and `aV62StoreClimbsThroughV63ToHead` both
-  # `migrate()` to head first, then rewind to V63), so the helper returns on its
-  # `hasNew` guard and nothing today can observe the difference. (This paragraph
-  # said "no fixture reaches that seam" — those two do; what none of them does is
-  # arrive there at the OLD spelling. Same correction as the helper's own doc.)
+  # `semantic_scan_results` present all carry the NEW spelling already — they
+  # `migrate()` to head first, so `createTables()` has built `backfillJobId`, and
+  # only then rewind — so the helper returns on its `hasNew` guard and nothing
+  # today can observe the difference. (This paragraph said "no fixture reaches
+  # that seam"; the correction for it then named exactly TWO,
+  # `BackgroundDownloadDropLaunchIdentityV64MigrationTests`'s
+  # `theLadderOnlySeamReachesV64` and `aV62StoreClimbsThroughV63ToHead`, which
+  # was the pair somebody had in hand read as a census. MEASURED: 23 test
+  # functions across twelve files, every `isolatedLadderReaches*` among them —
+  # the helper's own doc carries the predicate. What none of the 23 does is
+  # arrive there at the OLD spelling, which is what the conclusion rests on and
+  # is unchanged. playhead-1gu0 review round 6.)
   # It is an equivalent over the paths that EXIST, not one by construction: seed
   # that table at the OLD spelling into the ladder-only seam and GU05 becomes a
   # real mutant.

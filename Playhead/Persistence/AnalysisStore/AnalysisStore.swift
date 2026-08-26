@@ -9236,19 +9236,36 @@ actor AnalysisStore {
     /// call adds an EMPTY new column alongside a populated old one, which is
     /// mutation GU01. The V65 rung's has no `addColumnIfNeeded` under it at all;
     /// it is there because `migrateOnlyForTesting()` skips `createTables()`
-    /// entirely, so on that seam it is the only one of the three that RUNS: the
-    /// V42 rung's sits behind `if tableExists("semantic_scan_results")` AND
-    /// behind `guard observed >= 41`, and nothing in the tree is seeded at 41.
+    /// entirely, so on that seam it is the one that ALWAYS runs.
+    ///
+    /// **THAT IS NOT THE SAME AS BEING THE ONLY ONE, AND THIS PARAGRAPH SAID
+    /// "the only one of the three that RUNS" (playhead-1gu0 review round 6).**
+    /// The V42 rung's call sits behind `if tableExists("semantic_scan_results")`
+    /// AND behind `guard observed < 42` / `guard observed >= 41` — so it runs at
+    /// EXACTLY 41 — and **12 of the 23 fixtures that drive that seam to head
+    /// with the table present start below 42**, so they climb through 41 and the
+    /// V42 call runs there too. It declines there, like every other call on that
+    /// seam, because `createTables()` built `backfillJobId` before the rewind.
+    /// The same line also said "nothing in the tree is seeded at 41", which is
+    /// false and was generalised from the `seedSchemaVersion` call sites alone:
+    /// `SemanticScanRunAttributionTests.v41RowSurvivesMigrationAndStaysUnattributed`
+    /// seeds 41 with a raw `UPDATE _meta`. It drives `migrate()`, where
+    /// `createTables()` has already renamed — which is the claim that was wanted.
     ///
     /// **REACHED AND EXERCISED ARE DIFFERENT CLAIMS, AND AN EARLIER DRAFT OF
     /// THIS PARAGRAPH SAID "no fixture reaches it with `semantic_scan_results`
-    /// present today" (playhead-1gu0 review).** Two do:
-    /// `BackgroundDownloadDropLaunchIdentityV64MigrationTests`'s
-    /// `theLadderOnlySeamReachesV64` and `aV62StoreClimbsThroughV63ToHead` each
-    /// build a full store through `migrate()`, rewind it to V63, and drive the
-    /// ladder-only seam — so the table IS present and this helper DOES run
-    /// there. It returns on its `hasNew` guard, because that store already
-    /// carries the new spelling. So the call site is reached and the RENAME
+    /// present today" (playhead-1gu0 review).** **TWENTY-THREE do — and the
+    /// correction for that draft said "two", which was the pair somebody had in
+    /// hand read as a census (playhead-1gu0 review round 6).** Measured over
+    /// `PlayheadTests`, brace-matched bodies: 23 test functions across twelve
+    /// files call `migrate()` (so `createTables()` builds the table), rewind,
+    /// drive `migrateOnlyForTesting()`, and then assert
+    /// `schemaVersion() == currentSchemaVersion`. Only the V65 rung stamps 65,
+    /// so that assertion PROVES this helper ran on that seam. They include
+    /// `theLadderOnlySeamReachesV64`, `aV62StoreClimbsThroughV63ToHead` and
+    /// every `isolatedLadderReaches*`. In all 23 the table IS present and this
+    /// helper DOES run. It returns on its `hasNew` guard, because those stores
+    /// already carry the new spelling. So the call site is reached and the RENAME
     /// itself is not: nothing seeds `semantic_scan_results` at the OLD spelling
     /// below V65 on the ladder-only path, and the sibling rail
     /// (`v64RowKeepsItsJobIdAcrossTheV65Rename`) exercises the rename through
