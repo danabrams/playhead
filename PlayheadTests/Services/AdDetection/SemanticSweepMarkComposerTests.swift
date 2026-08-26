@@ -870,9 +870,21 @@ struct SemanticSweepConfidenceTests {
     ///
     /// THIS DOC QUOTES NO FIGURE FROM THE PULL, AND THAT IS THE POINT.
     /// ``SemanticSweepMarkComposer/corroboration(for:in:atTranscriptVersion:)``
-    /// holds the measurement — the replicate counts, both pulls, each with the
-    /// population it is over — and it is the ONLY place on this branch that
-    /// does. This doc used to carry a second copy, shipped by `6e9c386f`
+    /// holds the replicate counts — both pulls, each with the population it is
+    /// over. It is where they are MEASURED, and that is the claim worth making.
+    ///
+    /// **THIS LINE ALSO SAID IT WAS "the ONLY place on this branch that does",
+    /// AND A MONOPOLY CLAIM IS A CLAIM ABOUT EVERY OTHER FILE (playhead-1gu0
+    /// review round 8).** ``SemanticSweepMarkComposer/corroborationFactor(affirming:dissenting:)``
+    /// names "the four replicate windows" in its own doc while pointing at
+    /// `corroboration` for the measurement, and the ids-per-asset figure the
+    /// sibling rail `V65: one backfill job id spans re-screenings…` used to
+    /// carry is not in `corroboration` at all — it is with the COLUMN, at
+    /// ``SemanticScanResult/backfillJobId``. Name the home; do not assert there
+    /// is only one, because the second half of that sentence is unverifiable
+    /// from the file it is written in.
+    ///
+    /// This doc used to carry a second copy, shipped by `6e9c386f`
     /// alongside the composer's, and it was wrong in two ways the composer's was
     /// corrected for and this one was not: it called a tie "the MINORITY
     /// verdict", and it said the replicates were "each a separate FM call in a

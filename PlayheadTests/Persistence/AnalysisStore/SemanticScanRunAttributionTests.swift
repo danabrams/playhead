@@ -414,17 +414,39 @@ struct SemanticScanRunAttributionTests {
     /// screenings of the same window, `transcriptVersion` can.
     ///
     /// THE FIXTURE BELOW IS THE 2026-08-19 DEVICE PULL'S SHAPE IN MINIATURE, AND
-    /// IT QUOTES NO FIGURE FROM IT. ``SemanticSweepMarkComposer/corroboration(for:in:atTranscriptVersion:)``
-    /// holds the measurement — every count, both pulls, each with the population
-    /// it is over — and it is the ONLY place on this branch that does.
+    /// IT QUOTES NO FIGURE FROM IT. That is the whole of what this doc claims,
+    /// and it is checkable against this comment alone. The two measurements it
+    /// used to carry live in two DIFFERENT places, because they are about two
+    /// different things: the REPLICATE counts (both pulls, each with the
+    /// population it is over) are at
+    /// ``SemanticSweepMarkComposer/corroboration(for:in:atTranscriptVersion:)``,
+    /// and the ids-per-asset count is a property of the COLUMN rather than of
+    /// any replicate population, so it lives with the column rather than there.
     ///
-    /// That is deliberate and it is the branch's own finding. Six review rounds
-    /// of playhead-1gu0 produced one defect class and almost nothing else: a
-    /// figure restated in a second place and then corrected in only one of them.
-    /// This doc was two of those — it carried the pull's counts under a
-    /// population label that belonged to a different function, and the composer's
-    /// copy was fixed while this one stood. A pointer cannot drift out of step
-    /// with the thing it points at, so this is a pointer.
+    /// **THIS PARAGRAPH SAID `corroboration(for:in:atTranscriptVersion:)` HOLDS
+    /// "every count, both pulls" AND IS "the ONLY place on this branch that
+    /// does" — BOTH HALVES ARE FALSE (playhead-1gu0 review round 8).** That
+    /// function's doc holds no ids-per-asset figure at all, so the pointer did
+    /// not point at one of the two counts this doc had just removed; and the
+    /// figure it does not hold is carried by `SemanticScanResult`, by the V65
+    /// rung and by `docs/investigations/playhead-hx6n-scan-attribution.md`, so
+    /// "the only place" is wrong three times over. A monopoly claim is a claim
+    /// about every OTHER file, which is exactly the kind this bead keeps
+    /// catching — name the home, never assert there is one home.
+    ///
+    /// One reading really did leave the tree with these figures and nothing
+    /// records it: the `passA`-at-ANY-status replicate count for the 2026-08-19
+    /// pull. `corroboration`'s bullets are the EXAMINED population and its
+    /// any-status paragraph is the 2026-08-10 pull only. Dropped deliberately —
+    /// it existed to disambiguate a denominator this doc no longer quotes — and
+    /// said out loud so nobody hunts for it there.
+    ///
+    /// Seven review rounds of playhead-1gu0 produced one defect class and almost
+    /// nothing else: a figure restated in a second place and then corrected in
+    /// only one of them. This doc was two of those — it carried the pull's counts
+    /// under a population label that belonged to a different function, and the
+    /// composer's copy was fixed while this one stood. A pointer cannot drift out
+    /// of step with the thing it points at, so this is a pointer.
     // The name deliberately carries no semicolon: `mutation-battery.sh` SPLITS its
     // expectation field on ';', so a test whose display name contains one can
     // never be matched and every mutant naming it reports `expected test never
