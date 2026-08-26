@@ -1708,8 +1708,21 @@ struct FastTranscriptCoverageV37MigrationTests {
         // 64 -> 65 read for this rung (playhead-1gu0): V65 RENAMES ONE COLUMN —
         // `semantic_scan_results.runCorrelationId` becomes `backfillJobId`, and its
         // index moves with it. A pure `ALTER TABLE … RENAME COLUMN`: no row moves, no
-        // value is written, nothing is backfilled and no other table is named. It
-        // names no table this rung asserts on, so no assertion here moves.
+        // value is written, nothing is backfilled and no other table is named.
+        //
+        // THE "names a different table" ARGUMENT DOES NOT APPLY HERE AND THIS
+        // LINE USED IT (playhead-1gu0 review round 8). It read "it names no
+        // table this rung asserts on", and the table V65 names is
+        // `semantic_scan_results` — the one this file's coverage numerator is
+        // taken over, and the one thirty-seven of its own tests seed. That is the trap
+        // the V53 note above spells out in as many words, and the V61 note
+        // above — also a rung on this table — argues from the COLUMN instead.
+        // So: the claim is made on the RENAME's own shape. A `RENAME COLUMN`
+        // preserves every row and every value, and the column it renames is
+        // read by nothing here; the numerator is a function of `scanPass`,
+        // `status` and `errorContext`, none of which it names. It holds in both
+        // directions because the rung's whole body is two guards, the rename, a
+        // log line and the version stamp.
         #expect(AnalysisStore.currentSchemaVersion == 65)
     }
 
