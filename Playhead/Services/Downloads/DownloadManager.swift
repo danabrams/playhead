@@ -3085,14 +3085,19 @@ actor DownloadManager {
             // NOT `sessionIO`; they are separate queues with separate
             // deadlines, and recording the wrong one would make this table lie
             // about the very quantity the widening decision reads.
+            //
+            // playhead-sdis: `sessionCrossingId` is THE ONLY SITE THAT HAS ONE.
+            // A refusal reaches here only through the crossing, so it is never
+            // nil — see `backgroundSessionRidingCrossing`. The note is here
+            // rather than between the arguments so the call below is six lines
+            // of code with no prose in them: `scripts/mutation-battery.sh`
+            // anchors on it, and an anchor whose stability depends on nobody
+            // editing a paragraph is not an anchor.
             await recordBackgroundDownloadDrop(
                 episodeId: episodeId,
                 reason: .sessionNotVended,
                 context: context,
                 boundSeconds: sessionCreationIO.timeout,
-                // playhead-sdis: THE ONLY SITE THAT HAS ONE. A refusal reaches
-                // here only through the crossing, so this is never nil — see
-                // `backgroundSessionRidingCrossing`.
                 sessionCrossingId: sessionCrossingId
             )
             return
@@ -3126,18 +3131,19 @@ actor DownloadManager {
             // gets a different reason. A session exists, so the download
             // subsystem is alive for this process — only this episode is lost,
             // and the remedy is per-episode rather than per-launch.
+            //
+            // playhead-sdis: `sessionCrossingId` is NIL, and stated rather than
+            // defaulted. Nothing JOINS a `downloadTask(with:)` submission —
+            // this caller made its own and it expired on its own deadline — so
+            // for this reason a row IS a call and there is no shared crossing
+            // to name. A per-row UUID here would be a column in bijection with
+            // the primary key, carrying no information and inviting
+            // `count(DISTINCT sessionCrossingId)` to be read as outages.
             await recordBackgroundDownloadDrop(
                 episodeId: episodeId,
                 reason: .transferTaskNotVended,
                 context: context,
                 boundSeconds: sessionIO.timeout,
-                // playhead-sdis: NIL, and stated rather than defaulted. Nothing
-                // JOINS a `downloadTask(with:)` submission — this caller made
-                // its own and it expired on its own deadline — so for this
-                // reason a row IS a call and there is no shared crossing to
-                // name. A per-row UUID here would be a column in bijection with
-                // the primary key, carrying no information and inviting
-                // `count(DISTINCT sessionCrossingId)` to be read as outages.
                 sessionCrossingId: nil
             )
             return
@@ -3180,12 +3186,14 @@ actor DownloadManager {
             // value that names one thing read as though it named another. The
             // reason is distinct, so a reader who wants only the two can still
             // have them with a `WHERE reason IN (…)`.
+            //
+            // playhead-sdis: `sessionCrossingId` is NIL, for the reason given
+            // at the site above.
             await recordBackgroundDownloadDrop(
                 episodeId: episodeId,
                 reason: .transferNotResumed,
                 context: context,
                 boundSeconds: sessionIO.timeout,
-                // playhead-sdis: NIL, for the reason given at the site above.
                 sessionCrossingId: nil
             )
             return
