@@ -414,9 +414,13 @@ struct SemanticScanRunAttributionTests {
     /// screenings of the same window, `transcriptVersion` can.
     ///
     /// Measured on the 2026-08-19 device pull: 15 distinct ids for 15 distinct
-    /// assets, and 190 of 190 replicate coarse windows carry a single id while
-    /// 190 of 190 carry distinct transcript versions. The fixture below is that
-    /// shape in miniature.
+    /// assets, and — over EXAMINED `passA` rows keyed by
+    /// `(analysisAssetId, windowStartTime, windowEndTime)`, which is the
+    /// population ``SemanticSweepMarkComposer/corroborationFactor(affirming:dissenting:)``
+    /// can see — 190 of 190 replicate windows carry a single id while 190 of 190
+    /// carry distinct transcript versions. (Over `passA` at ANY status the same
+    /// pull reads 210 of 210 both ways; say which denominator you mean.) The
+    /// fixture below is that shape in miniature.
     // The name deliberately carries no semicolon: `mutation-battery.sh` SPLITS its
     // expectation field on ';', so a test whose display name contains one can
     // never be matched and every mutant naming it reports `expected test never
@@ -444,14 +448,28 @@ struct SemanticScanRunAttributionTests {
 
         let rows = try await store.fetchSemanticScanResults(analysisAssetId: "asset-rescan")
         try #require(rows.count == 3)
+        // THE SET IS TAKEN OVER NON-NIL IDS, AND "they are all present" IS ITS OWN
+        // ASSERTION. `Set([nil, nil, nil]).count` is 1, so a bare distinct-count
+        // reads a column that lost every value exactly like a column that shares
+        // one — the standing defect class, inside the rail written to remove an
+        // instance of it. GU02 (an ADD where the RENAME belongs) is precisely the
+        // mutation that empties this column, and it must not be able to pass here.
         #expect(
-            Set(rows.map(\.backfillJobId)).count == 1,
+            rows.allSatisfy { $0.backfillJobId != nil },
+            """
+            \(rows.filter { $0.backfillJobId == nil }.count) of \(rows.count) rows \
+            came back with NO job id. An absent column and a shared one are \
+            indistinguishable to a distinct-count, so this is asserted separately.
+            """
+        )
+        #expect(
+            Set(rows.compactMap(\.backfillJobId)) == ["fm-9330e821aeb36a0d"],
             """
             Three screenings of one window across three days produced \
-            \(Set(rows.map(\.backfillJobId)).count) distinct job id(s). It must be \
-            one: a backfill job is keyed on (asset, phase, offset) and outlives \
-            every re-screening, which is precisely why this column cannot be \
-            read as "a different FM call".
+            \(Set(rows.compactMap(\.backfillJobId)).sorted()) — it must be exactly \
+            the one id they were written under: a backfill job is keyed on \
+            (asset, phase, offset) and outlives every re-screening, which is \
+            precisely why this column cannot be read as "a different FM call".
             """
         )
         #expect(Set(rows.map(\.transcriptVersion)).count == 3)
@@ -545,7 +563,7 @@ struct SemanticScanRunAttributionTests {
             The scan -> job join resolved \(joined.count) row(s), not 2. Both \
             scans carry a backfillJobId that names a real backfill_jobs row, \
             so an INNER JOIN must return both — a missing row means the \
-            correlation id does not actually join, which is the failure mode \
+            job id does not actually join, which is the failure mode \
             this bead was filed against.
             """
         )

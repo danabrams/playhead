@@ -172,7 +172,7 @@ struct SemanticScanAttributionWireInTests {
                 from a pre-V42 row, and it silently shrinks the attributable corpus.
                 """
             )
-            #expect(row.backfillJobId != nil, "row \(row.id) has no run correlation id")
+            #expect(row.backfillJobId != nil, "row \(row.id) has no backfill job id")
         }
 
         // The id is not merely present — it JOINS.
@@ -190,7 +190,7 @@ struct SemanticScanAttributionWireInTests {
             orphans == 0,
             """
             \(orphans) persisted scan row(s) carry a backfillJobId that names \
-            no backfill_jobs row. A correlation id that joins to nothing is \
+            no backfill_jobs row. A job id that joins to nothing is \
             exactly as useless as no id at all — the measurement is still \
             impossible, it just looks like it should work.
             """
