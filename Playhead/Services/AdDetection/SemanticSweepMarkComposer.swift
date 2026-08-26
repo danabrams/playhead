@@ -887,13 +887,22 @@ enum SemanticSweepMarkComposer {
     /// `containsAd` row and clear "at most half" with zero affirmers. **24 is a
     /// CONTRAST between the two readings and NOT a denominator — the windows
     /// that do carry such a row number 16.** All four are a TIE (1 `containsAd`
-    /// row of 2) and a STRICT minority occurs on none of the 36, which is why
-    /// the predicate reads "at most HALF" rather than "the MINORITY".
+    /// row of 2) and a STRICT minority occurs on none of **THE 16**, which is
+    /// why the predicate reads "at most HALF" rather than "the MINORITY".
     /// (playhead-1gu0 review: the EXAMINED sentence below spells the condition
     /// out, "no window there carries a `containsAd` row its own replicates
     /// outvote or tie", and this one did not. Round 6 then found "worth 4
     /// against 24" transcribed elsewhere as though 24 NAMED the 16, so both
     /// numbers are written out rather than left to a contrast.)
+    /// **SAY 16 AND NOT 36 THERE (playhead-1gu0 review round 7).** This
+    /// sentence read "none of the 36", and over the 36 it is FALSE: drop the
+    /// condition — which is exactly what the 24 above does — and `containsAd`
+    /// is strictly under half on every one of the twenty zero-affirmer windows.
+    /// That is the SAME 20 already named and not a seventh count: no window of
+    /// the 16 is strictly under half, so the without-condition minority set IS
+    /// the 20 that carry no `containsAd` row. The paragraph was applying the
+    /// vacuous reading to "at most half" and the non-vacuous one to "minority"
+    /// — the contrast it exists to draw, committed one predicate along.
     ///
     /// **EVERY COUNT IN THIS PARAGRAPH — 125, 36, 4, 24, 20, 16 — IS OVER
     /// `passA` AT ANY STATUS** — a THIRD population, neither the bullets' below

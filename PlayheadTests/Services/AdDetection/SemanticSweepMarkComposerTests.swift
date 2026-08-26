@@ -878,11 +878,18 @@ struct SemanticSweepConfidenceTests {
     ///
     ///   * "the MINORITY verdict" overstated it. "At most HALF" admits a TIE,
     ///     and a tie is all there is: each of the four is 1 `containsAd` row of
-    ///     2, and a STRICT minority occurs on NONE of the 36. The 4 counts only
-    ///     windows carrying a `containsAd` row at all; DROP that condition and
-    ///     it reads 24, because the other 20 of the 36 carry none and clear "at
-    ///     most half" with zero affirmers. Both counts are over `passA` at ANY
-    ///     status, which is not the population this factor sees.
+    ///     2, and a STRICT minority occurs on NONE of the 16 that carry a
+    ///     `containsAd` row at all. The 4 counts only those 16; DROP that
+    ///     condition and it reads 24, because the other 20 of the 36 carry none
+    ///     and clear "at most half" with zero affirmers. Both counts are over
+    ///     `passA` at ANY status, which is not the population this factor sees.
+    ///
+    ///     **"NONE of the 36" IS WHAT THIS BULLET SAID, AND IT IS FALSE OVER
+    ///     THE 36 (playhead-1gu0 review round 7).** Dropping the condition — as
+    ///     the 24 does — makes `containsAd` strictly under half on all twenty
+    ///     zero-affirmer windows, i.e. on the SAME 20 named above; none of the
+    ///     16 is strictly under half. The bullet was reading "at most half"
+    ///     vacuously and "minority" non-vacuously in one sentence.
     ///
     ///     **24 IS THE COUNT WITHOUT THE CONDITION, NOT THE POPULATION THAT
     ///     MEETS IT — that population is 16, and this bullet said 24 was it
