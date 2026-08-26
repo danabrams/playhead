@@ -30156,7 +30156,24 @@ if [ "$DRY_RUN" -eq 0 ] && [ "${PLAYHEAD_MB_SKIP_BASELINE:-0}" != "1" ]; then
     exit 2
   fi
 
-  if [ "$(scored_field "$BASE_OUT" failures)" != "0" ]; then
+  # `scored_field` prints "" both for "the field says zero is not what it says"
+  # and for "there is no such field", and the test below reads `""` as
+  # NOT-ZERO — i.e. as a RED TREE. That is a claim about the codebase produced
+  # by an instrument that went quiet, and its remedy ("fix the tree") is
+  # unactionable because there would be no failures listed under it. So the
+  # ABSENCE gets its own arm, and it names the FILE rather than the tree.
+  BASE_FAILURES="$(scored_field "$BASE_OUT" failures)"
+  case "$BASE_FAILURES" in
+    ''|*[!0-9]*)
+      echo "mutation-battery: the scorer wrote no usable '#failures' count for the" >&2
+      echo "baseline (read: '$BASE_FAILURES'). That is a fault in the INSTRUMENT, not" >&2
+      echo "a finding about the tree — scripts/mutation_verdict.py and this script" >&2
+      echo "disagree about the outcomes-file format. Nothing below would be a verdict." >&2
+      echo "    $BASE_OUT" >&2
+      KEEP_WORK=1
+      exit 2 ;;
+  esac
+  if [ "$BASE_FAILURES" != "0" ]; then
     echo "mutation-battery: the focused suites are RED before any mutation." >&2
     sed -n 's/^#failure\t/    ✘ /p' "$BASE_OUT" >&2
     echo "Every mutation naming one of those tests would be credited KILLED for" >&2

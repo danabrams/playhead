@@ -1205,6 +1205,65 @@ class ShellLadderTests(ShellBatteryHarness):
         self.assertIn("batch-1414.log", proc.stderr)
 
 
+# A scorer that writes a well-formed outcomes file MINUS the `#failures` header
+# — i.e. the two halves of this bead disagreeing about their own file format.
+STUB_SCORER = r"""import sys
+args = dict(zip(sys.argv[1:-1:1], sys.argv[2::1]))
+out = args["--out"]
+names = open(args["--names"], encoding="utf-8").read().split("\n")
+lines = ["#batch\tOK", "#source\tstub", "#log\t" + args["--log"],
+         "#bundle\t(none)", "#hosts\t1", "#no_verdict\t0"]
+for n in names:
+    if n:
+        lines.append("PASSED\t" + n)
+open(out, "w", encoding="utf-8").write("\n".join(lines) + "\n")
+print("  stub scorer: wrote", out)
+"""
+
+
+class ShellInstrumentFaultTests(ShellBatteryHarness):
+    """The battery and the scorer disagreeing about their own file format.
+
+    `scored_field` prints "" for a MISSING field and for a field that says
+    nothing, and the baseline's test read `""` as NOT-ZERO — i.e. as a RED
+    TREE, printed with no failures under it and a remedy ("fix the tree") that
+    nobody can act on. An instrument that went quiet must not be able to make a
+    claim about the codebase.
+    """
+
+    MUTATION = "M05"
+
+    def test_a_scorer_that_omits_the_failure_count_blames_the_INSTRUMENT(self):
+        scorer = self.root / "scripts" / "mutation_verdict.py"
+        original = scorer.read_bytes()
+        self.addCleanup(scorer.write_bytes, original)
+        scorer.write_text(STUB_SCORER, encoding="utf-8")
+        green = console(tests=[(self.expect, "passed")])
+        proc = self.run_battery(green, green)
+        out = self.out(proc)
+        self.assertIn("fault in the INSTRUMENT", out, out[-4000:])
+        self.assertNotIn("are RED before any mutation", out)
+        self.assertEqual(proc.returncode, 2, out[-4000:])
+
+    def test_the_same_stub_WITH_the_count_gets_through_the_guard(self):
+        # ANTI-FABRICATION: the rail above must fail for the MISSING FIELD and
+        # not merely because the scorer was replaced. Same stub plus the one
+        # line, and the run reaches a verdict.
+        scorer = self.root / "scripts" / "mutation_verdict.py"
+        original = scorer.read_bytes()
+        self.addCleanup(scorer.write_bytes, original)
+        scorer.write_text(
+            STUB_SCORER.replace('"#no_verdict\\t0"]',
+                                '"#no_verdict\\t0", "#failures\\t0"]'),
+            encoding="utf-8")
+        green = console(tests=[(self.expect, "passed")])
+        proc = self.run_battery(green, green)
+        out = self.out(proc)
+        self.assertNotIn("fault in the INSTRUMENT", out, out[-4000:])
+        self.assertIn("baseline green", out, out[-4000:])
+        self.assertEqual(self.verdict_of(proc), "SURVIVED", out[-4000:])
+
+
 class ShellXCTestExpectationTests(ShellBatteryHarness):
     """The XCTest half of the battery, driven end to end — playhead-gjlp0 R1.
 
