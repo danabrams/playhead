@@ -13,7 +13,8 @@
 //   * `DownloadManager.recordBackgroundFailure`   — a terminal background
 //     transfer failure, carrying the `SliceMetadata` blob
 //     `SliceCompletionInstrumentation` built for it;
-//   * `DownloadManager.finalizeBackgroundDownload` — a transfer that landed;
+//   * `DownloadManager.handleBackgroundDownloadComplete` — a transfer that
+//     landed;
 //   * `ForceQuitResumeScan.scanForSuspendedTransfers` — the cold-launch
 //     preempted/corrupted rows;
 //   * `ForceQuitResumeScan.resumeSuspendedTransfer` — a corrupt resume blob.
@@ -123,11 +124,12 @@
 //     reader glances past as 0. `SELECT count(*) FROM
 //     download_work_journal_arming` first, exactly as at V62.
 //
-// READ THE LIST, NOT A NUMBER. This paragraph has carried a count three times
-// and it has been wrong all three — "three" while listing four, then "four"
-// while listing six, then "six" while introducing a seventh in the very
-// sentence that recorded the first two errors. The number is deleted rather
-// than incremented, which is what the file's own advice has said each time.
+// READ THE LIST, NOT A NUMBER. Every count this paragraph has carried has been
+// wrong, and the last attempt to summarise HOW was wrong too — it said "four
+// while listing six", but `b057e36e` said FOUR and listed four; the two extra
+// states arrived a commit later. Walking the commits is the only way to get
+// that history right, which is the argument for not carrying a number at all
+// rather than for carrying a better one. It is deleted, not incremented.
 // One more reading, and it is the one the bullets above do not cover:
 // `armedLaunches = 0` beside real rows is reachable — an event before the launch Task arms, or an arming write
 // that itself failed — and means "these rows are real and the denominator is
@@ -212,10 +214,18 @@
 //     so it can be re-run: 7,300 `finalized` rows with DISTINCT `episodeId`s,
 //     `metadata` literally `{}`, `cause` NULL, the shipped DDL verbatim,
 //     `VACUUM`ed, file size ÷ rows, sqlite3 3.54.0. Every figure is a FLOOR —
-//     a live WAL database is larger — and they move by a few bytes per row
-//     across sqlite builds: review 3 measured 127/140/170 at epLen 16 on its
-//     own, against 123/134/162 here. The conclusion is the same to two
-//     significant figures and the recipe is what to re-run, not the digits.
+//     a live WAL database is larger.
+//
+//     THE SPREAD IS THE FIXTURE, NOT THE SQLITE BUILD, and this line said the
+//     opposite for two rounds. Reviews 3 and 7 measured 127/140/170 at epLen
+//     16 against 123/134/162 here, ON THE SAME 3.54.0 — the difference is the
+//     `episodeId` STRINGS, which change index page fill. So the recipe has to
+//     name them: `https://feeds.example.com/show{i%40}/rss.xml::guid-{i}`,
+//     truncated or padded to `epLen`, 7,300 distinct. A different string
+//     shape moves every column by a few bytes and moves the conclusion by
+//     nothing. The artifact is
+//     `/Users/dabrams/playhead-gate-artifacts/4xmz/rowsize-measurement.txt`;
+//     re-run the recipe, do not quote the digits.
 //
 //     `epLen` is the length of `episodeId`, which on this path is
 //     `Episode.canonicalEpisodeKey` = `feedURL.absoluteString + "::" +
@@ -228,14 +238,14 @@
 //         epLen   table B/row   +occurred idx   +episode idx   MB/yr @ 20/day
 //            16           123             134            162             1.18
 //            36           144             154            203             1.48
-//        ** 88 **         198             209        ** 312 **       ** 2.28 **
+//        ** 88 **         198             209        ** 313 **       ** 2.28 **
 //           160           274             284            463             3.38
 //
 //     The two omissions: `id TEXT PRIMARY KEY` builds an implicit
 //     `sqlite_autoindex`, so the 36-char UUID is stored TWICE; and the two
 //     explicit indexes store the long `episodeId` again. At epLen 88 the
-//     indexes are 114 of the 312 bytes — 37 %, and `idx_..._episode` alone is
-//     103 of them, on the one table whose only named limit is growth. It is
+//     indexes are 115 of the 313 bytes — 37 %, and `idx_..._episode` alone is
+//     104 of them, on the one table whose only named limit is growth. It is
 //     kept anyway, deliberately: the reader this table is for runs raw
 //     `sqlite3` against a pulled file, `WHERE episodeId = ?` is the query they
 //     will write, and `idx_background_download_drops_episode` is equally
@@ -337,8 +347,12 @@
 //
 //         LRU EVICTION IS THE OTHER, and it runs constantly:
 //         `DownloadManager.evictIfNeeded` unlinks a completed episode's audio
-//         AND its pin, from three production sites (foreground completion,
-//         streaming completion, the background deposit). It enters no retire.
+//         AND its pin, from three sites INSIDE THE ACTOR (foreground
+//         completion, streaming completion, the background deposit) and from
+//         nowhere outside it. It enters no retire. Say "inside the actor":
+//         a tree-wide count of the bare name returns FIVE, because two
+//         unrelated stores have an `evictIfNeeded()` of their own — which is
+//         how the rail for this sentence failed on its first run.
 //         The RACE is nonetheless closed there, and by something else
 //         entirely: `evictIfNeeded` skips `bgInFlightEpisodes`, and
 //         `finishBackgroundTransfer` runs AFTER `await journalTask.value`, so
@@ -353,8 +367,11 @@
 //         (`SettingsViewModel.clearAudioCache`) unlinks the cache directory
 //         from a detached Task WITHOUT entering the `DownloadManager` actor,
 //         so nothing is retired and a `finalized` row can outlive its bytes.
-//         This was "the converse" for a round, which read as though it were the
-//         smaller half; it is the only half that ships. Routing it through
+//         This was "the converse" for a round, which read as though it were
+//         the smaller half; it is the half a USER ACTION reaches, and the
+//         only one that loses a row — but NOT the only one that ships, which
+//         is what the bullet above says and what an earlier version of this
+//         sentence contradicted three lines later. Routing it through
 //         `downloadManager` is an architecture change and is FILED as
 //         playhead-86sfq rather than taken here — read that bead before
 //         assuming the row is the only thing that path loses; it also skips the
@@ -629,7 +646,8 @@ struct AnalysisStoreDownloadWorkJournalRecorder: WorkJournalRecording {
     /// because a cheap pre-hop guard satisfies every test that can be written
     /// deterministically and would leave the in-actor check with no rail at
     /// all. The pre-hop read still exists at the production call site
-    /// (`DownloadManager.finalizeBackgroundDownload`), where it costs nothing.
+    /// (`DownloadManager.handleBackgroundDownloadComplete`, at the `guard
+    /// !Task.isCancelled` inside the journal `Task`), where it costs nothing.
     func recordFinalized(episodeId: String) async {
         await append(
             episodeId: episodeId,
@@ -809,8 +827,13 @@ struct AnalysisStoreDownloadWorkJournalRecorder: WorkJournalRecording {
             // `SettingsViewModel.clearAudioCache`, which enumerates
             // `DownloadManager.defaultCacheDirectory()` from a DETACHED TASK
             // and unlinks its contents without entering this actor — so a
-            // `finalized` row CAN outlive its bytes there, and that is the only
-            // deletion path that runs. Limit L-7; filed as playhead-86sfq.
+            // `finalized` row CAN outlive its bytes there. It is ONE OF TWO
+            // deletion paths that run — LRU `evictIfNeeded` is the other, and
+            // it is safe from this race only because it skips
+            // `bgInFlightEpisodes`. This said "the only deletion path that
+            // runs" for a round AFTER L-7 was corrected to say there are two,
+            // and survived the sweep because the phrase is WRAPPED ACROSS TWO
+            // LINES: no grep for it could match. Limit L-7; playhead-86sfq.
             return
         } catch {
             logger.error(

@@ -326,6 +326,115 @@ final class DownloadWorkJournalWiringSourceCanaryTests: XCTestCase {
         )
     }
 
+    /// THE SAFETY ARGUMENT ROUND 6 ADDED, PINNED RATHER THAN ASSERTED.
+    ///
+    /// `evictIfNeeded` unlinks a completed episode's audio and its pin and
+    /// enters no retire, so the delete-vs-finalization race is closed there by
+    /// something else entirely: it SKIPS `bgInFlightEpisodes`, and
+    /// `finishBackgroundTransfer` — which removes the episode from that set —
+    /// runs AFTER `await journalTask.value`. Both halves are properties of
+    /// other functions.
+    ///
+    /// Round 5's whole fix for the previous wrong version of this claim was to
+    /// make this file count call sites so "the next reader gets a number rather
+    /// than a sentence"; round 6 then added a new population claim to the same
+    /// file AS A SENTENCE, and round 7 found it unpinned. This is the number.
+    func testEvictionCannotRaceAJournalFinalization() throws {
+        let production = try Self.productionSources()
+        // SCOPED TO `DownloadManager.swift`, and this rail's own first run is
+        // why. A tree-wide count of the bare name returns FIVE, because
+        // `PerShowThresholdControllerStore` and `CrossShowSyndicationStore`
+        // each have an unrelated `evictIfNeeded()` of their own — the same
+        // name-collision that made the `clearCache()` rail read
+        // `FoundationModelsUsabilityProbe`'s method at review 4, now the THIRD
+        // instance of that class in this one file. Review 7 asserted "exactly
+        // three call sites" from a one-file grep and this rail, written to
+        // check it, failed on 5. Both halves are kept: the SELF-calls inside
+        // the actor, and zero EXTERNAL callers.
+        let manager = try code(Self.managerPath)
+        XCTAssertEqual(
+            SwiftSourceInspector.regexOccurrences(
+                of: #"(?<!func )\bevictIfNeeded\s*\("#, in: manager
+            ),
+            3,
+            "playhead-4xmz: THREE eviction sites inside DownloadManager — foreground "
+            + "completion, streaming completion, and the background deposit. A fourth is a "
+            + "fourth place a completed artifact is unlinked without retiring a journal "
+            + "finalization, and limit L-7 has to name it."
+        )
+        let externalEvictions = production.reduce(into: [String]()) { hits, entry in
+            let (path, source) = entry
+            let count = SwiftSourceInspector.regexOccurrences(
+                of: #"\bdownloadManager\s*\.\s*evictIfNeeded\s*\("#, in: source
+            )
+            if count > 0 { hits.append("\(path) x\(count)") }
+        }
+        XCTAssertEqual(
+            externalEvictions, [],
+            "playhead-4xmz: nothing outside the actor may drive eviction — the three sites "
+            + "above are the whole population only while that holds. Found: "
+            + "\(externalEvictions)"
+        )
+        let evictBody = try XCTUnwrap(
+            SwiftSourceInspector.firstBody(in: manager, after: "func evictIfNeeded() async throws"),
+            "could not isolate evictIfNeeded's body — this canary's anchor has drifted"
+        )
+        XCTAssertGreaterThanOrEqual(
+            SwiftSourceInspector.regexOccurrences(
+                of: #"\bbgInFlightEpisodes\b"#, in: evictBody
+            ),
+            1,
+            "playhead-4xmz: eviction must skip episodes whose background transfer is still "
+            + "in flight. That skip is the ONLY thing standing between an LRU eviction and a "
+            + "`finalized` row written for bytes it just unlinked."
+        )
+
+        // …AND THE ORDER THAT MAKES THE SKIP MEAN ANYTHING. The episode leaves
+        // `bgInFlightEpisodes` in `finishBackgroundTransfer`; if that ran
+        // BEFORE the journal await, the protection would end while the write
+        // was still in flight. Source order is the only place this is visible.
+        let completeBody = try XCTUnwrap(
+            SwiftSourceInspector.firstBody(
+                in: manager, after: "func handleBackgroundDownloadComplete("
+            ),
+            "could not isolate handleBackgroundDownloadComplete's body — anchor drifted"
+        )
+        let taskRange = try XCTUnwrap(
+            completeBody.range(of: "let journalTask = Task {"),
+            "could not find the journal Task's creation — this canary's anchor has drifted"
+        )
+        let awaitRange = try XCTUnwrap(
+            completeBody.range(of: "await journalTask.value"),
+            "could not find the journal await — this canary's anchor has drifted"
+        )
+        XCTAssertTrue(
+            awaitRange.lowerBound > taskRange.upperBound,
+            "playhead-4xmz: the await must follow the Task it awaits."
+        )
+        // THE WINDOW IS FROM THE TASK'S CREATION TO ITS AWAIT, not the whole
+        // function — a first cut asserted "no release anywhere before the
+        // await" and failed, correctly, on EIGHT of them. Those eight are
+        // early-RETURN guards (retired callback, lost ownership, a staging
+        // failure) that never create the Task at all, so they cannot race a
+        // finalization there is none of. What must hold is that once the Task
+        // exists, nothing releases the episode until it has been awaited.
+        let window = String(completeBody[taskRange.upperBound..<awaitRange.lowerBound])
+        XCTAssertFalse(
+            window.contains("finishBackgroundTransfer("),
+            "playhead-4xmz: nothing may release the episode between the journal Task's "
+            + "creation and its await. A release there takes the episode out of "
+            + "`bgInFlightEpisodes` while the write is still in flight, and eviction stops "
+            + "skipping it — which is the whole reason LRU eviction is safe without "
+            + "retiring anything."
+        )
+        let tail = String(completeBody[awaitRange.upperBound...])
+        XCTAssertTrue(
+            tail.contains("finishBackgroundTransfer("),
+            "playhead-4xmz: …and the release must actually happen AFTER the await, or the "
+            + "episode never leaves `bgInFlightEpisodes` at all."
+        )
+    }
+
     // MARK: - 7. Not `work_journal`
 
     /// The reason this bead is not a one-line fix, pinned where the decision
