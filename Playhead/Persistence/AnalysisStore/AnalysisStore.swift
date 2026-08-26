@@ -3473,8 +3473,8 @@ actor AnalysisStore {
         // that reaches it WITHOUT `createTables()` having renamed first, so it is
         // the path a fixture regressed to the old spelling WOULD take. NONE DOES,
         // and this line said "is exactly the path a fixture … takes" until
-        // playhead-1gu0 review round 6. TWENTY-THREE fixtures reach this seam with
-        // `semantic_scan_results` present, and they all already carry the NEW
+        // playhead-1gu0 review round 6. Every fixture that reaches this seam with
+        // `semantic_scan_results` present already carries the NEW
         // spelling, so the helper returns on its `hasNew` guard; the rail that
         // exercises the rename, `v64RowKeepsItsJobIdAcrossTheV65Rename`, goes
         // through `createTables()`.
@@ -3487,8 +3487,10 @@ actor AnalysisStore {
         // That is the identical error the very next commit of the same review
         // round corrected in the helper's doc and in `scripts/mutation-battery.sh`,
         // written into a THIRD place by the commit before it. Round 7 found it
-        // here. One claim, three copies, and the number is kept in exactly one of
-        // them now.
+        // here. THIS LINE THEN CLAIMED "the number is kept in exactly one of them
+        // now" WHILE PRINTING IT — round 10, which is the fourth time one claim's
+        // copies have disagreed on this branch. The count is gone from here; the
+        // argument never needed a cardinality.
         //
         // READ THE V60 NOTE ABOVE BEFORE ADDING A RUNG. A rung added to one
         // ladder and not the other is invisible to any test written for that

@@ -14899,15 +14899,21 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  # SD10's anchor was RE-DERIVED by playhead-1gu0, which broke it: V65 appended a
+  # rung to the test-only ladder between this call and the `}` / `#endif` the
+  # anchor used to disambiguate it from the PRODUCTION ladder's identical call.
+  # The mutation is unchanged — drop the V64 rung from `migrateOnlyForTesting()`
+  # — and so is every expectation. The new second line does the same
+  # disambiguation the braces used to: an anchor of the call ALONE would match
+  # the production site too, because that site's 12-space indent contains this
+  # one's 8-space text as a substring.
   SD10)
     snippet OLD <<'EOF'
         try migrateBackgroundDownloadDropLaunchIdentityV64IfNeeded()
-    }
-    #endif
+        // playhead-1gu0 (v65): a RENAME, not an add — and this ladder is the one
 EOF
     snippet NEW <<'EOF'
-    }
-    #endif
+        // playhead-1gu0 (v65): a RENAME, not an add — and this ladder is the one
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 

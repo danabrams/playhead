@@ -429,8 +429,11 @@ struct SemanticScanResult: Sendable, Equatable {
     /// 2026-08-19 device pull, 15 distinct ids for 15 distinct assets, with 176
     /// rows over four calendar days under a single id. It cannot tell two
     /// screenings of the same window apart, and anything that needs to should
-    /// read `transcriptVersion` (which separated every replicate on both
-    /// measured pulls) or `latencyMs`.
+    /// read `transcriptVersion`, which separated every replicate window on both
+    /// measured pulls. `latencyMs` does too on the population that matters and
+    /// NOT everywhere — two `cancelled` rows can both record 0 ms — so reach for
+    /// the version first. ``SemanticSweepMarkComposer/corroboration(for:in:atTranscriptVersion:)``
+    /// holds both measurements with the population each is over.
     let backfillJobId: String?
     /// playhead-bg2n (schema V55): the wall clock of this row's FIRST write, and
     /// the LICENCE that says ``createdAt`` and ``observedStatuses`` are complete.
