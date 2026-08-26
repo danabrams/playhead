@@ -30372,6 +30372,26 @@ for b in "${BATCH_IDS[@]}"; do
   esac
   BATCH_VOID_WHY="$(sed -n 's/^#reason\t/; /p' "$OUTCOMES" | tr -d '\n' | sed 's/^; //')"
 
+  # EVERY FAILURE THE BATCH PRODUCED, BY NAME — not only the expected ones.
+  #
+  # The pre-playhead-gjlp0 battery printed this block, and the first cut of the
+  # fix dropped it: the scorer reports a COUNT ("3 failed") and names only the
+  # tests some mutation declared. That is a real loss in the direction that
+  # matters most here. `docs/investigations/playhead-8cjo-mutation-ledger.md`
+  # opens with it — "A KILLED column is not evidence… a mutant that reports
+  # KILLED while killing a DIFFERENT set is a false credit" — and the only way
+  # to see that is the list. A mutation that reddens six tests and declares one
+  # is a finding about the mutation; with a count alone it reads as a clean kill.
+  #
+  # The count goes first so the magnitude is visible before the list, which a
+  # crash-looping batch can make long.
+  echo "  observed failures (ALL of them, $(scored_field "$OUTCOMES" failures)):"
+  if grep -q '^#failure\t' "$OUTCOMES"; then
+    sed -n 's/^#failure\t/    ✘ /p' "$OUTCOMES"
+  else
+    echo "    (none)"
+  fi
+
   BATCH_KEEP_EVIDENCE=0
   for rec in "${MEMBERS[@]}"; do
     name="$(rec_name "$rec")"

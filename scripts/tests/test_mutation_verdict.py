@@ -1309,6 +1309,38 @@ class ShellInstrumentFaultTests(ShellBatteryHarness):
         self.assertEqual(self.verdict_of(proc), "SURVIVED", out[-4000:])
 
 
+class ShellObservedFailuresTests(ShellBatteryHarness):
+    """A KILLED column is not evidence — the batch's WHOLE failure list is.
+
+    `docs/investigations/playhead-8cjo-mutation-ledger.md` opens with it: "a
+    mutant that reports KILLED while killing a DIFFERENT set is a false
+    credit", and its whole observed column is transcribed from this block. The
+    pre-gjlp0 battery printed it; the first cut of the fix replaced it with a
+    COUNT, which cannot show a mutant killing tests it never declared.
+    """
+
+    MUTATION = "M05"
+
+    def test_a_failure_no_mutation_declared_is_printed_by_name(self):
+        green = console(tests=[(self.expect, "passed")])
+        collateral = console(
+            tests=[(self.expect, "issue"), ("A TEST NOBODY DECLARED", "issue")],
+            terminal="** TEST FAILED **")
+        proc = self.run_battery(green, collateral)
+        out = self.out(proc)
+        self.assertEqual(self.verdict_of(proc), "KILLED", out[-4000:])
+        self.assertIn("observed failures (ALL of them, 2)", out, out[-4000:])
+        self.assertIn("✘ A TEST NOBODY DECLARED", out, out[-4000:])
+        self.assertEqual(proc.returncode, 0, out[-4000:])
+
+    def test_a_clean_batch_says_none_rather_than_printing_an_empty_block(self):
+        green = console(tests=[(self.expect, "passed")])
+        proc = self.run_battery(green, green)
+        out = self.out(proc)
+        self.assertIn("observed failures (ALL of them, 0)", out, out[-4000:])
+        self.assertIn("(none)", out, out[-4000:])
+
+
 class ShellNoTestsTests(ShellBatteryHarness):
     """A batch that never reached the test phase still names its log."""
 
