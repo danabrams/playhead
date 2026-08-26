@@ -476,13 +476,18 @@ enum SemanticSweepMarkComposer {
     /// against (playhead-3gzp's `ground-truth.sqlite`, sha256 `bcad2d09…`,
     /// schema V47) 36 of 125 coarse windows carry more than one `passA` row,
     /// and on four of them `containsAd` is at most HALF of the rows written for
-    /// the window. **BOTH OF THOSE COUNTS ARE OVER `passA` AT ANY STATUS** — a
-    /// THIRD population, neither the bullets' below nor this factor's own. It is
-    /// said here rather than only in the **IT NEVER SEPARATED** paragraph below,
-    /// which is where the qualification used to live alone — past the bullets,
-    /// which carry a DIFFERENT population's numbers (playhead-1gu0 review). On
-    /// the EXAMINED population the bullets use, that second count is **0**: no
-    /// window there carries a `containsAd` row its own replicates outvote or tie.
+    /// the window — counting only windows that carry a `containsAd` row AT ALL,
+    /// which is the unstated half of that predicate and is worth 4 against 24
+    /// (playhead-1gu0 review: the EXAMINED sentence below spells the condition
+    /// out, "no window there carries a `containsAd` row its own replicates
+    /// outvote or tie", and this one did not). **BOTH OF THOSE COUNTS ARE OVER
+    /// `passA` AT ANY STATUS** — a THIRD population, neither the bullets' below
+    /// nor this factor's own. It is said here rather than only in the
+    /// **IT NEVER SEPARATED** paragraph below, which is where the qualification
+    /// used to live alone — past the bullets, which carry a DIFFERENT
+    /// population's numbers (playhead-1gu0 review). On the EXAMINED population
+    /// the bullets use, that second count is **0**: no window there carries a
+    /// `containsAd` row its own replicates outvote or tie.
     ///
     /// **WHAT SEPARATES THOSE REPLICATES IS `transcriptVersion` AND `latencyMs`
     /// — NOT `runCorrelationId`. This line cited the id and playhead-1gu0
@@ -522,10 +527,14 @@ enum SemanticSweepMarkComposer {
     /// the pull straddles the change and the claim was already contradicted on
     /// it: over the 36 replicate windows of the opening paragraph's population
     /// (`passA`, ANY status), 16 have all-distinct ids, 12 are entirely NULL,
-    /// and **8 carry a single id** — and every row of those 8 was written after
-    /// 2026-08-07. Measured on both pulls, every distinct-id pair is also a
-    /// distinct-version pair and not conversely — the job id is a COARSENING of
-    /// `transcriptVersion` and can never separate two rows the version does not.
+    /// and **8 carry a single id** — every row of those 8 was written AFTER
+    /// 2026-08-07, and every one of the 16 has a row from BEFORE it (11 lie
+    /// wholly before it, 5 straddle it). Both directions are stated because
+    /// only the pair makes "the pull straddles the change" a measurement rather
+    /// than an assertion. Measured on both pulls, every distinct-id pair is
+    /// also a distinct-version pair and not conversely — the job id is a
+    /// COARSENING of `transcriptVersion` and can never separate two rows the
+    /// version does not.
     ///
     /// **THE INDEPENDENCE IS UNCHANGED; ONLY THE EVIDENCE FOR IT IS — AND THE
     /// EVIDENCE IS ABOUT THE SWEEP, NOT ABOUT THE PAIRS THIS FACTOR COUNTS.**
