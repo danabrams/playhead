@@ -12750,18 +12750,35 @@ MUTATIONS=(
   # ---- playhead-1gu0, the GU series: the V65 rename of
   #      `semantic_scan_results.runCorrelationId` to `backfillJobId` ---------
   #
-  # A RENAME has exactly one way to be right and four ways to be quietly wrong,
-  # and every one of the four is invisible on a FRESH INSTALL — `createTables()`
-  # builds the head shape unconditionally, so a device that never carried the old
-  # spelling passes all of them. That is why the rail
-  # (`$T_1GU0_RENAME`) regresses a live store to the V64 spelling first, and why
-  # each mutant below is one batch: they all edit the same helper or its single
-  # call site, so a batched partner would destroy the other's anchor.
+  # A RENAME has one way to be right and four ways to be quietly wrong, and
+  # THREE of the four are invisible on a FRESH INSTALL — `createTables()` builds
+  # the head shape unconditionally, so a device that never carried the old
+  # spelling passes GU01, GU02 and GU03. That is why the rail
+  # (`$T_1GU0_RENAME`) regresses a live store to the V64 spelling first.
+  #
+  # THE FOURTH IS NOT, AND THIS COMMENT SAID "every one of the four" UNTIL ITS
+  # OWN RECORD REFUTED IT (playhead-1gu0 review). GU04 drops
+  # `setSchemaVersion(65)`, so EVERY store — fresh installs included — finishes
+  # `migrate()` at 64, and the prediction-miss note twenty lines down records
+  # exactly that: 68 observed victims, essentially every "a fresh store reaches
+  # head" rail in the tree. A claim refuted by the measurement printed under it
+  # is the shape this bead exists to remove.
   #
   # GU01 is the ORDERING property, GU02 the DATA-PRESERVATION property, GU03 the
-  # INDEX-NAME property and GU04 the LADDER property. GU05 is deliberately NOT
-  # here: dropping the helper's `CREATE INDEX` can only ever be SURVIVED, and an
-  # entry that can only survive trains a reader to discount a survivor.
+  # INDEX-NAME property and GU04 the LADDER property.
+  #
+  # ONE BATCH EACH, AND THE STATED REASON WAS WRONG TOO (same round). They do
+  # NOT "all edit the same helper or its single call site": GU01 edits
+  # `createTables()`, GU02 / GU03 / GU99 edit
+  # `renameSemanticScanRunCorrelationIdIfNeeded()`, GU04 edits the V65 RUNG, and
+  # the helper has THREE call sites rather than one. Only GU02 and GU03
+  # genuinely collide — GU02's whole OLD text is one line of GU03's, so
+  # whichever applied first would destroy the other's anchor. The rest are
+  # one-per-batch because that is how they were RUN, which is the honest reason.
+  #
+  # GU05 is deliberately NOT here: dropping the helper's `CREATE INDEX` can only
+  # ever be SURVIVED, and an entry that can only survive trains a reader to
+  # discount a survivor.
   #
   # SAY THE REASON PRECISELY, THOUGH — "PROVEN EQUIVALENT" IS A STRONGER CLAIM
   # THAN THE CODE SUPPORTS, and this comment made it (playhead-1gu0 review). TWO
@@ -12770,10 +12787,17 @@ MUTATIONS=(
   # rung — so on every path a real device takes the index is rebuilt whatever the
   # helper does. The THIRD is not: the V65 rung calls the helper and stamps the
   # version, nothing more. That rung runs WITHOUT `createTables()` only through
-  # `migrateOnlyForTesting()`, and no fixture reaches that seam with
-  # `semantic_scan_results` present, so nothing today can observe the difference.
+  # `migrateOnlyForTesting()`, and the fixtures that DO reach that seam with
+  # `semantic_scan_results` present all carry the NEW spelling already
+  # (`BackgroundDownloadDropLaunchIdentityV64MigrationTests`'s
+  # `theLadderOnlySeamReachesV64` and `aV62StoreClimbsThroughV63ToHead` both
+  # `migrate()` to head first, then rewind to V63), so the helper returns on its
+  # `hasNew` guard and nothing today can observe the difference. (This paragraph
+  # said "no fixture reaches that seam" — those two do; what none of them does is
+  # arrive there at the OLD spelling. Same correction as the helper's own doc.)
   # It is an equivalent over the paths that EXIST, not one by construction: seed
-  # that table into the ladder-only seam and GU05 becomes a real mutant.
+  # that table at the OLD spelling into the ladder-only seam and GU05 becomes a
+  # real mutant.
   # GU01-GU03 each predicted exactly one victim and observed exactly one: the
   # rail below. That is the point of rewinding the fixture — the three defects
   # are indistinguishable from a correct migration everywhere else in the tree.
@@ -12795,10 +12819,14 @@ MUTATIONS=(
   # ladder anywhere, which is a weaker claim than this entry makes.
   "GU04|1615|STORE|$T_1GU0_RENAME;$T_HX6N_V41_SURVIVES"
 
-  # Batch 1616 — GU99, VACUITY CONTROL. The helper's `hasNew` local is renamed
-  # on the very line GU04's guard sits above; nothing observable changes. MUST
-  # SURVIVE. Non-empty expectation on purpose: it names the rail GU01-GU03 kill,
-  # so a KILLED verdict here would mean a local rename can change behaviour.
+  # Batch 1616 — GU99, VACUITY CONTROL. The `hasNew` local in
+  # `renameSemanticScanRunCorrelationIdIfNeeded()` is bound to a second name —
+  # the two lines directly above the `DROP INDEX` / `ALTER` pair GU02 and GU03
+  # mutate; nothing observable changes. (This line said "the very line GU04's
+  # guard sits above". GU04 is in a DIFFERENT function — the V65 rung — and has
+  # no guard; corrected at playhead-1gu0 review.) MUST SURVIVE. Non-empty
+  # expectation on purpose: it names the rail GU01-GU03 kill, so a KILLED
+  # verdict here would mean a local rename can change behaviour.
   "GU99|1616|STORE|$T_1GU0_RENAME"
 )
 
