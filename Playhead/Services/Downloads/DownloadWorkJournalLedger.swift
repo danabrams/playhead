@@ -347,8 +347,12 @@
 //
 //         LRU EVICTION IS THE OTHER, and it runs constantly:
 //         `DownloadManager.evictIfNeeded` unlinks a completed episode's audio
-//         AND its pin, from three production sites (foreground completion,
-//         streaming completion, the background deposit). It enters no retire.
+//         AND its pin, from three sites INSIDE THE ACTOR (foreground
+//         completion, streaming completion, the background deposit) and from
+//         nowhere outside it. It enters no retire. Say "inside the actor":
+//         a tree-wide count of the bare name returns FIVE, because two
+//         unrelated stores have an `evictIfNeeded()` of their own — which is
+//         how the rail for this sentence failed on its first run.
 //         The RACE is nonetheless closed there, and by something else
 //         entirely: `evictIfNeeded` skips `bgInFlightEpisodes`, and
 //         `finishBackgroundTransfer` runs AFTER `await journalTask.value`, so
