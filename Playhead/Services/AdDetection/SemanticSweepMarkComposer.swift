@@ -958,11 +958,14 @@ enum SemanticSweepMarkComposer {
     /// wholly before it, 5 straddle it). Both directions are stated because
     /// only the pair makes "the pull straddles the change" a measurement rather
     /// than an assertion. **THE CUTOFF IS THE MERGE INSTANT, NOT THE CALENDAR
-    /// DAY** — `45f4729b`, 2026-08-07 22:41:09 UTC. Re-derive it at midnight
-    /// instead and the split reads 11 / 4 / **1 wholly after**, because
-    /// `48E903D7` 596.3 s carries an earlier row at 21:03 UTC, 1h38m inside the
-    /// window. A day is not an instant; that substitution is the very defect
-    /// this comment is about. Measured on both pulls, every distinct-id pair is
+    /// DAY** — `45f4729b`, 2026-08-07 22:41:09 UTC. Cut at midnight STARTING
+    /// 2026-08-07 instead and the split reads 11 / 4 / **1 wholly after**,
+    /// because `48E903D7` 596.3 s carries an earlier row at 21:03:59.8 UTC —
+    /// 1 h 37 m 09 s inside the window, and the only row any of the 16 has on
+    /// 08-07 at all. (Midnight ENDING that day reproduces 11 / 5 / 0, the same
+    /// as the instant, which is why "at midnight" on its own settles nothing.)
+    /// A day is not an instant; that substitution is the very defect this
+    /// comment is about. Measured on both pulls, every distinct-id pair is
     /// also a distinct-version pair and not conversely — the job id is a
     /// COARSENING of `transcriptVersion` and can never separate two rows the
     /// version does not.

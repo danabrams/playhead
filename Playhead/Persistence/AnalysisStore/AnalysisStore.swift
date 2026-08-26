@@ -9163,17 +9163,29 @@ actor AnalysisStore {
     /// **THE NAME WAS THE DEFECT.** The places that say what this column HOLDS
     /// already said "the `backfill_jobs.jobId`" — the writer
     /// (`BackfillJobRunner.attributed(_:jobId:)`), the V42 schema note, and
-    /// ``SemanticScanResult/backfillJobId``'s own doc. Two others are edited in
-    /// this same change rather than cited as witnesses, and they are NOT the
-    /// same kind of wrong.
+    /// ``SemanticScanResult/backfillJobId``'s own doc. FOUR sites that described
+    /// the column in the RUN's vocabulary are edited in this same change rather
+    /// than cited as witnesses — `BackgroundGrantBudget`,
+    /// ``SemanticSweepMarkComposer/corroborationFactor(affirming:dissenting:)``,
+    /// `AnalysisCoordinator.runPendingCoarseScans`'s Returns note ("a run
+    /// correlation id") and `docs/investigations/playhead-hx6n-scan-attribution.md`
+    /// ("the correlation id costs no new plumbing"). **This line said TWO until
+    /// review round 13, which is a pair somebody had in hand read as a census —
+    /// the shape this whole paragraph is about, inside it.** They are not the
+    /// same kind of wrong, and the difference matters. TWO asserted something
+    /// untrue:
     /// ``SemanticSweepMarkComposer/corroborationFactor(affirming:dissenting:)``
     /// offered a "distinct `runCorrelationId`" as EVIDENCE that its replicates
     /// are independent — a false claim, and the reason this bead exists.
+    /// `AnalysisCoordinator`'s Returns note called the value a run correlation
+    /// id in prose, which is the column's own name-defect one layer along. The
+    /// other TWO asserted nothing untrue and were edited for consistency only:
     /// `BackgroundGrantBudget`'s limit paragraph called it "an `fm-*` id" and
     /// said it matches no `runId`, which is TRUE as written and merely does not
-    /// say whose id it is; the diff adds the word "job". **Silence is not
-    /// disagreement, and an earlier draft of this paragraph read it as such** —
-    /// first by claiming every other mention already agreed, then by
+    /// say whose id it is (the diff adds the word "job"), and the `hx6n`
+    /// investigation used the column's actual spelling of the day. **Silence is
+    /// not disagreement, and an earlier draft of this paragraph read it as
+    /// such** — first by claiming every other mention already agreed, then by
     /// over-correcting to "it did not agree". It said nothing either way.
     ///
     /// A job id is per `(asset, phase, offset)`: ONE value for an asset's whole
