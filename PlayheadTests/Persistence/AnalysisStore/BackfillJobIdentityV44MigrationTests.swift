@@ -87,7 +87,16 @@ struct BackfillJobIdentityV44MigrationTests {
         // (every download event before this build went to a no-op recorder and left no
         // trace, so there is nothing recoverable to seed). It names nothing this rung
         // asserts, so no assertion here moves.
-        #expect(AnalysisStore.currentSchemaVersion == 63)
+        // 63 -> 64 read for this rung (playhead-sdis): V64 ADDS FOUR NULLABLE
+        // COLUMNS and only to the two playhead-7dgx tables — `launchId`,
+        // `sessionCrossingId` and `launchArmingState` on
+        // `background_download_drops`, `lastArmedLaunchId` on
+        // `background_download_drop_arming`. No other table, no other column, no
+        // UPDATE, no DELETE, no DEFAULT and no backfill: a pre-V64 row is left
+        // NULL because every candidate default would turn an absence into a
+        // launch count. It names nothing this rung asserts, so no assertion here
+        // moves.
+        #expect(AnalysisStore.currentSchemaVersion == 64)
 
         try await store.insertAsset(makeAsset(id: "asset-fresh"))
         try await store.insertBackfillJob(
@@ -212,7 +221,7 @@ struct BackfillJobIdentityV44MigrationTests {
         // once more, and this time found BY READING THE PARAGRAPH ABOVE rather than
         // by a battery — which is the only reason it is worth the eight lines it now
         // costs. Two new tables, no existing table, column or row touched.
-        #expect(try await store.schemaVersion() == 63)
+        #expect(try await store.schemaVersion() == 64)
         #expect(try await store.fetchBackfillJob(byId: "fm-legacy-complete") == nil,
                 "a completed row minted under the old preimage cannot be addressed again")
         #expect(try await store.fetchBackfillJob(byId: "fm-legacy-queued") == nil,
