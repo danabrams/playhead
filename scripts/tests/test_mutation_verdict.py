@@ -25,10 +25,16 @@ every crash rail.
 
 WHAT IT COSTS, MEASURED, BECAUSE ~8 MINUTES IS NOT WHAT A `unittest` MODULE IN
 THIS REPO COSTS (playhead-gjlp0 R2). `test_gate_baseline` is 334 rails in about
-a second. This module is **104 rails in 497 s**, and the split is not subtle:
-the 62 rails that touch nothing but `mutation_verdict.py` run in **0.50 s**, and
-everything else is the shell half — 29 rails that invoke the real battery, plus
-4 that read its `--list`.
+a second. This module is **111 rails**, and the split is not subtle: **33** run
+the real battery end to end and **4** read its `--list`, so **74** exercise
+`mutation_verdict.py` directly — and the **65** of those that sit in classes
+needing neither a sandbox nor a `--list` run in **0.39 s**.
+
+Counted off the AST rather than by hand, and stated as three numbers that ADD UP
+because R3 found the previous wording quoting two different granularities in one
+sentence: it said 62 + 29 + 4 against a total of 104, and the missing nine were
+rails that live in a class whose SETUP reaches the battery while the rail itself
+does not. `33 + 4 + 74 = 111` is the same population counted one way.
 
 The unit is one invocation of `scripts/mutation-battery.sh` and it is ~12-15 s
 of which almost none is the rail: the battery walks all 1,109 MUTATIONS records
@@ -749,6 +755,50 @@ class OutputFileTests(VerdictTestCase):
         _rc, text = self.run_cli(log, ["A"])
         self.assertIn("#failures\t1\n", text)
         self.assertIn("#failure\tZ\n", text)
+
+    def test_a_denied_resource_is_a_RED_TEST_the_failure_count_does_not_hold(self):
+        # playhead-gjlp0 R3. `gate_baseline` lifts a denied key OUT of
+        # `failures` (playhead-s34ux: a denial names the BOX, not the code), so
+        # `#failures` reads 0 over a log carrying `✘ … failed`. Written out as
+        # its own count and its own list, because the caller's remedy differs.
+        log = self.write_log(console(
+            tests=[("A", "passed")],
+            extra=('◇ Test "Z" started.\n'
+                   '✘ Test "Z" recorded an issue at F.swift:1:1: '
+                   'Migration failed: unable to open database file\n'
+                   '✘ Test "Z" failed after 0.1 seconds with 1 issue.'),
+            terminal="** TEST FAILED **"))
+        _rc, text = self.run_cli(log, ["A"])
+        self.assertIn("#failures\t0\n", text)
+        self.assertNotIn("#failure\tZ\n", text)
+        self.assertIn("#resource\t1\n", text)
+        self.assertIn("#denied\tZ\n", text)
+
+    def test_a_denied_name_is_written_as_a_NAME_and_not_as_a_KEY(self):
+        # The mirror of the crash reason's own rule: `run.resource` is keyed,
+        # so the raw value carries `swift-testing::` in front of the test name
+        # — a spelling that appears nowhere else and that a reader would grep
+        # for in vain.
+        log = self.write_log(console(
+            tests=[("A", "passed")],
+            extra=('◇ Test "Z" started.\n'
+                   '✘ Test "Z" recorded an issue at F.swift:1:1: '
+                   'Migration failed: unable to open database file\n'
+                   '✘ Test "Z" failed after 0.1 seconds with 1 issue.'),
+            terminal="** TEST FAILED **"))
+        _rc, text = self.run_cli(log, ["A"])
+        self.assertNotIn("::", text.split("#denied\t", 1)[1].split("\n", 1)[0])
+
+    def test_a_clean_batch_states_a_ZERO_denial_count_rather_than_omitting_it(self):
+        # ANTI-FABRICATION, and the shell depends on it: the baseline REFUSES
+        # when `#resource` is missing, so a rail that only ever checks the
+        # non-zero direction would pass against a scorer that never writes the
+        # field at all.
+        log = self.write_log(console(tests=[("A", "passed"), ("Z", "failed")],
+                                     terminal="** TEST FAILED **"))
+        _rc, text = self.run_cli(log, ["A"])
+        self.assertIn("#resource\t0\n", text)
+        self.assertNotIn("#denied\t", text)
 
     def test_a_console_only_run_says_it_had_no_bundle(self):
         log = self.write_log(console(tests=[("A", "passed")]))
@@ -1553,10 +1603,13 @@ class ShellInstrumentFaultTests(ShellBatteryHarness):
         self.assertIn("THE COUNT AND THE LIST DISAGREE", out, out[-4000:])
         self.assertNotIn("(none)", out, out[-4000:])
 
-    def test_the_same_stub_WITH_the_count_gets_through_the_guard(self):
-        # ANTI-FABRICATION: the rail above must fail for the MISSING FIELD and
-        # not merely because the scorer was replaced. Same stub plus the one
-        # line, and the run reaches a verdict.
+    def test_a_scorer_that_omits_the_resource_count_blames_the_INSTRUMENT(self):
+        # playhead-gjlp0 R3 added `#resource` to the outcomes-file format, and
+        # a field the baseline REQUIRES has to be guarded in the same direction
+        # as `#failures`: `scored_field` prints "" for a missing field, and the
+        # numeric test would read "" as NOT ZERO — a denial count invented out
+        # of an absence. This stub states `#failures 0` so the guard above is
+        # satisfied and only the new one can fire.
         scorer = self.root / "scripts" / "mutation_verdict.py"
         original = scorer.read_bytes()
         self.addCleanup(scorer.write_bytes, original)
@@ -1567,8 +1620,106 @@ class ShellInstrumentFaultTests(ShellBatteryHarness):
         green = console(tests=[(self.expect, "passed")])
         proc = self.run_battery(green, green)
         out = self.out(proc)
+        self.assertIn("no usable '#resource' count", out, out[-4000:])
+        self.assertNotIn("baseline green", out, out[-4000:])
+        self.assertEqual(proc.returncode, 2, out[-4000:])
+
+    def test_the_same_stub_WITH_the_count_gets_through_the_guard(self):
+        # ANTI-FABRICATION: the rails above must fail for the MISSING FIELD and
+        # not merely because the scorer was replaced. Same stub plus the two
+        # lines, and the run reaches a verdict.
+        #
+        # `#resource\t0` joined this stub at R3, when the field became part of
+        # the format both halves must agree about. That is the guard working
+        # rather than a rail being loosened to fit: a scorer that does not
+        # write it can no longer license a baseline.
+        scorer = self.root / "scripts" / "mutation_verdict.py"
+        original = scorer.read_bytes()
+        self.addCleanup(scorer.write_bytes, original)
+        scorer.write_text(
+            STUB_SCORER.replace('"#no_verdict\\t0"]',
+                                '"#no_verdict\\t0", "#failures\\t0", "#resource\\t0"]'),
+            encoding="utf-8")
+        green = console(tests=[(self.expect, "passed")])
+        proc = self.run_battery(green, green)
+        out = self.out(proc)
         self.assertNotIn("fault in the INSTRUMENT", out, out[-4000:])
         self.assertIn("baseline green", out, out[-4000:])
+        self.assertEqual(self.verdict_of(proc), "SURVIVED", out[-4000:])
+
+
+#: One test denied a resource, spelled the way a real log spells it. The prose
+#: match (`unable to open database file`) is the one `gate_baseline` keeps
+#: because `AnalysisStore` throws `sqlite3_system_errno()` away before it logs
+#: — see playhead-enzva — so this is the shape that actually reaches a console.
+DENIED_TEST = ('◇ Test "a rail no mutation names" started.\n'
+               '✘ Test "a rail no mutation names" recorded an issue at A.swift:1:1: '
+               'Migration failed: unable to open database file\n'
+               '✘ Test "a rail no mutation names" failed after 0.1 seconds with 1 issue.')
+
+
+class ShellDeniedResourceTests(ShellBatteryHarness):
+    """A RED TEST THE FAILURE COUNT DOES NOT HOLD — playhead-gjlp0 R3.
+
+    `gate_baseline` lifts a denied resource out of `failures` (playhead-s34ux),
+    which is right, and it made this battery stop refusing a baseline that had
+    gone red. DRIVEN both ways before these rails were written:
+
+        pre-bead (`git show a82e52a9:scripts/mutation-battery.sh`)
+            rc 2, "the focused suites are RED before any mutation", test named
+        this bead as it stood
+            "baseline green", M05 SURVIVED, `observed failures (ALL of them, 0)`
+            followed by `(none)`
+
+    So the first rail here fails against the branch it reviews, and the second
+    is the anti-fabrication half: the same console WITHOUT the denial must get
+    through, or the rail is measuring the stub rather than the guard.
+    """
+
+    MUTATION = "M05"
+
+    def test_a_baseline_with_a_DENIED_test_refuses_instead_of_saying_green(self):
+        baseline = console(tests=[(self.expect, "passed")], extra=DENIED_TEST,
+                           summary="✔ Test run with 2 tests in 1 suite failed after 1.0 seconds.",
+                           terminal="** TEST FAILED **")
+        proc = self.run_battery(baseline, baseline)
+        out = self.out(proc)
+        self.assertIn("DENIED A RESOURCE", out, out[-4000:])
+        self.assertIn("a rail no mutation names", out, out[-4000:])
+        self.assertNotIn("baseline green", out, out[-4000:])
+        # The pre-bead REMEDY was wrong for this cause and must not come back:
+        # "fix the tree first" is unactionable when the box denied a descriptor.
+        self.assertNotIn("are RED before any mutation", out, out[-4000:])
+        self.assertIn("Re-run.", out, out[-4000:])
+        self.assertEqual(proc.returncode, 2, out[-4000:])
+
+    def test_the_same_console_WITHOUT_the_denial_reaches_a_verdict(self):
+        green = console(tests=[(self.expect, "passed")])
+        proc = self.run_battery(green, green)
+        out = self.out(proc)
+        self.assertNotIn("DENIED A RESOURCE", out, out[-4000:])
+        self.assertIn("baseline green", out, out[-4000:])
+        self.assertEqual(self.verdict_of(proc), "SURVIVED", out[-4000:])
+
+    def test_a_BATCH_denial_is_named_beside_the_failure_list(self):
+        # The batch half. `(none)` under `observed failures (ALL of them, 0)`
+        # is a true statement about FAILURES and reads as a clean batch, which
+        # is what the ledger in docs/investigations/ is transcribed from. The
+        # baseline is skipped so the refusal above is not in the way — which
+        # also means the stubbed gate's FIRST answer is the batch's, so both
+        # slots carry the same console (the shape every baseline-skipping rail
+        # here uses).
+        batch = console(tests=[(self.expect, "passed")], extra=DENIED_TEST,
+                        summary="✔ Test run with 2 tests in 1 suite failed after 1.0 seconds.",
+                        terminal="** TEST FAILED **")
+        proc = self.run_battery(batch, batch,
+                                args=["--only", self.MUTATION],
+                                env={"PLAYHEAD_MB_SKIP_BASELINE": "1"})
+        out = self.out(proc)
+        self.assertIn("ALSO DENIED A RESOURCE (1)", out, out[-4000:])
+        self.assertIn("⚠ a rail no mutation names", out, out[-4000:])
+        # It is REPORTED, not fatal: the declared expectation positively passed
+        # and a denial elsewhere names the box, so the verdict still stands.
         self.assertEqual(self.verdict_of(proc), "SURVIVED", out[-4000:])
 
 

@@ -128,15 +128,38 @@ rails lie with it.
 
 ## How a SURVIVED verdict is verified
 
-`scripts/mutation-battery.sh` reads a test with NO VERDICT as a PASS
-(`playhead-gjlp0`, open), so a crash-looping batch prints a FALSE SURVIVED and
-zero observed failures — indistinguishable on the results table from a genuine
-vacuity control. A SURVIVED verdict is therefore not accepted on the table
-alone: the batch's own xcodebuild log (kept under
-`/private/tmp/playhead-mutation-battery.*`) must show the focused suites
-actually RAN, i.e. a Swift Testing summary line with a test count in the tens.
-If the control ever dies, every KILLED above it is void, because they would all
-have been scored against a tree that fails for a reason unrelated to the mutant.
+**THE HAND CHECK BELOW IS HISTORY. `playhead-gjlp0` IS FIXED AND THE BATTERY
+DOES THIS ITSELF NOW** — read this section as the record of what had to be done
+by hand while it did not, and do not follow its recipe on a run from a tree that
+carries the fix. `SURVIVED` requires a POSITIVE pass verdict for the named test,
+taken from the batch's own `.xcresult` bundle via `scripts/mutation_verdict.py`;
+a batch that lost its test host reports **VOID** and exits 5; and every verdict
+that is not a plain KILL prints the absolute path of its own log and bundle, so
+nothing has to be looked up by batch number at all.
+
+Two things the old recipe got wrong that are worth carrying forward, because
+both are why the mechanism replaced it. *"A Swift Testing summary line with a
+test count in the tens"* is a reading of the BATCH, not of the test — the
+specimen `playhead-gjlp0` was filed on ends `Test run with 29 tests in 8 suites
+passed` on a host that had died and restarted eleven times, so that check passes
+on precisely the log it was written to catch. And a log found by searching
+`/private/tmp/playhead-mutation-battery.*` is very often another bead's run:
+`WORK` is per-INVOCATION, `KEEP_WORK=1` on every failure path, and batch numbers
+repeat across beads. The freshness floor is what closes the second one.
+
+What the section said while the bead was open:
+
+> `scripts/mutation-battery.sh` reads a test with NO VERDICT as a PASS
+> (`playhead-gjlp0`, open), so a crash-looping batch prints a FALSE SURVIVED and
+> zero observed failures — indistinguishable on the results table from a genuine
+> vacuity control. A SURVIVED verdict is therefore not accepted on the table
+> alone: the batch's own xcodebuild log (kept under
+> `/private/tmp/playhead-mutation-battery.*`) must show the focused suites
+> actually RAN, i.e. a Swift Testing summary line with a test count in the tens.
+
+The last sentence of it still stands and is not about the battery at all: if the
+control ever dies, every KILLED above it is void, because they would all have
+been scored against a tree that fails for a reason unrelated to the mutant.
 
 ## AK17 — the bypass a reviewer DEMONSTRATED, and why AK11 cannot settle it
 
@@ -299,11 +322,17 @@ log fabricates. The two vacuity controls are the only verdicts in this series
 that depend on the absence direction, and they are the only ones the floor has to
 protect. It is in place before either has run.
 
-Filed onward rather than left here: the finding is a `bd comment` on
-**playhead-gjlp0**, the open bead for the battery scoring a NO-VERDICT test as a
-PASS. Anyone fixing that bead will build this same checker, and they need to know
-the work directory is per-INVOCATION rather than per-bead, that `KEEP_WORK=1` on
-failure paths has left 38 of them on this box, and that batch numbers repeat.
+Filed onward rather than left here: the finding was a `bd comment` on
+**playhead-gjlp0**, then the bead for the battery scoring a NO-VERDICT test as a
+PASS. **It is fixed**, and it took that comment: the freshness floor is captured
+immediately before each batch, the battery prints each verdict's own log and
+bundle path, and nothing looks a batch log up by number any more. The three facts
+the comment carried are still the reasons — `WORK` is per-INVOCATION rather than
+per-bead, `KEEP_WORK=1` on every failure path leaves the directory behind, and
+batch numbers repeat across beads and across time. (The "38 of them on this box"
+is a reading taken one afternoon; `/private/tmp` is cleared on every boot and
+other worktrees produce and reap these continuously, so re-count rather than
+quoting it.)
 
 ## The MS re-aims — playhead-2d6i's mutants, moved by this bead's restructuring
 
@@ -601,8 +630,10 @@ of the soft limit either way, and that is playhead-vk68m's to fix.
   kills the demonstrated bypass), but it cannot see WHICH `hostGeneration` the
   view passes, and a change there would make the `didAccept` guard inert with
   every rail green.
-* A `bd comment` on **playhead-gjlp0** recording that a SURVIVED verdict's batch
-  log must be pinned to the RUN rather than the batch number.
+* ~~A `bd comment` on **playhead-gjlp0** recording that a SURVIVED verdict's
+  batch log must be pinned to the RUN rather than the batch number.~~ **FIXED**
+  in that bead: the floor is captured per batch immediately before the run, and
+  a log older than it is refused by name and date.
 
 ## Recorded as unreachable-by-type, not fixed
 A reviewer proposed adding `receipt.item.analysisAssetId != nil` to

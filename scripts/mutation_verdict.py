@@ -56,6 +56,16 @@ the one that is CHECKED POSITIVELY: it requires a terminal marker in the log
 (`** TEST SUCCEEDED/FAILED **` or `Test run with N tests …`), so a truncated
 log is VOID rather than clean.
 
+A DENIED RESOURCE DOES NOT VOID THE BATCH, AND IT IS STILL A RED TEST (R3).
+playhead-s34ux's rule is that a crash outranks everything because nothing was
+judged, while a denial does not, because it names the BOX rather than the code
+— so `gate_baseline` lifts a denied key out of `run.failures` and this module
+keeps that. The consequence for a caller is easy to miss and was missed: a run
+whose only redness is a burst of `SQLITE_CANTOPEN` reports `#failures 0` while
+`✘ … failed` lines sit in its log. So the count and the names are written out
+SEPARATELY (`#resource`, `#denied`) rather than folded into either the failure
+count or the batch state, and the battery refuses a baseline that carries any.
+
 WHERE THE FACTS COME FROM
 -------------------------
 Nothing here is a fifth parser. `scripts/gate_baseline.py` already reads both
@@ -224,6 +234,18 @@ def read_batch(log_path, since, xcresult=None, rc=0, xcresult_reader=None):
     return reading
 
 
+def _named(key):
+    """A test's NAME out of a gate_baseline KEY.
+
+    `run.crashed` and `run.resource` are keyed rather than named: the `Failure`
+    object that carried the display name is popped out of `run.failures` when
+    either classification wins, so the key is all that is left. Printing it raw
+    puts `swift-testing::` in front of a test name — a spelling that appears
+    nowhere else in this repo — and sends the reader grepping for it.
+    """
+    return str(key).split("::", 1)[-1]
+
+
 def _classify_batch(reading, scoped, rc):
     """OK or VOID, and why.
 
@@ -258,11 +280,7 @@ def _classify_batch(reading, scoped, rc):
             "line and no `** TEST SUCCEEDED/FAILED **` line"
         )
     if reading.run.crashed:
-        # The KEY, framework prefix stripped. `run.crashed` is keyed, not named
-        # — printing the key raw would put `swift-testing::` in front of a test
-        # name and invite a reader to search for a name that is not spelled
-        # that way anywhere else.
-        example = sorted(reading.run.crashed)[0].split("::", 1)[-1]
+        example = _named(sorted(reading.run.crashed)[0])
         reasons.append(
             "the .xcresult bundle STATES the host died under %d test(s), e.g. %s"
             % (len(reading.run.crashed), example)
@@ -407,6 +425,17 @@ def write_outcomes(path, reading, outcomes):
         "#hosts\t%d" % len(reading.host_pids),
         "#no_verdict\t%d" % len(run.no_verdict),
         "#failures\t%d" % len(run.failures),
+        # A DENIED RESOURCE IS A RED TEST THAT `#failures` DOES NOT COUNT, and
+        # until playhead-gjlp0 R3 the shell could not see it at all.
+        # `gate_baseline` routes a denial OUT of `failures` — correctly, on
+        # playhead-s34ux's rule that a denial names the BOX and not the code —
+        # so a baseline whose only redness was a burst of `SQLITE_CANTOPEN`
+        # read `#failures 0` and printed `baseline green`, where the pre-gjlp0
+        # battery had refused the run outright. Written as its own count and
+        # its own list so the caller decides, exactly as it does for failures.
+        # (`crashed` needs no field: it is already a `#reason`, so the batch is
+        # VOID and every caller is loud about it.)
+        "#resource\t%d" % len(run.resource),
     ]
     for reason in reading.batch_reasons:
         lines.append("#reason\t%s" % reason)
@@ -416,6 +445,8 @@ def write_outcomes(path, reading, outcomes):
     # named ones would hide exactly that.
     for key in sorted(run.failures):
         lines.append("#failure\t%s" % run.failures[key].name)
+    for key in sorted(run.resource):
+        lines.append("#denied\t%s" % _named(key))
     for name, state in outcomes:
         lines.append("%s\t%s" % (state, name))
     pathlib.Path(str(path)).write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -454,9 +485,20 @@ def main(argv=None):
     classify_p.add_argument("--names", required=True, help="file, one expected name per line")
     classify_p.add_argument("--out", required=True, help="file to write STATE<TAB>NAME into")
 
+    # NOTHING IN THE PRODUCT CALLS `verify`, AND THAT IS DELIBERATE — said here
+    # because an uncalled subcommand is indistinguishable from a hole (R2 filed
+    # exactly that question; R3 answers it). `classify` applies `require_fresh`
+    # to both artifacts itself, so a caller that scores does not need a second
+    # pass and `mutation-battery.sh` never makes one. What this is for is the
+    # HAND check the ledger in `docs/investigations/` used to do by eye: you
+    # have a preserved `batch-<N>.log` and you want to know whether it belongs
+    # to the run you are reasoning about, WITHOUT scoring anything. It is
+    # rail-covered (`FreshnessTests`), so it cannot rot unnoticed; if a caller
+    # ever appears, this comment is the thing to delete.
     verify_p = sub.add_parser(
         "verify",
-        help="freshness only: refuse an artifact this run did not produce")
+        help="freshness only: refuse an artifact this run did not produce "
+             "(a hand tool — the battery never calls it; see the note above)")
     verify_p.add_argument("--log", required=True)
     verify_p.add_argument("--xcresult", default=None)
     verify_p.add_argument("--since", type=int, required=True)

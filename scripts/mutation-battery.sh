@@ -29714,7 +29714,7 @@ restore_and_verify() {
 # preserved): the expected test had TEN start lines and ZERO result lines, the
 # batch had 2,332 tests with no verdict and 11 distinct test-host pids, the log
 # already carried `gate-memory: THE RUN DID NOT REACH A VERDICT — RESTARTED`
-# TEN lines from its end (line 24,986 of 24,996) — and the table printed
+# TEN lines from its end, counting itself (line 24,987 of 24,996) — and the table printed
 # `BD37 SURVIVED … still green`. Applied by hand that mutant dies in 0.147 s.
 # The rail existed and worked; only the reading was wrong.
 #
@@ -30264,6 +30264,61 @@ if [ "$DRY_RUN" -eq 0 ] && [ "${PLAYHEAD_MB_SKIP_BASELINE:-0}" != "1" ]; then
     exit 2
   fi
 
+  # A DENIED RESOURCE IS A RED TEST THAT `#failures` DOES NOT COUNT, AND THIS
+  # BEAD MADE THE BASELINE STOP SEEING IT (playhead-gjlp0 R3).
+  #
+  # `gate_baseline` routes a resource denial out of `failures` and into its own
+  # category, on playhead-s34ux's rule that a denial names the BOX rather than
+  # the code. That rule is right and is kept. What it costs HERE is that the
+  # count above reads 0 for a baseline whose log carries `✘ … failed` lines, so
+  # the run printed `baseline green` and went on to score mutations. DRIVEN,
+  # both ways, on one denied test and one passing expectation:
+  #
+  #   pre-bead (`git show a82e52a9:`)  rc 2, "the focused suites are RED before
+  #                                    any mutation", the test named
+  #   this bead as it stood            "baseline green", then M05 SURVIVED over
+  #                                    `observed failures (ALL of them, 0)`
+  #
+  # It is refused rather than merely reported, because the tolerance is not
+  # symmetric: the per-test rule is UNANIMITY, so a test that records one
+  # CANTOPEN and one genuine assertion stays a FAILURE — on a box that is
+  # denying descriptors to the focused suites, the next mutation's KILL may be
+  # the box rather than the edit, and that is the false-KILL direction this
+  # file calls silent and indistinguishable from success.
+  #
+  # The REMEDY is the thing the pre-bead message got wrong. "Fix the tree
+  # first" is unactionable for a denial; re-running is the honest advice, which
+  # is why this is its own arm rather than a widening of the count above.
+  BASE_DENIED="$(scored_field "$BASE_OUT" resource)"
+  case "$BASE_DENIED" in
+    ''|*[!0-9]*)
+      # Same arm, same reason, as the `#failures` guard above: an absence is
+      # not a reading. A scorer that writes no `#resource` count disagrees with
+      # this script about their shared file format, and the numeric test below
+      # would read "" as NOT ZERO.
+      echo "mutation-battery: the scorer wrote no usable '#resource' count for the" >&2
+      echo "baseline (read: '$BASE_DENIED'). That is a fault in the INSTRUMENT, not" >&2
+      echo "a finding about the tree — scripts/mutation_verdict.py and this script" >&2
+      echo "disagree about the outcomes-file format. Nothing below would be a verdict." >&2
+      echo "    $BASE_OUT" >&2
+      KEEP_WORK=1
+      exit 2 ;;
+  esac
+  if [ "$BASE_DENIED" != "0" ]; then
+    echo "mutation-battery: $BASE_DENIED baseline test(s) were DENIED A RESOURCE." >&2
+    sed -n 's/^#denied\t/    ⚠ /p' "$BASE_OUT" >&2
+    cat >&2 <<'MSG'
+Those tests went RED on the console and are NOT in the failure count, because
+gate_baseline classifies a denied resource as a fact about the BOX rather than
+about the code (playhead-s34ux). That makes them useless as a control: the
+per-test rule is UNANIMITY, so the next batch's genuine-looking failure may be
+one denial plus one assertion, and it would be credited to the mutation.
+This is NOT a claim about the tree, the anchors or the expectations. Re-run.
+MSG
+    KEEP_WORK=1
+    exit 2
+  fi
+
   # Every expectation must NAME A TEST THAT WAS ACTUALLY JUDGED. Checked here,
   # on the one build that is already being spent, so a mis-typed or mis-split
   # expectation costs zero mutation builds instead of printing SURVIVED.
@@ -30491,6 +30546,30 @@ for b in "${BATCH_IDS[@]}"; do
       else
         sed -n 's/^#failure\t/    ✘ /p' "$OUTCOMES"
       fi ;;
+  esac
+
+  # AND THE COUNT ABOVE IS NOT EVERY RED TEST (playhead-gjlp0 R3). A denied
+  # resource is `✘ … failed` on the console and is deliberately not a failure
+  # to `gate_baseline` (playhead-s34ux), so a batch that lost five tests to
+  # `SQLITE_CANTOPEN` printed `observed failures (ALL of them, 0)` and then
+  # `(none)`. That is the reading this block exists to prevent, one category
+  # over: the ledger this list feeds — `docs/investigations/
+  # playhead-8cjo-mutation-ledger.md` — is built on the OBSERVED VICTIM SET,
+  # and a mutation that denies a resource somewhere else reads as a clean kill.
+  #
+  # Reported beside the failures rather than folded into them, because the two
+  # are different claims and the remedies differ: a failure is about the EDIT,
+  # a denial is about the BOX and means re-run.
+  BATCH_DENIED="$(scored_field "$OUTCOMES" resource)"
+  case "$BATCH_DENIED" in
+    0) : ;;
+    ''|*[!0-9]*)
+      echo "  denied resources: UNKNOWN — the scorer wrote no '#resource' count."
+      echo "    The failure list above is not a census of the red tests. See $OUTCOMES" ;;
+    *)
+      echo "  ALSO DENIED A RESOURCE ($BATCH_DENIED) — red on the console, and NOT in the"
+      echo "  count above (playhead-s34ux: a denial names the BOX, not the code):"
+      sed -n 's/^#denied\t/    ⚠ /p' "$OUTCOMES" ;;
   esac
 
   BATCH_KEEP_EVIDENCE=0
