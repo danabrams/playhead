@@ -12821,10 +12821,15 @@ MUTATIONS=(
 
   # Batch 1616 — GU99, VACUITY CONTROL. The `hasNew` local in
   # `renameSemanticScanRunCorrelationIdIfNeeded()` is bound to a second name —
-  # the two lines directly above the `DROP INDEX` / `ALTER` pair GU02 and GU03
-  # mutate; nothing observable changes. (This line said "the very line GU04's
-  # guard sits above". GU04 is in a DIFFERENT function — the V65 rung — and has
-  # no guard; corrected at playhead-1gu0 review.) MUST SURVIVE. Non-empty
+  # the helper's FIRST two statements after its `tableExists` guard; nothing
+  # observable changes. (This line said "the very line GU04's guard sits above",
+  # and GU04 is in a DIFFERENT function — the V65 rung — and has no guard. The
+  # correction for THAT then said "the two lines directly above the `DROP INDEX`
+  # / `ALTER` pair GU02 and GU03 mutate", and they are not directly above it: a
+  # `runCorrelationId` `columnExists` guard and a five-line comment sit between.
+  # Two rounds of playhead-1gu0 review, and the second one is why a locational
+  # claim gets checked against the file rather than remembered.) MUST SURVIVE.
+  # Non-empty
   # expectation on purpose: it names the rail GU01-GU03 kill, so a KILLED
   # verdict here would mean a local rename can change behaviour.
   "GU99|1616|STORE|$T_1GU0_RENAME"
