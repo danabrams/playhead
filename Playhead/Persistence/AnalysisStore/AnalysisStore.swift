@@ -9191,13 +9191,17 @@ actor AnalysisStore {
     ///
     /// **AND IT IS THE FIRST RUNG ON THIS TABLE THAT AN OLDER BINARY CANNOT
     /// IGNORE.** Every earlier one left every existing column NAME in place —
-    /// even V52, which rebuilt the table to make `prewarmHit` nullable — so the
-    /// V42 note's "what an older binary sees: nothing" held. A rename REMOVES a
-    /// name that a pre-V65 binary's explicit column list still spells. What
-    /// happens then is not a crash and is worse than one: that binary's own
-    /// `createTables()` puts `runCorrelationId` back as an EMPTY column and
-    /// writes into it. See `renameSemanticScanRunCorrelationIdIfNeeded()` for
-    /// the state that leaves behind and why it is left alone.
+    /// even V52, which DROPPED AND RE-ADDED `prewarmHit` to make it nullable
+    /// (this line said "rebuilt the table", and
+    /// `migrateUnmeasuredPrewarmHitV52IfNeeded` says the opposite in its own
+    /// doc — "the drop is a single statement rather than a table rebuild";
+    /// playhead-1gu0 review) — so the V42 note's "what an older binary sees:
+    /// nothing" held. A rename REMOVES a name that a pre-V65 binary's explicit
+    /// column list still spells. What happens then is not a crash and is worse
+    /// than one: that binary's own `createTables()` puts `runCorrelationId`
+    /// back as an EMPTY column and writes into it. See
+    /// `renameSemanticScanRunCorrelationIdIfNeeded()` for the state that leaves
+    /// behind and why it is left alone.
     private func migrateSemanticScanBackfillJobIdentityV65IfNeeded() throws {
         let observed = (try schemaVersion() ?? 1)
         guard observed < 65 else { return }
