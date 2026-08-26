@@ -877,9 +877,22 @@ struct SemanticSweepConfidenceTests {
     /// the two places it was wrong is the shape that bead exists to remove).
     ///
     ///   * "the MINORITY verdict" overstated it. "At most HALF" admits a TIE,
-    ///     and the four are 4 against the 24 windows that carry a `containsAd`
-    ///     row AT ALL, over `passA` at ANY status — not the population this
-    ///     factor sees.
+    ///     and a tie is all there is: each of the four is 1 `containsAd` row of
+    ///     2, and a STRICT minority occurs on NONE of the 36. The 4 counts only
+    ///     windows carrying a `containsAd` row at all; DROP that condition and
+    ///     it reads 24, because the other 20 of the 36 carry none and clear "at
+    ///     most half" with zero affirmers. Both counts are over `passA` at ANY
+    ///     status, which is not the population this factor sees.
+    ///
+    ///     **24 IS THE COUNT WITHOUT THE CONDITION, NOT THE POPULATION THAT
+    ///     MEETS IT — that population is 16, and this bullet said 24 was it
+    ///     (playhead-1gu0 review round 6).** The composer's "worth 4 against
+    ///     24" states a CONTRAST between the two readings and was transcribed
+    ///     here as a denominator: the standing defect class, inside the bullet
+    ///     written to remove an instance of it. Re-measured on
+    ///     `3gzp/ground-truth.sqlite` (sha256 `bcad2d09…`, `immutable=1`): of
+    ///     the 36 replicate windows, 16 carry a `containsAd` row, 20 carry
+    ///     none, 4 of the 16 are at or under half and 0 are under it.
     ///   * "each a separate FM call in a separate RUN" was the half of the
     ///     deleted `runCorrelationId` parenthesis that survived here. That id is
     ///     a `backfill_jobs.jobId`, ONE value per `(asset, phase, offset)`, and

@@ -3470,8 +3470,17 @@ actor AnalysisStore {
         // mechanically.
         try migrateBackgroundDownloadDropLaunchIdentityV64IfNeeded()
         // playhead-1gu0 (v65): a RENAME, not an add — and this ladder is the one
-        // that reaches it WITHOUT `createTables()` having renamed first, which is
-        // exactly the path a fixture regressed to the old spelling takes.
+        // that reaches it WITHOUT `createTables()` having renamed first, so it is
+        // the path a fixture regressed to the old spelling WOULD take. NONE DOES,
+        // and this line said "is exactly the path a fixture … takes" until
+        // playhead-1gu0 review round 6. The two fixtures that reach this seam with
+        // `semantic_scan_results` present (`theLadderOnlySeamReachesV64` and
+        // `aV62StoreClimbsThroughV63ToHead`) already carry the NEW spelling, so the
+        // helper returns on its `hasNew` guard; the rail that exercises the rename,
+        // `v64RowKeepsItsJobIdAcrossTheV65Rename`, goes through `createTables()`.
+        // `renameSemanticScanRunCorrelationIdIfNeeded()`'s own doc was corrected for
+        // exactly this claim at an earlier round and this second copy was left
+        // standing — the one-of-two-places shape this bead exists to remove.
         //
         // READ THE V60 NOTE ABOVE BEFORE ADDING A RUNG. A rung added to one
         // ladder and not the other is invisible to any test written for that

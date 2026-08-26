@@ -882,10 +882,18 @@ enum SemanticSweepMarkComposer {
     /// schema V47) 36 of 125 coarse windows carry more than one `passA` row,
     /// and on four of them `containsAd` is at most HALF of the rows written for
     /// the window — counting only windows that carry a `containsAd` row AT ALL,
-    /// which is the unstated half of that predicate and is worth 4 against 24
+    /// which is the unstated half of that predicate: WITH the condition the
+    /// count is 4, WITHOUT it 24, because the other 20 of the 36 carry no
+    /// `containsAd` row and clear "at most half" with zero affirmers. **24 is a
+    /// CONTRAST between the two readings and NOT a denominator — the windows
+    /// that do carry such a row number 16.** All four are a TIE (1 `containsAd`
+    /// row of 2) and a STRICT minority occurs on none of the 36, which is why
+    /// the predicate reads "at most HALF" rather than "the MINORITY".
     /// (playhead-1gu0 review: the EXAMINED sentence below spells the condition
     /// out, "no window there carries a `containsAd` row its own replicates
-    /// outvote or tie", and this one did not). **BOTH OF THOSE COUNTS ARE OVER
+    /// outvote or tie", and this one did not. Round 6 then found "worth 4
+    /// against 24" transcribed elsewhere as though 24 NAMED the 16, so both
+    /// numbers are written out rather than left to a contrast.) **BOTH OF THOSE COUNTS ARE OVER
     /// `passA` AT ANY STATUS** — a THIRD population, neither the bullets' below
     /// nor this factor's own. It is said here rather than only in the
     /// **IT NEVER SEPARATED** paragraph below, which is where the qualification
