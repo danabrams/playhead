@@ -146,12 +146,38 @@ ABSENT = "ABSENT"
 BATCH_OK = "OK"
 BATCH_VOID = "VOID"
 
+#: THESE TWO SETS ARE DOCUMENTATION, AND NOTHING IN THE PRODUCT READS EITHER
+#: (playhead-gjlp0 R5, and said here because a green rail over a constant reads
+#: exactly like a green rail over the code).
+#:
+#: The rule they state is enforced by the SHELL: `mutation-battery.sh`'s
+#: `case "$st"` ladder routes FAILED and PASSED to their own arms and sends
+#: everything else — including a state this module has not got yet, and
+#: including `NO-STATE`, which is the scorer having written no line at all — to
+#: the `unjudged` arm through `*)`. So deleting `SKIPPED` from `UNJUDGED` below
+#: changes NO behaviour anywhere; it only reddens the two rails that assert its
+#: membership. That is the INERT-mutant shape wearing a KILLED verdict, which
+#: CLAUDE.md lists as the second way a mutant stops being evidence. The rails
+#: that measure the BEHAVIOUR are the end-to-end ones: `ShellLadderTests` drives
+#: NO-VERDICT, `ShellBundleTests` drives a bundle-stated CRASH, and
+#: `ShellConsoleOnlyVoidTests` drives SKIPPED — each through the real battery to
+#: a VOID row. Kept anyway, because naming the rule where the states are
+#: declared is worth a line; read them as a comment, not as a mechanism.
+
 #: States that are POSITIVE evidence — an instrument stated this outcome.
 STATED = frozenset((FAILED, PASSED))
 
 #: States that mean "nobody judged this test". Every one of them must keep a
 #: mutation out of both KILLED and SURVIVED: a test that was not judged is not
 #: evidence in either direction.
+#:
+#: SKIPPED is the member worth arguing about, so the argument is written down.
+#: A skipped rail asked no question and cannot license SURVIVED — but the
+#: baseline preflight has already required this same test to PASS on the
+#: UNMUTATED tree minutes earlier, so a skip inside a batch is most likely the
+#: MUTATION's own doing and every re-run reproduces it. VOID is still the right
+#: verdict (nothing judged the mutant), and the epilogue says outright that
+#: this is one of only two shapes a re-run can never clear (R5).
 UNJUDGED = frozenset((NO_VERDICT, CRASHED, DENIED, SKIPPED))
 
 EXIT_OK = 0

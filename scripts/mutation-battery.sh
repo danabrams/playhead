@@ -29781,8 +29781,10 @@ restore_and_verify() {
 # grep. This bead deleted the first two, which left a BYTE-EXACT DUPLICATE of
 # the largest artifact in `$WORK` being written once per batch so one `grep -q`
 # could read it. Measured on a preserved 37-batch run
-# (`/private/tmp/playhead-mutation-battery.9NQnSD`): **178.9 MB of `.log` beside
-# 178.9 MB of `.log.last`**, exactly half of that directory. The duplicate was
+# (`/private/tmp/playhead-mutation-battery.9NQnSD`): **178.9 MiB of `.log` beside
+# 178.9 MiB of `.log.last`**, exactly half of that directory. (R5 re-derived it:
+# 187,563,745 bytes over 38 `.log` files — 37 batches plus the baseline — so the
+# figure is `du`'s MiB and was written MB. Right reading, wrong unit.) The duplicate was
 # cheap while `$WORK` held only logs; this bead also started keeping each
 # non-KILL batch's `.xcresult` there, so it is not.
 #
@@ -30422,9 +30424,16 @@ MSG
   # expectation costs zero mutation builds instead of printing SURVIVED.
   #
   # playhead-gjlp0 widened this from "named a test that STARTED" to "named a
-  # test that reached a VERDICT". The old form let a rail that never reports —
-  # because its host dies under it every time — pass the preflight and then
-  # score SURVIVED for every mutation that names it.
+  # test that PASSED". The old form let a rail that never reports — because its
+  # host dies under it every time — pass the preflight and then score SURVIVED
+  # for every mutation that names it.
+  #
+  # PASSED, not "reached a verdict", and the two are not the same thing — this
+  # comment said the weaker one until playhead-gjlp0 R5 while the `case` below
+  # admitted PASSED alone. A baseline FAILED cannot actually reach here (the
+  # `#failures` guard above exits first, and so do the `#resource` and VOID
+  # guards), so the arm's own message enumerates only the states that CAN:
+  # started-and-never-judged, skipped, denied.
   UNKNOWN=""
   UNJUDGED=""
   for rec in "${SELECTED[@]}"; do
@@ -30699,12 +30708,39 @@ for b in "${BATCH_IDS[@]}"; do
     done
     IFS="$OLDIFS"
     if [ "$BATCH_IS_VOID" -eq 1 ]; then
-      # The batch outranks every per-test reading, including a FAILED one: a
-      # host that died mid-batch can redden a test for reasons that have
-      # nothing to do with the mutation, so a KILL off a void batch is not a
-      # kill either. playhead-4xmz measured exactly that — a mutant that
-      # TRAPPED took the host down, and whether its declared victim's failure
-      # line flushed before the crash became the whole verdict.
+      # THE BATCH OUTRANKS EVERY PER-TEST READING — including a FAILED one and
+      # including an ABSENT one. A host that died mid-batch can redden a test,
+      # and can swallow its `◇ started` line, for reasons that have nothing to
+      # do with the mutation. playhead-4xmz measured exactly that: a mutant
+      # that TRAPPED took the host down, and whether its declared victim's
+      # failure line flushed before the crash became the whole verdict.
+      #
+      # WHY THAT IS RIGHT EVEN WHEN IT THROWS A REAL KILL AWAY (playhead-gjlp0
+      # R5 — four rounds took this arm order on trust, so the argument is
+      # written down rather than waved at).
+      #
+      # The case it costs is CONSTRUCTIBLE, not hypothetical: mutation M
+      # reddens its declared victim deterministically while a BATCH-MATE traps
+      # and takes the host down. M's real kill is discarded, both members
+      # report VOID, and re-running the whole batch reproduces it every time,
+      # because the trapping mutant traps every time. What the operator does is
+      # `--only M`: one build, M in a batch of its own, and the trap is not in
+      # it. (`--series` and `--batch` keep the pair together and will not help.)
+      #
+      # THE REASON IT IS RIGHT IS THE ASYMMETRY, NOT THE FREQUENCY. Discarding
+      # a real kill costs one scoped re-run and announces itself in the table.
+      # Crediting a kill off a batch whose host died is a FALSE KILL — CLAUDE.md
+      # calls that shape silent and indistinguishable from success — and it
+      # lands in the ledger under docs/investigations/ where the next reader
+      # takes it as evidence. The loud error is recoverable and the quiet one
+      # is not, so the order resolves toward the loud one.
+      #
+      # ABSENT loses to VOID for the same reason one step along: the baseline
+      # preflight has ALREADY proved this expectation names a test that PASSED
+      # on the unmutated tree, so on a void batch "no roster mentions it" is far
+      # more likely to be a start line the dead host never printed than a
+      # renamed test — and ERROR's remedy ("fix the EDIT") would send the reader
+      # to change an expectation that is correct.
       echo "$name|VOID|the batch produced no usable verdict${BATCH_VOID_WHY:+ — $BATCH_VOID_WHY}" >>"$RESULTS"
       BATCH_KEEP_EVIDENCE=1
     elif [ -n "$never_ran" ]; then

@@ -1668,8 +1668,9 @@ class ShellLadderTests(ShellBatteryHarness):
         #    readers; this bead deleted two of them and left a BYTE-EXACT
         #    duplicate of the largest artifact in $WORK being written once per
         #    batch so one `grep -q` could read it. Measured on a preserved
-        #    37-batch run: 178.9 MB of `.log` beside 178.9 MB of `.log.last`,
-        #    exactly half the directory. It is a predicate now.
+        #    37-batch run: 178.9 MiB of `.log` beside 178.9 MiB of `.log.last`,
+        #    exactly half the directory (MiB, not MB — R5 re-derived it as
+        #    187,563,745 bytes). It is a predicate now.
         # 2. THE KEPT LINE COUNTS WHAT IS ACTUALLY THERE. It used to say
         #    "per-batch xcodebuild logs", full stop, while the directory had
         #    started holding an `.xcresult` per non-KILL batch — the biggest
