@@ -38,12 +38,20 @@
 // and a live session left registered on that identifier is what the next
 // construction collides with.
 //
-// ONE CLOCK REMAINS AND IT IS `downstreamBound`. The join rail's clock is gone
-// (an earlier version stranded the crossing on a held queue and let a 6 s
-// deadline expire, making it a race against the test's own arrival barrier —
-// see `suspendingRefusalIO`). What is left is the bound the two downstream
-// seams give the calls that must SUCCEED, and the 2026-08-26 merge gate is why
-// it is no longer 7.5 s.
+// EXACTLY ONE CLOCK IS LOAD-BEARING AND IT IS `downstreamBound`. The join
+// rail's clock is gone (an earlier version stranded the crossing on a held
+// queue and let a 6 s deadline expire, making it a race against the test's own
+// arrival barrier — see `suspendingRefusalIO`). What is left is the bound the
+// two downstream seams give the calls that must SUCCEED, and the 2026-08-26
+// merge gate is why it is no longer 7.5 s.
+//
+// `waited(until:)` carries a deadline too, and the distinction is worth being
+// exact about rather than claiming there is no second clock: its Bool IS
+// asserted, so it is not "never an input to an assertion". What makes it not
+// load-bearing is the DIRECTION — it waits for an event both a correct
+// implementation and a broken one reach, so on any build that arrives at all
+// the deadline is unreachable, and the only run it can decide is one that was
+// going to hang.
 
 import Foundation
 import Testing

@@ -27,10 +27,25 @@
 // which launch, which crossing, which arming state, on which of the three drop
 // sites — lives in the write-path suite; everything about what the rung does
 // to a store lives in the schema suite. What is left here is the set of
-// readings that need MORE THAN ONE ROW to mean anything, plus the two
-// strengthenings folded into their counterparts rather than duplicated (the
-// `count(DISTINCT)`-declines-NULL check, and the episodes-are-not-launches
-// discriminator).
+// readings that need MORE THAN ONE ROW to mean anything.
+//
+// SIX of the ten were pure duplicates. The other FOUR each carried one
+// property nothing else covered, and that property was folded into its
+// counterpart rather than kept as a second rail:
+//
+//   * `count(DISTINCT sessionCrossingId)` reads ZERO on a table of
+//     task-refusal rows          -> `onlyASessionRefusalCarriesACrossingId`
+//   * the write-failure UPDATE path (as against the re-create one)
+//                                 -> `aWriteFailureNeverNamesALaunch`
+//   * the equal-stamp anti-vacuity check
+//                                 -> `equalTimestampsPageDeterministically`
+//   * episodes-are-not-launches (two episodes per launch, so `count(*)` and
+//     `count(DISTINCT launchId)` cannot be swapped)
+//                                 -> `twoManagersAreTwoLaunches`
+//
+// An earlier version of this paragraph said "the two strengthenings" and named
+// two of the four. Four, and they are listed rather than counted — a count
+// nobody can check against a list is how the miscount happened.
 //
 // ─────────────────────────────────────────────────────────────────────────
 // THE THREE POPULATIONS, AND WHY TWO COLUMNS ARE NEEDED TO SEPARATE THEM
