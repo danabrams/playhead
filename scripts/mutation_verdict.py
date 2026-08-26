@@ -370,16 +370,24 @@ def write_outcomes(path, reading, outcomes):
     anything except a newline — quoting one through a shell pipeline is how the
     `;`-in-a-name fault got into this battery in the first place.
     """
+    run = reading.run
     lines = [
         "#batch\t%s" % reading.batch_state,
         "#source\t%s" % reading.verdict_source,
         "#log\t%s" % reading.log_path,
         "#bundle\t%s" % (reading.bundle_path or "(none — console only)"),
         "#hosts\t%d" % len(reading.host_pids),
-        "#no_verdict\t%d" % len(reading.run.no_verdict),
+        "#no_verdict\t%d" % len(run.no_verdict),
+        "#failures\t%d" % len(run.failures),
     ]
     for reason in reading.batch_reasons:
         lines.append("#reason\t%s" % reason)
+    # EVERY failure in the batch, not only the expected ones. The baseline
+    # guard needs this: a focused suite that is red on a test no mutation names
+    # still means every verdict in the run is worthless, and reporting only the
+    # named ones would hide exactly that.
+    for key in sorted(run.failures):
+        lines.append("#failure\t%s" % run.failures[key].name)
     for name, state in outcomes:
         lines.append("%s\t%s" % (state, name))
     pathlib.Path(str(path)).write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -387,7 +395,17 @@ def write_outcomes(path, reading, outcomes):
 
 def read_names(path):
     text = pathlib.Path(str(path)).read_text(encoding="utf-8")
-    return [line for line in text.split("\n") if line != ""]
+    names = [line for line in text.split("\n") if line != ""]
+    # The outcome file is TAB-separated and the shell reads it with awk, so a
+    # name carrying a TAB would be silently truncated into a name that matches
+    # nothing — which is how the `;`-in-a-display-name fault got into this
+    # battery in the first place. Refuse rather than mangle.
+    bad = [n for n in names if "\t" in n]
+    if bad:
+        raise CannotEvaluate(
+            "an expected test name contains a TAB, which this file format "
+            "cannot carry: %r" % bad[0])
+    return names
 
 
 # ---------------------------------------------------------------------------
