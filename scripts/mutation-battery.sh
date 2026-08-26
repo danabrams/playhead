@@ -3914,7 +3914,13 @@ T_HX6N_SQL_AGREES="the SQL split and the Swift split agree on one fixture"
 T_HX6N_RUNNER_STAMPS="every row the runner persists carries attribution, and the id resolves to a real job"
 # playhead-1gu0 (GU series): the V65 rename of `runCorrelationId` -> `backfillJobId`.
 T_1GU0_RENAME="V65: a pre-V65 row keeps its job id across the runCorrelationId -> backfillJobId rename"
-T_1GU0_ONE_ID="V65: one backfill job id spans re-screenings, and transcriptVersion is what separates them"
+# There is deliberately NO variable for the sibling rail `V65: one backfill job
+# id spans re-screenings…`. One was defined here and referenced by nothing, which
+# reads as an expectation somebody forgot to wire up. It is not: that rail opens
+# a store at the HEAD shape, where the rename helper returns before its first
+# statement, so no GU mutant can reach it — measured, not assumed (GU02 leaves it
+# green). The rail earns its place by refusing a vacuous assertion, not by being
+# a mutant's victim.
 T_HX6N_FOREGROUND_RUN="a foreground run lands on the foreground side of the same split"
 T_HX6N_BROKEN_PROVIDER="a provider that breaks the vocabulary yields unattributed rows, not guessed ones"
 T_HX6N_LADDER_RAIL="Cycle 4 H1 RAIL: the isolated ladder does NOT run createTables()"
