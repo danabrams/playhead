@@ -29765,11 +29765,39 @@ run_focused() {
 # place in the repo that both creates and removes directories under
 # /private/tmp, and CLAUDE.md's rm -rf rail says the path is proved, not
 # assumed.
+#
+# TWO CHECKS, BECAUSE `case`'s `*` CROSSES `/`. `"$WORK"/*.xcresult` is matched
+# by `$WORK/../../../etc/x.xcresult` — a glob in a `case` pattern is not a path
+# component. The first check proves the PREFIX and the second proves the
+# REMAINDER IS A BARE NAME, which is the part that cannot climb out. Both
+# callers pass `$WORK/baseline.xcresult` or `$WORK/batch-<digits>.xcresult`
+# (every one of the 1,109 MUTATIONS records carries a numeric batch field, so
+# `$b` cannot smuggle a separator), so this refuses nothing that exists today:
+# it is the rail, not a filter.
+#
+# And it SAYS what it removed. A bundle is evidence; a bundle that vanishes
+# without a line is a reader concluding the run never wrote one.
 drop_bundle() {
-  case "$1" in
-    "$WORK"/*.xcresult) rm -rf "$1" ;;
-    *) echo "mutation-battery: refusing to remove a bundle outside \$WORK: $1" >&2 ;;
+  local path="$1" rest
+  if [ -z "${WORK:-}" ]; then
+    echo "mutation-battery: refusing to remove a bundle with no \$WORK set: $path" >&2
+    return 1
+  fi
+  case "$path" in
+    "$WORK"/*.xcresult) rest="${path#"$WORK"/}" ;;
+    *)
+      echo "mutation-battery: refusing to remove a bundle outside \$WORK: $path" >&2
+      return 1 ;;
   esac
+  case "$rest" in
+    */*|.*)
+      echo "mutation-battery: refusing to remove a bundle that is not a bare name" >&2
+      echo "                  under \$WORK ($WORK): $path" >&2
+      return 1 ;;
+  esac
+  [ -d "$path" ] || return 0
+  rm -rf "$path"
+  echo "  dropped the .xcresult bundle (nothing here is evidence): $path"
 }
 
 # Score one batch's artifacts. Exit 0 = the batch supports verdicts, 3 = VOID,

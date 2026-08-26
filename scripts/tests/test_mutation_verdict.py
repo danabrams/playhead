@@ -685,6 +685,122 @@ class PreservedSpecimenTests(VerdictTestCase):
 
 
 # ---------------------------------------------------------------------------
+# `drop_bundle` — the one rm -rf this bead added
+# ---------------------------------------------------------------------------
+BATTERY = SCRIPTS / "mutation-battery.sh"
+
+
+def shell_function(name):
+    """The SHIPPED text of one function, lifted out of the battery.
+
+    Extracted rather than re-typed: a rail that re-types the function tests the
+    typing. The block runs from `name() {` to the first line that is exactly
+    `}`, which is this script's uniform style.
+    """
+    lines = BATTERY.read_text(encoding="utf-8").split("\n")
+    start = None
+    for i, line in enumerate(lines):
+        if line.startswith(name + "() {"):
+            start = i
+            break
+    if start is None:
+        raise AssertionError("%s() is not in %s any more" % (name, BATTERY))
+    for j in range(start + 1, len(lines)):
+        if lines[j] == "}":
+            return "\n".join(lines[start:j + 1])
+    raise AssertionError("%s() has no closing brace" % name)
+
+
+class DropBundleTests(unittest.TestCase):
+    """CLAUDE.md's rm -rf rail: the path is PROVED, not assumed.
+
+    `case`'s `*` crosses `/`, so `"$WORK"/*.xcresult` on its own is matched by
+    `$WORK/../../x.xcresult`. These drive the shipped function text — not a
+    re-typing of it — with arguments that climb out, and assert the target
+    SURVIVES.
+    """
+
+    def setUp(self):
+        self.dir = pathlib.Path(tempfile.mkdtemp(prefix="playhead-mv-drop."))
+        self.addCleanup(shutil.rmtree, str(self.dir), True)
+        self.work = self.dir / "work"
+        self.work.mkdir()
+
+    def drop(self, path, work=None):
+        script = "%s\nWORK=%s\ndrop_bundle %s\n" % (
+            shell_function("drop_bundle"),
+            "'%s'" % (self.work if work is None else work),
+            "'%s'" % path)
+        proc = subprocess.run(["bash", "-uo", "pipefail", "-c", script],
+                              capture_output=True, text=True)
+        return proc
+
+    def test_a_bundle_under_work_is_removed_and_the_removal_is_announced(self):
+        target = self.work / "batch-7.xcresult"
+        target.mkdir()
+        proc = self.drop(target)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertFalse(target.exists())
+        self.assertIn("dropped the .xcresult bundle", proc.stdout)
+
+    def test_a_path_that_climbs_out_with_dotdot_is_refused(self):
+        outside = self.dir / "outside.xcresult"
+        outside.mkdir()
+        proc = self.drop(str(self.work) + "/../outside.xcresult")
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertTrue(outside.exists(), "drop_bundle climbed out of $WORK")
+        self.assertIn("refusing", proc.stderr)
+
+    def test_a_nested_path_under_work_is_refused(self):
+        nested = self.work / "sub"
+        nested.mkdir()
+        target = nested / "x.xcresult"
+        target.mkdir()
+        proc = self.drop(target)
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertTrue(target.exists())
+
+    def test_a_path_outside_work_entirely_is_refused(self):
+        other = self.dir / "other.xcresult"
+        other.mkdir()
+        proc = self.drop(other)
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertTrue(other.exists())
+
+    def test_an_empty_WORK_removes_nothing(self):
+        # `WORK=` makes the prefix pattern `/*.xcresult`, which matches every
+        # absolute path on the box.
+        target = self.dir / "x.xcresult"
+        target.mkdir()
+        proc = self.drop(target, work="")
+        self.assertEqual(proc.returncode, 1, proc.stdout + proc.stderr)
+        self.assertTrue(target.exists())
+
+    def test_a_bundle_that_is_not_there_is_not_an_error_and_claims_nothing(self):
+        proc = self.drop(self.work / "batch-9.xcresult")
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertNotIn("dropped", proc.stdout)
+
+    def test_every_call_site_passes_a_bare_name_under_work(self):
+        # ANTI-VACUITY, and the half the rails above cannot see: the guard is
+        # only worth having if the CALLERS stay inside it. Both do, and the
+        # batch component is numeric in all 1,109 MUTATIONS records.
+        text = BATTERY.read_text(encoding="utf-8")
+        calls = re.findall(r"^\s*drop_bundle (.+)$", text, re.M)
+        self.assertEqual(sorted(set(calls)), ['"$BASE_BUNDLE"', '"$BUNDLE"'])
+        for var, literal in (("BASE_BUNDLE", '"$WORK/baseline.xcresult"'),
+                             ("BUNDLE", '"$WORK/batch-$b.xcresult"')):
+            self.assertIn("%s=%s" % (var, literal), text)
+        records = re.search(r"^MUTATIONS=\(\n(.*?)^\)\n", text, re.S | re.M).group(1)
+        batches = [line.strip().strip('"').split("|")[1]
+                   for line in records.split("\n")
+                   if line.strip() and not line.strip().startswith("#")
+                   and len(line.strip().strip('"').split("|")) > 1]
+        self.assertGreater(len(batches), 1000)
+        self.assertEqual([b for b in batches if not b.isdigit()], [])
+
+
+# ---------------------------------------------------------------------------
 # The shell half — the real battery, a stubbed gate
 # ---------------------------------------------------------------------------
 _SANDBOX = {}
