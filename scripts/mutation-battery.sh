@@ -29896,6 +29896,15 @@ note_bundle_presence() {
     return 0
   fi
   CONSOLE_ONLY=1
+  # AND WHICH RUNS, not merely that there was one (playhead-gjlp0 R5). One flag
+  # is set by the baseline and by every batch alike, and the SURVIVED epilogue
+  # then said "Those verdicts came off the CONSOLE alone" — false whenever it
+  # was the BASELINE that lost its bundle and the batches kept theirs. R2 fixed
+  # the header of that note to name RUNS and left the verdict sentence claiming
+  # the stronger thing; every console-only rail drops BOTH bundles, so the
+  # population that would have shown it was never driven. The list is what lets
+  # the epilogue be true in both worlds without a second flag.
+  CONSOLE_ONLY_WHICH="${CONSOLE_ONLY_WHICH}${CONSOLE_ONLY_WHICH:+, }$what"
   echo "  NO .xcresult BUNDLE — $what will be scored off the CONSOLE ALONE."
   echo "    asked fast-gate for: $bundle"
   echo "    A console-only reading is the weaker instrument: it cannot see a verdict"
@@ -29989,6 +29998,10 @@ console_only_note() {
   [ "$CONSOLE_ONLY" -eq 1 ] || return 0
   echo "AND AT LEAST ONE RUN BEHIND THIS TABLE HAD NO .xcresult BUNDLE — the block" >&2
   echo "above names which, and the baseline reaches that arm as well as any batch." >&2
+  # Named here as well as in the block above, because on a run where the fault
+  # is systemic that block is one paragraph per batch and this is the foot of
+  # the output (playhead-gjlp0 R5).
+  echo "    scored off the CONSOLE alone: $CONSOLE_ONLY_WHICH" >&2
   printf '%s\n' "$1" >&2
   echo "Find out why the bundle is missing: either PLAYHEAD_RESULT_BUNDLE is not" >&2
   echo "reaching fast-gate, or xcodebuild died before it could write one." >&2
@@ -30219,6 +30232,10 @@ FATAL=0
 # than a mode, and the SURVIVED epilogue at the foot of this script used to
 # assert the bundle was the verdict source unconditionally.
 CONSOLE_ONLY=0
+# WHICH runs, in order — "the baseline", "batch 7". The flag alone cannot tell
+# a baseline that lost its bundle from a batch that did, and the SURVIVED
+# epilogue was making a claim that needs exactly that distinction (R5).
+CONSOLE_ONLY_WHICH=""
 # Cleared by `restore_and_verify` and never re-set; see the note at the final
 # restore for why a repaired tree must not un-fail the run.
 RESTORE_OK=1
@@ -30845,9 +30862,11 @@ MSG
   # claim about where a verdict came from, printed without checking, in the one
   # place a reader decides whether to trust a SURVIVED — this bead's own defect
   # one layer out from the code it fixed.
-  console_only_note "Those verdicts came off the CONSOLE alone: still a positive \`✔\` rather than
-the pre-gjlp0 reading of silence, but the weaker instrument. Read the batch log
-before acting on a SURVIVED from this run."
+  console_only_note "A SURVIVED from any run named above came off the CONSOLE alone: still a
+positive \`✔\` rather than the pre-gjlp0 reading of silence, but the weaker
+instrument. If the only run named is THE BASELINE, the SURVIVED verdicts below
+still rest on their own batch's bundle. Read the batch log beside each SURVIVED
+before acting on it."
   exit 1
 fi
 if [ "$DRY_RUN" -eq 1 ]; then

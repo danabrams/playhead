@@ -1418,7 +1418,12 @@ fi
 # under test and the battery could report a bundle it never passed.
 if [ -n "${PLAYHEAD_RESULT_BUNDLE:-}" ]; then
   echo "$PLAYHEAD_RESULT_BUNDLE" >>"$MB_STUB_DIR/bundle-paths"
-  if [ -f "$MB_STUB_DIR/make-bundle" ]; then
+  # MB_STUB_BUNDLE_FROM lets a rail withhold the bundle for the first N-1 calls
+  # — i.e. give the BASELINE none and every batch one. Until playhead-gjlp0 R5
+  # no rail could build that shape, so the mixed run was outside the population
+  # the console-only rails measured, and the SURVIVED epilogue's claim about
+  # where those verdicts came from was never driven against it.
+  if [ -f "$MB_STUB_DIR/make-bundle" ] && [ "$N" -ge "${MB_STUB_BUNDLE_FROM:-1}" ]; then
     mkdir -p "$PLAYHEAD_RESULT_BUNDLE"
     : >"$PLAYHEAD_RESULT_BUNDLE/Info.plist"
   fi
@@ -2141,6 +2146,43 @@ class ShellConsoleOnlyTests(ShellBatteryHarness):
         # The claim it replaced. A reader who trusts this sentence would go
         # looking for a bundle that was never written.
         self.assertNotIn("read\nfrom the batch's own .xcresult bundle", out)
+        self.assertEqual(proc.returncode, 1, out[-4000:])
+        # playhead-gjlp0 R5: the epilogue names WHICH runs, and here it is both.
+        # This is the anti-fabrication half of the rail below — a list that said
+        # "the baseline" on every run would pass that one and mean nothing.
+        self.assertIn("scored off the CONSOLE alone: the baseline, batch", out, out[-4000:])
+
+    def test_a_BASELINE_only_bundle_loss_does_not_claim_the_SURVIVED_came_off_the_console(self):
+        """playhead-gjlp0 R5 — R2's own defect, in the sentence R2 wrote to fix it.
+
+        `CONSOLE_ONLY` is one flag set by the baseline AND by every batch, and
+        the SURVIVED epilogue said `Those verdicts came off the CONSOLE alone`.
+        When it is the BASELINE that lost its bundle and the batches kept
+        theirs, that is false: the SURVIVED verdicts came off their own batch's
+        bundle. R2 fixed the epilogue's HEADER to name RUNS and left the
+        verdict sentence claiming the stronger thing — and it was invisible
+        because every console-only rail here drops BOTH bundles, so the mixed
+        run was outside the population they measured. The same monoculture
+        finding R1 and R2 each made once about the rails.
+        """
+        green = console(tests=[(self.expect, "passed")])
+        env = self.stub_xcresult(bundle_payload([(self.expect, gb.XCRESULT_PASSED, [])]))
+        env["MB_STUB_BUNDLE_FROM"] = "2"       # the baseline gets none; batch 1 does
+        proc = self.run_battery(green, green, env=env)
+        out = self.out(proc)
+        self.assertEqual(self.verdict_of(proc), "SURVIVED", out[-4000:])
+        self.assertIn("NO .xcresult BUNDLE — the baseline", out, out[-4000:])
+        self.assertNotIn("NO .xcresult BUNDLE — batch", out, out[-4000:])
+        # The list names the baseline and NOTHING else.
+        named = [line for line in out.split("\n") if "scored off the CONSOLE alone:" in line]
+        self.assertEqual(len(named), 1, out[-4000:])
+        self.assertEqual(named[0].split(":", 1)[1].strip(), "the baseline", out[-4000:])
+        # And the verdict sentence no longer says these verdicts came off it.
+        self.assertNotIn("Those verdicts came off the CONSOLE alone", out)
+        self.assertIn("If the only run named is THE BASELINE", out, out[-4000:])
+        # The batch really was scored off its bundle — otherwise this rail would
+        # pass for the wrong reason.
+        self.assertIn("verdicts read from: the .xcresult bundle", out, out[-4000:])
         self.assertEqual(proc.returncode, 1, out[-4000:])
 
 
