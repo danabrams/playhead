@@ -564,7 +564,7 @@ enum SemanticSweepMarkComposer {
     /// same queries: 3 of 301 coarse and at most 3 of 53 `passB`.) The
     /// "3 of the 22 marks deducted" figure is from the same pre-kg6i run and
     /// has NOT been re-derived; correcting it needs a composer run rather than
-    /// a query, so it is left for the bead that re-measures the sweep.
+    /// a query, so it is left to **playhead-57ern**, filed for exactly that.
     ///
     /// IT CAN ONLY DEDUCT, AND THAT IS THE POINT. The smoothing means
     /// unanimity returns exactly 1.0 whether the window was screened once or
