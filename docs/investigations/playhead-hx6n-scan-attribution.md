@@ -42,7 +42,7 @@ this note said four and missed `makeRefinementFailureScanResult` and the two
 and every one of them already passes it — as `reuseScope: jobId`, which feeds
 `semanticScanReuseKeyHash` and is then **discarded**. The join key was in hand at
 every single write site and was being hashed into an opaque digest instead of
-stored. So the correlation id costs no new plumbing: it is the value that was
+stored. So the backfill job id costs no new plumbing: it is the value that was
 already there.
 
 `reuseScope` is not the only in-memory-only field on the struct —

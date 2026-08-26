@@ -317,11 +317,11 @@ struct BackgroundGrantBudget: Sendable, Equatable {
     /// Two limits on those figures, named because the join is by time interval
     /// rather than by key: `semantic_scan_results.backfillJobId` (spelled
     /// `runCorrelationId` before schema V65) is an `fm-*` job id and matches no
-    /// `runId`, and **37 of the 610 scan rows land
-    /// inside no recorded run at all** (6.1 %), so they are outside both
-    /// columns. And `createdAt` lags call completion, so the derived start is
-    /// an UPPER bound — which biases `into-grant` up and the true remaining
-    /// DOWN, i.e. against the conclusion drawn here.
+    /// `runId`, and **37 of the 610 scan rows land inside no recorded run at
+    /// all** (6.1 %), so they are outside both columns. And `createdAt` lags
+    /// call completion, so the derived start is an UPPER bound — which biases
+    /// `into-grant` up and the true remaining DOWN, i.e. against the conclusion
+    /// drawn here.
     ///
     /// This reproduces playhead-ejr7's finding at a coarser granularity: its
     /// per-FM-call sweep found `P(verdict | grant remaining)` flat at
