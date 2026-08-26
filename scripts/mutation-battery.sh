@@ -2870,7 +2870,33 @@ on_exit() {
   # interleaving the lock exists to close, reintroduced at the last moment.
   mb_lock_release
   if [ "$KEEP_WORK" -eq 1 ]; then
+    # SAY WHAT IS BEING KEPT AND HOW BIG IT IS (playhead-gjlp0 R4). This line
+    # said "per-batch xcodebuild logs", and it was the whole of what a reader
+    # deciding whether to reclaim had to go on. Since this bead the directory
+    # ALSO holds one `.xcresult` bundle per batch that produced anything other
+    # than a plain KILL — and a bundle is the biggest thing in here: a full-plan
+    # one measures 104-122 MB on this box, and a focused one runs about a
+    # quarter of that (the cost is ~4 KiB per stored object and the object count
+    # tracks the test count; measured, 26,088 objects and 113.9 MiB for 12,603
+    # tests). So on the crash-looping run this bead exists for — where EVERY
+    # batch is VOID and every bundle is kept — the bundles are the majority of
+    # what is left behind, under a line that named only logs. A category where a
+    # measurement belongs is this file's own subject one layer out.
+    local kept_size kept_bundles
     echo "mutation-battery: per-batch xcodebuild logs kept in $WORK" >&2
+    if [ -d "$WORK" ]; then
+      kept_size="$(du -sh "$WORK" 2>/dev/null | awk '{print $1}')"
+      kept_bundles="$(find "$WORK" -maxdepth 1 -name '*.xcresult' 2>/dev/null | wc -l | tr -d ' ')"
+      echo "mutation-battery:   ${kept_size:-?} in it, including $kept_bundles .xcresult bundle(s)." >&2
+      echo "mutation-battery:   scripts/disk-cleanup.sh sweeps it at 3 days; remove it by hand" >&2
+      echo "mutation-battery:   once the verdicts above have been read." >&2
+    else
+      # Never print "0 bundles, ? in it" for a directory that is not there —
+      # a measurement of an absence read as a measurement of a thing, which is
+      # the whole subject of this bead.
+      echo "mutation-battery:   …EXCEPT IT IS NOT THERE. Something removed it under this" >&2
+      echo "mutation-battery:   run; the evidence for every verdict above is gone." >&2
+    fi
   else
     rm -rf "$WORK"
   fi
@@ -29745,7 +29771,22 @@ restore_and_verify() {
 # `gate_baseline.parse_run` applies the same cut internally, so the scorer does
 # not need this; it survives because the `Test run with` guard below runs BEFORE
 # the scorer and must read the same attempt the scorer will.
-last_attempt() {
+#
+# IT IS A PREDICATE NOW, AND THE COPY IT USED TO WRITE IS GONE (playhead-gjlp0
+# R4). This was `last_attempt "$LOG" >"$LOG.last"` followed by a `grep -q`, and
+# `$LOG.last` had three readers: `extract_ran`, `extract_failures` and that
+# grep. This bead deleted the first two, which left a BYTE-EXACT DUPLICATE of
+# the largest artifact in `$WORK` being written once per batch so one `grep -q`
+# could read it. Measured on a preserved 37-batch run
+# (`/private/tmp/playhead-mutation-battery.9NQnSD`): **178.9 MB of `.log` beside
+# 178.9 MB of `.log.last`**, exactly half of that directory. The duplicate was
+# cheap while `$WORK` held only logs; this bead also started keeping each
+# non-KILL batch's `.xcresult` there, so it is not.
+#
+# The cut and the search happen in ONE pass in one process, so the answer is
+# still a property of the LAST ATTEMPT — which is the whole reason the cut
+# exists — and nothing is written to disk.
+last_attempt_ran_tests() {
   python3 -c '
 import sys
 lines = open(sys.argv[1], encoding="utf-8", errors="replace").readlines()
@@ -29753,7 +29794,7 @@ cut = 0
 for i, line in enumerate(lines):
     if "fast-gate: wedged simulator" in line:
         cut = i + 1
-sys.stdout.writelines(lines[cut:])
+sys.exit(0 if any("Test run with" in line for line in lines[cut:]) else 1)
 ' "$1"
 }
 
@@ -30229,8 +30270,7 @@ if [ "$DRY_RUN" -eq 0 ] && [ "${PLAYHEAD_MB_SKIP_BASELINE:-0}" != "1" ]; then
   run_focused "$BASE_LOG" "$BASE_BUNDLE"
   BASE_RC=$?
   BUILD_COUNT=$((BUILD_COUNT + 1))
-  last_attempt "$BASE_LOG" >"$BASE_LOG.last"
-  if ! grep -q "Test run with" "$BASE_LOG.last"; then
+  if ! last_attempt_ran_tests "$BASE_LOG"; then
     # playhead-pu7e: this used to print "the baseline did not run tests", which
     # is a claim ABOUT THE TREE, and then grep `error:|BUILD FAILED|Killed: 9`.
     # A concurrent battery matches none of those and a wedged simulator matches
@@ -30478,8 +30518,7 @@ for b in "${BATCH_IDS[@]}"; do
   RC=$?
   BUILD_COUNT=$((BUILD_COUNT + 1))
 
-  last_attempt "$LOG" >"$LOG.last"
-  if ! grep -q "Test run with" "$LOG.last"; then
+  if ! last_attempt_ran_tests "$LOG"; then
     # playhead-pu7e: "(build failure?)" was a guess printed as a finding. See
     # the baseline branch above.
     mb_diagnose_no_tests "$LOG" "$RC" "batch $b"
@@ -30751,10 +30790,16 @@ each VOID above for which of the two it was. Either way the mutation was never
 evaluated in EITHER direction: do not record it as KILLED and do not chase it as
 a coverage hole.
 
-The remedy is to run that batch again. If it recurs, the mutation itself is
-probably killing the test host, which is a real finding about the mutation and
-not about the rail: split it away from the test that reaches the trap and record
-why the remaining rail has no mutant (playhead-4xmz's DW18 is the worked case).
+The remedy is USUALLY to run that batch again — UNLESS A REASON BESIDE A ROW
+ABOVE SAYS OTHERWISE, and one of them does: a batch whose .xcresult used a
+result string the parser cannot read says so and says re-running will not
+change it (playhead-gjlp0 R4). Read the row before re-running; this paragraph
+is the general case, not an override of a stated reason.
+
+Where re-running IS the remedy: if it recurs, the mutation itself is probably
+killing the test host, which is a real finding about the mutation and not about
+the rail: split it away from the test that reaches the trap and record why the
+remaining rail has no mutant (playhead-4xmz's DW18 is the worked case).
 MSG
   console_only_note "READ THAT BEFORE RE-RUNNING. A console-only reading is the one that
 MANUFACTURES a NO VERDICT — xcodebuild splices the app's own output through a

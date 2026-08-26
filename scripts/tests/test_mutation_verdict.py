@@ -51,6 +51,7 @@ ever has to get materially cheaper again, the honest lever is the battery's
 fork-per-record preflight, not the rails.
 """
 
+import io
 import os
 import pathlib
 import re
@@ -681,6 +682,62 @@ class BundleTests(VerdictTestCase):
         _r, states = self.read(log, ["A", "B"], xcresult=path, reader=reader)
         self.assertEqual(states["A"], mv.NO_VERDICT)
         self.assertEqual(states["B"], mv.PASSED)
+
+    def test_a_result_string_the_parser_cannot_read_VOIDS_the_batch_and_says_so(self):
+        # playhead-gjlp0 R4. `gate_baseline` files a Test Case whose `result` is
+        # none of Passed/Failed/Skipped/Expected-Failure into `run.unjudged`,
+        # keyed and carrying the word it could not read, and unions its key into
+        # the roster — so the test reads NO-VERDICT, which is right. What was
+        # wrong is that the BATCH read OK, so the run said "the expected test
+        # reached NO VERDICT" and its epilogue sent the reader to re-run and
+        # then to suspect the mutation of killing the test host. Re-running
+        # cannot clear an unreadable result string.
+        log = self.write_log(console(tests=[("A", "started")]))
+        path, reader = self.bundle(bundle_payload([("A", "Bikeshed", [])]))
+        reading, states = self.read(log, ["A"], xcresult=path, reader=reader)
+        self.assertEqual(states["A"], mv.NO_VERDICT)
+        self.assertEqual(reading.batch_state, mv.BATCH_VOID, reading.batch_reasons)
+        reason = [r for r in reading.batch_reasons if "does not recognise" in r]
+        self.assertEqual(len(reason), 1, reading.batch_reasons)
+        # The word it could not read, the test's NAME rather than its key, and
+        # the remedy — which is the opposite of every other VOID reason's.
+        self.assertIn("'Bikeshed'", reason[0])
+        self.assertIn("e.g. A ", reason[0])
+        self.assertNotIn("swift-testing::", reason[0])
+        self.assertIn("RE-RUNNING WILL NOT CHANGE IT", reason[0])
+        # AND WHAT TO DO INSTEAD. Mutant R4-5 survived the first cut of this
+        # rail: it pinned the consequence ("do not re-run") and left the ACTION
+        # unpinned, so an edit that deleted the only sentence saying where the
+        # fix goes was invisible. A reason that only says what will not help is
+        # half a reason.
+        self.assertIn("gate_baseline.py", reason[0])
+        self.assertIn("XCRESULT_", reason[0])
+        out = io.StringIO()
+        mv.render(reading, [("A", states["A"])], out)
+        self.assertIn("1 unreadable", out.getvalue())
+
+    def test_a_bundle_whose_RESULTS_ARE_ALL_READABLE_never_says_that(self):
+        # The anti-fabrication half. A reason that fires on a healthy batch
+        # would be worse than no reason at all: it is checked here in the
+        # direction that must stay silent, over all four spellings the parser
+        # does recognise. Measured before the arm was written — `unjudged` is
+        # EMPTY across four preserved full-plan bundles, ~48,300 nodes.
+        log = self.write_log(console(tests=[("A", "started"), ("B", "started"),
+                                            ("C", "started"), ("D", "started")]))
+        path, reader = self.bundle(bundle_payload([
+            ("A", gb.XCRESULT_PASSED, []),
+            ("B", gb.XCRESULT_FAILED, ["Expectation failed: x"]),
+            ("C", gb.XCRESULT_SKIPPED, []),
+            ("D", gb.XCRESULT_EXPECTED_FAILURE, []),
+        ]))
+        reading, _s = self.read(log, ["A"], xcresult=path, reader=reader)
+        self.assertEqual(reading.run.unjudged, {})
+        self.assertEqual([r for r in reading.batch_reasons
+                          if "does not recognise" in r], [])
+        self.assertEqual(reading.batch_state, mv.BATCH_OK, reading.batch_reasons)
+        out = io.StringIO()
+        mv.render(reading, [("A", mv.PASSED)], out)
+        self.assertIn("0 unreadable", out.getvalue())
 
 
 class FreshnessTests(VerdictTestCase):
@@ -1409,7 +1466,14 @@ class ShellBatteryHarness(unittest.TestCase):
 
     @staticmethod
     def _reap_work_dir(proc):
-        """Remove the $WORK the battery kept.
+        """Remove the $WORK the battery kept, RECORDING WHAT WAS IN IT FIRST.
+
+        `proc.work_dir_files` is the listing, so a rail can assert on what a run
+        LEAVES BEHIND — which is a quantity no other rail here can reach, and
+        the one playhead-gjlp0 R4's disk findings are about. Without it the only
+        evidence of what the run kept is the sentence the run prints about
+        itself, and a sentence about a directory is exactly the kind of claim
+        this bead keeps finding printed without checking.
 
         Every rail here deliberately produces a non-KILL outcome, and the
         battery sets KEEP_WORK=1 on exactly those — so a full pass leaves a
@@ -1419,11 +1483,16 @@ class ShellBatteryHarness(unittest.TestCase):
         is taken from the battery's OWN line and re-checked against the prefix
         before anything is removed.
         """
+        proc.work_dir_files = None
         for line in (proc.stdout + proc.stderr).split("\n"):
             if "logs kept in " not in line:
                 continue
             kept = line.split("logs kept in ", 1)[1].strip()
             if kept.startswith("/private/tmp/playhead-mutation-battery."):
+                try:
+                    proc.work_dir_files = sorted(os.listdir(kept))
+                except OSError:
+                    proc.work_dir_files = None
                 shutil.rmtree(kept, ignore_errors=True)
 
     def out(self, proc):
@@ -1487,6 +1556,14 @@ class ShellLadderTests(ShellBatteryHarness):
         self.assertEqual(self.verdict_of(proc), "VOID", out[-4000:])
         self.assertIn("reached NO VERDICT", out, out[-4000:])
         self.assertEqual(proc.returncode, 5, out[-4000:])
+        # playhead-gjlp0 R4, pinned here rather than in a rail of its own
+        # because the epilogue is printed on EVERY void and this run already
+        # has one. R4 added a batch reason whose remedy is the OPPOSITE of the
+        # epilogue's ("re-running will not change it"), so the epilogue stopped
+        # being unconditionally true the moment that arm landed — two
+        # contradictory instructions in one output, which is what R2 closed for
+        # the failure count and the failure list.
+        self.assertIn("UNLESS A REASON BESIDE A ROW", out, out[-4000:])
 
     def test_a_positive_pass_still_reports_SURVIVED_and_names_its_log(self):
         green = console(tests=[(self.expect, "passed")])
@@ -1496,6 +1573,40 @@ class ShellLadderTests(ShellBatteryHarness):
         self.assertIn("still green:", out)
         self.assertRegex(out, r"evidence: \S*batch-\d+\.log")
         self.assertEqual(proc.returncode, 1, out[-4000:])
+
+        # --- playhead-gjlp0 R4: WHAT THE RUN KEEPS -------------------------
+        # Asserted on THIS run rather than in a class of its own, deliberately:
+        # every battery invocation costs ~12-15 s of fork-per-record preflight,
+        # and a rail whose whole subject is disk cost should not spend one to
+        # re-create a kept work directory this rail already has. It needs a
+        # SURVIVED, which is what makes `KEEP_WORK=1`, so this is the run.
+        #
+        # TWO PROPERTIES OF THE DIRECTORY A KEPT RUN LEAVES BEHIND.
+        #
+        # 1. NO `.log.last`. That file was `last_attempt`'s output and had three
+        #    readers; this bead deleted two of them and left a BYTE-EXACT
+        #    duplicate of the largest artifact in $WORK being written once per
+        #    batch so one `grep -q` could read it. Measured on a preserved
+        #    37-batch run: 178.9 MB of `.log` beside 178.9 MB of `.log.last`,
+        #    exactly half the directory. It is a predicate now.
+        # 2. THE KEPT LINE COUNTS WHAT IS ACTUALLY THERE. It used to say
+        #    "per-batch xcodebuild logs", full stop, while the directory had
+        #    started holding an `.xcresult` per non-KILL batch — the biggest
+        #    thing in it. A category where a measurement belongs.
+        files = proc.work_dir_files
+        self.assertIsNotNone(files, "the run kept no work dir to measure:\n" + out[-2000:])
+        self.assertEqual([f for f in files if f.endswith(".last")], [],
+                         "a duplicate of the batch log is being kept: %r" % (files,))
+        bundles = [f for f in files if f.endswith(".xcresult")]
+        stated = re.search(r"including (\d+) \.xcresult bundle\(s\)", out)
+        self.assertIsNotNone(stated, "the kept-work line states no bundle count:\n"
+                             + out[-2000:])
+        self.assertEqual(int(stated.group(1)), len(bundles),
+                         "the line claims %s bundles and the directory holds %d: %r"
+                         % (stated.group(1), len(bundles), files))
+        # And a size, because "logs kept in <path>" is what a reader deciding
+        # whether to reclaim had to go on.
+        self.assertRegex(out, r"mutation-battery:\s+\S+ in it, including")
 
     def test_a_real_failure_still_reports_KILLED(self):
         green = console(tests=[(self.expect, "passed")])
@@ -1852,6 +1963,26 @@ class ShellBundleTests(ShellBatteryHarness):
         self.assertNotIn("NO .xcresult BUNDLE", out, out[-4000:])
         self.assertNotIn("AND AT LEAST ONE RUN BEHIND THIS TABLE HAD NO", out, out[-4000:])
         self.assertEqual(proc.returncode, 1, out[-4000:])
+
+        # --- playhead-gjlp0 R4: THE KEPT-WORK LINE COUNTS A REAL BUNDLE -----
+        # The mirror of the count assertion on `ShellLadderTests`'s console-only
+        # SURVIVED, and it is what makes that one non-vacuous: there the answer
+        # is 0, which a hard-coded 0 would satisfy. Here a bundle really is kept
+        # — this batch is SURVIVED, so `BATCH_KEEP_EVIDENCE=1` and `drop_bundle`
+        # is not called — so the line has to have counted something.
+        files = proc.work_dir_files
+        self.assertIsNotNone(files, "the run kept no work dir:\n" + out[-2000:])
+        bundles = [f for f in files if f.endswith(".xcresult")]
+        self.assertGreaterEqual(len(bundles), 1,
+                                "a SURVIVED batch dropped its bundle: %r" % (files,))
+        stated = re.search(r"including (\d+) \.xcresult bundle\(s\)", out)
+        self.assertIsNotNone(stated, "the kept-work line states no bundle count:\n"
+                             + out[-2000:])
+        self.assertEqual(int(stated.group(1)), len(bundles),
+                         "the line claims %s bundles and the directory holds %d: %r"
+                         % (stated.group(1), len(bundles), files))
+        self.assertEqual([f for f in files if f.endswith(".last")], [],
+                         "a duplicate of the batch log is being kept: %r" % (files,))
 
     def test_a_bundle_STATED_crash_is_VOID_and_never_a_KILL(self):
         # playhead-4xmz's DW18: a trapping mutant takes the host down and

@@ -48,8 +48,21 @@ Per expected test:
 Per batch:
 
     OK          one test host, a terminal marker, no signal death.
-    VOID        the host was replaced, or died, or the run never reported.
+    VOID        the host was replaced, or died, or the run never reported, or
+                the bundle used a result string this parser cannot read.
                 A batch with host restarts is not a verdict about any mutation.
+
+A NINTH READING WOULD HAVE BEEN A LIE, SO IT IS A BATCH REASON INSTEAD (R4).
+A Test Case node whose `result` is none of Passed / Failed / Skipped / Expected
+Failure lands in `run.unjudged` with the word `gate_baseline` could not read,
+and its key is still in the roster — so `_state_of_key` falls through to
+NO-VERDICT, which is conservative and right. What was wrong is that the BATCH
+read OK, so the run said `the expected test reached NO VERDICT` and its
+epilogue sent the reader to re-run and then to suspect the mutation of killing
+the test host. Re-running cannot clear an unreadable result string. It is a
+stated batch reason now, carrying its own remedy. Measured before it was added:
+`unjudged` is EMPTY across four preserved full-plan bundles (~48,300 nodes), so
+it cannot fire on a run anyone can currently read.
 
 `OK` is the only state that can be reached by silence, and it is deliberately
 the one that is CHECKED POSITIVELY: it requires a terminal marker in the log
@@ -285,6 +298,39 @@ def _classify_batch(reading, scoped, rc):
             "the .xcresult bundle STATES the host died under %d test(s), e.g. %s"
             % (len(reading.run.crashed), example)
         )
+    # A RESULT STRING THIS PARSER DOES NOT RECOGNISE IS NOT A LOST VERDICT, AND
+    # UNTIL playhead-gjlp0 R4 IT WAS SPELLED AS ONE.
+    #
+    # `parse_xcresult` records a Test Case node whose `result` is none of
+    # Passed / Failed / Skipped / Expected Failure in `run.unjudged`, keyed and
+    # carrying the word it could not read, and unions its key into the roster.
+    # `_state_of_key` therefore falls through to NO-VERDICT — the conservative
+    # answer, and the right one — but with the BATCH reading OK the run printed
+    # `VOID | the expected test reached NO VERDICT` and the epilogue told the
+    # reader to re-run and, if it recurred, to suspect the mutation of killing
+    # the test host. Both are wrong for a bundle whose verdicts this parser
+    # simply cannot read, and re-running never clears it: every subsequent run
+    # says the same thing. The module knew the answer all along — the result
+    # string is sitting in `run.unjudged` — and did not say it.
+    #
+    # It is a BATCH reason rather than an eighth per-test state because it is a
+    # property of the instrument reading the bundle, not of any one test: if
+    # xcresulttool starts spelling `Passed` some other way, every test in the
+    # batch lands here at once.
+    #
+    # MEASURED BEFORE IT WAS WRITTEN, because a reason that fires on a healthy
+    # run is worse than no reason: across four preserved full-plan bundles on
+    # this box (~48,300 Test Case nodes) `unjudged` is EMPTY in all four. This
+    # can only fire on a bundle nobody can currently read.
+    if reading.run.unjudged:
+        key = sorted(reading.run.unjudged)[0]
+        reasons.append(
+            "the .xcresult bundle reports %d test(s) with a result string this "
+            "parser does not recognise, e.g. %s -> %r. Those tests read NO-VERDICT "
+            "and are NOT lost verdicts: RE-RUNNING WILL NOT CHANGE IT. "
+            "`gate_baseline.py`'s XCRESULT_* vocabulary needs the new spelling."
+            % (len(reading.run.unjudged), _named(key), reading.run.unjudged[key])
+        )
     reading.batch_state = BATCH_VOID if reasons else BATCH_OK
 
 
@@ -363,6 +409,25 @@ def _state_of_key(run, key):
 #: name can be written two ways — the answer is the WORSE one, except that a
 #: stated FAILURE outranks everything because it is the one thing that is
 #: positive evidence the rail fired.
+#:
+#: THE COLLISION IS LIVE, NOT HYPOTHETICAL, AND THE FAILED ARM IS THE COST OF IT
+#: (measured at playhead-gjlp0 R4). A display name is the whole of a Swift
+#: Testing key, so two tests in different suites that happen to share one are
+#: ONE key to everything downstream — and `parse_xcresult` resolves a colliding
+#: pair toward the worse news, so one failing twin puts the shared key in
+#: `run.failures`. Counted off a real full-plan bundle: **63 display-name keys
+#: are claimed by more than one suite**, and **three MUTATIONS records name
+#: one** — `JC08` (2 suites) and `SF02`/`AR09` (3 suites), with at least two of
+#: each collision's suites inside `FOCUSED_SUITES`, so both twins really do run
+#: in the same focused batch. A mutation whose declared victim's NAMESAKE fails
+#: is credited KILLED, which is the false-kill shape CLAUDE.md calls silent and
+#: indistinguishable from success.
+#:
+#: It is NOT introduced here and is not fixed here: the scraper this module
+#: replaced keyed on the same display name, and the key space is
+#: `gate_baseline`'s, shared with the merge gate. Filed as `playhead-fyma7`.
+#: The SURVIVED direction is safe by construction — `PASSED` is last, so a
+#: mutation is only called a survivor when every colliding test passed.
 _PRECEDENCE = (FAILED, CRASHED, DENIED, NO_VERDICT, SKIPPED, PASSED)
 
 
@@ -390,9 +455,10 @@ def render(reading, outcomes, out):
     print("  verdicts read from: %s" % reading.verdict_source, file=out)
     print(
         "  batch census: %d started · %d passed · %d failed · %d skipped · "
-        "%d NO VERDICT · %d crashed · %d resource-denied"
+        "%d NO VERDICT · %d crashed · %d resource-denied · %d unreadable"
         % (len(run.started), len(run.passed), len(run.failures), len(run.skipped),
-           len(run.no_verdict), len(run.crashed), len(run.resource)),
+           len(run.no_verdict), len(run.crashed), len(run.resource),
+           len(run.unjudged)),
         file=out,
     )
     print(
