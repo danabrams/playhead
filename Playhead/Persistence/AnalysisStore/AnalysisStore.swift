@@ -7175,11 +7175,10 @@ actor AnalysisStore {
     // is a free-text ATTRIBUTION, not a reference. (This line used to name
     // `semantic_scan_results.jobId` alongside it. There is no such column and
     // there never was — playhead-1gu0 removed the name rather than carry it.)
-    // So after
-    // this rung a pull will show scan rows attributed to job ids that no longer
-    // exist. That is correct — those scans really were produced by those jobs —
-    // but a query joining the two will silently return nothing for pre-v44
-    // rows. No in-memory state spans the migration: it runs inside `migrate()`
+    // So after this rung a pull will show scan rows attributed to job ids that
+    // no longer exist. That is correct — those scans really were produced by
+    // those jobs — but a query joining the two will silently return nothing for
+    // pre-v44 rows. No in-memory state spans the migration: it runs inside `migrate()`
     // at store open, before any `AdmissionController` or runner exists, and the
     // scheduler keys on `analysis_jobs.workKey` rather than on a backfill id.
 
@@ -9223,11 +9222,25 @@ actor AnalysisStore {
     /// `addColumnIfNeeded` for `backfillJobId`: without the rename first, that
     /// call adds an EMPTY new column alongside a populated old one, which is
     /// mutation GU01. The V65 rung's has no `addColumnIfNeeded` under it at all;
-    /// it is there because it is the only call site `migrateOnlyForTesting()`
-    /// can reach, that path skipping `createTables()` entirely. No fixture
-    /// reaches it with `semantic_scan_results` present today, so that third call
-    /// site is currently UNEXERCISED — said out loud rather than left for a
-    /// green suite to read as coverage.
+    /// it is there because `migrateOnlyForTesting()` skips `createTables()`
+    /// entirely, so on that seam it is the only one of the three that RUNS: the
+    /// V42 rung's sits behind `if tableExists("semantic_scan_results")` AND
+    /// behind `guard observed >= 41`, and nothing in the tree is seeded at 41.
+    ///
+    /// **REACHED AND EXERCISED ARE DIFFERENT CLAIMS, AND AN EARLIER DRAFT OF
+    /// THIS PARAGRAPH SAID "no fixture reaches it with `semantic_scan_results`
+    /// present today" (playhead-1gu0 review).** Two do:
+    /// `BackgroundDownloadDropLaunchIdentityV64MigrationTests`'s
+    /// `theLadderOnlySeamReachesV64` and `aV62StoreClimbsThroughV63ToHead` each
+    /// build a full store through `migrate()`, rewind it to V63, and drive the
+    /// ladder-only seam — so the table IS present and this helper DOES run
+    /// there. It returns on its `hasNew` guard, because that store already
+    /// carries the new spelling. So the call site is reached and the RENAME
+    /// itself is not: nothing seeds `semantic_scan_results` at the OLD spelling
+    /// below V65 on the ladder-only path, and the sibling rail
+    /// (`v64RowKeepsItsJobIdAcrossTheV65Rename`) exercises the rename through
+    /// `createTables()` instead. Said out loud rather than left for a green
+    /// suite to read as coverage.
     ///
     /// Idempotent, and it declines rather than guesses in the one ambiguous
     /// state. If BOTH spellings exist the new one wins and the old is left
