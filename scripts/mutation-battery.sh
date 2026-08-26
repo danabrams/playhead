@@ -12669,6 +12669,25 @@ MUTATIONS=(
   # reads 64. Predicted: the two ladder-climb rails, the idempotence rail
   # (which re-stamps and re-climbs through the same seam), and the canary.
   # NOT the rails that go through `migrate()`.
+  #
+  # PREDICTION MISS, and the biggest one in the series: predicted FOUR, observed
+  # TWENTY-THREE. `migrateOnlyForTesting` is not V64's ladder, it is EVERY
+  # fixture-driven migration test's ladder, and it climbs to head — so a rung
+  # missing from it leaves `schemaVersion()` at 63 for all of them. Nineteen of
+  # the twenty-three belong to other beads (V40's rollback floor, V44's index,
+  # v50/v51, the two earlier drop rungs, the Cycle-4 isolated-ladder rails).
+  #
+  # The declared set is DELIBERATELY LEFT AT FOUR rather than widened to the
+  # observed twenty-three. A KILL needs the DECLARED set to fail, and all four
+  # do; declaring the other nineteen would make this record fail the day any of
+  # nineteen unrelated tests is renamed, which is a rail about other beads
+  # wearing this one's name. The observed list is printed beside every verdict,
+  # which is what that list is for.
+  #
+  # Read the size as the FINDING rather than as noise: it is the V60 lesson
+  # measured. The rung's own comment says a rung in one ladder and not the
+  # other "is invisible to any test written for that rung" — the blast radius
+  # is in fact every test written for every rung.
   "SD10|1609|STORE|$T_SD_LADDER;$T_SD_TWO_RUNGS_BACK;$T_SD_IDEMPOTENT;$T_SD_C_LADDERS"
 
   # Batch 1610 — SD11, THE BRICKING OBLIGATION: the four columns are declared
@@ -12678,7 +12697,16 @@ MUTATIONS=(
   # unaffected (the DDL builds the full shape), so the victims are exactly the
   # rails that rewind a store into the older shape, plus the canary that owns
   # the pairing.
-  "SD11|1610|STORE|$T_SD_OLDSHAPE;$T_SD_LADDER;$T_SD_TWO_RUNGS_BACK;$T_SD_NO_BACKFILL;$T_SD_C_COLUMNS"
+  #
+  # PREDICTION MISS, one wide: predicted five, observed six. The extra is
+  # playhead-7dgx's own `a store carrying the PRE-dropWriteFailures shape still
+  # opens, and is repaired`, and the MECHANISM was named in the paragraph above
+  # without the rail being enumerated — that fixture rebuilds the arming table
+  # in a shape that lacks `lastArmedLaunchId` as well as `dropWriteFailures`, so
+  # `fetchBackgroundDownloadDropArming`'s SELECT names a column that is not
+  # there and throws. Declared, because it is one rail of this table's own
+  # family rather than nineteen of somebody else's.
+  "SD11|1610|STORE|$T_SD_OLDSHAPE;$T_SD_LADDER;$T_SD_TWO_RUNGS_BACK;$T_SD_NO_BACKFILL;$T_SD_C_COLUMNS;$T_7DGX_OLDSHAPE"
 
   # Batch 1611 — SD99, VACUITY CONTROL. `armDropLedger`'s outcome is bound to a
   # second name and aliased back; nothing observable changes at any layer.
