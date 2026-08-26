@@ -25,7 +25,7 @@ every crash rail.
 
 WHAT IT COSTS, MEASURED, BECAUSE ~8 MINUTES IS NOT WHAT A `unittest` MODULE IN
 THIS REPO COSTS (playhead-gjlp0 R2). `test_gate_baseline` is 334 rails in about
-a second. This module is **111 rails**, and the split is not subtle: **33** run
+a second. This module is **114 rails**, and the split is not subtle: **36** run
 the real battery end to end and **4** read its `--list`, so **74** exercise
 `mutation_verdict.py` directly — and the **65** of those that sit in classes
 needing neither a sandbox nor a `--list` run in **0.39 s**.
@@ -34,7 +34,7 @@ Counted off the AST rather than by hand, and stated as three numbers that ADD UP
 because R3 found the previous wording quoting two different granularities in one
 sentence: it said 62 + 29 + 4 against a total of 104, and the missing nine were
 rails that live in a class whose SETUP reaches the battery while the rail itself
-does not. `33 + 4 + 74 = 111` is the same population counted one way.
+does not. `36 + 4 + 74 = 114` is the same population counted one way.
 
 The unit is one invocation of `scripts/mutation-battery.sh` and it is ~12-15 s
 of which almost none is the rail: the battery walks all 1,109 MUTATIONS records
@@ -1826,6 +1826,61 @@ class ShellConsoleOnlyTests(ShellBatteryHarness):
         # looking for a bundle that was never written.
         self.assertNotIn("read\nfrom the batch's own .xcresult bundle", out)
         self.assertEqual(proc.returncode, 1, out[-4000:])
+
+
+class ShellConsoleOnlyVoidTests(ShellBatteryHarness):
+    """The console-only warning belongs on VOID and ERROR too — R3.
+
+    R2 put it on SURVIVED, which was the sentence printed without checking. But
+    a console-only SURVIVED still rests on a positive `✔`; it is a console-only
+    **VOID** that the missing bundle may have INVENTED. playhead-t53a measured
+    80 of 87 reported casualties across 27 crash-free full-plan logs to be
+    verdicts the console parser could not read, and the VOID epilogue tells a
+    reader to re-run and, if it recurs, to suspect the mutation of killing the
+    test host — the wrong thing to chase when the bundle simply never arrived.
+    """
+
+    MUTATION = "M05"
+
+    def test_a_console_only_VOID_says_the_missing_bundle_may_have_caused_it(self):
+        green = console(tests=[(self.expect, "passed")])
+        silent = console(tests=[(self.expect, "started")])   # started, never judged
+        proc = self.run_battery(green, silent)               # the stub writes no bundle
+        out = self.out(proc)
+        self.assertEqual(self.verdict_of(proc), "VOID", out[-4000:])
+        self.assertIn("AND AT LEAST ONE RUN BEHIND THIS TABLE HAD NO", out, out[-4000:])
+        self.assertIn("MANUFACTURES a NO VERDICT", out, out[-4000:])
+        self.assertEqual(proc.returncode, 5, out[-4000:])
+
+    def test_a_VOID_with_a_BUNDLE_does_not_get_the_warning(self):
+        # ANTI-FABRICATION. The paragraph must be a property of the MISSING
+        # BUNDLE, not of the VOID verdict — otherwise it would be printed on
+        # every void run and say nothing.
+        green = console(tests=[(self.expect, "passed")])
+        silent = console(tests=[(self.expect, "started")])
+        # SKIPPED so the bundle is REAL and readable and still judges nobody:
+        # a skipped rail asked no question, so the verdict stays VOID and the
+        # only variable between this rail and the one above is the bundle.
+        env = self.stub_xcresult(
+            bundle_payload([(self.expect, gb.XCRESULT_PASSED, [])]),
+            bundle_payload([(self.expect, gb.XCRESULT_SKIPPED, [])]))
+        proc = self.run_battery(green, silent, env=env)
+        out = self.out(proc)
+        self.assertEqual(self.verdict_of(proc), "VOID", out[-4000:])
+        self.assertNotIn("AND AT LEAST ONE RUN BEHIND THIS TABLE HAD NO", out, out[-4000:])
+        self.assertNotIn("MANUFACTURES a NO VERDICT", out, out[-4000:])
+
+    def test_a_console_only_ERROR_says_a_lost_START_line_reads_the_same_way(self):
+        # The third epilogue. `never ran` is ABSENT, and a START line the
+        # console lost makes a test ABSENT just as surely as a typo does.
+        green = console(tests=[(self.expect, "passed")])
+        nothing = console(tests=[])                          # the name is in no roster
+        proc = self.run_battery(green, nothing)
+        out = self.out(proc)
+        self.assertEqual(self.verdict_of(proc), "ERROR", out[-4000:])
+        self.assertIn("AND AT LEAST ONE RUN BEHIND THIS TABLE HAD NO", out, out[-4000:])
+        self.assertIn("makes a test invisible in both", out, out[-4000:])
+        self.assertEqual(proc.returncode, 3, out[-4000:])
 
 
 class ShellMultiExpectationTests(ShellBatteryHarness):

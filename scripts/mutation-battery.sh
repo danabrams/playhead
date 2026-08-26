@@ -165,8 +165,9 @@
 #
 #   1  a mutation SURVIVED
 #   2  refused to start (dirty tree, bad selection, a mutation whose file is not
-#      in MUTABLE_FILES, a red baseline, a baseline that produced no verdict, or
-#      an unresolved crashed run)
+#      in MUTABLE_FILES, a red baseline, a baseline that produced no verdict, a
+#      baseline in which any test was DENIED A RESOURCE, or an unresolved
+#      crashed run)
 #   3  a mutation could not be EVALUATED — fix the EDIT
 #   4  the tree was NOT restored byte-exactly — inspect before anything else
 #   5  a batch produced NO VERDICT (playhead-gjlp0) — nothing is wrong with the
@@ -29924,6 +29925,31 @@ print_evidence() {
   printf '%-16s           (the run kept its work dir: %s)\n' "" "$WORK"
 }
 
+# THE RUN-LEVEL BUNDLE FAULT, SAID IN WHICHEVER EPILOGUE IS PRINTING
+# (playhead-gjlp0 R2, extended at R3).
+#
+# R2 attached this to the SURVIVED epilogue, because that was the sentence
+# printed without checking. R3 found the DIRECTION matters more elsewhere. A
+# console-only SURVIVED still rests on a positive `✔` — the weaker instrument
+# making the same claim. A console-only VOID or ERROR may be the instrument
+# INVENTING the silence it reports: playhead-t53a measured 80 of 87 reported
+# casualties across 27 crash-free full-plan logs to be verdicts the console
+# parser could not read, and a severed START line makes a test invisible in
+# both directions. The VOID epilogue was telling a reader to re-run and, if it
+# recurs, to suspect the mutation of killing the test host — the wrong thing to
+# chase on a run whose bundle simply never arrived.
+#
+# The opening line is deliberately identical in all three: it is what a reader
+# greps for, and it is what the R2 rail asserts.
+console_only_note() {
+  [ "$CONSOLE_ONLY" -eq 1 ] || return 0
+  echo "AND AT LEAST ONE RUN BEHIND THIS TABLE HAD NO .xcresult BUNDLE — the block" >&2
+  echo "above names which, and the baseline reaches that arm as well as any batch." >&2
+  printf '%s\n' "$1" >&2
+  echo "Find out why the bundle is missing: either PLAYHEAD_RESULT_BUNDLE is not" >&2
+  echo "reaching fast-gate, or xcodebuild died before it could write one." >&2
+}
+
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
@@ -30707,6 +30733,10 @@ if [ "$RESTORE_OK" -eq 0 ]; then
 fi
 if [ "$ERRORS" -gt 0 ] || [ "$FATAL" -eq 1 ]; then
   echo "One or more mutations could not be evaluated. Fix the EDIT, not the expectation." >&2
+  console_only_note "An 'expected test never ran' from such a run may be the instrument rather
+than the table: a START line the console lost makes a test invisible in both
+directions (playhead-t53a). Anchor drift and a build failure are unaffected —
+the DIAGNOSIS beside each row says which of them this was."
   exit 3
 fi
 if [ "$VOIDS" -gt 0 ]; then
@@ -30726,6 +30756,11 @@ probably killing the test host, which is a real finding about the mutation and
 not about the rail: split it away from the test that reaches the trap and record
 why the remaining rail has no mutant (playhead-4xmz's DW18 is the worked case).
 MSG
+  console_only_note "READ THAT BEFORE RE-RUNNING. A console-only reading is the one that
+MANUFACTURES a NO VERDICT — xcodebuild splices the app's own output through a
+verdict line and the console loses it, which is exactly why playhead-t53a moved
+the gate's census onto the bundle. A VOID from such a run may be the instrument
+rather than the host, and the advice above would send you after the wrong thing."
   exit 5
 fi
 if [ "$SURVIVORS" -gt 0 ]; then
@@ -30739,21 +30774,14 @@ Every SURVIVED above rests on a POSITIVE pass verdict for the named test
 (playhead-gjlp0) — the batch's log, and its .xcresult bundle when there is one,
 are printed beside each one. Absence of a failure line is no longer enough.
 MSG
-  if [ "$CONSOLE_ONLY" -eq 1 ]; then
-    # The sentence above used to say "read from the batch's own .xcresult
-    # bundle" unconditionally, and at least one batch in this run had none.
-    # A claim about where a verdict came from, printed without checking, in the
-    # one place a reader decides whether to trust a SURVIVED — this bead's own
-    # defect one layer out from the code it fixed.
-    cat >&2 <<'MSG'
-AND AT LEAST ONE RUN BEHIND THIS TABLE HAD NO .xcresult BUNDLE — the block
-above names which, and the baseline reaches that arm as well as any batch. Those
-verdicts came off the CONSOLE alone: still a positive `✔` rather than the
-pre-gjlp0 reading of silence, but the weaker instrument. Read the batch log
-before acting on a SURVIVED from this run, and find out why the bundle is
-missing.
-MSG
-  fi
+  # The sentence above used to say "read from the batch's own .xcresult bundle"
+  # unconditionally, and at least one run behind the table may have had none. A
+  # claim about where a verdict came from, printed without checking, in the one
+  # place a reader decides whether to trust a SURVIVED — this bead's own defect
+  # one layer out from the code it fixed.
+  console_only_note "Those verdicts came off the CONSOLE alone: still a positive \`✔\` rather than
+the pre-gjlp0 reading of silence, but the weaker instrument. Read the batch log
+before acting on a SURVIVED from this run."
   exit 1
 fi
 if [ "$DRY_RUN" -eq 1 ]; then
