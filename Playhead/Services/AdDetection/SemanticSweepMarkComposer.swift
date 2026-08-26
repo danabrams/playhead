@@ -483,8 +483,8 @@ enum SemanticSweepMarkComposer {
     /// measured it out.** SAY WHICH POPULATION, because it is the RE-SCREENING
     /// one and NOT this factor's own — examined `passA` rows grouped by
     /// `(analysisAssetId, windowStartTime, windowEndTime)`, with no version
-    /// scope. The paragraph after the bullets says what this factor's own
-    /// filter adds and why it matters here:
+    /// scope. THE INDEPENDENCE paragraph below says what this factor's own
+    /// filter adds and why the difference matters:
     ///
     ///   * **2026-08-10**, 99 windows, **25** with more than one row.
     ///     `transcriptVersion` distinct across every row of **25 of 25**;
