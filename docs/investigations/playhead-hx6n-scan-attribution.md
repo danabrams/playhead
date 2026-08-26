@@ -64,7 +64,7 @@ Plus two indexes: `idx_semantic_scan_results_createdAt` (timeline
 reconstruction) and `idx_semantic_scan_results_backfill_job` (the join).
 
 **`backfillJobId` WAS CALLED `runCorrelationId` UNTIL SCHEMA V65** (playhead-1gu0,
-2026-08-22), and this whole document was written under the old spelling. The
+2026-08-26), and this whole document was written under the old spelling. The
 rename is the only change: it is an `ALTER TABLE … RENAME COLUMN`, no value moves
 and nothing is backfilled. It happened because the name said RUN and the writer
 writes a JOB — and a `backfill_jobs.jobId` is per `(asset, phase, offset)`, so it

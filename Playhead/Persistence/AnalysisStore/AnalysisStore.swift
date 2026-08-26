@@ -9142,11 +9142,19 @@ actor AnalysisStore {
     /// V65 migration (playhead-1gu0) — `semantic_scan_results.runCorrelationId`
     /// becomes `backfillJobId`, which is what it has always carried.
     ///
-    /// **THE NAME WAS THE DEFECT.** Every other mention of this column in the
-    /// tree already says "the `backfill_jobs.jobId`" — the writer
-    /// (`BackfillJobRunner.attributed(_:jobId:)`), the V42 schema note, the
-    /// `BackgroundGrantBudget` limit paragraph. Only the NAME said `run`, and a
-    /// job id is per `(asset, phase, offset)`: ONE value for an asset's whole
+    /// **THE NAME WAS THE DEFECT.** The places that say what this column HOLDS
+    /// already said "the `backfill_jobs.jobId`" — the writer
+    /// (`BackfillJobRunner.attributed(_:jobId:)`), the V42 schema note, and
+    /// ``SemanticScanResult/backfillJobId``'s own doc. The places that read its
+    /// NAME instead got it wrong, and BOTH are corrected in this same change
+    /// rather than cited as witnesses: `BackgroundGrantBudget`'s limit paragraph
+    /// called it "an `fm-*` id" without saying whose, and
+    /// ``SemanticSweepMarkComposer/corroborationFactor(affirming:dissenting:)``
+    /// offered a "distinct `runCorrelationId`" as EVIDENCE that its replicates
+    /// are independent. (An earlier draft of this paragraph claimed EVERY other
+    /// mention already agreed and named `BackgroundGrantBudget` as one of the
+    /// three; it did not agree, and the diff that says so is this one.) A job id
+    /// is per `(asset, phase, offset)`: ONE value for an asset's whole
     /// backfill history. Measured on the 2026-08-19 t4 pull,
     /// `count(DISTINCT runCorrelationId)` and `count(DISTINCT analysisAssetId)`
     /// are both **15**, and `A9F6DF05` carries 176 rows written across four
@@ -9159,7 +9167,11 @@ actor AnalysisStore {
     /// column as a "different FM call" spelling on the strength of its name, and
     /// the wrong claim that came out of it shipped in
     /// ``SemanticSweepMarkComposer/corroborationFactor(affirming:dissenting:)``'s
-    /// documentation for eleven days.
+    /// documentation from 2026-08-10 (`6e9c386f`) until this rung landed on
+    /// 2026-08-26 — SIXTEEN days in the tree, of which eleven passed before
+    /// `playhead-my33` measured it out. (This line read "eleven days", which is
+    /// the time to DISCOVERY and not the time it shipped: the same two-quantities
+    /// -one-name reading the rename exists to stop.)
     ///
     /// **WHY NO NEW PER-INVOCATION COLUMN.** Nothing wants one. The only
     /// consumer that ever asked "is this a different FM call" is
@@ -9177,6 +9189,16 @@ actor AnalysisStore {
     /// both. NOTHING IS BACKFILLED and no value moves: `RENAME COLUMN` preserves
     /// every row, and a NULL stays NULL because a pre-V42 row genuinely has no
     /// job.
+    ///
+    /// **AND IT IS THE FIRST RUNG ON THIS TABLE THAT AN OLDER BINARY CANNOT
+    /// IGNORE.** Every earlier one left every existing column NAME in place —
+    /// even V52, which rebuilt the table to make `prewarmHit` nullable — so the
+    /// V42 note's "what an older binary sees: nothing" held. A rename REMOVES a
+    /// name that a pre-V65 binary's explicit column list still spells. What
+    /// happens then is not a crash and is worse than one: that binary's own
+    /// `createTables()` puts `runCorrelationId` back as an EMPTY column and
+    /// writes into it. See `renameSemanticScanRunCorrelationIdIfNeeded()` for
+    /// the state that leaves behind and why it is left alone.
     private func migrateSemanticScanBackfillJobIdentityV65IfNeeded() throws {
         let observed = (try schemaVersion() ?? 1)
         guard observed < 65 else { return }
@@ -9189,21 +9211,40 @@ actor AnalysisStore {
         try setSchemaVersion(65)
     }
 
-    /// The V65 rename, factored out because THREE callers need it and the order
-    /// between them is the whole safety property: `createTables()` (which runs
-    /// BEFORE the ladder and would otherwise add an empty `backfillJobId`
-    /// alongside a populated `runCorrelationId`), the V42 rung (same hazard, one
-    /// rung down), and the V65 rung itself (which is the only one
-    /// `migrateOnlyForTesting()` reaches, since that path skips
-    /// `createTables()`).
+    /// The V65 rename, factored out because THREE call sites take it and the
+    /// order between them is the whole safety property: `createTables()`, the
+    /// V42 rung, and the V65 rung. Only ONE of them can ever do the work on a
+    /// given open, and which one is a property of the PATH rather than of the
+    /// database. In production `createTables()` runs BEFORE the whole
+    /// `V*IfNeeded` ladder, so it is always the one that renames — the other two
+    /// then find the new spelling present and decline. They are not therefore
+    /// decoration: each sits immediately above an `addColumnIfNeeded` for
+    /// `backfillJobId`, and without it that call would add an EMPTY new column
+    /// alongside a populated old one. The V65 rung's is the only one
+    /// `migrateOnlyForTesting()` can reach, since that path skips
+    /// `createTables()`; no fixture reaches it with `semantic_scan_results`
+    /// present today, so that call site is currently unexercised — say so rather
+    /// than let a green suite read as coverage.
     ///
     /// Idempotent, and it declines rather than guesses in the one ambiguous
     /// state. If BOTH spellings exist the new one wins and the old is left
     /// alone: this helper cannot know which holds the real values, and merging
-    /// them would be inventing attribution. That state is unreachable through
-    /// any path here — it is guarded against by calling this before every
-    /// `addColumnIfNeeded` — so leaving it alone means a hand-made fixture
-    /// carrying both stays exactly as its author left it.
+    /// them would be inventing attribution.
+    ///
+    /// **THAT STATE IS NOT UNREACHABLE, AND AN EARLIER DRAFT OF THIS PARAGRAPH
+    /// SAID IT WAS.** No path in THIS file produces it — every
+    /// `addColumnIfNeeded` for the new spelling is preceded by this call. A
+    /// DOWNGRADE does: a pre-V65 binary opening a V65 database runs its own
+    /// `createTables()`, whose `addColumnIfNeeded` puts `runCorrelationId` back
+    /// as an EMPTY column and then writes its rows into it, while
+    /// `_meta.schema_version` stays 65 and is never lowered. Coming forward
+    /// again, this helper sees the new spelling present and declines, so the
+    /// downgrade era's rows read NULL under `backfillJobId` for ever. Left alone
+    /// deliberately: the two columns hold rows from different eras and
+    /// coalescing them would invent the very attribution this column exists to
+    /// record. The cost is forensic rather than behavioural — nothing in
+    /// production READS this column — and `migrate()` already logs a fault when
+    /// it opens a schema newer than the binary knows.
     private func renameSemanticScanRunCorrelationIdIfNeeded() throws {
         guard try tableExists("semantic_scan_results") else { return }
         let hasNew = try columnExists(table: "semantic_scan_results", column: "backfillJobId")

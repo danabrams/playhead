@@ -487,14 +487,18 @@ enum SemanticSweepMarkComposer {
     ///     `transcriptVersion` distinct across every row of **25 of 25**;
     ///     `latencyMs` likewise **25 of 25**. `runCorrelationId` distinct on
     ///     13, and the other 12 windows are entirely NULL — those rows predate
-    ///     the V42 column. It separated **nothing it did not already share**.
+    ///     the V42 column (all 24 of them also carry a NULL `createdAt`, which
+    ///     the same rung added, so "pre-V42" is read off the row rather than
+    ///     inferred). On those 13 it separated **nothing `transcriptVersion` had
+    ///     not already separated**.
     ///   * **2026-08-19 t4**, 779 windows, **190** with more than one row.
     ///     `transcriptVersion` **190 of 190**, `latencyMs` **190 of 190**,
     ///     and `runCorrelationId` **0 of 190** — every one of the 190 carries a
     ///     single id. The column does not separate re-screenings at all.
     ///
-    /// IT NEVER COULD HAVE, and the 08-10 reading was a residue rather than a
-    /// property. `semantic_scan_results.backfillJobId` is the
+    /// **IT NEVER SEPARATED ANYTHING `transcriptVersion` DID NOT** — read the 13
+    /// above as the id AGREEING with the version, never as an independent
+    /// signal — and the 08-10 reading was a residue rather than a property. `semantic_scan_results.backfillJobId` is the
     /// `backfill_jobs.jobId` (it was spelled `runCorrelationId` until schema
     /// V65, which is playhead-1gu0's other half), and that id is per
     /// `(asset, phase, offset)` — one value for an asset's whole backfill
@@ -1550,9 +1554,13 @@ enum SemanticSweepMarkComposer {
     /// note was written, and playhead-1gu0 renamed it in schema V65 for exactly
     /// the reason below — was considered as a "different FM call" spelling and
     /// measured out: all five `containsAd` rows over `A9F6DF05` ~4038 s carry
-    /// the identical `fm-9330e821aeb36a0d` across four days and five calls, so
-    /// it does not separate re-screenings at all. That is a property of the
-    /// column and not of this pull: a job id is per `(asset, phase, offset)`.
+    /// the identical `fm-9330e821aeb36a0d` across THREE calendar days and five
+    /// calls (2026-08-12 ×3, -15, -16), so it does not separate re-screenings at
+    /// all. This line said "four days" and four is the ASSET's span, not these
+    /// five rows' — `A9F6DF05` carries 176 rows over 2026-08-12/-14/-15/-16, all
+    /// under the same one id, which is the stronger reading and the one the V65
+    /// rung quotes. That is a property of the column and not of this pull: a job
+    /// id is per `(asset, phase, offset)`.
     static func corroborates(
         _ candidate: SemanticScanResult,
         _ row: SemanticScanResult
