@@ -961,8 +961,9 @@ enum SemanticSweepMarkComposer {
     /// DAY** — `45f4729b`, 2026-08-07 22:41:09 UTC. Cut at midnight STARTING
     /// 2026-08-07 instead and the split reads 11 / 4 / **1 wholly after**,
     /// because `48E903D7` 596.3 s carries an earlier row at 21:03:59.8 UTC —
-    /// 1 h 37 m 09 s inside the window, and the only row any of the 16 has on
-    /// 08-07 at all. (Midnight ENDING that day reproduces 11 / 5 / 0, the same
+    /// 1 h 37 m 09 s before the merge — and the only row any of the 16 has on
+    /// 08-07 at all. ("Window" is not used there: on this page a window is a
+    /// coarse scan window, and `48E903D7` 596.3 s is one.) (Midnight ENDING that day reproduces 11 / 5 / 0, the same
     /// as the instant, which is why "at midnight" on its own settles nothing.)
     /// A day is not an instant; that substitution is the very defect this
     /// comment is about. Measured on both pulls, every distinct-id pair is

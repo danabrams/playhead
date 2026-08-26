@@ -9163,17 +9163,29 @@ actor AnalysisStore {
     /// **THE NAME WAS THE DEFECT.** The places that say what this column HOLDS
     /// already said "the `backfill_jobs.jobId`" — the writer
     /// (`BackfillJobRunner.attributed(_:jobId:)`), the V42 schema note, and
-    /// ``SemanticScanResult/backfillJobId``'s own doc. FOUR sites that described
-    /// the column in the RUN's vocabulary are edited in this same change rather
-    /// than cited as witnesses — `BackgroundGrantBudget`,
-    /// ``SemanticSweepMarkComposer/corroborationFactor(affirming:dissenting:)``,
-    /// `AnalysisCoordinator.runPendingCoarseScans`'s Returns note ("a run
-    /// correlation id") and `docs/investigations/playhead-hx6n-scan-attribution.md`
-    /// ("the correlation id costs no new plumbing"). **This line said TWO until
-    /// review round 13, which is a pair somebody had in hand read as a census —
-    /// the shape this whole paragraph is about, inside it.** They are not the
-    /// same kind of wrong, and the difference matters. TWO asserted something
-    /// untrue:
+    /// ``SemanticScanResult/backfillJobId``'s own doc.
+    ///
+    /// **THE SITES THAT SPELLED IT A *RUN* ARE EDITED HERE RATHER THAN CITED AS
+    /// WITNESSES, AND THE COUNT IS GIVEN AS A PREDICATE BECAUSE A BARE NUMBER
+    /// HAS NOW BEEN WRONG TWICE.** It said TWO, then FOUR; both were a handful
+    /// somebody had in hand read as a census — the shape this very paragraph is
+    /// about, inside it. Re-run it instead of re-counting it:
+    ///
+    ///     git grep -niI -e "run correlation" -e "correlation id" 55dd7e6e \
+    ///       -- Playhead PlayheadTests docs scripts
+    ///
+    /// **FIVE hits in FOUR files** at this branch's base, every one edited here:
+    /// `AnalysisCoordinator.runPendingCoarseScans`'s Returns note,
+    /// `SemanticScanAttributionWireInTests` ×2, `SemanticScanRunAttributionTests`
+    /// and `docs/investigations/playhead-hx6n-scan-attribution.md`. That grep is
+    /// deliberately narrower than the whole edit: it catches the PROSE spellings
+    /// and not the two sites that named the identifier and reasoned about it —
+    /// `BackgroundGrantBudget` and
+    /// ``SemanticSweepMarkComposer/corroborationFactor(affirming:dissenting:)``
+    /// — which are the two that matter most and are discussed below.
+    ///
+    /// They are not the same kind of wrong, and the difference matters. TWO
+    /// asserted something untrue:
     /// ``SemanticSweepMarkComposer/corroborationFactor(affirming:dissenting:)``
     /// offered a "distinct `runCorrelationId`" as EVIDENCE that its replicates
     /// are independent — a false claim, and the reason this bead exists.
@@ -9186,7 +9198,7 @@ actor AnalysisStore {
     /// investigation used the column's actual spelling of the day. **Silence is
     /// not disagreement, and an earlier draft of this paragraph read it as
     /// such** — first by claiming every other mention already agreed, then by
-    /// over-correcting to "it did not agree". It said nothing either way.
+    /// over-correcting to "it did not agree". Neither said anything either way.
     ///
     /// A job id is per `(asset, phase, offset)`: ONE value for an asset's whole
     /// backfill history. Measured on the 2026-08-19 t4 pull,
