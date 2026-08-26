@@ -893,9 +893,13 @@ enum SemanticSweepMarkComposer {
     /// out, "no window there carries a `containsAd` row its own replicates
     /// outvote or tie", and this one did not. Round 6 then found "worth 4
     /// against 24" transcribed elsewhere as though 24 NAMED the 16, so both
-    /// numbers are written out rather than left to a contrast.) **BOTH OF THOSE COUNTS ARE OVER
+    /// numbers are written out rather than left to a contrast.)
+    ///
+    /// **EVERY COUNT IN THIS PARAGRAPH — 125, 36, 4, 24, 20, 16 — IS OVER
     /// `passA` AT ANY STATUS** — a THIRD population, neither the bullets' below
-    /// nor this factor's own. It is said here rather than only in the
+    /// nor this factor's own. (It read "BOTH OF THOSE COUNTS", which named the
+    /// 36 and the four and was exact until round 6 added the rest; a deixis that
+    /// counts is a claim that expires, so the numbers are listed.) It is said here rather than only in the
     /// **IT NEVER SEPARATED** paragraph below, which is where the qualification
     /// used to live alone — past the bullets, which carry a DIFFERENT
     /// population's numbers (playhead-1gu0 review). On the EXAMINED population
