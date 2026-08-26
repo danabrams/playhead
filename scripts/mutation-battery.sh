@@ -3882,6 +3882,9 @@ T_HX6N_EMPTY_CORPUS="an empty corpus reports nil, not zero and not one"
 T_HX6N_INELIGIBLE="throughput excludes no-work sentinels, failures and zero-width windows"
 T_HX6N_SQL_AGREES="the SQL split and the Swift split agree on one fixture"
 T_HX6N_RUNNER_STAMPS="every row the runner persists carries attribution, and the id resolves to a real job"
+# playhead-1gu0 (GU series): the V65 rename of `runCorrelationId` -> `backfillJobId`.
+T_1GU0_RENAME="V65: a pre-V65 row keeps its job id across the runCorrelationId -> backfillJobId rename"
+T_1GU0_ONE_ID="V65: one backfill job id spans re-screenings, and transcriptVersion is what separates them"
 T_HX6N_FOREGROUND_RUN="a foreground run lands on the foreground side of the same split"
 T_HX6N_BROKEN_PROVIDER="a provider that breaks the vocabulary yields unattributed rows, not guessed ones"
 T_HX6N_LADDER_RAIL="Cycle 4 H1 RAIL: the isolated ladder does NOT run createTables()"
@@ -12713,6 +12716,34 @@ MUTATIONS=(
   # MUST SURVIVE. If it dies, the eleven verdicts above are measuring the
   # suites' fragility rather than the mutations.
   "SD99|1611|DLMGR|$T_SD_ARMED_ROW"
+
+  # ---- playhead-1gu0, the GU series: the V65 rename of
+  #      `semantic_scan_results.runCorrelationId` to `backfillJobId` ---------
+  #
+  # A RENAME has exactly one way to be right and four ways to be quietly wrong,
+  # and every one of the four is invisible on a FRESH INSTALL — `createTables()`
+  # builds the head shape unconditionally, so a device that never carried the old
+  # spelling passes all of them. That is why the rail
+  # (`$T_1GU0_RENAME`) regresses a live store to the V64 spelling first, and why
+  # each mutant below is one batch: they all edit the same helper or its single
+  # call site, so a batched partner would destroy the other's anchor.
+  #
+  # GU01 is the ORDERING property, GU02 the DATA-PRESERVATION property, GU03 the
+  # INDEX-NAME property and GU04 the LADDER property. GU05 is deliberately NOT
+  # here: dropping the helper's `CREATE INDEX` is a PROVEN EQUIVALENT, because
+  # `createTables()` re-creates the same index by name a few hundred lines later
+  # on every open. An entry for it would be permanently SURVIVED and would train
+  # a reader to discount a survivor.
+  "GU01|1612|STORE|$T_1GU0_RENAME"
+  "GU02|1613|STORE|$T_1GU0_RENAME"
+  "GU03|1614|STORE|$T_1GU0_RENAME"
+  "GU04|1615|STORE|$T_1GU0_RENAME;$T_HX6N_V41_SURVIVES"
+
+  # Batch 1616 — GU99, VACUITY CONTROL. The helper's `hasNew` local is renamed
+  # on the very line GU04's guard sits above; nothing observable changes. MUST
+  # SURVIVE. Non-empty expectation on purpose: it names the rail GU01-GU03 kill,
+  # so a KILLED verdict here would mean a local rename can change behaviour.
+  "GU99|1616|STORE|$T_1GU0_RENAME"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -13220,6 +13251,11 @@ describe_mutation() {
     T06) echo "readSemanticScanResult: read a NULL createdAt through sqlite3_column_double (1970)" ;;
     T07) echo "V42 rung stamps 41 instead of 42 — the ladder stops climbing to head" ;;
     T08) echo "BackfillJobRunner.attributed: stop stamping backfillJobId" ;;
+    GU01) echo "V65: createTables() stops renaming BEFORE it adds, so an upgraded DB carries BOTH spellings and every job id is stranded" ;;
+    GU02) echo "V65: the helper ADDS a fresh column instead of renaming — the shape looks right and every attribution is gone" ;;
+    GU03) echo "V65: the old index name survives the rename — idx_..._correlation over a column called backfillJobId" ;;
+    GU04) echo "V65: the rung renames but never stamps the version, so the ladder re-runs the rung on every open forever" ;;
+    GU99) echo "VACUITY CONTROL — the rename helper's hasNew local is renamed and nothing else changes; MUST SURVIVE" ;;
     T09) echo "BackfillJobRunner.attributed: stop stamping scenePhase" ;;
     T10) echo "BackfillJobRunner.attributed: guess .active when the provider breaks its vocabulary" ;;
     T11) echo "SemanticScanThroughputSplit.isEligible: admit no-work sentinels as throughput" ;;
@@ -18404,6 +18440,86 @@ EOF
     snippet NEW <<'EOF'
         guard collapsed.count > maxDomainLength else { return collapsed }
         return String(collapsed.prefix(maxDomainLength))
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # ---- playhead-1gu0: the V65 rename (GU series) ----
+
+  # GU01 — the ORDERING. `createTables()` runs BEFORE the V*IfNeeded ladder, so
+  # it is the first thing to see an upgraded table. Drop its rename call and the
+  # very next statement adds an EMPTY `backfillJobId` alongside the populated
+  # `runCorrelationId`; the V65 rung then sees the new name present and declines.
+  # Both columns exist, the head shape looks correct, and every job id on the
+  # device is stranded in a column nothing reads.
+  GU01)
+    snippet OLD <<'EOF'
+        try renameSemanticScanRunCorrelationIdIfNeeded()
+        try addColumnIfNeeded(
+            table: "semantic_scan_results",
+            column: "backfillJobId",
+            definition: "TEXT"
+        )
+EOF
+    snippet NEW <<'EOF'
+        try addColumnIfNeeded(
+            table: "semantic_scan_results",
+            column: "backfillJobId",
+            definition: "TEXT"
+        )
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # GU02 — the DATA. An ADD where a RENAME belongs: afterwards the table has
+  # both columns and the new one is entirely NULL. On a fresh install this is
+  # byte-identical to a correct migration, which is the whole reason the rail
+  # rewinds a store instead of asserting on a new one.
+  GU02)
+    snippet OLD <<'EOF'
+        try exec("ALTER TABLE semantic_scan_results RENAME COLUMN runCorrelationId TO backfillJobId")
+EOF
+    snippet NEW <<'EOF'
+        try exec("ALTER TABLE semantic_scan_results ADD COLUMN backfillJobId TEXT")
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # GU03 — the INDEX NAME. SQLite rewrites an index DEFINITION through a
+  # RENAME COLUMN but keeps the index's own NAME, so skipping the drop leaves
+  # `idx_semantic_scan_results_correlation` sitting over a column called
+  # `backfillJobId` — the same name-says-one-thing defect this bead exists to
+  # remove, one layer down and invisible to every query.
+  GU03)
+    snippet OLD <<'EOF'
+        try exec("DROP INDEX IF EXISTS idx_semantic_scan_results_correlation")
+        try exec("ALTER TABLE semantic_scan_results RENAME COLUMN runCorrelationId TO backfillJobId")
+EOF
+    snippet NEW <<'EOF'
+        try exec("ALTER TABLE semantic_scan_results RENAME COLUMN runCorrelationId TO backfillJobId")
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # GU04 — the LADDER. The rung does its work and never stamps the version, so
+  # `schemaVersion()` stays at 64 and the store re-runs the rung on every open
+  # forever. The shape is right, which is what makes it silent.
+  GU04)
+    snippet OLD <<'EOF'
+        try setSchemaVersion(65)
+    }
+EOF
+    snippet NEW <<'EOF'
+    }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # GU99 — VACUITY CONTROL, and it MUST SURVIVE. The rename helper's `hasNew`
+  # local is bound to a second name; nothing else changes.
+  GU99)
+    snippet OLD <<'EOF'
+        let hasNew = try columnExists(table: "semantic_scan_results", column: "backfillJobId")
+        guard !hasNew else { return }
+EOF
+    snippet NEW <<'EOF'
+        let hasNewSpelling = try columnExists(table: "semantic_scan_results", column: "backfillJobId")
+        guard !hasNewSpelling else { return }
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 

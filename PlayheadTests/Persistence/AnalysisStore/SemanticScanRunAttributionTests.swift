@@ -417,7 +417,11 @@ struct SemanticScanRunAttributionTests {
     /// assets, and 190 of 190 replicate coarse windows carry a single id while
     /// 190 of 190 carry distinct transcript versions. The fixture below is that
     /// shape in miniature.
-    @Test("V65: one backfill job id spans re-screenings; transcriptVersion is what separates them")
+    // The name deliberately carries no semicolon: `mutation-battery.sh` SPLITS its
+    // expectation field on ';', so a test whose display name contains one can
+    // never be matched and every mutant naming it reports `expected test never
+    // ran` instead of a verdict.
+    @Test("V65: one backfill job id spans re-screenings, and transcriptVersion is what separates them")
     func oneJobIdSpansReScreeningsAndVersionsDoNot() async throws {
         let (store, _) = try await makeTestStoreWithDirectory()
         try await store.insertAsset(makeAsset(id: "asset-rescan"))
