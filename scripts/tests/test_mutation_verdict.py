@@ -25,16 +25,16 @@ every crash rail.
 
 WHAT IT COSTS, MEASURED, BECAUSE ~8 MINUTES IS NOT WHAT A `unittest` MODULE IN
 THIS REPO COSTS (playhead-gjlp0 R2). `test_gate_baseline` is 334 rails in about
-a second. This module is **114 rails**, and the split is not subtle: **36** run
-the real battery end to end and **4** read its `--list`, so **74** exercise
-`mutation_verdict.py` directly — and the **65** of those that sit in classes
-needing neither a sandbox nor a `--list` run in **0.39 s**.
+a second. This module is **117 rails**, and the split is not subtle: **36** run
+the real battery end to end and **4** read its `--list`, so **77** exercise
+`mutation_verdict.py` directly — and the **68** of those that sit in classes
+needing neither a sandbox nor a `--list` run in **0.40 s**.
 
 Counted off the AST rather than by hand, and stated as three numbers that ADD UP
 because R3 found the previous wording quoting two different granularities in one
 sentence: it said 62 + 29 + 4 against a total of 104, and the missing nine were
 rails that live in a class whose SETUP reaches the battery while the rail itself
-does not. `36 + 4 + 74 = 114` is the same population counted one way.
+does not. `36 + 4 + 77 = 117` is the same population counted one way.
 
 The unit is one invocation of `scripts/mutation-battery.sh` and it is ~12-15 s
 of which almost none is the rail: the battery walks all 1,109 MUTATIONS records
@@ -185,7 +185,7 @@ def fake_bundle(directory, payload, ok=True, stderr=b""):
 
 class VerdictTestCase(unittest.TestCase):
     def setUp(self):
-        self.dir = pathlib.Path(tempfile.mkdtemp(prefix="playhead-mv-test."))
+        self.dir = scratch_dir("playhead-mv-test.")
         self.addCleanup(shutil.rmtree, str(self.dir), True)
 
     def write_log(self, text, name="batch.log", mtime=None):
@@ -814,6 +814,66 @@ class OutputFileTests(VerdictTestCase):
         self.assertEqual(rc, mv.EXIT_CANNOT_EVALUATE)
 
 
+class ScratchHygieneTests(unittest.TestCase):
+    """Every throwaway directory must land where the ONE cleaner can find it.
+
+    playhead-gjlp0 R3. `tempfile.mkdtemp()` defaults to `$TMPDIR`, and nothing
+    in this repo sweeps that: `scripts/disk-cleanup.sh` handles `.worktrees/*`,
+    `/private/tmp/playhead-*` and `$TMPDIR/Deleting-*`, and that is the list.
+    The sandbox is a ~67 MiB copy of the tree; `tearDownModule` drops it, and
+    `tearDownModule` does not run when a pass is interrupted. Measured at R3:
+    10 orphaned sandboxes, 670 MiB, from one earlier day of review rounds.
+
+    Pinned in SOURCE rather than by observation, because the failure is
+    invisible on any single green run — the directory is created, used, and
+    (usually) removed, and the leak only shows up days later on a box that
+    refuses to gate below 13.5 GiB.
+    """
+
+    def test_every_mkdtemp_in_this_module_names_the_swept_root(self):
+        import ast
+        src = pathlib.Path(__file__).read_text(encoding="utf-8")
+        offenders = []
+        for node in ast.walk(ast.parse(src)):
+            if not isinstance(node, ast.Call):
+                continue
+            fn = node.func
+            if not (isinstance(fn, ast.Attribute) and fn.attr == "mkdtemp"):
+                continue
+            if not any(kw.arg == "dir" for kw in node.keywords):
+                offenders.append(node.lineno)
+        self.assertEqual(
+            offenders, [],
+            "mkdtemp without dir= at line(s) %s — it would land in $TMPDIR, "
+            "which scripts/disk-cleanup.sh does not sweep. Use scratch_dir()."
+            % offenders)
+
+    def test_the_cleaner_really_sweeps_that_root(self):
+        # THE ANTI-VACUITY HALF. The rail above is worth nothing if the glob it
+        # aims at is not the glob the cleaner uses, so read the cleaner.
+        #
+        # It matches the LOOP HEADER, not the string. A first cut asserted the
+        # glob appeared anywhere in the file and PASSED with the loop rewritten
+        # to sweep something else — the section's own `# 2. /private/tmp/
+        # playhead-* cleanup` comment satisfied it. Driven: rewriting the `for`
+        # line left that rail green. A string that names a mechanism read as
+        # evidence the mechanism is there is this repo's standing defect class,
+        # and an anti-vacuity guard that commits it is worse than none.
+        cleaner = (ROOT / "scripts" / "disk-cleanup.sh").read_text(encoding="utf-8")
+        loop = re.compile(r"^\s*for\s+\w+\s+in\s+%s/playhead-\*\s*;\s*do\s*$"
+                          % re.escape(SCRATCH_ROOT), re.M)
+        self.assertRegex(cleaner, loop,
+                         "scripts/disk-cleanup.sh no longer LOOPS over "
+                         "%s/playhead-*, so SCRATCH_ROOT is a reservoir nobody "
+                         "reaps" % SCRATCH_ROOT)
+
+    def test_scratch_dir_puts_a_directory_there(self):
+        d = scratch_dir("playhead-mv-hygiene.")
+        self.addCleanup(shutil.rmtree, str(d), True)
+        self.assertTrue(str(d).startswith(SCRATCH_ROOT + "/playhead-"), str(d))
+        self.assertTrue(d.is_dir())
+
+
 # ---------------------------------------------------------------------------
 # The preserved specimens
 # ---------------------------------------------------------------------------
@@ -924,7 +984,7 @@ class StateOfTests(unittest.TestCase):
     """
 
     def setUp(self):
-        self.dir = pathlib.Path(tempfile.mkdtemp(prefix="playhead-mv-state."))
+        self.dir = scratch_dir("playhead-mv-state.")
         self.addCleanup(shutil.rmtree, str(self.dir), True)
         self.out = self.dir / "outcomes.txt"
 
@@ -979,7 +1039,7 @@ class PrintEvidenceTests(unittest.TestCase):
     """
 
     def setUp(self):
-        self.dir = pathlib.Path(tempfile.mkdtemp(prefix="playhead-mv-ev."))
+        self.dir = scratch_dir("playhead-mv-ev.")
         self.addCleanup(shutil.rmtree, str(self.dir), True)
         self.ev = self.dir / "evidence"
 
@@ -1024,7 +1084,7 @@ class DropBundleTests(unittest.TestCase):
     """
 
     def setUp(self):
-        self.dir = pathlib.Path(tempfile.mkdtemp(prefix="playhead-mv-drop."))
+        self.dir = scratch_dir("playhead-mv-drop.")
         self.addCleanup(shutil.rmtree, str(self.dir), True)
         self.work = self.dir / "work"
         self.work.mkdir()
@@ -1109,6 +1169,32 @@ class DropBundleTests(unittest.TestCase):
 _SANDBOX = {}
 
 
+#: EVERY throwaway directory this module makes goes under `/private/tmp` with
+#: the `playhead-` prefix, and that is not cosmetic — playhead-gjlp0 R3.
+#:
+#: `tempfile.mkdtemp()` defaults to `$TMPDIR`, which NOTHING in this repo
+#: reaps: `scripts/disk-cleanup.sh` sweeps `.worktrees/*`, `/private/tmp/
+#: playhead-*` and `$TMPDIR/Deleting-*`, and that is the whole list. The
+#: sandbox is a ~67 MiB copy of the tree and it is dropped by
+#: `tearDownModule`, which does not run when a pass is INTERRUPTED — a Ctrl-C,
+#: a timeout, a killed harness. Measured at R3: **10 orphaned sandboxes, 670
+#: MiB**, all from one earlier day of review rounds, with no sweeper that could
+#: ever have found them. That is the accumulation R2 fixed one layer down when
+#: it made these rails reap their own `$WORK`, and this is the same defect in
+#: the rails' own scaffolding: a box whose gate REFUSES below 13.5 GiB, and a
+#: new reservoir nobody was counting.
+#:
+#: `mutation-battery.sh` already made exactly this choice for `$WORK` and says
+#: so in a comment. Following it costs one keyword and buys the existing 3-day
+#: cron, rather than a second cleaner that drifts from the first.
+SCRATCH_ROOT = "/private/tmp"
+
+
+def scratch_dir(prefix):
+    """A throwaway directory the existing disk cleaner can actually find."""
+    return pathlib.Path(tempfile.mkdtemp(prefix=prefix, dir=SCRATCH_ROOT))
+
+
 def battery_sandbox():
     """A throwaway git checkout of the tree, built once and reused.
 
@@ -1121,7 +1207,7 @@ def battery_sandbox():
     """
     if "dir" in _SANDBOX:
         return _SANDBOX["dir"]
-    root = pathlib.Path(tempfile.mkdtemp(prefix="playhead-mb-sandbox.")).resolve()
+    root = scratch_dir("playhead-mb-sandbox.").resolve()
     # The WORKING TREE, not `git archive HEAD`. A rail that copies the last
     # commit tests the code you have already shipped: the first run of these
     # rails passed a sandbox built from HEAD while the fix under test sat
@@ -1253,7 +1339,7 @@ class ShellBatteryHarness(unittest.TestCase):
                                  % cls.MUTATION)
 
     def setUp(self):
-        self.stub = pathlib.Path(tempfile.mkdtemp(prefix="playhead-mb-stub."))
+        self.stub = scratch_dir("playhead-mb-stub.")
         self.addCleanup(shutil.rmtree, str(self.stub), True)
         self.gate = self.root / "scripts" / "fast-gate.sh"
         original = self.gate.read_bytes()
