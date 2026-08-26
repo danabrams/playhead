@@ -9179,10 +9179,15 @@ actor AnalysisStore {
     /// `SemanticScanAttributionWireInTests` ×2, `SemanticScanRunAttributionTests`
     /// and `docs/investigations/playhead-hx6n-scan-attribution.md`. That grep is
     /// deliberately narrower than the whole edit: it catches the PROSE spellings
-    /// and not the two sites that named the identifier and reasoned about it —
-    /// `BackgroundGrantBudget` and
-    /// ``SemanticSweepMarkComposer/corroborationFactor(affirming:dissenting:)``
-    /// — which are the two that matter most and are discussed below.
+    /// and not the sites that wrote the identifier in code font and reasoned
+    /// about it. **NO CARDINAL IS GIVEN FOR THOSE, DELIBERATELY** — round 15
+    /// found that this very clause had said "the two", and missed at least
+    /// ``SemanticSweepMarkComposer/corroborates(_:_:)``'s note, which measures
+    /// the id out over `A9F6DF05`. That is the fourth short count in one
+    /// sentence (TWO, then FOUR, then FIVE-plus-"two missed"), so the sentence
+    /// stops counting: the two worth reading are `BackgroundGrantBudget` and
+    /// ``SemanticSweepMarkComposer/corroborationFactor(affirming:dissenting:)``,
+    /// and they are named as EXAMPLES rather than as a census.
     ///
     /// They are not the same kind of wrong, and the difference matters. TWO
     /// asserted something untrue:
