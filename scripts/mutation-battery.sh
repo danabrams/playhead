@@ -3471,6 +3471,7 @@ T_SD_TWO_RUNGS_BACK="a store seeded two rungs back still reaches head, so V64 do
 T_SD_C_CROSSING_SITES="BackgroundDownloadDropWiringSourceCanaryTests/testEveryDropSiteStatesItsCrossingAndTheHelperHasNoDefault"
 T_SD_C_LAUNCH_SLOT="BackgroundDownloadDropWiringSourceCanaryTests/testProductionNamesNoLaunchIdAndTheSlotIsPerInstance"
 T_SD_C_LADDERS="BackgroundDownloadDropWiringSourceCanaryTests/testV64IsRegisteredInBothLaddersExactlyOnceEach"
+T_SD_C_ARM_WRITER="BackgroundDownloadDropWiringSourceCanaryTests/testOnlyArmDropLedgerMovesTheArmingState"
 T_SD_C_COLUMNS="BackgroundDownloadDropWiringSourceCanaryTests/testEveryV64ColumnIsBothDeclaredAndRepaired"
 # `aV61StoreGenuinelyLacksTheTable` deliberately has NO mutant and therefore
 # no variable here. It asserts that a table this suite itself dropped is
@@ -12585,7 +12586,14 @@ MUTATIONS=(
   # record, and that split is the discriminator against SD03. NOT the
   # never-armed rails either: `not_attempted` is what they already expect, so
   # they are the direction this mutant cannot be seen from.
-  "SD02|1601|DLMGR|$T_SD_ARMED_ROW;$T_SD_ARMFAIL_ROW;$T_SD_ARMING_PARTITION;$T_SD_DEGRADED_EXCEEDS;$T_SD_SAMPLED_AT_WRITE"
+  #
+  # PREDICTION MISS, recorded rather than quietly folded in: the first run of
+  # batch 1601 killed the five above AND `testOnlyArmDropLedgerMovesTheArmingState`,
+  # which counts the `launchArmingState: dropLedgerArming` READ at the write
+  # site. Under-prediction, not a false credit — every DECLARED expectation
+  # failed, and the battery printed the full observed list beside them, which
+  # is exactly what that list is for. It is declared now.
+  "SD02|1601|DLMGR|$T_SD_ARMED_ROW;$T_SD_ARMFAIL_ROW;$T_SD_ARMING_PARTITION;$T_SD_DEGRADED_EXCEEDS;$T_SD_SAMPLED_AT_WRITE;$T_SD_C_ARM_WRITER"
 
   # Batch 1602 — SD03, SD02's MIRROR from the other end: `armDropLedger()`
   # stops recording the one POSITIVE outcome, so no launch is ever `armed`.
@@ -12593,7 +12601,12 @@ MUTATIONS=(
   # it ADDS the fallback rail (the invariant text reads the actor, so this
   # mutant reaches it and SD02 does not) and DROPS the failed-arming rail (that
   # branch is untouched).
-  "SD03|1602|DLMGR|$T_SD_ARMED_ROW;$T_SD_FALLBACK_IDS;$T_SD_ARMING_PARTITION;$T_SD_DEGRADED_EXCEEDS;$T_SD_SAMPLED_AT_WRITE"
+  # The canary is DECLARED here too, and for a DIFFERENT reason than in SD02 —
+  # which is the check that the two are still distinguishable. SD02 removes
+  # the READ at the write site; SD03 removes one of the three WRITES inside
+  # `armDropLedger`, so the same rail fails on its `inArm == 3` arm rather
+  # than on its `total == inArm` one.
+  "SD03|1602|DLMGR|$T_SD_ARMED_ROW;$T_SD_FALLBACK_IDS;$T_SD_ARMING_PARTITION;$T_SD_DEGRADED_EXCEEDS;$T_SD_SAMPLED_AT_WRITE;$T_SD_C_ARM_WRITER"
 
   # Batch 1603 — SD04, `lastArmedLaunchId` stops moving on the CONFLICT branch,
   # so the arming row names the first launch that ever armed and calls it the
