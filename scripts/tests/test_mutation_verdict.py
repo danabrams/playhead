@@ -1047,11 +1047,12 @@ class ShellBatteryHarness(unittest.TestCase):
         self.gate.write_text(STUB_GATE, encoding="utf-8")
         self.gate.chmod(0o755)
 
-    def run_battery(self, baseline_log, batch_log, args=None):
+    def run_battery(self, baseline_log, batch_log, args=None, env=None):
         (self.stub / "baseline.log").write_text(baseline_log, encoding="utf-8")
         (self.stub / "batch.log").write_text(batch_log, encoding="utf-8")
         env = dict(os.environ, MB_STUB_DIR=str(self.stub),
-                   GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_SYSTEM="/dev/null")
+                   GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_SYSTEM="/dev/null",
+                   **(env or {}))
         proc = subprocess.run(
             ["bash", "scripts/mutation-battery.sh"] + list(args or ["--only", self.MUTATION]),
             cwd=str(self.root), capture_output=True, text=True, env=env, timeout=600)
@@ -1289,6 +1290,26 @@ class ShellInstrumentFaultTests(ShellBatteryHarness):
         self.assertIn("fault in the INSTRUMENT", out, out[-4000:])
         self.assertNotIn("are RED before any mutation", out)
         self.assertEqual(proc.returncode, 2, out[-4000:])
+
+    def test_a_scorer_that_CRASHES_on_a_batch_is_ERROR_and_names_its_log(self):
+        # The batch-level `*)` arm — "the batch could not be SCORED" — is the
+        # only branch the fix added that no rail reached. Driven with the
+        # baseline skipped, so the failure lands on a BATCH rather than on the
+        # preflight, and with a scorer that dies rather than one that refuses.
+        scorer = self.root / "scripts" / "mutation_verdict.py"
+        original = scorer.read_bytes()
+        self.addCleanup(scorer.write_bytes, original)
+        scorer.write_text("raise SystemExit('boom: the scorer died')\n",
+                          encoding="utf-8")
+        green = console(tests=[(self.expect, "passed")])
+        proc = self.run_battery(green, green,
+                                args=["--only", self.MUTATION],
+                                env={"PLAYHEAD_MB_SKIP_BASELINE": "1"})
+        out = self.out(proc)
+        self.assertEqual(self.verdict_of(proc), "ERROR", out[-4000:])
+        self.assertIn("could not be SCORED", out, out[-4000:])
+        self.assertRegex(out, r"evidence: \S*batch-\d+\.log")
+        self.assertEqual(proc.returncode, 3, out[-4000:])
 
     def test_the_same_stub_WITH_the_count_gets_through_the_guard(self):
         # ANTI-FABRICATION: the rail above must fail for the MISSING FIELD and
