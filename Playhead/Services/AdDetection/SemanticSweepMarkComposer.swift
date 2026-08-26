@@ -472,95 +472,20 @@ enum SemanticSweepMarkComposer {
     /// Laplace-smoothed agreement among the PRESENCE-pass replicates that
     /// examined this extent: `(1 + affirming) / (1 + affirming + dissenting)`.
     ///
-    /// The sweep genuinely re-screens: on the 2026-08-10 pull this was measured
-    /// against (playhead-3gzp's `ground-truth.sqlite`, sha256 `bcad2d09…`,
-    /// schema V47) 36 of 125 coarse windows carry more than one `passA` row,
-    /// and on four of them `containsAd` is at most HALF of the rows written for
-    /// the window — counting only windows that carry a `containsAd` row AT ALL,
-    /// which is the unstated half of that predicate and is worth 4 against 24
-    /// (playhead-1gu0 review: the EXAMINED sentence below spells the condition
-    /// out, "no window there carries a `containsAd` row its own replicates
-    /// outvote or tie", and this one did not). **BOTH OF THOSE COUNTS ARE OVER
-    /// `passA` AT ANY STATUS** — a THIRD population, neither the bullets' below
-    /// nor this factor's own. It is said here rather than only in the
-    /// **IT NEVER SEPARATED** paragraph below, which is where the qualification
-    /// used to live alone — past the bullets, which carry a DIFFERENT
-    /// population's numbers (playhead-1gu0 review). On the EXAMINED population
-    /// the bullets use, that second count is **0**: no window there carries a
-    /// `containsAd` row its own replicates outvote or tie.
+    /// The parenthesis that used to cite a distinct `runCorrelationId` here as
+    /// evidence that those replicates are independent was WRONG. The
+    /// measurement that retired it lives at
+    /// ``corroboration(for:in:atTranscriptVersion:)``, which is where the
+    /// replicate population is selected. The independence itself is unchanged
+    /// (playhead-1gu0).
     ///
-    /// **WHAT SEPARATES THOSE REPLICATES IS `transcriptVersion` AND `latencyMs`
-    /// — NOT `runCorrelationId`. This line cited the id and playhead-1gu0
-    /// measured it out.** Over those 36, `transcriptVersion` is all-distinct on
-    /// **36 of 36** and `latencyMs` on **35 of 36** — the exception is a pair of
-    /// `cancelled` rows both reading `latencyMs` 0.0, two rows that examined
-    /// nothing, which is why the examined bullet below reads 25 of 25 and why
-    /// the headline is exact only there. SAY WHICH POPULATION, because it is the
-    /// RE-SCREENING one and NOT this factor's own — examined `passA` rows
-    /// grouped by `(analysisAssetId, windowStartTime, windowEndTime)`, no version
-    /// scope. THE INDEPENDENCE paragraph below says what this factor's own
-    /// filter adds and why the difference matters:
-    ///
-    ///   * **2026-08-10**, 99 windows, **25** with more than one row.
-    ///     `transcriptVersion` distinct across every row of **25 of 25**;
-    ///     `latencyMs` likewise **25 of 25**. `runCorrelationId` distinct on
-    ///     13, and the other 12 windows are entirely NULL — those rows predate
-    ///     the V42 column (all 24 of them also carry a NULL `createdAt`, which
-    ///     the same rung added, so "pre-V42" is read off the row rather than
-    ///     inferred). On those 13 it separated **nothing `transcriptVersion` had
-    ///     not already separated**.
-    ///   * **2026-08-19 t4**, 779 windows, **190** with more than one row.
-    ///     `transcriptVersion` **190 of 190**, `latencyMs` **190 of 190**,
-    ///     and `runCorrelationId` **0 of 190** — every one of the 190 carries a
-    ///     single id. The column does not separate re-screenings at all.
-    ///
-    /// **IT NEVER SEPARATED ANYTHING `transcriptVersion` DID NOT** — read the 13
-    /// above as the id AGREEING with the version, never as an independent
-    /// signal — and the 08-10 reading was a residue rather than a property.
-    /// `semantic_scan_results.backfillJobId` is the
-    /// `backfill_jobs.jobId` (it was spelled `runCorrelationId` until schema
-    /// V65, which is playhead-1gu0's other half), and that id is per
-    /// `(asset, phase, offset)` — one value for an asset's whole backfill
-    /// history. It read as per-screening on 08-10 only because
-    /// `transcriptVersion` was IN the job-id preimage until **playhead-wxsv
-    /// removed it on 2026-08-07**, three days BEFORE this line was written. So
-    /// the pull straddles the change and the claim was already contradicted on
-    /// it: over the 36 replicate windows of the opening paragraph's population
-    /// (`passA`, ANY status), 16 have all-distinct ids, 12 are entirely NULL,
-    /// and **8 carry a single id** — every row of those 8 was written AFTER
-    /// 2026-08-07, and every one of the 16 has a row from BEFORE it (11 lie
-    /// wholly before it, 5 straddle it). Both directions are stated because
-    /// only the pair makes "the pull straddles the change" a measurement rather
-    /// than an assertion. Measured on both pulls, every distinct-id pair is
-    /// also a distinct-version pair and not conversely — the job id is a
-    /// COARSENING of `transcriptVersion` and can never separate two rows the
-    /// version does not.
-    ///
-    /// **THE INDEPENDENCE IS UNCHANGED; ONLY THE EVIDENCE FOR IT IS — AND THE
-    /// EVIDENCE IS ABOUT THE SWEEP, NOT ABOUT THE PAIRS THIS FACTOR COUNTS.**
-    /// Two rows at different `transcriptVersion`s were screened from different
-    /// transcripts in different FM calls, so the SWEEP really does re-screen
-    /// independently; that is what the bullets establish and it is what the
-    /// deleted parenthesis was reaching for. It is NOT a statement about the
-    /// pairs that reach `affirming`/`dissenting`, because
-    /// ``corroboration(for:in:atTranscriptVersion:)`` counts only rows AT ONE
-    /// VERSION (playhead-kg6i) — so every pair this arithmetic sees shares a
-    /// `transcriptVersion` by construction, and INSIDE that population the
-    /// column separates nothing. Do not close the gap with
-    /// ``corroborates(_:_:)``'s "a re-transcription makes the second screening
-    /// MORE independent, not less": that note governs a bound-equality
-    /// MEMBERSHIP test that is deliberately NOT version-scoped, and it says so
-    /// itself — "kg6i … was right about the quantity it governs — but that
-    /// quantity is not this one". Nothing about this factor's arithmetic or its
-    /// inputs changes.
-    ///
-    /// SAY WHICH ROWS THIS FACTOR CAN SEE, because the opening paragraph's four
-    /// are not it. A row that did not EXAMINE its window is not a verdict and is
-    /// skipped below, so on the 2026-08-10 pull only ONE of the 55 coarse
-    /// `containsAd` rows has an examined dissenter over it, and only 3 of the 22
-    /// persisted sweep marks are deducted at all. The factor is right; its reach
-    /// today is small, and quoting the wider count as if this read it would
-    /// overstate it.
+    /// SAY WHICH ROWS THIS FACTOR CAN SEE, because the four measured at
+    /// ``corroboration(for:in:atTranscriptVersion:)`` are not it. A row that did
+    /// not EXAMINE its window is not a verdict and is skipped below, so on the
+    /// 2026-08-10 pull only ONE of the 55 coarse `containsAd` rows has an
+    /// examined dissenter over it, and only 3 of the 22 persisted sweep marks
+    /// are deducted at all. The factor is right; its reach today is small, and
+    /// quoting the wider count as if this read it would overstate it.
     ///
     /// **THOSE TWO FIGURES ARE PRE-kg6i AND THE FIRST OVERSTATES THE REACH —
     /// read them as history (playhead-1gu0 review).** They landed on 2026-08-10
@@ -948,6 +873,87 @@ enum SemanticSweepMarkComposer {
     /// Seconds are version-independent, so a stale row's window bounds are still
     /// real geometry; what is version-dependent is whether two rows are the same
     /// experiment, and that is the only thing changed here.
+    ///
+    /// The sweep genuinely re-screens: on the 2026-08-10 pull this was measured
+    /// against (playhead-3gzp's `ground-truth.sqlite`, sha256 `bcad2d09…`,
+    /// schema V47) 36 of 125 coarse windows carry more than one `passA` row,
+    /// and on four of them `containsAd` is at most HALF of the rows written for
+    /// the window — counting only windows that carry a `containsAd` row AT ALL,
+    /// which is the unstated half of that predicate and is worth 4 against 24
+    /// (playhead-1gu0 review: the EXAMINED sentence below spells the condition
+    /// out, "no window there carries a `containsAd` row its own replicates
+    /// outvote or tie", and this one did not). **BOTH OF THOSE COUNTS ARE OVER
+    /// `passA` AT ANY STATUS** — a THIRD population, neither the bullets' below
+    /// nor this factor's own. It is said here rather than only in the
+    /// **IT NEVER SEPARATED** paragraph below, which is where the qualification
+    /// used to live alone — past the bullets, which carry a DIFFERENT
+    /// population's numbers (playhead-1gu0 review). On the EXAMINED population
+    /// the bullets use, that second count is **0**: no window there carries a
+    /// `containsAd` row its own replicates outvote or tie.
+    ///
+    /// **WHAT SEPARATES THOSE REPLICATES IS `transcriptVersion` AND `latencyMs`
+    /// — NOT `runCorrelationId`. `corroborationFactor`'s doc cited the id and
+    /// playhead-1gu0 measured it out.** Over those 36, `transcriptVersion` is
+    /// all-distinct on **36 of 36** and `latencyMs` on **35 of 36** — the
+    /// exception is a pair of `cancelled` rows both reading `latencyMs` 0.0, two
+    /// rows that examined nothing, which is why the examined bullet below reads
+    /// 25 of 25 and why the headline is exact only there. SAY WHICH POPULATION,
+    /// because it is the RE-SCREENING one and NOT this factor's own — examined
+    /// `passA` rows grouped by `(analysisAssetId, windowStartTime,
+    /// windowEndTime)`, no version scope. THE INDEPENDENCE paragraph below says
+    /// what this factor's own filter adds and why the difference matters:
+    ///
+    ///   * **2026-08-10**, 99 windows, **25** with more than one row.
+    ///     `transcriptVersion` distinct across every row of **25 of 25**;
+    ///     `latencyMs` likewise **25 of 25**. `runCorrelationId` distinct on
+    ///     13, and the other 12 windows are entirely NULL — those rows predate
+    ///     the V42 column (all 24 of them also carry a NULL `createdAt`, which
+    ///     the same rung added, so "pre-V42" is read off the row rather than
+    ///     inferred). On those 13 it separated **nothing `transcriptVersion` had
+    ///     not already separated**.
+    ///   * **2026-08-19 t4**, 779 windows, **190** with more than one row.
+    ///     `transcriptVersion` **190 of 190**, `latencyMs` **190 of 190**,
+    ///     and `runCorrelationId` **0 of 190** — every one of the 190 carries a
+    ///     single id. The column does not separate re-screenings at all.
+    ///
+    /// **IT NEVER SEPARATED ANYTHING `transcriptVersion` DID NOT** — read the 13
+    /// above as the id AGREEING with the version, never as an independent
+    /// signal — and the 08-10 reading was a residue rather than a property.
+    /// `semantic_scan_results.backfillJobId` is the
+    /// `backfill_jobs.jobId` (it was spelled `runCorrelationId` until schema
+    /// V65, which is playhead-1gu0's other half), and that id is per
+    /// `(asset, phase, offset)` — one value for an asset's whole backfill
+    /// history. It read as per-screening on 08-10 only because
+    /// `transcriptVersion` was IN the job-id preimage until **playhead-wxsv
+    /// removed it on 2026-08-07**, three days BEFORE that line was written. So
+    /// the pull straddles the change and the claim was already contradicted on
+    /// it: over the 36 replicate windows of the population measured above
+    /// (`passA`, ANY status), 16 have all-distinct ids, 12 are entirely NULL,
+    /// and **8 carry a single id** — every row of those 8 was written AFTER
+    /// 2026-08-07, and every one of the 16 has a row from BEFORE it (11 lie
+    /// wholly before it, 5 straddle it). Both directions are stated because
+    /// only the pair makes "the pull straddles the change" a measurement rather
+    /// than an assertion. Measured on both pulls, every distinct-id pair is
+    /// also a distinct-version pair and not conversely — the job id is a
+    /// COARSENING of `transcriptVersion` and can never separate two rows the
+    /// version does not.
+    ///
+    /// **THE INDEPENDENCE IS UNCHANGED; ONLY THE EVIDENCE FOR IT IS — AND THE
+    /// EVIDENCE IS ABOUT THE SWEEP, NOT ABOUT THE PAIRS THIS FACTOR COUNTS.**
+    /// Two rows at different `transcriptVersion`s were screened from different
+    /// transcripts in different FM calls, so the SWEEP really does re-screen
+    /// independently; that is what the bullets establish and it is what the
+    /// deleted parenthesis was reaching for. It is NOT a statement about the
+    /// pairs that reach `affirming`/`dissenting`, because this function counts
+    /// only rows AT ONE VERSION (playhead-kg6i) — so every pair this arithmetic
+    /// sees shares a `transcriptVersion` by construction, and INSIDE that
+    /// population the column separates nothing. Do not close the gap with
+    /// ``corroborates(_:_:)``'s "a re-transcription makes the second screening
+    /// MORE independent, not less": that note governs a bound-equality
+    /// MEMBERSHIP test that is deliberately NOT version-scoped, and it says so
+    /// itself — "kg6i … was right about the quantity it governs — but that
+    /// quantity is not this one". Nothing about this factor's arithmetic or its
+    /// inputs changes.
     ///
     /// - Parameter version: the `transcriptVersion` of the claim being graded —
     ///   i.e. of the row whose confidence term this count feeds. It has NO
