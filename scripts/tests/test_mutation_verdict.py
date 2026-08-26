@@ -779,6 +779,51 @@ class StateOfTests(unittest.TestCase):
         self.assertEqual(self.ask(rows, "A"), "FAILED")
 
 
+class PrintEvidenceTests(unittest.TestCase):
+    """A MISSING line and a line saying "none" are two different claims.
+
+    `print_evidence` used to print NOTHING for a mutation with no evidence
+    line — which is every ERROR raised before scoring. The table is the part
+    that gets quoted, so a row with no path under it is a row whose reader has
+    nowhere to go.
+    """
+
+    def setUp(self):
+        self.dir = pathlib.Path(tempfile.mkdtemp(prefix="playhead-mv-ev."))
+        self.addCleanup(shutil.rmtree, str(self.dir), True)
+        self.ev = self.dir / "evidence"
+
+    def show(self, rows, name):
+        self.ev.write_text("".join(r + "\n" for r in rows), encoding="utf-8")
+        script = ("EVIDENCE=%s\nWORK=%s\n%s\nprint_evidence \"$1\"\n"
+                  % ("'%s'" % self.ev, "'%s'" % self.dir,
+                     shell_function("print_evidence")))
+        proc = subprocess.run(["bash", "-uo", "pipefail", "-c", script, "_", name],
+                              capture_output=True, text=True)
+        return proc.stdout + proc.stderr
+
+    def test_a_recorded_log_and_bundle_are_both_printed(self):
+        out = self.show(["M05\t/w/batch-1.log\t/w/batch-1.xcresult"], "M05")
+        self.assertIn("/w/batch-1.log", out)
+        self.assertIn("/w/batch-1.xcresult", out)
+
+    def test_a_dash_bundle_is_not_printed_as_a_path(self):
+        # The battery records "-" when no bundle exists. Printing it would be a
+        # line naming a thing, read as evidence the thing is there.
+        out = self.show(["M05\t/w/batch-1.log\t-"], "M05")
+        self.assertIn("/w/batch-1.log", out)
+        self.assertNotIn("\n%s           -" % (" " * 16), out)
+
+    def test_no_line_at_all_SAYS_SO_and_names_the_work_dir(self):
+        out = self.show(["OTHER\t/w/batch-1.log\t-"], "M05")
+        self.assertIn("evidence: NONE", out)
+        self.assertIn(str(self.dir), out)
+
+    def test_an_empty_evidence_file_says_the_same_thing(self):
+        out = self.show([], "M05")
+        self.assertIn("evidence: NONE", out)
+
+
 class DropBundleTests(unittest.TestCase):
     """CLAUDE.md's rm -rf rail: the path is PROVED, not assumed.
 
@@ -1262,6 +1307,22 @@ class ShellInstrumentFaultTests(ShellBatteryHarness):
         self.assertNotIn("fault in the INSTRUMENT", out, out[-4000:])
         self.assertIn("baseline green", out, out[-4000:])
         self.assertEqual(self.verdict_of(proc), "SURVIVED", out[-4000:])
+
+
+class ShellNoTestsTests(ShellBatteryHarness):
+    """A batch that never reached the test phase still names its log."""
+
+    MUTATION = "M05"
+
+    def test_a_batch_that_never_ran_tests_is_ERROR_and_names_its_log(self):
+        green = console(tests=[(self.expect, "passed")])
+        broken = "error: no such module 'Nope'\n** BUILD FAILED **\n"
+        proc = self.run_battery(green, broken)
+        out = self.out(proc)
+        self.assertEqual(self.verdict_of(proc), "ERROR", out[-4000:])
+        self.assertRegex(out, r"evidence: \S*batch-\d+\.log")
+        self.assertNotIn("evidence: NONE", out)
+        self.assertEqual(proc.returncode, 3, out[-4000:])
 
 
 class ShellXCTestExpectationTests(ShellBatteryHarness):

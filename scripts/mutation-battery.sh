@@ -29841,12 +29841,30 @@ scored_field() {
 
 # Print where THIS mutation's verdict came from. Called for every verdict that
 # is not a plain KILL, because those are the ones somebody comes back to.
+#
+# AND IT SAYS SO WHEN THERE IS NONE. The first cut printed NOTHING for a
+# mutation with no evidence line — every ERROR raised before scoring: an anchor
+# that did not apply, a batch that never built, a batch whose artifacts could
+# not be read. The table is the part that gets quoted (that is why the run stamp
+# is repeated at its foot), so a row with no path under it is a row whose reader
+# has nowhere to go, and a MISSING line and a line saying "none" are two
+# different claims that must not be spelled the same way — which is this whole
+# bead in one function.
+#
+# `MB_EV_NAME` through the environment rather than `awk -v`: see `state_of`.
+# Mutation names are `[A-Z0-9]+` today, so nothing is escaped either way; two
+# spellings of one idiom is how the next reader concludes the difference matters.
 print_evidence() {
-  awk -F'\t' -v n="$1" '$1 == n {
+  if MB_EV_NAME="$1" awk -F'\t' '$1 == ENVIRON["MB_EV_NAME"] {
       printf "%-16s evidence: %s\n", "", $2
       if ($3 != "" && $3 != "-") printf "%-16s           %s\n", "", $3
+      found = 1
       exit
-    }' "$EVIDENCE"
+    } END { exit !found }' "$EVIDENCE"; then
+    return 0
+  fi
+  printf '%-16s evidence: NONE — this mutation never reached a scored test run\n' ""
+  printf '%-16s           (the run kept its work dir: %s)\n' "" "$WORK"
 }
 
 # ---------------------------------------------------------------------------
@@ -30322,6 +30340,7 @@ for b in "${BATCH_IDS[@]}"; do
     mb_diagnose_no_tests "$LOG" "$RC" "batch $b"
     for rec in "${MEMBERS[@]}"; do
       echo "$(rec_name "$rec")|ERROR|batch did not build/run — see the DIAGNOSIS above" >>"$RESULTS"
+      printf '%s\t%s\t-\n' "$(rec_name "$rec")" "$LOG" >>"$EVIDENCE"
     done
     FATAL=1
     restore_and_verify "batch $b" || break
@@ -30341,6 +30360,11 @@ for b in "${BATCH_IDS[@]}"; do
       # it is ERROR rather than VOID because re-running will not fix it.
       for rec in "${MEMBERS[@]}"; do
         echo "$(rec_name "$rec")|ERROR|the batch could not be SCORED (see CANNOT EVALUATE above)" >>"$RESULTS"
+        if [ -d "$BUNDLE" ]; then
+          printf '%s\t%s\t%s\n' "$(rec_name "$rec")" "$LOG" "$BUNDLE" >>"$EVIDENCE"
+        else
+          printf '%s\t%s\t-\n' "$(rec_name "$rec")" "$LOG" >>"$EVIDENCE"
+        fi
       done
       FATAL=1
       restore_and_verify "batch $b" || break
