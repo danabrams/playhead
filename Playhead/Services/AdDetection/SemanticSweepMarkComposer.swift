@@ -542,19 +542,28 @@ enum SemanticSweepMarkComposer {
     /// are deducted at all. The factor is right; its reach today is small, and
     /// quoting the wider count as if this read it would overstate it.
     ///
-    /// **THOSE TWO FIGURES ARE PRE-kg6i AND THEY OVERSTATE THE REACH — read
-    /// them as history (playhead-1gu0 review).** They landed on 2026-08-10
-    /// (`6e9c386f`) and kg6i scoped the count to one `transcriptVersion` on
+    /// **THOSE TWO FIGURES ARE PRE-kg6i AND THE FIRST OVERSTATES THE REACH —
+    /// read them as history (playhead-1gu0 review).** They landed on 2026-08-10
+    /// (`6e9c386f`); kg6i scoped the count to one `transcriptVersion` on
     /// 2026-08-21 (`0f0e9cb1`). Re-derived on the same pull with the same
-    /// predicate — an examined presence-pass row overlapping the row's own
-    /// window — the un-scoped query reproduces **55** and **1** exactly, and
-    /// adding kg6i's version scope takes the 1 to **0**: on the 08-10 pull
-    /// there is not one pair of examined presence-pass rows that overlaps AND
-    /// shares a version, so `dissenting` is 0 everywhere and this factor is
-    /// 1.0 on every row of it. (The 08-19 t4 pull has **22** such pairs, none
-    /// of them at identical bounds.) The "3 of the 22 marks deducted" figure is
-    /// from the same pre-kg6i run and has NOT been re-derived; do not quote it
-    /// as current. Correcting the marks figure needs a composer run rather than
+    /// predicate — an EXAMINED presence-pass row overlapping the coarse row's
+    /// own window — the un-scoped query reproduces **55** and **1** exactly,
+    /// and adding kg6i's version scope takes the 1 to **0**. That direction is
+    /// exact rather than approximate: a lone coarse row's extent IS its window
+    /// and a narrowed one is a subinterval of it, so **no coarse backing row on
+    /// the 08-10 pull contributes a dissent at its own version.**
+    ///
+    /// DO NOT READ THAT AS "the factor never deducts" — that is the mirror
+    /// error, and it is false. The other kind of backing row
+    /// ``scored(start:end:restingOn:in:)`` passes here is a `passB` refinement,
+    /// and the same version-scoped query over the ELEVEN `passB` `containsAd`
+    /// rows finds a same-version dissenter over **6 of the 11** — an UPPER
+    /// bound, exact for an ORPHAN refinement and too wide for a narrowed pair,
+    /// whose extent is the intersection. So on this pull deduction is reachable
+    /// through refinements and not through coarse replicates. (2026-08-19 t4,
+    /// same queries: 3 of 301 coarse and at most 3 of 53 `passB`.) The
+    /// "3 of the 22 marks deducted" figure is from the same pre-kg6i run and
+    /// has NOT been re-derived; correcting it needs a composer run rather than
     /// a query, so it is left for the bead that re-measures the sweep.
     ///
     /// IT CAN ONLY DEDUCT, AND THAT IS THE POINT. The smoothing means
