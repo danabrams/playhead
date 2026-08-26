@@ -2801,6 +2801,30 @@ FOCUSED_SUITES=(
   -only-testing:PlayheadTests/BackgroundDownloadDropLedgerTests
   -only-testing:PlayheadTests/BackgroundDownloadDropsV62MigrationTests
   -only-testing:PlayheadTests/BackgroundDownloadDropWiringSourceCanaryTests
+  # playhead-sdis (SD series): ONE daemon OUTAGE stops being indistinguishable
+  # from FORTY EPISODES. THREE more suites, split by LAYER, and no one of them
+  # can see another's half — which is why all three are here rather than the
+  # one that looks like it covers the bead.
+  #
+  # `BackgroundDownloadDropLaunchIdentityV64MigrationTests` is the only thing
+  # that can see what the RUNG does to a store: that a pre-V64 row keeps NULL
+  # rather than gaining a sentinel, that the older shape is repaired instead of
+  # bricking the open, and that both ladders reach V64.
+  #
+  # `BackgroundDownloadDropOutageIdentityTests` is the only thing that can see
+  # what the WRITE PATH stamps — which launch, which crossing, which arming
+  # state, on each of the three drop sites — and it is where the two MIRROR
+  # rails live: three sequential refusals in one launch are three crossings,
+  # three concurrent joiners of one crossing are one. A suite with only one of
+  # those proves the column is written without proving it discriminates.
+  #
+  # `BackgroundDownloadDropIdentityTests` is the only thing that runs the SQL a
+  # device pull runs, through a SECOND CONNECTION, over populations mixed in
+  # one table. A `count(DISTINCT)` that declines to count a NULL is invisible
+  # from Swift, and so is a `GROUP BY launchId` telling one outage from forty.
+  -only-testing:PlayheadTests/BackgroundDownloadDropLaunchIdentityV64MigrationTests
+  -only-testing:PlayheadTests/BackgroundDownloadDropOutageIdentityTests
+  -only-testing:PlayheadTests/BackgroundDownloadDropIdentityTests
   # And two suites that are NOT this bead's and are here because the V62 rung
   # moves `currentSchemaVersion`: they are the cross-rung "reaches head"
   # observers, and the V60 note in `migrateOnlyForTesting` records that a rung
@@ -3407,6 +3431,48 @@ T_7DGX_UNBOUNDED="an unbounded limit returns everything instead of trapping"
 T_7DGX_ARM_SILENT="an UNWIRED build's arming is silent, not an anomaly"
 T_7DGX_LANDED_QUIET="a drop that LANDS raises nothing"
 T_7DGX_UNKNOWN_REASON="an unrecognized reason is skipped and counted, never coerced into a known case"
+
+# ---- playhead-sdis (SD series): one OUTAGE is not forty EPISODES ----
+#
+# Display names, byte-exact. The battery resolves a Swift Testing expectation
+# by its DISPLAY name and an XCTest one by `Suite/method`, so the two spellings
+# below are not a style choice.
+T_SD_LAUNCH_EVERY_ROW="every drop row carries THIS manager's launch id, on all three paths"
+T_SD_CROSSING_ONLY_SESSION="only a session refusal carries a crossing id — the other two rows carry NONE"
+T_SD_SEQUENTIAL="three SEQUENTIAL refusals in ONE launch are three distinct crossings"
+T_SD_JOINERS="three CONCURRENT joiners of ONE crossing write three rows sharing ONE crossing id"
+T_SD_TWO_LAUNCHES="two managers are two launches, and the numerator matches armedLaunches' unit"
+T_SD_UNARMED_ROW="a drop written by a launch that never armed carries not_attempted, and the row is real"
+T_SD_ARMED_ROW="a drop written after a successful arming carries armed, the only positive value"
+T_SD_ARMFAIL_ROW="a drop written after a FAILED arming carries arming_failed, not not_attempted"
+T_SD_FALLBACK_IDS="a drop whose row cannot be written raises the launch, the crossing and the arming state"
+T_SD_FALLBACK_NONE="a task-vending drop that cannot be written says crossing=none rather than omitting it"
+T_SD_TWO_SURFACES="the gpdb refusal record and the drop row name ONE crossing"
+
+T_SD_MIXED="mixed populations in one table are separated by launch AND by crossing"
+T_SD_PREV64_UNCOUNTED="rows written before V64 are launchId IS NULL and add nothing to the launch count"
+T_SD_ARMING_PARTITION="launchArmingState separates counted, uncounted and unknowable rows"
+T_SD_DEGRADED_EXCEEDS="a DEGRADED launch drops without arming, and the numerator exceeds the denominator"
+T_SD_DEGRADED_FILE="a drop on a launch that never armed is legible from the FILE alone"
+T_SD_JOIN_NOT_A_SET="lastArmedLaunchId joins the two tables, and names ONE launch rather than a set"
+T_SD_SAMPLED_AT_WRITE="a drop before the arming and a drop after it disagree, in ONE launch"
+T_SD_NO_RECORDER="no_recorder is a state the READ path can express, and no wired build can write one"
+
+T_SD_NO_BACKFILL="a pre-V64 row survives the migration carrying NO identity — NULL, never a sentinel"
+T_SD_LASTARMED_FOLLOWS="lastArmedLaunchId follows every arming, and firstArmedAt still means THE FIRST"
+T_SD_WRITEFAIL_NO_LAUNCH="a write failure names NO launch, on the update path and on the re-create path"
+T_SD_IDEMPOTENT="re-running the rung preserves the arming row and the identities on it"
+T_SD_OLDSHAPE="a store carrying the PRE-V64 shape of BOTH tables still opens, and is repaired"
+T_SD_TIEBREAK="rows sharing one timestamp page deterministically, so a limit cuts a stated set"
+T_SD_THREE_READINGS="one outage, forty outages, and nobody counting are three different queries"
+T_SD_LADDER="a V63 store climbs to head through the ladder-only seam and gains all four columns"
+T_SD_TWO_RUNGS_BACK="a store seeded two rungs back still reaches head, so V64 does not depend on running alone"
+
+T_SD_C_CROSSING_SITES="BackgroundDownloadDropWiringSourceCanaryTests/testEveryDropSiteStatesItsCrossingAndTheHelperHasNoDefault"
+T_SD_C_LAUNCH_SLOT="BackgroundDownloadDropWiringSourceCanaryTests/testProductionNamesNoLaunchIdAndTheSlotIsPerInstance"
+T_SD_C_LADDERS="BackgroundDownloadDropWiringSourceCanaryTests/testV64IsRegisteredInBothLaddersExactlyOnceEach"
+T_SD_C_ARM_WRITER="BackgroundDownloadDropWiringSourceCanaryTests/testOnlyArmDropLedgerMovesTheArmingState"
+T_SD_C_COLUMNS="BackgroundDownloadDropWiringSourceCanaryTests/testEveryV64ColumnIsBothDeclaredAndRepaired"
 # `aV61StoreGenuinelyLacksTheTable` deliberately has NO mutant and therefore
 # no variable here. It asserts that a table this suite itself dropped is
 # dropped — a vacuity guard for the rails around it, and a property of the
@@ -12489,6 +12555,164 @@ MUTATIONS=(
   "DW37|1513|STORE|$T_DW_ARM_CREATE"
 
   "DW99|1500|DWJ|$T_DW_WRITEFAIL"
+
+  # ---- playhead-sdis (SD series): ONE daemon OUTAGE is not FORTY EPISODES ----
+  #
+  # PREDICTED VICTIM SETS ARE PART OF THE ENTRY. Every set below was written
+  # before the batch ran and compared against the observed one afterwards: a
+  # mutant that kills a DIFFERENT test than the one it names is a false credit,
+  # and the 4th field is what makes that visible.
+  #
+  # The NON-victims are stated too, because that is where the discrimination
+  # lives. SD02 and SD03 collapse the same column from opposite ends and MUST
+  # predict different sets; if they predicted the same one, the second is not
+  # testing anything the first does not.
+
+  # Batch 1600 — SD01, THE SHIPPED DEFECT VERBATIM. A joiner mints a crossing
+  # id of its own instead of returning the STARTER's, so N episodes lost to ONE
+  # daemon refusal go back to looking like N refusals — which is the exact
+  # reading `count(*)` already gave and the whole reason this bead exists.
+  # Predicted: the join rail and the mixed-population rail, and NOTHING else.
+  # NOT the sequential rail (no caller joins there, so every crossing is its
+  # own either way), NOT the two-surfaces rail (one caller, so it IS the
+  # starter), NOT the schema suite and NOT the canary.
+  "SD01|1600|DLMGR|$T_SD_JOINERS;$T_SD_MIXED"
+
+  # Batch 1601 — SD02, the row's arming state becomes a CONSTANT. Every row
+  # claims `not_attempted`, so the column stops reporting what this process
+  # knew about its own arming. Predicted: the two positive-state rails and the
+  # three multi-row partition rails. NOT the two fallback rails — they read
+  # `dropLedgerArming` off the actor for the invariant TEXT, not off the
+  # record, and that split is the discriminator against SD03. NOT the
+  # never-armed rails either: `not_attempted` is what they already expect, so
+  # they are the direction this mutant cannot be seen from.
+  #
+  # PREDICTION MISS, recorded rather than quietly folded in: the first run of
+  # batch 1601 killed the five above AND `testOnlyArmDropLedgerMovesTheArmingState`,
+  # which counts the `launchArmingState: dropLedgerArming` READ at the write
+  # site. Under-prediction, not a false credit — every DECLARED expectation
+  # failed, and the battery printed the full observed list beside them, which
+  # is exactly what that list is for. It is declared now.
+  "SD02|1601|DLMGR|$T_SD_ARMED_ROW;$T_SD_ARMFAIL_ROW;$T_SD_ARMING_PARTITION;$T_SD_DEGRADED_EXCEEDS;$T_SD_SAMPLED_AT_WRITE;$T_SD_C_ARM_WRITER"
+
+  # Batch 1602 — SD03, SD02's MIRROR from the other end: `armDropLedger()`
+  # stops recording the one POSITIVE outcome, so no launch is ever `armed`.
+  # Predicted set OVERLAPS SD02's and is not equal to it, which is the point:
+  # it ADDS the fallback rail (the invariant text reads the actor, so this
+  # mutant reaches it and SD02 does not) and DROPS the failed-arming rail (that
+  # branch is untouched).
+  # The canary is DECLARED here too, and for a DIFFERENT reason than in SD02 —
+  # which is the check that the two are still distinguishable. SD02 removes
+  # the READ at the write site; SD03 removes one of the three WRITES inside
+  # `armDropLedger`, so the same rail fails on its `inArm == 3` arm rather
+  # than on its `total == inArm` one.
+  "SD03|1602|DLMGR|$T_SD_ARMED_ROW;$T_SD_FALLBACK_IDS;$T_SD_ARMING_PARTITION;$T_SD_DEGRADED_EXCEEDS;$T_SD_SAMPLED_AT_WRITE;$T_SD_C_ARM_WRITER"
+
+  # Batch 1603 — SD04, `lastArmedLaunchId` stops moving on the CONFLICT branch,
+  # so the arming row names the first launch that ever armed and calls it the
+  # latest. Every rail below reaches the conflict branch because
+  # `makeTestStoreWithDirectory()` hands back a store whose arming row is
+  # already SEEDED — so the first `noteBackgroundDownloadDropInstrumentArmed`
+  # is an UPDATE, not an insert, and even the single-arming rails are victims.
+  # That is worth stating: the obvious prediction ("only the two-arming rails")
+  # is wrong, and it is wrong for a reason about the FIXTURE rather than the
+  # code.
+  "SD04|1603|STORE|$T_SD_LASTARMED_FOLLOWS;$T_SD_IDEMPOTENT;$T_SD_OLDSHAPE;$T_SD_TWO_LAUNCHES;$T_SD_JOIN_NOT_A_SET;$T_SD_ARMED_ROW;$T_SD_THREE_READINGS"
+
+  # Batch 1604 — SD05, THE SENTINEL TRAP, injected as a migration would inject
+  # it: a backfill that turns every pre-V64 NULL into one shared `'pre-v64'`,
+  # which `count(DISTINCT launchId)` then reports as a LAUNCH. Predicted to
+  # redden the no-backfill rail ALONE — and the reason the two Identity-suite
+  # legacy rails are NOT victims is a real limit worth recording: they insert a
+  # legacy-SHAPED row through a second connection AFTER the store is open, so
+  # no migration runs over it. Only the schema suite exercises a row that
+  # SURVIVED the rung. Both populations are worth having; they are not the
+  # same population.
+  "SD05|1604|STORE|$T_SD_NO_BACKFILL"
+
+  # Batch 1605 — SD06, the `, id DESC` TIEBREAKER is dropped (BD26 flips the
+  # whole order to ASC; this one leaves the order correct and only makes ties
+  # arbitrary, which is the half BD26 cannot isolate). Predicted: the tiebreak
+  # rail ALONE. Nothing else in either suite asserts an order.
+  "SD06|1605|STORE|$T_SD_TIEBREAK"
+
+  # Batch 1606 — SD07, the task-vending site records the crossing the session
+  # construction SUCCEEDED on, so a reason that rides no crossing starts
+  # naming one and `count(DISTINCT sessionCrossingId)` goes back to counting
+  # something other than refusals. Predicted: the crossing-asymmetry rail, the
+  # `crossing=none` fallback rail, and the canary — which is the only one of
+  # the three that can see the SITE rather than the row.
+  "SD07|1606|DLMGR|$T_SD_CROSSING_ONLY_SESSION;$T_SD_FALLBACK_NONE;$T_SD_C_CROSSING_SITES"
+
+  # Batch 1607 — SD08, the launch id's default becomes a LITERAL, i.e. one
+  # identity for every launch on every device — the collapse the column exists
+  # to prevent, and the shape a `static let` would have. Predicted: the
+  # two-launches rail and the canary. NOT the Identity suite, which passes
+  # explicit launch ids wherever it needs distinct ones, and NOT the
+  # every-row rail, which compares the row against the manager's OWN id and is
+  # satisfied by any value at all — the direction a rail cannot see itself.
+  "SD08|1607|DLMGR|$T_SD_TWO_LAUNCHES;$T_SD_C_LAUNCH_SLOT"
+
+  # Batch 1608 — SD09, `sessionCrossingId` gains a defaulted `= nil`. This
+  # mutant changes NO behaviour — all three sites still pass it explicitly —
+  # so it is predicted to redden the CANARY ALONE, and a behavioural rail
+  # dying under it would mean the prediction is wrong rather than the code. It
+  # is the reason that canary exists: a fourth abandonment path would then
+  # inherit "this reason rides no crossing" instead of deciding, and NULL on a
+  # post-V64 row is a STATEMENT, so nothing downstream could tell the
+  # forgotten case from the deliberate one.
+  "SD09|1608|DLMGR|$T_SD_C_CROSSING_SITES"
+
+  # Batch 1609 — SD10, THE V60 MISTAKE ONE RUNG ON: V64 is registered in the
+  # production ladder and NOT in `migrateOnlyForTesting`, so every
+  # fixture-driven test stops one rung short while `currentSchemaVersion` still
+  # reads 64. Predicted: the two ladder-climb rails, the idempotence rail
+  # (which re-stamps and re-climbs through the same seam), and the canary.
+  # NOT the rails that go through `migrate()`.
+  #
+  # PREDICTION MISS, and the biggest one in the series: predicted FOUR, observed
+  # TWENTY-THREE. `migrateOnlyForTesting` is not V64's ladder, it is EVERY
+  # fixture-driven migration test's ladder, and it climbs to head — so a rung
+  # missing from it leaves `schemaVersion()` at 63 for all of them. Nineteen of
+  # the twenty-three belong to other beads (V40's rollback floor, V44's index,
+  # v50/v51, the two earlier drop rungs, the Cycle-4 isolated-ladder rails).
+  #
+  # The declared set is DELIBERATELY LEFT AT FOUR rather than widened to the
+  # observed twenty-three. A KILL needs the DECLARED set to fail, and all four
+  # do; declaring the other nineteen would make this record fail the day any of
+  # nineteen unrelated tests is renamed, which is a rail about other beads
+  # wearing this one's name. The observed list is printed beside every verdict,
+  # which is what that list is for.
+  #
+  # Read the size as the FINDING rather than as noise: it is the V60 lesson
+  # measured. The rung's own comment says a rung in one ladder and not the
+  # other "is invisible to any test written for that rung" — the blast radius
+  # is in fact every test written for every rung.
+  "SD10|1609|STORE|$T_SD_LADDER;$T_SD_TWO_RUNGS_BACK;$T_SD_IDEMPOTENT;$T_SD_C_LADDERS"
+
+  # Batch 1610 — SD11, THE BRICKING OBLIGATION: the four columns are declared
+  # in the `CREATE TABLE` and NOT re-added with `addColumnIfNeeded`, which is
+  # measured rather than hypothetical — it is what V62 did with
+  # `dropWriteFailures` and it stopped the store opening. A FRESH install is
+  # unaffected (the DDL builds the full shape), so the victims are exactly the
+  # rails that rewind a store into the older shape, plus the canary that owns
+  # the pairing.
+  #
+  # PREDICTION MISS, one wide: predicted five, observed six. The extra is
+  # playhead-7dgx's own `a store carrying the PRE-dropWriteFailures shape still
+  # opens, and is repaired`, and the MECHANISM was named in the paragraph above
+  # without the rail being enumerated — that fixture rebuilds the arming table
+  # in a shape that lacks `lastArmedLaunchId` as well as `dropWriteFailures`, so
+  # `fetchBackgroundDownloadDropArming`'s SELECT names a column that is not
+  # there and throws. Declared, because it is one rail of this table's own
+  # family rather than nineteen of somebody else's.
+  "SD11|1610|STORE|$T_SD_OLDSHAPE;$T_SD_LADDER;$T_SD_TWO_RUNGS_BACK;$T_SD_NO_BACKFILL;$T_SD_C_COLUMNS;$T_7DGX_OLDSHAPE"
+
+  # Batch 1611 — SD99, VACUITY CONTROL. `armDropLedger`'s outcome is bound to a
+  # second name and aliased back; nothing observable changes at any layer.
+  # MUST SURVIVE. If it dies, the eleven verdicts above are measuring the
+  # suites' fragility rather than the mutations.
+  "SD99|1611|DLMGR|$T_SD_ARMED_ROW"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -13698,10 +13922,12 @@ EOF
                 episodeId: episodeId,
                 reason: .sessionNotVended,
                 context: context,
-                boundSeconds: sessionCreationIO.timeout
+                boundSeconds: sessionCreationIO.timeout,
+                sessionCrossingId: sessionCrossingId
             )
 EOF
     snippet NEW <<'EOF'
+
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -13720,19 +13946,21 @@ EOF
                 episodeId: episodeId,
                 reason: .transferNotResumed,
                 context: context,
-                boundSeconds: sessionIO.timeout
+                boundSeconds: sessionIO.timeout,
+                sessionCrossingId: nil
             )
 EOF
     snippet NEW <<'EOF'
+
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
   BD04)
     snippet OLD <<'EOF'
-                boundSeconds: sessionCreationIO.timeout
+                boundSeconds: sessionCreationIO.timeout,
 EOF
     snippet NEW <<'EOF'
-                boundSeconds: BackgroundSessionIO.defaultTimeout
+                boundSeconds: BackgroundSessionIO.defaultTimeout,
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -13872,6 +14100,7 @@ EOF
   BD16)
     snippet OLD <<'EOF'
         let outcome = await dropRecorder.recordInstrumentArmed(
+            launchId: launchId,
             at: Date().timeIntervalSince1970
         )
 EOF
@@ -14034,22 +14263,19 @@ EOF
   DW10)
     snippet OLD <<'EOF'
         try migrateDownloadWorkJournalV63IfNeeded()
-    }
-    #endif
+        // playhead-sdis (v64): four ADDED COLUMNS rather than a new table, so
 EOF
     snippet NEW <<'EOF'
-    }
-    #endif
+        // playhead-sdis (v64): four ADDED COLUMNS rather than a new table, so
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
   DW11)
     snippet OLD <<'EOF'
             try migrateDownloadWorkJournalV63IfNeeded()
-            try exec("COMMIT")
 EOF
     snippet NEW <<'EOF'
-            try exec("COMMIT")
+
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -14412,30 +14638,185 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
-  BD99)
+  # ---- playhead-sdis: one OUTAGE is not forty EPISODES (SD series) ----
+
+  SD01)
     snippet OLD <<'EOF'
-        boundSeconds: TimeInterval
-    ) async {
-        let outcome = await dropRecorder.recordDrop(
-            BackgroundDownloadDropRecord(
-                episodeId: episodeId,
-                reason: reason,
-                context: context,
-                boundSeconds: boundSeconds
-            )
+        if let inFlight = _sessionCreationsInFlight[resolvedRole] {
+            return (await inFlight.task.value, inFlight.id)
+        }
+EOF
+    snippet NEW <<'EOF'
+        if let inFlight = _sessionCreationsInFlight[resolvedRole] {
+            return (await inFlight.task.value, UUID().uuidString)
+        }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SD02)
+    snippet OLD <<'EOF'
+                launchArmingState: dropLedgerArming,
+EOF
+    snippet NEW <<'EOF'
+                launchArmingState: .notAttempted,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SD03)
+    snippet OLD <<'EOF'
+        case .landed: dropLedgerArming = .armed
+EOF
+    snippet NEW <<'EOF'
+        case .landed: break
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SD04)
+    snippet OLD <<'EOF'
+                lastArmedAt = excluded.lastArmedAt,
+                lastArmedLaunchId = excluded.lastArmedLaunchId
+EOF
+    snippet NEW <<'EOF'
+                lastArmedAt = excluded.lastArmedAt
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SD05)
+    snippet OLD <<'EOF'
+        try addColumnIfNeeded(
+            table: "background_download_drop_arming",
+            column: "lastArmedLaunchId",
+            definition: "TEXT"
         )
 EOF
     snippet NEW <<'EOF'
-        boundSeconds bound: TimeInterval
+        try addColumnIfNeeded(
+            table: "background_download_drop_arming",
+            column: "lastArmedLaunchId",
+            definition: "TEXT"
+        )
+        try exec("""
+            UPDATE background_download_drops SET launchId = 'pre-v64'
+            WHERE launchId IS NULL
+            """)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SD06)
+    snippet OLD <<'EOF'
+            ORDER BY occurredAt DESC, id DESC LIMIT ?
+EOF
+    snippet NEW <<'EOF'
+            ORDER BY occurredAt DESC LIMIT ?
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SD07)
+    snippet OLD <<'EOF'
+                reason: .transferTaskNotVended,
+                context: context,
+                boundSeconds: sessionIO.timeout,
+                sessionCrossingId: nil
+EOF
+    snippet NEW <<'EOF'
+                reason: .transferTaskNotVended,
+                context: context,
+                boundSeconds: sessionIO.timeout,
+                sessionCrossingId: sessionCrossingId
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SD08)
+    snippet OLD <<'EOF'
+        launchId: String = UUID().uuidString
+EOF
+    snippet NEW <<'EOF'
+        launchId: String = "playhead-launch"
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SD09)
+    snippet OLD <<'EOF'
+        boundSeconds: TimeInterval,
+        sessionCrossingId: String?
+    ) async {
+EOF
+    snippet NEW <<'EOF'
+        boundSeconds: TimeInterval,
+        sessionCrossingId: String? = nil
+    ) async {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SD10)
+    snippet OLD <<'EOF'
+        try migrateBackgroundDownloadDropLaunchIdentityV64IfNeeded()
+    }
+    #endif
+EOF
+    snippet NEW <<'EOF'
+    }
+    #endif
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SD11)
+    snippet OLD <<'EOF'
+        for column in ["launchId", "sessionCrossingId", "launchArmingState"] {
+            try addColumnIfNeeded(
+                table: "background_download_drops",
+                column: column,
+                definition: "TEXT"
+            )
+        }
+        try addColumnIfNeeded(
+            table: "background_download_drop_arming",
+            column: "lastArmedLaunchId",
+            definition: "TEXT"
+        )
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SD99)
+    snippet OLD <<'EOF'
+        let outcome = await dropRecorder.recordInstrumentArmed(
+            launchId: launchId,
+            at: Date().timeIntervalSince1970
+        )
+EOF
+    snippet NEW <<'EOF'
+        let armingOutcome = await dropRecorder.recordInstrumentArmed(
+            launchId: launchId,
+            at: Date().timeIntervalSince1970
+        )
+        let outcome = armingOutcome
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BD99)
+    snippet OLD <<'EOF'
+        boundSeconds: TimeInterval,
+        sessionCrossingId: String?
     ) async {
         let outcome = await dropRecorder.recordDrop(
             BackgroundDownloadDropRecord(
                 episodeId: episodeId,
                 reason: reason,
                 context: context,
-                boundSeconds: bound
-            )
-        )
+                boundSeconds: boundSeconds,
+EOF
+    snippet NEW <<'EOF'
+        boundSeconds bound: TimeInterval,
+        sessionCrossingId: String?
+    ) async {
+        let outcome = await dropRecorder.recordDrop(
+            BackgroundDownloadDropRecord(
+                episodeId: episodeId,
+                reason: reason,
+                context: context,
+                boundSeconds: bound,
 EOF
     # TWO PATCHES, and the second is why this control had to be repaired: R1
     # added a SECOND use of `boundSeconds` in the invariant text below, far
@@ -14500,7 +14881,8 @@ EOF
                 episodeId: episodeId,
                 reason: .sessionNotVended,
                 context: context,
-                boundSeconds: sessionCreationIO.timeout
+                boundSeconds: sessionCreationIO.timeout,
+                sessionCrossingId: sessionCrossingId
             )
             releaseInFlightReservationIfUnclaimed(episodeId: episodeId)
             deleteDownloadAttribution(episodeId: episodeId)
@@ -14509,18 +14891,23 @@ EOF
             )
 EOF
     patch "$file" "$OLD" "$NEW" || return $?
+    # The SECOND patch removes the ORIGINAL call, and its anchor is the call
+    # PLUS the `return` that follows it. That suffix is what keeps it unique
+    # after the first patch has planted a byte-identical copy above: the copy
+    # is followed by `releaseInFlightReservationIfUnclaimed`, never by
+    # `return`. Anchoring on the call alone would match TWICE and `patch`
+    # would refuse — which is the guard working, but it would cost a round.
     snippet OLD <<'EOF'
-            // about the very quantity the widening decision reads.
             await recordBackgroundDownloadDrop(
                 episodeId: episodeId,
                 reason: .sessionNotVended,
                 context: context,
-                boundSeconds: sessionCreationIO.timeout
+                boundSeconds: sessionCreationIO.timeout,
+                sessionCrossingId: sessionCrossingId
             )
             return
 EOF
     snippet NEW <<'EOF'
-            // about the very quantity the widening decision reads.
             return
 EOF
     patch "$file" "$OLD" "$NEW" ;;
@@ -14589,10 +14976,10 @@ EOF
 
   BD26)
     snippet OLD <<'EOF'
-            "\(Self.backgroundDownloadDropSelectColumns) ORDER BY occurredAt DESC LIMIT ?"
+            ORDER BY occurredAt DESC, id DESC LIMIT ?
 EOF
     snippet NEW <<'EOF'
-            "\(Self.backgroundDownloadDropSelectColumns) ORDER BY occurredAt ASC LIMIT ?"
+            ORDER BY occurredAt ASC, id ASC LIMIT ?
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -14648,12 +15035,12 @@ EOF
     snippet OLD <<'EOF'
                 reason: .transferNotResumed,
                 context: context,
-                boundSeconds: sessionIO.timeout
+                boundSeconds: sessionIO.timeout,
 EOF
     snippet NEW <<'EOF'
                 reason: .transferNotResumed,
                 context: context,
-                boundSeconds: sessionCreationIO.timeout
+                boundSeconds: sessionCreationIO.timeout,
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -14735,16 +15122,17 @@ EOF
 
   BD36)
     snippet OLD <<'EOF'
-        logger.error("Background download drop ledger NOT armed for this launch")
         invariantRecorder?(
             .backgroundDownloadDropNotRecorded,
-            "arming=failed — this launch had a live drop recorder and "
-            + "background_download_drop_arming.armedLaunches did not move, so "
-            + "any drop row it goes on to write has no launch in the denominator"
+            "arming=failed launch=\(launchId) — this launch had a live drop "
+            + "recorder and background_download_drop_arming.armedLaunches did "
+            + "not move, so any drop row it goes on to write has no launch in "
+            + "the denominator; those rows say so themselves, carrying "
+            + "launchArmingState=arming_failed"
         )
 EOF
     snippet NEW <<'EOF'
-        logger.error("Background download drop ledger NOT armed for this launch")
+
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -14755,15 +15143,11 @@ EOF
   BD37)
     snippet OLD <<'EOF'
         let probe = ceiling >= Int(Int32.max) ? Int(Int32.max) : ceiling + 1
-        let stmt = try prepare(
-            "\(Self.backgroundDownloadDropSelectColumns) ORDER BY occurredAt DESC LIMIT ?"
-        )
+        // `, id DESC` is a TIEBREAKER, not decoration (playhead-sdis). Three
 EOF
     snippet NEW <<'EOF'
         let probe = ceiling
-        let stmt = try prepare(
-            "\(Self.backgroundDownloadDropSelectColumns) ORDER BY occurredAt DESC LIMIT ?"
-        )
+        // `, id DESC` is a TIEBREAKER, not decoration (playhead-sdis). Three
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -14807,18 +15191,14 @@ EOF
   # mutation is unchanged; only the context that makes it unambiguous is.
   BD40)
     snippet OLD <<'EOF'
-                    ELSE background_download_drop_arming.firstArmedAt
-                END,
-                lastArmedAt = excluded.lastArmedAt
+                lastArmedAt = excluded.lastArmedAt,
 EOF
     snippet NEW <<'EOF'
-                    ELSE background_download_drop_arming.firstArmedAt
-                END,
                 lastArmedAt = CASE
                     WHEN background_download_drop_arming.armedLaunches = 0
                     THEN excluded.lastArmedAt
                     ELSE background_download_drop_arming.lastArmedAt
-                END
+                END,
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 

@@ -186,6 +186,120 @@
 // consequence to hold on to is above: `armedLaunches = 0` beside real rows is
 // a reachable, meaningful state, not a contradiction.
 //
+// ─────────────────────────────────────────────────────────────────────────
+// EPISODES ARE NOT OUTAGES — WHAT `launchId` AND `sessionCrossingId` FIX
+// (playhead-sdis)
+// ─────────────────────────────────────────────────────────────────────────
+// Everything above is about whether anybody was COUNTING. This section is
+// about what the count is a count OF, which is a different question and had a
+// wrong answer.
+//
+// `SELECT count(*) … WHERE reason='session_not_vended'` counts EPISODES
+// AFFECTED. It was read as a number of daemon refusals, and the two differ by
+// an unbounded factor:
+//
+//   * A REFUSAL IS NEVER CACHED (`_sessionsByRole` is written only on success),
+//     so ONE LAUNCH can hold many refusals — the next request retries
+//     naturally, which is the property `sessionCreationRetriesAfterARefusal`
+//     pins. So a launch identity alone does NOT separate one outage from many.
+//   * ONE REFUSAL CAN MINT N ROWS. `backgroundSession(for:requestedBy:)` lets
+//     concurrent callers JOIN an in-flight crossing through
+//     `_sessionCreationsInFlight` rather than opening a second `URLSession` on
+//     one background identifier. Every joiner gives up when the FIRST caller's
+//     deadline fires, and every one of them writes its own row. Before this
+//     bead those rows shared no marker at all.
+//
+// That mattered beyond tidiness: playhead-7dgx's retry RECOMMENDATION rests on
+// the claim that a `session_not_vended` refusal is a per-LAUNCH outage whose
+// right retry unit is the launch rather than the episode — and that claim was
+// UNFALSIFIABLE from the table it was written against.
+//
+// `occurredAt` CLUSTERING IS NOT AN IDENTITY and must not be used as one. It
+// is a heuristic over a quantity with no stated tolerance, and the same
+// heuristic reads "forty joiners of one crossing" and "forty independent
+// refusals inside one busy second" identically.
+//
+// THREE COLUMNS, AND EACH ANSWERS A QUESTION THE OTHERS CANNOT:
+//
+//   * `launchId` — the process that wrote the row. Puts the NUMERATOR in the
+//     same unit as `background_download_drop_arming.armedLaunches`, which is a
+//     count of LAUNCHES: `count(DISTINCT launchId)` over `armedLaunches` is,
+//     for the first time, a ratio of two quantities in one unit.
+//   * `sessionCrossingId` — the ONE bounded construction crossing this row's
+//     caller rode, whether it started that crossing or JOINED it. N rows
+//     sharing one value are N episodes lost to ONE refusal.
+//   * `launchArmingState` — what this process knew about its OWN arming when
+//     the row was written. See below; it is what makes a drop on a DEGRADED
+//     launch identifiable ON DISK rather than only inferable.
+//
+// SO THE THREE READINGS THE BEAD ASKED FOR ARE NOW THREE DIFFERENT QUERIES:
+//
+//     -- one outage that cost forty episodes:  40 rows, 1 crossing, 1 launch
+//     -- forty separate outages:               40 rows, 40 crossings
+//     SELECT count(*)                       AS episodes_affected,
+//            count(DISTINCT sessionCrossingId) AS daemon_refusals,
+//            count(DISTINCT launchId)       AS launches_affected
+//     FROM background_download_drops WHERE reason='session_not_vended';
+//
+//     -- and "nobody was counting", per row rather than per device:
+//     SELECT launchArmingState, count(*), count(DISTINCT launchId)
+//     FROM background_download_drops GROUP BY 1;
+//
+// `sessionCrossingId` IS NULL FOR THE OTHER TWO REASONS, AND THAT IS A
+// STATEMENT RATHER THAN A GAP. `transfer_task_not_vended` and
+// `transfer_not_resumed` each follow ONE `sessionIO.perform` that this caller
+// submitted itself — nothing joins, so for those reasons a row IS a call and
+// `count(*)` already answers "how many bounded calls expired". Giving them a
+// per-row UUID would be a column in bijection with the primary key: it would
+// carry no information and would invite `count(DISTINCT sessionCrossingId)`
+// across all reasons to be read as an outage count.
+//
+// WHAT IS DELIBERATELY NOT CLAIMED. Those two reasons DO have a common cause
+// that nothing here identifies: `sessionIO`'s queue is SERIAL, so one stalled
+// submission makes every submission behind it blow its own deadline. Forty
+// such rows are forty genuinely expired calls AND may be one stalled queue.
+// This ledger does not know which, and no column here should be read as
+// saying. It is bounded to the join it can actually witness.
+//
+// READ `launchId IS NULL` AS "THIS ROW PREDATES V64", NOT AS "NO LAUNCH".
+// The three columns are nullable in SQL and NON-OPTIONAL on the write path,
+// so nothing this build writes can be null — see `BackgroundDownloadDropRecord`
+// for why a NOT NULL column with a DEFAULT was refused. On a mixed table a
+// pre-V64 row is exactly one with `launchId IS NULL`, and NOTHING about
+// launches or crossings can be said about it; `sessionCrossingId IS NULL`
+// alone cannot tell such a row from a post-V64 `transfer_task_not_vended`.
+// Read the two together.
+//
+// ─────────────────────────────────────────────────────────────────────────
+// A DROP ON A DEGRADED LAUNCH IS NOW A ROW THAT SAYS SO (playhead-sdis)
+// ─────────────────────────────────────────────────────────────────────────
+// The bullets above record that `armedLaunches` under-counts in three ways,
+// and that rows can therefore exist whose launch is not in the denominator.
+// That was true, documented, and UNMEASURABLE: nothing on disk said WHICH
+// rows. `launchArmingState` says, per row, at the moment the row was written:
+//
+//   * `armed`         — `armDropLedger()` had already LANDED in this process.
+//                       This row's launch IS in `armedLaunches`.
+//   * `arming_failed` — it ran and the counter write failed. This launch is
+//                       NOT in `armedLaunches` and never will be.
+//   * `not_attempted` — it had not run at all. The store may have been
+//                       DEGRADED (`openAtLaunch` failed, so the launch Task
+//                       returns before arming, while `AnalysisStore` opens
+//                       LAZILY and lets this very row land), or the drop
+//                       simply raced the launch Task.
+//   * `no_recorder`   — arming reached a recorder that records nothing.
+//
+// TWO THINGS NOT TO MISREAD. `not_attempted` does NOT distinguish a degraded
+// launch from a race — both are "not yet, and possibly never", which is
+// exactly what the process knows at that instant and is why the two share a
+// value rather than being guessed apart. And `no_recorder` is UNREACHABLE ON A
+// PERSISTED ROW in production: arming and recording go to the SAME injected
+// `dropRecorder` instance, so a recorder that returns `.notRecording` for one
+// returns it for the other and no row lands. It is expressible anyway, because
+// folding it into `arming_failed` would say a write FAILED where nothing was
+// attempted — the collapse `BackgroundDownloadDropWriteOutcome` exists to
+// prevent, one table along.
+//
 // It is armed from `PlayheadRuntime` rather than from
 // `DownloadManager.bootstrap()`, where it started, for two reasons found in
 // review. Arming there made `bootstrap()` `async` and put its cache-directory
@@ -233,6 +347,57 @@ enum BackgroundDownloadDropReason: String, Sendable, Codable, Equatable, CaseIte
     /// `task.resume()` did not answer inside the bound. The task exists and
     /// is suspended; `abandonUnstartedTransfer` retires it.
     case transferNotResumed = "transfer_not_resumed"
+}
+
+// MARK: - BackgroundDownloadDropLaunchArming
+
+/// What the writing process knew about ITS OWN arming at the moment a drop row
+/// was written (playhead-sdis).
+///
+/// This is the per-row half of the arming record. `armedLaunches` is a COUNT
+/// with no recoverable membership, so it can say how many launches were
+/// counting and can never say whether THIS row's launch was one of them —
+/// which is precisely the reading hazard playhead-7dgx documented and could not
+/// measure. A drop written on a DEGRADED launch is reachable (`AnalysisStore`
+/// opens LAZILY, so a launch whose `openAtLaunch` failed can still land a row
+/// through `insertBackgroundDownloadDrop`), and before this enum nothing on
+/// disk said which rows those were.
+///
+/// A raw value is written to disk, so these strings are a schema and renaming
+/// one is a migration.
+enum BackgroundDownloadDropLaunchArming: String, Sendable, Codable, Equatable, CaseIterable {
+    /// `DownloadManager.armDropLedger()` had not run when this row was written.
+    ///
+    /// TWO CAUSES SHARE THIS VALUE and they are deliberately not guessed apart:
+    /// a DEGRADED launch (`openAtLaunch` failed, so `PlayheadRuntime`'s launch
+    /// Task returns before the arming — and this row landed anyway, because the
+    /// store opens lazily), and a drop that simply RACED the launch Task, which
+    /// still arms afterwards. At the instant of the write those are the same
+    /// fact — "not yet, and possibly never" — and inventing a third state would
+    /// be a claim about the future.
+    case notAttempted = "not_attempted"
+
+    /// Arming ran and the counter write LANDED. This row's launch IS one of the
+    /// `armedLaunches`, which is the only positive form this column has.
+    case armed = "armed"
+
+    /// Arming ran and the counter write FAILED. This launch is NOT in
+    /// `armedLaunches` and never will be — the write is not retried. Expect
+    /// `dropWriteFailures` to be silent about it: that counter is about DROP
+    /// rows, not about the arming.
+    case armingFailed = "arming_failed"
+
+    /// Arming reached a recorder that records nothing by design.
+    ///
+    /// UNREACHABLE ON A PERSISTED ROW IN PRODUCTION, and expressible anyway.
+    /// `armDropLedger()` and `recordDrop` go to the SAME injected
+    /// `dropRecorder` (a `let`), so a conformer returning `.notRecording` for
+    /// one returns it for the other and no row is written at all. Folding this
+    /// into `armingFailed` would report a write that failed where nothing was
+    /// attempted — the exact collapse `BackgroundDownloadDropWriteOutcome`
+    /// exists to prevent, one table along, and the one that sent a reader to
+    /// diagnose SQLite on a device whose only fault was its wiring.
+    case noRecorder = "no_recorder"
 }
 
 // MARK: - BackgroundDownloadDropRecord
@@ -293,6 +458,51 @@ struct BackgroundDownloadDropRecord: Sendable, Equatable {
     /// not read as if it ran the shipped one.
     let boundSeconds: Double
 
+    /// WHICH PROCESS wrote this row (playhead-sdis).
+    ///
+    /// `nil` means exactly one thing: THE ROW PREDATES SCHEMA V64. It can never
+    /// mean "this build did not know its launch" — the only initializer the
+    /// download path can reach takes a non-optional `launchId`, so every row
+    /// this build writes carries one.
+    ///
+    /// WHY THE COLUMN IS NULLABLE WHEN THE BEAD ASKED FOR `NOT NULL`. SQLite
+    /// cannot `ALTER TABLE … ADD COLUMN … NOT NULL` without a DEFAULT, and
+    /// there is no honest default here. A shared sentinel (`''`,
+    /// `'pre-v64'`) collapses every pre-V64 row into ONE launch under
+    /// `count(DISTINCT launchId)`; a per-row sentinel expands them into as many
+    /// launches as there are rows. Both are values that name an ABSENCE being
+    /// read as a presence — this repo's standing defect class, committed by the
+    /// instrument built to catch it. SQL's own `NULL` is the one spelling
+    /// `count(DISTINCT)` declines to count, so it fails safe. V61's
+    /// `usedPermissiveFallback` made the same call for the same reason:
+    /// UNKNOWN IS NOT ZERO, and it is not one either.
+    let launchId: String?
+
+    /// The ONE bounded `URLSession` construction crossing this row's caller
+    /// rode — whether it STARTED that crossing or JOINED an in-flight one
+    /// (playhead-sdis).
+    ///
+    /// N rows sharing one value are N EPISODES LOST TO ONE DAEMON REFUSAL.
+    /// That is the distinction `count(*)` cannot make and the reason this
+    /// column exists.
+    ///
+    /// `nil` for two unrelated reasons, and the discriminator is `launchId`:
+    ///   * `launchId` non-nil ⇒ this reason has NO joinable crossing. Only
+    ///     `sessionNotVended` rides one; the other two each follow a
+    ///     `sessionIO.perform` this caller submitted alone, so for them a row
+    ///     IS a call.
+    ///   * `launchId` nil ⇒ the row predates V64 and nothing about crossings
+    ///     can be said about it.
+    let sessionCrossingId: String?
+
+    /// What the writing process knew about its OWN arming when this row was
+    /// written (playhead-sdis). `nil` means the row predates schema V64.
+    ///
+    /// This is what makes a drop on a DEGRADED launch identifiable on disk:
+    /// anything other than `.armed` says this row's launch is NOT in
+    /// `background_download_drop_arming.armedLaunches`.
+    let launchArmingState: BackgroundDownloadDropLaunchArming?
+
     init(
         id: String = UUID().uuidString,
         episodeId: String,
@@ -301,7 +511,10 @@ struct BackgroundDownloadDropRecord: Sendable, Equatable {
         podcastId: String?,
         unattributedReason: DownloadContext.UnattributedReason?,
         isExplicitDownload: Bool,
-        boundSeconds: Double
+        boundSeconds: Double,
+        launchId: String?,
+        sessionCrossingId: String?,
+        launchArmingState: BackgroundDownloadDropLaunchArming?
     ) {
         self.id = id
         self.episodeId = episodeId
@@ -311,16 +524,29 @@ struct BackgroundDownloadDropRecord: Sendable, Equatable {
         self.unattributedReason = unattributedReason
         self.isExplicitDownload = isExplicitDownload
         self.boundSeconds = boundSeconds
+        self.launchId = launchId
+        self.sessionCrossingId = sessionCrossingId
+        self.launchArmingState = launchArmingState
     }
 
     /// Builds a record from the `DownloadContext` the caller already
     /// supplied, so the show identity on the drop row and the show identity
     /// on the deleted attribution sidecar cannot disagree.
+    ///
+    /// `launchId` and `launchArmingState` are NON-OPTIONAL here on purpose.
+    /// This is the only initializer the download path reaches, so the
+    /// nullability of the three new columns is a property of the SCHEMA'S
+    /// HISTORY and never of a row this build writes — the same discipline
+    /// `DownloadContext` applies to `podcastId` by having no nil-taking
+    /// initializer.
     init(
         episodeId: String,
         reason: BackgroundDownloadDropReason,
         context: DownloadContext,
         boundSeconds: Double,
+        launchId: String,
+        launchArmingState: BackgroundDownloadDropLaunchArming,
+        sessionCrossingId: String? = nil,
         occurredAt: Double = Date().timeIntervalSince1970,
         id: String = UUID().uuidString
     ) {
@@ -332,7 +558,10 @@ struct BackgroundDownloadDropRecord: Sendable, Equatable {
             podcastId: context.podcastId,
             unattributedReason: context.unattributedReason,
             isExplicitDownload: context.isExplicitDownload,
-            boundSeconds: boundSeconds
+            boundSeconds: boundSeconds,
+            launchId: launchId,
+            sessionCrossingId: sessionCrossingId,
+            launchArmingState: launchArmingState
         )
     }
 }
@@ -359,6 +588,20 @@ struct BackgroundDownloadDropPage: Sendable, Equatable {
     /// classification survives, the show attribution does not.
     let unrecognizedUnattributedReasonRows: Int
 
+    /// Rows whose `launchArmingState` holds a raw value this build cannot
+    /// decode — written by a build with a wider vocabulary (playhead-sdis).
+    ///
+    /// A THIRD counter rather than a fourth enum case folded into an existing
+    /// one, for the reason the two above already give: coercing an unknown raw
+    /// value into `.notAttempted` would inflate the population that says "this
+    /// launch is not in the denominator", which is the very claim the column
+    /// exists to make honestly.
+    ///
+    /// A row whose `launchArmingState` is NULL is NOT counted here — that is a
+    /// pre-V64 row, a legitimate absence, and it is returned in `rows` with
+    /// `launchArmingState == nil`.
+    let unrecognizedLaunchArmingStateRows: Int
+
     /// `true` when more rows exist than the `limit` allowed back.
     ///
     /// Without it, a window that stops at its own ceiling reports "this is
@@ -370,7 +613,10 @@ struct BackgroundDownloadDropPage: Sendable, Equatable {
     /// Every drop this page could read AND could not read. The honest
     /// denominator for any per-reason share taken off `rows`.
     var totalRowsSeen: Int {
-        rows.count + unrecognizedReasonRows + unrecognizedUnattributedReasonRows
+        rows.count
+            + unrecognizedReasonRows
+            + unrecognizedUnattributedReasonRows
+            + unrecognizedLaunchArmingStateRows
     }
 }
 
@@ -386,6 +632,10 @@ enum BackgroundDownloadDropReadRefusal: Error, Sendable, Equatable {
     /// say the caller NAMED a show, which is the opposite of what the row
     /// records.
     case unrecognizedUnattributedReason
+    /// The `launchArmingState` column holds a raw value this build does not
+    /// know (playhead-sdis). A nil there would say the row PREDATES V64, which
+    /// a row carrying a value demonstrably does not.
+    case unrecognizedLaunchArmingState
 }
 
 // MARK: - BackgroundDownloadDropArming
@@ -417,6 +667,28 @@ struct BackgroundDownloadDropArming: Sendable, Equatable {
     let firstArmedAt: Double?
     /// When the most recent one happened. `nil` while `armedLaunches` is 0.
     let lastArmedAt: Double?
+    /// WHICH LAUNCH `lastArmedAt` belongs to (playhead-sdis). `nil` while
+    /// `armedLaunches` is 0, for the same reason `lastArmedAt` is.
+    ///
+    /// **IT IS NOT A SET OF ARMED LAUNCHES AND CANNOT BE USED AS ONE.**
+    /// `armedLaunches` is a COUNT with no recoverable membership; this names
+    /// exactly one launch — the most recent to arm — and it is here so that the
+    /// arming row and a drop row can be spoken about in ONE vocabulary at all,
+    /// which they previously could not: the two tables shared no column.
+    ///
+    /// What it answers, and nothing beyond: "did the launch that armed most
+    /// recently also drop a download" —
+    /// `SELECT count(*) FROM background_download_drops WHERE launchId =
+    /// (SELECT lastArmedLaunchId FROM background_download_drop_arming)`. For
+    /// the general per-row question — "is THIS row's launch in the
+    /// denominator" — read `background_download_drops.launchArmingState`,
+    /// which is durable per row and does not go stale when the next launch
+    /// arms.
+    ///
+    /// There is deliberately NO `firstArmedLaunchId`. It would answer only what
+    /// `launchArmingState` already answers, better, and a column added for
+    /// symmetry with `firstArmedAt` is a column nobody can state a query for.
+    let lastArmedLaunchId: String?
     /// When this row was created.
     ///
     /// Usually the V62 migration, i.e. when this install first opened a build
@@ -506,8 +778,14 @@ protocol BackgroundDownloadDropRecording: Sendable {
     /// is what pins the single-call-site property, because nothing at runtime
     /// can see it.
     ///
+    /// `launchId` NAMES the launch being counted (playhead-sdis). Without it
+    /// `armedLaunches` is a count whose members cannot be named, and a drop
+    /// row's `launchId` has nothing on the arming row to be compared against —
+    /// the two tables shared no column at all.
+    ///
     /// NOT `@discardableResult`, for the reason given on `recordDrop`.
     func recordInstrumentArmed(
+        launchId: String,
         at now: Double
     ) async -> BackgroundDownloadDropWriteOutcome
 }
@@ -538,6 +816,7 @@ struct NoopBackgroundDownloadDropRecorder: BackgroundDownloadDropRecording {
 
     /// Same, for the denominator.
     func recordInstrumentArmed(
+        launchId: String,
         at now: Double
     ) async -> BackgroundDownloadDropWriteOutcome { .notRecording }
 }
@@ -596,10 +875,13 @@ struct AnalysisStoreBackgroundDownloadDropRecorder: BackgroundDownloadDropRecord
     }
 
     func recordInstrumentArmed(
+        launchId: String,
         at now: Double
     ) async -> BackgroundDownloadDropWriteOutcome {
         do {
-            try await store.noteBackgroundDownloadDropInstrumentArmed(at: now)
+            try await store.noteBackgroundDownloadDropInstrumentArmed(
+                launchId: launchId, at: now
+            )
             return .landed
         } catch {
             logger.error(

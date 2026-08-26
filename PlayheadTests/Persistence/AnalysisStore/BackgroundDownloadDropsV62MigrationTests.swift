@@ -176,8 +176,8 @@ struct BackgroundDownloadDropsV62MigrationTests {
         try await store.migrate()
         TestScratchReaper.shared.adopt(dir, owner: store)
 
-        try await store.noteBackgroundDownloadDropInstrumentArmed(at: 1000.0)
-        try await store.noteBackgroundDownloadDropInstrumentArmed(at: 2000.0)
+        try await store.noteBackgroundDownloadDropInstrumentArmed(launchId: "launch-fixture", at: 1000.0)
+        try await store.noteBackgroundDownloadDropInstrumentArmed(launchId: "launch-fixture", at: 2000.0)
         let beforeFetch = try await store.fetchBackgroundDownloadDropArming()
         let before = try #require(beforeFetch)
         #expect(before.armedLaunches == 2)
@@ -371,7 +371,7 @@ struct BackgroundDownloadDropsV62MigrationTests {
         // …and the tables are nonetheless present and usable.
         #expect(try probeTableExists(in: dir, table: Self.dropsTable))
         #expect(try probeTableExists(in: dir, table: Self.armingTable))
-        try await reopened.noteBackgroundDownloadDropInstrumentArmed(at: 5.0)
+        try await reopened.noteBackgroundDownloadDropInstrumentArmed(launchId: "launch-fixture", at: 5.0)
         let fetched = try await reopened.fetchBackgroundDownloadDropArming()
         #expect(try #require(fetched).armedLaunches == 1)
     }
@@ -383,14 +383,23 @@ struct BackgroundDownloadDropsV62MigrationTests {
     /// UPDATE, no DELETE, and no backfill (every drop before this build
     /// deleted its own evidence, so there is nothing to recover). Nothing any
     /// other migration suite asserts can move because of it.
-    @Test("head is 63")
-    func headIsSixtyThree() {
+    @Test("head is 64")
+    func headIsSixtyFour() {
         // 62 -> 63 read for this rung (playhead-4xmz): V63 CREATES TWO NEW TABLES —
         // `download_work_journal` and its single-row arming companion — and touches no
         // existing table, column or row: no ALTER, no UPDATE, no DELETE and no backfill
         // (every download event before this build went to a no-op recorder and left no
         // trace, so there is nothing recoverable to seed). It names nothing this rung
         // asserts, so no assertion here moves.
-        #expect(AnalysisStore.currentSchemaVersion == 63)
+        // 63 -> 64 read for this rung (playhead-sdis): V64 ADDS FOUR NULLABLE
+        // COLUMNS and only to the two playhead-7dgx tables — `launchId`,
+        // `sessionCrossingId` and `launchArmingState` on
+        // `background_download_drops`, `lastArmedLaunchId` on
+        // `background_download_drop_arming`. No other table, no other column, no
+        // UPDATE, no DELETE, no DEFAULT and no backfill: a pre-V64 row is left
+        // NULL because every candidate default would turn an absence into a
+        // launch count. It names nothing this rung asserts, so no assertion here
+        // moves.
+        #expect(AnalysisStore.currentSchemaVersion == 64)
     }
 }

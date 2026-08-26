@@ -514,6 +514,6 @@ struct SemanticScanVerdictProvenanceV61MigrationTests {
         // playhead-4xmz: 63, not 62. Same line, same trap, same reason — V63
         // creates two NEW tables (`download_work_journal` and its arming row)
         // and touches no existing column.
-        #expect(try await store.schemaVersion() == 63)
+        #expect(try await store.schemaVersion() == 64)
     }
 }

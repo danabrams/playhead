@@ -201,7 +201,16 @@ struct SemanticScanRunAttributionTests {
         // (every download event before this build went to a no-op recorder and left no
         // trace, so there is nothing recoverable to seed). It names nothing this rung
         // asserts, so no assertion here moves.
-        #expect(AnalysisStore.currentSchemaVersion == 63)
+        // 63 -> 64 read for this rung (playhead-sdis): V64 ADDS FOUR NULLABLE
+        // COLUMNS and only to the two playhead-7dgx tables — `launchId`,
+        // `sessionCrossingId` and `launchArmingState` on
+        // `background_download_drops`, `lastArmedLaunchId` on
+        // `background_download_drop_arming`. No other table, no other column, no
+        // UPDATE, no DELETE, no DEFAULT and no backfill: a pre-V64 row is left
+        // NULL because every candidate default would turn an absence into a
+        // launch count. It names nothing this rung asserts, so no assertion here
+        // moves.
+        #expect(AnalysisStore.currentSchemaVersion == 64)
         for column in ["createdAt", "scenePhase", "runCorrelationId"] {
             #expect(
                 try probeColumnExists(in: dir, table: "semantic_scan_results", column: column),

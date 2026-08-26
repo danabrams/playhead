@@ -1971,7 +1971,7 @@ actor AnalysisStore {
     /// assertions automatically follow the production constant — hardcoding
     /// the integer in tests has been a recurring source of stale-assertion
     /// flakes whenever the schema bumps.
-    nonisolated static let currentSchemaVersion = 63
+    nonisolated static let currentSchemaVersion = 64
 
     /// H1: minimum age (in seconds) a `backfill_jobs` / `final_pass_jobs`
     /// row stuck in `status='running'` must reach before the launch-time
@@ -2989,6 +2989,13 @@ actor AnalysisStore {
             // would tell recovery the ANALYSIS work is terminal. Nothing
             // backfilled; an arming row seeded at zero.
             try migrateDownloadWorkJournalV63IfNeeded()
+            // playhead-sdis: a launch identity, a session-crossing identity and
+            // a per-row arming state on `background_download_drops`, plus the
+            // launch id `lastArmedAt` belongs to on the arming row. Nothing
+            // backfilled and nothing could be — a pre-V64 row was written by a
+            // build that did not know any of it, and every candidate default
+            // would turn that absence into a launch count.
+            try migrateBackgroundDownloadDropLaunchIdentityV64IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -3447,6 +3454,17 @@ actor AnalysisStore {
         // `DownloadWorkJournalWiringSourceCanaryTests` checks this pairing
         // mechanically, on the V62 canary's precedent.
         try migrateDownloadWorkJournalV63IfNeeded()
+        // playhead-sdis (v64): four ADDED COLUMNS rather than a new table, so
+        // the rung's work is done by `addColumnIfNeeded` inside the shared V62
+        // DDL helper and a fixture already carrying the V64 shape still reaches
+        // v64.
+        //
+        // READ THE V60 NOTE ABOVE BEFORE ADDING A RUNG. A rung added to one
+        // ladder and not the other is invisible to any test written for that
+        // rung, and it cost V60 a commit.
+        // `BackgroundDownloadDropWiringSourceCanaryTests` checks this pairing
+        // mechanically.
+        try migrateBackgroundDownloadDropLaunchIdentityV64IfNeeded()
     }
     #endif
 
@@ -9015,6 +9033,83 @@ actor AnalysisStore {
         try setSchemaVersion(62)
     }
 
+    // MARK: V64 — one daemon OUTAGE stops being indistinguishable from forty
+    //             EPISODES (playhead-sdis)
+    //
+    // `SELECT count(*) … WHERE reason='session_not_vended'` counts EPISODES
+    // AFFECTED. It was being read as a number of daemon refusals, and
+    // playhead-7dgx's own retry recommendation rests on the claim that such a
+    // refusal is a per-LAUNCH outage — a claim the table it was written against
+    // could not falsify. This repo's standing defect class, shipped inside the
+    // instrument built to catch it.
+    //
+    // TWO MECHANISMS SEPARATE THE POPULATIONS, AND ONE COLUMN COVERS NEITHER
+    // ALONE:
+    //
+    //   * A REFUSAL IS NEVER CACHED, so ONE LAUNCH can hold MANY refusals.
+    //     `launchId` alone therefore separates "one launch" from "forty
+    //     launches" and says nothing about how many refusals happened inside
+    //     one of them.
+    //   * ONE REFUSAL MINTS N ROWS. `backgroundSession(for:requestedBy:)` lets
+    //     concurrent callers JOIN an in-flight crossing rather than open a
+    //     second `URLSession` on one background identifier; every joiner gives
+    //     up on the FIRST caller's deadline and writes its own row.
+    //     `sessionCrossingId` is what those rows now share.
+    //
+    // AND `launchArmingState` CLOSES THE READING HAZARD playhead-7dgx
+    // DOCUMENTED AND COULD NOT MEASURE. `armedLaunches` is a COUNT with no
+    // recoverable membership, so it can never say whether a given row's launch
+    // was one of the counted ones — while `AnalysisStore` opens LAZILY, so a
+    // DEGRADED launch (`openAtLaunch` failed, the launch Task returned before
+    // arming) can still land a drop row. Nothing on disk said which rows those
+    // were. Now the row says.
+    //
+    // `lastArmedLaunchId` ON THE ARMING ROW IS THE FOURTH COLUMN and the
+    // smallest one: it names the launch `lastArmedAt` already dates, so the two
+    // tables can be joined at all. It is NOT a set of armed launches. There is
+    // deliberately no `firstArmedLaunchId` — it would answer only what
+    // `launchArmingState` answers better, and symmetry is not a query.
+    //
+    // EVERY COLUMN IS NULLABLE AND NOTHING IS BACKFILLED. SQLite cannot add a
+    // NOT NULL column without a DEFAULT, and every candidate default is a value
+    // that names an ABSENCE: a shared sentinel collapses all pre-V64 rows into
+    // ONE launch under `count(DISTINCT launchId)`, a per-row sentinel expands
+    // them into as many launches as there are rows. NULL is the one spelling
+    // SQL's own `count(DISTINCT)` declines to count, so it fails safe. V61's
+    // `usedPermissiveFallback` made the identical call: UNKNOWN IS NOT ZERO,
+    // and it is not one either. What enforces the bead's `NOT NULL` intent is
+    // the WRITE PATH — `BackgroundDownloadDropRecord`'s `context:` initializer
+    // takes a non-optional `launchId` and `launchArmingState`, so no row this
+    // build writes can be null.
+    //
+    // DO NOT USE `_meta.schema_version < 64` AS THE DISCRIMINATOR, for the
+    // reason V62 and V63 both state: `createTables()` is unconditional and runs
+    // BEFORE the ladder, so a store parked below the V39 rollback floor carries
+    // these columns and real rows at a stamp of 38. READ THE COLUMN — a row
+    // that predates this rung is exactly one with `launchId IS NULL`.
+    //
+    // Idempotent: the whole rung is `addColumnIfNeeded` inside the shared V62
+    // DDL helper, so a second pass changes nothing.
+
+    /// V64 migration (playhead-sdis) — launch, crossing and arming identity on
+    /// the dropped-background-download ledger.
+    ///
+    /// The rung calls the SAME shared helper the V62 rung and `createTables()`
+    /// call, because the four columns are declared there — in the one place the
+    /// shape is declared, which is the V62 helper's own stated obligation. A
+    /// second copy of the DDL is how a fresh install and an upgrade drift.
+    private func migrateBackgroundDownloadDropLaunchIdentityV64IfNeeded() throws {
+        let observed = (try schemaVersion() ?? 1)
+        guard observed < 64 else { return }
+        // DO NOT STEP OVER A ROLLED-BACK V39 — same rationale as V40–V63.
+        guard observed >= 63 else { return }
+        try createBackgroundDownloadDropTables()
+        logger.notice(
+            "playhead-sdis V64: background_download_drops gains launchId, sessionCrossingId and launchArmingState, and background_download_drop_arming gains lastArmedLaunchId. NOTHING IS BACKFILLED and nothing could be — a pre-V64 row was written by a build that knew none of it, and every candidate default would turn that absence into a launch count. A pre-V64 row is exactly one with launchId IS NULL; read count(DISTINCT launchId) as LAUNCHES and count(DISTINCT sessionCrossingId) as DAEMON REFUSALS, never count(*), which is EPISODES."
+        )
+        try setSchemaVersion(64)
+    }
+
     /// The V62 DDL, shared verbatim by `createTables()` and the rung above so
     /// a fresh install and an upgrade converge on the same shape. Both callers
     /// are idempotent.
@@ -9060,7 +9155,49 @@ actor AnalysisStore {
                 -- The BackgroundSessionIO bound that expired, in seconds.
                 -- Recorded rather than assumed so a later change to the bound
                 -- cannot silently re-scale this table's whole history.
-                boundSeconds       REAL NOT NULL
+                boundSeconds       REAL NOT NULL,
+                -- playhead-sdis. WHICH PROCESS wrote the row. Without it
+                -- `count(*)` is EPISODES AFFECTED and nothing recovers the
+                -- number of daemon refusals behind them; with it,
+                -- `count(DISTINCT launchId)` is in the SAME UNIT as
+                -- `background_download_drop_arming.armedLaunches`, which is a
+                -- count of LAUNCHES.
+                --
+                -- NULL means the row PREDATES V64 and nothing else. It is
+                -- nullable rather than NOT NULL because SQLite cannot add a
+                -- NOT NULL column without a DEFAULT and there is no honest
+                -- default: one shared sentinel collapses every pre-V64 row
+                -- into ONE launch under `count(DISTINCT)`, and a per-row
+                -- sentinel expands them into as many launches as there are
+                -- rows. NULL is the one spelling `count(DISTINCT)` declines
+                -- to count. Nothing this build writes is NULL — the write
+                -- path's `launchId` is non-optional Swift.
+                launchId           TEXT,
+                -- playhead-sdis. The ONE bounded URLSession CONSTRUCTION
+                -- crossing this caller rode — started OR joined.
+                -- `backgroundSession(for:requestedBy:)` lets concurrent
+                -- callers JOIN an in-flight crossing, so ONE daemon refusal
+                -- mints N rows; N rows sharing this value are N EPISODES LOST
+                -- TO ONE REFUSAL. `occurredAt` clustering is a heuristic and
+                -- is not a substitute.
+                --
+                -- NULL for TWO unrelated reasons and `launchId` is the
+                -- discriminator: with a launchId, NULL means this reason has
+                -- no joinable crossing (only `session_not_vended` rides one —
+                -- the other two each follow a `sessionIO.perform` the caller
+                -- submitted alone, so for them a row IS a call); without a
+                -- launchId the row predates V64 and says nothing at all.
+                sessionCrossingId  TEXT,
+                -- playhead-sdis. not_attempted | armed | arming_failed |
+                -- no_recorder — what the writing process knew about ITS OWN
+                -- arming when this row was written. Anything other than
+                -- `armed` means THIS ROW'S LAUNCH IS NOT IN `armedLaunches`,
+                -- which is the reading hazard playhead-7dgx documented and
+                -- could not measure: `AnalysisStore` opens LAZILY, so a
+                -- DEGRADED launch that never armed can still land a row.
+                -- NULL means the row predates V64. A raw value on disk, so
+                -- these strings are a schema.
+                launchArmingState  TEXT
             );
         """)
         try exec("CREATE INDEX IF NOT EXISTS idx_background_download_drops_occurred ON background_download_drops(occurredAt DESC);")
@@ -9083,6 +9220,16 @@ actor AnalysisStore {
                 dropWriteFailures INTEGER NOT NULL DEFAULT 0,
                 firstArmedAt  REAL,
                 lastArmedAt   REAL,
+                -- playhead-sdis. WHICH LAUNCH `lastArmedAt` belongs to. NOT a
+                -- set of armed launches and it must not be used as one —
+                -- `armedLaunches` is a count with no recoverable membership.
+                -- It exists so the arming row and a drop row can be spoken
+                -- about in ONE vocabulary at all; before it the two tables
+                -- shared no column. For the per-row question ("is THIS row's
+                -- launch in the denominator") read
+                -- `background_download_drops.launchArmingState`, which is
+                -- durable and does not go stale when the next launch arms.
+                lastArmedLaunchId TEXT,
                 installedAt   REAL NOT NULL
             );
         """)
@@ -9124,6 +9271,29 @@ actor AnalysisStore {
             column: "dropWriteFailures",
             definition: "INTEGER NOT NULL DEFAULT 0"
         )
+        // playhead-sdis (V64). Four more, obeying the obligation stated
+        // immediately above. All four are NULLABLE and none carries a DEFAULT:
+        // `ALTER TABLE … ADD COLUMN` on a nullable column leaves every existing
+        // row NULL, which is the only honest value for a row written by a build
+        // that knew none of this. A DEFAULT here would not be a convenience —
+        // it would fabricate launch identities, and `count(DISTINCT launchId)`
+        // would then read them as launches.
+        //
+        // `lastArmedLaunchId` is deliberately NOT added to the seed INSERT
+        // below: a freshly seeded arming row has never armed, so NULL is what
+        // it means, exactly as for `firstArmedAt`/`lastArmedAt`.
+        for column in ["launchId", "sessionCrossingId", "launchArmingState"] {
+            try addColumnIfNeeded(
+                table: "background_download_drops",
+                column: column,
+                definition: "TEXT"
+            )
+        }
+        try addColumnIfNeeded(
+            table: "background_download_drop_arming",
+            column: "lastArmedLaunchId",
+            definition: "TEXT"
+        )
         // Seeded at zero so that "installed but never armed" is a row a pull
         // can read, rather than an absence indistinguishable from a build
         // that never had the instrument at all.
@@ -9149,8 +9319,9 @@ actor AnalysisStore {
         let sql = """
             INSERT INTO background_download_drops
             (id, episodeId, reason, occurredAt, podcastId, unattributedReason,
-             isExplicitDownload, boundSeconds)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             isExplicitDownload, boundSeconds, launchId, sessionCrossingId,
+             launchArmingState)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -9162,12 +9333,21 @@ actor AnalysisStore {
         bind(stmt, 6, record.unattributedReason?.rawValue)
         bind(stmt, 7, record.isExplicitDownload ? 1 : 0)
         bind(stmt, 8, record.boundSeconds)
+        // playhead-sdis. These three are OPTIONAL on the record for one reason
+        // only — a row read back from a pre-V64 store. On the WRITE path the
+        // download manager reaches an initializer whose `launchId` and
+        // `launchArmingState` are non-optional, so a null landing here means a
+        // caller built the record some other way.
+        bind(stmt, 9, record.launchId)
+        bind(stmt, 10, record.sessionCrossingId)
+        bind(stmt, 11, record.launchArmingState?.rawValue)
         try step(stmt, expecting: SQLITE_DONE)
     }
 
     private static let backgroundDownloadDropSelectColumns = """
         SELECT id, episodeId, reason, occurredAt, podcastId, unattributedReason,
-               isExplicitDownload, boundSeconds
+               isExplicitDownload, boundSeconds, launchId, sessionCrossingId,
+               launchArmingState
         FROM background_download_drops
         """
 
@@ -9203,6 +9383,21 @@ actor AnalysisStore {
             }
             unattributed = decoded
         }
+        // playhead-sdis, and it is THE SAME RULE a third time. A NULL here is a
+        // row written before V64 and is materialized as nil; a raw value this
+        // build cannot decode is REFUSED, because mapping it to nil would say
+        // the row predates V64 — which a row carrying a value demonstrably does
+        // not — and mapping it to `.notAttempted` would inflate the population
+        // that claims "this launch is not in the denominator".
+        var arming: BackgroundDownloadDropLaunchArming?
+        if let rawArming = optionalText(stmt, 10) {
+            guard let decoded = BackgroundDownloadDropLaunchArming(
+                rawValue: rawArming
+            ) else {
+                return .failure(.unrecognizedLaunchArmingState)
+            }
+            arming = decoded
+        }
         return .success(BackgroundDownloadDropRecord(
             id: text(stmt, 0),
             episodeId: text(stmt, 1),
@@ -9211,7 +9406,10 @@ actor AnalysisStore {
             podcastId: optionalText(stmt, 4),
             unattributedReason: unattributed,
             isExplicitDownload: sqlite3_column_int64(stmt, 6) != 0,
-            boundSeconds: sqlite3_column_double(stmt, 7)
+            boundSeconds: sqlite3_column_double(stmt, 7),
+            launchId: optionalText(stmt, 8),
+            sessionCrossingId: optionalText(stmt, 9),
+            launchArmingState: arming
         ))
     }
 
@@ -9244,14 +9442,25 @@ actor AnalysisStore {
         // than hidden: it needs 2^31 rows to reach, and the alternative is a
         // trap. Nothing in the codebase passes such a limit.
         let probe = ceiling >= Int(Int32.max) ? Int(Int32.max) : ceiling + 1
+        // `, id DESC` is a TIEBREAKER, not decoration (playhead-sdis). Three
+        // rows minted by three joiners of ONE session crossing carry
+        // `occurredAt` values that can be equal to the double's precision, and
+        // `ORDER BY occurredAt DESC` alone leaves their order — and therefore
+        // WHICH of them a `limit` cuts off — unspecified. A page whose contents
+        // depend on SQLite's scan order is a page whose `truncated` flag names
+        // an arbitrary set.
         let stmt = try prepare(
-            "\(Self.backgroundDownloadDropSelectColumns) ORDER BY occurredAt DESC LIMIT ?"
+            """
+            \(Self.backgroundDownloadDropSelectColumns)
+            ORDER BY occurredAt DESC, id DESC LIMIT ?
+            """
         )
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, probe)
         var rows: [BackgroundDownloadDropRecord] = []
         var unrecognizedReason = 0
         var unrecognizedUnattributed = 0
+        var unrecognizedArming = 0
         var seen = 0
         var truncated = false
         // `nextRow` rather than a bare step comparison: an I/O or corruption
@@ -9267,12 +9476,14 @@ actor AnalysisStore {
             case .success(let row): rows.append(row)
             case .failure(.unrecognizedReason): unrecognizedReason += 1
             case .failure(.unrecognizedUnattributedReason): unrecognizedUnattributed += 1
+            case .failure(.unrecognizedLaunchArmingState): unrecognizedArming += 1
             }
         }
         return BackgroundDownloadDropPage(
             rows: rows,
             unrecognizedReasonRows: unrecognizedReason,
             unrecognizedUnattributedReasonRows: unrecognizedUnattributed,
+            unrecognizedLaunchArmingStateRows: unrecognizedArming,
             truncated: truncated
         )
         // NOTE for the next reader: every count returned here is over the
@@ -9289,12 +9500,21 @@ actor AnalysisStore {
     /// The `INSERT … ON CONFLICT` is what makes this work on a store whose
     /// arming row is somehow missing — a hand-edited fixture, or a rung that
     /// rolled back — instead of counting into a row that is not there.
-    func noteBackgroundDownloadDropInstrumentArmed(at now: Double) throws {
+    /// `lastArmedLaunchId` moves with `lastArmedAt` and never independently
+    /// (playhead-sdis) — they are one fact spelled two ways, and a stamp whose
+    /// launch id belongs to a different arming would be worse than no launch id
+    /// at all. There is no `firstArmedLaunchId`: the per-row question it would
+    /// be reached for is answered durably by
+    /// `background_download_drops.launchArmingState`.
+    func noteBackgroundDownloadDropInstrumentArmed(
+        launchId: String,
+        at now: Double
+    ) throws {
         let sql = """
             INSERT INTO background_download_drop_arming
             (id, armedLaunches, dropWriteFailures, firstArmedAt, lastArmedAt,
-             installedAt)
-            VALUES (1, 1, 0, ?, ?, ?)
+             lastArmedLaunchId, installedAt)
+            VALUES (1, 1, 0, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 armedLaunches = armedLaunches + 1,
                 firstArmedAt = CASE
@@ -9302,13 +9522,15 @@ actor AnalysisStore {
                     THEN excluded.firstArmedAt
                     ELSE background_download_drop_arming.firstArmedAt
                 END,
-                lastArmedAt = excluded.lastArmedAt
+                lastArmedAt = excluded.lastArmedAt,
+                lastArmedLaunchId = excluded.lastArmedLaunchId
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, now)
         bind(stmt, 2, now)
-        bind(stmt, 3, now)
+        bind(stmt, 3, launchId)
+        bind(stmt, 4, now)
         try step(stmt, expecting: SQLITE_DONE)
     }
 
@@ -9332,11 +9554,15 @@ actor AnalysisStore {
     /// section is sub-second, and a time nobody can inject is a time no test
     /// can pin.
     func noteBackgroundDownloadDropWriteFailure(at now: Double) throws {
+        // playhead-sdis: `lastArmedLaunchId` stays NULL on the re-create path
+        // for the same reason `armedLaunches` stays 0 — a write FAILURE is not
+        // an arming, and naming a launch here would manufacture the very claim
+        // this row exists to withhold.
         let stmt = try prepare("""
             INSERT INTO background_download_drop_arming
             (id, armedLaunches, dropWriteFailures, firstArmedAt, lastArmedAt,
-             installedAt)
-            VALUES (1, 0, 1, NULL, NULL, ?)
+             lastArmedLaunchId, installedAt)
+            VALUES (1, 0, 1, NULL, NULL, NULL, ?)
             ON CONFLICT(id) DO UPDATE SET
                 dropWriteFailures = dropWriteFailures + 1
             """)
@@ -9354,7 +9580,7 @@ actor AnalysisStore {
     func fetchBackgroundDownloadDropArming() throws -> BackgroundDownloadDropArming? {
         let stmt = try prepare("""
             SELECT armedLaunches, dropWriteFailures, firstArmedAt, lastArmedAt,
-                   installedAt
+                   installedAt, lastArmedLaunchId
             FROM background_download_drop_arming WHERE id = 1
             """)
         defer { sqlite3_finalize(stmt) }
@@ -9367,6 +9593,7 @@ actor AnalysisStore {
             dropWriteFailures: Int(sqlite3_column_int64(stmt, 1)),
             firstArmedAt: optionalDouble(stmt, 2),
             lastArmedAt: optionalDouble(stmt, 3),
+            lastArmedLaunchId: optionalText(stmt, 5),
             installedAt: sqlite3_column_double(stmt, 4)
         )
     }
