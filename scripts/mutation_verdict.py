@@ -453,12 +453,47 @@ def classify(reading, names):
 def render(reading, outcomes, out):
     run = reading.run
     print("  verdicts read from: %s" % reading.verdict_source, file=out)
+    # `crashed` AND `unreadable` ARE NOT TWO MORE POPULATIONS, AND ON ONE LINE
+    # OF `·`-SEPARATED COUNTS THAT IS EXACTLY WHAT THEY LOOKED LIKE
+    # (playhead-gjlp0 R5). Driven on a four-test batch — one crashed, one with
+    # a result string the parser cannot read, one denied, one passed — the
+    # single line read
+    #
+    #   4 started · 1 passed · 0 failed · 0 skipped · 2 NO VERDICT
+    #   · 1 crashed · 1 resource-denied · 1 unreadable
+    #
+    # and the columns after `started` add to SIX. `no_verdict` is
+    # `started - ran - skipped - resource`, so a CRASHED key and an UNREADABLE
+    # one are each counted a second time inside `NO VERDICT`, while
+    # `resource-denied` is genuinely disjoint from it. Three columns that look
+    # like siblings, behaving three different ways — a value that names one
+    # thing read as though it named another, which is the defect class this
+    # whole module exists to remove, committed by its own census.
+    #
+    # So the counts that partition go on one line and the two that DIAGNOSE go
+    # on the next, saying in words that they are already counted above. Both
+    # lines are printed unconditionally, zeros included: a diagnosis line that
+    # appeared only when non-zero would be a guard whose false branch makes no
+    # claim, which is the other half of this bead's subject.
+    #
+    # `crashed` is a strict subset of `NO VERDICT` by construction —
+    # `parse_xcresult` discards a crashed key from passed, skipped, failures
+    # and resource, and every bundle key is unioned into `started`. `unjudged`
+    # is a subset too EXCEPT under a display-name collision (playhead-fyma7),
+    # where one twin's `Passed` puts the shared key in `ran` while the other's
+    # unreadable word stays in `unjudged`. Hence "already counted above" rather
+    # than "of the NO VERDICT": the weaker claim is the one that is always true.
     print(
         "  batch census: %d started · %d passed · %d failed · %d skipped · "
-        "%d NO VERDICT · %d crashed · %d resource-denied · %d unreadable"
+        "%d resource-denied · %d NO VERDICT"
         % (len(run.started), len(run.passed), len(run.failures), len(run.skipped),
-           len(run.no_verdict), len(run.crashed), len(run.resource),
-           len(run.unjudged)),
+           len(run.resource), len(run.no_verdict)),
+        file=out,
+    )
+    print(
+        "  …and WHY, for tests the line above ALREADY COUNTS — never extra: "
+        "%d crashed · %d unreadable result string"
+        % (len(run.crashed), len(run.unjudged)),
         file=out,
     )
     print(

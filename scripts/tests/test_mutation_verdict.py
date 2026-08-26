@@ -716,6 +716,75 @@ class BundleTests(VerdictTestCase):
         mv.render(reading, [("A", states["A"])], out)
         self.assertIn("1 unreadable", out.getvalue())
 
+    def test_the_census_never_presents_a_CRASH_as_a_test_the_other_columns_missed(self):
+        """playhead-gjlp0 R5 — the census counted two of its own columns twice.
+
+        `no_verdict` is `started - ran - skipped - resource`, so a CRASHED key
+        and an UNREADABLE one each land in it as well as in their own column,
+        while `resource-denied` is genuinely disjoint. Printed as one line of
+        `·`-separated counts, the columns after `started` add to SIX on the
+        four-test batch below. Three columns that look like siblings behaving
+        three different ways is a value that names one thing read as though it
+        named another — this module's own subject, in its own census.
+
+        Driven on the overlap itself rather than on the wording, so a future
+        re-flattening fails here rather than reading plausibly.
+        """
+        log = self.write_log(console(tests=[("A", "started"), ("B", "started"),
+                                            ("C", "started"), ("D", "passed")]))
+        path, reader = self.bundle(bundle_payload([
+            ("A", gb.XCRESULT_FAILED, ["Test crashed with signal trap."]),
+            ("B", "Bananas", []),
+            ("C", gb.XCRESULT_FAILED, ["Migration failed: unable to open database file"]),
+            ("D", gb.XCRESULT_PASSED, []),
+        ]))
+        reading, states = self.read(log, ["A", "B", "C", "D"],
+                                    xcresult=path, reader=reader)
+        run = reading.run
+        self.assertEqual(states, {"A": mv.CRASHED, "B": mv.NO_VERDICT,
+                                  "C": mv.DENIED, "D": mv.PASSED})
+        # THE OVERLAP, stated. Both are inside NO VERDICT here; the denial is not.
+        self.assertLessEqual(set(run.crashed), run.no_verdict)
+        self.assertLessEqual(set(run.unjudged), run.no_verdict)
+        self.assertEqual(set(run.resource) & run.no_verdict, set())
+        self.assertEqual(len(run.no_verdict), 2)
+
+        out = io.StringIO()
+        mv.render(reading, list(states.items()), out)
+        census = [line for line in out.getvalue().split("\n")
+                  if "batch census:" in line]
+        self.assertEqual(len(census), 1, out.getvalue())
+        # The counts that PARTITION, and nothing else, on the census line.
+        self.assertIn("4 started", census[0])
+        self.assertIn("2 NO VERDICT", census[0])
+        self.assertIn("1 resource-denied", census[0])
+        self.assertNotIn("crashed", census[0])
+        self.assertNotIn("unreadable", census[0])
+        # The two DIAGNOSES, on their own line, saying they are not extra tests.
+        why = [line for line in out.getvalue().split("\n") if "and WHY" in line]
+        self.assertEqual(len(why), 1, out.getvalue())
+        self.assertIn("1 crashed", why[0])
+        self.assertIn("1 unreadable", why[0])
+        self.assertIn("ALREADY COUNTS", why[0])
+        self.assertIn("never extra", why[0])
+
+    def test_the_diagnosis_line_states_its_zeroes_on_a_healthy_batch(self):
+        """The anti-fabrication half: it makes a claim in BOTH directions.
+
+        A line that appeared only when something was wrong would be a guard
+        whose false branch says nothing — the shape that shipped `sim-trim.sh`
+        inert (playhead-81ig) and that R2 closed one layer up in this same
+        script.
+        """
+        log = self.write_log(console(tests=[("A", "passed")]))
+        reading, states = self.read(log, ["A"])
+        out = io.StringIO()
+        mv.render(reading, list(states.items()), out)
+        why = [line for line in out.getvalue().split("\n") if "and WHY" in line]
+        self.assertEqual(len(why), 1, out.getvalue())
+        self.assertIn("0 crashed", why[0])
+        self.assertIn("0 unreadable", why[0])
+
     def test_a_bundle_whose_RESULTS_ARE_ALL_READABLE_never_says_that(self):
         # The anti-fabrication half. A reason that fires on a healthy batch
         # would be worse than no reason at all: it is checked here in the
