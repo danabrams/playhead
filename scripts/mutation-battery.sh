@@ -29828,6 +29828,39 @@ score_batch() {
   python3 scripts/mutation_verdict.py "${args[@]}"
 }
 
+# THE BUNDLE IS ASKED FOR ON EVERY RUN, SO ITS ABSENCE IS A FAULT AND MUST SAY SO
+# (playhead-gjlp0 R2).
+#
+# `score_batch` omits `--xcresult` when the directory is not there. That is the
+# right behaviour — `mutation_verdict.py` treats a bundle that was ASKED FOR and
+# could not be read as a hard error, so handing it a path to nothing would be
+# worse — but on its own it is a guard whose false branch makes no claim, which
+# is exactly the shape that shipped `scripts/sim-trim.sh` INERT for two full
+# plans (playhead-81ig): a trimmed run and an untrimmed run produced identical
+# logs. Here the two runs differ only in one line of the scorer's own census
+# (`verdicts read from: the console log`), which reads as a neutral fact about
+# where a verdict came from rather than as the fault it is in THIS caller.
+#
+# It is not fatal, and deliberately: a console-only SURVIVED still rests on a
+# positive `✔`, which is the whole point of this bead, and refusing would turn a
+# degraded run into no run at all. It is LOUD, and the epilogue stops claiming
+# the bundle when this fired.
+note_bundle_presence() {
+  local bundle="$1" what="$2"
+  if [ -d "$bundle" ]; then
+    return 0
+  fi
+  CONSOLE_ONLY=1
+  echo "  NO .xcresult BUNDLE — $what will be scored off the CONSOLE ALONE."
+  echo "    asked fast-gate for: $bundle"
+  echo "    A console-only reading is the weaker instrument: it cannot see a verdict"
+  echo "    xcodebuild spliced app output through, which is why playhead-t53a moved"
+  echo "    the gate's census onto the bundle. Nothing about this is a property of"
+  echo "    any mutation — either PLAYHEAD_RESULT_BUNDLE is not reaching fast-gate,"
+  echo "    or xcodebuild died before it could write one."
+  return 0
+}
+
 # The state the scorer recorded for one expected test.
 #
 # Prints NOTHING and returns 1 when the scorer wrote no line for that name. An
@@ -30101,6 +30134,12 @@ EVIDENCE="$WORK/evidence"
 : >"$EVIDENCE"
 BUILD_COUNT=0
 FATAL=0
+# Set when ANY batch in this run was scored without its .xcresult bundle
+# (playhead-gjlp0 R2). See `note_bundle_presence`: the battery asks fast-gate
+# for a bundle on every run, so an absent one is an instrument fault rather
+# than a mode, and the SURVIVED epilogue at the foot of this script used to
+# assert the bundle was the verdict source unconditionally.
+CONSOLE_ONLY=0
 # Cleared by `restore_and_verify` and never re-set; see the note at the final
 # restore for why a repaired tree must not un-fail the run.
 RESTORE_OK=1
@@ -30167,6 +30206,7 @@ if [ "$DRY_RUN" -eq 0 ] && [ "${PLAYHEAD_MB_SKIP_BASELINE:-0}" != "1" ]; then
     exit 2
   fi
 
+  note_bundle_presence "$BASE_BUNDLE" "the baseline"
   score_batch "$BASE_LOG" "$BASE_RC" "$BASE_SINCE" "$BASE_NAMES" "$BASE_OUT" "$BASE_BUNDLE"
   BASE_SCORE_RC=$?
   if [ "$BASE_SCORE_RC" -ne 0 ] && [ "$BASE_SCORE_RC" -ne 3 ]; then
@@ -30355,13 +30395,24 @@ for b in "${BATCH_IDS[@]}"; do
     mb_diagnose_no_tests "$LOG" "$RC" "batch $b"
     for rec in "${MEMBERS[@]}"; do
       echo "$(rec_name "$rec")|ERROR|batch did not build/run — see the DIAGNOSIS above" >>"$RESULTS"
-      printf '%s\t%s\t-\n' "$(rec_name "$rec")" "$LOG" >>"$EVIDENCE"
+      # The bundle only if it EXISTS, and only THEN — the same conditional the
+      # two arms below already carry. This one hard-coded `-`, so a batch that
+      # reached xcodebuild and wrote a bundle before failing had its evidence
+      # recorded as absent and `print_evidence` could never name it. A line
+      # that says a thing is not there, when it is, is the same defect as a
+      # line that says it is there when it is not (playhead-gjlp0 R1).
+      if [ -d "$BUNDLE" ]; then
+        printf '%s\t%s\t%s\n' "$(rec_name "$rec")" "$LOG" "$BUNDLE" >>"$EVIDENCE"
+      else
+        printf '%s\t%s\t-\n' "$(rec_name "$rec")" "$LOG" >>"$EVIDENCE"
+      fi
     done
     FATAL=1
     restore_and_verify "batch $b" || break
     continue
   fi
 
+  note_bundle_presence "$BUNDLE" "batch $b"
   echo "  scoring:"
   score_batch "$LOG" "$RC" "$BATCH_SINCE" "$NAMES" "$OUTCOMES" "$BUNDLE" | sed 's/^/  /'
   SCORE_RC="${PIPESTATUS[0]}"
@@ -30412,11 +30463,24 @@ for b in "${BATCH_IDS[@]}"; do
       echo "  observed failures: UNKNOWN — the scorer wrote no '#failures' count."
       echo "    Nothing below is a measurement of this batch. See $OUTCOMES" ;;
     *)
+      # AND THE COUNT MUST AGREE WITH THE LIST (playhead-gjlp0 R2). R1 armed the
+      # direction where the scorer states no count and the list is empty; this
+      # is its mirror — a stated count of N over an empty list printed `(none)`
+      # under a header saying N, which is two contradictory readings of one file
+      # with nothing to tell a reader which to believe. `(none)` is earned by a
+      # STATED ZERO and by nothing else.
+      BATCH_FAILURE_LINES="$(sed -n 's/^#failure\t.*$/x/p' "$OUTCOMES" | wc -l | tr -d ' ')"
       echo "  observed failures (ALL of them, $BATCH_FAILURES):"
-      if grep -q '^#failure\t' "$OUTCOMES"; then
-        sed -n 's/^#failure\t/    ✘ /p' "$OUTCOMES"
+      if [ "$BATCH_FAILURE_LINES" != "$BATCH_FAILURES" ]; then
+        echo "    THE COUNT AND THE LIST DISAGREE — '#failures' says $BATCH_FAILURES," >&2
+        echo "    and there are $BATCH_FAILURE_LINES '#failure' line(s). Neither is a" >&2
+        echo "    measurement of this batch: scripts/mutation_verdict.py and this script" >&2
+        echo "    disagree about the outcomes-file format. See $OUTCOMES" >&2
+      fi
+      if [ "$BATCH_FAILURE_LINES" -eq 0 ]; then
+        [ "$BATCH_FAILURES" = "0" ] && echo "    (none)"
       else
-        echo "    (none)"
+        sed -n 's/^#failure\t/    ✘ /p' "$OUTCOMES"
       fi ;;
   esac
 
@@ -30560,10 +30624,14 @@ fi
 if [ "$VOIDS" -gt 0 ]; then
   cat >&2 <<'MSG'
 
-A VOID IS NOT A VERDICT. The expected test produced no result at all — the host
-died under it, it was skipped, or it was denied a resource — so the mutation was
-never evaluated in EITHER direction. Do not record it as KILLED and do not chase
-it as a coverage hole.
+A VOID IS NOT A VERDICT. Either the expected test produced no result at all —
+the host died under it, it was skipped, or it was denied a resource — or the
+BATCH lost its test host, in which case no result from it is evidence about any
+mutation, INCLUDING a failure (playhead-4xmz: a trapping mutant reddens tests
+for reasons that have nothing to do with the mutation). Read the detail beside
+each VOID above for which of the two it was. Either way the mutation was never
+evaluated in EITHER direction: do not record it as KILLED and do not chase it as
+a coverage hole.
 
 The remedy is to run that batch again. If it recurs, the mutation itself is
 probably killing the test host, which is a real finding about the mutation and
@@ -30579,10 +30647,24 @@ A SURVIVOR IS A COVERAGE HOLE. The defect above can be introduced with the
 focused suites still green. Write the test that rejects it — do not relax the
 expectation and do not delete the entry.
 
-Every SURVIVED above rests on a POSITIVE pass verdict for the named test, read
-from the batch's own .xcresult bundle (playhead-gjlp0) — the log and bundle are
-printed beside each one. Absence of a failure line is no longer enough.
+Every SURVIVED above rests on a POSITIVE pass verdict for the named test
+(playhead-gjlp0) — the batch's log, and its .xcresult bundle when there is one,
+are printed beside each one. Absence of a failure line is no longer enough.
 MSG
+  if [ "$CONSOLE_ONLY" -eq 1 ]; then
+    # The sentence above used to say "read from the batch's own .xcresult
+    # bundle" unconditionally, and at least one batch in this run had none.
+    # A claim about where a verdict came from, printed without checking, in the
+    # one place a reader decides whether to trust a SURVIVED — this bead's own
+    # defect one layer out from the code it fixed.
+    cat >&2 <<'MSG'
+AND AT LEAST ONE BATCH HERE HAD NO .xcresult BUNDLE (it said so above): those
+verdicts came off the CONSOLE alone. Still a positive `✔` rather than the
+pre-gjlp0 reading of silence, but the weaker instrument — read the batch log
+before acting on a SURVIVED from this run, and find out why the bundle is
+missing.
+MSG
+  fi
   exit 1
 fi
 if [ "$DRY_RUN" -eq 1 ]; then
