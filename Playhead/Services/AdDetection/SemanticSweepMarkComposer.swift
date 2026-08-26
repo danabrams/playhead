@@ -908,7 +908,8 @@ enum SemanticSweepMarkComposer {
     /// `passA` AT ANY STATUS** — a THIRD population, neither the bullets' below
     /// nor this factor's own. (It read "BOTH OF THOSE COUNTS", which named the
     /// 36 and the four and was exact until round 6 added the rest; a deixis that
-    /// counts is a claim that expires, so the numbers are listed.) It is said here rather than only in the
+    /// counts is a claim that expires, so the numbers are listed.) It is said
+    /// here rather than only in the
     /// **IT NEVER SEPARATED** paragraph below, which is where the qualification
     /// used to live alone — past the bullets, which carry a DIFFERENT
     /// population's numbers (playhead-1gu0 review). On the EXAMINED population

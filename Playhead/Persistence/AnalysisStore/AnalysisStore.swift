@@ -9166,10 +9166,11 @@ actor AnalysisStore {
     /// ``SemanticScanResult/backfillJobId``'s own doc.
     ///
     /// **THE SITES THAT SPELLED IT A *RUN* ARE EDITED HERE RATHER THAN CITED AS
-    /// WITNESSES, AND THE COUNT IS GIVEN AS A PREDICATE BECAUSE A BARE NUMBER
-    /// HAS NOW BEEN WRONG TWICE.** It said TWO, then FOUR; both were a handful
-    /// somebody had in hand read as a census — the shape this very paragraph is
-    /// about, inside it. Re-run it instead of re-counting it:
+    /// WITNESSES, AND THE COUNT IS GIVEN AS A PREDICATE BECAUSE EVERY BARE
+    /// NUMBER THIS SENTENCE HAS CARRIED HAS BEEN SHORT.** It said TWO, then
+    /// FOUR; each was a handful somebody had in hand read as a census — the
+    /// shape this very paragraph is about, inside it. Re-run it instead of
+    /// re-counting it:
     ///
     ///     git grep -niI -e "run correlation" -e "correlation id" 55dd7e6e \
     ///       -- Playhead PlayheadTests docs scripts
@@ -9183,11 +9184,12 @@ actor AnalysisStore {
     /// about it. **NO CARDINAL IS GIVEN FOR THOSE, DELIBERATELY** — round 15
     /// found that this very clause had said "the two", and missed at least
     /// ``SemanticSweepMarkComposer/corroborates(_:_:)``'s note, which measures
-    /// the id out over `A9F6DF05`. That is the fourth short count in one
-    /// sentence (TWO, then FOUR, then FIVE-plus-"two missed"), so the sentence
-    /// stops counting: the two worth reading are `BackgroundGrantBudget` and
+    /// the id out over `A9F6DF05`. So the sentence stops counting: the two worth
+    /// reading are `BackgroundGrantBudget` and
     /// ``SemanticSweepMarkComposer/corroborationFactor(affirming:dissenting:)``,
-    /// and they are named as EXAMPLES rather than as a census.
+    /// and they are named as EXAMPLES rather than as a census. (The grep's own
+    /// FIVE is not one of the short ones — it re-derives exactly. What has been
+    /// short is every count of the sites the grep cannot see.)
     ///
     /// They are not the same kind of wrong, and the difference matters. TWO
     /// asserted something untrue:
