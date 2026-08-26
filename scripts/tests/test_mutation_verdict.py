@@ -1632,7 +1632,14 @@ class ShellLadderTests(ShellBatteryHarness):
         # being unconditionally true the moment that arm landed — two
         # contradictory instructions in one output, which is what R2 closed for
         # the failure count and the failure list.
-        self.assertIn("UNLESS A REASON BESIDE A ROW", out, out[-4000:])
+        #
+        # R5 found a SECOND shape a re-run cannot clear — an expectation the
+        # mutation itself made SKIP — so the exemption is no longer about batch
+        # `#reason` lines alone. This rail holds the general sentence; the
+        # [SKIPPED] half is pinned on the one run that produces one, in
+        # ShellConsoleOnlyVoidTests.
+        self.assertIn("UNLESS THE ROW SAYS OTHERWISE", out, out[-4000:])
+        self.assertIn("TWO shapes do", out, out[-4000:])
 
     def test_a_positive_pass_still_reports_SURVIVED_and_names_its_log(self):
         green = console(tests=[(self.expect, "passed")])
@@ -1710,6 +1717,29 @@ class ShellLadderTests(ShellBatteryHarness):
         out = self.out(proc)
         self.assertIn("THE BASELINE BATCH IS VOID", out, out[-4000:])
         self.assertIn("not a claim about the tree", out)
+        self.assertEqual(proc.returncode, 2, out[-4000:])
+
+    def test_a_void_baseline_whose_reason_says_do_not_re_run_is_not_told_to_re_run(self):
+        """playhead-gjlp0 R5 — R4's fix, in the arm R4 did not reach.
+
+        R4 qualified the BATCH epilogue's "run it again" so it defers to a
+        stated reason. The BASELINE arm said `the suites were never judged.
+        Re-run.` flat, two lines under a reason that can read `RE-RUNNING WILL
+        NOT CHANGE IT`. Driven, with a baseline bundle carrying an unrecognised
+        result string: both sentences were printed, in that order.
+
+        "The suites were never judged" was false here as well — they WERE
+        judged, in a word this parser cannot read.
+        """
+        green = console(tests=[(self.expect, "passed")])
+        env = self.stub_xcresult(bundle_payload([(self.expect, "Bikeshed", [])]))
+        proc = self.run_battery(green, green, env=env)
+        out = self.out(proc)
+        self.assertIn("THE BASELINE BATCH IS VOID", out, out[-4000:])
+        self.assertIn("RE-RUNNING WILL NOT CHANGE IT", out, out[-4000:])
+        self.assertIn("READ THE REASON(S) ABOVE FIRST", out, out[-4000:])
+        self.assertIn("XCRESULT_", out, out[-4000:])
+        self.assertNotIn("suites were never judged", out, out[-4000:])
         self.assertEqual(proc.returncode, 2, out[-4000:])
 
     def test_a_red_baseline_still_refuses_on_a_test_no_mutation_names(self):
@@ -2155,6 +2185,23 @@ class ShellConsoleOnlyVoidTests(ShellBatteryHarness):
         self.assertEqual(self.verdict_of(proc), "VOID", out[-4000:])
         self.assertNotIn("AND AT LEAST ONE RUN BEHIND THIS TABLE HAD NO", out, out[-4000:])
         self.assertNotIn("MANUFACTURES a NO VERDICT", out, out[-4000:])
+
+        # --- playhead-gjlp0 R5: A SKIP IS THE SECOND VOID A RE-RUN CANNOT CLEAR
+        # Folded into this run rather than paid for with another ~13 s battery
+        # invocation, because this is already the only rail whose expectation
+        # comes back SKIPPED. The baseline watched that same test PASS minutes
+        # earlier on the unmutated tree, so the MUTATION is the likeliest reason
+        # it skipped and every re-run skips it again — the same shape R4 closed
+        # for an unreadable result string, one state over, and the epilogue's
+        # exemption named only R4's because it was scoped to batch `#reason`
+        # lines while [SKIPPED] is a per-test state.
+        self.assertIn("[SKIPPED]", out, out[-4000:])
+        self.assertIn("UNLESS THE ROW SAYS OTHERWISE", out, out[-4000:])
+        self.assertIn("TWO shapes do", out, out[-4000:])
+        self.assertIn("every re-run will skip it again", out, out[-4000:])
+        # And what to DO — the hole L4 and R4-5 both went through: a consequence
+        # with no action is half a remedy.
+        self.assertIn("a different rail or a different mutant", out, out[-4000:])
 
     def test_a_console_only_ERROR_says_a_lost_START_line_reads_the_same_way(self):
         # The third epilogue. `never ran` is ABSENT, and a START line the

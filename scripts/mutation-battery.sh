@@ -170,8 +170,11 @@
 #      crashed run)
 #   3  a mutation could not be EVALUATED — fix the EDIT
 #   4  the tree was NOT restored byte-exactly — inspect before anything else
-#   5  a batch produced NO VERDICT (playhead-gjlp0) — nothing is wrong with the
-#      EDIT or the rail; the run is worthless and the remedy is to run it again
+#   5  a batch produced NO VERDICT (playhead-gjlp0) — the mutation was not
+#      evaluated in EITHER direction. USUALLY nothing is wrong with the EDIT or
+#      the rail and the remedy is to run it again, but READ THE ROW: two shapes
+#      never clear on a re-run — a bundle whose result string this parser
+#      cannot read (R4), and an expectation the mutation itself made SKIP (R5)
 #   75 another battery is already running in this worktree (EX_TEMPFAIL)
 #
 # ONE BATTERY PER WORKTREE — ENFORCED SINCE playhead-pu7e
@@ -30297,8 +30300,20 @@ if [ "$DRY_RUN" -eq 0 ] && [ "${PLAYHEAD_MB_SKIP_BASELINE:-0}" != "1" ]; then
     # again, so say that rather than implicating the tree.
     echo "mutation-battery: THE BASELINE BATCH IS VOID — it produced no usable verdict." >&2
     sed -n 's/^#reason\t/    * /p' "$BASE_OUT" >&2
-    echo "This is not a claim about the tree, the anchors or the expectations: the" >&2
-    echo "suites were never judged. Re-run. If it recurs, read the log:" >&2
+    echo "This is not a claim about the tree, the anchors or the expectations." >&2
+    # THE REMEDY DEFERS TO THE REASON ABOVE, and until playhead-gjlp0 R5 it did
+    # not. This arm said "the suites were never judged. Re-run." flat, two lines
+    # under a reason that can read `RE-RUNNING WILL NOT CHANGE IT` — two
+    # contradictory instructions in one output, which is what R2 closed for the
+    # failure count and R4 closed for the BATCH epilogue and left here. Driven:
+    # a baseline bundle carrying an unrecognised result string printed both.
+    # "The suites were never judged" is also false for that reason: they WERE
+    # judged, in a word this parser cannot read.
+    echo "The remedy is USUALLY to run it again — READ THE REASON(S) ABOVE FIRST." >&2
+    echo "One of them states outright that re-running will NOT change it, and no" >&2
+    echo "number of re-runs will: it is gate_baseline.py's XCRESULT_* vocabulary" >&2
+    echo "that needs the new spelling, not the box that needs another try." >&2
+    echo "Where re-running IS the remedy and it recurs, read the log:" >&2
     echo "    $BASE_LOG" >&2
     KEEP_WORK=1
     exit 2
@@ -30790,11 +30805,17 @@ each VOID above for which of the two it was. Either way the mutation was never
 evaluated in EITHER direction: do not record it as KILLED and do not chase it as
 a coverage hole.
 
-The remedy is USUALLY to run that batch again — UNLESS A REASON BESIDE A ROW
-ABOVE SAYS OTHERWISE, and one of them does: a batch whose .xcresult used a
-result string the parser cannot read says so and says re-running will not
-change it (playhead-gjlp0 R4). Read the row before re-running; this paragraph
-is the general case, not an override of a stated reason.
+The remedy is USUALLY to run that batch again — UNLESS THE ROW SAYS OTHERWISE,
+and TWO shapes do. A batch whose .xcresult used a result string the parser
+cannot read says so on its own reason line and says re-running will not change
+it (playhead-gjlp0 R4). And an expectation whose state reads [SKIPPED] did not
+run at all under the mutation, minutes after the baseline watched that same
+test PASS on the unmutated tree — so the MUTATION is the likeliest reason it
+skipped, and every re-run will skip it again (playhead-gjlp0 R5). That is a
+finding about the PAIRING: this rail cannot answer the question this mutant
+asks, and the fix is a different rail or a different mutant, never another run.
+Read the row before re-running; this paragraph is the general case, not an
+override of a stated reason.
 
 Where re-running IS the remedy: if it recurs, the mutation itself is probably
 killing the test host, which is a real finding about the mutation and not about
