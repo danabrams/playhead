@@ -865,51 +865,23 @@ struct SemanticSweepConfidenceTests {
                 "vetoed=\(vetoed as Any) clean=\(clean as Any)")
     }
 
-    /// A REPLICATE THAT DISAGREES IS EVIDENCE. The sweep really does re-screen:
-    /// on the 2026-08-10 pull 36 of 125 coarse windows carry more than one
-    /// `passA` row, and on four of them `containsAd` is at most HALF of the rows
-    /// written for the window. The composer filtered those rows out and never
-    /// counted them.
+    /// A REPLICATE THAT DISAGREES IS EVIDENCE, and the sweep really does
+    /// re-screen — the composer filtered those rows out and never counted them.
     ///
-    /// TWO WORDINGS CORRECTED HERE, both shipped by `6e9c386f` alongside the
-    /// composer's own copy of this sentence, and both left standing while that
-    /// copy was corrected (playhead-1gu0 review — a correction applied in one of
-    /// the two places it was wrong is the shape that bead exists to remove).
-    ///
-    ///   * "the MINORITY verdict" overstated it. "At most HALF" admits a TIE,
-    ///     and a tie is all there is: each of the four is 1 `containsAd` row of
-    ///     2, and a STRICT minority occurs on NONE of the 16 that carry a
-    ///     `containsAd` row at all. The 4 counts only those 16; DROP that
-    ///     condition and it reads 24, because the other 20 of the 36 carry none
-    ///     and clear "at most half" with zero affirmers. Both counts are over
-    ///     `passA` at ANY status, which is not the population this factor sees.
-    ///
-    ///     **"NONE of the 36" IS WHAT THIS BULLET SAID, AND IT IS FALSE OVER
-    ///     THE 36 (playhead-1gu0 review round 7).** Dropping the condition — as
-    ///     the 24 does — makes `containsAd` strictly under half on all twenty
-    ///     zero-affirmer windows, i.e. on the SAME 20 named above; none of the
-    ///     16 is strictly under half. The bullet was reading "at most half"
-    ///     vacuously and "minority" non-vacuously in one sentence.
-    ///
-    ///     **24 IS THE COUNT WITHOUT THE CONDITION, NOT THE POPULATION THAT
-    ///     MEETS IT — that population is 16, and this bullet said 24 was it
-    ///     (playhead-1gu0 review round 6).** The composer's "worth 4 against
-    ///     24" states a CONTRAST between the two readings and was transcribed
-    ///     here as a denominator: the standing defect class, inside the bullet
-    ///     written to remove an instance of it. Re-measured on
-    ///     `3gzp/ground-truth.sqlite` (sha256 `bcad2d09…`, `immutable=1`): of
-    ///     the 36 replicate windows, 16 carry a `containsAd` row, 20 carry
-    ///     none, 4 of the 16 are at or under half and 0 are under it.
-    ///   * "each a separate FM call in a separate RUN" was the half of the
-    ///     deleted `runCorrelationId` parenthesis that survived here. That id is
-    ///     a `backfill_jobs.jobId`, ONE value per `(asset, phase, offset)`, and
-    ///     it never separated anything `transcriptVersion` did not; on the
-    ///     08-10 pull it read as per-screening only because the version was in
-    ///     its preimage until 2026-08-07. The re-screening is real and the
-    ///     evidence for it is `transcriptVersion` — 36 of 36 on that pull.
-    ///
+    /// THIS DOC QUOTES NO FIGURE FROM THE PULL, AND THAT IS THE POINT.
     /// ``SemanticSweepMarkComposer/corroboration(for:in:atTranscriptVersion:)``
-    /// carries the population argument and every figure quoted here.
+    /// holds the measurement — the replicate counts, both pulls, each with the
+    /// population it is over — and it is the ONLY place on this branch that
+    /// does. This doc used to carry a second copy, shipped by `6e9c386f`
+    /// alongside the composer's, and it was wrong in two ways the composer's was
+    /// corrected for and this one was not: it called a tie "the MINORITY
+    /// verdict", and it said the replicates were "each a separate FM call in a
+    /// separate RUN" — the surviving half of the deleted `runCorrelationId`
+    /// parenthesis this bead exists to remove. A third round then transcribed a
+    /// contrast out of the composer as a denominator. Three errors, one cause:
+    /// a figure restated in a second place drifts out of step with the first.
+    /// A pointer cannot.
+    ///
     @Test("a contradicted verdict is worth less than an uncontradicted one")
     func aContradictedVerdictRanksLower() {
         let marks = Fx.compose(rows: [

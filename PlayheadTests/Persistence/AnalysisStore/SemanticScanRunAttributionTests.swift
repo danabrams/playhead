@@ -413,25 +413,18 @@ struct SemanticScanRunAttributionTests {
     /// was documented as relying on and does not: the id cannot separate two
     /// screenings of the same window, `transcriptVersion` can.
     ///
-    /// Measured on the 2026-08-19 device pull: 15 distinct ids for 15 distinct
-    /// assets, and — over EXAMINED `passA` rows keyed by
-    /// `(analysisAssetId, windowStartTime, windowEndTime)` — 190 of 190
-    /// replicate windows carry a single id while 190 of 190 carry distinct
-    /// transcript versions. (Over `passA` at ANY status the same pull reads
-    /// 210 of 210 both ways; say which denominator you mean.) The fixture below
-    /// is that shape in miniature.
+    /// THE FIXTURE BELOW IS THE 2026-08-19 DEVICE PULL'S SHAPE IN MINIATURE, AND
+    /// IT QUOTES NO FIGURE FROM IT. ``SemanticSweepMarkComposer/corroboration(for:in:atTranscriptVersion:)``
+    /// holds the measurement — every count, both pulls, each with the population
+    /// it is over — and it is the ONLY place on this branch that does.
     ///
-    /// **THAT IS THE RE-SCREENING POPULATION, NOT
-    /// ``SemanticSweepMarkComposer/corroborationFactor(affirming:dissenting:)``'s
-    /// OWN, AND AN EARLIER VERSION OF THIS LINE CALLED IT "the population that
-    /// factor can see" (playhead-1gu0 review).** That factor's inputs come from
-    /// ``SemanticSweepMarkComposer/corroboration(for:in:atTranscriptVersion:)``,
-    /// which counts only rows at ONE `transcriptVersion` (playhead-kg6i), so
-    /// every pair reaching its arithmetic shares a version by construction and
-    /// the job id separates nothing INSIDE that population. The composer's own
-    /// doc was corrected for exactly this claim and this second copy of it was
-    /// left behind — a correction applied in one of the two places it was
-    /// wrong is the shape this bead exists to remove.
+    /// That is deliberate and it is the branch's own finding. Six review rounds
+    /// of playhead-1gu0 produced one defect class and almost nothing else: a
+    /// figure restated in a second place and then corrected in only one of them.
+    /// This doc was two of those — it carried the pull's counts under a
+    /// population label that belonged to a different function, and the composer's
+    /// copy was fixed while this one stood. A pointer cannot drift out of step
+    /// with the thing it points at, so this is a pointer.
     // The name deliberately carries no semicolon: `mutation-battery.sh` SPLITS its
     // expectation field on ';', so a test whose display name contains one can
     // never be matched and every mutant naming it reports `expected test never
