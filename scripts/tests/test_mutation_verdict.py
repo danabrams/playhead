@@ -22,6 +22,27 @@ The two `.log` fixtures are byte-exact distillations of preserved batch logs,
 each verified to classify identically to its 4-5 MB original. The healthy one is
 load-bearing in the other direction: a checker that VOIDs everything passes
 every crash rail.
+
+WHAT IT COSTS, MEASURED, BECAUSE ~8 MINUTES IS NOT WHAT A `unittest` MODULE IN
+THIS REPO COSTS (playhead-gjlp0 R2). `test_gate_baseline` is 334 rails in about
+a second. This module is **104 rails in 497 s**, and the split is not subtle:
+the 62 rails that touch nothing but `mutation_verdict.py` run in **0.50 s**, and
+everything else is the shell half — 29 rails that invoke the real battery, plus
+4 that read its `--list`.
+
+The unit is one invocation of `scripts/mutation-battery.sh` and it is ~12-15 s
+of which almost none is the rail: the battery walks all 1,109 MUTATIONS records
+through `rec_file`/`rec_name` before it does anything at all — 2,218 command
+substitutions, i.e. 2,218 forks — and `--list` costs **14.0 s** on this box for
+the same reason. That is the battery's own preflight, every real operator
+invocation pays it too, and no rail can avoid it without stubbing away the thing
+under test.
+
+What WAS avoidable is six separate `--list` runs, one per shell class plus the
+table rail: `battery_listing()` caches it per root and took **~70 s** off the
+module, which is why R2 added 12 rails for +94 s rather than +164 s. If this
+ever has to get materially cheaper again, the honest lever is the battery's
+fork-per-record preflight, not the rails.
 """
 
 import os
@@ -334,9 +355,7 @@ class XCTestSpellingTests(VerdictTestCase):
         # the claim that the shape is still in the battery. If the MUTATIONS
         # table is ever rewritten to the module-qualified spelling, this fails
         # and says the rails above have become decoration.
-        listing = subprocess.run(
-            ["bash", str(SCRIPTS / "mutation-battery.sh"), "--list"],
-            cwd=str(ROOT), capture_output=True, text=True, check=True).stdout
+        listing = battery_listing(ROOT)
         bare = []
         for line in listing.split("\n"):
             if "expects:" not in line:
@@ -359,6 +378,127 @@ class XCTestSpellingTests(VerdictTestCase):
         _r, states = self.read(log, sorted(set(bare)))
         absent = [n for n, s in states.items() if s != mv.PASSED]
         self.assertEqual(absent, [], "unresolvable expectations: %r" % absent[:5])
+
+
+class WholeTableResolutionTests(VerdictTestCase):
+    """EVERY expectation in the table must resolve — playhead-gjlp0 R2.
+
+    The rail above measures ONE shape (`SomeTests/testFoo`, 128 expectations)
+    and it is the shape R1's P1 broke. This one takes the whole table — 1,910
+    expectations across 1,109 records — sorts it into the three spellings the
+    battery actually uses, builds a roster in the words xcodebuild really
+    prints, and asserts every single one comes back PASSED.
+
+    It exists because R1's lesson was about POPULATION, not about the resolver:
+    the twelve shell rails all drove one Swift Testing display name, so a whole
+    naming system sat outside what they measured. A rail over a sample of the
+    table has the same exposure one size down.
+    """
+
+    #: The three spellings, decided the way the battery's own comments decide
+    #: them. `Suite/method` and a bare `testFoo` are XCTest; anything else is a
+    #: Swift Testing DISPLAY name, including the 28 that contain a `/`.
+    XCTEST_QUALIFIED = re.compile(r"^[A-Za-z0-9_]+/[A-Za-z0-9_]+$")
+    XCTEST_BARE = re.compile(r"^test[A-Za-z0-9_]*$")
+
+    @classmethod
+    def spelling(cls, want):
+        if cls.XCTEST_QUALIFIED.match(want):
+            return "xctest-qualified"
+        if cls.XCTEST_BARE.match(want):
+            return "xctest-bare"
+        return "display-name"
+
+    @staticmethod
+    def table_expectations():
+        out = []
+        for line in battery_listing(ROOT).split("\n"):
+            if "expects:" not in line:
+                continue
+            for want in line.split("expects:", 1)[1].strip().split(";"):
+                out.append(want)
+        return out
+
+    def test_the_table_has_all_three_spellings_and_a_lot_of_them(self):
+        # ANTI-VACUITY. The rail below is only worth its runtime while the
+        # table really carries every shape it claims to cover.
+        counts = {}
+        for want in self.table_expectations():
+            counts[self.spelling(want)] = counts.get(self.spelling(want), 0) + 1
+        self.assertEqual(sorted(counts), ["display-name", "xctest-bare",
+                                          "xctest-qualified"], counts)
+        self.assertGreater(counts["display-name"], 1500, counts)
+        self.assertGreater(counts["xctest-qualified"], 100, counts)
+        self.assertGreater(counts["xctest-bare"], 10, counts)
+        self.assertEqual([w for w in self.table_expectations() if w != w.strip()], [],
+                         "an expectation carries edge whitespace; the shell writes it "
+                         "verbatim into the names file and the scorer matches exactly")
+        self.assertEqual([w for w in self.table_expectations() if not w], [],
+                         "an EMPTY expectation: the record would be KILLED for free")
+
+    def roster(self, wants):
+        lines = ["Command line invocation:", "    /usr/bin/xcodebuild test"]
+        for want in wants:
+            kind = self.spelling(want)
+            if kind == "xctest-qualified":
+                suite, method = want.split("/", 1)
+                lines.append("Test Case '-[PlayheadTests.%s %s]' passed (0.001 seconds)."
+                             % (suite, method))
+            elif kind == "xctest-bare":
+                lines.append("Test Case '-[PlayheadTests.SomeHostSuite %s]' "
+                             "passed (0.001 seconds)." % want)
+            else:
+                lines.append('✔ Test "%s" passed after 0.100 seconds.' % want)
+        lines.append("✔ Test run with 9 tests in 3 suites passed after 1.0 seconds.")
+        lines.append("** TEST SUCCEEDED **")
+        return "\n".join(lines) + "\n"
+
+    def test_every_expectation_in_the_table_resolves_off_the_console(self):
+        wants = self.table_expectations()
+        log = self.write_log(self.roster(wants), name="whole-table.log")
+        reading, states = self.read(log, wants)
+        self.assertEqual(reading.batch_state, mv.BATCH_OK, reading.batch_reasons)
+        unresolved = sorted({w for w in wants if states[w] != mv.PASSED})
+        self.assertEqual(unresolved, [], "%d unresolvable: %r"
+                         % (len(unresolved), unresolved[:5]))
+
+    def test_every_expectation_in_the_table_resolves_off_the_BUNDLE(self):
+        # The bundle is the verdict source on every real run, and it spells
+        # both frameworks from a different code path than the console does.
+        wants = self.table_expectations()
+        suites = {}
+        for want in wants:
+            kind = self.spelling(want)
+            if kind == "xctest-qualified":
+                suite, method, ident = want.split("/", 1)[0], want.split("/", 1)[1], None
+            elif kind == "xctest-bare":
+                suite, method = "SomeHostSuite", want
+            else:
+                suite, method = "STSuite", None
+            bucket = suites.setdefault(suite, [])
+            if method is None:
+                ident = "%s/f%d()" % (suite, len(bucket))
+                name = want
+            else:
+                ident = "%s/%s" % (suite, method)
+                name = method
+            bucket.append({
+                "nodeType": "Test Case", "name": name, "nodeIdentifier": ident,
+                "nodeIdentifierURL":
+                    "test://com.apple.xcode/Playhead/PlayheadTests/" + ident,
+                "result": gb.XCRESULT_PASSED, "children": [],
+            })
+        payload = {"testNodes": [{
+            "nodeType": "Unit test bundle", "name": "PlayheadTests",
+            "children": [{"nodeType": "Test Suite", "name": s, "children": c}
+                         for s, c in suites.items()]}]}
+        log = self.write_log(self.roster(wants), name="whole-table-bundle.log")
+        path, reader = fake_bundle(self.dir, payload)
+        reading, states = self.read(log, wants, xcresult=path, reader=reader)
+        self.assertEqual(reading.verdict_source, gb.VERDICT_SOURCE_BUNDLE)
+        unresolved = sorted({w for w in wants if states[w] != mv.PASSED})
+        self.assertEqual(unresolved, [], "%d unresolvable: %r"
+                         % (len(unresolved), unresolved[:5]))
 
 
 class PrecedenceTests(VerdictTestCase):
@@ -964,6 +1104,37 @@ def drop_sandbox():
     root = _SANDBOX.pop("dir", None)
     if root:
         shutil.rmtree(str(root), ignore_errors=True)
+    _LISTING.clear()
+
+
+#: `--list` output per root. It costs 14.0 s — the battery walks all 1,109
+#: records through two command substitutions apiece before printing anything —
+#: and six places here asked for it independently. Cached rather than
+#: hand-inlined: the whole point of resolving an expectation from `--list` is
+#: that a rail naming a test the table no longer has must fail loudly.
+_LISTING = {}
+
+
+def battery_listing(root):
+    key = str(root)
+    if key not in _LISTING:
+        _LISTING[key] = subprocess.run(
+            ["bash", "scripts/mutation-battery.sh", "--list"],
+            cwd=key, capture_output=True, text=True, check=True).stdout
+    return _LISTING[key]
+
+
+def expectations_of(root, mutation):
+    """One mutation's expectation list, from the battery's own `--list`."""
+    seen = False
+    for line in battery_listing(root).split("\n"):
+        if re.match(r"^%s\s" % re.escape(mutation), line):
+            seen = True
+            continue
+        if seen and "expects:" in line:
+            return line.split("expects:", 1)[1].strip().split(";")
+    raise AssertionError("could not resolve %s's expectation from --list; "
+                         "the rail below would test nothing" % mutation)
 
 
 STUB_GATE = r"""#!/bin/bash
@@ -1012,6 +1183,12 @@ class ShellBatteryHarness(unittest.TestCase):
     """
 
     MUTATION = None
+    #: Most rails here drive a mutation with ONE expectation and would silently
+    #: stop exercising the ladder if it grew a second, so the default is to
+    #: refuse. `ShellMultiExpectationTests` sets it, because the `;` shape is
+    #: what it is for — 419 of the 1,109 records carry it and until
+    #: playhead-gjlp0 R2 no shell rail drove one.
+    ALLOW_MULTI = False
 
     @classmethod
     def setUpClass(cls):
@@ -1019,22 +1196,9 @@ class ShellBatteryHarness(unittest.TestCase):
         # Resolved from the battery itself rather than hard-coded: a rail that
         # names a test the battery no longer expects would quietly stop
         # exercising the ladder.
-        listing = subprocess.run(
-            ["bash", "scripts/mutation-battery.sh", "--list"],
-            cwd=str(cls.root), capture_output=True, text=True, check=True).stdout
-        cls.expect = None
-        seen = False
-        for line in listing.split("\n"):
-            if re.match(r"^%s\s" % cls.MUTATION, line):
-                seen = True
-                continue
-            if seen and "expects:" in line:
-                cls.expect = line.split("expects:", 1)[1].strip()
-                break
-        if not cls.expect:
-            raise AssertionError("could not resolve %s's expectation from --list; "
-                                 "the rail below would test nothing" % cls.MUTATION)
-        if ";" in cls.expect:
+        cls.expects = expectations_of(cls.root, cls.MUTATION)
+        cls.expect = ";".join(cls.expects)
+        if len(cls.expects) > 1 and not cls.ALLOW_MULTI:
             raise AssertionError("%s now has several expectations; these rails assume one"
                                  % cls.MUTATION)
 
@@ -1046,6 +1210,46 @@ class ShellBatteryHarness(unittest.TestCase):
         self.addCleanup(self.gate.write_bytes, original)
         self.gate.write_text(STUB_GATE, encoding="utf-8")
         self.gate.chmod(0o755)
+
+    def stub_xcresult(self, *payloads):
+        """Make the stubbed gate write a real bundle DIRECTORY, and shadow
+        `xcrun` so the scorer can actually read it — playhead-gjlp0 R2.
+
+        Until this existed, the ONLY shell rail that made a bundle at all was
+        the one asserting an unreadable bundle is refused, so no end-to-end
+        rail ever took a verdict from a bundle. That is the bead's entire
+        verdict source: `mutation_verdict.py` reads it, `fast-gate.sh` writes
+        it, and the whole argument for the fix is that the console cannot be
+        trusted with a verdict. A Python rail cannot see the plumbing and the
+        shell rails could not see the bundle, so between them the shipped path
+        was measured by nothing.
+
+        Payloads are answered IN ORDER, one per `xcresulttool` call — the
+        baseline's read is the first, each batch's the next — and the last one
+        repeats, so a rail that does not care about later batches may pass one.
+
+        Returns the env overlay to hand to `run_battery`.
+        """
+        import json
+        (self.stub / "make-bundle").write_text("y", encoding="utf-8")
+        for i, payload in enumerate(payloads, 1):
+            (self.stub / ("xcresult-%d.json" % i)).write_text(
+                json.dumps(payload), encoding="utf-8")
+        binned = self.stub / "bin"
+        binned.mkdir(exist_ok=True)
+        (binned / "xcrun").write_text(
+            "#!/bin/bash\n"
+            "# playhead-gjlp0 R2 rail stub. The battery itself never shells out\n"
+            "# to xcrun (checked), so shadowing it reaches only the scorer.\n"
+            'N=0\n'
+            '[ -f "%(d)s/xcrun-n" ] && N="$(cat "%(d)s/xcrun-n")"\n'
+            'N=$((N + 1)); echo "$N" >"%(d)s/xcrun-n"\n'
+            'F="%(d)s/xcresult-$N.json"\n'
+            '[ -f "$F" ] || F="%(d)s/xcresult-%(last)d.json"\n'
+            'exec /bin/cat "$F"\n' % {"d": self.stub, "last": len(payloads)},
+            encoding="utf-8")
+        (binned / "xcrun").chmod(0o755)
+        return {"PATH": str(binned) + os.pathsep + os.environ["PATH"]}
 
     def run_battery(self, baseline_log, batch_log, args=None, env=None):
         (self.stub / "baseline.log").write_text(baseline_log, encoding="utf-8")
@@ -1328,6 +1532,27 @@ class ShellInstrumentFaultTests(ShellBatteryHarness):
         self.assertIn("observed failures: UNKNOWN", out, out[-4000:])
         self.assertNotIn("(none)", out, out[-4000:])
 
+    def test_a_COUNT_that_disagrees_with_the_LIST_says_so_and_never_says_none(self):
+        # THE MIRROR of the rail above (playhead-gjlp0 R2). R1 armed "the
+        # scorer stated NO count"; a count of N over an EMPTY list printed the
+        # header saying N and then `(none)` — two contradictory readings of one
+        # file, with nothing to tell a reader which to believe, and `(none)` is
+        # a measurement earned by a STATED ZERO alone.
+        scorer = self.root / "scripts" / "mutation_verdict.py"
+        original = scorer.read_bytes()
+        self.addCleanup(scorer.write_bytes, original)
+        scorer.write_text(
+            STUB_SCORER.replace('"#no_verdict\\t0"]', '"#no_verdict\\t0", "#failures\\t2"]'),
+            encoding="utf-8")
+        green = console(tests=[(self.expect, "passed")])
+        proc = self.run_battery(green, green,
+                                args=["--only", self.MUTATION],
+                                env={"PLAYHEAD_MB_SKIP_BASELINE": "1"})
+        out = self.out(proc)
+        self.assertIn("observed failures (ALL of them, 2)", out, out[-4000:])
+        self.assertIn("THE COUNT AND THE LIST DISAGREE", out, out[-4000:])
+        self.assertNotIn("(none)", out, out[-4000:])
+
     def test_the_same_stub_WITH_the_count_gets_through_the_guard(self):
         # ANTI-FABRICATION: the rail above must fail for the MISSING FIELD and
         # not merely because the scorer was replaced. Same stub plus the one
@@ -1345,6 +1570,203 @@ class ShellInstrumentFaultTests(ShellBatteryHarness):
         self.assertNotIn("fault in the INSTRUMENT", out, out[-4000:])
         self.assertIn("baseline green", out, out[-4000:])
         self.assertEqual(self.verdict_of(proc), "SURVIVED", out[-4000:])
+
+
+class ShellBundleTests(ShellBatteryHarness):
+    """The .xcresult bundle, driven end to end — playhead-gjlp0 R2.
+
+    The bead moved the battery's verdict onto the bundle and no shell rail ever
+    read one: the single rail that created a bundle asserted that an UNREADABLE
+    one is refused. So "the bundle is the verdict source" was a property of
+    Python plus a property of a `case` statement, with nothing joining them —
+    the playhead-s34ux shape this module's own header warns about.
+
+    Every rail here makes the CONSOLE say the opposite of the BUNDLE, so a run
+    that quietly fell back to the console fails rather than passing for the
+    wrong reason.
+    """
+
+    MUTATION = "M05"
+
+    def test_the_bundle_OVERRIDES_a_console_pass(self):
+        green = console(tests=[(self.expect, "passed")])
+        env = self.stub_xcresult(
+            bundle_payload([(self.expect, gb.XCRESULT_PASSED, [])]),
+            bundle_payload([(self.expect, gb.XCRESULT_FAILED,
+                             ["Expectation failed: capped.truncated"])]))
+        proc = self.run_battery(green, green, env=env)
+        out = self.out(proc)
+        self.assertIn("verdicts read from: the .xcresult bundle", out, out[-4000:])
+        self.assertEqual(self.verdict_of(proc), "KILLED", out[-4000:])
+        self.assertEqual(proc.returncode, 0, out[-4000:])
+
+    def test_a_SURVIVED_rests_on_the_BUNDLES_own_pass_not_the_consoles(self):
+        # The direction that decides whether the fix is worth anything: the
+        # console shows a FAILURE and the bundle a pass, so a KILLED here would
+        # mean the console is still the verdict.
+        green = console(tests=[(self.expect, "passed")])
+        red = console(tests=[(self.expect, "issue")], terminal="** TEST FAILED **")
+        env = self.stub_xcresult(
+            bundle_payload([(self.expect, gb.XCRESULT_PASSED, [])]))
+        proc = self.run_battery(green, red, env=env)
+        out = self.out(proc)
+        self.assertEqual(self.verdict_of(proc), "SURVIVED", out[-4000:])
+        # ...and the epilogue may claim the bundle, because there was one.
+        self.assertNotIn("NO .xcresult BUNDLE", out, out[-4000:])
+        self.assertNotIn("AND AT LEAST ONE BATCH HERE HAD NO", out, out[-4000:])
+        self.assertEqual(proc.returncode, 1, out[-4000:])
+
+    def test_a_bundle_STATED_crash_is_VOID_and_never_a_KILL(self):
+        # playhead-4xmz's DW18: a trapping mutant takes the host down and
+        # reddens tests for reasons that have nothing to do with the mutation.
+        # The bundle books that as a FAILURE carrying a crash message; reading
+        # it as one would write a healthy test into a KILLED column.
+        green = console(tests=[(self.expect, "passed")])
+        env = self.stub_xcresult(
+            bundle_payload([(self.expect, gb.XCRESULT_PASSED, [])]),
+            bundle_payload([(self.expect, gb.XCRESULT_FAILED,
+                             ["Test crashed with signal trap."])]))
+        proc = self.run_battery(green, console(tests=[(self.expect, "started")]),
+                                env=env)
+        out = self.out(proc)
+        self.assertEqual(self.verdict_of(proc), "VOID", out[-4000:])
+        self.assertIn("STATES the host died", out, out[-4000:])
+        self.assertEqual(proc.returncode, 5, out[-4000:])
+
+    def test_a_batch_of_nothing_but_KILLS_drops_its_bundle_and_says_so(self):
+        # A focused .xcresult is tens of megabytes on a box whose gate refuses
+        # to start below 13.5 GiB, and a bundle that vanishes without a line is
+        # a reader concluding the run never wrote one. Both halves are here
+        # because neither had an end-to-end rail.
+        green = console(tests=[(self.expect, "passed")])
+        env = self.stub_xcresult(
+            bundle_payload([(self.expect, gb.XCRESULT_PASSED, [])]),
+            bundle_payload([(self.expect, gb.XCRESULT_FAILED, ["Expectation failed"])]))
+        proc = self.run_battery(green, green, env=env)
+        out = self.out(proc)
+        self.assertEqual(self.verdict_of(proc), "KILLED", out[-4000:])
+        dropped = re.findall(r"dropped the \.xcresult bundle .*: (\S+)", out)
+        self.assertTrue(any(d.endswith("baseline.xcresult") for d in dropped), out[-4000:])
+        self.assertTrue(any(re.search(r"batch-\d+\.xcresult$", d) for d in dropped),
+                        out[-4000:])
+
+
+class ShellConsoleOnlyTests(ShellBatteryHarness):
+    """A run scored without a bundle must SAY SO — playhead-gjlp0 R2.
+
+    `score_batch` omits `--xcresult` when the directory is not there, and until
+    R2 nothing said so: the only difference between a bundle run and a console
+    run was one line of the scorer's census, which reads as a neutral fact
+    about provenance. Meanwhile the SURVIVED epilogue asserted, without
+    checking, that every verdict above it came from the bundle.
+    """
+
+    MUTATION = "M05"
+
+    def test_no_bundle_is_named_per_batch_and_qualifies_the_SURVIVED_epilogue(self):
+        green = console(tests=[(self.expect, "passed")])
+        proc = self.run_battery(green, green)          # the stub writes no bundle
+        out = self.out(proc)
+        self.assertEqual(self.verdict_of(proc), "SURVIVED", out[-4000:])
+        self.assertIn("NO .xcresult BUNDLE — the baseline", out, out[-4000:])
+        self.assertIn("NO .xcresult BUNDLE — batch", out, out[-4000:])
+        self.assertIn("AND AT LEAST ONE BATCH HERE HAD NO", out, out[-4000:])
+        # The claim it replaced. A reader who trusts this sentence would go
+        # looking for a bundle that was never written.
+        self.assertNotIn("read\nfrom the batch's own .xcresult bundle", out)
+        self.assertEqual(proc.returncode, 1, out[-4000:])
+
+
+class ShellMultiExpectationTests(ShellBatteryHarness):
+    """A record with SEVERAL expectations — playhead-gjlp0 R2.
+
+    419 of the 1,109 records carry a `;`-separated list and no shell rail drove
+    one: `setUpClass` actively REFUSED such a mutation, so the arm that decides
+    a verdict across several expectations — and the ORDER of the four arms,
+    which is what makes one unjudged expectation outrank one that passed — was
+    measured by nothing that runs the battery.
+    """
+
+    MUTATION = "FD02"
+    ALLOW_MULTI = True
+
+    @classmethod
+    def setUpClass(cls):
+        super(ShellMultiExpectationTests, cls).setUpClass()
+        if len(cls.expects) < 2:
+            raise AssertionError("%s no longer has several expectations; these rails "
+                                 "would test the single-expectation path" % cls.MUTATION)
+
+    def test_one_expectation_FAILED_and_one_UNJUDGED_is_VOID_not_KILLED(self):
+        # The whole ladder in one record. KILLED requires EVERY expectation to
+        # have failed; an expectation nobody judged is evidence in neither
+        # direction, and the unjudged arm must outrank the missing one.
+        green = console(tests=[(e, "passed") for e in self.expects])
+        mixed = console(tests=[(self.expects[0], "issue")] +
+                              [(e, "started") for e in self.expects[1:]],
+                        terminal="** TEST FAILED **")
+        proc = self.run_battery(green, mixed)
+        out = self.out(proc)
+        self.assertEqual(self.verdict_of(proc), "VOID", out[-4000:])
+        self.assertIn("[NO-VERDICT]", out, out[-4000:])
+        self.assertEqual(proc.returncode, 5, out[-4000:])
+
+    def test_a_partial_kill_is_SURVIVED_naming_ONLY_the_ones_that_passed(self):
+        green = console(tests=[(e, "passed") for e in self.expects])
+        partial = console(tests=[(self.expects[0], "issue")] +
+                                [(e, "passed") for e in self.expects[1:]],
+                          terminal="** TEST FAILED **")
+        proc = self.run_battery(green, partial)
+        out = self.out(proc)
+        self.assertEqual(self.verdict_of(proc), "SURVIVED", out[-4000:])
+        still = [l for l in out.split("\n") if "still green:" in l]
+        self.assertEqual(len(still), 1, out[-4000:])
+        for passing in self.expects[1:]:
+            self.assertIn(passing, still[0])
+        self.assertNotIn(self.expects[0], still[0])
+        self.assertEqual(proc.returncode, 1, out[-4000:])
+
+
+class ShellMultiBatchTests(ShellBatteryHarness):
+    """Several mutations, several batches, one invocation — playhead-gjlp0 R2.
+
+    Every other shell rail drives `--only <one mutation>`, which is one member
+    in one batch. Two shapes were therefore never driven: a batch with more
+    than one member (160 batches have exactly two, 57 have more), and a
+    selection that APPENDS a `*99` vacuity control living in a DIFFERENT batch
+    — 337 records reach that path, and it is the only way this script runs
+    `run_focused` twice and writes two of everything ($WORK/expect-N.txt,
+    outcomes-N.txt, batch-N.log, batch-N.xcresult, and one freshness floor per
+    batch rather than per run).
+    """
+
+    MUTATION = "TK03"        # batch 1242, with TK10; series control TK99 is batch 1246
+    ALLOW_MULTI = True       # TK03 carries three, which is not what these rails are about
+
+    def test_two_batches_run_and_every_member_gets_its_own_verdict(self):
+        others = {name: expectations_of(self.root, name) for name in ("TK10", "TK99")}
+        every = list(dict.fromkeys(
+            self.expects + others["TK10"] + others["TK99"]))
+        # Only the expectations TK03 alone declares fail, so TK03 must SURVIVE
+        # on the ones it shares, TK10 must SURVIVE, and the appended control
+        # must SURVIVE in its own batch.
+        shared = set(others["TK10"]) | set(others["TK99"])
+        green = console(tests=[(e, "passed") for e in every])
+        mixed = console(tests=[(e, "issue" if e not in shared else "passed")
+                               for e in every],
+                        terminal="** TEST FAILED **")
+        proc = self.run_battery(green, mixed, args=["--batch", "1242"])
+        out = self.out(proc)
+        self.assertIn("TK99 is APPENDED", out, out[-4000:])
+        self.assertIn("=== batch 1242: 2 mutation(s) ===", out, out[-4000:])
+        self.assertIn("=== batch 1246: 1 mutation(s) ===", out, out[-4000:])
+        self.assertEqual(self.verdict_of(proc, "TK03"), "SURVIVED", out[-6000:])
+        self.assertEqual(self.verdict_of(proc, "TK10"), "SURVIVED", out[-6000:])
+        self.assertEqual(self.verdict_of(proc, "TK99"), "SURVIVED", out[-6000:])
+        # Each verdict names ITS OWN batch's log, not the last one written.
+        self.assertRegex(out, r"evidence: \S*batch-1242\.log")
+        self.assertRegex(out, r"evidence: \S*batch-1246\.log")
+        self.assertEqual(proc.returncode, 1, out[-4000:])
 
 
 class ShellObservedFailuresTests(ShellBatteryHarness):
