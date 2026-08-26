@@ -415,12 +415,23 @@ struct SemanticScanRunAttributionTests {
     ///
     /// Measured on the 2026-08-19 device pull: 15 distinct ids for 15 distinct
     /// assets, and — over EXAMINED `passA` rows keyed by
-    /// `(analysisAssetId, windowStartTime, windowEndTime)`, which is the
-    /// population ``SemanticSweepMarkComposer/corroborationFactor(affirming:dissenting:)``
-    /// can see — 190 of 190 replicate windows carry a single id while 190 of 190
-    /// carry distinct transcript versions. (Over `passA` at ANY status the same
-    /// pull reads 210 of 210 both ways; say which denominator you mean.) The
-    /// fixture below is that shape in miniature.
+    /// `(analysisAssetId, windowStartTime, windowEndTime)` — 190 of 190
+    /// replicate windows carry a single id while 190 of 190 carry distinct
+    /// transcript versions. (Over `passA` at ANY status the same pull reads
+    /// 210 of 210 both ways; say which denominator you mean.) The fixture below
+    /// is that shape in miniature.
+    ///
+    /// **THAT IS THE RE-SCREENING POPULATION, NOT
+    /// ``SemanticSweepMarkComposer/corroborationFactor(affirming:dissenting:)``'s
+    /// OWN, AND AN EARLIER VERSION OF THIS LINE CALLED IT "the population that
+    /// factor can see" (playhead-1gu0 review).** That factor's inputs come from
+    /// ``SemanticSweepMarkComposer/corroboration(for:in:atTranscriptVersion:)``,
+    /// which counts only rows at ONE `transcriptVersion` (playhead-kg6i), so
+    /// every pair reaching its arithmetic shares a version by construction and
+    /// the job id separates nothing INSIDE that population. The composer's own
+    /// doc was corrected for exactly this claim and this second copy of it was
+    /// left behind — a correction applied in one of the two places it was
+    /// wrong is the shape this bead exists to remove.
     // The name deliberately carries no semicolon: `mutation-battery.sh` SPLITS its
     // expectation field on ';', so a test whose display name contains one can
     // never be matched and every mutant naming it reports `expected test never
