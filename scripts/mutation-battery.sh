@@ -339,6 +339,22 @@
 #   SURVIVED as required, 6 builds, 17m46s wall clock. Batches 1-1611 were NOT
 #   re-run and carry the verdicts above.
 #
+#   RUN TWICE, and the second run is the record. Review round 1 strengthened the
+#   sibling rail `V65: one backfill job id spans re-screenings…` — it had been
+#   taking a `Set` of OPTIONALS, so a column that lost every value read exactly
+#   like one that shares an id — and a changed test invalidates a verdict taken
+#   before it. Re-run: same 4 KILLED / GU99 SURVIVED / 0 VOID / 0 ERROR, 6
+#   builds, 16m11s. Two things the second run measured that the first did not:
+#     • GU02 observed TWO failures rather than one. The second, `closing the
+#       session log is non-terminal — a later write reopens the SAME file`,
+#       cannot be reached by GU02 — that mutant's only live path is a store
+#       carrying the OLD spelling — and it did not fail in the first run, in any
+#       other batch, or in either baseline. Recorded as batch noise, not as an
+#       extra victim. The verdict stands on the EXPECTED test, which failed.
+#     • GU04 observed 69 rather than 68, one more of the same fresh-store
+#       family. The prediction-miss note below quotes 68 from the first run and
+#       is left at 68 deliberately: the point it makes is the SHAPE of the miss.
+#
 #   THE FIRST ATTEMPT WAS DISCARDED AND IT IS WORTH SAYING WHY. Its baseline
 #   came back RED on one test — `the DOWNLOAD-JOURNAL tables exist BELOW the V39
 #   rollback floor` — with `Migration failed: disk I/O error (SQL: BEGIN

@@ -452,8 +452,19 @@ struct SemanticScanRunAttributionTests {
         // ASSERTION. `Set([nil, nil, nil]).count` is 1, so a bare distinct-count
         // reads a column that lost every value exactly like a column that shares
         // one — the standing defect class, inside the rail written to remove an
-        // instance of it. GU02 (an ADD where the RENAME belongs) is precisely the
-        // mutation that empties this column, and it must not be able to pass here.
+        // instance of it.
+        //
+        // NO MUTANT IN THE GU SERIES DEMONSTRATES IT, and an earlier version of
+        // this note claimed one did ("GU02, an ADD where the RENAME belongs, is
+        // precisely the mutation that empties this column"). Measured: GU02
+        // leaves this rail GREEN, because the rail opens a store at the HEAD
+        // shape, where `backfillJobId` already exists and the rename helper
+        // returns before its first statement. GU02 can only empty a column on a
+        // store carrying the OLD spelling, which is the sibling rail's fixture
+        // and not this one. The assertion stays — a vacuous rail is a defect
+        // whether or not a mutant in this series happens to reach it — but the
+        // reach was asserted rather than measured, which is the thing this bead
+        // is about.
         #expect(
             rows.allSatisfy { $0.backfillJobId != nil },
             """
