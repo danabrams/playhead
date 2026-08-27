@@ -146,12 +146,22 @@ private enum SecondsFixture {
     }
 
     /// What THIS row's writer would have persisted for it, had V66 existed when
-    /// it ran. Built through the production encoder rather than hand-spelled, so
-    /// a change to the payload FORMAT cannot leave these rails asserting against
-    /// a shape nothing writes.
+    /// it ran — built through **the production writer's own entry point**, from
+    /// raw `segments`, so a change to the payload format or to the projection
+    /// cannot leave these rails asserting against a shape nothing writes.
+    ///
+    /// It goes through `BackfillJobRunner.encodeSupportLineSeconds` rather than
+    /// `index.project` deliberately (review round 1): routing it through the
+    /// index would make the reader's derivation and the fixture's derivation the
+    /// SAME two calls, and `resolveAndTheProjectionAgree` would then be
+    /// `decode ∘ encode == id` wearing the name of a cross-check. This spelling
+    /// shares only `SupportLineIndex(segments:transcriptVersion:)` with the
+    /// reader, so a wrong `project` shows up as a disagreement rather than
+    /// cancelling out.
     static func projectedSeconds(_ refs: [Int] = [62]) -> String {
-        SupportLineIndex.encodeSupportLineSpans(
-            index.project(supportLineRefs: refs) ?? []
+        BackfillJobRunner.encodeSupportLineSeconds(
+            CoarseSupportSchema(supportLineRefs: refs, certainty: .strong),
+            segments: segments
         ) ?? ""
     }
 
@@ -227,6 +237,12 @@ struct SupportLineProjectionTests {
 
     @Test("an empty ref list projects nothing")
     func emptyRefsProjectNothing() {
+        // A CONTRACT, NOT A DISCRIMINATOR, and it says so rather than pretending
+        // otherwise: delete `guard !refs.isEmpty` and this still passes, because
+        // the loop appends nothing and the `projected.isEmpty ? nil` tail
+        // returns nil anyway. Both branches are stated invariants (see
+        // `project`'s own note), which is why no QJ mutant targets either — a
+        // mutant of a provable equivalent can only SURVIVE and be misread.
         #expect(Fx.index.project(supportLineRefs: []) == nil)
     }
 
@@ -246,7 +262,7 @@ struct SupportLineProjectionTests {
     @Test("the runner writes the projection for a coarse screening that names lines")
     func runnerWritesTheProjection() throws {
         let encoded = try #require(
-            BackfillJobRunner.encodeSupportLineSecondsForTesting(
+            BackfillJobRunner.encodeSupportLineSeconds(
                 CoarseSupportSchema(supportLineRefs: [62], certainty: .strong),
                 segments: Fx.segments
             )
@@ -260,15 +276,15 @@ struct SupportLineProjectionTests {
         // No support object — `{"supportLineRefs":[]}`'s three cousins. Each
         // leaves the row exactly as a pre-V66 row, i.e. on the resolve path,
         // which is the behaviour that was already shipping.
-        #expect(BackfillJobRunner.encodeSupportLineSecondsForTesting(
+        #expect(BackfillJobRunner.encodeSupportLineSeconds(
             nil, segments: Fx.segments) == nil)
-        #expect(BackfillJobRunner.encodeSupportLineSecondsForTesting(
+        #expect(BackfillJobRunner.encodeSupportLineSeconds(
             CoarseSupportSchema(supportLineRefs: [], certainty: .strong),
             segments: Fx.segments) == nil)
-        #expect(BackfillJobRunner.encodeSupportLineSecondsForTesting(
+        #expect(BackfillJobRunner.encodeSupportLineSeconds(
             CoarseSupportSchema(supportLineRefs: [999], certainty: .strong),
             segments: Fx.segments) == nil)
-        #expect(BackfillJobRunner.encodeSupportLineSecondsForTesting(
+        #expect(BackfillJobRunner.encodeSupportLineSeconds(
             CoarseSupportSchema(supportLineRefs: [62], certainty: .strong),
             segments: []) == nil)
     }
@@ -291,17 +307,30 @@ struct SupportLineSpansCodecTests {
 
     @Test("the encoding is stable BYTES, so a rewrite of the same verdict reads as unchanged")
     func encodingIsStable() throws {
-        let a = try #require(Fx.index.project(supportLineRefs: [62, 61]))
-        let b = try #require(Fx.index.project(supportLineRefs: [61, 62]))
-        #expect(SupportLineIndex.encodeSupportLineSpans(a)
-                == SupportLineIndex.encodeSupportLineSpans(b))
+        // NOT `project([62,61])` vs `project([61,62])` — `project` sorts, so
+        // those two return the IDENTICAL array and comparing their encodings is
+        // `encode(x) == encode(x)`. That was the first cut and it could not
+        // fail. Hand-built, ORDER-REVERSED input is what makes the claim about
+        // the ENCODER rather than about the projector.
+        let ordered = [
+            SupportLineSpan(lineRef: 61, start: 1_560.3, end: 1_570.62),
+            SupportLineSpan(lineRef: 62, start: 1_590.0, end: 1_611.42),
+        ]
+        #expect(SupportLineIndex.encodeSupportLineSpans(ordered)
+                == SupportLineIndex.encodeSupportLineSpans(ordered),
+                "the encoder is deterministic")
+
         // `.sortedKeys`, not incidental ordering: a diff over two device pulls
-        // must not report churn that did not happen.
-        let encoded = try #require(SupportLineIndex.encodeSupportLineSpans(a))
-        #expect(encoded.range(of: "\"end\"")!.lowerBound
-                < encoded.range(of: "\"lineRef\"")!.lowerBound)
-        #expect(encoded.range(of: "\"lineRef\"")!.lowerBound
-                < encoded.range(of: "\"start\"")!.lowerBound)
+        // must not report churn that did not happen. Declaration order is
+        // `lineRef, start, end`, so alphabetical ordering is observable.
+        // `#require`, never `!` — a force-unwrap here would TRAP the host, and a
+        // trapped host is VOID to the mutation battery rather than a failure.
+        let encoded = try #require(SupportLineIndex.encodeSupportLineSpans(ordered))
+        let endAt = try #require(encoded.range(of: "\"end\"")).lowerBound
+        let refAt = try #require(encoded.range(of: "\"lineRef\"")).lowerBound
+        let startAt = try #require(encoded.range(of: "\"start\"")).lowerBound
+        #expect(endAt < refAt)
+        #expect(refAt < startAt)
     }
 
     @Test("an empty projection encodes to NOTHING, never to an empty array")
@@ -545,6 +574,86 @@ struct PersistedSupportSecondsReaderTests {
         #expect(localisation(Fx.row(), index: nil) == .unreadable)
     }
 
+    @Test("a MULTI-SPAN payload composes as separate marks, not one wide one")
+    func multiSpanPayloadComposesSeparately() throws {
+        // THE MONOCULTURE THIS SUITE HAD (review round 1). Every other reader
+        // test carries refs `[62]` — one span — so a multi-span persisted
+        // payload never reached `padded(_:within:)`, `contribution`,
+        // `localise`'s union and duration floor, or mark minting. The RESOLVE
+        // path has this rail (`SupportLineLocalisationTests`'
+        // `separatedRegionsBecomeSeparateMarks`, refs `[60, 62]`); the recorded
+        // path had no mirror, and two ad reads with show between them is the
+        // shape the whole boundary argument rests on.
+        let row = Fx.row(
+            spansJSON: Fx.support([60, 62]),
+            seconds: Fx.projectedSeconds([60, 62])
+        )
+        let marks = SemanticSweepMarkComposer.compose(
+            scanRows: [row],
+            existingWindows: [],
+            supportLines: Fx.indexAtAnotherVersion,
+            analysisAssetId: Fx.assetId
+        ).sorted { $0.startTime < $1.startTime }
+        #expect(marks.count == 2, "line 61 is show and the model did not name it")
+        let first = try #require(marks.first)
+        let second = try #require(marks.last)
+        #expect(abs(first.startTime - 1_510.38) < 1e-6)
+        #expect(abs(first.endTime - 1_559.58) < 1e-6)
+        #expect(abs(second.startTime - 1_590.0) < 1e-6)
+        #expect(abs(second.endTime - 1_611.42) < 1e-6)
+    }
+
+    @Test("the fallback is reached for EVERY way resolve refuses, not only a stale version")
+    func fallbackIsNotOnlyForAStaleVersion() {
+        // Every other test here reaches the fallback through a version
+        // mismatch, which is the dominant cause and not the only one.
+        // `resolve` also refuses when the index does not hold the line whose
+        // atom ordinals the row's window names — the case
+        // `SupportLineIndexTests` already builds for the resolve side. Same
+        // version, unreadable anyway, and the recorded seconds still speak.
+        let unreachableWindow = Fx.row(atoms: 9_000...9_100, seconds: Fx.projectedSeconds())
+        #expect(localisation(unreachableWindow, index: Fx.index)
+                == .named([AdSpanBounds(start: 1_590.0, end: 1_611.42)]))
+        #expect(localisation(Fx.row(atoms: 9_000...9_100), index: Fx.index) == .unreadable)
+    }
+
+    @Test("a payload naming the same line twice is refused")
+    func duplicateLineRefsAreRefused() {
+        // Set equality alone accepts `[62, 62]`, and two entries for one line
+        // are not adjacent to each other — `contiguousBounds` would emit TWO
+        // spans where the model named one region. Production cannot write it
+        // (`project` deduplicates), but the bytes come off a disk this function
+        // does not control, which is the whole population it polices.
+        let payload = SupportLineIndex.encodeSupportLineSpans([
+            SupportLineSpan(lineRef: 62, start: 1_590.0, end: 1_600.0),
+            SupportLineSpan(lineRef: 62, start: 1_600.0, end: 1_611.42),
+        ])
+        let row = Fx.row(spansJSON: Fx.support([62]), seconds: payload)
+        #expect(SemanticSweepMarkComposer.persistedSupportSpans(of: row) == nil)
+        #expect(localisation(row) == .unreadable)
+    }
+
+    @Test("a span that clamps to NOTHING is refused — the one way this could DELETE a mark")
+    func aSpanThatClampsToNothingIsRefused() {
+        // The only non-additive outcome the change could have had. A span lying
+        // wholly outside the window WITHIN `boundaryEpsilon` passes a pure
+        // containment test; `padded(_:within:)` then clamps it away,
+        // `localisation` returns `.named([])`, and `localise`'s
+        // `guard contributed` DELETES the mark — where `.unreadable` would have
+        // kept the whole window. The overlap clause closes it.
+        let epsilon = SupportLineIndex.boundaryEpsilon
+        let payload = SupportLineIndex.encodeSupportLineSpans([
+            SupportLineSpan(lineRef: 62, start: 1_510.38 - epsilon, end: 1_510.38)
+        ])
+        let row = Fx.row(spansJSON: Fx.support([62]), seconds: payload)
+        #expect(SemanticSweepMarkComposer.persistedSupportSpans(of: row) == nil)
+        #expect(localisation(row) == .unreadable, "NOT .named([]) — that deletes the mark")
+        #expect(SemanticSweepMarkComposer.contribution(
+            of: row, in: [row], supportLines: Fx.indexAtAnotherVersion
+        ) == [AdSpanBounds(start: 1_510.38, end: 1_611.42)],
+        "and the row keeps its window, exactly as a pre-V66 row does")
+    }
+
     @Test("contribution narrows a stale projected row to the seconds, not the tile")
     func contributionUsesTheSeconds() {
         let row = Fx.row(seconds: Fx.projectedSeconds())
@@ -702,9 +811,15 @@ struct SupportLineSecondsCarrierTests {
         // column — while every rail in THIS file stayed green, because none of
         // them looked at a field this bead did not add. The V61 suite caught it.
         // A rail about one field is a rail about one field.
+        // Each of these BITES if its own slot is dropped: `verdictProvenance`
+        // is slot 34 (the one that actually went), `spansJSON` slot 10, and
+        // `transcriptQuality` slot 8. NOT `latencySampleCount` — the first cut
+        // used it, and `Fx.row` passes `latencyMs: nil`, so it reads nil whether
+        // or not its bind exists. A neighbour guard that cannot fire is the
+        // shape this whole rail exists to catch, one field over.
         #expect(withSeconds.verdictProvenance == .model)
-        #expect(withSeconds.latencySampleCount == nil)
         #expect(withSeconds.spansJSON == Fx.support([62]))
+        #expect(withSeconds.transcriptQuality == .good)
         let withoutSeconds = try #require(try await store.fetchSemanticScanResult(id: "scan-without"))
         #expect(withoutSeconds.supportLineSpansJSON == nil)
 
@@ -842,12 +957,22 @@ struct SupportLineSecondsCarrierTests {
         // The projection is ~10x its refs on the wire, so a `spansJSON` that
         // squeaks under the 1 MB cap can produce one that does not.
         let huge = "[" + String(repeating: "x", count: 1_000_001) + "]"
-        await #expect(throws: AnalysisStoreError.self) {
-            try await store.insertSemanticScanResult(
-                Fx.row(id: "scan-huge", atoms: 600...610, seconds: huge)
-            )
-        }
-        #expect(try await store.fetchSemanticScanResult(id: "scan-huge") == nil)
+        try await store.insertSemanticScanResult(
+            Fx.row(id: "scan-huge", atoms: 600...610, seconds: huge)
+        )
+        // THE ROW SURVIVES AND THE PROJECTION DOES NOT, which is the opposite of
+        // what the two caps above `errorContext` and `spansJSON` do — and the
+        // asymmetry is the point. Those are NOT NULL columns carrying the
+        // verdict, so refusing the insert is the only honest answer; this is an
+        // OPTIONAL that every pre-V66 row already reads NULL on. Throwing here
+        // would cost the VERDICT, and the coarse loop's insert is bare inside
+        // `for window in coarse.windows`, so one oversized projection would
+        // abandon every remaining window of the pass.
+        let row = try #require(try await store.fetchSemanticScanResult(id: "scan-huge"))
+        #expect(row.supportLineSpansJSON == nil)
+        #expect(row.spansJSON == Fx.support([62]), "the VERDICT is untouched")
+        #expect(row.verdictProvenance == .model)
+        #expect(try Self.rawSeconds(in: dir, rowId: "scan-huge") == .some(String?.none))
     }
 
     // MARK: Raw-column probes
@@ -924,53 +1049,96 @@ struct SupportLineSecondsCarrierTests {
        .timeLimit(.minutes(1)))
 struct SupportLineSecondsWiringSourceCanaryTests {
 
-    /// A behavioural rail proves the FUNCTIONS agree. It cannot prove that the
-    /// production write path CALLS the projector — `makeScanResult` is private
-    /// and its output goes straight to the store. So the one seam a unit test
-    /// cannot reach is checked in the source text, the way this repo checks
-    /// every other unreachable seam.
+    /// These three canaries check that the production CALL SITES are spelled,
+    /// which a behavioural rail cannot: `makeScanResult` is `private`, both
+    /// ladders are `AnalysisStore`-private, and a `bind` index is not observable
+    /// from any API. Read a green result as "the call site is there", never as
+    /// "the projection is correct" — that is what the six suites above are for,
+    /// and since review round 1 the WRITE path has a behavioural rail as well
+    /// (``SupportLineSecondsCarrierTests/theRunnerReallyWritesTheProjection()``).
     ///
-    /// Read a green result as "the call site is spelled here", not as "the
-    /// projection is correct" — that is what the six suites above are for.
+    /// Every one of them scopes to a FUNCTION BODY via `SwiftSourceInspector`
+    /// rather than searching the whole file. Round 1 found the first cut doing
+    /// the latter twice, and both were holes rather than nits: a whole-file
+    /// `contains("segments: inputs.segments")` matches thirteen unrelated call
+    /// sites in `BackfillJobRunner.swift`, and a whole-file COUNT of the V66
+    /// rung is satisfied by TWO calls both inside `migrate()` — which is exactly
+    /// the V60 defect this repo says cost it a commit.
     private static func source(_ relative: String) throws -> String {
-        let here = URL(fileURLWithPath: #filePath)
-        let root = here
-            .deletingLastPathComponent()   // AdDetection
-            .deletingLastPathComponent()   // Services
-            .deletingLastPathComponent()   // PlayheadTests
-            .deletingLastPathComponent()   // repo root
-        return try String(
-            contentsOf: root.appendingPathComponent(relative), encoding: .utf8
-        )
+        try SwiftSourceInspector.loadSource(repoRelativePath: relative)
+    }
+
+    private static func body(_ signature: String, in text: String) throws -> String {
+        try #require(SwiftSourceInspector.firstBody(in: text, after: signature),
+                     "signature drifted: \(signature)")
     }
 
     @Test("makeScanResult passes a projection into supportLineSpansJSON")
     func writerIsWired() throws {
         let text = try Self.source("Playhead/Services/AdDetection/BackfillJobRunner.swift")
-        #expect(text.contains("supportLineSpansJSON: Self.encodeSupportLineSecondsForTesting("),
+        let makeScanResult = try Self.body("private func makeScanResult(", in: text)
+        #expect(makeScanResult.contains("supportLineSpansJSON: Self.encodeSupportLineSeconds("),
                 "the coarse writer must project; without this the column is NULL for ever")
-        #expect(text.contains("segments: inputs.segments"),
+        // SCOPED TO THE BODY. `segments: inputs.segments` occurs thirteen times
+        // in this file, so the whole-file version of this line was true with the
+        // entire `supportLineSpansJSON:` argument deleted — decoration wearing
+        // the shape of a check, and its own failure message named a property it
+        // did not test.
+        #expect(makeScanResult.contains("segments: inputs.segments"),
                 "…and it must project from the segmentation the scan RAN, not any other")
+        // The refinement writer must NOT project: a passB row's own window IS
+        // the model's narrowing, and `supportLineRefs(of:)` refuses such a row.
+        let makeRefinement = try Self.body("private func makeRefinementScanResult(", in: text)
+        #expect(makeRefinement.contains("supportLineSpansJSON") == false)
     }
 
     @Test("localisation consults the recorded seconds before giving up")
     func readerIsWired() throws {
         let text = try Self.source(
             "Playhead/Services/AdDetection/SemanticSweepMarkComposer.swift")
-        #expect(text.contains("if let projected = persistedSupportSpans(of: row) {"),
+        let localisation = try Self.body("static func localisation(", in: text)
+        #expect(localisation.contains("if let projected = persistedSupportSpans(of: row) {"),
                 "the fallback must be on the path `resolve` refuses, or V66 is inert")
+        // AND ON THE REFUSAL PATH, not before it. The additive-only invariant
+        // (`resolvableRowsAreUnchanged`) is a property of this ordering, and a
+        // reader who moved the block above the `guard let resolved` would leave
+        // that rail green while every row that resolves today started taking the
+        // recorded value instead.
+        let resolveIdx = try #require(localisation.range(of: "supportLines?.resolve(")).lowerBound
+        let fallbackIdx = try #require(
+            localisation.range(of: "persistedSupportSpans(of: row)")).lowerBound
+        #expect(resolveIdx < fallbackIdx,
+                "the record is a FALLBACK; putting it first changes rows that work today")
     }
 
     @Test("the store both binds and reads the column")
     func storeIsWired() throws {
         let text = try Self.source("Playhead/Persistence/AnalysisStore/AnalysisStore.swift")
-        #expect(text.contains("bind(stmt, 35, result.supportLineSpansJSON)"))
+        #expect(text.contains("bind(stmt, 35, cappedSupportLineSpans)"))
         #expect(text.contains("supportLineSpansJSON: optionalText(stmt, 34)"))
-        // Both ladders. A rung added to one and not the other is invisible to
-        // any test written for that rung, and it cost V60 a commit.
+    }
+
+    @Test("the V66 rung is on BOTH ladders, and each one is named")
+    func bothLaddersRunTheRung() throws {
+        // NOT A WHOLE-FILE COUNT. The first cut asserted the rung's name occurs
+        // twice anywhere in the file, which is wrong in both directions: two
+        // calls both inside `migrate()` satisfy it — the V60 defect verbatim —
+        // and one doc comment quoting the rung's name reddens it. Scoped to the
+        // two function bodies, neither can happen.
+        let text = try Self.source("Playhead/Persistence/AnalysisStore/AnalysisStore.swift")
         let rung = "try migrateSemanticScanSupportLineSecondsV66IfNeeded()"
-        #expect(text.components(separatedBy: rung).count - 1 == 2,
-                "the rung must appear in migrate() AND migrateOnlyForTesting()")
+        let production = try Self.body("private func runSchemaMigration() throws", in: text)
+        let ladderOnly = try Self.body("func migrateOnlyForTesting() throws", in: text)
+        #expect(SwiftSourceInspector.occurrences(of: rung, in: production) == 1,
+                """
+                runSchemaMigration() — the body of migrate() since playhead-6boz \
+                — must run the V66 rung exactly once
+                """)
+        #expect(SwiftSourceInspector.occurrences(of: rung, in: ladderOnly) == 1,
+                """
+                migrateOnlyForTesting() must run it too — a rung on one ladder \
+                and not the other is invisible to any test written for it
+                """)
     }
 
     @Test("the semantic-scan INSERT binds every placeholder exactly once, in order")
@@ -986,11 +1154,18 @@ struct SupportLineSecondsWiringSourceCanaryTests {
         // A positional bind list is a place where an off-by-one is invisible to
         // every test about the field you are adding, so the shape gets its own
         // check: the indices must be exactly `1...n`, and `n` must equal the
-        // placeholder count. This is about the STRUCTURE, so it belongs here
-        // rather than in a behavioural suite that would need one assertion per
-        // column to say the same thing.
+        // placeholder count.
+        //
+        // WHAT IT DOES NOT CHECK, said out loud: it reads index STRUCTURE, not
+        // value assignment. Two binds with their payloads swapped still read
+        // `1…35`. The behavioural round-trip rails are what cover that, and
+        // `storeRoundTrip` asserts on this row's NEIGHBOURS for exactly that
+        // reason.
         let text = try Self.source("Playhead/Persistence/AnalysisStore/AnalysisStore.swift")
         let marker = "INSERT OR REPLACE INTO semantic_scan_results"
+        // Exactly one insert helper. A second would silently move this target,
+        // and the first-match search would keep passing over the wrong one.
+        #expect(SwiftSourceInspector.occurrences(of: marker, in: text) == 1)
         let start = try #require(text.range(of: marker)).lowerBound
         let end = try #require(
             text.range(of: "try step(stmt, expecting: SQLITE_DONE)", range: start..<text.endIndex)
@@ -1001,6 +1176,11 @@ struct SupportLineSecondsWiringSourceCanaryTests {
         let valuesEnd = try #require(block.range(of: ")", range: values.upperBound..<block.endIndex))
         let placeholders = block[values.upperBound..<valuesEnd.lowerBound]
             .filter { $0 == "?" }.count
+        // `try #require`, never a bare `Array(1...n)`: a zero would TRAP, and a
+        // trapped host is VOID to the mutation battery rather than a failure —
+        // a rail that crashes instead of failing is a rail that cannot be
+        // credited with a kill.
+        try #require(placeholders > 0)
 
         var indices: [Int] = []
         var cursor = block.startIndex

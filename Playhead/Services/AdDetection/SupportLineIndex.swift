@@ -129,21 +129,27 @@ struct AdSpanBounds: Sendable, Equatable {
 /// is gone — which is what happens every time an episode is re-transcribed and
 /// re-segmented. Measured on the 2026-08-19 t4 pull: of the 301 coarse
 /// `containsAd` rows, **282 name lines and 174 of those cannot be resolved**,
-/// every one of them because the segmentation the scan ran against no longer
-/// exists. Those rows keep their whole ~95 s scan tile
+/// essentially all of them because the segmentation the scan ran against no
+/// longer exists. Those rows keep their whole ~95 s scan tile
 /// (``SemanticSweepMarkComposer/Localisation/unreadable``), which is how a
 /// verdict about nine seconds of CTA becomes a 101 s mark over the show.
 ///
-/// **SECONDS ALONE WOULD NOT HAVE BEEN ENOUGH, and the reader is what proves
-/// it.** ``SemanticSweepMarkComposer/persistedSupportSpans(of:)`` requires the
-/// `lineRef` set persisted here to EQUAL the row's own `supportLineRefs`, so a
-/// payload that has drifted from the verdict it claims to project is refused
-/// rather than believed. Drop the `lineRef` and that check becomes untypeable:
-/// a bare `[{start, end}]` array is indistinguishable from one somebody
-/// reconstructed later against the wrong segmentation, which is this bead's own
-/// defect wearing the shape of its fix. The refs also carry the ADJACENCY that
-/// ``SupportLineIndex/contiguousBounds(of:)`` groups on — two spans that abut in
-/// time are not necessarily two consecutive lines, and only the ref says which.
+/// **SECONDS ALONE WOULD NOT HAVE BEEN ENOUGH, and the load-bearing reason is
+/// ADJACENCY.** ``SupportLineIndex/contiguousBounds(of:)`` groups the projection
+/// into maximal runs of CONSECUTIVE `lineRef`s, and two segments can abut in
+/// time without being adjacent lines — a bare `[{start, end}]` array cannot
+/// express the difference, so a reader would have to group on seconds and would
+/// merge across a line the model did not name. That is a property no in-tree
+/// writer can restore later, and mutant `QJ07` is what proves it bites.
+///
+/// A SECOND reason, weaker and worth naming as such:
+/// ``SemanticSweepMarkComposer/persistedSupportSpans(of:)`` requires the
+/// `lineRef` set here to equal the row's own `supportLineRefs` exactly, so a
+/// payload that has drifted from the verdict it claims to project is refused.
+/// **No in-tree writer can produce that drift** — both columns are written from
+/// one `screening.support` on one `INSERT OR REPLACE`, and no `UPDATE` touches
+/// either — so read it as a guard against bytes off a disk nobody controls,
+/// not as a defect anybody has seen.
 struct SupportLineSpan: Sendable, Codable, Equatable {
     /// The segment index the model named.
     let lineRef: Int
@@ -330,6 +336,15 @@ struct SupportLineIndex: Sendable, Equatable {
     ///
     /// The result is deduplicated and sorted by `lineRef`, so a writer and a
     /// reader handed the same refs in different orders produce the same bytes.
+    ///
+    /// TWO BRANCHES HERE ARE UNREACHABLE FROM EVERY PRODUCTION CALLER and are
+    /// written anyway, on the same terms as the note in `resolve`: the empty
+    /// guard (both callers already guard it — `resolve` on its own first line,
+    /// `BackfillJobRunner.encodeSupportLineSeconds` on `!supportLineRefs.isEmpty`)
+    /// and the `projected.isEmpty` tail (`refs` is non-empty here, so the loop
+    /// either appends or returns). They are stated invariants, not live paths;
+    /// the QJ series deliberately does not target them, because a mutant of a
+    /// provable equivalent can only ever SURVIVE and be misread as a hole.
     func project(supportLineRefs refs: [Int]) -> [SupportLineSpan]? {
         guard !refs.isEmpty else { return nil }
         var projected: [SupportLineSpan] = []
@@ -399,6 +414,8 @@ struct SupportLineIndex: Sendable, Equatable {
             previousRef = span.lineRef
         }
         spans.append(AdSpanBounds(start: runStart, end: runEnd))
+        // Unreachable: the append one line up always runs. Stated rather than
+        // live, for `project`'s reason — do not "fix" it into a real path.
         return spans.isEmpty ? nil : spans
     }
 

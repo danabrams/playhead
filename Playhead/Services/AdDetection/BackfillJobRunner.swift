@@ -6551,7 +6551,7 @@ actor BackfillJobRunner {
             // `windowOutput.lineRefs` into atom ordinals — and it is gone the
             // moment the episode is re-transcribed. Every later reader is
             // reconstructing; this one is recording.
-            supportLineSpansJSON: Self.encodeSupportLineSecondsForTesting(
+            supportLineSpansJSON: Self.encodeSupportLineSeconds(
                 windowOutput.screening.support,
                 segments: inputs.segments
             )
@@ -6560,6 +6560,13 @@ actor BackfillJobRunner {
 
     /// playhead-qjcf (V66): project a coarse screening's `supportLineRefs` into
     /// the seconds they named, for `semantic_scan_results.supportLineSpansJSON`.
+    ///
+    /// **THE ONLY PRODUCTION WRITER OF THAT COLUMN**, and `internal` rather than
+    /// `private` so a rail can drive it directly. It was called
+    /// `encodeSupportLineSecondsForTesting` for one commit, on
+    /// `makeScanResultIdForTesting`'s precedent in this same file; that suffix is
+    /// what anybody auditing "what writes this column" filters OUT, and this
+    /// function is the answer. Renamed rather than propagated.
     ///
     /// `nil` — WRITE NOTHING — whenever the projection cannot be made honestly:
     /// no support object, an empty ref list, or a ref this segmentation does not
@@ -6575,7 +6582,7 @@ actor BackfillJobRunner {
     /// ``SemanticSweepMarkComposer/supportLineRefs(of:)``, which excludes
     /// refinement rows for the same reason, and `makeRefinementScanResult`,
     /// which leaves this column nil by omission.
-    static func encodeSupportLineSecondsForTesting(
+    static func encodeSupportLineSeconds(
         _ support: CoarseSupportSchema?,
         segments: [AdTranscriptSegment]
     ) -> String? {

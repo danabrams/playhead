@@ -22410,7 +22410,7 @@ EOF
 
   QJ05)
     snippet OLD <<'EOF'
-            supportLineSpansJSON: Self.encodeSupportLineSecondsForTesting(
+            supportLineSpansJSON: Self.encodeSupportLineSeconds(
                 windowOutput.screening.support,
                 segments: inputs.segments
             )

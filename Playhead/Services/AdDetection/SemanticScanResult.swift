@@ -860,7 +860,7 @@ struct SemanticScanResult: Sendable, Equatable {
             // this is the PRODUCER's — it is a projection of the segmentation
             // the scan just ran, and nothing downstream of the scan can
             // reconstruct it. `attributed` is on the ONLY path from
-            // `makeCoarseScanResult` to `insertSemanticScanResult`
+            // `makeScanResult` to `insertSemanticScanResult`
             // (`BackfillJobRunner.attributed(_:jobId:)`), so omitting it here
             // would drop every projected second between the writer and the disk
             // while every rail on either side stayed green — a value silently

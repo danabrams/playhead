@@ -203,6 +203,31 @@ struct BackfillJobRunnerTests {
         let scans = try await store.fetchSemanticScanResults(analysisAssetId: "asset-runner")
         #expect(!scans.isEmpty)
         #expect(scans.allSatisfy { $0.scanPass == "passA" || $0.scanPass == "passB" })
+
+        // playhead-qjcf (V66): THE WRITE PATH, BEHAVIOURALLY. The fixture above
+        // returns `supportLineRefs: [1]`, so the coarse row this pass persists
+        // must carry the SECONDS line 1 covered in the segmentation the model
+        // was shown — projected by `makeScanResult`, carried through
+        // `attributed`, and bound by `insertSemanticScanResult`.
+        //
+        // It lives here rather than in `SupportLineSecondsTests` because
+        // `makeScanResult` is `private` and this is the nearest test that
+        // already drives the whole chain into the store. Without it the ONLY
+        // guard on "the writer actually projects" was a `contains` over the
+        // source text, and the QJ05 mutant that deletes the projection had
+        // exactly one victim: that substring match. A source canary is the right
+        // instrument for "the call site is spelled"; it is the wrong one for
+        // "the value reaches disk", and this bead's whole subject is the second.
+        let coarseWithRefs = scans.filter {
+            $0.scanPass == "passA" && $0.disposition == .containsAd
+        }
+        #expect(!coarseWithRefs.isEmpty, "precondition: the fixture must produce a coarse hit")
+        for row in coarseWithRefs {
+            let projected = SupportLineIndex.decodeSupportLineSpans(row.supportLineSpansJSON)
+            #expect(projected?.map(\.lineRef) == [1],
+                    "the coarse row must record the seconds its supportLineRefs named")
+            #expect(projected?.allSatisfy { $0.end > $0.start } == true)
+        }
         // Shadow mode never inserts AdWindows. Two independent reasons now,
         // and the second is playhead-y3ya's: `TestFMRuntime` defaults to
         // `.noAds`, so this fixture has no verdict to compose; AND the

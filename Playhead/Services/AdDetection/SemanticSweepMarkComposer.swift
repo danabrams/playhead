@@ -1654,6 +1654,13 @@ enum SemanticSweepMarkComposer {
         /// rows on the 2026-08-19 t4 pull, unbackfillable and permanent, because
         /// the segmentation that would produce their seconds is gone. What V66
         /// stopped is rows JOINING it.
+        ///
+        /// A stale `transcriptVersion` is the DOMINANT reason a row lands here
+        /// and not the only one: `resolve` also refuses when there is no index
+        /// at all, when the index does not hold the lines the window's atom
+        /// ordinals name, when the run between them is not contiguous, and when
+        /// its min/max does not reproduce the row's own bounds. Say "essentially
+        /// all", never "every one".
         case unreadable
         /// The model named NOTHING: no support object, or an empty
         /// `supportLineRefs`. A property of the VERDICT.
@@ -1678,21 +1685,38 @@ enum SemanticSweepMarkComposer {
     ///   * the column is NULL — the row predates V66, which is every row on
     ///     every device pull taken before this rung and cannot be backfilled;
     ///   * the payload does not decode, or decodes empty;
-    ///   * **the projected refs are not the refs the VERDICT names.** This is
-    ///     the check the `lineRef` half of ``SupportLineSpan`` exists for, and it
-    ///     is why persisting bare `{start, end}` pairs would not have been
-    ///     enough. `spansJSON` and this column are written on the same statement
-    ///     from the same screening, so a disagreement means one of them has been
-    ///     rewritten without the other — a projection of some OTHER verdict — and
-    ///     believing it would narrow a mark onto seconds this row never claimed;
+    ///   * **the projected refs are not, EXACTLY AND WITHOUT REPETITION, the
+    ///     refs the VERDICT names.** `spansJSON` and this column are written on
+    ///     the same statement from the same screening, so a disagreement means
+    ///     one has been rewritten without the other — a projection of some OTHER
+    ///     verdict. Duplicates are rejected as well as mismatches: a set
+    ///     comparison alone accepts `[62, 62]`, and two entries for one line
+    ///     are not adjacent to each other, so ``SupportLineIndex/contiguousBounds(of:)``
+    ///     would emit two spans where the model named one region;
     ///   * a span is not finite, or does not end after it starts;
-    ///   * a span falls outside the row's own window. Every persisted
+    ///   * a span does not OVERLAP the row's own window. Every persisted
     ///     `supportLineRefs` value is a subset of the window's own `lineRefs`
     ///     (`FoundationModelClassifier.sanitize` filters against
     ///     `Set(plan.lineRefs)`, and `PermissiveAdClassifier.parse` intersects
     ///     with the same set), so the lines named are inside the window BY
-    ///     CONSTRUCTION and a span outside it is a corrupt record, not a wide
-    ///     one.
+    ///     CONSTRUCTION and a span outside it is a corrupt record, not a wide one.
+    ///
+    /// # WHY OVERLAP AND NOT MERE CONTAINMENT-TO-EPSILON
+    ///
+    /// The first cut required only `start >= window.start - ε` and
+    /// `end <= window.end + ε`, which ADMITS a span lying wholly outside the
+    /// window inside that tolerance — e.g. `[window.start - ε, window.start]`.
+    /// ``padded(_:within:)`` then clamps it to nothing, `localisation` returns
+    /// `.named([])`, and if that row is an extent's only contributor
+    /// ``localise(_:scanRows:supportLines:)``'s `guard contributed` DELETES the
+    /// mark, where `.unreadable` would have kept the whole window. That is the
+    /// ONE way this change could fail to be additive, and it is closed here
+    /// rather than downstream because the honest reading of a span that clamps
+    /// to nothing is *our record is wrong*, not *the model found nothing*. It
+    /// needs a segment of duration ≤ 1e-6 s at a window edge, so no in-tree
+    /// writer can produce it — but a corrupt payload is exactly the population
+    /// this function exists to police, and "unreachable from today's writer" is
+    /// the argument every one of these guards could otherwise be deleted on.
     ///
     /// Coarse only, and the guard is ``supportLineRefs(of:)``'s own: it excludes
     /// refinement rows, so a `passB` row can never reach here even if some
@@ -1700,6 +1724,7 @@ enum SemanticSweepMarkComposer {
     static func persistedSupportSpans(of row: SemanticScanResult) -> [AdSpanBounds]? {
         guard let refs = supportLineRefs(of: row),
               let projected = SupportLineIndex.decodeSupportLineSpans(row.supportLineSpansJSON),
+              Set(projected.map(\.lineRef)).count == projected.count,
               Set(projected.map(\.lineRef)) == Set(refs)
         else { return nil }
 
@@ -1708,7 +1733,8 @@ enum SemanticSweepMarkComposer {
             guard span.start.isFinite, span.end.isFinite,
                   span.end > span.start,
                   span.start >= window.start - SupportLineIndex.boundaryEpsilon,
-                  span.end <= window.end + SupportLineIndex.boundaryEpsilon
+                  span.end <= window.end + SupportLineIndex.boundaryEpsilon,
+                  window.overlaps(start: span.start, end: span.end)
             else { return nil }
         }
         return SupportLineIndex.contiguousBounds(of: projected)
