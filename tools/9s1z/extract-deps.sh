@@ -52,5 +52,11 @@ P="$ROOT/Playhead"
   echo "// --- types the composer never touches. Nothing else is omitted.)"
   sed -n '389,508p' "$P/Persistence/AnalysisStore/AnalysisStore.swift"
   sed -n '542,609p' "$P/Persistence/AnalysisStore/AnalysisStore.swift"
-} > "$OUT"
+} | awk '
+  # The line-range extracts each start at their file'"'"'s top, so they carry
+  # their own `import` lines. Keep only the first one; a duplicate import is a
+  # lint error and is not part of any declaration being copied.
+  /^import / { if (seen[$0]++) next }
+  { print }
+' > "$OUT"
 echo "wrote $OUT ($(wc -l < "$OUT") lines)"

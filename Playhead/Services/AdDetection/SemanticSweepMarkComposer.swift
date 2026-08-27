@@ -1096,7 +1096,11 @@ enum SemanticSweepMarkComposer {
 
         // Stage 6: localise. Runs AFTER the dedupe on purpose — see
         // `localise(_:scanRows:supportLines:)`.
-        let localised = survivors.flatMap {
+        // playhead-9s1z MEASUREMENT ONLY: `skipLocalise9s1z` is false in every
+        // production path, so this is `survivors.flatMap { localise(...) }`
+        // exactly as before. The harness sets it to test the hypothesis that
+        // playhead-kg6i's quoted baseline was measured without this stage.
+        let localised = skipLocalise9s1z ? survivors : survivors.flatMap {
             localise($0, scanRows: scanRows, supportLines: supportLines)
         }
 
@@ -1151,6 +1155,8 @@ enum SemanticSweepMarkComposer {
     /// policy. Never read by the app.
     nonisolated(unsafe) static var measurement9s1zSuppressedCoarseWindows = 0
     nonisolated(unsafe) static var measurement9s1zSuppressedOrphanedRefinements = 0
+    /// playhead-9s1z MEASUREMENT ONLY. Never true in the app.
+    nonisolated(unsafe) static var skipLocalise9s1z = false
 
     static func presenceExtents(_ rows: [SemanticScanResult]) -> [Extent] {
         let admissible = rows.filter(isPresenceVerdict)

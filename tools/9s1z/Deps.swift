@@ -100,7 +100,6 @@ struct SpanRefinementSchema: Sendable, Codable, Hashable {
 
 
 // --- TranscriptSegmenter.swift 1-66 (AdTranscriptSegment + its two enums)
-import Foundation
 
 // MARK: - AdTranscriptSegment
 
@@ -372,7 +371,6 @@ enum TranscriptPassType: String, Sendable, Codable {
 // one kill switch governs both producers and cannot half-fire. Read that file's
 // header for the hot path's side of the rule.
 
-import Foundation
 
 // MARK: - ExtentAnchorTier
 
