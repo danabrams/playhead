@@ -41,6 +41,17 @@
 //     which must be BYTE-IDENTICAL before and after this change. They are the
 //     rail that says this rule cost no reach on the data it was chosen from.
 //
+// ANTI-VACUITY, MEASURED RATHER THAN ASSERTED. Eight of the ten tests below
+// pass against the OLD composer too — they are regression pins, and a pin that
+// only passes on the new code is not pinning anything. The victim set was
+// PREDICTED before it was run and came out exact: compiled against the
+// pre-change composer (`3eff997e`) and driven with these same fixtures on the
+// host, exactly two fail, and they are the two that encode the rule —
+// `aCrossVersionRefinementYieldsNoMarkAtAll` (old: [120-140]) and
+// `aSameVersionNarrowingSurvivesACrossVersionRefinementBesideIt` (old:
+// [120-140] AND [150-190]). Every other expectation here is byte-identical
+// before and after, which is the whole claim this change makes about reach.
+//
 // THE CONTINGENCY, stated here because it is the thing a future reader will
 // otherwise rediscover by measurement. The zero cost above is not a property of
 // the rule; it is a property of this pull. The rule suppresses 16 coarse
