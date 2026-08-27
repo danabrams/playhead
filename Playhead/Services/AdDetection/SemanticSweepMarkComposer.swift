@@ -1313,11 +1313,24 @@ enum SemanticSweepMarkComposer {
     /// playhead-kg6i: the corroboration count is computed INSIDE the map, once
     /// per backing row, at that row's `transcriptVersion` — it used to be
     /// hoisted out and shared, which is what made one set of votes speak for
-    /// claims formed against different transcripts. A backing pair is a coarse
-    /// window plus its pass-B narrowing and the two can genuinely differ in
-    /// version (the refinement is re-run when the transcript moves), so there is
-    /// no single version this could be hoisted back to without picking one row's
-    /// cohort to grade the other row's claim.
+    /// claims formed against different transcripts.
+    ///
+    /// PLAYHEAD-9s1z NARROWED THE JUSTIFICATION AND THE SENTENCE THAT USED TO
+    /// BE HERE IS NOW FALSE, so it is corrected rather than left standing. It
+    /// read: "a backing pair is a coarse window plus its pass-B narrowing and
+    /// the two can genuinely differ in version, so there is no single version
+    /// this could be hoisted back to." They can no longer differ —
+    /// ``presenceExtents(_:)`` refuses a cross-version pairing outright — so a
+    /// two-row `backing` always shares one version and a hoisted count would
+    /// now agree with this one. The per-row form is KEPT because it is still
+    /// the honest shape (the map is over rows, and each row is graded on its
+    /// own evidence) and because it is correct for a one-row `backing` too,
+    /// which is every other call. It is no longer load-bearing against a hoist,
+    /// and `SemanticSweepCorroborationScopeTests` records the rail that lost.
+    ///
+    /// The `min` over `backing` is untouched and is still load-bearing: two
+    /// rows sharing a version can still differ in certainty band and transcript
+    /// quality, which is what that test file now pins instead.
     ///
     /// The `min` over `backing` is unchanged and still means what it did: an
     /// extent resting on two rows is only as good as its weaker second.
