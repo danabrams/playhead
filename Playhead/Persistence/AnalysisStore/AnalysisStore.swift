@@ -9355,9 +9355,18 @@ actor AnalysisStore {
     /// V61 had two candidate seeds and picked the honest one. This rung has
     /// ONE, and the argument is short: **a row's segmentation is rebuildable if
     /// and only if today's chunks atomize to its version — i.e. if and only if
-    /// it is at the CURRENT version, i.e. if and only if it already resolves.**
-    /// **90 of the 301** rows are AT THE CURRENT VERSION — say that predicate
-    /// and not "already resolve", which is **83**. So a backfill could write
+    /// it is at the CURRENT version.** **90 of the 301** rows are, and **83** of
+    /// those actually resolve.
+    ///
+    /// THE THIRD CLAUSE THIS CHAIN USED TO CARRY — "i.e. if and only if it
+    /// already resolves" — IS FALSE, by the measurement twenty-five lines up:
+    /// 88 of the 282 are at the current version and 5 of those short-circuit at
+    /// the declined-pass-B stage, leaving 83. It survived here until review
+    /// round 6 while the three sites that DEFER to this header had already been
+    /// truncated correctly, which is the mirror-left shape one commit after the
+    /// round whose headline was that shape. Nothing in the backfill argument
+    /// needs the third clause: rebuildability turns on the version, and the
+    /// resolve count is a separate reading. So a backfill could write
     /// seconds only where seconds are already obtainable, and could write
     /// nothing at all for the 211 where they are not. There is no third state to
     /// seed.
@@ -9415,7 +9424,7 @@ actor AnalysisStore {
             definition: "TEXT"
         )
         logger.notice(
-            "playhead-qjcf V66: semantic_scan_results gains supportLineSpansJSON — the SECONDS a coarse row's supportLineRefs named, projected at write time from the segmentation the model saw. NOTHING IS BACKFILLED and nothing could be: the seconds were never written, and a row's segmentation is rebuildable only if it is at the asset's CURRENT transcript version — which is only 90 of the 301 coarse containsAd rows on the 2026-08-19 t4 pull, and 83 of those already resolve. (90 is rows AT the current version; 83 is rows whose refs RESOLVE. Do not read either as the other.) A NULL means the row PREDATES V66 and says nothing else; the 174 rows this stage already cannot localise stay unreadable for ever. It fixes the RATE, not the STOCK."
+            "playhead-qjcf V66: semantic_scan_results gains supportLineSpansJSON — the SECONDS a coarse row's supportLineRefs named, projected at write time from the segmentation the model saw. NOTHING IS BACKFILLED and nothing could be: the seconds were never written, and a row's segmentation is rebuildable only if it is at the asset's CURRENT transcript version — which is only 90 of the 301 coarse containsAd rows on the 2026-08-19 t4 pull, and 83 of those already resolve. (90 is rows AT the current version; 83 is rows whose refs RESOLVE. Do not read either as the other.) A NULL does NOT simply mean the row predates V66 — after this rung it also means a passB row, a coarse row that named nothing or an unprojectable ref, or a row whose oversized projection the 1 MB cap dropped. The 174 rows this stage already cannot localise stay unreadable for ever. It fixes the RATE, not the STOCK."
         )
         try setSchemaVersion(66)
     }

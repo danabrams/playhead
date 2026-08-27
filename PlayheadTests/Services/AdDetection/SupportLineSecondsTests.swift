@@ -57,11 +57,12 @@
 //      REFUSAL rather than a repair.
 //   5. ADDITIVE ONLY. Nothing that localises today may move.
 //   6. THE CARRIER. The projection survives `attributed` and the store.
-//   7. THE WIRING, IN SOURCE. Five canaries over the production call sites a
-//      behavioural rail cannot reach — a `private` writer, two
-//      `AnalysisStore`-private ladders, and a positional `bind` index. Listed
-//      here because the numbering invites a reader to expect every section, and
-//      until review round 5 this map stopped at 6 while the file had 7.
+//   7. THE WIRING, IN SOURCE. Five canaries over production call sites a
+//      behavioural rail cannot reach: the `private` writer; the READER's
+//      fallback AND its ordering, which is what makes the change additive; the
+//      store's bind and read; both migration ladders; and the positional bind
+//      list. Listed here because the numbering invites a reader to expect every
+//      section, and this map stopped at 6 while the file had 7.
 
 import Foundation
 import SQLite3
@@ -592,7 +593,7 @@ struct PersistedSupportSecondsReaderTests {
         }
     }
 
-    @Test("a NON-FINITE span is refused — the CODEC stops the only reachable route, and ORDERING would stop four of six anyway")
+    @Test("a NON-FINITE span is refused — the CODEC stops the only reachable route")
     func nonFiniteSpansAreRefused() {
         // THIS RAIL HAS BEEN WRONG TWICE AND THE SECOND TIME IS THE INSTRUCTIVE
         // ONE. The first cut folded `.nan`/`.infinity` into the degenerate-span
@@ -1050,9 +1051,9 @@ struct SupportLineSecondsCarrierTests {
         // candidate: a row's segmentation is rebuildable iff today's chunks
         // atomize to its version — iff it is at the CURRENT version — and only
         // 90 of the 301 are (83 of which actually resolve; ending the chain on
-        // "already resolves" is what made 90 read as the resolve count). (NOT out of the 280;
-        // that counts chunk-row STAMPS, kg6i refuted it as a reach figure, and
-        // this comment made the forbidden inference until review round 3.)
+        // "already resolves" is what made 90 read as the resolve count). NOT out
+        // of the 280: that counts chunk-row STAMPS, kg6i refuted it as a reach
+        // figure, and this comment made the forbidden inference for two rounds.
         #expect(try Self.rawSeconds(in: dir, rowId: "scan-pre") == .some(String?.none))
         let row = try #require(try await reopened.fetchSemanticScanResult(id: "scan-pre"))
         #expect(row.supportLineSpansJSON == nil)

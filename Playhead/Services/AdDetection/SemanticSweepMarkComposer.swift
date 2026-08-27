@@ -1647,9 +1647,14 @@ enum SemanticSweepMarkComposer {
         ///
         /// Since playhead-qjcf (V66) the second clause is the operative one. A
         /// coarse row written after that rung carries the seconds its own
-        /// `supportLineRefs` meant, so a stale `transcriptVersion` no longer
-        /// reaches here at all; what does reach here is a row written by a
-        /// binary that had nowhere to put them. **That is not a shrinking
+        /// `supportLineRefs` meant, so a stale `transcriptVersion` on such a row
+        /// no longer reaches here. **Not "no longer reaches here at all"**,
+        /// which is what this line said until review round 6: a post-V66 coarse
+        /// row whose projection was REFUSED — an unprojectable ref, or an
+        /// oversized payload the store's cap dropped — still arrives with a NULL
+        /// column and a stale version and still lands here, exactly as a pre-V66
+        /// row does. What changed is that the ORDINARY case stopped arriving,
+        /// not that the door closed. **That is not a shrinking
         /// population, it is a FROZEN one** — 174 of the 301 coarse `containsAd`
         /// rows on the 2026-08-19 t4 pull, unbackfillable and permanent, because
         /// the segmentation that would produce their seconds is gone. What V66
@@ -1685,8 +1690,14 @@ enum SemanticSweepMarkComposer {
     /// that cannot be trusted must leave the row keeping its whole window, which
     /// is the behaviour that was already shipping:
     ///
-    ///   * the column is NULL — the row predates V66, which is every row on
-    ///     every device pull taken before this rung and cannot be backfilled;
+    ///   * the column is NULL. On a pre-V66 pull that is every row and cannot
+    ///     be backfilled — but it is NOT only that, and reading it as a build
+    ///     date is the standing defect class: a `passB` row, a coarse row that
+    ///     named nothing or an unprojectable ref, and a row whose oversized
+    ///     projection the store dropped all read NULL too. See
+    ///     ``SemanticScanResult/supportLineSpansJSON`` for the whole list. Only
+    ///     the FIRST of those four can reach this function anyway, because the
+    ///     `supportLineRefs(of:)` guard above has already excluded the rest;
     ///   * the payload does not decode, or decodes empty;
     ///   * **the projected refs are not, EXACTLY AND WITHOUT REPETITION, the
     ///     refs the VERDICT names.** `spansJSON` and this column are written on
@@ -1979,11 +1990,13 @@ enum SemanticSweepMarkComposer {
     /// NOT gone, the stamp is NULL on 30,125 of 65,310 rows by design), and
     /// rows this stage cannot LOCALISE (**174**; "cannot resolve" is **194**,
     /// and the 20 between them are rescued by the declined-pass-B stage) —
-    /// quote whichever you took, WITH ITS PREDICATE. This list was wrong on TWO
-    /// of its three entries until review round 5, inside the sentence that
-    /// warns they are three and eleven lines above a paragraph forbidding the
-    /// reading it supplied.) That bound belongs to **playhead-kg6i**, not here: shrinking it
-    /// means composing from fewer versions, which removes marks.
+    /// quote whichever you took, WITH ITS PREDICATE — this list carried the
+    /// wrong predicate on TWO of its three entries for four review rounds,
+    /// inside the sentence that warns they are three and above the **DO NOT MAKE
+    /// THAT ARGUMENT OUT OF playhead-kg6i's 280** paragraph that forbids the
+    /// reading it supplied.) That bound belongs to **playhead-kg6i** and
+    /// not here: shrinking it means composing from fewer versions, which removes
+    /// marks.
     ///
     /// **playhead-qjcf (V66) DID NOT SHRINK IT AND WAS NOT MEANT TO.** A coarse
     /// row written after that rung persists the SECONDS its `supportLineRefs`
@@ -1996,9 +2009,9 @@ enum SemanticSweepMarkComposer {
     /// (Do NOT make that argument out of playhead-kg6i's 280, which counts a
     /// different predicate — kg6i itself refuted it as a reach figure, and
     /// `CD2976E6`'s own current segmentation falls inside it. The V66 rung's
-    /// header carries the whole correction.) **All 174 stay `.unreadable` for ever,
-    /// including the coarse row
-    /// behind the mark Dan vetoed by hand** (`CD2976E6` [1131.60–1210.86], refs
+    /// header carries the whole correction.) **All 174 stay `.unreadable` for
+    /// ever, including the coarse row behind the mark Dan vetoed by hand**
+    /// (`CD2976E6` [1131.60–1210.86], refs
     /// `[46]` at `807613cf` against a current `cd175ee9`). What V66 changes is
     /// the RATE: only 90 of the 301 rows are at their asset's current version, so
     /// ~70 % of every coarse verdict ever taken across these 15 assets has
@@ -2371,8 +2384,8 @@ enum SemanticSweepMarkComposer {
     /// gone, which is what this line said until playhead-qjcf review round 5
     /// and is the reading kg6i refuted; that stamp is NULL on 30,125 of 65,310
     /// chunk rows by design. It is not the same population as the rows stage 6
-    /// answers
-    /// `.unreadable` for, nor the count in kg6i's own title. Three quantities,
+    /// answers `.unreadable` for, nor the count in kg6i's own title. Three
+    /// quantities,
     /// three measurements; quote whichever you actually took.)
     static func attribution(
         for extent: Extent,

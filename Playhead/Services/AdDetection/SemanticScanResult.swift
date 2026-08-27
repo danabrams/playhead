@@ -401,16 +401,29 @@ struct SemanticScanResult: Sendable, Equatable {
     /// playhead-qjcf (schema V66): WHERE the lines this row's `supportLineRefs`
     /// name actually WERE, in seconds, in the segmentation the model was shown.
     ///
-    /// **`nil` means the row RECORDS NO SECONDS, and on disk it means exactly
-    /// one thing: the row predates V66.** There is no backfill and there cannot
+    /// **`nil` means THIS ROW RECORDS NO SECONDS — and on disk that is FOUR
+    /// different claims, three of which this very bead created.** On a pre-V66
+    /// pull it is every row. After the rung it is also: every `passB` row
+    /// (`makeRefinementScanResult` omits the argument, because a refinement's
+    /// own window IS the model's narrowing); every coarse row that named
+    /// nothing, named an empty list, or named a ref its own segmentation did
+    /// not hold (`BackfillJobRunner.encodeSupportLineSeconds` returns nil for
+    /// all three, deliberately — a partial projection is worse than none); and
+    /// any row whose oversized projection
+    /// ``AnalysisStore/insertSemanticScanResult(_:now:)`` dropped at its 1 MB
+    /// cap. **This line said "on disk it means exactly one thing: the row
+    /// predates V66" until review round 6**, which is the standing defect class
+    /// — a value that names one thing (no recorded seconds) read as though it
+    /// named another (a build date) — in the doc of the column this bead added.
+    /// There is no backfill and there cannot
     /// be one, and the argument is one line: **a row's segmentation is
     /// rebuildable iff today's chunks atomize to its version, i.e. iff it is at
     /// the CURRENT version.** Only 90 of the 301 coarse `containsAd` rows on
     /// the 2026-08-19 t4 pull are, and 83 of those actually resolve — end the
     /// chain on the predicate that was MEASURED, or 90 starts reading as the
-    /// resolve count. A default here
-    /// would be a fabrication with a `[]`-shaped hole in it, which is the same
-    /// trap ``verdictProvenance`` and ``prewarmHit`` document above.
+    /// resolve count. A default here would be a fabrication with a `[]`-shaped
+    /// hole in it, which is the same trap ``verdictProvenance`` and
+    /// ``prewarmHit`` document above.
     ///
     /// **DO NOT MAKE THAT ARGUMENT OUT OF playhead-kg6i's 280.** That figure
     /// counts a DIFFERENT predicate — rows whose `transcriptVersion` matches no
