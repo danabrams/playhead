@@ -100,7 +100,12 @@ private enum LocalisationFixture {
         scanPass: String = "passA",
         transcriptQuality: TranscriptQuality = .good,
         transcriptVersion version: String = transcriptVersion,
-        spansJSON: String? = nil
+        spansJSON: String? = nil,
+        // playhead-qjcf (V66): the seconds the row's own writer projected out of
+        // the segmentation the model saw. `nil` is a PRE-V66 row, which is what
+        // every fixture here was before this parameter existed and what every
+        // row on every archived device pull still is.
+        supportLineSpansJSON: String? = nil
     ) -> SemanticScanResult {
         SemanticScanResult(
             id: id,
@@ -127,7 +132,8 @@ private enum LocalisationFixture {
             // what makes its persisted band attributable at all — and the
             // struct's default deliberately withholds the licence from a writer
             // that says nothing.
-            verdictProvenance: .model
+            verdictProvenance: .model,
+            supportLineSpansJSON: supportLineSpansJSON
         )
     }
 
