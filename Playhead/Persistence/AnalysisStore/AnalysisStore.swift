@@ -1971,7 +1971,7 @@ actor AnalysisStore {
     /// assertions automatically follow the production constant — hardcoding
     /// the integer in tests has been a recurring source of stale-assertion
     /// flakes whenever the schema bumps.
-    nonisolated static let currentSchemaVersion = 65
+    nonisolated static let currentSchemaVersion = 66
 
     /// H1: minimum age (in seconds) a `backfill_jobs` / `final_pass_jobs`
     /// row stuck in `status='running'` must reach before the launch-time
@@ -3000,6 +3000,12 @@ actor AnalysisStore {
             // `backfillJobId`. A pure RENAME COLUMN — no row moves, no value is
             // backfilled, and the index moves with it.
             try migrateSemanticScanBackfillJobIdentityV65IfNeeded()
+            // playhead-qjcf: `semantic_scan_results` learns WHERE its
+            // `supportLineRefs` pointed, in SECONDS. Additive-only, one nullable
+            // column, and deliberately NOT backfilled — the seconds were never
+            // written and the segmentation that would produce them is gone for
+            // essentially every row that needs them. See the block comment.
+            try migrateSemanticScanSupportLineSecondsV66IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -3496,6 +3502,17 @@ actor AnalysisStore {
         // ladder and not the other is invisible to any test written for that
         // rung, and it cost V60 a commit.
         try migrateSemanticScanBackfillJobIdentityV65IfNeeded()
+        // playhead-qjcf (v66): one ADDED COLUMN, so the rung's work is done by
+        // `addColumnIfNeeded` and a fixture already carrying the V66 shape still
+        // reaches v66. Guarded on `tableExists` for the reason V42's rung is:
+        // `semantic_scan_results` lives only in `createTables()`, which THIS
+        // ladder skips, so most fixtures reaching here do not have the table at
+        // all and must still be stamped.
+        //
+        // READ THE V60 NOTE ABOVE BEFORE ADDING A RUNG. A rung added to one
+        // ladder and not the other is invisible to any test written for that
+        // rung, and it cost V60 a commit.
+        try migrateSemanticScanSupportLineSecondsV66IfNeeded()
     }
     #endif
 
@@ -9268,6 +9285,100 @@ actor AnalysisStore {
         try setSchemaVersion(65)
     }
 
+    // MARK: V66 — a support line stops being a coordinate in a system that moves
+    //
+    // playhead-qjcf. `semantic_scan_results.supportLineSpansJSON`: for a coarse
+    // (`passA`) row, the SECONDS each `supportLineRefs` entry named, projected
+    // at write time from the segmentation the model was actually shown.
+
+    /// V66 migration (playhead-qjcf) — one nullable TEXT column, no backfill.
+    ///
+    /// # THE DEFECT
+    ///
+    /// A `supportLineRefs` entry is an `AdTranscriptSegment.segmentIndex`, i.e.
+    /// a POSITION IN A COORDINATE SYSTEM that is derived from the transcript and
+    /// is not itself persisted. Re-transcribe the episode and that system is
+    /// replaced. `SupportLineIndex.resolve` then correctly REFUSES the row —
+    /// resolving anyway is measured to land 22 s into the show on Dan's own
+    /// episode, and `SupportLineIndex`'s header carries that witness — so
+    /// `SemanticSweepMarkComposer` keeps the row's whole ~95 s scan tile. The
+    /// verdict survives; its LOCALISATION does not.
+    ///
+    /// # THE SIZE OF IT, and which of three quantities this is
+    ///
+    /// Measured on the 2026-08-19 t4 pull, over the **301** rows with
+    /// `scanPass = 'passA' AND disposition = 'containsAd'`:
+    ///
+    ///   * **19** carry `spansJSON = "[]"` — the model named nothing
+    ///     (`Localisation.absent`, playhead-my33's population);
+    ///   * **282** carry a non-empty `supportLineRefs`. Zero rows carry
+    ///     `"supportLineRefs":[]`, so those two partition the 301 exactly;
+    ///   * of the 282, **108 resolve** and **174 do not** — `Localisation`
+    ///     `.unreadable`, and the population this column exists for.
+    ///
+    /// **THREE QUANTITIES LIVE HERE AND THEY ARE NOT INTERCHANGEABLE**
+    /// (playhead-kg6i settled the denominators): **211** rows are at a
+    /// `transcriptVersion` the asset's current chunk set no longer hashes to;
+    /// **280** carry a version no surviving `transcript_chunks` row carries (a
+    /// figure kg6i REFUTED as a reach number — it reads 69 on this pull even
+    /// with nothing superseded); **174** is *rows the localisation stage cannot
+    /// resolve*, and it is the only one of the three this migration is about.
+    /// Quote whichever you took, with its predicate attached.
+    ///
+    /// # THE BACKFILL IS `NULL`, AND UNLIKE V61's THERE IS NO CHOICE TO MAKE
+    ///
+    /// V61 had two candidate seeds and picked the honest one. This rung has
+    /// ONE. Reconstructing a pre-V66 row's seconds needs the segmentation it was
+    /// scanned against, and for 280 of the 301 rows above there is no surviving
+    /// chunk at that version to rebuild it from. The 21 that remain are, near
+    /// enough, exactly the rows that already resolve — so a backfill would write
+    /// seconds only where seconds are already obtainable, and could write
+    /// nothing at all where they are not.
+    ///
+    /// **SO THIS RUNG FIXES NOTHING THAT IS ALREADY BROKEN, AND SAYING SO IS
+    /// PART OF THE CHANGE.** All 174 stay `.unreadable` for ever, including the
+    /// coarse row behind the mark Dan vetoed by hand (`CD2976E6`
+    /// [1131.60–1210.86], `transcriptVersion 807613cf`, `supportLineRefs [46]`,
+    /// against a current version of `cd175ee9`). Moving that one needs a RE-SCAN
+    /// at the current version, or a decision to treat `.unreadable` like
+    /// `.absent` — both reach/cost calls, and both Dan's.
+    ///
+    /// # WHAT IT DOES FIX: THE RATE, NOT THE STOCK
+    ///
+    /// The orphaned population GROWS — every re-segmentation converts `.named`
+    /// rows into `.unreadable` ones, and only **90 of the 301** rows on that
+    /// pull are at their asset's current version, so ~70 % of every coarse
+    /// verdict ever taken across those 15 assets has already been orphaned. A
+    /// row written after this rung carries seconds, and seconds are version
+    /// independent, so it survives any number of later re-segmentations. The
+    /// rate goes to zero; the stock is untouched.
+    ///
+    /// ADDITIVE AND IDEMPOTENT, so it needs no SAVEPOINT: `addColumnIfNeeded` is
+    /// a no-op on a store already carrying the V66 `CREATE TABLE`, and there is
+    /// no UPDATE to be non-idempotent. What an older binary sees: nothing. Its
+    /// explicit column lists do not mention this column, its INSERT succeeds
+    /// because the column is nullable, and the row it lands is honestly one with
+    /// no recorded seconds.
+    private func migrateSemanticScanSupportLineSecondsV66IfNeeded() throws {
+        let observed = (try schemaVersion() ?? 1)
+        guard observed < 66 else { return }
+        // DO NOT STEP OVER A ROLLED-BACK V39 — same rationale as V40–V65.
+        guard observed >= 65 else { return }
+        guard try tableExists("semantic_scan_results") else {
+            try setSchemaVersion(66)
+            return
+        }
+        try addColumnIfNeeded(
+            table: "semantic_scan_results",
+            column: "supportLineSpansJSON",
+            definition: "TEXT"
+        )
+        logger.notice(
+            "playhead-qjcf V66: semantic_scan_results gains supportLineSpansJSON — the SECONDS a coarse row's supportLineRefs named, projected at write time from the segmentation the model saw. NOTHING IS BACKFILLED and nothing could be: the seconds were never written and 280 of the 301 coarse containsAd rows on the 2026-08-19 t4 pull carry a transcriptVersion no surviving transcript_chunks row carries. A NULL means the row PREDATES V66 and says nothing else; the 174 rows this stage already cannot localise stay unreadable for ever. It fixes the RATE, not the STOCK."
+        )
+        try setSchemaVersion(66)
+    }
+
     /// The V65 rename, factored out because THREE call sites take it and the
     /// order between them is the whole safety property: `createTables()`, the
     /// V42 rung, and the V65 rung. Only ONE of them can ever do the work on a
@@ -13015,6 +13126,21 @@ actor AnalysisStore {
             table: "semantic_scan_results",
             column: "usedPermissiveFallback",
             definition: "INTEGER"
+        )
+        // playhead-qjcf (V66): declared here as well as in
+        // `migrateSemanticScanSupportLineSecondsV66IfNeeded` so a fresh install
+        // and an upgrade converge on the same shape; both helpers are
+        // idempotent. Same reason V42's three columns are declared twice.
+        //
+        // NO INDEX. Nothing queries on this column and nothing can: it is read
+        // only by `SemanticSweepMarkComposer`, which is handed every row for one
+        // asset and filters in memory. An index here would be a standing write
+        // cost with no reader — the mirror of the column-with-no-reader trap
+        // V65's own note argues against.
+        try addColumnIfNeeded(
+            table: "semantic_scan_results",
+            column: "supportLineSpansJSON",
+            definition: "TEXT"
         )
         try exec("CREATE INDEX IF NOT EXISTS idx_semantic_scan_results_asset_pass ON semantic_scan_results(analysisAssetId, scanPass)")
         try exec("CREATE INDEX IF NOT EXISTS idx_semantic_scan_results_createdAt ON semantic_scan_results(createdAt DESC)")
@@ -22088,7 +22214,7 @@ actor AnalysisStore {
         suspendingLatencyMs, daemonPeersAtStart,
         firstAttemptAt, lastAttemptAt, observedStatuses,
         latencyMsTotal, latencyMsMax, latencySampleCount,
-        usedPermissiveFallback
+        usedPermissiveFallback, supportLineSpansJSON
         """
 
     /// H-1: canonicalize a `scanCohortJSON` before hashing so two
@@ -22282,6 +22408,20 @@ actor AnalysisStore {
                 "payloadTooLarge: spansJSON \(result.spansJSON.utf8.count) bytes (max \(maxBlobLength))"
             )
         }
+        // playhead-qjcf (V66): the same cap on the same terms. This payload is
+        // a PROJECTION of `spansJSON`'s refs, ~45 bytes per ref against ~4, so a
+        // spansJSON that squeaks under the cap can produce one an order of
+        // magnitude larger. In practice it is bounded well below either — the
+        // model's refs are capped at `FoundationModelClassifier`
+        // `.maximumCoarseSupportLineRefs` (32) and the permissive path
+        // intersects against the window's own line refs — but "bounded by
+        // something else today" is not a bound, and this is the one column here
+        // whose size is not the size of a thing a model returned.
+        if let spans = result.supportLineSpansJSON, spans.utf8.count > maxBlobLength {
+            throw AnalysisStoreError.insertFailed(
+                "payloadTooLarge: supportLineSpansJSON \(spans.utf8.count) bytes (max \(maxBlobLength))"
+            )
+        }
 
         let reuseKeyHash = Self.semanticScanReuseKeyHash(
             analysisAssetId: result.analysisAssetId,
@@ -22450,8 +22590,8 @@ actor AnalysisStore {
              suspendingLatencyMs, daemonPeersAtStart,
              firstAttemptAt, lastAttemptAt, observedStatuses,
              latencyMsTotal, latencyMsMax, latencySampleCount,
-             usedPermissiveFallback)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             usedPermissiveFallback, supportLineSpansJSON)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -22535,7 +22675,16 @@ actor AnalysisStore {
         // `map`, never `?? 0`: `.unknown` writes NULL. A writer with no
         // observation must not claim `.model`, which is what a coalesced zero
         // would say. Same shape as `prewarmHit` on column 17.
-        bind(stmt, 34, result.verdictProvenance.persistedFlag.map { $0 ? 1 : 0 })
+        // playhead-qjcf (V66). THE INCOMING VALUE, on `verdictProvenance`'s rule
+        // one line up and for the same reason: this is a property of the
+        // VERDICT, not of the row's HISTORY. Columns 9-10 (`disposition`,
+        // `spansJSON`) are being overwritten with this attempt's verdict on the
+        // same statement, and `persistedSupportSpans` requires the projected
+        // refs to MATCH `spansJSON`'s — so carrying a prior attempt's projection
+        // forward beside a new payload would not merely mis-attribute it, it
+        // would make the row REFUSE its own localisation. A `??` coalesce here
+        // would do exactly that.
+        bind(stmt, 35, result.supportLineSpansJSON)
         try step(stmt, expecting: SQLITE_DONE)
     }
 
@@ -23357,7 +23506,17 @@ actor AnalysisStore {
             // as the cheapest one in the store.
             latencyMsTotal: optionalDouble(stmt, 30),
             latencyMsMax: optionalDouble(stmt, 31),
-            latencySampleCount: optionalInt(stmt, 32)
+            latencySampleCount: optionalInt(stmt, 32),
+            // playhead-qjcf (V66): column 34, `optionalText`. A NULL is a row
+            // written before this column existed and it stays nil all the way to
+            // `SemanticSweepMarkComposer.persistedSupportSpans(of:)`, which reads
+            // it as "no recorded seconds" and leaves the row on the resolve path
+            // exactly as before. There is no default to reach for and no `?? ""`
+            // — an empty string would decode to nothing anyway, but it would
+            // also make "the writer recorded nothing" indistinguishable from
+            // "the writer recorded an empty projection", which is the fourth
+            // spelling of an absence `encodeSupportLineSpans` refuses to create.
+            supportLineSpansJSON: optionalText(stmt, 34)
         )
     }
 

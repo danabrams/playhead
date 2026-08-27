@@ -6543,8 +6543,49 @@ actor BackfillJobRunner {
             // window output rather than derived here — the runner does not know
             // which path answered, and a runner that guessed would be
             // manufacturing the provenance rather than recording it.
-            verdictProvenance: windowOutput.verdictProvenance
+            verdictProvenance: windowOutput.verdictProvenance,
+            // playhead-qjcf (V66): WHERE those `supportLineRefs` ARE, in
+            // seconds. Projected HERE, and it can only be projected here:
+            // `inputs.segments` is the very segmentation the refs index into —
+            // the two lines at the top of this function already use it to turn
+            // `windowOutput.lineRefs` into atom ordinals — and it is gone the
+            // moment the episode is re-transcribed. Every later reader is
+            // reconstructing; this one is recording.
+            supportLineSpansJSON: Self.encodeSupportLineSecondsForTesting(
+                windowOutput.screening.support,
+                segments: inputs.segments
+            )
         )
+    }
+
+    /// playhead-qjcf (V66): project a coarse screening's `supportLineRefs` into
+    /// the seconds they named, for `semantic_scan_results.supportLineSpansJSON`.
+    ///
+    /// `nil` — WRITE NOTHING — whenever the projection cannot be made honestly:
+    /// no support object, an empty ref list, or a ref this segmentation does not
+    /// hold. All three leave the row exactly as a pre-V66 row, i.e. on the
+    /// `SupportLineIndex.resolve` path, which is the behaviour that was already
+    /// shipping. **The refusal direction matters more than the success one**: a
+    /// partial or invented projection would narrow a mark onto seconds the model
+    /// never named, with full confidence, which is strictly worse than keeping
+    /// the whole window.
+    ///
+    /// Coarse only. A `passB` row's own window IS the model's narrowing, so
+    /// there is nothing here to project — see
+    /// ``SemanticSweepMarkComposer/supportLineRefs(of:)``, which excludes
+    /// refinement rows for the same reason, and `makeRefinementScanResult`,
+    /// which leaves this column nil by omission.
+    static func encodeSupportLineSecondsForTesting(
+        _ support: CoarseSupportSchema?,
+        segments: [AdTranscriptSegment]
+    ) -> String? {
+        guard let support, !support.supportLineRefs.isEmpty,
+              let projected = SupportLineIndex.project(
+                  supportLineRefs: support.supportLineRefs,
+                  segments: segments
+              )
+        else { return nil }
+        return SupportLineIndex.encodeSupportLineSpans(projected)
     }
 
     private func makeRefinementScanResult(
