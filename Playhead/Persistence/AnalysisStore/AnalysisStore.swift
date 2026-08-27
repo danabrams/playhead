@@ -9321,12 +9321,19 @@ actor AnalysisStore {
     /// `SemanticSweepMarkComposer.declinedRefinementSpans(over:in:)`, which
     /// needs no `SupportLineIndex` and no version match — only a DECLINED pass-B
     /// row at the coarse row's own version, lying strictly inside and strictly
-    /// narrower. Measured on the same pull, **25 of the 282 have one**, so at
-    /// most **83** of the 108 are localised by resolving refs at all. The
-    /// arithmetic corroborates: production builds exactly one index, at the
-    /// asset's CURRENT version, and only **90 of the 301** rows are at it, so 83
-    /// is the only figure of the three that can fit under that ceiling. Quote
-    /// 108 for "rows this stage localises" and never for "rows whose refs
+    /// narrower. Measured on the same pull, **25 of the 282 have one**, so
+    /// **exactly 83** of the 108 are localised by resolving refs.
+    ///
+    /// **THE TWO ARE DISJOINT BY CONSTRUCTION, not by luck**, which is what
+    /// makes `25 + 83 = 108` an identity rather than an assumption:
+    /// ``SemanticSweepMarkComposer/localisation(of:in:supportLines:)`` RETURNS
+    /// at stage 2 the moment a declined pass-B narrowing exists, so such a row
+    /// never reaches `resolve` and cannot be counted twice. And the ceiling is
+    /// tighter than 90: **88** of the 282 are at the asset's current version and
+    /// **5 of those 88 also carry a declined pass B** and short-circuit, leaving
+    /// 83 — so every row that CAN resolve does.
+    ///
+    /// Quote 108 for "rows this stage localises" and never for "rows whose refs
     /// resolve" — the first version of this line said the latter, which is the
     /// standing defect class inside the paragraph that names it.
     ///
@@ -22236,7 +22243,8 @@ actor AnalysisStore {
     /// playhead-bg2n appended 27–29 (firstAttemptAt, lastAttemptAt,
     /// observedStatuses), playhead-6gcy appended 30–32 (latencyMsTotal,
     /// latencyMsMax, latencySampleCount) and playhead-iw7q appended 33
-    /// (usedPermissiveFallback), all at the TAIL for the reason below.
+    /// (usedPermissiveFallback) and playhead-qjcf appended 34
+    /// (supportLineSpansJSON), all at the TAIL for the reason below.
     ///
     /// playhead-hx6n: the three V42 columns are APPENDED, never interleaved.
     /// `readSemanticScanResult` binds by positional index, so inserting a column
@@ -22452,16 +22460,25 @@ actor AnalysisStore {
         // REMEDY. This payload is a PROJECTION of `spansJSON`'s refs, ~45 bytes
         // per ref against ~4, so a `spansJSON` that squeaks under the cap can
         // produce one an order of magnitude larger. In practice it is bounded
-        // far below either — the model's refs are capped at
-        // `FoundationModelClassifier.maximumCoarseSupportLineRefs` (32) and the
-        // permissive path intersects against the window's own line refs, so
-        // 32 x ~45 B is about 1.5 KB against a 1 MB cap — but "bounded by
-        // something else today" is not a bound.
+        // far below either, and the TWO PATHS ARE BOUNDED DIFFERENTLY: the
+        // `@Generable` path goes through `FoundationModelClassifier.sanitize`,
+        // which caps refs at `maximumCoarseSupportLineRefs` (32), so 32 x ~45 B
+        // is about 1.5 KB; the PERMISSIVE path does not reach `sanitize` at all
+        // and is bounded only by the window's own line count — a ~95 s tile over
+        // segments of >= 10 s. Both land far under 1 MB, by DIFFERENT arguments;
+        // do not quote the 32 for the second, which is one bound's number
+        // attached to the other path. And "bounded by something else today" is
+        // not a bound either way.
         //
         // IT CLAMPS TO NULL RATHER THAN THROWING, and the asymmetry with the two
-        // caps above is the point. `errorContext` and `spansJSON` are NOT NULL
-        // columns carrying the verdict itself: losing them loses the row, so
-        // refusing the insert is the only honest answer. This column is an
+        // caps above is the point — though not for the reason a first draft of
+        // this comment gave, which said `errorContext` and `spansJSON` are both
+        // "NOT NULL columns carrying the verdict itself". `errorContext` is
+        // NULLABLE and is a diagnostic; only `spansJSON` is the verdict, and
+        // losing it loses the row, so refusing the insert is the only honest
+        // answer THERE. `errorContext`'s throw is an older decision this bead
+        // did not revisit. What settles the direction here is this column's own
+        // shape rather than its neighbours': it is an
         // OPTIONAL that every pre-V66 row already reads NULL on, so dropping it
         // costs exactly one localisation and the row behaves as it did before
         // the rung. Throwing here would cost the VERDICT — and worse, the coarse

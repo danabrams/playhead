@@ -18,14 +18,20 @@
 //
 //     19 carry `spansJSON = "[]"`             -> Localisation.absent
 //    282 carry a non-empty supportLineRefs    -> the population V66 writes for
-//         of which 108 resolve today
-//         and  174 do NOT                     -> Localisation.unreadable
+//         of which 108 come out `.named`      -> 83 by RESOLVING refs, and 25
+//                                                by a declined pass-B narrowing
+//                                                that needs no index at all
+//         and  174 come out `.unreadable`     -> the population V66 is about
 //
-// (19 + 282 = 301 exactly: zero rows carry `"supportLineRefs":[]`. Three
-// different quantities live in this neighbourhood and they are not
-// interchangeable — 211 rows at a superseded transcriptVersion, 280 whose
-// version no surviving chunk carries, 174 this stage cannot resolve. Only the
-// last is what V66 is about.)
+// (19 + 282 = 301 exactly: zero rows carry `"supportLineRefs":[]`. And
+// 25 + 83 = 108 exactly, disjointly, because `localisation` RETURNS at the
+// declined-pass-B stage before a ref is ever read. Note 194 refs will not
+// resolve while only 174 rows come out `.unreadable` — the 20 in between are
+// the ones that stage rescues. Three MORE quantities live in this
+// neighbourhood and none is interchangeable with another: 211 rows at a
+// superseded transcriptVersion, 280 whose version no surviving chunk STAMP
+// carries — a figure kg6i refuted as a reach number — and 174 this stage
+// cannot localise, which is the only one V66 is about.)
 //
 // WHAT THIS BEAD DOES NOT DO, pinned as hard as what it does. There is no
 // backfill and there cannot be one: the seconds were never written, and the
@@ -507,28 +513,50 @@ struct PersistedSupportSecondsReaderTests {
         #expect(SemanticSweepMarkComposer.persistedSupportSpans(of: row) == nil)
     }
 
-    @Test("a span outside the row's own window is refused")
+    @Test("a span outside the row's own window is refused, including one that only OVERHANGS")
     func spanOutsideTheWindowIsRefused() {
         // Every persisted `supportLineRefs` value is a subset of the window's own
         // lineRefs — `FoundationModelClassifier.sanitize` filters against
         // `Set(plan.lineRefs)` and `PermissiveAdClassifier.parse` intersects the
         // same set — so the lines named are inside the window BY CONSTRUCTION. A
-        // span outside it is a corrupt record, not a wide one.
-        let payload = SupportLineIndex.encodeSupportLineSpans(
-            [SupportLineSpan(lineRef: 62, start: 900.0, end: 950.0)]
-        )
-        let row = Fx.row(spansJSON: Fx.support([62]), seconds: payload)
-        #expect(SemanticSweepMarkComposer.persistedSupportSpans(of: row) == nil)
-        #expect(localisation(row) == .unreadable)
+        // span outside it is a corrupt record, not a wide one, and the honest
+        // answer is to refuse the whole projection rather than to clamp it: a
+        // record that disagrees with the row's own geometry is a record nobody
+        // should be narrowing a mark from.
+        //
+        // THE LAST TWO CASES ARE THE RAIL, and until review round 2 there were
+        // none. Every earlier fixture put the span WHOLLY OUTSIDE the window,
+        // which `window.overlaps(...)` — added in round 1 for a different
+        // reason — already refuses on its own. So the two CONTAINMENT clauses
+        // had no test in the tree at all, and mutant QJ03, which deletes exactly
+        // those two and keeps the overlap, would have reported SURVIVED against
+        // a written prediction that it dies. Round 1's fix created the blind
+        // spot in round 1's own verification.
+        for span in [
+            SupportLineSpan(lineRef: 62, start: 900.0, end: 950.0),      // wholly before
+            SupportLineSpan(lineRef: 62, start: 1_700.0, end: 1_800.0),  // wholly after
+            SupportLineSpan(lineRef: 62, start: 1_400.0, end: 1_550.0),  // overhangs the START
+            SupportLineSpan(lineRef: 62, start: 1_600.0, end: 1_700.0),  // overhangs the END
+        ] {
+            let row = Fx.row(
+                spansJSON: Fx.support([62]),
+                seconds: SupportLineIndex.encodeSupportLineSpans([span])
+            )
+            #expect(SemanticSweepMarkComposer.persistedSupportSpans(of: row) == nil, "\(span)")
+            #expect(localisation(row) == .unreadable, "\(span)")
+        }
     }
 
-    @Test("a span that ends before it starts, or is not finite, is refused")
+    @Test("a span that does not end AFTER it starts is refused")
     func degenerateSpansAreRefused() {
+        // The zero-length case is the one that exercises `span.end > span.start`
+        // on its own. The REVERSED case is refused one clause later by
+        // `window.overlaps(...)` as well, so it is coverage rather than a
+        // discriminator — said out loud, because the version of this test that
+        // listed four cases advertised more than it delivered.
         for span in [
             SupportLineSpan(lineRef: 62, start: 1_611.42, end: 1_590.0),
             SupportLineSpan(lineRef: 62, start: 1_590.0, end: 1_590.0),
-            SupportLineSpan(lineRef: 62, start: .nan, end: 1_611.42),
-            SupportLineSpan(lineRef: 62, start: 1_590.0, end: .infinity),
         ] {
             let row = Fx.row(
                 spansJSON: Fx.support([62]),
@@ -537,6 +565,32 @@ struct PersistedSupportSecondsReaderTests {
             #expect(SemanticSweepMarkComposer.persistedSupportSpans(of: row) == nil,
                     "\(span)")
         }
+    }
+
+    @Test("a NON-FINITE span cannot reach the reader at all — the codec refuses it first")
+    func nonFiniteSpansCannotBeEncodedOrDecoded() {
+        // WHAT THIS REPLACES. The first cut folded `.nan` and `.infinity` into
+        // the test above and read as covering `persistedSupportSpans`'
+        // `isFinite` clauses. It did not, and could not: `JSONEncoder` defaults
+        // to `nonConformingFloatEncodingStrategy = .throw`, so
+        // `encodeSupportLineSpans` returns nil, the row is built with NO payload
+        // at all, and the reader refuses it for the ordinary reason having never
+        // reached `isFinite`. The assertion passed while measuring nothing.
+        //
+        // So the honest rail is about the CODEC, and the two `isFinite` clauses
+        // are a stated invariant rather than a live path — `JSONDecoder`'s
+        // matching default means a non-finite Double cannot arrive through
+        // `decodeSupportLineSpans` either, whatever the bytes say. They are kept
+        // for `project`'s reason and no mutant targets them.
+        #expect(SupportLineIndex.encodeSupportLineSpans(
+            [SupportLineSpan(lineRef: 62, start: .nan, end: 1_611.42)]) == nil)
+        #expect(SupportLineIndex.encodeSupportLineSpans(
+            [SupportLineSpan(lineRef: 62, start: 1_590.0, end: .infinity)]) == nil)
+        // …and the same on the way in, from raw bytes no writer of ours produced.
+        #expect(SupportLineIndex.decodeSupportLineSpans(
+            #"[{"lineRef":62,"start":null,"end":1611.42}]"#) == nil)
+        #expect(SupportLineIndex.decodeSupportLineSpans(
+            #"[{"lineRef":62,"start":1590.0,"end":"Infinity"}]"#) == nil)
     }
 
     @Test("a row that named NOTHING cannot acquire seconds from a payload")

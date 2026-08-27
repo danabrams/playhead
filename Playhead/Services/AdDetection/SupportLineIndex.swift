@@ -128,9 +128,12 @@ struct AdSpanBounds: Sendable, Equatable {
 /// a coordinate system, so it names nothing at all once that coordinate system
 /// is gone — which is what happens every time an episode is re-transcribed and
 /// re-segmented. Measured on the 2026-08-19 t4 pull: of the 301 coarse
-/// `containsAd` rows, **282 name lines and 174 of those cannot be resolved**,
-/// essentially all of them because the segmentation the scan ran against no
-/// longer exists. Those rows keep their whole ~95 s scan tile
+/// `containsAd` rows, **282 name lines, 194 of those cannot be RESOLVED, and
+/// 174 come out `.unreadable`** — the 20 in between are rescued one stage
+/// earlier by a declined pass-B narrowing, which needs no index. Quote 194 for
+/// "refs that will not resolve" and 174 for "rows this stage cannot localise";
+/// they are two populations, and the second is the one V66 is about. Those rows
+/// keep their whole ~95 s scan tile
 /// (``SemanticSweepMarkComposer/Localisation/unreadable``), which is how a
 /// verdict about nine seconds of CTA becomes a 101 s mark over the show.
 ///

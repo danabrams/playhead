@@ -1659,8 +1659,11 @@ enum SemanticSweepMarkComposer {
         /// and not the only one: `resolve` also refuses when there is no index
         /// at all, when the index does not hold the lines the window's atom
         /// ordinals name, when the run between them is not contiguous, and when
-        /// its min/max does not reproduce the row's own bounds. Say "essentially
-        /// all", never "every one".
+        /// its min/max does not reproduce the row's own bounds. So say
+        /// "essentially all" when the claim is about the CODE. As a claim about
+        /// THIS PULL "every one" is true and measured — all 174 are at a
+        /// superseded version — which is why the note below says it. Two
+        /// different claims, both right.
         case unreadable
         /// The model named NOTHING: no support object, or an empty
         /// `supportLineRefs`. A property of the VERDICT.
@@ -1956,10 +1959,16 @@ enum SemanticSweepMarkComposer {
     /// named, projected from the segmentation the model was shown, so a later
     /// re-segmentation can no longer orphan it — see
     /// ``persistedSupportSpans(of:)``. There is no backfill and there cannot be
-    /// one: the seconds were never written, and playhead-kg6i measured that 280
-    /// of these 301 rows carry a `transcriptVersion` no surviving
-    /// `transcript_chunks` row carries, so there is nothing left to reconstruct
-    /// them from. **All 174 stay `.unreadable` for ever, including the coarse row
+    /// one, and the argument is one line: **a row's segmentation is rebuildable
+    /// iff today's chunks atomize to its version, i.e. iff it is at the CURRENT
+    /// version, i.e. iff it already resolves.** Only **90 of the 301** are.
+    /// (Do NOT make that argument out of playhead-kg6i's 280, which counts a
+    /// different predicate — kg6i itself refuted it as a reach figure and
+    /// `CD2976E6`'s own current segmentation falls inside it. This paragraph
+    /// made the forbidden inference until review round 2, three lines below a
+    /// list that names all three quantities correctly. The V66 rung's header
+    /// carries the whole correction.) **All 174 stay `.unreadable` for ever,
+    /// including the coarse row
     /// behind the mark Dan vetoed by hand** (`CD2976E6` [1131.60–1210.86], refs
     /// `[46]` at `807613cf` against a current `cd175ee9`). What V66 changes is
     /// the RATE: only 90 of the 301 rows are at their asset's current version, so

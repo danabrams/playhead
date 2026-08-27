@@ -229,8 +229,12 @@ struct BackfillJobRunnerTests {
             #expect(projected?.allSatisfy { $0.end > $0.start } == true)
         }
         // Shadow mode never inserts AdWindows. Two independent reasons now,
-        // and the second is playhead-y3ya's: `TestFMRuntime` defaults to
-        // `.noAds`, so this fixture has no verdict to compose; AND the
+        // and the second is playhead-y3ya's: `TestFMRuntime` falls back to
+        // `.noAds` once its one queued `containsAd` response is drained — so
+        // this fixture composes at most one verdict, and the block above is
+        // what asserts that verdict exists (the older wording said the fixture
+        // "has no verdict to compose", which stopped being true when a
+        // `containsAd` response was queued); AND the
         // semantic-sweep compose is gated on `canProposeNewRegions`, which
         // `.shadow` is not. The sibling `phase6ModesPersistWithoutAdWindowWrites`
         // is where the gate itself is exercised against a `containsAd` fixture.

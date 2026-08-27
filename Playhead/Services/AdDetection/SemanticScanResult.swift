@@ -395,13 +395,19 @@ struct SemanticScanResult: Sendable, Equatable {
     ///
     /// **`nil` means the row RECORDS NO SECONDS, and on disk it means exactly
     /// one thing: the row predates V66.** There is no backfill and there cannot
-    /// be one — the seconds were never written, and reconstructing them needs
-    /// the segmentation the scan ran against, which is gone for essentially
-    /// every orphaned row (playhead-kg6i: 280 of 301 coarse `containsAd` rows on
-    /// the 2026-08-19 t4 pull carry a `transcriptVersion` no surviving
-    /// `transcript_chunks` row carries). A default here would be a fabrication
-    /// with a `[]`-shaped hole in it, which is the same trap
-    /// ``verdictProvenance`` and ``prewarmHit`` document above.
+    /// be one, and the argument is one line: **a row's segmentation is
+    /// rebuildable iff today's chunks atomize to its version, i.e. iff it is at
+    /// the CURRENT version, i.e. iff it already resolves.** Only 90 of the 301
+    /// coarse `containsAd` rows on the 2026-08-19 t4 pull are. A default here
+    /// would be a fabrication with a `[]`-shaped hole in it, which is the same
+    /// trap ``verdictProvenance`` and ``prewarmHit`` document above.
+    ///
+    /// **DO NOT MAKE THAT ARGUMENT OUT OF playhead-kg6i's 280.** That figure
+    /// counts a DIFFERENT predicate — rows whose `transcriptVersion` matches no
+    /// surviving `transcript_chunks` ROW STAMP, with 30,125 of the 65,310 chunk
+    /// rows carrying NULL by design — kg6i itself refuted it as a reach figure,
+    /// and `CD2976E6`'s own CURRENT segmentation falls inside it. The V66 rung's
+    /// header carries the whole correction.
     ///
     /// # What it is FOR
     ///
