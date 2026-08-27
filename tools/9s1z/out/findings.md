@@ -210,9 +210,14 @@ What this bead's figures count, numerator and denominator both:
   battery was building concurrently in `.worktrees/qjcf` — the documented two-builds-on-16 GB
   OOM shape, where the loser dies with `** BUILD INTERRUPTED **` and no test failure. Only this
   worktree's `xcodebuild` (pid 80739) was terminated; the other session's (96472) was left
-  alone. `pgrep -x xcodebuild` was checked before starting and reported none; the other run
-  began afterwards. **An abandoned run is not a pass** — the suite still owes a verdict if any
-  of this is ever taken further than a measurement.
+  alone. **The `pgrep` check is weaker than it looks and is stated precisely rather than
+  claimed:** `pgrep -x xcodebuild` was run immediately before the FIRST launch and reported
+  none. That launch hit a 10-minute foreground timeout during the fresh worktree's cold build
+  and was relaunched in the background — and `pgrep` was **not** re-run before the relaunch. So
+  "the check passed" is true of a moment that is not the moment the surviving process started,
+  which is the same defect class this bead is about. Whether the qjcf run began before or after
+  the relaunch is **not established here**. **An abandoned run is not a pass** — the suite still
+  owes a verdict if any of this is ever taken further than a measurement.
 
 ## Recommendation — a recommendation, not a decision
 
