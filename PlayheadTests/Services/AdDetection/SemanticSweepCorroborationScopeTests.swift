@@ -179,11 +179,19 @@ struct SemanticSweepCorroborationScopeTests {
     /// control below is what found it. Two verdicts over identical bounds are
     /// two extents that stage 3 folds into one — but `clearedSpans` also makes
     /// the denial a merge BARRIER, and `coversGap(from: last.end, to:
-    /// extent.start)` is evaluated with an INVERTED range when the two extents
-    /// overlap, so a denial that spans BOTH edges bars a merge that has no gap
-    /// to bridge and the fixture silently becomes two marks. Filed as
-    /// playhead-vz3l; it fires zero times on the t4 pull. A denial that
-    /// overlaps one edge only is a clean dissenting replicate and no barrier.
+    /// extent.start)` used to be evaluated with an INVERTED range when the two
+    /// extents overlap, so a denial that spans BOTH edges barred a merge that
+    /// has no gap to bridge and the fixture silently became two marks.
+    ///
+    /// **playhead-vz3l FIXED THAT, so [90, 200] would compose to one mark here
+    /// too — and this fixture deliberately still reads [150, 250].** It is
+    /// pinning a CORROBORATION rule, and a denial overlapping one edge is the
+    /// clean dissenting replicate that rule is about; re-pointing it at the
+    /// wider window would silently make it a second test of the merge barrier.
+    /// The [90, 200] shape has its own rail — see
+    /// `SemanticSweepMergeBarrierTests.aBarrierContainingTheWholeOverlapDoesNotBar`
+    /// — where the observable is the colliding content-addressed id rather than
+    /// this test's confidence.
     @Test("a cross-version affirmer no longer props up a contested claim")
     func aCrossVersionAffirmerNoLongerPropsUpAContestedClaim() {
         let marks = Fx.compose(rows: [
@@ -228,9 +236,12 @@ struct SemanticSweepCorroborationScopeTests {
     /// second affirmer removed. Both compositions are asserted so the test
     /// cannot pass by the two happening to agree.
     ///
-    /// The denial overlaps ONE edge only — see
-    /// `aCrossVersionAffirmerNoLongerPropsUpAContestedClaim` for why a denial
-    /// spanning both edges would turn this fixture into two marks.
+    /// The denial overlaps ONE edge only, and playhead-vz3l is why that is now
+    /// a choice rather than a workaround: a denial spanning BOTH edges used to
+    /// turn this fixture into two marks, and no longer does. It still reads
+    /// [150, 250] because this test is about CORROBORATION — widening the
+    /// denial would quietly make it a second test of the merge barrier. See
+    /// `aCrossVersionAffirmerNoLongerPropsUpAContestedClaim` for the full note.
     @Test("an affirming replicate at the same version still counts")
     func aSameVersionAffirmerStillCounts() {
         let dissent = Fx.row(id: "dissent", start: 150, end: 250,

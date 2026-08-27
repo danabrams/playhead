@@ -91,6 +91,22 @@ struct AdSpanBounds: Sendable, Equatable {
     /// Open rather than closed on purpose: two extents that merely TOUCH a
     /// span's edge (`upper == span.start`) leave no swallowed audio, and a
     /// closed test would bar a merge that costs nothing.
+    ///
+    /// `lower` MUST BE BELOW `upper`, AND THAT IS THE CALLER'S DEBT
+    /// (playhead-vz3l). Handed `lower >= upper` there is no interval left to be
+    /// a gap, and this reads as `start < upper && end > lower` over a reversed
+    /// pair — i.e. "the span strictly CONTAINS `[upper, lower]`", a containment
+    /// test wearing the name of a gap. That is not hypothetical: it is what
+    /// ``SemanticSweepMarkComposer/mergeExtents(_:barredBy:)`` did for every
+    /// overlapping pair, which was the MAJORITY of its merge decisions.
+    ///
+    /// It is deliberately NOT defended here. Returning `false` for a reversed
+    /// pair would make a caller that reverses them look correct, which is
+    /// precisely how the defect survived review — and it would make
+    /// ``SemanticSweepMarkComposer/mergeIsBarred(from:to:by:)``'s guard
+    /// unfalsifiable, so the mutant that re-creates the defect would SURVIVE
+    /// and report a coverage hole that is not there. The one caller guards it
+    /// and says why.
     func coversGap(from lower: Double, to upper: Double) -> Bool {
         start < upper && end > lower
     }
