@@ -3361,6 +3361,12 @@ T_SHU5_BAR_UNEXAMINED="an unexamined row is not a barrier"
 T_SHU5_BAR_PASSB="a declined refinement is not a barrier"
 T_SHU5_BAR_PREDICATE="a containsAd row whose support payload is empty is NOT a cleared window"
 T_SHU5_BAR_TOUCH="a cleared window that only touches the gap edge does not bar"
+# ---- playhead-vz3l: the barrier over an INVERTED range (VZ series) ----
+T_VZ3L_OVERLAP="a re-screen of one window is ONE mark, whatever wider window was cleared"
+T_VZ3L_ONE_EDGE="a denial overlapping one edge of the re-screen is still one mark"
+T_VZ3L_EXTENTS="mergeExtents folds an overlap through a containing span, and still splits a real gap"
+T_VZ3L_GUARD="mergeIsBarred asks about a GAP, and only where there is one"
+
 T_SHU5_WIRE="every SemanticSweepMarkComposer.compose call site passes supportLines"
 T_SHU5_WIRE_SVC="the service builds its index from the backfill's own segments and version"
 T_SHU5_WIRE_RUN="the runner builds its index from inputs.segments, not a fresh segmentation"
@@ -12859,6 +12865,53 @@ MUTATIONS=(
   # expectation on purpose: it names the rail GU01-GU03 kill, so a KILLED
   # verdict here would mean a local rename can change behaviour.
   "GU99|1616|STORE|$T_1GU0_RENAME"
+
+  # ---- playhead-vz3l (VZ series): the barrier over an INVERTED range ----
+  #
+  # `mergeExtents` admits every OVERLAPPING and NESTED pair (`extent.start <=
+  # last.end + mergeGapSeconds`) and then asked `coversGap(from: last.end, to:
+  # extent.start)` — `lower` past `upper`. Inverted, that half-open predicate
+  # reads "the barrier CONTAINS the whole overlap", which is a containment test
+  # wearing the name of a gap. The guard now lives in `mergeIsBarred`.
+  #
+  # THE FOUR ARE DELIBERATELY NOT ONE MUTANT, and their predicted sets are the
+  # argument: VZ01 re-creates the defect and cannot reach the ONE-EDGE rail,
+  # VZ02 moves only the zero-length boundary and cannot reach either compose
+  # rail, VZ03 attacks the CALL SITE's argument order rather than the guard and
+  # is the only one that reaches shu5's field test. A single mutant covering
+  # all three would prove that one of the four rails fires, not which.
+
+  # Batch 1617 — VZ01, the defect VERBATIM: the guard is deleted, so an
+  # overlapping pair consults a barrier over an inverted range again. Predicted
+  # to redden the overlap rail, the extent-level rail and the predicate rail,
+  # and NOT the one-edge rail — [150, 250] fails `coversGap`'s first conjunct
+  # (`150 < 100`) either way, which is exactly why that fixture is the
+  # anti-fabrication guard. Not shu5's field test either: its 0.42 s gap is
+  # real, so the guard it deletes was never consulted there.
+  "VZ01|1617|SWEEP|$T_VZ3L_OVERLAP;$T_VZ3L_EXTENTS;$T_VZ3L_GUARD"
+
+  # Batch 1618 — VZ02, the guard closes at the touch point (`>` becomes `>=`),
+  # so two extents that merely TOUCH consult a barrier. This is the boundary
+  # `coversGap`'s own doc calls deliberate, one level up. Predicted to redden
+  # the predicate rail ALONE: no compose fixture in the tree touches exactly,
+  # and both compose rails sit strictly inside the overlap where `>=` and `>`
+  # agree. A mutant whose victim set collapses onto VZ01's would mean the
+  # predicate rail is not testing the boundary it names.
+  "VZ02|1618|SWEEP|$T_VZ3L_GUARD"
+
+  # Batch 1619 — VZ03, the standing defect class one layer UP: the guard is
+  # correct and the CALL SITE hands it the two edges the wrong way round. The
+  # arguments now read `from: extent.start, to: last.end`, so the guard admits
+  # exactly the overlaps it exists to refuse and refuses every real gap.
+  # Predicted to redden shu5's field test (the 0.42 s gap stops barring), the
+  # overlap rail and the extent-level rail — and NOT the predicate rail, which
+  # calls `mergeIsBarred` directly and cannot see a caller's argument order.
+  "VZ03|1619|SWEEP|$T_SHU5_BAR_SPLITS;$T_VZ3L_OVERLAP;$T_VZ3L_EXTENTS"
+
+  # Batch 1620 — VZ99, VACUITY CONTROL. `mergeIsBarred`'s third parameter is
+  # renamed at its declaration and its one use; no predicate, no bound and no
+  # caller moves. MUST SURVIVE.
+  "VZ99|1620|SWEEP|$T_VZ3L_OVERLAP"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -13371,6 +13424,10 @@ describe_mutation() {
     GU03) echo "V65: the old index name survives the rename — idx_..._correlation over a column called backfillJobId" ;;
     GU04) echo "V65: the rung renames but never stamps the version, so the ladder re-runs the rung on every open forever" ;;
     GU99) echo "VACUITY CONTROL — the rename helper's hasNew local is renamed and nothing else changes; MUST SURVIVE" ;;
+    VZ01) echo "vz3l: mergeIsBarred loses its guard, so an overlapping pair consults coversGap over an INVERTED range again" ;;
+    VZ02) echo "vz3l: the guard closes at the touch point (> becomes >=), so two extents that merely touch consult a barrier" ;;
+    VZ03) echo "vz3l: the CALL SITE hands mergeIsBarred its two edges the wrong way round — overlaps bar, real gaps do not" ;;
+    VZ99) echo "VACUITY CONTROL — mergeIsBarred's barriers parameter is renamed at its declaration and its one use; MUST SURVIVE" ;;
     T09) echo "BackfillJobRunner.attributed: stop stamping scenePhase" ;;
     T10) echo "BackfillJobRunner.attributed: guess .active when the provider breaks its vocabulary" ;;
     T11) echo "SemanticScanThroughputSplit.isEligible: admit no-work sentinels as throughput" ;;
@@ -21659,21 +21716,22 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  # RE-ANCHORED by playhead-vz3l, which moved the barrier clause into
+  # `mergeIsBarred`. The MUTATION is unchanged and so is its predicted victim
+  # set: Y18 deletes the WIDTH CEILING from the merge condition and has never
+  # had anything to do with the barrier — the barrier lines were only ever
+  # anchor context. Re-read before re-anchoring, per CLAUDE.md.
   Y18)
     snippet OLD <<'EOF'
             if var last = result.last,
                extent.start <= last.end + mergeGapSeconds,
-               !barriers.contains(where: {
-                   $0.coversGap(from: last.end, to: extent.start)
-               }),
+               !mergeIsBarred(from: last.end, to: extent.start, by: barriers),
                max(last.end, extent.end) - last.start <= maximumMarkDurationSeconds {
 EOF
     snippet NEW <<'EOF'
             if var last = result.last,
                extent.start <= last.end + mergeGapSeconds,
-               !barriers.contains(where: {
-                   $0.coversGap(from: last.end, to: extent.start)
-               }) {
+               !mergeIsBarred(from: last.end, to: extent.start, by: barriers) {
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -21893,15 +21951,62 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  # RE-ANCHORED by playhead-vz3l for the same reason as Y18, and re-read: SU18
+  # deletes the barrier clause from the merge condition ENTIRELY — "is a
+  # cleared window consulted at all" — which is a different question from
+  # VZ01's "is it consulted where there is no gap", and it still asks it.
   SU18)
     snippet OLD <<'EOF'
-               !barriers.contains(where: {
-                   $0.coversGap(from: last.end, to: extent.start)
-               }),
+               !mergeIsBarred(from: last.end, to: extent.start, by: barriers),
                max(last.end, extent.end) - last.start <= maximumMarkDurationSeconds {
 EOF
     snippet NEW <<'EOF'
                max(last.end, extent.end) - last.start <= maximumMarkDurationSeconds {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # ── playhead-vz3l: the barrier over an INVERTED range ────────────────────
+
+  VZ01)
+    snippet OLD <<'EOF'
+        guard nextStart > lastEnd else { return false }
+        return barriers.contains { $0.coversGap(from: lastEnd, to: nextStart) }
+EOF
+    snippet NEW <<'EOF'
+        return barriers.contains { $0.coversGap(from: lastEnd, to: nextStart) }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  VZ02)
+    snippet OLD <<'EOF'
+        guard nextStart > lastEnd else { return false }
+EOF
+    snippet NEW <<'EOF'
+        guard nextStart >= lastEnd else { return false }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  VZ03)
+    snippet OLD <<'EOF'
+               !mergeIsBarred(from: last.end, to: extent.start, by: barriers),
+EOF
+    snippet NEW <<'EOF'
+               !mergeIsBarred(from: extent.start, to: last.end, by: barriers),
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  VZ99)
+    snippet OLD <<'EOF'
+        by barriers: [AdSpanBounds]
+    ) -> Bool {
+        guard nextStart > lastEnd else { return false }
+        return barriers.contains { $0.coversGap(from: lastEnd, to: nextStart) }
+EOF
+    snippet NEW <<'EOF'
+        by clearedWindows: [AdSpanBounds]
+    ) -> Bool {
+        guard nextStart > lastEnd else { return false }
+        return clearedWindows.contains { $0.coversGap(from: lastEnd, to: nextStart) }
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
