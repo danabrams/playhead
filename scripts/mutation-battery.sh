@@ -333,44 +333,57 @@
 #       A shutdown + erase took it to 17 MiB and the volume from 12 to 22 GiB.
 #       Nothing was deleted by the refusal itself, as its own text says.
 #
-#   PARTIAL RE-RUN 2026-08-27 (playhead-vz3l). Batches 1617-1622 only, added by
-#   this bead: VZ01-VZ04 plus the VZ99 control, one batch each, driven as
-#   `--series VZ`. The subject is the merge barrier being asked over an
+#   PARTIAL RE-RUN 2026-08-27 (playhead-vz3l). Batches 1617-1619 and 1621-1622,
+#   added by this bead: VZ01-VZ04 plus the VZ99 control, one batch each, driven
+#   as `--series VZ`. The subject is the merge barrier being asked over an
 #   INVERTED range whenever two extents overlap — `coversGap(from: last.end,
 #   to: extent.start)` with `lower > upper`, which silently reads as
-#   containment. FINAL 4 KILLED / 0 SURVIVED / 0 ERROR / 0 VOID, plus VZ99
-#   SURVIVED as required. Batches 1-1616 were NOT re-run and carry the verdicts
-#   above.
+#   containment. FINAL, from the run of 03:19-04:23 (6 builds, 63m50s, 2,795
+#   tests per batch, 1 host pid, no restart marker): 4 KILLED / 0 SURVIVED /
+#   0 ERROR / 0 VOID, plus VZ99 SURVIVED as required on a stated positive pass.
+#   Batches 1-1616 were NOT re-run and carry the verdicts above. 1620 is
+#   deliberately UNUSED — it was VZ99's number for the first two runs, whose
+#   preserved `batch-1620.log`s are that control's evidence, and reusing it for
+#   VZ04 would have made two different mutations share a log name.
 #
-#   THE LEDGER IS THE PART WORTH READING, because one prediction was WRONG and
-#   the correction is the finding:
-#     • First run (VZ01-VZ03 + VZ99, 5 builds, 62m08s, 2,795 tests per batch,
-#       1 host pid, no restart marker): VZ01 predicted 3 / observed 3, VZ02
-#       predicted 1 / observed 1, VZ99 SURVIVED on a stated positive pass —
-#       and VZ03 predicted 3 / OBSERVED 6. A KILLED credited over a set nobody
-#       wrote down is a false credit, so the three extra names were run to
-#       ground by reading the fixtures rather than by accepting the verdict.
-#       The cause is a real asymmetry: the shipped bug needed a cleared span
-#       STRICTLY CONTAINING the overlap, while a SWAPPED call site asks merely
-#       "does any cleared span overlap the overlap region" — a wider net that
-#       also catches the one-edge rail and two SemanticSweepCorroborationScope
-#       fixtures. Re-run after declaring all six: 6 predicted / 6 observed,
-#       3 builds, 40m18s.
+#   THREE RUNS, AND THE LEDGER IS THE PART WORTH READING, because a prediction
+#   was wrong TWICE and both corrections are findings:
+#     • RUN 1 (VZ01-VZ03 + VZ99, 5 builds, 62m08s): VZ01 predicted 3 /
+#       observed 3, VZ02 predicted 1 / observed 1, VZ99 SURVIVED — and VZ03
+#       predicted 3 / OBSERVED 6. A KILLED credited over a set nobody wrote
+#       down is a false credit, so the three extra names were run to ground by
+#       reading the fixtures rather than by accepting the verdict. The cause is
+#       a real asymmetry: the shipped bug needed a cleared span strictly
+#       containing `[nextStart, lastEnd]`, while a SWAPPED call site asks
+#       merely "does any cleared span overlap the overlap region" — a wider net
+#       that also catches the one-edge rail and two
+#       SemanticSweepCorroborationScope fixtures.
+#     • RUN 2 (`--only VZ03`, 3 builds, 40m18s): 6 predicted / 6 observed.
+#     • RUN 3, THE RECORD (6 builds, 63m50s): VZ01 3/3, VZ02 1/1, VZ04 3/3,
+#       VZ99 SURVIVED — and VZ03 observed SEVEN. The seventh is
+#       `aPartialBarrierStillBars`, which review round 2 added in the same
+#       commit that recorded run 2's "6 / 6", so that figure was true of a tree
+#       that no longer existed by the time it was written. Declared now.
 #     • VZ04 was CONSTRUCTED BY A REVIEW ROUND, not found by a run. It swaps
 #       the same two edges one line lower, where `mergeIsBarred` DELEGATES.
 #       The guard still holds, so nothing inverted reaches `coversGap`; what
 #       changes is that an OVERLAP test becomes a CONTAINMENT test. Every
-#       barrier fixture predating it PASSED under it, because each of their
-#       barriers spans the whole 0.42 s gap. `aPartialBarrierStillBars` and a
-#       source canary on the argument order are what close it.
+#       barrier fixture PREDATING it passed under it, because each of their
+#       barriers spans the whole 0.42 s gap. `aPartialBarrierStillBars`, one
+#       assertion on the predicate rail, and a source canary on the argument
+#       order are what close it — and its 3/3 above is its FIRST run. An
+#       earlier draft of this entry stated `4 KILLED` before VZ04 had ever been
+#       driven; that was a fabricated measurement, it was caught at review, and
+#       the count above is now the run's.
 #     • A COUNT IN THIS BEAD'S OWN CENSUS WAS WRONG and is corrected here: the
 #       whole-table dry-run that verified the two moved anchors (Y18, SU18)
-#       reported "980 of 1,128 records". The table holds 1,130 — a counting
-#       regex of `[A-Z]+` for the file key drops `G08`/`G09`, whose key is
-#       `ADSVC_ATOM` and contains an underscore. The residual is 150, not 148.
-#       The conclusion is unaffected (`ADSVC_ATOM` is `AtomEvidence.swift`,
-#       neither file this bead edits), but it is the standing defect class
-#       committed by the instrument built to check for drift.
+#       reported "980 of 1,128 records". The table held 1,130 AT THAT DRY-RUN —
+#       a counting regex of `[A-Z]+` for the file key drops `G08`/`G09`, whose
+#       key is `ADSVC_ATOM` and contains an underscore — so the residual was
+#       150, not 148. VZ04 makes it 1,131 and was added after that dry-run. The
+#       conclusion is unaffected (`ADSVC_ATOM` is `AtomEvidence.swift`, neither
+#       file this bead edits), but it is the standing defect class committed by
+#       the instrument built to check for drift.
 #
 #   PARTIAL RE-RUN 2026-08-26 (playhead-1gu0). Batches 1612-1616 only, added by
 #   this bead: GU01-GU04 plus the GU99 control, one batch each, driven as
@@ -6911,7 +6924,7 @@ MUTATIONS=(
   # pull's 301 coarse verdicts are `containsAd` carrying "[]". SU22 closes the
   # gap test from open to closed, barring a merge that swallows no audio.
   # Batched: one deletion and three predicate edits, four disjoint fixtures.
-  "SU18|1187|SWEEP|$T_SHU5_BAR_SPLITS"
+  "SU18|1187|SWEEP|$T_SHU5_BAR_SPLITS;$T_VZ3L_PARTIAL;$T_VZ3L_EXTENTS"
   # SU19 IS NOT BATCHED WITH SU18, and the first run proved why: SU18 deletes
   # the barrier CHECK, and SU19 widens the barrier POPULATION. With both
   # applied the population is never read, so SU19 printed SURVIVED against a
@@ -12957,7 +12970,7 @@ MUTATIONS=(
   # were found by reading the fixtures, not by the run. The reason the first
   # prediction was short is a real asymmetry rather than an oversight —
   # SWAPPING the arguments is a WIDER net than the original defect. The shipped
-  # bug needed a cleared span STRICTLY CONTAINING the overlap
+  # bug needed a cleared span strictly containing `[nextStart, lastEnd]`
   # (`b.start < nextStart && b.end > lastEnd`); a swapped call site asks
   # `coversGap(from: nextStart, to: lastEnd)`, which is merely "does any
   # cleared span OVERLAP the overlap region". So every fixture with two
@@ -12972,7 +12985,7 @@ MUTATIONS=(
   # 2026-08-27 are exactly these six. It still does NOT reach the predicate
   # rail, which calls `mergeIsBarred` directly and cannot see a caller's
   # argument order — that non-victim is what still separates it from VZ01.
-  "VZ03|1619|SWEEP|$T_SHU5_BAR_SPLITS;$T_VZ3L_OVERLAP;$T_VZ3L_EXTENTS;$T_VZ3L_ONE_EDGE;$T_VZ3L_CORROB_CROSS;$T_VZ3L_CORROB_SAME"
+  "VZ03|1619|SWEEP|$T_SHU5_BAR_SPLITS;$T_VZ3L_OVERLAP;$T_VZ3L_EXTENTS;$T_VZ3L_ONE_EDGE;$T_VZ3L_CORROB_CROSS;$T_VZ3L_CORROB_SAME;$T_VZ3L_PARTIAL"
 
   # Batch 1621 — VZ04, THE SIBLING OF VZ03 ONE LINE LOWER, and the review round
   # that found it had to construct it: VZ03 swaps the edges at the CALL SITE,
@@ -22043,6 +22056,16 @@ EOF
   # deletes the barrier clause from the merge condition ENTIRELY — "is a
   # cleared window consulted at all" — which is a different question from
   # VZ01's "is it consulted where there is no gap", and it still asks it.
+  #
+  # ITS VICTIM SET GREW BY TWO, AND playhead-vz3l IS WHAT GREW IT. Re-reading a
+  # moved mutant's SEMANTICS is not the same as re-deriving its victim set, and
+  # the first pass of this bead did only the first. Deleting the barrier
+  # clause now also reddens `aPartialBarrierStillBars` (the 0.42 s gap merges,
+  # 1 mark against 2) and the split half of the extent-level rail
+  # (`mergeExtents(split, barredBy: […]).count == 2` reads 1). Both are
+  # declared. **Batch 1187's recorded KILLED predates them** and was not
+  # re-run, so it stands over the one-name set — which is the same false-credit
+  # shape review round 1 found in VZ03, one bead removed.
   SU18)
     snippet OLD <<'EOF'
                !mergeIsBarred(from: last.end, to: extent.start, by: barriers),

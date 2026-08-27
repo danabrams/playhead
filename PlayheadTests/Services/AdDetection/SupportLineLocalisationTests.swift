@@ -29,7 +29,7 @@
 // reproduces 321 of 321 persisted `passA` windows exactly, and finds 276 of
 // 276 support refs inside their own window's index range with zero outside.
 //
-// THE THREE THINGS THESE SUITES PIN:
+// THE FOUR THINGS THESE SUITES PIN:
 //   1. localisation happens, from both sources — a declined pass-B row's own
 //      window, and refs resolved through a version-matched index;
 //   2. it REFUSES rather than guesses whenever the coordinate system might not
@@ -39,7 +39,8 @@
 //   4. and — section 3, shu5's other half — that a merge NEVER bridges a window
 //      a presence pass cleared, which is geometry over the same `AdSpanBounds`
 //      the refs resolve into. playhead-vz3l is why that section carries the
-//      inverted-range rails and a source canary as well as the barrier ones.
+//      inverted-range rails as well as the barrier ones, and why section 4
+//      carries a source canary on the one predicate they all rest on.
 
 import Foundation
 import Testing
@@ -785,12 +786,15 @@ struct SemanticSweepMergeBarrierTests {
     /// `coversGap(from: nextStart, to: lastEnd)` — and it silently becomes
     /// CONTAINMENT: `barrier.start < lastEnd && barrier.end > nextStart`, which
     /// only a window spanning the WHOLE gap satisfies. That is this bead's own
-    /// defect one line lower than the one it fixed, and **every other fixture
-    /// in this suite passes under it**, because each of their barriers spans
-    /// the whole 0.42 s gap: [497.34–607.08] contains [529.8, 530.22] as
-    /// readily as it overlaps it. This fixture is the one that separates them —
+    /// defect one line lower than the one it fixed, and **every barrier fixture
+    /// that PREDATED it passes under it**, because each of their barriers spans
+    /// the whole 0.42 s gap: [497.34–607.08] strictly contains [529.8, 530.22]
+    /// as readily as it overlaps it. This fixture is what separates them —
     /// [500, 530] covers the gap's first 0.2 s and stops 0.22 s short of its
-    /// end, so it overlaps and does not contain. Mutant `VZ04`.
+    /// end, so it overlaps and does not contain — together with the partial
+    /// assertion added to ``mergeIsBarredIsAskedOnlyWhereThereIsAGap()`` in the
+    /// same round, which is the same claim without a composition around it.
+    /// Mutant `VZ04` reddens both, and the source canary; measured 3/3.
     @Test("a cleared window covering only PART of the gap still bars it")
     func aPartialBarrierStillBars() {
         let rows = [
@@ -925,13 +929,14 @@ struct SemanticSweepMergeBarrierTests {
             Extent(start: 100, end: 190, confidence: 0.5),
             Extent(start: 100, end: 190, confidence: 0.8),
         ]
-        for overlapping in [strongFirst, weakFirst] {
+        for (order, overlapping) in [("strong first", strongFirst),
+                                     ("weak first", weakFirst)] {
             #expect(
                 SemanticSweepMarkComposer.mergeExtents(
                     overlapping,
                     barredBy: [AdSpanBounds(start: 90, end: 200)]
                 ) == [Extent(start: 100, end: 190, confidence: 0.5)],
-                "the WEAKER of two claims over one window governs, either order"
+                "the WEAKER of two claims over one window governs — \(order)"
             )
         }
 
@@ -1085,32 +1090,73 @@ struct SemanticSweepSupportLineWiringSourceCanaryTests {
     /// and the ORDER of the two edges that caller passes.
     @Test("coversGap has exactly one production caller, and it passes lower before upper")
     func coversGapHasExactlyOneProductionCaller() throws {
-        let composer = try Self.source(
-            "Playhead/Services/AdDetection/SemanticSweepMarkComposer.swift"
-        )
         let index = try Self.source("Playhead/Services/AdDetection/SupportLineIndex.swift")
-
         #expect(index.contains("func coversGap(from lower: Double, to upper: Double) -> Bool"),
                 "control: the helper is still declared where this canary thinks it is")
 
-        let calls = composer.components(separatedBy: ".coversGap(").count - 1
+        // EVERY production file, not just the composer. `coversGap` is
+        // `internal` on `AdSpanBounds`, so any file in the module can reach it,
+        // and a canary that reads ONE file would be a claim about that file
+        // wearing the name of a claim about production — the very substitution
+        // this bead is about.
+        let composerPath = "Playhead/Services/AdDetection/SemanticSweepMarkComposer.swift"
+        var callSites: [String: Int] = [:]
+        for path in try Self.productionSwiftFiles() {
+            let count = try Self.source(path).components(separatedBy: ".coversGap(").count - 1
+            if count > 0 { callSites[path] = count }
+        }
+
         #expect(
-            calls == 1,
+            callSites == [composerPath: 1],
             """
-            \(calls) call(s) to coversGap in the composer. The inverted-range \
-            obligation is the CALLER's — the helper carries no guard, on purpose \
-            — so "the caller" has to stay singular for that to mean anything.
+            coversGap call sites across Playhead/: \(callSites.sorted { $0.key < $1.key }). \
+            The inverted-range obligation is the CALLER's — the helper carries no \
+            guard, on purpose — so "the caller" has to stay singular for that to \
+            mean anything, and the one caller has to be mergeIsBarred.
             """
         )
         #expect(
-            composer.contains(".coversGap(from: lastEnd, to: nextStart)"),
+            try Self.source(composerPath).contains(".coversGap(from: lastEnd, to: nextStart)"),
             """
             the two edges must be passed LOWER FIRST. coversGap is an OVERLAP \
             test over the open interval (lower, upper); swapping them silently \
-            makes it CONTAINMENT, so only a window spanning the WHOLE gap would \
-            bar — see aPartialBarrierStillBars, which is the behavioural half of \
-            this claim.
+            makes it CONTAINMENT, so only a window STRICTLY CONTAINING the gap \
+            would bar — see aPartialBarrierStillBars, which is the behavioural \
+            half of this claim.
             """
         )
+    }
+
+    /// Every `.swift` under `Playhead/`, repo-relative, so a canary can make a
+    /// claim about PRODUCTION rather than about the files somebody listed.
+    ///
+    /// Two spelling limits, named because a green result is evidence about the
+    /// spelling this scans for: a call written with no receiver (from inside an
+    /// `AdSpanBounds` extension, i.e. `coversGap(from:…)`) is invisible to
+    /// `.coversGap(`, and prose spelling it `AdSpanBounds.coversGap(` with a
+    /// dot rather than the DocC `/` would inflate the count. Every mention in
+    /// the tree today uses `/` or a bare backtick, so the count really is the
+    /// call count.
+    private static func productionSwiftFiles(filePath: String = #filePath) throws -> [String] {
+        let root = URL(fileURLWithPath: filePath)
+            .deletingLastPathComponent()   // AdDetection
+            .deletingLastPathComponent()   // Services
+            .deletingLastPathComponent()   // PlayheadTests
+            .deletingLastPathComponent()   // repo root
+        let app = root.appendingPathComponent("Playhead")
+        guard let walker = FileManager.default.enumerator(
+            at: app, includingPropertiesForKeys: nil
+        ) else { return [] }
+
+        var found: [String] = []
+        for case let url as URL in walker where url.pathExtension == "swift" {
+            found.append(
+                url.standardizedFileURL.path
+                    .replacingOccurrences(of: root.standardizedFileURL.path + "/", with: "")
+            )
+        }
+        // A walk that finds nothing would satisfy every assertion above it.
+        #expect(found.count > 200, "control: only \(found.count) production Swift files found")
+        return found
     }
 }

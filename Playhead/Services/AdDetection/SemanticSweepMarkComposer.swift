@@ -1358,8 +1358,9 @@ enum SemanticSweepMarkComposer {
     /// ``AdSpanBounds/coversGap(from:to:)`` is an OVERLAP test over the open
     /// interval, so a cleared window covering half the gap bars the merge.
     /// Swapping the two arguments below turns it into CONTAINMENT — only a
-    /// window spanning the whole gap would bar — which is the same defect this
-    /// function exists to close, one line lower down. Mutant `VZ04` is that
+    /// window STRICTLY containing the gap would bar, so a window exactly equal
+    /// to it would not either — which is the same defect this function exists
+    /// to close, one line lower down. Mutant `VZ04` is that
     /// edit and `aPartialBarrierStillBars` is what refuses it.
     ///
     /// THE GUARD IS THE WHOLE FUNCTION, AND IT IS WHY THIS IS NOT AN INLINE
@@ -1407,8 +1408,10 @@ enum SemanticSweepMarkComposer {
     ///
     /// WHAT THE WIDENING ADMITS, stated because the population being empty on
     /// one pull is not the same as it being empty: a pair whose extents overlap
-    /// or touch, with a cleared span STRICTLY CONTAINING that overlap
-    /// (`barrier.start < nextStart && barrier.end > lastEnd`). It is not
+    /// or touch, with a cleared span strictly containing `[nextStart, lastEnd]`
+    /// (`barrier.start < nextStart && barrier.end > lastEnd`) — the precise form
+    /// again, not "containing the overlap", for the nested-pair reason two
+    /// paragraphs up. It is not
     /// hypothetical — the shape is a coarse re-screen. Two `containsAd` rows
     /// over [100, 190] plus a `noAds` over [90, 200] composed to TWO marks with
     /// IDENTICAL bounds, and ``markId(analysisAssetId:start:end:)`` is
