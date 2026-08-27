@@ -1351,8 +1351,16 @@ enum SemanticSweepMarkComposer {
         return result
     }
 
-    /// Does a window somebody CLEARED cover the gap a merge from `lastEnd` to
-    /// `nextStart` would swallow (playhead-shu5)?
+    /// Does a window somebody CLEARED cover ANY PART of the gap a merge from
+    /// `lastEnd` to `nextStart` would swallow (playhead-shu5)?
+    ///
+    /// "Any part of", not "all of", and the three words are the contract:
+    /// ``AdSpanBounds/coversGap(from:to:)`` is an OVERLAP test over the open
+    /// interval, so a cleared window covering half the gap bars the merge.
+    /// Swapping the two arguments below turns it into CONTAINMENT — only a
+    /// window spanning the whole gap would bar — which is the same defect this
+    /// function exists to close, one line lower down. Mutant `VZ04` is that
+    /// edit and `aPartialBarrierStillBars` is what refuses it.
     ///
     /// THE GUARD IS THE WHOLE FUNCTION, AND IT IS WHY THIS IS NOT AN INLINE
     /// `contains` ANY MORE (playhead-vz3l). ``mergeExtents(_:barredBy:)``
@@ -1361,18 +1369,24 @@ enum SemanticSweepMarkComposer {
     /// or BEFORE `lastEnd`, and the call this replaced then handed
     /// ``AdSpanBounds/coversGap(from:to:)`` an INVERTED range. That helper is
     /// `start < upper && end > lower`; inverted it reads "the barrier begins
-    /// before the SECOND extent and ends after the FIRST", i.e. "the barrier
-    /// CONTAINS the whole overlap" — a condition about containment wearing the
-    /// name of a gap, which is this repo's standing defect class in its
-    /// geometric form. Two extents that overlap or touch have NO gap between
-    /// them, so a merge across them swallows no audio and nothing may bar it.
+    /// before the SECOND extent and ends after the FIRST", i.e. the barrier
+    /// strictly CONTAINS `[nextStart, lastEnd]` — a condition about containment
+    /// wearing the name of a gap, which is this repo's standing defect class in
+    /// its geometric form. Say it that precisely rather than "contains the
+    /// overlap": for a properly NESTED pair — 160 of the 173 measured below,
+    /// i.e. the majority — `[nextStart, lastEnd]` is strictly LARGER than the
+    /// overlap, so the two phrasings pick out different barriers and only the
+    /// first is the predicate. Either way, two extents that overlap or touch
+    /// have NO gap between them, so a merge across them swallows no audio and
+    /// nothing may bar it.
     ///
     /// The zero-length case (`nextStart == lastEnd`) is refused for the same
     /// REASON ``AdSpanBounds/coversGap(from:to:)`` is open rather than closed —
     /// extents that merely touch leave no swallowed audio, and barring on them
     /// costs a merge for nothing — but NOT by the same mechanism, and the
     /// difference matters: `coversGap(from: x, to: x)` is `start < x && end >
-    /// x`, which is **true** for any span containing that point. So this guard
+    /// x`, which is **true** for any span STRICTLY containing that point (not
+    /// merely containing it — `[x, y]` and `[y, x]` both fail). So this guard
     /// is load-bearing rather than belt-and-braces, and loosening `>` to `>=`
     /// is a real behaviour change rather than a no-op. Mutant `VZ02` is that
     /// edit, and it reddens `SemanticSweepMergeBarrierTests`.
@@ -1403,15 +1417,19 @@ enum SemanticSweepMarkComposer {
     /// silence. `SemanticSweepMergeBarrierTests` holds that fixture.
     ///
     /// A MERGE IS NOT GRADE-NEUTRAL, so say what the widening does to the
-    /// grade as well as to the bounds. The pair it admits overlaps, so the
-    /// merged extent spans the UNION of two extents that each already marked
-    /// their own half — no audio is newly claimed. Its confidence takes
-    /// ``mergeExtents(_:barredBy:)``'s existing rules: `min` for a nested pair
+    /// grade as well as to the bounds. The pair it admits overlaps or touches,
+    /// so the merged extent spans the UNION of two extents that each already
+    /// marked their own half — no audio is newly claimed. Its confidence takes
+    /// ``mergeExtents(_:barredBy:)``'s existing rules: `min` for a NESTED pair
     /// (which the re-screen above is, and which is the WEAKER of the two —
     /// under-claiming, the direction this file always takes), and the 92im
-    /// duration-weighted mean for a partial overlap. Both are strictly inside
-    /// `[min, max]` of the two inputs, so a merge admitted here can never grade
-    /// higher than the stronger claim it is made of.
+    /// duration-weighted mean whenever the second extent adds seconds, which
+    /// covers a partial overlap and a touching pair alike. Neither result can
+    /// LEAVE `[min, max]` of the two inputs — the phrasing that function's own
+    /// comment uses, and it is a CLOSED interval on purpose: `min` returns an
+    /// endpoint by construction, and the interpolation returns one exactly when
+    /// the two agree. So a merge admitted here can never grade higher than the
+    /// stronger claim it is made of.
     static func mergeIsBarred(
         from lastEnd: Double,
         to nextStart: Double,

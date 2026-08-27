@@ -333,6 +333,45 @@
 #       A shutdown + erase took it to 17 MiB and the volume from 12 to 22 GiB.
 #       Nothing was deleted by the refusal itself, as its own text says.
 #
+#   PARTIAL RE-RUN 2026-08-27 (playhead-vz3l). Batches 1617-1622 only, added by
+#   this bead: VZ01-VZ04 plus the VZ99 control, one batch each, driven as
+#   `--series VZ`. The subject is the merge barrier being asked over an
+#   INVERTED range whenever two extents overlap — `coversGap(from: last.end,
+#   to: extent.start)` with `lower > upper`, which silently reads as
+#   containment. FINAL 4 KILLED / 0 SURVIVED / 0 ERROR / 0 VOID, plus VZ99
+#   SURVIVED as required. Batches 1-1616 were NOT re-run and carry the verdicts
+#   above.
+#
+#   THE LEDGER IS THE PART WORTH READING, because one prediction was WRONG and
+#   the correction is the finding:
+#     • First run (VZ01-VZ03 + VZ99, 5 builds, 62m08s, 2,795 tests per batch,
+#       1 host pid, no restart marker): VZ01 predicted 3 / observed 3, VZ02
+#       predicted 1 / observed 1, VZ99 SURVIVED on a stated positive pass —
+#       and VZ03 predicted 3 / OBSERVED 6. A KILLED credited over a set nobody
+#       wrote down is a false credit, so the three extra names were run to
+#       ground by reading the fixtures rather than by accepting the verdict.
+#       The cause is a real asymmetry: the shipped bug needed a cleared span
+#       STRICTLY CONTAINING the overlap, while a SWAPPED call site asks merely
+#       "does any cleared span overlap the overlap region" — a wider net that
+#       also catches the one-edge rail and two SemanticSweepCorroborationScope
+#       fixtures. Re-run after declaring all six: 6 predicted / 6 observed,
+#       3 builds, 40m18s.
+#     • VZ04 was CONSTRUCTED BY A REVIEW ROUND, not found by a run. It swaps
+#       the same two edges one line lower, where `mergeIsBarred` DELEGATES.
+#       The guard still holds, so nothing inverted reaches `coversGap`; what
+#       changes is that an OVERLAP test becomes a CONTAINMENT test. Every
+#       barrier fixture predating it PASSED under it, because each of their
+#       barriers spans the whole 0.42 s gap. `aPartialBarrierStillBars` and a
+#       source canary on the argument order are what close it.
+#     • A COUNT IN THIS BEAD'S OWN CENSUS WAS WRONG and is corrected here: the
+#       whole-table dry-run that verified the two moved anchors (Y18, SU18)
+#       reported "980 of 1,128 records". The table holds 1,130 — a counting
+#       regex of `[A-Z]+` for the file key drops `G08`/`G09`, whose key is
+#       `ADSVC_ATOM` and contains an underscore. The residual is 150, not 148.
+#       The conclusion is unaffected (`ADSVC_ATOM` is `AtomEvidence.swift`,
+#       neither file this bead edits), but it is the standing defect class
+#       committed by the instrument built to check for drift.
+#
 #   PARTIAL RE-RUN 2026-08-26 (playhead-1gu0). Batches 1612-1616 only, added by
 #   this bead: GU01-GU04 plus the GU99 control, one batch each, driven as
 #   `--series GU`. FINAL 4 KILLED / 0 SURVIVED / 0 ERROR / 0 VOID, plus GU99
@@ -3372,6 +3411,8 @@ T_VZ3L_GUARD="mergeIsBarred asks about a GAP, and only where there is one"
 # can bar.
 T_VZ3L_CORROB_CROSS="a cross-version affirmer no longer props up a contested claim"
 T_VZ3L_CORROB_SAME="an affirming replicate at the same version still counts"
+T_VZ3L_PARTIAL="a cleared window covering only PART of the gap still bars it"
+T_VZ3L_ONE_CALLER="coversGap has exactly one production caller, and it passes lower before upper"
 
 T_SHU5_WIRE="every SemanticSweepMarkComposer.compose call site passes supportLines"
 T_SHU5_WIRE_SVC="the service builds its index from the backfill's own segments and version"
@@ -12933,10 +12974,31 @@ MUTATIONS=(
   # argument order — that non-victim is what still separates it from VZ01.
   "VZ03|1619|SWEEP|$T_SHU5_BAR_SPLITS;$T_VZ3L_OVERLAP;$T_VZ3L_EXTENTS;$T_VZ3L_ONE_EDGE;$T_VZ3L_CORROB_CROSS;$T_VZ3L_CORROB_SAME"
 
-  # Batch 1620 — VZ99, VACUITY CONTROL. `mergeIsBarred`'s third parameter is
+  # Batch 1621 — VZ04, THE SIBLING OF VZ03 ONE LINE LOWER, and the review round
+  # that found it had to construct it: VZ03 swaps the edges at the CALL SITE,
+  # this swaps them where `mergeIsBarred` DELEGATES. The guard still holds, so
+  # nothing inverted reaches `coversGap` — what changes is which question it
+  # asks. Shipped is `b.start < nextStart && b.end > lastEnd`, the barrier
+  # OVERLAPS the gap; swapped is `b.start < lastEnd && b.end > nextStart`, the
+  # barrier CONTAINS it. A cleared window covering HALF a gap bars under one
+  # and not the other.
+  #
+  # Every barrier fixture that predates this mutant PASSES under it, because
+  # each of their barriers spans the whole 0.42 s gap — [497.34–607.08]
+  # contains [529.8, 530.22] as readily as it overlaps it. That is the coverage
+  # hole; `aPartialBarrierStillBars` is what closes it, with [500, 530] over a
+  # gap that ends at 530.22. Predicted: the new compose fixture, the predicate
+  # rail's own partial assertion, and the source canary that pins the argument
+  # order. NOT the extent-level rail and NOT shu5's field test, both of whose
+  # barriers span their gap.
+  "VZ04|1621|SWEEP|$T_VZ3L_PARTIAL;$T_VZ3L_GUARD;$T_VZ3L_ONE_CALLER"
+
+  # Batch 1622 — VZ99, VACUITY CONTROL. `mergeIsBarred`'s third parameter is
   # renamed at its declaration and its one use; no predicate, no bound and no
-  # caller moves. MUST SURVIVE.
-  "VZ99|1620|SWEEP|$T_VZ3L_OVERLAP"
+  # caller moves. MUST SURVIVE. Note what the source canary added at review
+  # deliberately does NOT spell: this parameter's name. A canary matching
+  # `barriers.contains { … }` would turn this control into a false kill.
+  "VZ99|1622|SWEEP|$T_VZ3L_OVERLAP"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -13452,6 +13514,7 @@ describe_mutation() {
     VZ01) echo "vz3l: mergeIsBarred loses its guard, so an overlapping pair consults coversGap over an INVERTED range again" ;;
     VZ02) echo "vz3l: the guard closes at the touch point (> becomes >=), so two extents that merely touch consult a barrier" ;;
     VZ03) echo "vz3l: the CALL SITE hands mergeIsBarred its two edges the wrong way round — overlaps bar, real gaps do not" ;;
+    VZ04) echo "vz3l: mergeIsBarred DELEGATES its two edges the wrong way round — the gap test silently becomes containment" ;;
     VZ99) echo "VACUITY CONTROL — mergeIsBarred's barriers parameter is renamed at its declaration and its one use; MUST SURVIVE" ;;
     T09) echo "BackfillJobRunner.attributed: stop stamping scenePhase" ;;
     T10) echo "BackfillJobRunner.attributed: guess .active when the provider breaks its vocabulary" ;;
@@ -22017,6 +22080,15 @@ EOF
 EOF
     snippet NEW <<'EOF'
                !mergeIsBarred(from: extent.start, to: last.end, by: barriers),
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  VZ04)
+    snippet OLD <<'EOF'
+        return barriers.contains { $0.coversGap(from: lastEnd, to: nextStart) }
+EOF
+    snippet NEW <<'EOF'
+        return barriers.contains { $0.coversGap(from: nextStart, to: lastEnd) }
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 

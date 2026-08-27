@@ -35,7 +35,11 @@
 //   2. it REFUSES rather than guesses whenever the coordinate system might not
 //      be the row's, because guessing lands the mark on the show;
 //   3. it can only SHRINK — never admit a mark the pipeline suppressed, never
-//      delete one whose evidence it could not read.
+//      delete one whose evidence it could not read;
+//   4. and — section 3, shu5's other half — that a merge NEVER bridges a window
+//      a presence pass cleared, which is geometry over the same `AdSpanBounds`
+//      the refs resolve into. playhead-vz3l is why that section carries the
+//      inverted-range rails and a source canary as well as the barrier ones.
 
 import Foundation
 import Testing
@@ -772,6 +776,34 @@ struct SemanticSweepMergeBarrierTests {
         #expect(Fx.compose(rows: rows).count == 1)
     }
 
+    /// A cleared window covering only PART of the gap still bars it, and this
+    /// rail exists because nothing in the suite could see that (playhead-vz3l
+    /// review R2).
+    ///
+    /// `coversGap` is an OVERLAP test over the open interval, so half a gap is
+    /// enough. Swap the two arguments where `mergeIsBarred` calls it —
+    /// `coversGap(from: nextStart, to: lastEnd)` — and it silently becomes
+    /// CONTAINMENT: `barrier.start < lastEnd && barrier.end > nextStart`, which
+    /// only a window spanning the WHOLE gap satisfies. That is this bead's own
+    /// defect one line lower than the one it fixed, and **every other fixture
+    /// in this suite passes under it**, because each of their barriers spans
+    /// the whole 0.42 s gap: [497.34–607.08] contains [529.8, 530.22] as
+    /// readily as it overlaps it. This fixture is the one that separates them —
+    /// [500, 530] covers the gap's first 0.2 s and stops 0.22 s short of its
+    /// end, so it overlaps and does not contain. Mutant `VZ04`.
+    @Test("a cleared window covering only PART of the gap still bars it")
+    func aPartialBarrierStillBars() {
+        let rows = [
+            Fx.row(id: "a", start: 420.9, end: 529.8),
+            Fx.row(id: "b", start: 530.22, end: 619.62),
+            // Overlaps the gap (529.8, 530.22) without spanning it.
+            Fx.row(id: "partial", start: 500.0, end: 530.0, disposition: .noAds),
+        ]
+
+        #expect(Fx.compose(rows: rows).count == 2,
+                "half a cleared gap is still a cleared gap")
+    }
+
     // MARK: - The inverted range (playhead-vz3l)
 
     /// THE BEAD'S OWN TWO-LINE FIXTURE, and the observable is a COLLIDING ID
@@ -877,19 +909,31 @@ struct SemanticSweepMergeBarrierTests {
     func mergeExtentsSeparatesTheOverlapFromTheGap() {
         typealias Extent = SemanticSweepMarkComposer.Extent
 
-        // NESTED/IDENTICAL: no gap exists, so [90, 200] cannot bar it. `sorted`
-        // is not stable over the equal keys here, so the assertion is written
-        // to be order-independent: `min` gives 0.5 whichever arrives first.
-        let overlapping = [
+        // NESTED/IDENTICAL: no gap exists, so [90, 200] cannot bar it.
+        //
+        // BOTH INPUT ORDERS, and that is what makes the grade assertion bite.
+        // `sorted` is not stable over these equal keys, so which extent lands
+        // first is unspecified — and `min` is commutative, so 0.5 alone is
+        // order-independent for the RIGHT rule and therefore cannot tell a
+        // "keep the first" rule from a "keep the second" one. Asserting both
+        // orders kills both: one of the two must put 0.8 first.
+        let strongFirst = [
             Extent(start: 100, end: 190, confidence: 0.8),
             Extent(start: 100, end: 190, confidence: 0.5),
         ]
-        #expect(
-            SemanticSweepMarkComposer.mergeExtents(
-                overlapping,
-                barredBy: [AdSpanBounds(start: 90, end: 200)]
-            ) == [Extent(start: 100, end: 190, confidence: 0.5)]
-        )
+        let weakFirst = [
+            Extent(start: 100, end: 190, confidence: 0.5),
+            Extent(start: 100, end: 190, confidence: 0.8),
+        ]
+        for overlapping in [strongFirst, weakFirst] {
+            #expect(
+                SemanticSweepMarkComposer.mergeExtents(
+                    overlapping,
+                    barredBy: [AdSpanBounds(start: 90, end: 200)]
+                ) == [Extent(start: 100, end: 190, confidence: 0.5)],
+                "the WEAKER of two claims over one window governs, either order"
+            )
+        }
 
         // A REAL 0.42 s gap, from 561CEF5B: the barrier still bars.
         let split = [Extent(start: 420.9, end: 529.8), Extent(start: 530.22, end: 619.62)]
@@ -926,6 +970,13 @@ struct SemanticSweepMergeBarrierTests {
         #expect(!SemanticSweepMarkComposer.mergeIsBarred(from: 190, to: 190, by: containing))
         // A REAL gap the span covers.
         #expect(SemanticSweepMarkComposer.mergeIsBarred(from: 190, to: 195, by: containing))
+        // A REAL gap the span covers only PART of — `coversGap` is an OVERLAP
+        // test, so half a gap is enough. This is the direction a swapped
+        // delegation inside `mergeIsBarred` would lose (VZ04): [500, 530] does
+        // not span [529.8, 530.22], and containment would say no.
+        #expect(SemanticSweepMarkComposer.mergeIsBarred(
+            from: 529.8, to: 530.22, by: [AdSpanBounds(start: 500, end: 530.0)]
+        ))
         // A REAL gap the span does not reach.
         #expect(!SemanticSweepMarkComposer.mergeIsBarred(
             from: 400, to: 405, by: containing
@@ -1006,5 +1057,60 @@ struct SemanticSweepSupportLineWiringSourceCanaryTests {
         #expect(text.contains("segments: inputs.segments"))
         #expect(!text.contains("SupportLineIndex(\n                        segments: TranscriptSegmenter"),
                 "the runner must not re-segment; inputs.segments IS the plan's segmentation")
+    }
+
+    /// `coversGap` HAS EXACTLY ONE CALLER, AND THAT IS A MECHANISM RATHER THAN
+    /// A DOC COMMENT (playhead-vz3l review R2).
+    ///
+    /// The helper is `internal` on a `struct` and carries no guard of its own —
+    /// deliberately, because refusing an inverted range inside it would make a
+    /// caller that inverts LOOK correct, which is exactly how the shipped
+    /// defect survived review, and would make the mutant that re-creates that
+    /// defect SURVIVE and report a coverage hole that is not there. The
+    /// obligation therefore lives with the caller, and "the caller" has to stay
+    /// singular for that to mean anything: a second call site re-opens the
+    /// whole class, and it would be added by somebody who never read either doc
+    /// comment. Written as a CANARY because there is nothing in the type system
+    /// to say it.
+    ///
+    /// The one permitted site is ``SemanticSweepMarkComposer/mergeIsBarred(from:to:by:)``,
+    /// which guards `nextStart > lastEnd` before delegating.
+    ///
+    /// WHAT THIS DELIBERATELY DOES **NOT** PIN, because a canary that pins more
+    /// than its own property stops being able to tell mutants apart. It does
+    /// not assert the guard line (`VZ02` and the predicate rail own that), and
+    /// it does not name the `barriers` parameter — `VZ99` renames exactly that
+    /// and MUST SURVIVE, so a canary spelling it would convert this bead's
+    /// vacuity control into a false kill. One property: the number of callers,
+    /// and the ORDER of the two edges that caller passes.
+    @Test("coversGap has exactly one production caller, and it passes lower before upper")
+    func coversGapHasExactlyOneProductionCaller() throws {
+        let composer = try Self.source(
+            "Playhead/Services/AdDetection/SemanticSweepMarkComposer.swift"
+        )
+        let index = try Self.source("Playhead/Services/AdDetection/SupportLineIndex.swift")
+
+        #expect(index.contains("func coversGap(from lower: Double, to upper: Double) -> Bool"),
+                "control: the helper is still declared where this canary thinks it is")
+
+        let calls = composer.components(separatedBy: ".coversGap(").count - 1
+        #expect(
+            calls == 1,
+            """
+            \(calls) call(s) to coversGap in the composer. The inverted-range \
+            obligation is the CALLER's — the helper carries no guard, on purpose \
+            — so "the caller" has to stay singular for that to mean anything.
+            """
+        )
+        #expect(
+            composer.contains(".coversGap(from: lastEnd, to: nextStart)"),
+            """
+            the two edges must be passed LOWER FIRST. coversGap is an OVERLAP \
+            test over the open interval (lower, upper); swapping them silently \
+            makes it CONTAINMENT, so only a window spanning the WHOLE gap would \
+            bar — see aPartialBarrierStillBars, which is the behavioural half of \
+            this claim.
+            """
+        )
     }
 }
