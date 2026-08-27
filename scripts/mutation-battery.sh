@@ -361,7 +361,9 @@
 #   which the canary's control line reads, is untouched. Four rails in that
 #   suite read source text, not one — the other three read
 #   `AdDetectionService.swift` and `BackfillJobRunner.swift`, genuinely
-#   untouched. State the BEHAVIOUR qualifier rather than "any change", or every
+#   untouched. And those three directories ARE the whole of the diff: it
+#   touches nothing else but `.beads/issues.jsonl`, which no build and no rail
+#   reads — say that, or the enumeration is a proof a reader has to close. State the BEHAVIOUR qualifier rather than "any change", or every
 #   future comment edit re-opens a settled verdict.
 #   Batches 1-1616 were NOT re-run and carry the verdicts above. 1620 is
 #   deliberately UNUSED — it was VZ99's number for the first two runs, whose
@@ -403,8 +405,10 @@
 #       reasons — see the VZ04 record, which enumerates them. Not "their
 #       barriers span the gap", which is false for `aTouchingBarrierDoesNotBar`
 #       (its barrier starts AT the gap's end), and not "most have no gap",
-#       which is a minority: seven of the eleven predating fixture-halves have
-#       a real gap. `aPartialBarrierStillBars`, one
+#       which is a minority: seven of the TWELVE predating fixture-halves have
+#       a real gap (5 + 3 + 2 + 2 across the four cells; an earlier draft said
+#       eleven, and no sub-selection of the census yields it).
+#       `aPartialBarrierStillBars`, one
 #       assertion on the predicate rail, and a source canary on the argument
 #       order are what close it — it was first driven in RUN 3 and RUN 4
 #       reproduced it 3/3. An
@@ -13005,15 +13009,26 @@ MUTATIONS=(
   # `coversGap`'s own doc calls deliberate, one level up. Predicted to redden
   # the predicate rail ALONE — and say which POPULATION that is about, because
   # an earlier draft said "no compose fixture in the tree touches exactly" and
-  # four do. `SemanticSweepMarkComposerTests` has `[508,599]+[599,694]`,
+  # four do. `SemanticSweepMarkComposerTests.swift` has `[508,599]+[599,694]`,
   # `[0,95]+[95,190]+…`, `[100,190]+[190,280]` and
-  # `[292.02,380.4]+[380.4,468.78]+…`, one of which says so in its own
-  # assertion message. They are immune because none carries a cleared span, so
-  # `barriers` is EMPTY and `>` vs `>=` cannot matter — and that suite is in
-  # neither `FOCUSED_SUITES` nor any expectation, so this battery could not
-  # have observed them either way. The three vz3l compose rails are immune on
+  # `[292.02,380.4]+[380.4,468.78]+…`, two of which say so in their own
+  # assertion messages. They are immune because none carries a cleared span,
+  # so `barriers` is EMPTY and `>` vs `>=` cannot matter.
+  #
+  # AND THAT IS A FILE, NOT A SUITE — this line needed the correction twice.
+  # `SemanticSweepMarkComposerTests.swift` declares FIVE `@Suite` structs and
+  # none is called that, so "the suite is not in `FOCUSED_SUITES`" was a claim
+  # about a name nothing carries: a file read as a suite, which is the house
+  # defect class committed by the sentence correcting the house defect class.
+  # Measured — the first two fixtures live in `SemanticSweepExtentPolicyTests`,
+  # which IS focused, so this battery DID observe them, green, on every VZ
+  # batch; and `theMergeStopsAtTheCeiling` is `Y18`'s own declared expectation
+  # (`T_Y3YA_MERGE_CEILING`). The last two live in
+  # `SemanticSweepConfidenceTests`, deliberately unfocused for the reason its
+  # FOCUSED_SUITES note gives. The three vz3l compose rails are immune on
   # their own terms: two sit strictly inside the overlap, the third has a real
-  # 0.42 s gap, and `>` and `>=` agree on all three. A mutant whose victim set collapses onto VZ01's would mean the
+  # 0.42 s gap, and `>` and `>=` agree on all three.
+  # A mutant whose victim set collapses onto VZ01's would mean the
   # predicate rail is not testing the boundary it names.
   "VZ02|1618|SWEEP|$T_VZ3L_GUARD"
 
