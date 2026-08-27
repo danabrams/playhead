@@ -390,6 +390,44 @@ struct SemanticScanResult: Sendable, Equatable {
     /// under-claiming direction: a writer that says nothing withholds the
     /// licence instead of granting it.
     let verdictProvenance: ScanVerdictProvenance
+    /// playhead-qjcf (schema V66): WHERE the lines this row's `supportLineRefs`
+    /// name actually WERE, in seconds, in the segmentation the model was shown.
+    ///
+    /// **`nil` means the row RECORDS NO SECONDS, and on disk it means exactly
+    /// one thing: the row predates V66.** There is no backfill and there cannot
+    /// be one — the seconds were never written, and reconstructing them needs
+    /// the segmentation the scan ran against, which is gone for essentially
+    /// every orphaned row (playhead-kg6i: 280 of 301 coarse `containsAd` rows on
+    /// the 2026-08-19 t4 pull carry a `transcriptVersion` no surviving
+    /// `transcript_chunks` row carries). A default here would be a fabrication
+    /// with a `[]`-shaped hole in it, which is the same trap
+    /// ``verdictProvenance`` and ``prewarmHit`` document above.
+    ///
+    /// # What it is FOR
+    ///
+    /// `supportLineRefs` are SEGMENT INDICES, so they name a position in a
+    /// coordinate system rather than a stretch of audio. Re-transcribe the
+    /// episode and that system is replaced; `SupportLineIndex.resolve` then
+    /// correctly refuses, and `SemanticSweepMarkComposer` keeps the row's whole
+    /// ~95 s scan tile. **174 of the 301** coarse `containsAd` rows on that pull
+    /// are in that state. This column is the same claim in a coordinate system
+    /// nothing can supersede.
+    ///
+    /// # BOTH forms, never just the seconds
+    ///
+    /// Each entry carries its `lineRef` beside its seconds, and
+    /// ``SemanticSweepMarkComposer/persistedSupportSpans(of:)`` requires the ref
+    /// SET here to equal the set in ``spansJSON``. So a payload that has drifted
+    /// from the verdict it claims to project is refused rather than believed,
+    /// and a reader can always tell a projection of THIS row from bytes
+    /// reconstructed later against some other segmentation. Seconds alone cannot
+    /// support either check.
+    ///
+    /// Written for `passA` rows only. A `passB` row's geometry is its own
+    /// window, which is already seconds — see
+    /// ``SemanticSweepMarkComposer/supportLineRefs(of:)``, which excludes
+    /// refinement rows for the same reason.
+    let supportLineSpansJSON: String?
     /// Model-generated explanation from `Refusal.explanation` at the time the permissive
     /// fallback was triggered. `nil` if explanation was unavailable or the fallback was not used.
     ///
@@ -563,7 +601,8 @@ struct SemanticScanResult: Sendable, Equatable {
         observedStatusesCSV: String? = nil,
         latencyMsTotal: Double? = nil,
         latencyMsMax: Double? = nil,
-        latencySampleCount: Int? = nil
+        latencySampleCount: Int? = nil,
+        supportLineSpansJSON: String? = nil
     ) {
         self.id = id
         self.analysisAssetId = analysisAssetId
@@ -601,6 +640,7 @@ struct SemanticScanResult: Sendable, Equatable {
         self.latencyMsTotal = latencyMsTotal
         self.latencyMsMax = latencyMsMax
         self.latencySampleCount = latencySampleCount
+        self.supportLineSpansJSON = supportLineSpansJSON
     }
 
     // MARK: - playhead-bg2n: reading a row's ATTEMPT HISTORY
@@ -814,7 +854,19 @@ struct SemanticScanResult: Sendable, Equatable {
             // here would be asserting a history it has not read.
             latencyMsTotal: latencyMsTotal,
             latencyMsMax: latencyMsMax,
-            latencySampleCount: latencySampleCount
+            latencySampleCount: latencySampleCount,
+            // playhead-qjcf: carried through UNCHANGED, and the reason is the
+            // opposite of the two blocks above. Those are the STORE's to decide;
+            // this is the PRODUCER's — it is a projection of the segmentation
+            // the scan just ran, and nothing downstream of the scan can
+            // reconstruct it. `attributed` is on the ONLY path from
+            // `makeCoarseScanResult` to `insertSemanticScanResult`
+            // (`BackfillJobRunner.attributed(_:jobId:)`), so omitting it here
+            // would drop every projected second between the writer and the disk
+            // while every rail on either side stayed green — a value silently
+            // lost at a copy, which is this bead's own defect class one layer
+            // over. Pinned by `attributedCarriesTheProjectionThrough`.
+            supportLineSpansJSON: supportLineSpansJSON
         )
     }
 

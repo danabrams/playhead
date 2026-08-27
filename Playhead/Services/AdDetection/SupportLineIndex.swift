@@ -119,6 +119,39 @@ struct AdSpanBounds: Sendable, Equatable {
     }
 }
 
+/// ONE named support line, and THE SECONDS THAT LINE MEANT in the segmentation
+/// the model was actually shown. playhead-qjcf, schema V66.
+///
+/// # Why both halves travel together
+///
+/// A `supportLineRefs` entry is a segment INDEX. An index is only a position in
+/// a coordinate system, so it names nothing at all once that coordinate system
+/// is gone — which is what happens every time an episode is re-transcribed and
+/// re-segmented. Measured on the 2026-08-19 t4 pull: of the 301 coarse
+/// `containsAd` rows, **282 name lines and 174 of those cannot be resolved**,
+/// every one of them because the segmentation the scan ran against no longer
+/// exists. Those rows keep their whole ~95 s scan tile
+/// (``SemanticSweepMarkComposer/Localisation/unreadable``), which is how a
+/// verdict about nine seconds of CTA becomes a 101 s mark over the show.
+///
+/// **SECONDS ALONE WOULD NOT HAVE BEEN ENOUGH, and the reader is what proves
+/// it.** ``SemanticSweepMarkComposer/persistedSupportSpans(of:)`` requires the
+/// `lineRef` set persisted here to EQUAL the row's own `supportLineRefs`, so a
+/// payload that has drifted from the verdict it claims to project is refused
+/// rather than believed. Drop the `lineRef` and that check becomes untypeable:
+/// a bare `[{start, end}]` array is indistinguishable from one somebody
+/// reconstructed later against the wrong segmentation, which is this bead's own
+/// defect wearing the shape of its fix. The refs also carry the ADJACENCY that
+/// ``SupportLineIndex/contiguousBounds(of:)`` groups on — two spans that abut in
+/// time are not necessarily two consecutive lines, and only the ref says which.
+struct SupportLineSpan: Sendable, Codable, Equatable {
+    /// The segment index the model named.
+    let lineRef: Int
+    /// The seconds that segment covered, in the segmentation the model saw.
+    let start: Double
+    let end: Double
+}
+
 /// The segment geometry a coarse row's `supportLineRefs` are indices INTO,
 /// stamped with the `transcriptVersion` it belongs to.
 ///
@@ -263,31 +296,152 @@ struct SupportLineIndex: Sendable, Equatable {
         // AND SU10 as SURVIVED off one crash: three rails silenced by the
         // fourth. A guard doing double duty as a bounds check is a guard whose
         // removal cannot be measured.
-        func bounds(from lower: Int, through upper: Int) -> AdSpanBounds? {
-            let present = (lower...upper).compactMap { lines[$0] }
-            guard let start = present.map(\.startTime).min(),
-                  let end = present.map(\.endTime).max()
-            else { return nil }
-            return AdSpanBounds(start: start, end: end)
+        //
+        // playhead-qjcf: the projection and the run-grouping used to be two
+        // nested helpers here. They are ``project(supportLineRefs:)`` and
+        // ``contiguousBounds(of:)`` now, because the PERSISTED-seconds reader
+        // needs the second of them and a second copy of a grouping rule is how
+        // two readers of one format come to disagree.
+        //
+        // `project`'s OWN refusal is UNREACHABLE on this path and is written
+        // anyway. The `run` loop above has already proved every line in
+        // `first...last` exists, and the guard above bounds `sorted` inside that
+        // range, so no ref reaching here can be missing — i.e. deleting
+        // `else { return nil }` is an EQUIVALENT mutation from `resolve` and
+        // must be killed from ``project(supportLineRefs:)``'s own direct rails
+        // or not at all. It stays because the WRITER's overload has no such
+        // proof standing behind it: it is handed raw segments and refs the model
+        // chose, and there the refusal is the whole safety property.
+        guard let projected = project(supportLineRefs: sorted) else { return nil }
+        return Self.contiguousBounds(of: projected)
+    }
+
+    // MARK: - playhead-qjcf (V66): the projection, and the ONE grouping
+
+    /// Turn the refs the model named into the SECONDS they name, in THIS index's
+    /// segmentation.
+    ///
+    /// REFUSES (`nil`) when any ref is unknown to the index, rather than
+    /// projecting the ones it can find. A partial projection would say the model
+    /// named fewer lines than it did, and a consumer would then narrow a mark on
+    /// a claim nobody made. The under-claiming direction is to record nothing
+    /// and let the row keep its whole window — which is what a NULL
+    /// `semantic_scan_results.supportLineSpansJSON` already means.
+    ///
+    /// The result is deduplicated and sorted by `lineRef`, so a writer and a
+    /// reader handed the same refs in different orders produce the same bytes.
+    func project(supportLineRefs refs: [Int]) -> [SupportLineSpan]? {
+        guard !refs.isEmpty else { return nil }
+        var projected: [SupportLineSpan] = []
+        projected.reserveCapacity(refs.count)
+        for ref in Array(Set(refs)).sorted() {
+            guard let line = lines[ref] else { return nil }
+            projected.append(
+                SupportLineSpan(lineRef: ref, start: line.startTime, end: line.endTime)
+            )
         }
+        return projected.isEmpty ? nil : projected
+    }
+
+    /// Project `refs` against a raw segmentation — the WRITER's spelling of
+    /// ``project(supportLineRefs:)``, for a caller that holds `segments` and has
+    /// no version to check them against because it IS the version.
+    ///
+    /// The empty `transcriptVersion` is deliberate and is never persisted: this
+    /// overload exists only to reach the projection, and the resulting index is
+    /// discarded. Nothing here compares versions — the writer is projecting the
+    /// segmentation it just ran, so there is no other coordinate system in the
+    /// room to confuse it with. That is the whole reason the persisted seconds
+    /// survive a re-segmentation and the refs do not.
+    static func project(
+        supportLineRefs refs: [Int],
+        segments: [AdTranscriptSegment]
+    ) -> [SupportLineSpan]? {
+        SupportLineIndex(segments: segments, transcriptVersion: "")
+            .project(supportLineRefs: refs)
+    }
+
+    /// Group projected lines into the MAXIMAL RUNS OF CONSECUTIVE `lineRef`s and
+    /// give each run its union in seconds.
+    ///
+    /// **THIS IS THE ONLY GROUPING, ON PURPOSE.** ``resolve(supportLineRefs:in:)``
+    /// (which reads TODAY'S segmentation) and
+    /// ``SemanticSweepMarkComposer/persistedSupportSpans(of:)`` (which reads the
+    /// seconds the WRITER recorded) both end here, so the live path and the
+    /// recorded path cannot drift into disagreeing about what refs `[46, 48]`
+    /// mean. Before playhead-qjcf this loop lived once, inside `resolve`; a
+    /// second copy for the persisted payload is exactly how two readers of one
+    /// format come to disagree.
+    ///
+    /// Consecutiveness is decided on the REF, never on the seconds: two segments
+    /// can abut in time without being adjacent lines, and merging those would
+    /// widen a mark across audio the model did not name. Whether two runs then
+    /// become one MARK is a question about TIME, and `mergeExtents` answers it
+    /// with `mergeGapSeconds`.
+    static func contiguousBounds(of projected: [SupportLineSpan]) -> [AdSpanBounds]? {
+        let sorted = projected.sorted { $0.lineRef < $1.lineRef }
+        guard let firstSpan = sorted.first else { return nil }
 
         var spans: [AdSpanBounds] = []
-        var runStartRef = lowest
-        var previous = lowest
-        for ref in sorted.dropFirst() {
-            if ref == previous + 1 {
-                previous = ref
+        var runStart = firstSpan.start
+        var runEnd = firstSpan.end
+        var previousRef = firstSpan.lineRef
+        for span in sorted.dropFirst() {
+            if span.lineRef == previousRef + 1 {
+                runStart = Swift.min(runStart, span.start)
+                runEnd = Swift.max(runEnd, span.end)
+                previousRef = span.lineRef
                 continue
             }
-            if let span = bounds(from: runStartRef, through: previous) {
-                spans.append(span)
-            }
-            runStartRef = ref
-            previous = ref
+            spans.append(AdSpanBounds(start: runStart, end: runEnd))
+            runStart = span.start
+            runEnd = span.end
+            previousRef = span.lineRef
         }
-        if let span = bounds(from: runStartRef, through: previous) {
-            spans.append(span)
-        }
+        spans.append(AdSpanBounds(start: runStart, end: runEnd))
         return spans.isEmpty ? nil : spans
+    }
+
+    /// Encode a projection for `semantic_scan_results.supportLineSpansJSON`.
+    ///
+    /// `.sortedKeys` so the column is stable BYTES: a row rewritten by a later
+    /// attempt carrying the same verdict must not read as changed to anything
+    /// diffing two device pulls.
+    ///
+    /// Returns `nil` — i.e. WRITE NOTHING — for an empty projection or an
+    /// encoder failure. A column that says "the writer recorded no seconds" is
+    /// true in both cases, and `"[]"` would be a FOURTH spelling of an absence
+    /// this neighbourhood already has three of (`spansJSON == "[]"`, an empty
+    /// `supportLineRefs`, an undecodable payload) — the exact ambiguity
+    /// ``SemanticSweepMarkComposer/supportLineRefs(of:)`` has to spend a
+    /// paragraph disentangling.
+    static func encodeSupportLineSpans(_ spans: [SupportLineSpan]) -> String? {
+        guard !spans.isEmpty else { return nil }
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.sortedKeys]
+        guard let data = try? encoder.encode(spans),
+              let text = String(data: data, encoding: .utf8)
+        else { return nil }
+        return text
+    }
+
+    /// Decode `semantic_scan_results.supportLineSpansJSON`.
+    ///
+    /// `nil` for a NULL column, for a payload that will not decode, and for an
+    /// empty array — all three are "this row records no seconds", which is what
+    /// every pre-V66 row on disk is and what a caller must handle anyway.
+    ///
+    /// GEOMETRY IS NOT VALIDATED HERE, deliberately: whether a span is finite,
+    /// whether it lies inside the row's own window, and whether its refs are the
+    /// refs the row's VERDICT named are all properties of the ROW, which this
+    /// type does not hold. ``SemanticSweepMarkComposer/persistedSupportSpans(of:)``
+    /// owns every one of them, and a reader that took this function's non-nil as
+    /// a licence would be trusting bytes nobody had checked against a claim.
+    static func decodeSupportLineSpans(_ json: String?) -> [SupportLineSpan]? {
+        guard let json, let data = json.data(using: .utf8),
+              let spans = try? JSONDecoder().decode([SupportLineSpan].self, from: data),
+              !spans.isEmpty
+        else { return nil }
+        return spans
     }
 }
