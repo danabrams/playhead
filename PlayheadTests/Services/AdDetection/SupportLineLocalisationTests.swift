@@ -771,6 +771,137 @@ struct SemanticSweepMergeBarrierTests {
 
         #expect(Fx.compose(rows: rows).count == 1)
     }
+
+    // MARK: - The inverted range (playhead-vz3l)
+
+    /// THE BEAD'S OWN TWO-LINE FIXTURE, and the observable is a COLLIDING ID
+    /// rather than a count.
+    ///
+    /// A genuine re-screen — the same coarse window handed to a second FM call
+    /// — is two `containsAd` rows over identical bounds, and stage 3 must fold
+    /// them into one claim. It did not, whenever a `noAds` row examined a
+    /// window WIDER THAN BOTH: `mergeGapSeconds` admits the pair (100 ≤ 190 +
+    /// 2), and `coversGap(from: last.end, to: extent.start)` was then evaluated
+    /// with `lower` 190 and `upper` 100 — an INVERTED range, under which the
+    /// predicate reads "the barrier contains the whole overlap" and [90, 200]
+    /// satisfies it. There is no gap between two extents over the SAME window,
+    /// so nothing was being barred except a merge that swallows nothing.
+    ///
+    /// WHY THE ID IS THE ASSERTION. Two marks over identical bounds are not
+    /// merely redundant: `markId` is content-addressed on
+    /// `(asset, detectorVersion, start, end)`, so both carry the same
+    /// `AdWindow.id`, the store's INSERT-OR-REPLACE keeps whichever arrives
+    /// last, and the other's GRADE is discarded with nothing recording that it
+    /// existed. A count alone would let a future composer satisfy this test by
+    /// emitting one of two marks it should never have minted.
+    @Test("a re-screen of one window is ONE mark, whatever wider window was cleared")
+    func aBarrierContainingTheWholeOverlapDoesNotBar() {
+        let rows = [
+            Fx.row(id: "screen-1", start: 100, end: 190),
+            // The SAME window, screened again — a second FM call, not a
+            // different claim.
+            Fx.row(id: "screen-2", start: 100, end: 190),
+            // Examined [90, 200] and did not affirm: strictly wider than both.
+            Fx.row(id: "denial", start: 90, end: 200, disposition: .noAds),
+        ]
+
+        let marks = Fx.compose(rows: rows)
+
+        #expect(
+            Set(marks.map(\.id)).count == marks.count,
+            """
+            two marks over identical bounds mint the SAME content-addressed \
+            AdWindow.id, so the store's upsert keeps one and drops the other's \
+            grade in silence — ids: \(marks.map(\.id))
+            """
+        )
+        #expect(marks.count == 1, "the two screenings are one claim about one window")
+        #expect(marks.first?.startTime == 100)
+        #expect(marks.first?.endTime == 190)
+    }
+
+    /// THE PROPERTY THAT MUST NOT CHANGE, and it is the reason two fixtures in
+    /// ``SemanticSweepCorroborationScopeTests`` had to be written with a denial
+    /// at [150, 250] rather than [90, 200].
+    ///
+    /// A denial overlapping ONE edge is a clean dissenting replicate and was
+    /// never a barrier here — `coversGap(from: 190, to: 100)` is
+    /// `150 < 100 && 250 > 190`, false on its first conjunct. So this composes
+    /// to one mark BEFORE the fix as well as after, which is what makes it an
+    /// anti-fabrication guard: a "fix" that simply stopped consulting the
+    /// barriers would pass the test above and this one, and be caught by
+    /// ``aClearedWindowBarsTheMerge()``.
+    @Test("a denial overlapping one edge of the re-screen is still one mark")
+    func aBarrierOverlappingOneEdgeStillComposesToOneMark() {
+        let rows = [
+            Fx.row(id: "screen-1", start: 100, end: 190),
+            Fx.row(id: "screen-2", start: 100, end: 190),
+            Fx.row(id: "denial", start: 150, end: 250, disposition: .noAds),
+        ]
+
+        let marks = Fx.compose(rows: rows)
+
+        #expect(marks.count == 1)
+        #expect(Set(marks.map(\.id)).count == marks.count)
+        #expect(marks.first?.startTime == 100)
+        #expect(marks.first?.endTime == 190)
+    }
+
+    /// The same two claims at the extent level, so the geometry is pinned
+    /// without stages 1–2 and 4–7 in the way — and pinned in BOTH directions in
+    /// one test, because "overlapping extents always merge" is satisfiable by a
+    /// `mergeExtents` that ignores `barredBy` entirely.
+    @Test("mergeExtents folds an overlap through a containing span, and still splits a real gap")
+    func mergeExtentsSeparatesTheOverlapFromTheGap() {
+        typealias Extent = SemanticSweepMarkComposer.Extent
+
+        // NESTED/IDENTICAL: no gap exists, so [90, 200] cannot bar it.
+        let overlapping = [Extent(start: 100, end: 190), Extent(start: 100, end: 190)]
+        #expect(
+            SemanticSweepMarkComposer.mergeExtents(
+                overlapping,
+                barredBy: [AdSpanBounds(start: 90, end: 200)]
+            ) == [Extent(start: 100, end: 190)]
+        )
+
+        // A REAL 0.42 s gap, from 561CEF5B: the barrier still bars.
+        let split = [Extent(start: 420.9, end: 529.8), Extent(start: 530.22, end: 619.62)]
+        #expect(
+            SemanticSweepMarkComposer.mergeExtents(
+                split,
+                barredBy: [AdSpanBounds(start: 497.34, end: 607.08)]
+            ).count == 2,
+            "control: shu5's rule is intact"
+        )
+        #expect(
+            SemanticSweepMarkComposer.mergeExtents(split, barredBy: []).count == 1,
+            "control: it is the barrier that splits them, not the 0.42 s gap"
+        )
+    }
+
+    /// The predicate itself, over the four shapes its guard sorts. Stated
+    /// directly because ``SemanticSweepMarkComposer/mergeIsBarred(from:to:by:)``
+    /// exists so a caller can never hand
+    /// ``AdSpanBounds/coversGap(from:to:)`` an inverted range again, and that
+    /// is a property of the function rather than of any one composition.
+    @Test("mergeIsBarred asks about a GAP, and only where there is one")
+    func mergeIsBarredIsAskedOnlyWhereThereIsAGap() {
+        let containing = [AdSpanBounds(start: 90, end: 200)]
+
+        // INVERTED: last.end 190 is past next.start 100. No gap, no bar —
+        // even though the span strictly contains the whole overlap.
+        #expect(!SemanticSweepMarkComposer.mergeIsBarred(from: 190, to: 100, by: containing))
+        // ZERO-LENGTH: the extents touch, so nothing is swallowed.
+        #expect(!SemanticSweepMarkComposer.mergeIsBarred(from: 190, to: 190, by: containing))
+        // A REAL gap the span covers.
+        #expect(SemanticSweepMarkComposer.mergeIsBarred(from: 190, to: 195, by: containing))
+        // A REAL gap the span does not reach.
+        #expect(!SemanticSweepMarkComposer.mergeIsBarred(
+            from: 400, to: 405, by: containing
+        ))
+        // And nothing bars when nobody cleared anything.
+        #expect(!SemanticSweepMarkComposer.mergeIsBarred(from: 190, to: 195, by: []))
+    }
 }
 
 // MARK: - 4. The wires

@@ -1286,6 +1286,11 @@ enum SemanticSweepMarkComposer {
     /// One instance is the honest count and it is stated rather than rounded
     /// up: the rule is here because the shape is wrong, not because it is
     /// common.
+    ///
+    /// playhead-vz3l: THE BARRIER IS ASKED ONLY WHERE THERE IS A GAP TO BAR.
+    /// The distance test above admits every OVERLAPPING and NESTED pair, and
+    /// those have no gap at all — see ``mergeIsBarred(from:to:by:)``, which
+    /// owns that guard and the measurement behind it.
     static func mergeExtents(
         _ extents: [Extent],
         barredBy barriers: [AdSpanBounds] = []
@@ -1297,9 +1302,7 @@ enum SemanticSweepMarkComposer {
         for extent in sorted {
             if var last = result.last,
                extent.start <= last.end + mergeGapSeconds,
-               !barriers.contains(where: {
-                   $0.coversGap(from: last.end, to: extent.start)
-               }),
+               !mergeIsBarred(from: last.end, to: extent.start, by: barriers),
                max(last.end, extent.end) - last.start <= maximumMarkDurationSeconds {
                 let held = max(0, last.duration)
                 let added = max(0, extent.end - last.end)
@@ -1346,6 +1349,60 @@ enum SemanticSweepMarkComposer {
             }
         }
         return result
+    }
+
+    /// Does a window somebody CLEARED cover the gap a merge from `lastEnd` to
+    /// `nextStart` would swallow (playhead-shu5)?
+    ///
+    /// THE GUARD IS THE WHOLE FUNCTION, AND IT IS WHY THIS IS NOT AN INLINE
+    /// `contains` ANY MORE (playhead-vz3l). ``mergeExtents(_:barredBy:)``
+    /// admits a pair at `nextStart <= lastEnd + mergeGapSeconds`, which EVERY
+    /// overlapping and nested pair satisfies — so `nextStart` is routinely at
+    /// or BEFORE `lastEnd`, and the call this replaced then handed
+    /// ``AdSpanBounds/coversGap(from:to:)`` an INVERTED range. That helper is
+    /// `start < upper && end > lower`; inverted it reads "the barrier begins
+    /// before the SECOND extent and ends after the FIRST", i.e. "the barrier
+    /// CONTAINS the whole overlap" — a condition about containment wearing the
+    /// name of a gap, which is this repo's standing defect class in its
+    /// geometric form. Two extents that overlap or touch have NO gap between
+    /// them, so a merge across them swallows no audio and nothing may bar it.
+    ///
+    /// The zero-length case (`nextStart == lastEnd`) is refused for exactly the
+    /// reason ``AdSpanBounds/coversGap(from:to:)`` is OPEN rather than closed:
+    /// extents that merely touch leave no swallowed audio, and barring on them
+    /// costs a merge for nothing.
+    ///
+    /// MEASURED BEFORE IT WAS TAKEN, because it is a WIDENING and not a pure
+    /// repair. Stages 1–3 replayed over all 15 assets of the 2026-08-19 t4
+    /// pull: 238 pairs reach the distance test and **173 of them are at or past
+    /// the overlap** (160 nested, 13 partially overlapping, 0 exactly
+    /// touching), so the inverted call was the MAJORITY of merge decisions
+    /// rather than an edge. It barred **none** of the 173 — 168 of them have a
+    /// cleared span starting before `nextStart` and 139 have one ending after
+    /// `lastEnd`, but never the SAME span doing both. The barrier fires exactly
+    /// once on the whole pull and that instance is a REAL 0.42 s gap
+    /// (`561CEF5B`, `lastEnd` 529.80, `nextStart` 530.22, cleared window
+    /// [497.34–607.08]) — the one ``mergeExtents(_:barredBy:)`` documents.
+    /// Stage 3's output is byte-identical either way: 142 merged extents
+    /// before and after, zero assets moved.
+    ///
+    /// WHAT THE WIDENING ADMITS, stated because the population being empty on
+    /// one pull is not the same as it being empty: a pair whose extents overlap
+    /// or touch, with a cleared span STRICTLY CONTAINING that overlap
+    /// (`barrier.start < nextStart && barrier.end > lastEnd`). It is not
+    /// hypothetical — the shape is a coarse re-screen. Two `containsAd` rows
+    /// over [100, 190] plus a `noAds` over [90, 200] composed to TWO marks with
+    /// IDENTICAL bounds, and ``markId(analysisAssetId:start:end:)`` is
+    /// content-addressed on exactly those bounds, so both carried the same
+    /// `AdWindow.id` and the store's INSERT-OR-REPLACE discarded one grade in
+    /// silence. `SemanticSweepMergeBarrierTests` holds that fixture.
+    static func mergeIsBarred(
+        from lastEnd: Double,
+        to nextStart: Double,
+        by barriers: [AdSpanBounds]
+    ) -> Bool {
+        guard nextStart > lastEnd else { return false }
+        return barriers.contains { $0.coversGap(from: lastEnd, to: nextStart) }
     }
 
     /// The spans a PRESENCE-pass row examined and did NOT affirm — the windows
