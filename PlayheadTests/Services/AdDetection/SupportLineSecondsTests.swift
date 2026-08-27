@@ -30,8 +30,8 @@
 // the ones that stage rescues. Three MORE quantities live in this
 // neighbourhood and none is interchangeable with another: 211 rows at a
 // superseded transcriptVersion, 280 whose version no surviving chunk STAMP
-// carries — a figure kg6i refuted as a reach number — and 174 this stage
-// cannot localise, which is the only one V66 is about.)
+// carries — a figure kg6i refuted as a reach number — and the 174 above, which
+// is the only one V66 is about.)
 //
 // WHAT THIS BEAD DOES NOT DO, pinned as hard as what it does. There is no
 // backfill and there cannot be one: the seconds were never written, and the
@@ -530,9 +530,9 @@ struct PersistedSupportSecondsReaderTests {
         // than clamped. The last two cases OVERHANG — they overlap the window and
         // exceed it — and they are the only ones that exercise the containment
         // clauses, because `window.overlaps(...)` refuses the first two on its
-        // own. (Until review round 3 there were no overhang cases, so those two
-        // clauses had no rail and mutant QJ03 would have reported a false
-        // SURVIVED. Round 1's fix had subsumed round 1's own verification.)
+        // own. (The paragraph below records when and why they were added; round
+        // 3 restated it here and got the round number wrong, which is why this
+        // one is a pointer rather than a second copy.)
         // Every persisted `supportLineRefs` value is a subset of the window's own
         // lineRefs — `FoundationModelClassifier.sanitize` filters against
         // `Set(plan.lineRefs)` and `PermissiveAdClassifier.parse` intersects the
@@ -599,16 +599,28 @@ struct PersistedSupportSecondsReaderTests {
         // and the one input that would — an overflowing numeric LITERAL — was not
         // tried.
         //
-        // The honest justification does not depend on Foundation's defaults at
-        // all: **the containment clauses refuse every non-finite span on their
-        // own**, because every comparison against NaN is false and an infinite
-        // bound fails one of the two containments. That is provable locally, and
-        // it is what `persistedSupportSpans`' doc now says. The `isFinite`
-        // clauses are redundant with it and are kept as a stated invariant, on
+        // ROUND 4 CORRECTED THE CORRECTION, and the correction was wrong about
+        // WHICH CLAUSE does the work. With the two `isFinite` clauses
+        // hypothetically deleted, against a finite window, FOUR of the six
+        // non-finite cases are refused by the ORDERING clause and only two by
+        // containment:
+        //
+        //     start = NaN   -> `end > start` is false        (ordering)
+        //     end   = NaN   -> `end > start` is false        (ordering)
+        //     start = +inf  -> nothing exceeds +inf          (ordering)
+        //     end   = -inf  -> -inf > start is false         (ordering)
+        //     start = -inf  -> fails `start >= window.start` (containment)
+        //     end   = +inf  -> fails `end <= window.end`     (containment)
+        //
+        // Round 3 attributed all six to containment and offered the NaN half as
+        // the containment case, which is the half the ordering clause consumes.
+        // The standing defect class, inside the paragraph written to fix an
+        // instance of it. What survives is the OUTCOME claim — between ordering
+        // and containment nothing non-finite gets through — so the two `isFinite`
+        // clauses are redundant and are kept as a stated invariant, on
         // `project`'s precedent; no mutant targets them.
         //
-        // So this rail asserts the OUTCOME — refused — for every route a
-        // non-finite value could take, and asserts nothing about WHY.
+        // This rail therefore asserts the OUTCOME, and says nothing about WHY.
         #expect(SupportLineIndex.encodeSupportLineSpans(
             [SupportLineSpan(lineRef: 62, start: .nan, end: 1_611.42)]) == nil,
             "the encoder's own default refuses this one, so no payload is built")
@@ -617,18 +629,19 @@ struct PersistedSupportSecondsReaderTests {
 
         // The route that MATTERS: an overflowing literal is well-formed JSON and
         // is the only way a genuine non-finite `Double` can arrive off a disk.
-        // Whether the decoder yields `+inf` or refuses is Foundation's business
-        // and is deliberately not asserted; what is asserted is that the reader
-        // refuses the row either way.
+        // Round 3 tried `"start":null` (value-not-found) and `"end":"Infinity"`
+        // (type mismatch), neither of which engages non-finiteness at all.
         let overflowing = #"[{"lineRef":62,"start":1590.0,"end":1e400}]"#
+        #expect(SupportLineIndex.decodeSupportLineSpans(overflowing) == nil,
+                "the decoder is where it stops, and this is the input that says so")
         let row = Fx.row(spansJSON: Fx.support([62]), seconds: overflowing)
         #expect(SemanticSweepMarkComposer.persistedSupportSpans(of: row) == nil)
-        // …and directly, so the guard is exercised even if the decoder refuses.
-        let infinite = [SupportLineSpan(lineRef: 62, start: 1_590.0, end: .infinity)]
-        #expect(infinite.allSatisfy { $0.end.isFinite } == false)
-        #expect(AdSpanBounds(start: 1_510.38, end: 1_611.42)
-            .overlaps(start: 1_590.0, end: .infinity),
-            "overlap alone does NOT refuse it — containment is what does")
+        // NOTHING BELOW REACHES THE GUARD CHAIN, and round 3 claimed otherwise.
+        // `persistedSupportSpans` is called ONCE in this test, on the payload
+        // above; a non-finite `SupportLineSpan` cannot be handed to it, because
+        // the only way in is through `decodeSupportLineSpans`. So the guard's
+        // `isFinite` clauses have no reachable rail and are documented as a
+        // stated invariant rather than pretended to be tested.
     }
 
     @Test("a row that named NOTHING cannot acquire seconds from a payload")
@@ -988,10 +1001,16 @@ struct SupportLineSecondsCarrierTests {
         // Rewind to the V65 SHAPE, not merely the stamp — the sibling suites'
         // rule. WHAT IT PROVES, said precisely, because the sibling suites' own
         // wording over-claims and round 3 caught this copy of it: NOT that the
-        // rung adds the column. `createTables()` runs BEFORE the ladder on the
-        // `migrate()` path and re-adds it regardless, so the rung's
-        // `addColumnIfNeeded` is belt-and-braces and no rail can observe its
-        // deletion. What the rewind proves is the two things that matter — that
+        // rung adds the column. ON THE `migrate()` PATH `createTables()` runs
+        // BEFORE the ladder and re-adds it regardless, so no rail HERE can
+        // observe the rung's own `addColumnIfNeeded` being deleted. **That is
+        // not the same as "belt-and-braces", and the unscoped version of this
+        // sentence — round 3's — is what a future reader would delete the line
+        // on.** On the `migrateOnlyForTesting()` seam `createTables()` is
+        // skipped entirely, so there the rung's `addColumnIfNeeded` is the ONLY
+        // adder; that is what V65's own rung note says about itself, and what
+        // `bothLaddersRunTheRung` refuses to let anyone remove. What the rewind
+        // proves is the two things that matter — that
         // a store which really lost the column CONVERGES on the head shape, and
         // that a row which crossed the rung comes out with its projection still
         // NULL.

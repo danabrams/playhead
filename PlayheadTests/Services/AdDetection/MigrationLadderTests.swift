@@ -124,7 +124,9 @@ struct MigrationLadderTests {
         // the three blocks above it claim "on an UPGRADED database" and this test
         // has no `seedSchemaVersion`, so `createTables()` builds the head shape
         // before the ladder runs and the probe passes with the rung deleted. The
-        // V42 note eight lines up says as much in its own words. What this pins
+        // V42 note in this same test says as much in its own words — cited by
+        // NAME rather than by "eight lines up", which was wrong by thirty. What
+        // this pins
         // is that `semanticScanResultColumns` names a column a fresh install
         // really has; the UPGRADE direction is
         // `SupportLineSecondsTests.migrationDoesNotBackfill`, which drops the
