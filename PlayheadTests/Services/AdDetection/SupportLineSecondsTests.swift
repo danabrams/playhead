@@ -695,6 +695,16 @@ struct SupportLineSecondsCarrierTests {
 
         let withSeconds = try #require(try await store.fetchSemanticScanResult(id: "scan-with"))
         #expect(withSeconds.supportLineSpansJSON == payload)
+        // AND ITS NEIGHBOURS SURVIVE. Adding a column to a 35-slot positional
+        // bind is exactly the edit that silently drops the slot beside it, and
+        // it is what happened here: the first cut of this change deleted
+        // `bind(stmt, 34, …)` — `usedPermissiveFallback`, playhead-iw7q's whole
+        // column — while every rail in THIS file stayed green, because none of
+        // them looked at a field this bead did not add. The V61 suite caught it.
+        // A rail about one field is a rail about one field.
+        #expect(withSeconds.verdictProvenance == .model)
+        #expect(withSeconds.latencySampleCount == nil)
+        #expect(withSeconds.spansJSON == Fx.support([62]))
         let withoutSeconds = try #require(try await store.fetchSemanticScanResult(id: "scan-without"))
         #expect(withoutSeconds.supportLineSpansJSON == nil)
 
@@ -961,5 +971,48 @@ struct SupportLineSecondsWiringSourceCanaryTests {
         let rung = "try migrateSemanticScanSupportLineSecondsV66IfNeeded()"
         #expect(text.components(separatedBy: rung).count - 1 == 2,
                 "the rung must appear in migrate() AND migrateOnlyForTesting()")
+    }
+
+    @Test("the semantic-scan INSERT binds every placeholder exactly once, in order")
+    func insertBindsAreContiguous() throws {
+        // THE RAIL THIS BEAD OWES ITS OWN MISTAKE. The first cut of the change
+        // added `bind(stmt, 35, …)` by replacing the text of `bind(stmt, 34, …)`
+        // and DELETED it — `usedPermissiveFallback`, an unrelated column, went
+        // silently NULL on every write. The insert still prepared and still
+        // succeeded, because SQLite leaves an unbound parameter as NULL; only
+        // the V61 suite noticed, and only because it happens to assert on that
+        // one field.
+        //
+        // A positional bind list is a place where an off-by-one is invisible to
+        // every test about the field you are adding, so the shape gets its own
+        // check: the indices must be exactly `1...n`, and `n` must equal the
+        // placeholder count. This is about the STRUCTURE, so it belongs here
+        // rather than in a behavioural suite that would need one assertion per
+        // column to say the same thing.
+        let text = try Self.source("Playhead/Persistence/AnalysisStore/AnalysisStore.swift")
+        let marker = "INSERT OR REPLACE INTO semantic_scan_results"
+        let start = try #require(text.range(of: marker)).lowerBound
+        let end = try #require(
+            text.range(of: "try step(stmt, expecting: SQLITE_DONE)", range: start..<text.endIndex)
+        ).upperBound
+        let block = String(text[start..<end])
+
+        let values = try #require(block.range(of: "VALUES ("))
+        let valuesEnd = try #require(block.range(of: ")", range: values.upperBound..<block.endIndex))
+        let placeholders = block[values.upperBound..<valuesEnd.lowerBound]
+            .filter { $0 == "?" }.count
+
+        var indices: [Int] = []
+        var cursor = block.startIndex
+        while let hit = block.range(of: "bind(stmt, ", range: cursor..<block.endIndex) {
+            let tail = block[hit.upperBound...]
+            let digits = tail.prefix(while: \.isNumber)
+            if let value = Int(digits) { indices.append(value) }
+            cursor = hit.upperBound
+        }
+
+        let detail = "binds \(indices) against \(placeholders) placeholders — an index "
+            + "that is missing, repeated or out of order silently writes NULL"
+        #expect(indices == Array(1...placeholders), "\(detail)")
     }
 }

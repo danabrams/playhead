@@ -22675,6 +22675,7 @@ actor AnalysisStore {
         // `map`, never `?? 0`: `.unknown` writes NULL. A writer with no
         // observation must not claim `.model`, which is what a coalesced zero
         // would say. Same shape as `prewarmHit` on column 17.
+        bind(stmt, 34, result.verdictProvenance.persistedFlag.map { $0 ? 1 : 0 })
         // playhead-qjcf (V66). THE INCOMING VALUE, on `verdictProvenance`'s rule
         // one line up and for the same reason: this is a property of the
         // VERDICT, not of the row's HISTORY. Columns 9-10 (`disposition`,
