@@ -1118,18 +1118,64 @@ enum SemanticSweepMarkComposer {
     /// The rows that carry a usable presence verdict, with pass-B refinement
     /// applied. See the policy note in the file header for why a DECLINED
     /// pass B leaves the coarse verdict standing.
+    /// playhead-9s1z MEASUREMENT SWITCH — NOT A BEHAVIOUR CHANGE.
+    ///
+    /// `.shipped` is the default and every production call site takes it, so
+    /// the compiled behaviour of the app is byte-identical to `main`. The other
+    /// two values exist ONLY so `tools/9s1z` can recompose the t4 device pull
+    /// under options (ii) and (iii) using THIS source rather than a model of
+    /// it. Nothing in `Playhead/` ever writes this property.
+    ///
+    /// Dan has chosen no option. This must not ship.
+    enum VersionScopePolicy9s1z: Sendable, Equatable {
+        /// Today: a coarse window is narrowed by ANY overlapping refinement,
+        /// whatever transcript that refinement was formed against.
+        case shipped
+        /// (ii) require the same version. The pairing is refused, so the coarse
+        /// window stands UN-NARROWED and the refinement, now unclaimed, stands
+        /// alone as its own extent.
+        case sameVersion
+        /// (iii) require the same version, and keep BOTH halves of the refused
+        /// pairing out of the mark set: the coarse window contributes nothing
+        /// (rather than widening back to its full tile), and a refinement whose
+        /// only overlapping coarse windows were all cross-version is suppressed
+        /// (rather than standing alone). A coarse window with no overlapping
+        /// refinement at all, and a refinement inside no coarse window at all,
+        /// are untouched — those are not cross-version cases.
+        case sameVersionDropBoth
+    }
+
+    /// Set by `tools/9s1z` only. See ``VersionScopePolicy9s1z``.
+    nonisolated(unsafe) static var versionScopePolicy9s1z: VersionScopePolicy9s1z = .shipped
+    /// playhead-9s1z measurement counters, written only under a non-`.shipped`
+    /// policy. Never read by the app.
+    nonisolated(unsafe) static var measurement9s1zSuppressedCoarseWindows = 0
+    nonisolated(unsafe) static var measurement9s1zSuppressedOrphanedRefinements = 0
+
     static func presenceExtents(_ rows: [SemanticScanResult]) -> [Extent] {
         let admissible = rows.filter(isPresenceVerdict)
         let refinements = admissible.filter { $0.scanPass == refinementScanPass }
         let coarse = admissible.filter { $0.scanPass != refinementScanPass }
+        let policy = versionScopePolicy9s1z
 
         var result: [Extent] = []
         var claimedRefinements = Set<Int>()
+        // playhead-9s1z measurement bookkeeping. Under `.shipped` both stay
+        // empty and nothing below reads them.
+        var refinementsOverlappedByAnyCoarse = Set<Int>()
+        var suppressedCoarseWindows = 0
         for window in coarse {
             var narrowed: [Extent] = []
+            var sawCrossVersionRefinement = false
             for (index, refinement) in refinements.enumerated()
             where refinement.windowStartTime < window.windowEndTime
                 && refinement.windowEndTime > window.windowStartTime {
+                refinementsOverlappedByAnyCoarse.insert(index)
+                if policy != .shipped,
+                   refinement.transcriptVersion != window.transcriptVersion {
+                    sawCrossVersionRefinement = true
+                    continue
+                }
                 claimedRefinements.insert(index)
                 narrowed.append(
                     // playhead-92im: a narrowed extent rests on BOTH rows, so
@@ -1144,6 +1190,14 @@ enum SemanticSweepMarkComposer {
                     )
                 )
             }
+            if narrowed.isEmpty,
+               policy == .sameVersionDropBoth,
+               sawCrossVersionRefinement {
+                // (iii): the un-narrowed tile is a TARGETING failure, not a
+                // wider ad. Emit nothing rather than widening the mark.
+                suppressedCoarseWindows += 1
+                continue
+            }
             result.append(contentsOf: narrowed.isEmpty
                 ? [scored(
                     start: window.windowStartTime,
@@ -1153,6 +1207,7 @@ enum SemanticSweepMarkComposer {
                 )]
                 : narrowed)
         }
+        Self.measurement9s1zSuppressedCoarseWindows += suppressedCoarseWindows
         // A refinement inside no coarse containsAd window is itself a verdict
         // and stands alone. Dropping it would rebuild, one layer down, the
         // "presence needs a host to attach to" rule this bead removes.
@@ -1174,6 +1229,15 @@ enum SemanticSweepMarkComposer {
         // refinement never saw. The deduction is not weakened, it is aimed.
         for (index, refinement) in refinements.enumerated()
         where !claimedRefinements.contains(index) {
+            if policy == .sameVersionDropBoth,
+               refinementsOverlappedByAnyCoarse.contains(index) {
+                // (iii): this refinement is unclaimed ONLY because every coarse
+                // window over it was at another version. It is not a genuine
+                // orphan (one inside no coarse window at all), so it does not
+                // get the orphan rule's standing.
+                Self.measurement9s1zSuppressedOrphanedRefinements += 1
+                continue
+            }
             result.append(
                 scored(
                     start: refinement.windowStartTime,
