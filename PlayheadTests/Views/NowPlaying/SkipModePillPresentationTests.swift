@@ -145,23 +145,23 @@ struct NowPlayingViewModelSkipModeResolutionTests {
 
     /// The view model starts before any episode does.
     @Test("the view model defaults to no active episode")
-    func defaultsToNoActiveEpisode() {
-        let viewModel = NowPlayingViewModel(
-            runtime: PlayheadRuntime(isPreviewRuntime: true)
-        )
-        #expect(viewModel.skipModeResolution == .noActiveEpisode)
+    func defaultsToNoActiveEpisode() async {
+        await withTestRuntime(isPreviewRuntime: true) { runtime in
+            let viewModel = NowPlayingViewModel(runtime: runtime)
+            #expect(viewModel.skipModeResolution == .noActiveEpisode)
+        }
     }
 
     /// The user's own selection is not the orchestrator's lookup failure, and
     /// the pill must stop saying so the moment they choose.
     @Test("setting a mode marks the resolution as a session override")
-    func settingAModeMarksASessionOverride() {
-        let viewModel = NowPlayingViewModel(
-            runtime: PlayheadRuntime(isPreviewRuntime: true)
-        )
-        viewModel.noteSkipModeSelection(.manual)
-        #expect(viewModel.activeSkipMode == .manual)
-        #expect(viewModel.skipModeResolution == .sessionOverride)
+    func settingAModeMarksASessionOverride() async {
+        await withTestRuntime(isPreviewRuntime: true) { runtime in
+            let viewModel = NowPlayingViewModel(runtime: runtime)
+            viewModel.noteSkipModeSelection(.manual)
+            #expect(viewModel.activeSkipMode == .manual)
+            #expect(viewModel.skipModeResolution == .sessionOverride)
+        }
     }
 
     /// The load hop is where the orchestrator's cause actually reaches the
@@ -179,24 +179,24 @@ struct NowPlayingViewModelSkipModeResolutionTests {
                 mode: "auto", trustScore: 0.9, observations: 10
             )
         )
-        let viewModel = NowPlayingViewModel(
-            runtime: PlayheadRuntime(isPreviewRuntime: true)
-        )
+        await withTestRuntime(isPreviewRuntime: true) { runtime in
+            let viewModel = NowPlayingViewModel(runtime: runtime)
 
-        await orchestrator.beginEpisode(
-            analysisAssetId: "asset-1", episodeId: "ep-1", podcastId: nil
-        )
-        await viewModel.loadSkipMode(from: orchestrator)
-        #expect(viewModel.activeSkipMode == .shadow)
-        #expect(viewModel.skipModeResolution == .unresolvedShowIdentity)
+            await orchestrator.beginEpisode(
+                analysisAssetId: "asset-1", episodeId: "ep-1", podcastId: nil
+            )
+            await viewModel.loadSkipMode(from: orchestrator)
+            #expect(viewModel.activeSkipMode == .shadow)
+            #expect(viewModel.skipModeResolution == .unresolvedShowIdentity)
 
-        // ...and the resolved case, so the assertion above is not simply the
-        // view model's own default leaking through.
-        await orchestrator.beginEpisode(
-            analysisAssetId: "asset-1", episodeId: "ep-1", podcastId: "podcast-1"
-        )
-        await viewModel.loadSkipMode(from: orchestrator)
-        #expect(viewModel.activeSkipMode == .auto)
-        #expect(viewModel.skipModeResolution == .showTrustProfile)
+            // ...and the resolved case, so the assertion above is not simply the
+            // view model's own default leaking through.
+            await orchestrator.beginEpisode(
+                analysisAssetId: "asset-1", episodeId: "ep-1", podcastId: "podcast-1"
+            )
+            await viewModel.loadSkipMode(from: orchestrator)
+            #expect(viewModel.activeSkipMode == .auto)
+            #expect(viewModel.skipModeResolution == .showTrustProfile)
+        }
     }
 }

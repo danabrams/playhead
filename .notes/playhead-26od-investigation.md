@@ -801,9 +801,12 @@ Operationally, three faults worth more than the verdicts:
 * **A selective FOCUSED_SUITES run draws ~7 GiB.** Starting one at 10 GiB with
   `PLAYHEAD_DISK_MIN_GIB=6` reaches exactly the silent wedge the preflight exists
   to refuse. Erase the sim between batches; never lower the floor to fit.
-* **An XCTest expectation carries no module prefix.** `extract_failures` joins
-  the captured suite and method as `Suite/method`, so `PlayheadTests.Suite/method`
-  is unmatchable and reports ERROR while every named test really did fail.
+* **An XCTest expectation carries no module prefix.** Write it `Suite/method`;
+  `PlayheadTests.Suite/method` is unmatchable and reports ERROR while every named
+  test really did fail. (The mechanism named here at the time — `extract_failures`
+  joining the captured suite and method — was deleted by `playhead-gjlp0`. The
+  RULE is unchanged: `scripts/mutation_verdict.py`'s `candidate_keys` matches the
+  bare spelling as a dotted suffix of the bundle's module-qualified key.)
 
 ## Review round R5 — what it changed
 

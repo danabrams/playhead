@@ -3,11 +3,20 @@
 //
 //     A banner is presented for window W at time T  IF AND ONLY IF  W contains T.
 //
-// playhead-2d6i EXTENDED IT ALONG THE AXIS IT COULD NOT SEE, and the statement
-// the file now defends is:
+// playhead-2d6i EXTENDED IT ALONG THE AXIS IT COULD NOT SEE, and playhead-8cjo
+// corrected the second clause. The statement the file now defends is:
 //
-//     a CARD  iff  the playhead is inside W AND a host is attached;
+//     a CARD  iff  the playhead is inside W AND the banner queue ACCEPTED it;
 //     otherwise exactly one LIST ENTRY.
+//
+// 2d6i wrote that clause as "a host is attached", which is a fact about the
+// orchestrator's continuation dictionaries and not about anything the listener
+// saw: `AdBannerQueue.enqueue(_:hostGeneration:)` returns `false` and DROPS the
+// item across a host-generation change, and the observation `Task` can be
+// cancelled between the yield and the enqueue so nothing reaches the queue at
+// all. Those skips were counted on the CARD side and left no row — 2d6i's own
+// defect, one layer up. `BwxiHostDelivery` turns the boolean into three arms
+// and the middle one is that population. See section 1b.
 //
 // Everything below about the containment half stands unchanged. What was
 // missing is that every test in the original suite subscribes before
@@ -182,6 +191,48 @@ enum BwxiBannerTier: Sendable, CustomStringConvertible {
         switch self {
         case .autoSkip: return .autoSkipped
         case .suggest: return .suggest
+        }
+    }
+}
+
+// MARK: - What the host did (playhead-8cjo)
+
+/// playhead-8cjo: WHAT THE HOST DID WITH THE CARD, which is the axis
+/// playhead-2d6i's `hostAttached: Bool` could not express.
+///
+/// 2d6i had two arms because it believed there were two outcomes: a subscriber
+/// exists and gets a card, or none exists and the skip becomes a row. There are
+/// three. A subscriber can exist and the card still never be presented —
+/// `AdBannerQueue.enqueue(_:hostGeneration:)` returns `false` and drops the item
+/// across the reattach window, after `discardAllOnHostDisappear`, or on an
+/// episode/lifecycle mismatch, and the observation `Task` can be cancelled
+/// between the yield and the enqueue so nothing reaches the queue at all. That
+/// middle arm is this bead, and 2d6i's boolean puts it on the same side as a
+/// card the listener actually saw.
+enum BwxiHostDelivery: Sendable, CustomStringConvertible {
+    /// Subscribed, and the host reports the queue accepted every card.
+    case acknowledging
+    /// Subscribed — the item really is yielded — and no acknowledgement ever
+    /// comes back. THIS IS playhead-8cjo.
+    case subscribedButNeverAcknowledging
+    /// Nobody subscribed at all. playhead-2d6i's own case.
+    case unattached
+
+    var description: String {
+        switch self {
+        case .acknowledging:
+            return "a host that acknowledges (a card the listener saw)"
+        case .subscribedButNeverAcknowledging:
+            return "subscribed, never acknowledged (playhead-8cjo)"
+        case .unattached:
+            return "nobody subscribed (playhead-2d6i)"
+        }
+    }
+
+    var isSubscribed: Bool {
+        switch self {
+        case .acknowledging, .subscribedButNeverAcknowledging: return true
+        case .unattached: return false
         }
     }
 }
@@ -452,6 +503,31 @@ struct BannerPlayheadBiconditionalTests {
         await orchestrator.updatePlayheadTime(sentinelStart)
     }
 
+    /// playhead-8cjo: the host's half of the delivery contract, driven by hand.
+    ///
+    /// This is what `BannerHostDelivery.forward` does when the queue accepts an
+    /// item, and it is spelled out here rather than reached through that type
+    /// because THIS suite's subject is the orchestrator boundary — the axis is
+    /// "did an acknowledgement arrive", not "what did a queue decide".
+    /// `AutoSkipCardDeliveryAgainstTheQueueTests` drives the real forwarding
+    /// against a real `AdBannerQueue`; without it this helper would be a test
+    /// that agrees with itself.
+    private static func acknowledge(
+        _ orchestrator: SkipOrchestrator,
+        _ items: [AdSkipBannerItem]
+    ) async {
+        for item in items where item.tier == .autoSkipped {
+            await orchestrator.acknowledgeAutoSkippedBannerDelivery(
+                windowId: item.windowId,
+                episodeId: item.episodeId,
+                playbackLifecycleGeneration:
+                    item.playbackLifecycleGeneration,
+                windowMaterialRevisionToken:
+                    item.windowMaterialRevisionToken
+            )
+        }
+    }
+
     private static func windowsContaining(_ time: Double) -> Set<String> {
         Set(
             fieldWindows
@@ -616,8 +692,8 @@ struct BannerPlayheadBiconditionalTests {
 
     /// THE BICONDITIONAL, EXTENDED ALONG THE AXIS THE ORIGINAL COULD NOT SEE.
     ///
-    ///     a CARD  iff  the playhead is inside the window AND a host is
-    ///                  attached;
+    ///     a CARD  iff  the playhead is inside the window AND the banner queue
+    ///                  ACCEPTED it;
     ///     otherwise exactly one LIST ENTRY.
     ///
     /// The suite above always subscribes before `beginEpisode`, so every one of
@@ -628,7 +704,17 @@ struct BannerPlayheadBiconditionalTests {
     /// while the CALLER had already spent the window's one chance — so the
     /// listener got the skip and could never say No to it.
     ///
-    /// WHY THIS IS ONE TEST PARAMETERISED ON ATTACHMENT AND NOT TWO TESTS. The
+    /// **playhead-8cjo TURNED THE ATTACHMENT BOOLEAN INTO THREE ARMS, and the
+    /// new one is the bead.** 2d6i's second clause was "a host is attached",
+    /// which is a fact about the continuation dictionaries and not about
+    /// anything the listener saw. A subscriber can exist and the card still be
+    /// binned by `AdBannerQueue.enqueue`, or the observation `Task` can die
+    /// between the yield and the enqueue; under the boolean that skip was
+    /// counted on the CARD side and left no row. `BwxiHostDelivery
+    /// .subscribedButNeverAcknowledging` is exactly that population, and it now
+    /// has to land in the list like any other undelivered skip.
+    ///
+    /// WHY THIS IS ONE TEST PARAMETERISED ON DELIVERY AND NOT THREE TESTS. The
     /// same argument the original header makes about the two arrows applies to
     /// the two surfaces: a suite that pins the list separately invites a reader
     /// to keep the list green and let the card path regress, and — the
@@ -636,24 +722,31 @@ struct BannerPlayheadBiconditionalTests {
     /// satisfies "the list is right" perfectly. So the claim is a PARTITION,
     /// asserted at every observation of the same walk:
     ///
-    ///   cards ∪ list == entered      (nothing is lost — playhead-2d6i/isp5)
+    ///   cards ∪ list == entered      (nothing is lost — playhead-2d6i/8cjo/isp5)
     ///   cards ∩ list == ∅            (nothing is double-delivered)
     ///
-    /// `cards` is `emittedAutoSkipBannersSnapshot()`, which is populated ONLY
-    /// past the yield-to-subscriber gate, so it is the honest reading of "a
-    /// card was actually presented" in both arms.
+    /// `cards` is `deliveredAutoSkipCardWindowIDs()` — the windows a host said
+    /// the QUEUE ACCEPTED. It is deliberately NOT
+    /// `emittedAutoSkipBannersSnapshot()`, which 2d6i used and which means
+    /// "reached the yield-to-subscriber path": that is the very reading this
+    /// bead is about, and the two are asserted to DIFFER in the middle arm
+    /// below, which is what stops it being a rename.
     @Test(
         "THE EXTENDED PROPERTY: cards ∪ list is the entered set, and they never overlap",
-        arguments: [true, false]
+        arguments: [
+            BwxiHostDelivery.acknowledging,
+            BwxiHostDelivery.subscribedButNeverAcknowledging,
+            BwxiHostDelivery.unattached,
+        ]
     )
     func aCardIffAHostIsAttachedOtherwiseExactlyOneListEntry(
-        hostAttached: Bool
+        delivery: BwxiHostDelivery
     ) async throws {
         let (orchestrator, _) = try await Self.makeHarness()
-        // Subscribed BEFORE the delivery in the attached arm, exactly as the
-        // suite above does; not at all in the other.
+        // Subscribed BEFORE the delivery in both attached arms, exactly as the
+        // suite above does; not at all in the third.
         var reader: BiconditionalBannerReader?
-        if hostAttached {
+        if delivery.isSubscribed {
             reader = BiconditionalBannerReader(
                 await orchestrator.bannerItemStream()
             )
@@ -670,19 +763,36 @@ struct BannerPlayheadBiconditionalTests {
         var enteredSoFar: Set<String> = []
 
         for (index, time) in Self.schedule.enumerated() {
-            if hostAttached, var live = reader {
-                _ = await Self.step(
+            if var live = reader {
+                let observed = await Self.step(
                     orchestrator, &live, to: time, index: index
                 )
                 reader = live
+                if case .acknowledging = delivery {
+                    await Self.acknowledge(orchestrator, observed.emitted)
+                }
             } else {
                 await Self.unhostedStep(orchestrator, to: time, index: index)
             }
             enteredSoFar.formUnion(Self.windowsContaining(time))
 
-            let cards = await orchestrator.emittedAutoSkipBannersSnapshot()
+            let cards = await orchestrator.deliveredAutoSkipCardWindowIDs()
+            let yielded = await orchestrator.emittedAutoSkipBannersSnapshot()
             let receipts = await orchestrator.missedAutoSkipReceipts()
             let list = Set(receipts.map(\.windowId))
+
+            // playhead-8cjo: YOU CANNOT ACCEPT WHAT WAS NEVER OFFERED. The two
+            // sets are not the same claim and a fix that renamed one into the
+            // other would satisfy every assertion below.
+            #expect(
+                cards.isSubset(of: yielded),
+                """
+                \(delivery) — step \(index): \(cards.subtracting(yielded).sorted()) \
+                is recorded as a card the queue accepted and never reached the \
+                yield-to-subscriber path at all. An acknowledgement must be \
+                able to remove a receipt, never to manufacture a delivery.
+                """
+            )
             // THE COUNT, in the list's own terms. The list is a PULL, so
             // "delivered exactly once" is not a delivery tally — it is that ONE
             // skip is ONE ROW, on every read. A mechanism that appended per
@@ -698,12 +808,12 @@ struct BannerPlayheadBiconditionalTests {
             #expect(
                 cards.union(list) == enteredSoFar,
                 """
-                hostAttached=\(hostAttached), playhead \(time) s (step \(index)):
+                \(delivery), playhead \(time) s (step \(index)):
                   entered but neither carded nor listed: \
                 \(enteredSoFar.subtracting(cards.union(list)).sorted()) \
                 — the skip fired and left NO receipt at all, which is \
-                playhead-2d6i verbatim: the listener cannot see it, so they \
-                cannot correct it.
+                playhead-2d6i verbatim and playhead-8cjo one layer up: the \
+                listener cannot see it, so they cannot correct it.
                   carded or listed but NOT entered: \
                 \(cards.union(list).subtracting(enteredSoFar).sorted()) \
                 — a receipt for audio the listener has not reached \
@@ -713,7 +823,7 @@ struct BannerPlayheadBiconditionalTests {
             #expect(
                 cards.intersection(list).isEmpty,
                 """
-                hostAttached=\(hostAttached), step \(index): \
+                \(delivery), step \(index): \
                 \(cards.intersection(list).sorted()) produced BOTH a card and a \
                 list entry. The list is the ELSE branch of the card, not a \
                 parallel ledger — a window that got its card must not also \
@@ -722,23 +832,59 @@ struct BannerPlayheadBiconditionalTests {
             )
             // The arm-specific half, so a failure names WHICH surface was
             // wrong rather than only that the partition moved.
-            if hostAttached {
+            switch delivery {
+            case .acknowledging:
                 #expect(
                     list.isEmpty,
                     """
-                    a host was attached for the whole walk and the missed-skip \
-                    list still collected \(list.sorted()). Every one of those \
-                    skips was announced on a card.
+                    a host acknowledged every card of the whole walk and the \
+                    missed-skip list still collected \(list.sorted()). Every \
+                    one of those skips was announced on a card the queue took.
                     """
                 )
-            } else {
+            case .subscribedButNeverAcknowledging:
                 #expect(
                     cards.isEmpty,
                     """
-                    nobody was subscribed and \(cards.sorted()) reached the \
-                    yield-to-subscriber path anyway. Dan's decision is a \
-                    PASSIVE LIST, not a card — a receipt replayed as a card \
-                    asserts a skip affordance for audio already gone.
+                    \(cards.sorted()) is booked as a card the listener saw on \
+                    the strength of a SUBSCRIBER existing. That is \
+                    playhead-8cjo: `AdBannerQueue.enqueue` can refuse the item \
+                    after the yield, and the observation Task can be cancelled \
+                    before the enqueue happens at all, so nothing but an \
+                    acknowledgement can say a card was presented.
+                    """
+                )
+                // NON-VACUITY, and the thing that separates this arm from the
+                // unattached one: the item really WAS yielded. Without this the
+                // arm would pass for the wrong reason (a fix that stopped
+                // emitting to subscribers entirely) and would be a second
+                // spelling of `.unattached`.
+                #expect(
+                    yielded == enteredSoFar,
+                    """
+                    step \(index): the walk has entered \(enteredSoFar.sorted()) \
+                    and only \(yielded.sorted()) reached the \
+                    yield-to-subscriber path. This arm's whole claim is that a \
+                    card WAS offered to a live subscriber and still never \
+                    presented; if nothing was offered, it is testing \
+                    playhead-2d6i's case over again under a different name.
+                    """
+                )
+            case .unattached:
+                #expect(
+                    cards.isEmpty,
+                    """
+                    nobody was subscribed and \(cards.sorted()) is recorded as \
+                    accepted by a queue. Dan's decision is a PASSIVE LIST, not \
+                    a card — a receipt replayed as a card asserts a skip \
+                    affordance for audio already gone.
+                    """
+                )
+                #expect(
+                    yielded.isEmpty,
+                    """
+                    nobody was subscribed and \(yielded.sorted()) reached the \
+                    yield-to-subscriber path anyway.
                     """
                 )
             }
@@ -746,14 +892,20 @@ struct BannerPlayheadBiconditionalTests {
 
         // Every window the walk entered ended up on exactly one surface.
         let allWindowIds = Set(Self.fieldWindows.map(\.id))
-        let finalCards = await orchestrator.emittedAutoSkipBannersSnapshot()
+        let finalCards = await orchestrator.deliveredAutoSkipCardWindowIDs()
         let finalList = Set(
             await orchestrator.missedAutoSkipReceipts().map(\.windowId)
         )
+        let landed: Set<String>
+        if case .acknowledging = delivery {
+            landed = finalCards
+        } else {
+            landed = finalList
+        }
         #expect(
-            (hostAttached ? finalCards : finalList) == allWindowIds,
+            landed == allWindowIds,
             """
-            hostAttached=\(hostAttached): all \(allWindowIds.count) windows were \
+            \(delivery): all \(allWindowIds.count) windows were \
             entered, so all \(allWindowIds.count) must have landed on the one \
             surface this arm has. cards=\(finalCards.sorted()) \
             list=\(finalList.sorted())
@@ -834,6 +986,18 @@ struct BannerPlayheadBiconditionalTests {
             #expect(
                 cards.isEmpty,
                 "attach \(attach): \(cards.sorted()) reached the yield path on a mere attach"
+            )
+            // playhead-8cjo: and nothing was booked as ACCEPTED either. The
+            // two are different claims — a replay could yield without the
+            // queue taking it, and a bad acknowledgement seam could book a
+            // delivery for a window nothing yielded.
+            let accepted = await orchestrator.deliveredAutoSkipCardWindowIDs()
+            #expect(
+                accepted.isEmpty,
+                """
+                attach \(attach): \(accepted.sorted()) is recorded as a card \
+                the queue accepted, on an attach that presented nothing.
+                """
             )
         }
     }

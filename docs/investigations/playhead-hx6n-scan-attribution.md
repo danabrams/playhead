@@ -42,7 +42,7 @@ this note said four and missed `makeRefinementFailureScanResult` and the two
 and every one of them already passes it — as `reuseScope: jobId`, which feeds
 `semanticScanReuseKeyHash` and is then **discarded**. The join key was in hand at
 every single write site and was being hashed into an opaque digest instead of
-stored. So the correlation id costs no new plumbing: it is the value that was
+stored. So the backfill job id costs no new plumbing: it is the value that was
 already there.
 
 `reuseScope` is not the only in-memory-only field on the struct —
@@ -58,10 +58,23 @@ Three nullable columns on `semantic_scan_results`:
 | --- | --- | --- | --- |
 | `createdAt` | `REAL` | UNIX seconds, stamped at the write | `NULL` |
 | `scenePhase` | `TEXT` | app state when the row was written | `NULL` |
-| `runCorrelationId` | `TEXT` | the `backfill_jobs.jobId` this row came from | `NULL` |
+| `backfillJobId` | `TEXT` | the `backfill_jobs.jobId` this row came from | `NULL` |
 
 Plus two indexes: `idx_semantic_scan_results_createdAt` (timeline
-reconstruction) and `idx_semantic_scan_results_correlation` (the join).
+reconstruction) and `idx_semantic_scan_results_backfill_job` (the join).
+
+**`backfillJobId` WAS CALLED `runCorrelationId` UNTIL SCHEMA V65** (playhead-1gu0,
+2026-08-26), and this whole document was written under the old spelling. The
+rename is the only change: it is an `ALTER TABLE … RENAME COLUMN`, no value moves
+and nothing is backfilled. It happened because the name said RUN and the writer
+writes a JOB — and a `backfill_jobs.jobId` is per `(asset, phase, offset)`, so it
+is ONE value for an asset's whole backfill history. Measured on the 2026-08-19
+device pull, `count(DISTINCT runCorrelationId)` and `count(DISTINCT
+analysisAssetId)` are both **15**, with 176 rows over four calendar days under a
+single id. **Any archived device pull taken before V65 still spells the column
+`runCorrelationId`**, so a query that sweeps across pulls has to handle both.
+Nothing here can tell two screenings of the same window apart; `transcriptVersion`
+can, and does so on every replicate window of both measured pulls.
 
 **All three are NULLABLE with no DEFAULT, and that is the whole point.** A
 `DEFAULT 0` on `createdAt` would make every historical row claim 1970; a
@@ -174,7 +187,7 @@ three buckets, and it is what the negative test bites on.
 
 ### Joining a scan row to its BGTask run
 
-`runCorrelationId` is the `backfill_jobs.jobId`. The chain to a BGTask run is
+`backfillJobId` is the `backfill_jobs.jobId`. The chain to a BGTask run is
 scan → job → the run whose `[startedAt, finishedAt]` window contains the scan:
 
 ```sql
@@ -188,11 +201,11 @@ SELECT s.id            AS scanId,
        r.scenePhase    AS runPhase
 FROM semantic_scan_results s
 JOIN backfill_jobs j
-  ON j.jobId = s.runCorrelationId
+  ON j.jobId = s.backfillJobId
 LEFT JOIN background_task_runs r
   ON s.createdAt >= r.startedAt
  AND s.createdAt <= COALESCE(r.finishedAt, 9e18)
-WHERE s.runCorrelationId IS NOT NULL;
+WHERE s.backfillJobId IS NOT NULL;
 ```
 
 The scan → job join is an equality on a real key. The job → BGTask-run join is a

@@ -75,7 +75,27 @@ struct AdmissionRejectReasonV30MigrationTests {
         // and no backfill (every drop before this build deleted its own evidence,
         // so there is nothing recoverable to seed). It names nothing this rung
         // asserts, so no assertion here moves.
-        #expect(AnalysisStore.currentSchemaVersion == 62)
+        // 62 -> 63 read for this rung (playhead-4xmz): V63 CREATES TWO NEW TABLES —
+        // `download_work_journal` and its single-row arming companion — and touches no
+        // existing table, column or row: no ALTER, no UPDATE, no DELETE and no backfill
+        // (every download event before this build went to a no-op recorder and left no
+        // trace, so there is nothing recoverable to seed). It names nothing this rung
+        // asserts, so no assertion here moves.
+        // 63 -> 64 read for this rung (playhead-sdis): V64 ADDS FOUR NULLABLE
+        // COLUMNS and only to the two playhead-7dgx tables — `launchId`,
+        // `sessionCrossingId` and `launchArmingState` on
+        // `background_download_drops`, `lastArmedLaunchId` on
+        // `background_download_drop_arming`. No other table, no other column, no
+        // UPDATE, no DELETE, no DEFAULT and no backfill: a pre-V64 row is left
+        // NULL because every candidate default would turn an absence into a
+        // launch count. It names nothing this rung asserts, so no assertion here
+        // moves.
+        // 64 -> 65 read for this rung (playhead-1gu0): V65 RENAMES ONE COLUMN —
+        // `semantic_scan_results.runCorrelationId` becomes `backfillJobId`, and its
+        // index moves with it. A pure `ALTER TABLE … RENAME COLUMN`: no row moves, no
+        // value is written, nothing is backfilled and no other table is named. It
+        // names no table this rung asserts on, so no assertion here moves.
+        #expect(AnalysisStore.currentSchemaVersion == 65)
         #expect(try probeColumnExists(in: dir, table: "analysis_jobs", column: "lastRejectReason"))
         #expect(try probeColumnExists(in: dir, table: "analysis_jobs", column: "lastRejectAt"))
     }

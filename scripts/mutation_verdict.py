@@ -1,0 +1,663 @@
+#!/usr/bin/env python3
+"""Score one mutation batch's artifacts — playhead-gjlp0.
+
+WHY THIS EXISTS
+---------------
+`scripts/mutation-battery.sh` used to decide SURVIVED by the ABSENCE of a
+failure line:
+
+    if   the expected name is not in the STARTED roster -> ERROR "never ran"
+    elif the expected name is not in the FAILURE list   -> SURVIVED
+
+Both arms are readings of silence, and the second one is the dangerous
+direction. A test whose host died emits `◇ … started` and then nothing at all,
+so it scores exactly like a test that ran and passed — and a SURVIVED verdict
+is the one that sends the next person to write a test that already exists.
+
+MEASURED, on the specimen this bead was filed from
+(`/private/tmp/playhead-mutation-battery.F6R3wB`, 2026-08-23 04:14):
+
+    the expected test        10 `◇ … started` lines, ZERO `✔`/`✘` lines
+    the batch                2,688 started · 356 passed · 0 failed · 2,332 NO VERDICT
+    the host                 11 distinct pids, i.e. 10 replacements
+    the log's own last page  `gate-memory: THE RUN DID NOT REACH A VERDICT — RESTARTED`
+    `failed-1457.txt`        0 bytes
+    the verdict printed      `BD37 SURVIVED … still green: …`
+
+Applied by hand, that mutant dies deterministically in 0.147 s. The rail
+existed and worked; only the reading was wrong. This is `playhead-t53a` one
+tool over — the gate's census moved to the `.xcresult` bundle for exactly this
+reason and the battery never followed.
+
+THE LADDER, AND WHAT EACH STATE READS IF THE THING IT MEASURES NEVER HAPPENED
+----------------------------------------------------------------------------
+Per expected test:
+
+    FAILED      a STATED failure verdict exists for this name.
+                If the mutation changed nothing, nothing states a failure -> not FAILED.
+    PASSED      a STATED pass verdict exists for this name.
+                If the test never got to report, nothing states a pass -> not PASSED.
+                This is the whole fix: `SURVIVED` now requires a positive `✔`.
+    NO-VERDICT  the name is in the roster and NOTHING judged it.
+                Reads as NO-VERDICT precisely when no instrument judged it.
+    CRASHED     the bundle STATES the host died under this test.
+    DENIED      the bundle STATES a resource was denied to it (playhead-s34ux).
+    SKIPPED     it was skipped; a skipped rail asked no question.
+    ABSENT      no roster mentions it at all — a harness fault, not a survivor.
+
+Per batch:
+
+    OK          one test host, a terminal marker, no signal death.
+    VOID        the host was replaced, or died, or the run never reported, or
+                the bundle used a result string this parser cannot read.
+                A batch with host restarts is not a verdict about any mutation.
+
+A NINTH READING WOULD HAVE BEEN A LIE, SO IT IS A BATCH REASON INSTEAD (R4).
+A Test Case node whose `result` is none of Passed / Failed / Skipped / Expected
+Failure lands in `run.unjudged` with the word `gate_baseline` could not read,
+and its key is still in the roster — so `_state_of_key` falls through to
+NO-VERDICT, which is conservative and right. What was wrong is that the BATCH
+read OK, so the run said `the expected test reached NO VERDICT` and its
+epilogue sent the reader to re-run and then to suspect the mutation of killing
+the test host. Re-running cannot clear an unreadable result string. It is a
+stated batch reason now, carrying its own remedy. Measured before it was added:
+`unjudged` is EMPTY across four preserved full-plan bundles (~48,300 nodes), so
+it cannot fire on a run anyone can currently read.
+
+`OK` is the only state that can be reached by silence, and it is deliberately
+the one that is CHECKED POSITIVELY: it requires a terminal marker in the log
+(`** TEST SUCCEEDED/FAILED **` or `Test run with N tests …`), so a truncated
+log is VOID rather than clean.
+
+A DENIED RESOURCE DOES NOT VOID THE BATCH, AND IT IS STILL A RED TEST (R3).
+playhead-s34ux's rule is that a crash outranks everything because nothing was
+judged, while a denial does not, because it names the BOX rather than the code
+— so `gate_baseline` lifts a denied key out of `run.failures` and this module
+keeps that. The consequence for a caller is easy to miss and was missed: a run
+whose only redness is a burst of `SQLITE_CANTOPEN` reports `#failures 0` while
+`✘ … failed` lines sit in its log. So the count and the names are written out
+SEPARATELY (`#resource`, `#denied`) rather than folded into either the failure
+count or the batch state, and the battery refuses a baseline that carries any.
+
+WHERE THE FACTS COME FROM
+-------------------------
+Nothing here is a fifth parser. `scripts/gate_baseline.py` already reads both
+console formats, rejoins spliced verdict lines, decodes octal-escaped glyphs
+and takes verdicts from the `.xcresult` bundle; `scripts/gate_memory_verdict.py`
+already classifies a run's health off the test host's own pid. Both are
+imported. This module is the mapping from those facts onto the battery's
+question, and nothing else.
+
+    the VERDICT      the .xcresult bundle when there is one, else the console
+    the ROSTER       the console's `◇ … started` lines, UNIONED with the bundle
+    the HEALTH       distinct test-host pids (the app's own testimony), plus the
+                     restart marker as a boolean, plus a signal death, plus
+                     whether either format reported an outcome at all
+
+COUNT FROM THE PID, NOT FROM THE PHRASE. On the specimen above,
+`grep -c 'Restarting after unexpected exit'` returns 11 while the host was
+replaced 10 times: the eleventh hit is `gate-memory:`'s own verdict block
+QUOTING the message back into the same log. A count of a phrase that the
+run's own diagnostics also print is a count of two different things added
+together. The pid series says 11 distinct hosts and needs no interpretation.
+
+FRESHNESS: A LOG IS EVIDENCE ONLY IF THIS RUN PRODUCED IT
+---------------------------------------------------------
+`mutation-battery.sh` creates `WORK` per INVOCATION and sets `KEEP_WORK=1` on
+every failure path, so failed runs leave their whole directory behind — 52 of
+them on this box on 2026-08-25, 684 MiB, carrying EIGHT different mutation
+series. (Read the 52 as a reading taken at one moment: the same afternoon it
+was 56 and then 53, because other worktrees are producing and reaping them
+while you look. Only the directory THIS invocation created is a fixed
+quantity, which is the whole argument below.) Batch
+numbers are assigned per mutant and are NOT unique across beads or across time,
+so a lookup by batch number finds another investigation's evidence: playhead-8cjo
+measured its checker finding a three-day-old `batch-1414.log` from
+playhead-2d6i's vacuity control and reporting OK.
+
+So every artifact this module reads must be NEWER than a floor the caller
+states (`--since`), and one that is not is REFUSED BY NAME AND DATE rather than
+scored. The battery passes the epoch it captured immediately before launching
+the batch, which makes the floor a claim about THIS batch's invocation and not
+merely about this run.
+"""
+
+import argparse
+import os
+import pathlib
+import sys
+import time
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
+
+import gate_baseline as gb            # noqa: E402
+import gate_memory_verdict as gmv     # noqa: E402
+
+
+# --- the states, spelled once ---------------------------------------------
+FAILED = "FAILED"
+PASSED = "PASSED"
+NO_VERDICT = "NO-VERDICT"
+CRASHED = "CRASHED"
+DENIED = "DENIED"
+SKIPPED = "SKIPPED"
+ABSENT = "ABSENT"
+
+BATCH_OK = "OK"
+BATCH_VOID = "VOID"
+
+#: THESE TWO SETS ARE DOCUMENTATION, AND NOTHING IN THE PRODUCT READS EITHER
+#: (playhead-gjlp0 R5, and said here because a green rail over a constant reads
+#: exactly like a green rail over the code).
+#:
+#: The rule they state is enforced by the SHELL: `mutation-battery.sh`'s
+#: `case "$st"` ladder routes FAILED and PASSED to their own arms and sends
+#: everything else — including a state this module has not got yet, and
+#: including `NO-STATE`, which is the scorer having written no line at all — to
+#: the `unjudged` arm through `*)`. So deleting `SKIPPED` from `UNJUDGED` below
+#: changes NO behaviour anywhere; it only reddens the two rails that assert its
+#: membership. That is the INERT-mutant shape wearing a KILLED verdict, which
+#: CLAUDE.md lists as the second way a mutant stops being evidence. The rails
+#: that measure the BEHAVIOUR are the end-to-end ones: `ShellLadderTests` drives
+#: NO-VERDICT, `ShellBundleTests` drives a bundle-stated CRASH, and
+#: `ShellConsoleOnlyVoidTests` drives SKIPPED — each through the real battery to
+#: a VOID row. Kept anyway, because naming the rule where the states are
+#: declared is worth a line; read them as a comment, not as a mechanism.
+
+#: States that are POSITIVE evidence — an instrument stated this outcome.
+STATED = frozenset((FAILED, PASSED))
+
+#: States that mean "nobody judged this test". Every one of them must keep a
+#: mutation out of both KILLED and SURVIVED: a test that was not judged is not
+#: evidence in either direction.
+#:
+#: SKIPPED is the member worth arguing about, so the argument is written down.
+#: A skipped rail asked no question and cannot license SURVIVED — but the
+#: baseline preflight has already required this same test to PASS on the
+#: UNMUTATED tree minutes earlier, so a skip inside a batch is most likely the
+#: MUTATION's own doing and every re-run reproduces it. VOID is still the right
+#: verdict (nothing judged the mutant), and the epilogue says outright that
+#: this is one of only two shapes a re-run can never clear (R5).
+UNJUDGED = frozenset((NO_VERDICT, CRASHED, DENIED, SKIPPED))
+
+EXIT_OK = 0
+EXIT_VOID = 3
+EXIT_CANNOT_EVALUATE = 2
+
+
+class CannotEvaluate(Exception):
+    """The artifacts cannot support any verdict. Never a silent fallback."""
+
+
+# ---------------------------------------------------------------------------
+# Freshness
+# ---------------------------------------------------------------------------
+def _stamp(epoch):
+    return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(epoch))
+
+
+def require_fresh(path, since, what):
+    """Refuse an artifact older than `since`, naming it and its date.
+
+    The refusal is by NAME AND DATE deliberately. "stale artifact" sends a
+    reader looking for the wrong file; `batch-1414.log is from 2026-08-22
+    17:44, this batch started 2026-08-25 08:59` tells them which run they have
+    in their hand.
+    """
+    p = pathlib.Path(str(path))
+    if not p.exists():
+        raise CannotEvaluate("%s does not exist: %s" % (what, p))
+    mtime = p.stat().st_mtime
+    if mtime < since:
+        raise CannotEvaluate(
+            "%s is STALE — %s was last written %s, before this batch started at %s.\n"
+            "Batch numbers repeat across beads and `KEEP_WORK=1` leaves failed runs'\n"
+            "directories behind, so a log found by batch number is very often another\n"
+            "investigation's. Pin the log to the RUN (its own $WORK), not to the number."
+            % (what, p, _stamp(mtime), _stamp(since))
+        )
+    return p
+
+
+# ---------------------------------------------------------------------------
+# Reading the run
+# ---------------------------------------------------------------------------
+class BatchReading(object):
+    """Everything one batch's artifacts say, in the battery's own terms."""
+
+    def __init__(self):
+        self.run = None
+        self.batch_state = BATCH_OK
+        self.batch_reasons = []
+        self.verdict_source = gb.VERDICT_SOURCE_CONSOLE
+        self.host_pids = []
+        self.restart_marker = False
+        self.log_path = None
+        self.bundle_path = None
+
+    @property
+    def host_replacements(self):
+        """Replacements, not hosts. One host is zero replacements."""
+        return max(len(self.host_pids) - 1, 0)
+
+
+def read_batch(log_path, since, xcresult=None, rc=0, xcresult_reader=None):
+    """Parse one batch's log (and bundle) into a BatchReading.
+
+    `xcresult` absent is not an error — a build that never reached the test
+    phase writes no bundle, and fast-gate itself only passes `--xcresult` when
+    there is one. `xcresult` present and UNREADABLE is a hard error: falling
+    back to the console on a bad path would reinstate the defect this module
+    exists to delete, invisibly.
+    """
+    reading = BatchReading()
+    log = require_fresh(log_path, since, "the batch log")
+    reading.log_path = str(log)
+    text = log.read_text(encoding="utf-8", errors="replace")
+
+    reading.run = gb.parse_run(text)
+
+    scoped, _invocations = gmv.last_invocation(text)
+    reading.host_pids = gmv.host_pids(scoped)
+    reading.restart_marker = "Restarting after unexpected exit" in scoped
+
+    if xcresult:
+        bundle_dir = require_fresh(xcresult, since, "the result bundle")
+        reading.bundle_path = str(bundle_dir)
+        payload = gb.read_xcresult(bundle_dir, runner=xcresult_reader)
+        bundle = gb.parse_xcresult(payload)
+        gb.with_xcresult_verdicts(reading.run, bundle)
+    reading.verdict_source = reading.run.verdict_source
+
+    _classify_batch(reading, scoped, rc)
+    return reading
+
+
+def _named(key):
+    """A test's NAME out of a gate_baseline KEY.
+
+    `run.crashed` and `run.resource` are keyed rather than named: the `Failure`
+    object that carried the display name is popped out of `run.failures` when
+    either classification wins, so the key is all that is left. Printing it raw
+    puts `swift-testing::` in front of a test name — a spelling that appears
+    nowhere else in this repo — and sends the reader grepping for it.
+    """
+    return str(key).split("::", 1)[-1]
+
+
+def _classify_batch(reading, scoped, rc):
+    """OK or VOID, and why.
+
+    Reasons ACCUMULATE rather than short-circuit: a run that lost its host AND
+    was killed by a signal should say both, because the remedies differ.
+    """
+    reasons = reading.batch_reasons
+
+    if len(reading.host_pids) > 1:
+        reasons.append(
+            "the test host was REPLACED %d time(s) mid-batch: pids %s"
+            % (reading.host_replacements, " -> ".join(reading.host_pids))
+        )
+    if reading.restart_marker:
+        reasons.append(
+            "xcodebuild printed `Restarting after unexpected exit, crash, or "
+            "test timeout`"
+        )
+    signal = gmv.killed_by_signal(scoped)
+    if signal:
+        reasons.append(
+            "the shell reported `%s` — the kernel killed xcodebuild itself" % signal
+        )
+    if rc in (137, 143):
+        reasons.append(
+            "xcodebuild exited %d (128 + %s)"
+            % (rc, "SIGKILL" if rc == 137 else "SIGTERM")
+        )
+    if not gmv.reached_a_verdict(scoped):
+        reasons.append(
+            "neither format reported an outcome: no `Test run with N tests …` "
+            "line and no `** TEST SUCCEEDED/FAILED **` line"
+        )
+    if reading.run.crashed:
+        example = _named(sorted(reading.run.crashed)[0])
+        reasons.append(
+            "the .xcresult bundle STATES the host died under %d test(s), e.g. %s"
+            % (len(reading.run.crashed), example)
+        )
+    # A RESULT STRING THIS PARSER DOES NOT RECOGNISE IS NOT A LOST VERDICT, AND
+    # UNTIL playhead-gjlp0 R4 IT WAS SPELLED AS ONE.
+    #
+    # `parse_xcresult` records a Test Case node whose `result` is none of
+    # Passed / Failed / Skipped / Expected Failure in `run.unjudged`, keyed and
+    # carrying the word it could not read, and unions its key into the roster.
+    # `_state_of_key` therefore falls through to NO-VERDICT — the conservative
+    # answer, and the right one — but with the BATCH reading OK the run printed
+    # `VOID | the expected test reached NO VERDICT` and the epilogue told the
+    # reader to re-run and, if it recurred, to suspect the mutation of killing
+    # the test host. Both are wrong for a bundle whose verdicts this parser
+    # simply cannot read, and re-running never clears it: every subsequent run
+    # says the same thing. The module knew the answer all along — the result
+    # string is sitting in `run.unjudged` — and did not say it.
+    #
+    # It is a BATCH reason rather than an eighth per-test state because it is a
+    # property of the instrument reading the bundle, not of any one test: if
+    # xcresulttool starts spelling `Passed` some other way, every test in the
+    # batch lands here at once.
+    #
+    # MEASURED BEFORE IT WAS WRITTEN, because a reason that fires on a healthy
+    # run is worse than no reason: across four preserved full-plan bundles on
+    # this box (~48,300 Test Case nodes) `unjudged` is EMPTY in all four. This
+    # can only fire on a bundle nobody can currently read.
+    if reading.run.unjudged:
+        key = sorted(reading.run.unjudged)[0]
+        reasons.append(
+            "the .xcresult bundle reports %d test(s) with a result string this "
+            "parser does not recognise, e.g. %s -> %r. Those tests read NO-VERDICT "
+            "and are NOT lost verdicts: RE-RUNNING WILL NOT CHANGE IT. "
+            "`gate_baseline.py`'s XCRESULT_* vocabulary needs the new spelling."
+            % (len(reading.run.unjudged), _named(key), reading.run.unjudged[key])
+        )
+    reading.batch_state = BATCH_VOID if reasons else BATCH_OK
+
+
+# ---------------------------------------------------------------------------
+# Resolving one expectation
+# ---------------------------------------------------------------------------
+def candidate_keys(run, want):
+    """Every key spelling `want` could name, restricted to keys this run knows.
+
+    The battery's expectations are Swift Testing DISPLAY names, and since
+    playhead-le02 also XCTest method names written either bare (`testFoo`) or
+    qualified (`SomeTests/testFoo`). `extract_failures` used to register both
+    spellings for every XCTest result; this reproduces that, from the run's own
+    key space instead of from a second regex.
+
+    THE SUITE IS SPELLED MODULE-QUALIFIED ON ONE SIDE AND BARE ON THE OTHER, AND
+    A FIRST CUT OF THIS FUNCTION COMPARED THEM DIRECTLY. `gate_baseline` keys an
+    XCTest case off the WHOLE bracketed name — `xctest::PlayheadTests.SomeTests/
+    testFoo` — because its `_XC_RESULT` group is greedy over `[A-Za-z0-9_.]+`.
+    The MUTATIONS table spells the same test `SomeTests/testFoo`, because the
+    scraper this module replaced used a NON-greedy prefix and threw the module
+    away. Compared literally, every one of the 48 mutations whose sole
+    expectation is written that way resolved ABSENT — and ABSENT is the arm that
+    exits 2 out of the baseline preflight with "an expectation names a test that
+    never ran", so the XCTest half of the battery refused to run at all. So the
+    bare spelling is matched as a dotted SUFFIX of the key's suite, which is
+    exactly what `gate_baseline._blamed_matches` already does for the
+    `Failing tests:` block's own third spelling. The leading `.` is what keeps
+    it exact: `.SomeTests/testFoo` cannot match `…OtherSomeTests/testFoo`.
+    """
+    known = (set(run.started) | set(run.passed) | set(run.failures)
+             | set(run.skipped) | set(run.crashed) | set(run.resource))
+    out = []
+
+    st = gb.st_key(want)
+    if st in known:
+        out.append(st)
+
+    prefix = gb.FRAMEWORK_XCTEST + "::"
+    if "/" in want:
+        suite, method = want.split("/", 1)
+        xc = gb.xc_key(suite, method)
+        if xc in known:
+            out.append(xc)
+        tail = "." + suite + "/" + method
+        for key in sorted(known):
+            if key.startswith(prefix) and key.endswith(tail):
+                out.append(key)
+    else:
+        for key in sorted(known):
+            if key.startswith(prefix) and key.rsplit("/", 1)[-1] == want:
+                out.append(key)
+    return out
+
+
+def _state_of_key(run, key):
+    # FAILURES FIRST, and the order is load-bearing. `parse_xcresult` has
+    # already lifted crashed and resource-denied keys OUT of `failures`, so a
+    # key still in there is a stated failure and nothing else — which is what
+    # keeps a dead host from being credited as a KILL.
+    if key in run.failures:
+        return FAILED
+    if key in run.crashed:
+        return CRASHED
+    if key in run.resource:
+        return DENIED
+    if key in run.skipped:
+        return SKIPPED
+    if key in run.passed:
+        return PASSED
+    return NO_VERDICT
+
+
+#: Worst-first. When one expectation resolves to several keys — two same-named
+#: tests in different suites share a Swift Testing key, and an XCTest method
+#: name can be written two ways — the answer is the WORSE one, except that a
+#: stated FAILURE outranks everything because it is the one thing that is
+#: positive evidence the rail fired.
+#:
+#: THE COLLISION IS LIVE, NOT HYPOTHETICAL, AND THE FAILED ARM IS THE COST OF IT
+#: (measured at playhead-gjlp0 R4). A display name is the whole of a Swift
+#: Testing key, so two tests in different suites that happen to share one are
+#: ONE key to everything downstream — and `parse_xcresult` resolves a colliding
+#: pair toward the worse news, so one failing twin puts the shared key in
+#: `run.failures`. Counted off a real full-plan bundle: **63 display-name keys
+#: are claimed by more than one suite**, and **three MUTATIONS records name
+#: one** — `JC08` (2 suites) and `SF02`/`AR09` (3 suites), with at least two of
+#: each collision's suites inside `FOCUSED_SUITES`, so both twins really do run
+#: in the same focused batch. A mutation whose declared victim's NAMESAKE fails
+#: is credited KILLED, which is the false-kill shape CLAUDE.md calls silent and
+#: indistinguishable from success.
+#:
+#: It is NOT introduced here and is not fixed here: the scraper this module
+#: replaced keyed on the same display name, and the key space is
+#: `gate_baseline`'s, shared with the merge gate. Filed as `playhead-fyma7`.
+#: The SURVIVED direction is safe by construction — `PASSED` is last, so a
+#: mutation is only called a survivor when every colliding test passed.
+_PRECEDENCE = (FAILED, CRASHED, DENIED, NO_VERDICT, SKIPPED, PASSED)
+
+
+def state_of(run, want):
+    keys = candidate_keys(run, want)
+    if not keys:
+        return ABSENT
+    states = {_state_of_key(run, key) for key in keys}
+    for state in _PRECEDENCE:
+        if state in states:
+            return state
+    return NO_VERDICT       # unreachable; a state not in _PRECEDENCE is a bug
+
+
+def classify(reading, names):
+    """[(name, state)] in the order given."""
+    return [(name, state_of(reading.run, name)) for name in names]
+
+
+# ---------------------------------------------------------------------------
+# Reporting
+# ---------------------------------------------------------------------------
+def render(reading, outcomes, out):
+    run = reading.run
+    print("  verdicts read from: %s" % reading.verdict_source, file=out)
+    # `crashed` AND `unreadable` ARE NOT TWO MORE POPULATIONS, AND ON ONE LINE
+    # OF `·`-SEPARATED COUNTS THAT IS EXACTLY WHAT THEY LOOKED LIKE
+    # (playhead-gjlp0 R5). Driven on a four-test batch — one crashed, one with
+    # a result string the parser cannot read, one denied, one passed — the
+    # single line read
+    #
+    #   4 started · 1 passed · 0 failed · 0 skipped · 2 NO VERDICT
+    #   · 1 crashed · 1 resource-denied · 1 unreadable
+    #
+    # and the columns after `started` add to SIX. `no_verdict` is
+    # `started - ran - skipped - resource`, so a CRASHED key and an UNREADABLE
+    # one are each counted a second time inside `NO VERDICT`, while
+    # `resource-denied` is genuinely disjoint from it. Three columns that look
+    # like siblings, behaving three different ways — a value that names one
+    # thing read as though it named another, which is the defect class this
+    # whole module exists to remove, committed by its own census.
+    #
+    # So the counts that partition go on one line and the two that DIAGNOSE go
+    # on the next, saying in words that they are already counted above. Both
+    # lines are printed unconditionally, zeros included: a diagnosis line that
+    # appeared only when non-zero would be a guard whose false branch makes no
+    # claim, which is the other half of this bead's subject.
+    #
+    # `crashed` is a strict subset of `NO VERDICT` by construction —
+    # `parse_xcresult` discards a crashed key from passed, skipped, failures
+    # and resource, and every bundle key is unioned into `started`. `unjudged`
+    # is a subset too EXCEPT under a display-name collision (playhead-fyma7),
+    # where one twin's `Passed` puts the shared key in `ran` while the other's
+    # unreadable word stays in `unjudged`. Hence "already counted above" rather
+    # than "of the NO VERDICT": the weaker claim is the one that is always true.
+    print(
+        "  batch census: %d started · %d passed · %d failed · %d skipped · "
+        "%d resource-denied · %d NO VERDICT"
+        % (len(run.started), len(run.passed), len(run.failures), len(run.skipped),
+           len(run.resource), len(run.no_verdict)),
+        file=out,
+    )
+    print(
+        "  …and WHY, for tests the line above ALREADY COUNTS — never extra: "
+        "%d crashed · %d unreadable result string"
+        % (len(run.crashed), len(run.unjudged)),
+        file=out,
+    )
+    print(
+        "  test hosts: %d distinct pid(s) = %d replacement(s); restart marker %s"
+        % (len(reading.host_pids), reading.host_replacements,
+           "PRESENT" if reading.restart_marker else "absent"),
+        file=out,
+    )
+    if reading.batch_state == BATCH_VOID:
+        print("  BATCH IS VOID — it cannot support a verdict about any mutation:", file=out)
+        for reason in reading.batch_reasons:
+            print("    * %s" % reason, file=out)
+    for name, state in outcomes:
+        print("    %-10s %s" % (state, name), file=out)
+
+
+def write_outcomes(path, reading, outcomes):
+    """`STATE<TAB>NAME`, plus `#` header lines the shell reads with `sed`.
+
+    A file rather than stdout because a Swift Testing display name may contain
+    anything except a newline — quoting one through a shell pipeline is how the
+    `;`-in-a-name fault got into this battery in the first place.
+    """
+    run = reading.run
+    lines = [
+        "#batch\t%s" % reading.batch_state,
+        "#source\t%s" % reading.verdict_source,
+        "#log\t%s" % reading.log_path,
+        "#bundle\t%s" % (reading.bundle_path or "(none — console only)"),
+        "#hosts\t%d" % len(reading.host_pids),
+        "#no_verdict\t%d" % len(run.no_verdict),
+        "#failures\t%d" % len(run.failures),
+        # A DENIED RESOURCE IS A RED TEST THAT `#failures` DOES NOT COUNT, and
+        # until playhead-gjlp0 R3 the shell could not see it at all.
+        # `gate_baseline` routes a denial OUT of `failures` — correctly, on
+        # playhead-s34ux's rule that a denial names the BOX and not the code —
+        # so a baseline whose only redness was a burst of `SQLITE_CANTOPEN`
+        # read `#failures 0` and printed `baseline green`, where the pre-gjlp0
+        # battery had refused the run outright. Written as its own count and
+        # its own list so the caller decides, exactly as it does for failures.
+        # (`crashed` needs no field: it is already a `#reason`, so the batch is
+        # VOID and every caller is loud about it.)
+        "#resource\t%d" % len(run.resource),
+    ]
+    for reason in reading.batch_reasons:
+        lines.append("#reason\t%s" % reason)
+    # EVERY failure in the batch, not only the expected ones. The baseline
+    # guard needs this: a focused suite that is red on a test no mutation names
+    # still means every verdict in the run is worthless, and reporting only the
+    # named ones would hide exactly that.
+    for key in sorted(run.failures):
+        lines.append("#failure\t%s" % run.failures[key].name)
+    for key in sorted(run.resource):
+        lines.append("#denied\t%s" % _named(key))
+    for name, state in outcomes:
+        lines.append("%s\t%s" % (state, name))
+    pathlib.Path(str(path)).write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def read_names(path):
+    text = pathlib.Path(str(path)).read_text(encoding="utf-8")
+    names = [line for line in text.split("\n") if line != ""]
+    # The outcome file is TAB-separated and the shell reads it with awk, so a
+    # name carrying a TAB would be silently truncated into a name that matches
+    # nothing — which is how the `;`-in-a-display-name fault got into this
+    # battery in the first place. Refuse rather than mangle.
+    bad = [n for n in names if "\t" in n]
+    if bad:
+        raise CannotEvaluate(
+            "an expected test name contains a TAB, which this file format "
+            "cannot carry: %r" % bad[0])
+    return names
+
+
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    sub = parser.add_subparsers(dest="command")
+
+    classify_p = sub.add_parser(
+        "classify", help="score one batch's expected tests against its artifacts")
+    classify_p.add_argument("--log", required=True)
+    classify_p.add_argument("--xcresult", default=None)
+    classify_p.add_argument("--rc", type=int, default=0)
+    classify_p.add_argument(
+        "--since", type=int, required=True,
+        help="epoch seconds; an artifact older than this is REFUSED, not scored")
+    classify_p.add_argument("--names", required=True, help="file, one expected name per line")
+    classify_p.add_argument("--out", required=True, help="file to write STATE<TAB>NAME into")
+
+    # NOTHING IN THE PRODUCT CALLS `verify`, AND THAT IS DELIBERATE — said here
+    # because an uncalled subcommand is indistinguishable from a hole (R2 filed
+    # exactly that question; R3 answers it). `classify` applies `require_fresh`
+    # to both artifacts itself, so a caller that scores does not need a second
+    # pass and `mutation-battery.sh` never makes one. What this is for is the
+    # HAND check the ledger in `docs/investigations/` used to do by eye: you
+    # have a preserved `batch-<N>.log` and you want to know whether it belongs
+    # to the run you are reasoning about, WITHOUT scoring anything. It is
+    # rail-covered (`FreshnessTests`), so it cannot rot unnoticed; if a caller
+    # ever appears, this comment is the thing to delete.
+    verify_p = sub.add_parser(
+        "verify",
+        help="freshness only: refuse an artifact this run did not produce "
+             "(a hand tool — the battery never calls it; see the note above)")
+    verify_p.add_argument("--log", required=True)
+    verify_p.add_argument("--xcresult", default=None)
+    verify_p.add_argument("--since", type=int, required=True)
+
+    args = parser.parse_args(argv)
+    if args.command is None:
+        parser.print_help()
+        return EXIT_CANNOT_EVALUATE
+
+    try:
+        if args.command == "verify":
+            require_fresh(args.log, args.since, "the batch log")
+            if args.xcresult:
+                require_fresh(args.xcresult, args.since, "the result bundle")
+            print("mutation-verdict: artifacts are from this run (floor %s)"
+                  % _stamp(args.since))
+            return EXIT_OK
+
+        names = read_names(args.names)
+        reading = read_batch(args.log, args.since, xcresult=args.xcresult, rc=args.rc)
+        outcomes = classify(reading, names)
+        write_outcomes(args.out, reading, outcomes)
+        render(reading, outcomes, sys.stdout)
+        return EXIT_VOID if reading.batch_state == BATCH_VOID else EXIT_OK
+    except CannotEvaluate as exc:
+        print("mutation-verdict: CANNOT EVALUATE — %s" % exc, file=sys.stderr)
+        return EXIT_CANNOT_EVALUATE
+    except gb.XcresultUnreadable as exc:
+        print("mutation-verdict: CANNOT EVALUATE — the result bundle was asked "
+              "for and could not be read: %s" % exc, file=sys.stderr)
+        return EXIT_CANNOT_EVALUATE
+
+
+if __name__ == "__main__":
+    sys.exit(main())

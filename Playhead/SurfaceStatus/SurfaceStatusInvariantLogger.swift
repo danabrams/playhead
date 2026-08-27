@@ -124,6 +124,14 @@ final class SurfaceStatusInvariantLogger: @unchecked Sendable {
         state.migrate()
     }
 
+    /// playhead-882eg: flush and release the session file's descriptor. See
+    /// `LoggerState.close()`. Idempotent; a later `record(_:)` reopens the same
+    /// file and appends.
+    func close() {
+        state.close()
+    }
+
+
     // MARK: - Public API
 
     /// Append a single state-transition entry to the current session
@@ -230,6 +238,18 @@ final class SurfaceStatusInvariantLogger: @unchecked Sendable {
     // MARK: - Test-only introspection
 
     #if DEBUG
+    /// playhead-882eg: whether a session-file descriptor is currently held.
+    /// Reads the `FileHandle` itself, not a flag — a rail that pins `close()`
+    /// against a boolean somebody else maintains is pinning the boolean.
+    ///
+    /// Inside `#if DEBUG` with its neighbours: it exists for
+    /// `RuntimeStoreTeardownTests` and has no production reader, and a
+    /// test-only accessor that ships in release is dead code with an
+    /// `internal` door on it.
+    var hasOpenSessionFileForTesting: Bool {
+        state.hasOpenSessionFile
+    }
+
     /// Test hook: synchronously drain pending writes. Use after
     /// `record(_:)` to ensure the file reflects every emitted entry
     /// before reading it back.
@@ -317,6 +337,29 @@ private final class LoggerState: @unchecked Sendable {
             _ = self.resolveDiagnosticsDirectoryLocked()
             _ = self.resolveInstallIdLocked()
         }
+    }
+
+    /// playhead-882eg: flush and release the session file's descriptor.
+    ///
+    /// One `surface-status-<ts>-<uuid>.jsonl` descriptor accumulated per
+    /// constructed `PlayheadRuntime` — 89 distinct files still open on the test
+    /// host after the last test of a full plan had finished. The `FileHandle`
+    /// is released with the object and the object was never released, so the
+    /// descriptor needed an owner willing to say when it was done.
+    ///
+    /// Idempotent and non-terminal: `currentSessionFileURL` is kept, so the
+    /// next write reopens THAT file and appends.
+    func close() {
+        writeQueue.sync {
+            self.currentFileHandle?.synchronizeFile()
+            try? self.currentFileHandle?.close()
+            self.currentFileHandle = nil
+        }
+    }
+
+    /// playhead-882eg: whether a session-file descriptor is currently held.
+    var hasOpenSessionFile: Bool {
+        writeQueue.sync { self.currentFileHandle != nil }
     }
 
     /// Must run on `writeQueue`. Resolves (and caches) the diagnostics
@@ -525,6 +568,19 @@ private final class LoggerState: @unchecked Sendable {
     /// on first call; returns the cached handle on subsequent calls.
     private func ensureSessionFileLocked() throws -> FileHandle {
         if let handle = currentFileHandle { return handle }
+
+        // playhead-882eg: a session file this state has ALREADY created is
+        // reopened rather than replaced. `close()` drops the handle at an
+        // owner's teardown to return the descriptor; a later write must land in
+        // the same session's file, because two files carrying one `sessionId`
+        // would split that session's entries and consume two slots of the
+        // eviction window.
+        if let existing = currentSessionFileURL,
+           let reopened = try? FileHandle(forWritingTo: existing) {
+            try reopened.seekToEnd()
+            self.currentFileHandle = reopened
+            return reopened
+        }
 
         let diagnosticsDirectory = resolveDiagnosticsDirectoryLocked()
 

@@ -57,8 +57,15 @@ struct TranscriptPeekView: View {
 
     /// playhead-2d6i: the current list, refreshed on appear and after every
     /// answered row. Not observed continuously: while this sheet is up, Now
-    /// Playing is still mounted underneath and its banner host is still
-    /// attached, so no NEW missed receipt can accrue behind it.
+    /// Playing is still mounted underneath. playhead-8cjo corrected the
+    /// reason this used to give — "its banner host is still attached, so no
+    /// NEW missed receipt can accrue behind it" — because attachment is
+    /// exactly what stopped being the test. A receipt is now written for every
+    /// announced skip and removed only when a host reports the queue accepted
+    /// the card, so one CAN accrue while this sheet is up: the card is
+    /// unexposed behind the sheet, and if the queue never takes it the row
+    /// stays. Pulling on appear and after every answered row is still the
+    /// right cadence; it is no longer true that there is nothing to miss.
     @State private var missedAutoSkips: [MissedAutoSkipReceipt] = []
 
     /// Window ids whose veto is in flight, so a double-tap cannot submit twice.

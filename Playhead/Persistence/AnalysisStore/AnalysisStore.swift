@@ -1971,7 +1971,7 @@ actor AnalysisStore {
     /// assertions automatically follow the production constant — hardcoding
     /// the integer in tests has been a recurring source of stale-assertion
     /// flakes whenever the schema bumps.
-    nonisolated static let currentSchemaVersion = 62
+    nonisolated static let currentSchemaVersion = 65
 
     /// H1: minimum age (in seconds) a `backfill_jobs` / `final_pass_jobs`
     /// row stuck in `status='running'` must reach before the launch-time
@@ -2291,6 +2291,31 @@ actor AnalysisStore {
                 ofItemAtPath: databaseURL.path
             )
         }
+    }
+
+    /// playhead-882eg: return the SQLite descriptors NOW, without waiting for
+    /// deallocation.
+    ///
+    /// `deinit` closes correctly and is not the problem — the problem is that
+    /// deallocation does not happen. Measured on this bead: a `PlayheadRuntime`
+    /// deallocates every time and its service graph does not, so one open
+    /// connection to the app's real `analysis.sqlite` accumulates per runtime
+    /// ever constructed. A WAL connection is three descriptors, and the test
+    /// host reaches 93-99 % of `RLIMIT_NOFILE` soft 2560 and has lost its host
+    /// there; 179 of the 499 descriptors it still held after the last test
+    /// finished were on this one file.
+    ///
+    /// Idempotent, and deliberately NOT terminal: `didOpen` returns to `false`,
+    /// so the next call to any SQL surface re-opens through `ensureOpen()`
+    /// exactly as the first one did, schema ladder and all. That is what makes
+    /// it safe to call at an owner's teardown without auditing every reader —
+    /// a use-after-close reopens rather than misusing a stale handle.
+    func close() {
+        if let handle = db {
+            sqlite3_close_v2(handle)
+            db = nil
+        }
+        didOpen = false
     }
 
     /// Shared failure tail: close the handle and reset `db` so a subsequent
@@ -2955,6 +2980,26 @@ actor AnalysisStore {
             // arming row seeded at zero so "nobody was counting" stays
             // distinguishable from "counted, and there were none".
             try migrateBackgroundDownloadDropsV62IfNeeded()
+            // playhead-4xmz: the DOWNLOAD half of the work journal gets a
+            // table it can actually write to. Episode-keyed and deliberately
+            // NOT foreign-keyed, because the event worth recording is the one
+            // where no `analysis_jobs` row exists — and a SEPARATE table from
+            // `work_journal`, because that table's `event_type` is an input to
+            // cold-launch orphan recovery and a download failure written there
+            // would tell recovery the ANALYSIS work is terminal. Nothing
+            // backfilled; an arming row seeded at zero.
+            try migrateDownloadWorkJournalV63IfNeeded()
+            // playhead-sdis: a launch identity, a session-crossing identity and
+            // a per-row arming state on `background_download_drops`, plus the
+            // launch id `lastArmedAt` belongs to on the arming row. Nothing
+            // backfilled and nothing could be — a pre-V64 row was written by a
+            // build that did not know any of it, and every candidate default
+            // would turn that absence into a launch count.
+            try migrateBackgroundDownloadDropLaunchIdentityV64IfNeeded()
+            // playhead-1gu0: `semantic_scan_results.runCorrelationId` is renamed
+            // `backfillJobId`. A pure RENAME COLUMN — no row moves, no value is
+            // backfilled, and the index moves with it.
+            try migrateSemanticScanBackfillJobIdentityV65IfNeeded()
             try exec("COMMIT")
         } catch {
             try? exec("ROLLBACK")
@@ -3403,6 +3448,54 @@ actor AnalysisStore {
         // `BackgroundDownloadDropLadderSourceCanaryTests` now checks this
         // mechanically, on the V58 canary's precedent.
         try migrateBackgroundDownloadDropsV62IfNeeded()
+        // playhead-4xmz (v63): two brand-new tables, same shape of rung as
+        // V62 — `CREATE TABLE IF NOT EXISTS` plus an `INSERT OR IGNORE` arming
+        // row, so a fixture already carrying the V63 shape still reaches v63.
+        //
+        // READ THE V60 NOTE ABOVE BEFORE ADDING A RUNG. A rung added to one
+        // ladder and not the other is invisible to any test written for that
+        // rung, and it cost V60 a commit.
+        // `DownloadWorkJournalWiringSourceCanaryTests` checks this pairing
+        // mechanically, on the V62 canary's precedent.
+        try migrateDownloadWorkJournalV63IfNeeded()
+        // playhead-sdis (v64): four ADDED COLUMNS rather than a new table, so
+        // the rung's work is done by `addColumnIfNeeded` inside the shared V62
+        // DDL helper and a fixture already carrying the V64 shape still reaches
+        // v64.
+        //
+        // READ THE V60 NOTE ABOVE BEFORE ADDING A RUNG. A rung added to one
+        // ladder and not the other is invisible to any test written for that
+        // rung, and it cost V60 a commit.
+        // `BackgroundDownloadDropWiringSourceCanaryTests` checks this pairing
+        // mechanically.
+        try migrateBackgroundDownloadDropLaunchIdentityV64IfNeeded()
+        // playhead-1gu0 (v65): a RENAME, not an add — and this ladder is the one
+        // that reaches it WITHOUT `createTables()` having renamed first, so it is
+        // the path a fixture regressed to the old spelling WOULD take. NONE DOES,
+        // and this line said "is exactly the path a fixture … takes" until
+        // playhead-1gu0 review round 6. Every fixture that reaches this seam with
+        // `semantic_scan_results` present already carries the NEW
+        // spelling, so the helper returns on its `hasNew` guard; the rail that
+        // exercises the rename, `v64RowKeepsItsJobIdAcrossTheV65Rename`, goes
+        // through `createTables()`.
+        // `renameSemanticScanRunCorrelationIdIfNeeded()`'s own doc carries the
+        // predicate, the census and its limit — read it there rather than
+        // re-deriving a number here.
+        //
+        // THIS LINE NAMED TWO OF THEM — `theLadderOnlySeamReachesV64` and
+        // `aV62StoreClimbsThroughV63ToHead` — AND READ THE PAIR AS THE CENSUS.
+        // That is the identical error the very next commit of the same review
+        // round corrected in the helper's doc and in `scripts/mutation-battery.sh`,
+        // written into a THIRD place by the commit before it. Round 7 found it
+        // here. THIS LINE THEN CLAIMED "the number is kept in exactly one of them
+        // now" WHILE PRINTING IT — round 10, which is the fourth time one claim's
+        // copies have disagreed on this branch. The count is gone from here; the
+        // argument never needed a cardinality.
+        //
+        // READ THE V60 NOTE ABOVE BEFORE ADDING A RUNG. A rung added to one
+        // ladder and not the other is invisible to any test written for that
+        // rung, and it cost V60 a commit.
+        try migrateSemanticScanBackfillJobIdentityV65IfNeeded()
     }
     #endif
 
@@ -6945,7 +7038,12 @@ actor AnalysisStore {
     //                               already stores, because they come from the
     //                               same helper (playhead-9v09: reuse the
     //                               vocabulary, do not invent a second one).
-    //   * `runCorrelationId` TEXT — the `backfill_jobs.jobId`.
+    //   * `backfillJobId`   TEXT — the `backfill_jobs.jobId`. It was called
+    //                               `runCorrelationId` until V65; playhead-1gu0
+    //                               renamed it because the name said RUN, the
+    //                               writer wrote a JOB, and a job is per
+    //                               `(asset, phase, offset)` — one value for an
+    //                               asset's whole backfill history.
     //
     // WHY NO DEFAULTS, stated plainly: a `DEFAULT 0` on `createdAt` would make
     // every historical row claim 1970 and a `DEFAULT 'active'` on `scenePhase`
@@ -7001,13 +7099,22 @@ actor AnalysisStore {
                 column: "scenePhase",
                 definition: "TEXT"
             )
+            // playhead-1gu0 (V65): this rung adds the column under TODAY'S
+            // spelling, `backfillJobId`, rather than under V42's original
+            // `runCorrelationId`. It has to. `createTables()` runs BEFORE this
+            // ladder and already declares `backfillJobId`, so a rung that added
+            // the old name here would leave a pre-V42 database carrying BOTH — a
+            // populated one and an empty one — and V65's rename would then find
+            // the new name present and decline. The rename helper below is what
+            // repairs a database that really does carry the old spelling.
+            try renameSemanticScanRunCorrelationIdIfNeeded()
             try addColumnIfNeeded(
                 table: "semantic_scan_results",
-                column: "runCorrelationId",
+                column: "backfillJobId",
                 definition: "TEXT"
             )
             try exec("CREATE INDEX IF NOT EXISTS idx_semantic_scan_results_createdAt ON semantic_scan_results(createdAt DESC)")
-            try exec("CREATE INDEX IF NOT EXISTS idx_semantic_scan_results_correlation ON semantic_scan_results(runCorrelationId)")
+            try exec("CREATE INDEX IF NOT EXISTS idx_semantic_scan_results_backfill_job ON semantic_scan_results(backfillJobId)")
         }
         try setSchemaVersion(42)
     }
@@ -7083,12 +7190,14 @@ actor AnalysisStore {
     // NO CONSTRAINT IS VIOLATED BY THE DELETE, and one thing is left DANGLING —
     // say so here rather than let a device pull surprise somebody. Nothing
     // holds a foreign key to `backfill_jobs.jobId`: `final_pass_jobs` is a
-    // sibling with its own id space, and `semantic_scan_results.jobId` /
-    // `.runCorrelationId` are free-text ATTRIBUTIONS, not references. So after
-    // this rung a pull will show scan rows attributed to job ids that no longer
-    // exist. That is correct — those scans really were produced by those jobs —
-    // but a query joining the two will silently return nothing for pre-v44
-    // rows. No in-memory state spans the migration: it runs inside `migrate()`
+    // sibling with its own id space, and `semantic_scan_results.backfillJobId`
+    // is a free-text ATTRIBUTION, not a reference. (This line used to name
+    // `semantic_scan_results.jobId` alongside it. There is no such column and
+    // there never was — playhead-1gu0 removed the name rather than carry it.)
+    // So after this rung a pull will show scan rows attributed to job ids that
+    // no longer exist. That is correct — those scans really were produced by
+    // those jobs — but a query joining the two will silently return nothing for
+    // pre-v44 rows. No in-memory state spans the migration: it runs inside `migrate()`
     // at store open, before any `AdmissionController` or runner exists, and the
     // scheduler keys on `analysis_jobs.workKey` rather than on a backfill id.
 
@@ -8918,10 +9027,13 @@ actor AnalysisStore {
     // is the numerator. `background_download_drop_arming` is the claim that
     // anybody was counting: the recorder is an INJECTED dependency whose
     // default is a no-op, and this repo has already shipped that hole once —
-    // `DownloadManager.workJournalRecorder` defaults to
-    // `NoopWorkJournalRecorder` and production never replaces it. Without an
+    // `DownloadManager.workJournalRecorder` defaulted to
+    // `NoopWorkJournalRecorder` and production never replaced it. Without an
     // arming row, "zero drops" and "the recorder was never installed" are the
-    // same empty table.
+    // same empty table. (That `workJournalRecorder` hole is FIXED — see the
+    // V63 rung below, which is the bead this paragraph's own reasoning found —
+    // and the sentence is kept in the past tense because it is the shipped
+    // instance the argument rests on.)
     //
     // So the reader gets a three-state ladder, all of it on disk:
     //   * no `background_download_drops` TABLE
@@ -8966,6 +9078,299 @@ actor AnalysisStore {
         guard observed >= 61 else { return }
         try createBackgroundDownloadDropTables()
         try setSchemaVersion(62)
+    }
+
+    // MARK: V64 — one daemon OUTAGE stops being indistinguishable from forty
+    //             EPISODES (playhead-sdis)
+    //
+    // `SELECT count(*) … WHERE reason='session_not_vended'` counts EPISODES
+    // AFFECTED. It was being read as a number of daemon refusals, and
+    // playhead-7dgx's own retry recommendation rests on the claim that such a
+    // refusal is a per-LAUNCH outage — a claim the table it was written against
+    // could not falsify. This repo's standing defect class, shipped inside the
+    // instrument built to catch it.
+    //
+    // TWO MECHANISMS SEPARATE THE POPULATIONS, AND ONE COLUMN COVERS NEITHER
+    // ALONE:
+    //
+    //   * A REFUSAL IS NEVER CACHED, so ONE LAUNCH can hold MANY refusals.
+    //     `launchId` alone therefore separates "one launch" from "forty
+    //     launches" and says nothing about how many refusals happened inside
+    //     one of them.
+    //   * ONE REFUSAL MINTS N ROWS. `backgroundSession(for:requestedBy:)` lets
+    //     concurrent callers JOIN an in-flight crossing rather than open a
+    //     second `URLSession` on one background identifier; every joiner gives
+    //     up on the FIRST caller's deadline and writes its own row.
+    //     `sessionCrossingId` is what those rows now share.
+    //
+    // AND `launchArmingState` CLOSES THE READING HAZARD playhead-7dgx
+    // DOCUMENTED AND COULD NOT MEASURE. `armedLaunches` is a COUNT with no
+    // recoverable membership, so it can never say whether a given row's launch
+    // was one of the counted ones — while `AnalysisStore` opens LAZILY, so a
+    // DEGRADED launch (`openAtLaunch` failed, the launch Task returned before
+    // arming) can still land a drop row. Nothing on disk said which rows those
+    // were. Now the row says.
+    //
+    // `lastArmedLaunchId` ON THE ARMING ROW IS THE FOURTH COLUMN and the
+    // smallest one: it names the launch `lastArmedAt` already dates, so the two
+    // tables can be joined at all. It is NOT a set of armed launches. There is
+    // deliberately no `firstArmedLaunchId` — it would answer only what
+    // `launchArmingState` answers better, and symmetry is not a query.
+    //
+    // EVERY COLUMN IS NULLABLE AND NOTHING IS BACKFILLED. SQLite cannot add a
+    // NOT NULL column without a DEFAULT, and every candidate default is a value
+    // that names an ABSENCE: a shared sentinel collapses all pre-V64 rows into
+    // ONE launch under `count(DISTINCT launchId)`, a per-row sentinel expands
+    // them into as many launches as there are rows. NULL is the one spelling
+    // SQL's own `count(DISTINCT)` declines to count, so it fails safe. V61's
+    // `usedPermissiveFallback` made the identical call: UNKNOWN IS NOT ZERO,
+    // and it is not one either. What enforces the bead's `NOT NULL` intent is
+    // the WRITE PATH — `BackgroundDownloadDropRecord`'s `context:` initializer
+    // takes a non-optional `launchId` and `launchArmingState`, so no row this
+    // build writes can be null.
+    //
+    // DO NOT USE `_meta.schema_version < 64` AS THE DISCRIMINATOR, for the
+    // reason V62 and V63 both state: `createTables()` is unconditional and runs
+    // BEFORE the ladder, so a store parked below the V39 rollback floor carries
+    // these columns and real rows at a stamp of 38. READ THE COLUMN — a row
+    // that predates this rung is exactly one with `launchId IS NULL`.
+    //
+    // Idempotent: the whole rung is `addColumnIfNeeded` inside the shared V62
+    // DDL helper, so a second pass changes nothing.
+
+    /// V64 migration (playhead-sdis) — launch, crossing and arming identity on
+    /// the dropped-background-download ledger.
+    ///
+    /// The rung calls the SAME shared helper the V62 rung and `createTables()`
+    /// call, because the four columns are declared there — in the one place the
+    /// shape is declared, which is the V62 helper's own stated obligation. A
+    /// second copy of the DDL is how a fresh install and an upgrade drift.
+    private func migrateBackgroundDownloadDropLaunchIdentityV64IfNeeded() throws {
+        let observed = (try schemaVersion() ?? 1)
+        guard observed < 64 else { return }
+        // DO NOT STEP OVER A ROLLED-BACK V39 — same rationale as V40–V63.
+        guard observed >= 63 else { return }
+        try createBackgroundDownloadDropTables()
+        logger.notice(
+            "playhead-sdis V64: background_download_drops gains launchId, sessionCrossingId and launchArmingState, and background_download_drop_arming gains lastArmedLaunchId. NOTHING IS BACKFILLED and nothing could be — a pre-V64 row was written by a build that knew none of it, and every candidate default would turn that absence into a launch count. A pre-V64 row is exactly one with launchId IS NULL; read count(DISTINCT launchId) as LAUNCHES and count(DISTINCT sessionCrossingId) as DAEMON REFUSALS, never count(*), which is EPISODES."
+        )
+        try setSchemaVersion(64)
+    }
+
+    /// V65 migration (playhead-1gu0) — `semantic_scan_results.runCorrelationId`
+    /// becomes `backfillJobId`, which is what it has always carried.
+    ///
+    /// **THE NAME WAS THE DEFECT.** The places that say what this column HOLDS
+    /// already said "the `backfill_jobs.jobId`" — the writer
+    /// (`BackfillJobRunner.attributed(_:jobId:)`), the V42 schema note, and
+    /// ``SemanticScanResult/backfillJobId``'s own doc.
+    ///
+    /// **THE SITES THAT SPELLED IT A *RUN* ARE EDITED HERE RATHER THAN CITED AS
+    /// WITNESSES, AND THE COUNT IS GIVEN AS A PREDICATE BECAUSE EVERY BARE
+    /// NUMBER THIS SENTENCE HAS CARRIED HAS BEEN SHORT.** It said TWO, then
+    /// FOUR; each was a handful somebody had in hand read as a census — the
+    /// shape this very paragraph is about, inside it. Re-run it instead of
+    /// re-counting it:
+    ///
+    ///     git grep -niI -e "run correlation" -e "correlation id" 55dd7e6e \
+    ///       -- Playhead PlayheadTests docs scripts
+    ///
+    /// **FIVE hits in FOUR files** at this branch's base, every one edited here:
+    /// `AnalysisCoordinator.runPendingCoarseScans`'s Returns note,
+    /// `SemanticScanAttributionWireInTests` ×2, `SemanticScanRunAttributionTests`
+    /// and `docs/investigations/playhead-hx6n-scan-attribution.md`. That grep is
+    /// deliberately narrower than the whole edit: it catches the PROSE spellings
+    /// and not the sites that wrote the identifier in code font and reasoned
+    /// about it. **NO CARDINAL IS GIVEN FOR THOSE, DELIBERATELY** — round 15
+    /// found that this very clause had said "the two", and missed at least
+    /// ``SemanticSweepMarkComposer/corroborates(_:_:)``'s note, which measures
+    /// the id out over `A9F6DF05`. So the sentence stops counting: the two worth
+    /// reading are `BackgroundGrantBudget` and
+    /// ``SemanticSweepMarkComposer/corroborationFactor(affirming:dissenting:)``,
+    /// and they are named as EXAMPLES rather than as a census. (The grep's own
+    /// FIVE is not one of the short ones — it re-derives exactly. What has been
+    /// short is every count of the sites the grep cannot see.)
+    ///
+    /// They are not the same kind of wrong, and the difference matters. TWO
+    /// asserted something untrue:
+    /// ``SemanticSweepMarkComposer/corroborationFactor(affirming:dissenting:)``
+    /// offered a "distinct `runCorrelationId`" as EVIDENCE that its replicates
+    /// are independent — a false claim, and the reason this bead exists.
+    /// `AnalysisCoordinator`'s Returns note called the value a run correlation
+    /// id in prose, which is the column's own name-defect one layer along. The
+    /// other TWO asserted nothing untrue and were edited for consistency only:
+    /// `BackgroundGrantBudget`'s limit paragraph called it "an `fm-*` id" and
+    /// said it matches no `runId`, which is TRUE as written and merely does not
+    /// say whose id it is (the diff adds the word "job"), and the `hx6n`
+    /// investigation used the column's actual spelling of the day. **Silence is
+    /// not disagreement, and an earlier draft of this paragraph read it as
+    /// such** — first by claiming every other mention already agreed, then by
+    /// over-correcting to "it did not agree". Neither said anything either way.
+    ///
+    /// A job id is per `(asset, phase, offset)`: ONE value for an asset's whole
+    /// backfill history. Measured on the 2026-08-19 t4 pull,
+    /// `count(DISTINCT runCorrelationId)` and `count(DISTINCT analysisAssetId)`
+    /// are both **15**, and `A9F6DF05` carries 176 rows written across four
+    /// calendar days under the single id `fm-9330e821aeb36a0d`.
+    ///
+    /// **WHY A RENAME RATHER THAN A DOC COMMENT.** This column's working reader
+    /// is a person at a `sqlite3` prompt over a device pull, and no doc comment
+    /// reaches there — the column name is the only documentation that travels
+    /// with the data. That is not hypothetical: `playhead-my33` reached for this
+    /// column as a "different FM call" spelling on the strength of its name, and
+    /// the wrong claim that came out of it shipped in
+    /// ``SemanticSweepMarkComposer/corroborationFactor(affirming:dissenting:)``'s
+    /// documentation from 2026-08-10 (`6e9c386f`) until this rung landed on
+    /// 2026-08-26 — SIXTEEN days in the tree, of which eleven passed before
+    /// `playhead-my33` measured it out. (This line read "eleven days", which is
+    /// the time to DISCOVERY and not the time it shipped — the same
+    /// two-quantities-one-name reading the rename exists to stop.)
+    ///
+    /// **WHY NO NEW PER-INVOCATION COLUMN.** Nothing wants one. The only
+    /// consumer that ever asked "is this a different FM call" is
+    /// ``SemanticSweepMarkComposer/corroborates(_:_:)``, and playhead-my33
+    /// settled it on window bounds; ``SemanticSweepMarkComposer/corroboration(for:in:atTranscriptVersion:)``
+    /// scopes by `transcriptVersion`. Both were decided against an id, and
+    /// `transcriptVersion` separates every replicate on both measured pulls. A
+    /// column nobody reads is a standing writer obligation with no reader — which
+    /// is exactly how this one came to mean something nobody checked.
+    ///
+    /// **WHAT IT COSTS, said plainly:** a device pull taken before this rung
+    /// spells the column `runCorrelationId` and one taken after spells it
+    /// `backfillJobId`. Every archived pull under `playhead-gate-artifacts` keeps
+    /// the old spelling forever, so a query that sweeps across pulls must handle
+    /// both. NOTHING IS BACKFILLED and no value moves: `RENAME COLUMN` preserves
+    /// every row, and a NULL stays NULL because a pre-V42 row genuinely has no
+    /// job.
+    ///
+    /// **AND IT IS THE FIRST RUNG ON THIS TABLE THAT AN OLDER BINARY CANNOT
+    /// IGNORE.** Every earlier one left every existing column NAME in place —
+    /// even V52, which DROPPED AND RE-ADDED `prewarmHit` to make it nullable
+    /// (this line said "rebuilt the table", and
+    /// `migrateUnmeasuredPrewarmHitV52IfNeeded` says the opposite in its own
+    /// doc — "the drop is a single statement rather than a table rebuild";
+    /// playhead-1gu0 review) — so the V42 note's "what an older binary sees:
+    /// nothing" held. A rename REMOVES a name that a pre-V65 binary's explicit
+    /// column list still spells. What happens then is not a crash and is worse
+    /// than one: that binary's own `createTables()` puts `runCorrelationId`
+    /// back as an EMPTY column and writes into it. See
+    /// `renameSemanticScanRunCorrelationIdIfNeeded()` for the state that leaves
+    /// behind and why it is left alone.
+    private func migrateSemanticScanBackfillJobIdentityV65IfNeeded() throws {
+        let observed = (try schemaVersion() ?? 1)
+        guard observed < 65 else { return }
+        // DO NOT STEP OVER A ROLLED-BACK V39 — same rationale as V40–V64.
+        guard observed >= 64 else { return }
+        try renameSemanticScanRunCorrelationIdIfNeeded()
+        logger.notice(
+            "playhead-1gu0 V65: semantic_scan_results.runCorrelationId is renamed backfillJobId, which is what it has always held — the backfill_jobs.jobId, one value per (asset, phase, offset). Nothing is backfilled and no value moves. A device pull taken before this rung still spells the column runCorrelationId."
+        )
+        try setSchemaVersion(65)
+    }
+
+    /// The V65 rename, factored out because THREE call sites take it and the
+    /// order between them is the whole safety property: `createTables()`, the
+    /// V42 rung, and the V65 rung. Only ONE of them can ever do the work on a
+    /// given open, and which one is a property of the PATH rather than of the
+    /// database. In production `createTables()` runs BEFORE the whole
+    /// `V*IfNeeded` ladder, so it is always the one that renames — the other two
+    /// then find the new spelling present and decline. The other two are not
+    /// therefore decoration, and they earn their place for DIFFERENT reasons.
+    /// `createTables()`'s call and the V42 rung's each sit immediately above an
+    /// `addColumnIfNeeded` for `backfillJobId`: without the rename first, that
+    /// call adds an EMPTY new column alongside a populated old one, which is
+    /// mutation GU01. The V65 rung's has no `addColumnIfNeeded` under it at all;
+    /// it is there because `migrateOnlyForTesting()` skips `createTables()`
+    /// entirely, so on that seam it is the one that ALWAYS runs.
+    ///
+    /// **THAT IS NOT THE SAME AS BEING THE ONLY ONE, AND THIS PARAGRAPH SAID
+    /// "the only one of the three that RUNS" (playhead-1gu0 review round 6).**
+    /// The V42 rung's call sits behind `if tableExists("semantic_scan_results")`
+    /// AND behind `guard observed < 42` / `guard observed >= 41` — so it runs at
+    /// EXACTLY 41 — and **NINE of the 23 fixtures that drive that seam to head
+    /// with the table present start below 42**, so they climb through 41 and the
+    /// V42 call runs there too. It declines there, like every other call on that
+    /// seam, because `createTables()` built `backfillJobId` before the rewind.
+    /// (Round 6 wrote **12** here and round 7 re-derived it off the stamp each
+    /// fixture rewinds to: 28, 29, 30, 32, 34, 38, 38, 38, 39 — nine. Every
+    /// other one of the 23 rewinds to 43 or higher and can never see 41. The
+    /// claim the sentence makes is unchanged; the count was not measured.)
+    /// The same line also said "nothing in the tree is seeded at 41", which is
+    /// false and was generalised from the `seedSchemaVersion` call sites alone:
+    /// `SemanticScanRunAttributionTests.v41RowSurvivesMigrationAndStaysUnattributed`
+    /// seeds 41 with a raw `UPDATE _meta`. It drives `migrate()`, where
+    /// `createTables()` has already renamed — which is the claim that was wanted.
+    ///
+    /// **REACHED AND EXERCISED ARE DIFFERENT CLAIMS, AND AN EARLIER DRAFT OF
+    /// THIS PARAGRAPH SAID "no fixture reaches it with `semantic_scan_results`
+    /// present today" (playhead-1gu0 review).** **TWENTY-THREE do — and the
+    /// correction for that draft said "two", which was the pair somebody had in
+    /// hand read as a census (playhead-1gu0 review round 6).** Measured over
+    /// `PlayheadTests`, brace-matched bodies with comments and string literals
+    /// blanked before the braces are counted: **23 test functions across
+    /// THIRTEEN files** call `migrate()` (so `createTables()` builds the table),
+    /// rewind, drive `migrateOnlyForTesting()`, and then assert
+    /// `schemaVersion() == currentSchemaVersion` AFTER that call. Only the V65
+    /// rung stamps 65, so that assertion PROVES this helper ran on that seam.
+    /// They include `theLadderOnlySeamReachesV64`,
+    /// `aV62StoreClimbsThroughV63ToHead` and all six `isolatedLadderReaches*`.
+    /// In all 23 the table IS present and this
+    /// helper DOES run. It returns on its `hasNew` guard, because those stores
+    /// already carry the new spelling. So the call site is reached and the RENAME
+    /// itself is not: nothing seeds `semantic_scan_results` at the OLD spelling
+    /// below V65 on the ladder-only path, and the sibling rail
+    /// (`v64RowKeepsItsJobIdAcrossTheV65Rename`) exercises the rename through
+    /// `createTables()` instead. Said out loud rather than left for a green
+    /// suite to read as coverage.
+    ///
+    /// **SAY WHETHER A HELPER COUNTS, BECAUSE THE TWO READINGS DIFFER BY A WHOLE
+    /// FILE — and this paragraph said "23 … across twelve files", which no single
+    /// predicate yields (playhead-1gu0 review round 7).** `migrate()` reaches the
+    /// test through a same-file helper in
+    /// `DownloadWorkJournalV63MigrationTests`, whose `makeHeadStore(prefix:)`
+    /// calls it: that file contributes THREE (`theLadderOnlySeamReachesV63`,
+    /// `aV61StoreClimbsThroughV62ToHead`, `theRungIsIdempotentAndNeverErases`)
+    /// and is invisible to any search over the test body's own text. Counting
+    /// helper-mediated calls the census is **23 across thirteen files**; counting
+    /// only a literal `.migrate()` in the test's own body it is **20 across
+    /// twelve**. 23 is the first reading and twelve is the second, so the two
+    /// halves of that sentence came from different searches. The CONCLUSION is
+    /// the same under either: every one of them runs `createTables()` before
+    /// rewinding, so the helper returns on `hasNew` and the rename stays
+    /// unexercised on this seam.
+    ///
+    /// Idempotent, and it declines rather than guesses in the one ambiguous
+    /// state. If BOTH spellings exist the new one wins and the old is left
+    /// alone: this helper cannot know which holds the real values, and merging
+    /// them would be inventing attribution.
+    ///
+    /// **THAT STATE IS NOT UNREACHABLE, AND AN EARLIER DRAFT OF THIS PARAGRAPH
+    /// SAID IT WAS.** No path in THIS file produces it — every
+    /// `addColumnIfNeeded` for the new spelling is preceded by this call. A
+    /// DOWNGRADE does: a pre-V65 binary opening a V65 database runs its own
+    /// `createTables()`, whose `addColumnIfNeeded` puts `runCorrelationId` back
+    /// as an EMPTY column and then writes its rows into it, while
+    /// `_meta.schema_version` stays 65 and is never lowered. Coming forward
+    /// again, this helper sees the new spelling present and declines, so the
+    /// downgrade era's rows read NULL under `backfillJobId` for ever. Left alone
+    /// deliberately: the two columns hold rows from different eras and
+    /// coalescing them would invent the very attribution this column exists to
+    /// record. The cost is forensic rather than behavioural — nothing in
+    /// production READS this column — and `migrate()` already logs a fault when
+    /// it opens a schema newer than the binary knows.
+    private func renameSemanticScanRunCorrelationIdIfNeeded() throws {
+        guard try tableExists("semantic_scan_results") else { return }
+        let hasNew = try columnExists(table: "semantic_scan_results", column: "backfillJobId")
+        guard !hasNew else { return }
+        guard try columnExists(table: "semantic_scan_results", column: "runCorrelationId") else { return }
+        // Drop the old index first and rebuild it under the new name. SQLite
+        // does rewrite an index definition through a RENAME COLUMN, but it
+        // would keep the index NAME — leaving an index called `_correlation`
+        // over a column called `backfillJobId`, which is the same
+        // name-says-one-thing defect one layer down.
+        try exec("DROP INDEX IF EXISTS idx_semantic_scan_results_correlation")
+        try exec("ALTER TABLE semantic_scan_results RENAME COLUMN runCorrelationId TO backfillJobId")
+        try exec("CREATE INDEX IF NOT EXISTS idx_semantic_scan_results_backfill_job ON semantic_scan_results(backfillJobId)")
     }
 
     /// The V62 DDL, shared verbatim by `createTables()` and the rung above so
@@ -9013,7 +9418,49 @@ actor AnalysisStore {
                 -- The BackgroundSessionIO bound that expired, in seconds.
                 -- Recorded rather than assumed so a later change to the bound
                 -- cannot silently re-scale this table's whole history.
-                boundSeconds       REAL NOT NULL
+                boundSeconds       REAL NOT NULL,
+                -- playhead-sdis. WHICH PROCESS wrote the row. Without it
+                -- `count(*)` is EPISODES AFFECTED and nothing recovers the
+                -- number of daemon refusals behind them; with it,
+                -- `count(DISTINCT launchId)` is in the SAME UNIT as
+                -- `background_download_drop_arming.armedLaunches`, which is a
+                -- count of LAUNCHES.
+                --
+                -- NULL means the row PREDATES V64 and nothing else. It is
+                -- nullable rather than NOT NULL because SQLite cannot add a
+                -- NOT NULL column without a DEFAULT and there is no honest
+                -- default: one shared sentinel collapses every pre-V64 row
+                -- into ONE launch under `count(DISTINCT)`, and a per-row
+                -- sentinel expands them into as many launches as there are
+                -- rows. NULL is the one spelling `count(DISTINCT)` declines
+                -- to count. Nothing this build writes is NULL — the write
+                -- path's `launchId` is non-optional Swift.
+                launchId           TEXT,
+                -- playhead-sdis. The ONE bounded URLSession CONSTRUCTION
+                -- crossing this caller rode — started OR joined.
+                -- `backgroundSession(for:requestedBy:)` lets concurrent
+                -- callers JOIN an in-flight crossing, so ONE daemon refusal
+                -- mints N rows; N rows sharing this value are N EPISODES LOST
+                -- TO ONE REFUSAL. `occurredAt` clustering is a heuristic and
+                -- is not a substitute.
+                --
+                -- NULL for TWO unrelated reasons and `launchId` is the
+                -- discriminator: with a launchId, NULL means this reason has
+                -- no joinable crossing (only `session_not_vended` rides one —
+                -- the other two each follow a `sessionIO.perform` the caller
+                -- submitted alone, so for them a row IS a call); without a
+                -- launchId the row predates V64 and says nothing at all.
+                sessionCrossingId  TEXT,
+                -- playhead-sdis. not_attempted | armed | arming_failed |
+                -- no_recorder — what the writing process knew about ITS OWN
+                -- arming when this row was written. Anything other than
+                -- `armed` means THIS ROW'S LAUNCH IS NOT IN `armedLaunches`,
+                -- which is the reading hazard playhead-7dgx documented and
+                -- could not measure: `AnalysisStore` opens LAZILY, so a
+                -- DEGRADED launch that never armed can still land a row.
+                -- NULL means the row predates V64. A raw value on disk, so
+                -- these strings are a schema.
+                launchArmingState  TEXT
             );
         """)
         try exec("CREATE INDEX IF NOT EXISTS idx_background_download_drops_occurred ON background_download_drops(occurredAt DESC);")
@@ -9036,6 +9483,16 @@ actor AnalysisStore {
                 dropWriteFailures INTEGER NOT NULL DEFAULT 0,
                 firstArmedAt  REAL,
                 lastArmedAt   REAL,
+                -- playhead-sdis. WHICH LAUNCH `lastArmedAt` belongs to. NOT a
+                -- set of armed launches and it must not be used as one —
+                -- `armedLaunches` is a count with no recoverable membership.
+                -- It exists so the arming row and a drop row can be spoken
+                -- about in ONE vocabulary at all; before it the two tables
+                -- shared no column. For the per-row question ("is THIS row's
+                -- launch in the denominator") read
+                -- `background_download_drops.launchArmingState`, which is
+                -- durable and does not go stale when the next launch arms.
+                lastArmedLaunchId TEXT,
                 installedAt   REAL NOT NULL
             );
         """)
@@ -9077,6 +9534,29 @@ actor AnalysisStore {
             column: "dropWriteFailures",
             definition: "INTEGER NOT NULL DEFAULT 0"
         )
+        // playhead-sdis (V64). Four more, obeying the obligation stated
+        // immediately above. All four are NULLABLE and none carries a DEFAULT:
+        // `ALTER TABLE … ADD COLUMN` on a nullable column leaves every existing
+        // row NULL, which is the only honest value for a row written by a build
+        // that knew none of this. A DEFAULT here would not be a convenience —
+        // it would fabricate launch identities, and `count(DISTINCT launchId)`
+        // would then read them as launches.
+        //
+        // `lastArmedLaunchId` is deliberately NOT added to the seed INSERT
+        // below: a freshly seeded arming row has never armed, so NULL is what
+        // it means, exactly as for `firstArmedAt`/`lastArmedAt`.
+        for column in ["launchId", "sessionCrossingId", "launchArmingState"] {
+            try addColumnIfNeeded(
+                table: "background_download_drops",
+                column: column,
+                definition: "TEXT"
+            )
+        }
+        try addColumnIfNeeded(
+            table: "background_download_drop_arming",
+            column: "lastArmedLaunchId",
+            definition: "TEXT"
+        )
         // Seeded at zero so that "installed but never armed" is a row a pull
         // can read, rather than an absence indistinguishable from a build
         // that never had the instrument at all.
@@ -9102,8 +9582,9 @@ actor AnalysisStore {
         let sql = """
             INSERT INTO background_download_drops
             (id, episodeId, reason, occurredAt, podcastId, unattributedReason,
-             isExplicitDownload, boundSeconds)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+             isExplicitDownload, boundSeconds, launchId, sessionCrossingId,
+             launchArmingState)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
@@ -9115,12 +9596,21 @@ actor AnalysisStore {
         bind(stmt, 6, record.unattributedReason?.rawValue)
         bind(stmt, 7, record.isExplicitDownload ? 1 : 0)
         bind(stmt, 8, record.boundSeconds)
+        // playhead-sdis. These three are OPTIONAL on the record for one reason
+        // only — a row read back from a pre-V64 store. On the WRITE path the
+        // download manager reaches an initializer whose `launchId` and
+        // `launchArmingState` are non-optional, so a null landing here means a
+        // caller built the record some other way.
+        bind(stmt, 9, record.launchId)
+        bind(stmt, 10, record.sessionCrossingId)
+        bind(stmt, 11, record.launchArmingState?.rawValue)
         try step(stmt, expecting: SQLITE_DONE)
     }
 
     private static let backgroundDownloadDropSelectColumns = """
         SELECT id, episodeId, reason, occurredAt, podcastId, unattributedReason,
-               isExplicitDownload, boundSeconds
+               isExplicitDownload, boundSeconds, launchId, sessionCrossingId,
+               launchArmingState
         FROM background_download_drops
         """
 
@@ -9156,6 +9646,21 @@ actor AnalysisStore {
             }
             unattributed = decoded
         }
+        // playhead-sdis, and it is THE SAME RULE a third time. A NULL here is a
+        // row written before V64 and is materialized as nil; a raw value this
+        // build cannot decode is REFUSED, because mapping it to nil would say
+        // the row predates V64 — which a row carrying a value demonstrably does
+        // not — and mapping it to `.notAttempted` would inflate the population
+        // that claims "this launch is not in the denominator".
+        var arming: BackgroundDownloadDropLaunchArming?
+        if let rawArming = optionalText(stmt, 10) {
+            guard let decoded = BackgroundDownloadDropLaunchArming(
+                rawValue: rawArming
+            ) else {
+                return .failure(.unrecognizedLaunchArmingState)
+            }
+            arming = decoded
+        }
         return .success(BackgroundDownloadDropRecord(
             id: text(stmt, 0),
             episodeId: text(stmt, 1),
@@ -9164,7 +9669,10 @@ actor AnalysisStore {
             podcastId: optionalText(stmt, 4),
             unattributedReason: unattributed,
             isExplicitDownload: sqlite3_column_int64(stmt, 6) != 0,
-            boundSeconds: sqlite3_column_double(stmt, 7)
+            boundSeconds: sqlite3_column_double(stmt, 7),
+            launchId: optionalText(stmt, 8),
+            sessionCrossingId: optionalText(stmt, 9),
+            launchArmingState: arming
         ))
     }
 
@@ -9197,14 +9705,25 @@ actor AnalysisStore {
         // than hidden: it needs 2^31 rows to reach, and the alternative is a
         // trap. Nothing in the codebase passes such a limit.
         let probe = ceiling >= Int(Int32.max) ? Int(Int32.max) : ceiling + 1
+        // `, id DESC` is a TIEBREAKER, not decoration (playhead-sdis). Three
+        // rows minted by three joiners of ONE session crossing carry
+        // `occurredAt` values that can be equal to the double's precision, and
+        // `ORDER BY occurredAt DESC` alone leaves their order — and therefore
+        // WHICH of them a `limit` cuts off — unspecified. A page whose contents
+        // depend on SQLite's scan order is a page whose `truncated` flag names
+        // an arbitrary set.
         let stmt = try prepare(
-            "\(Self.backgroundDownloadDropSelectColumns) ORDER BY occurredAt DESC LIMIT ?"
+            """
+            \(Self.backgroundDownloadDropSelectColumns)
+            ORDER BY occurredAt DESC, id DESC LIMIT ?
+            """
         )
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, probe)
         var rows: [BackgroundDownloadDropRecord] = []
         var unrecognizedReason = 0
         var unrecognizedUnattributed = 0
+        var unrecognizedArming = 0
         var seen = 0
         var truncated = false
         // `nextRow` rather than a bare step comparison: an I/O or corruption
@@ -9220,12 +9739,14 @@ actor AnalysisStore {
             case .success(let row): rows.append(row)
             case .failure(.unrecognizedReason): unrecognizedReason += 1
             case .failure(.unrecognizedUnattributedReason): unrecognizedUnattributed += 1
+            case .failure(.unrecognizedLaunchArmingState): unrecognizedArming += 1
             }
         }
         return BackgroundDownloadDropPage(
             rows: rows,
             unrecognizedReasonRows: unrecognizedReason,
             unrecognizedUnattributedReasonRows: unrecognizedUnattributed,
+            unrecognizedLaunchArmingStateRows: unrecognizedArming,
             truncated: truncated
         )
         // NOTE for the next reader: every count returned here is over the
@@ -9242,12 +9763,21 @@ actor AnalysisStore {
     /// The `INSERT … ON CONFLICT` is what makes this work on a store whose
     /// arming row is somehow missing — a hand-edited fixture, or a rung that
     /// rolled back — instead of counting into a row that is not there.
-    func noteBackgroundDownloadDropInstrumentArmed(at now: Double) throws {
+    /// `lastArmedLaunchId` moves with `lastArmedAt` and never independently
+    /// (playhead-sdis) — they are one fact spelled two ways, and a stamp whose
+    /// launch id belongs to a different arming would be worse than no launch id
+    /// at all. There is no `firstArmedLaunchId`: the per-row question it would
+    /// be reached for is answered durably by
+    /// `background_download_drops.launchArmingState`.
+    func noteBackgroundDownloadDropInstrumentArmed(
+        launchId: String,
+        at now: Double
+    ) throws {
         let sql = """
             INSERT INTO background_download_drop_arming
             (id, armedLaunches, dropWriteFailures, firstArmedAt, lastArmedAt,
-             installedAt)
-            VALUES (1, 1, 0, ?, ?, ?)
+             lastArmedLaunchId, installedAt)
+            VALUES (1, 1, 0, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 armedLaunches = armedLaunches + 1,
                 firstArmedAt = CASE
@@ -9255,13 +9785,15 @@ actor AnalysisStore {
                     THEN excluded.firstArmedAt
                     ELSE background_download_drop_arming.firstArmedAt
                 END,
-                lastArmedAt = excluded.lastArmedAt
+                lastArmedAt = excluded.lastArmedAt,
+                lastArmedLaunchId = excluded.lastArmedLaunchId
             """
         let stmt = try prepare(sql)
         defer { sqlite3_finalize(stmt) }
         bind(stmt, 1, now)
         bind(stmt, 2, now)
-        bind(stmt, 3, now)
+        bind(stmt, 3, launchId)
+        bind(stmt, 4, now)
         try step(stmt, expecting: SQLITE_DONE)
     }
 
@@ -9285,11 +9817,15 @@ actor AnalysisStore {
     /// section is sub-second, and a time nobody can inject is a time no test
     /// can pin.
     func noteBackgroundDownloadDropWriteFailure(at now: Double) throws {
+        // playhead-sdis: `lastArmedLaunchId` stays NULL on the re-create path
+        // for the same reason `armedLaunches` stays 0 — a write FAILURE is not
+        // an arming, and naming a launch here would manufacture the very claim
+        // this row exists to withhold.
         let stmt = try prepare("""
             INSERT INTO background_download_drop_arming
             (id, armedLaunches, dropWriteFailures, firstArmedAt, lastArmedAt,
-             installedAt)
-            VALUES (1, 0, 1, NULL, NULL, ?)
+             lastArmedLaunchId, installedAt)
+            VALUES (1, 0, 1, NULL, NULL, NULL, ?)
             ON CONFLICT(id) DO UPDATE SET
                 dropWriteFailures = dropWriteFailures + 1
             """)
@@ -9307,7 +9843,7 @@ actor AnalysisStore {
     func fetchBackgroundDownloadDropArming() throws -> BackgroundDownloadDropArming? {
         let stmt = try prepare("""
             SELECT armedLaunches, dropWriteFailures, firstArmedAt, lastArmedAt,
-                   installedAt
+                   installedAt, lastArmedLaunchId
             FROM background_download_drop_arming WHERE id = 1
             """)
         defer { sqlite3_finalize(stmt) }
@@ -9318,6 +9854,407 @@ actor AnalysisStore {
         return BackgroundDownloadDropArming(
             armedLaunches: Int(sqlite3_column_int64(stmt, 0)),
             dropWriteFailures: Int(sqlite3_column_int64(stmt, 1)),
+            firstArmedAt: optionalDouble(stmt, 2),
+            lastArmedAt: optionalDouble(stmt, 3),
+            lastArmedLaunchId: optionalText(stmt, 5),
+            installedAt: sqlite3_column_double(stmt, 4)
+        )
+    }
+
+    // MARK: V63 — the DOWNLOAD half of the work journal gets a table it can
+    //             write to (playhead-4xmz)
+    //
+    // `DownloadManager.workJournalRecorder` defaulted to
+    // `NoopWorkJournalRecorder` and PRODUCTION NEVER REPLACED IT, so every
+    // event the download path emitted — a terminal background transfer
+    // failure, a finalized transfer, the force-quit scan's preempted and
+    // corrupted rows — went to a method whose body is `{}`. Four months, one
+    // production construction site, zero rows anywhere.
+    //
+    // WHY NOT `work_journal`, WHICH ALREADY EXISTS AND HAS A LIVE RECORDER.
+    // Two reasons, and the second is the one that makes the one-line fix
+    // dangerous rather than merely inert.
+    //
+    //   1. IDENTITY. `AnalysisStoreWorkJournalRecorder.persist` resolves
+    //      `{generationID, schedulerEpoch}` from `fetchLatestJobForEpisode`
+    //      and RETURNS EARLY when there is no `analysis_jobs` row. A
+    //      background download that fails before any analysis job exists —
+    //      the common case for an auto-download — would log a warning and
+    //      write nothing even with the recorder wired.
+    //
+    //   2. `work_journal.event_type` IS A COLD-LAUNCH RECOVERY INPUT
+    //      (playhead-rqgr). `AnalysisCoordinator.recoverOrphans` reads the
+    //      LAST row for the `{episode_id, generation_id}` of every job whose
+    //      lease expired and routes `.failed`/`.finalized` to
+    //      `terminalNoRequeue` — clear the lease, do NOT requeue. A row saying
+    //      the DOWNLOAD failed, written under the ANALYSIS job's generation,
+    //      therefore tells recovery the ANALYSIS work is over. That is
+    //      playhead-rqgr's shipped defect re-created from a new writer.
+    //
+    // SO: A SIBLING TABLE, EPISODE-KEYED AND DELIBERATELY NOT FOREIGN-KEYED,
+    // which is `rediff_day_zero_kickoffs`' answer to the identical problem —
+    // see the V41 block comment above. There, the give-up worth recording was
+    // exactly the one where no `analysis_assets` row existed, so an FK would
+    // have rejected every insert that mattered; here it is exactly the one
+    // where no `analysis_jobs` row exists, and an episode id is the only
+    // identity the download path holds.
+    //
+    // NO `generationID` COLUMN, on purpose. It would cost a store READ on the
+    // download completion path for a join nobody has asked for, and a nullable
+    // generation beside an `eventType` spelled `failed` is precisely the shape
+    // that invites a later reader to join these rows back into orphan
+    // recovery — the hazard in (2).
+    //
+    // TWO TABLES, AND THE SECOND ONE IS THE POINT, exactly as at V62.
+    // `download_work_journal_arming` is the claim that anybody was counting.
+    // Without it "no download ever failed" and "nobody was recording" are the
+    // same empty table — which is the state this bead found, and the reason it
+    // took four months to find.
+    //
+    // THE FULL READING IS ENUMERATED IN ONE PLACE ONLY, AND IT CARRIES NO
+    // COUNT — it has been wrong four times, so there is no number to get right:
+    // `DownloadWorkJournalLedger.swift`'s header. It is deliberately NOT
+    // restated here — this comment carried a four-state copy that went stale
+    // the moment review 3 added two more, which is exactly how the V62 recipe
+    // came to be followed against a V63 table. The states the SCHEMA is
+    // responsible for are:
+    //
+    //   * no `download_work_journal` TABLE  — build predates the instrument;
+    //   * table present, arming ROW absent  — `sqlite3` prints a blank line;
+    //   * table present, `armedLaunches = 0` — nobody was counting;
+    //   * `writeFailures > 0` — events happened and this store could not hold
+    //         them.
+    //
+    // The rest are properties of the RECORDER (a positive claim, a finalized
+    // event discarded by cancellation, and a missing denominator beside real
+    // rows) and are stated there.
+    //
+    // DO NOT USE `_meta.schema_version < 63` AS THE DISCRIMINATOR, for the
+    // reason V62 states above: `createTables()` is unconditional and runs
+    // BEFORE the ladder, so a store parked below the V39 rollback floor
+    // carries both tables and real rows at a stamp of 38. READ THE TABLE.
+    //
+    // NOTHING IS BACKFILLED and nothing could be: every download event before
+    // this build went to a no-op and left no trace. The absence of pre-V63
+    // rows is honest.
+    //
+    // Idempotent: `CREATE TABLE IF NOT EXISTS` + `CREATE INDEX IF NOT EXISTS`
+    // + `INSERT OR IGNORE` on a single-row table, so it needs no SAVEPOINT and
+    // a second pass changes nothing.
+
+    /// V63 migration (playhead-4xmz) — the download-path work journal and its
+    /// arming row.
+    private func migrateDownloadWorkJournalV63IfNeeded() throws {
+        let observed = (try schemaVersion() ?? 1)
+        guard observed < 63 else { return }
+        // DO NOT STEP OVER A ROLLED-BACK V39 — same rationale as V40–V62.
+        guard observed >= 62 else { return }
+        try createDownloadWorkJournalTables()
+        try setSchemaVersion(63)
+    }
+
+    /// The V63 DDL, shared verbatim by `createTables()` and the rung above so
+    /// a fresh install and an upgrade converge on the same shape. Both callers
+    /// are idempotent.
+    ///
+    /// `installedAt` is stamped when the arming row is first created. It is
+    /// NOT NULL because it is always knowable; `firstArmedAt`/`lastArmedAt`
+    /// are nullable because "never armed" is a state that must not be spelled
+    /// as a date at the epoch.
+    private func createDownloadWorkJournalTables() throws {
+        try exec("""
+            CREATE TABLE IF NOT EXISTS download_work_journal (
+                -- playhead-4xmz. INSIDE the parentheses on purpose: SQLite
+                -- stores this statement from the CREATE keyword on, so a
+                -- comment ABOVE it is discarded and never reaches a pulled
+                -- file (measured at V62).
+                --
+                -- THIS IS NOT `work_journal` AND MUST NEVER BE JOINED INTO
+                -- ORPHAN RECOVERY. `work_journal.event_type` routes
+                -- `AnalysisCoordinator.recoverOrphans`; nothing routes on the
+                -- rows here, which exist for a human reading a device pull.
+                -- The two tables answer different questions about different
+                -- halves of the pipeline and share only a word in their names.
+                --
+                -- READ THE TABLE, NOT `_meta.schema_version`, to decide
+                -- whether this build carried the instrument: these tables are
+                -- created before the migration ladder and can exist at an
+                -- older stamp. Always read `download_work_journal_arming`
+                -- alongside these rows — a count here means nothing without
+                -- the denominator, and `armedLaunches` is not an attempt
+                -- count. And prefer RAW SQL for totals: the Swift reader
+                -- `fetchDownloadWorkJournal` SKIPS a row whose `eventType` it
+                -- cannot decode and counts it into `unrecognizedEventTypeRows`,
+                -- whereas `GROUP BY eventType` returns every raw value.
+                id          TEXT PRIMARY KEY,
+                -- The ONLY identity the download path holds, and deliberately
+                -- NOT `REFERENCES analysis_jobs(...)`: the event this table
+                -- exists for is the one where no job row was ever created.
+                episodeId   TEXT NOT NULL,
+                -- finalized | failed | preempted. A raw value on disk, so
+                -- these strings are a schema and renaming one is a migration.
+                eventType   TEXT NOT NULL,
+                -- NULL exactly for `finalized`. A successful transfer has no
+                -- miss cause and inventing one would put a value in a column
+                -- whose whole job is to carry a reason.
+                cause       TEXT,
+                occurredAt  REAL NOT NULL,
+                -- The SliceMetadata JSON blob the emission site built: stage,
+                -- error text, bytes written, device class. playhead-1nl6
+                -- removed the protocol default that silently dropped it.
+                metadata    TEXT NOT NULL DEFAULT '{}'
+            );
+        """)
+        try exec("CREATE INDEX IF NOT EXISTS idx_download_work_journal_occurred ON download_work_journal(occurredAt DESC);")
+        try exec("CREATE INDEX IF NOT EXISTS idx_download_work_journal_episode ON download_work_journal(episodeId, occurredAt DESC);")
+        try exec("""
+            CREATE TABLE IF NOT EXISTS download_work_journal_arming (
+                id            INTEGER PRIMARY KEY CHECK (id = 1),
+                -- LAUNCHES on which the analysis store opened and the download
+                -- work-journal recorder was live. NOT a count of download
+                -- ATTEMPTS, and no rate can be computed from it. Read it as
+                -- "was anyone recording, and for how long". A LOWER BOUND: a
+                -- degraded launch is deliberately not counted, and neither is
+                -- one that dies before the launch Task runs.
+                armedLaunches INTEGER NOT NULL DEFAULT 0,
+                -- Events whose row could not be written. Without this,
+                -- `armedLaunches > 0` with zero rows is reachable by a store
+                -- that simply could not be written to, and that state is
+                -- byte-identical to this journal's strongest positive claim.
+                writeFailures INTEGER NOT NULL DEFAULT 0,
+                firstArmedAt  REAL,
+                lastArmedAt   REAL,
+                installedAt   REAL NOT NULL
+            );
+        """)
+        // EVERY COLUMN THAT COMES LATER MUST BE RE-ADDED HERE with
+        // `addColumnIfNeeded`, for the reason V62's helper spells out at
+        // length: `CREATE TABLE IF NOT EXISTS` is a NO-OP on a table that
+        // already exists in an OLDER SHAPE, the seed below would then name a
+        // column that is not there, `createTables()` would throw, and the
+        // store would fail to OPEN — taking the whole analysis pipeline with
+        // it, not just this journal. There are no such columns yet; this
+        // comment is the obligation, and it sits where the shape is declared
+        // because the rung's version guard cannot help (this helper runs from
+        // `createTables()`, which is unconditional and runs BEFORE the ladder).
+        //
+        // Seeded at zero so that "installed but never armed" is a row a pull
+        // can read, rather than an absence indistinguishable from a build that
+        // never had the instrument at all.
+        let stmt = try prepare("""
+            INSERT OR IGNORE INTO download_work_journal_arming
+            (id, armedLaunches, writeFailures, firstArmedAt, lastArmedAt,
+             installedAt)
+            VALUES (1, 0, 0, NULL, NULL, ?)
+            """)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, Date().timeIntervalSince1970)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    // MARK: - Download-path work journal (playhead-4xmz, schema v63)
+
+    /// Append one download-path work-journal event.
+    ///
+    /// The sole writer. Append-only on purpose: a repeated failure for the
+    /// same episode is among the most interesting things this table can show,
+    /// so nothing here upserts or coalesces.
+    func insertDownloadWorkJournalEntry(
+        _ record: DownloadWorkJournalRecord
+    ) throws {
+        let sql = """
+            INSERT INTO download_work_journal
+            (id, episodeId, eventType, cause, occurredAt, metadata)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, record.id)
+        bind(stmt, 2, record.episodeId)
+        bind(stmt, 3, record.eventType.rawValue)
+        bind(stmt, 4, record.cause?.rawValue)
+        bind(stmt, 5, record.occurredAt)
+        bind(stmt, 6, record.metadataJSON)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// Append one download-path event, UNLESS the calling task has been
+    /// cancelled.
+    ///
+    /// The check has to happen HERE, inside the actor, and not only at the
+    /// caller: an `await` onto an actor is not a cancellation point, so a
+    /// `Task.isCancelled` read before the hop cannot see a cancellation that
+    /// lands during it. That window is however long this actor is busy — a
+    /// whole migration ladder, on the launch after an upgrade.
+    ///
+    /// `AnalysisStore.appendWorkJournalEntryUnlessCancelled` is the same
+    /// mechanism one table over, and it exists for the same reason: the
+    /// download manager RETIRES a finalization task before unlinking the
+    /// bytes, so a row that lands afterwards claims an artifact that is gone.
+    func insertDownloadWorkJournalEntryUnlessCancelled(
+        _ record: DownloadWorkJournalRecord
+    ) throws {
+        try Task.checkCancellation()
+        try insertDownloadWorkJournalEntry(record)
+    }
+
+    /// Every recorded download-path event, most recent first, with what the
+    /// caller needs in order not to over-read the array.
+    ///
+    /// A row whose `eventType` this build cannot decode is DROPPED and COUNTED
+    /// rather than folded into a default case: a wider-vocabulary build's row
+    /// collapsed into `failed` would silently inflate that population, which
+    /// is this repo's standing defect class. The `cause` column needs no such
+    /// treatment — `InternalMissCause` carries a forward-compat
+    /// `.unknown(String)` case, so an unrecognized cause round-trips verbatim.
+    func fetchDownloadWorkJournal(
+        limit: Int = 500
+    ) throws -> DownloadWorkJournalPage {
+        // `limit + 1` rows are asked for and at most `limit` are returned: the
+        // extra one is how the page knows it TRUNCATED. The clamp at
+        // `Int32.max` is because `bind(_:_:Int)` goes through the TRAPPING
+        // `Int32(_:)` — see `fetchBackgroundDownloadDrops`, where a guard
+        // written to prevent an overflow caused a crash instead. At or above
+        // that value the probe equals the ceiling and `truncated` is hard-wired
+        // false; it needs 2^31 rows to reach and the alternative is a trap.
+        let ceiling = max(0, limit)
+        let probe = ceiling >= Int(Int32.max) ? Int(Int32.max) : ceiling + 1
+        let stmt = try prepare("""
+            SELECT id, episodeId, eventType, cause, occurredAt, metadata
+            FROM download_work_journal
+            -- `rowid DESC` is the TIEBREAKER, on `fetchLastWorkJournalEntry`'s
+            -- precedent. `occurredAt` comes from `Date()`, so two events inside
+            -- the same clock tick order arbitrarily without it — and at a
+            -- truncation boundary that changes WHICH row the window drops.
+            ORDER BY occurredAt DESC, rowid DESC
+            LIMIT ?
+            """)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, probe)
+        var rows: [DownloadWorkJournalRecord] = []
+        var unrecognizedEventType = 0
+        var seen = 0
+        var truncated = false
+        // `nextRow` rather than a bare step comparison: an I/O or corruption
+        // error must not be reported as an empty journal, which in this table
+        // is a claim rather than an absence of information.
+        while try nextRow(stmt) {
+            seen += 1
+            if seen > ceiling {
+                truncated = true
+                break
+            }
+            let rawEvent = text(stmt, 2)
+            guard let eventType = DownloadWorkJournalEventType(
+                rawValue: rawEvent
+            ) else {
+                unrecognizedEventType += 1
+                continue
+            }
+            let rawCause = optionalText(stmt, 3)
+            rows.append(DownloadWorkJournalRecord(
+                id: text(stmt, 0),
+                episodeId: text(stmt, 1),
+                eventType: eventType,
+                cause: rawCause.map {
+                    InternalMissCause(rawValue: $0) ?? .unknown($0)
+                },
+                occurredAt: sqlite3_column_double(stmt, 4),
+                metadataJSON: text(stmt, 5)
+            ))
+        }
+        return DownloadWorkJournalPage(
+            rows: rows,
+            unrecognizedEventTypeRows: unrecognizedEventType,
+            truncated: truncated
+        )
+        // NOTE for the next reader: every count returned here is over the
+        // WINDOW, not over the table. `truncated` says so; it does not fix it.
+        // The table's own totals come from SQL.
+    }
+
+    /// Record that this process installed a live download work-journal
+    /// recorder.
+    ///
+    /// `firstArmedAt` is written only on the transition out of zero
+    /// (`CASE WHEN armedLaunches = 0`), so it keeps meaning "the first time"
+    /// rather than drifting to mean "the latest time".
+    ///
+    /// The `INSERT … ON CONFLICT` is what makes this work on a store whose
+    /// arming row is somehow missing — a hand-edited fixture, or a rung that
+    /// rolled back — instead of counting into a row that is not there.
+    func noteDownloadWorkJournalInstrumentArmed(at now: Double) throws {
+        let sql = """
+            INSERT INTO download_work_journal_arming
+            (id, armedLaunches, writeFailures, firstArmedAt, lastArmedAt,
+             installedAt)
+            VALUES (1, 1, 0, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                armedLaunches = armedLaunches + 1,
+                firstArmedAt = CASE
+                    WHEN download_work_journal_arming.armedLaunches = 0
+                    THEN excluded.firstArmedAt
+                    ELSE download_work_journal_arming.firstArmedAt
+                END,
+                lastArmedAt = excluded.lastArmedAt
+            """
+        let stmt = try prepare(sql)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, now)
+        bind(stmt, 2, now)
+        bind(stmt, 3, now)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// Count one event whose durable row could NOT be written.
+    ///
+    /// A second best-effort write on the failure path of the first, and the
+    /// only thing that stops `armedLaunches > 0` with zero rows from being
+    /// reachable by silence. It THROWS rather than swallowing, because its
+    /// caller has a third medium to fall back on and needs to know.
+    ///
+    /// `armedLaunches` stays 0 when this creates a missing row: a failure is
+    /// not an arming, and inventing one here would manufacture the very claim
+    /// this column exists to withhold. On that path `installedAt` dates the
+    /// FAILURE, which is the third writer that stamp can have.
+    ///
+    /// Takes the clock rather than reading `strftime('%s','now')` in SQL: that
+    /// is whole SECONDS while every other stamp here is sub-second, and a time
+    /// nobody can inject is a time no test can pin.
+    func noteDownloadWorkJournalWriteFailure(at now: Double) throws {
+        let stmt = try prepare("""
+            INSERT INTO download_work_journal_arming
+            (id, armedLaunches, writeFailures, firstArmedAt, lastArmedAt,
+             installedAt)
+            VALUES (1, 0, 1, NULL, NULL, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                writeFailures = writeFailures + 1
+            """)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, now)
+        try step(stmt, expecting: SQLITE_DONE)
+    }
+
+    /// The arming row, or `nil` when the table holds none.
+    ///
+    /// `nil` rather than a zeroed value on purpose: a synthesized
+    /// `armedLaunches = 0` would be indistinguishable from a genuine
+    /// never-armed row, and those are different claims — one says the
+    /// migration ran, the other says nothing at all did.
+    func fetchDownloadWorkJournalArming() throws -> DownloadWorkJournalArming? {
+        let stmt = try prepare("""
+            SELECT armedLaunches, writeFailures, firstArmedAt, lastArmedAt,
+                   installedAt
+            FROM download_work_journal_arming WHERE id = 1
+            """)
+        defer { sqlite3_finalize(stmt) }
+        // `nextRow` rather than a bare `sqlite3_step == SQLITE_ROW`: an I/O or
+        // corruption error must not read as "the table holds no row", which
+        // here is a documented CLAIM rather than an absence of information.
+        guard try nextRow(stmt) else { return nil }
+        return DownloadWorkJournalArming(
+            armedLaunches: Int(sqlite3_column_int64(stmt, 0)),
+            writeFailures: Int(sqlite3_column_int64(stmt, 1)),
             firstArmedAt: optionalDouble(stmt, 2),
             lastArmedAt: optionalDouble(stmt, 3),
             installedAt: sqlite3_column_double(stmt, 4)
@@ -11953,7 +12890,7 @@ actor AnalysisStore {
                 jobPhase TEXT NOT NULL DEFAULT 'shadow',
                 createdAt REAL,
                 scenePhase TEXT,
-                runCorrelationId TEXT,
+                backfillJobId TEXT,
                 suspendingLatencyMs REAL,
                 daemonPeersAtStart INTEGER,
                 -- playhead-bg2n (V55): the row's ATTEMPT HISTORY. All three are
@@ -12022,9 +12959,15 @@ actor AnalysisStore {
             column: "scenePhase",
             definition: "TEXT"
         )
+        // playhead-1gu0 (V65): rename in place BEFORE adding the new column,
+        // so a database carrying V42's `runCorrelationId` does not end up with
+        // both — the same ordering H10 already needed for `needsShadowRetry`,
+        // and for the same reason. `createTables()` runs before the V*IfNeeded
+        // ladder, so this is the FIRST thing that sees an upgraded table.
+        try renameSemanticScanRunCorrelationIdIfNeeded()
         try addColumnIfNeeded(
             table: "semantic_scan_results",
-            column: "runCorrelationId",
+            column: "backfillJobId",
             definition: "TEXT"
         )
         // playhead-bg2n (V55): declared here as well as in
@@ -12080,7 +13023,7 @@ actor AnalysisStore {
         // reader repointed at an unindexed column is a full scan on every
         // background grant.
         try exec("CREATE INDEX IF NOT EXISTS idx_semantic_scan_results_lastAttemptAt ON semantic_scan_results(lastAttemptAt DESC)")
-        try exec("CREATE INDEX IF NOT EXISTS idx_semantic_scan_results_correlation ON semantic_scan_results(runCorrelationId)")
+        try exec("CREATE INDEX IF NOT EXISTS idx_semantic_scan_results_backfill_job ON semantic_scan_results(backfillJobId)")
         try exec("CREATE INDEX IF NOT EXISTS idx_semantic_scan_results_asset_runMode ON semantic_scan_results(analysisAssetId, runMode)")
         try exec("CREATE INDEX IF NOT EXISTS idx_semantic_scan_results_asset_jobPhase ON semantic_scan_results(analysisAssetId, jobPhase)")
         // M1/L3: dropped `idx_semantic_scan_results_reuse` and
@@ -12229,6 +13172,11 @@ actor AnalysisStore {
         // V49 house rule. The two callers share ONE helper rather than two
         // copies of the DDL, because two copies is how they drift.
         try createBackgroundDownloadDropTables()
+
+        // playhead-4xmz: the download-path work journal and its arming row.
+        // Declared here AND in `migrateDownloadWorkJournalV63IfNeeded` for the
+        // same V49 house rule, through the same single shared helper.
+        try createDownloadWorkJournalTables()
     }
 
     // MARK: - CRUD: analysis_assets
@@ -21111,7 +22059,7 @@ actor AnalysisStore {
     /// 4  windowStartTime           13 inputTokenCount      21 jobPhase (Rev3-M6)
     /// 5  windowEndTime             14 outputTokenCount     22 createdAt (V42)
     /// 6  scanPass                  15 latencyMs            23 scenePhase (V42)
-    /// 7  transcriptQuality         16 prewarmHit           24 runCorrelationId (V42)
+    /// 7  transcriptQuality         16 prewarmHit           24 backfillJobId (V42)
     /// 8  disposition
     ///
     /// playhead-exxc (V52): index 16 is unchanged, but the column beneath it is
@@ -21136,7 +22084,7 @@ actor AnalysisStore {
         disposition, spansJSON, status, attemptCount, errorContext,
         inputTokenCount, outputTokenCount, latencyMs, prewarmHit,
         scanCohortJSON, transcriptVersion, reuseKeyHash, runMode, jobPhase,
-        createdAt, scenePhase, runCorrelationId,
+        createdAt, scenePhase, backfillJobId,
         suspendingLatencyMs, daemonPeersAtStart,
         firstAttemptAt, lastAttemptAt, observedStatuses,
         latencyMsTotal, latencyMsMax, latencySampleCount,
@@ -21498,7 +22446,7 @@ actor AnalysisStore {
              disposition, spansJSON, status, attemptCount, errorContext,
              inputTokenCount, outputTokenCount, latencyMs, prewarmHit,
              scanCohortJSON, transcriptVersion, reuseKeyHash, runMode, jobPhase,
-             createdAt, scenePhase, runCorrelationId,
+             createdAt, scenePhase, backfillJobId,
              suspendingLatencyMs, daemonPeersAtStart,
              firstAttemptAt, lastAttemptAt, observedStatuses,
              latencyMsTotal, latencyMsMax, latencySampleCount,
@@ -21534,7 +22482,7 @@ actor AnalysisStore {
         bind(stmt, 21, result.runMode.rawValue)
         bind(stmt, 22, result.jobPhase)
         // playhead-hx6n. `createdAt` falls back to the store's clock (see the
-        // backstop note above). `scenePhase` and `runCorrelationId` do NOT fall
+        // backstop note above). `scenePhase` and `backfillJobId` do NOT fall
         // back to anything: the store has no way to know either, and a store
         // that guessed would be manufacturing the attribution rather than
         // recording it. A caller with nothing to say writes NULL, which is the
@@ -21545,7 +22493,7 @@ actor AnalysisStore {
         // both — that is the whole of "createdAt stops moving".
         bind(stmt, 23, effectiveCreatedAt)
         bind(stmt, 24, result.scenePhase?.rawValue)
-        bind(stmt, 25, result.runCorrelationId)
+        bind(stmt, 25, result.backfillJobId)
         // playhead-rkfp/ezmv (V45). Neither falls back to anything: a NULL
         // means "the producing path did not measure this", and a store that
         // substituted 0 would turn "unmeasured" into "no sleep, no peers" —
@@ -22394,7 +23342,7 @@ actor AnalysisStore {
             // oldest thing in the database.
             createdAt: optionalDouble(stmt, 22),
             scenePhase: scenePhase,
-            runCorrelationId: optionalText(stmt, 24),
+            backfillJobId: optionalText(stmt, 24),
             // playhead-bg2n (V55): columns 27–29. `optionalDouble` /
             // `optionalText` for the same reason as every nullable above — a
             // NULL read as 0.0 would claim a first attempt in 1970, and a NULL

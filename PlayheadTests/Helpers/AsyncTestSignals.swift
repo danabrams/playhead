@@ -182,3 +182,55 @@ final class SignalingCorrectionStore: UserCorrectionStore, @unchecked Sendable {
         await wrapped.correctionFactorSnapshot(for: analysisAssetId)
     }
 }
+
+// MARK: - SuspendingSeamGate
+
+/// A one-shot gate the TEST opens and a SEAM awaits, for the case where a
+/// seam has to SUSPEND rather than answer.
+///
+/// playhead-sdis. `BackgroundSessionIO.Behavior.suspendsThenRefusesCallsLabelled`
+/// is the motivating caller: `DownloadManager.backgroundSessionRidingCrossing`
+/// writes its in-flight entry, awaits the crossing and clears the entry, so a
+/// second caller can find that entry only while the first is suspended. Every
+/// other refusing seam answers synchronously, so no joiner can ever exist and
+/// the population playhead-sdis exists to count — N episodes lost to ONE daemon
+/// refusal — is unreachable from any test.
+///
+/// AN ACTOR RATHER THAN A `DispatchSemaphore`, and the difference is the whole
+/// reason this is not three lines at a call site. `BackgroundSessionIO.perform`
+/// is `nonisolated async`, so its prologue runs on the COOPERATIVE POOL; a
+/// semaphore wait there occupies a pool thread the runtime will not replace,
+/// for the whole barrier, and a rail that eats a pool thread under an
+/// 11,000-test parallel plan is a rail that measures the box.
+///
+/// AND IT COSTS NO WALL CLOCK, which is what makes a rail built on it
+/// deterministic. The alternative — occupy a serial queue and let a DEADLINE
+/// expire — makes every run a race between the test's own arrival barrier and
+/// that bound, and the 2026-08-13 merge gate lost exactly that race. An event
+/// the test signals cannot be lost to load.
+///
+/// `wait()` after `open()` returns at once and waiters resume in arrival
+/// order, so no caller can be stranded by ordering. Same one-shot contract as
+/// `DeallocLatch` above, signalled by a rail instead of by a `deinit`.
+actor SuspendingSeamGate {
+    private var opened = false
+    private var waiting: [CheckedContinuation<Void, Never>] = []
+
+    /// Releases every current and future waiter. Idempotent.
+    func open() {
+        guard !opened else { return }
+        opened = true
+        let pending = waiting
+        waiting = []
+        for continuation in pending { continuation.resume() }
+    }
+
+    /// Suspends until `open()` is called. Returns immediately if it already
+    /// was. No deadline — the test's `.timeLimit` trait is the hang backstop.
+    func wait() async {
+        if opened { return }
+        await withCheckedContinuation { continuation in
+            waiting.append(continuation)
+        }
+    }
+}

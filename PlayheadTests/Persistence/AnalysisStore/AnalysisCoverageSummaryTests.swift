@@ -1690,7 +1690,48 @@ struct FastTranscriptCoverageV37MigrationTests {
         // and no backfill (every drop before this build deleted its own evidence,
         // so there is nothing recoverable to seed). It names nothing this rung
         // asserts, so no assertion here moves.
-        #expect(AnalysisStore.currentSchemaVersion == 62)
+        // 62 -> 63 read for this rung (playhead-4xmz): V63 CREATES TWO NEW TABLES —
+        // `download_work_journal` and its single-row arming companion — and touches no
+        // existing table, column or row: no ALTER, no UPDATE, no DELETE and no backfill
+        // (every download event before this build went to a no-op recorder and left no
+        // trace, so there is nothing recoverable to seed). It names nothing this rung
+        // asserts, so no assertion here moves.
+        // 63 -> 64 read for this rung (playhead-sdis): V64 ADDS FOUR NULLABLE
+        // COLUMNS and only to the two playhead-7dgx tables — `launchId`,
+        // `sessionCrossingId` and `launchArmingState` on
+        // `background_download_drops`, `lastArmedLaunchId` on
+        // `background_download_drop_arming`. No other table, no other column, no
+        // UPDATE, no DELETE, no DEFAULT and no backfill: a pre-V64 row is left
+        // NULL because every candidate default would turn an absence into a
+        // launch count. It names nothing this rung asserts, so no assertion here
+        // moves.
+        // 64 -> 65 read for this rung (playhead-1gu0): V65 RENAMES ONE COLUMN —
+        // `semantic_scan_results.runCorrelationId` becomes `backfillJobId`, and its
+        // index moves with it. A pure `ALTER TABLE … RENAME COLUMN`: no row moves, no
+        // value is written, nothing is backfilled and no other table is named.
+        //
+        // THE "names a different table" ARGUMENT DOES NOT APPLY HERE AND THIS
+        // LINE USED IT (playhead-1gu0 review round 8). It read "it names no
+        // table this rung asserts on", and the table V65 names is
+        // `semantic_scan_results` — the one this file's coverage numerator is
+        // taken over, and the one its own tests seed directly. That is the trap
+        // the V53 note above spells out in as many words, and the V61 note
+        // above — also a rung on this table — argues from the COLUMN instead.
+        // ("its own tests seed directly" above read "thirty-seven of its own
+        // tests seed", and thirty-seven is the count of tests calling
+        // `insertSemanticScanResult`: it misses the one test that seeds
+        // only through `seedRawScanRow`'s raw SQL, and it counts the two
+        // whose every insert is REFUSED and which assert `rows.isEmpty`. So it
+        // named neither the tests that write rows nor the tests that try. A
+        // count of test functions decays with the next test written, so it is
+        // dropped rather than restated; playhead-1gu0 review round 9.)
+        // So: the claim is made on the RENAME's own shape. A `RENAME COLUMN`
+        // preserves every row and every value, and the column it renames is
+        // read by nothing here; the numerator is a function of `scanPass`,
+        // `status` and `errorContext`, none of which it names. It holds in both
+        // directions because the rung's whole body is two guards, the rename, a
+        // log line and the version stamp.
+        #expect(AnalysisStore.currentSchemaVersion == 65)
     }
 
     /// THE MIGRATION EVIDENCE. An asset already on disk — written by a

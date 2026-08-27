@@ -190,6 +190,25 @@ final class PlayheadRuntime {
     /// download itself recorded.
     let dayZeroKickoffEpisodeFactsBox = DayZeroKickoffEpisodeFactsBox()
     let downloadManager: DownloadManager
+
+    /// playhead-4xmz: the SAME instance injected into ``downloadManager`` as
+    /// its `workJournalRecorder`, held so the launch Task can ARM it.
+    ///
+    /// Held rather than reconstructed at the arming site on purpose — and the
+    /// reason is the SHAPE, not today's arithmetic. A second instance built at
+    /// the arming site would write the same `download_work_journal_arming` row,
+    /// because this recorder is a struct whose only durable state is the shared
+    /// store actor, so `armedLaunches` would be byte-identical today. What
+    /// differs even today is that the second instance carries no
+    /// `invariantRecorder`, so a FAILED arming would go unreported; and the
+    /// moment the recorder acquires any per-instance state, "the thing that was
+    /// armed" and "the thing that was injected" stop being the same claim. That
+    /// is the shape this bead exists to remove, so it is closed here rather
+    /// than after it bites. `DownloadWorkJournalWiringSourceCanaryTests` pins
+    /// the identity in source, because nothing at runtime can see it.
+    private let downloadWorkJournalRecorder:
+        AnalysisStoreDownloadWorkJournalRecorder
+
     let analysisJobRunner: AnalysisJobRunner
     let analysisWorkScheduler: AnalysisWorkScheduler
     /// playhead-3xtw: user-intent "Download & Analyze on demand" trigger.
@@ -232,6 +251,13 @@ final class PlayheadRuntime {
     /// same installId — a precondition for byte-identical
     /// `episode_id_hash` values across the pair.
     let surfaceStatusLogger: SurfaceStatusInvariantLogger
+
+    /// playhead-882eg: the on-device ad catalog. It used to be a LOCAL in
+    /// `init`, handed to `SkipOrchestrator` and `AdDetectionService` and held
+    /// by nothing else the runtime could name — which is why nothing could
+    /// close it. 168 of the 499 descriptors the test host still held after a
+    /// full plan's last test were this file, 84 open connections to it.
+    let adCatalogStore: AdCatalogStore?
 
     /// playhead-4nt1: Live evaluator threaded into
     /// `EpisodeSurfaceStatusObserver` so its eligibility verdict
@@ -608,6 +634,33 @@ final class PlayheadRuntime {
         OSAllocatedUnfairLock<Bool>(initialState: false)
     private let playbackStateObserverHookForTesting =
         OSAllocatedUnfairLock<(@Sendable () async -> Void)?>(initialState: nil)
+
+    /// playhead-882eg: handles for the three `init`-time Tasks that had none.
+    ///
+    /// A running `Task` is retained by the concurrency runtime whether or not
+    /// anyone holds its handle, so a fire-and-forget `Task` whose body never
+    /// returns is unreachable for cancellation FOREVER — and everything in its
+    /// capture list goes with it. `repeatedAdCacheKillSwitchObserverTask` above
+    /// is the same defect already fixed once (playhead-43ed M1); these three
+    /// were its siblings and were missed.
+    ///
+    /// MEASURED on this bead, one runtime at a time: the `PlayheadRuntime`
+    /// itself always deallocates, and its `AnalysisStore`, `AdCatalogStore` and
+    /// `SurfaceStatusInvariantLogger` never did — five of five live after five
+    /// constructions, ~5 descriptors each, which is the ~453 descriptor FLOOR
+    /// (17.7 % of `RLIMIT_NOFILE` soft 2560) the test host carried into every
+    /// run.
+    @ObservationIgnored
+    private var capabilityEligibilitySubscriptionTask: Task<Void, Never>?
+    /// The deferred bootstrap chain. It strongly captures `analysisStore`,
+    /// `adCatalogStore` and `surfaceStatusLogger` for its whole duration AND it
+    /// is what starts the scheduler loop, so `shutdown()` must JOIN it before
+    /// stopping anything — otherwise a chain still in flight starts a loop
+    /// after the stop that was supposed to catch it.
+    @ObservationIgnored
+    private var bootstrapTask: Task<Void, Never>?
+    @ObservationIgnored
+    private var dayZeroKickoffInstallTask: Task<Void, Never>?
 
     /// True when an episode is actively loaded for playback.
     var isPlayingEpisode: Bool {
@@ -1249,6 +1302,7 @@ final class PlayheadRuntime {
                 .warning("AdCatalogStore init failed — catalog disabled: \(error.localizedDescription, privacy: .public)")
             adCatalogStore = nil
         }
+        self.adCatalogStore = adCatalogStore
 
         // playhead-43ed / playhead-o4qr: build the per-show recurrence
         // service before SkipOrchestrator so both durable recurrence stores
@@ -1506,7 +1560,38 @@ final class PlayheadRuntime {
         // whole. Injected at construction for the same reason the recorder
         // above is — the sceneless relaunch is where this matters and a
         // deferred hop does not run there.
+        // playhead-4xmz: and the DOWNLOAD half of the work journal, which was
+        // a NO-OP IN PRODUCTION for four months. `workJournalRecorder`
+        // defaulted to `NoopWorkJournalRecorder` and this — the app's only
+        // `DownloadManager` construction — never replaced it, so every
+        // `recordFailed` / `recordPreempted` / `recordFinalized` the download
+        // path emitted went to a method whose body is `{}`.
+        //
+        // NOT `AnalysisStoreWorkJournalRecorder`, which is the obvious
+        // one-liner and is wrong twice over: it returns early when the episode
+        // has no `analysis_jobs` row (the state a failed auto-download is
+        // exactly in), and the rows it does write land in `work_journal`, whose
+        // `event_type` is a cold-launch input to
+        // `AnalysisCoordinator.recoverOrphans` — so a DOWNLOAD failure written
+        // under the ANALYSIS generation would tell recovery the ANALYSIS work
+        // is terminal. See `DownloadWorkJournalLedger.swift`.
+        //
+        // Injected at construction for the same reason as the two recorders
+        // above: the sceneless relaunch is where these records matter and a
+        // deferred hop does not run there. It is held in a `let` here as well
+        // because the launch Task ARMS THE SAME INSTANCE — an arming taken on
+        // a second instance would be a claim about a recorder nobody injected.
+        let downloadWorkJournalRecorder = AnalysisStoreDownloadWorkJournalRecorder(
+            store: analysisStore,
+            invariantRecorder: { [surfaceStatusLogger] code, description in
+                surfaceStatusLogger.invariantViolated(
+                    code: code, description: description
+                )
+            }
+        )
+        self.downloadWorkJournalRecorder = downloadWorkJournalRecorder
         self.downloadManager = DownloadManager(
+            workJournalRecorder: downloadWorkJournalRecorder,
             invariantRecorder: { [surfaceStatusLogger] code, description in
                 surfaceStatusLogger.invariantViolated(
                     code: code, description: description
@@ -2285,7 +2370,7 @@ final class PlayheadRuntime {
         // production read also seeds the cache lazily inside the
         // observer's `eligibilityProvider` closure (see init), so this
         // Task is purely about staying current.
-        Task { [eligibilityCache = surfaceStatusEligibilityCache, evaluator = analysisEligibilityEvaluator, capabilitiesService] in
+        capabilityEligibilitySubscriptionTask = Task { [eligibilityCache = surfaceStatusEligibilityCache, evaluator = analysisEligibilityEvaluator, capabilitiesService] in
             let initial = await capabilitiesService.currentSnapshot
             eligibilityCache.set(initial)
             evaluator.invalidate()
@@ -2363,7 +2448,7 @@ final class PlayheadRuntime {
         // — it's now constructed before AdDetectionService and passed via
         // init, so there's no race with the first backfill/hot-path run.
 
-        Task { [weak self, analysisStore, analysisStoreRecovery, downloadManager, analysisWorkScheduler, analysisJobReconciler, backgroundProcessingService, lanePreemptionCoordinator, analysisCoordinator, shadowCaptureCoordinator, adCatalogStore, negativeFingerprintBank, skipOrchestrator, feedbackStore, surfaceStatusLogger, preBuiltDecisionLogger, preBuiltShadowGateLogger, lifecycleLogger, bgTaskTelemetry, episodeSummaryBackfillCoordinator, finalPassRetranscriptionRunner, episodePodcastIdResolverBox, episodePodcastIdBatchResolverBox, backgroundTaskRunLedger, processLaunchTimestamp, shadowRetryObserver, finalPassThermalRecoveryObserver, finalPassSweepInFlightFlag] in
+        bootstrapTask = Task { [weak self, analysisStore, analysisStoreRecovery, downloadManager, analysisWorkScheduler, analysisJobReconciler, backgroundProcessingService, lanePreemptionCoordinator, analysisCoordinator, shadowCaptureCoordinator, adCatalogStore, negativeFingerprintBank, skipOrchestrator, feedbackStore, surfaceStatusLogger, preBuiltDecisionLogger, preBuiltShadowGateLogger, lifecycleLogger, bgTaskTelemetry, episodeSummaryBackfillCoordinator, finalPassRetranscriptionRunner, episodePodcastIdResolverBox, episodePodcastIdBatchResolverBox, backgroundTaskRunLedger, processLaunchTimestamp, shadowRetryObserver, finalPassThermalRecoveryObserver, finalPassSweepInFlightFlag] in
             // skeptical-review-cycle-9 L-4: pin the implicit MainActor
             // isolation that cycle-8 M1 relies on. PlayheadRuntime is
             // declared `@MainActor` (file:line 19), and an unannotated
@@ -2471,6 +2556,24 @@ final class PlayheadRuntime {
             // bring the store up outside the thing that counts consecutive
             // failures and decides whether to offer a rebuild.
             await downloadManager.armDropLedger()
+
+            // playhead-4xmz: ARM the download work journal, and arm it HERE,
+            // for the identical reason. `armedLaunches` is the denominator
+            // that lets zero rows be read as a positive claim rather than as
+            // silence, so it must count launches on which a row COULD have
+            // been written — i.e. launches on which the store actually opened.
+            // Above the guard it would count degraded launches, where analysis
+            // is off and nothing could ever be recorded, and a run of those
+            // would then read as evidence that no download ever failed.
+            //
+            // It arms the SAME recorder instance that was injected into
+            // `downloadManager` at construction. Constructing a second one
+            // here would count launches for a recorder nobody installed —
+            // an arming row that names one thing while measuring another,
+            // which is the shape this bead exists to remove.
+            await downloadWorkJournalRecorder.recordInstrumentArmed(
+                at: Date().timeIntervalSince1970
+            )
 
             // playhead-dgly: REPORT every persisted terminal state that is no
             // longer true, BEFORE this launch repairs any of it. Repairs
@@ -3248,7 +3351,7 @@ final class PlayheadRuntime {
             let kickoffFacts = dayZeroKickoffEpisodeFactsBox
             let kickoffReporter = dayZeroKickoffViolationReporter
             let kickoffHasher = surfaceStatusHasher
-            Task {
+            dayZeroKickoffInstallTask = Task {
                 await Self.installDayZeroBackgroundDownloadKickoff(
                     downloads: kickoffDownloads,
                     coordinator: dayZeroKickoffCoordinator,
@@ -3931,6 +4034,74 @@ final class PlayheadRuntime {
         }
         await shadowRetryObserver?.stop()
         await finalPassThermalRecoveryObserver?.stop()
+
+        // playhead-882eg: the RUNTIME-SCOPED PERPETUAL LOOPS.
+        //
+        // Everything above this line cancels a task the runtime itself holds a
+        // handle for. What follows is the half that had no handle at all, and
+        // it is the half that held the descriptors. Four services start a loop
+        // shaped
+        //
+        //     someTask = Task { [weak self] in
+        //         guard let self else { return }   // strong for the WHOLE task
+        //         await self.runLoop()             // never returns
+        //     }
+        //
+        // in which `[weak self]` is defeated by `guard let self`: the strong
+        // binding lives in the task frame for the entire unbounded loop, so
+        // `owner -> Task -> owner` is a cycle only CANCELLATION can break.
+        // Every one of the four has a `stop()`, and until this bead not one of
+        // them had a caller anywhere in `Playhead/`.
+        //
+        // The join comes FIRST and is not optional. The bootstrap chain is what
+        // calls `analysisWorkScheduler.startSchedulerLoop()`; stopping the
+        // scheduler while that chain is still in flight would be a stop the
+        // chain then undoes.
+        let pendingBootstrapTask = bootstrapTask
+        pendingBootstrapTask?.cancel()
+        bootstrapTask = nil
+        capabilityEligibilitySubscriptionTask?.cancel()
+        capabilityEligibilitySubscriptionTask = nil
+        let pendingDayZeroKickoffInstallTask = dayZeroKickoffInstallTask
+        pendingDayZeroKickoffInstallTask?.cancel()
+        dayZeroKickoffInstallTask = nil
+        await pendingBootstrapTask?.value
+        await pendingDayZeroKickoffInstallTask?.value
+        await analysisWorkScheduler.stop()
+        await backgroundProcessingService.stop()
+        // NOT `analysisCoordinator.stop()`: that one deliberately leaves the
+        // capability observer running so a thermal/battery recovery need not
+        // re-arm it, and it has two production callers that rely on exactly
+        // that. Teardown is the one caller for which it is wrong.
+        await analysisCoordinator.stopCapabilityObserver()
+        await episodeSummaryBackfillCoordinator?.stop()
+        await capabilitiesService.stopObserving()
+        // playhead-882eg: UNWIRE what init WIRED. Cancelling the loops above is
+        // necessary and measurably not sufficient — with all four stopped, 19 of
+        // 22 runtime-owned objects were still alive, because
+        // `downloadManager.setAnalysisWorkScheduler(...)` and
+        // `AnalysisWorkScheduler`'s own `let downloadManager` point at each
+        // other. A two-object strong cycle between two hubs pins the whole
+        // service graph, with no Task involved at all.
+        await downloadManager.detachRuntimeInjectedDependencies()
+
+        // playhead-882eg: RELEASE THE DESCRIPTORS EXPLICITLY.
+        //
+        // Everything above frees the graph if the graph is freeable. Measured,
+        // it is not: with all four loops stopped, the bootstrap chain joined and
+        // the one stored-property cycle cut, 19 of 22 runtime-owned objects were
+        // still alive after the runtime itself had deallocated. Something in
+        // ~2,500 lines of init wiring holds them and this bead did not find it
+        // (filed separately, with the measurement).
+        //
+        // The descriptors do not have to wait for that. A file handle belongs to
+        // whoever opened it, and this is the moment its owner is finished with
+        // it — so the three stores are closed here rather than left to a
+        // deallocation that may never come. All three closes are IDEMPOTENT and
+        // NON-TERMINAL: each reopens on next use, so this cannot strand a reader.
+        await analysisStore.close()
+        await adCatalogStore?.close()
+        surfaceStatusLogger.close()
     }
 
     @MainActor

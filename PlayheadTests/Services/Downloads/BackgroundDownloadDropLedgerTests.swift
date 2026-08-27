@@ -445,7 +445,9 @@ struct BackgroundDownloadDropLedgerTests {
                     episodeId: "ep-limit-\(index)",
                     reason: .sessionNotVended,
                     context: Self.context(),
-                    boundSeconds: 1
+                    boundSeconds: 1,
+                    launchId: "launch-limit",
+                    launchArmingState: .armed
                 )
             )
         }
@@ -472,6 +474,10 @@ struct BackgroundDownloadDropLedgerTests {
         #expect(arming.armedLaunches == 0)
         #expect(arming.firstArmedAt == nil, "a zero here would date an arming that never happened")
         #expect(arming.lastArmedAt == nil)
+        // playhead-sdis: and no launch is NAMED either. A seeded row that
+        // carried a launch id would claim an arming that never happened, in the
+        // one column a drop row's `launchId` is compared against.
+        #expect(arming.lastArmedLaunchId == nil)
         #expect(arming.installedAt > 0)
     }
 
@@ -564,12 +570,16 @@ struct BackgroundDownloadDropLedgerTests {
                 episodeId: "ep-noop",
                 reason: .sessionNotVended,
                 context: Self.context(),
-                boundSeconds: 1
+                boundSeconds: 1,
+                launchId: "launch-noop",
+                launchArmingState: .notAttempted
             )
         )
         #expect(outcome == .notRecording)
         #expect(
-            await NoopBackgroundDownloadDropRecorder().recordInstrumentArmed(at: 1) == .notRecording
+            await NoopBackgroundDownloadDropRecorder().recordInstrumentArmed(
+                launchId: "launch-noop", at: 1
+            ) == .notRecording
         )
     }
 
@@ -769,7 +779,7 @@ struct BackgroundDownloadDropLedgerTests {
         // And the arming writer REBUILDS it rather than counting into a row
         // that is not there — the branch that makes a hand-edited or
         // partially-rolled-back store still countable.
-        try await store.noteBackgroundDownloadDropInstrumentArmed(at: 1234.0)
+        try await store.noteBackgroundDownloadDropInstrumentArmed(launchId: "launch-fixture", at: 1234.0)
         let rebuilt = try #require(try await store.fetchBackgroundDownloadDropArming())
         #expect(rebuilt.armedLaunches == 1)
         #expect(rebuilt.firstArmedAt == 1234.0)

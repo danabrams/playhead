@@ -780,6 +780,33 @@ mb_warn_if_xcodebuild_running() {
 # suites RAN, rc=65 merely means some test failed, which for a mutation battery
 # is the expected outcome and is decided by name-matching, not by rc.
 #
+# WHAT THIS RUN IS HOLDING, AND IT IS SAID OUT OF ONE FUNCTION SO THE TWO DISK
+# ARMS CANNOT DRIFT (playhead-gjlp0 R4, generalised at R5).
+#
+# Since playhead-gjlp0 the battery keeps an `.xcresult` bundle per non-KILL
+# batch inside `$WORK`, so a long series accumulates hundreds of megabytes
+# DURING the run — the one way a disk refusal can be the run's own doing. Both
+# remedies the disk arms print are useless for it: `disk-cleanup.sh` sweeps
+# `/private/tmp/playhead-*` at THREE DAYS and this directory is minutes old, so
+# a reader who follows the advice reclaims nothing and concludes the box is
+# short; `$TMPDIR/Deleting-*` is somebody else's reservoir entirely.
+#
+# R4 wrote this into the `rc=28` arm alone and left the `DISK EXHAUSTION
+# mid-run` arm eight lines below it printing exactly the two useless remedies —
+# the same finding, in the sibling arm, unfixed. One function now.
+#
+# Guarded on WORK because `mb_diagnose_no_tests` is also called from the lock
+# rails, where there is none: printing "holding 0 bundles" for a directory
+# nobody created would be a measurement of an absence read as a measurement of
+# a thing, which is the defect the bead this clause belongs to exists to remove.
+mb__say_work_holdings() {
+  [ -n "${WORK:-}" ] && [ -d "${WORK:-}" ] || return 0
+  mb__say "  THIS RUN is holding $(du -sh "$WORK" 2>/dev/null | awk '{print $1}') in"
+  mb__say "  $WORK ($(find "$WORK" -maxdepth 1 -name '*.xcresult' 2>/dev/null | wc -l | tr -d ' ') .xcresult bundle(s) kept as evidence for the"
+  mb__say "  verdicts above). It is minutes old, so disk-cleanup.sh's 3-day sweep"
+  mb__say "  will NOT touch it: read the verdicts, then remove it by hand."
+}
+
 # $1 log  $2 rc  $3 label ("the baseline", "batch 7")
 mb_diagnose_no_tests() {
   local log="$1" rc="$2" what="$3" hit="" others
@@ -797,6 +824,8 @@ mb_diagnose_no_tests() {
     mb__say "  (exit 28 = POSIX ENOSPC). Nothing was run and nothing was deleted."
     mb__say "  Reclaim with scripts/disk-cleanup.sh, or check \$TMPDIR/Deleting-*"
     mb__say "  — stranded CoreSimulator trash is the biggest reservoir on this box."
+    # AND NAME THE ONE THIS RUN IS SITTING ON — see `mb__say_work_holdings`.
+    mb__say_work_holdings
     return 0
   fi
 
@@ -870,6 +899,12 @@ mb_diagnose_no_tests() {
     mb__say "  Reclaim with scripts/disk-cleanup.sh and check \$TMPDIR/Deleting-*,"
     mb__say "  then re-run at a PLAYHEAD_DISK_MIN_GIB floor high enough to refuse"
     mb__say "  rather than wedge."
+    # AND THE ONE THIS RUN IS SITTING ON — the same clause as the `rc=28` arm,
+    # and MORE this run's own doing than that one: the preflight passed at this
+    # batch's start and what filled the volume afterwards includes the bundles
+    # this run has been writing. Raising PLAYHEAD_DISK_MIN_GIB does not act on
+    # them either; it is a start-of-run check.
+    mb__say_work_holdings
     return 0
   fi
 

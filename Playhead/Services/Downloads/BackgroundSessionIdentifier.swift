@@ -92,8 +92,12 @@ extension InternalMissCause {
 /// types (which land on a parallel branch).
 ///
 /// The default in-process binding (`NoopWorkJournalRecorder`) swallows
-/// events; uzdq wires a real recorder by passing it to
-/// `DownloadManager(workJournalRecorder:)` at construction time.
+/// events. **PRODUCTION HELD THAT DEFAULT FOR FOUR MONTHS** — the sentence
+/// here used to say uzdq wires a real recorder at construction, and nothing
+/// ever did. playhead-4xmz wires one: `AnalysisStoreDownloadWorkJournalRecorder`
+/// in `DownloadWorkJournalLedger.swift`, which writes `download_work_journal`
+/// and NOT the `work_journal` table uzdq owns — see that file's header for why
+/// the two must not be the same table.
 protocol WorkJournalRecording: Sendable {
     /// Record that the background transfer for `episodeId` finished
     /// successfully and its artifact is in place.
@@ -146,8 +150,16 @@ protocol WorkJournalRecording: Sendable {
     ) async
 }
 
-/// Default no-op binding used until playhead-uzdq wires a real recorder.
-/// Kept `final` + `Sendable` so it can be stored in an actor.
+/// Records nothing. Kept `final` + `Sendable` so it can be stored in an actor.
+///
+/// This said "used until playhead-uzdq wires a real recorder" for four months
+/// while PRODUCTION HELD IT — the defect playhead-4xmz fixes, asserted as a
+/// temporary state in the doc comment of the thing that made it permanent. It
+/// is now the default for TESTS AND PREVIEWS only: production takes
+/// `AnalysisStoreDownloadWorkJournalRecorder`
+/// (`DownloadWorkJournalLedger.swift`), and
+/// `DownloadWorkJournalWiringSourceCanaryTests` fails if this type is ever
+/// named in the composition root again.
 final class NoopWorkJournalRecorder: WorkJournalRecording, Sendable {
     func recordFinalized(episodeId: String) async {}
     func recordFailed(episodeId: String, cause: InternalMissCause) async {}

@@ -681,6 +681,34 @@ struct InvariantViolation: Sendable, Hashable, Codable {
         case backgroundDownloadDropNotRecorded =
             "background_download_drop_not_recorded"
 
+        /// playhead-4xmz: a DOWNLOAD-path work-journal event — a terminal
+        /// transfer failure, a finalized transfer, or the force-quit scan's
+        /// preempted/corrupted rows — that neither `download_work_journal` nor
+        /// its arming row's `writeFailures` counter could hold.
+        ///
+        /// The description carries everything the lost row would have: the
+        /// episode, the event, the cause and the store error, so the loss is
+        /// recoverable from this line alone.
+        ///
+        /// **A DIFFERENT FILE, NOT A DIFFERENT FAILURE DOMAIN** — the caveat
+        /// ``backgroundDownloadDropNotRecorded`` states applies here verbatim,
+        /// and it is playhead-dyvh2's measurement rather than an assumption:
+        /// this stream takes the same `completeUntilFirstUserAuthentication`
+        /// class `analysis.sqlite` sets explicitly, so a pre-first-unlock
+        /// background relaunch or a full volume silences both. What it covers
+        /// is a failure LOCAL TO THE DATABASE.
+        ///
+        /// Two spellings, and they are different diagnoses. `arming=failed`
+        /// means the DENOMINATOR did not move, so a row this launch goes on to
+        /// write has no launch behind it. `row=failed counter=failed` means an
+        /// EVENT was lost outright. Neither is ever expected on healthy
+        /// hardware with the recorder wired — and a build with no recorder
+        /// installed produces NO line at all rather than either of these,
+        /// which is why `armedLaunches` and not this stream is what tells you
+        /// the wiring was missing.
+        case downloadWorkJournalNotRecorded =
+            "download_work_journal_not_recorded"
+
         /// playhead-dgly: one persisted-state invariant's CENSUS for this
         /// launch — which invariant, how many rows violate it, how many were
         /// judged, and how many it abstained on and why. The body is

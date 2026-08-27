@@ -19,9 +19,23 @@
 # six of them now, not the three this line used to promise), checks the expected
 # tests actually failed, and restores the tree with `git checkout --`.
 #
-#   KILLED   — the expected test(s) failed. The rail works.
+#   KILLED   — the expected test(s) FAILED. The rail works.
 #   SURVIVED — the mutation was applied, the suites ran, and the expected
-#              test(s) still passed.
+#              test(s) POSITIVELY PASSED.
+#   VOID     — nobody judged the expected test, or the batch lost its test
+#              host. NOT a verdict in either direction: run it again.
+#   ERROR    — the mutation could not be evaluated at all (anchor drift, a
+#              build failure, an expectation naming a test that never ran).
+#
+# SURVIVED REQUIRES A POSITIVE PASS, and until playhead-gjlp0 it did not: the
+# verdict was inferred from the ABSENCE of a failure line, so a test whose host
+# died — ten `started` lines and no result at all — scored exactly like a test
+# that ran and passed. Measured on the preserved specimen
+# `/private/tmp/playhead-mutation-battery.F6R3wB`: `BD37 SURVIVED … still
+# green`, on a batch with 2,332 unjudged tests and 10 host replacements, for a
+# mutant that dies deterministically in 0.147 s when applied by hand. Verdicts
+# now come from the batch's own `.xcresult` bundle via
+# `scripts/mutation_verdict.py`, and a batch that lost its host is VOID.
 #
 # A SURVIVOR IS A MISSING TEST, NOT A BROKEN SCRIPT. Do not "fix" a survivor by
 # relaxing its expectation or deleting the entry. A survivor means the codebase
@@ -138,6 +152,8 @@
 #   scripts/mutation-battery.sh              # whole battery
 #   scripts/mutation-battery.sh --list       # print the battery, run nothing
 #   scripts/mutation-battery.sh --only M07   # one mutation, alone
+#   scripts/mutation-battery.sh --series DW  # every mutation whose name starts DW,
+#                                            # control included, on ONE baseline
 #   scripts/mutation-battery.sh --batch 3    # one batch
 #   scripts/mutation-battery.sh --dry-run    # apply + diffstat + restore, no build
 #
@@ -149,9 +165,16 @@
 #
 #   1  a mutation SURVIVED
 #   2  refused to start (dirty tree, bad selection, a mutation whose file is not
-#      in MUTABLE_FILES, a red baseline, or an unresolved crashed run)
-#   3  a mutation could not be EVALUATED
+#      in MUTABLE_FILES, a red baseline, a baseline that produced no verdict, a
+#      baseline in which any test was DENIED A RESOURCE, or an unresolved
+#      crashed run)
+#   3  a mutation could not be EVALUATED — fix the EDIT
 #   4  the tree was NOT restored byte-exactly — inspect before anything else
+#   5  a batch produced NO VERDICT (playhead-gjlp0) — the mutation was not
+#      evaluated in EITHER direction. USUALLY nothing is wrong with the EDIT or
+#      the rail and the remedy is to run it again, but READ THE ROW: two shapes
+#      never clear on a re-run — a bundle whose result string this parser
+#      cannot read (R4), and an expectation the mutation itself made SKIP (R5)
 #   75 another battery is already running in this worktree (EX_TEMPFAIL)
 #
 # ONE BATTERY PER WORKTREE — ENFORCED SINCE playhead-pu7e
@@ -309,6 +332,84 @@
 #       <udid>`), not derivedData and not `$TMPDIR/Deleting-*`, which was empty.
 #       A shutdown + erase took it to 17 MiB and the volume from 12 to 22 GiB.
 #       Nothing was deleted by the refusal itself, as its own text says.
+#
+#   PARTIAL RE-RUN 2026-08-26 (playhead-1gu0). Batches 1612-1616 only, added by
+#   this bead: GU01-GU04 plus the GU99 control, one batch each, driven as
+#   `--series GU`. FINAL 4 KILLED / 0 SURVIVED / 0 ERROR / 0 VOID, plus GU99
+#   SURVIVED as required, 6 builds, 17m46s wall clock. Batches 1-1611 were NOT
+#   re-run and carry the verdicts above.
+#
+#   RUN TWICE, and the second run is the record. Review round 1 strengthened the
+#   sibling rail `V65: one backfill job id spans re-screenings…` — it had been
+#   taking a `Set` of OPTIONALS, so a column that lost every value read exactly
+#   like one that shares an id — and a changed test invalidates a verdict taken
+#   before it. Re-run: same 4 KILLED / GU99 SURVIVED / 0 VOID / 0 ERROR, 6
+#   builds, 16m11s. Two things the second run measured that the first did not:
+#     • GU02 observed TWO failures rather than one. The second, `closing the
+#       session log is non-terminal — a later write reopens the SAME file`,
+#       cannot be reached by GU02 — that mutant's only live path is a store
+#       carrying the OLD spelling — and it did not fail in the first run, in any
+#       other batch, or in either baseline. Recorded as batch noise, not as an
+#       extra victim. The verdict stands on the EXPECTED test, which failed.
+#     • GU04 observed 69 rather than 68, one more of the same fresh-store
+#       family. The prediction-miss note below quotes 68 from the first run and
+#       is left at 68 deliberately: the point it makes is the SHAPE of the miss.
+#
+#   THE FIRST ATTEMPT WAS DISCARDED AND IT IS WORTH SAYING WHY. Its baseline
+#   came back RED on one test — `the DOWNLOAD-JOURNAL tables exist BELOW the V39
+#   rollback floor` — with `Migration failed: disk I/O error (SQL: BEGIN
+#   IMMEDIATE)`. The script refused to score anything, which is correct: an
+#   environmental failure on a shared suite would have credited a KILLED to
+#   whatever mutation happened to name it. The re-run's baseline was green
+#   (2,788 passed, 0 failed, 0 NO VERDICT, 1 host pid) and is the run above.
+#
+#   PARTIAL RE-RUN 2026-08-25 (playhead-4xmz). Batches 1477-1513 only, added by
+#   this bead: DW01-DW29, DW31-DW37 plus the DW99 control, one batch each — 37
+#   records, 37 batches, 38 builds, 105m17s wall clock, driven as
+#   `--series DW` (the flag this bead added). FINAL 36 KILLED / 0 SURVIVED /
+#   0 ERROR, plus DW99 SURVIVED as required. Baseline GREEN before any
+#   mutation. Batches 1-1476 were NOT re-run and carry the verdicts above.
+#
+#   PREDICTED vs OBSERVED was checked MECHANICALLY, not by eye: every record's
+#   declared expectation was resolved through the `T_*` table and compared
+#   against the failing set its own batch produced. The only declared victim
+#   not observed is DW99's, which is the required outcome for a control.
+#   UNDECLARED COLLATERAL, re-derived mechanically rather than recalled — SIX
+#   mutants have it and the first version of this line named the wrong ones:
+#   DW11 41 (V42/V53/V55/V56/V57/V58/V60/H11/C6/R29/narl.2/fn0 — the whole
+#   "reaches head" population, not just the V62/V40 pair), DW10 16, DW13 6,
+#   DW23 2, DW20 1, DW35 1. DW09 has ZERO — its `testEveryEventTypeIsProducedBySomeSite`
+#   is DECLARED, and calling a declared victim collateral is the same defect
+#   this file exists to catch. None of it can manufacture a kill: the scorer
+#   requires the DECLARED set to fail.
+#
+#   FIVE OPERATIONAL FAULTS, none about a mutation, all worth knowing because
+#   four of them are this file's own guards doing their job:
+#     • An `--only DW37` dry run reported `anchor did not apply`: the V62
+#       arming SQL is byte-identical to V63's, so the narrow anchor matched
+#       TWICE and `patch()` refused rather than mutating the wrong table. The
+#       anchor now names the table. THE SAME COLLISION BROKE SIX playhead-7dgx
+#       ANCHORS IN THE OTHER DIRECTION (BD05/BD07 1->0, BD10/BD27/BD37/BD40
+#       1->2) and nothing on this branch would have surfaced it — a `--dry-run
+#       --series BD` is now part of this bead's close checklist, and should be
+#       part of every schema bead's.
+#     • The pre-run expectation check caught a renamed canary method
+#       (`T_DW_C_RETIRE`) before spending a build: "an expectation names a test
+#       that never ran … every one of them would otherwise print SURVIVED
+#       against a working rail."
+#     • DW26's anchor was 30 lines of PROSE inside the arm it mutates and had
+#       to be re-cut four times, once per review round that edited the comment.
+#       It is one line of code now. An anchor whose stability depends on nobody
+#       editing a paragraph is not an anchor.
+#     • DW18's first cut dropped the `Int32` clamp as well as the `+ 1`, and
+#       `bind(_:_:Int)` TRAPS — measured, one batch produced 19 host restarts
+#       and 38 fatal errors, and a test with no verdict scores as a PASS
+#       (playhead-gjlp0), so the declared victim's verdict had become a
+#       question about log flushing.
+#     • A whole suite was added to FOCUSED_SUITES and had to be narrowed to one
+#       test: its sibling is in the committed gate baseline at 5/10 `timeout`,
+#       and a RED focused baseline exits 2 having run NO mutants, for every
+#       series.
 #
 #   WHY KG03 AND KG04 ARE BOTH HERE, since a reviewer will ask whether one
 #   would do: `scored` takes the `min` over the backing rows' grades, and a
@@ -713,9 +814,11 @@
 #   visibly listed two lines above. `extract_ran` matched the marker only at the
 #   START of a line, and this run interleaved `XCTestOutputBarrier` into the
 #   `◇ Test "…" started` line — word characters, so `^\W*` could not skip them.
-#   `extract_failures` had the identical exposure and got lucky. Both now scan
-#   for the marker anywhere in the line; see the note there for why that cannot
-#   manufacture a KILL.
+#   `extract_failures` had the identical exposure and got lucky. Both were made
+#   to scan for the marker anywhere in the line. (Both functions are GONE since
+#   playhead-gjlp0; `gate_baseline.py` searches rather than anchoring, and goes
+#   further — it rejoins verdict lines the app's output severed outright. The
+#   pointer that used to sit here named a note that was deleted with them.)
 #
 #   Composition, stated because it was not one invocation. First pass, batches
 #   120-125: 11 KILLED, 1 SURVIVED. Z02 — delete the orphan-mark reset in
@@ -1249,6 +1352,27 @@ MPTRENG="Playhead/Services/TranscriptEngine/TranscriptEngineService.swift"
 # readiness cache guard.
 THROT="Playhead/Services/AdDetection/FMDaemonThrottle.swift"
 SSR="Playhead/Services/AdDetection/SemanticScanResult.swift"
+
+# playhead-882eg (FD series): the descriptor FLOOR. The test host carried 499
+# open descriptors into every full-plan run, 89 connections to the app's real
+# `analysis.sqlite`, 84 to `ad_catalog.sqlite` and one `surface-status-*.jsonl`
+# per runtime — about five per `PlayheadRuntime` any test had ever constructed,
+# on a host that reaches 93-99 % of `RLIMIT_NOFILE` soft 2560 and has lost its
+# host there. FOUR files because the claim spans four layers that cannot see
+# each other: `$RT` owns the teardown that closes; `$SSIL` owns the logger's
+# close AND the reopen-the-SAME-file property that makes closing safe; `$STORE`
+# owns `AnalysisStore.close()`'s non-terminality; and `$TRTC` is the canary that
+# keeps every test-side runtime routed through the one helper that shuts down —
+# without it the closes exist and 33 test sites still never call them.
+SSIL="Playhead/SurfaceStatus/SurfaceStatusInvariantLogger.swift"
+TRTC="PlayheadTests/Design/TestRuntimeTeardownCanaryTests.swift"
+# playhead-882eg FD06's target. It is ALLOWLISTED by the canary and it is
+# `PerfGate`d, so it is in no focused suite — which is what makes it the right
+# mutation site: the canary reads test SOURCES from disk at run time, so this
+# file's text can be made to violate the rule without changing what any running
+# test does. A mutant that deleted the canary's own check instead SURVIVED, and
+# rightly: deleting an assertion's producer is not the defect the entry names.
+MAFT="PlayheadTests/Services/Diagnostics/MainActorFreedomTests.swift"
 # playhead-e75l: the daemon-refusal CLASS — kvs8's throttle plus the metadata
 # stall — and the per-kind tokens and log events that keep the two countable
 # apart in a device pull. Added for the DR series.
@@ -1467,6 +1591,8 @@ SEGAGG="Playhead/Services/AdDetection/SegmentAggregator.swift"
 # could and were dropping it.
 DLMGR="Playhead/Services/Downloads/DownloadManager.swift"
 LEDGER="Playhead/Services/Downloads/BackgroundDownloadDropLedger.swift"
+# playhead-4xmz: the DOWNLOAD-path work journal (the DW series).
+DWJ="Playhead/Services/Downloads/DownloadWorkJournalLedger.swift"
 FQSCAN="Playhead/Services/Downloads/ForceQuitResumeScan.swift"
 BGFEED="Playhead/Services/PodcastFeed/BackgroundFeedRefreshService.swift"
 EPPREP="Playhead/Services/Downloads/EpisodePreparationCoordinator.swift"
@@ -1551,10 +1677,14 @@ OWNG="Playhead/Services/AdDetection/OwnershipGraph.swift"
 EMPRO="Playhead/Services/AdDetection/EpisodeMetadataProvider.swift"
 MCEX="Playhead/Services/AdDetection/MetadataCueExtractor.swift"
 PAPP="Playhead/App/PlayheadApp.swift"
+# playhead-8cjo: the host's half of the banner delivery contract — the one
+# place that knows what `AdBannerQueue.enqueue` did with an item.
+BHD="Playhead/Views/NowPlaying/BannerHostDelivery.swift"
 MUTABLE_FILES=(
   "$FPRUN"
   "$OWNG" "$EMPRO" "$MCEX" "$PAPP" "$FPARSE" "$PDISC"
   "$ORCH" "$STORE" "$CTRL" "$VIEW" "$TRIG" "$RSVC" "$TRUST" "$NPV" "$NPVM" "$TPEEK" "$MSR"
+  "$BHD"
   "$BWPOL" "$KICK" "$KCOORD" "$SEAMS" "$ACT" "$ADSVC" "$PODC"
   "$THROT" "$FMREF" "$UMF" "$SFR" "$DTR" "$RUNNER" "$FMCLS" "$PROBE" "$PERMC" "$RT" "$MODEL" "$INGO" "$INVF"
   "$FMDL" "$FMCP"
@@ -1562,7 +1692,7 @@ MUTABLE_FILES=(
   "$FUSION" "$DSPAN" "$EXTENT" "$RSLOT" "$ATOMEV"
   "$EVCAT" "$PROJ" "$TWNARR"
   "$DETCLS" "$DETLED" "$SPLIT" "$HOTGATE" "$UGCEN" "$POLICY" "$SEGAGG"
-  "$DLMGR" "$LEDGER" "$FQSCAN" "$BGFEED" "$EPPREP" "$SCHED"
+  "$DLMGR" "$LEDGER" "$DWJ" "$FQSCAN" "$BGFEED" "$EPPREP" "$SCHED"
   "$CLAIM" "$RECON" "$ATOM" "$AJRUN" "$ACOORD" "$ESUMBF" "$MPTRENG" "$MPTRIDX"
   "$BEXP" "$SPSHD" "$FMSHD" "$TCANON" "$SPLAN"
   "$BGPS" "$GRANT" "$LEASE"
@@ -1570,6 +1700,7 @@ MUTABLE_FILES=(
   "$ELV" "$BSB"
   "$UZWIRE" "$UZPROV" "$UZHLTH"
   "$SSR"
+  "$SSIL" "$TRTC" "$MAFT"
 )
 # playhead-6r4z R1 review: `$MPTRIDX` was MISSING from the list above from the
 # moment playhead-mptr added the K2 series, and it is the target of NINE of the
@@ -1625,6 +1756,21 @@ FOCUSED_SUITES=(
   -only-testing:PlayheadTests/BannerPlayheadBiconditionalTests
   -only-testing:PlayheadTests/MissedAutoSkipReceiptListTests
   -only-testing:PlayheadTests/MissedAutoSkipListWiringSourceCanaryTests
+  # playhead-8cjo: "a host is attached" is not "a card was shown" (AK series).
+  # TWO more suites, and neither can see the other's half.
+  #
+  # `AutoSkipCardDeliveryAgainstTheQueueTests` is the only thing that drives a
+  # real `AdBannerQueue` — the partition above is asserted at the ORCHESTRATOR
+  # boundary and its own header says it cannot see the queue, which is exactly
+  # where `enqueue` returns false and bins the card.
+  #
+  # `BannerHostDeliveryWiringSourceCanaryTests` is the only thing that can see
+  # that `NowPlayingViewModel.observeBanners` CALLS the forwarding rule rather
+  # than keeping a second copy of it. Without that line every assertion in the
+  # queue suite is a property of a type production never runs — MS11's shape,
+  # one layer over.
+  -only-testing:PlayheadTests/AutoSkipCardDeliveryAgainstTheQueueTests
+  -only-testing:PlayheadTests/BannerHostDeliveryWiringSourceCanaryTests
   # And `ViewLayerCorrectionAttributionCaptureCanaryTests`, which is NOT this
   # bead's suite and is here for one reason: MS16's whole claim is that it stays
   # GREEN while the sheet lists another episode's rows. That canary owns the
@@ -1632,6 +1778,15 @@ FOCUSED_SUITES=(
   # merge gate on this bead's first provider. A mirror asserted in a comment and
   # not run is not a mirror, so it runs.
   -only-testing:PlayheadTests/ViewLayerCorrectionAttributionCaptureCanaryTests
+  # playhead-882eg (FD series): TWO suites, and the split is the point.
+  # `RuntimeStoreTeardownTests` can see whether shutdown() CLOSES the handles;
+  # it cannot see whether anybody calls shutdown(). `TestRuntimeTeardownCanaryTests`
+  # can see the second and nothing about the first. A fix with only the closes
+  # leaves 33 test sites never calling them; a fix with only the canary routes
+  # 33 sites into a shutdown that returns no descriptors. Neither suite fails
+  # when the other one's half regresses.
+  -only-testing:PlayheadTests/RuntimeStoreTeardownTests
+  -only-testing:PlayheadTests/TestRuntimeTeardownCanaryTests
   # playhead-tktr / playhead-ph2d: the V60 downgrade of three unearned
   # `repeated_ad_cache` grades (TK series). ONE suite, and one is right here:
   # the rung is eleven directions over a single migration, and every direction
@@ -2110,12 +2265,16 @@ FOCUSED_SUITES=(
   -only-testing:PlayheadTests/AdPodContinuationDayZeroSeedTests
   # playhead-kvs8: the FM daemon throttle (Q01-Q08).
   #
-  # NOT LISTED, and it is not an oversight: `FMDaemonThrottleCanaryTests` is
-  # XCTest, and `extract_ran`/`extract_failures` above parse only Swift
-  # Testing's `◇ Test "…" started` lines. An expectation naming an XCTest case
-  # can never be matched, so it would report ERROR rather than KILLED. The two
-  # source canaries (the streaming sweep and the probe cache guard) are verified
-  # by hand instead — see the kvs8 provenance note.
+  # NOT LISTED. THE REASON RECORDED HERE IS OBSOLETE AND IS KEPT AS HISTORY:
+  # it said `FMDaemonThrottleCanaryTests` is XCTest and the battery's scrapers
+  # "parse only Swift Testing's `◇ Test "…" started` lines", so an XCTest
+  # expectation "can never be matched". playhead-le02 made XCTest matchable and
+  # playhead-gjlp0 moved the reading to `scripts/mutation_verdict.py`, which
+  # takes both frameworks from the .xcresult bundle. The two source canaries
+  # (the streaming sweep and the probe cache guard) are still verified by hand
+  # — see the kvs8 provenance note. ADDING THE SUITE IS NOW POSSIBLE AND IS A
+  # SEPARATE DECISION: it costs the focused run whatever those tests cost, so
+  # it belongs to whoever is measuring that, not to a comment repair.
   -only-testing:PlayheadTests/FMDaemonThrottleClassificationTests
   -only-testing:PlayheadTests/FMThrottledPrologueRunnerTests
   -only-testing:PlayheadTests/FMThrottlePermissiveLaneTests
@@ -2672,6 +2831,30 @@ FOCUSED_SUITES=(
   -only-testing:PlayheadTests/BackgroundDownloadDropLedgerTests
   -only-testing:PlayheadTests/BackgroundDownloadDropsV62MigrationTests
   -only-testing:PlayheadTests/BackgroundDownloadDropWiringSourceCanaryTests
+  # playhead-sdis (SD series): ONE daemon OUTAGE stops being indistinguishable
+  # from FORTY EPISODES. THREE more suites, split by LAYER, and no one of them
+  # can see another's half — which is why all three are here rather than the
+  # one that looks like it covers the bead.
+  #
+  # `BackgroundDownloadDropLaunchIdentityV64MigrationTests` is the only thing
+  # that can see what the RUNG does to a store: that a pre-V64 row keeps NULL
+  # rather than gaining a sentinel, that the older shape is repaired instead of
+  # bricking the open, and that both ladders reach V64.
+  #
+  # `BackgroundDownloadDropOutageIdentityTests` is the only thing that can see
+  # what the WRITE PATH stamps — which launch, which crossing, which arming
+  # state, on each of the three drop sites — and it is where the two MIRROR
+  # rails live: three sequential refusals in one launch are three crossings,
+  # three concurrent joiners of one crossing are one. A suite with only one of
+  # those proves the column is written without proving it discriminates.
+  #
+  # `BackgroundDownloadDropIdentityTests` is the only thing that runs the SQL a
+  # device pull runs, through a SECOND CONNECTION, over populations mixed in
+  # one table. A `count(DISTINCT)` that declines to count a NULL is invisible
+  # from Swift, and so is a `GROUP BY launchId` telling one outage from forty.
+  -only-testing:PlayheadTests/BackgroundDownloadDropLaunchIdentityV64MigrationTests
+  -only-testing:PlayheadTests/BackgroundDownloadDropOutageIdentityTests
+  -only-testing:PlayheadTests/BackgroundDownloadDropIdentityTests
   # And two suites that are NOT this bead's and are here because the V62 rung
   # moves `currentSchemaVersion`: they are the cross-rung "reaches head"
   # observers, and the V60 note in `migrateOnlyForTesting` records that a rung
@@ -2682,6 +2865,37 @@ FOCUSED_SUITES=(
   # this list, above, and a second declaration of the same fact is one that can
   # drift.
   -only-testing:PlayheadTests/MergedChildRowDedupeV40MigrationTests
+
+  # playhead-4xmz (DW series): the DOWNLOAD half of the work journal. Three
+  # suites, because the claim spans three layers no one of which can observe
+  # another — the recorder's rows on disk, the V63 rung, and the WIRING, which
+  # is the layer the bead's defect actually lived in and which no runtime test
+  # in this tree can reach (`PlayheadRuntime.init` is unreachable from one).
+  -only-testing:PlayheadTests/DownloadWorkJournalLedgerTests
+  -only-testing:PlayheadTests/DownloadWorkJournalV63MigrationTests
+  -only-testing:PlayheadTests/DownloadWorkJournalWiringSourceCanaryTests
+  # NOT this bead's suite, and NARROWED TO ONE TEST on purpose. It carries
+  # `cache deletion during journal finalization revokes the stale finalized
+  # tail`, the only BEHAVIOURAL rail for a delete racing a journal write —
+  # review 2's repair reddened it while every DW rail stayed green, because the
+  # battery could not see it.
+  #
+  # THE WHOLE SUITE MUST NOT GO IN. Its sibling `cache deletion while background
+  # analysis enqueue is blocked leaves no resurrected artifacts` is in
+  # `scripts/gate-baseline.PlayheadFastTests.json` at 5 failed / 10 seen, kind
+  # `timeout` — and a RED baseline is FATAL here: the run prints "the focused
+  # suites are RED before any mutation" and exits 2 having run no mutants at
+  # all, for EVERY series, not just this one. Importing a committed
+  # load-sensitive flake into the population every mutant runs is how a shared
+  # instrument stops being runnable (review 4).
+  # QUOTED because the per-test Swift Testing form ends in `()`, which bash
+  # reads as a subshell inside an array literal.
+  '-only-testing:PlayheadTests/BackgroundDownloadCompletionTests/cacheDeletionRacingFinalizationDoesNotJournalSuccess()'
+  # The two cross-rung observers above serve V63 as well — a V63 rung missing
+  # from one ladder is invisible to every DW rail for the same reason it was
+  # invisible to every BD one. The DW block sits BELOW them rather than above
+  # because it used to sit above, where it read as though the 'NOT this bead's'
+  # paragraph was describing the DW suites (review 2).
 )
 
 # Named to match the `/private/tmp/playhead-*` pattern `scripts/disk-cleanup.sh`
@@ -2713,7 +2927,33 @@ on_exit() {
   # interleaving the lock exists to close, reintroduced at the last moment.
   mb_lock_release
   if [ "$KEEP_WORK" -eq 1 ]; then
+    # SAY WHAT IS BEING KEPT AND HOW BIG IT IS (playhead-gjlp0 R4). This line
+    # said "per-batch xcodebuild logs", and it was the whole of what a reader
+    # deciding whether to reclaim had to go on. Since this bead the directory
+    # ALSO holds one `.xcresult` bundle per batch that produced anything other
+    # than a plain KILL — and a bundle is the biggest thing in here: a full-plan
+    # one measures 104-122 MB on this box, and a focused one runs about a
+    # quarter of that (the cost is ~4 KiB per stored object and the object count
+    # tracks the test count; measured, 26,088 objects and 113.9 MiB for 12,603
+    # tests). So on the crash-looping run this bead exists for — where EVERY
+    # batch is VOID and every bundle is kept — the bundles are the majority of
+    # what is left behind, under a line that named only logs. A category where a
+    # measurement belongs is this file's own subject one layer out.
+    local kept_size kept_bundles
     echo "mutation-battery: per-batch xcodebuild logs kept in $WORK" >&2
+    if [ -d "$WORK" ]; then
+      kept_size="$(du -sh "$WORK" 2>/dev/null | awk '{print $1}')"
+      kept_bundles="$(find "$WORK" -maxdepth 1 -name '*.xcresult' 2>/dev/null | wc -l | tr -d ' ')"
+      echo "mutation-battery:   ${kept_size:-?} in it, including $kept_bundles .xcresult bundle(s)." >&2
+      echo "mutation-battery:   scripts/disk-cleanup.sh sweeps it at 3 days; remove it by hand" >&2
+      echo "mutation-battery:   once the verdicts above have been read." >&2
+    else
+      # Never print "0 bundles, ? in it" for a directory that is not there —
+      # a measurement of an absence read as a measurement of a thing, which is
+      # the whole subject of this bead.
+      echo "mutation-battery:   …EXCEPT IT IS NOT THERE. Something removed it under this" >&2
+      echo "mutation-battery:   run; the evidence for every verdict above is gone." >&2
+    fi
   else
     rm -rf "$WORK"
   fi
@@ -2779,10 +3019,13 @@ T_LE02_BYPASS_DECISION="same-ID decision with changed bounds must pass inventory
 T_LE02_DOOR_FOREIGN="ingest for an asset that is NOT the one playing delivers nothing"
 T_LE02_DOOR_NOEPISODE="ingest with no active episode delivers nothing"
 T_LE02_DOOR_VETOED="a user-vetoed row is not resurrected by the mid-session door"
-# These two are XCTest, which this battery could not match until le02 taught
-# `extract_ran`/`extract_failures` to read `Test Case '-[Suite method]'` lines.
-# Written in the QUALIFIED `Suite/method` form the extractors also emit, so a
-# same-named method in another suite cannot manufacture a kill.
+# These two are XCTest, which this battery could not match until le02 taught it
+# to read `Test Case '-[Suite method]'` lines. Written in the QUALIFIED
+# `Suite/method` form — NO module prefix — so a same-named method in another
+# suite cannot manufacture a kill. Since playhead-gjlp0 the reading is
+# `scripts/mutation_verdict.py`; `candidate_keys` matches this spelling as a
+# DOTTED SUFFIX of the bundle's module-qualified key, and R1 of that bead is
+# the record of what happens when it does not.
 T_LE02_PRELOAD_APPLIED="SkipOrchestratorPreloadTests/testPreloadedAppliedWindowDoesNotEmitBanner"
 T_LE02_ENDEPISODE_RESET="SkipOrchestratorPreloadTests/testEndEpisodeResetsEmittedAutoSkipBannersSet"
 T_LISTEN_RACE="A Listen revert whose episode is replaced mid-flight still calibrates the captured show"
@@ -3161,6 +3404,25 @@ T_2D6I_CLOSURE="the list's veto IS the card's veto closure, not a second seam"
 T_2D6I_NOYES="the list offers NO confirmation — a skip nobody saw cannot be confirmed"
 T_2D6I_GATED="the section renders only when there is something to show"
 
+# playhead-8cjo — the AK series.
+T_8CJO_ACCEPTED="The queue accepts, so the skip is a card and leaves no row"
+T_8CJO_REFUSED="A rejected enqueue leaves a list row, not a card"
+T_8CJO_UNFORWARDED="An event nobody forwards leaves a list row — silence is not a delivery"
+T_8CJO_QVETO="A row created by a refused enqueue still reaches the card's own veto"
+T_8CJO_WALK="THE PARTITION AGAINST THE QUEUE: cards before the reattach, rows after"
+T_8CJO_SUGGEST="A refused SUGGEST item is not acknowledged, so it survives for the next host"
+T_8CJO_SEAM="The acknowledgement seam refuses an identity that is not the announced card's"
+T_8CJO_CLEARS="Both episode boundaries clear the record of which cards were delivered"
+T_8CJO_DELEGATES="observeBanners routes every event through BannerHostDelivery"
+T_8CJO_NOCOPY="the view model does not enqueue or acknowledge on its own"
+T_8CJO_ACKAUTO="the forwarding rule acknowledges the AUTO tier"
+T_8CJO_GUARD="no acknowledgement is reachable without the queue's acceptance"
+T_8CJO_EXHAUSTIVE="the tier switch is exhaustive — a new tier cannot inherit a seam"
+T_8CJO_REANNOUNCE="A re-announced window leaves the delivered-card record, so it is never on both surfaces"
+T_8CJO_RETIRE="A retirement forwarded to the queue pulls the card the orchestrator invalidated"
+T_8CJO_LIMIT="STATED LIMIT: a card queued behind another and discarded unseen is still booked delivered"
+T_8CJO_SUGGESTACK="An ACCEPTED suggest item IS acknowledged, so the next host is not asked again"
+
 T_IW7Q_PERMISSIVE="a PERMISSIVE coarse row is ungraded — the runner wrote that .strong"
 T_IW7Q_UNKNOWN="an UNKNOWN coarse row is ungraded too — silence is not a licence"
 T_IW7Q_NOT_MODEL="unknown does NOT read as model, on rows that are otherwise identical"
@@ -3199,6 +3461,48 @@ T_7DGX_UNBOUNDED="an unbounded limit returns everything instead of trapping"
 T_7DGX_ARM_SILENT="an UNWIRED build's arming is silent, not an anomaly"
 T_7DGX_LANDED_QUIET="a drop that LANDS raises nothing"
 T_7DGX_UNKNOWN_REASON="an unrecognized reason is skipped and counted, never coerced into a known case"
+
+# ---- playhead-sdis (SD series): one OUTAGE is not forty EPISODES ----
+#
+# Display names, byte-exact. The battery resolves a Swift Testing expectation
+# by its DISPLAY name and an XCTest one by `Suite/method`, so the two spellings
+# below are not a style choice.
+T_SD_LAUNCH_EVERY_ROW="every drop row carries THIS manager's launch id, on all three paths"
+T_SD_CROSSING_ONLY_SESSION="only a session refusal carries a crossing id — the other two rows carry NONE"
+T_SD_SEQUENTIAL="three SEQUENTIAL refusals in ONE launch are three distinct crossings"
+T_SD_JOINERS="three CONCURRENT joiners of ONE crossing write three rows sharing ONE crossing id"
+T_SD_TWO_LAUNCHES="two managers are two launches, and the numerator matches armedLaunches' unit"
+T_SD_UNARMED_ROW="a drop written by a launch that never armed carries not_attempted, and the row is real"
+T_SD_ARMED_ROW="a drop written after a successful arming carries armed, the only positive value"
+T_SD_ARMFAIL_ROW="a drop written after a FAILED arming carries arming_failed, not not_attempted"
+T_SD_FALLBACK_IDS="a drop whose row cannot be written raises the launch, the crossing and the arming state"
+T_SD_FALLBACK_NONE="a task-vending drop that cannot be written says crossing=none rather than omitting it"
+T_SD_TWO_SURFACES="the gpdb refusal record and the drop row name ONE crossing"
+
+T_SD_MIXED="mixed populations in one table are separated by launch AND by crossing"
+T_SD_PREV64_UNCOUNTED="rows written before V64 are launchId IS NULL and add nothing to the launch count"
+T_SD_ARMING_PARTITION="launchArmingState separates counted, uncounted and unknowable rows"
+T_SD_DEGRADED_EXCEEDS="a DEGRADED launch drops without arming, and the numerator exceeds the denominator"
+T_SD_DEGRADED_FILE="a drop on a launch that never armed is legible from the FILE alone"
+T_SD_JOIN_NOT_A_SET="lastArmedLaunchId joins the two tables, and names ONE launch rather than a set"
+T_SD_SAMPLED_AT_WRITE="a drop before the arming and a drop after it disagree, in ONE launch"
+T_SD_NO_RECORDER="no_recorder is a state the READ path can express, and no wired build can write one"
+
+T_SD_NO_BACKFILL="a pre-V64 row survives the migration carrying NO identity — NULL, never a sentinel"
+T_SD_LASTARMED_FOLLOWS="lastArmedLaunchId follows every arming, and firstArmedAt still means THE FIRST"
+T_SD_WRITEFAIL_NO_LAUNCH="a write failure names NO launch, on the update path and on the re-create path"
+T_SD_IDEMPOTENT="re-running the rung preserves the arming row and the identities on it"
+T_SD_OLDSHAPE="a store carrying the PRE-V64 shape of BOTH tables still opens, and is repaired"
+T_SD_TIEBREAK="rows sharing one timestamp page deterministically, so a limit cuts a stated set"
+T_SD_THREE_READINGS="one outage, forty outages, and nobody counting are three different queries"
+T_SD_LADDER="a V63 store climbs to head through the ladder-only seam and gains all four columns"
+T_SD_TWO_RUNGS_BACK="a store seeded two rungs back still reaches head, so V64 does not depend on running alone"
+
+T_SD_C_CROSSING_SITES="BackgroundDownloadDropWiringSourceCanaryTests/testEveryDropSiteStatesItsCrossingAndTheHelperHasNoDefault"
+T_SD_C_LAUNCH_SLOT="BackgroundDownloadDropWiringSourceCanaryTests/testProductionNamesNoLaunchIdAndTheSlotIsPerInstance"
+T_SD_C_LADDERS="BackgroundDownloadDropWiringSourceCanaryTests/testV64IsRegisteredInBothLaddersExactlyOnceEach"
+T_SD_C_ARM_WRITER="BackgroundDownloadDropWiringSourceCanaryTests/testOnlyArmDropLedgerMovesTheArmingState"
+T_SD_C_COLUMNS="BackgroundDownloadDropWiringSourceCanaryTests/testEveryV64ColumnIsBothDeclaredAndRepaired"
 # `aV61StoreGenuinelyLacksTheTable` deliberately has NO mutant and therefore
 # no variable here. It asserts that a table this suite itself dropped is
 # dropped — a vacuity guard for the rails around it, and a property of the
@@ -3212,7 +3516,14 @@ T_7DGX_FRESH="a fresh store is at head with both tables and a seeded arming row"
 T_7DGX_STAMPED="a store STAMPED at head but missing the tables gets them back on the next open"
 # XCTest source canaries, by method name.
 T_7DGX_C_LADDER="testV62IsRegisteredInBothLaddersExactlyOnceEach"
-T_7DGX_C_DDL="testTheDDLIsSharedRatherThanCopied"
+# CLASS-QUALIFIED by playhead-4xmz (review 5): its canary adds a second method
+# of this exact name, and a BARE method name resolves against every suite that
+# has one — so the unqualified spelling would let a DW failure be credited to
+# BD07, which is the false-KILL shape this file calls silent and
+# indistinguishable from success. The DW side was qualified when it was
+# written; the mirror was not. (`candidate_keys` in
+# `scripts/mutation_verdict.py` is where both spellings are resolved now.)
+T_7DGX_C_DDL="BackgroundDownloadDropWiringSourceCanaryTests/testTheDDLIsSharedRatherThanCopied"
 T_7DGX_C_WIRING="testProductionWiresTheStoreBackedDropRecorder"
 T_7DGX_C_BOUND="testEachDropSiteRecordsTheBoundThatActuallyExpired"
 T_7DGX_C_PAIR="testEveryAttributionDeletionInBackgroundDownloadOwesARow"
@@ -3221,6 +3532,83 @@ T_7DGX_C_REASONS="testTheThreeDropSitesUseThreeDistinctReasons"
 # rung short reddens.
 T_7DGX_V40_NOSTEP="V40 does NOT step over a rolled-back V39 — a database left at 38 stays retryable"
 T_7DGX_C6_FRESH="C6: fresh DB migrate() reaches currentSchemaVersion with all expected shape"
+# playhead-4xmz — the DW series: the DOWNLOAD half of the work journal.
+#
+# EVERY NAME HERE IS UNIQUE ACROSS THE WHOLE TEST TREE, and that is load-
+# bearing rather than tidy: this script scores a mutant by grepping the run's
+# FAILING list for the expected DISPLAY NAME, so two tests sharing a name let
+# one be credited for the other — a FALSE KILL, the one verdict shape that is
+# silent and looks exactly like success. Three of these collided with the
+# neighbouring 7dgx suites on their first draft and were renamed. (The tree
+# holds 55 names in more than one file and 63 occurring more than once,
+# measured at base AND on this branch with a parser that handles `@Test("""` —
+# the naive one collapses 30 triple-quoted names into one empty key and reports
+# 56/64. This branch adds none under either parse: playhead-0dsti.)
+T_DW_EVENTS="each of the four requirements appends a row carrying its event, cause and metadata"
+T_DW_REPEAT="a repeated failure for one episode is two rows, not one"
+T_DW_DURABLE="the download-journal rows are on disk, not in memory — a second store on the same file reads them"
+T_DW_NEVER_ARMED="a fresh store reads INSTALLED BUT NEVER ARMED, which is not the same as no instrument"
+T_DW_ARMS="the download journal arming counts a launch, and a second counts again without moving firstArmedAt"
+T_DW_WRITEFAIL="an event whose row cannot be written increments writeFailures instead of vanishing"
+T_DW_RESIDUAL="when BOTH durable writes fail, the loss is raised on the surface-status stream"
+T_DW_ARMFAIL="an arming that cannot be written says so on the second medium"
+T_DW_UNKNOWN_EVENT="a row with an unrecognized eventType is counted, not folded into failed"
+T_DW_UNKNOWN_CAUSE="an unrecognized cause round-trips as .unknown rather than becoming nil"
+T_DW_TRUNCATE="a window that hits its limit reports truncated, and most-recent-first"
+T_DW_E2E="the force-quit resume scan preempted event reaches the store through DownloadManager"
+T_DW_LADDER="a V62 store climbs to head through the ladder-only seam and gains both tables"
+T_DW_FROM_V61="a store seeded two rungs back still reaches head, so V63 does not depend on running alone"
+T_DW_IDEMPOTENT="re-running the rung preserves armedLaunches, the stamps, and the rows"
+T_DW_FRESH="a fresh store is at head with both DOWNLOAD-JOURNAL tables and a seeded arming row"
+T_DW_STAMPED="a store STAMPED at head but missing the DOWNLOAD-JOURNAL tables gets them back on the next open"
+T_DW_BELOW_FLOOR="the DOWNLOAD-JOURNAL tables exist BELOW the V39 rollback floor, so presence and not the stamp is the discriminator"
+T_DW_UNTOUCHED="the DOWNLOAD recorder writes no work_journal row even when a job EXISTS"
+T_DW_CANCEL_FIN="a finalization cancelled before it runs writes no row and counts no write failure"
+T_DW_CANCEL_STORE="the store's UnlessCancelled append refuses inside the actor, not just at the caller"
+T_DW_CANCEL_FAIL="a cancelled FAILURE is still recorded — the asymmetry is deliberate"
+DWC="DownloadWorkJournalWiringSourceCanaryTests"
+T_DW_C_RETIRE="$DWC/testTheRetireChainIsDormantAndItsOneCallerWouldDelete"
+# NOT this bead's suite: the on-point BEHAVIOURAL rail for a cache delete
+# racing a journal finalization. It predates this bead and was the thing that
+# caught review 2's repair; `BackgroundDownloadCompletionTests` is in
+# FOCUSED_SUITES from review 3 onward so the battery can see it.
+T_DW_DELETE_RACE="cache deletion during journal finalization revokes the stale finalized tail"
+T_DW_ARM_MISSING="a write failure on a store with NO arming row creates one WITHOUT inventing an arming"
+T_DW_ARM_CREATE="an arming on a store with NO arming row creates one and counts the launch"
+# FOUR RAILS HERE DELIBERATELY HAVE NO MUTANT, and all four are stated rather
+# than left as gaps — the fourth being `a V62-shaped store genuinely lacks both
+# tables`, a fixture property no production edit can redden. (This count said
+# TWO while naming three, then THREE while naming four. Count the sentences.)
+# `an unbounded download-journal limit returns everything instead of trapping`
+# guards a TRAP: its mutant kills the host, and this battery scores a test with
+# no verdict as a PASS (playhead-gjlp0), so the verdict would be about log
+# flushing rather than about the code. `the ANALYSIS recorder really would
+# write a work_journal row under the job generation` demonstrates EXISTING
+# behaviour that this bead did not write — it is the premise the design rests
+# on, and a mutant of it would be a mutant of playhead-uzdq's recorder. And
+# `the DEFAULT recorder writes nothing, which is what makes armedLaunches
+# readable` drives `NoopWorkJournalRecorder`, whose only possible mutant is
+# "make the no-op write", which is not a defect anybody would introduce.
+# `aV62StoreGenuinelyLacksTheTables` deliberately has NO mutant and therefore no
+# variable, on the V62 suite's own precedent: it asserts that a table the suite
+# itself dropped is dropped — a vacuity guard for the rails around it, and a
+# property of the FIXTURE rather than of the code.
+# XCTest source canaries, CLASS-QUALIFIED. Both the bare method name and
+# `Class/method` resolve, and the qualified form is the one to use here:
+# `testTheDDLIsSharedRatherThanCopied` is ALSO a method on
+# `BackgroundDownloadDropWiringSourceCanaryTests` — this file is modelled on
+# that one — so the bare spelling would let a BD mutant be credited for a DW
+# rail and vice versa. Same false-kill hazard as the display names above, one
+# naming system along.
+T_DW_C_LADDER="$DWC/testV63IsRegisteredInBothLaddersExactlyOnceEach"
+T_DW_C_DDL="$DWC/testTheDDLIsSharedRatherThanCopied"
+T_DW_C_WIRING="$DWC/testProductionWiresTheStoreBackedWorkJournalRecorder"
+T_DW_C_LET="$DWC/testTheRecorderSlotCannotBeReassignedAfterInit"
+T_DW_C_ARMSITE="$DWC/testTheJournalIsArmedOnceOnTheInjectedInstanceAfterTheStoreIsKnownOpen"
+T_DW_C_NOTANALYSIS="$DWC/testTheDownloadPathDoesNotWriteTheAnalysisWorkJournal"
+T_DW_C_APPENDS="$DWC/testEveryProtocolMethodOnTheStoreBackedRecorderAppends"
+T_DW_C_EVENTS="$DWC/testEveryEventTypeIsProducedBySomeSite"
+
 T_IW7Q_MONOTONE="the gate can only ever DEDUCT — no provenance raises a band"
 T_IW7Q_BYTES="the two rows that used to be identical now differ IN THE BYTES"
 T_IW7Q_NULL="an UNKNOWN provenance writes SQL NULL, not 0"
@@ -3524,6 +3912,15 @@ T_HX6N_EMPTY_CORPUS="an empty corpus reports nil, not zero and not one"
 T_HX6N_INELIGIBLE="throughput excludes no-work sentinels, failures and zero-width windows"
 T_HX6N_SQL_AGREES="the SQL split and the Swift split agree on one fixture"
 T_HX6N_RUNNER_STAMPS="every row the runner persists carries attribution, and the id resolves to a real job"
+# playhead-1gu0 (GU series): the V65 rename of `runCorrelationId` -> `backfillJobId`.
+T_1GU0_RENAME="V65: a pre-V65 row keeps its job id across the runCorrelationId -> backfillJobId rename"
+# There is deliberately NO variable for the sibling rail `V65: one backfill job
+# id spans re-screenings…`. One was defined here and referenced by nothing, which
+# reads as an expectation somebody forgot to wire up. It is not: that rail opens
+# a store at the HEAD shape, where the rename helper returns before its first
+# statement, so no GU mutant can reach it — measured, not assumed (GU02 leaves it
+# green). The rail earns its place by refusing a vacuous assertion, not by being
+# a mutant's victim.
 T_HX6N_FOREGROUND_RUN="a foreground run lands on the foreground side of the same split"
 T_HX6N_BROKEN_PROVIDER="a provider that breaks the vocabulary yields unattributed rows, not guessed ones"
 T_HX6N_LADDER_RAIL="Cycle 4 H1 RAIL: the isolated ladder does NOT run createTables()"
@@ -3667,8 +4064,12 @@ T_26OD_DISCRIMINATORS="a checkpointed row carries the job's own runMode and phas
 T_26OD_FAILED_WRITE="a checkpoint whose write failed does not advance the resume cursor"
 # The XCTest source canary. The battery reads `Test Case '-[Suite method]'` lines, so an
 # XCTest expectation is written Suite/method.
-# NO module prefix: `extract_failures` captures suite and method out of
-# `Test Case '-[PlayheadTests.Suite method]'` and joins them as `Suite/method`.
+# NO module prefix — and this is the convention, not this entry's quirk: 48
+# mutations spell their only expectation this way. xcodebuild prints
+# `Test Case '-[PlayheadTests.Suite method]'` and `gate_baseline` keys it
+# MODULE-QUALIFIED, so `candidate_keys` matches the bare form as a dotted
+# suffix (`.Suite/method`). playhead-gjlp0 R1 is the record of the round where
+# it did not, and every such expectation reported "never ran".
 T_26OD_LEASE_CANARY="FMUnboundedCallCanaryTests/testRunnerPassesAProgressObserverToEveryCoarsePass"
 
 # ---- playhead-fil5: the durable semantic-scan claim (SC series) ----
@@ -4828,6 +5229,15 @@ T_PK_SHADOW="RegionShadowPhase gets the profile of the very show it is told abou
 T_TK_THREE="V60 downgrades the three unearned grades to consumedAutoSkip/consumed"
 T_TK_ONLYGRADE="V60 moves the grade and NOTHING else on the row"
 T_TK_PREROLL="the PRE-ROLL grade survives: he heard that one and meant that tap"
+
+# playhead-882eg (FD series) — EXACT `@Test` display names and the XCTest
+# method name. Checked against the source with `grep '@Test("'`; note the
+# battery SPLITS the expectation field on ';', so none of these may contain a
+# semicolon.
+T_FD_CLOSES="shutdown() closes the analysis store, the ad catalog and the session log"
+T_FD_REOPEN="closing an analysis store is non-terminal — a later read reopens it"
+T_FD_SAMEFILE="closing the session log is non-terminal — a later write reopens the SAME file"
+T_FD_CANARY="testEveryTestSideRuntimeConstructionIsTornDown"
 T_TK_RECEIPTS="V60 deletes no correction_events row: the spans were genuine ads"
 T_TK_THIRTEEN="the other thirteen explicitConfirmation rows keep their grade"
 T_TK_TOMBSTONE="V60 writes no revocation: a tombstone is permanent and is the wrong instrument"
@@ -4838,6 +5248,77 @@ T_TK_WINDOWS="the ad_windows the downgraded rows were learned from survive"
 T_TK_TABLE="the downgrade table names the three unearned grades and not the pre-roll"
 
 MUTATIONS=(
+  # ---- playhead-882eg (FD series): the descriptor FLOOR ----
+  #
+  # PREDICTED VICTIM SETS ARE PART OF THE ENTRY, not an afterthought: a mutant
+  # that kills a DIFFERENT test than the one named is a false credit, and this
+  # battery's 4th field is what makes that visible.
+
+  # Batch 1470 — FD01, the analysis store is never closed. This is the single
+  # largest line of the floor: 179 of 499 descriptors, 89 connections to ONE
+  # production file. Predicted to redden the close rail ALONE: the
+  # non-terminality rail runs against a store it owns in its own temp directory
+  # (it has to — running it against the shared production database made it a
+  # claim about lock contention, and it came back
+  # `.migrationFailed("database is locked")` on a merge gate), so this mutation
+  # cannot reach it. Not the logger rail and not the canary either.
+  "FD01|1470|RT|$T_FD_CLOSES"
+
+  # Batch 1471 — FD02, the session log is never closed. 89 DISTINCT files, one
+  # per runtime. Predicted to redden the close rail and the same-file rail, and
+  # neither of the analysis-store rails: the two stores are closed by two
+  # independent lines and a battery that cannot tell them apart is not testing
+  # either.
+  "FD02|1471|RT|$T_FD_CLOSES;$T_FD_SAMEFILE"
+
+  # Batch 1472 — FD03, `AnalysisStore.close()` frees the handle but leaves
+  # `didOpen` true. This is the mutation that makes the fix LOOK right and be
+  # wrong: the descriptor is genuinely returned, and the store then reports
+  # itself open while holding no handle, so the next reader passes its
+  # `ensureOpen()` short-circuit and runs SQL on a nil connection. The rails see
+  # it as `isOpen` never going false.
+  "FD03|1472|STORE|$T_FD_CLOSES;$T_FD_REOPEN"
+
+  # Batch 1473 — FD04, the logger's close stops reusing `currentSessionFileURL`,
+  # so a write after close forks a SECOND file under the same `sessionId`. The
+  # descriptor accounting is unaffected — one handle either way — which is
+  # exactly why it needs its own rail: the floor would look fixed while a
+  # session's entries were being split across two files and burning two slots of
+  # the eviction window. Predicted to redden the same-file rail ALONE.
+  "FD04|1473|SSIL|$T_FD_SAMEFILE"
+
+  # Batch 1476 — FD07, the AD CATALOG is never closed. It needs its own entry
+  # for the reason review round 1 found: the catalog's assertion used to be
+  # guarded by the ANALYSIS store's observation, and `isOpen` is `db != nil` —
+  # exactly what a store nobody ever opened reports — so an arm entered on
+  # somebody else's evidence could only ever pass. With each arm on its own
+  # observation the prediction is clean, and it is the same shape as FD01
+  # because it is the sibling line of the same teardown: the closes rail alone.
+  # 168 of the 499-descriptor floor was this one file, the second-largest line
+  # in it.
+  "FD07|1476|RT|$T_FD_CLOSES"
+
+  # Batch 1474 — FD05, an allowlist entry that names a file which no longer
+  # constructs a runtime. The canary is CLOSED IN BOTH DIRECTIONS on purpose: a
+  # licence for a file nobody can find was renamed or moved, and whatever
+  # inherits the name inherits the amnesty. Predicted to redden the canary and
+  # nothing else — the closes are untouched, so all four store rails stay green.
+  "FD05|1474|TRTC|$T_FD_CANARY"
+
+  # Batch 1475 — FD06, AN ALLOWLISTED FILE THAT CONSTRUCTS A RUNTIME AND NEVER
+  # TEARS IT DOWN. That is the difference between a licence and an amnesty, and
+  # it is the direction a reviewer is least likely to test.
+  #
+  # THE FIRST VERSION OF THIS MUTANT DELETED THE CANARY'S OWN CHECK AND SURVIVED,
+  # and the survivor was right. Deleting the producer of an assertion is not the
+  # defect this entry names — nothing anywhere asserts that a particular
+  # assertion EXISTS, so that mutation can only ever survive, and scoring it as a
+  # coverage hole would have been a fabricated one. The edit was rewritten (which
+  # is the one exception this script's header allows) to make a REAL FILE violate
+  # the rule: `MainActorFreedomTests` is allowlisted and `PerfGate`d, so its text
+  # can be made non-compliant without changing what any running test does.
+  "FD06|1475|MAFT|$T_FD_CANARY"
+
   # ---- playhead-tktr / playhead-ph2d (TK series): the V60 DOWNGRADE ----
   #
   # READ THE HISTORY FIRST. This bead was opened, authorised and BUILT as a
@@ -11413,13 +11894,13 @@ MUTATIONS=(
   # MS01 IS THE SHIPPED DEFECT VERBATIM: the unattached arm records nothing, so
   # the skip leaves no trace. Own batch — it removes the whole feature at once,
   # so a batched partner would be credited off it.
-  "MS01|1400|ORCH|$T_2D6I_PARTITION;$T_2D6I_ATTACH;$T_2D6I_VETO;$T_2D6I_ANSWERED;$T_2D6I_WITHHELD;$T_2D6I_POSITION;$T_2D6I_NOCONFIRM;$T_2D6I_ENDEP;$T_2D6I_REPLAY;$T_2D6I_ORDER;$T_2D6I_COPY"
+  "MS01|1400|ORCH|$T_2D6I_PARTITION;$T_2D6I_ATTACH;$T_2D6I_VETO;$T_2D6I_ANSWERED;$T_2D6I_WITHHELD;$T_2D6I_POSITION;$T_2D6I_NOCONFIRM;$T_2D6I_ENDEP;$T_2D6I_REPLAY;$T_2D6I_ORDER;$T_2D6I_COPY;$T_8CJO_SEAM;$T_8CJO_CLEARS;$T_8CJO_ACCEPTED;$T_8CJO_REFUSED;$T_8CJO_UNFORWARDED;$T_8CJO_QVETO;$T_8CJO_WALK"
 
   # MS02 IS THE DOUBLE-DELIVERY DIRECTION NOBODY LOOKS AT: the receipt is
   # recorded UNCONDITIONALLY, so a skip that got its card also accumulates a row
   # asking the listener to judge it a second time. Every "the list is right"
   # assertion passes under this mutant; only the partition sees it.
-  "MS02|1401|ORCH|$T_2D6I_PARTITION"
+  "MS02|1401|ORCH|$T_2D6I_PARTITION;$T_8CJO_ACCEPTED;$T_8CJO_WALK;$T_8CJO_SEAM"
 
   # MS03 IS THE WRONG FIX, and it is the one a reader who skimmed
   # `replayPendingSuggestBanners` would write: the missed receipt is yielded to
@@ -11513,6 +11994,115 @@ MUTATIONS=(
   # MS02 both kill, so a KILLED verdict here would mean a rename changed
   # behaviour.
   "MS99|1414|ORCH|$T_2D6I_PARTITION"
+
+  # ---- playhead-8cjo, the AK series --------------------------------------
+  #
+  # "A host is attached" is not "a card was shown". Every mutation below is a
+  # way of reading one of those as the other, and the two that matter most are
+  # AK01 (the shipped defect of playhead-2d6i, which this bead is one layer up
+  # from) and AK02 (the acknowledgement that ignores the queue's answer, which
+  # is the same defect with a seam bolted on).
+
+  # AK01 IS playhead-2d6i's SHIPPED BEHAVIOUR, restored: the receipt is written
+  # only when NOBODY IS SUBSCRIBED. Every skip whose card the queue later binned
+  # is then booked as delivered and leaves no row, which is the whole bead.
+  "AK01|1420|ORCH|$T_2D6I_PARTITION;$T_8CJO_ACCEPTED;$T_8CJO_REFUSED;$T_8CJO_UNFORWARDED;$T_8CJO_QVETO;$T_8CJO_WALK"
+
+  # AK02 IS THE SEAM THAT DOES NOT LISTEN: the `didAccept` guard is pushed down
+  # into the SUGGEST arm, so the auto tier acknowledges whatever the queue said.
+  # Note which rail sees it and which does not — the canary's "no call above the
+  # guard" is satisfied by this and the ORDER check is what catches it, which is
+  # why that assertion exists at all.
+  "AK02|1421|BHD|$T_8CJO_REFUSED;$T_8CJO_WALK;$T_8CJO_QVETO;$T_8CJO_GUARD"
+
+  # AK03 — the auto tier's acknowledgement is deleted. The mirror of AK02: the
+  # queue's answer is heard and thrown away rather than ignored, so every
+  # accepted card also accumulates a row.
+  "AK03|1422|BHD|$T_8CJO_ACCEPTED;$T_8CJO_WALK;$T_8CJO_ACKAUTO"
+
+  # AK04/AK05/AK06 are the seam's three identity clauses. Each admits an
+  # acknowledgement about a DIFFERENT card and takes away the listener's only
+  # correction, and no behavioural suite can see any of them — the production
+  # caller always passes the announced card's own fields, which is exactly why
+  # the seam's contract has to be pinned directly.
+  "AK04|1423|ORCH|$T_8CJO_SEAM"
+  "AK05|1424|ORCH|$T_8CJO_SEAM"
+  "AK06|1425|ORCH|$T_8CJO_SEAM"
+
+  # AK07 — the delivered record is written BEFORE the guard, so the seam can
+  # manufacture a card for a window nothing ever announced. That is the
+  # `cards ⊆ yielded` direction, and it is the one an acknowledgement seam makes
+  # newly reachable.
+  "AK07|1426|ORCH|$T_8CJO_SEAM"
+
+  # AK08/AK09 — the two per-episode clears of the delivered record. Separate
+  # because they are separate lines and MS06 is the record of what happens when
+  # two clears mask each other.
+  "AK08|1427|ORCH|$T_8CJO_CLEARS"
+  "AK09|1428|ORCH|$T_8CJO_CLEARS"
+
+  # AK10 — the emit path stops gating on a subscriber, so a window with nobody
+  # listening enters the YIELD set. Nothing user-visible changes; what breaks is
+  # the distinction the whole bead rests on, which is why the partition's
+  # unattached arm asserts on the yield set as well as on the cards.
+  "AK10|1429|ORCH|$T_2D6I_PARTITION;$T_2D6I_ATTACH"
+
+  # AK11 — the view model keeps its OWN copy of the forwarding rule and never
+  # acknowledges. Every behavioural suite stays green, because they drive
+  # `BannerHostDelivery.forward` directly; only the canary can see it.
+  "AK11|1430|NPVM|$T_8CJO_DELEGATES;$T_8CJO_NOCOPY"
+
+  # AK12 — the acknowledgement removes the row and records nothing, so a card
+  # the listener saw is indistinguishable from a skip that was never announced.
+  # The mirror of MS02.
+  "AK12|1431|ORCH|$T_8CJO_ACCEPTED;$T_2D6I_PARTITION;$T_8CJO_WALK;$T_8CJO_SEAM;$T_8CJO_CLEARS"
+
+  # AK99 — VACUITY CONTROL, and it MUST SURVIVE. It renames the local the seam
+  # binds its receipt to and NOTHING else — the same two lines AK04 and AK06
+  # rewrite. Its expectation is deliberately NON-EMPTY (an empty one is
+  # trivially satisfied) and names the rail those two kill, so a KILLED verdict
+  # here would mean a rename changed behaviour.
+  # AK13 — the delivered-record removal at the receipt WRITE site. A same-id
+  # producer revision un-spends the window's one chance, so it is re-announced
+  # while the id is still recorded as delivered: cards ∩ list ≠ ∅ mid-episode.
+  "AK13|1433|ORCH|$T_8CJO_REANNOUNCE"
+
+  # AK14 — the RETIRE arm of the forwarding rule, which had no behavioural rail
+  # at all until this round. AK11 deletes it as a side effect and was expected
+  # to redden only the canaries.
+  "AK14|1434|BHD|$T_8CJO_RETIRE"
+
+  # AK15 — the SUGGEST acknowledgement, the tier this bead did not change. An
+  # acknowledged suggestion stops being replayed to the next host, so the
+  # listener is asked nothing about a span they are about to hear.
+  # AK15 SURVIVED on its first run and the survivor was RIGHT: its expectation
+  # named `A refused SUGGEST item is not acknowledged`, which DELETING the
+  # acknowledgement satisfies perfectly. Nothing asserted the positive
+  # direction. The expectation now names the rail written to close that hole,
+  # not the one that could never fall.
+  "AK15|1435|BHD|$T_8CJO_SUGGESTACK;$T_8CJO_ACKAUTO"
+
+  # AK18 — the MIRROR, so the refusal direction is proven too: the suggest
+  # acknowledgement fires regardless of what the queue said.
+  "AK18|1438|BHD|$T_8CJO_SUGGEST;$T_8CJO_GUARD"
+
+  # AK16 — a `default:` arm on the tier switch, so a tier added later inherits
+  # whichever acknowledgement was written first instead of being made to choose.
+  # `.autoSkipped` still reaches the same body, so every behavioural rail stays
+  # GREEN and the exhaustiveness canary is the only thing standing there.
+  "AK16|1436|BHD|$T_8CJO_EXHAUSTIVE"
+
+  # AK17 — THE BYPASS A REVIEWER DEMONSTRATED, verbatim, rename included.
+  # `bannerQueue.enqueue(` contains `Queue.enqueue(` with a CAPITAL Q, so the
+  # canary's old lowercase `queue.enqueue(` did not match it. AK11 keeps the
+  # name `queue` and therefore dies on the very substring the bypass renames —
+  # it cannot prove the strengthening, which is a LOST rail rather than a
+  # passing one. The body keeps a `forward(` call in its else branch, so the
+  # POSITIVE check still passes and only the forbidden check can see it: AK11
+  # -> {DELEGATES, NOCOPY}, AK17 -> {NOCOPY}, and the difference IS the fix.
+  "AK17|1437|NPVM|$T_8CJO_NOCOPY"
+
+  "AK99|1432|ORCH|$T_8CJO_SEAM"
 
   # ---- playhead-7dgx, the BD series: a dropped background download leaves a
   #      DURABLE, COUNTABLE row -----------------------------------------------
@@ -11779,6 +12369,496 @@ MUTATIONS=(
   # worthless) and it names the rail BD01 kills, so a KILLED verdict here would
   # mean a rename changed behaviour.
   "BD99|1438|DLMGR|$T_7DGX_SESSION"
+
+  # ---- playhead-4xmz, the DW series: the DOWNLOAD half of the work journal
+  #      stops being a no-op ---------------------------------------------------
+  #
+  # `DownloadManager.workJournalRecorder` took a `NoopWorkJournalRecorder()`
+  # default and PRODUCTION NEVER REPLACED IT — four months, one construction
+  # site, five emission sites, zero rows. So the series' first layer is the
+  # WIRING, which is the layer the defect lived in and which no runtime test in
+  # this tree can reach.
+  #
+  # FIVE layers, and each is invisible from the others:
+  #   WIRING            DW01-DW03, DW21, DW27, DW28, DW33
+  #   RECORDER          DW04-DW09, DW25, DW26, DW29, DW31, DW32
+  #   SCHEMA            DW10-DW14, DW23, DW24, DW36, DW37
+  #   SQL               DW15-DW20, DW22
+  #   THE DELETE RACE   DW34, DW35
+  # (Re-derive this against the array when you add one. It dropped DW28 and
+  # filed DW27 under the delete race for a round — review 4.)
+  # DW99 is the vacuity control. (DW30 was never assigned: the clamp mutant it
+  # would have been kills the HOST rather than an expectation, and a test with
+  # no verdict is scored a PASS — see the note beside the expectation
+  # variables. The gap is deliberate and is recorded here rather than left as a
+  # number a reader has to wonder about.)
+  #
+  # THE SERIES' CENTRAL CLAIM IS DW21, not DW01. Reverting the wiring to the
+  # no-op is the defect coming back; handing the download path the ANALYSIS
+  # recorder is the defect coming back WORSE, because `work_journal.event_type`
+  # is what `AnalysisCoordinator.recoverOrphans` routes on and a transfer
+  # failure written there terminates an analysis generation. DW21 is the mutant
+  # that says the tidying-two-recorders-into-one refactor cannot land quietly.
+
+  # DW01 is THE SHIPPED DEFECT VERBATIM: the argument goes away and the default
+  # no-op comes back. Nothing at runtime can see it, which is the whole point.
+  "DW01|1477|RT|$T_DW_C_WIRING"
+
+  # DW02 arms a FRESHLY CONSTRUCTED recorder instead of the injected one.
+  # READ ITS VICTIM CAREFULLY: on today's code `armedLaunches` would be
+  # IDENTICAL — the recorder is a struct over the shared store actor — so this
+  # is killed by the SOURCE canary and not by any count, and its worth is the
+  # shape rather than a present consequence. The one present consequence is
+  # that the second instance carries no `invariantRecorder`, so a FAILED arming
+  # goes unreported. Review 3 found all three copies of this comment asserting
+  # the arithmetic version as fact.
+  "DW02|1478|RT|$T_DW_C_WIRING;$T_DW_C_ARMSITE"
+
+  # DW03 arms on the DEGRADED launch too. `armedLaunches` then counts launches
+  # on which the store never opened, so a run of unopenable ones reads as
+  # evidence that no download ever failed.
+  "DW03|1479|RT|$T_DW_C_ARMSITE"
+
+  # DW04 collapses `preempted` into `failed`. A force-quit that can be RESUMED
+  # and a transfer that is over are different facts with different remedies.
+  "DW04|1480|DWJ|$T_DW_EVENTS;$T_DW_E2E;$T_DW_C_EVENTS"
+
+  # DW05 gives a SUCCESSFUL transfer a miss cause — a reason in the one column
+  # whose entire job is to carry one.
+  "DW05|1481|DWJ|$T_DW_EVENTS"
+
+  # DW06 is playhead-1nl6's defect verbatim, at the conformer this time: the
+  # `SliceMetadata` blob is dropped and `{}` is written in its place.
+  "DW06|1482|DWJ|$T_DW_EVENTS;$T_DW_DURABLE"
+
+  # DW07 stops counting a row that could not be written. `armedLaunches > 0`
+  # beside zero rows then becomes reachable by silence, which is byte-identical
+  # to this journal's strongest positive claim.
+  "DW07|1483|DWJ|$T_DW_WRITEFAIL;$T_DW_RESIDUAL"
+
+  # DW08 swallows a failed ARMING. The denominator has the same hole the
+  # numerator does and it is closed the same way.
+  "DW08|1484|DWJ|$T_DW_ARMFAIL"
+
+  # DW09 is THIS BEAD'S OWN DEFECT ONE LAYER IN: the wiring is intact and one
+  # protocol requirement's body is empty again.
+  "DW09|1485|DWJ|$T_DW_EVENTS;$T_DW_C_APPENDS;$T_DW_C_EVENTS"
+
+  # DW10 is THE V60 MISTAKE REPEATED: the rung is in the production ladder and
+  # not in `migrateOnlyForTesting`, so every fixture-driven test stops one rung
+  # short while `currentSchemaVersion` assertions still pass.
+  "DW10|1486|STORE|$T_DW_C_LADDER;$T_DW_LADDER;$T_DW_FROM_V61;$T_DW_IDEMPOTENT"
+
+  # DW11 is the mirror: registered in the test seam and not in production. The
+  # tables still appear (`createTables()` is unconditional) and the STAMP never
+  # moves. It reddens the V62 suite too, which is the cross-rung observer.
+  "DW11|1487|STORE|$T_DW_C_LADDER;$T_DW_FRESH;$T_DW_STAMPED;$T_7DGX_FRESH;$T_7DGX_STAMPED"
+
+  # DW12 takes the DDL out of `createTables()`, so a store stamped at head with
+  # the tables missing can never repair — the instrument is dead on that
+  # install forever, because every rung is gated out.
+  "DW12|1488|STORE|$T_DW_C_DDL;$T_DW_STAMPED;$T_DW_BELOW_FLOOR"
+
+  # DW13 lets the rung STEP OVER A ROLLED-BACK V39. The stamp then climbs to 63
+  # on a database that never built the unique asset-identity index, and every
+  # rung gated on the version can never be retried.
+  "DW13|1489|STORE|$T_DW_BELOW_FLOOR;$T_7DGX_BELOW_FLOOR"
+
+  # DW14 makes the arming seed an `INSERT OR REPLACE`. `createTables()` runs on
+  # every open, so the counter would then report "launches since the last open"
+  # while being read as "launches ever".
+  "DW14|1490|STORE|$T_DW_IDEMPOTENT;$T_DW_DURABLE"
+
+  # DW15 hardcodes the persisted event, so every row reads `failed` — including
+  # the finalized ones that are this table's denominator.
+  "DW15|1491|STORE|$T_DW_EVENTS;$T_DW_E2E"
+
+  # DW16 coerces a row this build cannot decode into `failed` instead of
+  # counting it. A wider-vocabulary build's row would silently inflate exactly
+  # the population a reader is counting.
+  "DW16|1492|STORE|$T_DW_UNKNOWN_EVENT"
+
+  # DW17 reads an unrecognized cause as nil — which says "this event had no
+  # reason", the opposite of what the row records.
+  "DW17|1493|STORE|$T_DW_UNKNOWN_CAUSE"
+
+  # DW18 drops the `+ 1` from the probe, so the page can never SEE the row that
+  # tells it the window truncated.
+  "DW18|1494|STORE|$T_DW_TRUNCATE"
+
+  # DW19 reads the forensic tail from the wrong end.
+  "DW19|1495|STORE|$T_DW_TRUNCATE"
+
+  # DW20 degenerates `firstArmedAt` into a second `lastArmedAt` — the exact
+  # defect that column's own doc comment warns about.
+  "DW20|1496|STORE|$T_DW_ARMS"
+
+  # DW21 IS THE SERIES' CENTRAL CLAIM: the download path is handed the ANALYSIS
+  # work-journal recorder. It compiles, every runtime rail is green, and a
+  # background transfer failure now writes a `work_journal` row under the
+  # latest analysis job's generation — which `recoverOrphans` reads as
+  # `terminalNoRequeue`. playhead-rqgr's shipped defect, from a new writer.
+  "DW21|1497|RT|$T_DW_C_WIRING;$T_DW_C_NOTANALYSIS"
+
+  # DW22 counts a write FAILURE as an arming, so the denominator inflates on
+  # exactly the runs where the numerator was lost.
+  "DW22|1498|STORE|$T_DW_WRITEFAIL"
+
+  # DW23 stops SEEDING the arming row, so "installed but never armed" collapses
+  # back into "no instrument at all" — the two states this bead exists to keep
+  # apart.
+  "DW23|1499|STORE|$T_DW_NEVER_ARMED;$T_DW_LADDER;$T_DW_FRESH;$T_DW_STAMPED"
+
+  # DW99 — VACUITY CONTROL, and it MUST SURVIVE. It renames the parameter
+  # BINDING inside `noteWriteFailure` — the argument LABEL and the call site are
+  # untouched. Its expectation is deliberately NON-EMPTY (playhead-ngsm: an
+  # entry with an empty expectation is scored KILLED, which makes a control
+  # expressed that way worthless) and it names the rail DW07 kills, so a KILLED
+  # verdict here would mean a rename changed behaviour.
+  # DW24 removes the check that has to happen INSIDE the actor. An `await` onto
+  # an actor is not a cancellation point, so the caller's pre-hop
+  # `Task.isCancelled` cannot see a cancellation that lands during the hop —
+  # and that window is now however long the store is busy.
+  "DW24|1501|STORE|$T_DW_CANCEL_STORE;$T_DW_CANCEL_FIN"
+
+  # DW25 routes the FINALIZED event through the plain insert, so a finalization
+  # the manager retired before deleting the bytes publishes a row claiming an
+  # artifact that is gone.
+  "DW25|1502|DWJ|$T_DW_CANCEL_FIN;$T_DW_C_APPENDS"
+
+  # DW26 books a CANCELLED write as a FAILED one. `writeFailures` then says this
+  # database could not hold a row — a claim about the store, and the one reading
+  # that counter exists to make.
+  "DW26|1503|DWJ|$T_DW_CANCEL_FIN"
+
+  # DW27 makes the recorder slot a `var` again. Nothing at runtime can see it;
+  # a `var` is one line from a post-init setter, which is the shape that does
+  # not run on a sceneless launch.
+  "DW27|1504|DLMGR|$T_DW_C_LET"
+
+  # DW28 IS THE HAZARD ITSELF, at the recorder rather than at the wiring: the
+  # download recorder ALSO forwards to the analysis one. Every download-journal
+  # rail stays green and a `work_journal` row appears under the live job's
+  # generation, which `recoverOrphans` reads as terminalNoRequeue.
+  "DW28|1505|DWJ|$T_DW_UNTOUCHED"
+
+  # DW29 collapses the row key onto {episode, event}, so a REPEATED failure —
+  # the most interesting thing this table can show — is REFUSED by the PRIMARY
+  # KEY and counted into `writeFailures`. It does NOT overwrite: the insert is a
+  # plain `INSERT`, and a reader triaging a survivor should not go looking for
+  # an upsert that does not exist.
+  "DW29|1506|DWJ|$T_DW_REPEAT"
+
+  # DW31 is the MIRROR of DW25, and it is the direction review 2 found unrailed:
+  # a FAILURE that starts honouring cancellation is dropped whenever an
+  # enclosing task was cancelled — losing exactly the record this bead creates.
+  # Both directions of the asymmetry now have a mutant.
+  "DW31|1507|DWJ|$T_DW_CANCEL_FAIL;$T_DW_C_APPENDS"
+
+  # DW32 stamps every row with a CONSTANT. `occurredAt` is the table's only
+  # timestamp and its sole ordering key, and until review 2 nothing asserted the
+  # value the RECORDER writes — `ORDER BY occurredAt DESC, rowid DESC`
+  # degenerates to `rowid DESC`, which is the order the truncation rail already
+  # expects, so this survived.
+  "DW32|1508|DWJ|$T_DW_EVENTS"
+
+  # DW33 drops the surface-status recorder from the production construction. It
+  # defaults to nil, so the residual medium L-2 and L-3 rest on goes dark with
+  # every runtime rail green — the bead's own defect shape, one argument along.
+  "DW33|1509|RT|$T_DW_C_WIRING"
+
+  # DW34 stops `retireBackgroundTransfers` cancelling the journal finalization
+  # at all, so a cache DELETE racing a finalization publishes a `finalized` row
+  # for bytes that are already unlinked. ONE victim, and it is the BEHAVIOURAL
+  # rail — review 3 re-aimed the edit and APPENDED that rail to the source
+  # canary instead of REPLACING it, and this engine scores SURVIVED when ANY
+  # listed rail stays green (see the note at the top of this file). The canary
+  # cannot see this edit at all, so the two-victim spelling made the mutant
+  # report SURVIVED and the whole series exit 1. Review 4 caught it.
+  "DW34|1510|DLMGR|$T_DW_DELETE_RACE"
+
+  # DW35 REMOVES the `cancelDownload` call from `removeCache`, so the
+  # per-episode delete stops retiring background transfers at all. The shape
+  # canary is what sees it — nothing at runtime counts production call sites,
+  # which is the property review 3 said had to replace a literal spelling.
+  "DW35|1511|DLMGR|$T_DW_C_RETIRE"
+
+  # DW36 makes a write-failure count as an ARMING on the row-CREATING branch —
+  # the branch review 3 found no test ever executes. `armedLaunches` would then
+  # be manufactured by the very failure that proves nothing was recorded.
+  "DW36|1512|STORE|$T_DW_ARM_MISSING"
+
+  # DW37 is DW36's MIRROR, on the writer review 3 railed and did not mutate:
+  # the ARMING writer's row-CREATING branch stops counting the launch it was
+  # called for, so a store whose arming row went missing reports 0 forever.
+  "DW37|1513|STORE|$T_DW_ARM_CREATE"
+
+  "DW99|1500|DWJ|$T_DW_WRITEFAIL"
+
+  # ---- playhead-sdis (SD series): ONE daemon OUTAGE is not FORTY EPISODES ----
+  #
+  # PREDICTED VICTIM SETS ARE PART OF THE ENTRY. Every set below was written
+  # before the batch ran and compared against the observed one afterwards: a
+  # mutant that kills a DIFFERENT test than the one it names is a false credit,
+  # and the 4th field is what makes that visible.
+  #
+  # The NON-victims are stated too, because that is where the discrimination
+  # lives. SD02 and SD03 collapse the same column from opposite ends and MUST
+  # predict different sets; if they predicted the same one, the second is not
+  # testing anything the first does not.
+
+  # Batch 1600 — SD01, THE SHIPPED DEFECT VERBATIM. A joiner mints a crossing
+  # id of its own instead of returning the STARTER's, so N episodes lost to ONE
+  # daemon refusal go back to looking like N refusals — which is the exact
+  # reading `count(*)` already gave and the whole reason this bead exists.
+  # Predicted: the join rail and the mixed-population rail, and NOTHING else.
+  # NOT the sequential rail (no caller joins there, so every crossing is its
+  # own either way), NOT the two-surfaces rail (one caller, so it IS the
+  # starter), NOT the schema suite and NOT the canary.
+  "SD01|1600|DLMGR|$T_SD_JOINERS;$T_SD_MIXED"
+
+  # Batch 1601 — SD02, the row's arming state becomes a CONSTANT. Every row
+  # claims `not_attempted`, so the column stops reporting what this process
+  # knew about its own arming. Predicted: the two positive-state rails and the
+  # three multi-row partition rails. NOT the two fallback rails — they read
+  # `dropLedgerArming` off the actor for the invariant TEXT, not off the
+  # record, and that split is the discriminator against SD03. NOT the
+  # never-armed rails either: `not_attempted` is what they already expect, so
+  # they are the direction this mutant cannot be seen from.
+  #
+  # PREDICTION MISS, recorded rather than quietly folded in: the first run of
+  # batch 1601 killed the five above AND `testOnlyArmDropLedgerMovesTheArmingState`,
+  # which counts the `launchArmingState: dropLedgerArming` READ at the write
+  # site. Under-prediction, not a false credit — every DECLARED expectation
+  # failed, and the battery printed the full observed list beside them, which
+  # is exactly what that list is for. It is declared now.
+  "SD02|1601|DLMGR|$T_SD_ARMED_ROW;$T_SD_ARMFAIL_ROW;$T_SD_ARMING_PARTITION;$T_SD_DEGRADED_EXCEEDS;$T_SD_SAMPLED_AT_WRITE;$T_SD_C_ARM_WRITER"
+
+  # Batch 1602 — SD03, SD02's MIRROR from the other end: `armDropLedger()`
+  # stops recording the one POSITIVE outcome, so no launch is ever `armed`.
+  # Predicted set OVERLAPS SD02's and is not equal to it, which is the point:
+  # it ADDS the fallback rail (the invariant text reads the actor, so this
+  # mutant reaches it and SD02 does not) and DROPS the failed-arming rail (that
+  # branch is untouched).
+  # The canary is DECLARED here too, and for a DIFFERENT reason than in SD02 —
+  # which is the check that the two are still distinguishable. SD02 removes
+  # the READ at the write site; SD03 removes one of the three WRITES inside
+  # `armDropLedger`, so the same rail fails on its `inArm == 3` arm rather
+  # than on its `total == inArm` one.
+  "SD03|1602|DLMGR|$T_SD_ARMED_ROW;$T_SD_FALLBACK_IDS;$T_SD_ARMING_PARTITION;$T_SD_DEGRADED_EXCEEDS;$T_SD_SAMPLED_AT_WRITE;$T_SD_C_ARM_WRITER"
+
+  # Batch 1603 — SD04, `lastArmedLaunchId` stops moving on the CONFLICT branch,
+  # so the arming row names the first launch that ever armed and calls it the
+  # latest. Every rail below reaches the conflict branch because
+  # `makeTestStoreWithDirectory()` hands back a store whose arming row is
+  # already SEEDED — so the first `noteBackgroundDownloadDropInstrumentArmed`
+  # is an UPDATE, not an insert, and even the single-arming rails are victims.
+  # That is worth stating: the obvious prediction ("only the two-arming rails")
+  # is wrong, and it is wrong for a reason about the FIXTURE rather than the
+  # code.
+  "SD04|1603|STORE|$T_SD_LASTARMED_FOLLOWS;$T_SD_IDEMPOTENT;$T_SD_OLDSHAPE;$T_SD_TWO_LAUNCHES;$T_SD_JOIN_NOT_A_SET;$T_SD_ARMED_ROW;$T_SD_THREE_READINGS"
+
+  # Batch 1604 — SD05, THE SENTINEL TRAP, injected as a migration would inject
+  # it: a backfill that turns every pre-V64 NULL into one shared `'pre-v64'`,
+  # which `count(DISTINCT launchId)` then reports as a LAUNCH. Predicted to
+  # redden the no-backfill rail ALONE — and the reason the two Identity-suite
+  # legacy rails are NOT victims is a real limit worth recording: they insert a
+  # legacy-SHAPED row through a second connection AFTER the store is open, so
+  # no migration runs over it. Only the schema suite exercises a row that
+  # SURVIVED the rung. Both populations are worth having; they are not the
+  # same population.
+  "SD05|1604|STORE|$T_SD_NO_BACKFILL"
+
+  # Batch 1605 — SD06, the `, id DESC` TIEBREAKER is dropped (BD26 flips the
+  # whole order to ASC; this one leaves the order correct and only makes ties
+  # arbitrary, which is the half BD26 cannot isolate). Predicted: the tiebreak
+  # rail ALONE. Nothing else in either suite asserts an order.
+  "SD06|1605|STORE|$T_SD_TIEBREAK"
+
+  # Batch 1606 — SD07, the task-vending site records the crossing the session
+  # construction SUCCEEDED on, so a reason that rides no crossing starts
+  # naming one and `count(DISTINCT sessionCrossingId)` goes back to counting
+  # something other than refusals. Predicted: the crossing-asymmetry rail, the
+  # `crossing=none` fallback rail, and the canary — which is the only one of
+  # the three that can see the SITE rather than the row.
+  "SD07|1606|DLMGR|$T_SD_CROSSING_ONLY_SESSION;$T_SD_FALLBACK_NONE;$T_SD_C_CROSSING_SITES"
+
+  # Batch 1607 — SD08, the launch id's default becomes a LITERAL, i.e. one
+  # identity for every launch on every device — the collapse the column exists
+  # to prevent, and the shape a `static let` would have. Predicted: the
+  # two-launches rail and the canary. NOT the Identity suite, which passes
+  # explicit launch ids wherever it needs distinct ones, and NOT the
+  # every-row rail, which compares the row against the manager's OWN id and is
+  # satisfied by any value at all — the direction a rail cannot see itself.
+  "SD08|1607|DLMGR|$T_SD_TWO_LAUNCHES;$T_SD_C_LAUNCH_SLOT"
+
+  # Batch 1608 — SD09, `sessionCrossingId` gains a defaulted `= nil`. This
+  # mutant changes NO behaviour — all three sites still pass it explicitly —
+  # so it is predicted to redden the CANARY ALONE, and a behavioural rail
+  # dying under it would mean the prediction is wrong rather than the code. It
+  # is the reason that canary exists: a fourth abandonment path would then
+  # inherit "this reason rides no crossing" instead of deciding, and NULL on a
+  # post-V64 row is a STATEMENT, so nothing downstream could tell the
+  # forgotten case from the deliberate one.
+  "SD09|1608|DLMGR|$T_SD_C_CROSSING_SITES"
+
+  # Batch 1609 — SD10, THE V60 MISTAKE ONE RUNG ON: V64 is registered in the
+  # production ladder and NOT in `migrateOnlyForTesting`, so every
+  # fixture-driven test stops one rung short while `currentSchemaVersion` still
+  # reads 64. Predicted: the two ladder-climb rails, the idempotence rail
+  # (which re-stamps and re-climbs through the same seam), and the canary.
+  # NOT the rails that go through `migrate()`.
+  #
+  # PREDICTION MISS, and the biggest one in the series: predicted FOUR, observed
+  # TWENTY-THREE. `migrateOnlyForTesting` is not V64's ladder, it is EVERY
+  # fixture-driven migration test's ladder, and it climbs to head — so a rung
+  # missing from it leaves `schemaVersion()` at 63 for all of them. Nineteen of
+  # the twenty-three belong to other beads (V40's rollback floor, V44's index,
+  # v50/v51, the two earlier drop rungs, the Cycle-4 isolated-ladder rails).
+  #
+  # The declared set is DELIBERATELY LEFT AT FOUR rather than widened to the
+  # observed twenty-three. A KILL needs the DECLARED set to fail, and all four
+  # do; declaring the other nineteen would make this record fail the day any of
+  # nineteen unrelated tests is renamed, which is a rail about other beads
+  # wearing this one's name. The observed list is printed beside every verdict,
+  # which is what that list is for.
+  #
+  # Read the size as the FINDING rather than as noise: it is the V60 lesson
+  # measured. The rung's own comment says a rung in one ladder and not the
+  # other "is invisible to any test written for that rung" — the blast radius
+  # is in fact every test written for every rung.
+  "SD10|1609|STORE|$T_SD_LADDER;$T_SD_TWO_RUNGS_BACK;$T_SD_IDEMPOTENT;$T_SD_C_LADDERS"
+
+  # Batch 1610 — SD11, THE BRICKING OBLIGATION: the four columns are declared
+  # in the `CREATE TABLE` and NOT re-added with `addColumnIfNeeded`, which is
+  # measured rather than hypothetical — it is what V62 did with
+  # `dropWriteFailures` and it stopped the store opening. A FRESH install is
+  # unaffected (the DDL builds the full shape), so the victims are exactly the
+  # rails that rewind a store into the older shape, plus the canary that owns
+  # the pairing.
+  #
+  # PREDICTION MISS, one wide: predicted five, observed six. The extra is
+  # playhead-7dgx's own `a store carrying the PRE-dropWriteFailures shape still
+  # opens, and is repaired`, and the MECHANISM was named in the paragraph above
+  # without the rail being enumerated — that fixture rebuilds the arming table
+  # in a shape that lacks `lastArmedLaunchId` as well as `dropWriteFailures`, so
+  # `fetchBackgroundDownloadDropArming`'s SELECT names a column that is not
+  # there and throws. Declared, because it is one rail of this table's own
+  # family rather than nineteen of somebody else's.
+  "SD11|1610|STORE|$T_SD_OLDSHAPE;$T_SD_LADDER;$T_SD_TWO_RUNGS_BACK;$T_SD_NO_BACKFILL;$T_SD_C_COLUMNS;$T_7DGX_OLDSHAPE"
+
+  # Batch 1611 — SD99, VACUITY CONTROL. `armDropLedger`'s outcome is bound to a
+  # second name and aliased back; nothing observable changes at any layer.
+  # MUST SURVIVE. If it dies, the eleven verdicts above are measuring the
+  # suites' fragility rather than the mutations.
+  "SD99|1611|DLMGR|$T_SD_ARMED_ROW"
+
+  # ---- playhead-1gu0, the GU series: the V65 rename of
+  #      `semantic_scan_results.runCorrelationId` to `backfillJobId` ---------
+  #
+  # A RENAME has one way to be right and four ways to be quietly wrong, and
+  # THREE of the four are invisible on a FRESH INSTALL — `createTables()` builds
+  # the head shape unconditionally, so a device that never carried the old
+  # spelling passes GU01, GU02 and GU03. That is why the rail
+  # (`$T_1GU0_RENAME`) regresses a live store to the V64 spelling first.
+  #
+  # THE FOURTH IS NOT, AND THIS COMMENT SAID "every one of the four" UNTIL ITS
+  # OWN RECORD REFUTED IT (playhead-1gu0 review). GU04 drops
+  # `setSchemaVersion(65)`, so EVERY store — fresh installs included — finishes
+  # `migrate()` at 64, and GU04's own `PREDICTION MISS, 66 WIDE` note below
+  # records exactly that: 68 observed victims, essentially every "a fresh store
+  # reaches head" rail in the tree. A claim refuted by the measurement printed
+  # under it is the shape this bead exists to remove. (This line used to say
+  # that note sits "twenty lines down", and it was already wrong by more than a
+  # factor of two on the commit that wrote it — the THIRD wrong positional claim
+  # in this block, after the two GU99's comment records. Name the thing, never
+  # the offset; playhead-1gu0 review.)
+  #
+  # GU01 is the ORDERING property, GU02 the DATA-PRESERVATION property, GU03 the
+  # INDEX-NAME property and GU04 the LADDER property.
+  #
+  # ONE BATCH EACH, AND THE STATED REASON WAS WRONG TOO (same round). They do
+  # NOT "all edit the same helper or its single call site": GU01 edits
+  # `createTables()`, GU02 / GU03 / GU99 edit
+  # `renameSemanticScanRunCorrelationIdIfNeeded()`, GU04 edits the V65 RUNG, and
+  # the helper has THREE call sites rather than one. Only GU02 and GU03
+  # genuinely collide — GU02's whole OLD text is one line of GU03's — and THE
+  # TWO ORDERS FAIL DIFFERENTLY, which this line used to flatten into "whichever
+  # applied first would destroy the other's anchor" (playhead-1gu0 review).
+  # GU02 first REWRITES that line, so GU03's two-line anchor matches nothing and
+  # the battery prints `anchor did not apply` — loud. GU03 first only DELETES
+  # the `DROP INDEX` line above it, so GU02's anchor still matches exactly once
+  # and applies: the batch then runs a COMPOUND mutant that is neither entry,
+  # with no complaint. The conclusion is unchanged and the SILENT order is the
+  # reason for it. The rest are one-per-batch because that is how they were RUN,
+  # which is the honest reason.
+  #
+  # GU05 is deliberately NOT here: dropping the helper's `CREATE INDEX` can only
+  # ever be SURVIVED, and an entry that can only survive trains a reader to
+  # discount a survivor.
+  #
+  # SAY THE REASON PRECISELY, THOUGH — "PROVEN EQUIVALENT" IS A STRONGER CLAIM
+  # THAN THE CODE SUPPORTS, and this comment made it (playhead-1gu0 review). TWO
+  # of the helper's three call sites are each followed by their own
+  # `CREATE INDEX IF NOT EXISTS` of the same name — `createTables()` and the V42
+  # rung — so on every path a real device takes the index is rebuilt whatever the
+  # helper does. The THIRD is not: the V65 rung calls the helper and stamps the
+  # version, nothing more. That rung runs WITHOUT `createTables()` only through
+  # `migrateOnlyForTesting()`, and the fixtures that DO reach that seam with
+  # `semantic_scan_results` present all carry the NEW spelling already — they
+  # `migrate()` to head first, so `createTables()` has built `backfillJobId`, and
+  # only then rewind — so the helper returns on its `hasNew` guard and nothing
+  # today can observe the difference. (This paragraph said "no fixture reaches
+  # that seam"; the correction for it then named exactly TWO,
+  # `BackgroundDownloadDropLaunchIdentityV64MigrationTests`'s
+  # `theLadderOnlySeamReachesV64` and `aV62StoreClimbsThroughV63ToHead`, which
+  # was the pair somebody had in hand read as a census. MEASURED: 23 test
+  # functions across THIRTEEN files, all six `isolatedLadderReaches*` among them
+  # — the helper's own doc carries the predicate and its limit. (Round 6 wrote
+  # "twelve files" beside the 23 and round 7 could not reproduce the pair: 23 is
+  # the count WITH a `migrate()` reached through a same-file helper, twelve is
+  # the file count WITHOUT one, and without one the count is 20. Two searches,
+  # one sentence.) What none of the 23 does is arrive there at the OLD spelling,
+  # which is what the conclusion rests on and is unchanged. playhead-1gu0 review
+  # rounds 6 and 7.)
+  # It is an equivalent over the paths that EXIST, not one by construction: seed
+  # that table at the OLD spelling into the ladder-only seam and GU05 becomes a
+  # real mutant.
+  # GU01-GU03 each predicted exactly one victim and observed exactly one: the
+  # rail below. That is the point of rewinding the fixture — the three defects
+  # are indistinguishable from a correct migration everywhere else in the tree.
+  "GU01|1612|STORE|$T_1GU0_RENAME"
+  "GU02|1613|STORE|$T_1GU0_RENAME"
+  "GU03|1614|STORE|$T_1GU0_RENAME"
+
+  # PREDICTION MISS, 66 WIDE, and declared rather than quietly re-fitted:
+  # predicted 2 victims, observed 68. The mechanism was named in the prediction
+  # ("the ladder re-runs the rung on every open") and its REACH was not — with
+  # `setSchemaVersion(65)` gone, EVERY store finishes `migrate()` at 64, so
+  # every migration suite's "a fresh store reaches head" rail fails, in every
+  # rung from C6 to V64. The lesson is the T09 one from the other direction: a
+  # mutation on the version STAMP is not scoped to its own rung, because the
+  # stamp is the one piece of state every other rung's rail reads.
+  #
+  # The expectation is deliberately left at the two names rather than grown to
+  # 68. A 68-name expectation would pass for any mutation that stalls the
+  # ladder anywhere, which is a weaker claim than this entry makes.
+  "GU04|1615|STORE|$T_1GU0_RENAME;$T_HX6N_V41_SURVIVES"
+
+  # Batch 1616 — GU99, VACUITY CONTROL. The `hasNew` local in
+  # `renameSemanticScanRunCorrelationIdIfNeeded()` is bound to a second name —
+  # the helper's FIRST two statements after its `tableExists` guard; nothing
+  # observable changes. (This line said "the very line GU04's guard sits above",
+  # and GU04 is in a DIFFERENT function — the V65 rung — and has no guard. The
+  # correction for THAT then said "the two lines directly above the `DROP INDEX`
+  # / `ALTER` pair GU02 and GU03 mutate", and they are not directly above it: a
+  # `runCorrelationId` `columnExists` guard and a five-line comment sit between.
+  # Two rounds of playhead-1gu0 review, and the second one is why a locational
+  # claim gets checked against the file rather than remembered.) MUST SURVIVE.
+  # Non-empty
+  # expectation on purpose: it names the rail GU01-GU03 kill, so a KILLED
+  # verdict here would mean a local rename can change behaviour.
+  "GU99|1616|STORE|$T_1GU0_RENAME"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -12049,8 +13129,8 @@ describe_mutation() {
     NQ19) echo "nqwr: the Settings toggle binds a LITERAL key that has drifted from the seam's — the switch writes a key nobody reads" ;;
     NQ20) echo "nqwr: the toggle spells the key as a literal that is correct TODAY — two spellings, from which a rename moves one and not the other" ;;
     NQ99) echo "VACUITY CONTROL — the request-instant local in playAdSkipCue is renamed and nothing else is. MUST SURVIVE" ;;
-    MS01) echo "2d6i THE SHIPPED DEFECT: an auto-skip with no host attached records nothing — the listener gets the skip and can never say No to it" ;;
-    MS02) echo "2d6i DOUBLE DELIVERY: the receipt is recorded even when a card fired, so one skip becomes a card AND a row" ;;
+    MS01) echo "2d6i THE SHIPPED DEFECT: an announced auto-skip records nothing at all — the listener gets the skip and can never say No to it" ;;
+    MS02) echo "2d6i/8cjo DOUBLE DELIVERY: the acknowledgement does not remove the receipt, so one skip becomes a card AND a row" ;;
     MS03) echo "2d6i THE WRONG FIX: the missed receipt is replayed to a newly attached host as a CARD — a skip affordance for audio already gone" ;;
     MS04) echo "2d6i: the read-time filter stops checking the decision state, so an already-answered row keeps being offered" ;;
     MS05) echo "2d6i: the read-time filter stops checking the material token, so a row the seam would refuse on its token is offered anyway" ;;
@@ -12066,6 +13146,25 @@ describe_mutation() {
     MS13) echo "2d6i: the render gate is inverted — the section appears only when there is nothing to show" ;;
     MS14) echo "2d6i: the transcript surface gains a Yes, which writes bannerAutoSkipConfirmed for audio the listener never heard" ;;
     MS99) echo "VACUITY CONTROL — the attachment-test local in emitBannerItem is renamed and nothing else is. MUST SURVIVE" ;;
+    AK01) echo "8cjo THE SHIPPED DEFECT (2d6i verbatim): the receipt is written only when NOBODY IS SUBSCRIBED, so a card the queue binned leaves no row" ;;
+    AK02) echo "8cjo THE SEAM THAT DOES NOT LISTEN: the didAccept guard is pushed into the suggest arm, so the auto tier acknowledges an item the queue refused" ;;
+    AK03) echo "8cjo: the AUTO tier's acknowledgement is deleted, so every card the listener saw also accumulates a passive-list row" ;;
+    AK04) echo "8cjo: the seam stops checking the EPISODE, so an acknowledgement from another episode removes this one's row" ;;
+    AK05) echo "8cjo: the seam stops checking the PLAYBACK GENERATION, so an acknowledgement from a previous transaction removes this one's row" ;;
+    AK06) echo "8cjo: the seam stops checking the MATERIAL TOKEN, so an acknowledgement for a different emission of the same window removes the row" ;;
+    AK07) echo "8cjo: the delivered record is written before the guard, so the seam manufactures a card for a window nothing ever announced" ;;
+    AK08) echo "8cjo: endEpisode stops clearing the delivered-card record, so the next episode credits this one's card for a reused window id" ;;
+    AK09) echo "8cjo: beginEpisode stops clearing the delivered-card record, so a same-asset REPLAY inherits the previous transaction's deliveries" ;;
+    AK10) echo "8cjo: the emit path stops gating on a subscriber, so a window nobody was listening for enters the YIELD set" ;;
+    AK11) echo "8cjo: observeBanners keeps its own copy of the forwarding rule and never acknowledges — every behavioural suite stays green" ;;
+    AK12) echo "8cjo: the acknowledgement removes the row and records nothing, so a card the listener saw looks like a skip nobody announced" ;;
+    AK13) echo "8cjo: the delivered record is not cleared when a window is re-announced, so a producer revision puts one window on BOTH surfaces" ;;
+    AK14) echo "8cjo: the RETIRE arm of the forwarding rule is deleted, so an invalidated card can still collect an answer" ;;
+    AK15) echo "8cjo: the SUGGEST acknowledgement is deleted, so a delivered suggestion is replayed to the next host and asked twice" ;;
+    AK16) echo "8cjo: a default: arm on the tier switch, so a tier added later inherits an acknowledgement nobody chose for it" ;;
+    AK18) echo "8cjo: the SUGGEST acknowledgement fires regardless of the queue verdict, so a refused suggestion is never replayed to the next host" ;;
+    AK17) echo "8cjo THE DEMONSTRATED BYPASS: the inline enqueue written with the parameter RENAMED, which the file-wide canary could not see" ;;
+    AK99) echo "VACUITY CONTROL — the local the acknowledgement seam binds its receipt to is renamed and nothing else is. MUST SURVIVE" ;;
     YX99) echo "VACUITY CONTROL — the band in buildFMLedgerEntries is bound through a renamed intermediate on the line YX01 rewrites; nothing else changes. MUST SURVIVE" ;;
     NY01) echo "AdDetectionService.hotPathCandidates sorts the RAW array — the shipped defect: runBackfill canonicalized and the hot path did not" ;;
     SU01) echo "THE SHIPPED DEFECT VERBATIM — stage 6 deleted, so a mark is its SCAN WINDOW again" ;;
@@ -12133,6 +13232,43 @@ describe_mutation() {
     BD39) echo "every SUCCESSFUL drop raises the loss invariant, so the line stops meaning anything" ;;
     BD40) echo "lastArmedAt degenerates into a second firstArmedAt" ;;
     BD99) echo "VACUITY CONTROL — the parameter BINDING inside recordBackgroundDownloadDrop is renamed; the label and every call site are untouched. MUST SURVIVE" ;;
+    DW01) echo "THE SHIPPED DEFECT VERBATIM — the workJournalRecorder argument goes away and the no-op default comes back" ;;
+    DW02) echo "the arming goes to a FRESHLY CONSTRUCTED recorder, so armedLaunches counts launches for an instrument nobody injected" ;;
+    DW03) echo "the journal is armed on the DEGRADED launch too, so the denominator counts launches on which the store never opened" ;;
+    DW04) echo "preempted collapses into failed — a resumable force-quit reported as a transfer that is over" ;;
+    DW05) echo "a SUCCESSFUL transfer is given a miss cause" ;;
+    DW06) echo "playhead-1nl6 AT THE CONFORMER — the SliceMetadata blob is dropped and {} written in its place" ;;
+    DW07) echo "a row that could not be written stops being counted, so armed-and-silent becomes reachable by silence" ;;
+    DW08) echo "a failed ARMING is swallowed — the denominator's own silent failure" ;;
+    DW09) echo "THIS BEAD'S DEFECT ONE LAYER IN — the wiring is intact and one protocol requirement's body is empty again" ;;
+    DW10) echo "THE V60 MISTAKE REPEATED — the V63 rung is missing from migrateOnlyForTesting" ;;
+    DW11) echo "the mirror of DW10 — the V63 rung is missing from the production ladder, so the stamp never moves" ;;
+    DW12) echo "createTables() stops carrying the DDL, so a store stamped at head with the tables missing can never repair" ;;
+    DW13) echo "the V63 rung STEPS OVER a rolled-back V39 and stamps 63 onto a database that never built the V39 index" ;;
+    DW14) echo "the arming seed becomes INSERT OR REPLACE, so every store OPEN resets the launch counter" ;;
+    DW15) echo "the persisted eventType is hardcoded, so every row reads failed — including the denominator" ;;
+    DW16) echo "an unrecognized eventType is coerced into failed instead of being counted" ;;
+    DW17) echo "an unrecognized cause reads as nil, which says the event had no reason" ;;
+    DW18) echo "the probe drops the + 1, so the page can never SEE the row that says it truncated" ;;
+    DW19) echo "the forensic tail is read from the wrong end" ;;
+    DW20) echo "firstArmedAt follows the LATEST arming — a second lastArmedAt under a name that says the opposite" ;;
+    DW21) echo "THE SERIES' CENTRAL CLAIM — the download path is handed the ANALYSIS work-journal recorder, so a transfer failure writes a work_journal row that recoverOrphans reads as terminalNoRequeue" ;;
+    DW22) echo "a write FAILURE is counted as an arming, inflating the denominator on exactly the runs where the numerator was lost" ;;
+    DW23) echo "the arming row is no longer SEEDED, so \"installed but never armed\" collapses into \"no instrument at all\"" ;;
+    DW24) echo "the cancellation check INSIDE the actor is removed, so a cancellation landing during the hop is invisible" ;;
+    DW25) echo "the FINALIZED event stops honouring cancellation, so a retired finalization publishes a row for deleted bytes" ;;
+    DW26) echo "a CANCELLED write is booked as a FAILED one, so writeFailures claims the store could not hold a row" ;;
+    DW27) echo "the recorder slot goes back to being a var — one line from a post-init setter" ;;
+    DW28) echo "THE HAZARD AT THE RECORDER — the download recorder ALSO forwards to the ANALYSIS one, so a transfer failure lands in work_journal under the live job generation" ;;
+    DW29) echo "the row key collapses onto {episode, event}, so a repeated failure is REFUSED by the PRIMARY KEY and counted into writeFailures (it does not upsert — there is no upsert here)" ;;
+    DW31) echo "a FAILURE starts honouring cancellation, so a cancelled enclosing task drops the record this bead exists to create" ;;
+    DW32) echo "every row is stamped with a CONSTANT occurredAt — the table's only timestamp and its sole ordering key" ;;
+    DW33) echo "production stops passing the surface-status recorder, so the residual medium goes dark with every rail green" ;;
+    DW34) echo "retireBackgroundTransfers stops cancelling the journal finalization, so a cache DELETE racing one publishes a finalized row for unlinked bytes" ;;
+    DW35) echo "the per-episode delete stops retiring background transfers at all" ;;
+    DW36) echo "a write FAILURE manufactures an arming on the row-creating branch — a denominator invented by the failure that proves nothing was recorded" ;;
+    DW37) echo "the arming writer's row-CREATING branch stops counting the launch, so a store whose arming row went missing reports 0 forever" ;;
+    DW99) echo "VACUITY CONTROL — the parameter BINDING inside noteWriteFailure is renamed; the label and the call site are untouched. MUST SURVIVE" ;;
     IW01) echo "THE SHIPPED DEFECT VERBATIM — the coarse gate is gone, so a runner hardcode reads as the model's grade" ;;
     IW02) echo "the gate opens for anything that is NOT permissive, so UNKNOWN licenses the band — the backfill defect in the reader" ;;
     IW03) echo "the coarse branch bypasses the gate at the CALL SITE instead of inside PersistedCertainty" ;;
@@ -12229,7 +13365,12 @@ describe_mutation() {
     T05) echo "insertSemanticScanResult: drop the createdAt backstop clock" ;;
     T06) echo "readSemanticScanResult: read a NULL createdAt through sqlite3_column_double (1970)" ;;
     T07) echo "V42 rung stamps 41 instead of 42 — the ladder stops climbing to head" ;;
-    T08) echo "BackfillJobRunner.attributed: stop stamping runCorrelationId" ;;
+    T08) echo "BackfillJobRunner.attributed: stop stamping backfillJobId" ;;
+    GU01) echo "V65: createTables() stops renaming BEFORE it adds, so an upgraded DB carries BOTH spellings and every job id is stranded" ;;
+    GU02) echo "V65: the helper ADDS a fresh column instead of renaming — the shape looks right and every attribution is gone" ;;
+    GU03) echo "V65: the old index name survives the rename — idx_..._correlation over a column called backfillJobId" ;;
+    GU04) echo "V65: the rung renames but never stamps the version, so the ladder re-runs the rung on every open forever" ;;
+    GU99) echo "VACUITY CONTROL — the rename helper's hasNew local is renamed and nothing else changes; MUST SURVIVE" ;;
     T09) echo "BackfillJobRunner.attributed: stop stamping scenePhase" ;;
     T10) echo "BackfillJobRunner.attributed: guess .active when the provider breaks its vocabulary" ;;
     T11) echo "SemanticScanThroughputSplit.isEligible: admit no-work sentinels as throughput" ;;
@@ -12820,6 +13961,110 @@ apply_mutation() {
   local name="$1" file="$2" OLD NEW
   case "$name" in
 
+  # ---- playhead-882eg: the descriptor FLOOR (FD series) ----
+
+  FD01)
+    snippet OLD <<'EOF'
+        await analysisStore.close()
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  FD02)
+    snippet OLD <<'EOF'
+        surfaceStatusLogger.close()
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  FD03)
+    snippet OLD <<'EOF'
+        if let handle = db {
+            sqlite3_close_v2(handle)
+            db = nil
+        }
+        didOpen = false
+    }
+EOF
+    snippet NEW <<'EOF'
+        if let handle = db {
+            sqlite3_close_v2(handle)
+            db = nil
+        }
+    }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  FD04)
+    snippet OLD <<'EOF'
+        if let existing = currentSessionFileURL,
+           let reopened = try? FileHandle(forWritingTo: existing) {
+            try reopened.seekToEnd()
+            self.currentFileHandle = reopened
+            return reopened
+        }
+
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  FD07)
+    snippet OLD <<'EOF'
+        await adCatalogStore?.close()
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  FD05)
+    snippet OLD <<'EOF'
+        "RuntimeStoreTeardownTests.swift":
+            "its subject IS what shutdown() closes, including the arm that must NOT shut down first",
+EOF
+    snippet NEW <<'EOF'
+        "RuntimeStoreTeardownTests.swift":
+            "its subject IS what shutdown() closes, including the arm that must NOT shut down first",
+        "ThisFileWasRenamedOrNeverExisted.swift":
+            "playhead-882eg FD05: a licence for a file nobody can find",
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  FD06)
+    # THREE patches, because the canary asks whether the file contains the token
+    # AT ALL and one surviving spelling would leave it compliant. Every patch but
+    # the last takes `|| return $?` per this script's own rule about
+    # half-applied mutations. The replacement still compiles — it is the same
+    # call with a space inside the parens — so the only thing that changes is
+    # whether the file matches the literal the canary greps for.
+    snippet OLD <<'EOF'
+        await warmupRuntime.shutdown()
+EOF
+    snippet NEW <<'EOF'
+        await warmupRuntime.shutdown( )
+EOF
+    patch "$file" "$OLD" "$NEW" || return $?
+    snippet OLD <<'EOF'
+            await runtime.shutdown()
+            return
+EOF
+    snippet NEW <<'EOF'
+            await runtime.shutdown( )
+            return
+EOF
+    patch "$file" "$OLD" "$NEW" || return $?
+    snippet OLD <<'EOF'
+        await runtime.shutdown()
+    }
+EOF
+    snippet NEW <<'EOF'
+        await runtime.shutdown( )
+    }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
   # ---- playhead-7dgx: the dropped-background-download ledger (BD series) ----
 
   BD01)
@@ -12828,10 +14073,12 @@ apply_mutation() {
                 episodeId: episodeId,
                 reason: .sessionNotVended,
                 context: context,
-                boundSeconds: sessionCreationIO.timeout
+                boundSeconds: sessionCreationIO.timeout,
+                sessionCrossingId: sessionCrossingId
             )
 EOF
     snippet NEW <<'EOF'
+
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -12850,31 +14097,35 @@ EOF
                 episodeId: episodeId,
                 reason: .transferNotResumed,
                 context: context,
-                boundSeconds: sessionIO.timeout
+                boundSeconds: sessionIO.timeout,
+                sessionCrossingId: nil
             )
 EOF
     snippet NEW <<'EOF'
+
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
   BD04)
     snippet OLD <<'EOF'
-                boundSeconds: sessionCreationIO.timeout
+                boundSeconds: sessionCreationIO.timeout,
 EOF
     snippet NEW <<'EOF'
-                boundSeconds: BackgroundSessionIO.defaultTimeout
+                boundSeconds: BackgroundSessionIO.defaultTimeout,
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  # ANCHOR WIDENED BY playhead-4xmz (review 5). V63 added a rung and a
+  # near-identical arming table, so this anchor matched 0 or 2 times and the
+  # battery refused — a LOST RAIL for playhead-7dgx on every future run. The
+  # mutation is unchanged; only the context that makes it unambiguous is.
   BD05)
     snippet OLD <<'EOF'
         try migrateBackgroundDownloadDropsV62IfNeeded()
-    }
-    #endif
+        // playhead-4xmz (v63): two brand-new tables, same shape of rung as
 EOF
     snippet NEW <<'EOF'
-    }
-    #endif
+        // playhead-4xmz (v63): two brand-new tables, same shape of rung as
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -12886,13 +14137,19 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  # ANCHOR WIDENED BY playhead-4xmz (review 5). V63 added a rung and a
+  # near-identical arming table, so this anchor matched 0 or 2 times and the
+  # battery refused — a LOST RAIL for playhead-7dgx on every future run. The
+  # mutation is unchanged; only the context that makes it unambiguous is.
   BD07)
     snippet OLD <<'EOF'
         try createBackgroundDownloadDropTables()
-    }
+
+        // playhead-4xmz: the download-path work journal and its arming row.
 EOF
     snippet NEW <<'EOF'
-    }
+
+        // playhead-4xmz: the download-path work journal and its arming row.
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -12925,12 +14182,20 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  # ANCHOR WIDENED BY playhead-4xmz (review 5). V63 added a rung and a
+  # near-identical arming table, so this anchor matched 0 or 2 times and the
+  # battery refused — a LOST RAIL for playhead-7dgx on every future run. The
+  # mutation is unchanged; only the context that makes it unambiguous is.
   BD10)
     snippet OLD <<'EOF'
                 armedLaunches = armedLaunches + 1,
+                firstArmedAt = CASE
+                    WHEN background_download_drop_arming.armedLaunches = 0
 EOF
     snippet NEW <<'EOF'
                 armedLaunches = 1,
+                firstArmedAt = CASE
+                    WHEN background_download_drop_arming.armedLaunches = 0
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -12986,6 +14251,7 @@ EOF
   BD16)
     snippet OLD <<'EOF'
         let outcome = await dropRecorder.recordInstrumentArmed(
+            launchId: launchId,
             at: Date().timeIntervalSince1970
         )
 EOF
@@ -13016,30 +14282,698 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
-  BD99)
+  DW01)
     snippet OLD <<'EOF'
-        boundSeconds: TimeInterval
-    ) async {
-        let outcome = await dropRecorder.recordDrop(
-            BackgroundDownloadDropRecord(
-                episodeId: episodeId,
-                reason: reason,
-                context: context,
-                boundSeconds: boundSeconds
+        self.downloadManager = DownloadManager(
+            workJournalRecorder: downloadWorkJournalRecorder,
+EOF
+    snippet NEW <<'EOF'
+        self.downloadManager = DownloadManager(
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW02)
+    snippet OLD <<'EOF'
+            await downloadWorkJournalRecorder.recordInstrumentArmed(
+                at: Date().timeIntervalSince1970
             )
+EOF
+    snippet NEW <<'EOF'
+            await AnalysisStoreDownloadWorkJournalRecorder(
+                store: analysisStore
+            ).recordInstrumentArmed(
+                at: Date().timeIntervalSince1970
+            )
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW03)
+    snippet OLD <<'EOF'
+            guard storeOutcome.isOpen else {
+                return  // Degraded launch: playback works, analysis does not.
+            }
+EOF
+    snippet NEW <<'EOF'
+            guard storeOutcome.isOpen else {
+                await downloadWorkJournalRecorder.recordInstrumentArmed(
+                    at: Date().timeIntervalSince1970
+                )
+                return  // Degraded launch: playback works, analysis does not.
+            }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW04)
+    snippet OLD <<'EOF'
+            eventType: .preempted,
+EOF
+    snippet NEW <<'EOF'
+            eventType: .failed,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW05)
+    snippet OLD <<'EOF'
+            eventType: .finalized,
+            cause: nil,
+EOF
+    snippet NEW <<'EOF'
+            eventType: .finalized,
+            cause: .userCancelled,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW06)
+    snippet OLD <<'EOF'
+            eventType: .failed,
+            cause: cause,
+            metadataJSON: metadataJSON,
+            honoringCancellation: false
+        )
+    }
+
+    /// Persists the blob, same decision and same reason as above.
+EOF
+    snippet NEW <<'EOF'
+            eventType: .failed,
+            cause: cause,
+            metadataJSON: "{}",
+            honoringCancellation: false
+        )
+    }
+
+    /// Persists the blob, same decision and same reason as above.
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW07)
+    snippet OLD <<'EOF'
+            await noteWriteFailure(
+                episodeId: episodeId,
+                eventType: eventType,
+                cause: cause,
+                at: now,
+                rowError: error
+            )
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW08)
+    snippet OLD <<'EOF'
+            invariantRecorder?(
+                .downloadWorkJournalNotRecorded,
+                "arming=failed — this launch had a live download work-journal "
+                + "recorder and download_work_journal_arming.armedLaunches did "
+                + "not move, so any row it goes on to write has no launch in "
+                + "the denominator: \(String(describing: error))"
+            )
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW09)
+    snippet OLD <<'EOF'
+    func recordFailed(episodeId: String, cause: InternalMissCause) async {
+        await append(
+            episodeId: episodeId,
+            eventType: .failed,
+            cause: cause,
+            metadataJSON: "{}",
+            honoringCancellation: false
+        )
+    }
+EOF
+    snippet NEW <<'EOF'
+    func recordFailed(episodeId: String, cause: InternalMissCause) async {}
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW10)
+    snippet OLD <<'EOF'
+        try migrateDownloadWorkJournalV63IfNeeded()
+        // playhead-sdis (v64): four ADDED COLUMNS rather than a new table, so
+EOF
+    snippet NEW <<'EOF'
+        // playhead-sdis (v64): four ADDED COLUMNS rather than a new table, so
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW11)
+    snippet OLD <<'EOF'
+            try migrateDownloadWorkJournalV63IfNeeded()
+EOF
+    snippet NEW <<'EOF'
+
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW12)
+    snippet OLD <<'EOF'
+        // playhead-4xmz: the download-path work journal and its arming row.
+        // Declared here AND in `migrateDownloadWorkJournalV63IfNeeded` for the
+        // same V49 house rule, through the same single shared helper.
+        try createDownloadWorkJournalTables()
+EOF
+    snippet NEW <<'EOF'
+        // playhead-4xmz: the download-path work journal and its arming row.
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW13)
+    snippet OLD <<'EOF'
+        guard observed < 63 else { return }
+        // DO NOT STEP OVER A ROLLED-BACK V39 — same rationale as V40–V62.
+        guard observed >= 62 else { return }
+EOF
+    snippet NEW <<'EOF'
+        guard observed < 63 else { return }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW14)
+    snippet OLD <<'EOF'
+            INSERT OR IGNORE INTO download_work_journal_arming
+EOF
+    snippet NEW <<'EOF'
+            INSERT OR REPLACE INTO download_work_journal_arming
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW15)
+    snippet OLD <<'EOF'
+        bind(stmt, 3, record.eventType.rawValue)
+EOF
+    snippet NEW <<'EOF'
+        bind(stmt, 3, DownloadWorkJournalEventType.failed.rawValue)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW16)
+    snippet OLD <<'EOF'
+            let rawEvent = text(stmt, 2)
+            guard let eventType = DownloadWorkJournalEventType(
+                rawValue: rawEvent
+            ) else {
+                unrecognizedEventType += 1
+                continue
+            }
+EOF
+    snippet NEW <<'EOF'
+            let rawEvent = text(stmt, 2)
+            let eventType = DownloadWorkJournalEventType(
+                rawValue: rawEvent
+            ) ?? .failed
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW17)
+    snippet OLD <<'EOF'
+                cause: rawCause.map {
+                    InternalMissCause(rawValue: $0) ?? .unknown($0)
+                },
+EOF
+    snippet NEW <<'EOF'
+                cause: rawCause.flatMap {
+                    InternalMissCause(rawValue: $0)
+                },
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # DW18 drops ONLY the `+ 1`. Its first cut wrote `let probe = ceiling`, which
+  # ALSO removed the `Int32` clamp — and `bind(_:_:Int)` goes through the
+  # TRAPPING `Int32(_:)`, so the `limit: .max` rail in the same suite killed the
+  # HOST. Measured: 19 host restarts and 38 fatal errors in one batch, and a
+  # test with no verdict is scored a PASS (playhead-gjlp0), so the declared
+  # victim's verdict became a question about log flushing. The clamp is left
+  # alone here and is deliberately unmutated — see the note beside the
+  # expectation variables.
+  DW18)
+    snippet OLD <<'EOF'
+        let probe = ceiling >= Int(Int32.max) ? Int(Int32.max) : ceiling + 1
+        let stmt = try prepare("""
+            SELECT id, episodeId, eventType, cause, occurredAt, metadata
+EOF
+    snippet NEW <<'EOF'
+        let probe = ceiling >= Int(Int32.max) ? Int(Int32.max) : ceiling
+        let stmt = try prepare("""
+            SELECT id, episodeId, eventType, cause, occurredAt, metadata
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW19)
+    snippet OLD <<'EOF'
+            ORDER BY occurredAt DESC, rowid DESC
+            LIMIT ?
+EOF
+    snippet NEW <<'EOF'
+            ORDER BY occurredAt ASC, rowid ASC
+            LIMIT ?
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW20)
+    snippet OLD <<'EOF'
+                firstArmedAt = CASE
+                    WHEN download_work_journal_arming.armedLaunches = 0
+                    THEN excluded.firstArmedAt
+                    ELSE download_work_journal_arming.firstArmedAt
+                END,
+EOF
+    snippet NEW <<'EOF'
+                firstArmedAt = excluded.firstArmedAt,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW21)
+    snippet OLD <<'EOF'
+            workJournalRecorder: downloadWorkJournalRecorder,
+EOF
+    snippet NEW <<'EOF'
+            workJournalRecorder: AnalysisStoreWorkJournalRecorder(store: analysisStore),
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW22)
+    snippet OLD <<'EOF'
+            ON CONFLICT(id) DO UPDATE SET
+                writeFailures = writeFailures + 1
+EOF
+    snippet NEW <<'EOF'
+            ON CONFLICT(id) DO UPDATE SET
+                writeFailures = writeFailures + 1,
+                armedLaunches = armedLaunches + 1
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW23)
+    snippet OLD <<'EOF'
+        let stmt = try prepare("""
+            INSERT OR IGNORE INTO download_work_journal_arming
+            (id, armedLaunches, writeFailures, firstArmedAt, lastArmedAt,
+             installedAt)
+            VALUES (1, 0, 0, NULL, NULL, ?)
+            """)
+        defer { sqlite3_finalize(stmt) }
+        bind(stmt, 1, Date().timeIntervalSince1970)
+        try step(stmt, expecting: SQLITE_DONE)
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW24)
+    snippet OLD <<'EOF'
+    ) throws {
+        try Task.checkCancellation()
+        try insertDownloadWorkJournalEntry(record)
+    }
+EOF
+    snippet NEW <<'EOF'
+    ) throws {
+        try insertDownloadWorkJournalEntry(record)
+    }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW25)
+    snippet OLD <<'EOF'
+            eventType: .finalized,
+            cause: nil,
+            metadataJSON: "{}",
+            honoringCancellation: true
+EOF
+    snippet NEW <<'EOF'
+            eventType: .finalized,
+            cause: nil,
+            metadataJSON: "{}",
+            honoringCancellation: false
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # THE ANCHOR IS THE CODE, NOT THE PROSE. This was re-cut FOUR times on this
+  # branch — once per review round that edited the comment inside the arm —
+  # each time reported as `anchor did not apply`. An anchor whose stability
+  # depends on nobody editing a paragraph is not an anchor (review 5). The edit
+  # is the same in effect: the arm stops catching `CancellationError`, which
+  # then falls through to the generic `catch` and is booked as a FAILED write.
+  # `DecodingError` is a stdlib type nothing on this path throws, so the arm
+  # compiles and is unreachable — a deleted arm in every sense that matters.
+  DW26)
+    snippet OLD <<'EOF'
+        } catch is CancellationError {
+EOF
+    snippet NEW <<'EOF'
+        } catch is DecodingError {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW27)
+    snippet OLD <<'EOF'
+    internal let workJournalRecorder: WorkJournalRecording
+EOF
+    snippet NEW <<'EOF'
+    internal var workJournalRecorder: WorkJournalRecording
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW28)
+    snippet OLD <<'EOF'
+        do {
+            if honoringCancellation {
+EOF
+    snippet NEW <<'EOF'
+        do {
+            await AnalysisStoreWorkJournalRecorder(store: store).recordFailed(
+                episodeId: episodeId,
+                cause: cause ?? .pipelineError,
+                metadataJSON: metadataJSON
+            )
+            if honoringCancellation {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW29)
+    snippet OLD <<'EOF'
+        let record = DownloadWorkJournalRecord(
+            episodeId: episodeId,
+EOF
+    snippet NEW <<'EOF'
+        let record = DownloadWorkJournalRecord(
+            id: "\(episodeId)|\(eventType.rawValue)",
+            episodeId: episodeId,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW31)
+    snippet OLD <<'EOF'
+            eventType: .failed,
+            cause: cause,
+            metadataJSON: metadataJSON,
+            honoringCancellation: false
+EOF
+    snippet NEW <<'EOF'
+            eventType: .failed,
+            cause: cause,
+            metadataJSON: metadataJSON,
+            honoringCancellation: true
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW32)
+    snippet OLD <<'EOF'
+            occurredAt: now,
+            metadataJSON: metadataJSON
         )
 EOF
     snippet NEW <<'EOF'
-        boundSeconds bound: TimeInterval
+            occurredAt: 0,
+            metadataJSON: metadataJSON
+        )
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW33)
+    snippet OLD <<'EOF'
+        let downloadWorkJournalRecorder = AnalysisStoreDownloadWorkJournalRecorder(
+            store: analysisStore,
+            invariantRecorder: { [surfaceStatusLogger] code, description in
+                surfaceStatusLogger.invariantViolated(
+                    code: code, description: description
+                )
+            }
+        )
+EOF
+    snippet NEW <<'EOF'
+        let downloadWorkJournalRecorder = AnalysisStoreDownloadWorkJournalRecorder(
+            store: analysisStore
+        )
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW34)
+    snippet OLD <<'EOF'
+        if let episodeId {
+            backgroundJournalFinalizations[episodeId]?.task.cancel()
+        } else {
+            for finalization in
+                backgroundJournalFinalizations.values {
+                finalization.task.cancel()
+            }
+        }
+EOF
+    snippet NEW <<'EOF'
+        _ = episodeId
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW35)
+    snippet OLD <<'EOF'
+        await cancelDownload(episodeId: episodeId)
+        let fm = FileManager.default
+EOF
+    snippet NEW <<'EOF'
+        let fm = FileManager.default
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW36)
+    snippet OLD <<'EOF'
+            VALUES (1, 0, 1, NULL, NULL, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                writeFailures = writeFailures + 1
+EOF
+    snippet NEW <<'EOF'
+            VALUES (1, 1, 1, NULL, NULL, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                writeFailures = writeFailures + 1
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+
+  # The table name is IN the anchor: the 7dgx arming writer's SQL is otherwise
+  # byte-identical, so the narrower spelling matched twice and the battery
+  # refused (`anchor matched 2 times`) rather than mutating the wrong table.
+  DW37)
+    snippet OLD <<'EOF'
+            INSERT INTO download_work_journal_arming
+            (id, armedLaunches, writeFailures, firstArmedAt, lastArmedAt,
+             installedAt)
+            VALUES (1, 1, 0, ?, ?, ?)
+EOF
+    snippet NEW <<'EOF'
+            INSERT INTO download_work_journal_arming
+            (id, armedLaunches, writeFailures, firstArmedAt, lastArmedAt,
+             installedAt)
+            VALUES (1, 0, 0, ?, ?, ?)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  DW99)
+    snippet OLD <<'EOF'
+        at now: Double,
+        rowError: Error
+    ) async {
+        do {
+            try await store.noteDownloadWorkJournalWriteFailure(at: now)
+EOF
+    snippet NEW <<'EOF'
+        at stamp: Double,
+        rowError: Error
+    ) async {
+        let now = stamp
+        do {
+            try await store.noteDownloadWorkJournalWriteFailure(at: now)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # ---- playhead-sdis: one OUTAGE is not forty EPISODES (SD series) ----
+
+  SD01)
+    snippet OLD <<'EOF'
+        if let inFlight = _sessionCreationsInFlight[resolvedRole] {
+            return (await inFlight.task.value, inFlight.id)
+        }
+EOF
+    snippet NEW <<'EOF'
+        if let inFlight = _sessionCreationsInFlight[resolvedRole] {
+            return (await inFlight.task.value, UUID().uuidString)
+        }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SD02)
+    snippet OLD <<'EOF'
+                launchArmingState: dropLedgerArming,
+EOF
+    snippet NEW <<'EOF'
+                launchArmingState: .notAttempted,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SD03)
+    snippet OLD <<'EOF'
+        case .landed: dropLedgerArming = .armed
+EOF
+    snippet NEW <<'EOF'
+        case .landed: break
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SD04)
+    snippet OLD <<'EOF'
+                lastArmedAt = excluded.lastArmedAt,
+                lastArmedLaunchId = excluded.lastArmedLaunchId
+EOF
+    snippet NEW <<'EOF'
+                lastArmedAt = excluded.lastArmedAt
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SD05)
+    snippet OLD <<'EOF'
+        try addColumnIfNeeded(
+            table: "background_download_drop_arming",
+            column: "lastArmedLaunchId",
+            definition: "TEXT"
+        )
+EOF
+    snippet NEW <<'EOF'
+        try addColumnIfNeeded(
+            table: "background_download_drop_arming",
+            column: "lastArmedLaunchId",
+            definition: "TEXT"
+        )
+        try exec("""
+            UPDATE background_download_drops SET launchId = 'pre-v64'
+            WHERE launchId IS NULL
+            """)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SD06)
+    snippet OLD <<'EOF'
+            ORDER BY occurredAt DESC, id DESC LIMIT ?
+EOF
+    snippet NEW <<'EOF'
+            ORDER BY occurredAt DESC LIMIT ?
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SD07)
+    snippet OLD <<'EOF'
+                reason: .transferTaskNotVended,
+                context: context,
+                boundSeconds: sessionIO.timeout,
+                sessionCrossingId: nil
+EOF
+    snippet NEW <<'EOF'
+                reason: .transferTaskNotVended,
+                context: context,
+                boundSeconds: sessionIO.timeout,
+                sessionCrossingId: sessionCrossingId
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SD08)
+    snippet OLD <<'EOF'
+        launchId: String = UUID().uuidString
+EOF
+    snippet NEW <<'EOF'
+        launchId: String = "playhead-launch"
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SD09)
+    snippet OLD <<'EOF'
+        boundSeconds: TimeInterval,
+        sessionCrossingId: String?
+    ) async {
+EOF
+    snippet NEW <<'EOF'
+        boundSeconds: TimeInterval,
+        sessionCrossingId: String? = nil
+    ) async {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # SD10's anchor was RE-DERIVED by playhead-1gu0, which broke it: V65 appended a
+  # rung to the test-only ladder between this call and the `}` / `#endif` the
+  # anchor used to disambiguate it from the PRODUCTION ladder's identical call.
+  # The mutation is unchanged — drop the V64 rung from `migrateOnlyForTesting()`
+  # — and so is every expectation. The new second line does the same
+  # disambiguation the braces used to: an anchor of the call ALONE would match
+  # the production site too, because that site's 12-space indent contains this
+  # one's 8-space text as a substring.
+  SD10)
+    snippet OLD <<'EOF'
+        try migrateBackgroundDownloadDropLaunchIdentityV64IfNeeded()
+        // playhead-1gu0 (v65): a RENAME, not an add — and this ladder is the one
+EOF
+    snippet NEW <<'EOF'
+        // playhead-1gu0 (v65): a RENAME, not an add — and this ladder is the one
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SD11)
+    snippet OLD <<'EOF'
+        for column in ["launchId", "sessionCrossingId", "launchArmingState"] {
+            try addColumnIfNeeded(
+                table: "background_download_drops",
+                column: column,
+                definition: "TEXT"
+            )
+        }
+        try addColumnIfNeeded(
+            table: "background_download_drop_arming",
+            column: "lastArmedLaunchId",
+            definition: "TEXT"
+        )
+EOF
+    snippet NEW <<'EOF'
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  SD99)
+    snippet OLD <<'EOF'
+        let outcome = await dropRecorder.recordInstrumentArmed(
+            launchId: launchId,
+            at: Date().timeIntervalSince1970
+        )
+EOF
+    snippet NEW <<'EOF'
+        let armingOutcome = await dropRecorder.recordInstrumentArmed(
+            launchId: launchId,
+            at: Date().timeIntervalSince1970
+        )
+        let outcome = armingOutcome
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  BD99)
+    snippet OLD <<'EOF'
+        boundSeconds: TimeInterval,
+        sessionCrossingId: String?
     ) async {
         let outcome = await dropRecorder.recordDrop(
             BackgroundDownloadDropRecord(
                 episodeId: episodeId,
                 reason: reason,
                 context: context,
-                boundSeconds: bound
-            )
-        )
+                boundSeconds: boundSeconds,
+EOF
+    snippet NEW <<'EOF'
+        boundSeconds bound: TimeInterval,
+        sessionCrossingId: String?
+    ) async {
+        let outcome = await dropRecorder.recordDrop(
+            BackgroundDownloadDropRecord(
+                episodeId: episodeId,
+                reason: reason,
+                context: context,
+                boundSeconds: bound,
 EOF
     # TWO PATCHES, and the second is why this control had to be repaired: R1
     # added a SECOND use of `boundSeconds` in the invariant text below, far
@@ -13104,7 +15038,8 @@ EOF
                 episodeId: episodeId,
                 reason: .sessionNotVended,
                 context: context,
-                boundSeconds: sessionCreationIO.timeout
+                boundSeconds: sessionCreationIO.timeout,
+                sessionCrossingId: sessionCrossingId
             )
             releaseInFlightReservationIfUnclaimed(episodeId: episodeId)
             deleteDownloadAttribution(episodeId: episodeId)
@@ -13113,18 +15048,23 @@ EOF
             )
 EOF
     patch "$file" "$OLD" "$NEW" || return $?
+    # The SECOND patch removes the ORIGINAL call, and its anchor is the call
+    # PLUS the `return` that follows it. That suffix is what keeps it unique
+    # after the first patch has planted a byte-identical copy above: the copy
+    # is followed by `releaseInFlightReservationIfUnclaimed`, never by
+    # `return`. Anchoring on the call alone would match TWICE and `patch`
+    # would refuse — which is the guard working, but it would cost a round.
     snippet OLD <<'EOF'
-            // about the very quantity the widening decision reads.
             await recordBackgroundDownloadDrop(
                 episodeId: episodeId,
                 reason: .sessionNotVended,
                 context: context,
-                boundSeconds: sessionCreationIO.timeout
+                boundSeconds: sessionCreationIO.timeout,
+                sessionCrossingId: sessionCrossingId
             )
             return
 EOF
     snippet NEW <<'EOF'
-            // about the very quantity the widening decision reads.
             return
 EOF
     patch "$file" "$OLD" "$NEW" ;;
@@ -13193,24 +15133,30 @@ EOF
 
   BD26)
     snippet OLD <<'EOF'
-            "\(Self.backgroundDownloadDropSelectColumns) ORDER BY occurredAt DESC LIMIT ?"
+            ORDER BY occurredAt DESC, id DESC LIMIT ?
 EOF
     snippet NEW <<'EOF'
-            "\(Self.backgroundDownloadDropSelectColumns) ORDER BY occurredAt ASC LIMIT ?"
+            ORDER BY occurredAt ASC, id ASC LIMIT ?
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  # ANCHOR WIDENED BY playhead-4xmz (review 5). V63 added a rung and a
+  # near-identical arming table, so this anchor matched 0 or 2 times and the
+  # battery refused — a LOST RAIL for playhead-7dgx on every future run. The
+  # mutation is unchanged; only the context that makes it unambiguous is.
   BD27)
     snippet OLD <<'EOF'
             if seen > ceiling {
                 truncated = true
                 break
             }
+            switch readBackgroundDownloadDropRow(stmt) {
 EOF
     snippet NEW <<'EOF'
             if seen > ceiling {
                 break
             }
+            switch readBackgroundDownloadDropRow(stmt) {
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -13246,12 +15192,12 @@ EOF
     snippet OLD <<'EOF'
                 reason: .transferNotResumed,
                 context: context,
-                boundSeconds: sessionIO.timeout
+                boundSeconds: sessionIO.timeout,
 EOF
     snippet NEW <<'EOF'
                 reason: .transferNotResumed,
                 context: context,
-                boundSeconds: sessionCreationIO.timeout
+                boundSeconds: sessionCreationIO.timeout,
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -13333,25 +15279,32 @@ EOF
 
   BD36)
     snippet OLD <<'EOF'
-        logger.error("Background download drop ledger NOT armed for this launch")
         invariantRecorder?(
             .backgroundDownloadDropNotRecorded,
-            "arming=failed — this launch had a live drop recorder and "
-            + "background_download_drop_arming.armedLaunches did not move, so "
-            + "any drop row it goes on to write has no launch in the denominator"
+            "arming=failed launch=\(launchId) — this launch had a live drop "
+            + "recorder and background_download_drop_arming.armedLaunches did "
+            + "not move, so any drop row it goes on to write has no launch in "
+            + "the denominator; those rows say so themselves, carrying "
+            + "launchArmingState=arming_failed"
         )
 EOF
     snippet NEW <<'EOF'
-        logger.error("Background download drop ledger NOT armed for this launch")
+
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  # ANCHOR WIDENED BY playhead-4xmz (review 5). V63 added a rung and a
+  # near-identical arming table, so this anchor matched 0 or 2 times and the
+  # battery refused — a LOST RAIL for playhead-7dgx on every future run. The
+  # mutation is unchanged; only the context that makes it unambiguous is.
   BD37)
     snippet OLD <<'EOF'
         let probe = ceiling >= Int(Int32.max) ? Int(Int32.max) : ceiling + 1
+        // `, id DESC` is a TIEBREAKER, not decoration (playhead-sdis). Three
 EOF
     snippet NEW <<'EOF'
         let probe = ceiling
+        // `, id DESC` is a TIEBREAKER, not decoration (playhead-sdis). Three
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -13389,16 +15342,20 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  # ANCHOR WIDENED BY playhead-4xmz (review 5). V63 added a rung and a
+  # near-identical arming table, so this anchor matched 0 or 2 times and the
+  # battery refused — a LOST RAIL for playhead-7dgx on every future run. The
+  # mutation is unchanged; only the context that makes it unambiguous is.
   BD40)
     snippet OLD <<'EOF'
-                lastArmedAt = excluded.lastArmedAt
+                lastArmedAt = excluded.lastArmedAt,
 EOF
     snippet NEW <<'EOF'
                 lastArmedAt = CASE
                     WHEN background_download_drop_arming.armedLaunches = 0
                     THEN excluded.lastArmedAt
                     ELSE background_download_drop_arming.lastArmedAt
-                END
+                END,
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -16607,6 +18564,86 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
+  # ---- playhead-1gu0: the V65 rename (GU series) ----
+
+  # GU01 — the ORDERING. `createTables()` runs BEFORE the V*IfNeeded ladder, so
+  # it is the first thing to see an upgraded table. Drop its rename call and the
+  # very next statement adds an EMPTY `backfillJobId` alongside the populated
+  # `runCorrelationId`; the V65 rung then sees the new name present and declines.
+  # Both columns exist, the head shape looks correct, and every job id on the
+  # device is stranded in a column nothing reads.
+  GU01)
+    snippet OLD <<'EOF'
+        try renameSemanticScanRunCorrelationIdIfNeeded()
+        try addColumnIfNeeded(
+            table: "semantic_scan_results",
+            column: "backfillJobId",
+            definition: "TEXT"
+        )
+EOF
+    snippet NEW <<'EOF'
+        try addColumnIfNeeded(
+            table: "semantic_scan_results",
+            column: "backfillJobId",
+            definition: "TEXT"
+        )
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # GU02 — the DATA. An ADD where a RENAME belongs: afterwards the table has
+  # both columns and the new one is entirely NULL. On a fresh install this is
+  # byte-identical to a correct migration, which is the whole reason the rail
+  # rewinds a store instead of asserting on a new one.
+  GU02)
+    snippet OLD <<'EOF'
+        try exec("ALTER TABLE semantic_scan_results RENAME COLUMN runCorrelationId TO backfillJobId")
+EOF
+    snippet NEW <<'EOF'
+        try exec("ALTER TABLE semantic_scan_results ADD COLUMN backfillJobId TEXT")
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # GU03 — the INDEX NAME. SQLite rewrites an index DEFINITION through a
+  # RENAME COLUMN but keeps the index's own NAME, so skipping the drop leaves
+  # `idx_semantic_scan_results_correlation` sitting over a column called
+  # `backfillJobId` — the same name-says-one-thing defect this bead exists to
+  # remove, one layer down and invisible to every query.
+  GU03)
+    snippet OLD <<'EOF'
+        try exec("DROP INDEX IF EXISTS idx_semantic_scan_results_correlation")
+        try exec("ALTER TABLE semantic_scan_results RENAME COLUMN runCorrelationId TO backfillJobId")
+EOF
+    snippet NEW <<'EOF'
+        try exec("ALTER TABLE semantic_scan_results RENAME COLUMN runCorrelationId TO backfillJobId")
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # GU04 — the LADDER. The rung does its work and never stamps the version, so
+  # `schemaVersion()` stays at 64 and the store re-runs the rung on every open
+  # forever. The shape is right, which is what makes it silent.
+  GU04)
+    snippet OLD <<'EOF'
+        try setSchemaVersion(65)
+    }
+EOF
+    snippet NEW <<'EOF'
+    }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # GU99 — VACUITY CONTROL, and it MUST SURVIVE. The rename helper's `hasNew`
+  # local is bound to a second name; nothing else changes.
+  GU99)
+    snippet OLD <<'EOF'
+        let hasNew = try columnExists(table: "semantic_scan_results", column: "backfillJobId")
+        guard !hasNew else { return }
+EOF
+    snippet NEW <<'EOF'
+        let hasNewSpelling = try columnExists(table: "semantic_scan_results", column: "backfillJobId")
+        guard !hasNewSpelling else { return }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
   # ---- playhead-hx6n: scan-row run attribution (T series) ----
 
   # T01 — THE one-line mutation the whole bead reduces to: read a nil scene
@@ -16696,10 +18733,10 @@ EOF
   # useless as having no column.
   T08)
     snippet OLD <<'EOF'
-            runCorrelationId: jobId
+            backfillJobId: jobId
 EOF
     snippet NEW <<'EOF'
-            runCorrelationId: nil
+            backfillJobId: nil
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -27417,30 +29454,27 @@ EOF
   # and drops it on the floor, exactly as the early `return` did.
   MS01)
     snippet OLD <<'EOF'
-            missedAutoSkipReceiptsByWindowId[adWindow.id] =
-                MissedAutoSkipReceipt(
+        missedAutoSkipReceiptsByWindowId[adWindow.id] =
+            MissedAutoSkipReceipt(
 EOF
     snippet NEW <<'EOF'
-            _ = adWindow.id
-            _ = MissedAutoSkipReceipt(
+        _ = adWindow.id
+        _ = MissedAutoSkipReceipt(
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
-  # MS02 — recorded in BOTH arms. The card still fires; the list gains a row
-  # for it as well.
+  # MS02 — the acknowledgement books the card and LEAVES the row. The listener
+  # sees the card and is then asked to judge the same skip again from the
+  # passive list. playhead-8cjo moved this direction from `emitBannerItem` to
+  # the seam: since the receipt is now written for EVERY announced skip, the
+  # only thing standing between one skip and two surfaces is this removal.
   MS02)
     snippet OLD <<'EOF'
-        guard hasAttachedHost else {
-            // playhead-2d6i: nobody is listening, and the caller has already
+        missedAutoSkipReceiptsByWindowId.removeValue(forKey: windowId)
+        deliveredAutoSkipCardWindowIds.insert(windowId)
 EOF
     snippet NEW <<'EOF'
-        missedAutoSkipReceiptsByWindowId[adWindow.id] = MissedAutoSkipReceipt(
-            item: item,
-            playheadTimeAtSkip: currentPlayheadTime,
-            occurredAt: Date()
-        )
-        guard hasAttachedHost else {
-            // playhead-2d6i: nobody is listening, and the caller has already
+        deliveredAutoSkipCardWindowIds.insert(windowId)
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -27515,6 +29549,12 @@ EOF
         // clear has to be here too: a leak that is invisible is still a leak,
         // and the next episode could legitimately reuse a window id.
         missedAutoSkipReceiptsByWindowId.removeAll()
+        // playhead-8cjo: and so is the record of which cards a host ACCEPTED.
+        // It is read only by the partition rails, so a leak here is invisible
+        // in production and lethal to the one thing that can see this bead's
+        // defect: the next episode's partition would credit a card this episode
+        // delivered, and window ids are not unique across episodes.
+        deliveredAutoSkipCardWindowIds.removeAll()
         suggestBanneredWindowIds.removeAll()
 EOF
     snippet NEW <<'EOF'
@@ -27525,6 +29565,12 @@ EOF
         // leak here would present the previous episode's receipt against the
         // next episode's playhead.
         armedAutoSkipBannerWindowIds.removeAll()
+        // playhead-8cjo: and so is the record of which cards a host ACCEPTED.
+        // It is read only by the partition rails, so a leak here is invisible
+        // in production and lethal to the one thing that can see this bead's
+        // defect: the next episode's partition would credit a card this episode
+        // delivered, and window ids are not unique across episodes.
+        deliveredAutoSkipCardWindowIds.removeAll()
         suggestBanneredWindowIds.removeAll()
 EOF
     patch "$file" "$OLD" "$NEW" ;;
@@ -27549,6 +29595,12 @@ EOF
         // clear has to be here too: a leak that is invisible is still a leak,
         // and the next episode could legitimately reuse a window id.
         missedAutoSkipReceiptsByWindowId.removeAll()
+        // playhead-8cjo: and so is the record of which cards a host ACCEPTED.
+        // It is read only by the partition rails, so a leak here is invisible
+        // in production and lethal to the one thing that can see this bead's
+        // defect: the next episode's partition would credit a card this episode
+        // delivered, and window ids are not unique across episodes.
+        deliveredAutoSkipCardWindowIds.removeAll()
         suggestBanneredWindowIds.removeAll()
 EOF
     snippet NEW <<'EOF'
@@ -27559,6 +29611,12 @@ EOF
         // leak here would present the previous episode's receipt against the
         // next episode's playhead.
         armedAutoSkipBannerWindowIds.removeAll()
+        // playhead-8cjo: and so is the record of which cards a host ACCEPTED.
+        // It is read only by the partition rails, so a leak here is invisible
+        // in production and lethal to the one thing that can see this bead's
+        // defect: the next episode's partition would credit a card this episode
+        // delivered, and window ids are not unique across episodes.
+        deliveredAutoSkipCardWindowIds.removeAll()
         suggestBanneredWindowIds.removeAll()
 EOF
     patch "$file" "$OLD" "$NEW" ;;
@@ -27566,10 +29624,10 @@ EOF
   # MS07 — the position at which the skip fired becomes the SPAN's own start.
   MS07)
     snippet OLD <<'EOF'
-                    playheadTimeAtSkip: currentPlayheadTime,
+                playheadTimeAtSkip: currentPlayheadTime,
 EOF
     snippet NEW <<'EOF'
-                    playheadTimeAtSkip: managed.snappedStart,
+                playheadTimeAtSkip: managed.snappedStart,
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -27708,10 +29766,392 @@ EOF
 EOF
     patch "$file" "$OLD" "$NEW"
     snippet OLD <<'EOF'
-        guard hasAttachedHost else {
+        guard hasAttachedHost else { return }
 EOF
     snippet NEW <<'EOF'
-        guard hostIsAttached else {
+        guard hostIsAttached else { return }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+
+  # ---- playhead-8cjo, the AK series ---------------------------------------
+
+  # AK01 — playhead-2d6i's shipped behaviour restored: the receipt is written
+  # only when nobody is subscribed.
+  AK01)
+    snippet OLD <<'EOF'
+        missedAutoSkipReceiptsByWindowId[adWindow.id] =
+            MissedAutoSkipReceipt(
+EOF
+    snippet NEW <<'EOF'
+        missedAutoSkipReceiptsByWindowId[adWindow.id] =
+            hasAttachedHost ? nil : MissedAutoSkipReceipt(
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # AK02 — the `didAccept` guard is pushed into the SUGGEST arm, so the auto
+  # tier acknowledges whatever the queue said.
+  AK02)
+    snippet OLD <<'EOF'
+            guard didAccept else { return }
+            switch item.tier {
+            case .suggest:
+EOF
+    snippet NEW <<'EOF'
+            switch item.tier {
+            case .suggest:
+                guard didAccept else { return }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # AK03 — the auto tier's acknowledgement is deleted.
+  AK03)
+    snippet OLD <<'EOF'
+            case .autoSkipped:
+                await orchestrator.acknowledgeAutoSkippedBannerDelivery(
+                    windowId: item.windowId,
+                    episodeId: item.episodeId,
+                    playbackLifecycleGeneration:
+                        item.playbackLifecycleGeneration,
+                    windowMaterialRevisionToken:
+                        item.windowMaterialRevisionToken
+                )
+EOF
+    snippet NEW <<'EOF'
+            case .autoSkipped:
+                break
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # AK04 — the seam's EPISODE clause.
+  AK04)
+    snippet OLD <<'EOF'
+        guard activeEpisodeId == episodeId,
+              activePlaybackLifecycleGeneration
+                == playbackLifecycleGeneration,
+              let receipt = missedAutoSkipReceiptsByWindowId[windowId],
+EOF
+    snippet NEW <<'EOF'
+        guard activePlaybackLifecycleGeneration
+                == playbackLifecycleGeneration,
+              let receipt = missedAutoSkipReceiptsByWindowId[windowId],
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # AK05 — the seam's PLAYBACK GENERATION clause.
+  AK05)
+    snippet OLD <<'EOF'
+        guard activeEpisodeId == episodeId,
+              activePlaybackLifecycleGeneration
+                == playbackLifecycleGeneration,
+              let receipt = missedAutoSkipReceiptsByWindowId[windowId],
+EOF
+    snippet NEW <<'EOF'
+        guard activeEpisodeId == episodeId,
+              let receipt = missedAutoSkipReceiptsByWindowId[windowId],
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # AK06 — the seam's MATERIAL TOKEN clause.
+  AK06)
+    snippet OLD <<'EOF'
+              let receipt = missedAutoSkipReceiptsByWindowId[windowId],
+              receipt.item.windowMaterialRevisionToken
+                == windowMaterialRevisionToken
+        else {
+EOF
+    snippet NEW <<'EOF'
+              missedAutoSkipReceiptsByWindowId[windowId] != nil
+        else {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # AK07 — the delivered record is written before the guard.
+  AK07)
+    snippet OLD <<'EOF'
+        windowMaterialRevisionToken: String?
+    ) {
+        guard activeEpisodeId == episodeId,
+EOF
+    snippet NEW <<'EOF'
+        windowMaterialRevisionToken: String?
+    ) {
+        deliveredAutoSkipCardWindowIds.insert(windowId)
+        guard activeEpisodeId == episodeId,
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # AK08 — the endEpisode clear of the delivered record. Anchored through
+  # `latestUserSeekOperationGeneration = 0`, which is what distinguishes
+  # endEpisode's block from beginEpisode's byte-identical one.
+  AK08)
+    snippet OLD <<'EOF'
+        latestUserSeekOperationGeneration = 0
+        banneredWindowIds.removeAll()
+        emittedAutoSkipBannerWindowIds.removeAll()
+        // playhead-bwxi: an armed auto-skip banner is per-episode state, and a
+        // leak here would present the previous episode's receipt against the
+        // next episode's playhead.
+        armedAutoSkipBannerWindowIds.removeAll()
+        // playhead-2d6i: so is a MISSED receipt. A leak here would offer the
+        // previous episode's uncorrected skip against the next episode's
+        // windows — and `denyAutoSkippedBanner` would refuse it, leaving a row
+        // whose only possible action does nothing. The `windows`-derived filter
+        // in `missedAutoSkipReceipts()` would hide it, which is exactly why the
+        // clear has to be here too: a leak that is invisible is still a leak,
+        // and the next episode could legitimately reuse a window id.
+        missedAutoSkipReceiptsByWindowId.removeAll()
+        // playhead-8cjo: and so is the record of which cards a host ACCEPTED.
+        // It is read only by the partition rails, so a leak here is invisible
+        // in production and lethal to the one thing that can see this bead's
+        // defect: the next episode's partition would credit a card this episode
+        // delivered, and window ids are not unique across episodes.
+        deliveredAutoSkipCardWindowIds.removeAll()
+EOF
+    snippet NEW <<'EOF'
+        latestUserSeekOperationGeneration = 0
+        banneredWindowIds.removeAll()
+        emittedAutoSkipBannerWindowIds.removeAll()
+        // playhead-bwxi: an armed auto-skip banner is per-episode state, and a
+        // leak here would present the previous episode's receipt against the
+        // next episode's playhead.
+        armedAutoSkipBannerWindowIds.removeAll()
+        // playhead-2d6i: so is a MISSED receipt. A leak here would offer the
+        // previous episode's uncorrected skip against the next episode's
+        // windows — and `denyAutoSkippedBanner` would refuse it, leaving a row
+        // whose only possible action does nothing. The `windows`-derived filter
+        // in `missedAutoSkipReceipts()` would hide it, which is exactly why the
+        // clear has to be here too: a leak that is invisible is still a leak,
+        // and the next episode could legitimately reuse a window id.
+        missedAutoSkipReceiptsByWindowId.removeAll()
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # AK09 — the beginEpisode clear of the delivered record. Anchored through
+  # `decisionLog.removeAll()`.
+  AK09)
+    snippet OLD <<'EOF'
+        decisionLog.removeAll()
+        banneredWindowIds.removeAll()
+        emittedAutoSkipBannerWindowIds.removeAll()
+        // playhead-bwxi: an armed auto-skip banner is per-episode state, and a
+        // leak here would present the previous episode's receipt against the
+        // next episode's playhead.
+        armedAutoSkipBannerWindowIds.removeAll()
+        // playhead-2d6i: so is a MISSED receipt. A leak here would offer the
+        // previous episode's uncorrected skip against the next episode's
+        // windows — and `denyAutoSkippedBanner` would refuse it, leaving a row
+        // whose only possible action does nothing. The `windows`-derived filter
+        // in `missedAutoSkipReceipts()` would hide it, which is exactly why the
+        // clear has to be here too: a leak that is invisible is still a leak,
+        // and the next episode could legitimately reuse a window id.
+        missedAutoSkipReceiptsByWindowId.removeAll()
+        // playhead-8cjo: and so is the record of which cards a host ACCEPTED.
+        // It is read only by the partition rails, so a leak here is invisible
+        // in production and lethal to the one thing that can see this bead's
+        // defect: the next episode's partition would credit a card this episode
+        // delivered, and window ids are not unique across episodes.
+        deliveredAutoSkipCardWindowIds.removeAll()
+EOF
+    snippet NEW <<'EOF'
+        decisionLog.removeAll()
+        banneredWindowIds.removeAll()
+        emittedAutoSkipBannerWindowIds.removeAll()
+        // playhead-bwxi: an armed auto-skip banner is per-episode state, and a
+        // leak here would present the previous episode's receipt against the
+        // next episode's playhead.
+        armedAutoSkipBannerWindowIds.removeAll()
+        // playhead-2d6i: so is a MISSED receipt. A leak here would offer the
+        // previous episode's uncorrected skip against the next episode's
+        // windows — and `denyAutoSkippedBanner` would refuse it, leaving a row
+        // whose only possible action does nothing. The `windows`-derived filter
+        // in `missedAutoSkipReceipts()` would hide it, which is exactly why the
+        // clear has to be here too: a leak that is invisible is still a leak,
+        // and the next episode could legitimately reuse a window id.
+        missedAutoSkipReceiptsByWindowId.removeAll()
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # AK10 — the emit path stops gating on a subscriber.
+  AK10)
+    snippet OLD <<'EOF'
+        guard hasAttachedHost else { return }
+EOF
+    snippet NEW <<'EOF'
+        _ = hasAttachedHost
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # AK11 — the view model keeps its own copy of the forwarding rule.
+  AK11)
+    snippet OLD <<'EOF'
+                await BannerHostDelivery.forward(
+                    event,
+                    from: orchestrator,
+                    into: queue,
+                    hostGeneration: hostGeneration
+                )
+EOF
+    snippet NEW <<'EOF'
+                if case let .present(item) = event {
+                    _ = await MainActor.run {
+                        queue.enqueue(item, hostGeneration: hostGeneration)
+                    }
+                }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # AK12 — the acknowledgement records no delivery.
+  AK12)
+    snippet OLD <<'EOF'
+        missedAutoSkipReceiptsByWindowId.removeValue(forKey: windowId)
+        deliveredAutoSkipCardWindowIds.insert(windowId)
+EOF
+    snippet NEW <<'EOF'
+        missedAutoSkipReceiptsByWindowId.removeValue(forKey: windowId)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # AK13 — the delivered-record removal at the receipt write site.
+  AK13)
+    snippet OLD <<'EOF'
+        deliveredAutoSkipCardWindowIds.remove(adWindow.id)
+EOF
+    snippet NEW <<'EOF'
+        _ = adWindow.id
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # AK14 — the RETIRE arm of the forwarding rule.
+  AK14)
+    snippet OLD <<'EOF'
+        case let .retireWindow(retirement):
+            _ = await MainActor.run {
+                queue.retireWindow(
+                    retirement,
+                    hostGeneration: hostGeneration
+                )
+            }
+EOF
+    snippet NEW <<'EOF'
+        case .retireWindow:
+            break
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # AK15 — the SUGGEST acknowledgement.
+  AK15)
+    snippet OLD <<'EOF'
+            case .suggest:
+                await orchestrator.acknowledgeSuggestedBannerDelivery(
+                    windowId: item.windowId,
+                    episodeId: item.episodeId,
+                    playbackLifecycleGeneration:
+                        item.playbackLifecycleGeneration,
+                    suggestionRevisionToken:
+                        item.suggestionRevisionToken
+                )
+EOF
+    snippet NEW <<'EOF'
+            case .suggest:
+                break
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # AK16 — a `default:` arm on the tier switch.
+  AK16)
+    snippet OLD <<'EOF'
+            case .autoSkipped:
+                await orchestrator.acknowledgeAutoSkippedBannerDelivery(
+EOF
+    snippet NEW <<'EOF'
+            default:
+                await orchestrator.acknowledgeAutoSkippedBannerDelivery(
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # AK18 — the SUGGEST acknowledgement escapes the didAccept guard while the
+  # AUTO one stays behind it. Deliberately NOT "delete the guard": that is AK02
+  # and it unguards both tiers, so its victim set could not isolate the suggest
+  # direction. Here only the suggest tier reports a delivery the queue refused.
+  AK18)
+    snippet OLD <<'EOF'
+            guard didAccept else { return }
+            switch item.tier {
+            case .suggest:
+                await orchestrator.acknowledgeSuggestedBannerDelivery(
+EOF
+    snippet NEW <<'EOF'
+            if item.tier == .suggest {
+                await orchestrator.acknowledgeSuggestedBannerDelivery(
+                    windowId: item.windowId,
+                    episodeId: item.episodeId,
+                    playbackLifecycleGeneration:
+                        item.playbackLifecycleGeneration,
+                    suggestionRevisionToken:
+                        item.suggestionRevisionToken
+                )
+            }
+            guard didAccept else { return }
+            switch item.tier {
+            case .suggest:
+                await orchestrator.acknowledgeSuggestedBannerDelivery(
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # AK17 — THE DEMONSTRATED BYPASS. Two sites: the parameter is renamed so the
+  # old file-wide `queue.enqueue(` ban cannot see it, and a `forward(` call is
+  # KEPT in an else branch so the positive check still passes.
+  AK17)
+    snippet OLD <<'EOF'
+        into queue: AdBannerQueue,
+        hostGeneration: UInt64
+    ) {
+        bannerObservationTask?.cancel()
+EOF
+    snippet NEW <<'EOF'
+        into bannerQueue: AdBannerQueue,
+        hostGeneration: UInt64
+    ) {
+        bannerObservationTask?.cancel()
+EOF
+    patch "$file" "$OLD" "$NEW" || return $?
+    snippet OLD <<'EOF'
+                await BannerHostDelivery.forward(
+                    event,
+                    from: orchestrator,
+                    into: queue,
+                    hostGeneration: hostGeneration
+                )
+EOF
+    snippet NEW <<'EOF'
+                if case let .present(item) = event {
+                    _ = await MainActor.run {
+                        bannerQueue.enqueue(item, hostGeneration: hostGeneration)
+                    }
+                } else {
+                    await BannerHostDelivery.forward(
+                        event,
+                        from: orchestrator,
+                        into: bannerQueue,
+                        hostGeneration: hostGeneration
+                    )
+                }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  # AK99 — VACUITY CONTROL. The seam's receipt binding is renamed and nothing
+  # else is; both uses are inside the one anchor, so this compiles.
+  AK99)
+    snippet OLD <<'EOF'
+              let receipt = missedAutoSkipReceiptsByWindowId[windowId],
+              receipt.item.windowMaterialRevisionToken
+                == windowMaterialRevisionToken
+EOF
+    snippet NEW <<'EOF'
+              let announced = missedAutoSkipReceiptsByWindowId[windowId],
+              announced.item.windowMaterialRevisionToken
+                == windowMaterialRevisionToken
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 
@@ -27735,6 +30175,9 @@ rec_file()   {
     UZPROV) printf '%s' "$UZPROV" ;;
     UZHLTH) printf '%s' "$UZHLTH" ;;
     STORE) printf '%s' "$STORE" ;;
+    SSIL)  printf '%s' "$SSIL" ;;
+    TRTC)  printf '%s' "$TRTC" ;;
+    MAFT)  printf '%s' "$MAFT" ;;
     CTRL)  printf '%s' "$CTRL" ;;
     VIEW)  printf '%s' "$VIEW" ;;
     TRIG)  printf '%s' "$TRIG" ;;
@@ -27742,6 +30185,7 @@ rec_file()   {
     TRUST) printf '%s' "$TRUST" ;;
     NPV)   printf '%s' "$NPV" ;;
     NPVM)  printf '%s' "$NPVM" ;;
+    BHD)   printf '%s' "$BHD" ;;
     TPEEK) printf '%s' "$TPEEK" ;;
     MSR)   printf '%s' "$MSR" ;;
     BWPOL) printf '%s' "$BWPOL" ;;
@@ -27800,6 +30244,7 @@ rec_file()   {
     SEGAGG) printf '%s' "$SEGAGG" ;;
     DLMGR) printf '%s' "$DLMGR" ;;
     LEDGER) printf '%s' "$LEDGER" ;;
+    DWJ)   printf '%s' "$DWJ" ;;
     FQSCAN) printf '%s' "$FQSCAN" ;;
     BGFEED) printf '%s' "$BGFEED" ;;
     EPPREP) printf '%s' "$EPPREP" ;;
@@ -27899,17 +30344,71 @@ restore_and_verify() {
 }
 
 # ---------------------------------------------------------------------------
-# Focused run + failure extraction
+# Focused run + VERDICT extraction
 # ---------------------------------------------------------------------------
-# Swift Testing prints `✘ Test "<display name>" failed after …` through
-# xcodebuild.  Function-name form (no display name) is handled too so a future
-# undecorated @Test is not silently invisible here.
+# THE VERDICT IS READ POSITIVELY, NEVER FROM SILENCE (playhead-gjlp0).
+#
+# `extract_failures` and `extract_ran` used to live here: two console scrapers,
+# one for `✘ … failed` and one for `◇ … started`, and the verdict was the
+# arithmetic between them —
+#
+#     not in STARTED -> ERROR "never ran";  not in FAILED -> SURVIVED
+#
+# Both arms read SILENCE, and the second one reads it in the dangerous
+# direction. A test whose host died prints `◇ … started` and then nothing at
+# all, so it scored exactly like a test that ran and passed. MEASURED on this
+# bead's own specimen (`/private/tmp/playhead-mutation-battery.F6R3wB`,
+# preserved): the expected test had TEN start lines and ZERO result lines, the
+# batch had 2,332 tests with no verdict and 11 distinct test-host pids, the log
+# already carried `gate-memory: THE RUN DID NOT REACH A VERDICT — RESTARTED`
+# TEN lines from its end, counting itself (line 24,987 of 24,996) — and the table printed
+# `BD37 SURVIVED … still green`. Applied by hand that mutant dies in 0.147 s.
+# The rail existed and worked; only the reading was wrong.
+#
+# What replaces them is `scripts/mutation_verdict.py`, which requires a STATED
+# outcome — the `.xcresult` bundle's verdict, or a `✔`/`✘` on the console —
+# before a mutation may be called either KILLED or SURVIVED, and reports
+# NO VERDICT / VOID BATCH otherwise. It is not a third scraper: it imports
+# `gate_baseline.py` (both console formats, the spliced-line rejoin, the
+# octal-escaped glyph shards, and the bundle) and `gate_memory_verdict.py` (the
+# host-pid health classifier), so this battery and the merge gate now read a run
+# the same way.
+#
+# WHY IT IS PYTHON AND NOT THREE MORE GREPS. The cheap first cut in the bead was
+# `grep -c 'Restarting after unexpected exit'`, and on the very specimen it was
+# written for that returns 11 while the host was replaced 10 times: the eleventh
+# hit is `gate-memory:`'s own verdict block quoting the message back into the
+# same log. Counting a phrase that the run's own diagnostics also print adds two
+# different quantities together. The pid series says 11 distinct hosts and needs
+# no interpretation.
+
 # `scripts/fast-gate.sh` retries once on a wedged simulator, and BOTH attempts
-# land in the same log. Attempt 1's casualties (tests that were mid-flight when
-# the sim died) would otherwise union with attempt 2's results and credit a
+# land in the same log. Attempt 1's casualties — tests that were mid-flight when
+# the sim died — would otherwise union with attempt 2's results and credit a
 # mutation as KILLED off an infrastructure artefact. Cut everything before the
 # retry banner so only the last attempt is read.
-last_attempt() {
+#
+# `gate_baseline.parse_run` applies the same cut internally, so the scorer does
+# not need this; it survives because the `Test run with` guard below runs BEFORE
+# the scorer and must read the same attempt the scorer will.
+#
+# IT IS A PREDICATE NOW, AND THE COPY IT USED TO WRITE IS GONE (playhead-gjlp0
+# R4). This was `last_attempt "$LOG" >"$LOG.last"` followed by a `grep -q`, and
+# `$LOG.last` had three readers: `extract_ran`, `extract_failures` and that
+# grep. This bead deleted the first two, which left a BYTE-EXACT DUPLICATE of
+# the largest artifact in `$WORK` being written once per batch so one `grep -q`
+# could read it. Measured on a preserved 37-batch run
+# (`/private/tmp/playhead-mutation-battery.9NQnSD`): **178.9 MiB of `.log` beside
+# 178.9 MiB of `.log.last`**, exactly half of that directory. (R5 re-derived it:
+# 187,563,745 bytes over 38 `.log` files — 37 batches plus the baseline — so the
+# figure is `du`'s MiB and was written MB. Right reading, wrong unit.) The duplicate was
+# cheap while `$WORK` held only logs; this bead also started keeping each
+# non-KILL batch's `.xcresult` there, so it is not.
+#
+# The cut and the search happen in ONE pass in one process, so the answer is
+# still a property of the LAST ATTEMPT — which is the whole reason the cut
+# exists — and nothing is written to disk.
+last_attempt_ran_tests() {
   python3 -c '
 import sys
 lines = open(sys.argv[1], encoding="utf-8", errors="replace").readlines()
@@ -27917,107 +30416,221 @@ cut = 0
 for i, line in enumerate(lines):
     if "fast-gate: wedged simulator" in line:
         cut = i + 1
-sys.stdout.writelines(lines[cut:])
+sys.exit(0 if any("Test run with" in line for line in lines[cut:]) else 1)
 ' "$1"
 }
 
-extract_failures() {
-  python3 -c '
-import re, sys
-# playhead-avbn: SEARCH, not match-from-start. xcodebuild interleaves its own
-# output into a line often enough to matter — an observed run prefixed
-# XCTestOutputBarrier onto a started-marker line, and those are WORD characters,
-# so the old ^\W* could not skip them. Widening cannot manufacture a KILL: the
-# anchor is the Swift Testing glyph plus the literal " Test \"", which nothing
-# else in the log emits.
-pat_named = re.compile(r"✘ Test \"(.+?)\" (?:failed|recorded an issue)")
-pat_plain = re.compile(r"✘ Test ([A-Za-z_][A-Za-z0-9_]*\(\)) failed")
-# playhead-le02: XCTest, which this battery could not see at all. Until now an
-# expectation naming an XCTest case reported ERROR ("expected test never ran"),
-# so those rails were "verified by hand" (see the kvs8 note in FOCUSED_SUITES)
-# — i.e. not verified by anything that fails when someone stops doing it.
+# $1 log  $2 where to write the .xcresult bundle
 #
-# The duration heuristic INVERTS for XCTest and that matters here: a Swift
-# Testing failure over ~97 s is a load flake, but an XCTest failure is an
-# ASSERTION and is fast (0.025 s is typical). Nothing in this function times
-# anything, which is correct — a mutation battery wants every failure, flake or
-# not, because the baseline run is the control.
-# `chr(39)` rather than a literal apostrophe: this whole program is inside a
-# single-quoted `python3 -c` argument, so an apostrophe would end it.
-Q = chr(39)
-pat_xctest = re.compile(r"Test Case " + Q + r"-\[[A-Za-z0-9_.]*?([A-Za-z0-9_]+) ([A-Za-z0-9_]+)\]" + Q + r" failed")
-seen = []
-for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
-    x = pat_xctest.search(line)
-    if x:
-        # Both forms, so an expectation may be written bare when the method
-        # name is distinctive or qualified when it is not.
-        for name in (x.group(2), x.group(1) + "/" + x.group(2)):
-            if name not in seen:
-                seen.append(name)
-        continue
-    m = pat_named.search(line) or pat_plain.search(line)
-    if m and m.group(1) not in seen:
-        seen.append(m.group(1))
-# Deliberately not `print("\n".join(...))`: on an empty list that emits a bare
-# newline, which reads downstream as one nameless failure.
-sys.stdout.writelines(name + "\n" for name in seen)
-' "$1"
-}
-
-# Every test that RAN in this attempt, by display name. Companion to
-# `extract_failures`, and the input to the "expected test never ran" check
-# below: an expectation that matches NOTHING in the run is a harness fault
-# (typo, renamed test, suite missing from FOCUSED_SUITES, or a ';' inside a
-# display name colliding with the record separator) — and without this it is
-# indistinguishable from a genuine SURVIVED, which is the failure direction
-# that reads as a coverage hole and sends the next person to write a test that
-# already exists. Measured: playhead-96ot's E04 reported SURVIVED with its
-# expected test visibly failing three lines above, one bead after playhead-d3g0
-# documented the same collision.
-extract_ran() {
-  python3 -c '
-import re, sys
-# playhead-avbn: SEARCH, not match-from-start — see extract_failures. This is
-# the function the interleaving actually defeated, turning a real KILL into a
-# reported ERROR ("expected test never ran") with the failure printed two lines
-# above it. Widening here can only move a verdict ERROR -> KILLED/SURVIVED; the
-# KILL itself comes from extract_failures.
-pat_named = re.compile(r"◇ Test \"(.+?)\" started")
-pat_plain = re.compile(r"◇ Test ([A-Za-z_][A-Za-z0-9_]*\(\)) started")
-# playhead-le02: the XCTest half — see extract_failures for why. Must stay in
-# lockstep with that function: a name this one cannot record is reported as a
-# harness fault no matter what the other one saw, which is exactly the
-# false-ERROR direction the "never ran" check exists to remove.
-Q = chr(39)  # see extract_failures
-pat_xctest = re.compile(r"Test Case " + Q + r"-\[[A-Za-z0-9_.]*?([A-Za-z0-9_]+) ([A-Za-z0-9_]+)\]" + Q + r" started")
-seen = []
-for line in open(sys.argv[1], encoding="utf-8", errors="replace"):
-    x = pat_xctest.search(line)
-    if x:
-        for name in (x.group(2), x.group(1) + "/" + x.group(2)):
-            if name not in seen:
-                seen.append(name)
-        continue
-    m = pat_named.search(line) or pat_plain.search(line)
-    if m and m.group(1) not in seen:
-        seen.append(m.group(1))
-sys.stdout.writelines(name + "\n" for name in seen)
-' "$1"
-}
-
+# THE BUNDLE IS THE VERDICT SOURCE (playhead-gjlp0, following playhead-t53a).
+# `PLAYHEAD_RESULT_BUNDLE` makes fast-gate write it to a path we own instead of
+# to a scratch dir it deletes on exit, which is the only way this script can
+# read it afterwards. The bundle costs disk, so `drop_bundle` removes it again
+# for any batch that produced nothing but KILLs — a bundle is kept exactly when
+# it is EVIDENCE.
 run_focused() {
-  local log="$1"
-  scripts/fast-gate.sh "${FOCUSED_SUITES[@]}" >"$log" 2>&1
+  local log="$1" bundle="${2:-}"
+  if [ -n "$bundle" ]; then
+    PLAYHEAD_RESULT_BUNDLE="$bundle" scripts/fast-gate.sh "${FOCUSED_SUITES[@]}" >"$log" 2>&1
+  else
+    scripts/fast-gate.sh "${FOCUSED_SUITES[@]}" >"$log" 2>&1
+  fi
   # fast-gate.sh already captures PIPESTATUS internally; its exit code is the
   # xcodebuild status.  Deliberately NOT piped here.
   return $?
+}
+
+# Only ever under $WORK, checked rather than trusted. This script is the one
+# place in the repo that both creates and removes directories under
+# /private/tmp, and CLAUDE.md's rm -rf rail says the path is proved, not
+# assumed.
+#
+# TWO CHECKS, BECAUSE `case`'s `*` CROSSES `/`. `"$WORK"/*.xcresult` is matched
+# by `$WORK/../../../etc/x.xcresult` — a glob in a `case` pattern is not a path
+# component. The first check proves the PREFIX and the second proves the
+# REMAINDER IS A BARE NAME, which is the part that cannot climb out. Both
+# callers pass `$WORK/baseline.xcresult` or `$WORK/batch-<digits>.xcresult`
+# (every one of the 1,109 MUTATIONS records carries a numeric batch field, so
+# `$b` cannot smuggle a separator), so this refuses nothing that exists today:
+# it is the rail, not a filter.
+#
+# And it SAYS what it removed. A bundle is evidence; a bundle that vanishes
+# without a line is a reader concluding the run never wrote one.
+drop_bundle() {
+  local path="$1" rest
+  if [ -z "${WORK:-}" ]; then
+    echo "mutation-battery: refusing to remove a bundle with no \$WORK set: $path" >&2
+    return 1
+  fi
+  case "$path" in
+    "$WORK"/*.xcresult) rest="${path#"$WORK"/}" ;;
+    *)
+      echo "mutation-battery: refusing to remove a bundle outside \$WORK: $path" >&2
+      return 1 ;;
+  esac
+  case "$rest" in
+    */*|.*)
+      echo "mutation-battery: refusing to remove a bundle that is not a bare name" >&2
+      echo "                  under \$WORK ($WORK): $path" >&2
+      return 1 ;;
+  esac
+  [ -d "$path" ] || return 0
+  rm -rf "$path"
+  echo "  dropped the .xcresult bundle (nothing here is evidence): $path"
+}
+
+# Score one batch's artifacts. Exit 0 = the batch supports verdicts, 3 = VOID,
+# anything else = the artifacts could not be read at all.
+#
+# $1 log  $2 rc  $3 freshness floor (epoch)  $4 names file  $5 out file  $6 bundle
+score_batch() {
+  local log="$1" rc="$2" since="$3" names="$4" out="$5" bundle="${6:-}"
+  local args=(classify --log "$log" --rc "$rc" --since "$since" --names "$names" --out "$out")
+  if [ -n "$bundle" ] && [ -d "$bundle" ]; then
+    args+=(--xcresult "$bundle")
+  fi
+  python3 scripts/mutation_verdict.py "${args[@]}"
+}
+
+# THE BUNDLE IS ASKED FOR ON EVERY RUN, SO ITS ABSENCE IS A FAULT AND MUST SAY SO
+# (playhead-gjlp0 R2).
+#
+# `score_batch` omits `--xcresult` when the directory is not there. That is the
+# right behaviour — `mutation_verdict.py` treats a bundle that was ASKED FOR and
+# could not be read as a hard error, so handing it a path to nothing would be
+# worse — but on its own it is a guard whose false branch makes no claim, which
+# is exactly the shape that shipped `scripts/sim-trim.sh` INERT for two full
+# plans (playhead-81ig): a trimmed run and an untrimmed run produced identical
+# logs. Here the two runs differ only in one line of the scorer's own census
+# (`verdicts read from: the console log`), which reads as a neutral fact about
+# where a verdict came from rather than as the fault it is in THIS caller.
+#
+# It is not fatal, and deliberately: a console-only SURVIVED still rests on a
+# positive `✔`, which is the whole point of this bead, and refusing would turn a
+# degraded run into no run at all. It is LOUD, and the epilogue stops claiming
+# the bundle when this fired.
+note_bundle_presence() {
+  local bundle="$1" what="$2"
+  if [ -d "$bundle" ]; then
+    return 0
+  fi
+  CONSOLE_ONLY=1
+  # AND WHICH RUNS, not merely that there was one (playhead-gjlp0 R5). One flag
+  # is set by the baseline and by every batch alike, and the SURVIVED epilogue
+  # then said "Those verdicts came off the CONSOLE alone" — false whenever it
+  # was the BASELINE that lost its bundle and the batches kept theirs. R2 fixed
+  # the header of that note to name RUNS and left the verdict sentence claiming
+  # the stronger thing; every console-only rail drops BOTH bundles, so the
+  # population that would have shown it was never driven. The list is what lets
+  # the epilogue be true in both worlds without a second flag.
+  CONSOLE_ONLY_WHICH="${CONSOLE_ONLY_WHICH}${CONSOLE_ONLY_WHICH:+, }$what"
+  echo "  NO .xcresult BUNDLE — $what will be scored off the CONSOLE ALONE."
+  echo "    asked fast-gate for: $bundle"
+  echo "    A console-only reading is the weaker instrument: it cannot see a verdict"
+  echo "    xcodebuild spliced app output through, which is why playhead-t53a moved"
+  echo "    the gate's census onto the bundle. Nothing about this is a property of"
+  echo "    any mutation — either PLAYHEAD_RESULT_BUNDLE is not reaching fast-gate,"
+  echo "    or xcodebuild died before it could write one."
+  return 0
+}
+
+# The state the scorer recorded for one expected test.
+#
+# Prints NOTHING and returns 1 when the scorer wrote no line for that name. An
+# absent line is deliberately NOT spelled the same way as a state: every caller
+# must decide what to do about an instrument that went quiet, rather than
+# inheriting a default. That is the whole shape of the defect this bead fixes,
+# so the fix must not re-introduce it one layer up.
+# THE NAME GOES THROUGH THE ENVIRONMENT, NOT THROUGH `-v` (playhead-gjlp0 R1).
+# `awk -v x=VALUE` runs VALUE through ESCAPE PROCESSING, so a display name
+# containing a backslash arrives as something else and matches nothing.
+# Measured: `a\b name` is present in the file, `-v` reports NO-STATE for it and
+# `ENVIRON` reports PASSED. NO-STATE lands in the `unjudged` arm, so such an
+# expectation would report VOID on every run for ever — the scorer resolved it
+# perfectly and only this reader could not see it, which is this bead's own
+# defect shape between two readers of one file. No entry in MUTATIONS carries a
+# backslash today; a Swift Testing display name may.
+state_of() {
+  MB_WANT="$2" awk -F'\t' \
+    '$1 !~ /^#/ && $2 == ENVIRON["MB_WANT"] { print $1; found = 1; exit } END { exit !found }' "$1"
+}
+
+# One `#`-prefixed header field from the scorer's output file, or "".
+#
+# `-v` here and ENVIRON in `state_of` / `print_evidence`, and the difference is
+# NOT meaningful — which is worth a line, because R1 changed those two after
+# `-v` mangled a display name and a reader finding the third spelling would
+# reasonably conclude something. `-v` escape-processes its value; the values
+# there are TEST NAMES and mutation names, which come from the MUTATIONS table
+# and may legally contain a backslash. The value here is a FIELD NAME, supplied
+# by this script as a literal (`failures`), and there are no others. If a caller
+# ever passes a field name it did not spell itself, this becomes the same bug.
+scored_field() {
+  awk -F'\t' -v key="#$2" '$1 == key { print $2; exit }' "$1"
+}
+
+# Print where THIS mutation's verdict came from. Called for every verdict that
+# is not a plain KILL, because those are the ones somebody comes back to.
+#
+# AND IT SAYS SO WHEN THERE IS NONE. The first cut printed NOTHING for a
+# mutation with no evidence line — every ERROR raised before scoring: an anchor
+# that did not apply, a batch that never built, a batch whose artifacts could
+# not be read. The table is the part that gets quoted (that is why the run stamp
+# is repeated at its foot), so a row with no path under it is a row whose reader
+# has nowhere to go, and a MISSING line and a line saying "none" are two
+# different claims that must not be spelled the same way — which is this whole
+# bead in one function.
+#
+# `MB_EV_NAME` through the environment rather than `awk -v`: see `state_of`.
+# Mutation names are `[A-Z0-9]+` today, so nothing is escaped either way; two
+# spellings of one idiom is how the next reader concludes the difference matters.
+print_evidence() {
+  if MB_EV_NAME="$1" awk -F'\t' '$1 == ENVIRON["MB_EV_NAME"] {
+      printf "%-16s evidence: %s\n", "", $2
+      if ($3 != "" && $3 != "-") printf "%-16s           %s\n", "", $3
+      found = 1
+      exit
+    } END { exit !found }' "$EVIDENCE"; then
+    return 0
+  fi
+  printf '%-16s evidence: NONE — this mutation never reached a scored test run\n' ""
+  printf '%-16s           (the run kept its work dir: %s)\n' "" "$WORK"
+}
+
+# THE RUN-LEVEL BUNDLE FAULT, SAID IN WHICHEVER EPILOGUE IS PRINTING
+# (playhead-gjlp0 R2, extended at R3).
+#
+# R2 attached this to the SURVIVED epilogue, because that was the sentence
+# printed without checking. R3 found the DIRECTION matters more elsewhere. A
+# console-only SURVIVED still rests on a positive `✔` — the weaker instrument
+# making the same claim. A console-only VOID or ERROR may be the instrument
+# INVENTING the silence it reports: playhead-t53a measured 80 of 87 reported
+# casualties across 27 crash-free full-plan logs to be verdicts the console
+# parser could not read, and a severed START line makes a test invisible in
+# both directions. The VOID epilogue was telling a reader to re-run and, if it
+# recurs, to suspect the mutation of killing the test host — the wrong thing to
+# chase on a run whose bundle simply never arrived.
+#
+# The opening line is deliberately identical in all three: it is what a reader
+# greps for, and it is what the R2 rail asserts.
+console_only_note() {
+  [ "$CONSOLE_ONLY" -eq 1 ] || return 0
+  echo "AND AT LEAST ONE RUN BEHIND THIS TABLE HAD NO .xcresult BUNDLE — the block" >&2
+  echo "above names which, and the baseline reaches that arm as well as any batch." >&2
+  # Named here as well as in the block above, because on a run where the fault
+  # is systemic that block is one paragraph per batch and this is the foot of
+  # the output (playhead-gjlp0 R5).
+  echo "    scored off the CONSOLE alone: $CONSOLE_ONLY_WHICH" >&2
+  printf '%s\n' "$1" >&2
+  echo "Find out why the bundle is missing: either PLAYHEAD_RESULT_BUNDLE is not" >&2
+  echo "reaching fast-gate, or xcodebuild died before it could write one." >&2
 }
 
 # ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 ONLY=""
+ONLY_SERIES=""
 ONLY_BATCH=""
 LIST_ONLY=0
 DRY_RUN=0
@@ -28030,6 +30643,15 @@ while [ $# -gt 0 ]; do
     --list)    LIST_ONLY=1; shift ;;
     --dry-run) DRY_RUN=1; shift ;;
     --only)  ONLY="$2"; shift 2 ;;
+    --series)
+      # An EXPLICIT empty string must not read as "no filter". `set -u` catches
+      # a MISSING value; it cannot catch `--series ""`, which would silently
+      # select the entire battery — about 1,500 batches — instead of refusing.
+      if [ -z "$2" ]; then
+        echo "mutation-battery: --series needs a non-empty prefix" >&2
+        exit 2
+      fi
+      ONLY_SERIES="$2"; shift 2 ;;
     --batch) ONLY_BATCH="$2"; shift 2 ;;
     -h|--help)
       # Print the whole header block and stop at the first non-comment line.
@@ -28129,12 +30751,77 @@ for rec in "${MUTATIONS[@]}"; do
   name="$(rec_name "$rec")"
   batch="$(rec_batch "$rec")"
   if [ -n "$ONLY" ] && [ "$name" != "$ONLY" ]; then continue; fi
+  # playhead-4xmz: `--series DW` selects every mutation whose NAME starts with
+  # the prefix. It exists because `--only` is exact and the baseline is re-run
+  # on EVERY invocation — a 24-mutant series driven one `--only` at a time pays
+  # ~3 minutes of redundant baseline per mutant, which was 72 minutes of the
+  # first attempt at this bead's ledger.
+  #
+  # IT CANNOT DROP A SERIES' VACUITY CONTROL — but NOT "by construction", which
+  # is what this comment claimed on its first cut and is false: `--series DW0`
+  # selects DW01…DW09 and not DW99, and such a run exits 0 where the whole
+  # series exits 1, because the control legitimately survives. Dropping a
+  # control turns a red run GREEN. What actually stops it is the explicit
+  # refusal below the SELECTED loop.
+  if [ -n "$ONLY_SERIES" ]; then
+    case "$name" in
+      "$ONLY_SERIES"*) : ;;
+      *) continue ;;
+    esac
+  fi
   if [ -n "$ONLY_BATCH" ] && [ "$batch" != "$ONLY_BATCH" ]; then continue; fi
   SELECTED+=("$rec")
 done
 if [ "${#SELECTED[@]}" -eq 0 ]; then
   echo "mutation-battery: nothing selected" >&2
   exit 2
+fi
+
+# playhead-4xmz: A SELECTION THAT WOULD DROP A SERIES' VACUITY CONTROL GETS THE
+# CONTROL APPENDED, rather than being refused.
+#
+# WHY IT MATTERS AT ALL: a run without the control cannot distinguish "every
+# mutant died" from "the focused suites fail on anything", and — the direction
+# that bites — it exits 0 where the whole series exits 1, because a control
+# legitimately SURVIVES. `--series DW0` selects DW01..DW09 and not DW99;
+# `--batch 1477` and `--only DW07` each select one mutant and no control.
+# DROPPING A CONTROL TURNS A RED RUN GREEN. CLAUDE.md records the R-engine
+# batteries closing exactly this hole (playhead-o89d R5).
+#
+# WHY APPEND RATHER THAN REFUSE, which is what R1 shipped and R3 measured: a
+# refusal made `--batch <id>` exit 2 for 303 of 805 batch ids across 24 series
+# that never asked for it, deleting the per-batch re-run recipe this script's
+# own USAGE documents. Appending preserves every existing invocation and costs
+# one extra batch. It is also what the R engine does.
+#
+# The first cut of this claimed the property held "by construction" because a
+# control is named after its series. That is true of `--series DW` and false of
+# every other spelling, which is the whole reason this block exists.
+if [ -n "$ONLY" ] || [ -n "$ONLY_SERIES" ] || [ -n "$ONLY_BATCH" ]; then
+  for rec in "${MUTATIONS[@]}"; do
+    ctl_name="$(rec_name "$rec")"
+    case "$ctl_name" in
+      *99) ;;
+      *) continue ;;
+    esac
+    ctl_series="${ctl_name%99}"
+    touches=0
+    holds_control=0
+    for sel in "${SELECTED[@]}"; do
+      sel_name="$(rec_name "$sel")"
+      case "$sel_name" in
+        "$ctl_series"*) touches=1 ;;
+      esac
+      [ "$sel_name" = "$ctl_name" ] && holds_control=1
+    done
+    if [ "$touches" -eq 1 ] && [ "$holds_control" -eq 0 ]; then
+      echo "mutation-battery: this selection covers part of the $ctl_series series without its"
+      echo "  vacuity control $ctl_name, so $ctl_name is APPENDED. A run without it cannot tell"
+      echo "  'every mutant died' from 'the suites fail on anything', and it exits 0 where the"
+      echo "  whole series exits 1."
+      SELECTED+=("$rec")
+    fi
+  done
 fi
 
 # Batch ids, in first-seen order
@@ -28150,8 +30837,24 @@ done
 
 RESULTS="$WORK/results"
 : >"$RESULTS"
+# name<TAB>log<TAB>bundle — where the evidence for each mutation's verdict is.
+# The table prints it for every verdict that is not a plain KILL, so nobody has
+# to go looking for `batch-<N>.log` under /private/tmp, which is where a
+# checker finds another bead's run of the same batch number (playhead-8cjo).
+EVIDENCE="$WORK/evidence"
+: >"$EVIDENCE"
 BUILD_COUNT=0
 FATAL=0
+# Set when ANY batch in this run was scored without its .xcresult bundle
+# (playhead-gjlp0 R2). See `note_bundle_presence`: the battery asks fast-gate
+# for a bundle on every run, so an absent one is an instrument fault rather
+# than a mode, and the SURVIVED epilogue at the foot of this script used to
+# assert the bundle was the verdict source unconditionally.
+CONSOLE_ONLY=0
+# WHICH runs, in order — "the baseline", "batch 7". The flag alone cannot tell
+# a baseline that lost its bundle from a batch that did, and the SURVIVED
+# epilogue was making a claim that needs exactly that distinction (R5).
+CONSOLE_ONLY_WHICH=""
 # Cleared by `restore_and_verify` and never re-set; see the note at the final
 # restore for why a repaired tree must not un-fail the run.
 RESTORE_OK=1
@@ -28186,11 +30889,27 @@ echo
 if [ "$DRY_RUN" -eq 0 ] && [ "${PLAYHEAD_MB_SKIP_BASELINE:-0}" != "1" ]; then
   echo "=== baseline: focused suites on UNMUTATED sources ==="
   BASE_LOG="$WORK/baseline.log"
-  run_focused "$BASE_LOG"
+  BASE_BUNDLE="$WORK/baseline.xcresult"
+  BASE_NAMES="$WORK/baseline-expect.txt"
+  BASE_OUT="$WORK/baseline-outcomes.txt"
+  : >"$BASE_NAMES"
+  for rec in "${SELECTED[@]}"; do
+    exp="$(rec_expect "$rec")"
+    OLDIFS="$IFS"; IFS=';'
+    for want in $exp; do
+      IFS="$OLDIFS"
+      printf '%s\n' "$want" >>"$BASE_NAMES"
+      IFS=';'
+    done
+    IFS="$OLDIFS"
+  done
+  # The freshness floor. Captured immediately before the run so it is a claim
+  # about THIS INVOCATION, not merely about this run — see mutation_verdict.py.
+  BASE_SINCE="$(date +%s)"
+  run_focused "$BASE_LOG" "$BASE_BUNDLE"
   BASE_RC=$?
   BUILD_COUNT=$((BUILD_COUNT + 1))
-  last_attempt "$BASE_LOG" >"$BASE_LOG.last"
-  if ! grep -q "Test run with" "$BASE_LOG.last"; then
+  if ! last_attempt_ran_tests "$BASE_LOG"; then
     # playhead-pu7e: this used to print "the baseline did not run tests", which
     # is a claim ABOUT THE TREE, and then grep `error:|BUILD FAILED|Killed: 9`.
     # A concurrent battery matches none of those and a wedged simulator matches
@@ -28200,28 +30919,155 @@ if [ "$DRY_RUN" -eq 0 ] && [ "${PLAYHEAD_MB_SKIP_BASELINE:-0}" != "1" ]; then
     KEEP_WORK=1
     exit 2
   fi
-  extract_failures "$BASE_LOG.last" >"$WORK/baseline-failures.txt"
-  if [ -s "$WORK/baseline-failures.txt" ]; then
+
+  note_bundle_presence "$BASE_BUNDLE" "the baseline"
+  score_batch "$BASE_LOG" "$BASE_RC" "$BASE_SINCE" "$BASE_NAMES" "$BASE_OUT" "$BASE_BUNDLE"
+  BASE_SCORE_RC=$?
+  if [ "$BASE_SCORE_RC" -ne 0 ] && [ "$BASE_SCORE_RC" -ne 3 ]; then
+    echo "mutation-battery: the baseline's artifacts could not be READ (see above)." >&2
+    echo "Nothing below this line is a verdict about anything." >&2
+    KEEP_WORK=1
+    exit 2
+  fi
+  if [ "$BASE_SCORE_RC" -eq 3 ]; then
+    # playhead-gjlp0. A baseline batch that lost its host tells you nothing
+    # about whether the suites are green, and a run that proceeds from it
+    # measures every mutation against an unknown. The remedy is to run it
+    # again, so say that rather than implicating the tree.
+    echo "mutation-battery: THE BASELINE BATCH IS VOID — it produced no usable verdict." >&2
+    sed -n 's/^#reason\t/    * /p' "$BASE_OUT" >&2
+    echo "This is not a claim about the tree, the anchors or the expectations." >&2
+    # THE REMEDY DEFERS TO THE REASON ABOVE, and until playhead-gjlp0 R5 it did
+    # not. This arm said "the suites were never judged. Re-run." flat, two lines
+    # under a reason that can read `RE-RUNNING WILL NOT CHANGE IT` — two
+    # contradictory instructions in one output, which is what R2 closed for the
+    # failure count and R4 closed for the BATCH epilogue and left here. Driven:
+    # a baseline bundle carrying an unrecognised result string printed both.
+    # "The suites were never judged" is also false for that reason: they WERE
+    # judged, in a word this parser cannot read.
+    echo "The remedy is USUALLY to run it again — READ THE REASON(S) ABOVE FIRST." >&2
+    echo "One of them states outright that re-running will NOT change it, and no" >&2
+    echo "number of re-runs will: it is gate_baseline.py's XCRESULT_* vocabulary" >&2
+    echo "that needs the new spelling, not the box that needs another try." >&2
+    echo "Where re-running IS the remedy and it recurs, read the log:" >&2
+    echo "    $BASE_LOG" >&2
+    KEEP_WORK=1
+    exit 2
+  fi
+
+  # `scored_field` prints "" both for "the field says zero is not what it says"
+  # and for "there is no such field", and the test below reads `""` as
+  # NOT-ZERO — i.e. as a RED TREE. That is a claim about the codebase produced
+  # by an instrument that went quiet, and its remedy ("fix the tree") is
+  # unactionable because there would be no failures listed under it. So the
+  # ABSENCE gets its own arm, and it names the FILE rather than the tree.
+  BASE_FAILURES="$(scored_field "$BASE_OUT" failures)"
+  case "$BASE_FAILURES" in
+    ''|*[!0-9]*)
+      echo "mutation-battery: the scorer wrote no usable '#failures' count for the" >&2
+      echo "baseline (read: '$BASE_FAILURES'). That is a fault in the INSTRUMENT, not" >&2
+      echo "a finding about the tree — scripts/mutation_verdict.py and this script" >&2
+      echo "disagree about the outcomes-file format. Nothing below would be a verdict." >&2
+      echo "    $BASE_OUT" >&2
+      KEEP_WORK=1
+      exit 2 ;;
+  esac
+  if [ "$BASE_FAILURES" != "0" ]; then
     echo "mutation-battery: the focused suites are RED before any mutation." >&2
-    sed 's/^/    ✘ /' "$WORK/baseline-failures.txt" >&2
+    sed -n 's/^#failure\t/    ✘ /p' "$BASE_OUT" >&2
     echo "Every mutation naming one of those tests would be credited KILLED for" >&2
     echo "a reason that has nothing to do with the mutation. Fix the tree first." >&2
     KEEP_WORK=1
     exit 2
   fi
-  # Every expectation must NAME A TEST THAT ACTUALLY RAN. Checked here, on the
-  # one build that is already being spent, so a mis-typed or mis-split
+
+  # A DENIED RESOURCE IS A RED TEST THAT `#failures` DOES NOT COUNT, AND THIS
+  # BEAD MADE THE BASELINE STOP SEEING IT (playhead-gjlp0 R3).
+  #
+  # `gate_baseline` routes a resource denial out of `failures` and into its own
+  # category, on playhead-s34ux's rule that a denial names the BOX rather than
+  # the code. That rule is right and is kept. What it costs HERE is that the
+  # count above reads 0 for a baseline whose log carries `✘ … failed` lines, so
+  # the run printed `baseline green` and went on to score mutations. DRIVEN,
+  # both ways, on one denied test and one passing expectation:
+  #
+  #   pre-bead (`git show a82e52a9:`)  rc 2, "the focused suites are RED before
+  #                                    any mutation", the test named
+  #   this bead as it stood            "baseline green", then M05 SURVIVED over
+  #                                    `observed failures (ALL of them, 0)`
+  #
+  # It is refused rather than merely reported, because the tolerance is not
+  # symmetric: the per-test rule is UNANIMITY, so a test that records one
+  # CANTOPEN and one genuine assertion stays a FAILURE — on a box that is
+  # denying descriptors to the focused suites, the next mutation's KILL may be
+  # the box rather than the edit, and that is the false-KILL direction this
+  # file calls silent and indistinguishable from success.
+  #
+  # The REMEDY is the thing the pre-bead message got wrong. "Fix the tree
+  # first" is unactionable for a denial; re-running is the honest advice, which
+  # is why this is its own arm rather than a widening of the count above.
+  BASE_DENIED="$(scored_field "$BASE_OUT" resource)"
+  case "$BASE_DENIED" in
+    ''|*[!0-9]*)
+      # Same arm, same reason, as the `#failures` guard above: an absence is
+      # not a reading. A scorer that writes no `#resource` count disagrees with
+      # this script about their shared file format, and the numeric test below
+      # would read "" as NOT ZERO.
+      echo "mutation-battery: the scorer wrote no usable '#resource' count for the" >&2
+      echo "baseline (read: '$BASE_DENIED'). That is a fault in the INSTRUMENT, not" >&2
+      echo "a finding about the tree — scripts/mutation_verdict.py and this script" >&2
+      echo "disagree about the outcomes-file format. Nothing below would be a verdict." >&2
+      echo "    $BASE_OUT" >&2
+      KEEP_WORK=1
+      exit 2 ;;
+  esac
+  if [ "$BASE_DENIED" != "0" ]; then
+    echo "mutation-battery: $BASE_DENIED baseline test(s) were DENIED A RESOURCE." >&2
+    sed -n 's/^#denied\t/    ⚠ /p' "$BASE_OUT" >&2
+    cat >&2 <<'MSG'
+Those tests went RED on the console and are NOT in the failure count, because
+gate_baseline classifies a denied resource as a fact about the BOX rather than
+about the code (playhead-s34ux). That makes them useless as a control: the
+per-test rule is UNANIMITY, so the next batch's genuine-looking failure may be
+one denial plus one assertion, and it would be credited to the mutation.
+This is NOT a claim about the tree, the anchors or the expectations. Re-run.
+MSG
+    KEEP_WORK=1
+    exit 2
+  fi
+
+  # Every expectation must NAME A TEST THAT WAS ACTUALLY JUDGED. Checked here,
+  # on the one build that is already being spent, so a mis-typed or mis-split
   # expectation costs zero mutation builds instead of printing SURVIVED.
-  extract_ran "$BASE_LOG.last" >"$WORK/baseline-ran.txt"
+  #
+  # playhead-gjlp0 widened this from "named a test that STARTED" to "named a
+  # test that PASSED". The old form let a rail that never reports — because its
+  # host dies under it every time — pass the preflight and then score SURVIVED
+  # for every mutation that names it.
+  #
+  # PASSED, not "reached a verdict", and the two are not the same thing — this
+  # comment said the weaker one until playhead-gjlp0 R5 while the `case` below
+  # admitted PASSED alone. A baseline FAILED cannot actually reach here (the
+  # `#failures` guard above exits first, and so do the `#resource` and VOID
+  # guards), so the arm's own message enumerates only the states that CAN:
+  # started-and-never-judged, skipped, denied.
   UNKNOWN=""
+  UNJUDGED=""
   for rec in "${SELECTED[@]}"; do
     exp="$(rec_expect "$rec")"
     OLDIFS="$IFS"; IFS=';'
     for want in $exp; do
       IFS="$OLDIFS"
-      grep -Fxq "$want" "$WORK/baseline-ran.txt" || \
-        UNKNOWN="${UNKNOWN}    $(rec_name "$rec") expects: ${want}
-"
+      base_state="$(state_of "$BASE_OUT" "$want")" || base_state="(the scorer wrote no state for it)"
+      case "$base_state" in
+        PASSED) : ;;
+        ABSENT)
+          UNKNOWN="${UNKNOWN}    $(rec_name "$rec") expects: ${want}
+" ;;
+        *)
+          UNJUDGED="${UNJUDGED}    $(rec_name "$rec") expects: ${want}  [${base_state}]
+" ;;
+      esac
       IFS=';'
     done
     IFS="$OLDIFS"
@@ -28238,6 +31084,23 @@ MSG
     KEEP_WORK=1
     exit 2
   fi
+  if [ -n "$UNJUDGED" ]; then
+    echo "mutation-battery: an expectation names a test that RAN and was never JUDGED." >&2
+    printf '%s' "$UNJUDGED" >&2
+    cat >&2 <<'MSG'
+It started and produced no verdict, or was skipped, or was denied a resource.
+Either way nothing about it is evidence: on the UNMUTATED tree it must PASS
+before a mutation may be scored against it. A rail whose host dies under it
+every time would otherwise be credited SURVIVED for every mutation that names
+it — which is precisely the defect playhead-gjlp0 fixed one layer down.
+MSG
+    KEEP_WORK=1
+    exit 2
+  fi
+  # The baseline is green and every expectation is a test that PASSED. Nothing
+  # here is evidence any more, so the bundle goes; the log stays, because it is
+  # what `mb_diagnose_no_tests` sends a reader to.
+  drop_bundle "$BASE_BUNDLE"
   echo "  baseline green"
   echo
 fi
@@ -28292,62 +31155,246 @@ for b in "${BATCH_IDS[@]}"; do
   fi
 
   LOG="$WORK/batch-$b.log"
+  BUNDLE="$WORK/batch-$b.xcresult"
+  NAMES="$WORK/expect-$b.txt"
+  OUTCOMES="$WORK/outcomes-$b.txt"
+  : >"$NAMES"
+  for rec in "${MEMBERS[@]}"; do
+    exp="$(rec_expect "$rec")"
+    OLDIFS="$IFS"; IFS=';'
+    for want in $exp; do
+      IFS="$OLDIFS"
+      printf '%s\n' "$want" >>"$NAMES"
+      IFS=';'
+    done
+    IFS="$OLDIFS"
+  done
   echo "  running focused suites…"
-  run_focused "$LOG"
+  # See the baseline block: the floor is captured HERE, not at run start.
+  BATCH_SINCE="$(date +%s)"
+  run_focused "$LOG" "$BUNDLE"
   RC=$?
   BUILD_COUNT=$((BUILD_COUNT + 1))
 
-  last_attempt "$LOG" >"$LOG.last"
-  if ! grep -q "Test run with" "$LOG.last"; then
+  if ! last_attempt_ran_tests "$LOG"; then
     # playhead-pu7e: "(build failure?)" was a guess printed as a finding. See
     # the baseline branch above.
     mb_diagnose_no_tests "$LOG" "$RC" "batch $b"
     for rec in "${MEMBERS[@]}"; do
       echo "$(rec_name "$rec")|ERROR|batch did not build/run — see the DIAGNOSIS above" >>"$RESULTS"
+      # The bundle only if it EXISTS, and only THEN — the same conditional the
+      # two arms below already carry. This one hard-coded `-`, so a batch that
+      # reached xcodebuild and wrote a bundle before failing had its evidence
+      # recorded as absent and `print_evidence` could never name it. A line
+      # that says a thing is not there, when it is, is the same defect as a
+      # line that says it is there when it is not (playhead-gjlp0 R1).
+      if [ -d "$BUNDLE" ]; then
+        printf '%s\t%s\t%s\n' "$(rec_name "$rec")" "$LOG" "$BUNDLE" >>"$EVIDENCE"
+      else
+        printf '%s\t%s\t-\n' "$(rec_name "$rec")" "$LOG" >>"$EVIDENCE"
+      fi
     done
     FATAL=1
     restore_and_verify "batch $b" || break
     continue
   fi
 
-  FAILED_LIST="$WORK/failed-$b.txt"
-  RAN_LIST="$WORK/ran-$b.txt"
-  extract_ran "$LOG.last" >"$RAN_LIST"
-  extract_failures "$LOG.last" >"$FAILED_LIST"
-  echo "  observed failures:"
-  if [ -s "$FAILED_LIST" ]; then
-    sed 's/^/    ✘ /' "$FAILED_LIST"
-  else
-    echo "    (none)"
-  fi
+  note_bundle_presence "$BUNDLE" "batch $b"
+  echo "  scoring:"
+  score_batch "$LOG" "$RC" "$BATCH_SINCE" "$NAMES" "$OUTCOMES" "$BUNDLE" | sed 's/^/  /'
+  SCORE_RC="${PIPESTATUS[0]}"
+  BATCH_IS_VOID=0
+  case "$SCORE_RC" in
+    0) : ;;
+    3) BATCH_IS_VOID=1 ;;
+    *)
+      # The artifacts could not be read at all — a stale or missing log, an
+      # unreadable bundle. That is not a verdict about any mutation either, and
+      # it is ERROR rather than VOID because re-running will not fix it.
+      for rec in "${MEMBERS[@]}"; do
+        echo "$(rec_name "$rec")|ERROR|the batch could not be SCORED (see CANNOT EVALUATE above)" >>"$RESULTS"
+        if [ -d "$BUNDLE" ]; then
+          printf '%s\t%s\t%s\n' "$(rec_name "$rec")" "$LOG" "$BUNDLE" >>"$EVIDENCE"
+        else
+          printf '%s\t%s\t-\n' "$(rec_name "$rec")" "$LOG" >>"$EVIDENCE"
+        fi
+      done
+      FATAL=1
+      restore_and_verify "batch $b" || break
+      continue ;;
+  esac
+  BATCH_VOID_WHY="$(sed -n 's/^#reason\t/; /p' "$OUTCOMES" | tr -d '\n' | sed 's/^; //')"
 
+  # EVERY FAILURE THE BATCH PRODUCED, BY NAME — not only the expected ones.
+  #
+  # The pre-playhead-gjlp0 battery printed this block, and the first cut of the
+  # fix dropped it: the scorer reports a COUNT ("3 failed") and names only the
+  # tests some mutation declared. That is a real loss in the direction that
+  # matters most here. `docs/investigations/playhead-8cjo-mutation-ledger.md`
+  # opens with it — "A KILLED column is not evidence… a mutant that reports
+  # KILLED while killing a DIFFERENT set is a false credit" — and the only way
+  # to see that is the list. A mutation that reddens six tests and declares one
+  # is a finding about the mutation; with a count alone it reads as a clean kill.
+  #
+  # The count goes first so the magnitude is visible before the list, which a
+  # crash-looping batch can make long.
+  #
+  # `(none)` IS A MEASUREMENT AND IT IS ONLY EARNED BY A STATED ZERO. If the
+  # scorer wrote no `#failures` field, an empty list means "the instrument said
+  # nothing", which is a different claim and must not be spelled the same way.
+  # The baseline has its own arm for this and refuses; a batch can reach here
+  # with the baseline skipped, so it says so rather than printing `(none)`.
+  BATCH_FAILURES="$(scored_field "$OUTCOMES" failures)"
+  case "$BATCH_FAILURES" in
+    ''|*[!0-9]*)
+      echo "  observed failures: UNKNOWN — the scorer wrote no '#failures' count."
+      echo "    Nothing below is a measurement of this batch. See $OUTCOMES" ;;
+    *)
+      # AND THE COUNT MUST AGREE WITH THE LIST (playhead-gjlp0 R2). R1 armed the
+      # direction where the scorer states no count and the list is empty; this
+      # is its mirror — a stated count of N over an empty list printed `(none)`
+      # under a header saying N, which is two contradictory readings of one file
+      # with nothing to tell a reader which to believe. `(none)` is earned by a
+      # STATED ZERO and by nothing else.
+      BATCH_FAILURE_LINES="$(sed -n 's/^#failure\t.*$/x/p' "$OUTCOMES" | wc -l | tr -d ' ')"
+      echo "  observed failures (ALL of them, $BATCH_FAILURES):"
+      if [ "$BATCH_FAILURE_LINES" != "$BATCH_FAILURES" ]; then
+        echo "    THE COUNT AND THE LIST DISAGREE — '#failures' says $BATCH_FAILURES," >&2
+        echo "    and there are $BATCH_FAILURE_LINES '#failure' line(s). Neither is a" >&2
+        echo "    measurement of this batch: scripts/mutation_verdict.py and this script" >&2
+        echo "    disagree about the outcomes-file format. See $OUTCOMES" >&2
+      fi
+      if [ "$BATCH_FAILURE_LINES" -eq 0 ]; then
+        [ "$BATCH_FAILURES" = "0" ] && echo "    (none)"
+      else
+        sed -n 's/^#failure\t/    ✘ /p' "$OUTCOMES"
+      fi ;;
+  esac
+
+  # AND THE COUNT ABOVE IS NOT EVERY RED TEST (playhead-gjlp0 R3). A denied
+  # resource is `✘ … failed` on the console and is deliberately not a failure
+  # to `gate_baseline` (playhead-s34ux), so a batch that lost five tests to
+  # `SQLITE_CANTOPEN` printed `observed failures (ALL of them, 0)` and then
+  # `(none)`. That is the reading this block exists to prevent, one category
+  # over: the ledger this list feeds — `docs/investigations/
+  # playhead-8cjo-mutation-ledger.md` — is built on the OBSERVED VICTIM SET,
+  # and a mutation that denies a resource somewhere else reads as a clean kill.
+  #
+  # Reported beside the failures rather than folded into them, because the two
+  # are different claims and the remedies differ: a failure is about the EDIT,
+  # a denial is about the BOX and means re-run.
+  BATCH_DENIED="$(scored_field "$OUTCOMES" resource)"
+  case "$BATCH_DENIED" in
+    0) : ;;
+    ''|*[!0-9]*)
+      echo "  denied resources: UNKNOWN — the scorer wrote no '#resource' count."
+      echo "    The failure list above is not a census of the red tests. See $OUTCOMES" ;;
+    *)
+      echo "  ALSO DENIED A RESOURCE ($BATCH_DENIED) — red on the console, and NOT in the"
+      echo "  count above (playhead-s34ux: a denial names the BOX, not the code):"
+      sed -n 's/^#denied\t/    ⚠ /p' "$OUTCOMES" ;;
+  esac
+
+  BATCH_KEEP_EVIDENCE=0
   for rec in "${MEMBERS[@]}"; do
     name="$(rec_name "$rec")"
     expect="$(rec_expect "$rec")"
     missing=""
     never_ran=""
+    unjudged=""
     OLDIFS="$IFS"; IFS=';'
     for want in $expect; do
       IFS="$OLDIFS"
-      if ! grep -Fxq "$want" "$RAN_LIST"; then
-        # Not a survivor — the harness never asked the question. Kept separate
-        # from `missing` so the two are never conflated in the report.
-        never_ran="${never_ran}${never_ran:+ | }${want}"
-      elif ! grep -Fxq "$want" "$FAILED_LIST"; then
-        missing="${missing}${missing:+ | }${want}"
-      fi
+      # THE LADDER. Four arms, and each one is a DIFFERENT claim — the whole
+      # point of playhead-gjlp0 is that the old two-arm form spelled three of
+      # them the same way.
+      st="$(state_of "$OUTCOMES" "$want")" || st="NO-STATE"
+      case "$st" in
+        # A stated failure. The mutation was caught.
+        FAILED) : ;;
+        # A stated pass. THIS is what licences "still green" — nothing else.
+        PASSED) missing="${missing}${missing:+ | }${want}" ;;
+        # The harness never asked the question.
+        ABSENT) never_ran="${never_ran}${never_ran:+ | }${want}" ;;
+        # It ran and nobody judged it: NO-VERDICT, CRASHED, DENIED, SKIPPED —
+        # or NO-STATE, meaning the scorer itself wrote nothing for this name,
+        # which is the same class of silence one layer up and must not default.
+        *) unjudged="${unjudged}${unjudged:+ | }${want} [${st}]" ;;
+      esac
       IFS=';'
     done
     IFS="$OLDIFS"
-    if [ -n "$never_ran" ]; then
+    if [ "$BATCH_IS_VOID" -eq 1 ]; then
+      # THE BATCH OUTRANKS EVERY PER-TEST READING — including a FAILED one and
+      # including an ABSENT one. A host that died mid-batch can redden a test,
+      # and can swallow its `◇ started` line, for reasons that have nothing to
+      # do with the mutation. playhead-4xmz measured exactly that: a mutant
+      # that TRAPPED took the host down, and whether its declared victim's
+      # failure line flushed before the crash became the whole verdict.
+      #
+      # WHY THAT IS RIGHT EVEN WHEN IT THROWS A REAL KILL AWAY (playhead-gjlp0
+      # R5 — four rounds took this arm order on trust, so the argument is
+      # written down rather than waved at).
+      #
+      # The case it costs is CONSTRUCTIBLE, not hypothetical: mutation M
+      # reddens its declared victim deterministically while a BATCH-MATE traps
+      # and takes the host down. M's real kill is discarded, both members
+      # report VOID, and re-running the whole batch reproduces it every time,
+      # because the trapping mutant traps every time. What the operator does is
+      # `--only M`: one build, M in a batch of its own, and the trap is not in
+      # it. (`--series` and `--batch` keep the pair together and will not help.)
+      #
+      # THE REASON IT IS RIGHT IS THE ASYMMETRY, NOT THE FREQUENCY. Discarding
+      # a real kill costs one scoped re-run and announces itself in the table.
+      # Crediting a kill off a batch whose host died is a FALSE KILL — CLAUDE.md
+      # calls that shape silent and indistinguishable from success — and it
+      # lands in the ledger under docs/investigations/ where the next reader
+      # takes it as evidence. The loud error is recoverable and the quiet one
+      # is not, so the order resolves toward the loud one.
+      #
+      # ABSENT loses to VOID for the same reason one step along: the baseline
+      # preflight has ALREADY proved this expectation names a test that PASSED
+      # on the unmutated tree, so on a void batch "no roster mentions it" is far
+      # more likely to be a start line the dead host never printed than a
+      # renamed test — and ERROR's remedy ("fix the EDIT") would send the reader
+      # to change an expectation that is correct.
+      echo "$name|VOID|the batch produced no usable verdict${BATCH_VOID_WHY:+ — $BATCH_VOID_WHY}" >>"$RESULTS"
+      BATCH_KEEP_EVIDENCE=1
+    elif [ -n "$never_ran" ]; then
       echo "$name|ERROR|expected test never ran (';' in the name? renamed? suite not in FOCUSED_SUITES?): $never_ran" >>"$RESULTS"
       FATAL=1
+      BATCH_KEEP_EVIDENCE=1
+    elif [ -n "$unjudged" ]; then
+      echo "$name|VOID|the expected test reached NO VERDICT: $unjudged" >>"$RESULTS"
+      BATCH_KEEP_EVIDENCE=1
     elif [ -z "$missing" ]; then
       echo "$name|KILLED|" >>"$RESULTS"
     else
       echo "$name|SURVIVED|$missing" >>"$RESULTS"
+      BATCH_KEEP_EVIDENCE=1
+    fi
+    # Where the evidence for THIS verdict lives, recorded per mutation so the
+    # results table can print it. A SURVIVED verdict that does not name its own
+    # log sends the next reader searching /private/tmp by batch number, and
+    # batch numbers repeat across beads (playhead-8cjo: a checker verified
+    # today's control against a three-day-old log and reported OK).
+    # The bundle only if it EXISTS. Printing a path to something that is not
+    # there is the same defect one layer up: a line that names a thing, read as
+    # evidence that the thing is there.
+    if [ -d "$BUNDLE" ]; then
+      printf '%s\t%s\t%s\n' "$name" "$LOG" "$BUNDLE" >>"$EVIDENCE"
+    else
+      printf '%s\t%s\t%s\n' "$name" "$LOG" "-" >>"$EVIDENCE"
     fi
   done
+
+  # A batch of nothing but KILLs is not evidence of anything anybody will come
+  # back to, and a focused .xcresult is tens of megabytes on a box whose gate
+  # refuses to start below 13.5 GiB. Keep the bundle exactly when a verdict
+  # might be questioned.
+  if [ "$BATCH_KEEP_EVIDENCE" -eq 0 ]; then
+    drop_bundle "$BUNDLE"
+  fi
 
   restore_and_verify "batch $b" || break
   echo
@@ -28373,24 +31420,34 @@ echo "================================ RESULTS ================================"
 printf '%-6s %-9s %s\n' "NAME" "VERDICT" "MUTATION"
 SURVIVORS=0
 ERRORS=0
+VOIDS=0
 while IFS='|' read -r name verdict detail; do
   printf '%-6s %-9s %s\n' "$name" "$verdict" "$(describe_mutation "$name")"
   case "$verdict" in
     SURVIVED) SURVIVORS=$((SURVIVORS + 1))
-              printf '%-16s still green: %s\n' "" "$detail" ;;
+              printf '%-16s still green: %s\n' "" "$detail"
+              print_evidence "$name" ;;
+    # playhead-gjlp0. NOT a survivor and NOT a kill: nothing judged the test,
+    # so the mutation has not been evaluated in either direction. Spelled with
+    # its own word because the whole defect this fixes was three different
+    # claims sharing one.
+    VOID)     VOIDS=$((VOIDS + 1))
+              printf '%-16s NO VERDICT: %s\n' "" "$detail"
+              print_evidence "$name" ;;
     ERROR)    ERRORS=$((ERRORS + 1))
-              printf '%-16s %s\n' "" "$detail" ;;
+              printf '%-16s %s\n' "" "$detail"
+              print_evidence "$name" ;;
   esac
 done <"$RESULTS"
 echo "-------------------------------------------------------------------------"
-printf 'builds: %d   wall clock: %dm%02ds   survivors: %d   errors: %d\n' \
-  "$BUILD_COUNT" "$((ELAPSED / 60))" "$((ELAPSED % 60))" "$SURVIVORS" "$ERRORS"
+printf 'builds: %d   wall clock: %dm%02ds   survivors: %d   voids: %d   errors: %d\n' \
+  "$BUILD_COUNT" "$((ELAPSED / 60))" "$((ELAPSED % 60))" "$SURVIVORS" "$VOIDS" "$ERRORS"
 # Repeated at the FOOT as well as the head: a collector that tails the table
 # would otherwise never see it, and the table is the part that gets quoted.
 printf 'run started %s   pid %d   argv: %s\n' \
   "$RUN_STARTED_HUMAN" "$$" "${INVOCATION_ARGV:-<none>}"
 
-if [ "$SURVIVORS" -gt 0 ] || [ "$ERRORS" -gt 0 ] || [ "$FATAL" -eq 1 ]; then
+if [ "$SURVIVORS" -gt 0 ] || [ "$VOIDS" -gt 0 ] || [ "$ERRORS" -gt 0 ] || [ "$FATAL" -eq 1 ]; then
   KEEP_WORK=1
 fi
 
@@ -28400,7 +31457,47 @@ if [ "$RESTORE_OK" -eq 0 ]; then
 fi
 if [ "$ERRORS" -gt 0 ] || [ "$FATAL" -eq 1 ]; then
   echo "One or more mutations could not be evaluated. Fix the EDIT, not the expectation." >&2
+  console_only_note "An 'expected test never ran' from such a run may be the instrument rather
+than the table: a START line the console lost makes a test invisible in both
+directions (playhead-t53a). Anchor drift and a build failure are unaffected —
+the DIAGNOSIS beside each row says which of them this was."
   exit 3
+fi
+if [ "$VOIDS" -gt 0 ]; then
+  cat >&2 <<'MSG'
+
+A VOID IS NOT A VERDICT. Either the expected test produced no result at all —
+the host died under it, it was skipped, or it was denied a resource — or the
+BATCH lost its test host, in which case no result from it is evidence about any
+mutation, INCLUDING a failure (playhead-4xmz: a trapping mutant reddens tests
+for reasons that have nothing to do with the mutation). Read the detail beside
+each VOID above for which of the two it was. Either way the mutation was never
+evaluated in EITHER direction: do not record it as KILLED and do not chase it as
+a coverage hole.
+
+The remedy is USUALLY to run that batch again — UNLESS THE ROW SAYS OTHERWISE,
+and TWO shapes do. A batch whose .xcresult used a result string the parser
+cannot read says so on its own reason line and says re-running will not change
+it (playhead-gjlp0 R4). And an expectation whose state reads [SKIPPED] did not
+run at all under the mutation, minutes after the baseline watched that same
+test PASS on the unmutated tree — so the MUTATION is the likeliest reason it
+skipped, and every re-run will skip it again (playhead-gjlp0 R5). That is a
+finding about the PAIRING: this rail cannot answer the question this mutant
+asks, and the fix is a different rail or a different mutant, never another run.
+Read the row before re-running; this paragraph is the general case, not an
+override of a stated reason.
+
+Where re-running IS the remedy: if it recurs, the mutation itself is probably
+killing the test host, which is a real finding about the mutation and not about
+the rail: split it away from the test that reaches the trap and record why the
+remaining rail has no mutant (playhead-4xmz's DW18 is the worked case).
+MSG
+  console_only_note "READ THAT BEFORE RE-RUNNING. A console-only reading is the one that
+MANUFACTURES a NO VERDICT — xcodebuild splices the app's own output through a
+verdict line and the console loses it, which is exactly why playhead-t53a moved
+the gate's census onto the bundle. A VOID from such a run may be the instrument
+rather than the host, and the advice above would send you after the wrong thing."
+  exit 5
 fi
 if [ "$SURVIVORS" -gt 0 ]; then
   cat >&2 <<'MSG'
@@ -28408,7 +31505,21 @@ if [ "$SURVIVORS" -gt 0 ]; then
 A SURVIVOR IS A COVERAGE HOLE. The defect above can be introduced with the
 focused suites still green. Write the test that rejects it — do not relax the
 expectation and do not delete the entry.
+
+Every SURVIVED above rests on a POSITIVE pass verdict for the named test
+(playhead-gjlp0) — the batch's log, and its .xcresult bundle when there is one,
+are printed beside each one. Absence of a failure line is no longer enough.
 MSG
+  # The sentence above used to say "read from the batch's own .xcresult bundle"
+  # unconditionally, and at least one run behind the table may have had none. A
+  # claim about where a verdict came from, printed without checking, in the one
+  # place a reader decides whether to trust a SURVIVED — this bead's own defect
+  # one layer out from the code it fixed.
+  console_only_note "A SURVIVED from any run named above came off the CONSOLE alone: still a
+positive \`✔\` rather than the pre-gjlp0 reading of silence, but the weaker
+instrument. If the only run named is THE BASELINE, the SURVIVED verdicts below
+still rest on their own batch's bundle. Read the batch log beside each SURVIVED
+before acting on it."
   exit 1
 fi
 if [ "$DRY_RUN" -eq 1 ]; then

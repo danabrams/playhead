@@ -463,6 +463,22 @@ actor DownloadManager {
     /// Cancellable journal tails for placed background artifacts. Cache
     /// deletion retires these before unlinking bytes so a recorder suspended
     /// before its durable append cannot publish a stale `.finalized` row.
+    ///
+    /// **THE WINDOW THIS PROTECTS WAS ~0 UNTIL playhead-4xmz AND IS NOW A STORE
+    /// ROUND-TRIP.** `workJournalRecorder` was a no-op in production, so the
+    /// tail returned immediately and the cancellation had nothing to race; it
+    /// now writes `download_work_journal` and can be suspended for as long as
+    /// the `AnalysisStore` actor is busy. NO production path retires today —
+    /// `removeCache` and `clearCache()` both have zero callers outside tests.
+    /// The paths that DO unlink bytes never enter this actor's retire at all —
+    /// Settings' bulk clear, and LRU `evictIfNeeded` (three sites inside this
+    /// actor, none outside it), which is safe from this race only because it
+    /// skips `bgInFlightEpisodes` (limit L-7 in
+    /// `DownloadWorkJournalLedger.swift`, filed as playhead-86sfq). The
+    /// behavioural rail for the race, exercised by tests, is
+    /// `BackgroundDownloadCompletionTests`'
+    /// `cacheDeletionRacingFinalizationDoesNotJournalSuccess`, which review 3
+    /// found is the only thing that catches a repair aimed at the wrong half.
     private struct BackgroundJournalFinalization {
         let id: UUID
         let task: Task<Void, Never>
@@ -568,8 +584,29 @@ actor DownloadManager {
     /// Holds a `Task`, not a flag: the joiner has to be able to WAIT for the
     /// answer and receive it. And the entry is dropped on BOTH outcomes — see
     /// ``backgroundSession(for:requestedBy:)`` — so a refusal is never cached.
+    ///
+    /// playhead-sdis: it now carries an IDENTITY beside the task, and that is
+    /// the whole point of this bead. A joiner gives up when the FIRST caller's
+    /// deadline fires and writes its own `background_download_drops` row, so ONE
+    /// daemon refusal mints N rows — and before this they shared no marker at
+    /// all, which made `count(*)` on `session_not_vended` a count of EPISODES
+    /// being read as a count of OUTAGES.
     private var _sessionCreationsInFlight:
-        [BackgroundSessionRole: Task<URLSession?, Never>] = [:]
+        [BackgroundSessionRole: SessionCreationCrossing] = [:]
+
+    /// One in-flight background-session construction crossing, and the identity
+    /// every caller that rides it records (playhead-sdis).
+    ///
+    /// The id is minted by the caller that STARTS the crossing and read from
+    /// this map by every caller that JOINS it, so all of them stamp the same
+    /// value. That equality is the measurement: N rows sharing one
+    /// `sessionCrossingId` are N episodes lost to ONE refusal, and N distinct
+    /// values are N refusals — a distinction `occurredAt` clustering can only
+    /// guess at, having no stated tolerance.
+    private struct SessionCreationCrossing {
+        let id: String
+        let task: Task<URLSession?, Never>
+    }
 
     #if DEBUG
     /// How many callers have reached the CROSSING DECISION — found no
@@ -604,14 +641,31 @@ actor DownloadManager {
     /// flip it without reaching into UserDefaults.
     private var useDualBackgroundSessions: Bool
 
-    /// Recorder injected by playhead-uzdq (or any test double) to emit
-    /// WorkJournal events from the download delegate callbacks. Defaults
-    /// to a no-op so 24cm can ship before uzdq lands.
+    /// Recorder for the work-journal events this actor and the force-quit
+    /// scan emit. Production passes
+    /// ``AnalysisStoreDownloadWorkJournalRecorder``, which writes
+    /// `download_work_journal`.
     ///
     /// Visibility is `internal` (not `private`) so the playhead-hyht
     /// force-quit scan extension in `ForceQuitResumeScan.swift` can emit
     /// preempted/failed rows without re-entering DownloadManager.swift.
-    internal var workJournalRecorder: WorkJournalRecording
+    ///
+    /// **THE DEFAULT IS STILL A NO-OP, AND FOR FOUR MONTHS PRODUCTION HELD IT**
+    /// (playhead-4xmz). `PlayheadRuntime` passed `invariantRecorder:` and later
+    /// `dropRecorder:` and never this, so every `recordFailed` /
+    /// `recordPreempted` / `recordFinalized` below went to a method whose body
+    /// is `{}` — the very state `NoopBackgroundDownloadDropRecorder`'s doc
+    /// comment names by example. A default no-op plus an intention is not a
+    /// mechanism. What stops it now is
+    /// `DownloadWorkJournalWiringSourceCanaryTests` plus
+    /// `download_work_journal_arming`, which makes the state visible on a
+    /// device pull rather than only in source.
+    ///
+    /// `let`, not `var`: no production or test site has ever assigned it after
+    /// init, and a post-init setter is precisely what does not run on the
+    /// sceneless relaunch these records matter most on — the same reason
+    /// ``dropRecorder`` and ``invariantRecorder`` are injected at construction.
+    internal let workJournalRecorder: WorkJournalRecording
 
     /// Delegate for background sessions. A single delegate instance
     /// serves all three identifier lanes — the session identifier is
@@ -729,13 +783,52 @@ actor DownloadManager {
     /// not run there.
     ///
     /// **A production manager holding the no-op is a defect.** It is not
-    /// hypothetical — ``workJournalRecorder`` above is in exactly that state:
-    /// its default is never replaced by `PlayheadRuntime`, so every
-    /// `recordFailed` this actor makes goes nowhere. What stops that here is
-    /// `BackgroundDownloadDropWiringSourceCanaryTests` plus the arming row the
-    /// ledger keeps, which makes the state visible on a device pull rather
-    /// than only in source.
+    /// hypothetical — ``workJournalRecorder`` above WAS in exactly that state
+    /// for four months: its default was never replaced by `PlayheadRuntime`,
+    /// so every `recordFailed` this actor made went nowhere. That is fixed
+    /// (playhead-4xmz) and the sentence is kept in the past tense rather than
+    /// deleted, because the argument for injecting at construction rests on it
+    /// having actually happened here. What stops it, in both cases, is a source
+    /// canary plus an arming row that makes the state visible on a device pull
+    /// rather than only in source.
     internal let dropRecorder: BackgroundDownloadDropRecording
+
+    /// playhead-sdis: WHICH PROCESS this is, stamped onto every
+    /// `background_download_drops` row and onto the arming row it increments.
+    ///
+    /// It is called a LAUNCH id because in production it is one: `PlayheadRuntime`
+    /// constructs exactly one `DownloadManager`, once, per process — the
+    /// property `BackgroundDownloadDropWiringSourceCanaryTests` pins, since
+    /// nothing at runtime can see it. Strictly it identifies this INSTANCE, and
+    /// that is the stronger of the two: a second manager in one process would be
+    /// a second independent recorder arming the ledger a second time, so giving
+    /// the two the same id would break `count(DISTINCT launchId) <= armedLaunches`
+    /// — which is exactly what a process-wide `static` would have done.
+    ///
+    /// Injectable so a test can pin an exact value; production must NOT pass one
+    /// (a constant here would make every launch on every device read as one),
+    /// and the canary pins that too.
+    internal let launchId: String
+
+    /// playhead-sdis: what this process knows about its OWN arming, stamped onto
+    /// every drop row it writes.
+    ///
+    /// `armedLaunches` is a COUNT with no recoverable membership, so it can say
+    /// how many launches were counting and can never say whether the launch that
+    /// wrote a given row was one of them. That gap is not hypothetical:
+    /// `AnalysisStore` opens LAZILY, so a DEGRADED launch — `openAtLaunch`
+    /// failed, `PlayheadRuntime`'s launch Task returned before `armDropLedger()`
+    /// — can still land a drop row through `insertBackgroundDownloadDrop`.
+    /// playhead-7dgx documented that and could not measure it. This is what the
+    /// row carries so it no longer has to be inferred.
+    ///
+    /// A NON-OPTIONAL `var` with a real starting value, not an optional: the
+    /// pre-arming state is a STATE (`notAttempted`) rather than an absence, and
+    /// an optional would make "nobody set this" and "arming has not run" the
+    /// same `nil` — the collapse this whole file exists to refuse. It is also
+    /// why it is not named `currentArmingState`: it is not a singleton standing
+    /// for a set, it is one process's one arming, which happens at most once.
+    private var dropLedgerArming: BackgroundDownloadDropLaunchArming = .notAttempted
 
     // MARK: - Streams
 
@@ -769,9 +862,11 @@ actor DownloadManager {
             @Sendable (InvariantViolation.Code, String) -> Void
         )? = nil,
         dropRecorder: BackgroundDownloadDropRecording =
-            NoopBackgroundDownloadDropRecorder()
+            NoopBackgroundDownloadDropRecorder(),
+        launchId: String = UUID().uuidString
     ) {
         self.dropRecorder = dropRecorder
+        self.launchId = launchId
         self.sessionIO = sessionIO
         self.enumerationIO = sessionIO.onItsOwnQueue(
             labelled: "\(sessionIO.queueLabel).enumeration"
@@ -1009,6 +1104,37 @@ actor DownloadManager {
     /// Wire up the analysis scheduler so downloads automatically enqueue jobs.
     func setAnalysisWorkScheduler(_ scheduler: AnalysisWorkScheduler) {
         self.analysisWorkScheduler = scheduler
+    }
+
+    /// playhead-882eg: drop everything `PlayheadRuntime` injected, at the
+    /// runtime's terminal owner boundary.
+    ///
+    /// `analysisWorkScheduler` is a strong stored reference to an actor that
+    /// holds this manager strongly right back (`AnalysisWorkScheduler`'s own
+    /// `downloadManager` is a `let`), so `setAnalysisWorkScheduler` creates a
+    /// permanent two-object cycle. Neither side can ever be released — and both
+    /// are hubs: the scheduler reaches `AnalysisStore`, the job runner and the
+    /// capabilities service, and this manager reaches the store again through
+    /// its work-journal, DAI-stitch and drop recorders and reaches the
+    /// `SurfaceStatusInvariantLogger` through its `invariantRecorder` closure.
+    /// One cycle, and the whole service graph is immortal: measured, 19 of 22
+    /// runtime-owned objects were still alive after the owning runtime had
+    /// deallocated, holding ~5 production-store file descriptors per runtime
+    /// constructed.
+    ///
+    /// This is a CLEAR rather than a `weak` back-pointer on purpose. `weak`
+    /// would be the ownership-correct shape, but three tests
+    /// (`DownloadShowAttributionTests`, `BackgroundDownloadCompletionTests`)
+    /// hand this setter a scheduler they do not keep a reference to, so the
+    /// manager owning it is load-bearing today. Changing who owns the scheduler
+    /// is a design decision, not a teardown fix; this is the teardown fix.
+    ///
+    /// Called from `PlayheadRuntime.shutdown()`, which has no production
+    /// caller, so nothing about a running app changes.
+    func detachRuntimeInjectedDependencies() {
+        analysisWorkScheduler = nil
+        daiStitchRecorder = nil
+        backgroundDownloadCompletionObserver = nil
     }
 
     /// playhead-xsdz.71 (Signal 1): inject the DAI-stitch redirect-chain
@@ -1371,10 +1497,24 @@ actor DownloadManager {
     /// its ordering, because nothing at runtime can see either.
     ///
     /// Idempotence is the CALLER's — this counts every call it receives.
+    /// playhead-sdis: it also RECORDS its own outcome on this actor, so every
+    /// drop row this process goes on to write can say whether its launch is in
+    /// `armedLaunches`. The state is written before the early `return` below —
+    /// `.landed` is as much a fact worth stamping on a row as `.writeFailed` is,
+    /// and it is the only positive one.
     func armDropLedger() async {
         let outcome = await dropRecorder.recordInstrumentArmed(
+            launchId: launchId,
             at: Date().timeIntervalSince1970
         )
+        // A SWITCH here too, and for the same reason as the one below: a fourth
+        // outcome must fail to COMPILE rather than default into a state that
+        // claims something about the denominator.
+        switch outcome {
+        case .landed: dropLedgerArming = .armed
+        case .writeFailed: dropLedgerArming = .armingFailed
+        case .notRecording: dropLedgerArming = .noRecorder
+        }
         // A SWITCH, not `== .writeFailed`, so a fourth outcome added later
         // fails to COMPILE here rather than being silently classified as
         // "nothing to say" — which is the failure direction the three-case
@@ -1398,12 +1538,19 @@ actor DownloadManager {
         // that make `armedLaunches = 0` beside real drop rows reachable — so it
         // is said out loud on the second surface rather than left to be
         // inferred from a number that did not move.
-        logger.error("Background download drop ledger NOT armed for this launch")
+        logger.error(
+            "Background download drop ledger NOT armed for launch \(self.launchId, privacy: .public)"
+        )
+        // playhead-sdis: NAME the launch. Every drop row this process goes on to
+        // write carries `launchId` and `launchArmingState = arming_failed`, so
+        // the two surfaces can now be matched instead of correlated by time.
         invariantRecorder?(
             .backgroundDownloadDropNotRecorded,
-            "arming=failed — this launch had a live drop recorder and "
-            + "background_download_drop_arming.armedLaunches did not move, so "
-            + "any drop row it goes on to write has no launch in the denominator"
+            "arming=failed launch=\(launchId) — this launch had a live drop "
+            + "recorder and background_download_drop_arming.armedLaunches did "
+            + "not move, so any drop row it goes on to write has no launch in "
+            + "the denominator; those rows say so themselves, carrying "
+            + "launchArmingState=arming_failed"
         )
     }
 
@@ -1506,12 +1653,42 @@ actor DownloadManager {
         for role: BackgroundSessionRole,
         requestedBy site: BackgroundSessionRequestSite
     ) async -> URLSession? {
+        await backgroundSessionRidingCrossing(
+            for: role, requestedBy: site
+        ).session
+    }
+
+    /// ``backgroundSession(for:requestedBy:)``, plus the IDENTITY of the
+    /// crossing this call rode (playhead-sdis).
+    ///
+    /// `sessionCrossingId` is non-nil whenever this call reached the crossing
+    /// decision — i.e. found no memoized session — whether it STARTED the
+    /// crossing or JOINED one already in flight. It is nil in exactly one case:
+    /// a memoized session was returned and no crossing happened, which is also
+    /// the only case in which the session is non-nil without one. **So on a
+    /// REFUSAL the crossing id is always present**, which is what makes it
+    /// recordable on every `sessionNotVended` drop row.
+    ///
+    /// One production caller needs it — `backgroundDownload`, which is the only
+    /// site that writes a drop row — so the plain-`URLSession?` spelling above
+    /// is kept for the four callers that do not, rather than making all of them
+    /// spell out a value they discard. A caller that later starts recording
+    /// drops must come here instead; that is not a rule anything can enforce,
+    /// which is why the drop helper takes `sessionCrossingId` WITHOUT a default
+    /// and forces every call site to say what it means.
+    internal func backgroundSessionRidingCrossing(
+        for role: BackgroundSessionRole,
+        requestedBy site: BackgroundSessionRequestSite
+    ) async -> (session: URLSession?, sessionCrossingId: String?) {
         let resolvedRole: BackgroundSessionRole = {
             if !useDualBackgroundSessions, role != .legacy { return .legacy }
             return role
         }()
 
-        if let existing = _sessionsByRole[resolvedRole] { return existing }
+        if let existing = _sessionsByRole[resolvedRole] {
+            // No crossing: this call never went near the daemon.
+            return (existing, nil)
+        }
 
         #if DEBUG
         // playhead-gpdb R1: this caller found no memoized session, so it is
@@ -1524,14 +1701,21 @@ actor DownloadManager {
         // Somebody is already inside the daemon for this role. Join them
         // rather than opening a second `URLSession` on the same background
         // identifier — see `_sessionCreationsInFlight`.
+        //
+        // playhead-sdis: the joiner returns the STARTER's crossing id, not one
+        // of its own. Minting a fresh id here would make every joiner look like
+        // its own refusal, which is the reading this column exists to remove.
         if let inFlight = _sessionCreationsInFlight[resolvedRole] {
-            return await inFlight.value
+            return (await inFlight.task.value, inFlight.id)
         }
 
+        let crossingId = UUID().uuidString
         let creation = Task { [self] () -> URLSession? in
             await createBackgroundSession(role: resolvedRole)
         }
-        _sessionCreationsInFlight[resolvedRole] = creation
+        _sessionCreationsInFlight[resolvedRole] = SessionCreationCrossing(
+            id: crossingId, task: creation
+        )
         let session = await creation.value
         // Dropped on BOTH outcomes, and there is no suspension point between
         // here and the memo write below, so no caller can observe a state
@@ -1541,18 +1725,25 @@ actor DownloadManager {
 
         guard let session else {
             logger.error(
-                "backgroundSession(\(resolvedRole.identifier, privacy: .public)) REFUSED at \(site.rawValue, privacy: .public): the background transfer daemon did not hand back a session"
+                "backgroundSession(\(resolvedRole.identifier, privacy: .public)) REFUSED at \(site.rawValue, privacy: .public): the background transfer daemon did not hand back a session (crossing \(crossingId, privacy: .public))"
             )
+            // playhead-sdis: `crossing=` is the join between this record and the
+            // `background_download_drops` rows the refusal goes on to mint. Only
+            // the caller that STARTED the crossing reaches this arm — a joiner
+            // returns above — so this stream counts REFUSALS while that table
+            // counts EPISODES, and the id is what lets the two be compared
+            // instead of guessed at by timestamp.
             invariantRecorder?(
                 .backgroundSessionCreationRefused,
                 """
                 site=\(site.rawValue) role=\(resolvedRole.identifier) \
+                crossing=\(crossingId) \
                 bound=\(sessionCreationIO.timeout)s — nsurlsessiond did not \
                 hand back a background URLSession; nothing was cached, the \
                 next request retries
                 """
             )
-            return nil
+            return (nil, crossingId)
         }
 
         // onBackgroundDownloadStaged is wired once at init — see
@@ -1560,7 +1751,7 @@ actor DownloadManager {
         // needed.
 
         _sessionsByRole[resolvedRole] = session
-        return session
+        return (session, crossingId)
     }
 
     /// The crossing itself: build the configuration AND the session inside one
@@ -2868,7 +3059,10 @@ actor DownloadManager {
         // dual-session flag is on so it cannot starve user-initiated
         // (.interactive) downloads. When the flag is off, fall through
         // to the legacy single session.
-        let session = await backgroundSession(
+        // playhead-sdis: the CROSSING is taken here rather than the session
+        // alone, because a refusal that N concurrent callers JOINED mints N
+        // rows and this id is the only thing that says they are one refusal.
+        let (session, sessionCrossingId) = await backgroundSessionRidingCrossing(
             for: useDualBackgroundSessions ? .maintenance : .legacy,
             requestedBy: .backgroundDownload
         )
@@ -2891,11 +3085,20 @@ actor DownloadManager {
             // NOT `sessionIO`; they are separate queues with separate
             // deadlines, and recording the wrong one would make this table lie
             // about the very quantity the widening decision reads.
+            //
+            // playhead-sdis: `sessionCrossingId` is THE ONLY SITE THAT HAS ONE.
+            // A refusal reaches here only through the crossing, so it is never
+            // nil — see `backgroundSessionRidingCrossing`. The note is here
+            // rather than between the arguments so the call below is six lines
+            // of code with no prose in them: `scripts/mutation-battery.sh`
+            // anchors on it, and an anchor whose stability depends on nobody
+            // editing a paragraph is not an anchor.
             await recordBackgroundDownloadDrop(
                 episodeId: episodeId,
                 reason: .sessionNotVended,
                 context: context,
-                boundSeconds: sessionCreationIO.timeout
+                boundSeconds: sessionCreationIO.timeout,
+                sessionCrossingId: sessionCrossingId
             )
             return
         }
@@ -2928,11 +3131,20 @@ actor DownloadManager {
             // gets a different reason. A session exists, so the download
             // subsystem is alive for this process — only this episode is lost,
             // and the remedy is per-episode rather than per-launch.
+            //
+            // playhead-sdis: `sessionCrossingId` is NIL, and stated rather than
+            // defaulted. Nothing JOINS a `downloadTask(with:)` submission —
+            // this caller made its own and it expired on its own deadline — so
+            // for this reason a row IS a call and there is no shared crossing
+            // to name. A per-row UUID here would be a column in bijection with
+            // the primary key, carrying no information and inviting
+            // `count(DISTINCT sessionCrossingId)` to be read as outages.
             await recordBackgroundDownloadDrop(
                 episodeId: episodeId,
                 reason: .transferTaskNotVended,
                 context: context,
-                boundSeconds: sessionIO.timeout
+                boundSeconds: sessionIO.timeout,
+                sessionCrossingId: nil
             )
             return
         }
@@ -2974,11 +3186,15 @@ actor DownloadManager {
             // value that names one thing read as though it named another. The
             // reason is distinct, so a reader who wants only the two can still
             // have them with a `WHERE reason IN (…)`.
+            //
+            // playhead-sdis: `sessionCrossingId` is NIL, for the reason given
+            // at the site above.
             await recordBackgroundDownloadDrop(
                 episodeId: episodeId,
                 reason: .transferNotResumed,
                 context: context,
-                boundSeconds: sessionIO.timeout
+                boundSeconds: sessionIO.timeout,
+                sessionCrossingId: nil
             )
             return
         }
@@ -3004,18 +3220,36 @@ actor DownloadManager {
     /// silences both. What it genuinely covers is a failure LOCAL TO THE
     /// DATABASE, and for that it is what stops a drop the database could not
     /// hold from being byte-identical, on disk, to no drop at all.
+    ///
+    /// playhead-sdis: `sessionCrossingId` has NO DEFAULT. Only
+    /// `sessionNotVended` rides a crossing that other callers can join, so two
+    /// of the three sites pass `nil` — and they pass it explicitly, on
+    /// `requestedBy:`'s precedent one function along, so that a fourth
+    /// abandonment path has to decide rather than inherit. A defaulted `nil`
+    /// would let a future joinable refusal be recorded as an isolated one, and
+    /// nothing would say so.
     private func recordBackgroundDownloadDrop(
         episodeId: String,
         reason: BackgroundDownloadDropReason,
         context: DownloadContext,
-        boundSeconds: TimeInterval
+        boundSeconds: TimeInterval,
+        sessionCrossingId: String?
     ) async {
         let outcome = await dropRecorder.recordDrop(
             BackgroundDownloadDropRecord(
                 episodeId: episodeId,
                 reason: reason,
                 context: context,
-                boundSeconds: boundSeconds
+                boundSeconds: boundSeconds,
+                // playhead-sdis: WHO wrote it and whether that launch is in the
+                // denominator, read on the actor at the moment of the write. The
+                // arming state is deliberately sampled HERE rather than captured
+                // at construction: a drop that races the launch Task genuinely
+                // was written before the arming, and a row saying so is the
+                // measurement.
+                launchId: launchId,
+                launchArmingState: dropLedgerArming,
+                sessionCrossingId: sessionCrossingId
             )
         )
         guard outcome != .landed else { return }
@@ -3042,9 +3276,19 @@ actor DownloadManager {
                     + "legitimately zero and the fault is the wiring, not the store"
             }
         }()
+        // playhead-sdis: the identities travel to the FALLBACK MEDIUM too.
+        // This line is reached exactly when the durable row did NOT land, so it
+        // is the only place the launch and the crossing survive — and a
+        // fallback that dropped them would leave the second medium unable to
+        // answer the question the first one was extended to answer.
+        // `crossing=none` is spelled out rather than omitted: an absent field
+        // reads as a forgotten one, and for the two reasons that ride no
+        // crossing the absence is the measurement.
         invariantRecorder?(
             .backgroundDownloadDropNotRecorded,
             "episodeId=\(episodeId) reason=\(reason.rawValue) "
+            + "launch=\(launchId) crossing=\(sessionCrossingId ?? "none") "
+            + "arming=\(dropLedgerArming.rawValue) "
             + "bound=\(boundSeconds)s — the download was abandoned and \(detail)"
         )
     }
@@ -3100,6 +3344,17 @@ actor DownloadManager {
     // MARK: - Cancel
 
     /// Cancels an active download for the given episode.
+    ///
+    /// **ITS ONLY CALLER IS `removeCache(for:)`, WHICH ITSELF HAS NO PRODUCTION
+    /// CALLER** — measured over `Playhead/**` at playhead-4xmz review 5, so
+    /// this whole chain is reachable only from tests today. It retires
+    /// background transfers, which cancels any in-flight
+    /// `download_work_journal` finalization — correct only because
+    /// `removeCache` unlinks the artifact three lines after calling here. A
+    /// caller that does NOT delete would silently drop a `finalized` row for an
+    /// artifact still on disk, out of the column that makes `finalized`/`failed`
+    /// a real split. `DownloadWorkJournalWiringSourceCanaryTests` pins the
+    /// call-site counts, because nothing at runtime can see them.
     func cancelDownload(episodeId: String) async {
         var cancelled = false
 
@@ -3228,6 +3483,31 @@ actor DownloadManager {
     /// hop. All three known session identifiers are instantiated here
     /// deliberately: explicit deletion is not latency-sensitive like the
     /// launch scan, and must find tasks retained by an older process.
+    /// CANCELLING A FINALIZATION DESTROYS A `download_work_journal` ROW for a
+    /// transfer that completed, so it is correct only where the bytes are about
+    /// to be unlinked — otherwise the row would have been true.
+    ///
+    /// **NOTHING IN PRODUCTION REACHES HERE TODAY.** Measured over
+    /// `Playhead/**` at playhead-4xmz review 5: the two callers are
+    /// `cancelDownload(episodeId:)` and ``clearCache()``; `cancelDownload`'s
+    /// only caller is `removeCache(for:)`; and `removeCache(for:)` and
+    /// ``clearCache()`` both have ZERO callers outside `PlayheadTests/`. There
+    /// is no per-episode delete affordance in the UI, and the bulk clear
+    /// (Settings' "Clear Cached Audio") never enters this actor. So this
+    /// mechanism is DORMANT in shipping builds and is exercised only by tests.
+    ///
+    /// It is kept, and kept correct, because the moment a delete is wired to
+    /// `removeCache` the race is live and the row must not survive the bytes.
+    ///
+    /// THREE REVIEW ROUNDS DESCRIBED THIS AS "THE ONE PRODUCTION PATH", each
+    /// one call frame further out. Review 2 made the cancel conditional, which
+    /// disarmed the per-episode delete and reddened
+    /// `cacheDeletionRacingFinalizationDoesNotJournalSuccess`; review 3
+    /// reverted that and wrote "two deleting callers"; review 4 found one of
+    /// the two has no caller; review 5 found the other has none either. So
+    /// `DownloadWorkJournalWiringSourceCanaryTests` pins the tree-wide
+    /// call-site COUNT of all three, and the next reader gets a number rather
+    /// than a sentence.
     @discardableResult
     private func retireBackgroundTransfers(
         episodeId: String?
