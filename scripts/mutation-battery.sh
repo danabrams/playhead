@@ -2007,6 +2007,17 @@ FOCUSED_SUITES=(
   # at the compose seam, because an affirming `passB` row overlapping the
   # extent is itself a contributor, so no end-to-end test can ever kill it.
   -only-testing:PlayheadTests/SemanticSweepSoleBackingTests
+  # playhead-qjcf: schema V66, the seven suites of `SupportLineSecondsTests`.
+  # They must ALL be here — the QJ series' expectations name tests in six of
+  # them, and a mutation whose declared victim does not RUN resolves ABSENT,
+  # which exits 2 out of the baseline preflight rather than being scored.
+  -only-testing:PlayheadTests/SupportLineProjectionTests
+  -only-testing:PlayheadTests/SupportLineSpansCodecTests
+  -only-testing:PlayheadTests/SupportLineGroupingTests
+  -only-testing:PlayheadTests/PersistedSupportSecondsReaderTests
+  -only-testing:PlayheadTests/PersistedSupportSecondsAreAdditiveTests
+  -only-testing:PlayheadTests/SupportLineSecondsCarrierTests
+  -only-testing:PlayheadTests/SupportLineSecondsWiringSourceCanaryTests
   -only-testing:PlayheadTests/SemanticSweepCorroborationPredicateTests
   # playhead-f5ao: the write-only-at-init mirror (F5 series). Two suites,
   # because the two halves of the claim are unobservable from each other. The
@@ -3466,6 +3477,39 @@ T_VZ3L_CORROB_CROSS="a cross-version affirmer no longer props up a contested cla
 T_VZ3L_CORROB_SAME="an affirming replicate at the same version still counts"
 T_VZ3L_PARTIAL="a cleared window covering only PART of the gap still bars it"
 T_VZ3L_ONE_CALLER="coversGap has exactly one production caller, and it passes lower before upper"
+
+# playhead-qjcf (schema V66) — a support line stops being a coordinate in a
+# system that moves. All display names from `SupportLineSecondsTests.swift`.
+T_QJ_HEADLINE="THE HEADLINE: a row at a superseded version keeps its localisation"
+T_QJ_NOINDEX="with NO index at all, the recorded seconds still localise the row"
+T_QJ_CONTRIB="contribution narrows a stale projected row to the seconds, not the tile"
+T_QJ_COMPOSE="compose narrows the MARK on a stale row that carried its seconds"
+T_QJ_READER="localisation consults the recorded seconds before giving up"
+T_QJ_REFS_DISAGREE="a payload whose refs disagree with the VERDICT is refused"
+T_QJ_REFS_SUPERSET="a payload that is a SUPERSET of the verdict's refs is refused too"
+T_QJ_OUTSIDE="a span outside the row's own window is refused"
+T_QJ_DEGENERATE="a span that ends before it starts, or is not finite, is refused"
+T_QJ_ABSENT="a row that named NOTHING cannot acquire seconds from a payload"
+T_QJ_REFINEMENT="a REFINEMENT row is untouched by a payload"
+T_QJ_WRITER="makeScanResult passes a projection into supportLineSpansJSON"
+T_QJ_ATTRIBUTED="attributed() carries the projection through"
+T_QJ_PARTIAL="one unknown ref among known ones refuses too — never a PARTIAL projection"
+T_QJ_NOBACKFILL="a pre-V66 row climbs to V66 and its projection stays NULL — no backfill"
+T_QJ_ADJACENCY="adjacency is decided on the REF, never on the seconds"
+T_QJ_ROUNDTRIP="the column round-trips through the store, and a NULL stays a NULL"
+T_QJ_REPLACE="a REPLACE takes the incoming projection, because it takes the incoming verdict"
+T_QJ_IDEM="the migration is idempotent and never clears a projection already recorded"
+T_QJ_STORE="the store both binds and reads the column"
+T_QJ_EMPTY_ENC="an empty projection encodes to NOTHING, never to an empty array"
+T_QJ_BINDS="the semantic-scan INSERT binds every placeholder exactly once, in order"
+T_QJ_AGREE="resolve and the recorded projection agree on a row BOTH can read"
+# playhead-iw7q's own display names — QJ13 re-creates the regression that made
+# THIS bead's first cut drop `bind(stmt, 34, …)`, and the V61 suite is what
+# caught it. Naming them here is what makes that claim a measurement.
+T_QJ_V61_BYTES="the two rows that used to be identical now differ IN THE BYTES"
+T_QJ_V61_RT="the flag round-trips through the store for all three states"
+T_QJ_V61_IDEM="the migration is idempotent and never overwrites a value already recorded"
+T_QJ_V61_REPLACE="a replace overwrites the provenance, because it overwrites the verdict"
 
 T_SHU5_WIRE="every SemanticSweepMarkComposer.compose call site passes supportLines"
 T_SHU5_WIRE_SVC="the service builds its index from the backfill's own segments and version"
@@ -13106,6 +13150,71 @@ MUTATIONS=(
   # deliberately does NOT spell: this parameter's name. A canary matching
   # `barriers.contains { … }` would turn this control into a false kill.
   "VZ99|1622|SWEEP|$T_VZ3L_OVERLAP"
+
+  # ── playhead-qjcf (V66) — the seconds a support line meant ──────────────
+  #
+  # Batches 1700-1709. Each mutant's PREDICTED victim set was written down
+  # before the run and compared against the observed one; a KILLED that kills a
+  # different test is a false credit, and a batch is split rather than shared
+  # whenever two edits touch the same guard chain.
+
+  # Batch 1700 — the READ path stops consulting the record at all. This is V66
+  # reverted in one line: a stale row goes back to keeping its whole ~95 s tile.
+  "QJ01|1700|SWEEP|$T_QJ_HEADLINE;$T_QJ_NOINDEX;$T_QJ_CONTRIB;$T_QJ_COMPOSE;$T_QJ_READER"
+
+  # Batch 1701 — the payload stops being checked against the VERDICT it claims
+  # to project. This is the whole answer to "would bare {start,end} pairs have
+  # done?": without the lineRef there is nothing to compare, so this mutant is
+  # what the seconds-only design would have shipped permanently.
+  "QJ02|1701|SWEEP|$T_QJ_REFS_DISAGREE;$T_QJ_REFS_SUPERSET"
+
+  # Batches 1702/1703 — the two remaining geometry refusals, in SEPARATE
+  # batches because they are clauses of ONE guard chain and a shared batch
+  # would have to patch the same anchor twice.
+  "QJ03|1702|SWEEP|$T_QJ_OUTSIDE"
+  "QJ04|1703|SWEEP|$T_QJ_DEGENERATE"
+
+  # Batch 1704 — two edits in two different FILES with disjoint victims. QJ05
+  # is the seam no behavioural test can reach (`makeScanResult` is private and
+  # writes straight to the store), so its single victim is the source canary —
+  # which is exactly what proves that canary is not vacuous. QJ08 is the value
+  # dropped AT A COPY, this bead's own defect class one layer over.
+  "QJ05|1704|RUNNER|$T_QJ_WRITER"
+  "QJ08|1704|SCANRES|$T_QJ_ATTRIBUTED"
+
+  # Batch 1705 — the writer projects PARTIALLY (recording a claim about fewer
+  # lines than the model made), and the migration BACKFILLS. The second is the
+  # one the bead's headline rests on: there is no honest value to seed.
+  "QJ06|1705|SLIDX|$T_QJ_PARTIAL"
+  "QJ10|1705|STORE|$T_QJ_NOBACKFILL"
+
+  # Batch 1706 — the grouping starts merging on SECONDS as well as on refs (two
+  # segments can abut in time without being adjacent lines), and the store binds
+  # nothing into the new slot.
+  "QJ07|1706|SLIDX|$T_QJ_ADJACENCY"
+  "QJ09|1706|STORE|$T_QJ_ROUNDTRIP;$T_QJ_REPLACE;$T_QJ_IDEM;$T_QJ_STORE"
+
+  # Batch 1707 — a FOURTH spelling of an absence reaches the column, and a row
+  # that named NOTHING acquires seconds it never claimed.
+  "QJ11|1707|SLIDX|$T_QJ_EMPTY_ENC"
+  "QJ12|1707|SWEEP|$T_QJ_ABSENT;$T_QJ_REFINEMENT"
+
+  # Batch 1708 — THE REGRESSION THIS BEAD ACTUALLY COMMITTED, re-created
+  # verbatim. Adding a 35th slot to a positional bind list by replacing the text
+  # of the 34th deleted it: `usedPermissiveFallback` went silently NULL on every
+  # write, the INSERT still prepared and still succeeded, and none of this
+  # bead's own 43 rails could see it. Its victims are therefore mostly OTHER
+  # people's rails, which is the point — a mutant whose predicted set is a
+  # different bead's suite is the only kind that can prove a cross-column guard.
+  "QJ13|1708|STORE|$T_QJ_BINDS;$T_QJ_ROUNDTRIP;$T_QJ_V61_BYTES;$T_QJ_V61_RT;$T_QJ_V61_IDEM;$T_QJ_V61_REPLACE"
+
+  # Batch 1709 — QJ99, VACUITY CONTROL. `contiguousBounds`'s parameter is
+  # renamed at its declaration and its one use; the argument LABEL (`of`) does
+  # not move, so no call site changes and no predicate, bound or ordering moves.
+  # MUST SURVIVE. Note what the source canaries deliberately do NOT spell: this
+  # parameter's name. A canary matching `of projected:` would turn this control
+  # into a false kill.
+  "QJ99|1709|SLIDX|$T_QJ_AGREE"
 )
 
 # KNOWN GAP, deliberately NOT encoded above (an entry here would make this
@@ -13623,6 +13732,20 @@ describe_mutation() {
     VZ03) echo "vz3l: the CALL SITE hands mergeIsBarred its two edges the wrong way round — overlaps bar, real gaps do not" ;;
     VZ04) echo "vz3l: mergeIsBarred DELEGATES its two edges the wrong way round — the gap test silently becomes containment" ;;
     VZ99) echo "VACUITY CONTROL — mergeIsBarred's barriers parameter is renamed at its declaration and its one use; MUST SURVIVE" ;;
+    QJ01) echo "qjcf: localisation stops consulting the recorded seconds — a stale row goes back to its whole ~95 s tile" ;;
+    QJ02) echo "qjcf: the payload stops being checked against the VERDICT's own refs — what a seconds-only design ships permanently" ;;
+    QJ03) echo "qjcf: a projected span outside the row's own window is believed" ;;
+    QJ04) echo "qjcf: a span that ends before it starts is believed" ;;
+    QJ05) echo "qjcf: the coarse writer stops projecting — the column is NULL for ever and V66 is inert" ;;
+    QJ06) echo "qjcf: project() SKIPS a ref it cannot find instead of refusing — a PARTIAL claim, recorded as the whole one" ;;
+    QJ07) echo "qjcf: contiguousBounds also merges on TIME, so two abutting non-adjacent lines become one span" ;;
+    QJ08) echo "qjcf: attributed() drops the projection — every second lost between the writer and the disk" ;;
+    QJ09) echo "qjcf: the store binds NOTHING into slot 35 — the column is written NULL on every row" ;;
+    QJ10) echo "qjcf: the V66 rung BACKFILLS '[]' — a value nobody measured, over rows nobody can speak for" ;;
+    QJ11) echo "qjcf: encodeSupportLineSpans writes \"[]\" for an empty projection — a fourth spelling of an absence" ;;
+    QJ12) echo "qjcf: a row that named NOTHING acquires seconds from a payload" ;;
+    QJ13) echo "qjcf: bind(stmt, 34) is DELETED — the regression this bead committed, re-created verbatim" ;;
+    QJ99) echo "VACUITY CONTROL — contiguousBounds' parameter is renamed at its declaration and its one use; MUST SURVIVE" ;;
     T09) echo "BackfillJobRunner.attributed: stop stamping scenePhase" ;;
     T10) echo "BackfillJobRunner.attributed: guess .active when the provider breaks its vocabulary" ;;
     T11) echo "SemanticScanThroughputSplit.isEligible: admit no-work sentinels as throughput" ;;
@@ -22221,6 +22344,184 @@ EOF
     ) -> Bool {
         guard nextStart > lastEnd else { return false }
         return clearedWindows.contains { $0.coversGap(from: lastEnd, to: nextStart) }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  QJ01)
+    snippet OLD <<'EOF'
+            if let projected = persistedSupportSpans(of: row) {
+                return .named(padded(projected, within: window))
+            }
+            return .unreadable
+EOF
+    snippet NEW <<'EOF'
+            return .unreadable
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  QJ02)
+    snippet OLD <<'EOF'
+        guard let refs = supportLineRefs(of: row),
+              let projected = SupportLineIndex.decodeSupportLineSpans(row.supportLineSpansJSON),
+              Set(projected.map(\.lineRef)) == Set(refs)
+        else { return nil }
+EOF
+    snippet NEW <<'EOF'
+        guard supportLineRefs(of: row) != nil,
+              let projected = SupportLineIndex.decodeSupportLineSpans(row.supportLineSpansJSON)
+        else { return nil }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  QJ03)
+    snippet OLD <<'EOF'
+            guard span.start.isFinite, span.end.isFinite,
+                  span.end > span.start,
+                  span.start >= window.start - SupportLineIndex.boundaryEpsilon,
+                  span.end <= window.end + SupportLineIndex.boundaryEpsilon
+            else { return nil }
+EOF
+    snippet NEW <<'EOF'
+            guard span.start.isFinite, span.end.isFinite,
+                  span.end > span.start
+            else { return nil }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  QJ04)
+    snippet OLD <<'EOF'
+            guard span.start.isFinite, span.end.isFinite,
+                  span.end > span.start,
+                  span.start >= window.start - SupportLineIndex.boundaryEpsilon,
+                  span.end <= window.end + SupportLineIndex.boundaryEpsilon
+            else { return nil }
+EOF
+    snippet NEW <<'EOF'
+            guard span.start.isFinite, span.end.isFinite,
+                  span.start >= window.start - SupportLineIndex.boundaryEpsilon,
+                  span.end <= window.end + SupportLineIndex.boundaryEpsilon
+            else { return nil }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  QJ05)
+    snippet OLD <<'EOF'
+            supportLineSpansJSON: Self.encodeSupportLineSecondsForTesting(
+                windowOutput.screening.support,
+                segments: inputs.segments
+            )
+EOF
+    snippet NEW <<'EOF'
+            supportLineSpansJSON: nil
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  QJ06)
+    snippet OLD <<'EOF'
+        for ref in Array(Set(refs)).sorted() {
+            guard let line = lines[ref] else { return nil }
+EOF
+    snippet NEW <<'EOF'
+        for ref in Array(Set(refs)).sorted() {
+            guard let line = lines[ref] else { continue }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  QJ07)
+    snippet OLD <<'EOF'
+            if span.lineRef == previousRef + 1 {
+EOF
+    snippet NEW <<'EOF'
+            if span.lineRef == previousRef + 1 || span.start <= runEnd + Self.boundaryEpsilon {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  QJ08)
+    snippet OLD <<'EOF'
+            supportLineSpansJSON: supportLineSpansJSON
+        )
+    }
+EOF
+    snippet NEW <<'EOF'
+            supportLineSpansJSON: nil
+        )
+    }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  QJ09)
+    snippet OLD <<'EOF'
+        bind(stmt, 35, result.supportLineSpansJSON)
+EOF
+    snippet NEW <<'EOF'
+        bind(stmt, 35, nil as String?)
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  QJ10)
+    snippet OLD <<'EOF'
+        try addColumnIfNeeded(
+            table: "semantic_scan_results",
+            column: "supportLineSpansJSON",
+            definition: "TEXT"
+        )
+        logger.notice(
+            "playhead-qjcf V66:
+EOF
+    snippet NEW <<'EOF'
+        try addColumnIfNeeded(
+            table: "semantic_scan_results",
+            column: "supportLineSpansJSON",
+            definition: "TEXT"
+        )
+        try exec("UPDATE semantic_scan_results SET supportLineSpansJSON = '[]' WHERE supportLineSpansJSON IS NULL")
+        logger.notice(
+            "playhead-qjcf V66:
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  QJ11)
+    snippet OLD <<'EOF'
+    static func encodeSupportLineSpans(_ spans: [SupportLineSpan]) -> String? {
+        guard !spans.isEmpty else { return nil }
+EOF
+    snippet NEW <<'EOF'
+    static func encodeSupportLineSpans(_ spans: [SupportLineSpan]) -> String? {
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  QJ12)
+    snippet OLD <<'EOF'
+        guard let refs = supportLineRefs(of: row),
+              let projected = SupportLineIndex.decodeSupportLineSpans(row.supportLineSpansJSON),
+              Set(projected.map(\.lineRef)) == Set(refs)
+        else { return nil }
+EOF
+    snippet NEW <<'EOF'
+        let refs = supportLineRefs(of: row) ?? []
+        guard let projected = SupportLineIndex.decodeSupportLineSpans(row.supportLineSpansJSON),
+              refs.isEmpty || Set(projected.map(\.lineRef)) == Set(refs)
+        else { return nil }
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  QJ13)
+    snippet OLD <<'EOF'
+        bind(stmt, 34, result.verdictProvenance.persistedFlag.map { $0 ? 1 : 0 })
+EOF
+    snippet NEW <<'EOF'
+        // QJ13: the slot beside the new one, deleted — exactly as this bead did.
+EOF
+    patch "$file" "$OLD" "$NEW" ;;
+
+  QJ99)
+    snippet OLD <<'EOF'
+    static func contiguousBounds(of projected: [SupportLineSpan]) -> [AdSpanBounds]? {
+        let sorted = projected.sorted { $0.lineRef < $1.lineRef }
+EOF
+    snippet NEW <<'EOF'
+    static func contiguousBounds(of lineSpans: [SupportLineSpan]) -> [AdSpanBounds]? {
+        let sorted = lineSpans.sorted { $0.lineRef < $1.lineRef }
 EOF
     patch "$file" "$OLD" "$NEW" ;;
 

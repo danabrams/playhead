@@ -304,7 +304,7 @@ struct SupportLineSpansCodecTests {
                 < encoded.range(of: "\"start\"")!.lowerBound)
     }
 
-    @Test("an empty projection encodes to NOTHING, never to \"[]\"")
+    @Test("an empty projection encodes to NOTHING, never to an empty array")
     func emptyEncodesToNil() {
         // `"[]"` would be a FOURTH spelling of an absence in a neighbourhood
         // that already has three, and `supportLineRefs(of:)` spends a paragraph
