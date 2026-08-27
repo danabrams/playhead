@@ -788,9 +788,12 @@ struct SemanticSweepMergeBarrierTests {
     /// only a window STRICTLY containing the gap satisfies — a window exactly
     /// equal to it fails both conjuncts. That is this bead's own
     /// defect one line lower than the one it fixed, and **every barrier fixture
-    /// that PREDATED it passes under it**, because each of their barriers spans
-    /// the whole 0.42 s gap: [497.34–607.08] strictly contains [529.8, 530.22]
-    /// as readily as it overlaps it. This fixture is what separates them —
+    /// that PREDATED it passes under it** — most of them because the guard
+    /// still refuses every pair with NO gap, and the two with a real gap
+    /// because the barrier they share, [497.34–607.08], strictly contains
+    /// [529.8, 530.22] as readily as it overlaps it. (Not "their barriers span
+    /// the gap": ``aTouchingBarrierDoesNotBar()``'s barrier starts AT the gap's
+    /// end and spans none of it.) This fixture is what separates them —
     /// [500, 530] covers the gap's first 0.2 s and stops 0.22 s short of its
     /// end, so it overlaps and does not contain — together with the partial
     /// assertion added to ``mergeIsBarredIsAskedOnlyWhereThereIsAGap()`` in the

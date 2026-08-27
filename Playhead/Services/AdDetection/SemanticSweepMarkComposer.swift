@@ -1374,10 +1374,14 @@ enum SemanticSweepMarkComposer {
     /// strictly CONTAINS `[nextStart, lastEnd]` — a condition about containment
     /// wearing the name of a gap, which is this repo's standing defect class in
     /// its geometric form. Say it that precisely rather than "contains the
-    /// overlap": for a properly NESTED pair — 160 of the 173 measured below,
-    /// i.e. the majority — `[nextStart, lastEnd]` is strictly LARGER than the
+    /// overlap": for a properly NESTED pair whose second extent ends STRICTLY
+    /// INSIDE the first, `[nextStart, lastEnd]` is strictly LARGER than the
     /// overlap, so the two phrasings pick out different barriers and only the
-    /// first is the predicate. Either way, two extents that overlap or touch
+    /// first is the predicate. That is the nested majority of the 173 measured
+    /// below — deliberately not "160 of the 173", because the nested bucket
+    /// also holds the IDENTICAL-bounds re-screen this bead's own fixture is
+    /// built on, for which the two phrasings coincide; a count from one
+    /// classification does not license a claim about another. Either way, two extents that overlap or touch
     /// have NO gap between them, so a merge across them swallows no audio and
     /// nothing may bar it.
     ///

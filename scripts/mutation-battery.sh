@@ -338,22 +338,29 @@
 #   as `--series VZ`. The subject is the merge barrier being asked over an
 #   INVERTED range whenever two extents overlap — `coversGap(from: last.end,
 #   to: extent.start)` with `lower > upper`, which silently reads as
-#   containment. FINAL, from the CONFIRMING run of 04:44-05:49 taken on the
-#   tree as it ships (6 builds, 64m38s, 2,797 tests per batch, 1 host pid, no
-#   restart marker, baseline GREEN): 4 KILLED / 0 SURVIVED / 0 ERROR / 0 VOID,
-#   plus VZ99 SURVIVED as required on a stated positive pass, and EVERY
-#   declared victim set matched its observed set exactly — VZ01 3/3, VZ02 1/1,
-#   VZ03 7/7, VZ04 3/3. It is that run and not the 03:19-04:23 one because
-#   review round 3 rewrote `coversGapHasExactlyOneProductionCaller`, a declared
-#   VZ04 victim, afterwards; a changed test invalidates a verdict taken before
-#   it, which is the rule this entry applies to VZ03 and SU18 two paragraphs
-#   down and therefore owes itself.
+#   containment. FINAL, from the CONFIRMING run of 04:44-05:49 taken on
+#   `6ae3f8a6` (6 builds, 64m38s, 2,797 tests per batch, 1 host pid, no restart
+#   marker, baseline GREEN): 4 KILLED / 0 SURVIVED / 0 ERROR / 0 VOID, plus
+#   VZ99 SURVIVED as required on a stated positive pass, and EVERY declared
+#   victim set matched its observed set exactly — VZ01 3/3, VZ02 1/1, VZ03 7/7,
+#   VZ04 3/3. It is that run and not the 03:19-04:23 one because review round 3
+#   rewrote `coversGapHasExactlyOneProductionCaller`, a declared VZ04 victim,
+#   afterwards, and A TEST WHOSE BEHAVIOUR CHANGED INVALIDATES A VERDICT TAKEN
+#   BEFORE IT — the rule this entry applies to VZ03 and SU18 below and
+#   therefore owes itself.
+#
+#   THE SHIPPING TREE IS LATER THAN `6ae3f8a6` AND THE VERDICT STILL CARRIES,
+#   provably rather than by assertion: every line of the diff since begins with
+#   `#` or `///`. No production line moved, no assertion moved, and the only
+#   rail that reads source text reads `Playhead/`, which the diff does not
+#   touch. State the BEHAVIOUR qualifier rather than "any change", or every
+#   future comment edit re-opens a settled verdict.
 #   Batches 1-1616 were NOT re-run and carry the verdicts above. 1620 is
 #   deliberately UNUSED — it was VZ99's number for the first two runs, whose
 #   preserved `batch-1620.log`s are that control's evidence, and reusing it for
 #   VZ04 would have made two different mutations share a log name.
 #
-#   THREE RUNS, AND THE LEDGER IS THE PART WORTH READING, because a prediction
+#   FOUR RUNS, AND THE LEDGER IS THE PART WORTH READING, because a prediction
 #   was wrong TWICE and both corrections are findings:
 #     • RUN 1 (VZ01-VZ03 + VZ99, 5 builds, 62m08s): VZ01 predicted 3 /
 #       observed 3, VZ02 predicted 1 / observed 1, VZ99 SURVIVED — and VZ03
@@ -366,19 +373,33 @@
 #       that also catches the one-edge rail and two
 #       SemanticSweepCorroborationScope fixtures.
 #     • RUN 2 (`--only VZ03`, 3 builds, 40m18s): 6 predicted / 6 observed.
-#     • RUN 3, THE RECORD (6 builds, 63m50s): VZ01 3/3, VZ02 1/1, VZ04 3/3,
-#       VZ99 SURVIVED — and VZ03 observed SEVEN. The seventh is
-#       `aPartialBarrierStillBars`, which review round 2 added in the same
-#       commit that recorded run 2's "6 / 6", so that figure was true of a tree
-#       that no longer existed by the time it was written. Declared now.
+#     • RUN 3 (03:19-04:23, 6 builds, 63m50s) — SUPERSEDED, see the header:
+#       VZ01 3/3, VZ02 1/1, VZ04 3/3 (its first run), VZ99 SURVIVED — and VZ03
+#       observed SEVEN. The seventh is `aPartialBarrierStillBars`, which review
+#       round 2 added in the same commit that recorded run 2's "6 / 6", so that
+#       figure was true of a tree that no longer existed by the time it was
+#       written. Declared now.
+#     • RUN 4, THE RECORD (04:44-05:49, 6 builds, 64m38s): every declared set
+#       matched observed exactly — VZ01 3/3, VZ02 1/1, VZ03 7/7, VZ04 3/3,
+#       VZ99 SURVIVED. Its first attempt REFUSED on a red baseline
+#       (`shutdown() closes the analysis store, the ad catalog and the session
+#       log`, a playhead-882eg descriptor rail this bead never touches); it
+#       passed 2/2 scoped in isolation, was green in three earlier baselines,
+#       and the re-run's baseline was green. Flake, and the refusal is the
+#       battery's strictest guard working.
 #     • VZ04 was CONSTRUCTED BY A REVIEW ROUND, not found by a run. It swaps
 #       the same two edges one line lower, where `mergeIsBarred` DELEGATES.
 #       The guard still holds, so nothing inverted reaches `coversGap`; what
 #       changes is that an OVERLAP test becomes a CONTAINMENT test. Every
-#       barrier fixture PREDATING it passed under it, because each of their
-#       barriers spans the whole 0.42 s gap. `aPartialBarrierStillBars`, one
+#       barrier fixture PREDATING it passed under it — most of them because the
+#       guard still refuses every pair with NO gap, and the two that do have a
+#       real gap because the barrier they share, [497.34-607.08], strictly
+#       contains [529.8, 530.22] as readily as it overlaps it. (Not "their
+#       barriers span the gap": `aTouchingBarrierDoesNotBar`'s barrier starts
+#       AT the gap's end and spans none of it.) `aPartialBarrierStillBars`, one
 #       assertion on the predicate rail, and a source canary on the argument
-#       order are what close it — and its 3/3 above is its FIRST run. An
+#       order are what close it — it was first driven in RUN 3 and RUN 4
+#       reproduced it 3/3. An
 #       earlier draft of this entry stated `4 KILLED` before VZ04 had ever been
 #       driven; that was a fabricated measurement, it was caught at review, and
 #       the count above is now the run's.
@@ -12947,14 +12968,17 @@ MUTATIONS=(
   # argument — each reaches a rail the others cannot, and each has a stated
   # NON-victim that separates it:
   #   VZ01 re-creates the defect verbatim and cannot reach the ONE-EDGE rail;
-  #   VZ02 moves only the zero-length boundary and reaches neither compose rail;
+  #   VZ02 moves only the zero-length boundary and reaches none of the three
+  #        compose rails — two sit strictly inside the overlap where `>` and
+  #        `>=` agree, and the third has a real 0.42 s gap where they agree too;
   #   VZ03 attacks the CALL SITE's argument order rather than the guard, is the
   #        only one that reaches shu5's field test, and cannot reach the
   #        predicate rail, which calls `mergeIsBarred` directly;
   #   VZ04 attacks the DELEGATION one line lower — the guard still holds, so
   #        what moves is overlap-vs-containment — and cannot reach the
-  #        extent-level rail or shu5's field test, whose barriers strictly
-  #        contain their gaps.
+  #        extent-level rail or shu5's field test: the guard refuses their
+  #        gapless halves outright, and the barrier their real-gap halves share
+  #        strictly CONTAINS that gap as readily as it overlaps it.
   # A single mutant covering all four would prove that one of the SIX rails
   # fires, not which.
 
@@ -12971,8 +12995,8 @@ MUTATIONS=(
   # so two extents that merely TOUCH consult a barrier. This is the boundary
   # `coversGap`'s own doc calls deliberate, one level up. Predicted to redden
   # the predicate rail ALONE: no compose fixture in the tree touches exactly,
-  # and both compose rails sit strictly inside the overlap where `>=` and `>`
-  # agree. A mutant whose victim set collapses onto VZ01's would mean the
+  # the three compose rails are all immune: two sit strictly inside the overlap
+  # and the third has a real 0.42 s gap, and `>` and `>=` agree on all three. A mutant whose victim set collapses onto VZ01's would mean the
   # predicate rail is not testing the boundary it names.
   "VZ02|1618|SWEEP|$T_VZ3L_GUARD"
 
